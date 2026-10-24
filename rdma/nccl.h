@@ -158,8 +158,13 @@
    ncclSystemError naming the bytes asked and the pages free, one while every client slot is held ncclSystemError naming
    mesh.h MESH_CLIENTS, and one where the process attaches no region of a bridge that runs names the requirement, a
    bridge whose configuration's region holds the client's footprint (etc/bridge/README.md; ncclRemoteError where the
-   bridge stopped, else ncclSystemError); nothing falls back to other memory.  ncclMemFree returns the pages; the leases
-   of a process gone are returned by its bridge, as every retired client's rows are.  ncclCommRegister takes a buffer in
+   bridge stopped, else ncclSystemError); nothing falls back to other memory.  ncclMemFree logically releases the lease
+   without waiting. Its pages remain retained for all registered source DMA uses, including future SENDs whose
+   descriptors the bridge has not posted yet. Once a holding can post no further reads, outstanding posted reads may
+   instead retain the pages through bridge-owned pins; this handoff never permits the caller to overwrite them.
+   The caller must finish its GPU and destination uses before logical free and may schedule no new use afterward.
+   The leases of a process gone are returned by its bridge, as every retired client's rows are.
+   ncclCommRegister takes a buffer in
    the region, its handle the buffer itself, and refuses any other (ncclInvalidArgument: lease it with ncclMemAlloc);
    ncclCommDeregister releases nothing.  A lease is an operand of the region it came from, which outlives a bridge's
    restart (its next bridge adopts it: the lease stands, nothing is reloaded).  A region a stop released, or a bridge
@@ -173,9 +178,15 @@
    releases them, and their residency, before ncclMemFree, or ends.  Weights, KV and
    every buffer a peer reads are leases: "why would weights or kv be outside of the memory pinned pool? being outside of
    it means that they cannot be zero copy passed to peers."  A lease's Metal buffer is ncclMeshMemBuffer's (below), the
-   buffer an MPS tensor or a kernel takes over the lease.  Zero copy, always (the operator, 2026-10-21: "zero copy
+   buffer an MPS tensor or a kernel takes over the lease.  The operator's 2026-10-21 requirement was "zero copy
    methods must always be used over access by copy because memory bandwidth and flops are too scarce on this hardware
-   api"): the bridge sends a crossing's bytes from the pages they lie in and lands them in the pages they belong in (a
+   api". The 2026-10-24 amendment explicitly permits compiled masked streaming data functions: pack sub-page or strided
+   values into separately owned padded ingress frames, then consume their valid intervals at precompiled destinations.
+   Invalid source loads and destination stores are masked; padding never overwrites neighboring final-output values.
+   This is explicit arithmetic in the data graph, not a native transport repair or a receiver's address-selection
+   protocol. Its copies, padding and dispatch costs count in whole-function latency and useful bandwidth.
+   The native transport remains direct and page-granular: the bridge sends a crossing's bytes from their declared
+   source pages and lands them in their declared destination pages (a
    COPY in its destination, a combine in a landing area of the communicator's, combined from there), each step one entry
    that starts on a page (design/transport.md section 14: max_sge 1, and registrations in extents no page crosses).  So
    every crossing call's send buffer, and every buffer it sends from or lands in, is in this node's region, and every
@@ -187,10 +198,14 @@
    send buffer lies apart from its result reads it in place where its program allows (a SEND of a range no step of the
    rank wrote reads it, the first combine of such a range writes send op piece, the ranges of the result no step writes
    are copied from it after the publications, and no scratch buffer no step writes is made); else its operand is made in
-   place in the region (a premultiply, or a copy within the region).  The NIC reads a SEND's pages until the SEND is
-   done, and a group completes without waiting for that: a buffer a SEND read may be rewritten once a later landing from
-   each peer it went to depends on that SEND, else the peer may receive the later bytes; a lease freed while a SEND
-   still names it is released by the bridge once none does.
+   place in the region (a premultiply, or a copy within the region). The NIC reads a SEND's pages until the SEND is
+   done, and a group completes without waiting for that. Published source bytes are immutable until every registered
+   physical DMA reader has finished, including readers on parallel cables, relay paths and not-yet-posted entries.
+   Mutating them earlier is invalid. ncclMeshMemReusable supplies a nonblocking source-DMA proof; local GPU reads,
+   incoming writes and destination consumers require separate ownership proofs before overwrite. A natural landing
+   is an alternative witness only if its actual causal ancestry proves every relevant reader finished; merely being
+   later or coming from each peer is insufficient. Logical free defers physical reuse under these source obligations
+   without adding a receipt, acknowledgment or data-program wait.
    ncclCommRegister refuses a buffer outside the region.  Design: design/transport.md.
 
    Failures are ncclResult_t values, ncclGetLastError naming what was lost; nothing resumes a failed group, and a
@@ -244,26 +259,25 @@ struct mesh_trees;
 typedef void *cudaStream_t;
 typedef struct { void *buffer; size_t offset; } ncclMeshBuffer;
 typedef struct { uint64_t ticket; int published; } ncclMeshIssue;
-/* A fused crossing's steps, run by the caller's kernels (below): publication and landing
-   records on physical channels, each one's six bindings' GPU addresses, in the library's
-   binding order (0 d, 1 s, 2 its argument record, 3 a, 4 v, 5 progress); a Metal 4 kernel takes them through its
-   argument table, a classic one as one record of its bytes (ncclMeshMetalPrelude's mesh_step_binding, the six in this
-   order).  The caller gives `publish` and `land` room for `publishes` and `lands` records (its declared
-   group's entries, ncclMeshPlan); the group writes its records in physical channel order and sets the two
-   counts to those written: 0 and 0 where the group is not a fused crossing, which then runs as an ordinary group.
-   A group consisting exclusively of ncclMeshWrite uses one publication and one final landing prefix per active
-   physical channel, including parallel cables and relays. Its source and relay leases are immutable through the
-   complete data function's downstream uses. Landing ranges are disjoint from each other and from local source
-   ranges. Previous users of those landing leases must have completed before encoding the group: these receives
-   are posted immediately, without a stream-start gate. Relays use their compiled incoming landed prefixes;
-   releasing a publication cannot release an unlanded relay page. The caller's producer releases every publication
-   after making its data, and its consumer awaits every landing before reading results.
-   `repeats` (0 as 1) is the crossings one issue of a group of ncclSend and ncclRecv presents: comm's next `repeats`
-   groups (under a plan, each this group's declaration: another is the program's error, undefined, as a group that
-   is not its declaration is), its entries laid that many times, each repeat after the last, repeat j's buffers each
-   j x `stride` bytes (whole pages) past repeat 0's; its records are written once, each with the pages a repeat adds
-   to its count, and the caller's kernels run repeat j by mesh_step_release and mesh_step_await at j.  Every landing
-   of the issue is gated on its first publication: no kernel before that one reads a landing buffer of a later repeat. */
+/* Fused publication and landing bindings, in physical channel order. Each
+   record contains six GPU addresses: d, s, argument record, a, v, progress
+   (ncclMeshMetalPrelude's mesh_step_binding). The caller supplies room using
+   its compiled group's counts; the result gives actual active-channel counts.
+   Parallel channels remain separate and may contain multiple physical fragments.
+   Zero counts mean no corresponding local publication/consumption, not permission
+   to silently execute an unfused source read before its producer.
+
+   Producers release all ordinary source publications. Relay fragments are
+   supplied by their incoming landed prefixes. Consumers await the final own
+   landing on each relevant channel, excluding any relay-only trailing entries.
+   Source and relay bytes remain immutable through all declared reads; receiving
+   ranges have a first-write ownership proof and no reciprocal producer gate.
+
+   repeats (0 as 1) declares consecutive executions of the same compiled form.
+   stride is their page-aligned storage displacement. Only the first frame's
+   binding records are returned; their prefix increments describe subsequent
+   frames, and kernels use mesh_step_release/mesh_step_await with that frame's
+   index. A zero stride does not establish permission to overwrite live pages. */
 typedef struct { uint64_t (*publish)[6], (*land)[6]; uint32_t publishes, lands, repeats; size_t stride; } ncclMeshFused;
 typedef struct {
   void *commandBuffer;
@@ -1020,8 +1034,8 @@ ncclResult_t ncclMeshTraceStop(ncclMeshTrace_t trace, struct ncclMeshWindow *out
    and ncclMeshReduceScatterV's, a rank's count each; ncclMeshAlltoAllV's sendcounts then recvcounts), `type`, `op` (a
    reduction's), and `group`: consecutive calls of one number are one group (ncclGroupStart to ncclGroupEnd; a call
    outside one its own group), issued `repeat` times in a row (its first call's; 0 as 1).  `fused` (not 0): the call is
-   issued on a fused stream (ncclMeshStream fused), so its steps are compiled as that stream's are, each whole on one
-   cable (a fused crossing is one SEND and one landing toward each peer), not striped over the pair's cables. */
+   issued on a fused stream (ncclMeshStream fused). It uses the same physical striping and routed-write
+   representation as other calls; fusion changes publication/consumption encoding, not available cables. */
 enum { ncclMeshCallSend = 16, ncclMeshCallRecv = 17, ncclMeshCallAlltoAllV = 18, ncclMeshCallWrite = 19 };
 typedef struct {
   int what, peer;
@@ -1055,6 +1069,14 @@ typedef struct {
    group then compiled at its call.  A form set after it (ncclMeshCommForms) changes no planned group.  A declared call
    that would fail at its call fails the plan as a value (ncclInvalidArgument, ncclInvalidUsage), comm's plan kept. */
 ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall* calls, int count, const ncclMeshPlan** plan);
+/* Configuration boundary only: suspend the cached function order for feedback or
+   placement; resuming begins at its first group without dropping the plan. */
+ncclResult_t ncclMeshCommPlanActive(ncclComm_t comm, int active);
+/* Nonblocking allocator proof: all registered local source DMA reads have completed,
+   including scheduled reads not yet posted when their ownership was registered.
+   This proves neither GPU completion nor incoming-write/destination-consumer safety;
+   the allocator must establish those separate obligations before overwriting pages. */
+ncclResult_t ncclMeshMemReusable(const void* ptr, int* ready);
 /* Every issued group through `ticket` that is not complete, completed on `stream` (its commandBuffer and
    commandEncoder, or the Metal 4 form's, and its polls; issue and workspace not read); *published (may be NULL)
    whether a publication was encoded.  A ticket already complete encodes nothing; one whose communicator failed returns
@@ -1063,47 +1085,41 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream* stream, int
 /* The highest ticket through which every issued group is complete (or lost with a failed communicator): its
    workspace may be reused in the stream's order. */
 uint64_t ncclMeshRetired(void);
-/* A crossing whose steps the caller's own kernels run (either Metal form: the Metal 4 form, or the classic form with its
-   residencySet, Metal path above; metal-microbench docs/kernels.md#collectives, Q5P's in-stream form and its one-sided
-   fused crossings, and torch-mesh's torch_mesh/fused.py on torch's stream, the steps still this library's:
-   docs/acceptance-20261014.md A39, A40).  A fused group, on a stream whose `fused` is set, is completed at once (issue
-   or not: issue->ticket 0), the groups in flight before it completed first, so it completes alone, each of its channels
-   in the stream's order, and its steps that cross are at most one SEND and one landing in place toward each peer
-   (ncclMeshFused's records), each of a whole buffer, no combine: ncclSend(send, n, type, q) and ncclRecv(landing_q, n,
-   type, q) toward each peer q in one group (an all-reduce's or a reduce's one-shot form: each rank sends its part to
-   every peer and receives every peer's; the library cannot see when the caller's kernels read a landing area of its
-   own, so the caller sums its own part with what lands in its landing buffers), any of them alone, an in-place
-   ncclBroadcast, or an in-place ncclAllGather (sendbuff recvbuff + rank x sendcount, NCCL's), any type and any size,
-   each buffer a lease's and starting on a page (Memory, above).  The call presents its entries, encodes every other step of the
-   group as ever (its gate store, where its landing has no publication of its own to wait on) and the fused steps in no
-   dispatch: their records are written and their bindings returned in *fused (each six GPU addresses, ncclMeshFused's
-   order; none where the group has no such step, a group that crosses no link among them).  A publication: the caller's
-   kernel that writes the operand (d + record.dst: its send buffer) calls mesh_step_enter on each publication's
-   bindings, writes it, and from its last threadgroup to arrive (the one that knows every other threadgroup's stores are
-   done: the caller's own count of arrivals) calls mesh_step_release on each publication's a, one system fence and one
-   store of that holding's `ready`; it is encoded after the call returns.  The landing: the
-   kernel after it calls mesh_step_enter and mesh_step_await on a (every threadgroup may: each its own bounded wait for
-   the holding's `landed` past the landing; each ends at once after any wait on its failure words has failed), then reads the landed bytes from d + record.dst (its landing buffer) with
-   mesh_step_read and combines them with its own part where it reduces.  Nothing waits for the publication's SENDs: the
-   send buffer may be written again once a later landing from each peer it went to depends on them (that peer's next
-   crossing), and before that the peer may receive the later bytes.  The call encodes no
-   dispatch of either fused step, so the caller's kernels are ordered by its stream alone: on the classic form, its
-   queue's order (a serial compute encoder's dispatches, its command buffers in commit order).  A group on such a stream
-   that is not a fused crossing (one that crosses no link; more than one SEND or landing toward a peer, a combine or a
-   scratch; a SEND of bytes its call also receives, a forwarding rank's) is not refused: it runs as an ordinary group
-   on that stream, its steps encoded by the library as on any stream (issued where the stream asks issue, else
-   completed), writes no record and sets both counts to 0, so the caller's kernels publish and await nothing; as an
-   ordinary call it reads its send buffer at its place in the stream, so the kernel that writes it is encoded before
-   the call.  A group on a classic stream without its residencySet fails (ncclInvalidArgument).  The landing's receive
-   is posted only once its gate opens.  On a channel where the group also publishes, the gate is that publication's
-   `ready`, which the caller's publishing kernel stores from its last threadgroup, so the landing buffer may be the one
-   the previous crossing's landing kernel read where that kernel is the publishing kernel itself (fused.py's step
-   kernel, which lands crossing t - 1 and publishes crossing t) or one encoded before it.  On a channel where the group only lands (a reduce's
-   root, a broadcast's receiver: no publication of its own to wait on) the gate is the communicator's gate word, which
-   the call stores in the stream: its receive is posted once the stream reaches the call, so where its landing buffer
-   is the one the previous crossing's landing kernel read, that kernel is encoded before the call (as for any buffer
-   an ordinary call writes); the library sees no kernel of the caller's, so it can order nothing after one.  A fused
-   group's publications and landings are its declared group's entries (ncclMeshCommPlan: ncclMeshPlan's entries). */
+/* Fused execution uses the same physical fragment compiler and channel bindings
+   as ordinary compiled writes. A peer may have any number of parallel channels,
+   and a logical transfer may contain multiple fragments and relay hops. There is
+   no peer-sized restriction and no silent fallback that reads an operand before
+   the caller's publishing kernel has produced it. Unsupported arithmetic or
+   ownership forms must be resolved at realization, not changed to a different
+   publication contract while executing.
+
+   The caller supplies room for the declared physical publication and landing
+   bindings (ncclMeshFused). The producer writes source pages with the required
+   coherence and releases each active channel's cumulative publication. Relay
+   entries instead depend on their actual incoming landed prefix and forward from
+   those same pages. A source publication never declares an unlanded relay ready.
+   The consumer observes only the final incoming prefixes needed by its local
+   data uses. It need not await later relay-only entries or local SEND completion.
+   Consolidate repeated observation/fence work where the execution graph permits;
+   observing availability is not a separate network message.
+
+   Receives have AOT addresses and orders. Fresh disjoint landing ranges can be
+   preposted immediately, independent of this node's outgoing publication. Reuse
+   needs a proof before the next first write. The recurrent all-gather proof in
+   design/whole-function.md permits two source/landing slots when every rank's
+   next publication follows consumption of all previous pieces. It does not
+   apply to arbitrary asymmetric sends or independent feed-forward calls. Their
+   immutable source leases survive until their final local DMA reads end, with
+   asynchronous bridge-owned retirement; destination consumers have separate
+   lifetimes. No receive gate, per-tensor receipt all-gather or remote ACK is a
+   substitute for those proofs.
+
+   Fused kernels are ordered by the caller's serial compute stream. An encoding
+   group publishes binding records, not the source values themselves. Repeated
+   groups return the first frame's physical records and their per-repeat prefix
+   increments; stride addresses distinct page-aligned storage for later repeats.
+   These contracts describe expressibility and ownership, not a proof of optimal
+   routing, collective decomposition or attained bandwidth. */
 /* rdma/mesh.metal's text as this library was built with it, then the Metal text of the steps the library's kernels and
    a fused crossing's kernels run: the whole of what a caller's kernel is compiled after, from the library the process
    loaded, so it never reads a file that may be another build's (a checkout's mesh.metal newer or older than the
@@ -1118,12 +1134,16 @@ uint64_t ncclMeshRetired(void);
    waits"), kept so that a kernel testing them compiles as it is. */
 const char* ncclMeshMetalPrelude(void);
 /* The Metal buffer (an id<MTLBuffer>) over the whole lease (ncclMemAlloc) holding `ptr`, any byte of it, and ptr's offset
-   in it: the library's, made at the lease's first such call and released by ncclMemFree, the buffer a tensor allocator
+   in it: the library's, made at the lease's first such call and released during deferred lease retirement after
+   ncclMemFree, the buffer a tensor allocator
    or the caller's kernels bind over the lease (mesh 3981ca80^'s).  A Metal-path collective's buffers are leases, which
    its bridge sends from and lands in and its kernels read in place (Memory, above); once its group is complete in the
-   stream's order (its landings landed) nothing the library encoded reads or writes the lease for it, though the NIC
-   may still read it for a SEND not yet done; ncclMemFree may return its pages, which the bridge releases once no
-   request names them.  ncclInvalidArgument where ptr is in no lease of this process. */
+   stream's order, its encoded GPU uses have ended, but registered source SENDs can still be unposted or reading it.
+   ncclMemFree is a logical asynchronous release that retains those obligations, not permission to mutate the source.
+   ncclMeshMemReusable proves source DMA retirement only; the caller separately proves all GPU uses and destination
+   writes/consumers finished before reuse. Explicit masked data functions may produce padded ingress frames and read
+   only their valid intervals; this API and the native transport introduce no hidden copy to repair an operand.
+   ncclInvalidArgument where ptr is in no lease of this process. */
 ncclResult_t ncclMeshMemBuffer(const void* ptr, void** buffer, size_t* offset);
 /* The bytes of a page of comm's region (its block of pages, the unit of a lease and of an entry: design/
    pages-and-functions.md), on which each segment of a V collective and each entry starts (Memory, above).

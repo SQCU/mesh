@@ -195,6 +195,10 @@ or not it announces itself.
 
 ## RDMA: measured, and the constraint that bites first
 
+The following is an earlier single-cable measurement, not a description of the current cluster topology or its
+aggregate bandwidth. Communicators discover the physical multigraph and retain parallel cables
+([rdma/NCCL.md](rdma/NCCL.md#communicators)).
+
 Verified between `Mac16,11` and `Mac17,6` over one Thunderbolt 5 cable with
 `ibv_uc_pingpong`, GID index 0 (the EUI-64 link-local this repo assigns):
 
@@ -222,9 +226,9 @@ link's two bridges state what their devices hold and make the lanes both can, te
 both hold ten and one stream's two where either holds two
 ([design/HETEROGENEOUS-LINKS.md](design/HETEROGENEOUS-LINKS.md)).
 
-RDMA never routes. It is point-to-point per cable, and the out-of-band GID/QPN
-exchange only needs a socket to the directly connected peer — which is why none of
-this depends on the routing layer.
+The verbs transfer is point-to-point per cable, and its out-of-band GID/QPN exchange needs a socket to the directly
+connected peer. Multihop data movement is compiled by the collective layer into these physical transfers; relays
+forward their landed pages. This data route is separate from the IP routing layer.
 
 [design/transport.md](design/transport.md) is the transport: who owns which pages and addresses, why a
 send or a receive does not fail, and which kernel calls can wedge a node (killing a verbs process can need a

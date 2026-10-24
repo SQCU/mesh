@@ -1,5 +1,6 @@
 #include "mesh-plan.h"
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -64,6 +65,85 @@ int mesh_fabric_stripe(const struct mesh_fabric *f,uint32_t rank,const struct me
   }
   free(parts);free(remainder);
   return (int)written;
+}
+
+static int mesh_cut_order(const void *a,const void *b){
+  const uint64_t x=*(const uint64_t *)a,y=*(const uint64_t *)b;
+  return (x>y)-(x<y);
+}
+
+int mesh_fabric_refine(const struct mesh_transfer *in,uint32_t count,uint64_t page,
+                       struct mesh_transfer *out,uint32_t room){
+  if((count && !in) || !page || (out && out==in))return -EINVAL;
+  if(count>INT_MAX)return -EOVERFLOW;
+  if((uint64_t)count*2+2>SIZE_MAX/sizeof(uint64_t))return -EOVERFLOW;
+  for(uint32_t k=0;k<count;k++){
+    const struct mesh_step *s=&in[k].step;
+    if(s->op>MESH_STEP_COPY || !s->piece.element_bytes)return -EINVAL;
+    if(s->piece.elements>UINT64_MAX-s->first ||
+       s->first+s->piece.elements>UINT64_MAX/s->piece.element_bytes)return -EOVERFLOW;
+  }
+  uint64_t *cuts=malloc(((size_t)count*2+2)*sizeof *cuts);
+  if(!cuts)return -ENOMEM;
+  uint64_t written=0;
+  int error=0;
+  for(uint32_t k=0;k<count && !error;k++){
+    if(written>=INT_MAX){error=-EOVERFLOW;break;}
+    const struct mesh_step *s=&in[k].step;
+    if(s->op!=MESH_STEP_SEND || !s->piece.elements){
+      if(out && written<room)out[written]=in[k];
+      written++;
+      continue;
+    }
+    const uint64_t end=s->first+s->piece.elements;
+    size_t n=0;
+    cuts[n++]=s->first;cuts[n++]=end;
+    for(uint32_t j=0;j<k;j++){
+      const struct mesh_step *a=&in[j].step;
+      if(a->op==MESH_STEP_SEND || a->buffer!=s->buffer || a->piece.element_bytes!=s->piece.element_bytes ||
+         !a->piece.elements || a->first>=end || a->first+a->piece.elements<=s->first)continue;
+      if(a->first>s->first)cuts[n++]=a->first;
+      if(a->first+a->piece.elements<end)cuts[n++]=a->first+a->piece.elements;
+    }
+    qsort(cuts,n,sizeof *cuts,mesh_cut_order);
+    uint64_t a=page,b=s->piece.element_bytes;
+    while(b){const uint64_t r=a%b;a=b;b=r;}
+    const uint64_t quantum=page/a;
+    uint64_t first=s->first;
+    int64_t owner=-2;
+    for(size_t i=0;i+1<n;i++){
+      if(cuts[i]==cuts[i+1])continue;
+      int64_t next=-1;
+      for(uint32_t j=k;j>0;){
+        const struct mesh_step *prior=&in[--j].step;
+        if(prior->op==MESH_STEP_SEND || prior->buffer!=s->buffer ||
+           prior->piece.element_bytes!=s->piece.element_bytes || prior->first>cuts[i] ||
+           prior->first+prior->piece.elements<=cuts[i])continue;
+        if(prior->op==MESH_STEP_COPY)next=j;
+        break;
+      }
+      if(next>=0 && next!=owner && (cuts[i]-in[next].step.first)%quantum){error=-EINVAL;break;}
+      if(owner!=-2 && next!=owner){
+        if((cuts[i]-s->first)%quantum){error=-EINVAL;break;}
+        if(out && written<room){
+          out[written]=in[k];out[written].step.first=first;
+          out[written].step.piece.elements=cuts[i]-first;
+        }
+        written++;first=cuts[i];
+      }
+      owner=next;
+    }
+    if(!error){
+      if(out && written<room){
+        out[written]=in[k];out[written].step.first=first;
+        out[written].step.piece.elements=end-first;
+      }
+      written++;
+    }
+    if(written>INT_MAX)error=-EOVERFLOW;
+  }
+  free(cuts);
+  return error?error:out && written>room?-ENOSPC:(int)written;
 }
 
 /* design/whole-function.md#one-way-writes */

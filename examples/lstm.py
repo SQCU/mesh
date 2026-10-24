@@ -29,7 +29,7 @@ class Tick:
         self.group, self.sizes = mesh.get_group('tp').group_name, partition.split(mesh, 'tp', H)
         self.c = torch_mesh.empty(self.L, rows, HR, dtype=torch.float32)
         self.mine = torch_mesh.empty(self.L, rows, HR, dtype=torch.half)
-        self.h = torch.empty(self.L, rows, H, dtype=torch.half, device='mps')
+        self.h = torch_mesh.empty(self.L, rows, H, dtype=torch.half)
         self.reset()
 
     # docs/writing-a-service.md#the-lstm
@@ -49,7 +49,7 @@ class Tick:
     # docs/writing-a-service.md#the-lstm
     def gather(self):
         """Every rank's h slices of every layer, gathered along the units (partition's allgatherv), into h."""
-        self.h.copy_(torch.ops.torch_mesh.allgatherv(self.mine, 2, self.sizes, self.group))
+        torch.ops.torch_mesh.allgatherv_out(self.mine, self.h, 2, self.sizes, self.group)
 
     # docs/writing-a-service.md#the-lstm
     def starting(self, s, x):

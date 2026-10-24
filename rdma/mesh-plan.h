@@ -147,8 +147,9 @@ struct mesh_operand { uint32_t type,element_bytes; uint64_t elements; };
    REDUCE receives that typed piece from peer and combines it into `buffer` at `first`.
    COPY   receives that typed piece from peer into `buffer` at `first`.
    buffer 0 is the operand, the result made in place; b >= 1 the rank's scratch b, a copy of the operand made at the
-   call's start.  round is the step's position: sender and receiver agree on it, and a rank's k-th SEND to a peer
-   in a round is that peer's k-th receive from it in the round. */
+   call's start. round is the step's position: both ends agree on logical order.
+   Physical refinement may split a SEND at page boundaries without splitting its
+   receive; the ordered wire-page sequence, rather than entry count, agrees. */
 enum { MESH_STEP_SEND, MESH_STEP_REDUCE, MESH_STEP_COPY };
 struct mesh_step { uint32_t op,peer,round,buffer; uint64_t first; struct mesh_operand piece; };
 
@@ -159,6 +160,22 @@ struct mesh_transfer { struct mesh_step step; uint32_t cable,padding; };
 int mesh_fabric_check(const struct mesh_fabric *);
 int mesh_fabric_stripe(const struct mesh_fabric *,uint32_t rank,const struct mesh_step *,uint64_t page,
                        const double *weights,struct mesh_transfer *,uint32_t room);
+/* Refine physical SENDs where their latest preceding receive changes: a COPY's
+   interval is an identity source; REDUCE or no receive is not. Only receives in
+   the same buffer with the same element size participate. Adjacent pieces with
+   the same latest COPY are kept whole, including where older writes overlap.
+   Non-SEND transfers are unchanged; each SEND's pieces retain its order, cable,
+   round, peer, type and exact coverage. Every inserted boundary is a multiple
+   of page bytes from that SEND's start, so its wire page sequence is unchanged
+   and its peer may retain the unsplit receive. Entry-indexed diagnostics must
+   match page ranges rather than require one local entry per remote entry.
+   Returns the required count (out NULL: count only), or -errno: EINVAL for a
+   needed non-page cut or COPY-relative start, invalid operands/page, or aliased input/output; ENOSPC
+   for insufficient room; EOVERFLOW for unrepresentable extents/count. out must
+   be separate storage; a negative return leaves no usable output. No state,
+   receive gate, payload copy or synchronization is introduced. */
+int mesh_fabric_refine(const struct mesh_transfer *,uint32_t count,uint64_t page,
+                       struct mesh_transfer *out,uint32_t room);
 struct mesh_paths { uint32_t count; const uint32_t *first,*cable; const double *log_weight; };
 int mesh_paths_check(const struct mesh_fabric *,uint32_t source,uint32_t destination,const struct mesh_paths *);
 int mesh_write_compile(const struct mesh_fabric *,uint32_t rank,uint32_t source,uint32_t destination,
@@ -234,20 +251,20 @@ struct mesh_place { uint32_t step,send; uint64_t entry; };
 /* The entries a rank's steps of one collective take on its channel toward `peer`, its SENDs to it on the send list
    (`send` 1) or its receives from it on the landing list (`send` 0), from entry `at`: by round, a round's steps in their
    order, a step of no bytes none; the end, and each step placed in made[*placed ..], *placed counting them.  The one
-   order both ends make of their two ranks' steps: a rank's k-th SEND to its peer is the peer's k-th receive from it
-   (libnccl-mesh schedule_group). */
+   order both ends make of their ranks' logical steps; physical SEND refinement
+   preserves that order and the peer's exact wire-page sequence (libnccl-mesh schedule_group). */
 uint64_t mesh_lay(const struct mesh_step *steps,uint32_t count,uint32_t peer,int send,uint64_t at,struct mesh_place *made,uint32_t *placed);
 /* Each step's receive before it (by round, then the steps' order) of any bytes, -1 where none: a step's first event
    waits until that receive is consumed, and so, by induction, every receive before it.  0, or ENOMEM. */
 int mesh_steps_before(const struct mesh_step *steps,uint32_t count,int32_t *before);
 /* design/transport.md, a group's calls on one communicator, as libnccl-mesh issues them between ncclGroupStart and
    ncclGroupEnd: call i of kind MESH_GROUP_*, its steps at rank r steps[r][0 .. count[r]) (a point-to-point call's at its
-   own rank alone, one SEND or COPY; a row of none where count[r] is 0), every rank's collectives and counted
+   own rank alone, its physical pieces of one logical SEND or COPY; a row of none where count[r] is 0), every rank's collectives and counted
    all-to-alls in one call order, and `page` the bytes an entry starts on (0: not read).  mesh_group_lay: the entries
    rank `rank`'s calls take on its list toward `peer` (send 1: its send list; 0: its landing list) from `at`, each
    collective's in call order (mesh_lay), then each counted all-to-all's
-   (HOSTED), then its point-to-point calls in call order; each placement its call and mesh_lay's place (a
-   point-to-point call's step 0) in made[*placed ..], scratch the room of the most steps a call has at the rank; the end.
+   (HOSTED), then its point-to-point calls in call order, retaining every physical piece; each placement its call and
+   mesh_lay's place in made[*placed ..], scratch the room of the most steps a call has at the rank; the end.
    So separate send and receive calls pair as NCCL's do: a rank's j-th point-to-point SEND to a peer is the peer's j-th
    point-to-point receive from it.  HOSTED: a counted all-to-all whose counts both ends hold (ncclAlltoAll, ncclGather,
    ncclScatter, ncclMeshAlltoAllV), NCCL's sends and receives of it (classifyCollToP2pTasks), each receive into its own

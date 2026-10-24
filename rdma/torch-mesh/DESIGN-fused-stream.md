@@ -1,5 +1,156 @@
 # Fused crossings on torch's stream
 
+Current implementation, 2026-10-24. The contract is [nccl.h](../nccl.h),
+[the data model](../../design/data-model.md), and [whole-function dependencies](../../design/whole-function.md).
+The original branch record is retained below as history; its peer-sized API, receiver gates, and timing targets
+do not describe the current implementation.
+
+## One physical write representation
+
+The communicator retains every reciprocal physical cable as a separate channel. A logical write can be striped
+across parallel cables and forwarded through other ranks. The common compiler fixes its source ranges, relay
+landings, final destinations, channel order, and prefix dependencies before execution. Fusion changes which kernel
+publishes or consumes those ranges; it does not select a different fabric or discard routes. A different solver
+must emit this same representation. Unsupported fused forms fail instead of silently reading the source through
+an ordinary collective before its producer runs.
+
+Rank metadata and physical bindings have different extents. `sizes`, padded `counts`, and segment `starts` have
+one entry per rank. Publication and landing bindings have room for the communicator's physical channel count,
+obtained from `ncclMeshCommSample`. Each binding holds six GPU addresses in `mesh_step_binding` order; channels
+without applicable work have null records. Kernels test the record before entering or releasing it. There is no
+assumption that ranks minus one equals channels, or that a channel contains only one fragment.
+
+| Interface | Current contract |
+|---|---|
+| `fused.steps()` | The loaded library's Metal prelude and step definitions, used to compile the caller's kernels. |
+| `fused.writes(send, landings, pairs, group, polls=0, repeats=1, stride=0)` | Immutable source ranges and disjoint landing leases for declared source/destination pairs, lowered to physical WRITE records; returns `Crossing(publish, land)` in physical channel order. Repeated frames occupy distinct page-aligned displacements in the full backing leases. |
+| `fused.encode(handle, buffers, constants, at, gx, gy, threads, channels, land=None, publish=None)` | Caller words padded to an even count, then `channels` landing records and `channels` publication records; publishes under the stream's commit rule. |
+| `fused.encode_many(calls)` | An ordered list of the same encoding arguments, prepared before one native queue entry; every frame keeps its own constant words. Publication applies the stream's commit policy and the batch ends by submitting any remaining producer command buffer without waiting. |
+| `group.write(source_buffer, landing_buffer, source, destination)` | The common explicit WRITE call; the source rank reads its source argument and other ranks use their landing argument, including relay storage. |
+
+The former `fused.exchange` and native `fused_exchange` entry points have been removed. The private native
+`fused_gather` is collective lowering: it issues one `ncclMeshAllGatherV` over page-padded rank segments through the
+same physical compiler and binding executor. It is not a second peer-sized transport interface.
+
+## Generic gather, sum, and persistent outputs
+
+`partition.gathered` and `partition.summed` each declare one fused ALLGATHER, with the exact padded counts used by
+the native lowering. Sum gathers the ranks' partials and folds them in the consumer. `_fused_form` compiles the
+publisher, consumer, shapes, original source strides, and physical channel extent once per form; native caches
+include those strides. `gather_publish` reads a strided source directly, without a hidden `contiguous()` tensor.
+`linear_publish` computes directly into its publication segment; unsupported column strides raise at realization.
+
+The generic publisher still writes a source segment in the collective's common layout, and `gather_land` still
+assembles the logical output. This path is not a claim that every existing tensor is sent from its original bytes
+or that all layout copies have disappeared. `allgatherv_out`/`fused_step_out` let the consumer write a supplied
+destination, removing the additional copy from an allocated result. `examples/lstm.py` uses this for persistent
+hidden state `h`; `examples/chain.py` reaches the same collective lowering through its tensor operations.
+
+For a consumer with one threadgroup, its compile-time `WAIT` specialization observes the incoming prefixes inline.
+For multiple threadgroups, one `gather_ready` dispatch observes all relevant physical prefixes, then performs one
+threadgroup barrier and system fence. The serial MPS encoder orders the parallel `WAIT=false` consumers after it;
+they use coherent payload loads without repeating the wait in every worker. These are data-availability
+dependencies, not network acknowledgments. The generic operation still joins its complete operand; finer consumers
+can name narrower dependencies through the common physical representation.
+
+Source publications release only actual source fragments. Relay fragments become sendable from their incoming
+landed prefixes, forwarding those same pages. A final consumer does not wait for later relay-only entries or for
+completion of its own outgoing SEND merely to read available input.
+
+## Plans, commits, and ownership
+
+`torch_mesh.plan` declares the function's collective order and counts before repeated execution. CP and EP examples
+now supply their declarations as well as TP. `partition.evaluations` enables the function plan around each
+evaluation and suspends it for feedback, repartitioning, and replanning through `ncclMeshCommPlanActive`; resuming
+restarts its cursor. Feedback uses the existing communicator. A cached form first realized lazily is not by itself
+proof that every planning cost has been moved out of the measured function; a benchmark must realize and declare
+its complete workload before measuring.
+
+GPU producers publish through the stream's commit rule. For configuration-time migration from tensors written by
+ordinary Torch GPU kernels, `_stream.publish_boundary()` commits the preceding producer command buffer without
+waiting for CPU/GPU completion. The following work stays on the same serial queue. This establishes visibility;
+it sends no receipt and adds no reciprocal receive gate.
+
+Fresh disjoint WRITE and fused landing ranges can be preposted independently of the receiver's outgoing producer.
+Ordinary NCCL calls with in-place aliases retain their existing receive gates; those gates are not part of the
+immutable WRITE contract. A reused range needs proof that every previous reader precedes its next first write:
+
+- Positive-contribution recurrent all-gathers use `lifetimes.prove_recurrent_gather`: each rank consumes the previous
+  pieces before its next publication. The returning natural data dependencies prove two-slot reuse. This proof is
+  specific to that recurrence, including relays; it does not certify unrelated feed-forward or asymmetric sends.
+- A zero-count participant has no corresponding returning publication. Native realization therefore gives that
+  shape fresh generations and retires old leases asynchronously instead of applying the positive-count proof.
+- Other source/relay leases remain immutable through their final DMA reads. Region retirement combines completion
+  of local GPU users with `ncclMeshMemReusable`, which includes registered reads not yet posted by the bridge.
+  Dropping a Python tensor or completing its producer alone does not release its bytes for reuse. Destination
+  readers have their own lifetime dependencies. No receipt all-gather or remote ACK establishes these lifetimes.
+
+## Indexed migration and masked frames
+
+`partition.follow` uses `migration.compile_migration` at the configuration boundary to derive exact original-source
+and final-destination byte ranges for a changed partition, including interior tensor axes and zero-share ranks.
+For declared contiguous region layouts whose remote offsets and lengths are page aligned, it coalesces those
+ranges into common `group.write` calls. Source and terminal buffers are views of the real tensors; each relay span
+gets a distinct fresh lease. A retained contiguous interval with no remote incoming pieces aliases the original;
+other retained pieces copy locally once. This path has no remote pack/unpack staging or receipt collective.
+
+The bridge's current entry format addresses whole pages. For contiguous tensor layouts whose ranges cut pages,
+`migration.compile_rows` builds one affine descriptor per nonempty partition intersection: source/destination
+offsets, row length, row count, and source/destination strides. It does not first enumerate all prefix rows. Payload
+byte `i` maps to `offset + (i // row_bytes) * stride + i % row_bytes`; the frame's validity mask is its global payload
+index below the run's useful byte count. The descriptor therefore stays small even for a billion prefix rows.
+
+`_follow_masked` binds one repeated WRITE train per remote descriptor. Producers read the original bytes directly
+into each frame's own page-aligned ingress layout, preserving raw bits with vector loads/stores where alignment
+permits. Padding is written only in owned frame storage. Consumers observe their frame prefix, then store only valid
+payload bytes into the final destination; they never DMA padding across neighboring live final bytes. Local retained
+runs use the same affine map, or alias when possible. Whole-operand packing, a whole-operand landing join, and a
+receipt collective are absent from this path. Its producer/consumer stores are the explicitly compiled streaming
+data function, not a claim of zero GPU memory traffic.
+
+Frame grain uses the page size and number of physical paths for the commodity, capped to the padded useful extent
+when smaller. This exposes multiple routing quanta without replacing the common route allocation. Each source train
+is bound and published before that rank begins any incoming wait; incoming consumers are then encoded round-robin
+by frame. `encode_many` batches each producer train and the consumer sequence without a host queue roundtrip per
+frame. Its final nonblocking producer flush prevents a later descriptor reservation from waiting for data whose
+GPU producer is still in an unsubmitted command buffer. Unsupported native descriptor capacity is an explicit
+error, not a change to a different protocol.
+
+Every frame has distinct source/relay/landing storage. The current realization allocates the complete train and
+retires it asynchronously; it is not a bounded-memory recycling ring. Padding contributes to wire bytes and is
+reported separately from useful bytes. Unsupported non-contiguous layouts still use `follow`'s older whole-operand
+staging fallback. The frame grain and vector choices are realizations to measure, not an optimality proof.
+
+## Evidence and remaining performance work
+
+`rdma/tests/fused-physical.py` passed 176 calls per rank on both two- and three-rank cluster runs on 2026-10-24. Each
+run included 32 aligned asymmetric migrations across leading and interior axes, with the staging collective
+patched to raise if used. Collective cases covered changing inputs, repeats, ragged and zero shares, fp16/fp32,
+strided views, persistent output destinations, and sums. Large collective cases checked positive traffic on every
+observed physical channel. The three-rank run observed six cables and ingress counts 5/5/2; this is a dated
+observation, not a topology constant. Six local tensor-view lowering tests also check exact pointer offsets,
+distinct relay leases, aliases, zero shares, and capability rejection.
+
+The masked extension has 120 actual local GPU checks over vector widths 1/2/4/8/16 bytes, physical binding extents
+1/3/5/6, inline/separate frame readiness, and multiple frames. They check raw bits (including NaN payloads), padded
+tails, row/frame boundaries, and poisoned neighboring bytes, with null transport bindings. Pure tests compare 200
+random compact masks against exact byte ranges and check source-before-wait scheduling. The extended three-rank
+cluster run passed 184 calls per rank, including eight guarded masked migrations with the whole-operand staging
+collective patched to raise. Original bytes and poisoned neighbors remained exact, and all six cables carried
+traffic. Each odd-row commodity used three frames: 229,397 useful bytes occupied 245,760 transport bytes. The tiny
+three-byte case occupied one 16,384-byte page; this page-grain amplification is reported, not counted as useful
+bandwidth. The added batch-boundary flush and extended two-rank run require their subsequent regression results.
+
+These establish correctness and route use for those cases. They do not establish maximum useful bandwidth or
+minimum whole-function latency. Performance claims require complete-function timings, invariant useful output
+bytes, and comparison with an all-link capacity bound during the transaction's active windows. Wire traffic
+includes relay/redundant bytes and is not interchangeable with useful throughput.
+
+## Historical branch record — not the current API
+
+The following original branch notes are preserved as historical evidence. Their API table, receive-gate lifetime
+argument, per-worker waits, unrun test status, and numerical targets were the branch's state, not current guidance.
+
 Branch `fused-stream`, merged with mesh main (49eda816). The source was written and judged against design/rubrics.md.
 On this M5 it was built and installed in the branch's worktree, `mesh-advise` and `mesh-advise mutate` were run, the
 torch-mesh extension was built, and the chain kernel's instances were compiled in one process. Nothing has run on two
@@ -11,7 +162,7 @@ each peer's part to land in its own landing tensor, then adds them to its own pa
 own for either step. (Until main's merge db7326b3 it was a two-rank in-place float16 sum through a slot of 61,440
 bytes; the sections below on the branch keep that history.)
 
-## The form
+### The form
 
 **The library** (rdma/). The classic form gets what the Metal 4 form has, for a fused call only.
 - `ncclMeshStream.residencySet` is read on the classic form when `fused` is set (nccl.h, Metal path).
@@ -45,7 +196,7 @@ and then each of its channels is completed in the stream's order, one after anot
   `streamed`, and its `published()` for a publishing kernel. That is the one commit rule, the same as for every group.
 - The residency set is the device's one set, added once to each queue it meets.
 
-## The chain (examples/)
+### The chain (examples/)
 
 The host makes two calls a step: `fused.exchange` of the step's part, which only writes the records (a publication
 and a landing for each peer), and the kernel's encode. One more dispatch after the last step lands the last crossing.
@@ -82,7 +233,7 @@ of the slots `ring_bytes` holds, and the float64 check reads the same windows. R
 since the kernel writes tanh(z) itself. The plain all-reduce timing (`crossing_microseconds`) is kept, as the
 crossing the fused step no longer pays.
 
-## What the first two-rank run must show
+### What the first two-rank run must show
 
 - No command buffer error (no GPU fault, so the residency set covers what the kernel touches). The async error reads
   ncclSuccess, and the chain's `err` word is 0.

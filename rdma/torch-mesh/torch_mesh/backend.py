@@ -225,7 +225,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
         for g, repeat, c in rows:
             reduces = c.kind in (ALLREDUCE, REDUCE, REDUCE_SCATTER)
             nccl, per = typed(c.dtype, reduces)
-            code = op(c.op) if reduces else LIB.ncclSum
+            code = (c.op if isinstance(c.op, int) else op(c.op)) if reduces else LIB.ncclSum
             if c.dtype == torch.bool and reduces:
                 code = LIB.ncclMax if code == LIB.ncclSum else LIB.ncclMin if code == LIB.ncclProd else code
             kept.append(ffi.new('size_t[]', [n * per for n in c.counts]) if c.counts is not None else ffi.NULL)
@@ -234,6 +234,10 @@ class ProcessGroupMesh(dist.ProcessGroup):
         view = ffi.new('ncclMeshPlan **')
         check(LIB.ncclMeshCommPlan(self.comm, ffi.new('ncclMeshCall[]', made or 1), len(made), view))
         return [] if view[0] == ffi.NULL else [tuple(view[0].entries[g]) for g in range(view[0].groups)]
+
+    def plan_active(self, active):
+        """Suspend the function declaration for feedback; resume at its first group."""
+        check(LIB.ncclMeshCommPlanActive(self.comm, bool(active)))
 
     def write(self, source_buffer, landing_buffer, source, destination, async_op=False):
         """design/whole-function.md#one-way-writes"""
@@ -329,6 +333,14 @@ class ProcessGroupMesh(dist.ProcessGroup):
     def recv(self, tensors, src, tag):
         return self._issue([(RECV, [], [t], [], 0, src) for t in tensors], tensors, True)
 
+    def partials_operator(self, width):
+        """Realize a partial-row reduction operator before declaring a function."""
+        if width not in self._operators:
+            made = ffi.new('ncclRedOp_t *')
+            check(LIB.ncclMeshRedOpCreatePartials(made, width - 2, LIB.ncclFloat32, self.comm))
+            self._operators[width] = made[0]
+        return self._operators[width]
+
     def merge_partials(self, out, partials, rows=None, root=-1, async_op=False):
         """Split-KV attention partials merged by their log-sum-exp, by the library's partials operator (nccl.h
         ncclMeshRedOpCreatePartials, one an operand width, made at its first use): `partials` this member's float32 rows
@@ -336,11 +348,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
         reduce), or, where `rows` gives each rank's rows of them in rank order, rank r's rows[r] merged into its `out`
         (ncclMeshReduceScatterV).  One call of the one path, coalesced like any other."""
         width = partials.shape[-1]
-        if width not in self._operators:
-            made = ffi.new('ncclRedOp_t *')
-            check(LIB.ncclMeshRedOpCreatePartials(made, width - 2, LIB.ncclFloat32, self.comm))
-            self._operators[width] = made[0]
-        merge = self._operators[width]
+        merge = self.partials_operator(width)
         call = ((REDUCE_SCATTER, [partials], [out], [r * width for r in rows], merge, 0) if rows is not None
                 else (ALLREDUCE, [partials], [out], [], merge, 0) if root < 0 else (REDUCE, [partials], [out], [], merge, root))
         return self._issue([call], [out], async_op)

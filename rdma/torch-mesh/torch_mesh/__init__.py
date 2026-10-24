@@ -59,7 +59,7 @@ def compiler(gm, example_inputs):
     aten = torch.ops.aten
     # each fused crossing's op and where its group's name lies among its arguments, its repeats the next
     CROSSINGS = {torch.ops.torch_mesh.all_reduce.default: 2, torch.ops.torch_mesh.linear_sum.default: 2,
-                 torch.ops.torch_mesh.allgatherv.default: 3}
+                 torch.ops.torch_mesh.allgatherv.default: 3, torch.ops.torch_mesh.allgatherv_out.default: 4}
 
     def rows(x, w):
         """Whether x @ w is linear's: on MPS (its one implementation), fp16, x [R <= 8, K] contiguous, w the transposed

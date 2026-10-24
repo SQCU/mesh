@@ -242,18 +242,20 @@ library never learns a lane, a frame or a queue pair (design/transport.md sectio
   least its pages) and the kernel the rest. A COPY lands in place, so its consumption is the wait alone.
   - torch-mesh runs MPS region tensors here.
   - A group can be issued and completed later (`issue`, `ncclMeshComplete`).
-  - **Gates.** A Metal-path group's landing entries are gated on the stream reaching the group. Each names a word and a
-    value before which the bridge posts no receive into its pages: the holding's own `ready` past the group's first
-    publication on that channel (where that publication waits on no receive), else the communicator's gate word, which
-    the group's first dispatch stores. So no receive lands in pages the stream's earlier work still reads or writes.
-    Meanwhile the peer's SEND waits in the hardware's credit. A fused crossing's channel that only lands (a reduce's
-    root, a broadcast's receiver) is gated on the gate word, which the call stores: the caller's kernel that reads the
-    previous landing in the same buffer is encoded before the call. A channel that also publishes is gated on its
-    publication, which the caller's publishing kernel stores from its last threadgroup, so there the reading kernel may
-    be the publishing kernel itself, encoded after the call (torch_mesh/fused.py's step kernel).
+  - **Gates and first-write ownership.** Ordinary NCCL calls with in-place aliases retain receive gates so an incoming
+    write cannot overwrite pages used by earlier stream work. Such an entry names the holding's `ready` past the
+    group's first independent publication, or the communicator's gate word stored by its first dispatch; the bridge
+    waits before posting that receive. Explicit immutable WRITE groups and physical fused crossings skip this gate:
+    their landing addresses and order are known ahead of time, and their disjoint fresh ranges can be preposted
+    independently of this node's outgoing producer. Reusing those pages requires a dependency proof before the next
+    first write, or fresh leases with deferred retirement. The old rule that a receiver's outgoing publication made
+    arbitrary receive-buffer reuse safe does not apply to this contract.
   - **Group end.** Publication is not send completion. There is no `sent` wait; the
-    data program retains source and relay buffers until their downstream consumers
-    finish, and establishes reuse through its dependencies (data-model.md section 6).
+    data program retains source and relay buffers through their final local DMA reads
+    and establishes reuse through typed dependencies or asynchronous bridge-owned retirement. GPU readers must also
+    have finished; `ncclMeshMemReusable` proves only the DMA-read side, including registered reads not yet posted.
+    Destination consumers have separate lifetimes. No receipt collective or remote ACK is required for retirement
+    (data-model.md section 6).
   - **Metal 4.** A stream whose `argumentTable` is set encodes into the caller's `MTL4ComputeCommandEncoder`
     (`commandEncoder`) between the commands before and after it, every binding through that argument table (at least
     six buffer bindings; each dispatch's arguments a record of the library's ring, never `setBytes`), on pipelines of
@@ -271,27 +273,27 @@ library never learns a lane, a frame or a queue pair (design/transport.md sectio
     ticket on the last one's stream, their channels interleaved as tracks (a stream that asks issue gets that ticket);
     on the host path each runs on a thread of its own.
     Every one is launched whatever another's result; the first failure is returned.
-  - **Fused crossings.** A group whose steps that cross are at most one SEND and one landing in place toward each peer,
-    each of a whole buffer (`ncclMeshFused`'s records, a publication and a landing a peer), runs its steps in the
-    caller's own kernels. That is `ncclSend` and `ncclRecv` toward each peer in one group (an all-reduce's or a
-    reduce's one-shot form on n ranks: each rank sends its part to every peer and receives every peer's into a landing
-    buffer of its own, and the caller sums what lands with its own part), any of them alone, an in-place broadcast, or
-    an in-place all-gather. On a stream whose `fused` is set, the call writes the steps' argument records into the
-    caller's lists and returns their bindings (`ncclMeshFused`: room given, counts written, the records in its peers'
-    order, its channels'); it dispatches no step. It
-    completes at once, issued or not, the groups in flight before it completed first, each of its channels in the
-    stream's order. A declared group's entries (`ncclMeshCommPlan`'s `ncclMeshPlan`) give the counts: an all-reduce's n - 1 of each, a reduce's root n - 1
-    landings and every other rank one publication, a broadcast's and an all-gather's this rank's moves where the
-    communicator's program moves whole operands (a forwarding rank, a chain's middle or a broadcast tree's inner rank,
-    does not fuse), each where this rank has a channel to every peer the form uses (the communicator's map); else 0 and
-    0, and the caller issues the unfused call. A group on a fused stream that is no fused crossing is not refused: it
-    runs as an ordinary group on that stream, its steps the library's, and sets both counts to 0, so the caller's
-    kernels publish and await nothing.
-    - The caller's kernel writes its send buffer, and its last threadgroup to arrive calls `mesh_step_release` on each
-      publication: one fence and one store of that holding's `ready`.
-    - The kernel after it calls `mesh_step_await` on each landing (the landing, and its own SEND to that peer done) and
-      reads each landing buffer with `mesh_step_read`.
-    - Any type, any size; the send buffer and every landing buffer leases, each from a page.
+  - **Fused crossings.** Immutable explicit WRITE, point calls, and supported in-place broadcast/all-gather forms
+    lower to the same physical SEND/COPY fragments as ordinary compiled writes. Parallel cables, multiple fragments
+    per channel, and multihop relay paths remain available. Arithmetic that combines operands belongs in the
+    caller's producer or consumer. A remote fused request whose lowered form needs library arithmetic or unsupported
+    ownership fails as a value; it never silently executes an ordinary source read before the caller's producer.
+    On a stream whose `fused` is set, the call writes the argument records and returns `ncclMeshFused` bindings in
+    physical channel order. The caller supplies enough room for the declared physical bindings; rank counts remain
+    separate metadata. The caller's kernels run publication and consumption steps. Zero counts mean no applicable
+    local binding, not permission to change the publication contract.
+    - The producer stores source bytes coherently and its last threadgroup releases every active source publication
+      with `mesh_step_release`. Relay fragments instead become ready from their actual incoming landed prefixes and
+      forward those pages; a source publication cannot announce an unlanded relay range ready.
+    - A consumer observes the final incoming prefixes required by its local uses and reads payload with
+      `mesh_step_read`. It need not wait for later relay-only entries or local SEND completion. Observation can be
+      shared before parallel readers: torch-mesh uses one `gather_ready` dispatch followed by consumers without
+      repeated waits, or inlines observation when the consumer has one threadgroup.
+    - The send and landing buffers are region leases satisfying the compiled page layout. Source/relay bytes remain
+      immutable through their declared reads. Fresh disjoint landings are preposted without reciprocal producer
+      gates. The recurrent all-gather has a two-slot lifetime proof when every rank's next publication follows its
+      consumption of the previous pieces. A zero-share rank lacks that natural return edge; torch-mesh then allocates
+      fresh generations and retires them asynchronously. See [whole-function.md](../design/whole-function.md).
     - `repeats` crossings at once (`ncclMeshFused`'s `repeats` and `stride`: torch-mesh's compiled graphs, one a graph's
       sums on a group): the group's entries laid that many times, repeat j's buffers j strides on, as that many of the
       communicator's groups; one record each, its count's stride the pages a repeat adds, so the caller's kernels run
@@ -425,10 +427,10 @@ system call".
   communicator. Its slot owns the process's leases and holds the streams its communicators use. A communicator leases
   a page for its gate, and a pool of leases for the pages its groups send from and land in that are not the caller's
   (a reduce-scatter's operand, a tree's scratch, a combine's landing area). A lease of the pool is held by a group until
-  it retires, then reused by a later group (gated on that group's start), and returned at `ncclCommDestroy`. It goes
-  back at the retire while the group's SENDs may still read it: a later group may write it before a late peer's receive
-  takes the earlier bytes, and that peer then receives the later ones. That is accepted rather than a wait or a kept
-  lease ([Failures](#failures)).
+  it retires. `spare_take` also requires `ncclMeshMemReusable` before a later group can take that lease: retiring the
+  group's local work does not prove all DMA reads have ended. An allocation still read by a late transfer remains
+  held; the later group takes another lease. Ordinary in-place calls retain their stream-order receive gates as
+  described above. Pool leases are logically freed at `ncclCommDestroy`, with outstanding reads retired asynchronously.
 - `ncclMemAlloc(ptr, size)` is the lease, the system call: whole pages of the region covering `size` (one page for 0),
   already registered; a lease registers nothing. Its bookkeeping is the region's (the lease's rows are owned by the
   client's slot), so when the process exits or dies its bridge returns the pages as it returns every retired client's
@@ -438,7 +440,12 @@ system call".
   region of a bridge that runs, it names the requirement: the node's bridge runs with a configuration whose region
   holds the client's footprint (`ncclRemoteError` where the bridge stopped, else `ncclSystemError`). Nothing falls back
   to other memory.
-- `ncclMemFree(ptr)` returns the lease's pages at once.
+- `ncclMemFree(ptr)` logically frees the lease without waiting. Registered local DMA reads, including descriptors
+  not yet taken by the bridge, keep its pages alive. Once no holding can post a future read, already-posted reads can
+  remain protected by the bridge's pins until completion. This handoff permits asynchronous retirement, not an
+  application overwrite. `ncclMeshMemReusable(ptr, &ready)` provides the stronger nonblocking proof that all
+  registered DMA reads of a still-owned lease have ended; the caller must separately establish that its GPU readers
+  have ended before reuse. No application receipt or remote ACK is added.
 - `ncclCommRegister` takes a buffer in the region (its handle is the buffer itself) and refuses any other with
   `ncclInvalidArgument` (lease it with `ncclMemAlloc`). `ncclCommDeregister` releases nothing.
 - A lease is an operand of the node's region, which outlives a restart of its bridge: the next bridge adopts it

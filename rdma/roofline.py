@@ -12,6 +12,88 @@ def union_ns(intervals):
     return total
 
 
+def matched_transfers(ranks):
+    """One observation per SEND, matching equal directed page *coverage*.
+
+    SEND and receive entry boundaries may differ. First arrival is observed
+    only for a receive entry's first page, and completion only for its final
+    page. An interior SEND boundary therefore gets the conservative interval
+    [containing receive's first-arrival lower, final-landing upper], not a
+    fabricated interior arrival/completion timestamp. ``*_exact`` means that
+    the boundary has its own observed bracket, not that clock/poll uncertainty
+    has disappeared. All returned arrival/completion times use destination time.
+
+    Coverage on each directed physical cable must match exactly and must not
+    overlap itself on either side. Bytes per prefix unit must also agree.
+    Multiple splits count the SEND bytes once, never the enclosing receive's
+    bytes repeatedly. Original window dictionaries remain available to callers.
+    """
+    channels = {}
+    for rank in ranks:
+        for window in rank['windows']:
+            direction = window['direction']
+            if 'peer' not in window or direction not in (0, 1) or window['last'] <= window['first'] or window['bytes'] <= 0:
+                raise ValueError('invalid directed page observation')
+            source, destination = ((rank['rank'], window['peer']) if not direction else
+                                   (window['peer'], rank['rank']))
+            key = window['cable'], source, destination
+            channels.setdefault(key, ([], []))[direction].append(window)
+    result = []
+    for (cable, source, destination), (sends, receives) in sorted(channels.items()):
+        for entries in (sends, receives):
+            entries.sort(key=lambda w: (w['first'], w['last']))
+            if any(a['last'] > b['first'] for a, b in zip(entries, entries[1:])):
+                raise ValueError('duplicate or overlapping directed page coverage')
+        if not sends or not receives:
+            raise ValueError('page coverage has no matching source/destination observation')
+        by_send = [[] for _ in sends]
+        si = ri = 0
+        s_at, r_at = sends[0]['first'], receives[0]['first']
+        while si < len(sends) and ri < len(receives):
+            send, receive = sends[si], receives[ri]
+            if s_at != r_at:
+                raise ValueError('source and destination page coverage disagree')
+            if (send['bytes'] * (receive['last'] - receive['first']) !=
+                    receive['bytes'] * (send['last'] - send['first'])):
+                raise ValueError('source and destination page byte counts disagree')
+            if 'wire' in send and 'wire' in receive and send['wire'] != receive['wire']:
+                raise ValueError('source and destination wire identities disagree')
+            by_send[si].append(receive)
+            through = min(send['last'], receive['last'])
+            s_at = r_at = through
+            if through == send['last']:
+                si += 1
+                if si < len(sends):
+                    s_at = sends[si]['first']
+            if through == receive['last']:
+                ri += 1
+                if ri < len(receives):
+                    r_at = receives[ri]['first']
+        if si != len(sends) or ri != len(receives):
+            raise ValueError('source and destination page coverage has unmatched ranges')
+        for send, landed in zip(sends, by_send):
+            first, last = landed[0], landed[-1]
+            if not send['start_hi_ns'] or any(not r['start_hi_ns'] or not r['end_hi_ns'] for r in landed):
+                raise ValueError('unfinished page transaction has no complete arrival observation')
+            if send['start_lo_ns'] > send['start_hi_ns'] or any(
+                r['start_lo_ns'] > r['start_hi_ns'] or r['end_lo_ns'] > r['end_hi_ns']
+                or r['start_lo_ns'] > r['end_hi_ns'] for r in landed
+            ):
+                raise ValueError('inconsistent page observation timestamp brackets')
+            arrival_exact = send['first'] == first['first']
+            completion_exact = send['last'] == last['last']
+            arrival = [first['start_lo_ns'], first['start_hi_ns'] if arrival_exact else first['end_hi_ns']]
+            completion = [last['end_lo_ns'] if completion_exact else last['start_lo_ns'], last['end_hi_ns']]
+            if len(landed) > 1:
+                completion[0] = max(completion[0], *(r['end_lo_ns'] for r in landed[:-1]))
+            if completion[0] > completion[1]:
+                raise ValueError('ordered receive completion observations disagree')
+            result.append({'source': source, 'destination': destination, 'send': send, 'receives': tuple(landed),
+                           'arrival_ns': arrival, 'completion_ns': completion,
+                           'arrival_exact': arrival_exact, 'completion_exact': completion_exact})
+    return tuple(result)
+
+
 def causal_offsets(ranks, offsets):
     """Tighten clock bounds using send eligibility preceding first arrival.
 
@@ -25,21 +107,10 @@ def causal_offsets(ranks, offsets):
         lo, hi = offsets[str(rank)]
         bound[0, rank] = min(bound[0, rank], hi)
         bound[rank, 0] = min(bound[rank, 0], -lo)
-    arrivals = {(w['cable'], w['peer'], w['first'], w['last']): (r['rank'], w)
-                for r in ranks for w in r['windows'] if w['direction'] == 1}
-    for rank in ranks:
-        source = rank['rank']
-        for w in rank['windows']:
-            if w['direction']:
-                continue
-            key = w['cable'], source, w['first'], w['last']
-            if key not in arrivals or not w['start_hi_ns']:
-                raise ValueError('clock constraint has no complete source/destination observation')
-            destination, landed = arrivals[key]
-            if not landed['start_hi_ns']:
-                raise ValueError('clock constraint has no observed arrival')
-            bound[destination, source] = min(bound[destination, source],
-                                             landed['start_hi_ns'] - w['start_lo_ns'])
+    for match in matched_transfers(ranks):
+        source, destination, send = match['source'], match['destination'], match['send']
+        bound[destination, source] = min(bound[destination, source],
+                                         match['arrival_ns'][1] - send['start_lo_ns'])
     for via in nodes:
         for a in nodes:
             for b in nodes:
@@ -60,32 +131,17 @@ def roofline(cables, ranks, useful_bytes, offsets):
     capacity = sum(2 * c['bits_per_second'] / 8 for c in cables)
     lower, upper, loads = [], [], {}
     per_node = {r['rank']: {'ingress': [], 'egress': []} for r in ranks}
-    arrivals = {(w['cable'], w['peer'], w['first'], w['last']): (r['rank'], w)
-                for r in ranks for w in r['windows'] if w['direction'] == 1}
-    for rank in ranks:
-        source = rank['rank']
+    for match in matched_transfers(ranks):
+        source, destination, w = match['source'], match['destination'], match['send']
         source_offset = offsets[str(source)]
-        for w in rank['windows']:
-            if w['direction']:
-                continue
-            key = w['cable'], source, w['first'], w['last']
-            if key not in arrivals:
-                raise ValueError('a page transaction has no matching destination observation')
-            destination, landed = arrivals.pop(key)
-            if not w['start_hi_ns'] or not landed['end_hi_ns']:
-                raise ValueError('an unfinished page transaction has no attained bandwidth')
-            if landed['bytes'] != w['bytes'] or w['peer'] != destination:
-                raise ValueError('source and destination page observations disagree')
-            destination_offset = offsets[str(destination)]
-            inner = (w['start_hi_ns'] + source_offset[1], landed['end_lo_ns'] + destination_offset[0])
-            outer = (w['start_lo_ns'] + source_offset[0], landed['end_hi_ns'] + destination_offset[1])
-            lower.append(inner); upper.append(outer)
-            arc = 2 * w['cable'] + (source == cables[w['cable']]['nodes'][1])
-            loads[str(arc)] = loads.get(str(arc), 0) + w['bytes']
-            per_node[source]['egress'].append((inner, outer, w['bytes']))
-            per_node[destination]['ingress'].append((inner, outer, w['bytes']))
-    if arrivals:
-        raise ValueError('destination observations have unmatched page transactions')
+        destination_offset = offsets[str(destination)]
+        inner = (w['start_hi_ns'] + source_offset[1], match['completion_ns'][0] + destination_offset[0])
+        outer = (w['start_lo_ns'] + source_offset[0], match['completion_ns'][1] + destination_offset[1])
+        lower.append(inner); upper.append(outer)
+        arc = 2 * w['cable'] + (source == cables[w['cable']]['nodes'][1])
+        loads[str(arc)] = loads.get(str(arc), 0) + w['bytes']
+        per_node[source]['egress'].append((inner, outer, w['bytes']))
+        per_node[destination]['ingress'].append((inner, outer, w['bytes']))
     nodes = []
     for rank, directions in per_node.items():
         node = {'rank': rank}
@@ -116,11 +172,14 @@ def roofline(cables, ranks, useful_bytes, offsets):
 def finishes(cables, ranks, stages, offsets):
     """Completion residuals for a repeated compiled group, after the full call.
 
-    Every stage has the same entry sequence on each cable. Page-prefix order
-    identifies stages without inserting phase barriers or modifying transport.
+    The caller declares repeated stages with the same byte/range/relay layout
+    on each cable. Verify that translated entry pattern, not merely divisibility
+    of the entry count. Other stage layouts need explicit stage metadata; do
+    not fabricate stage boundaries from their observed number of entries.
     """
-    arrivals = {(w['cable'], w['peer'], w['first'], w['last']): (r['rank'], w)
-                for r in ranks for w in r['windows'] if w['direction'] == 1}
+    if not isinstance(stages, int) or stages <= 0:
+        raise ValueError('positive integral repeated-stage count required')
+    matched = {id(m['send']): m for m in matched_transfers(ranks)}
     groups = [{} for _ in range(stages)]
     for rank in ranks:
         source = rank['rank']
@@ -132,14 +191,20 @@ def finishes(cables, ranks, stages, offsets):
             if len(entries) % stages:
                 raise ValueError('trace does not match repeated compiled stages')
             count = len(entries) // stages
+            signature = lambda part: [(w['first'] - part[0]['first'], w['last'] - part[0]['first'],
+                                       w['bytes'], w.get('relay', 0)) for w in part]
+            pattern = signature(entries[:count])
+            if any(signature(entries[layer * count:(layer + 1) * count]) != pattern for layer in range(stages)):
+                raise ValueError('trace entry layout does not repeat across declared stages; explicit stage metadata required')
             arc = str(2 * cable + (source == c['nodes'][1]))
             for layer in range(stages):
                 part = entries[layer * count:(layer + 1) * count]
                 starts, ends, inner, outer, own_inner, own_outer, own_starts = [], [], [], [], [], [], []
                 for w in part:
-                    dest, landed = arrivals[w['cable'], source, w['first'], w['last']]
+                    match = matched[id(w)]
+                    dest = match['destination']
                     start = [w['start_lo_ns'] + offsets[str(source)][0], w['start_hi_ns'] + offsets[str(source)][1]]
-                    end = [landed['end_lo_ns'] + offsets[str(dest)][0], landed['end_hi_ns'] + offsets[str(dest)][1]]
+                    end = [match['completion_ns'][k] + offsets[str(dest)][k] for k in (0, 1)]
                     starts.append(start); ends.append(end)
                     inner.append((start[1], end[0])); outer.append((start[0], end[1]))
                     if not w.get('relay', 0):

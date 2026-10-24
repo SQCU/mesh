@@ -7,6 +7,15 @@ Statements below about instant execution and topology-independent utilization
 express the desired absence of added control dependencies, not a zero-latency
 theorem or a measured performance guarantee.
 
+Topology is discovered for each realized configuration. The 2026-10-24 morning
+microprofile recorded Studio–Studio/first-Studio–Mini/second-Studio–Mini cable
+counts 4/1/2 and ingress degrees 5/6/3. Read-only discovery at 12:57:27 PDT
+found 4/1/1 paired cables and degrees 5/5/2, with one Studio–Mini pairing
+unavailable. See [data-model.md](data-model.md#8-writes-over-many-hops-and-many-paths)
+for the dated provenance and corresponding 140/120 GB/s advertised wire ceilings.
+Two-peer and infinite-Mini examples below illustrate dependencies; they are not
+topology constraints on either the compiler or its transport interface.
+
 Plain statements of the algorithm, in the words of the operator's own turns:
 mesh, peers, pages, page table, rows, stamps, use count, buffers as function
 returns, functions, release, reduce, accumulator page, index page, NFE, status
@@ -83,20 +92,29 @@ carries no numerical value and does not say that outstanding work completed.
 4. The next function has two inputs: my reduce output and the peer's reduce
    output. When all their rows carry stamp k, it runs. It reads those pages
    directly. There is no copy.
-5. The GPU is given a function only after all its input rows carry stamp k.
-   So the GPU never waits.
+5. A function's reads depend only on the input page/range stamps they use.
+   The compiled GPU stream may already contain that function with a bounded
+   availability dependency. This is not a host scheduler waiting for a peer,
+   and not a separate permission message. The current kernels encode GPU
+   prefix observations; "the GPU never waits" was not a description of them.
+   A ready page should not wait for an unrelated operand's last page.
 
 ### Freeing
 
-6. When function g's output rows carry stamp k on every node that needed
-   function f's output, f's output pages of NFE k are done. The runtime calls
-   release on those rows. The use count goes down. At zero the page goes back
-   to the free list and its contents are zeroed, asynchronously. A page that
-   came from the peer goes back to the bridge. No node tells another node
-   anything.
+6. A page is reusable after its final local arithmetic read and final outgoing
+   DMA read. The compiler records those distinct uses. A naturally returning
+   downstream result may prove the remote read ended, but only if the actual
+   dependency graph carries that result back to the owner. The bridge's
+   existing final DMA-read completion can independently release a source;
+   this is local ownership bookkeeping, not a remote-consumption ACK. The
+   destination's consumers have their own lifetime. No receipt message is
+   introduced. If the owner has neither proof, it retains the page. Release
+   does not zero the page: each next producer must define the values it exposes.
 7. A page is written again only after release. Two NFEs can be in flight
    because rows for NFE k+1 point at other pages until the rows for NFE k are
-   released.
+   released. Reuse must be ordered before the next **first write**, not merely
+   its eventual publication. A publish-after-read fact alone does not prove
+   in-place overwrite safety.
 
 ### Link error
 
@@ -131,14 +149,16 @@ input is some function's output rows, on this Mini or on an adjacent Mini.
 
 ### One NFE, number k
 
-1. A function's input rows all carry stamp k. Now the function runs. It is
-   given to the GPU only now. The GPU never waits.
+1. A function's required input rows carry stamp k before their first read.
+   AOT dependencies express this without asking a peer or dispatching a host
+   scheduling decision. Independent pages can enable independent arithmetic.
 2. The function writes its output into pages. When a page is written, its row
    gets stamp k. Nothing else is said.
 3. An output page that an adjacent Mini needs goes over the link to that Mini.
    It travels one hop. It lands in a free page there. The row for it on that
    Mini gets the page and stamp k. A result at depth D from here arrives after
-   D hops. That is the whole latency of transport.
+   D hops. Their service times, finite-pipeline startup and any contention on
+   shared directed links also enter the transaction latency.
 4. A reduce is a function. Its inputs are my partial and the partial that
    arrived from the adjacent Mini. When row p of both carries stamp k, the
    reduce adds page p of each in high precision into an accumulator page, and
@@ -150,19 +170,21 @@ input is some function's output rows, on this Mini or on an adjacent Mini.
    back from the adjacent Mini. When all those rows carry stamp k, it runs. It
    reads the pages where they are. There is no copy.
 6. Partials are combined as they pass. A Mini that has two partials for the
-   same rows adds them before the pages go on. So the pages crossing any link
-   are bounded no matter how many Minis lie beyond it. Infinite Minis do not
-   raise the load on this link.
+   same rows may add them before the pages go on. When that associative
+   reduction preserves the declared numerical semantics and its output
+   extent stays fixed, it bounds bytes per result on a link independently of
+   the number of contributors. This is not true for arbitrary all-gathers,
+   increasing output extents, or increasing rates of independent requests.
 
 ### Freeing
 
-7. When the rows of function g's output carry stamp k on every Mini that
-   needed function f's output, f's output pages of NFE k are done. The runtime
-   calls release on those rows. The use count goes down. At zero the page
-   returns to the free list, and it is zeroed asynchronously. A page that came
-   over the link goes back to the bridge. No Mini tells any Mini anything. The
-   proof that the page may be freed is the stamp on the dependent's rows, and
-   that stamp already had to arrive for the next function to run.
+7. Apply the same local-read and outgoing-DMA-read ownership proof as above.
+   A dependent's stamp is sufficient only where it already arrives by a
+   natural data dependency and proves **every** relevant use. Feed-forward
+   topology alone does not guarantee a return path. In a one-way migration
+   from rank 1 to rank 2, an unrelated later landing on rank 1 proves nothing
+   about rank 2; the source bridge can still retire rank 1's source after its
+   own DMA reads end, without learning when rank 2 finishes arithmetic.
 8. A page is written again only after release. Two NFEs can be in flight
    because the rows for NFE k+1 point at other pages until the rows for NFE k
    are released.
@@ -174,17 +196,17 @@ input is some function's output rows, on this Mini or on an adjacent Mini.
     consume that status. The calling context may reject the result and rerun
     the complete feed-forward NFE; mesh does not perform recovery or replay.
 
-### Why two Minis are the same as infinitely many
+### What does and does not generalize to more Minis
 
-Each Mini waits only on its own input rows. Each link carries only the pages
-its two ends exchange, already combined. So the latency of an NFE is the
-number of hops on its longest dependency chain times the hop time, plus the
-service time of the functions on that chain. The FLOPs utilization of a Mini
-is the fraction of its roofline its functions reach while their inputs are
-present. Neither number changes if you draw the mesh as two Minis or as an
-infinite tree of rings. A presentation that changes them — a stage index, a
-chunk, a gate, a group, a copy into a hidden buffer, a wait on anything but
-stamped rows — is not describing this algorithm.
+Each Mini waits only on its actual input rows. Its ownership and availability
+rules do not depend on the graph's size. Performance does: a dependency-chain
+service sum and the directed-link workload/capacity bounds are lower bounds,
+and queue order, release times, arithmetic placement and finite buffers can
+increase completion time. Adding nodes may change those bounds, contention,
+the collective decomposition and the useful output extent. Express all those
+possibilities in the physical graph; do not turn a two-node example into an
+interface restriction or claim topology-independent utilization from AOT
+knowledge alone. Compare actual whole-function execution to explicit bounds.
 
 ## Addendum: waiting for messages about data, on infinitely many Minis
 
@@ -217,17 +239,18 @@ stands in for the pages. Then it acts on the message. This is what goes wrong.
    pages have all arrived. On an infinite mesh there is always a slowest
    scheduler somewhere, and the chain of "waiting for whose message" has no
    end. Waiting on rows binds a Mini only to the pages in front of it.
-5. **Work handed to the GPU while it waits for a message is killed or idles.**
+5. **A GPU wait on an absent message can idle or fail.**
    We measured this: a command buffer that waits on a signal for seconds is
    ended by the watchdog, and every buffer behind it dies with it. A GPU given
-   only functions whose rows are stamped runs at its roofline fraction. Its
-   utilization then does not depend on the mesh at all.
+   only useful input dependencies avoids that extra protocol wait. Actual
+   utilization still depends on data availability, dispatch and arithmetic.
 6. **Messages need their own storage and their own freeing.** Every message in
    flight is state: a queue entry, a counter, an event value, a callback. On an
    infinite mesh the number of messages in flight is not bounded, so this
    state is not bounded, and it is freed by other messages. Pages are freed by
-   release when the dependent's rows are stamped. That state is bounded by the
-   pages, and the pages were needed anyway.
+   release when a typed proof covers all of their final reads. That state is
+   bounded by the compiled live pages; no general feed-forward graph promises
+   a returning stamp for every remote consumer.
 7. **A speculative message lets a function run before its data.** "The pages
    will arrive" is not "the pages have arrived". A function that runs on the
    promise reads stale pages and writes a wrong output with a good stamp. The
@@ -240,12 +263,44 @@ stands in for the pages. Then it acts on the message. This is what goes wrong.
 The operator, 2026-09-10: "syncs, messages, ping pongs, and gaurds or waits
 are not part of a specification... remember this..."
 
-In the algorithm above a Mini acts on data alone, the moment the data is
-present. The row's stamp is the only signal. The GPU is handed only functions
-whose rows are stamped. The calling context receives errors through
+In the algorithm above a Mini acts on its required data. A row's availability
+stamp is data evidence, not a permission exchange. The calling context receives errors through
 asynchronous metadata, not through numerical values or a status gate inside
-the callgraph. So a Mini's latency and utilization are the same whether it has
-one neighbour or an infinite mesh behind it.
+the callgraph. The same dependency rules apply whether it has one neighbour
+or many; latency and utilization must be measured for the actual graph.
+
+## Executable ownership proof
+
+`rdma/lifetimes.py` compiles `Event`, `Lease`, `Read` and `Transfer` declarations.
+Each read is an obligation. Existing natural events and monotone prefixes
+provide proofs; all physical outgoing fragments must be covered. It emits
+incremental retirement rules and page aliases justified by existing
+happens-before edges, without inserting waits, messages or copies. The
+allocator/bridge can observe a typed `source_done`; data functions cannot use
+it as an execution prerequisite. A partial SEND completion must not cover
+unposted source pages: presentation retention lasts until **all** compiled
+reads of that source range have been scheduled and completed.
+
+`prove_recurrent_gather` proves two-slot source, landing and relay reuse only
+for a recurrence where every rank consumes all source pieces before its next
+publication. For independent feed-forward writes or asymmetric migration,
+there is no such theorem. Unknown first-write order gets separate storage;
+unknown retirement evidence retains storage. See
+[whole-function.md](whole-function.md#typed-one-sided-lifetimes) and
+`rdma/tests/test_lifetimes.py` for the proof and counterexamples.
+
+The same types cover a sub-page masked frame train. Packing reads the original
+operand and an immutable affine descriptor; a transport lease covers the full
+padded frame. Its landing enables a masked read and writes only the declared
+final-output intervals. Every frame use retains the descriptor, and the output
+becomes available only after all stores required by that output are complete.
+The original operand can retire after its last pack read; the packed source
+remains owned until every DMA read ends. A landing remains owned until its
+masked consumer and any forwarding reads end. Serial receiver execution alone
+does not prevent an already preposted remote write from overwriting that frame.
+Without a natural return proof, successive landing frames have distinct storage.
+Mask geometry and disjoint final stores are separate compiler obligations;
+ownership reachability does not prove byte-address arithmetic.
 
 ## What this is called elsewhere
 

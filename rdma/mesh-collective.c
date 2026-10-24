@@ -816,7 +816,8 @@ int mesh_group_before(uint32_t kind,const struct mesh_step *steps,uint32_t count
 /* design/transport.md section 14: a group's calls laid together (libnccl-mesh schedule_group) and a counted
    all-to-all's steps (mesh_counted_steps).  The lists' rule, as libnccl-mesh runs it (nccl-mesh.c run,
    complete): each direction between two ranks is one list, the sender's send list and the receiver's landing list,
-   entry for entry; the sender publishes its entries in order (its holding's `ready`, one count), the receiver consumes
+   in the same wire-page order (physical entry boundaries may differ after refinement);
+   the sender publishes its entries in order (its holding's `ready`, one count), the receiver consumes
    them in order, each once it has landed (`landed`, one count); a step's first event, published or consumed, waits until
    the receive before it in its call (mesh_steps_before) is consumed; a combine into bytes a SEND of the same rank on the
    same channel reads runs after that SEND's publication, unordered with the NIC's read of it.  Nothing else orders them:
@@ -847,9 +848,9 @@ uint64_t mesh_group_lay(const struct mesh_group *g,uint32_t rank,uint32_t peer,i
   for(uint32_t i=0;i<g->calls;i++){
     const struct mesh_group_call *c=g->call+i;
     if(c->kind!=MESH_GROUP_POINT || !c->count[rank])continue;
-    const struct mesh_step *step=c->steps[rank];
-    if(step->peer==peer && mesh_step_bytes(step) && (step->op==MESH_STEP_SEND)==(send!=0))
-      made[(*placed)++]=(struct mesh_group_place){i,0,{0,send!=0,at++}};
+    uint32_t laid=0;
+    at=mesh_lay(c->steps[rank],c->count[rank],peer,send,at,scratch,&laid);
+    for(uint32_t k=0;k<laid;k++)made[(*placed)++]=(struct mesh_group_place){i,0,scratch[k]};
   }
   return at;
 }

@@ -154,8 +154,8 @@ kernel void linear_group(device const half* x0 [[buffer(0)]], device const half*
 }
 
 #ifdef MESH_METAL
-template <uint PEERS>
-struct linear_publish_words { uint R, K, N, B, LDW, K0, LD0, LD1, j; mesh_step_binding land[PEERS], publish[PEERS]; };
+template <uint CHANNELS>
+struct linear_publish_words { uint R, K, N, B, LDW, K0, LD0, LD1, j; mesh_step_binding land[CHANNELS], publish[CHANNELS]; };
 
 struct linear_step_store {
     device uchar* send;
@@ -163,23 +163,25 @@ struct linear_step_store {
     void operator()(uint r, uint n, float s) const { mesh_step_write<half>(send, ulong(r) * N + n, half(s)); }
 };
 
-template <uint VW, uint VX, uint COLS, uint NSG, uint U, uint PEERS>
+template <uint VW, uint VX, uint COLS, uint NSG, uint U, uint CHANNELS>
 [[max_total_threads_per_threadgroup(NSG * 32)]]
 kernel void linear_publish(device const half* x [[buffer(0)]], device const half* w [[buffer(1)]], device uchar* send [[buffer(2)]],
                            device atomic_uint* arrivals [[buffer(3)]], device const half* x1 [[buffer(4)]],
-                           constant linear_publish_words<PEERS>& p [[buffer(15)]],
+                           constant linear_publish_words<CHANNELS>& p [[buffer(15)]],
                            uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
                            uint tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
                            uint groups [[threadgroups_per_grid]]) {
     threadgroup float part[NSG * 8 * COLS];
     threadgroup uint last;
-    for (uint q = 0; q < PEERS; q++) mesh_step_enter(*p.publish[q].p, p.publish[q].v, p.publish[q].progress, tg == 0 && tid == 0);
+    for (uint q = 0; q < CHANNELS; q++) if (p.publish[q].p)
+        mesh_step_enter(*p.publish[q].p, p.publish[q].v, p.publish[q].progress, tg == 0 && tid == 0);
     const linear_dims d = {p.R, p.K, p.N, 0, p.LDW, p.K0, p.LD0, p.LD1};
     const linear_step_store store{send, p.N};
     linear_body<VW, VX, COLS, NSG, U>(x, x1, w, d, store, part, sg, lane, tg, tid);
     threadgroup_barrier(mem_flags::mem_device);
     if (mesh_last_arrival<true>(arrivals, 0, groups, tid, &last)) {
-        for (uint q = 0; q < PEERS; q++) mesh_step_release(*p.publish[q].p, p.publish[q].a, tid, p.j);
+        for (uint q = 0; q < CHANNELS; q++) if (p.publish[q].p)
+            mesh_step_release(*p.publish[q].p, p.publish[q].a, tid, p.j);
         mesh_arrival_reset(arrivals, 0, tid);
     }
 }

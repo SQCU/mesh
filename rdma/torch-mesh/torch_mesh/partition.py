@@ -182,60 +182,118 @@ def _in_region(y):
 def allgatherv(x: torch.Tensor, dim: int, sizes: list[int], group_name: str, repeats: int = 1) -> torch.Tensor:
     """The blocks gathered along `dim` from x's block, an opaque op, so a compiled graph calls it as torch's
     functional collectives are called.  On the mesh backend (_region_backed) it is a fused crossing (_fused):
-    this rank's block copied once into its page-padded segment of a held lease and published by partition's own
-    kernel, every peer's landing waited for and the segments joined along `dim` by another, the library encoding no
-    dispatch, the crossing issued once for `repeats` of them (a graph's, torch_mesh.compiler); else out of place from
-    x's block by dist.all_gather."""
+    this rank's block published from a page-padded region segment, the physical landing prefixes
+    observed once and parallel readers joining the segments along `dim`, the crossing issued once for `repeats` of
+    them (a graph's, torch_mesh.compiler); else out of place from x's block by dist.all_gather."""
     group = dist.distributed_c10d._resolve_process_group(group_name)
     if not _region_backed(x, group):
         y = x.movedim(dim, 0).contiguous()
         out = _empty((sum(sizes),) + y.shape[1:], y)
         dist.all_gather(list(out.split(sizes)), y, group=group)
         return out.movedim(0, dim).contiguous()
-    return _fused(x.contiguous(), dim, sizes, group, False, None, repeats)
+    return _fused(x, dim, sizes, group, False, None, repeats)
 
 
-# The all-gather and the all-reduce as a fused crossing (rdma/nccl.h ncclMeshFused; torch_mesh/fused.py): one SEND
-# toward each peer from this rank's segment and one landing from each peer into its own, the segments page-padded in a
-# slot of a held lease (two, taken in turn: no wait reads a send's completion, so a segment is written again only after
-# a later call has landed); the library encodes no step of it, and two dispatches of partition's own run them:
-# gather_publish copies the block into its segment (mesh_step_write) and releases it (mesh_step_release); gather_land
-# waits for every landing (mesh_step_await) and joins the segments along the gathered dimension into the output,
-# sum_land adds them, every rank's in rank order, so every rank holds the same sum.  A graph's crossings of one form on
-# a group are one issue's repeats (torch_mesh.compiler; nccl.h ncclMeshFused repeats): the host issues the crossing at
-# the first, each repeat j in slot j of the lease, and the kernels run repeat j's steps at j.  Each call's output is a
-# lease of _stream.mm's held pool (region_empty, held), returned to it once its tensor is freed and the stream has passed
-# it, so no output is written while a tensor of it lives (autograd may keep one for a backward) and no call grows
-# torch's MPS heaps.  The host encodes the two; it waits for nothing.
+@torch.library.custom_op('torch_mesh::allgatherv_out', mutates_args=('out',))
+def allgatherv_out(x: torch.Tensor, out: torch.Tensor, dim: int, sizes: list[int], group_name: str,
+                  repeats: int = 1) -> None:
+    """Gather directly into a caller's declared destination.
+
+    This is the same physical write program as allgatherv. The destination's
+    previous readers must precede this call on the MPS stream; its next readers
+    follow it. No intermediate output lease and copy into `out` are encoded.
+    """
+    group = dist.distributed_c10d._resolve_process_group(group_name)
+    if len(sizes) == 1:
+        out.copy_(x)
+    elif _region_backed(x, group):
+        torch.ops.torch_mesh.fused_step_out(x, None, out, dim, list(sizes), group_name, False, repeats)
+    else:
+        out.copy_(allgatherv(x, dim, sizes, group_name, repeats))
+
+
+@allgatherv_out.register_fake
+def _(x, out, dim, sizes, group_name, repeats=1):
+    return None
+
+
+# The generic gather and sum are data functions over the compiler's physical
+# one-sided all-gather writes. Rank-sized arrays describe tensor layout; channel-
+# sized arrays describe the transport, including parallel cables and relays.
+# The producer writes one region segment and publishes its physical bindings.
+# A single ready dispatch observes those landings, then parallel gather/fold
+# readers load coherent payloads without repeating waits. The out variant binds
+# a declared destination directly, avoiding a second output copy.
+# Two slots may be reused only for the recurrent all-gather: consuming every
+# peer's preceding contribution before publishing the next supplies a natural
+# descendant observation of each old reader. It is not a general lifetime rule
+# for asymmetric writes (follow uses transfer-owned deferred retirement).
 _GATHER_SOURCE = r"""
-template <uint N>
-struct gather_words { uint count, pre, post, rank, j; uint sizes[N], starts[N]; mesh_step_binding land[N - 1], publish[N - 1]; };
+template <uint N, uint CHANNELS>
+struct gather_words { uint count, pre, post, rank, j; uint sizes[N], starts[N]; mesh_step_binding land[CHANNELS], publish[CHANNELS]; };
 
-template <uint N, uint THREADS>
+template <uint AXES, uint CHANNELS>
+struct gather_publish_words {
+    uint count, j, shape[AXES], strides[AXES];
+    mesh_step_binding land[CHANNELS], publish[CHANNELS];
+};
+
+template <uint AXES, uint HALF, uint CHANNELS, bool CONTIGUOUS, uint THREADS>
 [[max_total_threads_per_threadgroup(THREADS)]]
 kernel void gather_publish(device const ushort* x [[buffer(0)]], device uchar* send [[buffer(1)]],
-                           device atomic_uint* arrivals [[buffer(2)]], constant gather_words<N>& w [[buffer(15)]],
+                           device atomic_uint* arrivals [[buffer(2)]], constant gather_publish_words<AXES, CHANNELS>& w [[buffer(15)]],
                            uint tid [[thread_index_in_threadgroup]], uint g [[threadgroup_position_in_grid]],
                            uint groups [[threadgroups_per_grid]]) {
     threadgroup uint last;
-    for (uint q = 0; q + 1 < N; q++) mesh_step_enter(*w.publish[q].p, w.publish[q].v, w.publish[q].progress, g == 0 && tid == 0);
-    for (uint k = g * THREADS + tid; k < w.count; k += groups * THREADS) mesh_step_write<ushort>(send, k, x[k]);
+    for (uint q = 0; q < CHANNELS; q++) if (w.publish[q].p)
+        mesh_step_enter(*w.publish[q].p, w.publish[q].v, w.publish[q].progress, g == 0 && tid == 0);
+    for (uint k = g * THREADS + tid; k < w.count; k += groups * THREADS) {
+        ulong at = k;
+        if (!CONTIGUOUS) {
+            uint element = k / HALF;
+            at = k % HALF;
+            for (uint axis = AXES; axis-- > 0;) {
+                at += ulong(element % w.shape[axis]) * w.strides[axis] * HALF;
+                element /= w.shape[axis];
+            }
+        }
+        mesh_step_write<ushort>(send, k, x[at]);
+    }
     threadgroup_barrier(mem_flags::mem_device);
     if (mesh_last_arrival<true>(arrivals, 0, groups, tid, &last)) {
-        for (uint q = 0; q + 1 < N; q++) mesh_step_release(*w.publish[q].p, w.publish[q].a, tid, w.j);
+        for (uint q = 0; q < CHANNELS; q++) if (w.publish[q].p)
+            mesh_step_release(*w.publish[q].p, w.publish[q].a, tid, w.j);
         mesh_arrival_reset(arrivals, 0, tid);
     }
 }
 
-template <uint N, uint THREADS>
+// Exactly one threadgroup observes the compiled physical landing prefixes.
+// The serial encoder orders the parallel consumers after this dispatch; they
+// use system-coherent payload loads, without repeating these waits or fences.
+template <uint N, uint CHANNELS>
+inline void gather_observe(constant gather_words<N, CHANNELS>& w, uint tid) {
+    if (tid == 0)
+        for (uint q = 0; q < CHANNELS; q++) if (w.land[q].p) {
+            mesh_step_enter(*w.land[q].p, w.land[q].v, w.land[q].progress, true);
+            mesh_step_counts(*w.land[q].p, w.land[q].a, w.land[q].v, w.j);
+        }
+    threadgroup_barrier(mem_flags::mem_device);
+    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));
+}
+
+template <uint N, uint CHANNELS, uint THREADS>
+[[max_total_threads_per_threadgroup(THREADS)]]
+kernel void gather_ready(constant gather_words<N, CHANNELS>& w [[buffer(15)]],
+                         uint tid [[thread_index_in_threadgroup]]) {
+    gather_observe(w, tid);
+}
+
+template <uint N, uint CHANNELS, bool WAIT, uint THREADS>
 [[max_total_threads_per_threadgroup(THREADS)]]
 kernel void gather_land(device const uchar* lease [[buffer(0)]], device ushort* out [[buffer(1)]],
-                        constant gather_words<N>& w [[buffer(15)]], uint tid [[thread_index_in_threadgroup]],
+                        constant gather_words<N, CHANNELS>& w [[buffer(15)]], uint tid [[thread_index_in_threadgroup]],
                         uint g [[threadgroup_position_in_grid]], uint groups [[threadgroups_per_grid]]) {
-    for (uint q = 0; q + 1 < N; q++) {
-        mesh_step_enter(*w.land[q].p, w.land[q].v, w.land[q].progress, g == 0 && tid == 0);
-        mesh_step_await(*w.land[q].p, w.land[q].a, w.land[q].v, tid, w.j);
-    }
+    if (WAIT) gather_observe(w, tid);
     uint total = 0;
     for (uint r = 0; r < N; r++) total += w.sizes[r];
     const uint row = total * w.post;
@@ -248,16 +306,13 @@ kernel void gather_land(device const uchar* lease [[buffer(0)]], device ushort* 
     }
 }
 
-template <uint BYTES, uint N, uint THREADS>
+template <uint BYTES, uint N, uint CHANNELS, bool WAIT, uint THREADS>
 [[max_total_threads_per_threadgroup(THREADS)]]
 kernel void sum_land(device const uchar* lease [[buffer(0)]], device metal::conditional_t<BYTES == 2, half, float>* out [[buffer(1)]],
-                     constant gather_words<N>& w [[buffer(15)]], uint tid [[thread_index_in_threadgroup]],
+                     constant gather_words<N, CHANNELS>& w [[buffer(15)]], uint tid [[thread_index_in_threadgroup]],
                      uint g [[threadgroup_position_in_grid]], uint groups [[threadgroups_per_grid]]) {
     using T = metal::conditional_t<BYTES == 2, half, float>;
-    for (uint q = 0; q + 1 < N; q++) {
-        mesh_step_enter(*w.land[q].p, w.land[q].v, w.land[q].progress, g == 0 && tid == 0);
-        mesh_step_await(*w.land[q].p, w.land[q].a, w.land[q].v, tid, w.j);
-    }
+    if (WAIT) gather_observe(w, tid);
     for (uint k = g * THREADS + tid; k < w.count * 2 / BYTES; k += groups * THREADS) {
         float sum = 0.0f;
         for (uint r = 0; r < N; r++)
@@ -270,7 +325,7 @@ _GATHER_KERNELS, _GATHER_THREADS = {}, 256
 
 
 def _gather_kernel(kernel, *arguments):
-    """gather_publish, gather_land or sum_land at `arguments` (n ranks; sum_land its element's bytes first), compiled
+    """A gather/fold kernel at `arguments` (ranks and physical channels, sum's element bytes first), compiled
     once after the library's steps (fused.steps)."""
     from . import _stream, fused
     from .argmax import SOURCE
@@ -298,7 +353,8 @@ def _linear_kernel(*arguments):
 
 def _fused(x, dim, sizes, group, adds, w=None, repeats=1):
     """allgatherv on the mesh backend (above), or where `adds` the all-reduce's sum (backend.all_reduce, every rank's
-    block all of x: sizes x's extent along dim, n times): x contiguous, of 2 or 4 bytes an element; the output a lease of
+    block all of x: sizes x's extent along dim, n times): x of 2 or 4 bytes an element, its source strides compiled
+    into the publisher; the output a lease of
     the held pool (above), its own while its tensor lives.  Where `w` (a weight [N, K] of fp16 rows
     any whole stride apart) is given, the sum's operand is x's product with it, x [R, K] (backend.linear_sum):
     linear.metal's linear_publish computes it into this rank's segment and publishes it there through the collective's
@@ -307,35 +363,51 @@ def _fused(x, dim, sizes, group, adds, w=None, repeats=1):
     its first call (_fused_form)."""
     if len(sizes) == 1:
         return x.clone() if w is None else torch.ops.torch_mesh.linear(x, w)
-    return torch.ops.torch_mesh.fused_step(x.contiguous(), w, dim, list(sizes), group.group_name, adds, repeats)
+    return torch.ops.torch_mesh.fused_step(x, w, dim, list(sizes), group.group_name, adds, repeats)
 
 
-def _fused_form(x, w, dim, sizes, group_name, adds):
+def _fused_form(x, w, dim, sizes, group_name, adds, channels):
     """A fused crossing's form for torch_mesh::fused_step, made at its first call (_stream.mm fused_maker): the
     communicator and the waits' bound; this rank and the ranks; the publication's kernel (gather_publish, or
     linear_publish where `w`), constant words, its repeat's word and grid; the landing's (sum_land or gather_land, and
     this rank's segment's start and each rank's sizes in its words); every rank's segment's start and padded count
-    (_paged, the library's page) and the output's shape; the publication's arrival count."""
+    (_paged, the library's page) and the output's shape; the publication's arrival count; the separate landing-prefix
+    observer and physical channel extent."""
     from . import _stream
+    from lifetimes import prove_recurrent_gather
     group = dist.distributed_c10d._resolve_process_group(group_name)
     n, rank = len(sizes), group.rank()
     operand = tuple(x.shape) if w is None else (x.shape[0], w.shape[0])
-    row, half = math.prod(operand) // max(1, operand[dim]), x.element_size() // 2
+    dim %= len(operand)
+    row, half = math.prod(operand[:dim] + operand[dim + 1:]), x.element_size() // 2
     counts, starts = _paged([s * row for s in sizes], x.element_size(), group)
+    # Positive contributions provide the returning dependency that proves the
+    # two-slot recurrence. Empty participants have no such publication; native
+    # realization must retain fresh generations for those shapes instead.
+    if all(counts):
+        prove_recurrent_gather(n)
     words = ([math.prod(operand) * half, math.prod(operand[:dim]), math.prod(operand[dim + 1:]) * half, rank, 0] + list(sizes) +
              [a * (1 if adds else half) for a in starts[:-1]])
     shape = operand if adds else operand[:dim] + (sum(sizes),) + operand[dim + 1:]
     spread = lambda count: max(1, min(16, -(-count // (_GATHER_THREADS * 8))))
-    land = _gather_kernel('sum_land', x.element_size(), n) if adds else _gather_kernel('gather_land', n)
+    groups = spread(math.prod(shape) * half)
+    inline_wait = groups == 1
+    land = (_gather_kernel('sum_land', x.element_size(), n, channels, inline_wait) if adds else
+            _gather_kernel('gather_land', n, channels, inline_wait))
     if w is None:
-        publish = (_gather_kernel('gather_publish', n), words, 4, spread(words[0]), _GATHER_THREADS)
+        publish_words = [math.prod(operand) * half, 0, *x.shape, *x.stride()]
+        publish = (_gather_kernel('gather_publish', x.ndim, half, channels, x.is_contiguous()), publish_words, 1,
+                   spread(words[0]), _GATHER_THREADS)
     else:
         K, N, ldw = x.shape[1], w.shape[0], w.stride(0)
+        if x.stride(1) != 1:
+            raise ValueError('mesh: linear publication requires contiguous columns; realize a strided producer kernel')
         split = _stream.linear_split(K, N)
-        publish = (_linear_kernel(4 if ldw % 4 == 0 else 1, 4 if K % 4 == 0 else 1, 2, split, 2, n - 1),
-                   [x.shape[0], K, N, 0, ldw, K, K, K, 0], 8, -(-N // 2), split * 32)
-    return (group.handle, _stream.polls, n, rank, *publish, land, words, 4, spread(math.prod(shape) * half), _GATHER_THREADS,
-            starts, counts, list(shape), torch.zeros(1, dtype=torch.int32, device=x.device))
+        publish = (_linear_kernel(4 if ldw % 4 == 0 else 1, 4 if x.stride(0) % 4 == 0 else 1, 2, split, 2, channels),
+                   [x.shape[0], K, N, 0, ldw, K, x.stride(0), x.stride(0), 0], 8, -(-N // 2), split * 32)
+    return (group.handle, _stream.polls, n, rank, *publish, land, words, 4, groups, _GATHER_THREADS,
+            starts, counts, list(shape), torch.zeros(1, dtype=torch.int32, device=x.device),
+            -1 if inline_wait else _gather_kernel('gather_ready', n, channels), channels)
 
 
 from . import _stream as _native  # noqa: E402  (torch_mesh::fused_step's library)
@@ -346,7 +418,13 @@ _native.fused_maker(_fused_form)
 @torch.library.register_fake('torch_mesh::fused_step')
 def _(x, w, dim, sizes, group_name, adds, repeats):
     operand = tuple(x.shape) if w is None else (x.shape[0], w.shape[0])
+    dim %= len(operand)
     return x.new_empty(operand if adds else operand[:dim] + (sum(sizes),) + operand[dim + 1:])
+
+
+@torch.library.register_fake('torch_mesh::fused_step_out')
+def _(x, w, out, dim, sizes, group_name, adds, repeats):
+    return None
 
 
 def _paged(counts, size, group):
@@ -395,29 +473,29 @@ def _allgatherv(x, dim, sizes, group):
 
 def _row(x, dim):
     """The elements of x a step along `dim` holds (its shape's product but that dimension's)."""
+    dim %= len(x.shape)
     return math.prod(s for k, s in enumerate(x.shape) if k != dim)
 
 
 def gathered(x, dim, sizes, group):
     """allgatherv's group of a block like `x` (its shape and dtype) along `dim` on mesh `group`, each rank's block
     sizes[r] long, as it issues it (torch_mesh.plan): on the mesh backend its fused crossing (_fused), this rank's
-    page-padded segment sent to each peer and each peer's landed, in rank order, declared fused; else one all-gather of
-    every rank's block."""
-    from .backend import ALLGATHER, RECV, SEND, Call
+    page-padded rank segments declared as one all-gather, lowered through the physical write compiler; else one
+    all-gather of every rank's block."""
+    from .backend import ALLGATHER, Call
     if not _region_backed(x, group):
         return [Call(ALLGATHER, x.numel(), x.dtype, counts=[s * _row(x, dim) for s in sizes])]
     counts = _paged([s * _row(x, dim) for s in sizes], x.element_size(), group)[0]
-    return [Call(kind, counts[rank if kind == SEND else q], x.dtype, q, fused=True)
-            for rank in (group.rank(),) for q in range(group.size()) if q != rank for kind in (SEND, RECV)]
+    return [Call(ALLGATHER, counts[group.rank()], x.dtype, counts=counts, fused=True)]
 
 
 def summed(x, group):
     """backend.all_reduce's sum of an operand like `x` (its elements and dtype) on mesh `group`, as its fused crossing
-    issues it (_fused): this rank's page-padded segment sent to each peer and each peer's landed, in rank order, one
-    group (torch_mesh.plan), declared fused (its steps compiled whole, as its fused stream's are)."""
-    from .backend import RECV, SEND, Call
+    issues it (_fused): one all-gather of page-padded partials, followed by the data function's sum. Its transport
+    has the same physical routability as every other compiled write program."""
+    from .backend import ALLGATHER, Call
     count = _paged([x.numel()], x.element_size(), group)[0][0]
-    return [Call(kind, count, x.dtype, q, fused=True) for q in range(group.size()) if q != group.rank() for kind in (SEND, RECV)]
+    return [Call(ALLGATHER, count, x.dtype, counts=[count] * group.size(), fused=True)]
 
 
 def scattered(x, dim, sizes, op='sum'):
@@ -554,29 +632,313 @@ def operand(mesh, name):
     return _OPERANDS[_NAMED[mesh, name]]
 
 
+_MIGRATION_SOURCE = r"""
+template <uint CHANNELS>
+struct migration_words {
+    ulong source, destination, row, rows, source_stride, destination_stride, frame;
+    uint j, unused;
+    mesh_step_binding land[CHANNELS], publish[CHANNELS];
+};
+template <uint BYTES> using migration_bits = metal::conditional_t<BYTES == 16, uint4,
+    metal::conditional_t<BYTES == 8, uint2, metal::conditional_t<BYTES == 4, uint,
+    metal::conditional_t<BYTES == 2, ushort, uchar>>>>;
+
+template <uint CHANNELS>
+inline void migration_observe(constant migration_words<CHANNELS>& w, uint tid) {
+    if (tid == 0)
+        for (uint q = 0; q < CHANNELS; q++) if (w.land[q].p) {
+            mesh_step_enter(*w.land[q].p, w.land[q].v, w.land[q].progress, true);
+            mesh_step_counts(*w.land[q].p, w.land[q].a, w.land[q].v, w.j);
+        }
+    threadgroup_barrier(mem_flags::mem_device);
+    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));
+}
+template <uint CHANNELS, uint THREADS>
+[[max_total_threads_per_threadgroup(THREADS)]]
+kernel void migration_ready(constant migration_words<CHANNELS>& w [[buffer(15)]],
+                            uint tid [[thread_index_in_threadgroup]]) { migration_observe(w, tid); }
+
+template <uint BYTES, uint CHANNELS, uint THREADS>
+[[max_total_threads_per_threadgroup(THREADS)]]
+kernel void migration_publish(device const migration_bits<BYTES>* original [[buffer(0)]],
+                              device uchar* frames [[buffer(1)]], device atomic_uint* arrivals [[buffer(2)]],
+                              constant migration_words<CHANNELS>& w [[buffer(15)]],
+                              uint tid [[thread_index_in_threadgroup]], uint g [[threadgroup_position_in_grid]],
+                              uint groups [[threadgroups_per_grid]]) {
+    using T = migration_bits<BYTES>;
+    threadgroup uint last;
+    for (uint q = 0; q < CHANNELS; q++) if (w.publish[q].p)
+        mesh_step_enter(*w.publish[q].p, w.publish[q].v, w.publish[q].progress, g == 0 && tid == 0);
+    for (ulong k = ulong(g) * THREADS + tid; k < w.frame; k += ulong(groups) * THREADS) {
+        const ulong i = ulong(w.j) * w.frame + k;
+        T value = T(0);
+        if (i < w.rows * w.row) value = original[w.source + (i / w.row) * w.source_stride + i % w.row];
+        mesh_step_write<T>(frames, i, value);
+    }
+    threadgroup_barrier(mem_flags::mem_device);
+    if (mesh_last_arrival<true>(arrivals, 0, groups, tid, &last)) {
+        for (uint q = 0; q < CHANNELS; q++) if (w.publish[q].p)
+            mesh_step_release(*w.publish[q].p, w.publish[q].a, tid, w.j);
+        mesh_arrival_reset(arrivals, 0, tid);
+    }
+}
+
+template <uint BYTES, uint CHANNELS, bool WAIT, uint THREADS>
+[[max_total_threads_per_threadgroup(THREADS)]]
+kernel void migration_land(device const uchar* frames [[buffer(0)]], device migration_bits<BYTES>* destination [[buffer(1)]],
+                           constant migration_words<CHANNELS>& w [[buffer(15)]],
+                           uint tid [[thread_index_in_threadgroup]], uint g [[threadgroup_position_in_grid]],
+                           uint groups [[threadgroups_per_grid]]) {
+    if (WAIT) migration_observe(w, tid);
+    for (ulong k = ulong(g) * THREADS + tid; k < w.frame; k += ulong(groups) * THREADS) {
+        const ulong i = ulong(w.j) * w.frame + k;
+        if (i < w.rows * w.row)
+            destination[w.destination + (i / w.row) * w.destination_stride + i % w.row] =
+                mesh_step_read<migration_bits<BYTES>>(frames, i);
+    }
+}
+
+template <uint BYTES, uint CHANNELS, uint THREADS>
+[[max_total_threads_per_threadgroup(THREADS)]]
+kernel void migration_local(device const migration_bits<BYTES>* original [[buffer(0)]],
+                            device migration_bits<BYTES>* destination [[buffer(1)]],
+                            constant migration_words<CHANNELS>& w [[buffer(15)]],
+                            uint tid [[thread_index_in_threadgroup]], uint g [[threadgroup_position_in_grid]],
+                            uint groups [[threadgroups_per_grid]]) {
+    for (ulong i = ulong(g) * THREADS + tid; i < w.rows * w.row; i += ulong(groups) * THREADS)
+        destination[w.destination + (i / w.row) * w.destination_stride + i % w.row] =
+            original[w.source + (i / w.row) * w.source_stride + i % w.row];
+}
+"""
+
+
+def _migration_kernel(kernel, *arguments):
+    from . import _stream, fused
+    from .argmax import SOURCE
+    from .streamed import instance
+    name, line = instance(kernel, *arguments, _GATHER_THREADS)
+    if name not in _GATHER_KERNELS:
+        _GATHER_KERNELS[name] = _stream.pipeline(fused.steps() + SOURCE + '\n' + _MIGRATION_SOURCE + '\n' + line, name)
+    return _GATHER_KERNELS[name]
+
+
+def _migration_words(run, frame_bytes, vector, j=0):
+    values = (run.source_offset // vector, run.destination_offset // vector, run.row_bytes // vector,
+              run.rows, run.source_stride // vector, run.destination_stride // vector, frame_bytes // vector)
+    return [word for value in values for word in (value & 0xFFFFFFFF, value >> 32)] + [j, 0]
+
+
+def _follow_masked(placement, local, logical_shape, logical_stride, key, rank, group):
+    """Stream sub-page affine intervals through owned ingress frames.
+
+    A train is bound once per commodity. Each frame has disjoint storage, is
+    published in stream order, and is consumed on its own landing prefix. The
+    final mask writes only logical output bytes; DMA padding stays in ingress.
+    The current train holds all its frame generations until native deferred
+    retirement; it is not a bounded-memory recycling ring without a return edge.
+    """
+    from migration import compile_rows
+    from routing import Fabric
+    from . import address, fused
+
+    if not _region_backed(local, group) or tuple(logical_stride) != tuple(torch.empty(tuple(logical_shape), device='meta').stride()):
+        return None
+    dim, size = placement.dim % local.ndim, local.element_size()
+    shape = list(local.shape)
+    shape[dim] = logical_shape[dim]
+    program = compile_rows(shape, dim, _OPERANDS[placement.key].capacity, _OPERANDS[key].capacity, size)
+    if not local.is_contiguous() or tuple(local.shape) != program.source_shapes[rank] or (local.numel() and not address(local)):
+        raise ValueError('mesh: masked migration requires the declared contiguous region source')
+    original = local.view(-1)
+    incoming = [run for run in program.runs if run.destination == rank]
+    extent = math.prod(program.destination_shapes[rank])
+    alias = (len(incoming) == 1 and incoming[0].source == rank and incoming[0].destination_offset == 0 and
+             incoming[0].bytes == extent * size and
+             (incoming[0].rows == 1 or incoming[0].source_stride == incoming[0].row_bytes))
+    result = (original.narrow(0, incoming[0].source_offset // size, extent).view(program.destination_shapes[rank])
+              if alias else _empty(program.destination_shapes[rank], local, group))
+    fabric = Fabric.of(group.comm)
+    channels = len(fabric.adjacent[rank])
+    jobs = []
+    # Compile kernels and allocate all needed leases before issuing any train.
+    for run in program.runs:
+        remote = run.source != run.destination
+        if not remote and (run.source != rank or alias):
+            continue
+        frame_bytes = (min(group.page * len(fabric.paths[run.source, run.destination]),
+                           -(-run.bytes // group.page) * group.page) if remote else run.bytes)
+        vector = math.gcd(16, run.source_offset, run.destination_offset, run.row_bytes,
+                          run.source_stride, run.destination_stride, frame_bytes)
+        if rank == run.source:
+            vector = math.gcd(vector, address(local))
+        if rank == run.destination:
+            vector = math.gcd(vector, address(result))
+        groups = max(1, -(-(frame_bytes // vector) // (_GATHER_THREADS * 8)))
+        words = _migration_words(run, frame_bytes, vector)
+        if not remote:
+            jobs.append((run, _migration_kernel('migration_local', vector, channels), None, None,
+                         words, groups, None, 1, frame_bytes))
+            continue
+        repeats = run.frames(frame_bytes)
+        frames = _empty((repeats * frame_bytes,), local, group, torch.uint8)
+        arrivals = torch.zeros(1, dtype=torch.int32, device=local.device) if rank == run.source else None
+        kernel = (_migration_kernel('migration_publish', vector, channels) if rank == run.source else
+                  _migration_kernel('migration_land', vector, channels, groups == 1) if rank == run.destination else None)
+        ready = _migration_kernel('migration_ready', channels) if rank == run.destination and groups > 1 else None
+        jobs.append((run, kernel, ready, frames, words, groups, arrivals, repeats, frame_bytes))
+    consumers = []
+    for run, kernel, ready, frames, words, groups, arrivals, repeats, frame_bytes in jobs:
+        if run.source == run.destination:
+            fused.encode(kernel, [local, result], words, 15, groups, 1, _GATHER_THREADS, channels)
+            continue
+        first = frames.narrow(0, 0, frame_bytes)
+        crossing = fused.writes(first, [first], [(run.source, run.destination)], group, repeats=repeats, stride=frame_bytes)
+        if rank == run.source:
+            commands = []
+            for j in range(repeats):
+                words[14] = j
+                commands.append((kernel, [local, frames, arrivals], words.copy(), 15, groups, 1, _GATHER_THREADS,
+                                 channels, None, crossing))
+            fused.encode_many(commands)
+        elif rank == run.destination:
+            consumers.append((kernel, ready, frames, words, groups, repeats, crossing))
+    # Independent outgoing data must be produced before any incoming wait can
+    # hold this rank's serial compute queue. Bind + publish each train together
+    # so descriptors can drain while later trains are presented. Consume frame
+    # prefixes round-robin; no consumer joins an entire tensor or all trains.
+    commands = []
+    for j in range(max((entry[5] for entry in consumers), default=0)):
+        for kernel, ready, frames, words, groups, repeats, crossing in consumers:
+            if j >= repeats:
+                continue
+            words[14] = j
+            if ready is not None:
+                commands.append((ready, [], words.copy(), 15, 1, 1, _GATHER_THREADS, channels, crossing, None))
+            commands.append((kernel, [frames, result], words.copy(), 15, groups, 1, _GATHER_THREADS, channels, crossing, None))
+    fused.encode_many(commands)
+    return result
+
+
+def _follow_indexed(placement, local, logical_shape, logical_stride, key, rank, group, publish_boundary):
+    """Realize aligned migration ranges through the common physical WRITE API.
+
+    The global layout and range geometry select this realization identically
+    on every participant. A rank's original region storage must satisfy that
+    declaration; a local mismatch raises before issue instead of choosing a
+    different collective sequence on that rank. Each relay range has its own
+    fresh lease. The terminal range is the actual output, with no unpack pass.
+    """
+    from migration import compile_migration, compile_rows
+    from . import address
+
+    if not _region_backed(local, group):
+        return None
+    contiguous = torch.empty(tuple(logical_shape), device='meta').stride()
+    if tuple(logical_stride) != tuple(contiguous):
+        return None
+    dim, size = placement.dim % local.ndim, local.element_size()
+    shape = list(local.shape)
+    shape[dim] = logical_shape[dim]
+    rows = compile_rows(shape, dim, _OPERANDS[placement.key].capacity, _OPERANDS[key].capacity, size)
+    if any(not run.aligned(group.page) for run in rows.runs if run.source != run.destination):
+        return None
+    program = compile_migration(shape, dim, _OPERANDS[placement.key].capacity, _OPERANDS[key].capacity, size)
+    remote = [write for write in program.writes if write.source != write.destination]
+    unaligned = set(program.unaligned(group.page))
+    if any(i in unaligned for i, write in enumerate(program.writes) if write.source != write.destination):
+        return None
+    location = address(local)
+    if (not local.is_contiguous() or tuple(local.shape) != program.source_shapes[rank] or
+            (local.numel() and not location) or
+            any(write.source == rank for write in remote) and location % group.page):
+        raise ValueError('mesh: indexed migration requires the declared contiguous, page-aligned region source')
+    original = local.view(-1)
+    incoming = [program.writes[i] for i in program.destination_writes(rank)]
+    extent = math.prod(program.destination_shapes[rank])
+    alias = (len(incoming) == 1 and incoming[0].source == rank and incoming[0].destination_offset == 0 and
+             incoming[0].bytes == extent * size)
+    if alias:
+        result = original.narrow(0, incoming[0].source_offset // size, extent).view(program.destination_shapes[rank])
+    else:
+        result = _empty(program.destination_shapes[rank], local, group)
+    destination = result.view(-1)
+    if not alias:
+        for write in incoming:
+            if write.source == rank:
+                destination.narrow(0, write.destination_offset // size, write.bytes // size).copy_(
+                    original.narrow(0, write.source_offset // size, write.bytes // size))
+    buffers = []
+    for write in remote:
+        count = write.bytes // size
+        if rank == write.source:
+            buffer = original.narrow(0, write.source_offset // size, count)
+        elif rank == write.destination:
+            buffer = destination.narrow(0, write.destination_offset // size, count)
+        else:
+            buffer = _empty((count,), local, group)
+        buffers.append(buffer)
+    if remote:
+        # Original data functions may have used plain GPU stores. End that
+        # command buffer once, without waiting, before publishing their pages.
+        publish_boundary()
+        group.start_coalescing(local.device)
+        for write, buffer in zip(remote, buffers):
+            # WRITE reads send only at its source and recv everywhere else.
+            # The unused argument aliases the used one; no dummy payload copy.
+            group.write(buffer, buffer, write.source, write.destination)
+        group.end_coalescing(local.device)
+    return result
+
+
 @torch.no_grad()
 def follow(*tensors):
     """DTensors `tensors` (of one mesh), each split along each partitioned mesh dimension by the operand attached there
-    now (after the Balancer moved it), as a list.  A mesh dimension's move is one group (the backend's) a tensor, in
-    turn, of one MPI_Alltoallv (ncclMeshAlltoAllV) of the rows that change rank alone, each piece a segment of whole
+    now (after the Balancer moved it), as a list. Page-aligned ranges use the indexed migration compiler and the
+    common physical WRITE interface: original source pages to final output pages, with separate relay leases.
+    An unchanged contiguous local interval is aliased; other retained ranges are copied directly once.
+
+    Sub-page ranges in contiguous region layouts use compact affine masks and
+    repeated physical WRITE trains. Each frame is independently published and
+    consumed into its final positions; padding stays in owned ingress pages.
+    Sources and relays retain each immutable frame generation through DMA.
+
+    Other unsupported layouts still use one MPI_Alltoallv (ncclMeshAlltoAllV) a tensor of the rows that
+    change rank alone, each piece a segment of whole
     pages (_paged: the library places each segment on a page) of a staging lease, sent once and copied once into its
     place in the tensor's new block, a region tensor contiguous in the tensor's own layout; the rows that stay are
-    copied into their place there, crossing nothing.  The staging is two pairs of leases taken for the move, each grown
-    to the largest need, the tensors taking them in turn, a pair written again (or returned) only after every peer has
-    landed this rank's sends: after each tensor's alltoall every rank issues a one-word all-gather once it has landed
-    the tensor, so landing every peer's word proves its own sends were read (a 1-D re-partition need not receive from
-    the peers it sends to, so a later tensor's landing proves nothing); the staging is returned with the move: the
-    move's own memory is its new blocks and the staging, not every tensor's staging at once.  The rows that stay pass
+    copied into their place there, crossing nothing. Each tensor has fresh transfer leases. Dropping their Python
+    references returns them through native deferred retirement: their local GPU users and every DMA reader must
+    finish before the region can allocate the bytes again. No receipt all-gather or other application acknowledgment
+    is emitted, and no unrelated incoming transfer is used as evidence of consumption. The rows that stay pass
     through the staging too, so no copy has both sides strided (torch's MPS copy makes such a copy through a temporary
     of its size, from 10 MiB a 1 GiB heap).  Each is returned at its logical shape and that shape's contiguous strides
-    (a moved block's leading extents of one may carry any stride, which from_local's inference would refuse)."""
-    mesh, held = tensors[0].device_mesh, [[list(t.placements), t.to_local(), t.shape] for t in tensors]
+    (a moved block's leading extents of one may carry any stride, which from_local's inference would refuse).
+
+    The unsupported-layout fallback still materializes whole-operand staging.
+    The masked path intentionally performs streamed producer/consumer stores;
+    its padding and masks never permit overwriting neighboring live bytes."""
+    from . import _stream
+    mesh, held = tensors[0].device_mesh, [[list(t.placements), t.to_local(), t.shape, t.stride()] for t in tensors]
     for i in range(mesh.ndim):
         key = _NAMED.get((mesh, mesh.mesh_dim_names[i])) if mesh.mesh_dim_names else None
         moving = [h for h in held if isinstance(h[0][i], RaggedShard) and key not in (None, h[0][i].key)]
-        rank, group, stage, word = mesh.get_coordinate()[i], mesh.get_group(i), [[None, None], [None, None]], None
-        for k, h in enumerate(moving):
+        rank, group = mesh.get_coordinate()[i], mesh.get_group(i)
+        published = False
+
+        def publish_boundary():
+            nonlocal published
+            if not published:
+                _stream.publish_boundary()
+                published = True
+
+        for h in moving:
             p, d = h[0][i], h[0][i].dim % h[1].ndim
+            direct = _follow_indexed(p, h[1], h[2], h[3], key, rank, group, publish_boundary)
+            if direct is None:
+                direct = _follow_masked(p, h[1], h[2], h[3], key, rank, group)
+            if direct is not None:
+                h[0][i], h[1] = RaggedShard(p.dim, key), direct
+                continue
             rows = h[1].movedim(d, 0)
             old, rest = _OPERANDS[p.key], rows.shape[1:]
             a, b = (list(itertools.accumulate(o.parts.tolist(), initial=0)) for o in (old, _OPERANDS[key]))
@@ -586,10 +948,8 @@ def follow(*tensors):
             first, into = list(itertools.accumulate(sends, initial=0)), list(itertools.accumulate(receives, initial=0))
             out, out_at = _paged([0 if q == rank else c * row for q, c in enumerate(sends)], rows.element_size(), group)
             land, land_at = _paged([0 if r == rank else c * row for r, c in enumerate(receives)], rows.element_size(), group)
-            pair, sizes = stage[k % 2], ((out_at[-1] + sends[rank] * row) * rows.element_size(), land_at[-1] * rows.element_size())
-            for s, need in enumerate(sizes):
-                if pair[s] is None or pair[s].numel() < need:
-                    pair[s] = _empty((max(need, 1),), rows, group, torch.uint8)
+            sizes = ((out_at[-1] + sends[rank] * row) * rows.element_size(), land_at[-1] * rows.element_size())
+            pair = [_empty((max(need, 1),), rows, group, torch.uint8) for need in sizes]
             x, y = (pair[s][:need].view(rows.dtype) for s, need in enumerate(sizes))
             x, stay = x[:out_at[-1]], x[out_at[-1]:].view((sends[rank],) + rest)
             new = _empty(h[1].shape[:d] + (into[-1],) + h[1].shape[d + 1:], rows, group)
@@ -602,13 +962,9 @@ def follow(*tensors):
             for r in range(n):
                 if r != rank:
                     block[into[r]:into[r + 1]].copy_(y[land_at[r]:land_at[r] + receives[r] * row].view((receives[r],) + rest))
-            if word is None:
-                counts, starts = _paged([1] * n, 4, group)
-                word = (_empty((starts[-1],), rows, group, torch.int32), counts, starts)
-            dist.all_gather(list(word[0].split(word[1])), word[0][word[2][rank]:word[2][rank + 1]], group=group)
             h[0][i], h[1] = RaggedShard(h[0][i].dim, key), new
     contiguous = lambda shape: torch.empty(shape, device='meta').stride()
-    return [from_local(local, mesh, placements, shape=shape, stride=contiguous(shape)) for placements, local, shape in held]
+    return [from_local(local, mesh, placements, shape=shape, stride=contiguous(shape)) for placements, local, shape, _ in held]
 
 
 # The tensors partition split along each partitioned mesh dimension, re-laid in place where the balancer moves its
@@ -709,7 +1065,16 @@ def evaluations(mesh, name, count):
     for k in range(count):
         if k:
             _balance(mesh, name, held, group)
-        yield k
+        # Feedback and migration are outside the compiled function. They must
+        # not advance its declared group cursor or execute one of its plans.
+        planned = (mesh, name) in _PLANS
+        if planned:
+            group.plan_active(True)
+        try:
+            yield k
+        finally:
+            if planned:
+                group.plan_active(False)
 
 
 WINDOW = 4  # the evaluations at one set of parts the Balancer observes at once, as its invocations
@@ -1463,6 +1828,44 @@ def ring_attention(mesh, name, query, key, value, is_causal=False, scale=None, l
     o = operand(mesh, name)
     S = query.size(2) * o.units // o.capacity[mesh.get_local_rank(name)]
     return _ring_attention(mesh.get_group(name), o.key, query, key, value, is_causal, scale, _halves(o, S, load_balance))
+
+
+def ring_calls(mesh, name, query_shape, dtype, value_width):
+    """The split-KV function's query gather and partials reduce-scatter.
+
+    Shapes are metadata at realization: [batch, heads, local positions, dim].
+    The same custom reduction operator is used by declaration and execution.
+    A callable partition.plan rebuilds these counts after a share change.
+    """
+    from .backend import ALLGATHER, REDUCE_SCATTER, Call
+    group, o, rank = mesh.get_group(name), operand(mesh, name), mesh.get_local_rank(name)
+    batch, heads, local, dim = query_shape
+    total, remainder = divmod(local * o.units, o.capacity[rank])
+    if remainder:
+        raise ValueError('mesh: query positions are not a block of this partition')
+    lengths = _blocks(o, total)[0]
+    counts = [batch * heads * length * dim for length in lengths]
+    width = 2 + value_width
+    partials = [batch * heads * length * width for length in lengths]
+    return [[Call(ALLGATHER, counts[rank], dtype, counts=counts)],
+            [Call(REDUCE_SCATTER, sum(partials), torch.float32,
+                  op=group.partials_operator(width), counts=partials)]]
+
+
+def unshard_calls(mesh, name, shapes, dims, dtype):
+    """The static gathered blocks used by context_parallel_unshard."""
+    from .backend import ALLGATHER, Call
+    group, o, rank = mesh.get_group(name), operand(mesh, name), mesh.get_local_rank(name)
+    groups = []
+    for shape, dim in zip(shapes, dims):
+        dim %= len(shape)
+        total, remainder = divmod(shape[dim] * o.units, o.capacity[rank])
+        if remainder:
+            raise ValueError('mesh: unshard positions are not a block of this partition')
+        row = math.prod(shape[:dim] + shape[dim + 1:])
+        counts = _paged([length * row for length in _blocks(o, total)[0]], dtype.itemsize, group)[0]
+        groups.append([Call(ALLGATHER, counts[rank], dtype, counts=counts)])
+    return groups
 
 
 SCORES = 1 << 26

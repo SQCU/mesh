@@ -25,6 +25,21 @@ orders. Overlapping receive/write ranges create dependencies; disjoint receive
 ranges do not. Cable resources remain separate from node compute resources:
 two cables incident on one node are not mutually exclusive.
 
+The retained 2026-10-24 morning microprofile configuration had 4/1/2 parallel cables between the
+Studio pair/first Studio and Mini/second Studio and Mini, giving ingress
+degrees 5/6/3. Its wire identities and advertised capacities are recorded in
+`metal-microbench/output_data/review-20261024/microprofile/fixed.json`.
+Read-only discovery at 12:57:27 PDT found six paired cables, 4/1/1, with
+degrees 5/5/2: second Studio port 2 was `STOPPED` and Mini port 1 `PAIRING`.
+The [dated snapshot](../../../metal-microbench/output_data/review-20261024/interface-refactor/topology-current.json)
+retains those observations; [data-model.md](data-model.md#8-writes-over-many-hops-and-many-paths)
+links the earlier bridge-log event without inferring its cause.
+Thus its active advertised aggregate wire ceiling was 120 GB/s, versus the
+morning's 140 GB/s. Neither snapshot is a constant in the solver or interface.
+Discovery is authoritative for each realization; retain its actual cable
+identities and statuses with the execution. An unavailable cable is not a
+solver-imposed restriction, and it must not be counted as an active resource.
+
 ## Interface
 
 The NCCL calls remain the data-program interface. The collective compiler can
@@ -34,6 +49,14 @@ complete call sequence with `ncclMeshCommPlan`. Installing routes invalidates
 the previous compiled sequence. The caller completes its previous function,
 installs the next routes, and compiles the next sequence before starting it.
 No route decision belongs inside a tensor operation or recurrent timestep.
+
+All collective front ends must lower into the same physical fragment, relay,
+page-range and lifetime representation. A solver with a different objective
+retains the same placement and routing capabilities. A peer-sized publication
+array, a single-cable fused form, or an operation that excludes declared relays
+is an interface defect; preserving it is not a permitted bandwidth tradeoff.
+Physical constraints such as page granularity belong in realization, with the
+attainable bound reported. They do not justify discarding representable routes.
 
 `ncclMeshCommSample` exposes byte prefixes supplied, sent, and landed on each
 local cable. Supplied minus sent is the ordinary published backlog. A relay may
@@ -88,8 +111,9 @@ counts by largest remainder, conserving the operand exactly. It does not add a
 mandatory page to every possible path: that would distort the requested vector
 and create relay dependencies for shares smaller than a page. Physical cable
 coverage is assessed across the function's complete set of writes.
-The ordinary two-participant NCCL send/receive interface still requires a direct
-connection; a multi-hop write declares its participating relays collectively.
+Multi-hop execution declares its participating relays in the compiled fabric.
+A two-party source call must be lowered into that declaration when necessary;
+the endpoint signature must not silently reduce execution to a direct cable.
 
 ### Fused physical writes
 
@@ -129,7 +153,11 @@ Publication is not send completion. There are no waits on `sent`. The data progr
 keeps each source and relay lease alive and unmodified through its downstream
 uses; independent layers can have independent leases. A complete-function
 rendezvous in a test establishes safe reuse between evaluations without adding
-per-send synchronization to the executor.
+per-send synchronization to the executor. That test boundary is not a universal
+ownership proof for arbitrary asymmetric programs, nor a requirement to add a
+rendezvous to applications. Native source retirement can follow the bridge's
+existing final DMA-read evidence asynchronously; destination consumer lifetime
+is separate. The typed rules below specify exactly which proof is needed.
 
 A GPU producer stores its published result through `mesh_step_write`, and a GPU
 consumer reads NIC-written bytes through `mesh_step_read`. Ordinary cached stores
@@ -138,6 +166,111 @@ can retain old contents of a reused receive buffer. The collective's own payload
 producers follow the same coherent-store rule. No staging copy is added to repair
 an ordinary producer. The DNN example computes its second matrix product directly
 into the published lease using the existing Metal tensor-operation pattern.
+
+### Typed one-sided lifetimes
+
+`rdma/lifetimes.py` is an executable compiler for ownership proofs. Its inputs
+are invocation-specific page-range `Lease`s; local `Event`s for first write,
+publication, final read and landing; physical `Transfer`s; and declared local
+`Read`s. Every physical fragment and relay use must appear, including planned
+reads not posted yet. A transfer adds only the real publish → first destination
+write → landing relation. Local edges are existing arithmetic dependencies.
+There is no arbitrary cross-node edge that could smuggle in a missing receipt.
+
+For a lease `p`, let `uses(p)` contain each final arithmetic read and each
+outgoing DMA read. A transfer's final DMA read is proved either by its local
+bridge-owned final source completion or by the destination landing; neither
+requires destination arithmetic to finish. For every use `u`, reuse needs a
+known event `e` with `u ≺ e`. A naturally returning result can supply `e` when
+the actual remote data graph contains that dependency. An unrelated landing,
+an ordinally later collective, or local function completion cannot supply it.
+Remote consumers of the independent destination pages have their own uses.
+
+Monotone prefixes imply all earlier contiguous prefixes on the same physical
+channel, direction and connection generation. Every outgoing fragment is an
+AND obligation, even when several go to one peer. Alternative witnesses of
+one final DMA read are OR proofs. `plan.rules(node, bridge=True)` exposes
+bridge-owned source completion to the allocator; the default rules exclude it
+from data-program observation. `plan.tracker(...).observe(existing_event)`
+updates only affected ownership obligations and returns newly retired leases.
+It sends no message and inserts no wait, copy, read of private driver state,
+or data-program branch. An unproved lifetime remains retained.
+
+The source completion must cover the entire presented range, not only the
+first posted requests. Presentation ownership must therefore survive until
+every scheduled use has been posted and every actual DMA read has ended.
+The final destination consumer's lifetime is not shortened by that event.
+Runtime adapters supply actual events; this pure compiler does not observe
+hardware or grant permission to fabricate completion.
+
+Static allocation first-fits compatible page intervals only when every old
+use already precedes the new **first write**. Publication comes after stores,
+so publication-after-read alone cannot justify in-place reuse. Missing
+first-write evidence gets separate storage. The allocator introduces no
+dependency to obtain a smaller allocation and claims no minimum-memory proof.
+Splitting a lease into page/range leases permits retirement at that granularity.
+
+`prove_recurrent_gather(participants, paths)` checks the following two-slot
+proof once at realization, retaining parallel physical fragments and relays:
+
+- Each rank's `publish(i+1)` follows its `consume(i)`.
+- Each `consume(i)` follows final landing of all ranks' required pieces at i.
+- Local `consume(i+1)` therefore proves that every peer consumed its previous
+  value i, so the local source slot i can be first-written for i+2.
+- Remote `publish(i+2)` follows that peer's `consume(i+1)`, which follows our
+  `publish(i+1)`, which follows our `consume(i)`. Thus the next write into our
+  destination slot i cannot begin until its old consumer ended. Forwarding
+  preserves the same causal chain; relay page reuse is checked as well.
+
+No destination gate or receipt message is needed for this proven recurrence.
+One-slot reuse fails the proof. Independent feed-forward publications and
+asymmetric repartitioning also fail that recurrence; their source releases
+must use actual DMA-read retirement or another natural proof. The tests cover
+these counterexamples, multiple physical fragments, independent channel
+generations, returning data, local readers, and remote sinks with no return.
+
+`mesh-lease-retire.h` supplies native source ownership bookkeeping. It records
+the maximum final **page** prefix for each physical stream/holding before
+presentation, including unposted SENDs. The bridge's `sent` prefix is contiguous
+completed reads across both hardware lanes (`mesh-link.c:link_send/walk_count`).
+All dependencies must complete; one peer's progress cannot release another's.
+A local holding generation is separate from the wire/QP identity, because the
+same wire resets its counts for a later holder. A lost `~0` prefix, changed
+wire, changed holding, timeout, or local GPU completion is never retirement.
+Such a dependency stays retained until an explicit actual-DMA/quiescent-driver
+proof. The helper is nonblocking and adds no transport traffic. Its metadata
+destructor is not a proof that the underlying pages may be overwritten.
+
+### Compiled masked sub-page writes
+
+`migration.compile_rows` represents a partition intersection by an affine byte
+map: base, row width, row count and stride at each endpoint. A frame carries a
+contiguous interval of that logical payload. Its final-frame mask excludes
+padding before the original-source load and before the final-destination store.
+Padding lives in separate transport storage, so a partial output page never
+overwrites another writer's neighboring values. Descriptor count depends on
+partition intersections rather than the number of rows or transport pages.
+
+The physical WRITE plan for a repeated frame train is realized once. Producers
+publish each complete frame's contiguous prefix; consumers read each landed
+frame and apply its precompiled mask. Frame size, vector width and GPU dispatch
+structure are realization choices whose whole-function cost must be measured.
+They do not narrow the available physical routes or authorize a fixed size rule
+that another solver cannot change. Useful bytes exclude padding; wire bytes
+include every padded frame on every hop, and packing/unpacking contributes to
+end-to-end latency.
+
+Ownership needs no new event kind. The original operand has one read use for
+each pack; the full padded source and relay frames have their physical DMA
+uses; each destination frame has its masked-consumer read. Descriptors are
+ordinary closure inputs retained through all their uses. The final output's
+publication follows all stores required by the declared output extent. For an
+isolated one-way train, serial receiver consumers do not order remote writes,
+and source DMA retirement does not retire the destination's pending consumer.
+The current lowering therefore allocates distinct frame generations instead
+of assuming the recurrent gather's two-slot proof. The lifetime tests exercise
+these counterexamples; affine coverage and mask geometry require their own
+migration compiler and GPU checks.
 
 ## Ahead of time
 
@@ -185,18 +318,24 @@ There is no control/trial comparison, acceptance threshold, rollback, or winner
 selection. Best attained measurements are reporting statistics and do not steer
 the state. Persisted state contains the vector, moments, and partial stencil.
 
-The current cost is `J = log(T) + w * sum_e(A_e/C_e) / T^2 + v * F`, where `T` is complete
-function latency, `A_e` is integrated queued bytes on directed cable `e`, and
-`C_e` is that cable's capacity in bytes/second. The congestion term is continuous
-and dimensionless, with default weight `w = 1`. It prices own and relay traffic
-sharing links without equating DMA with GPU arithmetic. Every observation names
-the exact compiled configuration, workload, and completed function. Incorrect or
-partial results are measurement failures, never samples of a slower route.
-`F` is the mean over repeated stages of the variance of directed-cable final
-landing times, divided by that stage's transaction span squared (`v = 1`).
-Clock-bracket midpoints supply this numerical residual; the report retains
-lower and upper completion-spread bounds. Finishes are grouped from repeated
-compiled entry order after the complete function, with no new phase barrier.
+The current default cost is `J = log(T/U)`, where `T` is complete function
+latency and `U` is fixed useful numerical work. The DNN uses one logical final
+output (`rows * width * 4` bytes), independent of replicated partials, relays,
+padding or collective decomposition. With fixed `U`, lower latency and higher
+whole-function useful throughput are the same objective. Empty queues or
+smaller finish variance cannot compensate for a slower function. Queue area,
+completion residuals and clock-bracketed finish spread remain model inputs and
+reported evidence, not independent rewards. Every observation names the exact
+compiled configuration, workload and completed function.
+
+An explicit `transaction_weight = w > 0` selects
+`J = log(T/U) + w*log(W/U_transaction)`, where `W` is the conservative upper
+bound on the transaction-window union and `U_transaction` is fixed under its
+declared contract. This is an explicit throughput tradeoff, not an inferred
+congestion preference or strict lexicographic guarantee. The default is zero.
+See [objective-20261024.md](objective-20261024.md) for the derivation, unchanged
+continuous updates, accounting invariants, and the distinction between final
+numerical work and implementation-specific transaction bytes.
 
 The DNN also enables the historical affine `allocate.equal_finish` calculation
 (restored from `fa36bea6^`) and its existing `min_max` tile realization. GPU
@@ -238,8 +377,8 @@ the observations; changed upstream queuing can introduce cross-flow derivatives.
 The local model is anchored at the preceding stencil's measured mean finish,
 then adjusted for the next compute centre. Its route coordinates satisfy
 `finish(x) = b + J*x`, with each commodity's path fractions summing to one.
-A convex proximal step minimizes a smooth maximum finish plus finish variance
-and `||x-x0||^2/(2*rate)`, with the same decaying learning rate as the joint
+A convex proximal step minimizes a monotone smooth maximum finish plus
+`||x-x0||^2/(2*rate)`, with the same decaying learning rate as the joint
 finite differences. This is an incremental step in a local model, not global
 minimization of its extrapolation. Finish times are normalized by the preceding
 stencil's longest finish; smooth-maximum sharpness is 64. The result becomes
@@ -248,7 +387,10 @@ from actual landings; neither delay nor its sensitivity is assumed constant
 across executions. Residual fit error, Jacobian, and predicted finishes are
 recorded. This supplies a physical
 preconditioner for fourteen simultaneous finish residuals while finite
-differences retain the full function's measured latency and queue objective.
+differences retain the full function's measured useful-throughput objective.
+The finish-variance term was removed: delaying an early completion must not
+improve the predicted performance score. Model corrections and quantized
+finite differences do not establish descent on every actual evaluation.
 It adds neither runtime routing choices nor measured-candidate rejection.
 The harness realizes one canonical configuration on rank zero and distributes
 its serialized values before compilation. Constrained numerical solvers can
@@ -320,8 +462,10 @@ raw traces, so narrower clock uncertainty is not credited as a transport speedup
 
 Report best attained whole-function latency and best attained transaction-window
 bandwidth with their evaluation IDs and corresponding other measurements. They
-may belong to different evaluations. The cluster's advertised 80 Gbit/s per
-direction on seven cables gives `C = 140 GB/s`; this is a physical ceiling, not
-a demonstrated sustainable payload rate. Positive traffic on all fourteen
-directions establishes coverage; the utilization above measures the remaining
-gap to that ceiling.
+may belong to different evaluations. The morning microprofile's advertised
+80 Gbit/s per direction on seven cables gave `C = 140 GB/s`; the six paired
+cables observed at 12:57:27 PDT gave `C = 120 GB/s`. Use the actual discovered
+fabric of each execution. These are advertised physical ceilings, not
+demonstrated sustainable payload rates. Positive traffic in every discovered
+direction establishes coverage; utilization measures the gap to that specific
+fabric's capacity. Historical measurements retain their original denominator.

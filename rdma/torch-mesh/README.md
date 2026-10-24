@@ -1,11 +1,13 @@
 # torch-mesh
 
 torch.distributed's `mesh` backend over [libnccl-mesh](../NCCL.md). MPS tensors run on the library's Metal path:
-encoded on torch's MPS stream, each tensor passed as its storage's `MTLBuffer` and offset, no copies. CPU tensors
-run on the host path.
+encoded on torch's MPS stream, with region operands passed as their storage's `MTLBuffer` and offset. The transport
+reads and lands those bytes in place; higher-level packing and layout operations can still make copies, as described
+below. CPU tensors run on the host path.
 
-Every collective takes one path: a group of calls issued by `_stream.mm`'s `issue` (the backend's methods, torch's
-functional collectives and the library's own calls alike), each call one kind of the library's set. An all-gather and a
+Ordinary backend collectives are groups issued by `_stream.mm`'s `issue` (the backend's methods, torch's functional
+collectives and the library's own calls), each call one kind of the library's set. Fused producer/consumer calls
+bind the same physical compiler through their native lowering, described below. An all-gather and a
 reduce-scatter are always the V calls (`ncclMeshAllGatherV`, `ncclMeshReduceScatterV`; the library takes equal
 segments as its equal program). `all_to_all`, `all_to_all_single`, `gather` and `scatter` are `ncclMeshAlltoAllV`,
 MPI_Alltoallv with its counts on the host (a gather or scatter of any sizes is the rooted V, MPI's `Gatherv` and
@@ -36,16 +38,17 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   Separate `isend`/`irecv` calls in the same order on both sides do not pair, and the library does not detect it
   ([NCCL.md](../NCCL.md#rules-a-program-keeps)).
 - A subgroup (`new_group`) is a communicator of its own, made in any order, before or after the world group; no two
-  communicators hold one stream, and a link has up to four (one for each lane pair its plan holds), so the world group
-  and three subgroups use a node pair at once; one more is refused (EBUSY) until a group is destroyed
+  communicators hold one stream. Each communicator acquires a stream on every participating physical cable. A link
+  has up to four, subject to its endpoints' actual lane capacity; a required busy link refuses another communicator
+  (EBUSY) until a stream becomes free
   ([NCCL.md](../NCCL.md#rules-a-program-keeps)).
 - Every wait carries a deadline set when it is made (design/data-model.md section 6): a work's `wait(timeout)` its
   timeout, 5 s where none is given; each turn of torch's queue and each command buffer `_stream.mm` waits for, 5 s;
   the library's own waits theirs ([NCCL.md](../NCCL.md#bounded-waits)). Past it the process ends, naming the wait and
   its deadline.
 - A group's collectives run where a path between its ranks joins every two of them, each rank's bridge reaching the
-  next one's node: a route crosses ranks alone (a node it is to cross takes part as a rank, and contributes its operand
-  like every rank: this backend compiles no rank as the identity, design/data-model.md section 9's relay), and a group
+  next one's node. Routes cross communicator members; explicit WRITE can use a member solely to relay pages, and
+  generic gathers support zero-share ranks. A group
   whose ranks no such path joins fails at its first collective that crosses a link
   ([NCCL.md](../NCCL.md#routes-between-unlinked-ranks)).
 - Memory ([NCCL.md](../NCCL.md#memory)): the backend's own CPU tensors (a
@@ -54,9 +57,10 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   `torch_mesh.empty(shape, dtype=..., device="cpu")`.
 - Region MPS tensors: `torch_mesh.empty(shape, dtype=..., device="mps")` is an MPS tensor whose storage is a lease's
   Metal buffer (`ncclMeshMemBuffer`), made through torch's DLPack interop (`at::fromDLPack` of a `kDLMetal` tensor, its
-  data the `MTLBuffer` and its byte offset, as torch's `toDLPack` writes an MPS tensor). Its release returns the lease
-  once the stream's command buffer open at the release has completed (torch's MPS allocator's own rule for a buffer in
-  flight). Every collective passes it as its `MTLBuffer` and offset, so the library reaches it where it lies wherever
+  data the `MTLBuffer` and its byte offset, as torch's `toDLPack` writes an MPS tensor). Its release defers reuse until
+  both its local GPU users and all registered local DMA reads have completed, including reads the bridge has not yet
+  posted (`ncclMeshMemReusable`). GPU completion alone does not establish source retirement, and no receipt collective
+  is needed to establish local DMA-read completion. Every collective passes it as its `MTLBuffer` and offset, so the library reaches it where it lies wherever
   it reads or writes region operands in place ([NCCL.md](../NCCL.md#memory)). `torch_mesh.records()` lists the region
   tensors' live leases and `torch_mesh.address(t)` where a tensor's bytes lie in the region (0: outside it).
   `torch_mesh.check_memory()` warns where the process's MPS tensors outside the region come to 1 GiB or more
@@ -67,7 +71,10 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   (`ncclInvalidUsage`: the library copies nothing into the region). torch's MPS factories take their allocator from a
   fixed instance (`at::mps::GetMPSAllocator`, no registered or pluggable allocator for MPS), so a program places a
   tensor in the region by making it with `empty`, never by default. The tensors the backend makes itself (a
-  functional collective's result) are region tensors (`torch_mesh.empty`). A non-contiguous operand fails as a value.
+  functional collective's result) are region tensors (`torch_mesh.empty`). Raw transport operands must satisfy their
+  declared contiguous region layout. The generic fused gather separately supports strided source views by compiling
+  their strides into its publisher, without making a contiguous input tensor; it still writes a collective segment
+  and assembles the logical output.
   metal-microbench's callers: `crossing.py` `REGION_TENSORS=1` all-reduces one in place.
 
 ## What works
@@ -93,6 +100,22 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 
 An indexed scatter into the blocks of `all_to_all_single` at a program's maximum extents, written in the program's own
 code, is any dispatch by index (an expert dispatch among them); how much of a block a step fills is data in its pages.
+
+### Physical fused writes
+
+Every communicator retains its physical cables, including parallel cables to the same peer. Explicit WRITE and
+fused collective lowering share the same physical fragment compiler, relay dependencies, and channel bindings.
+`torch_mesh.fused.writes` declares immutable source/destination pairs; `fused.encode` takes a physical `channels`
+extent, independently of rank counts. The removed `fused.exchange` interface is not supported. Unsupported fused
+forms fail rather than executing an ordinary source read before the producer publishes it.
+
+Generic gather and sum declare one page-padded ALLGATHER. A single `gather_ready` dispatch observes their incoming
+prefixes before a parallel consumer; a one-threadgroup consumer inlines that observation. The LSTM example uses
+`torch_mesh::allgatherv_out` to write its persistent hidden-state destination directly, eliminating the additional
+result-to-state copy. Generic gather still uses its common segment layout; not every remaining layout copy has been
+removed. Positive-contribution recurrent gathers have a typed two-slot reuse proof; zero-share cases use fresh
+generations and deferred retirement. See [DESIGN-fused-stream.md](DESIGN-fused-stream.md) for the current API,
+ownership requirements, and dated two-/three-rank validation.
 
 ### Partials merge
 
@@ -192,11 +215,26 @@ parallelize_module(block, mesh, {"wq": partition.ColwiseParallel(), "wo": partit
 
 ### Parts from the run's own evidence
 
-No program knows the parts. The backend splits the units evenly for a program's whole run. The Balancer
-(`rdma/allocate.py`, DFPA: the ranks' measured points, the grains given to whoever finishes earliest with them, a stop
-once the measurements promise no gain past their own resolution) is to step between evaluations, at the boundary of a
-declared plan's repeat, from each rank's work between its collectives; that step is not built yet.
-`partition.follow(*ts)` moves sharded tensors onto parts attached again, one group a move.
+The program declares units; the backend initially splits them evenly. `partition.evaluations` drives the existing
+Balancer (`rdma/allocate.py`) between declared function evaluations, using each rank's measured work between
+collectives. A changed partition is attached as a new operand, registered tensors move through `partition.follow`,
+and callable plan declarations are rebuilt. The function's cached plan is enabled only around its evaluation and
+suspended for feedback and migration on the same communicator (`ncclMeshCommPlanActive`), so those calls cannot
+consume the function's plan cursor. This is the existing compute-share feedback implementation; the separate
+whole-function routing objective is documented in [whole-function.md](../../design/whole-function.md).
+
+`partition.follow(*ts)` compiles exact migration ranges. Page-aligned remote ranges in declared contiguous region
+layouts write from original source views to final destination views through the common WRITE interface, with
+distinct relay leases and no receipt all-gather. Unchanged contiguous local intervals can alias their sources;
+other retained pieces copy locally once. Contiguous sub-page layouts use compact affine
+masks and repeated physical WRITE frames: each frame streams selected original bytes into owned ingress pages, and
+its consumer stores valid bytes directly into the final positions. Padding cannot overwrite neighboring live
+destination bytes. Source frames are produced before incoming waits, and incoming frames are consumed round-robin;
+`fused.encode_many` batches the encoded sequences and submits any remaining source-producer command buffer at the
+batch boundary without waiting, so later descriptor allocation cannot strand its publications. Each train is bound once, with distinct immutable storage per
+frame and no receipt collective. Padding remains a wire cost, and the current implementation holds the complete
+train rather than recycling frames without a lifetime proof. Unsupported non-contiguous layouts still use the
+older whole-operand staging fallback.
 - A placement has two throughputs, the aggregate and each stream's, so the calls trace a frontier rather than a best:
   `allocate.pareto(rows, coordinate=("ctx_in", "ctx_out"))` keeps, per workload coordinate, the call records (each a
   call's own `aggregate_tok_s` and `per_sequence_tok_s`, its `program`, `backend` and batch `bs`) that no other beats in
@@ -346,7 +384,8 @@ w = s["lm_head"].to("cpu")                        # decoded
 ## Performance
 
 - The MPS path is the measured path; async ops hide the crossing behind compute.
-- On two ranks every all-reduce is the direct exchange: one crossing.
+- Two-rank direct-exchange all-reduces stripe their crossing over the physical parallel cables according to the
+  compiled form. Rank count does not select one cable or establish that a particular collective form is optimal.
 - One commit rule for every caller (`_stream.mm`, "The commit rule"): eager calls and compiled graphs, the library's
   own callers and user programs alike. Nothing is entered, wrapped or opted into, and how a program is written does
   not decide how fast its collectives are. The rule's work is throughput, the GPU fed with the fewest command buffers
