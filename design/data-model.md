@@ -214,12 +214,21 @@ presents an algorithmic problem that can't be solved any other way. Then exactly
 operator's demand. None comes in as a precaution.
 
 **Every wait that remains has a deadline.** The operator, 2026-10-23: "no wait may ever run longer than a deadline
-operand presented at the time the wait was constructed; the presumed default is 5 seconds." So each wait that is left
-gets its deadline when it is made. Its caller or its configuration gives it, and 5 s is the default. A GPU kernel has
-no clock, so its deadline is a count of polls (mesh.metal mesh_wait_bounded). When the deadline passes, the program
-ends at once and names the wait and its deadline. It does not try again, wait again or fall back. The operator: "we
-will add bounds and crash programs voluntarily by producing invalid results or exceptions caused by immediate exit
-due to unbounded wait error rather than allow an unbounded wait of any kind anywhere anyhow." This is the minimum the
+operand presented at the time the wait was constructed; the presumed default is 5 seconds." The reason, in the
+operator's words: "a 'communicator' cannot wait forever for a crashed or hung data processing client because this
+would reserve resources forever and prevent other replacement data code from using the collective. the bridge cannot
+wait forever either for the same reason." So the waits with deadlines are the collective's and the bridge's own: each
+wait that holds a slot, a lease, a lane or a page while a data program or a peer has yet to act. Each gets its
+deadline when it is made. Its caller or its configuration gives it, and 5 s is the default. A GPU kernel has no clock,
+so its deadline is a count of polls (mesh.metal mesh_wait_bounded). Data code never sees one. The operator: "if you
+need to rewrite a data program to 'add' a deadline it is not relevant to the scope which was described; this is one of
+many features which is opaque to library users for obvious reasons."
+
+When a deadline passes, what the wait held goes back, so replacement data code can take the collective. Nothing tries
+again, waits again or falls back. What the data program then gets is the operator's: "we don't care about data
+processing code being correct, complete, getting results every time, etc. we always corrupt data processing code's
+numerics if it's a choice between that, running slower, faulting, or hanging." So the step goes on with whatever has
+landed, and invalid results come before running slower, ending the program or hanging. This is the minimum the
 operator demanded for the waits that remain. It adds no wait, and code still only loses them.
 
 **Data code and the driver's state.** The bridge turns fast. The driver's completions are a ring that the controller
