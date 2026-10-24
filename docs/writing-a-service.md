@@ -132,6 +132,9 @@ is the library's.
   (`Recording.issue`). The backend's dispatch runs when a graph is compiled, never between its ops, and a replay's host
   cost is paid once for k steps. The recorded step (`chain.stepper`) reads e_t from the input operand and writes
   tanh(z) into the output operand at a step counter it holds on the GPU, so every replay is the same graph.
+- **The products.** The compile backend runs both products as `torch_mesh::linear`, torch-mesh's small-rows linear
+  kernel, one dispatch each at a host cost of about 2 µs where MPS's matmul costs about 12, with y's tanh folded in. It
+  reads a weight laid out as nn.Linear's, so the chain holds B transposed, its rows padded to whole 4-element loads.
 
 ## The configuration
 
