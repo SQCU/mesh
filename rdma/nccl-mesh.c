@@ -1948,6 +1948,9 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
     const uint32_t uncut_count = s->count;
     memcpy(uncut, s->steps, uncut_count * sizeof *uncut);
     s->count = 0;
+    /* each step striped over its pair's cables (mesh_fabric_stripe), but a call on a fused stream's whole on the first
+       cable its stripe takes: a fused crossing is one SEND and one landing toward each peer (fusable), its caller's
+       kernels publishing and awaiting one each, so a step cut over cables is no fused crossing */
     for (uint32_t k = 0; k < uncut_count; k++) {
       const int count = mesh_fabric_stripe(&comm->fabric, (uint32_t)comm->rank, uncut + k, comm->page, comm->cable_weights,
                                            striped, comm->fabric.cables);
@@ -1955,8 +1958,8 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
         free(uncut); free(striped);
         return fail(ncclInvalidUsage, "compiling physical transfers for %s: %s", comm->name, strerror(-count));
       }
-      for (int j = 0; j < count; j++) {
-        s->steps[s->count] = striped[j].step;
+      for (int j = 0; j < (c->fused && count ? 1 : count); j++) {
+        s->steps[s->count] = c->fused ? uncut[k] : striped[j].step;
         s->cable[s->count++] = striped[j].cable;
       }
     }
@@ -3539,15 +3542,22 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   if (!result) result = group_bound(comm, list, n, holder, repeats, list[0].fused ? list[0].fused->stride : 0, &plans);
   if (!result) result = operands_check(list, n);
   if (result) { pthread_mutex_unlock(&group_lock); schedules_free(comm, plans); calls_free(list, n); return result; }
-  /* a group on a fused stream that is no fused crossing (fusable: one that crosses no link, or not ncclSend and ncclRecv
-     toward each peer, an in-place broadcast or all-gather, at most one SEND and one landing of a whole buffer each,
-     forwarding nothing) is an ordinary group on that stream, its steps the library's: no record is written and both
-     counts are 0, so the caller's kernels publish and await nothing (a form choice, not a refusal) */
+  /* a group on a fused stream that crosses a link and is no fused crossing (fusable: ncclSend and ncclRecv toward each
+     peer, an in-place broadcast or all-gather, at most one SEND and one landing of a whole buffer each, forwarding
+     nothing) is refused: its caller's kernels write the bytes it sends after it is issued and read the bytes it lands
+     as they await them, so the library's own steps in its place would send before the bytes are written and land
+     after they are read (torch_mesh/fused.py: one the library does not fuse raises, no slower form in its place).
+     One that crosses no link has no record and both counts 0 */
   const int fused_kind = list[0].fused && remote ? fusable(list, n) : 0;
   ncclMeshFused *const fused = fused_kind ? list[0].fused : NULL;
   if (fused_kind == 2 && !fused_writes_disjoint(list, n)) {
     pthread_mutex_unlock(&group_lock); schedules_free(comm, plans); calls_free(list, n);
     return fail(ncclInvalidUsage, "fused writes require disjoint landing ranges and immutable source ranges");
+  }
+  if (list[0].fused && remote && !fused) {
+    pthread_mutex_unlock(&group_lock); schedules_free(comm, plans); calls_free(list, n);
+    return fail(ncclInvalidUsage, "a fused crossing the library does not fuse: not ncclSend and ncclRecv of a whole buffer toward each peer, "
+                                  "one SEND and one landing each, forwarding nothing (fusable)");
   }
   if (list[0].fused && !fused) list[0].fused->publishes = list[0].fused->lands = 0;
   for (size_t i = 0; i < n && !fused; i++) list[i].fused = NULL;
