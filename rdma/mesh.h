@@ -146,7 +146,10 @@ static inline _Atomic uint32_t *mesh_unit_row(void *m,uint64_t rows,int way,int 
    holding it is gone with that process (verbs), so the units outstanding count only while it lives
    (mesh-dataflow.c mesh_pinned).  Nothing is posted on a stream but its holders' entries' pages, and a holding ends with nothing of it
    outstanding or the stream never live again in the pairing, so on a live stream both ends'
-   counts are equal whenever no holder holds it; no client reads them.  A holding that ended with units
+   counts are equal whenever no holder holds it.  No communicator reads them; a client reads every stream's, and their
+   rows and child, as it returns a lease (mesh-dataflow.c mesh_lease_return, mesh_pinned: a row a unit outstanding
+   names stays held), and the bridge tells each unit before it posts it so that read sees it (mesh-link.c unit_told).
+   A holding that ended with units
    outstanding leaves its owner word MESH_STREAM_GIVEN alone (naming no client, so none takes it) and the stream not
    live for the rest of its pairing.  The holder presents its
    entries in order: entry e of a list in slot e mod MESH_STREAM_ENTRIES of `lists` (region offsets: the send list,
