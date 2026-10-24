@@ -203,11 +203,8 @@ def allgatherv(x: torch.Tensor, dim: int, sizes: list[int], group_name: str, rep
 # waits for every landing (mesh_step_await) and joins the segments along the gathered dimension into the output,
 # sum_land adds them, every rank's in rank order, so every rank holds the same sum.  A graph's crossings of one form on
 # a group are one issue's repeats (torch_mesh.compiler; nccl.h ncclMeshFused repeats): the host issues the crossing at
-# the first, each repeat j in slot j of the lease, and the kernels run repeat j's steps at j.  The output is held too:
-# repeat j's of a region lease of the form's `repeats` outputs, two taken in turn with the slots, so no call grows
-# torch's MPS heaps (one of 16 MiB takes a whole 1 GiB heap on the Mini, which the GPU wires) and a call's output stays
-# valid until the issue after the next; a compiled graph reads each repeat's once.  The host encodes the two; it waits
-# for nothing.
+# the first, each repeat j in slot j of the lease, and the kernels run repeat j's steps at j.  The host encodes the two;
+# it waits for nothing.
 _GATHER_SOURCE = r"""
 template <uint N>
 struct gather_words { uint count, pre, post, rank, j; uint sizes[N], starts[N]; mesh_step_binding land[N - 1], publish[N - 1]; };
@@ -299,12 +296,11 @@ def _linear_kernel(*arguments):
 
 def _fused(x, dim, sizes, group, adds, w=None, repeats=1):
     """allgatherv on the mesh backend (above), or where `adds` the all-reduce's sum (backend.all_reduce, every rank's
-    block all of x: sizes x's extent along dim, n times): x contiguous, of 2 or 4 bytes an element; the output a held
-    region lease (above), valid until the issue after the next of this form.  Where `w` (a weight [N, K] of fp16 rows
-    any whole stride apart) is given, the sum's operand is x's product with it, x [R, K] (backend.linear_sum):
-    linear.metal's linear_publish computes it into this rank's segment and publishes it there through the collective's
-    steps, in place of gather_publish.  The call is repeat j of the `repeats` one issue presents, j its calls of this
-    form since the last issue (torch_mesh.compiler)."""
+    block all of x: sizes x's extent along dim, n times): x contiguous, of 2 or 4 bytes an element; the output a new
+    tensor.  Where `w` (a weight [N, K] of fp16 rows any whole stride apart) is given, the sum's operand is x's
+    product with it, x [R, K] (backend.linear_sum): linear.metal's linear_publish computes it into this rank's segment
+    and publishes it there through the collective's steps, in place of gather_publish.  The call is repeat j of the
+    `repeats` one issue presents, j its calls of this form since the last issue (torch_mesh.compiler)."""
     from . import _stream, fused
     n, rank = len(sizes), group.rank()
     operand = tuple(x.shape) if w is None else (x.shape[0], w.shape[0])
@@ -326,7 +322,7 @@ def _fused(x, dim, sizes, group, adds, w=None, repeats=1):
             split = _stream.linear_split(K, N)
             publish = (_linear_kernel(4 if ldw % 4 == 0 else 1, 4 if K % 4 == 0 else 1, 2, split, 2, n - 1),
                        [x.shape[0], K, N, 0, ldw, K, K, K, 0], 8, -(-N // 2), split * 32)
-        _FUSED[key] = {'rings': {}, 'outs': {}, 'turn': 0, 'j': 0, 'words': words, 'shape': shape, 'counts': counts, 'starts': starts,
+        _FUSED[key] = {'rings': {}, 'turn': 0, 'j': 0, 'words': words, 'shape': shape, 'counts': counts, 'starts': starts,
                        'arrivals': torch.zeros(1, dtype=torch.int32, device=x.device),
                        'publish': publish, 'land': (land, spread(math.prod(shape) * half))}
     held = _FUSED[key]
@@ -337,9 +333,7 @@ def _fused(x, dim, sizes, group, adds, w=None, repeats=1):
             leases = [_empty((repeats * starts[-1],), x, group) for _ in range(2)]
             held['rings'][repeats] = [[(slot, [slot[starts[q]:starts[q] + counts[q]] for q in range(n)])
                                        for slot in lease.split(starts[-1])] for lease in leases]
-            held['outs'][repeats] = [_empty((repeats,) + tuple(held['shape']), x, group).unbind(0) for _ in range(2)]
-        held['slots'], held['out'] = held['rings'][repeats][held['turn'] % 2], held['outs'][repeats][held['turn'] % 2]
-        held['turn'] += 1
+        held['slots'], held['turn'] = held['rings'][repeats][held['turn'] % 2], held['turn'] + 1
         segments = held['slots'][0][1]
         held['crossing'] = fused.exchange(segments[rank], [segments[q] for q in range(n) if q != rank], _stream.polls, group, repeats,
                                           starts[-1] * x.element_size())
@@ -349,7 +343,7 @@ def _fused(x, dim, sizes, group, adds, w=None, repeats=1):
     pwords[at], lwords[4] = j, j
     fused.encode(publish, [x] + ([] if w is None else [w]) + [segments[rank], held['arrivals']] + ([] if w is None else [x]), pwords, 15,
                  gp, 1, threads, n - 1, publish=crossing)
-    out = held['out'][j]
+    out = torch.empty(held['shape'], dtype=x.dtype, device=x.device)
     fused.encode(land, [slot, out], lwords, 15, gl, 1, _GATHER_THREADS, n - 1, land=crossing)
     return out
 
