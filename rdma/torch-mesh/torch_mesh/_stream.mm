@@ -827,12 +827,6 @@ static std::string metal_prelude() { return ncclMeshMetalPrelude(); }
 // toward each other rank, on torch's stream, the stream's `fused` set; each publication's bindings and each landing's,
 // in rank order (ncclMeshFused, six GPU addresses each).  A dtype NCCL lacks moves as its bytes.  Nothing is committed
 // here: the publication is the caller's kernel, encoded after this returns (fused_published).
-// a tensor's NCCL count and type: its elements of its own type, or its bytes where NCCL names no such type
-static std::pair<size_t, ncclDataType_t> counted(const at::Tensor &t) {
-  const ncclDataType_t type = kind(t.scalar_type());
-  return type == ncclNumTypes ? std::pair<size_t, ncclDataType_t>{(size_t)t.nbytes(), ncclUint8} : std::pair<size_t, ncclDataType_t>{(size_t)t.numel(), type};
-}
-
 static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> fused_exchange(
     const at::Tensor &send, const std::vector<at::Tensor> &landings, int64_t comm, int64_t polls) {
   int rank = 0, ranks = 0;
@@ -840,25 +834,16 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
   checked(ncclCommCount(communicator(comm), &ranks));
   TORCH_CHECK(landings.size() == (size_t)(ranks - 1), "fused exchange: a landing tensor for each of the ", ranks - 1,
               " other ranks, not ", landings.size());
-  for (const at::Tensor &landing : landings)
-    TORCH_CHECK(send.is_mps() && send.is_contiguous() && landing.is_mps() && landing.is_contiguous(),
-                "fused exchange: send and landings are contiguous MPS tensors (region tensors: torch_mesh.empty)");
   TORCH_CHECK(polls >= 0 && polls <= (int64_t)UINT32_MAX, "fused exchange: polls ", polls, " is not a 32-bit count of loads");
-  const std::pair<size_t, ncclDataType_t> sent_as = counted(send);
-  const size_t count = sent_as.first;
-  const ncclDataType_t type = sent_as.second;
-  std::vector<std::pair<size_t, ncclDataType_t>> each;
-  for (const at::Tensor &landing : landings) each.push_back(counted(landing));
-  const auto *const sizes = each.data();
-  const ncclMeshBuffer out = {(__bridge void *)at::native::mps::getMTLBufferStorage(send), (size_t)(send.storage_offset() * send.element_size())};
-  std::vector<ncclMeshBuffer> in;
-  for (const at::Tensor &landing : landings)
-    in.push_back({(__bridge void *)at::native::mps::getMTLBufferStorage(landing), (size_t)(landing.storage_offset() * landing.element_size())});
+  Group g{true};
+  const Operand out = g.moving(send);
+  std::vector<Operand> in;
+  for (const at::Tensor &landing : landings) in.push_back(g.moving(landing));
   std::vector<std::array<uint64_t, 6>> publish(landings.size()), land(landings.size());
   ncclMeshFused steps = {reinterpret_cast<uint64_t(*)[6]>(publish.data()), reinterpret_cast<uint64_t(*)[6]>(land.data()),
                          (uint32_t)landings.size(), (uint32_t)landings.size()};
   ncclMeshFused *const records = &steps;
-  ncclMeshBuffer *const ins = in.data();
+  const Operand *const ins = in.data();
   __block ncclResult_t result = ncclSuccess;
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
   MeshStream *s = &stream_of(stream);
@@ -868,12 +853,11 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
     @autoreleasepool {
       ncclMeshStream on = {(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, nullptr,
                            nullptr, (__bridge void *)residency, (uint32_t)polls, records};
-      ncclMeshBuffer sent = out;
       ncclResult_t made = ncclGroupStart();
       for (int q = 0, i = 0; q < ranks && !made; q++) {
         if (q == rank) continue;
-        made = ncclSend(&sent, count, type, q, c, &on);
-        if (!made) made = ncclRecv(ins + i, sizes[i].first, sizes[i].second, q, c, &on);
+        made = ncclSend(out.at, out.count, out.type, q, c, &on);
+        if (!made) made = ncclRecv((void *)ins[i].at, ins[i].count, ins[i].type, q, c, &on);
         i++;
       }
       const ncclResult_t ended = ncclGroupEnd();

@@ -106,7 +106,6 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,str
   }
   mesh_bits_set(mesh_plane(m,MESH_ROW_HOT),first,rows);
   /* design/transport.md */
-  /* design/transport.md */
   uint32_t page=mesh_arena_alloc(context,(uint32_t)span*count,m->block);
   if(page==MESH_ABSENT){
     int error=errno;

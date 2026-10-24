@@ -826,7 +826,7 @@ int mesh_group_before(uint32_t kind,const struct mesh_step *steps,uint32_t count
 }
 
 /* design/transport.md section 14: a group's calls laid together (libnccl-mesh schedule_group) and a counted
-   all-to-all's steps (libnccl-mesh counted_steps).  The lists' rule, as libnccl-mesh runs it (nccl-mesh.c run,
+   all-to-all's steps (mesh_counted_steps).  The lists' rule, as libnccl-mesh runs it (nccl-mesh.c run,
    complete): each direction between two ranks is one list, the sender's send list and the receiver's landing list,
    entry for entry; the sender publishes its entries in order (its holding's `ready`, one count), the receiver consumes
    them in order, each once it has landed (`landed`, one count); a step's first event, published or consumed, waits until

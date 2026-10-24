@@ -46,7 +46,7 @@ int mesh_reached(struct mesh_reach *out,uint32_t capacity,uint32_t *node){
 }
 
 /* design/transport.md: the flows and awaiting programs the bridge holds and the wall clock (ns) at which it
-   last held none (0 while it holds any).  The bridge stores idle_since before busy (mesh-program.c busy_tell), and
+   last held none (0 while it holds any).  The bridge stores idle_since before busy (mesh-records.c busy_tell), and
    idle_since is never 0 while it holds none (the region's boot from its start), so a read that meets it as it becomes
    busy (busy 0 and idle_since 0: the old count, the new time) is a busy one and is told as one */
 int mesh_busy(uint64_t *busy,uint64_t *idle_since){
@@ -358,7 +358,6 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
   return first;
 }
 
-/* design/transport.md */
 /* design/transport.md */
 /* The arena's pages: every one addressable by every client and by the GPU, and registered on every port's device
    since that device came up (mesh-verbs.h device_up); a lease the region cannot meet is refused (ENOMEM).  The bits

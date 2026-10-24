@@ -1135,7 +1135,6 @@ static int comm_table(struct ncclComm *made, const struct mesh_trees *paths, con
 }
 
 
-/* the attach's hold of the stream toward `node`, NULL where it holds none; under attach_lock */
 /* comm's hold of its stream toward node `node`, NULL where it holds none */
 static struct hold *comm_hold_toward(struct ncclComm *comm, uint32_t node) {
   for (uint32_t k = 0; k < MESH_STREAMS; k++)
@@ -1516,30 +1515,28 @@ ncclResult_t ncclMemFree(void *ptr) {
 
 /* the lease holding `ptr` (any byte of it): the Metal buffer over the whole lease (made at its first use, kept until
    ncclMemFree) and ptr's offset in it; 0, ENOENT where no lease of this process holds ptr, ENOMEM */
-static int lease_buffer(const void *ptr, void **buffer, size_t *offset) {
-  int status = ENOENT;
-  pthread_mutex_lock(&attach_lock);
-  for (struct attach *a = attaches; a && status == ENOENT; a = a->next)
-    for (size_t i = 0; i < a->count && status == ENOENT; i++) {
-      struct lease *l = a->leases + i;
-      const uintptr_t at = (uintptr_t)ptr, first = (uintptr_t)l->address;
-      if (at < first || at >= first + l->bytes) continue;
-      if (!l->buffer && (l->buffer = metal_wrap(l->address, l->bytes))) atomic_store(&a->wrapped, 1);
-      status = l->buffer ? 0 : ENOMEM;
-      if (!status) { *buffer = l->buffer; *offset = (size_t)(at - first); }
-    }
-  pthread_mutex_unlock(&attach_lock);
-  return status;
-}
-
-/* the lease holding ptr, under attach_lock (NULL: none) */
-static struct lease *lease_at(const void *ptr) {
+/* the lease holding ptr and its attach (*held, where held is not NULL), under attach_lock (NULL: none) */
+static struct lease *lease_at(const void *ptr, struct attach **held) {
   for (struct attach *a = attaches; a; a = a->next)
     for (size_t i = 0; i < a->count; i++) {
       const uintptr_t at = (uintptr_t)ptr, first = (uintptr_t)a->leases[i].address;
-      if (at >= first && at < first + a->leases[i].bytes) return a->leases + i;
+      if (at >= first && at < first + a->leases[i].bytes) {
+        if (held) *held = a;
+        return a->leases + i;
+      }
     }
   return NULL;
+}
+
+static int lease_buffer(const void *ptr, void **buffer, size_t *offset) {
+  pthread_mutex_lock(&attach_lock);
+  struct attach *a = NULL;
+  struct lease *l = lease_at(ptr, &a);
+  if (l && !l->buffer && (l->buffer = metal_wrap(l->address, l->bytes))) atomic_store(&a->wrapped, 1);
+  const int status = !l ? ENOENT : l->buffer ? 0 : ENOMEM;
+  if (!status) { *buffer = l->buffer; *offset = (size_t)((uintptr_t)ptr - (uintptr_t)l->address); }
+  pthread_mutex_unlock(&attach_lock);
+  return status;
 }
 
 /* nccl.h ncclMeshMemBuffer */
@@ -1549,9 +1546,6 @@ ncclResult_t ncclMeshMemBuffer(const void *ptr, void **buffer, size_t *offset) {
   if (status == ENOMEM) return fail(ncclSystemError, "ncclMeshMemBuffer of %p: no Metal buffer over its lease", ptr);
   return status ? fail(ncclInvalidArgument, "ncclMeshMemBuffer: %p is in no lease of this process (ncclMemAlloc)", ptr) : ncclSuccess;
 }
-
-
-
 
 /* an operator made into the communicator's table (a freed slot, else one more), its handle past ncclNumOps */
 static ncclResult_t op_make(ncclComm_t comm, struct redop made, ncclRedOp_t *op) {
@@ -1764,11 +1758,10 @@ static size_t elements(const struct call *c) {
 }
 /* rank r's segment of a reduce-scatter's or all-gather's operand: the elements before it, and *length its own (r x
    count and count; an uneven call's, its counts') */
+static uint64_t seg_first(const uint64_t *seg, int q);
 static size_t segment_at(const struct call *c, int r, size_t *length) {
-  size_t before = 0;
-  for (int q = 0; c->segments && q < r; q++) before += c->segments[q];
   *length = c->segments ? c->segments[r] : c->count;
-  return c->segments ? before : (size_t)r * c->count;
+  return c->segments ? seg_first(c->segments, r) : (size_t)r * c->count;
 }
 /* the entries before rank q's segment of a count a rank (an all-to-all's sendcounts or recvcounts) */
 static uint64_t seg_first(const uint64_t *seg, int q) {
@@ -2049,7 +2042,7 @@ static ncclResult_t place_group(struct metal_program *program, struct ncclComm *
         const unsigned char *address = address_of(x->data);
         const int inside = in_region(comm, x->data, x->bytes);
         pthread_mutex_lock(&attach_lock);
-        const struct lease *held = inside ? lease_at(address) : NULL;
+        const struct lease *held = inside ? lease_at(address, NULL) : NULL;
         const uint64_t row = held ? held->row + (uint64_t)(address - (const unsigned char *)held->address) / page : 0;
         pthread_mutex_unlock(&attach_lock);
         if (held && !((size_t)(address - region) % page)) { x->row = row; continue; }

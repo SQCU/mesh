@@ -1,10 +1,9 @@
 """The partial-tensor library's Python surface (design/algorithm-sources.md#program; design/deliverables.md section 5,
 program type B): higher-order functions over partial tensors and the partial tensors' collectives, zero-copy and
-asynchronous once the call graph is known.  The same contract as swift/Mesh.swift, spelled as Pallas spells it:
+asynchronous once the call graph is known, spelled as Pallas spells it:
 Program.kernel_call over a grid with BlockSpecs, Refs to sections, Partial contribution sets that a function refuses
 before their sum completes unless it declares itself their combine, and the collective verbs (mesh.collective).  It
-holds no numerics: every kernel and combine is a supplied callable (examples/kernels.py and examples/nn.py, program
-type C, are compositions of it).
+holds no numerics: every kernel and combine is a supplied callable.
 
 A program is SPMD: every member records the same calls; `peer=` places a kernel, a copy's two ends and a collective's
 members place its crossings.  Recording builds the graph; realize() (start(), Swift's name) prepares it; then the
@@ -63,7 +62,7 @@ def __getattr__(name):
 
 # design/algorithm-sources.md#mesherror
 class MeshError(Exception):
-    """swift/Mesh.swift's MeshError as an exception: `kind` busy, link (`peer` the member across it) or function
+    """A failure: `kind` busy, link (`peer` the member across it) or function
     (`call` the task's record index); `code` an errno."""
 
     def __init__(self, kind, code, *, peer=None, call=None, detail=''):
