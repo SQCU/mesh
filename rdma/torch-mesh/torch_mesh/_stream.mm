@@ -782,7 +782,7 @@ static std::vector<std::pair<uint64_t, uint64_t>> records() {
   return out;
 }
 
-// Fused crossings (torch_mesh/fused.py; nccl.h ncclMeshFusableRooted, ncclMeshFused): the one-shot exchange, ncclSend
+// Fused crossings (torch_mesh/fused.py; nccl.h ncclMeshFused): the one-shot exchange, ncclSend
 // of a rank's part to every other rank and ncclRecv of each one's part into a landing tensor of its own, in one group,
 // whose steps the caller's kernels run on torch's stream: the kernel that makes the rank's part writes it into its send
 // tensor and publishes it to every peer (one store of each holding's `ready`), and the kernel after the call awaits
@@ -792,7 +792,7 @@ static std::vector<std::pair<uint64_t, uint64_t>> records() {
 // (torch_mesh.empty: a lease), each starting on a page, which the bridge sends from and lands in, zero copy.  The call
 // is the library's classic form on torch's command buffer and open encoder with a residency set: the library writes
 // each publication's and each landing's argument record into the lists this call gives it room in (n - 1 of each:
-// ncclMeshFusableRooted's all-reduce counts) and returns their bindings, GPU addresses the caller's kernels reach by
+// an all-reduce's one-shot counts) and returns their bindings, GPU addresses the caller's kernels reach by
 // address, and adds every buffer they name to the set, which is resident for every command buffer of each queue it
 // was added to (the device's one set, added to a stream's queue at its first fused call); nothing removes a buffer from
 // it.  A call the library does not fuse (a tensor that is no region tensor or does not start on a page) fails as a

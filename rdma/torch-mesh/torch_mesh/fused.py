@@ -1,4 +1,4 @@
-"""Fused crossings on torch's MPS stream (rdma/nccl.h ncclMeshFusableRooted, ncclMeshFused; ../DESIGN-fused-stream.md):
+"""Fused crossings on torch's MPS stream (rdma/nccl.h ncclMeshFused; ../DESIGN-fused-stream.md):
 the one-shot exchange among n ranks, whose steps the caller's own kernels run, zero copy.  The kernel that makes a
 rank's part writes it into the rank's send tensor and publishes it to every peer, and the kernel after the call reads
 each peer's part from its landing tensor: it adds them to its own (an all-reduce, the chain) or reads them in place

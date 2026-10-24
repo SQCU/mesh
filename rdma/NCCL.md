@@ -205,7 +205,7 @@ history). With no forms nothing changes: the structural table as above. Every ra
 point between its groups, taken at the communicator's next group; splits and shrinks keep them; a communicator over the
 caller's own programs compiles them ahead of its programs. A share is 0 or more: a tree of share 0 carries none of its
 root's segment, and a form whose root's trees all take 0 fails as a value where it is compiled. A form that cuts a broadcast's or an all-gather's operand (chunked) does not fuse
-(`ncclMeshFusableRooted` answers 0 for both steps); its cuts lie on pages. Reproduction target: simulated 0.51x the default's time at 1 GiB on six-node maps and 0.58x at 16 MiB, the ring4
+(both its counts 0); its cuts lie on pages. Reproduction target: simulated 0.51x the default's time at 1 GiB on six-node maps and 0.58x at 16 MiB, the ring4
 16 MiB all-reduce 2.18 to 1.71 ms, a six-node full mesh's 1 GiB all-gather 158.1 to 20.5 ms (metal-microbench
 output_data/library-20261015/pass2/sims), and the pair's 256 and 512 KiB calls 57.4 to 31.2-36.2 us
 (pair_programs.json): never measured on more than two nodes.
@@ -276,7 +276,7 @@ library never learns a lane, a frame or a queue pair (design/transport.md sectio
     caller's lists and returns their bindings (`ncclMeshFused`: room given, counts written, the records in its peers'
     order, its channels'); it dispatches no step. It
     completes at once, issued or not, the groups in flight before it completed first, each of its channels in the
-    stream's order. `ncclMeshFusableRooted` gives the counts: an all-reduce's n - 1 of each, a reduce's root n - 1
+    stream's order. A declared group's entries (`ncclMeshCommPlan`'s `ncclMeshPlan`) give the counts: an all-reduce's n - 1 of each, a reduce's root n - 1
     landings and every other rank one publication, a broadcast's and an all-gather's this rank's moves where the
     communicator's program moves whole operands (a forwarding rank, a chain's middle or a broadcast tree's inner rank,
     does not fuse), each where this rank has a channel to every peer the form uses (the communicator's map); else 0 and

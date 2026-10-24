@@ -135,7 +135,7 @@
    the library's ring), on pipelines of the residency set's device, every buffer of the library's it touches added to
    the caller's residency set (committed where one was added); nothing is committed or signalled, and with no workspace
    its scratch is the communicator's, reused in the encoder's order.  The classic form reads residencySet only for a
-   fused crossing (ncclMeshFusableRooted, below), whose steps the caller's kernels run by their bindings' GPU addresses:
+   fused crossing (below), whose steps the caller's kernels run by their bindings' GPU addresses:
    an id<MTLResidencySet> of the command buffer's device, to which the library adds every buffer those bindings name
    (committed where one was added), and which the caller makes resident for the command buffers its kernels are encoded
    into (its queue's addResidencySet:, or each command buffer's useResidencySet:), since a classic encoder makes resident
@@ -237,13 +237,13 @@ struct mesh_trees;
 typedef void *cudaStream_t;
 typedef struct { void *buffer; size_t offset; } ncclMeshBuffer;
 typedef struct { uint64_t ticket; int published; } ncclMeshIssue;
-/* A fused crossing's steps, run by the caller's kernels (ncclMeshFusableRooted, below): a publication toward each peer
+/* A fused crossing's steps, run by the caller's kernels (below): a publication toward each peer
    it sends to and a landing from each peer it receives from, each one's six bindings' GPU addresses, in the library's
    binding order (0 d, 1 s, 2 its argument record, 3 a, 4 v, 5 progress); a Metal 4 kernel takes them through its
    argument table, a classic one as one record of its bytes (ncclMeshMetalPrelude's mesh_step_binding, the six in this
-   order).  The caller gives `publish` and `land` room for `publishes` and `lands` records (ncclMeshFusableRooted's
-   counts); the group writes its records in its peers' order (its channels') and sets the two counts to those written:
-   0 and 0 where the group is not a fused crossing, which then runs as an ordinary group (ncclMeshFusableRooted). */
+   order).  The caller gives `publish` and `land` room for `publishes` and `lands` records (its declared
+   group's entries, ncclMeshPlan); the group writes its records in its peers' order (its channels') and sets the two
+   counts to those written: 0 and 0 where the group is not a fused crossing, which then runs as an ordinary group. */
 typedef struct { uint64_t (*publish)[6], (*land)[6]; uint32_t publishes, lands; } ncclMeshFused;
 typedef struct {
   void *commandBuffer;
@@ -962,7 +962,7 @@ typedef struct {
 /* A communicator's configuration operand: its forms, in order, compiled ahead of its structural table at each map read
    (Programs, above), so a call runs the first form of its collective (and root) whose bound its bytes are under, else
    the caller's programs (a communicator over its own, ncclMeshCommInitRank's) or the default; no entry, no form (the
-   default for every collective and size).  Taken at the communicator's next group (or ncclMeshFusableRooted), copied
+   default for every collective and size).  Taken at the communicator's next group (or ncclMeshCommPlan), copied
    with their shares; count 0 clears them.  Every rank passes the same forms at the same point between its groups (its
    members compile its table alike from them); its splits and shrinks keep them (a form at a root past a split's ranks
    makes no entry there).  A share is 0 or more (a tree of share 0 carries none of its root's segment); a form whose
@@ -1055,22 +1055,8 @@ uint64_t ncclMeshRetired(void);
    root, a broadcast's receiver: no publication of its own to wait on) the gate is the communicator's gate word, which
    the call stores in the stream: its receive is posted once the stream reaches the call, so where its landing buffer
    is the one the previous crossing's landing kernel read, that kernel is encoded before the call (as for any buffer
-   an ordinary call writes); the library sees no kernel of the caller's, so it can order nothing after one.
-   *publishes and *lands are this rank's fused steps where a fused group of `kind` rooted at `root` (an all-reduce's and
-   an all-gather's root 0) of `count` elements of `type` (an all-gather's a rank's piece, its sendcount) runs on comm
-   of n ranks (one rank, or no elements, crosses nothing and has no fused step): an all-reduce's one-shot form n - 1 of
-   each (the caller's send to and receive from every peer), a reduce's root n - 1 landings and every other rank one
-   publication (the same calls, toward the root), a broadcast's and an all-gather's the SENDs and landings of this
-   rank's moves in the communicator's program, where it moves each whole operand in one entry each way and sends no
-   part it also receives (a configured form that cuts it, and a forwarding rank, a chain's middle or a broadcast tree's
-   inner rank, do not fuse: both 0).  Every count is from comm's map: a fused step is a SEND or a landing on this
-   rank's channel toward its peer, so where the form uses a peer this rank has no channel to (its bridge reaches no
-   node of that rank's: an all-reduce's or a reduce root's any other rank, a reduce's other ranks' root, a program's
-   move toward it) the form has no fused step here and both are 0.  Both 0 is a form choice, not a refusal: the caller
-   issues the unfused call, which completes.  `op` is not read: no fused step combines. */
-typedef enum { ncclMeshFuseAllReduce = 0, ncclMeshFuseBroadcast = 1, ncclMeshFuseReduce = 2, ncclMeshFuseAllGather = 3 } ncclMeshFuseKind;
-ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int root, size_t count, ncclDataType_t type, ncclRedOp_t op,
-                                   int* publishes, int* lands);
+   an ordinary call writes); the library sees no kernel of the caller's, so it can order nothing after one.  A fused
+   group's publications and landings are its declared group's entries (ncclMeshCommPlan: ncclMeshPlan's entries). */
 /* rdma/mesh.metal's text as this library was built with it, then the Metal text of the steps the library's kernels and
    a fused crossing's kernels run: the whole of what a caller's kernel is compiled after, from the library the process
    loaded, so it never reads a file that may be another build's (a checkout's mesh.metal newer or older than the
