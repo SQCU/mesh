@@ -74,14 +74,15 @@ devices), and once the bridge has ended it makes the region *expire*, its layout
   recorded in the region, each by its pid and its process's start (so a pid the system gives again is no holder): the
   bridge (`bridge_pid` and `bridge_start`), each child a bridge spawned (the children register the region and hold it
   until their exit, which can outlast their bridge's), and each client slot's process (its owner's pid and `start`).
-  A process in its exit is none of them: XNU takes it from every lookup by pid as the exit begins, before the kernel
-  releases its device objects (metal-microbench docs/facts.md). On 10-23 the heartbeat so made a region beside port
-  children of the reverted line that never left that release (metal-microbench
-  output_data/review-20261023/LIBRARY-STATES.md, section 2).
+  A process in its exit is a holder until that exit ends: XNU takes it from every lookup by pid as the exit begins
+  (`kill`, PROC_PIDTBSDINFO, `KERN_PROCARGS2`, an EVFILT_PROC filter: bsd/kern/kern_exit.c `proc_prepareexit`), before
+  the kernel releases its device objects, so the holders are read as zombies are (`proc_pidinfo`'s argument 1), ended
+  at status SZOMB (mesh-dataflow.h `mesh_started`). On 10-23 every probe called children stuck in that release gone,
+  and a region was made new beside them (metal-microbench output_data/review-20261023/LIBRARY-STATES.md, section 2).
   Fields of the header, the slots and the bridge's area are only ever appended, so the heartbeat reads the holders of
   a region of any layout.
 
-A second region is never made beside a live holder of the first, because on the Mini (24 GB, a 17 GB region) GPU work on
+A second region is never made beside a holder of the first, because on the Mini (24 GB, a 17 GB region) GPU work on
 one region beside another's registration wired all its memory and its watchdog halted the node (2026-10-20): the
 heartbeat opens a bridge only once no expired region is named. A process that maps the region without a slot (a reader,
 or a child forked by a client without exec) is not recorded; none registers it or makes it resident.
@@ -201,7 +202,9 @@ process in that state (STAT `U`) ignores every signal, SIGKILL included. Observe
 
 So the bridge makes no call that can wait on a termination: no `ibv_dealloc_pd`, `ibv_dereg_mr`, `ibv_destroy_qp`,
 `ibv_destroy_cq`, `ibv_close_device`, no drain. A device or queue pair it no longer uses is forgotten; the kernel
-releases it at the process's exit.
+releases it at the process's exit. The one call before that exit is the literature's flush of a queue pair that still
+holds work, made after the child's quiet windows, so outside any termination, and bounded (section 14, "A process a
+port").
 
 Every process of ours can be ended by any signal at any time, SIGKILL included. A guard that keeps a process from
 being killed is a second failure added to compensate for the first: it presumes the deadlock will happen, it does not
@@ -366,6 +369,8 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
 | Where the next holding starts | the bridge's answer in the client's slot (127) ≺ each lane's counts sampled as a holding begins, exchanged as `start` words and MAXed, spares and duds between (129-132) ≺ where the last one ended at each end, the stream's pages posted told as facts, the filler presented by the collective (133) ≺ where the last one ended, equal at both ends of a live stream by construction, the facts kept as a statistic (134) | M2, C7 |
 | A holding that ends with units outstanding | its receives' owner's every row held until they land (`touching`), the next communicator's filler and its wait taking them up (133) ≺ the queue pairs moved to Error and every request flushed (the operator's permission of 10-22, not used) ≺ the stream not live for its pairing, a link with no live stream lost by the port child's exit, the window's rows held until each unit completes or the child exits (134) | M3, M4 |
 | Which rows a reclaim keeps | every row of a holder a stream still names (`mesh_touched`, 133: D(P) taken as everything P held) ≺ W(t), the rows the units posted and not completed name, the plan's window in flight, each until its unit completes or its port's child exits (134; design/extents-and-liveness.md, d) | M4 |
+| A port child's queue pairs at its exit | released by the kernel with work posted (130-134: 10-23, the release waited forever at both ends of a cable, the node's memory held wired) ≺ the lanes holding work moved to Error and their flush completions taken, then the kernel's release, the literature's sequence | M3, M4 |
+| A holder in its exit | gone to every probe by pid (`kill`, PROC_PIDTBSDINFO, `KERN_PROCARGS2`), a region made new and a device opened beside it (10-23) ≺ a holder until its status is SZOMB, its device's next child and a new region both waiting for it, the other ports serving | M4, M7 |
 | A queue pair's re-pairing | moved to RESET (127, panicked the M5) ≺ destroyed and made again ≺ none: made and connected once in the bridge's life, a lost link down until a person relaunched it (129) ≺ none in a process: made and connected once in a port child's life, released by its exit, the link paired again by the port's next child (130) | M3, M4, M6 |
 | A progress thread with nothing to do | parked on a bell clients ring (127) ≺ spinning while the link serves, waiting on the guard word while it serves nothing | M8 |
 | The binary changing | the bridge stops itself ≺ it stops on its heartbeat's SIGHUP alone | M3 |
@@ -560,7 +565,16 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   faults, guards not held and terminations it heard. Queue pairs exist only in a child, and a child is the bridge
   ("the bridge and only the bridge may ever have access to that exact data structure", 10-20).
 - A link's queue pairs are made once and connected once in a child's life. None is moved to another state,
-  destroyed or forgotten; the kernel releases them at the child's exit. A link takes every queue pair its device holds
+  destroyed or forgotten; the kernel releases them at the child's exit. A queue pair that still holds work as its child
+  leaves (a SEND not completed, a receive not landed: a holding that ended outstanding, a stop during a holding) is
+  first moved to Error and its flush completions taken, at most MESH_PLATFORM_NS, under the port's guard and after the
+  child's quiet windows (mesh-link.c `child_leave`, `lanes_flush`): the literature's teardown (rdmamojo "Flushing Work
+  Requests"; Linux `ib_drain_qp`, then `ib_destroy_qp`), whose destroy, deregistration and close are the kernel's at
+  the exit, and the one use of the operator's permission of 10-22. On 10-23 the kernel's release of queue pairs holding
+  work, at both ends of a cable at once, waited forever in `IOThunderboltPath::deactivateSynchronous` (the queue's
+  path deactivation, which has no deadline; Linux's waits 500 ms for a hop to drain, drivers/thunderbolt/path.c), and
+  the processes held the region wired; every release with nothing posted was clean, both ends at once included, and on
+  the pair the provider flushed 687 of 687 requests in 0.41 and 0.46 s (2026-10-18). A link takes every queue pair its device holds
   for it (ten of a macOS 26 device's ten; two of the M5 Ultra's macOS 27 device's two by max_qp − 1), so a returning peer's lanes
   cannot exist beside the old ones, and the old child's exit is their one release (RESET panicked the M5 on 10-19;
   destroy is ruled out by its history, M3).
@@ -572,13 +586,16 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   parent asks the child to end, reaps it and spawns the next, which opens the port and pairs with the peer whenever it answers. Nobody acts.
   Other ports' children and links, the clients and their leases are untouched.
 - A child that ends unbidden loses its link the same way and is spawned again once the port's quiet window has
-  passed, at the events that open any port (its child's end is one). Nothing the bridge does next depends on how often
-  a child ended: the spawn backoff of 1f9be1d5 and 128d0e84 (the k-th unbidden end within 60 s of a spawn holding the
-  next 60·2^(k−2) s) is deleted (4dc9e98a; the operator, 2026-10-23 01:03Z: "this is not a real feature. delete it and
-  anything like it"). A child whose parent is gone halts its
-  lanes and exits MESH_PLATFORM_NS later, its own windows held; a port's child is spawned only while no other child of
-  its device lives (one of the launch before, whose parent ended unbidden; one in its exit is not seen), so a device's
-  queue pairs are one child's at a time and no make meets the device's ceiling. At the bridge's stop every child is halted before the
+  passed; the k-th such end in a row within 60 s of its spawn, k from 2, holds the port's next spawn 60·2^(k−2) s, at
+  most an hour (section 9's rule, a port's: "restarted, not crashing again of course"). A child whose parent is gone halts its
+  lanes and exits MESH_PLATFORM_NS later, its own windows held; one stopped from outside (a shutdown's SIGTERM, SIGINT,
+  SIGHUP) leaves as at its parent's word, its lanes flushed as there, and only a crash ends a child another way; a
+  port's child is spawned only while no other child of
+  its device lives (one of an earlier launch, alive or in its exit: each holder entry names its child's device, and an
+  exiting one is read again every MESH_PAUSE_NS, since XNU attaches no filter to it), so a device's queue pairs are one
+  child's at a time, no make meets the device's ceiling, and no child enters a device an earlier one has not left; the
+  other ports' children spawn. The parent's end of a child's socket is non-blocking, so a child that reads no more
+  holds no send of the parent. At the bridge's stop every child is halted before the
   farewell, asked to end after the exit's hold, and awaited up to MESH_PLATFORM_NS.
 - Streams across children. A port's streams' lists, rings and words are the parent's, leased once. Each stream names
   the child that posts on it (`child`, `child_start`), and its units count only while that process lives: a child's

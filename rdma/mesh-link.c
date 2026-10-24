@@ -785,7 +785,7 @@ static void link_set(struct port *port,uint32_t peer,uint32_t phase,int64_t code
    gate set, every lane's progress made new, and the port's progress threads started).  No queue pair is moved to
    another state, destroyed or forgotten after it: the in-place RESET of 127 panicked the M5 in AppleThunderboltRDMA on its
    first run (2026-10-19, design/RDMA-KERNEL-RECOVERY.md), and the kernel releases every object at the child's exit, its
-   one end */
+   one end, once the lanes that hold work are flushed (child_leave: the literature's error state and its completions) */
 struct link_numbers { uint32_t peer[MESH_LINK_LANES][2],pairing; uint16_t lid; uint8_t gid[16]; };
 static int link_lapsed(const struct link *l,const struct link_numbers *numbers){
   return atomic_load_explicit(&l->pairing,memory_order_relaxed)!=numbers->pairing?ECANCELED:0;
@@ -1282,7 +1282,7 @@ static struct port *port_at(uint32_t interface){
    within MESH_PLATFORM_NS: ETIMEDOUT, port_wait); a context that fails stays as it is, and the port with it, until its
    child ends (design/transport.md section 14: nothing made is forgotten or made again in a process).  The device is
    its child's: spawned here where the port has none (child_spawn: not while its last child's end is awaited, `recycle`,
-   nor before the hold a spawn that failed set, `hold_to`), and asked to open it (CHILD_OPEN), its answer the
+   nor before the hold a child that ended unbidden set, `hold_to`), and asked to open it (CHILD_OPEN), its answer the
    job's end (child_heard) */
 static int child_spawn(struct port *port);
 static void port_open(struct port *port){
@@ -1701,41 +1701,32 @@ static void child_send(struct port *port,struct child_message said){
   }
 }
 static void child_reaped(struct port *port);
-/* a process, not this bridge nor one of its children, that is a child of the port's device of any version (its argv
-   `--child VERSION DEVICE ...`, the three words every version keeps): a child of a launch whose parent ended unbidden, which holds the device's queue
-   pairs until its exit (child_leave, at most 2 MESH_PLATFORM_NS); its pid, or 0.  A device's queue pairs are one
-   child's at a time: a link takes as many as its device holds for it, up to MESH_LINK_LANES (ten of a macOS 26
-   device's ten, design/HETEROGENEOUS-LINKS.md) */
+/* a child of the port's device that an earlier launch spawned and that has not ended: the region's holder entry of a
+   process not this bridge's child, of the port's device (`unit`, or 0: an entry an earlier build wrote, any device),
+   alive or in its exit (mesh_holds: the kernel's release of its queue pairs is inside that exit, and a release that
+   never ends keeps it so, 2026-10-23); its pid, or 0.  A device's queue pairs are one child's at a time: a link takes as
+   many as its device holds for it, up to MESH_LINK_LANES (ten of a macOS 26 device's ten, design/HETEROGENEOUS-LINKS.md),
+   and no child enters a device whose earlier child has not left it.  The entries are the region's, so every child that
+   holds it is among them (child_spawn records each before it opens a device; a region is made new only once none of its
+   holders lives, mesh-heartbeat.c replace_turn) */
 static pid_t child_elsewhere(const struct port *port){
-  static pid_t pids[16384];
-  static char *arguments;
-  static size_t room;
-  int most=0,argmax[2]={CTL_KERN,KERN_ARGMAX};
-  size_t length=sizeof most;
-  if(!arguments && (sysctl(argmax,2,&most,&length,NULL,0) || most<=0 || !(arguments=malloc(room=(size_t)most))))return 0;
-  const int count=proc_listallpids(pids,(int)sizeof pids);
-  for(int i=0;i<count && i<(int)(sizeof pids/sizeof *pids);i++){
-    const pid_t pid=pids[i];
-    int own=pid==getpid();
+  const struct mesh_holder *holders=mesh_bridge_pages(M)->child;
+  for(uint32_t entry=0;entry<2*MESH_PORTS;entry++){
+    const pid_t pid=(pid_t)holders[entry].pid;
+    int own=0;
     for(uint32_t p=0;p<port_count;p++)own|=pid==ports[p].child;
-    if(own)continue;
-    int mib[3]={CTL_KERN,KERN_PROCARGS2,pid},argc=0;
-    size_t size=room;
-    if(sysctl(mib,3,arguments,&size,NULL,0) || size<sizeof argc)continue;
-    memcpy(&argc,arguments,sizeof argc);
-    const char *at=arguments+sizeof argc,*end=arguments+size,*argv[4]={0};
-    at+=strnlen(at,(size_t)(end-at));
-    while(at<end && !*at)at++;
-    for(int a=0;a<argc && a<4 && at<end;a++){argv[a]=at;at+=strnlen(at,(size_t)(end-at))+1;}
-    if(argc>=4 && argv[1] && argv[3] && !strcmp(argv[1],"--child") && !strcmp(argv[3],port->device.name))return pid;
+    if(!own && (!holders[entry].unit || holders[entry].unit==port->unit+1) && mesh_holds(pid,holders[entry].start))return pid;
   }
   return 0;
 }
-/* the port's child spawned (its socket's messages and its exit watched, tagged by the port); 0, or the error, the
-   port's next spawn held MESH_PAUSE_NS.  A child of its device from an earlier launch (child_elsewhere) holds the spawn
-   until its exit, which the event loop hears (EVFILT_PROC, tagged by the port: `elsewhere` cleared) and spawns at once;
-   the processes are read again only then, not at every turn while it lives.  One whose exit cannot be watched is read
-   again at the next turn (at once where it has already gone or is in its exit, which the scan does not see) */
+/* the port's child spawned (its socket's messages and its exit watched, tagged by the port; its socket's end
+   non-blocking, so a child that reads no more, in an exit that has not ended, holds no send of the parent: child_send
+   drops what it cannot take); 0, or the error, the port's next spawn held MESH_PAUSE_NS.  A child of its device from
+   an earlier launch (child_elsewhere) holds the spawn until its exit, which the event loop hears (EVFILT_PROC, tagged by
+   the port: `elsewhere` cleared) and spawns at once; the holders are read again only then, not at every turn while it
+   lives.  One already in its exit takes no filter (ESRCH: XNU's proc_prepareexit took it from every lookup by pid, and
+   its NOTE_EXIT is posted to filters attached before), so it is read again MESH_PAUSE_NS on (`hold_to`), as long as
+   that exit lasts; each one is told once (`awaited`) */
 static int child_spawn(struct port *port){
   int pair[2],on=1;
   if(port->elsewhere)return EBUSY;
@@ -1743,10 +1734,13 @@ static int child_spawn(struct port *port){
   if(elsewhere){
     struct kevent64_s watch;
     EV_SET64(&watch,(uint64_t)elsewhere,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,TAG_CHILD|port->index,0,0);
-    if(kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)){if(errno==ESRCH)wake();return EBUSY;}
-    say("link %u (%s): process %d, a child of its device from an earlier launch, holds its queue pairs until its exit; its "
-        "own child spawned after it\n",port->index,port->name,(int)elsewhere);
-    port->elsewhere=elsewhere;
+    const int exiting=kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)!=0;
+    if(port->awaited!=elsewhere)say("link %u (%s): process %d, a child of its device from an earlier launch, holds its queue "
+                                    "pairs until its exit%s; its own child spawned after it\n",port->index,port->name,
+                                    (int)elsewhere,exiting?", in which it is":"");
+    port->awaited=elsewhere;
+    if(exiting)port->hold_to=now+MESH_PAUSE_NS;
+    else port->elsewhere=elsewhere;
     return EBUSY;
   }
   /* design/transport.md section 2: the child's entry among the region's holders, one no live child holds; where every
@@ -1762,6 +1756,7 @@ static int child_spawn(struct port *port){
     return error;
   }
   setsockopt(pair[0],SOL_SOCKET,SO_NOSIGPIPE,&on,sizeof on);
+  fcntl(pair[0],F_SETFL,O_NONBLOCK);
   char index[16],page[16];
   snprintf(index,sizeof index,"%u",port->index);snprintf(page,sizeof page,"%u",ones);
   char version[16];
@@ -1787,8 +1782,8 @@ static int child_spawn(struct port *port){
     port->hold_to=now+MESH_PAUSE_NS;
     return error;
   }
-  port->child=pid;port->child_fd=pair[0];port->child_held=0;port->ending=0;
-  holders[entry]=(struct mesh_holder){(uint32_t)pid,0,mesh_started(pid)};
+  port->child=pid;port->child_fd=pair[0];port->child_at=now;port->child_held=0;port->ending=0;
+  holders[entry]=(struct mesh_holder){(uint32_t)pid,port->unit+1,mesh_started(pid)};
   port->holder=entry;
   say("link %u (%s): its child %d spawned\n",port->index,port->name,(int)pid);
   struct kevent64_s watch;
@@ -1864,9 +1859,9 @@ static void child_turn(struct port *port){
       port->index,port->name,(int)port->child);
 }
 /* the port's child ended: its last messages taken, its exit reaped, a job of it out ended (ECHILD); one that ended
-   unbidden loses the link (port_lost, ECHILD) and is spawned again once the port's quiet window has passed, at the
-   events that open any port, however often its children ended (the operator, 2026-10-23 01:03Z: "this is not a real feature.
-   delete it and anything like it").  Its streams cancelled again,
+   unbidden loses the link (port_lost, ECHILD) and is spawned again once the port's quiet window has passed, and the
+   k-th in a row within MESH_CHILD_SETTLE_NS of its spawn, k from 2, holds the port's next spawn 60 2^(k-2) s, at most an
+   hour (the boot ledger's rule, a port's: restarted, "not crashing again of course", the operator 10-20).  Its streams cancelled again,
    the region's closed leases looked at again (`unreleased`: the rows its units named are held no more, its queue
    pairs gone with it, mesh-dataflow.c mesh_pinned), its link down with no lanes, and the port to be opened by its next
    child */
@@ -1882,10 +1877,13 @@ static void child_reaped(struct port *port){
     mesh_bridge_pages(M)->child[port->holder]=(struct mesh_holder){0};
   const int asked=port->ending;
   port->ending=port->recycle=0;
-  if(asked)say("link %u (%s): its child %d ended\n",port->index,port->name,(int)pid);
+  if(asked){port->aborts=0;say("link %u (%s): its child %d ended\n",port->index,port->name,(int)pid);}
   else{
-    say("link %u (%s): its child %d ended unbidden (%s %d)\n",port->index,port->name,(int)pid,
-        WIFSIGNALED(status)?"signal":"status",WIFSIGNALED(status)?WTERMSIG(status):WEXITSTATUS(status));
+    port->aborts=now-port->child_at<MESH_CHILD_SETTLE_NS?port->aborts+1:0;
+    const uint64_t hold=port->aborts>1?MIN(UINT64_C(60)<<MIN(port->aborts-2,6u),UINT64_C(3600)):0;
+    port->hold_to=now+hold*UINT64_C(1000000000);
+    say("link %u (%s): its child %d ended unbidden (%s %d); its next spawned in %llu s\n",port->index,port->name,(int)pid,
+        WIFSIGNALED(status)?"signal":"status",WIFSIGNALED(status)?WTERMSIG(status):WEXITSTATUS(status),(unsigned long long)hold);
     port->open=0;
     port_lost(port,ECHILD);
   }
@@ -1948,8 +1946,9 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
    served, a job out lapsed), an end, and a message of any other kind let be; and tells each job's end, naming the pairing it was asked for.  A connect that
    ends while its pairing stands opens the link's streams (streams_open) and then serves every lane, its pairing read
    again (port_halt's order).  The child ends at its parent's word, once its own windows have ended (at most
-   MESH_PLATFORM_NS on), or at its parent's loss (the socket's end), its lanes served no more, MESH_PLATFORM_NS and its
-   windows on (at most twice that): its exit, the kernel's release of its device's objects, no verbs call made */
+   MESH_PLATFORM_NS on), or at a stop from outside (SIGTERM, SIGINT, SIGHUP) as at that word, or at its parent's loss
+   (the socket's end), its lanes served no more, MESH_PLATFORM_NS and its windows on (at most twice that): its exit, the
+   kernel's release of its device's objects, after the lanes holding work are flushed (child_leave, lanes_flush) */
 static uint32_t child_asked;
 static uint64_t child_bandwidth;
 static int child_halted;
@@ -1965,12 +1964,48 @@ static void child_tell(struct child_message said){
     at+=sent;left-=(size_t)sent;
   }
 }
+/* design/transport.md section 14, "A process a port": the queue pairs a child leaves holding work, released as the
+   literature releases one (rdmamojo "Flushing Work Requests"; Linux ib_drain_qp, then ib_destroy_qp; the operator's
+   permission of 2026-10-22, design/rubrics.md M3): each lane with a SEND not completed or a receive not landed moved to
+   the error state, so the device completes each of them (IBV_WC_WR_FLUSH_ERR), and those completions taken, at most
+   until `until`; the kernel then destroys the queue pairs and completion queues, deregisters the region and frees the
+   domain and context at the exit, the rest of that sequence.  A child's exit with work posted, at both ends of a cable
+   at once, waited forever in the kernel's release (AppleThunderboltRDMA's queue stop, IOThunderboltPath::
+   deactivateSynchronous, 2026-10-23: metal-microbench output_data/review-20261023/LIBRARY-STATES.md); exits with none
+   posted were clean, at both ends at once too, and on the pair the provider flushed 687 of 687 work requests in 0.41
+   and 0.46 s (2026-10-18).  Under the port's guard, raised by child_leave (design/transport.md B13: no post or poll of
+   its progress threads since, their counts whole) */
+static void lanes_flush(struct port *port,uint64_t until){
+  struct link *l=&port->link;
+  uint64_t left=0;
+  uint32_t moved=0;
+  for(uint32_t k=0;k<MESH_LINK_LANES;k++){
+    const struct lane_state *s=l->lane+k;
+    struct ibv_qp_attr error={.qp_state=IBV_QPS_ERR};
+    if((s->sent!=s->done || s->posted!=s->got) && !ibv_modify_qp(l->provider.queues[k].pair,&error,IBV_QP_STATE)){
+      moved|=UINT32_C(1)<<k;left+=s->sent-s->done+s->posted-s->got;
+    }
+  }
+  const uint64_t held=left;
+  struct ibv_wc done[16];
+  for(int n=0,c=0;left && n>=0 && clock_ns()<until;c^=1){
+    n=l->provider.poll(c?l->provider.sent:l->provider.completion,16,done);
+    for(int i=0;i<n;i++)if(left && moved>>link_lane(l,done[i].qp_num)&1)left--;
+  }
+  if(held)say("link %u (%s): its child leaves with %llu work requests outstanding on lanes %#x: moved to the error state, %llu "
+              "flushed\n",port->index,port->name,(unsigned long long)held,moved,(unsigned long long)(held-left));
+}
+/* the child's end: its progress threads held at the port's guard (none where a job of the port's is out: a lane is
+   posted on only once its connect's job has ended, and no job is asked after it), its lanes served no more, its own
+   windows waited out (B9, B9b: no release inside a termination), what its lanes hold flushed (lanes_flush, where the
+   threads held: none ran, so nothing was posted, or one is in a call that has not returned), and its exit */
 static __attribute__((noreturn)) void child_leave(struct port *port,int asked){
+  const uint64_t start=clock_ns(),bound=start+(asked?1:2)*MESH_PLATFORM_NS;
+  const int held=port->link.job?0:guard_raise(port);
   atomic_fetch_add(&port->link.pairing,1);
   atomic_store(&port->link.served,0);
   atomic_store_explicit(&port->closing,1,memory_order_release);
   guard_wake(port);
-  const uint64_t start=clock_ns(),bound=start+(asked?1:2)*MESH_PLATFORM_NS;
   for(;;){
     const uint64_t at=clock_ns(),windows=MAX(atomic_load(&exit_at),atomic_load(&port->quiet_at));
     const uint64_t until=MIN(bound,MAX(asked?start:start+MESH_PLATFORM_NS,windows));
@@ -1978,6 +2013,7 @@ static __attribute__((noreturn)) void child_leave(struct port *port,int asked){
     struct timespec rest={(time_t)((until-at)/1000000000u),(long)((until-at)%1000000000u)};
     nanosleep(&rest,NULL);
   }
+  if(held>0)lanes_flush(port,clock_ns()+MESH_PLATFORM_NS);
   exit(0);
 }
 static void child_command(struct port *port,const struct child_message *heard){
@@ -2081,6 +2117,14 @@ static int child_main(int argc,char **argv){
   if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("child events");
   EV_SET64(&event,3,EVFILT_READ,EV_ADD,0,0,UINT64_MAX,0,0);
   if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("child events");
+  /* a stop from outside (a shutdown's SIGTERM, SIGINT, SIGHUP) heard as an event, its filter added before its default
+     is ignored (the parent's own stop, main), so the child leaves as at its parent's word (child_leave) */
+  static const int ending[]={SIGTERM,SIGINT,SIGHUP};
+  for(size_t i=0;i<sizeof ending/sizeof *ending;i++){
+    EV_SET64(&event,(uint64_t)ending[i],EVFILT_SIGNAL,EV_ADD,0,0,UINT64_MAX,0,0);
+    if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("child events");
+    signal(ending[i],SIG_IGN);
+  }
   terminations_watch(0);
   for(;;){
     now=clock_ns();
@@ -2090,7 +2134,10 @@ static int child_main(int argc,char **argv){
     struct timespec tick={(time_t)(MESH_PAUSE_NS/1000000000u),(long)(MESH_PAUSE_NS%1000000000u)};
     const int count=kevent64(events,NULL,0,ready,4,0,&tick);
     now=clock_ns();
-    for(int i=0;i<count;i++)if(ready[i].filter==EVFILT_READ && ready[i].ident==3)child_read(port);
+    for(int i=0;i<count;i++){
+      if(ready[i].filter==EVFILT_SIGNAL)child_leave(port,1);
+      if(ready[i].filter==EVFILT_READ && ready[i].ident==3)child_read(port);
+    }
   }
 }
 

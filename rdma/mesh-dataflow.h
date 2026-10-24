@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <libproc.h>
 #include <signal.h>
+#include <sys/proc.h>
 /* design/transport.md */
 struct mesh_ctx { struct hdr *M; size_t len; uint64_t client; uint32_t row_cursor,arena_cursor; int fd; };
 /* design/transport.md: a process's client slot of this node's one region, taken vacant by one compare-exchange
@@ -20,12 +21,14 @@ int mesh_detach(struct mesh_ctx *);
 /* design/transport.md: a process gone (its slot's or the bridge's pid; 0: none) */
 static inline int mesh_gone(pid_t process){ return !process || (kill(process,0) && errno==ESRCH); }
 /* design/transport.md section 2: a process's start in microseconds of the wall clock (libproc PROC_PIDTBSDINFO), 0
-   where it is gone or in its exit (XNU takes a process from every lookup by pid as its exit begins, before the kernel
-   releases its device objects: metal-microbench docs/facts.md); with its pid, the identity of a holder of the region,
-   which a later process given the same pid does not share */
+   where it is gone; with its pid, the identity of a holder of the region, which a later process given the same pid
+   does not share.  A process in its exit is not gone: it holds its registration until that exit ends (a port's child
+   in the kernel's release of its queue pairs, 2026-10-23), and XNU takes it from every lookup by pid as the exit begins
+   (bsd/kern/kern_exit.c proc_prepareexit: P_REF_DEAD), so it is read as a zombie is (the call's argument 1:
+   proc_info.c proc_find_zombref), and gone once its status is SZOMB (kern_exit.c proc_exit, its last step) */
 static inline uint64_t mesh_started(pid_t process){
   struct proc_bsdinfo info;
-  return process && proc_pidinfo(process,PROC_PIDTBSDINFO,0,&info,(int)sizeof info)==(int)sizeof info?
+  return process && proc_pidinfo(process,PROC_PIDTBSDINFO,1,&info,(int)sizeof info)==(int)sizeof info && info.pbi_status!=SZOMB?
          (uint64_t)info.pbi_start_tvsec*UINT64_C(1000000)+info.pbi_start_tvusec:0;
 }
 /* the process `pid` of start `start` alive (a start of 0, which a region an earlier bridge or library wrote holds:

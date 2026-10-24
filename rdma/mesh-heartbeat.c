@@ -4,7 +4,7 @@
    then heard as a kernel event, never inferred from time passing), and is the one process that unlinks an expired
    region, once none of the region's holders lives (the bridge, its children and its clients, each recorded in the region
    by its pid and start: mesh_holds), before it opens a bridge again: a bridge is never opened while another is ending,
-   and no second region is ever made beside a live holder of the first (a process in its exit is none: mesh_started).
+   and no second region is ever made beside a holder of the first.
 
    Its operator's signals (`launchctl kill SIG user/$(id -u)/io.mesh.bridge`):
    - SIGHUP: open, or restart: the bridge closed by SIGHUP (its region kept for the next to adopt), this heartbeat's own
@@ -124,8 +124,9 @@ static void reopen_later(void){
 
 /* design/transport.md section 2: an expired region (magic, layout version 0) unlinked once none of its holders lives:
    its bridge (`bridge_pid`, `bridge_start`), each child its bridges recorded, and each client slot's process (its
-   owner's pid, `start`), each identified by its pid and start (mesh_holds, so a reused pid is no holder).  Until then
-   they are watched (their exits as events, the slots read every REPLACE_TICK_MS for a client that lets go and lives on)
+   owner's pid, `start`), each identified by its pid and start (mesh_holds, so a reused pid is no holder, and one in its
+   exit, which may not end, still is).  Until then they are watched (their exits as events, the slots read every
+   REPLACE_TICK_MS for a client that lets go and lives on, and for a holder already in its exit, which takes no filter)
    and named as they change.  A region that is live, or none, ends the replacement */
 static void replace_turn(void){
   size_t size=0;
