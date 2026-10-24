@@ -178,10 +178,13 @@ after its input.
 **Split.** The hidden units are the mesh dimension `tp`, attached with the backend (`partition.attach`), and each
 rank's block of them is the backend's (`partition.split`), never the configuration's. A rank holds its units' gate rows
 of W_l and b_l, unit-major, as a ragged shard (`RaggedShard(0)`: torch's column-parallel split of a linear layer), and
-its units' cell state, which never leaves the rank. The gate product is torch's linear on the replicated u and the
-sharded weights, so the backend's dispatch gives each rank its own gate columns. The new h slices of every layer are
-then one ragged tensor (`RaggedShard(2)`), and `full_tensor()` gathers them to every rank: the backend's allgatherv,
-one crossing a tick. This is Megatron's split of a cell by hidden unit.
+its units' cell state, which never leaves the rank. The state is unit-major, [units, L, rows], so a tick's gather
+crosses its outermost dimension. The gate product is torch's mm of the sharded weights by the replicated u, so the
+backend's dispatch gives each rank its own gate rows. The new h slices of every layer are then one ragged tensor
+(`RaggedShard(0)`), and `full_tensor()` gathers them to every rank: the backend's allgatherv, one crossing a tick.
+This is Megatron's split of a cell by hidden unit. The h slices (two, a tick's and the last), c and rank 0's
+output are region tensors made at load (`torch_mesh.empty`); after each tick, `partition.rebalance` may move the
+blocks, and `follow` moves the program's sharded tensors onto them.
 
 **Blocks.** The program declares the units, `partition.attach(mesh, tp=H)`, and the backend splits them evenly at
 first. After each tick it calls `partition.rebalance(mesh, 'tp')`. That measures each rank's own work between its

@@ -63,7 +63,7 @@ def main():
     X = torch_mesh.empty(steps, rows, KIN, dtype=torch.half)
     if rank == 0:
         X.copy_(torch.from_numpy(inputs[:]))
-    O = torch.empty(steps, rows, H, dtype=torch.half, device='mps') if rank == 0 else None
+    O = torch_mesh.empty(steps, rows, H, dtype=torch.half) if rank == 0 else None
     torch_mesh.check_memory()
     torch.mps.synchronize()
     dist.barrier()
@@ -74,7 +74,7 @@ def main():
     for s in range(ticks):
         top = tick(X[min(s, steps - 1)])
         if O is not None and s >= L - 1:
-            O[s - L + 1].copy_(top)
+            O[s - L + 1].copy_(top.T)
         if partition.rebalance(mesh, 'tp'):
             tick.follow()
         if s == half:
@@ -85,7 +85,7 @@ def main():
     seconds = time.perf_counter() - began
     steady = middle.elapsed_time(end) / 1e3 / (ticks - 1 - half)
     if O is not None:
-        np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, H))[:] = O.cpu().numpy()
+        torch.from_numpy(np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, H))).copy_(O)
     blocks = partition.split(mesh, 'tp', H)
     summary = dict(rank=rank, size=size, blocks=blocks, balancing=partition.balancing(mesh, 'tp'), layers=L, rows=rows,
                    input_width=KIN, width=H, steps=steps, ticks=ticks, seconds=seconds,
