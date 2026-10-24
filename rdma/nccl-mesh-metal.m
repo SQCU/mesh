@@ -385,8 +385,14 @@ struct metal_result metal_spin(struct metal_program *program, const struct metal
   return dispatch(program, KIND_spin, w->words, w->words, NULL, w->violation, wait_args(w, 0, 1, 0), 1, 1);
 }
 
-struct metal_result metal_land(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *w) {
-  return dispatch(program, typed(OP_LAND, type), dst, w->data, w->words, w->violation, wait_args(w, dst_offset, n, op), n, 0);
+struct metal_result metal_land(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, size_t n, mesh_pages pages,
+                               uint64_t page, const struct metal_wait *w) {
+  struct args p = wait_args(w, dst_offset, n, op);
+  if (type == METAL_MERGE) return dispatch(program, typed(OP_LAND, type), dst, w->data, w->words, w->violation, p, n, 0);
+  p.scalar = pages_to_word(pages_sub(w->target, pages)) + 1;
+  p.count = (uint32_t)pages_to_word(pages);
+  p.mask = (uint32_t)page;
+  return dispatch(program, typed(OP_LAND, type), dst, w->data, w->words, w->violation, p, (n + 3) / 4, 0);
 }
 
 /* a deferred step's program is one whose records the argument ring holds (metal_begin4, or metal_begin with a residency
@@ -431,6 +437,15 @@ static void recording_free(struct recording *r) {
   free(r);
 }
 
+/* the pages of a landing of `pages` its item awaits before its track runs it, the rest awaited in the kernel page by
+   page (nccl-mesh-kernels.h LANDS): the least r with r * r at least `pages`, so a landing of a page or two is awaited
+   whole and a larger one is summed from its first r pages on */
+static uint64_t first_pages(uint64_t pages) {
+  uint64_t r = 1;
+  while (r * r < pages) r++;
+  return r < pages ? r : pages;
+}
+
 /* a step of kind `kind` recorded onto the item being recorded: a consumption's first step that awaits a word (WORD) its
    item's wait */
 static struct metal_result record_step(struct metal_program *program, uint32_t kind, void *d, void *s, void *a, void *v, struct args p) {
@@ -449,7 +464,7 @@ static struct metal_result record_step(struct metal_program *program, uint32_t k
     it->wait_op = (uint32_t)(r->ops - 1);
     it->word_buffer = WORD[kind] == WORD_D ? made.d : made.a;
     it->word = p.aux;
-    it->target = p.scalar;
+    it->target = WORD[kind] == WORD_P ? p.scalar + first_pages(p.count) - 1 : p.scalar;
   }
   if (!it->v && p.polls) it->v = made.v;
   return METAL_DONE;

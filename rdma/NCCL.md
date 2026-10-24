@@ -235,8 +235,11 @@ library never learns a lane, a frame or a queue pair (design/transport.md sectio
   bridge runs (NumPy, CPU region tensors). It is functional, not the measured path.
 - **Metal path.** An `ncclMeshStream`: the group is encoded into a Metal command buffer, and every buffer is an
   `ncclMeshBuffer` (an `MTLBuffer` and a byte offset into it). A publication is one kernel's system fence and one store
-  of the holding's `ready` (a count of pages). A landing is a kernel's bounded wait on its `landed`, then its combine,
-  every threadgroup of a wide landing kernel awaiting on its own. A COPY lands in place, so its consumption is the wait alone.
+  of the holding's `ready` (a count of pages). A landing is its combine page by page as its pages land: each
+  threadgroup of the landing kernel combines a block of four elements a thread (a vector where the operand and the
+  landed bytes are both aligned to one), its thread 0 first making a bounded wait on `landed` for the block's last page
+  wherever the count it last read falls short; on a track, the landing's item awaits its first r pages (r * r at
+  least its pages) and the kernel the rest. A COPY lands in place, so its consumption is the wait alone.
   - torch-mesh runs MPS region tensors here.
   - A group can be issued and completed later (`issue`, `ncclMeshComplete`).
   - **Gates.** A Metal-path group's landing entries are gated on the stream reaching the group. Each names a word and a
