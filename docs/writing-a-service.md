@@ -205,7 +205,9 @@ layer's h into the output at the counter less L - 1 (rank 0), and advances the c
 records it as the chain's step is, k ticks unrolled in one graph and the fewer that k does not divide in a graph of
 their own, and the run issues every later tick through it (`Recording.issue`); the first L - 1 ticks, while the
 layers above have not begun, run as they are (`Tick.starting`). The service replays it before the run (k ticks and
-the rest, so each graph compiles on every rank), then zeroes the state and the counter.
+the rest, so each graph compiles on every rank), then zeroes the state and the counter. Once the input is broadcast it
+declares the gather once (`torch_mesh.plan` of `partition.gathered`, as the chain declares its sum), and a replay's k
+gathers are one crossing issued once, each tick's its repeat (the compiler tells allgatherv its repeats).
 
 **Configuration.** `input`, `weights`, `output`, `input_width`, `width` (H), `layers` and `steps_per_replay`, the k
 ticks one replay runs (the chain's name for its k). The weights directory holds
