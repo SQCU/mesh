@@ -52,11 +52,14 @@ def compiler(gm, example_inputs):
     from torch._inductor import config
     from torch._inductor.custom_graph_pass import CustomGraphPass
 
-    from . import _stream, backend  # noqa: F401  (torch_mesh::all_reduce)
+    from . import _stream, backend, partition  # noqa: F401  (torch_mesh::all_reduce, torch_mesh::allgatherv)
     from .streamed import node
     _stream.linear_source((Path(__file__).parent / 'linear.metal').read_text(), node()[1])
 
     aten = torch.ops.aten
+    # each fused crossing's op and where its group's name lies among its arguments, its repeats the next
+    CROSSINGS = {torch.ops.torch_mesh.all_reduce.default: 2, torch.ops.torch_mesh.linear_sum.default: 2,
+                 torch.ops.torch_mesh.allgatherv.default: 3}
 
     def rows(x, w):
         """Whether x @ w is linear's: fp16, x [R <= 8, K] contiguous, w the transposed view of a [N, K] whose rows lie
@@ -66,11 +69,13 @@ def compiler(gm, example_inputs):
                 and x.shape[0] <= 8 and x.is_contiguous() and w.stride(0) == 1 and w.stride(1) >= w.shape[0])
 
     def told(node, repeats):
-        """A sum's node told its repeats, the fake values Inductor records for its call alike."""
-        node.args = (*node.args[:3], repeats)
+        """A crossing's node told its repeats (the argument after its group's name), the fake values Inductor records
+        for its call alike."""
+        i = CROSSINGS[node.target] + 1
+        node.args = (*node.args[:i], repeats)
         if 'eager_input_vals' in node.meta:
             values, named = node.meta['eager_input_vals']
-            node.meta['eager_input_vals'] = ((*values[:3], repeats), named)
+            node.meta['eager_input_vals'] = ((*values[:i], repeats), named)
 
     def joined(x):
         """The two fp16 rows-segments x is the cat of along its last dimension, where that cat has no other use."""
@@ -158,17 +163,17 @@ def compiler(gm, example_inputs):
                         users[0].replace_all_uses_with(made)
                         graph.erase_node(users[0])
             grouped(graph)
-            sums = (torch.ops.torch_mesh.all_reduce.default, torch.ops.torch_mesh.linear_sum.default)
-            for name in {node.args[2] for node in graph.nodes if node.target in sums}:
+            for name in {node.args[CROSSINGS[node.target]] for node in graph.nodes if node.target in CROSSINGS}:
                 nodes = [node for node in graph.nodes if any(isinstance(a, str) and a == name for a in node.args)]
-                forms = {(n.target, *((a.meta['val'].shape, a.meta['val'].stride(), a.meta['val'].dtype) if hasattr(a, 'meta') else a
-                                      for a in n.args[:2])) for n in nodes}
-                if len(nodes) > 1 and len(forms) == 1 and nodes[0].target in sums:
+                forms = {(n.target, *((a.meta['val'].shape, a.meta['val'].stride(), a.meta['val'].dtype) if hasattr(a, 'meta')
+                                      else tuple(a) if isinstance(a, list) else a for a in n.args[:CROSSINGS.get(n.target, 2)]))
+                         for n in nodes}
+                if len(nodes) > 1 and len(forms) == 1 and nodes[0].target in CROSSINGS:
                     for n in nodes:
                         told(n, len(nodes))
 
         def uuid(self):
-            return 'torch_mesh::all_reduce torch_mesh::linear cat linears repeats'
+            return 'torch_mesh::all_reduce torch_mesh::linear cat linears repeats allgatherv'
     with config.patch(post_grad_custom_pre_pass=Leased(), size_asserts=False, alignment_asserts=False, scalar_asserts=False):
         return lookup_backend('inductor')(gm, example_inputs)
 

@@ -178,19 +178,20 @@ def _in_region(y):
 
 
 @torch.library.custom_op('torch_mesh::allgatherv', mutates_args=())
-def allgatherv(x: torch.Tensor, dim: int, sizes: list[int], group_name: str) -> torch.Tensor:
+def allgatherv(x: torch.Tensor, dim: int, sizes: list[int], group_name: str, repeats: int = 1) -> torch.Tensor:
     """The blocks gathered along `dim` from x's block, an opaque op, so a compiled graph calls it as torch's
     functional collectives are called.  On the mesh backend (_region_backed) it is a fused crossing (_fused):
     this rank's block copied once into its page-padded segment of a held lease and published by partition's own
     kernel, every peer's landing waited for and the segments joined along `dim` by another, the library encoding no
-    dispatch; else out of place from x's block by dist.all_gather."""
+    dispatch, the crossing issued once for `repeats` of them (a graph's, torch_mesh.compiler); else out of place from
+    x's block by dist.all_gather."""
     group = dist.distributed_c10d._resolve_process_group(group_name)
     if not _region_backed(x, group):
         y = x.movedim(dim, 0).contiguous()
         out = _empty((sum(sizes),) + y.shape[1:], y)
         dist.all_gather(list(out.split(sizes)), y, group=group)
         return out.movedim(0, dim).contiguous()
-    return _fused(x.contiguous(), dim, sizes, group, False)
+    return _fused(x.contiguous(), dim, sizes, group, False, None, repeats)
 
 
 # The all-gather and the all-reduce as a fused crossing (rdma/nccl.h ncclMeshFused; torch_mesh/fused.py): one SEND
@@ -373,7 +374,7 @@ def reduce_scatterv(x: torch.Tensor, dim: int, sizes: list[int], rank: int, op: 
 
 
 @allgatherv.register_fake
-def _(x, dim, sizes, group_name):
+def _(x, dim, sizes, group_name, repeats=1):
     shape = list(x.shape)
     shape[dim] = sum(sizes)
     return x.new_empty(shape)
@@ -395,11 +396,17 @@ def _row(x, dim):
     return math.prod(s for k, s in enumerate(x.shape) if k != dim)
 
 
-def gathered(x, dim, sizes):
-    """allgatherv's group of a block like `x` (its shape and dtype) along `dim`, each rank's block sizes[r] long: one
-    all-gather of every rank's block (torch_mesh.plan)."""
-    from .backend import ALLGATHER, Call
-    return [Call(ALLGATHER, x.numel(), x.dtype, counts=[s * _row(x, dim) for s in sizes])]
+def gathered(x, dim, sizes, group):
+    """allgatherv's group of a block like `x` (its shape and dtype) along `dim` on mesh `group`, each rank's block
+    sizes[r] long, as it issues it (torch_mesh.plan): on the mesh backend its fused crossing (_fused), this rank's
+    page-padded segment sent to each peer and each peer's landed, in rank order, declared fused; else one all-gather of
+    every rank's block."""
+    from .backend import ALLGATHER, RECV, SEND, Call
+    if not _region_backed(x, group):
+        return [Call(ALLGATHER, x.numel(), x.dtype, counts=[s * _row(x, dim) for s in sizes])]
+    counts = _paged([s * _row(x, dim) for s in sizes], x.element_size(), group)[0]
+    return [Call(kind, counts[rank if kind == SEND else q], x.dtype, q, fused=True)
+            for rank in (group.rank(),) for q in range(group.size()) if q != rank for kind in (SEND, RECV)]
 
 
 def summed(x, group):
@@ -590,7 +597,7 @@ def calls(tensor):
     """The groups full_tensor() of RaggedTensor `tensor` issues, one all-gather of its blocks a partitioned mesh
     dimension (RaggedShard._to_replicate_tensor), each from its shape and the operand attached now (torch_mesh.plan)."""
     mesh, local = tensor.device_mesh, tensor.to_local()
-    return [gathered(local, p.dim, _blocks(_OPERANDS[p.key], tensor.shape[p.dim])[0])
+    return [gathered(local, p.dim, _blocks(_OPERANDS[p.key], tensor.shape[p.dim])[0], mesh.get_group(i))
             for i, p in enumerate(tensor.placements) if isinstance(p, RaggedShard) and mesh.size(i) > 1]
 
 
