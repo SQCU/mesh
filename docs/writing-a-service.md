@@ -183,8 +183,9 @@ sharded weights, so the backend's dispatch gives each rank its own gate columns.
 then one ragged tensor (`RaggedShard(2)`), and `full_tensor()` gathers them to every rank along that dimension: the
 backend's allgatherv, one crossing a tick.
 This is Megatron's split of a cell by hidden unit. The h slices (two, a tick's and the last), c and rank 0's
-output are region tensors made at load (`torch_mesh.empty`); after each tick, `partition.rebalance` may move the
-blocks, and `follow` moves the program's sharded tensors onto them.
+output are region tensors made at load (`torch_mesh.empty`). The blocks hold for the whole run, one evaluation:
+once it has ended, `partition.evaluated` gives the backend's Balancer the run's own evidence, and the next run's
+attach takes the blocks it sets (design/data-model.md section 9).
 
 **Blocks.** The program declares the units, `partition.attach(mesh, tp=H)`, and the backend splits them evenly at
 first. After each tick it calls `partition.rebalance(mesh, 'tp')`. That measures each rank's own work between its

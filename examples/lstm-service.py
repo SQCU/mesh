@@ -75,8 +75,6 @@ def main():
         top = tick(X[min(s, steps - 1)])
         if O is not None and s >= L - 1:
             O[s - L + 1].copy_(top)
-        if partition.rebalance(mesh, 'tp'):
-            tick.follow()
         if s == half:
             middle.record()
     end.record()
@@ -86,8 +84,8 @@ def main():
     steady = middle.elapsed_time(end) / 1e3 / (ticks - 1 - half)
     if O is not None:
         torch.from_numpy(np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, H))).copy_(O)
-    blocks = partition.split(mesh, 'tp', H)
-    summary = dict(rank=rank, size=size, blocks=blocks, balancing=partition.balancing(mesh, 'tp'), layers=L, rows=rows,
+    blocks, following = partition.split(mesh, 'tp', H), partition.evaluated(mesh, 'tp')
+    summary = dict(rank=rank, size=size, blocks=blocks, following=following, balancing=partition.balancing(mesh, 'tp'), layers=L, rows=rows,
                    input_width=KIN, width=H, steps=steps, ticks=ticks, seconds=seconds,
                    aggregate_rows_per_second=steps * rows / seconds,
                    steady_aggregate_rows_per_second=rows / steady, per_stream_steps_per_second=steps / seconds,

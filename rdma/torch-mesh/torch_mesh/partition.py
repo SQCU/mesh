@@ -91,6 +91,7 @@ the dimension again at them."""
 import contextlib
 import itertools
 import math
+import os
 import resource
 
 import torch
@@ -382,14 +383,57 @@ class RaggedShard(Shard):
 # The operand's API.
 def attach(mesh, **dims):
     """Partition mesh dimensions by name: attach(mesh, tp=units), the units every extent the program splits along the
-    dimension is a multiple of, the same on every rank.  The backend splits them evenly over the coordinates in rank
-    order (the first units mod n one more), and rebalance moves them from there."""
+    dimension is a multiple of, the same on every rank.  The parts are those the last evaluation on these nodes left
+    (evaluated: its Balancer, kept in each node's store), rank 0's on every rank, else an even split in rank order (the
+    first units mod n one more); the dimension's group is watched from here for the evaluation's own evidence
+    (torch_mesh.evidence).  Two exchanges of a page, at load."""
+    import allocate
+    from . import evidence
     for name, units in dims.items():
         n = mesh.size(mesh.mesh_dim_names.index(name)) if name in (mesh.mesh_dim_names or ()) else 0
         if not 0 < n <= units:
             raise ValueError(f'mesh: partition {name}: {units} units over a mesh dimension of {mesh.mesh_dim_names}, '
                              f'at least one a coordinate')
-        _attach(mesh, name, [units // n + (r < units % n) for r in range(n)])
+        group = mesh.get_group(name)
+        held = _BALANCING[id(group), name] = {}
+        nodes = [int(v[0]) for v in _shared(held, group, [_node()])] if getattr(group, 'handle', 0) else list(range(n))
+        held['path'] = os.path.join(_STORE, f'{name}-{units}-{"-".join(map(str, nodes))}.json')
+        state = _stored(held['path'])
+        held['balancer'] = allocate.Balancer.of(state) if state else allocate.Balancer(
+            {name: {'parts': [units // n + (r < units % n) for r in range(n)], 'low': [1] * n, 'high': [units - n + 1] * n}})
+        _attach(mesh, name, [int(p) for p in _shared(held, group, held['balancer'].parts[name])[0]])
+        evidence.watch(group, mesh.device_type)
+
+
+_STORE = os.path.expanduser('~/.cache/torch_mesh/balance')
+
+
+def _node():
+    """This node's bridge node number (rdma/mesh.py current: mesh_reached)."""
+    import mesh as library
+    own = library.ffi.new('uint32_t *')
+    library.lib.mesh_reached(library.ffi.NULL, 0, own)
+    return own[0]
+
+
+def _stored(path):
+    """A Balancer's state an evaluation left at `path` (evaluated), None where none did."""
+    import json
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+
+
+def _store(path, state):
+    """A Balancer's state kept at `path` for the next evaluation's attach, written whole (a new file renamed over it)."""
+    import json
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    part = f'{path}.{os.getpid()}'
+    with open(part, 'w') as f:
+        json.dump(state, f)
+    os.replace(part, path)
 
 
 def _attach(mesh, name, parts):
@@ -1236,16 +1280,9 @@ def rebalance(mesh, name='tp', every=8):
     group = mesh.get_group(name)
     if mesh.device_type == 'mps' and not getattr(group, 'handle', 0):
         raise ValueError(f'mesh: rebalance {name}: its group is not the mesh backend\'s (no communicator to watch)')
-    where = (id(group), name)
-    held = _BALANCING.get(where)
-    n = len(o.capacity)
-    if held is None:
-        _BALANCING[where] = {'balancer': allocate.Balancer({name: {'parts': o.parts.tolist(), 'low': [1] * n,
-                                                                   'high': [o.units - n + 1] * n}}), 'steps': 0}
-        evidence.watch(group, mesh.device_type)
-        return False
+    held, n = _BALANCING[id(group), name], len(o.capacity)
     evidence.step(group)
-    held['steps'] += 1
+    held['steps'] = held.get('steps', 0) + 1
     if held['steps'] < every:
         return False
     held['steps'] = 0
@@ -1264,29 +1301,53 @@ def rebalance(mesh, name='tp', every=8):
 
 
 def _exchange(held, group, steps):
-    """Each rank's `steps` (its stretches, a list a step) on every rank, through the backend: each rank's one page of
-    float64 in the region (the library sends only leases, rdma/nccl.h Memory), held from the first window, gathered
-    into the pages of every rank: its steps' count, then each step's count and its stretches."""
-    from . import empty
-    n, page = dist.get_world_size(group), resource.getpagesize() // 8
-    if 'pages' not in held:
-        held['pages'] = empty(page, dtype=torch.float64, device='cpu'), empty(n * page, dtype=torch.float64, device='cpu')
-    mine, every = held['pages']
-    width = (page - 1) // max(1, len(steps))
-    if any(len(step) >= width for step in steps):
-        raise ValueError(f'mesh: rebalance: {len(steps)} steps of up to {max(map(len, steps))} collectives do not fit a '
-                         f'page of {page} float64')
-    words = [float(len(steps))]
-    for step in steps:
-        words += [float(len(step))] + list(step) + [0.0] * (width - 1 - len(step))
-    mine[:len(words)] = torch.tensor(words, dtype=torch.float64)
-    dist.all_gather_into_tensor(every, mine, group=group)
+    """Each rank's `steps` (its stretches, a list a step) on every rank (_shared): its steps' count, then each step's
+    count and its stretches."""
     out = []
-    for words in every.view(n, page).tolist():
-        m = int(words[0])
-        w = (page - 1) // max(1, m)
-        out.append([words[2 + k * w:2 + k * w + int(words[1 + k * w])] for k in range(m)])
+    for words in _shared(held, group, [len(steps)] + [w for step in steps for w in (len(step), *step)]):
+        at, mine = 1, []
+        for _ in range(int(words[0])):
+            mine.append(words[at + 1:at + 1 + int(words[at])])
+            at += 1 + int(words[at])
+        out.append(mine)
     return out
+
+
+def _shared(held, group, words):
+    """Each rank's `words` (float64) on every rank, through the backend: each rank's segment whole pages in the region
+    (the library sends only leases and places each segment on a page: rdma/nccl.h Memory; torch's memory on a group
+    of another backend), sized at the first exchange from its words and held, grown where a later one's need more
+    (every rank's alike: SPMD), its words' count then the words, all gathered by one all_gather_into_tensor."""
+    from . import empty
+    n, need = dist.get_world_size(group), _paged([1 + len(words)], 8)[0][0]
+    if held.get('page', 0) < need:
+        made = empty if getattr(group, 'handle', 0) else lambda size, dtype, device: torch.empty(size, dtype=dtype, device=device)
+        held['page'], held['pages'] = need, (made(need, dtype=torch.float64, device='cpu'), made(n * need, dtype=torch.float64, device='cpu'))
+    mine, every = held['pages']
+    mine[:1 + len(words)] = torch.tensor([float(len(words))] + [float(w) for w in words], dtype=torch.float64)
+    dist.all_gather_into_tensor(every, mine, group=group)
+    return [row[1:1 + int(row[0])] for row in every.view(n, held['page']).tolist()]
+
+
+def evaluated(mesh, name='tp'):
+    """The parts the evidence of the evaluation just ended gives, kept in each node's store for the next evaluation's
+    attach (design/data-model.md section 9: the shares set between evaluations, a new share a new compiled plan): the
+    program calls it once its evaluation has ended, after its own synchronize, never inside one.  Each rank's evidence
+    is its work between its collectives on the dimension's group since attach (torch_mesh.evidence), every stretch an
+    invocation; one exchange gives every rank every rank's median, and one step of the Balancer (the same on every
+    rank: R4) the parts."""
+    from . import evidence
+    o, group = operand(mesh, name), mesh.get_group(name)
+    held, n = _BALANCING[id(group), name], len(o.capacity)
+    evidence.step(group)
+    stretches = sorted(t for step in evidence.work(group) for t in step)
+    medians = _shared(held, group, [stretches[len(stretches) // 2]] if stretches else [])
+    held['work'] = [m[0] if m else None for m in medians]
+    balancer = held['balancer']
+    balancer.decisions[name]['parts'] = o.parts.tolist()
+    parts = balancer.observe({'evaluation': {'scales': {name: [1.0] * n}, 'times': [m or None for m in medians]}})[name]
+    _store(held['path'], balancer.state())
+    return parts
 
 
 def balancing(mesh, name='tp'):
