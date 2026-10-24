@@ -665,35 +665,39 @@ def _declarable(mesh, name):
 class exchange:
     """An all_to_all_single declared once: `src`'s blocks into `dst`'s (one logical shape split along two dimensions of
     one partitioned mesh dimension, dst's outermost in src's block, else a declaration error), `back`'s pair the
-    reverse.  dst's block receives every rank's part source after source (pieces); the counts are compiled from the
-    parts here and at every move (_relay)."""
+    reverse.  dst's block receives every rank's part source after source (the declared `pieces` buffers' per-source
+    views); its calls, counts and views are compiled here, at the reserve and at every move, so a step only issues."""
 
-    def __init__(self, src, dst, back=None):
+    def __init__(self, src, dst, back=None, pieces=()):
         (self.i, p), = [(i, p) for i, p in enumerate(src.placements) if isinstance(p, RaggedShard)]
         self.e, self.d, self.mesh = p.dim % src.ndim, dst.placements[self.i].dim % src.ndim, src.device_mesh
         if self.e < self.d or math.prod(src.shape[:self.d]) != 1 or src.shape != dst.shape:
             raise ValueError(f"mesh: an exchange needs dst's split dimension {self.d} outermost in src's block")
         _declarable(self.mesh, self.mesh.mesh_dim_names[self.i]).setdefault('exchanges', []).append(self)
-        self.src, self.dst, self.back_pair = src, dst, back
+        self.src, self.dst, self.back_pair, self.declared = src, dst, back, pieces
         self.compile()
 
     def compile(self):
         o, rank = _OPERANDS[self.src.placements[self.i].key], self.mesh.get_coordinate()[self.i]
         self.s, self.t = ([_units(o, self.src.shape[c]) * q for q in o.parts.tolist()] for c in (self.e, self.d))
         rest = self.src.numel() // (self.src.shape[self.e] * self.src.shape[self.d])
-        self.counts = [self.s[r] * self.t[rank] * rest for r in range(len(self.s))], [self.s[rank] * q * rest for q in self.t]
+        counts, flat, group = ([self.s[r] * self.t[rank] * rest for r in range(len(self.s))], [self.s[rank] * q * rest for q in self.t]
+                               ), lambda t: t.to_local().view(-1), self.mesh.get_group(self.i)
+        self.calls = [(flat(self.dst), flat(self.src), *counts)] + ([(flat(self.back_pair[1]), flat(self.back_pair[0]), *counts[::-1])]
+                                                                     if self.back_pair else [])
+        self.group, self.views = group, {id(t): self._pieces(t) for t in self.declared}
 
     def __call__(self):
-        dist.all_to_all_single(self.dst.to_local().view(-1), self.src.to_local().view(-1), *self.counts,
-                               group=self.mesh.get_group(self.i))
+        dist.all_to_all_single(*self.calls[0], group=self.group)
 
     def back(self):
-        results, back = self.back_pair
-        dist.all_to_all_single(back.to_local().view(-1), results.to_local().view(-1), *reversed(self.counts),
-                               group=self.mesh.get_group(self.i))
+        dist.all_to_all_single(*self.calls[1], group=self.group)
 
     def pieces(self, t):
-        """`t`'s block, placed as dst and of src's extent along src's split, as each source's piece in arrival order."""
+        """A declared buffer's per-source views (placed as dst, of src's extent along src's split), in arrival order."""
+        return self.views[id(t)]
+
+    def _pieces(self, t):
         local = t.to_local()
         shape = lambda s: local.shape[:self.e] + (s,) + local.shape[self.e + 1:]
         return [p.view(shape(s)) for p, s in zip(local.reshape(-1).split([math.prod(shape(s)) for s in self.s]), self.s)]
@@ -778,6 +782,8 @@ def _reserve(mesh, name, held, group):
         held = _holding(group)
         held.update({(what, dtype): lease for (what, dtype, _), lease in zip(spaces, caps[len(ts) + staged:-1])})
         held['staging'] = [caps[len(ts):len(ts) + staged], (caps[-1], counts, starts)]
+    for x in _BALANCING.get((mesh, name), {}).get('exchanges', []):
+        x.compile()
     return [int(w[0]) for w in words]
 
 
