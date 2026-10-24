@@ -738,10 +738,11 @@ def _follow_masked(placement, local, logical_shape, logical_stride, key, rank, g
     retirement; it is not a bounded-memory recycling ring without a return edge.
     """
     from migration import compile_rows
-    from routing import Fabric
+    from routing import Fabric, routed
     from . import address, fused
 
-    if not _region_backed(local, group) or tuple(logical_stride) != tuple(torch.empty(tuple(logical_shape), device='meta').stride()):
+    if not _region_backed(local, group) or tuple(logical_stride) != tuple(torch.empty(tuple(logical_shape), device='meta').stride()) or \
+            not routed(group.comm):  # no write routes yet: the staging fallback (until the collective sets them at init)
         return None
     dim, size = placement.dim % local.ndim, local.element_size()
     shape = list(local.shape)
@@ -829,9 +830,10 @@ def _follow_indexed(placement, local, logical_shape, logical_stride, key, rank, 
     fresh lease. The terminal range is the actual output, with no unpack pass.
     """
     from migration import compile_migration, compile_rows
+    from routing import routed
     from . import address
 
-    if not _region_backed(local, group):
+    if not _region_backed(local, group) or not routed(group.comm):  # no write routes yet: the staging fallback
         return None
     contiguous = torch.empty(tuple(logical_shape), device='meta').stride()
     if tuple(logical_stride) != tuple(contiguous):
