@@ -1,4 +1,11 @@
-import http.client, json, os, socket, threading, time
+import http.client, json, os, socket, sys, threading, time
+
+# design/data-model.md#6-why-code-here-only-loses-waits-and-guards
+DEADLINE_S = 5.0
+
+def expired(wait, seconds=DEADLINE_S):
+    print(f"{wait}: past its deadline of {seconds:.3f} s; the program ends (design/data-model.md section 6)", file=sys.stderr, flush=True)
+    os._exit(1)
 
 class WorkloadMeter:
     def __init__(self, name, labels=None, endpoint=None):
@@ -50,7 +57,7 @@ class WorkloadMeter:
                 payload["delivery_error"] = failed
             body = json.dumps(payload, separators=(",", ":")).encode()
             try:
-                connection = http.client.HTTPConnection(self.address[0], self.address[1])
+                connection = http.client.HTTPConnection(self.address[0], self.address[1], timeout=DEADLINE_S)
                 connection.request("POST", "/v1/workload-measures", body, {"Content-Type": "application/json"})
                 response = connection.getresponse()
                 response.read()
@@ -58,6 +65,8 @@ class WorkloadMeter:
                 if response.status >= 300:
                     raise OSError(f"HTTP {response.status}")
                 failed = None
+            except TimeoutError:
+                expired("the workload measures' POST to the telemetry service")
             except Exception as error:
                 failed = f"{type(error).__name__}: {error}"
 
@@ -68,7 +77,9 @@ class WorkloadMeter:
             self.measure_stopping = True
             self.measure_condition.notify_all()
         if self.measure_thread is not None:
-            self.measure_thread.join()
+            self.measure_thread.join(DEADLINE_S)
+            if self.measure_thread.is_alive():
+                expired("the workload meter's measures thread at its close")
         self.socket.close()
 
     def record(self, elapsed_s, flops_lower, flops_upper, bytes_lower, bytes_upper,
@@ -156,7 +167,9 @@ class WorkloadSpan:
     def finish(self):
         self.stop.set()
         if self.thread is not None:
-            self.thread.join()
+            self.thread.join(DEADLINE_S)
+            if self.thread.is_alive():
+                expired("the workload span's thread at its finish")
         self.publish(True)
 
 __all__ = ["WorkloadMeter", "WorkloadSpan"]

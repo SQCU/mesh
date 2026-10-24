@@ -5,10 +5,20 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [HERE, os.path.join(HERE, "..", "rdma")]
 import peers
 BASE = os.environ.get("MESH_TELEMETRY_URL", "http://127.0.0.1:8788")
+# ../design/data-model.md#6-why-code-here-only-loses-waits-and-guards
+DEADLINE = 5.0
+
+def expired(wait):
+    print(f"mesh-observe: {wait}: past its deadline of {DEADLINE:.3f} s; the program ends (design/data-model.md section 6)", file=sys.stderr, flush=True)
+    os._exit(1)
 
 def fetch(path):
-    with urllib.request.urlopen(BASE.rstrip("/") + path) as response:
-        return json.load(response)
+    try:
+        with urllib.request.urlopen(BASE.rstrip("/") + path, timeout=DEADLINE) as response:
+            return json.load(response)
+    except OSError as error:
+        if isinstance(error, TimeoutError) or isinstance(getattr(error, "reason", None), TimeoutError): expired("the telemetry's read")
+        raise
 
 def direct():
     attempts = []
@@ -20,7 +30,8 @@ def direct():
     for path in candidates:
         if not os.path.isfile(path): continue
         try:
-            result = subprocess.run([sys.executable, path, "--once"], capture_output=True, text=True)
+            try: result = subprocess.run([sys.executable, path, "--once"], capture_output=True, text=True, timeout=DEADLINE)
+            except subprocess.TimeoutExpired: expired(f"{path} --once")
             if result.returncode == 0: return json.loads(result.stdout.strip().splitlines()[-1])
             attempts.append({"path": path, "returncode": result.returncode, "error": result.stderr.strip()})
         except Exception as error:

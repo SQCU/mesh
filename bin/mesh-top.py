@@ -10,6 +10,8 @@ TELEMETRY_PORT = int(os.environ.get("MESH_TELEMETRY_PORT", "8788"))
 LATEST = "/v1/latest?measures=scalars"
 RESIDENT = ("beacon", "bridge", "router", "telemetry", "observer")
 SPARK = " ▁▂▃▄▅▆▇█"
+# ../design/data-model.md#6-why-code-here-only-loses-waits-and-guards
+DEADLINE = 5.0
 USAGE = "mesh-top [-n SECONDS] [--window SECONDS] [--nodes A,B] [--once | --html FILE]   keys: q quit, j/k scroll"
 
 class Node:
@@ -18,13 +20,20 @@ class Node:
         self.sample, self.record, self.error, self.rtt = None, {}, None, None
         self.sequence, self.previous, self.asked = None, None, None
 
+def expired(wait):
+    """`wait` past its deadline: said on stderr, and mesh-top ends."""
+    print(f"mesh-top: {wait}: past its deadline of {DEADLINE:.3f} s; the program ends (design/data-model.md section 6)", file=sys.stderr, flush=True)
+    os._exit(1)
+
 def fetch(node):
-    """This node's telemetry over loopback, read once; another node's stays on that node, the map giving its facts."""
+    """This node's telemetry over loopback, read once within the deadline; another node's stays on that node, the map
+    giving its facts."""
     started = time.monotonic()
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{TELEMETRY_PORT}{LATEST}") as response: envelope = json.load(response)
+        with urllib.request.urlopen(f"http://127.0.0.1:{TELEMETRY_PORT}{LATEST}", timeout=DEADLINE) as response: envelope = json.load(response)
         node.rtt = time.monotonic() - started
     except (OSError, ValueError) as error:
+        if isinstance(error, TimeoutError) or isinstance(getattr(error, "reason", None), TimeoutError): expired("the telemetry's read")
         node.error, node.rtt = f"{type(error).__name__}: {error}", None
         return
     record = (envelope or {}).get("record") or {}
@@ -95,7 +104,8 @@ class Top:
         for node in self.nodes.values():
             node.record = records.get(node.number) or {}
             if node.me and (node.asked is None or node.asked.done()): node.asked = self.pool.submit(fetch, node)
-        if wait: concurrent.futures.wait([node.asked for node in self.nodes.values() if node.asked])
+        if wait and concurrent.futures.wait([node.asked for node in self.nodes.values() if node.asked], timeout=DEADLINE).not_done:
+            expired("the nodes' telemetry reads")
         for node in self.nodes.values(): self.account(node)
 
     def live(self, node):

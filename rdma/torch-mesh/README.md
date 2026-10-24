@@ -39,8 +39,10 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   communicators hold one stream, and a link has up to four (one for each lane pair its plan holds), so the world group
   and three subgroups use a node pair at once; one more is refused (EBUSY) until a group is destroyed
   ([NCCL.md](../NCCL.md#rules-a-program-keeps)).
-- The group's `timeout` is not the library's to read: a collective's waits end at a landing or a lost link; a GPU
-  wait also at its bound, and a host-path wait at a revoke. No clock ends a wait on a peer's data.
+- Every wait carries a deadline set when it is made (design/data-model.md section 6): a work's `wait(timeout)` its
+  timeout, 5 s where none is given; each turn of torch's queue and each command buffer `_stream.mm` waits for, 5 s;
+  the library's own waits theirs ([NCCL.md](../NCCL.md#bounded-waits)). Past it the process ends, naming the wait and
+  its deadline.
 - A group's collectives run where a path between its ranks joins every two of them, each rank's bridge reaching the
   next one's node: a route crosses ranks alone (a node it is to cross takes part as a rank, the identity where it has
   no work), and a group whose ranks no such path joins fails at its first collective that crosses a link
@@ -374,7 +376,7 @@ w = s["lm_head"].to("cpu")                        # decoded
     `torch.accelerator.synchronize()`, `.item()` and `.cpu()` commit torch's open buffer and wait
     (`MPSStream::synchronize` with `COMMIT_AND_WAIT`).
   - A host that blocks outside torch while a publication waits in the open buffer stalls its peer. Avoiding that is
-    the program's responsibility; the peer's bounded wait ends the call as a value
+    the program's responsibility; the peer's wait ends at its deadline, which ends its program
     ([NCCL.md](../NCCL.md#bounded-waits)).
   - The stream's commit state is one object a torch stream owns (`_stream.mm` `MeshStream`), read and written by the
     host inside torch's queue, with no counter a caller enters, so no caller's exception leaves it deferring. No thread
