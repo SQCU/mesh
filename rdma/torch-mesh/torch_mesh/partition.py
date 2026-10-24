@@ -577,39 +577,51 @@ def follow(*tensors):
         stage = getattr(group, '_staging', None) or [[None, None], [None, None], None]
         for k, h in enumerate(h for h in held if isinstance(h[0][i], RaggedShard) and key not in (None, h[0][i].key)):
             p, d, t = h[0][i], h[0][i].dim % h[1].ndim, h[3]
-            rows, old, es = h[1].movedim(d, 0), _OPERANDS[p.key], h[1].element_size()
-            a, b = (list(itertools.accumulate(o.parts.tolist(), initial=0)) for o in (old, _OPERANDS[key]))
-            g, n, rest = _units(old, h[2][p.dim]), len(old.capacity), rows.shape[1:]
-            row, span = math.prod(rest), lambda r, q: g * max(0, min(a[r + 1], b[q + 1]) - max(a[r], b[q]))
-            sends, receives = [span(rank, q) for q in range(n)], [span(r, rank) for r in range(n)]
-            first, into = list(itertools.accumulate(sends, initial=0)), list(itertools.accumulate(receives, initial=0))
-            shape = h[1].shape[:d] + (into[-1],) + h[1].shape[d + 1:]
+            rows, old, es, halves = h[1].movedim(d, 0), _OPERANDS[p.key], h[1].element_size(), getattr(t, '_halves', 1)
+            g, n, rest, parts = _units(old, h[2][p.dim]) // halves, len(old.capacity), rows.shape[1:], (old.parts.tolist(), _OPERANDS[key].parts.tolist())
+            row, plans = math.prod(rest), []
+            for order in ([*range(n)], [*range(n)][::-1])[:halves]:  # head-tail: the tail half's ranks lie in reverse
+                a, b = ({r: s for r, s in zip(order, itertools.accumulate([q[r] for r in order], initial=0))} for q in parts)
+                span = lambda r, q: g * max(0, min(a[r] + parts[0][r], b[q] + parts[1][q]) - max(a[r], b[q]))
+                sends, receives = [span(rank, q) for q in range(n)], [span(r, rank) for r in range(n)]
+                at = lambda c: dict(zip(order, itertools.accumulate([c[r] for r in order], initial=0)))
+                plans.append((sends, receives, at(sends), at(receives)))
+            old_h, new_h = rows.shape[0] // halves, sum(plans[0][1])
+            shape = h[1].shape[:d] + (new_h * halves,) + h[1].shape[d + 1:]
             if getattr(t, '_capacity', None) is None:
                 high = _BALANCING.get((mesh, mesh.mesh_dim_names[i]), {}).get('high', old.units - n + 1)
-                t._capacity = _empty((max(math.prod(shape), high * g * row),), rows, group)
+                t._capacity = _empty((max(math.prod(shape), high * g * halves * row),), rows, group)
             if math.prod(shape) > t._capacity.numel():
-                raise RuntimeError(f'mesh: a share of {into[-1]} past the capacity of {tuple(shape)} (the Balancer\'s bounds)')
+                raise RuntimeError(f'mesh: a share of {new_h * halves} past the capacity of {tuple(shape)} (the Balancer\'s bounds)')
             new = t._capacity[:math.prod(shape)].view(shape)
             h[0][i], h[1] = RaggedShard(p.dim, key), new
             if getattr(t, '_scratch', False):
                 continue
-            kept = first[rank] == into[rank] and math.prod(shape[:d]) == 1 and rows.data_ptr() == new.data_ptr()
-            out, out_at = _paged([0 if q == rank else c * row for q, c in enumerate(sends)], es, group)
-            land, land_at = _paged([0 if r == rank else c * row for r, c in enumerate(receives)], es, group)
-            pair, sizes = stage[k % 2], ((out_at[-1] + (0 if kept else sends[rank] * row)) * es, land_at[-1] * es)
+            same = math.prod(shape[:d]) == 1 and rows.data_ptr() == new.data_ptr()
+            kept = [same and e * old_h + f[rank] == e * new_h + v[rank] for e, (_, _, f, v) in enumerate(plans)]
+            out, out_at = _paged([0 if q == rank else sum(c[0][q] for c in plans) * row for q in range(n)], es, group)
+            land, land_at = _paged([0 if r == rank else sum(c[1][r] for c in plans) * row for r in range(n)], es, group)
+            stays = sum(c[0][rank] for c, k in zip(plans, kept) if not k)
+            pair, sizes = stage[k % 2], ((out_at[-1] + stays * row) * es, land_at[-1] * es)
             for s, need in enumerate(sizes):
                 if pair[s] is None or pair[s].numel() < need:
                     pair[s] = _empty((max(need, 1),), rows, group, torch.uint8)
             x, y = (pair[s][:need].view(rows.dtype) for s, need in enumerate(sizes))
-            x, stay = x[:out_at[-1]], x[out_at[-1]:].view((0 if kept else sends[rank],) + rest)
-            for q in range(n):
-                if q != rank or not kept:
-                    _copy(stay if q == rank else x[out_at[q]:out_at[q] + sends[q] * row].view((sends[q],) + rest), rows[first[q]:first[q + 1]])
-            dist.all_to_all_single(y, x, land, out, group=group)
-            block = new.movedim(d, 0)
-            for r in range(n):
-                if r != rank or not kept:
-                    _copy(block[into[r]:into[r + 1]], stay if r == rank else y[land_at[r]:land_at[r] + receives[r] * row].view((receives[r],) + rest))
+            block, at = new.movedim(d, 0), {('x', q): out_at[q] for q in range(n)} | {('y', r): land_at[r] for r in range(n)}
+            at['x', rank] = out_at[-1]
+            for e, ((sends, _, first, _), keep) in enumerate(zip(plans, kept)):
+                for q in range(n):
+                    if sends[q] and not (q == rank and keep):
+                        _copy(x[at['x', q]:at['x', q] + sends[q] * row].view((sends[q],) + rest), rows[e * old_h + first[q]:e * old_h + first[q] + sends[q]])
+                        at['x', q] += sends[q] * row
+            dist.all_to_all_single(y, x[:out_at[-1]], land, out, group=group)
+            at['x', rank] = out_at[-1]
+            for e, ((_, receives, _, into), keep) in enumerate(zip(plans, kept)):
+                for r in range(n):
+                    if receives[r] and not (r == rank and keep):
+                        src = ('x' if r == rank else 'y', r)
+                        _copy(block[e * new_h + into[r]:e * new_h + into[r] + receives[r]], (x if r == rank else y)[at[src]:at[src] + receives[r] * row].view((receives[r],) + rest))
+                        at[src] += receives[r] * row
             if stage[2] is None:
                 counts, starts = _paged([1] * n, 4, group)
                 stage[2] = (_empty((starts[-1],), rows, group, torch.int32), counts, starts)
@@ -639,7 +651,7 @@ def _registered(t):
     return any((r := held.get(id(t))) is not None and r() is t for held in _SPLIT.values())
 
 
-def empty(mesh, name, shape, dim, dtype=None, scratch=False):
+def empty(mesh, name, shape, dim, dtype=None, scratch=False, halves=1):
     """A program's buffer declared by its whole extent: a RaggedTensor of logical `shape` split along `dim` by
     partitioned mesh dimension `name`, its local block a region lease of this rank's share (_empty), registered, so
     it is re-laid in place where the shares move between evaluations; a `scratch` one (its contents dead between
@@ -649,7 +661,7 @@ def empty(mesh, name, shape, dim, dtype=None, scratch=False):
     placements[mesh.mesh_dim_names.index(name)] = Shard(dim)
     local = distribute_tensor(torch.empty(shape, dtype=dtype, device='meta'), mesh, placements, src_data_rank=None).to_local()
     held = from_local(_empty(local.shape, torch.empty(0, dtype=local.dtype, device=mesh.device_type), mesh.get_group(name)), mesh, placements)
-    held._scratch = scratch
+    held._scratch, held._halves = scratch, halves
     return held
 
 
