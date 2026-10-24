@@ -325,7 +325,7 @@ static c10::intrusive_ptr<c10d::Work> work_of(uint64_t ticket, std::vector<at::T
 
 static ncclComm_t communicator(int64_t comm) { return (ncclComm_t)(uintptr_t)comm; }
 
-static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps);
+static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps, bool held = false);
 
 // One call of a group: its kind, its send and receive tensors (an all-to-all's none where it moves none that way; an
 // all-reduce's, reduce's or broadcast's sends alone where it is in place), its counts (a V call's segment a rank, an
@@ -538,6 +538,8 @@ static int group_argument(const std::string &name) {
 
 // Issued and not completed (split) where the result is its own operand: torch's wait_tensor (its work registry) waits
 // for it.  A result made here is a region tensor (region_empty): the library sends from and lands in leases alone (nccl.h Memory).
+// An all-reduce's or a broadcast's is a held lease, taken again by the next result of its size once the stream is done
+// with it, so a program's steady steps lease nothing.
 static void functional(const c10::OperatorHandle &op, torch::jit::Stack *stack) {
   const std::string name = op.schema().name().substr(sizeof "_c10d_functional::" - 1) +
                            (op.schema().overload_name().empty() || op.schema().overload_name() == "default" ? "" : "." + op.schema().overload_name());
@@ -554,7 +556,7 @@ static void functional(const c10::OperatorHandle &op, torch::jit::Stack *stack) 
   at::Tensor result;
   Call call;
   if (name.rfind("all_reduce", 0) == 0 || name.rfind("broadcast", 0) == 0) {
-    result = name.back() == '_' ? input : region_empty(input.sizes().vec(), input, true).copy_(input);
+    result = name.back() == '_' ? input : region_empty(input.sizes().vec(), input, true, true).copy_(input);
     call = name[0] == 'a' ? Call{ALLREDUCE, {result}, {}, {}, reduction(arguments[1].toStringRef()), 0}
                           : Call{BROADCAST, {result}, {}, {}, 0, arguments[1].toInt()};
   } else if (name.rfind("all_gather_into_tensor", 0) == 0) {
@@ -780,12 +782,23 @@ struct RegionShape {
   std::vector<int64_t> sizes, strides;
 };
 
-static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps) {
+// Held MPS leases (region_empty's `held`), by their bytes: each released once the stream's work on it had completed.
+static std::multimap<size_t, void *> held_;
+
+static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps, bool held) {
   const at::ScalarType dtype = like.scalar_type();
   const size_t bytes = std::max<size_t>(1, (size_t)c10::multiply_integers(sizes) * c10::elementSize(dtype));
   void *memory = nullptr;
-  checked(ncclMemAlloc(&memory, bytes));
   {
+    std::lock_guard<std::mutex> guard(region_tensors_lock_);
+    const auto found = held ? held_.find(bytes) : held_.end();
+    if (found != held_.end()) {
+      memory = found->second;
+      held_.erase(found);
+    }
+  }
+  if (!memory) {
+    checked(ncclMemAlloc(&memory, bytes));
     std::lock_guard<std::mutex> guard(region_tensors_lock_);
     region_tensors_[(uintptr_t)memory] = bytes;
   }
@@ -812,9 +825,16 @@ static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &lik
     delete (RegionShape *)self->manager_ctx;
     delete self;
   };
-  return at::fromDLPack(managed, [managed, memory](void *) {
+  return at::fromDLPack(managed, [managed, memory, bytes, held](void *) {
     managed->deleter(managed);
-    at::mps::getCurrentMPSStream()->addCompletedHandler(^(id<MTLCommandBuffer>) { returned(memory); });
+    at::mps::getCurrentMPSStream()->addCompletedHandler(^(id<MTLCommandBuffer>) {
+      if (!held) {
+        returned(memory);
+        return;
+      }
+      std::lock_guard<std::mutex> guard(region_tensors_lock_);
+      held_.emplace(bytes, memory);
+    });
   });
 }
 
@@ -972,7 +992,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   });
   module.def("attach", &attach);
   module.def("commit", &commit);
-  module.def("region_empty", &region_empty);
+  module.def("region_empty", [](std::vector<int64_t> sizes, const at::Tensor &like, bool mps) { return region_empty(sizes, like, mps); });
   module.def("address", &address);
   module.def("records", &records);
   module.def("metal_prelude", &metal_prelude);
