@@ -86,8 +86,8 @@ Replicate mesh dimensions, as torch's does, and compares no shape (a ragged one'
 Left as they are: the strategy costs (MeshTopoInfo, redistribute_cost), which choose among collectives, not splits.
 Under torch.compile the SDPA ring is a graph break (UnsupportedOperatorException on fake tensors).
 
-evaluated(mesh, name) is one step of the group's Balancer (allocate.Balancer) on an evaluation's own evidence, between
-evaluations, the parts the next evaluation takes; the Balancer lives with the group, in memory."""
+The parts are the backend's even split for a program's whole run; the Balancer (allocate.Balancer) is to step between
+evaluations, at the boundary of a declared plan's repeat (design/data-model.md section 9)."""
 import contextlib
 import itertools
 import math
@@ -455,21 +455,13 @@ class RaggedShard(Shard):
 def attach(mesh, **dims):
     """Partition mesh dimensions by name: attach(mesh, tp=units), the units every extent the program splits along the
     dimension is a multiple of, the same on every rank.  The backend splits them evenly over the coordinates in rank
-    order (the first units mod n one more).  The dimension's Balancer lives with its group, in memory, from here, and
-    its group is watched from here for the evaluations' own evidence (torch_mesh.evidence); nothing outlives the
-    communicator or the process."""
-    import allocate
-    from . import evidence
+    order (the first units mod n one more)."""
     for name, units in dims.items():
         n = mesh.size(mesh.mesh_dim_names.index(name)) if name in (mesh.mesh_dim_names or ()) else 0
         if not 0 < n <= units:
             raise ValueError(f'mesh: partition {name}: {units} units over a mesh dimension of {mesh.mesh_dim_names}, '
                              f'at least one a coordinate')
-        group, parts = mesh.get_group(name), [units // n + (r < units % n) for r in range(n)]
-        _BALANCING[id(group), name] = {'balancer': allocate.Balancer({name: {'parts': parts, 'low': [1] * n,
-                                                                             'high': [units - n + 1] * n}})}
-        _attach(mesh, name, parts)
-        evidence.watch(group, mesh.device_type)
+        _attach(mesh, name, [units // n + (r < units % n) for r in range(n)])
 
 
 def _attach(mesh, name, parts):
@@ -1304,50 +1296,3 @@ def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=N
     group.merge_partials(merged, packed, rows)
     out, lse = attention(merged.view(lead + (lengths[rank], width)))
     return out.to(query.dtype), lse
-
-
-_BALANCING = {}
-
-
-def _shared(held, group, words):
-    """Each rank's `words` (float64) on every rank, through the backend: each rank's segment whole pages in the region
-    (the library sends only leases and places each segment on a page: rdma/nccl.h Memory; torch's memory on a group
-    of another backend), sized at the first exchange from its words and held, grown where a later one's need more
-    (every rank's alike: SPMD), its words' count then the words, all gathered by one all_gather_into_tensor."""
-    from . import empty
-    n, need = dist.get_world_size(group), _paged([1 + len(words)], 8, group)[0][0]
-    if held.get('page', 0) < need:
-        made = empty if getattr(group, 'handle', 0) else lambda size, dtype, device: torch.empty(size, dtype=dtype, device=device)
-        held['page'], held['pages'] = need, (made(need, dtype=torch.float64, device='cpu'), made(n * need, dtype=torch.float64, device='cpu'))
-    mine, every = held['pages']
-    mine[:1 + len(words)] = torch.tensor([float(len(words))] + [float(w) for w in words], dtype=torch.float64)
-    dist.all_gather_into_tensor(every, mine, group=group)
-    return [row[1:1 + int(row[0])] for row in every.view(n, held['page']).tolist()]
-
-
-def evaluated(mesh, name='tp'):
-    """The parts the evidence of the evaluation just ended gives, for the next evaluation on this communicator (design/
-    data-model.md section 9: the shares set between evaluations, a new share a new compiled plan): called once an
-    evaluation has ended, after the program's own synchronize, never inside one; the Balancer is the group's, in
-    memory, and ends with it.  Each rank's evidence is its work between its collectives on the dimension's group since
-    attach (torch_mesh.evidence), every stretch an invocation; one exchange gives every rank every rank's median, and
-    one step of the Balancer (the same on every rank: R4) the parts."""
-    from . import evidence
-    o, group = operand(mesh, name), mesh.get_group(name)
-    held, n = _BALANCING[id(group), name], len(o.capacity)
-    evidence.step(group)
-    stretches = sorted(t for step in evidence.work(group) for t in step)
-    medians = _shared(held, group, [stretches[len(stretches) // 2]] if stretches else [])
-    held['work'] = [m[0] if m else None for m in medians]
-    balancer = held['balancer']
-    balancer.decisions[name]['parts'] = o.parts.tolist()
-    return balancer.observe({'evaluation': {'scales': {name: [1.0] * n}, 'times': [m or None for m in medians]}})[name]
-
-
-def balancing(mesh, name='tp'):
-    """What evaluated last saw of partitioned dimension `name`: {'parts', 'stands', 'work': each rank's median
-    stretch (seconds) in the evaluation}, None before the first."""
-    held = _BALANCING.get((id(mesh.get_group(name)), name))
-    if not held or 'work' not in held:
-        return None
-    return {'parts': held['balancer'].parts[name], 'stands': held['balancer'].stands(name), 'work': held['work']}

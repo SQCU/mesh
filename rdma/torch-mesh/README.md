@@ -191,16 +191,11 @@ parallelize_module(block, mesh, {"wq": partition.ColwiseParallel(), "wo": partit
 
 ### Parts from the run's own evidence
 
-No program knows the parts. The dimension's group is watched from `attach`: every collective on it is marked as it is
-issued and once its wait has run, on MPS by timing events on torch's stream (in `_stream.mm`, functional collectives
-included), on CPU by the host clock (`torch_mesh/evidence.py`). A rank's work is the time between its collectives,
-never inside them, so a slow peer never reads as a slow rank. Between evaluations, never inside one,
-`partition.evaluated(mesh, "tp")` gives every rank every rank's median stretch and runs one step of `rdma/allocate.py`
-`Balancer`, the same on every rank, so all get the same parts for the next evaluation: DFPA, the ranks' measured
-points, the grains given to whoever finishes earliest with them, and a stop once the measurements promise no gain past
-their own resolution. The Balancer lives with the group, in memory, and ends with it. `partition.follow(*ts)` moves
-sharded tensors onto parts attached again, one group a move.
-- `partition.balancing(mesh, "tp")` returns what the last evaluation saw.
+No program knows the parts. The backend splits the units evenly for a program's whole run. The Balancer
+(`rdma/allocate.py`, DFPA: the ranks' measured points, the grains given to whoever finishes earliest with them, a stop
+once the measurements promise no gain past their own resolution) is to step between evaluations, at the boundary of a
+declared plan's repeat, from each rank's work between its collectives; that step is not built yet.
+`partition.follow(*ts)` moves sharded tensors onto parts attached again, one group a move.
 - A placement has two throughputs, the aggregate and each stream's, so the calls trace a frontier rather than a best:
   `allocate.pareto(rows, coordinate=("ctx_in", "ctx_out"))` keeps, per workload coordinate, the call records (each a
   call's own `aggregate_tok_s` and `per_sequence_tok_s`, its `program`, `backend` and batch `bs`) that no other beats in
