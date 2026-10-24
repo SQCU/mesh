@@ -62,10 +62,10 @@ def compiler(gm, example_inputs):
                  torch.ops.torch_mesh.allgatherv.default: 3}
 
     def rows(x, w):
-        """Whether x @ w is linear's: fp16, x [R <= 8, K] contiguous, w the transposed view of a [N, K] whose rows lie
-        apart by K or more."""
+        """Whether x @ w is linear's: on MPS (its one implementation), fp16, x [R <= 8, K] contiguous, w the transposed
+        view of a [N, K] whose rows lie apart by K or more."""
         x, w = x.meta.get('val'), w.meta.get('val')
-        return (x is not None and w is not None and x.dtype == w.dtype == torch.half and x.dim() == w.dim() == 2
+        return (x is not None and w is not None and x.device.type == 'mps' and x.dtype == w.dtype == torch.half and x.dim() == w.dim() == 2
                 and x.shape[0] <= 8 and x.is_contiguous() and w.stride(0) == 1 and w.stride(1) >= w.shape[0])
 
     def told(node, repeats):
