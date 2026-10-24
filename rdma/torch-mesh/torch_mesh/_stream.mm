@@ -678,6 +678,37 @@ static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> 
   });
 }
 
+// torch_mesh::linear (linear.metal): y[R, N] = x[R, K] w[N, K]^T (+ bias[N]) of fp16 MPS tensors, one dispatch of
+// linear_rows encoded in torch's open compute encoder (encode), its output a new tensor of torch's.  Its pipelines, one a
+// load width, are compiled at the first call from the source backend.py hands over as it loads (linear_source).
+static std::string linear_source_;
+static std::array<int64_t, 3> linear_pipelines_ = {-1, -1, -1};
+constexpr int64_t LINEAR_COLUMNS = 2, LINEAR_SIMDGROUPS = 2;
+
+static void linear_source(const std::string &source) { linear_source_ = source; }
+
+static at::Tensor linear(const at::Tensor &x, const at::Tensor &w, const std::optional<at::Tensor> &bias) {
+  TORCH_CHECK(x.scalar_type() == at::kHalf && w.scalar_type() == at::kHalf && x.dim() == 2 && w.dim() == 2 && x.size(1) == w.size(1),
+              "torch_mesh::linear takes fp16 x [R, K] and w [N, K], not ", x.sizes(), " ", x.scalar_type(), " and ", w.sizes(), " ",
+              w.scalar_type());
+  if (linear_pipelines_[0] < 0)
+    for (int v : {1, 2, 4}) {
+      const std::string name = "linear_rows_" + std::to_string(v) + "_" + std::to_string(LINEAR_COLUMNS) + "_" + std::to_string(LINEAR_SIMDGROUPS);
+      const std::string args = std::to_string(v) + ", " + std::to_string(LINEAR_COLUMNS) + ", " + std::to_string(LINEAR_SIMDGROUPS);
+      linear_pipelines_[v == 4 ? 2 : v - 1] = pipeline(linear_source_ + "\ntemplate [[host_name(\"" + name + "\")]] [[kernel]] decltype(linear_rows<" +
+                                                       args + ">) linear_rows<" + args + ">;\n", name);
+    }
+  const at::Tensor xc = x.contiguous(), wc = w.contiguous();
+  const int64_t R = x.size(0), K = x.size(1), N = w.size(0);
+  at::Tensor y = at::empty({R, N}, x.options());
+  encode(linear_pipelines_[K % 4 == 0 ? 2 : K % 2 == 0 ? 1 : 0], {xc, wc, y, bias ? std::optional<at::Tensor>(bias->contiguous()) : y},
+         {R, K, N, bias ? 1 : 0}, 4, (N + LINEAR_COLUMNS - 1) / LINEAR_COLUMNS, 1, LINEAR_SIMDGROUPS * 32, false);
+  return y;
+}
+
+TORCH_LIBRARY_FRAGMENT(torch_mesh, m) { m.def("linear(Tensor x, Tensor w, Tensor? bias=None) -> Tensor"); }
+TORCH_LIBRARY_IMPL(torch_mesh, MPS, m) { m.impl("linear", &linear); }
+
 // The same dispatch in a command buffer of its own on torch's queue, committed and waited `repeats` times: each one's
 // GPU time (GPUEndTime - GPUStartTime), the measure the engine's kernel harness reports.  Torch's stream is synchronized
 // by the caller first.
@@ -1017,6 +1048,7 @@ static void fused_published() {
 // MeshWork to wait on, its outputs `outputs`), else None (complete).
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("pipeline", &pipeline);
+  module.def("linear_source", &linear_source);
   module.def("device_facts", &device_facts);
   module.def("pipeline_facts", &pipeline_facts);
   module.attr("polls") = (int64_t)NCCL_MESH_POLLS;

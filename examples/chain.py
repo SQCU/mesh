@@ -17,7 +17,8 @@ def weights(mesh, folds, width):
     else:
         folds = [torch_mesh.empty(width, width, dtype=torch.half).copy_(torch.from_numpy(w)) for w in folds]
     a, b = (partition.distribute_tensor(w, mesh, [Shard(0)], src_data_rank=0) for w in folds)
-    return a.T, b
+    bt = torch_mesh.empty(width, b.to_local().shape[0], dtype=torch.half).copy_(b.to_local().T)
+    return a.T, partition.from_local(bt.T, mesh, [Shard(0)])
 
 
 # docs/writing-a-service.md#the-step

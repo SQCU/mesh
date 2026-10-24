@@ -21,6 +21,7 @@ read.
 The silent-link bound is the library's (nccl.h)."""
 import collections
 import math
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -388,6 +389,14 @@ def all_reduce(input: torch.Tensor, reduce_op: str, group_name: str) -> torch.Te
 @all_reduce.register_fake
 def _(input, reduce_op, group_name):
     return torch.empty_like(input)
+
+
+_stream.linear_source((Path(__file__).parent / 'linear.metal').read_text())
+
+
+@torch.library.register_fake('torch_mesh::linear')
+def _(x, w, bias=None):
+    return x.new_empty(x.shape[0], w.shape[0])
 
 
 def create(opts, options):
