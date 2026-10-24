@@ -193,12 +193,14 @@ run.
 
 **The recorded tick.** Every tick after the first L - 1 runs every layer, so it is one function of no arguments
 (`Tick.stepper`): it reads its input at a step counter held on the GPU, runs each layer and the gather, writes the top
-layer's h into the output at the counter less L - 1 (rank 0), and advances the counter. `torch_mesh.record` compiles it
-once into one graph, as the chain's step is, and the run replays it a tick; the first L - 1 ticks, while the layers
-above have not begun, run as they are (`Tick.starting`). The service replays it once before the run to compile it on
-every rank, then zeroes the state and the counter.
+layer's h into the output at the counter less L - 1 (rank 0), and advances the counter. `torch_mesh.record(step, k)`
+records it as the chain's step is, k ticks unrolled in one graph and the fewer that k does not divide in a graph of
+their own, and the run issues every later tick through it (`Recording.issue`); the first L - 1 ticks, while the
+layers above have not begun, run as they are (`Tick.starting`). The service replays it before the run (k ticks and
+the rest, so each graph compiles on every rank), then zeroes the state and the counter.
 
-**Configuration.** `input`, `weights`, `output`, `input_width`, `width` (H) and `layers`. The weights directory holds
+**Configuration.** `input`, `weights`, `output`, `input_width`, `width` (H), `layers` and `steps_per_replay`, the k
+ticks one replay runs (the chain's name for its k). The weights directory holds
 `w_ih_<l>` [4H, its input], `w_hh_<l>` [4H, H] and `b_<l>` [4H] in torch's gate order, one .npy file an array.
 `lstm.inputs(configuration, steps, rows)` makes sample ones with torch's initialization. Rank 0 reads them
 memory-mapped into region tensors before the communicator exists, so no peer's wait spans that host work; every other
