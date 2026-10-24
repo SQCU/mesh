@@ -123,6 +123,7 @@ class _Operand:
     def __init__(self, key, parts):
         self.key, self.capacity, self.units = key, tuple(int(p) for p in parts), sum(int(p) for p in parts)
         self.parts, self.cache = torch.tensor(self.capacity, dtype=torch.int64), {}
+        self.high = self.most = self.units - len(self.capacity) + 1  # this rank's most units, and any rank's (_reserve)
 
     def cached(self, what, build):
         if what not in self.cache:
@@ -427,12 +428,17 @@ def _(x, w, out, dim, sizes, group_name, adds, repeats):
     return None
 
 
+def _page(group):
+    """Bytes a page of `group`'s region: the library places each segment of a V collective on a page of its own."""
+    return group.page if getattr(group, 'handle', 0) else resource.getpagesize()
+
+
 def _paged(counts, size, group):
     """Segments of `counts` elements of `size` bytes laid end to end, each padded to whole pages of `group`'s region,
     since the library places each segment of a V collective on a page of its own (rdma/nccl.h, Memory; the group's
     page, ncclMeshCommPage, on the mesh backend, the OS's on another): the padded counts and the segments' starts (the
     last the elements in all)."""
-    page = max(1, (group.page if getattr(group, 'handle', 0) else resource.getpagesize()) // size)
+    page = max(1, _page(group) // size)
     padded = [-(-c // page) * page for c in counts]
     return padded, list(itertools.accumulate(padded, initial=0))
 
@@ -622,8 +628,10 @@ def attach(mesh, **dims):
 
 def _attach(mesh, name, parts):
     """`parts` attached to mesh dimension `name` as a new operand: tensors split by the old one keep it (follow)."""
-    key = f'{name}#{next(_KEYS)}'
+    key, old = f'{name}#{next(_KEYS)}', _OPERANDS.get(_NAMED.get((mesh, name)))
     _OPERANDS[key] = _Operand(key, parts)
+    if old and old.units == _OPERANDS[key].units:
+        _OPERANDS[key].high, _OPERANDS[key].most = old.high, old.most
     _NAMED[mesh, name] = key
 
 
@@ -966,7 +974,7 @@ def follow(*tensors):
                     block[into[r]:into[r + 1]].copy_(y[land_at[r]:land_at[r] + receives[r] * row].view((receives[r],) + rest))
             h[0][i], h[1] = RaggedShard(h[0][i].dim, key), new
     contiguous = lambda shape: torch.empty(shape, device='meta').stride()
-    return [from_local(local, mesh, placements, shape=shape, stride=contiguous(shape)) for placements, local, shape, _ in held]
+    return [_from_local(local, mesh, placements, shape=shape, stride=contiguous(shape)) for placements, local, shape, _ in held]
 
 
 # The tensors partition split along each partitioned mesh dimension, re-laid in place where the balancer moves its
@@ -976,10 +984,12 @@ _SPLIT = {}
 
 
 def _register(t):
-    """`t` (a RaggedTensor) registered with each partitioned mesh dimension it is split along; `t` returned."""
+    """`t` (a RaggedTensor) registered with each partitioned mesh dimension it is split along, but one reserved; `t` returned."""
     names = t.device_mesh.mesh_dim_names or ()
     for i, p in enumerate(t.placements):
         if isinstance(p, RaggedShard) and i < len(names):
+            if 'balancer' in (_holding(t.device_mesh.get_group(i), names[i]) or ()):
+                raise RuntimeError(f'mesh: a tensor split along {names[i]} after its reserve: declare it before the first evaluation')
             held = _SPLIT.setdefault((t.device_mesh, names[i]), {})
             held[id(t)] = weakref.ref(t, lambda _, held=held, k=id(t): held.pop(k, None))
     return t
@@ -989,26 +999,220 @@ def _registered(t):
     return any((r := held.get(id(t))) is not None and r() is t for held in _SPLIT.values())
 
 
-def empty(mesh, name, shape, dim, dtype=None):
+def empty(mesh, name, shape, dim, dtype=None, scratch=False):
     """A program's buffer declared by its whole extent: a RaggedTensor of logical `shape` split along `dim` by
     partitioned mesh dimension `name`, its local block a region lease of this rank's share (_empty), registered, so
-    it is re-laid in place where the shares move between evaluations.  The program takes its local view (to_local, no
-    copy) inside its step."""
+    it is re-laid in place where the shares move between evaluations; a `scratch` one (its contents dead between
+    evaluations) only re-viewed at the new share, nothing copied or sent.  The program takes its local view (to_local,
+    no copy) inside its step."""
+    _declarable(mesh, name)
     placements = [Replicate()] * mesh.ndim
     placements[mesh.mesh_dim_names.index(name)] = Shard(dim)
     local = distribute_tensor(torch.empty(shape, dtype=dtype, device='meta'), mesh, placements, src_data_rank=None).to_local()
-    held = _empty(local.shape, torch.empty(0, dtype=local.dtype, device=mesh.device_type), mesh.get_group(name))
-    return from_local(held, mesh, placements)
+    held = from_local(_empty(local.shape, torch.empty(0, dtype=local.dtype, device=mesh.device_type), mesh.get_group(name)), mesh, placements)
+    held._scratch = scratch
+    return held
+
+
+def _declarable(mesh, name):
+    """What `name`'s communicator holds (_holding), its declarations among it: one on another backend's group, which
+    holds nothing, or after the reserve is refused where it is made."""
+    held = _holding(mesh.get_group(name), name)
+    if held is None or 'balancer' in held:
+        raise RuntimeError(f'mesh: a declaration on {name} on another backend than mesh or after its first evaluation')
+    return held
+
+
+class exchange:
+    """An all_to_all_single declared once: `src`'s blocks into `dst`'s (one logical shape split along two dimensions of
+    one partitioned mesh dimension, dst's outermost in src's block, else a declaration error), `back`'s pair the
+    reverse.  dst's block receives every rank's part source after source (the declared `pieces` buffers' per-source
+    views); its calls, counts and views are compiled here, at the reserve and at every move, so a step only issues.
+    Its communicator holds it (_declarable), so it keeps nothing alive past it."""
+
+    def __init__(self, src, dst, back=None, pieces=()):
+        (self.i, p), = [(i, p) for i, p in enumerate(src.placements) if isinstance(p, RaggedShard)]
+        self.e, self.d, self.mesh = p.dim % src.ndim, dst.placements[self.i].dim % src.ndim, src.device_mesh
+        if self.e < self.d or math.prod(src.shape[:self.d]) != 1 or src.shape != dst.shape:
+            raise ValueError(f"mesh: an exchange needs dst's split dimension {self.d} outermost in src's block")
+        _declarable(self.mesh, self.mesh.mesh_dim_names[self.i]).setdefault('declared', []).append(self)
+        self.src, self.dst, self.back_pair, self.declared, self.spaces = src, dst, back, pieces, []
+        self.compile()
+
+    def compile(self):
+        o, rank = _OPERANDS[self.src.placements[self.i].key], self.mesh.get_coordinate()[self.i]
+        self.s, self.t = ([_units(o, self.src.shape[c]) * q for q in o.parts.tolist()] for c in (self.e, self.d))
+        rest = self.src.numel() // (self.src.shape[self.e] * self.src.shape[self.d])
+        counts, flat, group = ([self.s[r] * self.t[rank] * rest for r in range(len(self.s))], [self.s[rank] * q * rest for q in self.t]
+                               ), lambda t: t.to_local().view(-1), self.mesh.get_group(self.i)
+        self.issues = [(flat(self.dst), flat(self.src), *counts)] + ([(flat(self.back_pair[1]), flat(self.back_pair[0]), *counts[::-1])]
+                                                                      if self.back_pair else [])
+        self.group, self.views = group, {id(t): self._pieces(t) for t in self.declared}
+
+    def calls(self):
+        """Its groups for partition.plan, from the parts attached now: the alltoall, and the back's."""
+        from .backend import ALLTOALL, Call
+        return [[Call(ALLTOALL, sum(send), self.src.dtype, counts=list(send) + list(recv))] for _, _, recv, send in self.issues]
+
+    def __call__(self):
+        dist.all_to_all_single(*self.issues[0], group=self.group)
+
+    def back(self):
+        dist.all_to_all_single(*self.issues[1], group=self.group)
+
+    def pieces(self, t):
+        """A declared buffer's per-source views (placed as dst, of src's extent along src's split), in arrival order."""
+        return self.views[id(t)]
+
+    def _pieces(self, t):
+        local = t.to_local()
+        shape = lambda s: local.shape[:self.e] + (s,) + local.shape[self.e + 1:]
+        return [p.view(shape(s)) for p, s in zip(local.reshape(-1).split([math.prod(shape(s)) for s in self.s]), self.s)]
+
+
+class attention:
+    """The ring attention one call site of a program runs on `name` (a model's layers declare one each, so no two
+    calls share an output), declared by its query's logical shape [batch, sequence, heads, dim], causal or not, and its
+    halves (2: head-tail, causal): its query, key and value (.q, .k, .v, which the program writes) and its output are
+    scratch buffers of that shape split along the sequence; its partials its own and its scratch the group's (dead past
+    a call), all the reserve's at the most a share up to the bounds needs (spaces); its ring planned (_ring) at the
+    reserve and every move, so a call checks, leases, computes and decides nothing on the host (_ringed issues it).
+    attend() is (output, each row's logsumexp), [batch, heads, positions, dim] and [batch, heads, positions]."""
+
+    def __init__(self, mesh, name, shape, causal=True, halves=1, dtype=None):
+        (b, S, h, d), o, n = shape, operand(mesh, name), mesh.size(mesh.mesh_dim_names.index(name))
+        if halves not in (1, 2) or S % (halves * o.units) or halves == 2 and not causal:
+            raise ValueError(f'mesh: attention over {S} positions in {halves} halves of {o.units} units, causal {causal}')
+        self.q, self.k, self.v, self.out = (empty(mesh, name, shape, 1, dtype, scratch=True) for _ in range(4))
+        self.mesh, self.name, self.causal, self.halves, self.group = mesh, name, causal, halves, mesh.get_group(name)
+        lead, unit, width, dtype = b * h, S // o.units, 2 + d, self.q.dtype
+        rows = unit * (o.units - n + 1) // halves
+        self.spaces = [(what, (self if what == 'ring partials' else what, t), t, size) for what, t, size in (
+            ('scores', torch.float32, lambda p: SCORES), ('mask', torch.bool, lambda p: min(SCORES // lead, rows * unit * p)),
+            ('top', torch.float32, lambda p: lead * rows), ('total', torch.float32, lambda p: lead * rows),
+            ('out', dtype, lambda p: lead * rows * d), ('ring queries', dtype, lambda p: S * lead * d),
+            ('ring merged', torch.float32, lambda p: lead * unit * p * width), ('ring partials', torch.float32, lambda p: S * lead * width))]
+        _declarable(mesh, name).setdefault('declared', []).append(self)
+
+    def compile(self):
+        """At the reserve and every move: the partials zeroed (a row no block writes stays 0), the ring planned.  A
+        limit: at a move the zeroing is ordered after the last call's merge only by the move's own crossings, so on a
+        dimension with no tensor but scratch ones (none crossing) it may race that merge's last sends."""
+        self.leases['ring partials'].zero_()
+        q, k, v = (t.to_local().transpose(1, 2) for t in (self.q, self.k, self.v))
+        self.ring = _ring(self.group, operand(self.mesh, self.name).key, q, k, v, self.causal, None, self.halves,
+                          lambda what, shape, dtype=None, capacity=0: self.leases[what][:math.prod(shape)].view(shape), self.out.to_local())
+
+    def calls(self):
+        """Its groups for partition.plan, from the parts attached now (ring_calls): the query gather and the merge."""
+        return ring_calls(self.mesh, self.name, tuple(self.q.to_local().transpose(1, 2).shape), self.q.dtype, self.q.shape[-1])
+
+    def __call__(self):
+        return _ringed(*self.ring)
+
+
+class unshard:
+    """The context_parallel_unshard one call site of a program runs on `name`, declared by its buffer's logical shape,
+    sequence dim and halves: the program writes its block into .x (a scratch buffer of that shape split along `dim`);
+    unshard() is the whole sequence in its own leases, the reserve's (gathered page-padded, and whole), planned
+    (_unshard) at the reserve and every move."""
+
+    def __init__(self, mesh, name, shape, dim, halves=1, dtype=None):
+        o, n, page = operand(mesh, name), mesh.size(mesh.mesh_dim_names.index(name)), _page(mesh.get_group(name))
+        if halves not in (1, 2) or shape[dim] % (halves * o.units):
+            raise ValueError(f'mesh: an unshard of {shape[dim]} positions in {halves} halves of {o.units} units')
+        self.x = empty(mesh, name, shape, dim, dtype, scratch=True)
+        self.mesh, self.name, self.dim, self.halves, self.group = mesh, name, dim, halves, mesh.get_group(name)
+        whole, e = math.prod(shape), self.x.element_size()
+        self.spaces = [(what, (self, what), self.x.dtype, size) for what, size in (
+            ('gathered', lambda p: whole + n * page // e), ('whole', lambda p: whole))]
+        _declarable(mesh, name).setdefault('declared', []).append(self)
+
+    def compile(self):
+        self.plan = _unshard(self.x.to_local(), self.dim, operand(self.mesh, self.name), self.group, self.halves,
+                             self.leases['gathered'], self.leases['whole'].view(self.x.shape))
+
+    def calls(self):
+        """Its group for partition.plan, from the parts attached now (unshard_calls): the gather."""
+        return unshard_calls(self.mesh, self.name, [tuple(self.x.to_local().shape)], [self.dim], self.x.dtype)
+
+    def __call__(self):
+        return _unsharded(*self.plan)
 
 
 def _relay(mesh, name):
-    """Every live tensor split along mesh dimension `name` moved onto the parts attached now, in place (its local
-    block and spec replaced, the object kept, so a module's parameters move under it): one follow, one coalesced
-    group."""
+    """Every live tensor split along mesh dimension `name` onto the parts attached now, in place (its local block and
+    spec replaced, the object kept, so a module's parameters move under it): a scratch one re-viewed in its capacity,
+    nothing crossing; the others by one follow.  Then every declared collective compiled again."""
     held = [t for r in list(_SPLIT.get((mesh, name), {}).values()) if (t := r()) is not None]
-    if held:
-        for t, moved in zip(held, follow(*held)):
+    moving = [t for t in held if not getattr(t, '_scratch', False)]
+    if moving:
+        for t, moved in zip(moving, follow(*moving)):
             t._local_tensor, t._spec = moved._local_tensor, moved._spec
+    o, i = operand(mesh, name), mesh.mesh_dim_names.index(name)
+    for t in (t for t in held if getattr(t, '_scratch', False)):
+        p, local = t.placements[i], t._local_tensor
+        d = p.dim % local.ndim
+        shape = local.shape[:d] + (_units(o, t.shape[p.dim]) * int(o.parts[mesh.get_coordinate()[i]]),) + local.shape[d + 1:]
+        t._local_tensor = t._capacity[:math.prod(shape)].view(shape)
+        t._spec = DTensorSpec(mesh, tuple(RaggedShard(p.dim, o.key) if j == i else q for j, q in enumerate(t.placements)),
+                              tensor_meta=t._spec.tensor_meta)
+    for x in _holding(mesh.get_group(name), name).get('declared', []):
+        x.compile()
+
+
+@torch.no_grad()
+def _reserve(mesh, name, held, group):
+    """The contiguity solver, once, before the dimension's first collective, from the declarations alone: each scratch
+    tensor split along `name` gets a capacity lease of this rank's `high` units (re-viewed in it at every share), and
+    the declared collectives their leases for every share up to the bounds (each one's spaces, a key two share the
+    most either asks), so no step takes one.  `high` is bisected from the share held to units - n + 1: the most at
+    which the region grants every tensor's block, those leases and a move's (two staging leases and one more of the
+    largest block) with headroom.  A rank the region refuses fails every rank after the one exchange, the
+    declaration's (each rank's high, which the Balancer takes as its bounds).  Then each declared collective compiled."""
+    o, rank, n = operand(mesh, name), mesh.get_local_rank(name), len(operand(mesh, name).capacity)
+    ts = [t for r in list(_SPLIT.get((mesh, name), {}).values()) if (t := r()) is not None]
+    if any(getattr(t, '_reserved', name) != name for t in ts):
+        raise NotImplementedError(f'mesh: a tensor split along two partitioned mesh dimensions, each with evaluations')
+    dims = [t.placements[mesh.mesh_dim_names.index(name)].dim % t.ndim for t in ts]
+    per = [_units(o, t.shape[d]) * (t.to_local().numel() // max(t.to_local().shape[d], 1)) for t, d in zip(ts, dims)]
+    page, declared, spaces = _page(group), held.get('declared', []), {}
+    for _, key, dtype, size in (row for x in declared for row in x.spaces):
+        spaces[key] = (dtype, lambda p, f=spaces.get(key, (dtype, lambda p: 0))[1], size=size: max(f(p), size(p)))
+    wide = max([e * t.element_size() for t, e in zip(ts, per)], default=0)
+    leases = lambda p: [_empty((max(p * e, 1),), t.to_local(), group) for t, e in zip(ts, per)] + [
+        _empty((max(size(p), 1),), ts[0].to_local(), group, dtype) for dtype, size in spaces.values()]
+
+    def fits(p):
+        try:
+            return bool(leases(p) + [_empty((p * wide + n * page,), ts[0].to_local(), group, torch.uint8) for _ in range(2)] +
+                        [_empty((max([t.to_local().nbytes for t in ts]),), ts[0].to_local(), group, torch.uint8)])
+        except RuntimeError:
+            return False
+        finally:
+            torch.mps.synchronize() if mesh.device_type == 'mps' else None
+    lo, hi = (int(o.parts[rank]) if ts else o.units - n + 1), o.units - n + 1
+    refused, caps = bool(ts) and not fits(lo), []
+    while lo < hi and not refused:
+        mid = (lo + hi + 1) // 2
+        lo, hi = (mid, hi) if fits(mid) else (lo, mid - 1)
+    try:  # the leases kept, taken before the exchange so a refusal of them is every rank's too
+        caps = leases(lo) if ts and not refused else []
+    except RuntimeError:
+        refused = True
+    words = _shared(held, group, [float(lo), float(refused)])
+    if any(w[1] for w in words):  # every rank raises together, none left waiting in an exchange
+        raise RuntimeError(f'mesh: the region refuses a share with headroom on ranks {[r for r, w in enumerate(words) if w[1]]}')
+    o.high, o.most = lo, max(int(w[0]) for w in words)
+    for t, cap in zip(ts, caps):
+        t._reserved = name
+        if getattr(t, '_scratch', False):
+            t._capacity, t._local_tensor = cap, cap[:t.to_local().numel()].view(t.to_local().shape)
+    held.update(zip(spaces, caps[len(ts):]))
+    for x in declared:
+        x.leases = {what: held[key] for what, key, _, _ in x.spaces}
+        x.compile()
+    return [int(w[0]) for w in words]
 
 
 def calls(tensor):
@@ -1023,8 +1227,11 @@ def plan(mesh, name, groups):
     """The program's collectives on mesh dimension `name`'s group declared once, in their order (torch_mesh.plan):
     `groups` from the ops' own (calls, gathered, scattered), as a step issues them, or a function of no arguments
     giving them from the parts attached now, which is called again where the balancer moves the parts (a list
-    declared is dropped there: its counts are the old parts')."""
+    declared is dropped there: its counts are the old parts'), or the declared collectives (exchange, attention,
+    unshard) a step issues, in its order, whose groups (calls) are compiled again there too."""
     from . import plan as declare
+    if not callable(groups) and groups and all(hasattr(x, 'calls') for x in groups):
+        groups = lambda declared=tuple(groups): [g for x in declared for g in x.calls()]
     _PLANS[mesh, name] = groups
     return declare(mesh.get_group(name), groups() if callable(groups) else groups)
 
@@ -1044,7 +1251,6 @@ def _replan(mesh, name):
 # sets the shares ... A new share is then a new compiled plan ... Within an evaluation, nothing about the shares is
 # chosen"; the operator, 2026-10-23: "it is the collective's job to use every rank to the maximum extent possible and
 # measure the residual in completion time between ranks to allow for cross-function-evaluation rebalancings").
-_BALANCING = {}
 
 
 def evaluations(mesh, name, count):
@@ -1054,14 +1260,15 @@ def evaluations(mesh, name, count):
     for the group's life, in memory) steps on each rank's work between its collectives in the evaluations the GPU has
     passed (torch_mesh.evidence, watched from here and read without a wait), every rank's exchanged once on the host
     path (_shared); where it moves the parts, every tensor partition split along `name` is re-laid in place
-    (_relay) and the declared plan compiled again (_replan)."""
+    (_relay) and the declared plan compiled again (_replan).  The communicator holds the Balancer and the declarations
+    (_holding), so they are gone with it."""
     import allocate
     from . import evidence
     group, o = mesh.get_group(name), operand(mesh, name)
-    held = _BALANCING.setdefault((mesh, name), {})
-    if 'balancer' not in held:
-        n = len(o.capacity)
-        held.update(balancer=allocate.Balancer({name: {'parts': o.parts.tolist(), 'low': [1] * n, 'high': [o.units - n + 1] * n}}),
+    held = _holding(group, name) or _declarable(mesh, name)
+    if 'balancer' not in held:  # the reserve, from the declarations, before the first collective
+        n, high = len(o.capacity), _reserve(mesh, name, held, group)
+        held.update(balancer=allocate.Balancer({name: {'parts': o.parts.tolist(), 'low': [1] * n, 'high': high}}),
                     closed=0, read=0, skip=1, words=None)
         evidence.watch(group, mesh.device_type)
     for k in range(count):
@@ -1088,7 +1295,7 @@ def _balance(mesh, name, held, group):
     of parts, its warm-up, which holds the re-lay), this rank's work in each (the sum of its stretches) exchanged with
     every rank's and held, and, once every rank has WINDOW at these parts, one step of the Balancer on all of them as
     its invocations (so its median and standard error, and the band it stands within, see their real spread); a move
-    attaches its parts, re-lays and replans."""
+    attaches its parts, re-lays and replans, and drops the words carried (_shared), which ran on the old parts."""
     from . import evidence
     o = operand(mesh, name)
     evidence.step(group)
@@ -1097,7 +1304,8 @@ def _balance(mesh, name, held, group):
     held['read'] += len(steps)
     drop = min(held['skip'], len(steps))
     held['skip'] -= drop
-    words = _shared(held, group, [sum(s) for s in steps[drop:]])
+    mine = held.get('carry', []) + [sum(s) for s in steps[drop:]]
+    held['carry'], words = mine[SHARED:], _shared(held, group, mine[:SHARED])
     held['words'] = words = [a + b for a, b in zip(held['words'] or [[]] * len(words), words)]
     if min(map(len, words)) < WINDOW:
         return
@@ -1106,27 +1314,30 @@ def _balance(mesh, name, held, group):
     parts = [int(p) for p in balancer.observe({'evaluation': {'scales': {name: [1.0] * len(words)}, 'times': words}})[name]]
     if parts == o.parts.tolist():
         return
-    held['skip'] = held['closed'] - held['read'] + 1
+    held['skip'], held['carry'] = held['closed'] - held['read'] + 1, []
     _attach(mesh, name, parts)
     _relay(mesh, name)
     _replan(mesh, name)
 
 
+SHARED = 8  # the most words a rank exchanges at one boundary (_shared): _balance carries any more to the next
+
+
 def _shared(held, group, words):
-    """Each rank's `words` (float64) on every rank, through the backend on the host path: each rank's segment whole
-    pages of a CPU region lease (the library sends only leases and places each segment on a page: rdma/nccl.h Memory;
-    torch's memory on a group of another backend), sized at the first exchange from its words and held, grown where a
-    later one's need more (every rank's alike), its words' count then the words, all gathered by one
-    all_gather_into_tensor; a host-path call, complete where it returns, with nothing of torch's stream waited for."""
+    """Each rank's `words` (float64, at most SHARED) on every rank, through the backend on the host path: each rank's
+    segment whole pages of a CPU region lease (the library sends only leases and places each segment on a page:
+    rdma/nccl.h Memory; torch's memory on a group of another backend) of SHARED words, made at the first exchange, the
+    reserve's (the declaration's), its words' count then the words, all gathered by one all_gather_into_tensor; a
+    host-path call, complete where it returns, with nothing of torch's stream waited for."""
     from . import empty as lease
-    n, need = dist.get_world_size(group), _paged([1 + len(words)], 8, group)[0][0]
-    if held.get('page', 0) < need:
+    n, need = dist.get_world_size(group), _paged([1 + SHARED], 8, group)[0][0]
+    if 'pages' not in held:
         made = lease if getattr(group, 'handle', 0) else lambda size, dtype, device: torch.empty(size, dtype=dtype, device=device)
-        held['page'], held['pages'] = need, (made(need, dtype=torch.float64, device='cpu'), made(n * need, dtype=torch.float64, device='cpu'))
+        held['pages'] = made(need, dtype=torch.float64, device='cpu'), made(n * need, dtype=torch.float64, device='cpu')
     mine, every = held['pages']
     mine[:1 + len(words)] = torch.tensor([float(len(words))] + [float(w) for w in words], dtype=torch.float64)
     dist.all_gather_into_tensor(every, mine, group=group)
-    return [row[1:1 + int(row[0])] for row in every.view(n, held['page']).tolist()]
+    return [row[1:1 + int(row[0])] for row in every.view(n, need).tolist()]
 
 
 def split(mesh, name, N):
@@ -1333,7 +1544,15 @@ def distribute_tensor(tensor, device_mesh, placements, *, src_data_rank=0):
 
 def from_local(local_tensor, device_mesh, placements, *, run_check=False, shape=None, stride=None, grad_placements=None):
     """torch's DTensor.from_local, a Shard on an attached mesh dimension its RaggedShard; without shape= and stride=
-    the local tensor is a capacity block (global = local P / c_r)."""
+    the local tensor is a capacity block (global = local P / c_r).  Registered (_register): a program's buffer or
+    parameter, made at setup."""
+    return _register(_from_local(local_tensor, device_mesh, placements, run_check=run_check, shape=shape, stride=stride,
+                                 grad_placements=grad_placements))
+
+
+def _from_local(local_tensor, device_mesh, placements, *, run_check=False, shape=None, stride=None, grad_placements=None):
+    """from_local unregistered: the inputs torch's parallel styles make each step (_prepare, SequenceParallel's),
+    transient, which no move re-lays."""
     placements = _placements(device_mesh, placements, local_tensor.ndim)
     if not _ragged(placements):
         return DTensor.from_local(local_tensor, device_mesh, placements, run_check=run_check, shape=shape, stride=stride,
@@ -1348,8 +1567,8 @@ def from_local(local_tensor, device_mesh, placements, *, run_check=False, shape=
                     mesh_broadcast(local_tensor, device_mesh, mesh_dim=i)
     if shape is None or stride is None:
         shape, stride = _global_info(local_tensor, device_mesh, placements)
-    return _register(_FromLocal.apply(local_tensor, device_mesh, placements, torch.Size(shape), tuple(stride),
-                                      None if grad_placements is None else tuple(grad_placements)))
+    return _FromLocal.apply(local_tensor, device_mesh, placements, torch.Size(shape), tuple(stride),
+                            None if grad_placements is None else tuple(grad_placements))
 
 
 def redistribute(tensor, placements, *, async_op=False):
@@ -1601,7 +1820,7 @@ def _spec_like(spec, shape, dtype):
 def _attention(op_call, args, kwargs):
     """SDPA on query, key and value split along the sequence (dimension 2) by one RaggedShard, on any mesh dimension
     (its others replicated or splitting the batch or the heads, the three tensors placed alike): ring attention over
-    their capacity blocks, contiguous shares, along that dimension's group (_ring_attention).  torch.compile's tracing
+    their capacity blocks, contiguous shares, along that dimension's group (_undeclared).  torch.compile's tracing
     runs ops on fake tensors, and the ring (its collectives, the operand's host-side tables) runs only on real ones:
     under fake tensors the op is refused as unsupported, which dynamo takes as a graph break."""
     named = _named(op_call, args, kwargs)
@@ -1617,8 +1836,8 @@ def _attention(op_call, args, kwargs):
     if (named.get('attn_mask') is not None or named.get('dropout_p', 0.0) or named.get('dropout_mask') is not None
             or named.get('enable_gqa', False)):
         raise NotImplementedError('mesh: ragged SDPA takes no attn_mask, dropout or enable_gqa')
-    out, lse = _ring_attention(spec.mesh.get_group(ragged[0]), held.key, query._local_tensor, key._local_tensor,
-                               value._local_tensor, named.get('is_causal', False), named.get('scale'), 1)
+    out, lse = _undeclared(spec.mesh.get_group(ragged[0]), held.key, query._local_tensor, key._local_tensor,
+                           value._local_tensor, named.get('is_causal', False), named.get('scale'), 1)
     out = RaggedTensor(out, _spec_like(spec, query.shape[:-1] + value.shape[-1:], out.dtype), requires_grad=False)
     if op_call is aten._scaled_dot_product_attention_math_for_mps.default:
         return out, None
@@ -1684,7 +1903,7 @@ def _tracker(mesh):
 # torch's tensor-parallel styles over the partition.
 def _prepare(x, layouts, desired, mesh):
     if not isinstance(x, DTensor):
-        x = from_local(x, mesh, layouts)
+        x = _from_local(x, mesh, layouts)
     return redistribute(x, desired, async_op=True) if layouts != desired else x
 
 
@@ -1741,7 +1960,7 @@ class SequenceParallel(_Sequence):
         if isinstance(x, DTensor):
             return redistribute(x, sequence_sharding, async_op=True)
         if isinstance(x, torch.Tensor):
-            return from_local(x, device_mesh, sequence_sharding)
+            return _from_local(x, device_mesh, sequence_sharding)
         raise ValueError(f'expecting input of {mod} to be a torch.Tensor or DTensor, but got {x}')
 
 
@@ -1791,45 +2010,51 @@ def context_parallel_buffers(mesh, name, buffers, seq_dims, load_balance=True):
     return shards
 
 
-_JOINED = {}
-
-
 @torch.no_grad()
 def context_parallel_unshard(mesh, name, buffers, seq_dims, load_balance=True):
-    """torch's context_parallel_unshard over partitioned mesh dimension `name`: every rank's capacity block gathered as
-    it lies (one Allgatherv, dist.all_gather, into the page-padded segments of a region lease held for the shape: the
-    library places each segment on a page, _paged) and each half of each block copied into its positions of the
-    sequence, in a second lease held for the shape."""
+    """torch's context_parallel_unshard over partitioned mesh dimension `name`, undeclared: each buffer's whole sequence
+    (_unshard) in leases taken for the call."""
     o, rank, group = operand(mesh, name), mesh.get_local_rank(name), mesh.get_group(name)
     local = buffers[0].shape[seq_dims[0]]
     S, rest = divmod(local * o.units, o.capacity[rank])
     if rest:
         raise ValueError(f'mesh: {local} positions on rank {rank} are no capacity block of {o.capacity}')
-    halves, lengths, joined = _halves(o, S, load_balance), _blocks(o, S)[0], []
+    joined = []
     for b, dim in zip(buffers, seq_dims):
-        shape, b = lambda s: b.shape[:dim] + (s,) + b.shape[dim + 1:], b.contiguous()
-        counts, starts = _paged([s * math.prod(shape(1)) for s in lengths], b.element_size(), group)
-        key = (tuple(b.shape), dim, b.dtype, group.group_name)
-        if key not in _JOINED:
-            _JOINED[key] = _empty((starts[-1],), b, group), _empty(shape(S), b, group)
-        out, whole = _JOINED[key]
-        out[starts[rank]:starts[rank] + b.numel()].view(b.shape).copy_(b)
-        dist.all_gather(list(out.split(counts)), out[starts[rank]:starts[rank] + counts[rank]], group=group)
-        for r, (at, s) in enumerate(zip(starts, lengths)):
-            block = out[at:at + math.prod(shape(s))].view(shape(s))
-            for a, (lo, hi) in enumerate(_spans(o, r, S, halves)):
-                whole.narrow(dim, lo, hi - lo).copy_(block.narrow(dim, a * (s // halves), hi - lo))
-        joined.append(whole)
+        b, shape = b.contiguous(), b.shape[:dim] + (S,) + b.shape[dim + 1:]
+        out = _empty((math.prod(shape) + len(o.capacity) * _page(group) // b.element_size(),), b, group)
+        joined.append(_unsharded(*_unshard(b, dim, o, group, _halves(o, S, load_balance), out, _empty(shape, b, group))))
     return joined
+
+
+def _unshard(b, dim, o, group, halves, out, whole):
+    """An unshard of every rank's capacity block b planned on the parts attached now: b's segment of `out`, every
+    rank's page-padded segment (one Allgatherv, dist.all_gather: the library places each segment on a page, _paged),
+    and each half of each block's copy into its positions of the sequence, `whole` (_unsharded issues it)."""
+    rank, S = dist.get_rank(group), whole.size(dim)
+    lengths, shape = _blocks(o, S)[0], lambda s: b.shape[:dim] + (s,) + b.shape[dim + 1:]
+    counts, starts = _paged([s * math.prod(shape(1)) for s in lengths], b.element_size(), group)
+    segments = list(out[:starts[-1]].split(counts))
+    copies = [(whole.narrow(dim, lo, hi - lo), out[at:at + math.prod(shape(s))].view(shape(s)).narrow(dim, a * (s // halves), hi - lo))
+              for r, (at, s) in enumerate(zip(starts, lengths)) for a, (lo, hi) in enumerate(_spans(o, r, S, halves))]
+    return b, out[starts[rank]:starts[rank] + b.numel()].view(b.shape), segments, segments[rank], group, copies, whole
+
+
+def _unsharded(b, mine, segments, own, group, copies, whole):
+    mine.copy_(b)
+    dist.all_gather(segments, own, group=group)
+    for into, block in copies:
+        into.copy_(block)
+    return whole
 
 
 def ring_attention(mesh, name, query, key, value, is_causal=False, scale=None, load_balance=True):
     """This rank's query block's attention over every rank's keys and values, the blocks along dimension 2 (the
     sequence) as context_parallel_buffers made them over partitioned mesh dimension `name`: (output, each query row's
-    logsumexp), padded query rows garbage that the unshard drops."""
+    logsumexp), padded query rows garbage that the unshard drops.  Undeclared (_undeclared)."""
     o = operand(mesh, name)
     S = query.size(2) * o.units // o.capacity[mesh.get_local_rank(name)]
-    return _ring_attention(mesh.get_group(name), o.key, query, key, value, is_causal, scale, _halves(o, S, load_balance))
+    return _undeclared(mesh.get_group(name), o.key, query, key, value, is_causal, scale, _halves(o, S, load_balance))
 
 
 def ring_calls(mesh, name, query_shape, dtype, value_width):
@@ -1871,114 +2096,135 @@ def unshard_calls(mesh, name, shapes, dims, dtype):
 
 
 SCORES = 1 << 26
-_HELD = {}
 
 
-def _held(group, what, shape, like, dtype=None):
-    """A region lease held for the group, by what it holds and its shape (the ring's scores, and each chunk's mask, row
-    maxima, sums and outputs): made at its first use and written again by every later one, so a step queued behind the
-    GPU holds no memory of its own (torch's MPS allocator keeps every queued step's temporaries until its command
-    buffer completes)."""
-    key = (group.group_name, what, tuple(shape), dtype or like.dtype)
-    if key not in _HELD:
-        _HELD[key] = _empty(shape, like, group, dtype)
-    return _HELD[key]
+def _holding(group, name):
+    """What partition holds for partitioned mesh dimension `name` on its communicator's object, gone with it (each
+    dimension its own, two meshes on one communicator apart): its declarations and Balancer, the reserve's leases (name
+    None: those _held keeps for undeclared calls); None on a group of another backend, which holds nothing.  A limit:
+    two meshes on one communicator with a dimension of the same name share its holding."""
+    if not getattr(group, 'handle', 0):
+        return None
+    if getattr(group, '_partition_leases', None) is None:
+        group._partition_leases = {}
+    return group._partition_leases.setdefault(name, {})
 
 
-def _block(query, key, value, into, group, scale=None, queries=None, keys=None, valid=None):
+def _held(group, what, shape, like, dtype=None, capacity=0):
+    """A region lease held for the group (_holding) by what it holds (an undeclared ring's chunks'), as large as the
+    largest shape asked of it or `capacity` elements, returned as its prefix at `shape`: written again by every later
+    use, so a step queued behind the GPU holds no memory of its own, and a share's new shape takes no lease where the
+    capacity covers it."""
+    held, key, n = _holding(group, None), (what, dtype or like.dtype), math.prod(shape)
+    if key not in held or held[key].numel() < n:
+        held[key] = _empty((max(n, capacity, 1),), like, group, dtype)
+    return held[key][:n].view(shape)
+
+
+def _chunks(query, key, value, into, lease, scale=None, queries=None, keys=None, valid=None, capacity=(0, 0)):
     """Each query row's attention over these keys as the library's partials, written into `into` (rows of [m, l, O]:
     the row's greatest score, its sum of exponentials and its unnormalized output, nccl.h ncclMeshRedOpCreatePartials;
     l 0 where it sees no key), the scores SCORES at a time, every pass over them in place, and every result of a chunk
-    in a lease held for the group (_held): keys where `valid` (a bool a key) is False masked, and where `queries` (each
-    query's logical position) is given each key past its query (`keys`: each key's)."""
+    in the ring's leases (`lease`): keys where `valid` (a bool a key) is False masked, and where `queries` (each
+    query's logical position) is given each key past its query (`keys`: each key's).  Planned: each chunk's views and
+    leases, which _attend issues."""
     scale = query.shape[-1] ** -0.5 if scale is None else scale
     lead, rows, n = query.shape[:-2], query.shape[-2], key.shape[-2]
     step, kt = max(1, SCORES // (math.prod(lead) * n)), key.transpose(-2, -1)
-    scores = _held(group, 'scores', (SCORES,), query, torch.float32)
+    most = math.prod(lead) * (capacity[0] or rows)  # a chunk's rows at most: any rank's query block at its high
+    scores, chunks = lease('scores', (SCORES,), torch.float32), []
     for at in range(0, rows, step):
         q, part = query[..., at:at + step, :], into[..., at:at + step, :]
         c = q.shape[-2]
-        s = scores[:math.prod(lead) * c * n].view(lead + (c, n))
+        cap = min(SCORES // math.prod(lead), most // math.prod(lead) * (capacity[1] or n))
+        chunks.append((q, kt, scores[:math.prod(lead) * c * n].view(lead + (c, n)), scale,
+                       None if queries is None else (keys, queries[at:at + step, None], lease('mask', (c, n), torch.bool, cap)), valid,
+                       *(lease(what, lead + (c, 1), torch.float32, most) for what in ('top', 'total')),
+                       lease('out', lead + (c, value.size(-1)), value.dtype, most * value.size(-1)), part, value))
+    return chunks
+
+
+def _attend(chunks):
+    for q, kt, s, scale, causal, valid, top, total, out, part, value in chunks:
         torch.matmul(q, kt, out=s) if q.dtype == s.dtype else s.copy_(q @ kt)
         s.mul_(scale)
-        if queries is not None:
-            s.masked_fill_(torch.gt(keys, queries[at:at + step, None], out=_held(group, 'mask', (c, n), query, torch.bool)), -math.inf)
+        if causal is not None:
+            s.masked_fill_(torch.gt(causal[0], causal[1], out=causal[2]), -math.inf)
         if valid is not None:
             s.masked_fill_(~valid, -math.inf)
-        top, total = (_held(group, what, lead + (c, 1), query, torch.float32) for what in ('top', 'total'))
         part[..., :1] = torch.amax(s, -1, keepdim=True, out=top).masked_fill_(top == -math.inf, 0)
         part[..., 1:2] = torch.sum(s.sub_(top).exp_(), -1, keepdim=True, out=total)
-        part[..., 2:] = torch.matmul(s.to(value.dtype), value, out=_held(group, 'out', lead + (c, value.size(-1)), value))
+        part[..., 2:] = torch.matmul(s.to(value.dtype), value, out=out)
 
 
-_RINGS = {}
-
-
-def _ring(query, value, lengths, rows, rank, group):
-    """The ring's region leases for a shape, made once and held, so no call leases or wraps one: the gathered query
-    blocks, the partials (zeroed once: a row no block of the shape writes stays [0, 0, 0], and every row one writes is
-    written whole at every call), the merged rows and the output, [batch, positions, heads, dim] (held: the next call
-    of the shape writes it again)."""
-    key = (tuple(query.shape), tuple(lengths), query.dtype, value.size(-1), group.group_name)
-    if key not in _RINGS:
-        width = 2 + value.size(-1)
-        _RINGS[key] = (_empty((sum(lengths) * (query.numel() // query.size(2)),), query, group),
-                       _empty((sum(rows), width), query, group, torch.float32).zero_(),
-                       _empty((rows[rank], width), query, group, torch.float32),
-                       _empty((query.size(0), lengths[rank], query.size(1), value.size(-1)), query, group))
-    return _RINGS[key]
-
-
-def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=None, halves=1):
-    """Ring attention over capacity blocks as split-KV partials: every rank's query block gathered (one Allgatherv,
-    static counts, into a region tensor on the mesh backend: _empty, this rank's copied into its place there and the
-    call run in place, mesh f9898875); each block's attention over this rank's own keys and values written as its
-    owner's rows of the partials (_block, in place in the region; keys past their valid extents masked, a causal one by
-    the logical positions of its queries and keys, a half of the block attending only to the halves of this rank's keys
-    it can see, none where it sees none); and the partials reduce-scattered by the library's partials operator, each
-    owner's rows merged at it by their log-sum-exp (ProcessGroupMesh.merge_partials, ncclMeshReduceScatterV); the
-    partials' rows laid out position-major (each position's heads together), so the output O / l is one gather of the
-    merged rows into a region lease laid out [batch, positions, heads, dim] and divided there in place (a caller's
-    view of it as [batch, positions, heads x dim] is no copy), the logsumexp m + log l.  This rank's own block is
-    computed while the gather is in flight.  Its leases are held for the shape (_ring).  Padded query rows compute
-    garbage that the unshard drops.  Forward only."""
+def _undeclared(group, key_name, query, key, value, is_causal, scale, halves):
+    """A ring no program declared (ring_attention, the SDPA handler), planned and issued in its call: torch's refusals;
+    its own leases fresh for the call (its partials zeroed: a lease held across calls may still be sending a previous
+    call's), its chunks' held for the group (_held)."""
     from .backend import ProcessGroupMesh
     if not isinstance(group, ProcessGroupMesh):
         raise TypeError('mesh: the ring\'s merge is the mesh backend\'s partials operator (torch_mesh::merge_partials)')
-    o = _OPERANDS[key_name]
     if is_causal and query.size(2) != key.size(2):
         raise NotImplementedError('is_causal requires the same query and context sequence lengths')
     if not is_causal and halves == 2:
         raise RuntimeError('Load balancing requires `is_causal=True`.')
-    rank, size = dist.get_rank(group), dist.get_world_size(group)
+
+    def lease(what, shape, dtype=None, capacity=0):
+        if what.startswith('ring'):
+            fresh = _empty(shape, query, group, dtype)
+            return fresh.zero_() if what == 'ring partials' else fresh
+        return _held(group, what, shape, query, dtype, capacity)
+    out = _empty((query.size(0), query.size(2), query.size(1), value.size(-1)), query, group)
+    return _ringed(*_ring(group, key_name, query, key, value, is_causal, scale, halves, lease, out))
+
+
+def _ring(group, key_name, query, key, value, is_causal, scale, halves, lease, out):
+    """Ring attention over capacity blocks as split-KV partials, planned on the parts attached now (_ringed issues it):
+    every rank's query block gathered (one Allgatherv, static counts, into a region lease, this rank's copied into its
+    place there and the call run in place, mesh f9898875); each block's attention over this rank's own keys and values
+    written as its owner's rows of the partials (_chunks, in place in the region; keys past their valid extents masked,
+    a causal one by the logical positions of its queries and keys, a half of the block attending only to the halves of
+    this rank's keys it can see, none where it sees none); and the partials reduce-scattered by the library's partials
+    operator, each owner's rows merged at it by their log-sum-exp (ProcessGroupMesh.merger, ncclMeshReduceScatterV);
+    the partials' rows laid out position-major (each position's heads together), so the output O / l is one gather of
+    the merged rows into `out` [batch, positions, heads, dim], divided there in place (a caller's view of it as [batch,
+    positions, heads x dim] is no copy), the logsumexp m + log l.  This rank's own block is computed while the gather
+    is in flight.  Its leases are `lease`'s (what, shape, dtype, capacity): a declared ring's the reserve's, an
+    undeclared one's _undeclared's.  Padded query rows compute garbage that the unshard drops.  Forward only."""
+    o, rank, size = _OPERANDS[key_name], dist.get_rank(group), dist.get_world_size(group)
     S = query.size(2) * o.units // o.capacity[rank]
     lengths, lead, width = _blocks(o, S)[0], tuple(query.shape[:2]), 2 + value.size(-1)
     row, rows = query.numel() // query.size(2), [math.prod(lead) * s for s in lengths]
-    gathered_lease, packed, merged, out = _ring(query, value, lengths, rows, rank, group)
-    blocks = list(gathered_lease.split([s * row for s in lengths]))
-    blocks[rank].view(query.shape).copy_(query)
-    gathered = dist.all_gather(blocks, blocks[rank], group=group, async_op=True)
+    blocks = list(lease('ring queries', (sum(lengths) * row,)).split([s * row for s in lengths]))
+    packed, merged = lease('ring partials', (sum(rows), width), torch.float32), lease('ring merged', (rows[rank], width), torch.float32)
     owners = list(packed.split(rows))
     keys, valid = _positions(key_name, rank, S, halves, query.device)
     mine, step = _spans(o, rank, S, halves), lengths[rank] // halves
+    most = (S // o.units * o.most // halves, S // o.units * o.high)  # a query half-block's rows and this rank's keys at most
 
     def owned(j):
-        """Block j's queries' attention over this rank's keys, as owner j's rows of the partials."""
+        """Block j's queries' attention over this rank's keys, as owner j's rows of the partials: its chunks."""
         into = owners[j].view(lead[0], lengths[j], lead[1], width).transpose(1, 2)
-        q = blocks[j].view(lead + (lengths[j],) + query.shape[3:])
+        q, chunks = blocks[j].view(lead + (lengths[j],) + query.shape[3:]), []
         queries, height = _positions(key_name, j, S, halves, query.device)[0], lengths[j] // halves
         for a, (_, hi) in enumerate(_spans(o, j, S, halves)):
             seen = [b for b, (lo, _) in enumerate(mine) if not is_causal or lo < hi]
             if seen:
                 at, cols = slice(a * height, (a + 1) * height), slice(seen[0] * step, (seen[-1] + 1) * step)
-                _block(q[:, :, at], key[:, :, cols], value[:, :, cols], into[:, :, at], group, scale,
-                       queries[at] if is_causal else None, keys[cols], valid[cols])
-    owned(rank)
-    gathered.wait()
-    for j in range(size):
-        if j != rank:
-            owned(j)
-    group.merge_partials(merged, packed, rows)
+                chunks += _chunks(q[:, :, at], key[:, :, cols], value[:, :, cols], into[:, :, at], lease, scale,
+                                  queries[at] if is_causal else None, keys[cols], valid[cols], most)
+        return chunks
     m, l = (t.view(lead[0], lengths[rank], lead[1]) for t in (merged[:, 0], merged[:, 1]))
-    out.view(-1, value.size(-1)).copy_(merged[:, 2:]).view(out.shape).div_(l[..., None]).masked_fill_((l == 0)[..., None], 0)
+    return (query, blocks[rank].view(query.shape), blocks, blocks[rank], group, owned(rank), [c for j in range(size) if j != rank for c in owned(j)],
+            group.merger(merged, packed, rows), out, merged[:, 2:], m, l)
+
+
+def _ringed(query, block, blocks, mine, group, own, others, merge, out, merged, m, l):
+    block.copy_(query)
+    gathered = dist.all_gather(blocks, mine, group=group, async_op=True)
+    _attend(own)
+    gathered.wait()
+    _attend(others)
+    merge()
+    out.view(-1, merged.size(-1)).copy_(merged).view(out.shape).div_(l[..., None]).masked_fill_((l == 0)[..., None], 0)
     return out.transpose(1, 2), torch.where(l > 0, m + l.log(), -math.inf).transpose(1, 2)
