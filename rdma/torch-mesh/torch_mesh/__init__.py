@@ -39,8 +39,10 @@ def compiler(gm, example_inputs):
     few fp16 rows by a weight laid out as nn.Linear's (aten.mm(x, w^T), aten.addmm(b, x, w^T): w^T the transposed view of
     a [N, K] whose rows lie apart by K or more, x at most 8 rows) are torch_mesh::linear, one plain dispatch of
     torch-mesh's own (linear.metal) where MPS's matmul costs its host about 12 us a call, with a tanh that is a
-    product's one use folded into it.  Inductor's run-time size, alignment and scalar asserts are off: each is a check
-    at every call of what the compile fixed (design/data-model.md section 6)."""
+    product's one use folded into it.  A graph's sums on a group, where every collective it names that group in is one
+    of them and all of one form, are one issue's repeats (each node told their count: rdma/nccl.h ncclMeshFused repeats),
+    so the host issues their crossing once a graph.  Inductor's run-time size, alignment and scalar asserts are off: each
+    is a check at every call of what the compile fixed (design/data-model.md section 6)."""
     from pathlib import Path
 
     import torch
@@ -61,16 +63,24 @@ def compiler(gm, example_inputs):
         return (x is not None and w is not None and x.dtype == w.dtype == torch.half and x.dim() == w.dim() == 2
                 and x.shape[0] <= 8 and x.is_contiguous() and w.stride(0) == 1 and w.stride(1) >= w.shape[0])
 
+    def told(node, repeats):
+        """A sum's node told its repeats, the fake values Inductor records for its call alike."""
+        node.args = (*node.args[:3], repeats)
+        if 'eager_input_vals' in node.meta:
+            values, named = node.meta['eager_input_vals']
+            node.meta['eager_input_vals'] = ((*values[:3], repeats), named)
+
     class Leased(CustomGraphPass):
         def __call__(self, graph):
             for node in list(graph.nodes):
                 if node.target is torch.ops._c10d_functional.all_reduce.default:
                     node.target = torch.ops.torch_mesh.all_reduce.default
+                    told(node, 1)
                     made = node.args[0]
                     if (node.args[1] == 'sum' and made.target is torch.ops.torch_mesh.linear.default and len(made.users) == 1
                             and made.args[2:] in ((), (None,))):
                         with graph.inserting_before(node):
-                            summed = graph.call_function(torch.ops.torch_mesh.linear_sum.default, (*made.args[:2], node.args[2]))
+                            summed = graph.call_function(torch.ops.torch_mesh.linear_sum.default, (*made.args[:2], node.args[2], 1))
                         summed.meta['val'] = node.meta['val']
                         node.replace_all_uses_with(summed)
                         graph.erase_node(node)
@@ -93,9 +103,17 @@ def compiler(gm, example_inputs):
                         made.args = made.args + (1,)
                         users[0].replace_all_uses_with(made)
                         graph.erase_node(users[0])
+            sums = (torch.ops.torch_mesh.all_reduce.default, torch.ops.torch_mesh.linear_sum.default)
+            for name in {node.args[2] for node in graph.nodes if node.target in sums}:
+                nodes = [node for node in graph.nodes if any(isinstance(a, str) and a == name for a in node.args)]
+                forms = {(n.target, *((a.meta['val'].shape, a.meta['val'].stride(), a.meta['val'].dtype) if hasattr(a, 'meta') else a
+                                      for a in n.args[:2])) for n in nodes}
+                if len(nodes) > 1 and len(forms) == 1 and nodes[0].target in sums:
+                    for n in nodes:
+                        told(n, len(nodes))
 
         def uuid(self):
-            return 'torch_mesh::all_reduce torch_mesh::linear'
+            return 'torch_mesh::all_reduce torch_mesh::linear repeats'
     with config.patch(post_grad_custom_pre_pass=Leased(), size_asserts=False, alignment_asserts=False, scalar_asserts=False):
         return lookup_backend('inductor')(gm, example_inputs)
 

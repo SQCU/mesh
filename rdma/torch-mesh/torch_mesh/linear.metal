@@ -7,7 +7,7 @@
 // on whole 4-element loads, else 1 (four loads of one).  linear_rows stores into y, ACT its activation (0 none, 1
 // tanh); linear_publish (compiled after the library's steps, fused.steps(), and argmax.metal) stores each output into a
 // fused crossing's send segment through the collective's mesh_step_write and publishes it from its last threadgroup
-// (mesh_step_enter, mesh_step_release: partition._fused, which runs the crossing).
+// (mesh_step_enter, mesh_step_release at its repeat j: partition._fused, which runs the crossing).
 #include <metal_stdlib>
 using namespace metal;
 
@@ -92,7 +92,7 @@ kernel void linear_rows(device const half* x [[buffer(0)]], device const half* w
 
 #ifdef MESH_METAL
 template <uint PEERS>
-struct linear_publish_words { uint R, K, N, B, LDW, pad; mesh_step_binding land[PEERS], publish[PEERS]; };
+struct linear_publish_words { uint R, K, N, B, LDW, j; mesh_step_binding land[PEERS], publish[PEERS]; };
 
 struct linear_step_store {
     device uchar* send;
@@ -115,7 +115,7 @@ kernel void linear_publish(device const half* x [[buffer(0)]], device const half
     linear_body<VW, VX, COLS, NSG, U>(x, w, d, store, part, sg, lane, tg, tid);
     threadgroup_barrier(mem_flags::mem_device);
     if (mesh_last_arrival<true>(arrivals, 0, groups, tid, &last)) {
-        for (uint q = 0; q < PEERS; q++) mesh_step_release(*p.publish[q].p, p.publish[q].a, tid);
+        for (uint q = 0; q < PEERS; q++) mesh_step_release(*p.publish[q].p, p.publish[q].a, tid, p.j);
         mesh_arrival_reset(arrivals, 0, tid);
     }
 }

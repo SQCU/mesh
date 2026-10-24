@@ -257,8 +257,14 @@ typedef struct { uint64_t ticket; int published; } ncclMeshIssue;
    ranges. Previous users of those landing leases must have completed before encoding the group: these receives
    are posted immediately, without a stream-start gate. Relays use their compiled incoming landed prefixes;
    releasing a publication cannot release an unlanded relay page. The caller's producer releases every publication
-   after making its data, and its consumer awaits every landing before reading results. */
-typedef struct { uint64_t (*publish)[6], (*land)[6]; uint32_t publishes, lands; } ncclMeshFused;
+   after making its data, and its consumer awaits every landing before reading results.
+   `repeats` (0 as 1) is the crossings one issue of a group of ncclSend and ncclRecv presents: comm's next `repeats`
+   groups (under a plan, each this group's declaration: another is the program's error, undefined, as a group that
+   is not its declaration is), its entries laid that many times, each repeat after the last, repeat j's buffers each
+   j x `stride` bytes (whole pages) past repeat 0's; its records are written once, each with the pages a repeat adds
+   to its count, and the caller's kernels run repeat j by mesh_step_release and mesh_step_await at j.  Every landing
+   of the issue is gated on its first publication: no kernel before that one reads a landing buffer of a later repeat. */
+typedef struct { uint64_t (*publish)[6], (*land)[6]; uint32_t publishes, lands, repeats; size_t stride; } ncclMeshFused;
 typedef struct {
   void *commandBuffer;
   void *commandEncoder;

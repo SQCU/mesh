@@ -949,10 +949,11 @@ static std::string metal_prelude() { return ncclMeshMetalPrelude(); }
 // contiguous MPS region tensors of one dtype and size, on communicator `comm`, each landing's wait bounded by `polls`
 // (nccl.h ncclMeshStream polls; _stream.polls the library's most): one group of ncclSend(send) and ncclRecv(landing)
 // toward each other rank, on torch's stream, the stream's `fused` set; each publication's bindings and each landing's,
-// in rank order (ncclMeshFused, six GPU addresses each).  A dtype NCCL lacks moves as its bytes.  Nothing is committed
-// here: the publication is the caller's kernel, encoded after this returns (fused_published).
+// in rank order (ncclMeshFused, six GPU addresses each), `repeats` crossings at once, each `stride` bytes past the last
+// (ncclMeshFused repeats).  A dtype NCCL lacks moves as its bytes.  Nothing is committed here: the publication is the
+// caller's kernel, encoded after this returns (fused_published).
 static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> fused_exchange(
-    const at::Tensor &send, const std::vector<at::Tensor> &landings, int64_t comm, int64_t polls) {
+    const at::Tensor &send, const std::vector<at::Tensor> &landings, int64_t comm, int64_t polls, int64_t repeats, int64_t stride) {
   int rank = 0, ranks = 0;
   checked(ncclCommUserRank(communicator(comm), &rank));
   checked(ncclCommCount(communicator(comm), &ranks));
@@ -965,7 +966,7 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
   for (const at::Tensor &landing : landings) in.push_back(g.moving(landing));
   std::vector<std::array<uint64_t, 6>> publish(landings.size()), land(landings.size());
   ncclMeshFused steps = {reinterpret_cast<uint64_t(*)[6]>(publish.data()), reinterpret_cast<uint64_t(*)[6]>(land.data()),
-                         (uint32_t)landings.size(), (uint32_t)landings.size()};
+                         (uint32_t)landings.size(), (uint32_t)landings.size(), (uint32_t)repeats, (size_t)stride};
   ncclMeshFused *const records = &steps;
   const Operand *const ins = in.data();
   __block ncclResult_t result = ncclSuccess;

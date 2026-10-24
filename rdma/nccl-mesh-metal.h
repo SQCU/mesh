@@ -117,10 +117,12 @@ struct metal_result metal_truncdiv(struct metal_program *, int type, void *dst, 
                                    uint64_t divisor);
 /* A wait (design/transport.md section 14): in `words` (the Metal buffer over a holding's counts), the count at `word`
    (its `landed`) until it reaches `target` (0: none), in pages; `data` at `data_offset` the landed bytes a landing combines (the group's
-   landing area); its failure recorded in `violation`'s words at entry `at` of channel `channel`. */
-struct metal_wait { void *words, *violation, *data; size_t word, data_offset; mesh_pages target; uint64_t at; uint32_t channel; };
-/* A publication: in `words`, the count at `word` (a holding's `ready`) stored `value` after one system fence */
-struct metal_release { void *words; size_t word; mesh_pages value; };
+   landing area); its failure recorded in `violation`'s words at entry `at` of channel `channel`; `stride` the pages
+   each later repeat of a fused crossing's adds to its target (nccl.h ncclMeshFused repeats; 0 none). */
+struct metal_wait { void *words, *violation, *data; size_t word, data_offset; mesh_pages target; uint64_t at; uint32_t channel; mesh_pages stride; };
+/* A publication: in `words`, the count at `word` (a holding's `ready`) stored `value` after one system fence, each
+   later repeat of a fused crossing's `stride` pages past it */
+struct metal_release { void *words; size_t word; mesh_pages value, stride; };
 struct metal_result metal_publish(struct metal_program *, const struct metal_release *);
 /* Buffers a dispatch reaches through no binding of its own (a publication's operands, a landing's or a gate's landing
    buffers), declared on the classic form's encoder before it, with write use where `write`: Metal orders a pass after

@@ -195,15 +195,17 @@ def allgatherv(x: torch.Tensor, dim: int, sizes: list[int], group_name: str) -> 
 
 # The all-gather and the all-reduce as a fused crossing (rdma/nccl.h ncclMeshFused; torch_mesh/fused.py): one SEND
 # toward each peer from this rank's segment and one landing from each peer into its own, the segments page-padded in a
-# held lease (two, taken in turn: no wait reads a send's completion, so a segment is written again only after a later
-# call has landed); the library encodes no step of it, and two dispatches of partition's own run them: gather_publish
-# copies the block into its segment (mesh_step_write) and releases it (mesh_step_release); gather_land waits for every
-# landing (mesh_step_await) and joins the segments along the gathered dimension into the output, sum_land adds them,
-# every rank's in rank order, so every rank holds the same sum.  The host issues the crossing and encodes the two; it
-# waits for nothing.
+# slot of a held lease (two, taken in turn: no wait reads a send's completion, so a segment is written again only after
+# a later call has landed); the library encodes no step of it, and two dispatches of partition's own run them:
+# gather_publish copies the block into its segment (mesh_step_write) and releases it (mesh_step_release); gather_land
+# waits for every landing (mesh_step_await) and joins the segments along the gathered dimension into the output,
+# sum_land adds them, every rank's in rank order, so every rank holds the same sum.  A graph's crossings of one form on
+# a group are one issue's repeats (torch_mesh.compiler; nccl.h ncclMeshFused repeats): the host issues the crossing at
+# the first, each repeat j in slot j of the lease, and the kernels run repeat j's steps at j.  The host encodes the two;
+# it waits for nothing.
 _GATHER_SOURCE = r"""
 template <uint N>
-struct gather_words { uint count, pre, post, rank; uint sizes[N], starts[N]; mesh_step_binding land[N - 1], publish[N - 1]; };
+struct gather_words { uint count, pre, post, rank, j; uint sizes[N], starts[N]; mesh_step_binding land[N - 1], publish[N - 1]; };
 
 template <uint N, uint THREADS>
 [[max_total_threads_per_threadgroup(THREADS)]]
@@ -216,7 +218,7 @@ kernel void gather_publish(device const ushort* x [[buffer(0)]], device uchar* s
     for (uint k = g * THREADS + tid; k < w.count; k += groups * THREADS) mesh_step_write<ushort>(send, k, x[k]);
     threadgroup_barrier(mem_flags::mem_device);
     if (mesh_last_arrival<true>(arrivals, 0, groups, tid, &last)) {
-        for (uint q = 0; q + 1 < N; q++) mesh_step_release(*w.publish[q].p, w.publish[q].a, tid);
+        for (uint q = 0; q + 1 < N; q++) mesh_step_release(*w.publish[q].p, w.publish[q].a, tid, w.j);
         mesh_arrival_reset(arrivals, 0, tid);
     }
 }
@@ -228,7 +230,7 @@ kernel void gather_land(device const uchar* lease [[buffer(0)]], device ushort* 
                         uint g [[threadgroup_position_in_grid]], uint groups [[threadgroups_per_grid]]) {
     for (uint q = 0; q + 1 < N; q++) {
         mesh_step_enter(*w.land[q].p, w.land[q].v, w.land[q].progress, g == 0 && tid == 0);
-        mesh_step_await(*w.land[q].p, w.land[q].a, w.land[q].v, tid);
+        mesh_step_await(*w.land[q].p, w.land[q].a, w.land[q].v, tid, w.j);
     }
     uint total = 0;
     for (uint r = 0; r < N; r++) total += w.sizes[r];
@@ -250,7 +252,7 @@ kernel void sum_land(device const uchar* lease [[buffer(0)]], device metal::cond
     using T = metal::conditional_t<BYTES == 2, half, float>;
     for (uint q = 0; q + 1 < N; q++) {
         mesh_step_enter(*w.land[q].p, w.land[q].v, w.land[q].progress, g == 0 && tid == 0);
-        mesh_step_await(*w.land[q].p, w.land[q].a, w.land[q].v, tid);
+        mesh_step_await(*w.land[q].p, w.land[q].a, w.land[q].v, tid, w.j);
     }
     for (uint k = g * THREADS + tid; k < w.count * 2 / BYTES; k += groups * THREADS) {
         float sum = 0.0f;
@@ -290,12 +292,13 @@ def _linear_kernel(*arguments):
     return _GATHER_KERNELS[name]
 
 
-def _fused(x, dim, sizes, group, adds, w=None):
+def _fused(x, dim, sizes, group, adds, w=None, repeats=1):
     """allgatherv on the mesh backend (above), or where `adds` the all-reduce's sum (backend.all_reduce, every rank's
     block all of x: sizes x's extent along dim, n times): x contiguous, of 2 or 4 bytes an element; the output a new
     tensor.  Where `w` (a weight [N, K] of fp16 rows any whole stride apart) is given, the sum's operand is x's
     product with it, x [R, K] (backend.linear_sum): linear.metal's linear_publish computes it into this rank's segment
-    and publishes it there through the collective's steps, in place of gather_publish."""
+    and publishes it there through the collective's steps, in place of gather_publish.  The call is repeat j of the
+    `repeats` one issue presents, j its calls of this form since the last issue (torch_mesh.compiler)."""
     from . import _stream, fused
     n, rank = len(sizes), group.rank()
     operand = tuple(x.shape) if w is None else (x.shape[0], w.shape[0])
@@ -305,32 +308,41 @@ def _fused(x, dim, sizes, group, adds, w=None):
     if key not in _FUSED:
         row, half = math.prod(operand) // max(1, operand[dim]), x.element_size() // 2
         counts, starts = _paged([s * row for s in sizes], x.element_size(), group)
-        words = ([math.prod(operand) * half, math.prod(operand[:dim]), math.prod(operand[dim + 1:]) * half, rank] + list(sizes) +
+        words = ([math.prod(operand) * half, math.prod(operand[:dim]), math.prod(operand[dim + 1:]) * half, rank, 0] + list(sizes) +
                  [a * (1 if adds else half) for a in starts[:-1]])
         shape = operand if adds else operand[:dim] + (sum(sizes),) + operand[dim + 1:]
         spread = lambda count: max(1, min(16, -(-count // (_GATHER_THREADS * 8))))
         land = _gather_kernel('sum_land', x.element_size(), n) if adds else _gather_kernel('gather_land', n)
         if w is None:
-            publish = (_gather_kernel('gather_publish', n), words, spread(words[0]), _GATHER_THREADS)
+            publish = (_gather_kernel('gather_publish', n), words, 4, spread(words[0]), _GATHER_THREADS)
         else:
             K, N, ldw = x.shape[1], w.shape[0], w.stride(0)
             split = _stream.linear_split(K, N)
             publish = (_linear_kernel(4 if ldw % 4 == 0 else 1, 4 if K % 4 == 0 else 1, 2, split, 2, n - 1),
-                       [x.shape[0], K, N, 0, ldw, 0], -(-N // 2), split * 32)
-        _FUSED[key] = {'rings': [_empty((starts[-1],), x, group) for _ in range(2)], 'turn': 0, 'words': words,
-                       'shape': shape, 'counts': counts, 'starts': starts,
+                       [x.shape[0], K, N, 0, ldw, 0], 5, -(-N // 2), split * 32)
+        _FUSED[key] = {'rings': {}, 'turn': 0, 'j': 0, 'words': words, 'shape': shape, 'counts': counts, 'starts': starts,
                        'arrivals': torch.zeros(1, dtype=torch.int32, device=x.device),
                        'publish': publish, 'land': (land, spread(math.prod(shape) * half))}
     held = _FUSED[key]
-    lease, held['turn'] = held['rings'][held['turn'] % 2], held['turn'] + 1
-    starts, counts = held['starts'], held['counts']
-    segment = lambda q: lease[starts[q]:starts[q] + counts[q]]
-    crossing = fused.exchange(segment(rank), [segment(q) for q in range(n) if q != rank], _stream.polls, group)
-    (publish, pwords, gp, threads), (land, gl) = held['publish'], held['land']
-    fused.encode(publish, [x] + ([] if w is None else [w]) + [segment(rank), held['arrivals']], pwords, 15, gp, 1, threads, n - 1,
+    starts, counts, j = held['starts'], held['counts'], held['j']
+    held['j'] = (j + 1) % repeats
+    if j == 0:
+        if repeats not in held['rings']:
+            leases = [_empty((repeats * starts[-1],), x, group) for _ in range(2)]
+            held['rings'][repeats] = [[(slot, [slot[starts[q]:starts[q] + counts[q]] for q in range(n)])
+                                       for slot in lease.split(starts[-1])] for lease in leases]
+        held['slots'], held['turn'] = held['rings'][repeats][held['turn'] % 2], held['turn'] + 1
+        segments = held['slots'][0][1]
+        held['crossing'] = fused.exchange(segments[rank], [segments[q] for q in range(n) if q != rank], _stream.polls, group, repeats,
+                                          starts[-1] * x.element_size())
+    (slot, segments), crossing = held['slots'][j], held['crossing']
+    (publish, pwords, at, gp, threads), (land, gl) = held['publish'], held['land']
+    pwords, lwords = list(pwords), list(held['words'])
+    pwords[at], lwords[4] = j, j
+    fused.encode(publish, [x] + ([] if w is None else [w]) + [segments[rank], held['arrivals']], pwords, 15, gp, 1, threads, n - 1,
                  publish=crossing)
     out = torch.empty(held['shape'], dtype=x.dtype, device=x.device)
-    fused.encode(land, [lease, out], held['words'], 15, gl, 1, _GATHER_THREADS, n - 1, land=crossing)
+    fused.encode(land, [slot, out], lwords, 15, gl, 1, _GATHER_THREADS, n - 1, land=crossing)
     return out
 
 

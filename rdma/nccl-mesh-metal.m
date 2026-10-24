@@ -354,12 +354,12 @@ struct metal_result metal_truncdiv(struct metal_program *program, int type, void
    counts become the record's words here and in release_args alone */
 static struct args wait_args(const struct metal_wait *w, size_t dst_offset, size_t n, int op) {
   return (struct args){.dst = dst_offset, .src = w->data_offset, .n = n, .scalar = pages_to_word(w->target), .aux = w->word, .op = (uint32_t)op,
-                       .at = w->at, .channel = w->channel};
+                       .at = w->at, .channel = w->channel, .stride = (uint32_t)pages_to_word(w->stride)};
 }
 
 /* a publication's arguments (struct metal_release): its count at aux stored scalar; dst the operand's offset (a deferred one's) */
 static struct args release_args(const struct metal_release *r, size_t dst_offset) {
-  return (struct args){.dst = dst_offset, .scalar = pages_to_word(r->value), .aux = r->word};
+  return (struct args){.dst = dst_offset, .scalar = pages_to_word(r->value), .aux = r->word, .stride = (uint32_t)pages_to_word(r->stride)};
 }
 
 void metal_uses(struct metal_program *program, void *const *buffers, size_t n, int write) {

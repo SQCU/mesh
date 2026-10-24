@@ -43,7 +43,8 @@ kernel that read it before.  That holds because every channel of an all_reduce p
 reduce's root, a broadcast's receiver: nccl.h ncclMeshFused) is gated at the call, so there the kernel that reads the
 previous landing is encoded before the next call.  The send tensor may be written again once the landing of each peer's
 next crossing, which depends on this one, has come: nothing waits for a publication's SENDs, so a write before that may
-reach a peer in this crossing's place.  polls bounds each wait in loads (0:
+reach a peer in this crossing's place.  Repeat j of an exchange of several (exchange's repeats) runs both steps at j:
+mesh_step_release(*b.p, b.a, tid, j) and mesh_step_await(*l.p, l.a, l.v, tid, j).  polls bounds each wait in loads (0:
 NCCL_MESH_POLLS; _stream.polls is that bound, which holds a GPU at most the platform's 5 seconds: rdma/NCCL.md "Bounded
 waits").
 
@@ -66,15 +67,16 @@ def steps():
     return STEPS
 
 
-def exchange(send, landings, polls, group=None):
+def exchange(send, landings, polls, group=None, repeats=1, stride=0):
     """The fused exchange over a mesh group of `send` (this rank's part, which its publishing kernel writes to every
     peer) and `landings` (where each other rank's part lands, in rank order, each its own size, which its landing kernel
-    reads): a Crossing, each publication's and each landing's six addresses (nccl.h ncclMeshFused).  One the library
-    does not fuse raises RuntimeError with the library's reason (ncclInvalidUsage: a tensor that is no region tensor, or
-    does not start on a page)."""
+    reads): a Crossing, each publication's and each landing's six addresses (nccl.h ncclMeshFused).  `repeats`
+    crossings at once, repeat j's tensors each j x `stride` bytes past these, its steps run at j (nccl.h ncclMeshFused
+    repeats).  One the library does not fuse raises RuntimeError with the library's reason (ncclInvalidUsage: a tensor
+    that is no region tensor, or does not start on a page)."""
     import torch.distributed as dist
     group = group or dist.distributed_c10d._get_default_group()
-    publish, land = _stream.fused_exchange(send, list(landings), group.handle, int(polls))
+    publish, land = _stream.fused_exchange(send, list(landings), group.handle, int(polls), int(repeats), int(stride))
     return Crossing(tuple(map(tuple, publish)), tuple(map(tuple, land)))
 
 

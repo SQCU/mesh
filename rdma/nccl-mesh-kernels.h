@@ -13,11 +13,12 @@
 #define STR(...) #__VA_ARGS__
 #define XSTR(...) STR(__VA_ARGS__)
 /* a kernel's arguments, one layout for the host (struct args) and the kernels (struct mesh_args): a wait's count at
-   aux until scalar, a publication's count at aux stored scalar; a landing's count is its first page's, of count pages of
-   mask bytes (nccl-mesh-metal.m metal_land).
+   aux until scalar, a publication's count at aux stored scalar, each repeat j of a fused crossing's at scalar + j x
+   stride (the pages a repeat adds to the count: nccl.h ncclMeshFused repeats); a landing's count is its first page's,
+   of count pages of mask bytes (nccl-mesh-metal.m metal_land).
    A holding's counts are pages, as words here (nccl-mesh-metal.m wait_args, release_args); aux and first are byte
    offsets, at an entry */
-#define ARGS(NAME, U64, U32) struct NAME { U64 dst, src, n, scalar, aux; U32 op, polls; U64 at, sequence; U32 count, mask, channel; }
+#define ARGS(NAME, U64, U32) struct NAME { U64 dst, src, n, scalar, aux; U32 op, polls; U64 at, sequence; U32 count, mask, channel, stride; }
 
 /* a step of a compiled program, the library's one implementation of it (metal-microbench docs/acceptance-20261014.md
    A39), after rdma/mesh.metal: libnccl-mesh's kernels call these, and so does a caller's kernel that runs a step its
@@ -47,7 +48,8 @@
    whatever its bytes (a dud's among them: placed where a send must happen and its producer is gone, never a value a
    consumer reads as a signal, design/rubrics.md M4).  The host reads the record after the command buffer and fails the
    group as a value (nccl-mesh.c comm_failure); no kernel halts on it.  mesh_step_counts: the record's waits, `landed`
-   at p.aux until p.scalar, where its target is not 0 and no wait on vb has
+   at p.aux until p.scalar + j x p.stride (repeat j of a fused crossing's records: nccl.h ncclMeshFused repeats; 0, the
+   library's own kernels, and a crossing of one repeat), where its target is not 0 and no wait on vb has
    failed (mesh_step_failed), each ended once one has: a dispatch's later waits, a wide landing's later threadgroups'
    among them, end at once, so a dispatch spins about one bound however many waves its threadgroups run in (a resident
    grid past the GPU's co-residency reset the Mini, 2026-10-21).  mesh_step_await: the
@@ -61,7 +63,7 @@
    operand already written through mesh_step_write by the caller's kernel (its last threadgroup to arrive calls it,
    after every other threadgroup's stores): a device barrier, then thread 0's one system-scope fence (mesh.metal
    mesh_publish: every store of the operand visible before the count the bridge acts on) and its one store of the
-   holding's `ready` (p.scalar at p.aux).  mesh_step_read: element k of a landing buffer the
+   holding's `ready` (p.scalar + j x p.stride at p.aux).  mesh_step_read: element k of a landing buffer the
    NIC wrote, loaded system-coherent (mesh.metal mesh_payload; half4 where it names no type: float16 fourths), so the
    caller names no transport qualifier of its own (they are compiled here, under mesh.metal's pragma: a header after
    it, MetalPerformancePrimitives', may end that pragma). */
@@ -90,15 +92,16 @@ static NSString *const STEPS =
   "if (!mesh_step_claim(vb)) return; "
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); "
   "v[0] = cause; v[3] = ulong(p.channel); v[4] = ulong(p.polls); mesh_publish(v + 2, p.at + 1); }\n"
-  "static inline void mesh_step_counts(constant mesh_args &p, device uchar *words, device uchar *vb) { "
-  "if (p.scalar && !mesh_step_failed(p, vb)) mesh_step_check(p, mesh_step_wait(p, words + p.aux, p.scalar, vb), p.scalar, vb); }\n"
-  "static inline bool mesh_step_await(constant mesh_args &p, device uchar *words, device uchar *vb, uint i) { "
-  "if (i == 0) mesh_step_counts(p, words, vb); "
+  "static inline void mesh_step_counts(constant mesh_args &p, device uchar *words, device uchar *vb, uint j = 0) { "
+  "const ulong target = p.scalar + ulong(j) * p.stride; "
+  "if (p.scalar && !mesh_step_failed(p, vb)) mesh_step_check(p, mesh_step_wait(p, words + p.aux, target, vb), target, vb); }\n"
+  "static inline bool mesh_step_await(constant mesh_args &p, device uchar *words, device uchar *vb, uint i, uint j = 0) { "
+  "if (i == 0) mesh_step_counts(p, words, vb, j); "
   "threadgroup_barrier(mem_flags::mem_device); "
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); return true; }\n"
-  "static inline void mesh_step_release(constant mesh_args &p, device uchar *words, uint i) { "
+  "static inline void mesh_step_release(constant mesh_args &p, device uchar *words, uint i, uint j = 0) { "
   "threadgroup_barrier(mem_flags::mem_device); "
-  "if (i == 0) mesh_publish((volatile coherent(system) device ulong *)(words + p.aux), p.scalar); }\n"
+  "if (i == 0) mesh_publish((volatile coherent(system) device ulong *)(words + p.aux), p.scalar + ulong(j) * p.stride); }\n"
   "template <typename T> static inline void mesh_step_write(device uchar *operand, ulong k, T value) { "
   "((volatile coherent(system) device T *)operand)[k] = value; }\n"
   "template <typename T = half4> static inline T mesh_step_read(device const uchar *landing, ulong k) { "

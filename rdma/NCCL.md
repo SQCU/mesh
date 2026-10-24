@@ -292,6 +292,10 @@ library never learns a lane, a frame or a queue pair (design/transport.md sectio
     - The kernel after it calls `mesh_step_await` on each landing (the landing, and its own SEND to that peer done) and
       reads each landing buffer with `mesh_step_read`.
     - Any type, any size; the send buffer and every landing buffer leases, each from a page.
+    - `repeats` crossings at once (`ncclMeshFused`'s `repeats` and `stride`: torch-mesh's compiled graphs, one a graph's
+      sums on a group): the group's entries laid that many times, repeat j's buffers j strides on, as that many of the
+      communicator's groups; one record each, its count's stride the pages a repeat adds, so the caller's kernels run
+      repeat j by `mesh_step_release` and `mesh_step_await` at j, and the host issues one call for them all.
     - Either form: a Metal 4 kernel binds them through its argument table; a classic one takes them as one
       `mesh_step_binding` record, and its stream names a `residencySet`, which the library fills with the buffers the
       bindings name and the caller makes resident for its queue (torch-mesh's `torch_mesh/fused.py` on torch's
