@@ -678,6 +678,52 @@ static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> 
   });
 }
 
+// torch_mesh::linear (linear.metal): y[R, N] = act(x[R, K] w[N, K]^T (+ bias[N])) of fp16 MPS tensors (act 0 none, 1
+// tanh), w's rows any whole
+// stride apart (w.stride(0)), one dispatch of linear_rows encoded in torch's open compute encoder (encode), its output a
+// new tensor of torch's.  Its K split, the simdgroups a threadgroup, is fitted to K, N and the GPU's cores: about 256
+// simdgroups a core over the N / 2 threadgroups, a power of two from 1 to 8 (rounded up), each simdgroup at least 1,024
+// elements of K.  Its pipelines (by load width
+// and split) compile at their first call from the source backend.py hands over as it loads (linear_source).
+static std::string linear_source_;
+static int64_t linear_cores_ = 0;
+static std::map<std::tuple<int, int, int, int>, int64_t> linear_pipelines_;
+constexpr int64_t LINEAR_COLUMNS = 2, LINEAR_LOADS = 2;
+
+static void linear_source(const std::string &source, int64_t cores) {
+  linear_source_ = source;
+  linear_cores_ = cores;
+}
+
+static at::Tensor linear(const at::Tensor &x, const at::Tensor &w, const std::optional<at::Tensor> &bias, int64_t act) {
+  TORCH_CHECK(x.scalar_type() == at::kHalf && w.scalar_type() == at::kHalf && x.dim() == 2 && w.dim() == 2 && x.size(1) == w.size(1),
+              "torch_mesh::linear takes fp16 x [R, K] and w [N, K], not ", x.sizes(), " ", x.scalar_type(), " and ", w.sizes(), " ",
+              w.scalar_type());
+  const at::Tensor xc = x.contiguous(), wc = w.stride(1) == 1 ? w : w.contiguous();
+  const int64_t R = x.size(0), K = x.size(1), N = w.size(0), ldw = wc.stride(0);
+  const int64_t groups = (N + LINEAR_COLUMNS - 1) / LINEAR_COLUMNS;
+  int split = 1;
+  while (split < 8 && split * groups < linear_cores_ * 256 && K / (split * 2) >= 1024) split *= 2;
+  const auto key = std::make_tuple(ldw % 4 ? 1 : 4, K % 4 ? 1 : 4, split, (int)act);
+  auto found = linear_pipelines_.find(key);
+  if (found == linear_pipelines_.end()) {
+    const std::string args = std::to_string(std::get<0>(key)) + ", " + std::to_string(std::get<1>(key)) + ", " +
+                             std::to_string(LINEAR_COLUMNS) + ", " + std::to_string(split) + ", " + std::to_string(LINEAR_LOADS) + ", " +
+                             std::to_string(act);
+    std::string name = "linear_rows_" + args;
+    for (auto &ch : name) ch = ch == ',' || ch == ' ' ? '_' : ch;
+    found = linear_pipelines_.emplace(key, pipeline(linear_source_ + "\ntemplate [[host_name(\"" + name + "\")]] [[kernel]] decltype(linear_rows<" +
+                                                    args + ">) linear_rows<" + args + ">;\n", name)).first;
+  }
+  at::Tensor y = at::empty({R, N}, x.options());
+  encode(found->second, {xc, wc, y, bias ? std::optional<at::Tensor>(bias->contiguous()) : y}, {R, K, N, bias ? 1 : 0, ldw}, 4, groups, 1,
+         split * 32, false);
+  return y;
+}
+
+TORCH_LIBRARY_FRAGMENT(torch_mesh, m) { m.def("linear(Tensor x, Tensor w, Tensor? bias=None, int act=0) -> Tensor"); }
+TORCH_LIBRARY_IMPL(torch_mesh, MPS, m) { m.impl("linear", &linear); }
+
 // The same dispatch in a command buffer of its own on torch's queue, committed and waited `repeats` times: each one's
 // GPU time (GPUEndTime - GPUStartTime), the measure the engine's kernel harness reports.  Torch's stream is synchronized
 // by the caller first.
@@ -1017,6 +1063,7 @@ static void fused_published() {
 // MeshWork to wait on, its outputs `outputs`), else None (complete).
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("pipeline", &pipeline);
+  module.def("linear_source", &linear_source);
   module.def("device_facts", &device_facts);
   module.def("pipeline_facts", &pipeline_facts);
   module.attr("polls") = (int64_t)NCCL_MESH_POLLS;
