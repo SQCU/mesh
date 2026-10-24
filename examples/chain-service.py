@@ -67,8 +67,6 @@ def main():
     o = torch.zeros(rows, width, dtype=torch.half, device='mps')
     for t in range(steps):
         o = chain.step(E[t] + o, at, b, O[t])
-        if partition.rebalance(mesh, 'tp'):
-            at, b = partition.follow(at), partition.follow(b)
         if t == half:
             middle.record()
     end.record()
@@ -76,6 +74,7 @@ def main():
     torch.mps.synchronize()
     seconds = time.perf_counter() - began
     steady = middle.elapsed_time(end) / 1e3 / (steps - 1 - half)
+    blocks, following = partition.split(mesh, 'tp', width), partition.evaluated(mesh, 'tp')
     if rank == 0:
         torch.from_numpy(np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, width))).copy_(O)
     p = torch_mesh.empty(rows, width, dtype=torch.half).zero_()
@@ -86,7 +85,7 @@ def main():
         dist.all_reduce(p)
     torch.mps.synchronize()
     crossing = time.perf_counter() - began
-    summary = dict(rank=rank, size=size, blocks=partition.split(mesh, 'tp', width), rows=rows, width=width, steps=steps,
+    summary = dict(rank=rank, size=size, blocks=blocks, following=following, rows=rows, width=width, steps=steps,
                    seconds=seconds, aggregate_rows_per_second=steps * rows / seconds,
                    steady_aggregate_rows_per_second=rows / steady, per_stream_steps_per_second=steps / seconds,
                    step_microseconds=seconds / steps * 1e6, steady_step_microseconds=steady * 1e6,

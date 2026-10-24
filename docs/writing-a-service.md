@@ -118,10 +118,10 @@ torch.distributed ([examples/chain.py](../examples/chain.py), `step`). It holds 
 is the library's.
 
 - **Shares.** The rows of A and B are the mesh dimension `tp`, attached with the backend
-  (`partition.attach(mesh, tp=width)`, a unit a row). The backend starts from an even split, and each rank's block is
-  the backend's (`partition.split`), never the configuration's. After each step every rank calls
-  `partition.rebalance(mesh, 'tp')`. Where the backend's balancer moves the blocks by the run's own evidence, every rank
-  moves its weights onto them through the backend (`partition.follow`: the rows that change rank cross once).
+  (`partition.attach(mesh, tp=width)`, a unit a row). Each rank's block is the backend's (`partition.split`), never
+  the configuration's: the blocks the last evaluation on these nodes left, else an even split. Nothing about them is
+  chosen within an evaluation. Once the run has ended, every rank calls `partition.evaluated(mesh, 'tp')`, and the
+  backend's balancer sets the next evaluation's blocks from this one's evidence.
 - **y = tanh(x Aᵀ), column-parallel.** x is replicated and Aᵀ is a `RaggedShard(1)`, so the backend's dispatch gives
   each rank its own columns of y, with no crossing.
 - **z = y B, row-parallel.** y's columns and B's rows are the same ragged shards, so each rank's product is a partial
