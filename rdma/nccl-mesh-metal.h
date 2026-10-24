@@ -117,14 +117,11 @@ struct metal_result metal_premultiply(struct metal_program *, int type, void *ds
 struct metal_result metal_truncdiv(struct metal_program *, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n,
                                    uint64_t divisor);
 /* A wait (design/transport.md section 14): in `words` (the Metal buffer over a holding's counts), the count at `word`
-   (its `landed`) until it reaches `target` (0: none), and the count at `sent_word` (its `sent`) until it reaches
-   `sent_target` (0: none), each in pages; `data` at `data_offset` the landed bytes a landing combines (the group's
+   (its `landed`) until it reaches `target` (0: none), in pages; `data` at `data_offset` the landed bytes a landing combines (the group's
    landing area); its failure recorded in `violation`'s words at entry `at` of channel `channel`. */
-struct metal_wait { void *words, *violation, *data; size_t word, sent_word, data_offset; mesh_pages target, sent_target; uint64_t at; uint32_t channel; };
-/* A publication: in `words`, the count at `word` (a holding's `ready`) stored `value` after one system fence; the count
-   at `sent_word` (the holding's `sent`) reaches `sent_target` once the NIC is done reading the published pages (a
-   deferred publication's record, read by mesh_step_sent; 0 none). */
-struct metal_release { void *words; size_t word; mesh_pages value; size_t sent_word; mesh_pages sent_target; };
+struct metal_wait { void *words, *violation, *data; size_t word, data_offset; mesh_pages target; uint64_t at; uint32_t channel; };
+/* A publication: in `words`, the count at `word` (a holding's `ready`) stored `value` after one system fence */
+struct metal_release { void *words; size_t word; mesh_pages value; };
 struct metal_result metal_publish(struct metal_program *, const struct metal_release *);
 /* Buffers a dispatch reaches through no binding of its own (a publication's operands, a landing's or a gate's landing
    buffers), declared on the classic form's encoder before it, with write use where `write`: Metal orders a pass after

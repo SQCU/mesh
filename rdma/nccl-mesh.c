@@ -234,20 +234,19 @@ struct entry { uint64_t below; struct mesh_program program; };
 
 /* a channel (design/transport.md section 14): toward rank `peer` on node `node`, the holding of the stream toward that
    node its process holds (mesh-call.h mesh_stream_view: its two lists and its counts), and the Metal buffer over the
-   page that holds the counts (`buffer`: `ready`, `sent` and `landed` at those offsets in it; `ready_at` the region
+   page that holds the counts (`buffer`: `ready` and `landed` at those offsets in it; `ready_at` the region
    offset of `ready`, a landing's gate).  Its entries, each list in its own order: `sends` and `lands` laid by the
    groups scheduled, `out` and `in` their pages (the value each count reaches once they are whole), `published` send
-   entries published, `consumed` landing entries consumed, `waited` landing entries awaited by the GPU work encoded,
-   and `sent_waited` the most of `sent` a wait encoded has awaited */
+   entries published, `consumed` landing entries consumed, `waited` landing entries awaited by the GPU work encoded */
 struct channel {
   int peer;
   uint32_t node, stream;
   const uint64_t *wire;
   struct mesh_stream_view view;
   void *buffer;
-  size_t ready, sent, landed;
+  size_t ready, landed;
   uint64_t ready_at, sends, lands, published, consumed, waited;
-  mesh_pages out, in, sent_waited;
+  mesh_pages out, in;
 };
 /* a lease of a communicator's pool (struct ncclComm `spares`): its address and bytes, and the group holding it (its
    number + 1: group_numbered; 0 free) */
@@ -1181,12 +1180,12 @@ static int comm_hold(struct ncclComm *comm, const struct report *reports) {
    `ready`'s region offset */
 static int channel_buffer(struct channel *ch, const struct hdr *m) {
   const uintptr_t page = (uintptr_t)getpagesize();
-  const uintptr_t at[3] = {(uintptr_t)ch->view.ready, (uintptr_t)ch->view.sent, (uintptr_t)ch->view.landed};
+  const uintptr_t at[2] = {(uintptr_t)ch->view.ready, (uintptr_t)ch->view.landed};
   uintptr_t lo = at[0], hi = at[0] + sizeof(uint64_t);
-  for (int k = 1; k < 3; k++) { lo = at[k] < lo ? at[k] : lo; hi = at[k] + sizeof(uint64_t) > hi ? at[k] + sizeof(uint64_t) : hi; }
+  for (int k = 1; k < 2; k++) { lo = at[k] < lo ? at[k] : lo; hi = at[k] + sizeof(uint64_t) > hi ? at[k] + sizeof(uint64_t) : hi; }
   lo &= ~(page - 1);
   hi = (hi + page - 1) & ~(page - 1);
-  ch->ready = at[0] - lo; ch->sent = at[1] - lo; ch->landed = at[2] - lo;
+  ch->ready = at[0] - lo; ch->landed = at[1] - lo;
   ch->ready_at = at[0] - (uintptr_t)m;
   return (ch->buffer = metal_wrap((void *)lo, hi - lo)) ? 0 : ENOMEM;
 }
@@ -1590,8 +1589,7 @@ ncclResult_t ncclRedOpDestroy(ncclRedOp_t op, ncclComm_t comm) {
    in, a landing entry the pages they land in (the destination itself for a COPY, the group's landing area for a
    combine), each a page's first byte; this end publishes its sends by raising its holding's `ready` past them, in
    order, and consumes its landings once `landed` covers them.  Nothing credits a publication: the hardware's credit
-   holds a SEND until its receive is posted (design/transport.md).  A write over bytes an earlier SEND reads waits
-   for `sent` (the same channel's combine, meeting; the group's end, retire); a Metal-path landing entry is gated on its
+   holds a SEND until its receive is posted (design/transport.md).  A Metal-path landing entry is gated on its
    group's start in the stream (gate_of), so no receive lands in pages the stream's earlier work still reads.  A group
    presents its entries before it publishes any (schedule); a member that fails mid-group sends nothing more, and its
    holding's end with units outstanding takes its stream out of the pairing (design/transport.md section 14). ---------- */
@@ -1884,9 +1882,8 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
    value its list's count reaches once it is whole (`end`), its piece's byte offset in its buffer and its bytes, where
    its bytes lie (a SEND's source, a COPY's destination, a combine's landing area: `data`) and the first of the rows
    they lie in (`row`); a landing's `need` (the send entries a combine into bytes an earlier SEND of its call on its
-   channel reads waits to be published: that entry + 1, 0 none) and `sent` (that SEND's end, the `sent` the combine
-   awaits) */
-struct message { struct call *c; uint32_t step; uint64_t entry; mesh_pages pages, end; uint64_t need; mesh_pages sent; size_t offset, bytes;
+   channel reads waits to be published: that entry + 1, 0 none) */
+struct message { struct call *c; uint32_t step; uint64_t entry; mesh_pages pages, end; uint64_t need; size_t offset, bytes;
                  struct where data; uint64_t row; };
 /* a group's entries on one channel, each list in its order from its first (`first`: [0] the send list's, [1] the
    landing list's), and its landing entries' gate (`word` a region offset, 0 none; `base` the value it reaches: a page
@@ -2040,7 +2037,6 @@ static void schedule_laid(struct ncclComm *comm, struct schedule *plans) {
         const struct message *o = p->out + j;
         if (o->c != m->c || o->step >= m->step || (st->read && named(st->read[o->step])) || !meet(st->steps + o->step, st->steps + m->step)) continue;
         if (o->entry + 1 > m->need) m->need = o->entry + 1;
-        if (pages_below(m->sent, o->end)) m->sent = o->end;
       }
     }
   }
@@ -2281,7 +2277,6 @@ static ncclResult_t held_fail(const struct ncclComm *comm, const struct channel 
               comm->name, ch->node);
 }
 static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
-  const mesh_pages none = {0};
   const struct mesh_deadline landing = mesh_deadline("libnccl-mesh: a host-path group's landings and publications (run)", 0);
   for (;;) {
     if (revoked(comm)) return revoked_fail(comm);
@@ -2301,11 +2296,11 @@ static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
         struct steps *st = m->c->bound;
         const struct mesh_step *step = st->steps + m->step;
         if (!ready(st, m->step) || ch->published < m->need) break;
-        const mesh_pages landed = count_of(ch->view.landed), sent = pages_below(none, m->sent) ? count_of(ch->view.sent) : none;
-        if (pages_lost(landed) || pages_lost(sent))
+        const mesh_pages landed = count_of(ch->view.landed);
+        if (pages_lost(landed))
           return fail(ncclRemoteError, "the link to node %u was lost at landing entry %llu (its holding's counts ~0)", ch->node,
                       (unsigned long long)ch->consumed);
-        if (pages_below(landed, m->end) || pages_below(sent, m->sent)) break;
+        if (pages_below(landed, m->end)) break;
         if (step->op == MESH_STEP_REDUCE) {
           unsigned char *to = address_of(st->buffer[step->buffer]) + m->offset;
           if (st->fresh && st->fresh[m->step]) memmove(to, address_of(st->read[m->step]) + m->offset, m->bytes);
@@ -2325,23 +2320,8 @@ static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
     }
     if (!open) break;
   }
-  const struct mesh_deadline sending = mesh_deadline("libnccl-mesh: a host-path group's SENDs done (run)", 0);
-  for (int all = 0; !all;) {
-    if (revoked(comm)) return revoked_fail(comm);
-    mesh_deadline_left(&sending);
-    all = 1;
-    for (uint32_t h = 0; h < comm->count; h++) {
-      const struct channel *ch = comm->channels + h;
-      const mesh_pages sent = plans[h].outs ? count_of(ch->view.sent) : none;
-      if (pages_lost(sent)) return fail(ncclRemoteError, "the link to node %u was lost before its SENDs completed (its holding's counts ~0)", ch->node);
-      if (plans[h].outs && pages_below(sent, ch->out) && !mesh_stream_held(&comm->attach->context, ch->stream, *ch->wire))
-        return held_fail(comm, ch);
-      all &= !plans[h].outs || !pages_below(sent, ch->out);
-    }
-  }
   for (uint32_t h = 0; h < comm->count; h++) {
     comm->channels[h].waited = comm->channels[h].consumed;
-    if (plans[h].outs) comm->channels[h].sent_waited = comm->channels[h].out;
   }
   return ncclSuccess;
 }
@@ -2700,7 +2680,7 @@ static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm
   struct inflight *g = inflight_at(comm, h, 0, upto - 1);
   if (!g) return outside_groups(comm, h, 0, upto - 1);
   const struct message *m = out_at(g, h, upto - 1);
-  const struct metal_release release = {ch->buffer, ch->ready, m->end, ch->sent, m->end};
+  const struct metal_release release = {ch->buffer, ch->ready, m->end};
   ncclResult_t result;
   if (g->fused) {
     if (fusing.published >= fusing.room[0])
@@ -2724,15 +2704,13 @@ static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm
 
 /* channel h's next landing entry consumed, as its track's item (metal_record; rdma/NCCL.md "Per-channel progress") or,
    `base` METAL_NONE, as dispatches in the stream's order (complete_track): its first wait on the holding's `landed`
-   past it, and on its `sent` past the SEND whose bytes it combines into (struct message `sent`), and, where `fold`
-   (one track, the stream's own order) at the group's last landing on the channel with every send of the group there
-   already published, past those (the group's end needs no wait of its own: retire); a combine's landed bytes combined
+   past it; a combine's landed bytes combined
    into its buffer (its first one, a call reading its send buffer in place, after a wait: with op landed), a COPY's
    wait alone (it landed in place), the fused crossing's landing recorded for its caller's kernel
    (metal_land_deferred: its wait for `sent` past the group's send there); a receive's first event after the receive
    before it (as a track's item, metal_depend: that receive's channel, track `base` + its index, consumed past it; in
    the stream, consumed before it) */
-static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm, uint32_t h, uint32_t base, int fold) {
+static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm, uint32_t h, uint32_t base) {
   struct channel *ch = comm->channels + h;
   const uint64_t at = ch->consumed;
   struct inflight *g = inflight_at(comm, h, 1, at);
@@ -2745,10 +2723,7 @@ static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm
     const int32_t j = st->before[m->step];
     result = gpu(metal_depend(program, base + st->channel[j], st->entry[j] + 1), "a receive's dependency");
   }
-  mesh_pages sent = m->sent;
-  const mesh_pages last = g->end[h][0] > g->start[h][0] ? out_at(g, h, g->end[h][0] - 1)->end : (mesh_pages){0};
-  if ((fold || g->fused) && at + 1 == g->end[h][1] && ch->published >= g->end[h][0] && pages_below(sent, last)) sent = last;
-  const struct metal_wait wait = {ch->buffer, comm->violation, m->data.buffer, ch->landed, ch->sent, m->data.offset, m->end, sent, at, h};
+  const struct metal_wait wait = {ch->buffer, comm->violation, m->data.buffer, ch->landed, m->data.offset, m->end, at, h};
   if (!result && step->op == MESH_STEP_REDUCE) {
     const struct where to = shifted(st->buffer[step->buffer], m->offset);
     if (st->fresh && st->fresh[m->step]) {
@@ -2765,7 +2740,6 @@ static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm
     fusing.landed += !result;
   } else if (!result) result = gpu(metal_spin(program, &wait), "a wait");
   if (result) return result;
-  if (!g->fused && pages_below(ch->sent_waited, sent)) ch->sent_waited = sent;
   st->done[m->step] = 1;
   ch->consumed = at + 1;
   if (ch->waited < at + 1) ch->waited = at + 1;
@@ -2812,7 +2786,7 @@ static ncclResult_t complete_track(struct metal_program *program, struct infligh
     if (upto > ch->published) { result = publish(program, comm, h, upto, published); continue; }
     struct inflight *x = ch->consumed < in ? inflight_at(comm, h, 1, ch->consumed) : NULL;
     const struct message *r = x ? in_at(x, h, ch->consumed) : NULL;
-    if (r && ready(r->c->bound, r->step) && ch->published >= r->need) result = consume(program, comm, h, METAL_NONE, 1);
+    if (r && ready(r->c->bound, r->step) && ch->published >= r->need) result = consume(program, comm, h, METAL_NONE);
     else
       result = fail(ncclInternalError, "channel %u's entries admit no order on one track (published %llu of %llu, consumed %llu of %llu)", h,
                     (unsigned long long)ch->published, (unsigned long long)out, (unsigned long long)ch->consumed, (unsigned long long)in);
@@ -2888,7 +2862,7 @@ static ncclResult_t complete(struct metal_program *program, struct inflight *thr
         struct inflight *g = inflight_at(c, h, 1, at);
         if (!g || g->fused) { result = g ? fail(ncclInternalError, "a fused crossing's landing on two tracks") : outside_groups(c, h, 1, at); break; }
         result = gpu(metal_record(program, track, METAL_CONSUME, at, in_at(g, h, at)->need), "a consumption's record");
-        if (!result) result = consume(program, c, h, base[k], 0);
+        if (!result) result = consume(program, c, h, base[k]);
       }
     }
   }
@@ -3123,14 +3097,6 @@ static ncclResult_t retire(struct metal_program *program) {
     for (uint32_t h = 0; h < comm->count; h++)
       if (comm->channels[h].consumed < g->end[h][1] || comm->channels[h].published < g->end[h][0]) return ncclSuccess;
     metal_gate(program, comm->violation);
-    for (uint32_t h = 0; h < comm->count && !result && !g->fused; h++) {
-      struct channel *ch = comm->channels + h;
-      if (g->end[h][0] == g->start[h][0]) continue;
-      const mesh_pages last = out_at(g, h, g->end[h][0] - 1)->end;
-      if (!pages_below(ch->sent_waited, last)) continue;
-      const struct metal_wait wait = {ch->buffer, comm->violation, NULL, 0, ch->sent, 0, (mesh_pages){0}, last, g->end[h][0] - 1, h};
-      if (!(result = gpu(metal_spin(program, &wait), "a wait for the group's SENDs"))) ch->sent_waited = last;
-    }
     if (!result) result = epilogue(program, g->list, g->n);
     inflight = g->next_group;
     if (!inflight) inflight_last = NULL;

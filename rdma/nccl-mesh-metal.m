@@ -349,19 +349,17 @@ struct metal_result metal_truncdiv(struct metal_program *program, int type, void
                   n, 0);
 }
 
-/* a wait's arguments (nccl-mesh-metal.h struct metal_wait): `landed` at aux until scalar, `sent` at first until sent,
+/* a wait's arguments (nccl-mesh-metal.h struct metal_wait): `landed` at aux until scalar,
    the landed bytes at src, dst the destination's offset, its entry and channel for its failure's record.  Its page
    counts become the record's words here and in release_args alone */
 static struct args wait_args(const struct metal_wait *w, size_t dst_offset, size_t n, int op) {
   return (struct args){.dst = dst_offset, .src = w->data_offset, .n = n, .scalar = pages_to_word(w->target), .aux = w->word, .op = (uint32_t)op,
-                       .first = w->sent_word, .sent = pages_to_word(w->sent_target), .at = w->at, .channel = w->channel};
+                       .at = w->at, .channel = w->channel};
 }
 
-/* a publication's arguments (struct metal_release): its count at aux stored scalar; `sent` at first until sent, for
-   mesh_step_sent; dst the operand's offset (a deferred one's) */
+/* a publication's arguments (struct metal_release): its count at aux stored scalar; dst the operand's offset (a deferred one's) */
 static struct args release_args(const struct metal_release *r, size_t dst_offset) {
-  return (struct args){.dst = dst_offset, .scalar = pages_to_word(r->value), .aux = r->word, .first = r->sent_word,
-                       .sent = pages_to_word(r->sent_target)};
+  return (struct args){.dst = dst_offset, .scalar = pages_to_word(r->value), .aux = r->word};
 }
 
 void metal_uses(struct metal_program *program, void *const *buffers, size_t n, int write) {
@@ -502,7 +500,7 @@ struct track_item { uint64_t position, need, target, word, v; uint32_t first_op,
 struct track_op { uint64_t d, s, a, v; struct args p; uint32_t kind, pad; };
 struct track_dep { uint64_t count; uint32_t other, pad; };
 _Static_assert(sizeof(struct track_head) == 64 && sizeof(struct track_rec) == 16 && sizeof(struct track_item) == 64 &&
-               sizeof(struct track_op) == 136 && sizeof(struct track_dep) == 16, "the track records");
+               sizeof(struct track_op) == 120 && sizeof(struct track_dep) == 16, "the track records");
 
 static uint64_t up(uint64_t x) { return (x + 255) & ~(uint64_t)255; }
 
