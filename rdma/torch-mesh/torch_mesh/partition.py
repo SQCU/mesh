@@ -1188,29 +1188,36 @@ def context_parallel_buffers(mesh, name, buffers, seq_dims, load_balance=True):
     return shards
 
 
+_JOINED = {}
+
+
 @torch.no_grad()
 def context_parallel_unshard(mesh, name, buffers, seq_dims, load_balance=True):
-    """torch's context_parallel_unshard over partitioned mesh dimension `name`: every rank's capacity block gathered
-    (Allgatherv) and the valid positions put back in sequence order."""
-    o, rank = operand(mesh, name), mesh.get_local_rank(name)
+    """torch's context_parallel_unshard over partitioned mesh dimension `name`: every rank's capacity block gathered as
+    it lies (one Allgatherv, dist.all_gather, into the page-padded segments of a region lease held for the shape: the
+    library places each segment on a page, _paged) and each half of each block copied into its positions of the
+    sequence, in a second lease held for the shape."""
+    o, rank, group = operand(mesh, name), mesh.get_local_rank(name), mesh.get_group(name)
     local = buffers[0].shape[seq_dims[0]]
     S, rest = divmod(local * o.units, o.capacity[rank])
     if rest:
         raise ValueError(f'mesh: {local} positions on rank {rank} are no capacity block of {o.capacity}')
-    halves = _halves(o, S, load_balance)
-    lengths, offsets = _blocks(o, S)
-
-    def build(parts):
-        """Where each logical position lies in the gathered blocks, from the parts on the host (no device sync per
-        call)."""
-        order = torch.empty(S, dtype=torch.int64)
-        for r in range(len(lengths)):
-            index, valid = _positions(o.key, r, S, halves, 'cpu')
-            order[index[valid]] = offsets[r] + valid.nonzero().squeeze(1)
-        return order.to(buffers[0].device)
-    order = o.cached(('order', S, halves, str(buffers[0].device)), build)
-    group = mesh.get_group(name)
-    return [_allgatherv(b, dim, lengths, group).index_select(dim, order) for b, dim in zip(buffers, seq_dims)]
+    halves, lengths, joined = _halves(o, S, load_balance), _blocks(o, S)[0], []
+    for b, dim in zip(buffers, seq_dims):
+        shape, b = lambda s: b.shape[:dim] + (s,) + b.shape[dim + 1:], b.contiguous()
+        counts, starts = _paged([s * math.prod(shape(1)) for s in lengths], b.element_size(), group)
+        key = (tuple(b.shape), dim, b.dtype, group.group_name)
+        if key not in _JOINED:
+            _JOINED[key] = _empty((starts[-1],), b, group), _empty(shape(S), b, group)
+        out, whole = _JOINED[key]
+        out[starts[rank]:starts[rank] + b.numel()].view(b.shape).copy_(b)
+        dist.all_gather(list(out.split(counts)), out[starts[rank]:starts[rank] + counts[rank]], group=group)
+        for r, (at, s) in enumerate(zip(starts, lengths)):
+            block = out[at:at + math.prod(shape(s))].view(shape(s))
+            for a, (lo, hi) in enumerate(_spans(o, r, S, halves)):
+                whole.narrow(dim, lo, hi - lo).copy_(block.narrow(dim, a * (s // halves), hi - lo))
+        joined.append(whole)
+    return joined
 
 
 def ring_attention(mesh, name, query, key, value, is_causal=False, scale=None, load_balance=True):
@@ -1223,41 +1230,52 @@ def ring_attention(mesh, name, query, key, value, is_causal=False, scale=None, l
 
 
 SCORES = 1 << 26
+_SCORES = {}
 
 
-def _block(query, key, value, scale=None, queries=None, keys=None, valid=None):
-    """softmax(q k^T scale) v and each query row's logsumexp (MPS's SDPA returns none), the scores SCORES at a time: keys
+def _scores(like, group):
+    """The ring's scores: one float32 region lease of SCORES elements, held for the group (_block writes it in place)."""
+    if group.group_name not in _SCORES:
+        _SCORES[group.group_name] = _empty((SCORES,), like, group, torch.float32)
+    return _SCORES[group.group_name]
+
+
+def _block(query, key, value, into, scores, scale=None, queries=None, keys=None, valid=None):
+    """Each query row's attention over these keys as the library's partials, written into `into` (rows of [m, l, O]:
+    the row's greatest score, its sum of exponentials and its unnormalized output, nccl.h ncclMeshRedOpCreatePartials;
+    l 0 where it sees no key), the scores SCORES at a time in `scores` (_scores), every pass over them in place: keys
     where `valid` (a bool a key) is False masked, and where `queries` (each query's logical position) is given each key
     past its query (`keys`: each key's)."""
     scale = query.shape[-1] ** -0.5 if scale is None else scale
-    rows, n = query.shape[-2], key.shape[-2]
-    step = max(1, SCORES // (query[..., 0, 0].numel() * n))
-    out = query.new_empty(query.shape[:-1] + value.shape[-1:])
-    lse = query.new_empty(query.shape[:-1], dtype=torch.float32)
+    lead, rows, n = query.shape[:-2], query.shape[-2], key.shape[-2]
+    step = max(1, SCORES // (math.prod(lead) * n))
     kt = key.transpose(-2, -1)
     for at in range(0, rows, step):
-        scores = (query[..., at:at + step, :] @ kt).float() * scale
+        q, part = query[..., at:at + step, :], into[..., at:at + step, :]
+        s = scores[:math.prod(lead) * q.shape[-2] * n].view(lead + (q.shape[-2], n))
+        torch.matmul(q, kt, out=s) if q.dtype == s.dtype else s.copy_(q @ kt)
+        s.mul_(scale)
         if queries is not None:
-            scores.masked_fill_(keys > queries[at:at + step, None], -math.inf)
+            s.masked_fill_(keys > queries[at:at + step, None], -math.inf)
         if valid is not None:
-            scores.masked_fill_(~valid, -math.inf)
-        top = torch.logsumexp(scores, -1, keepdim=True)
-        lse[..., at:at + step] = top.squeeze(-1)
-        out[..., at:at + step, :] = torch.exp(scores - top).to(value.dtype) @ value
-    return out, lse
+            s.masked_fill_(~valid, -math.inf)
+        top = s.amax(-1, keepdim=True)
+        part[..., :1] = top.masked_fill_(top == -math.inf, 0)
+        part[..., 1:2] = s.sub_(top).exp_().sum(-1, keepdim=True)
+        part[..., 2:] = s.to(value.dtype) @ value
 
 
 def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=None, halves=1):
     """Ring attention over capacity blocks as split-KV partials: every rank's query block gathered (one Allgatherv,
     static counts, into a region tensor on the mesh backend: _empty, this rank's copied into its place there and the
     call run in place, mesh f9898875); each block's attention over this rank's own keys and values written as its
-    owner's rows of the partials (backend.partial; keys past their valid extents masked, a causal one by the logical
-    positions of its queries and keys, a half of the block attending only to the halves of this rank's keys it can see,
-    none where it sees none); and the partials reduce-scattered by the library's partials operator, each owner's rows
-    merged at it by their log-sum-exp (ProcessGroupMesh.merge_partials, ncclMeshReduceScatterV).  This rank's own block
-    is computed while the gather is in flight.  Padded query rows compute garbage that the unshard drops.  Forward
-    only."""
-    from .backend import ProcessGroupMesh, attention, partial
+    owner's rows of the partials (_block, in place in the region; keys past their valid extents masked, a causal one by
+    the logical positions of its queries and keys, a half of the block attending only to the halves of this rank's keys
+    it can see, none where it sees none); and the partials reduce-scattered by the library's partials operator, each
+    owner's rows merged at it by their log-sum-exp (ProcessGroupMesh.merge_partials, ncclMeshReduceScatterV), the
+    output O / l and the logsumexp m + log l read from the merged lease in place.  This rank's own block is computed
+    while the gather is in flight.  Padded query rows compute garbage that the unshard drops.  Forward only."""
+    from .backend import ProcessGroupMesh
     if not isinstance(group, ProcessGroupMesh):
         raise TypeError('mesh: the ring\'s merge is the mesh backend\'s partials operator (torch_mesh::merge_partials)')
     o = _OPERANDS[key_name]
@@ -1276,7 +1294,7 @@ def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=N
     packed = _empty((sum(rows), width), query, group, torch.float32).zero_()
     owners = list(packed.split(rows))
     keys, valid = _positions(key_name, rank, S, halves, query.device)
-    mine, step = _spans(o, rank, S, halves), lengths[rank] // halves
+    mine, step, scores = _spans(o, rank, S, halves), lengths[rank] // halves, _scores(query, group)
 
     def owned(j):
         """Block j's queries' attention over this rank's keys, as owner j's rows of the partials."""
@@ -1286,8 +1304,8 @@ def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=N
             seen = [b for b, (lo, _) in enumerate(mine) if not is_causal or lo < hi]
             if seen:
                 at, cols = slice(a * height, (a + 1) * height), slice(seen[0] * step, (seen[-1] + 1) * step)
-                into[:, :, at] = partial(*_block(q[:, :, at], key[:, :, cols], value[:, :, cols], scale,
-                                                 queries[at] if is_causal else None, keys[cols], valid[cols]))
+                _block(q[:, :, at], key[:, :, cols], value[:, :, cols], into[:, :, at], scores, scale,
+                       queries[at] if is_causal else None, keys[cols], valid[cols])
     owned(rank)
     gathered.wait()
     for j in range(size):
@@ -1295,5 +1313,6 @@ def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=N
             owned(j)
     merged = _empty((rows[rank], width), query, group, torch.float32)
     group.merge_partials(merged, packed, rows)
-    out, lse = attention(merged.view(lead + (lengths[rank], width)))
-    return out.to(query.dtype), lse
+    m, l, out = (t.view(lead + (lengths[rank],) + t.shape[1:]) for t in (merged[:, 0], merged[:, 1], merged[:, 2:]))
+    lse = torch.where(l > 0, m + l.log(), -math.inf)
+    return out.div_(l[..., None]).masked_fill_((l == 0)[..., None], 0).to(query.dtype), lse
