@@ -414,6 +414,11 @@ def _(x, w, group_name):
     return x.new_empty(x.shape[0], w.shape[0])
 
 
+@torch.library.register_fake('torch_mesh::linears')
+def _(x, w, bias, act, x1):
+    return [a.new_empty(a.shape[0], b.shape[0]) for a, b in zip(x, w)]
+
+
 @torch.library.register_fake('torch_mesh::linear')
 def _(x, w, bias=None, act=0, x1=None):
     return x.new_empty(x.shape[0], w.shape[0])

@@ -39,7 +39,8 @@ def compiler(gm, example_inputs):
     few fp16 rows by a weight laid out as nn.Linear's (aten.mm(x, w^T), aten.addmm(b, x, w^T): w^T the transposed view of
     a [N, K] whose rows lie apart by K or more, x at most 8 rows) are torch_mesh::linear, one plain dispatch of
     torch-mesh's own (linear.metal) where MPS's matmul costs its host about 12 us a call, with a tanh that is a
-    product's one use folded into it.  Inductor's run-time size, alignment and scalar asserts are off: each is a check
+    product's one use folded into it, a cat of two row segments that is its x read in place, and up to four consecutive
+    independent products one dispatch (torch_mesh::linears).  Inductor's run-time size, alignment and scalar asserts are off: each is a check
     at every call of what the compile fixed (design/data-model.md section 6)."""
     from pathlib import Path
 
@@ -69,6 +70,44 @@ def compiler(gm, example_inputs):
         if any(p is None or p.dtype != torch.half or p.dim() != 2 or p.stride(1) != 1 for p in parts):
             return None
         return x.args[0]
+
+    def grouped(graph):
+        """Consecutive products of torch_mesh::linear, up to four, none reading another's output nor any of their outputs
+        used before the last of them, as one torch_mesh::linears: one dispatch."""
+        import operator
+        order = {n: i for i, n in enumerate(graph.nodes)}
+        products = [n for n in graph.nodes if n.target is torch.ops.torch_mesh.linear.default]
+        above = {}
+
+        def ancestors(n):
+            if n not in above:
+                seen, stack = set(), list(n.all_input_nodes)
+                while stack:
+                    m = stack.pop()
+                    if m not in seen:
+                        seen.add(m)
+                        stack.extend(m.all_input_nodes)
+                above[n] = seen
+            return above[n]
+        i = 0
+        while i < len(products):
+            group = [products[i]]
+            for m in products[i + 1:4 + i]:
+                if any(g in ancestors(m) for g in group) or any(order[u] < order[m] for g in group for u in g.users):
+                    break
+                group.append(m)
+            if len(group) > 1:
+                args = [list(m.args) + [None, 0, None][len(m.args) - 2:] for m in group]
+                with graph.inserting_before(group[-1]):
+                    made = graph.call_function(torch.ops.torch_mesh.linears.default, tuple([a[k] for a in args] for k in range(5)))
+                    made.meta['val'] = [m.meta['val'] for m in group]
+                    for j, m in enumerate(group):
+                        part = graph.call_function(operator.getitem, (made, j))
+                        part.meta['val'] = m.meta['val']
+                        m.replace_all_uses_with(part)
+                for m in group:
+                    graph.erase_node(m)
+            i += len(group)
 
     class Leased(CustomGraphPass):
         def __call__(self, graph):
@@ -107,9 +146,10 @@ def compiler(gm, example_inputs):
                         made.args = made.args[:3] + (1,) + made.args[4:]
                         users[0].replace_all_uses_with(made)
                         graph.erase_node(users[0])
+            grouped(graph)
 
         def uuid(self):
-            return 'torch_mesh::all_reduce torch_mesh::linear cat'
+            return 'torch_mesh::all_reduce torch_mesh::linear cat linears'
     with config.patch(post_grad_custom_pre_pass=Leased(), size_asserts=False, alignment_asserts=False, scalar_asserts=False):
         return lookup_backend('inductor')(gm, example_inputs)
 
