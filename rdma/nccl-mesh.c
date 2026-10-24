@@ -877,6 +877,52 @@ static int cable_order(const void *left, const void *right) {
   return (a->wire > b->wire) - (a->wire < b->wire);
 }
 
+/* every simple path over fabric f's cables from rank `at` to rank `to` (`seen`: the ranks on it so far, `path` its cables
+   so far, `depth` of them), depth first in cable order, as rdma/routing.py Fabric enumerates them: each appended to
+   `out` (its cables after the last's, `first` each path's start, `count` the paths); ENOMEM where they cannot grow */
+struct walked { uint32_t *first, *cable; uint32_t count, cables, room; };
+static int walk_paths(const struct mesh_fabric *f, uint32_t at, uint32_t to, uint64_t seen, uint32_t *path, uint32_t depth, struct walked *out) {
+  if (at == to) {
+    uint32_t *first = realloc(out->first, (out->count + 2) * sizeof *first), *cable = first ? realloc(out->cable, (out->cables + depth + 1) * sizeof *cable) : NULL;
+    if (first) out->first = first;
+    if (!cable) return ENOMEM;
+    out->cable = cable;
+    memcpy(out->cable + out->cables, path, depth * sizeof *path);
+    out->first[out->count] = out->cables; out->cables += depth; out->first[++out->count] = out->cables;
+    return 0;
+  }
+  for (uint32_t e = 0; e < f->cables; e++) {
+    const uint32_t a = f->cable[e].node[0], b = f->cable[e].node[1], other = a == at ? b : b == at ? a : UINT32_MAX;
+    if (other == UINT32_MAX || seen >> other & 1) continue;
+    path[depth] = e;
+    const int status = walk_paths(f, other, to, seen | UINT64_C(1) << other, path, depth + 1, out);
+    if (status) return status;
+  }
+  return 0;
+}
+/* design/whole-function.md#one-way-writes: comm's one-way write routes as its map gives them, made with its map: from each
+   rank to each other, every physical path over its cables at equal weight (log weight 0), as rdma/tests/fused-physical.py
+   installs them (rdma/routing.py Fabric.install); ncclMeshCommWriteRoutes replaces a pair's.  A pair no path joins has
+   none (a write between them fails as a value: write_steps).  The simple paths between two nodes grow exponentially with
+   the nodes (a complete map of k nodes has about (k - 2)! e of them a pair); routing.Fabric walks them all, uncapped, and
+   so does this: at the mesh's three nodes a pair has two or three */
+static int write_defaults(struct ncclComm *comm) {
+  const uint32_t n = (uint32_t)comm->nranks;
+  uint32_t *path = malloc((comm->fabric.cables + 1) * sizeof *path);
+  if (!path || n > 64 || !(comm->writes = calloc((size_t)n * n, sizeof *comm->writes))) { free(path); return ENOMEM; }
+  int status = 0;
+  for (uint32_t s = 0; s < n && !status; s++)
+    for (uint32_t d = 0; d < n && !status; d++) {
+      struct walked w = {0};
+      if (s == d || (status = walk_paths(&comm->fabric, s, d, UINT64_C(1) << s, path, 0, &w)) || !w.count) { free(w.first); free(w.cable); continue; }
+      double *weight = calloc(w.count, sizeof *weight);
+      if (!weight) { free(w.first); free(w.cable); status = ENOMEM; break; }
+      comm->writes[s * n + d] = (struct mesh_paths){w.count, w.first, w.cable, weight};
+    }
+  free(path);
+  return status;
+}
+
 static int fabric_discover(struct ncclComm *comm, const struct report *reports) {
   const uint32_t n = (uint32_t)comm->nranks;
   struct mesh_cable *cables = calloc((size_t)n * MESH_STREAMS + 1, sizeof *cables);
@@ -929,8 +975,8 @@ static int fabric_discover(struct ncclComm *comm, const struct report *reports) 
     comm->endpoint[e] = UINT32_MAX;
   }
   for (uint32_t r = 0; r < n; r++) map->mark[r] = reports[r].node;
-  const int checked = mesh_fabric_check(&comm->fabric);
-  return checked ? checked : mesh_link_map_joined(map, NULL);
+  const int checked = mesh_fabric_check(&comm->fabric), joined = checked ? checked : mesh_link_map_joined(map, NULL);
+  return joined ? joined : write_defaults(comm);
 }
 
 ncclResult_t ncclGetVersion(int *version) {
