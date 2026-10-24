@@ -1689,16 +1689,28 @@ static void arrivals_turn(void){
    its port's verbs objects (the kernel's), and a link once connected and then lost pairs again with the port's next
    child */
 static char self_path[PATH_MAX];
-/* a message to the port's child, whole; one not taken (the child gone) is dropped, its end reaped (child_reaped) */
-static void child_send(struct port *port,struct child_message said){
-  const char *at=(const char *)&said;
-  size_t left=sizeof said;
-  while(port->child_fd>=0 && left){
-    const ssize_t sent=send(port->child_fd,at,left,0);
+/* a message whole on the socket between a port's child and its parent, within MESH_PLATFORM_NS of the call (the operator,
+   2026-10-23: no wait runs longer than a deadline presented when it is made, 5 s by default): a peer gone drops it, and
+   one that takes no more by the deadline ends this process at once, the wait named (`what`) */
+static void message_send(int fd,const struct child_message *said,const char *what){
+  const char *at=(const char *)said;
+  size_t left=sizeof *said;
+  const uint64_t until=clock_ns()+MESH_PLATFORM_NS;
+  while(left){
+    const ssize_t sent=send(fd,at,left,MSG_DONTWAIT);
+    if(sent>0){at+=sent;left-=(size_t)sent;continue;}
     if(sent<0 && errno==EINTR)continue;
-    if(sent<=0)return;
-    at+=sent;left-=(size_t)sent;
+    if(sent==0 || errno!=EAGAIN)return;
+    const uint64_t t=clock_ns();
+    if(t>=until){say("%s: its peer took no message for %.0f s; this process exits\n",what,(double)MESH_PLATFORM_NS/1e9);exit(EX_SOFTWARE);}
+    struct pollfd room={.fd=fd,.events=POLLOUT};
+    poll(&room,1,(int)((until-t+999999)/1000000));
   }
+}
+/* a message to the port's child, whole (message_send); one not taken (the child gone) is dropped, its end reaped
+   (child_reaped) */
+static void child_send(struct port *port,struct child_message said){
+  if(port->child_fd>=0)message_send(port->child_fd,&said,"bridge: child_send to a port's child");
 }
 static void child_reaped(struct port *port);
 /* a process, not this bridge nor one of its children, that is a child of the port's device of any version (its argv
@@ -1955,16 +1967,7 @@ static uint64_t child_bandwidth;
 static int child_halted;
 static unsigned char child_in[sizeof(struct child_message)];
 static uint32_t child_got;
-static void child_tell(struct child_message said){
-  const char *at=(const char *)&said;
-  size_t left=sizeof said;
-  while(left){
-    const ssize_t sent=send(3,at,left,0);
-    if(sent<0 && errno==EINTR)continue;
-    if(sent<=0)return;
-    at+=sent;left-=(size_t)sent;
-  }
-}
+static void child_tell(struct child_message said){ message_send(3,&said,"child: child_tell to its parent"); }
 static __attribute__((noreturn)) void child_leave(struct port *port,int asked){
   atomic_fetch_add(&port->link.pairing,1);
   atomic_store(&port->link.served,0);
