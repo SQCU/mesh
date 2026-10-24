@@ -178,8 +178,8 @@ struct mesh_move { uint32_t op,peer,round,buffer,part,parts; };
 struct mesh_program { uint32_t what,root,nodes,parts,scratch,padding; const uint32_t *segment; const double *log_weight;
                       const uint32_t *first; const struct mesh_move *move; };
 
-/* The room mesh_compile needs at `chunks`: parts and moves. */
-void mesh_compile_room(const struct mesh_trees *,uint32_t chunks,uint32_t *parts,uint32_t *moves);
+/* The room mesh_compile needs: parts and moves. */
+void mesh_compile_room(const struct mesh_trees *,uint32_t *parts,uint32_t *moves);
 /* A collective compiled along `trees` into `program` (arrays of mesh_compile_room's room: segment and log_weight a
    part, first nodes + 1, move a move):
      MESH_REDUCE           the whole operand up root's trees, a part a tree (its weight);
@@ -190,19 +190,19 @@ void mesh_compile_room(const struct mesh_trees *,uint32_t chunks,uint32_t *parts
                            whole 1: the whole operand reduced toward every contributor at once, up its heaviest tree,
                            a node forwarding its partial for another from a scratch buffer of its own and its own
                            operand from a copy, or, where it sends that to one node only and forwards nothing (two
-                           nodes, the direct exchange), from the operand itself: its one SEND and its one REDUCE of
-                           each chunk then meet in the operand on one channel, and the executors combine into it only
+                           nodes, the direct exchange), from the operand itself: its one SEND and its one REDUCE
+                           then meet in the operand on one channel, and the executors combine into it only
                            once the bridge has sent the SEND's bytes (libnccl-mesh, the holding's `sent`), so the SEND
                            reads the operand before the sum is made in it (its dependent crossings the heaviest trees'
                            height, 1 where they are stars, the direct exchange; each node
                            sends the whole operand once for every other) [single-phase all-reduce: Trivance 2026].
-   Each tree's part is cut into `chunks` parts (at least 1), chunk j of every move at its round + j, so a node forwards
-   a part's chunk as it arrives rather than the whole part once all of it has: the trees pipelined [Blink; NCCL's
-   chunked trees; MSCCLang's chunks, Cowan et al. 2023]; a segment's parts are chunk-major (chunk 0 of each of its
-   trees, then chunk 1, ...), so a message coalesces a chunk across the segment's trees.  Going up a tree a node sends
-   chunk j at round its height + j, after its children's chunk j; coming down, a node at depth d receives chunk j at
-   base + d - 1 + j and sends it at base + d + j, base the highest of the trees' heights (the reduce-scatter's first
-   chunk's last round plus one); a round's SENDs come before its receives, so a SEND waits on lower rounds alone.  A
+   A tree's part is one move a hop, uncut: a node that sends on unchanged what it received (a COPY, the identity at a
+   rank, design/data-model.md section 9) sends each page as it lands (libnccl-mesh presents the SEND gated page by page
+   on that receive's landed count), so such a path pipelines by the page and no count of chunks exists; a node that
+   combines sends its sum once its part is combined.  Going up a
+   tree a node sends at round its height, after its children; coming down, a node at depth d receives at base + d - 1
+   and sends at base + d, base the highest of the trees' heights (the reduce-scatter's last round plus one); a round's
+   SENDs come before its receives, so a SEND waits on lower rounds alone.  A
    message is coalesced with the next between the same two nodes in the same round where their parts adjoin and each
    end's buffer and step are the same.  `contributors` (a bit a node, 64 a word; NULL: every node) are the nodes with
    work: those whose operands a reduction combines, whose segments a reduce-scatter, an all-reduce and an all-gather
@@ -210,7 +210,7 @@ void mesh_compile_room(const struct mesh_trees *,uint32_t chunks,uint32_t *parts
    node runs the identity: up a tree it takes its first child's partial as it comes and combines the rest into it, and
    sends it on; down a tree it is sent a piece only where a contributor lies below it, and sends it on.  0, or
    EINVAL. */
-int mesh_compile(const struct mesh_trees *,uint32_t what,uint32_t root,int whole,uint32_t chunks,const uint64_t *contributors,
+int mesh_compile(const struct mesh_trees *,uint32_t what,uint32_t root,int whole,const uint64_t *contributors,
                  struct mesh_program *program,uint32_t *segment,double *log_weight,uint32_t *first,struct mesh_move *move);
 /* A rank's steps of a program for an operand, a step a move (none where its elements are none), at most first[rank +
    1] - first[rank], over an operand cut into segments of the given sizes (MPI_Allgatherv's and MPI_Reduce_scatter's counts, one

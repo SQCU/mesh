@@ -393,18 +393,17 @@ static int program_copy(struct mesh_program *made, const struct mesh_program *fr
   return 0;
 }
 
-/* `what` (at `root`) along `trees` (mesh-plan.h mesh_compile), each tree's part cut into `chunks` (1: uncut, each
-   step's piece one entry, which the bridge cuts into SENDs), an all-reduce single-phase where `whole`,
-   compiled into the table's next entry, for calls of fewer bytes than `below` (0: any size); 0, or EINVAL */
-static int compile_entry(struct ncclComm *comm, const struct mesh_trees *trees, uint32_t what, uint32_t root, int whole, uint32_t chunks,
-                         uint64_t below) {
+/* `what` (at `root`) along `trees` (mesh-plan.h mesh_compile: each step's piece one entry, which the bridge cuts into
+   SENDs), an all-reduce single-phase where `whole`, compiled into the table's next entry, for calls of fewer bytes than
+   `below` (0: any size); 0, or EINVAL */
+static int compile_entry(struct ncclComm *comm, const struct mesh_trees *trees, uint32_t what, uint32_t root, int whole, uint64_t below) {
   uint32_t parts, moves;
-  mesh_compile_room(trees, chunks, &parts, &moves);
+  mesh_compile_room(trees, &parts, &moves);
   uint32_t *segment = malloc((parts + 1) * sizeof *segment), *first = malloc((trees->nodes + 1) * sizeof *first);
   double *weight = malloc((parts + 1) * sizeof *weight);
   struct mesh_move *move = malloc((moves + 1) * sizeof *move);
   struct entry *e = comm->entries + comm->programs;
-  if (!segment || !first || !weight || !move || mesh_compile(trees, what, root, whole, chunks, NULL, &e->program, segment, weight, first, move)) {
+  if (!segment || !first || !weight || !move || mesh_compile(trees, what, root, whole, NULL, &e->program, segment, weight, first, move)) {
     free(segment); free(first); free(weight); free(move);
     return EINVAL;
   }
@@ -425,7 +424,7 @@ static int root_carried(const struct mesh_trees *trees, uint32_t r) {
 /* a configured form's entries (ncclMeshCommForms): its collective along the communicator's trees (`along`) or the map's
    packed trees (mesh_trees_pack at the form's eps and most, made here: mesh cc8a6f8e^ comm_routes' sets[1]; a segment
    cut among a root's trees by the form's shares, else by the packing's flows; a tree of share 0 carries none of it; the
-   communicator's trees cut alike where the form gives shares), whole or two-phase, at its chunks, below its bound; a rooted one at
+   communicator's trees cut alike where the form gives shares), whole or two-phase, below its bound; a rooted one at
    its root, or at each root (-1), none where its root is past the communicator's ranks (a split's).  A root every one
    of whose trees takes share 0 has no tree to carry its segment: the form fails there as a value */
 static ncclResult_t compile_form(struct ncclComm *comm, const struct mesh_trees *along, const ncclMeshForm *x) {
@@ -465,7 +464,7 @@ static ncclResult_t compile_form(struct ncclComm *comm, const struct mesh_trees 
     for (uint32_t q = has_root(x->collective) ? root : 0; !result && weighs && q < (has_root(x->collective) ? root + 1 : n); q++)
       if (!root_carried(trees, q))
         result = fail(ncclInvalidArgument, "the configured form of collective %d: every tree of root %u takes share 0", x->collective, q);
-    if (!result && compile_entry(comm, trees, (uint32_t)x->collective, root, x->whole, x->chunks, x->below))
+    if (!result && compile_entry(comm, trees, (uint32_t)x->collective, root, x->whole, x->below))
       result = fail(ncclInternalError, "the configured form of collective %d at root %u does not compile", x->collective, root);
   }
   trees_free(&packed);
@@ -479,11 +478,9 @@ static ncclResult_t compile_form(struct ncclComm *comm, const struct mesh_trees 
    the all-gather, each root's alone for its reduce and broadcast, every link in use and each tree's part its flow's
    share, so a part crosses every route and the routes end together [Garg & Konemann 1998; Blink, Wang et al. 2020]),
    the all-reduce two-phase (the reduce-scatter and then the all-gather over every pair [Patarasuk & Yuan 2009]), the
-   reduce-scatter and the all-gather (segment s up and down s's trees), and each root's reduce and broadcast, each tree's
-   part uncut, one entry the bridge cuts into SENDs (in 4 chunks on three nodes, the all-gather, the reduce-scatter and
-   the all-reduce ran 15 to 50% slower from 256 KiB to 4 MiB and no faster above: metal-microbench
-   output_data/route-20261023/explore-0013), of any size (mesh_compile; mesh 2bf5a50d^ comm_routes's table, its entries
-   along the routes): a
+   reduce-scatter and the all-gather (segment s up and down s's trees), and each root's reduce and broadcast, each
+   tree's part one entry, a relay sending on each page as it lands (present_group, forwards), of any size (mesh_compile;
+   mesh 2bf5a50d^ comm_routes's table, its entries along the routes): a
    call takes the first entry that fits it (program_of), so a collective no form names, or a size past every form's
    bound, runs the caller's program or the default.  Where trees are compiled (a form, or no programs listed), a map
    whose links do not join its members fails it, naming two: a route crosses ranks alone, so a node a route is to cross
@@ -535,11 +532,11 @@ static ncclResult_t comm_routes(struct ncclComm *comm) {
     comm->entries[comm->programs++].below = comm->given[e].below;
   }
   if (comm->listed) return ncclSuccess;
-  if (compile_entry(comm, along, MESH_ALLREDUCE, 0, 0, 1, 0) || compile_entry(comm, along, MESH_REDUCE_SCATTER, 0, 0, 1, 0) ||
-      compile_entry(comm, along, MESH_ALLGATHER, 0, 0, 1, 0))
+  if (compile_entry(comm, along, MESH_ALLREDUCE, 0, 0, 0) || compile_entry(comm, along, MESH_REDUCE_SCATTER, 0, 0, 0) ||
+      compile_entry(comm, along, MESH_ALLGATHER, 0, 0, 0))
     return fail(ncclInternalError, "the all-reduce, reduce-scatter or all-gather along the communicator's trees does not compile");
   for (uint32_t r = 0; r < n; r++)
-    if (compile_entry(comm, rooted, MESH_REDUCE, r, 0, 1, 0) || compile_entry(comm, rooted, MESH_BROADCAST, r, 0, 1, 0))
+    if (compile_entry(comm, rooted, MESH_REDUCE, r, 0, 0) || compile_entry(comm, rooted, MESH_BROADCAST, r, 0, 0))
       return fail(ncclInternalError, "the reduce or broadcast of root %u along the communicator's trees does not compile", r);
   return ncclSuccess;
 }
@@ -589,10 +586,10 @@ ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm *forms, int c
     const ncclMeshForm *x = forms + f;
     int shared = !x->shares || x->most;
     for (size_t k = 0; x->shares && shared && k < (size_t)comm->nranks * x->most; k++) shared = x->shares[k] >= 0 && isfinite(x->shares[k]);
-    if (x->collective < MESH_ALLREDUCE || x->collective > MESH_ALLGATHER || (has_root(x->collective) && x->root < -1) || !x->chunks || !shared ||
+    if (x->collective < MESH_ALLREDUCE || x->collective > MESH_ALLGATHER || (has_root(x->collective) && x->root < -1) || !shared ||
         (x->trees != ncclMeshTreesOwn && x->trees != ncclMeshTreesPacked) || (x->trees == ncclMeshTreesPacked && (!x->most || !(x->eps > 0))))
       return fail(ncclInvalidArgument, "form %d: a collective (mesh-plan.h MESH_*), a rooted one's root (-1 every root), its trees "
-                  "(shortest, or packed with eps > 0 and most > 0), shares of 0 or more (most of them a root) or none, and chunks > 0", f);
+                  "(shortest, or packed with eps > 0 and most > 0), shares of 0 or more (most of them a root) or none", f);
   }
   ncclMeshForm *made = count ? forms_copy(forms, (uint32_t)count, (uint32_t)comm->nranks) : NULL;
   if (count && !made) return fail(ncclSystemError, "out of memory");
@@ -1981,6 +1978,17 @@ static int meet(const struct mesh_step *x, const struct mesh_step *y) {
   return x->buffer == y->buffer && x->first < y->first + y->piece.elements && y->first < x->first + x->piece.elements;
 }
 
+/* the receive whose bytes SEND step k sends on unchanged, page by page as they land (design/data-model.md section 9: a
+   relay is the identity at a rank), or -1: the last receive before it that meets its piece, a COPY into the same
+   buffer whose piece holds its own, from a page of it (step k not reading the send buffer in place) */
+static int32_t forwards(const struct steps *s, uint32_t k, uint64_t page) {
+  if (s->prior_first[k] == s->prior_first[k + 1] || (s->read && named(s->read[k]))) return -1;
+  const uint32_t r = s->prior[s->prior_first[k + 1] - 1];
+  const struct mesh_step *a = s->steps + r, *b = s->steps + k;
+  return a->op == MESH_STEP_COPY && a->first <= b->first && b->first + b->piece.elements <= a->first + a->piece.elements &&
+         (b->first - a->first) * b->piece.element_bytes % page == 0 ? (int32_t)r : -1;
+}
+
 /* each channel's entries for the group, each list from its 0 (mesh_group_lay: schedule_laid lays them from the last
    scheduled entry and page), the overlapping receives before each step kept, a receive with no bytes done */
 static ncclResult_t schedule_group(struct ncclComm *comm, struct call *list, size_t n, struct schedule *plans) {
@@ -2302,14 +2310,14 @@ static ncclResult_t present_group(struct ncclComm *comm, struct schedule *plans)
     for (size_t k = 0; !status && k < p->outs; k++) {
       const struct message *m = p->out + k;
       struct mesh_entry entry = {m->row, pages_to_word(m->pages), 0, pages_to_word(pages_sub(m->end, m->pages))};
-      if (0 && m->c->target && comm->rank != m->c->root) {
-        const struct steps *s = m->c->bound;
-        const uint32_t dependency = s->prior[s->prior_first[m->step]];
+      const struct steps *s = m->c->bound;
+      const int32_t dependency = m->c->target && comm->rank != m->c->root ? (int32_t)s->prior[s->prior_first[m->step]] : forwards(s, m->step, comm->page);
+      if (dependency >= 0) {
         const uint32_t incoming = s->channel[dependency];
         const struct schedule *received = plans + incoming;
         const struct message *from = received->in + s->entry[dependency] - received->first[1];
         entry.word = (uint64_t)((char *)comm->channels[incoming].view.landed - (char *)context->M);
-        entry.base = pages_to_word(pages_sub(from->end, from->pages));
+        entry.base = pages_to_word(pages_add(pages_sub(from->end, from->pages), pages_of(m->offset - from->offset, comm->page)));
       }
       status = mesh_stream_present(context, ch->stream, 0, entry);
     }

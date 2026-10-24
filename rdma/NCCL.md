@@ -149,7 +149,7 @@ paths, programs and forms; nothing is compared at run time.
 
 Collectives are compiled programs: every rank's moves, made ahead of time (`mesh-plan.h` `struct mesh_program`, as
 MSCCL-IR), the communicator's table of them. The caller passes its own table (`ncclMeshCommInitRank`'s `programs`;
-`mesh_compile`, `chunks` its cut, `whole` the single-phase all-reduce); with none, the communicator compiles
+`mesh_compile`, `whole` the single-phase all-reduce); with none, the communicator compiles
 the structural table at its first call that needs it, along the caller's `paths` or else the map's links packed
 (`mesh_trees_pack`, Garg and Konemann's maximum concurrent flow: every member's trees at once, and each root's alone
 for its reduce and broadcast; every link in use, each tree's part its flow's share, so the routes end together):
@@ -158,9 +158,11 @@ for its reduce and broadcast; every link in use, each tree's part its flow's sha
 - the reduce-scatter and the all-gather, segment s up and down s's trees;
 - each root's reduce and broadcast, up and down the root's own packed trees, toward its min cut.
 
-Each is uncut: a step's piece is one entry of its holding's list, any size, which the bridge alone cuts into SENDs (in
-4 chunks the all-gather, the reduce-scatter and the all-reduce ran 15 to 50% slower from 256 KiB to 4 MiB on three
-nodes, and no faster above). A program's own cuts (a two-phase all-reduce's segments, a tree's shares, chunks) lie on the region's pages
+Each is uncut: a step's piece is one entry of its holding's list, any size, which the bridge alone cuts into SENDs. A
+relay sends on what it received as it lands, page by page: the SEND of a piece a COPY landed is presented with that
+landing's holding's `landed` as its supplied count (`struct mesh_entry` `word` and `base`), so no count of chunks
+exists (4 chunks ran the all-gather, the reduce-scatter and the all-reduce 15 to 50% slower from 256 KiB to 4 MiB on
+three nodes). A program's own cuts (a two-phase all-reduce's segments, a tree's shares) lie on the region's pages
 (`mesh_program_steps_cut`), so every piece starts on a page wherever its buffer does ([Memory](#memory)). A call runs
 its table's first program of its collective (and root) whose size bound its operand is under. Nothing about a program
 is decided where a call runs.
@@ -199,7 +201,6 @@ structural table at each map read, so a call takes the first form that fits it a
 | `trees` | `ncclMeshTreesOwn` (the communicator's paths, else its packed trees) or `ncclMeshTreesPacked` (`mesh_trees_pack` at the entry's `eps` and `most` trees a root: Blink's packed spanning trees, every link a share) |
 | `shares` | a form's cut of each segment among its root's trees (root r's k-th tree, the packing's heaviest first or the communicator's trees' order, `shares[r x most + k]`, a tree of share 0 or past `most` carrying none; NULL: the packing's flows) |
 | `whole` | an all-reduce's: 1 single-phase, 0 two-phase (the reduce-scatter and then the all-gather along the same trees) |
-| `chunks` | each tree's part cut into chunks, pipelined down and up the trees (1: uncut) |
 | `below` | the bytes a call is under to take it (0: any size): the size classes |
 
 These are the forms mesh cc8a6f8e^'s default table chose among by a price (its `sets[1]`, single-phase or not, 1 to 64

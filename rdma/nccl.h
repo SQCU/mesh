@@ -951,8 +951,8 @@ ncclResult_t ncclMeshCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId com
    `shares` (root r's k-th tree in the packing's order, heaviest first, or the communicator's trees' order, shares[r x
    most + k], each 0 or more, a tree of 0 or past `most` carrying none, for the communicator's ranks; NULL: the
    packing's flows); an all-reduce `whole` (1: single-phase, each member's sum up its own tree, its heaviest share's; 0: the
-   reduce-scatter and then the all-gather [Patarasuk & Yuan 2009; Rabenseifner 2004]); each tree's part cut into
-   `chunks` (1: uncut), pipelined down and up the trees [Blink; NCCL's chunked trees]. */
+   reduce-scatter and then the all-gather [Patarasuk & Yuan 2009; Rabenseifner 2004]); each tree's part one entry a
+   hop, a relay sending each page on as it lands (mesh-plan.h mesh_compile). */
 typedef enum { ncclMeshTreesOwn = 0, ncclMeshTreesPacked = 1 } ncclMeshTrees;
 typedef struct {
   int collective;
@@ -960,7 +960,6 @@ typedef struct {
   uint64_t below;
   ncclMeshTrees trees;
   int whole;
-  uint32_t chunks;
   uint32_t most;
   double eps;
   const double* shares;
