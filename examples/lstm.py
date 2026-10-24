@@ -18,6 +18,16 @@ def gate_rows(blocks, k):
     return np.stack([units, H + units, 2 * H + units, 3 * H + units], 1).reshape(-1)
 
 
+# docs/writing-a-service.md#the-lstm
+@torch.compile(fullgraph=True)
+def cell(z, c, h):
+    """One layer's cell update from its gates z [rows, 4 units] ((i, f, g, o) of each unit in turn): its units' c and h
+    written in place, one compiled kernel."""
+    i, f, g, o = z.float().view(z.shape[0], -1, 4).unbind(-1)
+    c.copy_(torch.sigmoid(f) * c + torch.sigmoid(i) * torch.tanh(g))
+    h.copy_(torch.sigmoid(o) * torch.tanh(c))
+
+
 class Tick:
     # docs/writing-a-service.md#the-lstm
     def __init__(self, mesh, weights, biases, rows, steps):
@@ -29,6 +39,8 @@ class Tick:
         self.mine = [torch_mesh.empty(self.L, rows, HR, dtype=torch.half).zero_() for _ in range(2)]
         self.h = torch.zeros(self.L, rows, H, dtype=torch.half, device='mps')
         self.tick = 0
+        for l in range(self.L):
+            cell(torch.zeros(rows, 4 * HR, dtype=torch.half, device='mps'), self.c[l], self.mine[0][l])
 
     # docs/writing-a-service.md#the-lstm
     def __call__(self, x):
@@ -39,9 +51,7 @@ class Tick:
                 mine[l] = last[l]
                 continue
             u = partition.from_local(torch.cat([x if l == 0 else self.h[l - 1], self.h[l]], 1), self.mesh, [Replicate()])
-            i, f, g, o = torch.nn.functional.linear(u, self.W[l], self.b[l]).to_local().float().view(self.rows, -1, 4).unbind(-1)
-            self.c[l] = torch.sigmoid(f) * self.c[l] + torch.sigmoid(i) * torch.tanh(g)
-            mine[l] = torch.sigmoid(o) * torch.tanh(self.c[l])
+            cell(torch.nn.functional.linear(u, self.W[l], self.b[l]).to_local(), self.c[l], mine[l])
         self.h = partition.from_local(mine, self.mesh, [Shard(2)]).full_tensor()
         self.tick = s + 1
         return self.h[self.L - 1]
