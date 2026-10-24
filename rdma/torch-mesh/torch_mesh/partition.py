@@ -50,8 +50,14 @@ place; the reduce-scatter's input (where it does not lie in the region already, 
 gathered queries and its partials; so the library reads what they send where it lies.  Elsewhere, and where the region
 refuses a lease, torch's own memory.
 
+An input is declared once and delivered by pages: declare(t, mesh, [Replicate()], src_data_rank) names a tensor the
+source rank holds, deliver(t) sends it to every rank as the library's in-place broadcast, a fused crossing, waiting
+for nothing, and row(t, at) reads the row at a cursor and advances it, waiting on the GPU for that row's pages alone
+(mesh_step_await_pages), so a program's first steps start as their rows land and the rest land under them.
+
 Torch entry points (torch 2.14; nothing of torch is assigned, so a tensor with no RaggedShard runs as torch runs it):
-- torch.library.custom_op with register_fake: torch_mesh::allgatherv and reduce_scatterv.
+- torch.library.custom_op with register_fake: torch_mesh::allgatherv and reduce_scatterv; torch_mesh::row (_stream.mm)
+  with register_fake.
 - RaggedShard subclasses torch.distributed.tensor.placement_types.Shard and overrides the methods DTensor calls on a
   placement instance: local_shard_size_and_offset and _local_shard_size_and_offset (compute_local_shape_and_global_
   offset, the redistribute planner, the RNG), _split_tensor and _select_split_tensor (and through them the inherited

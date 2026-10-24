@@ -86,10 +86,8 @@ input's shape and broadcasts two numbers, the steps and the rows, so every rank 
 
 Rank 0 distributes A and B as ragged shards of their rows (`partition.distribute_tensor` with `Shard(0)` on the mesh
 dimension `tp`: the backend's scatter, MPI_Scatterv), so each rank holds the block of rows the backend's partition gives
-it ([The step](#the-step)). The inputs are one operand, [steps, rows, width], declared once as replicated from rank 0
-(`partition.declare`). Rank 0 copies them from its file into a region tensor, and at the run's start `partition.deliver`
-sends them to every rank by pages, waiting for nothing. Each step reads its row with `partition.row`, which waits on
-the GPU for that row's pages alone and advances a cursor of its own. The outputs are one operand of the same shape
+it ([The step](#the-step)). The inputs are one operand, [steps, rows, width]. Rank 0 copies them from its file into a
+region tensor and broadcasts it whole to every rank before the first step. The outputs are one operand of the same shape
 on every rank. Each step writes its tanh(z) there, and after the last step rank 0 copies it into the output file's
 memory. Within a step only the step's sum crosses between ranks.
 
@@ -202,19 +200,27 @@ last), c and rank 0's output are region tensors made at load (`torch_mesh.empty`
 run.
 
 **The recorded tick.** Every tick after the first L - 1 runs every layer, so it is one function of no arguments
-(`Tick.stepper`): it reads its input at a step counter held on the GPU, runs each layer and the gather, writes the top
-layer's h into the output at the counter less L - 1 (rank 0), and advances the counter. `torch_mesh.record(step, k)`
+(`Tick.stepper`): it reads its input's next row (`partition.row` at the input's cursor, below), runs each layer and the
+gather, writes the top layer's h into the output at a step counter held on the GPU (rank 0), and advances the counter. `torch_mesh.record(step, k)`
 records it as the chain's step is, k ticks unrolled in one graph and the fewer that k does not divide in a graph of
 their own, and the run issues every later tick through it (`Recording.issue`); the first L - 1 ticks, while the
 layers above have not begun, run as they are (`Tick.starting`). The service replays it before the run (k ticks and
-the rest, so each graph compiles on every rank), then zeroes the state and the counter.
+the rest, so each graph compiles on every rank), then zeroes the state, the cursor and the counter.
+
+**The input, by pages.** The input is declared once (`partition.declare(X, mesh, [Replicate()], src_data_rank=0)`) and
+delivered at the run's start (`partition.deliver`): rank 0 sends it whole to every rank as the library's in-place
+broadcast, a fused crossing, and nothing waits for it. A tick reads its row through `partition.row(X, at)`, which waits
+on the GPU for the pages that row lies in alone (the collective's `mesh_step_await_pages`), copies it out
+system-coherent, and advances the cursor `at`, which nothing else reads, so the recorded graph reads and advances it in
+place. The first ticks start as their rows land, and the rest of the input lands under them.
 
 **Configuration.** `input`, `weights`, `output`, `input_width`, `width` (H), `layers` and `steps_per_replay`, the k
 ticks one replay runs (the chain's name for its k). The weights directory holds
 `w_ih_<l>` [4H, its input], `w_hh_<l>` [4H, H] and `b_<l>` [4H] in torch's gate order, one .npy file an array.
 `lstm.inputs(configuration, steps, rows)` makes sample ones with torch's initialization. Rank 0 reads them
 memory-mapped into region tensors before the communicator exists, so no peer's wait spans that host work; every other
-rank passes the global shape alone to the scatter. The input is broadcast once into a region tensor.
+rank passes the global shape alone to the scatter. The input is a region tensor on every rank, rank 0's read into it
+before the run.
 
 ## What to read next
 
