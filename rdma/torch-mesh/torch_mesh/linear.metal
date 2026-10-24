@@ -4,7 +4,8 @@
 // lanes across its slice four elements at a time, U loads of each row in flight, eight rows a pass; a simdgroup's sums
 // reduced across its lanes (simd_sum), then the simdgroups' through threadgroup memory (linear_body), each output then
 // handed to the kernel's store.  Each weight element is read once a pass.  x may be two segments, x0 [R, K0] and x1
-// [R, K - K0], rows LD0 and LD1 apart (a cat of the two along K, never made: x0 = x1 and K0 = K where there is one).
+// [R, K - K0], rows LD0 and LD1 apart (a cat of the two along K, never made: x0 = x1 and K0 = K where there is one),
+// each segment's span of a simdgroup's K slice its own loop, no branch a load.
 // VW and VX are 4 where w's and x's rows lie on whole 4-element loads, else 1 (four loads of one).  linear_rows stores into y, ACT its activation (0 none, 1
 // tanh); linear_publish (compiled after the library's steps, fused.steps(), and argmax.metal) stores each output into a
 // fused crossing's send segment through the collective's mesh_step_write and publishes it from its last threadgroup
@@ -18,11 +19,12 @@ template <uint V> inline float4 linear_load(device const half* p);
 template <> inline float4 linear_load<4>(device const half* p) { return float4(*(device const half4*)p); }
 template <> inline float4 linear_load<1>(device const half* p) { return float4(p[0], p[1], p[2], p[3]); }
 
-// elements k to k + 3 of a row of x, its segments' rows a and b, the second from K0 on
-template <uint VX> inline float4 linear_x(device const half* a, device const half* b, uint k, uint K0) {
-    if (VX == 4) return k < K0 ? linear_load<4>(a + k) : linear_load<4>(b + (k - K0));
+// elements k to k + 3 of a row, those at or past `hi` zero (a 1-element load's group may cross a segment's end; a
+// 4-element load's never does: K0 and the slices are whole groups there)
+template <uint V> inline float4 linear_part(device const half* p, uint k, uint hi) {
+    if (V == 4) return linear_load<4>(p + k);
     float4 v;
-    for (uint j = 0; j < 4; j++) v[j] = k + j < K0 ? a[k + j] : b[k + j - K0];
+    for (uint j = 0; j < 4; j++) v[j] = k + j < hi ? float(p[k + j]) : 0.0f;
     return v;
 }
 
@@ -43,23 +45,27 @@ inline void linear_body(device const half* x, device const half* x1, device cons
             xr[r] = x + ulong(min(r0 + r, R - 1)) * d.LD0;
             xs[r] = x1 + ulong(min(r0 + r, R - 1)) * d.LD1;
         }
-        uint k = k0 + lane * 4;
-        for (; k + 128 * (U - 1) < k1; k += 128 * U) {
-            float4 wv[U][COLS];
-            for (uint u = 0; u < U; u++)
-                for (uint c = 0; c < COLS; c++) wv[u][c] = linear_load<VW>(wr[c] + k + 128 * u);
-            for (uint u = 0; u < U; u++)
+        for (uint seg = 0; seg < 2; seg++) {
+            const uint lo = seg ? max(k0, d.K0) : k0, hi = seg ? k1 : min(k1, d.K0), off = seg ? d.K0 : 0;
+            device const half* const* xx = seg ? xs : xr;
+            uint k = lo + lane * 4;
+            for (; k + 128 * (U - 1) < hi; k += 128 * U) {
+                float4 wv[U][COLS];
+                for (uint u = 0; u < U; u++)
+                    for (uint c = 0; c < COLS; c++) wv[u][c] = linear_part<VW>(wr[c], k + 128 * u, hi);
+                for (uint u = 0; u < U; u++)
+                    for (uint r = 0; r < 8; r++) {
+                        const float4 xv = linear_part<VX>(xx[r] - off, k + 128 * u, hi);
+                        for (uint c = 0; c < COLS; c++) acc[r][c] += dot(xv, wv[u][c]);
+                    }
+            }
+            for (; k < hi; k += 128) {
+                float4 wv[COLS];
+                for (uint c = 0; c < COLS; c++) wv[c] = linear_part<VW>(wr[c], k, hi);
                 for (uint r = 0; r < 8; r++) {
-                    const float4 xv = linear_x<VX>(xr[r], xs[r], k + 128 * u, d.K0);
-                    for (uint c = 0; c < COLS; c++) acc[r][c] += dot(xv, wv[u][c]);
+                    const float4 xv = linear_part<VX>(xx[r] - off, k, hi);
+                    for (uint c = 0; c < COLS; c++) acc[r][c] += dot(xv, wv[c]);
                 }
-        }
-        for (; k < k1; k += 128) {
-            float4 wv[COLS];
-            for (uint c = 0; c < COLS; c++) wv[c] = linear_load<VW>(wr[c] + k);
-            for (uint r = 0; r < 8; r++) {
-                const float4 xv = linear_x<VX>(xr[r], xs[r], k, d.K0);
-                for (uint c = 0; c < COLS; c++) acc[r][c] += dot(xv, wv[c]);
             }
         }
         if (sg == 0 && K4 + lane < K)

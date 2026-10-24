@@ -715,7 +715,7 @@ static at::Tensor linear(const at::Tensor &x, const at::Tensor &w, const std::op
   const int64_t R = x.size(0), N = w.size(0), ldw = wc.stride(0), ld0 = xc.stride(0), ld1 = x1c.stride(0);
   const int64_t groups = (N + LINEAR_COLUMNS - 1) / LINEAR_COLUMNS;
   const int split = (int)linear_split(K, N);
-  const auto key = std::make_tuple(ldw % 4 ? 1 : 4, K0 % 4 || ld0 % 4 || ld1 % 4 ? 1 : 4, split, (int)act);
+  const auto key = std::make_tuple(ldw % 4 || K0 % 4 ? 1 : 4, K0 % 4 || ld0 % 4 || ld1 % 4 ? 1 : 4, split, (int)act);
   auto found = linear_pipelines_.find(key);
   if (found == linear_pipelines_.end()) {
     const std::string args = std::to_string(std::get<0>(key)) + ", " + std::to_string(std::get<1>(key)) + ", " +
@@ -761,7 +761,7 @@ static std::vector<at::Tensor> linears(const std::vector<at::Tensor> &xs, const 
     words[32 + p] = first, words[36 + p] = acts[p];
     first += (N + LINEAR_COLUMNS - 1) / LINEAR_COLUMNS;
     split = std::max(split, linear_split(K, N));
-    wide_w &= ldw % 4 == 0, wide_x &= K0 % 4 == 0 && ld0 % 4 == 0 && ld1 % 4 == 0;
+    wide_w &= ldw % 4 == 0 && K0 % 4 == 0, wide_x &= K0 % 4 == 0 && ld0 % 4 == 0 && ld1 % 4 == 0;
   }
   for (size_t p = P; p < 4; p++) {
     for (int k = 0; k < 5; k++) buffers[5 * p + k] = buffers[k];
