@@ -135,6 +135,10 @@ is the library's.
 - **The products.** The compile backend runs both products as `torch_mesh::linear`, torch-mesh's small-rows linear
   kernel, one dispatch each at a host cost of about 2 µs where MPS's matmul costs about 12, with y's tanh folded in. It
   reads a weight laid out as nn.Linear's, so the chain holds B transposed, its rows padded to whole 4-element loads.
+- **The crossing.** The all-reduce is partition's fused crossing (`partition._fused`), declared once for the run
+  (`torch_mesh.plan` with `partition.summed`): z's product publishes itself (`torch_mesh::linear_sum`: linear's
+  `linear_publish` writes each rank's part into its send segment through the collective's `mesh_step_write` and
+  releases it from its last threadgroup), and `sum_land` adds every rank's part, in rank order, once they land.
 
 ## The configuration
 
