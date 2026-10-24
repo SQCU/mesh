@@ -264,6 +264,113 @@ kernel void linear_landed(device const half* x [[buffer(0)]], device const half*
     linear_body<VW, VX, COLS, NSG, U>(src, w, d, store, part, sg, lane, tg, tid);
 }
 
+// A gather's landing read as the products' x (torch_mesh::linears_landed, up to four products in one dispatch): every
+// threadgroup awaits each peer's landing at its repeat j, then reads each product's rows through linear_joined: x0 [R,
+// K0] (rows LD0 apart, none where K0 is 0) and then layers first to first + (K - K0) / H of the gathered [L, R, H], unit
+// u of a layer read from the segment of the rank whose block holds it ([L, R, HR_q] at its start in the slot, as
+// gather_land joins them), this rank's plainly and every peer's through mesh_step_read (the NIC wrote it).  `landed`
+// takes the whole gathered [L, R, H] where `keep` (its users that are no product's x), each threadgroup a stride of it.
+template <uint VX, uint RANKS>
+struct linear_joined_rows {
+    device const half* x[8];
+    device const uchar* seg[RANKS][8];
+    uint K0, H, rank;
+    uint sizes[RANKS], units[RANKS], layer[RANKS];
+    // the landed element kk past K0 (layer kk / H from the first, unit kk % H), and four of them where VX allows: the
+    // ranks' blocks and H whole 4-element groups, so four never cross a rank's block or a layer
+    float at(uint r, uint kk) const {
+        const uint l = kk / H, u = kk % H;
+        uint q = 0;
+        while (q + 1 < RANKS && u >= units[q + 1]) q++;
+        device const uchar* p = seg[q][r] + 2 * (ulong(l) * layer[q] + (u - units[q]));
+        return q == rank ? float(*(device const half*)p) : float(mesh_step_read<half>(p, 0));
+    }
+    template <uint SEG, uint V> float4 load(uint r, uint k, uint hi) const {
+        if (SEG == 0) return linear_part<V>(x[r], k, hi);
+        if (VX == 4) {
+            const uint kk = k - K0, l = kk / H, u = kk % H;
+            uint q = 0;
+            while (q + 1 < RANKS && u >= units[q + 1]) q++;
+            device const uchar* p = seg[q][r] + 2 * (ulong(l) * layer[q] + (u - units[q]));
+            return q == rank ? float4(*(device const half4*)p) : float4(mesh_step_read<half4>(p, 0));
+        }
+        float4 v;
+        for (uint j = 0; j < 4; j++) v[j] = k + j < hi ? at(r, k + j - K0) : 0.0f;
+        return v;
+    }
+    float one(uint r, uint k) const { return k < K0 ? float(x[r][k]) : at(r, k - K0); }
+};
+
+template <uint VX, uint RANKS>
+struct linear_joined {
+    device const half* x;
+    device const uchar* slot;
+    uint LD0, K0, H, R, rank, first;
+    uint sizes[RANKS], units[RANKS], starts[RANKS];
+    linear_joined_rows<VX, RANKS> block(uint r0, uint Rr) const {
+        linear_joined_rows<VX, RANKS> b;
+        b.K0 = K0, b.H = H, b.rank = rank;
+        for (uint q = 0; q < RANKS; q++) b.sizes[q] = sizes[q], b.units[q] = units[q], b.layer[q] = R * sizes[q];
+        for (uint r = 0; r < 8; r++) {
+            const uint row = min(r0 + r, Rr - 1);
+            b.x[r] = x + ulong(row) * LD0;
+            for (uint q = 0; q < RANKS; q++) b.seg[q][r] = slot + 2 * (ulong(starts[q]) + (ulong(first) * R + row) * sizes[q]);
+        }
+        return b;
+    }
+    // element (l, r, u) of the gathered [L, R, H]
+    float gathered(uint l, uint r, uint u) const {
+        uint q = 0;
+        while (q + 1 < RANKS && u >= units[q + 1]) q++;
+        device const uchar* p = slot + 2 * (ulong(starts[q]) + (ulong(l) * R + r) * sizes[q] + (u - units[q]));
+        return q == rank ? float(*(device const half*)p) : float(mesh_step_read<half>(p, 0));
+    }
+};
+
+struct linear_joined_dims { uint R, K, N, B, LDW, K0, LD0, first; };
+template <uint PEERS>
+struct linears_landed_words {
+    linear_joined_dims d[4];
+    uint group[4], act[4];
+    uint rank, j, H, L, keep, pad;
+    uint sizes[PEERS + 1], units[PEERS + 1], starts[PEERS + 1];
+    mesh_step_binding land[PEERS], publish[PEERS];
+};
+
+template <uint VW, uint VX, uint COLS, uint NSG, uint U, uint PEERS>
+[[max_total_threads_per_threadgroup(NSG * 32)]]
+kernel void linears_landed(device const half* x0 [[buffer(0)]], device const half* w0 [[buffer(1)]], device half* y0 [[buffer(2)]],
+                           device const half* b0 [[buffer(3)]], device const half* x1 [[buffer(4)]], device const half* w1 [[buffer(5)]],
+                           device half* y1 [[buffer(6)]], device const half* b1 [[buffer(7)]], device const half* x2 [[buffer(8)]],
+                           device const half* w2 [[buffer(9)]], device half* y2 [[buffer(10)]], device const half* b2 [[buffer(11)]],
+                           device const half* x3 [[buffer(12)]], device const half* w3 [[buffer(13)]], device half* y3 [[buffer(14)]],
+                           device const half* b3 [[buffer(15)]], device const uchar* slot [[buffer(16)]], device half* landed [[buffer(17)]],
+                           constant linears_landed_words<PEERS>& g [[buffer(18)]],
+                           uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+                           uint tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+                           uint groups [[threadgroups_per_grid]]) {
+    threadgroup float part[NSG * 8 * COLS];
+    for (uint q = 0; q < PEERS; q++) {
+        mesh_step_enter(*g.land[q].p, g.land[q].v, g.land[q].progress, tg == 0 && tid == 0);
+        mesh_step_await(*g.land[q].p, g.land[q].a, g.land[q].v, tid, g.j);
+    }
+    const uint p = tg >= g.group[3] ? 3 : tg >= g.group[2] ? 2 : tg >= g.group[1] ? 1 : 0;
+    const linear_joined_dims e = g.d[p];
+    linear_joined<VX, PEERS + 1> src;
+    src.x = p == 0 ? x0 : p == 1 ? x1 : p == 2 ? x2 : x3;
+    src.slot = slot, src.LD0 = e.LD0, src.K0 = e.K0, src.H = g.H, src.R = e.R, src.rank = g.rank, src.first = e.first;
+    for (uint q = 0; q <= PEERS; q++) src.sizes[q] = g.sizes[q], src.units[q] = g.units[q], src.starts[q] = g.starts[q];
+    if (g.keep)
+        for (uint i = tg * NSG * 32 + tid; i < g.L * e.R * g.H; i += groups * NSG * 32)
+            landed[i] = half(src.gathered(i / (e.R * g.H), i / g.H % e.R, i % g.H));
+    device const half* w = p == 0 ? w0 : p == 1 ? w1 : p == 2 ? w2 : w3;
+    device half* y = p == 0 ? y0 : p == 1 ? y1 : p == 2 ? y2 : y3;
+    device const half* b = p == 0 ? b0 : p == 1 ? b1 : p == 2 ? b2 : b3;
+    const linear_act_store store{y, b, e.N, e.B, g.act[p]};
+    const linear_dims d = {e.R, e.K, e.N, e.B, e.LDW, e.K0, e.LD0, e.LD0};
+    linear_body<VW, VX, COLS, NSG, U>(src, w, d, store, part, sg, lane, tg - g.group[p], tid);
+}
+
 template <uint PEERS>
 struct linear_publish_words { uint R, K, N, B, LDW, K0, LD0, LD1, j; mesh_step_binding land[PEERS], publish[PEERS]; };
 

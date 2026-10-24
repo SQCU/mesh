@@ -182,6 +182,67 @@ def compiler(gm, example_inputs):
             graph.erase_node(node)
         return True
 
+    def gather_landed(graph, gather):
+        """A gather's crossing (allgatherv) whose landing reaches products' x through linear's menu alone, a layer's select
+        of the gathered [L, R, H] as a segment of a grouped product's x (torch_mesh::linears, the cat it reads in place),
+        each product's x a dense x0 and then consecutive layers, folded into those products
+        (torch_mesh::linears_landed, its publication torch_mesh::gather_publish): they await and read the landing, so
+        no dispatch lands it.  Any other user of the landing reads linears_landed's gathered [L, R, H]; any product of
+        another form, no fold.  Whether it folded."""
+        import operator
+
+        import torch.distributed as dist
+        x, dim, sizes, group = gather.args[:4]
+        g, resolved = gather.meta['val'], dist.distributed_c10d._resolve_process_group(group)
+        if resolved.size() < 2 or not partition._region_backed(g, resolved) or dim != 2 or g.dim() != 3:
+            return False
+        layer = lambda n: (n.args[2] if n.target is aten.select.int and n.args[0] is gather and n.args[1] == 0
+                           and isinstance(n.args[2], int) else None)
+        products = {u for s in gather.users if layer(s) is not None for u in s.users if u.target is torch.ops.torch_mesh.linears.default}
+        if len(products) != 1:
+            return False
+        product = next(iter(products))
+        xs, ws, bs, acts, x1s = product.args
+        x0s, firsts = [], []
+        for a, b in zip(xs, x1s):
+            la, lb = layer(a), (layer(b) if b is not None else None)
+            if la is None and lb is not None:
+                x0s.append(a), firsts.append(lb)
+            elif la is not None and lb == la + 1:
+                x0s.append(None), firsts.append(la)
+            else:
+                return False
+        reads = {n for n in list(xs) + list(x1s) if n is not None and layer(n) is not None}
+        others = [u for u in gather.users if u not in reads] + [u for r in reads for u in r.users if u is not product]
+        with graph.inserting_before(gather):
+            slot = graph.call_function(torch.ops.torch_mesh.gather_publish.default, tuple(gather.args))
+        row = g.numel() // g.shape[2]
+        slot.meta['val'] = g.new_empty(partition._paged([s * row for s in sizes], g.element_size(), resolved)[1][-1])
+        with graph.inserting_before(product):
+            made = graph.call_function(torch.ops.torch_mesh.linears_landed.default,
+                                       (x0s, slot, ws, bs, acts, firsts, bool(others), list(g.shape), list(sizes), group))
+            parts = [graph.call_function(operator.getitem, (made, p)) for p in range(len(ws) + 1)]
+        for part, val in zip(parts, list(product.meta['val']) + [g if others else g.new_empty(0)]):
+            part.meta['val'] = val
+        made.meta['val'] = [p.meta['val'] for p in parts]
+        for u in list(product.users):
+            if u.target is operator.getitem:
+                u.replace_all_uses_with(parts[u.args[1]])
+                graph.erase_node(u)
+        for u in [u for r in reads for u in list(r.users) if u is not product]:
+            for r in reads:
+                if r in u.all_input_nodes:
+                    with graph.inserting_before(u):
+                        view = graph.call_function(aten.select.int, (parts[-1], 0, layer(r)))
+                    view.meta['val'] = r.meta['val']
+                    u.replace_input_with(r, view)
+        graph.erase_node(product)
+        for r in reads:
+            graph.erase_node(r)
+        gather.replace_all_uses_with(parts[-1])
+        graph.erase_node(gather)
+        return True
+
     class Leased(CustomGraphPass):
         def __call__(self, graph):
             for node in list(graph.nodes):
@@ -229,13 +290,14 @@ def compiler(gm, example_inputs):
                 if len(nodes) > 1 and len(forms) == 1 and nodes[0].target in CROSSINGS:
                     for n in nodes:
                         told(n, len(nodes))
-            folded = [landed(graph, n) for n in list(graph.nodes) if n.target is torch.ops.torch_mesh.linear_sum.default]
+            folded = ([landed(graph, n) for n in list(graph.nodes) if n.target is torch.ops.torch_mesh.linear_sum.default] +
+                      [gather_landed(graph, n) for n in list(graph.nodes) if n.target is torch.ops.torch_mesh.allgatherv.default])
             if any(folded):
                 from torch._inductor.pattern_matcher import stable_topological_sort
                 stable_topological_sort(graph)
 
         def uuid(self):
-            return 'torch_mesh::all_reduce torch_mesh::linear cat linears repeats allgatherv landed'
+            return 'torch_mesh::all_reduce torch_mesh::linear cat linears repeats allgatherv landed joined'
     with config.patch(post_grad_custom_pre_pass=Leased(), size_asserts=False, alignment_asserts=False, scalar_asserts=False):
         return lookup_backend('inductor')(gm, example_inputs)
 

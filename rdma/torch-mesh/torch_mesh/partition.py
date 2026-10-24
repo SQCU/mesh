@@ -410,6 +410,64 @@ def _(x, slot, w, bias, act, slot_act, keep, rows, group_name):
     return w.new_empty(rows, w.shape[0]), w.new_empty((rows, w.shape[1]) if keep else (0,))
 
 
+@torch.library.custom_op('torch_mesh::gather_publish', mutates_args=())
+def gather_publish(x: torch.Tensor, dim: int, sizes: list[int], group_name: str, repeats: int = 1) -> torch.Tensor:
+    """allgatherv's publication alone (torch_mesh.compiler, where the next products read its landing: linears_landed):
+    x's block published as this rank's segment of the crossing's slot, which is returned, every rank's segment in it once
+    landed."""
+    group = dist.distributed_c10d._resolve_process_group(group_name)
+    held, j, slot, crossing = _crossing(x.contiguous(), dim, sizes, group, False, None, repeats)
+    _LANDINGS[slot.data_ptr()] = (held, j, crossing)
+    return slot
+
+
+@gather_publish.register_fake
+def _(x, dim, sizes, group_name, repeats=1):
+    group = dist.distributed_c10d._resolve_process_group(group_name)
+    return x.new_empty(_paged([s * _row(x, dim) for s in sizes], x.element_size(), group)[1][-1])
+
+
+@torch.library.custom_op('torch_mesh::linears_landed', mutates_args=())
+def linears_landed(xs: list[torch.Tensor | None], slot: torch.Tensor, ws: list[torch.Tensor], biases: list[torch.Tensor | None],
+                   acts: list[int], firsts: list[int], keep: bool, shape: list[int], sizes: list[int],
+                   group_name: str) -> list[torch.Tensor]:
+    """torch_mesh::linears of operands read through a gather's landing (torch_mesh.compiler): product p's x is xs[p]
+    [R, K0] (None: K0 0) and then layers firsts[p] onward of the gathered `shape` [L, R, H] (gather_publish's slot,
+    each rank's block sizes[r] units), each product act(x w^T + bias); one dispatch (linear.metal linears_landed) that
+    awaits each peer's segment at the slot's repeat and reads it in place, so no dispatch lands it.  Returns the
+    products and, where `keep`, the gathered [L, R, H] for the landing's other users (else an empty tensor)."""
+    from . import _stream, fused
+    held, j, crossing = _LANDINGS[slot.data_ptr()]
+    group = dist.distributed_c10d._resolve_process_group(group_name)
+    n, P, (L, R, H) = group.size(), len(ws), shape
+    units = list(itertools.accumulate(sizes, initial=0))[:-1]
+    ys, buffers, dims, first, least, wide = [], [], [], 0, None, H % 4 == 0 and all(s % 4 == 0 for s in sizes)
+    for x, w, b, f in zip(xs, ws, biases, firsts):
+        x = x.contiguous() if x is not None else None
+        K, N, ldw = w.shape[1], w.shape[0], w.stride(0)
+        K0, ld0 = (x.shape[1], x.stride(0)) if x is not None else (0, K)
+        ys.append(torch.empty(R, N, dtype=w.dtype, device=w.device))
+        buffers += [x if x is not None else ys[-1], w, ys[-1], b if b is not None else ys[-1]]
+        dims.append(([R, K, N, int(b is not None), ldw, K0, ld0, f], first))
+        first += -(-N // 2)
+        least = K if least is None else min(least, K)
+        wide = wide and ldw % 4 == 0 and K0 % 4 == 0 and ld0 % 4 == 0
+    landed = torch.empty(shape, dtype=ws[0].dtype, device=ws[0].device) if keep else torch.empty(0, dtype=ws[0].dtype, device=ws[0].device)
+    for _ in range(P, 4):
+        buffers += buffers[:4]
+    words = ([v for d, _ in dims for v in d] + [0] * 8 * (4 - P) + [g for _, g in dims] + [first] * (4 - P) +
+             list(acts) + [0] * (4 - P) + [group.rank(), j, H, L, int(keep), 0] + list(sizes) + units + held['starts'][:n])
+    split = _stream.linear_split(least, 2 * first)
+    kernel = _linear_kernel('linears_landed', 4 if wide else 1, 4 if wide else 1, 2, split, 2, n - 1)
+    fused.encode(kernel, buffers + [slot, landed if keep else ys[0]], words, 18, first, 1, split * 32, n - 1, land=crossing)
+    return ys + [landed]
+
+
+@linears_landed.register_fake
+def _(xs, slot, ws, biases, acts, firsts, keep, shape, sizes, group_name):
+    return [w.new_empty(shape[1], w.shape[0]) for w in ws] + [ws[0].new_empty(shape if keep else (0,))]
+
+
 def _paged(counts, size, group):
     """Segments of `counts` elements of `size` bytes laid end to end, each padded to whole pages of `group`'s region,
     since the library places each segment of a V collective on a page of its own (rdma/nccl.h, Memory; the group's
