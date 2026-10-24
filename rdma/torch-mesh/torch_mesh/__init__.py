@@ -37,9 +37,10 @@ def compiler(gm, example_inputs):
     than lowers: it would lower one to a copy into a buffer of its own and an all_reduce_ in place there
     (torch/_inductor/comm_lowering.py), memory the library does not send from (rdma/nccl.h Memory).  Its products of a
     few fp16 rows by a weight laid out as nn.Linear's (aten.mm(x, w^T), aten.addmm(b, x, w^T): w^T the transposed view of
-    a [N, K] whose rows lie apart by K or more, x at most 8 rows) are torch_mesh::linear, one plain dispatch of torch-mesh's own (linear.metal),
-    where MPS's matmul costs its host about 12 us a call.  Inductor's run-time size, alignment and scalar asserts are
-    off: each is a check at every call of what the compile fixed (design/data-model.md section 6)."""
+    a [N, K] whose rows lie apart by K or more, x at most 8 rows) are torch_mesh::linear, one plain dispatch of
+    torch-mesh's own (linear.metal) where MPS's matmul costs its host about 12 us a call, with a tanh that is a
+    product's one use folded into it.  Inductor's run-time size, alignment and scalar asserts are off: each is a check
+    at every call of what the compile fixed (design/data-model.md section 6)."""
     from pathlib import Path
 
     import torch
@@ -78,6 +79,11 @@ def compiler(gm, example_inputs):
                     made.meta['val'] = node.meta['val']
                     node.replace_all_uses_with(made)
                     graph.erase_node(node)
+                    users = list(made.users)
+                    if len(users) == 1 and users[0].target is aten.tanh.default:
+                        made.args = made.args + (1,)
+                        users[0].replace_all_uses_with(made)
+                        graph.erase_node(users[0])
 
         def uuid(self):
             return 'torch_mesh::all_reduce torch_mesh::linear'

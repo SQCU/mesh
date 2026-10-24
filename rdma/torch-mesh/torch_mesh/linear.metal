@@ -3,7 +3,8 @@
 // step: one dispatch, a threadgroup per COLS output columns, its NSG simdgroups each a K slice of them, a simdgroup's lanes
 // across its slice four elements at a time, U loads of each row in flight, eight rows a pass; a simdgroup's sums reduced
 // across its lanes (simd_sum), then the simdgroups' through threadgroup memory.  Each weight element is read once a pass.
-// VW and VX are 4 where w's and x's rows lie on whole 4-element loads, else 1 (four loads of one).
+// VW and VX are 4 where w's and x's rows lie on whole 4-element loads, else 1 (four loads of one).  ACT is the
+// activation applied as each output is stored: 0 none, 1 tanh.
 #include <metal_stdlib>
 using namespace metal;
 
@@ -13,7 +14,7 @@ template <uint V> inline float4 linear_load(device const half* p);
 template <> inline float4 linear_load<4>(device const half* p) { return float4(*(device const half4*)p); }
 template <> inline float4 linear_load<1>(device const half* p) { return float4(p[0], p[1], p[2], p[3]); }
 
-template <uint VW, uint VX, uint COLS, uint NSG, uint U>
+template <uint VW, uint VX, uint COLS, uint NSG, uint U, uint ACT>
 [[max_total_threads_per_threadgroup(NSG * 32)]]
 kernel void linear_rows(device const half* x [[buffer(0)]], device const half* w [[buffer(1)]], device half* y [[buffer(2)]],
                         device const half* bias [[buffer(3)]], constant linear_dims& d [[buffer(4)]],
@@ -62,7 +63,8 @@ kernel void linear_rows(device const half* x [[buffer(0)]], device const half* w
             const uint r = tid / COLS, c = tid % COLS;
             float s = 0.0f;
             for (uint g = 0; g < NSG; g++) s += part[g][r][c];
-            if (r0 + r < R && n0 + c < N) y[ulong(r0 + r) * N + n0 + c] = half(s + (d.B ? float(bias[n0 + c]) : 0.0f));
+            const float v = s + (d.B ? float(bias[n0 + c]) : 0.0f);
+            if (r0 + r < R && n0 + c < N) y[ulong(r0 + r) * N + n0 + c] = half(ACT == 1 ? tanh(v) : v);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
