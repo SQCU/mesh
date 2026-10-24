@@ -72,6 +72,7 @@ class FunctionFlow:
         self.compute_samples, self.compute_model = [], None
         self.schedule_model = None
         self.routing_model, self.routing_samples, self.routing_fit = copy.deepcopy(routing_model), [], None
+        self.routing_observations = []
         self.serial, self.round, self.workload = 0, 0, None
         self.samples, self.history = [], []
         for name, spec in self.decisions.items():
@@ -98,7 +99,8 @@ class FunctionFlow:
         obj.__dict__.update(copy.deepcopy(state))
         for name, value in {'finish_weight': 1.0, 'fit_compute': False,
                             'compute_samples': [], 'compute_model': None,
-                            'routing_model': None, 'routing_samples': [], 'routing_fit': None, 'schedule_model': None}.items():
+                            'routing_model': None, 'routing_samples': [], 'routing_fit': None, 'schedule_model': None,
+                            'routing_observations': []}.items():
             obj.__dict__.setdefault(name, value)
         return obj
 
@@ -170,6 +172,9 @@ class FunctionFlow:
             self._compute_observation(observation)
         if self.routing_model is not None:
             self.routing_samples.append(copy.deepcopy(observation['finishes']['stages']))
+            self.routing_observations.append({'parts': copy.deepcopy(observation['parts']),
+                                              'stages': copy.deepcopy(observation['finishes']['stages'])})
+            self.routing_observations = self.routing_observations[-64:]
         cost = math.log(seconds) + self.congestion_weight * congestion / seconds + self.finish_weight * finish
         self.samples.append({'id': self.serial, 'seconds': seconds, 'cost': cost, 'offset': expected['offset']})
         self.serial += 1
@@ -235,8 +240,20 @@ class FunctionFlow:
             coef, _ = nnls(np.vstack((matrix, np.eye(2) * 0.03)), np.r_[y * np.sqrt(weights), np.asarray(prior) * 0.03])
             fixed.append(float(coef[0])); slopes.append(max(float(coef[1]) / total, 1e-12))
             tails.append(float(np.average([s['tails'][i] for s in self.compute_samples], weights=weights)))
+        # A smaller producer can still publish late because its own inputs
+        # arrived later. Subtract its measured producer duration from observed
+        # publication time to isolate that input-release delay. Do not add a
+        # whole communication window (which also contains other producers).
+        recent = self.compute_samples[-4:]
+        start_delay = [0.0] * n
+        if 'release' in recent[-1]:
+            start_delay = [statistics.mean(s['release'][i] * s['stages'] - s['seconds'][i] for s in recent)
+                           for i in range(n)]
+            origin = min(start_delay)
+            start_delay = [t - origin for t in start_delay]
+        intercepts = [a + d for a, d in zip(fixed, start_delay)]
         tiles, target, finish = equal_finish(int(total), spec['grain'], list(map(int, spec['low'])), list(map(int, spec['high'])),
-                                             fixed, slopes)
+                                             intercepts, slopes)
         # Move the continuous centre each stencil; never keep/reject a measured
         # candidate. Tile realization uses the historical time-aware min_max.
         # This refitted affine model is an ongoing allocation input, not an
@@ -245,10 +262,9 @@ class FunctionFlow:
         values = [(1 - guide) * a + guide * b for a, b in zip(self.centre['compute'], target)]
         fractions = [(v - lo) / (hi - lo) for v, lo, hi in zip(values, spec['low'], spec['high'])]
         self.vector['compute'] = [math.log(max(v, 1e-12) / max(1 - v, 1e-12)) for v in fractions]
-        self.compute_model = {'fixed': fixed, 'slopes': slopes, 'tails': tails, 'target': target,
+        self.compute_model = {'fixed': fixed, 'slopes': slopes, 'start_delay': start_delay, 'tails': tails, 'target': target,
                               'tiles': tiles, 'predicted_finish': finish}
         if 'release' in self.compute_samples[-1]:
-            recent = self.compute_samples[-4:]
             self.schedule_model = {'release': [statistics.mean(s['release'][i] for s in recent) for i in range(n)],
                                    'parts': [statistics.mean(s['parts'][i] for s in recent) for i in range(n)],
                                    'stages': recent[-1]['stages']}
@@ -262,7 +278,8 @@ class FunctionFlow:
         actual landing times, so release delays need not match the fluid model.
         """
         import numpy as np
-        from scipy.optimize import linprog, minimize
+        from scipy.optimize import minimize
+        from scipy.special import logsumexp
         model = self.routing_model
         columns = [(name, p) for name, spec in model['paths'].items() for p in range(len(spec['arcs']))]
         names = list(model['paths'])
@@ -274,40 +291,69 @@ class FunctionFlow:
             conserve[names.index(name), k] = 1
             for e in model['paths'][name]['arcs'][p]:
                 matrix[e, k] = model['paths'][name]['bytes'] / model['capacities'][e]
-        measured, loads = [], []
-        for stages in self.routing_samples:
+        def finish(stages):
+            measured = []
             for stage in stages:
                 arcs = stage['arcs']
                 origin = min(v['start_ns'][0] for v in arcs.values())
                 measured.append([(sum(arcs[str(e)]['finish_ns']) / 2 - origin) * 1e-9 for e in range(len(matrix))])
-                loads.append([arcs[str(e)]['bytes'] / model['capacities'][e] for e in range(len(matrix))])
-        measured, loads = np.mean(measured, axis=0), np.mean(loads, axis=0)
+            return np.mean(measured, axis=0)
+
+        # Learn residual sensitivities, not just offsets. A change to one
+        # route can change another cable's upstream queue. Compute fractions
+        # are joint features so their perturbations are not misattributed to
+        # the path weights. Ridge regularization retains the physical prior
+        # in directions that the completed calls have not identified yet.
+        def features(parts):
+            values = [parts[name][p] / self.decisions[name]['total'] for name, p in columns]
+            if 'compute' in parts:
+                values += [v / self.decisions['compute']['total'] for v in parts['compute']]
+            return values
+
+        observations = self.routing_observations
+        X = np.asarray([features(o['parts']) for o in observations])
+        Y = np.asarray([finish(o['stages']) for o in observations])
+        physical = np.pad(matrix, ((0, 0), (0, X.shape[1] - len(columns))))
+        residuals = Y - X @ physical.T
+        weights = np.asarray([0.97 ** (len(X) - 1 - k) for k in range(len(X))])
+        xmean, ymean = np.average(X, axis=0, weights=weights), np.average(residuals, axis=0, weights=weights)
+        centred_x = (X - xmean) * np.sqrt(weights)[:, None]
+        centred_y = (residuals - ymean) * np.sqrt(weights)[:, None]
+        correction = np.linalg.solve(centred_x.T @ centred_x + np.eye(X.shape[1]) * 1e-3,
+                                     centred_x.T @ centred_y).T
+        sensitivity = physical + correction
+        measured, observed_x = np.mean(Y[-4:], axis=0), np.mean(X[-4:], axis=0)
+        at_centre = measured + sensitivity @ (np.asarray(features(centre)) - observed_x)
         scale = max(measured)
-        residual, jacobian = (measured - loads) / scale, matrix / scale
+        jacobian = sensitivity[:, :len(columns)] / scale
+        residual = at_centre / scale - jacobian @ x0
 
         bounds = [(1e-9, 1)] * len(x0)
-        first = linprog([0.0] * len(x0) + [1.0], A_ub=np.column_stack((jacobian, -np.ones(len(matrix)))),
-                        b_ub=-residual, A_eq=np.column_stack((conserve, np.zeros(len(names)))), b_eq=np.ones(len(names)),
-                        bounds=bounds + [(0, None)], method='highs')
-        if not first.success:
-            raise ArithmeticError(f'completion duration solve: {first.message}')
-        target = first.x[-1]
+        # A learned Jacobian is local. A proximal step evolves the vector
+        # continuously; globally minimizing its affine extrapolation could
+        # move an entire commodity on the strength of one noisy derivative.
+        rate = self.learning_rate / (self.round + 1) ** 0.3
+        # The smooth maximum differs from max by at most log(cables)/64
+        # in units of this stencil's longest measured finish.
+        sharpness = 64.0
 
         def cost(x):
-            delta = residual + jacobian @ x - target
-            return float(delta @ delta + 1e-4 * np.sum((x - x0) ** 2))
+            finish = residual + jacobian @ x
+            delta = finish - np.mean(finish)
+            return float(logsumexp(sharpness * finish) / sharpness + np.mean(delta ** 2)
+                         + np.sum((x - x0) ** 2) / (2 * rate))
 
         def gradient(x):
-            return 2 * jacobian.T @ (residual + jacobian @ x - target) + 2e-4 * (x - x0)
+            finish = residual + jacobian @ x
+            probability = np.exp(sharpness * finish - logsumexp(sharpness * finish))
+            return jacobian.T @ (probability + 2 * (finish - np.mean(finish)) / len(finish)) + (x - x0) / rate
 
-        solved = minimize(cost, first.x[:-1], jac=gradient, method='SLSQP', bounds=bounds,
-                          constraints=[{'type': 'eq', 'fun': lambda x: conserve @ x - 1, 'jac': lambda x: conserve},
-                                       {'type': 'ineq', 'fun': lambda x: target + 1e-8 - residual - jacobian @ x,
-                                        'jac': lambda x: -jacobian}],
+        solved = minimize(cost, x0, jac=gradient, method='SLSQP', bounds=bounds,
+                          constraints=[{'type': 'eq', 'fun': lambda x: conserve @ x - 1, 'jac': lambda x: conserve}],
                           options={'ftol': 1e-11, 'maxiter': 300})
         if not solved.success:
             raise ArithmeticError(f'completion residual solve: {solved.message}')
-        x = (x0 + solved.x) / 2
+        x = solved.x
         for name in names:
             values = [x[k] * self.decisions[name]['total'] for k, (n, _) in enumerate(columns) if n == name]
             spec = self.decisions[name]
@@ -315,5 +361,7 @@ class FunctionFlow:
             self.vector[name] = [math.log(max(v, 1e-12) / max(1 - v, 1e-12)) for v in fractions]
         self.routing_fit = {'measured_finish_seconds': measured.tolist(),
                             'residual_seconds': (residual * scale).tolist(),
+                            'residual_jacobian_seconds': correction.tolist(),
+                            'residual_fit_rms_seconds': float(np.sqrt(np.mean((residuals - ymean - (X - xmean) @ correction.T) ** 2))),
                             'predicted_finish_seconds': ((residual + jacobian @ x) * scale).tolist()}
         self.routing_samples = []

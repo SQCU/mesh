@@ -205,8 +205,14 @@ existing complete-function synchronization. Completed calls fit
 `compute_i(s) = a_i + b_i*s` by exponentially weighted nonnegative least squares,
 separating fixed and work-dependent cost. A weak prior resolves the initially
 underdetermined fit; the record exposes both coefficients rather than claiming
-that one share identifies a slope. Equal-finish uses these producer costs;
-communication remains in the joint whole-function objective. Recorded own
+that one share identifies a slope. The previous stencil also supplies input
+release offsets: subtract each rank's measured producer duration from its own
+publication time, then express those inferred start times relative to the
+earliest rank. Equal-finish uses `start_delay_i + a_i + b_i*s`. Thus a rank whose
+inputs arrive later receives a shorter compute stretch even if its arithmetic
+rate is otherwise equal. The repeated-stage observer averages these offsets
+over stages; it is not a per-layer timing model for arbitrary programs.
+Communication also remains in the joint whole-function objective. Recorded own
 first-hop delivery windows are diagnostics, not added compute intercepts:
 those windows also contain waits for upstream producers, and including them
 can create circular feedback. Every four-call stencil moves the continuous
@@ -224,15 +230,23 @@ that those historical RLS claims were implemented.
 
 The DNN supplies `Fabric.completion_model`, the physical path-incidence matrix
 scaled by each commodity's bytes and each directed cable's capacity. After a
-four-call stencil, `FunctionFlow` also fits the observed completion residual
-`b_e = observed_finish_e - observed_bytes_e/C_e`. The local model is
-`finish(x) = b + A*x`, where each commodity's path fractions sum to one. A convex
-linear program minimizes the maximum predicted finish. On its optimum face,
-a quadratic solve minimizes squared distance from that common finish plus a
-small movement penalty. The latent vector moves halfway to that solution
-after the joint finite-difference update. The next complete calls refresh `b`
-from actual landings; it is not assumed to be a permanent release-time constant.
-The fit and predicted finishes are recorded. This supplies a physical
+four-call stencil, `FunctionFlow` fits the observed completion residual beyond
+the physical path-load model. The last 64 complete calls fit a weighted ridge
+Jacobian of those residuals against joint route and compute fractions. The
+physical capacity Jacobian is the prior in directions not yet identified by
+the observations; changed upstream queuing can introduce cross-flow derivatives.
+The local model is anchored at the preceding stencil's measured mean finish,
+then adjusted for the next compute centre. Its route coordinates satisfy
+`finish(x) = b + J*x`, with each commodity's path fractions summing to one.
+A convex proximal step minimizes a smooth maximum finish plus finish variance
+and `||x-x0||^2/(2*rate)`, with the same decaying learning rate as the joint
+finite differences. This is an incremental step in a local model, not global
+minimization of its extrapolation. Finish times are normalized by the preceding
+stencil's longest finish; smooth-maximum sharpness is 64. The result becomes
+the next vector unconditionally. The next complete calls refresh `b` and `J`
+from actual landings; neither delay nor its sensitivity is assumed constant
+across executions. Residual fit error, Jacobian, and predicted finishes are
+recorded. This supplies a physical
 preconditioner for fourteen simultaneous finish residuals while finite
 differences retain the full function's measured latency and queue objective.
 It adds neither runtime routing choices nor measured-candidate rejection.

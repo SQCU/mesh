@@ -121,6 +121,22 @@ class WholeFunctionTests(unittest.TestCase):
                           'seconds': 1.0, 'finish_variance': residual})
         self.assertAlmostEqual(flow.centre['route'][0], 90, delta=2)
 
+    def test_compute_allocation_accounts_for_late_input_release(self):
+        flow = FunctionFlow({'compute': {'parts': [100, 100], 'grain': 1, 'low': [1, 1], 'high': [199, 199]}},
+                            fit_compute=True)
+        for _ in range(80):
+            request = flow.ask()
+            times = [0.01 + x * 0.001 for x in request['parts']['compute']]
+            release = [times[0], times[1] + 0.08]
+            origin = min(release)
+            flow.observe({**request, 'scope': 'function', 'complete': True, 'workload': 'late-input-dnn',
+                          'seconds': max(release), 'compute_seconds': times, 'delivery_tail_seconds': [0.1, 0.1],
+                          'producer_release_seconds': [t - origin for t in release], 'finishes': {'stages': [{}]}})
+        model = flow.compute_model
+        self.assertAlmostEqual(model['start_delay'][1], 0.08, places=8)
+        self.assertLess(model['target'][1], 65)
+        self.assertAlmostEqual(model['target'][0] - model['target'][1], 80, delta=3)
+
     def test_physical_finish_correction_handles_unequal_capacity_and_release(self):
         from routing import Fabric
         fabric = Fabric(2, [{'nodes': [0, 1], 'bits_per_second': 80}, {'nodes': [0, 1], 'bits_per_second': 160}])
@@ -164,6 +180,40 @@ class WholeFunctionTests(unittest.TestCase):
         for start in (0, 4, 8):
             self.assertEqual(requests[start]['producer_seconds'], requests[start + 3]['producer_seconds'])
             self.assertEqual(requests[start + 1]['producer_seconds'], requests[start + 2]['producer_seconds'])
+
+    def test_finish_model_learns_cross_flow_queue_sensitivity(self):
+        from routing import Fabric
+        fabric = Fabric(2, [{'nodes': [0, 1], 'bits_per_second': 80}, {'nodes': [0, 1], 'bits_per_second': 160}])
+        demands = {(0, 1): 96, (1, 0): 96}
+        decisions, _ = fabric.allocate(demands)
+        model = fabric.completion_model(demands)
+        flow = FunctionFlow(decisions, routing_model=model)
+
+        def measured(parts):
+            loads = [0.0] * 4
+            for name, spec in model['paths'].items():
+                for weight, arcs in zip(parts[name], spec['arcs']):
+                    for e in arcs:
+                        loads[e] += spec['bytes'] * weight / sum(parts[name])
+            finish = [q / c for q, c in zip(loads, model['capacities'])]
+            # Cross-flow upstream delay changes with the other commodity's
+            # route. A constant fitted cable offset cannot predict that move.
+            finish[0] += loads[3] / 20
+            finish[1] += loads[2] / 20
+            finish[2] += 0.7
+            finish[3] += 0.7
+            arcs = {str(e): {'bytes': loads[e], 'start_ns': [0, 0], 'finish_ns': [t * 1e9] * 2} for e, t in enumerate(finish)}
+            return finish, arcs
+
+        for _ in range(160):
+            request = flow.ask()
+            finish, arcs = measured(request['parts'])
+            flow.observe({**request, 'scope': 'function', 'complete': True, 'workload': 'cross-flow-dnn',
+                          'seconds': max(finish), 'finishes': {'stages': [{'arcs': arcs}]}})
+        finish, _ = measured(flow.centre)
+        self.assertLess(max(finish) - min(finish), max(finish) * 0.05)
+        self.assertLess(flow.routing_fit['residual_fit_rms_seconds'], 0.02)
+        self.assertGreater(max(abs(x) for row in flow.routing_fit['residual_jacobian_seconds'] for x in row), 0.1)
 
 
 if __name__ == '__main__':
