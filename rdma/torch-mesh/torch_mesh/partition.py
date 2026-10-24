@@ -123,7 +123,7 @@ class _Operand:
     def __init__(self, key, parts):
         self.key, self.capacity, self.units = key, tuple(int(p) for p in parts), sum(int(p) for p in parts)
         self.parts, self.cache = torch.tensor(self.capacity, dtype=torch.int64), {}
-        self.high = self.units - len(self.capacity) + 1  # this rank's most units (_reserve)
+        self.high = self.most = self.units - len(self.capacity) + 1  # this rank's most units, and any rank's (_reserve)
 
     def cached(self, what, build):
         if what not in self.cache:
@@ -552,7 +552,8 @@ def _attach(mesh, name, parts):
     """`parts` attached to mesh dimension `name` as a new operand: tensors split by the old one keep it (follow)."""
     key, old = f'{name}#{next(_KEYS)}', _OPERANDS.get(_NAMED.get((mesh, name)))
     _OPERANDS[key] = _Operand(key, parts)
-    _OPERANDS[key].high = old.high if old else _OPERANDS[key].high
+    if old and old.units == _OPERANDS[key].units:
+        _OPERANDS[key].high, _OPERANDS[key].most = old.high, old.most
     _NAMED[mesh, name] = key
 
 
@@ -624,7 +625,8 @@ def follow(*tensors):
     contiguous, out = lambda shape: torch.empty(shape, device='meta').stride(), []
     for placements, local, shape, t in held:
         out.append(from_local(local, mesh, placements, shape=shape, stride=contiguous(shape)))
-        out[-1]._capacity, out[-1]._scratch = getattr(t, '_capacity', None), getattr(t, '_scratch', False)
+        for a, d in (('_capacity', None), ('_scratch', False), ('_reserved', None)):
+            setattr(out[-1], a, getattr(t, a, d))
     return out
 
 
@@ -698,21 +700,26 @@ def _reserve(mesh, name, held, group):
         finally:
             torch.mps.synchronize() if mesh.device_type == 'mps' else None
     lo, hi = (int(o.parts[rank]) if ts else o.units - n + 1), o.units - n + 1
-    refused = bool(ts) and not fits(lo)
+    refused, caps = bool(ts) and not fits(lo), []
     while lo < hi and not refused:
         mid = (lo + hi + 1) // 2
         lo, hi = (mid, hi) if fits(mid) else (lo, mid - 1)
+    try:  # the leases kept, taken before the exchange so a refusal of them is every rank's too
+        counts, starts = _paged([1] * n, 4, group)
+        word = [_empty((starts[-1],), ts[0].to_local(), group, torch.int32)] if staged else []
+        caps = leases(lo) + word if ts and not refused else []
+    except RuntimeError:
+        refused = True
     words = _shared(held, group, [float(lo), float(refused)])
     if any(w[1] for w in words):  # every rank raises together, none left waiting in an exchange
         raise RuntimeError(f'mesh: the region refuses a share with headroom on ranks {[r for r, w in enumerate(words) if w[1]]}')
-    o.high, caps = lo, leases(lo) if ts else []
+    o.high, o.most = lo, max(int(w[0]) for w in words)
     for t, cap in zip(ts, caps):
         prefix = cap[:t.to_local().numel()].view(t.to_local().shape)
         t._capacity, t._reserved = cap, name
         t._local_tensor = prefix if getattr(t, '_scratch', False) else _copy(prefix, t.to_local())
     if getattr(group, 'handle', 0) and ts:
-        counts, starts = _paged([1] * n, 4, group)
-        group._staging = [caps[-2:], (_empty((starts[-1],), ts[0].to_local(), group, torch.int32), counts, starts)]
+        group._staging = [caps[-3:-1], (caps[-1], counts, starts)]
     return [int(w[0]) for w in words]
 
 
@@ -835,7 +842,7 @@ def counts(src, dst):
     o, e, d, rank = _OPERANDS[p.key], p.dim % src.ndim, dst.placements[i].dim % src.ndim, src.device_mesh.get_coordinate()[i]
     s, t = ([_units(o, src.shape[c]) * q for q in o.parts.tolist()] for c in (e, d))
     rest = src.numel() // (src.shape[e] * src.shape[d])
-    if math.prod(src.to_local().shape[:d]) != 1:
+    if e < d or math.prod(src.shape[:d]) != 1:
         raise NotImplementedError(f"mesh: counts needs dst's split dimension {d} outermost in src's block")
     return [s[r] * t[rank] * rest for r in range(len(s))], [s[rank] * t[q] * rest for q in range(len(s))]
 
@@ -1582,7 +1589,7 @@ def _high(key, S):
     return S // _OPERANDS[key].units * _OPERANDS[key].high
 
 
-def _block(query, key, value, into, group, scale=None, queries=None, keys=None, valid=None, capacity=0):
+def _block(query, key, value, into, group, scale=None, queries=None, keys=None, valid=None, capacity=(0, 0)):
     """Each query row's attention over these keys as the library's partials, written into `into` (rows of [m, l, O]:
     the row's greatest score, its sum of exponentials and its unnormalized output, nccl.h ncclMeshRedOpCreatePartials;
     l 0 where it sees no key), the scores SCORES at a time, every pass over them in place, and every result of a chunk
@@ -1591,7 +1598,7 @@ def _block(query, key, value, into, group, scale=None, queries=None, keys=None, 
     scale = query.shape[-1] ** -0.5 if scale is None else scale
     lead, rows, n = query.shape[:-2], query.shape[-2], key.shape[-2]
     step, kt = max(1, SCORES // (math.prod(lead) * n)), key.transpose(-2, -1)
-    most = math.prod(lead) * min(SCORES // math.prod(lead), capacity or rows)  # the largest chunk at any share
+    most = math.prod(lead) * (capacity[0] or rows)  # a chunk's rows at most: any rank's query block at its high
     scores = _held(group, 'scores', (SCORES,), query, torch.float32)
     for at in range(0, rows, step):
         q, part = query[..., at:at + step, :], into[..., at:at + step, :]
@@ -1600,7 +1607,8 @@ def _block(query, key, value, into, group, scale=None, queries=None, keys=None, 
         torch.matmul(q, kt, out=s) if q.dtype == s.dtype else s.copy_(q @ kt)
         s.mul_(scale)
         if queries is not None:
-            mask = _held(group, 'mask', (c, n), query, torch.bool, SCORES)
+            cap = min(SCORES // math.prod(lead), most // math.prod(lead) * (capacity[1] or n))
+            mask = _held(group, 'mask', (c, n), query, torch.bool, cap)
             s.masked_fill_(torch.gt(keys, queries[at:at + step, None], out=mask), -math.inf)
         if valid is not None:
             s.masked_fill_(~valid, -math.inf)
@@ -1611,14 +1619,14 @@ def _block(query, key, value, into, group, scale=None, queries=None, keys=None, 
         part[..., 2:] = torch.matmul(s.to(value.dtype), value, out=out)
 
 
-def _ring(query, value, lengths, rows, rank, group, high):
+def _ring(query, value, lengths, rows, rank, group, high, form=None):
     """The ring's region leases (_held, at capacity for `high` positions): the gathered query blocks, the partials
     (zeroed where the blocks change: a row no block writes stays [0, 0, 0], and every row one writes is written whole
     at every call), the merged rows and the output, [batch, positions, heads, dim]."""
     width, row, lead = 2 + value.size(-1), query.numel() // query.size(2), math.prod(query.shape[:2])
     packed = _held(group, 'ring partials', (sum(rows), width), query, torch.float32)
-    if _holding(group).get('ring blocks') != (tuple(lengths), tuple(query.shape), width):
-        _holding(group)['ring blocks'] = (tuple(lengths), tuple(query.shape), width)
+    if _holding(group).get('ring blocks') != (tuple(lengths), tuple(query.shape), width, form):
+        _holding(group)['ring blocks'] = (tuple(lengths), tuple(query.shape), width, form)
         packed.zero_()
     return (_held(group, 'ring queries', (sum(lengths) * row,), query), packed,
             _held(group, 'ring merged', (rows[rank], width), query, torch.float32, lead * high * width),
@@ -1650,13 +1658,15 @@ def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=N
     S = query.size(2) * o.units // o.capacity[rank]
     lengths, lead, width = _blocks(o, S)[0], tuple(query.shape[:2]), 2 + value.size(-1)
     row, rows = query.numel() // query.size(2), [math.prod(lead) * s for s in lengths]
-    gathered_lease, packed, merged, out = _ring(query, value, lengths, rows, rank, group, _high(key_name, S))
+    gathered_lease, packed, merged, out = _ring(query, value, lengths, rows, rank, group, _high(key_name, S),
+                                                (is_causal, halves))
     blocks = list(gathered_lease.split([s * row for s in lengths]))
     blocks[rank].view(query.shape).copy_(query)
     gathered = dist.all_gather(blocks, blocks[rank], group=group, async_op=True)
     owners = list(packed.split(rows))
     keys, valid = _positions(key_name, rank, S, halves, query.device)
     mine, step = _spans(o, rank, S, halves), lengths[rank] // halves
+    most = (S // o.units * o.most // halves, _high(key_name, S))  # a query half-block's rows and this rank's keys at most
 
     def owned(j):
         """Block j's queries' attention over this rank's keys, as owner j's rows of the partials."""
@@ -1668,7 +1678,7 @@ def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=N
             if seen:
                 at, cols = slice(a * height, (a + 1) * height), slice(seen[0] * step, (seen[-1] + 1) * step)
                 _block(q[:, :, at], key[:, :, cols], value[:, :, cols], into[:, :, at], group, scale,
-                       queries[at] if is_causal else None, keys[cols], valid[cols], S)
+                       queries[at] if is_causal else None, keys[cols], valid[cols], most)
     owned(rank)
     gathered.wait()
     for j in range(size):
