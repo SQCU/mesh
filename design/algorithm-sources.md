@@ -792,9 +792,12 @@ native bodies are recorded in the
 Pitch Patarasuk and Xin Yuan,
 [Bandwidth Optimal All-reduce Algorithms for Clusters of Workstations](https://www.cs.fsu.edu/~xyuan/paper/09jpdc.pdf)
 (2009), motivate sparse connected topologies. A route is the map's: `mesh_map` (mesh-plan.h) links members the
-links leave apart along the routing table's route between them ([Topology](#topology)), each node between them a
-member of the communicator with no contribution, which sends on what lands (the identity: mesh-plan.h
-`mesh_compile`'s `contributors`). No route is chosen by a caller or guessed from rank count.
+links leave apart along the routing table's route between them ([Topology](#topology)), each node between them a relay
+of the members' map. A communicator carries such a route only where the node is one of its members, and in
+libnccl-mesh's own table that member contributes its operand like every member (`compile_entry` passes no
+`contributors`); a member that sends on what lands alone, the identity of design/data-model.md section 9's relay, is
+compiled only in a C caller's own programs (mesh-plan.h `mesh_compile`'s `contributors`). No route is chosen by a caller
+or guessed from rank count.
 
 For a section s on `v0 → v1 → … → vk`, each intermediate node's program receives on the rows it sends: a record
 landed from `v(i-1)` releases the SEND cell that carries it to `v(i+1)` (transport.md), with no numerical
@@ -822,15 +825,18 @@ each node's mark (its bridge's node number) and the routing table, an operand: e
 costed as the relayed path it is: its links' α summed and the greatest β, a node between handing each piece on as it
 lands, not the betas summed; and its bytes charged to every link it crosses in the tree packing (a port's capacity
 shared by the hops whose routes cross it), so hops that share a cable share its time. A node between two members takes
-part as a member of their communicator with no contribution, which copies its first child's partial as it comes and
-sends it on (the identity: mesh-collective.c `mesh_compile`'s `contributors`). Several cables between one pair are links
-of their own, each with its own streams (design/transport.md section 14). The bridges' map lists a pair's cables as
-such, each at the least bandwidth either end reports (mesh-dataflow.c mesh_joined), and the planner counts them
+part as a member of their communicator. In libnccl-mesh's own table it contributes its operand like every member;
+outside a program's contributors it copies its first child's partial as it comes and sends it on, the identity
+(mesh-collective.c `mesh_compile`), which only a C caller's own programs compile. Several cables between one pair are
+links of their own, each with its own streams (design/transport.md section 14). The bridges' map lists a pair's cables
+as such, each at the least bandwidth either end reports (mesh-dataflow.c mesh_joined), and the planner counts them
 together at n times the slowest (mesh_routes, mesh_trees_pack). A communicator holds one stream toward each member's
-node, on one of the cables (nccl-mesh.c comm_hold), and lists that one link a pair (map_of).
+node, on one of the cables (nccl-mesh.c comm_hold, wire_between), and lists one link a pair (map_of), so a pair's other
+cables carry none of its bytes: that falls short of design/data-model.md section 9 ("Where today's code is slower than
+this"), where the bridge lays a holding's pages over every link toward the node.
 
 The table (`mesh_routes`): Dijkstra [1959] toward each node in its dense form, every length an exact integer (a
-pair's cables striped) so every bridge and member that holds the same records makes
+pair's parallel links counted together at n times the slowest) so every bridge and member that holds the same records makes
 the same table, each node's parent among its equals the least hash of its mark, the parent's and the root's
 [splitmix64's finalizer: Steele, Lea & Flood, OOPSLA 2014], equal-cost multipath by a hash as ECMP spreads flows
 [Hopps, RFC 2992]. A node's parent reads its own candidates alone, so the route between two nodes is a function of the

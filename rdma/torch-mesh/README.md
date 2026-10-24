@@ -44,8 +44,9 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   the library's own waits theirs ([NCCL.md](../NCCL.md#bounded-waits)). Past it the process ends, naming the wait and
   its deadline.
 - A group's collectives run where a path between its ranks joins every two of them, each rank's bridge reaching the
-  next one's node: a route crosses ranks alone (a node it is to cross takes part as a rank, the identity where it has
-  no work), and a group whose ranks no such path joins fails at its first collective that crosses a link
+  next one's node: a route crosses ranks alone (a node it is to cross takes part as a rank, and contributes its operand
+  like every rank: this backend compiles no rank as the identity, design/data-model.md section 9's relay), and a group
+  whose ranks no such path joins fails at its first collective that crosses a link
   ([NCCL.md](../NCCL.md#routes-between-unlinked-ranks)).
 - Memory ([NCCL.md](../NCCL.md#memory)): the backend's own CPU tensors (a
   barrier's tensor, the flattened operands of the list `all_gather` and `reduce_scatter`) are leases of the node's

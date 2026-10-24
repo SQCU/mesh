@@ -506,9 +506,10 @@ static ncclResult_t compile_form(struct ncclComm *comm, const struct mesh_trees 
    along the routes): a
    call takes the first entry that fits it (program_of), so a collective no form names, or a size past every form's
    bound, runs the caller's program or the default.  Where trees are compiled (a form, or no programs listed), a map
-   whose links do not join its members fails it, naming two: a route crosses ranks alone, each sending on what lands
-   (a rank with no work: the identity, mesh-plan.h mesh_compile's contributors), so a node a route is to cross takes
-   part as a rank */
+   whose links do not join its members fails it, naming two: a route crosses ranks alone, so a node a route is to cross
+   takes part as a rank, and in this table, compiled with no contributors (compile_entry), it combines its own operand
+   into what it sends on; the identity at a rank with no work (design/data-model.md section 9) is only a caller's
+   programs' (mesh-plan.h mesh_compile's contributors) */
 static ncclResult_t comm_routes(struct ncclComm *comm) {
   const uint32_t n = (uint32_t)comm->nranks;
   if (n < 2) return ncclSuccess;
@@ -821,10 +822,13 @@ static uint32_t joined(const struct report *reports, uint32_t a, uint32_t b, uin
 
 /* design/transport.md section 14: the communicator's map, made alike by every member from the same gathered reports:
    its ranks its nodes, each marked by its bridge's node number, two linked where they are joined (joined: each one's
-   bridge reaches the other's node), its routing table mesh_routes'.  It has no relays: a route crosses ranks alone,
-   each sending on what lands (a rank with no work: the identity, mesh-plan.h mesh_compile's contributors), so a node
-   a route is to cross takes part as a rank.  One link a pair, the one the pair's channel crosses (comm_hold: one
-   stream toward each member's node, on one of the cables joining them).  0, or ENOMEM, EINVAL */
+   bridge reaches the other's node), its routing table mesh_routes'.  It has no relays: a route crosses ranks alone, so
+   a node a route is to cross takes part as a rank.  One link a pair, at the lesser of the bandwidths of the first live
+   stream each end's bridge reports toward the other (mesh-call.h mesh_nodes_reached: one cable's stream, not
+   necessarily the cable of the pair's channel, comm_hold's wire_between); the channel holds one stream on one cable,
+   so the pair's other cables carry none of the communicator's bytes, where design/data-model.md section 9 ("Where
+   today's code is slower than this") has the bridge lay a holding's pages over every link toward the node.  0, or
+   ENOMEM, EINVAL */
 static int map_of(struct ncclComm *comm, const struct report *reports) {
   const uint32_t n = (uint32_t)comm->nranks;
   uint32_t links = 0;

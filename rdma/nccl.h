@@ -34,10 +34,13 @@
    or its bridge is still ending its last holding, or gone; what it held is then let go and the next init reads the streams as they stand.  A
    connection to the root whose report fails or names no rank still to meet is closed alone and the root meets the
    next (one that sends nothing holds the root's read until the phase ends).  A communicator's map is its members joined where their bridges reach each other's nodes, made alike by
-   every member from the same reports and kept for its life: its nodes are its members, and a route crosses members
-   alone, each sending on what lands (a member with no work: the identity, mesh-plan.h mesh_compile's contributors), so
-   a node a route is to cross takes part as a member; two members no path between members joins fail a collective, and
-   a call between two members not joined fails, as values (ncclInvalidUsage).  ncclMeshCommInitRank (below) is the same init for a program
+   every member from the same reports and kept for its life: its nodes are its members, one link a pair (the channel
+   toward a member is one stream, on one cable: design/data-model.md section 9 names the cables this leaves unused),
+   and a route crosses members alone, so a node a route is to cross takes part as a member.  The communicator's own
+   table makes every member a contributor, so a member on a route combines its own operand into what it sends on; only
+   a program passed to ncclMeshCommInitRank, compiled with mesh-plan.h mesh_compile's contributors, has a member that
+   sends on what lands alone (the identity, data-model.md section 9's relay).  Two members no path between members
+   joins fail a collective, and a call between two members not joined fails, as values (ncclInvalidUsage).  ncclMeshCommInitRank (below) is the same init for a program
    that passes its own programs or paths.  ncclCommSplit and ncclCommShrink make communicators of the ranks they take;
    Split holds its children's streams over comm (NCCL's bootstrapSplit), and Shrink makes no exchange, so a shrink to
    two ranks or more holds none: it is made with no channel, and its first call that crosses a link fails as a value

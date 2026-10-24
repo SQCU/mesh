@@ -36,9 +36,10 @@ int mesh_busy(uint64_t *busy,uint64_t *idle_since);
    and the packed trees read: of routes of equally few links the one over the faster hops (mesh_routes), and a hop's
    capacity (mesh_trees_pack).  `relays` (a graph's, with a table) more nodes, numbered from `nodes`, that a route may
    cross and that hold no rank with work: a collective's working ranks are the map's first `nodes`, and its links may
-   join any of its nodes and relays.  A route through a node is carried by the node's rank of the communicator that
-   runs the collective, sending on what lands (a rank with no work: the identity, mesh_compile's `contributors`), so a
-   communicator's map, whose nodes are its ranks, lists such a node among them and has no relays (nccl-mesh.c map_of).
+   join any of its nodes and relays.  A route through a node is carried only by the node's rank of the communicator
+   that runs the collective, so a communicator's map, whose nodes are its ranks, lists such a node among them and has
+   no relays (nccl-mesh.c map_of); that rank sends on what lands alone (the identity) only where a program's
+   mesh_compile left it out of `contributors`, which libnccl-mesh's own table never does.
    `mark` (NULL: each node's number) is each node's and relay's mark, distinct (mesh_map's: its bridge's node number,
    the same wherever it is numbered).
    `next` (NULL: none, and no relays) is the routing table, an operand (mesh_routes makes one): of N = nodes + relays,
