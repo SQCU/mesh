@@ -92,6 +92,7 @@ import contextlib
 import itertools
 import math
 import resource
+import weakref
 
 import torch
 import torch.distributed as dist
@@ -593,6 +594,48 @@ def follow(*tensors):
     return [from_local(local, mesh, placements) for placements, local, _ in held]
 
 
+# The tensors partition split along each partitioned mesh dimension, re-laid in place where the balancer moves its
+# shares between evaluations (evaluations): weak references by id (a tensor's == is elementwise), so the registry holds
+# nothing alive.
+_SPLIT = {}
+
+
+def _register(t):
+    """`t` (a RaggedTensor) registered with each partitioned mesh dimension it is split along; `t` returned."""
+    names = t.device_mesh.mesh_dim_names or ()
+    for i, p in enumerate(t.placements):
+        if isinstance(p, RaggedShard) and i < len(names):
+            held = _SPLIT.setdefault((t.device_mesh, names[i]), {})
+            held[id(t)] = weakref.ref(t, lambda _, held=held, k=id(t): held.pop(k, None))
+    return t
+
+
+def _registered(t):
+    return any((r := held.get(id(t))) is not None and r() is t for held in _SPLIT.values())
+
+
+def empty(mesh, name, shape, dim, dtype=None):
+    """A program's buffer declared by its whole extent: a RaggedTensor of logical `shape` split along `dim` by
+    partitioned mesh dimension `name`, its local block a region lease of this rank's share (_empty), registered, so
+    it is re-laid in place where the shares move between evaluations.  The program takes its local view (to_local, no
+    copy) inside its step."""
+    placements = [Replicate()] * mesh.ndim
+    placements[mesh.mesh_dim_names.index(name)] = Shard(dim)
+    local = distribute_tensor(torch.empty(shape, dtype=dtype, device='meta'), mesh, placements, src_data_rank=None).to_local()
+    held = _empty(local.shape, torch.empty(0, dtype=local.dtype, device=mesh.device_type), mesh.get_group(name))
+    return from_local(held, mesh, placements)
+
+
+def _relay(mesh, name):
+    """Every live tensor split along mesh dimension `name` moved onto the parts attached now, in place (its local
+    block and spec replaced, the object kept, so a module's parameters move under it): one follow, one coalesced
+    group."""
+    held = [t for r in list(_SPLIT.get((mesh, name), {}).values()) if (t := r()) is not None]
+    if held:
+        for t, moved in zip(held, follow(*held)):
+            t._local_tensor, t._spec = moved._local_tensor, moved._spec
+
+
 def calls(tensor):
     """The groups full_tensor() of RaggedTensor `tensor` issues, one all-gather of its blocks a partitioned mesh
     dimension (RaggedShard._to_replicate_tensor), each from its shape and the operand attached now (torch_mesh.plan)."""
@@ -808,7 +851,7 @@ def distribute_tensor(tensor, device_mesh, placements, *, src_data_rank=0):
         else:
             raise NotImplementedError(f'mesh: distributing over {p}')
     spec = DTensorSpec(device_mesh, placements, tensor_meta=TensorMeta(tensor.size(), tensor.stride(), tensor.dtype))
-    return RaggedTensor(local.requires_grad_(tensor.requires_grad), spec, requires_grad=tensor.requires_grad)
+    return _register(RaggedTensor(local.requires_grad_(tensor.requires_grad), spec, requires_grad=tensor.requires_grad))
 
 
 def from_local(local_tensor, device_mesh, placements, *, run_check=False, shape=None, stride=None, grad_placements=None):
@@ -828,8 +871,8 @@ def from_local(local_tensor, device_mesh, placements, *, run_check=False, shape=
                     mesh_broadcast(local_tensor, device_mesh, mesh_dim=i)
     if shape is None or stride is None:
         shape, stride = _global_info(local_tensor, device_mesh, placements)
-    return _FromLocal.apply(local_tensor, device_mesh, placements, torch.Size(shape), tuple(stride),
-                            None if grad_placements is None else tuple(grad_placements))
+    return _register(_FromLocal.apply(local_tensor, device_mesh, placements, torch.Size(shape), tuple(stride),
+                                      None if grad_placements is None else tuple(grad_placements)))
 
 
 def redistribute(tensor, placements, *, async_op=False):
@@ -1105,9 +1148,16 @@ def _attention(op_call, args, kwargs):
     return out, RaggedTensor(lse, _spec_like(spec, query.shape[:-1], lse.dtype), requires_grad=False)
 
 
+def _detached(op_call, args, kwargs):
+    """detach (nn.Parameter makes a parameter by it) of a tensor split along a partitioned dimension, registered as
+    its source is (_register), so the parameter is the one re-laid."""
+    out = _propagated(op_call, args, kwargs)
+    return _register(out) if _registered(args[0]) else out
+
+
 _HANDLERS = {aten.mean.default: _mean, aten.mean.dim: _mean, aten.linear_backward.default: _linear_backward,
              aten._scaled_dot_product_flash_attention_for_cpu.default: _attention,
-             aten._scaled_dot_product_attention_math_for_mps.default: _attention}
+             aten._scaled_dot_product_attention_math_for_mps.default: _attention, aten.detach.default: _detached}
 
 
 class _Offsets(_random.OffsetBasedRNGTracker):
