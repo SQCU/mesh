@@ -52,27 +52,32 @@ def main():
     tick = lstm.Tick(mesh, [split(w) for w, _ in held], [split(b) for _, b in held], rows, steps)
     del held
     X = torch_mesh.empty(steps, rows, KIN, dtype=torch.half)
+    O = torch_mesh.empty(steps, rows, H, dtype=torch.half) if rank == 0 else None
+    t = torch.empty(1, dtype=torch.int64, device='mps').fill_(L - 1)
+    recording = torch_mesh.record(tick.stepper(X, O, t))
+    torch_mesh.replay(recording)
+    tick.reset()
+    t.fill_(L - 1)
     if rank == 0:
         X.copy_(torch.from_numpy(inputs[:]))
-    O = torch_mesh.empty(steps, rows, H, dtype=torch.half) if rank == 0 else None
     torch_mesh.check_memory()
     torch.mps.synchronize()
     dist.barrier()
-    ticks, half = steps + L - 1, (steps + L - 1) // 2
+    ticks, half = steps + L - 1, steps // 2
     middle, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
     began = time.perf_counter()
     dist.broadcast(X, src=0)
-    for s in range(ticks):
-        top = tick(X[min(s, steps - 1)])
-        if O is not None and s >= L - 1:
-            O[s - L + 1].copy_(top)
+    for s in range(L - 1):
+        tick.starting(s, X[s])
+    for s in range(steps):
+        recording.compiled()
         if s == half:
             middle.record()
     end.record()
     hosted = time.perf_counter() - began
     torch.mps.synchronize()
     seconds = time.perf_counter() - began
-    steady = middle.elapsed_time(end) / 1e3 / (ticks - 1 - half)
+    steady = middle.elapsed_time(end) / 1e3 / (steps - 1 - half)
     if O is not None:
         torch.from_numpy(np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, H))).copy_(O)
     blocks = partition.split(mesh, 'tp', H)

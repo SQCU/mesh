@@ -184,10 +184,17 @@ Each layer's weights are the files' own [4H, K] (w_ih and w_hh side by side), he
 turn. The backend's scatter (`partition.distribute_tensor`, `Shard(1)`) gives each rank its units of every gate, and
 the rank holds them from load as [4 x its units, K]. Its gates are then torch's linear of u by its own rows: a column
 split, so nothing crosses for it. Its units' cell state never leaves the rank. The new h slices of every layer are one
-ragged tensor (`RaggedShard(2)`), and `full_tensor()` gathers them to every rank along that dimension: the backend's
-allgatherv, one crossing a tick. This is Megatron's split of a cell by hidden unit. The h slices (two, a tick's and the
+ragged tensor along the units, and the backend's allgatherv (`torch_mesh::allgatherv`, partition's op) gathers them to
+every rank along that dimension: one fused crossing a tick. This is Megatron's split of a cell by hidden unit. The h slices (two, a tick's and the
 last), c and rank 0's output are region tensors made at load (`torch_mesh.empty`), and the blocks hold for the whole
 run.
+
+**The recorded tick.** Every tick after the first L - 1 runs every layer, so it is one function of no arguments
+(`Tick.stepper`): it reads its input at a step counter held on the GPU, runs each layer and the gather, writes the top
+layer's h into the output at the counter less L - 1 (rank 0), and advances the counter. `torch_mesh.record` compiles it
+once into one graph, as the chain's step is, and the run replays it a tick; the first L - 1 ticks, while the layers
+above have not begun, run as they are (`Tick.starting`). The service replays it once before the run to compile it on
+every rank, then zeroes the state and the counter.
 
 **Configuration.** `input`, `weights`, `output`, `input_width`, `width` (H) and `layers`. The weights directory holds
 `w_ih_<l>` [4H, its input], `w_hh_<l>` [4H, H] and `b_<l>` [4H] in torch's gate order, one .npy file an array.
