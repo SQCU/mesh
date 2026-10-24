@@ -17,7 +17,12 @@
    The bridge keeps its region at every stop of its own; a release is the heartbeat's: once the bridge it closed has
    ended, it expires the region (region_expire).  A bridge that ends unasked is opened again REOPEN_S later (a mesh is never restarted more than once a minute); one
    that ended finding its region expired (EX_TEMPFAIL, mesh-link.c region_open) is opened again once the heartbeat has
-   unlinked that region. */
+   unlinked that region.  Every wait has a deadline set as it begins (the operator, 2026-10-23: no wait runs longer than
+   a deadline presented when it is made, 5 s by default): a bridge asked to close ends within 3 MESH_PLATFORM_NS
+   (TIMER_END), an expired region's holders within 2 MESH_PLATFORM_NS (a port child's own bound after its bridge's
+   end), a bridge's exit status is read within MESH_PLATFORM_NS; past one the heartbeat exits at once, the wait named
+   (EX_SOFTWARE, which launchd's KeepAlive starts again ThrottleInterval later; a release's end, 0).  Its event loop
+   waits REPLACE_TICK_MS at most. */
 #include "mesh.h"
 #include "mesh-dataflow.h"
 #include "mesh-observe.h"
@@ -25,6 +30,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
+#include <poll.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdarg.h>
@@ -55,6 +61,7 @@ static void say(const char *format,...){
   va_list arguments;va_start(arguments,format);vfprintf(stderr,format,arguments);va_end(arguments);
 }
 static uint64_t wall_us(void){return clock_gettime_nsec_np(CLOCK_REALTIME)/1000u;}
+static uint64_t clock_ns(void){return clock_gettime_nsec_np(CLOCK_MONOTONIC);}
 
 static int events;
 static char self[PATH_MAX];
@@ -70,6 +77,7 @@ static uint64_t opened_at;
 /* whether a bridge is wanted (SIGHUP; a release none), whether an expired region waits to be unlinked (its holders
    watched), whether a reopen waits REOPEN_S, and the holders last told */
 static int wanted=1,replacing,timer_open;
+static uint64_t replace_by;
 static pid_t told[3*MESH_PORTS+MESH_CLIENTS];
 static uint32_t told_count;
 
@@ -157,6 +165,12 @@ static void replace_turn(void){
       if(!timer_open)reopen_later();
     }
     return;
+  }
+  if(!replacing)replace_by=clock_ns()+2*MESH_PLATFORM_NS;
+  else if(clock_ns()>=replace_by){
+    say("region %s is expired and %u of its holders live %.0f s on (replace_turn's wait for them); the heartbeat exits\n",
+        MESH_NAME,count,(double)(2*MESH_PLATFORM_NS)/1e9);
+    exit(EX_SOFTWARE);
   }
   replacing=1;
   int same=count==told_count;
@@ -254,7 +268,19 @@ static void turn(void){
 static void bridge_ended(void){
   int status=0;
   const pid_t was=bridge;
-  const int reaped=child && waitpid(was,&status,0)==was;
+  int reaped=0;
+  for(const uint64_t until=clock_ns()+MESH_PLATFORM_NS;child && !reaped;){
+    const pid_t got=waitpid(was,&status,WNOHANG);
+    if(got==was)reaped=1;
+    else if(got<0 && errno!=EINTR)break;
+    else if(clock_ns()>=until){
+      say("bridge %d ended and its status not read %.0f s on (bridge_ended's waitpid); the heartbeat exits\n",(int)was,
+          (double)MESH_PLATFORM_NS/1e9);
+      exit(EX_SOFTWARE);
+    }
+    else poll(NULL,0,1);
+  }
+  timer_off(TIMER_END);
   bridge=0;child=0;
   const int expired=reaped && WIFEXITED(status) && WEXITSTATUS(status)==EX_TEMPFAIL;
   if(!reaped)say("bridge %d ended\n",(int)was);
@@ -291,6 +317,9 @@ static void close_bridge(int how,int signal_number){
   asked=how;
   say("bridge %d asked to close (%s)\n",(int)bridge,signal_number==SIGHUP?"SIGHUP: restarted, its region kept":"SIGTERM: released");
   kill(bridge,signal_number);
+  struct kevent64_s t;
+  EV_SET64(&t,TIMER_END,EVFILT_TIMER,EV_ADD|EV_ONESHOT,0,(int64_t)(3*MESH_PLATFORM_NS/1000000),0,0,0);
+  kevent64(events,&t,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
 }
 
 static void noted(int number){(void)number;}
@@ -332,11 +361,10 @@ int main(int argc,char **argv){
     say("bridge %d found serving region %s; watched\n",(int)serving,MESH_NAME);
   }
   else open_bridge();
-  int ending=0;
   for(;;){
     struct kevent64_s ready[8];
     struct timespec tick={REPLACE_TICK_MS/1000,(long)(REPLACE_TICK_MS%1000)*1000000};
-    const int count=kevent64(events,NULL,0,ready,8,0,replacing?&tick:NULL);
+    const int count=kevent64(events,NULL,0,ready,8,0,&tick);
     if(count<0 && errno!=EINTR){say("events: %s\n",strerror(errno));return 1;}
     if(count==0 && replacing)turn();
     for(int i=0;i<count;i++){
@@ -360,17 +388,12 @@ int main(int argc,char **argv){
         wanted=0;
         if(!bridge){region_expire();replace_turn();say("signal %d: the heartbeat ends\n",(int)e->ident);return 0;}
         close_bridge(ASKED_END,SIGTERM);
-        if(!ending){
-          ending=1;
-          struct kevent64_s t;
-          EV_SET64(&t,TIMER_END,EVFILT_TIMER,EV_ADD|EV_ONESHOT,0,(int64_t)(3*MESH_PLATFORM_NS/1000000),0,0,0);
-          kevent64(events,&t,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
-        }
       }
       else if(e->filter==EVFILT_TIMER && e->ident==TIMER_OPEN){timer_open=0;turn();}
-      else if(e->filter==EVFILT_TIMER && e->ident==TIMER_END){
-        say("bridge %d has not ended %.0f s after it was asked; the heartbeat ends without it\n",(int)bridge,
-            (double)(3*MESH_PLATFORM_NS)/1e9);
+      else if(e->filter==EVFILT_TIMER && e->ident==TIMER_END && bridge){
+        say("bridge %d has not ended %.0f s after it was asked (close_bridge's wait); the heartbeat exits without it\n",
+            (int)bridge,(double)(3*MESH_PLATFORM_NS)/1e9);
+        if(asked!=ASKED_END)exit(EX_SOFTWARE);
         region_expire();
         return 0;
       }
