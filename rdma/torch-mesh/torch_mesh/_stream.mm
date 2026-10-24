@@ -820,15 +820,22 @@ static std::vector<at::Tensor> linears(const std::vector<at::Tensor> &xs, const 
 
 static at::Tensor fused_step(const at::Tensor &x, const std::optional<at::Tensor> &w, int64_t dim, std::vector<int64_t> sizes,
                              std::string group, bool adds, int64_t repeats);
+static std::tuple<at::Tensor, at::Tensor> cell_step(const std::vector<at::Tensor> &xs, const std::vector<std::optional<at::Tensor>> &x1s,
+                                                    const std::vector<at::Tensor> &ws, const std::vector<std::optional<at::Tensor>> &biases,
+                                                    const at::Tensor &c, int64_t dim, std::vector<int64_t> sizes, std::string group,
+                                                    int64_t repeats);
 TORCH_LIBRARY_FRAGMENT(torch_mesh, m) {
   m.def("linear(Tensor x, Tensor w, Tensor? bias=None, int act=0, Tensor? x1=None) -> Tensor");
   m.def("linears(Tensor[] x, Tensor[] w, Tensor?[] bias, int[] act, Tensor?[] x1) -> Tensor[]");
   m.def("fused_step(Tensor x, Tensor? w, int dim, int[] sizes, str group_name, bool adds, int repeats) -> Tensor");
+  m.def("cell_step(Tensor[] x, Tensor?[] x1, Tensor[] w, Tensor?[] bias, Tensor c, int dim, int[] sizes, str group_name, "
+        "int repeats) -> (Tensor, Tensor)");
 }
 TORCH_LIBRARY_IMPL(torch_mesh, MPS, m) {
   m.impl("linear", &linear);
   m.impl("linears", &linears);
   m.impl("fused_step", &fused_step);
+  m.impl("cell_step", &cell_step);
 }
 
 // The same dispatch in a command buffer of its own on torch's queue, committed and waited `repeats` times: each one's
@@ -1170,10 +1177,9 @@ static FusedForm &fused_form_of(const at::Tensor &x, const std::optional<at::Ten
 // partition._fused's crossing on the native path: repeat j of `repeats` (j this form's calls since its last batch), the
 // batch's leases and exchange at j 0, then the publication (gather_publish, or linear_publish of x w^T) and the landing
 // (gather_land or sum_land) encoded in one turn of torch's queue; the output, a lease of the held pool
-static at::Tensor fused_step(const at::Tensor &x, const std::optional<at::Tensor> &w, int64_t dim, std::vector<int64_t> sizes,
-                             std::string group, bool adds, int64_t repeats) {
-  const at::Tensor xc = x.is_contiguous() ? x : x.contiguous();
-  FusedForm &f = fused_form_of(xc, w, dim, sizes, group, adds);
+// a call's repeat j of `repeats` in form f (its calls since its last batch), and at j 0 the batch: its two leases' slots
+// (made once a repeats), the half taken in turn, the exchange of its segments and the records' binding words
+static int64_t fused_turn(FusedForm &f, const at::Tensor &xc, int64_t repeats) {
   const int64_t j = f.j, peers = f.ranks - 1;
   f.j = (j + 1) % repeats;
   if (j == 0) {
@@ -1202,6 +1208,14 @@ static at::Tensor fused_step(const at::Tensor &x, const std::optional<at::Tensor
     for (int64_t k = 0; k < peers; k++) binding_words(f.lbind, k < (int64_t)made.second.size() ? &made.second[k] : nullptr);
     for (int64_t k = 0; k < peers; k++) binding_words(f.lbind, nullptr);
   }
+  return j;
+}
+
+static at::Tensor fused_step(const at::Tensor &x, const std::optional<at::Tensor> &w, int64_t dim, std::vector<int64_t> sizes,
+                             std::string group, bool adds, int64_t repeats) {
+  const at::Tensor xc = x.is_contiguous() ? x : x.contiguous();
+  FusedForm &f = fused_form_of(xc, w, dim, sizes, group, adds);
+  const int64_t j = fused_turn(f, xc, repeats);
   const FusedForm::Ring &ring = *f.ring;
   const std::vector<at::Tensor> &segments = ring.segments[f.half][j];
   std::vector<int64_t> pwords = f.pwords, lwords = f.lwords;
@@ -1235,6 +1249,95 @@ static at::Tensor fused_step(const at::Tensor &x, const std::optional<at::Tensor
     });
   }
   return out;
+}
+
+// torch_mesh::cell_step: an LSTM tick's layers, their cells and the gather of their h, one native call
+// (torch_mesh.compiler's fold of a grouped product, torch's LSTMCell of its gates and the allgatherv of h): the gather's
+// form (fused_form_of, of a region block [L, R, HR] of x's dtype, made once a shape) and turn (fused_turn), its
+// publication linear.metal's linears_cell (each layer's gates x [x1] w^T + bias, the cell on them, h written into this
+// rank's send segment and released) in place of gather_publish, its landing gather_land; c [L, R, HR] the layers' state;
+// c' and the gathered h leases of the held pool.  linears_cell's pipelines, by their loads, split and peers, are
+// partition's, compiled there (cell_maker).
+static pybind11::object *cell_maker_ = nullptr;
+static std::map<std::tuple<int, int, int64_t, int64_t>, int64_t> cell_pipelines_;
+static void cell_maker(pybind11::object maker) { cell_maker_ = new pybind11::object(std::move(maker)); }
+
+static std::tuple<at::Tensor, at::Tensor> cell_step(const std::vector<at::Tensor> &xs, const std::vector<std::optional<at::Tensor>> &x1s,
+                                                    const std::vector<at::Tensor> &ws, const std::vector<std::optional<at::Tensor>> &biases,
+                                                    const at::Tensor &c, int64_t dim, std::vector<int64_t> sizes, std::string group,
+                                                    int64_t repeats) {
+  const size_t P = ws.size();
+  TORCH_CHECK(P >= 1 && P <= 4 && xs.size() == P && x1s.size() == P && biases.size() == P && c.dim() == 3 && c.size(0) == (int64_t)P &&
+                  c.scalar_type() == at::kFloat && dim == 2,
+              "torch_mesh::cell_step takes one to four layers' x, x1, w and bias, their state c [L, R, HR] float, and the gather's dim 2");
+  const int64_t R = c.size(1), HR = c.size(2);
+  static std::map<std::vector<int64_t>, at::Tensor> likes;
+  const std::vector<int64_t> block{(int64_t)P, R, HR};
+  auto like = likes.find(block);
+  if (like == likes.end()) like = likes.emplace(block, region_empty(block, xs[0], true)).first;
+  FusedForm &f = fused_form_of(like->second, std::nullopt, dim, sizes, group, false);
+  const int64_t j = fused_turn(f, like->second, repeats);
+  const std::vector<at::Tensor> &segments = f.ring->segments[f.half][j];
+  const at::Tensor cc = c.is_contiguous() ? c : c.contiguous();
+  const at::Tensor c1 = region_empty(cc.sizes().vec(), cc, true, true);
+  std::vector<std::optional<at::Tensor>> buffers(26);
+  std::vector<int64_t> words(4 * 12, 0);
+  int64_t first = 0, least = INT64_MAX;
+  bool wide_w = true, wide_x = true;
+  for (size_t p = 0; p < P; p++) {
+    const at::Tensor xc = xs[p].stride(1) == 1 ? xs[p] : xs[p].contiguous(), wc = ws[p].stride(1) == 1 ? ws[p] : ws[p].contiguous();
+    const at::Tensor x1c = !x1s[p] ? xc : x1s[p]->stride(1) == 1 ? *x1s[p] : x1s[p]->contiguous();
+    const int64_t K0 = xc.size(1), K = wc.size(1), N = wc.size(0), ldw = wc.stride(0);
+    TORCH_CHECK(N == 4 * HR && K == K0 + (x1s[p] ? x1c.size(1) : 0) && xc.size(0) == R, "torch_mesh::cell_step: layer ", p,
+                " takes x [R, K0], x1 [R, K - K0] and w [4 HR, K]");
+    buffers[6 * p] = xc, buffers[6 * p + 1] = x1c, buffers[6 * p + 2] = wc;
+    buffers[6 * p + 3] = biases[p] ? std::optional<at::Tensor>(biases[p]->contiguous()) : std::optional<at::Tensor>(wc);
+    buffers[6 * p + 4] = cc.select(0, p), buffers[6 * p + 5] = c1.select(0, p);
+    const int64_t d[12] = {R, K, N, biases[p] ? 1 : 0, ldw, K0, xc.stride(0), x1c.stride(0), HR, (int64_t)p, first, 0};
+    for (int k = 0; k < 12; k++) words[12 * p + k] = d[k];
+    first += HR;
+    least = std::min(least, K);
+    wide_w &= ldw % 4 == 0 && K0 % 4 == 0, wide_x &= K0 % 4 == 0 && xc.stride(0) % 4 == 0 && x1c.stride(0) % 4 == 0;
+  }
+  for (size_t p = P; p < 4; p++) {
+    for (int k = 0; k < 6; k++) buffers[6 * p + k] = buffers[k];
+    words[12 * p + 10] = first;
+  }
+  buffers[24] = segments[f.rank], buffers[25] = f.arrivals;
+  words.push_back(j), words.push_back(0);
+  words.insert(words.end(), f.pbind.begin(), f.pbind.end());
+  const int64_t split = linear_fit(least, first);
+  const auto key = std::make_tuple(wide_w ? 4 : 1, wide_x ? 4 : 1, split, f.ranks - 1);
+  auto kernel = cell_pipelines_.find(key);
+  if (kernel == cell_pipelines_.end()) {
+    TORCH_CHECK(cell_maker_, "torch_mesh::cell_step: no kernel maker (partition registers it as it loads)");
+    pybind11::gil_scoped_acquire gil;
+    kernel = cell_pipelines_.emplace(key, (*cell_maker_)(std::get<0>(key), std::get<1>(key), split, f.ranks - 1).cast<int64_t>()).first;
+  }
+  std::vector<int64_t> lwords = f.lwords;
+  lwords[f.lj] = j;
+  if (lwords.size() % 2) lwords.push_back(0);
+  lwords.insert(lwords.end(), f.lbind.begin(), f.lbind.end());
+  const Dispatch publication = encoded(kernel->second, buffers, words, 26, first, 1, split * 32);
+  const at::Tensor out = region_empty(f.shape, like->second, true, true);
+  const Dispatch landing = encoded(f.land, {f.ring->slots[f.half][j], out}, lwords, 15, f.lgx, 1, f.lthreads);
+  at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
+  MeshStream *s = &stream_of(stream);
+  {
+    const Deadline deadline("cell_step: a turn of torch's queue, a tick's two kernels encoded");
+    dispatch_sync(stream->queue(), ^{
+      @autoreleasepool {
+        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
+        declare_fused(encoder);
+        encode_in(encoder, publication);
+        s->published();
+        encoder = stream->commandEncoder();
+        declare_fused(encoder);
+        encode_in(encoder, landing);
+      }
+    });
+  }
+  return {out, c1};
 }
 
 // A declared set of routed writes. Bindings name physical channels, including
@@ -1335,6 +1438,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("metal_prelude", &metal_prelude);
   module.def("fused_exchange", &fused_exchange);
   module.def("fused_maker", &fused_maker);
+  module.def("cell_maker", &cell_maker);
   module.def("fused_writes", &fused_writes);
   module.def("fused_published", &fused_published);
 }

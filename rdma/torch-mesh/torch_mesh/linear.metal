@@ -28,13 +28,31 @@ template <uint V> inline float4 linear_part(device const half* p, uint k, uint h
     return v;
 }
 
-template <uint VW, uint VX, uint COLS, uint NSG, uint U, typename Store>
+// A threadgroup's output columns (linear_body's column map): column c of threadgroup tg, COLS adjacent ones by default.
+struct linear_adjacent {
+    template <uint COLS> uint n(uint tg, uint c) const { return tg * COLS + c; }
+};
+
+// A row block's sums handed to the store (linear_body's emission): by default each (row, column) sum in a thread of its
+// own, store(row, column, sum); a store that takes a row's COLS sums at once overloads it (linear_cell_store, below).
+template <uint COLS, uint NSG, typename Store, typename Cols>
+inline void linear_emit(thread const Store& store, thread const Cols& cols, threadgroup float* part, uint r0, uint R, uint N, uint tg,
+                        uint tid) {
+    if (tid < 8 * COLS) {
+        const uint r = tid / COLS, c = tid % COLS, n = cols.template n<COLS>(tg, c);
+        float s = 0.0f;
+        for (uint g = 0; g < NSG; g++) s += part[(g * 8 + r) * COLS + c];
+        if (r0 + r < R && n < N) store(r0 + r, n, s);
+    }
+}
+
+template <uint VW, uint VX, uint COLS, uint NSG, uint U, typename Store, typename Cols = linear_adjacent>
 inline void linear_body(device const half* x, device const half* x1, device const half* w, const linear_dims d, thread const Store& store,
-                        threadgroup float* part, uint sg, uint lane, uint tg, uint tid) {
-    const uint R = d.R, K = d.K, N = d.N, n0 = tg * COLS, K4 = K & ~3u;
+                        threadgroup float* part, uint sg, uint lane, uint tg, uint tid, thread const Cols& cols = Cols()) {
+    const uint R = d.R, K = d.K, N = d.N, K4 = K & ~3u;
     const uint span = (K4 / 4 + NSG - 1) / NSG * 4, k0 = sg * span, k1 = min(K4, k0 + span);
     device const half* wr[COLS];
-    for (uint c = 0; c < COLS; c++) wr[c] = w + ulong(min(n0 + c, N - 1)) * d.LDW;
+    for (uint c = 0; c < COLS; c++) wr[c] = w + ulong(min(cols.template n<COLS>(tg, c), N - 1)) * d.LDW;
     for (uint r0 = 0; r0 < R; r0 += 8) {
         float acc[8][COLS];
         for (uint r = 0; r < 8; r++)
@@ -78,12 +96,7 @@ inline void linear_body(device const half* x, device const half* x1, device cons
                 if (lane == 0) part[(sg * 8 + r) * COLS + c] = s;
             }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (tid < 8 * COLS) {
-            const uint r = tid / COLS, c = tid % COLS;
-            float s = 0.0f;
-            for (uint g = 0; g < NSG; g++) s += part[(g * 8 + r) * COLS + c];
-            if (r0 + r < R && n0 + c < N) store(r0 + r, n0 + c, s);
-        }
+        linear_emit<COLS, NSG>(store, cols, part, r0, R, N, tg, tid);
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 }
@@ -180,6 +193,87 @@ kernel void linear_publish(device const half* x [[buffer(0)]], device const half
     threadgroup_barrier(mem_flags::mem_device);
     if (mesh_last_arrival<true>(arrivals, 0, groups, tid, &last)) {
         for (uint q = 0; q < PEERS; q++) mesh_step_release(*p.publish[q].p, p.publish[q].a, tid, p.j);
+        mesh_arrival_reset(arrivals, 0, tid);
+    }
+}
+
+// The LSTM's tick as one dispatch (torch_mesh.compiler's fold of linears, torch's LSTMCell and allgatherv: _stream.mm
+// cell_step): up to four layers' gates, each layer's threadgroup tg one unit of the layer's HR, its four columns that
+// unit's gates (i, f, g and o: columns tg, HR + tg, 2 HR + tg and 3 HR + tg of the layer's [4 HR, K] weight,
+// linear_gates), and each row's four sums handed together to linear_cell_store: the cell (torch's LSTMCell's arithmetic on
+// the gates as linear stores them, fp16 with the bias added; c read and its new value written) and h written into this rank's send segment of the gather's crossing
+// ([L, R, HR] at the layer) through the collective's mesh_step_write; the last threadgroup to arrive releases it at its
+// repeat j (mesh_step_release), as linear_publish does.
+struct linear_gates {
+    uint HR;
+    template <uint COLS> uint n(uint tg, uint c) const { return c * HR + tg; }
+};
+
+struct linear_cell_store {
+    device const half* bias;
+    device const float* c;
+    device float* c1;
+    device uchar* send;
+    uint HR, R, layer, B;
+};
+
+inline float linear_sigmoid(float v) { return 1.0f / (1.0f + exp(-v)); }
+
+template <uint COLS, uint NSG>
+inline void linear_emit(thread const linear_cell_store& store, thread const linear_gates& cols, threadgroup float* part, uint r0, uint R,
+                        uint N, uint tg, uint tid) {
+    if (tid < 8 && r0 + tid < R && tg < store.HR) {
+        const uint r = r0 + tid, j = tg, HR = store.HR;
+        float s[4];
+        for (uint c = 0; c < 4; c++) {
+            s[c] = 0.0f;
+            for (uint g = 0; g < NSG; g++) s[c] += part[(g * 8 + tid) * COLS + c];
+            s[c] = float(half(s[c] + (store.B ? float(store.bias[c * HR + j]) : 0.0f)));  // the gate as linear stores it
+        }
+        const ulong at = ulong(r) * HR + j;
+        const float cn = linear_sigmoid(s[1]) * store.c[at] + linear_sigmoid(s[0]) * tanh(s[2]);
+        store.c1[at] = cn;
+        mesh_step_write<half>(store.send, (ulong(store.layer) * store.R + r) * HR + j, half(linear_sigmoid(s[3]) * tanh(cn)));
+    }
+}
+
+struct linears_cell_problem { linear_dims d; uint HR, layer, first, pad; };
+template <uint PEERS>
+struct linears_cell_words { linears_cell_problem p[4]; uint j, pad; mesh_step_binding land[PEERS], publish[PEERS]; };
+
+// problem P through its own inlined body, its buffers the kernel's own arguments (as linear_group's)
+#define LINEARS_CELL_CASE(P, X_, S_, W_, B_, C_, D_) case P: { const linears_cell_problem e = g.p[P]; \
+    const linear_cell_store store{B_, C_, D_, send, e.HR, e.d.R, e.layer, e.d.B}; \
+    linear_body<VW, VX, 4, NSG, U>(X_, S_, W_, e.d, store, part, sg, lane, tg - e.first, tid, linear_gates{e.HR}); break; }
+
+template <uint VW, uint VX, uint NSG, uint U, uint PEERS>
+[[max_total_threads_per_threadgroup(NSG * 32)]]
+kernel void linears_cell(device const half* x0 [[buffer(0)]], device const half* s0 [[buffer(1)]], device const half* w0 [[buffer(2)]],
+                         device const half* b0 [[buffer(3)]], device const float* c0 [[buffer(4)]], device float* d0 [[buffer(5)]],
+                         device const half* x1 [[buffer(6)]], device const half* s1 [[buffer(7)]], device const half* w1 [[buffer(8)]],
+                         device const half* b1 [[buffer(9)]], device const float* c1 [[buffer(10)]], device float* d1 [[buffer(11)]],
+                         device const half* x2 [[buffer(12)]], device const half* s2 [[buffer(13)]], device const half* w2 [[buffer(14)]],
+                         device const half* b2 [[buffer(15)]], device const float* c2 [[buffer(16)]], device float* d2 [[buffer(17)]],
+                         device const half* x3 [[buffer(18)]], device const half* s3 [[buffer(19)]], device const half* w3 [[buffer(20)]],
+                         device const half* b3 [[buffer(21)]], device const float* c3 [[buffer(22)]], device float* d3 [[buffer(23)]],
+                         device uchar* send [[buffer(24)]], device atomic_uint* arrivals [[buffer(25)]],
+                         constant linears_cell_words<PEERS>& g [[buffer(26)]],
+                         uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+                         uint tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+                         uint groups [[threadgroups_per_grid]]) {
+    threadgroup float part[NSG * 8 * 4];
+    threadgroup uint last;
+    for (uint q = 0; q < PEERS; q++) mesh_step_enter(*g.publish[q].p, g.publish[q].v, g.publish[q].progress, tg == 0 && tid == 0);
+    const uint p = tg >= g.p[3].first ? 3 : tg >= g.p[2].first ? 2 : tg >= g.p[1].first ? 1 : 0;
+    switch (p) {
+        LINEARS_CELL_CASE(0, x0, s0, w0, b0, c0, d0)
+        LINEARS_CELL_CASE(1, x1, s1, w1, b1, c1, d1)
+        LINEARS_CELL_CASE(2, x2, s2, w2, b2, c2, d2)
+        default: LINEARS_CELL_CASE(3, x3, s3, w3, b3, c3, d3)
+    }
+    threadgroup_barrier(mem_flags::mem_device);
+    if (mesh_last_arrival<true>(arrivals, 0, groups, tid, &last)) {
+        for (uint q = 0; q < PEERS; q++) mesh_step_release(*g.publish[q].p, g.publish[q].a, tid, g.j);
         mesh_arrival_reset(arrivals, 0, tid);
     }
 }
