@@ -66,6 +66,15 @@ def compiler(gm, example_inputs):
             for node in list(graph.nodes):
                 if node.target is torch.ops._c10d_functional.all_reduce.default:
                     node.target = torch.ops.torch_mesh.all_reduce.default
+                    made = node.args[0]
+                    if (node.args[1] == 'sum' and made.target is torch.ops.torch_mesh.linear.default and len(made.users) == 1
+                            and made.args[2:] in ((), (None,))):
+                        with graph.inserting_before(node):
+                            summed = graph.call_function(torch.ops.torch_mesh.linear_sum.default, (*made.args[:2], node.args[2]))
+                        summed.meta['val'] = node.meta['val']
+                        node.replace_all_uses_with(summed)
+                        graph.erase_node(node)
+                        graph.erase_node(made)
                     continue
                 mm = node.target is aten.mm.default and rows(*node.args)
                 addmm = (node.target is aten.addmm.default and not node.kwargs and len(node.args) == 3 and rows(*node.args[1:])

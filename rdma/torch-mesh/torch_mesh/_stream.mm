@@ -695,6 +695,13 @@ static void linear_source(const std::string &source, int64_t cores) {
   linear_cores_ = cores;
 }
 
+static int64_t linear_split(int64_t K, int64_t N) {
+  const int64_t groups = (N + LINEAR_COLUMNS - 1) / LINEAR_COLUMNS;
+  int64_t split = 1;
+  while (split < 8 && split * groups < linear_cores_ * 256 && K / (split * 2) >= 1024) split *= 2;
+  return split;
+}
+
 static at::Tensor linear(const at::Tensor &x, const at::Tensor &w, const std::optional<at::Tensor> &bias, int64_t act) {
   TORCH_CHECK(x.scalar_type() == at::kHalf && w.scalar_type() == at::kHalf && x.dim() == 2 && w.dim() == 2 && x.size(1) == w.size(1),
               "torch_mesh::linear takes fp16 x [R, K] and w [N, K], not ", x.sizes(), " ", x.scalar_type(), " and ", w.sizes(), " ",
@@ -702,8 +709,7 @@ static at::Tensor linear(const at::Tensor &x, const at::Tensor &w, const std::op
   const at::Tensor xc = x.contiguous(), wc = w.stride(1) == 1 ? w : w.contiguous();
   const int64_t R = x.size(0), K = x.size(1), N = w.size(0), ldw = wc.stride(0);
   const int64_t groups = (N + LINEAR_COLUMNS - 1) / LINEAR_COLUMNS;
-  int split = 1;
-  while (split < 8 && split * groups < linear_cores_ * 256 && K / (split * 2) >= 1024) split *= 2;
+  const int split = (int)linear_split(K, N);
   const auto key = std::make_tuple(ldw % 4 ? 1 : 4, K % 4 ? 1 : 4, split, (int)act);
   auto found = linear_pipelines_.find(key);
   if (found == linear_pipelines_.end()) {
@@ -1064,6 +1070,7 @@ static void fused_published() {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("pipeline", &pipeline);
   module.def("linear_source", &linear_source);
+  module.def("linear_split", &linear_split);
   module.def("device_facts", &device_facts);
   module.def("pipeline_facts", &pipeline_facts);
   module.attr("polls") = (int64_t)NCCL_MESH_POLLS;
