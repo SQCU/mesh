@@ -209,8 +209,9 @@ struct link {
    and the lanes a progress thread found failed, or every lane of a link none of whose streams is live (CHILD_BROKEN,
    naming its connect's pairing, `result` the loss's code where it is not a failed lane: LINK_STREAMS_ENDED), a fault
    absorbed on the
-   provider's doorbell (CHILD_FAULTED), a guard not held within MESH_PLATFORM_NS (CHILD_UNGUARDED), its port's peer
-   interface terminating (CHILD_TERMINATED, as the child heard it: B9b) */
+   provider's doorbell (CHILD_FAULTED), its port's peer interface terminating (CHILD_TERMINATED, as the child heard it:
+   B9b); 11 was a guard not held, which now ends the child (mesh-link.c port_wait), so a parent and child of builds
+   either side of it read every kind alike */
 /* design/transport.md section 14, "A process a port": the version of the contract between the bridge and its children,
    declared: their command line, `mesh-flow --child VERSION DEVICE INDEX ONES` (its first three words the same
    for every version, so a bridge finds a child of any version that holds a device: child_elsewhere), and struct
@@ -223,7 +224,7 @@ struct link {
    2 of the children's contract) */
 #define LINK_STREAMS_ENDED ECONNABORTED
 enum { CHILD_OPEN=1, CHILD_MAKE, CHILD_CONNECT, CHILD_HALT, CHILD_END,
-       CHILD_OPENED, CHILD_MADE, CHILD_CONNECTED, CHILD_BROKEN, CHILD_FAULTED, CHILD_UNGUARDED, CHILD_TERMINATED };
+       CHILD_OPENED, CHILD_MADE, CHILD_CONNECTED, CHILD_BROKEN, CHILD_FAULTED, CHILD_TERMINATED=12 };
 struct child_message {
   uint32_t kind,pairing;
   int32_t result,refused;

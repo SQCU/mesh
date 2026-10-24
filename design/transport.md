@@ -284,13 +284,6 @@ Nothing of the node's brings a fabric port down: a port whose cable link is up w
 objects. A job an operator disables (`launchctl disable`) stays off: the installers load no disabled job
 (`bin/mesh-launchd-agent.sh`).
 
-A fault the bridge's start or its pairing meets would recur at every boot, since launchd and the keeper start the
-bridge at boot. The bridge therefore keeps a boot ledger beside its configuration (`boots`): the boot it started in,
-and how many boots in a row ended while a bridge was in its first 10 minutes with the ledger set, a panic, a power loss
-or a reset. At n of them, it opens no device for 60·2ⁿ⁻¹ s, at most an hour, and a stop signal ends it meanwhile. Its
-stop clears the ledger, and so do 10 minutes of running. Such a fault then recurs at most once an hour, its report is
-written at each boot, and the node stays reachable by ssh in between.
-
 ## 10. Duds
 
 A dud is the whole page of all-ones. The bridge chooses which page every SEND names, so a dud is a SEND whose SGE
