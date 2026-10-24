@@ -8,6 +8,7 @@ import torch
 import torch.distributed as dist
 import torch_mesh
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import Shard
 from torch_mesh import partition
 
 import chain
@@ -17,35 +18,25 @@ CHUNK = 512
 
 
 # docs/writing-a-service.md#the-lstm
-def weights(config, blocks, rank, size):
-    """Each layer's gate rows of this rank's block of units, [4 H_r, K] and [4 H_r], in MPS region tensors: rank 0
-    reads the files memory-mapped and sends each rank its rows."""
-    L, KIN, H, folder = config['layers'], config['input_width'], sum(blocks), Path(config['weights'])
+def weights(config, mesh):
+    """Each layer's gate weights [4H, K] and bias [4H], unit-major, split over the mesh dimension tp by the backend's
+    scatter from rank 0 (partition.distribute_tensor), which reads the files memory-mapped into region tensors; every
+    other rank passes the global shape alone."""
+    L, KIN, H, folder = config['layers'], config['input_width'], config['width'], Path(config['weights'])
     load = lambda name: np.load(folder / f'{name}.npy', mmap_mode='r')
-    made = []
+    rows, made = lstm.gate_rows(H), []
     for l in range(L):
         K = (KIN if l == 0 else H) + H
-        W = torch_mesh.empty(4 * blocks[rank], K, dtype=torch.half)
-        b = torch_mesh.empty(4 * blocks[rank], dtype=torch.half)
-        if rank:
-            dist.recv(W, src=0)
-            dist.recv(b, src=0)
-        else:
+        if dist.get_rank() == 0:
             w_ih, w_hh, bias = load(f'w_ih_{l}'), load(f'w_hh_{l}'), load(f'b_{l}')
-            for r in reversed(range(size)):
-                rows = lstm.gate_rows(blocks, r)
-                Wr = torch_mesh.empty(len(rows), K, dtype=torch.half, device='cpu')
-                for c in range(0, len(rows), CHUNK):
-                    picked = rows[c:c + CHUNK]
-                    Wr[c:c + CHUNK] = torch.from_numpy(np.concatenate([w_ih[picked], w_hh[picked]], 1))
-                br = torch_mesh.empty(len(rows), dtype=torch.half, device='cpu').copy_(torch.from_numpy(bias[rows].copy()))
-                if r:
-                    dist.send(Wr, dst=r)
-                    dist.send(br, dst=r)
-                else:
-                    W.copy_(Wr)
-                    b.copy_(br)
-        made.append((W, b))
+            W = torch_mesh.empty(4 * H, K, dtype=torch.half)
+            for c in range(0, 4 * H, CHUNK):
+                picked = rows[c:c + CHUNK]
+                W[c:c + CHUNK].copy_(torch.from_numpy(np.concatenate([w_ih[picked], w_hh[picked]], 1)))
+            b = torch_mesh.empty(4 * H, dtype=torch.half).copy_(torch.from_numpy(bias[rows].copy()))
+        else:
+            W, b = torch_mesh.empty(1, K, dtype=torch.half).expand(4 * H, K), torch_mesh.empty(1, dtype=torch.half).expand(4 * H)
+        made.append([partition.distribute_tensor(t, mesh, [Shard(0)], src_data_rank=0) for t in (W, b)])
     return [w for w, _ in made], [b for _, b in made]
 
 
@@ -58,7 +49,7 @@ def main():
     mesh = DeviceMesh.from_group(dist.group.WORLD, 'mps', mesh_dim_names=('tp',))
     partition.attach(mesh, tp=H)
     steps, rows, inputs = chain.operand(config['input'], rank, KIN)
-    W, b = weights(config, partition.split(mesh, 'tp', H), rank, size)
+    W, b = weights(config, mesh)
     tick = lstm.Tick(mesh, W, b, rows, steps)
     X = torch_mesh.empty(steps, rows, KIN, dtype=torch.half)
     if rank == 0:

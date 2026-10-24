@@ -10,11 +10,9 @@ import chain
 
 
 # docs/writing-a-service.md#the-lstm
-def gate_rows(blocks, k):
-    """Block k's rows of a layer's [4H, K] gate weights, H the blocks' sum, unit-major: (i, f, g, o) of each of its
-    units in turn."""
-    H, start = sum(blocks), sum(blocks[:k])
-    units = np.arange(start, start + blocks[k])
+def gate_rows(H):
+    """A layer's [4H, K] gate weights' rows unit-major: (i, f, g, o) of each unit in turn."""
+    units = np.arange(H)
     return np.stack([units, H + units, 2 * H + units, 3 * H + units], 1).reshape(-1)
 
 
@@ -32,9 +30,8 @@ class Tick:
     # docs/writing-a-service.md#the-lstm
     def __init__(self, mesh, weights, biases, rows, steps):
         self.mesh, self.rows, self.steps, self.L = mesh, rows, steps, len(weights)
-        self.W = [partition.from_local(w, mesh, [Shard(0)]) for w in weights]
-        self.b = [partition.from_local(b, mesh, [Shard(0)]) for b in biases]
-        H, HR = self.W[0].shape[0] // 4, biases[0].numel() // 4
+        self.W, self.b = weights, biases
+        H, HR = self.W[0].shape[0] // 4, self.b[0].to_local().numel() // 4
         self.c = torch_mesh.empty(self.L, rows, HR, dtype=torch.float32).zero_()
         self.mine = [torch_mesh.empty(self.L, rows, HR, dtype=torch.half).zero_() for _ in range(2)]
         self.h = torch.zeros(self.L, rows, H, dtype=torch.half, device='mps')

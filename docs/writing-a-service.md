@@ -196,8 +196,9 @@ cross once, by one all-to-all. The program never chooses a block.
 **Configuration.** `input`, `weights`, `output`, `input_width`, `width` (H) and `layers`. The weights directory holds
 `w_ih_<l>` [4H, its input], `w_hh_<l>` [4H, H] and `b_<l>` [4H] in torch's gate order, one .npy file an array.
 `lstm.inputs(configuration, steps, rows)` makes sample ones with torch's initialization. Rank 0 reads them
-memory-mapped and sends each rank its gate rows, into MPS region tensors; the input is broadcast once into a region
-tensor.
+memory-mapped into region tensors, each layer's rows unit-major, and the backend's scatter
+(`partition.distribute_tensor`, `Shard(0)`) gives each rank its block of them; every other rank passes the global shape
+alone. The input is broadcast once into a region tensor.
 
 ## What to read next
 
