@@ -251,6 +251,11 @@ static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &c
     const Deadline deadline("on_stream: a turn of torch's queue, a group encoded");
     dispatch_sync(stream->queue(), ^{
       @autoreleasepool {
+        // torch's open command buffer committed first, so the group's publication is in a later buffer than the work
+        // that wrote what it sends: a kernel's plain stores reach the NIC only as its command buffer ends (2,041,216 of
+        // 4,194,304 plain-stored words read stale on the M5: metal-microbench docs/measurement.md, 2026-09-29), and a
+        // call that sends a tensor in place has its bridge read it once the publication's `ready` passes
+        stream->synchronize(at::mps::SyncType::COMMIT_AND_CONTINUE);
         ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, split ? &issue : nullptr};
         result = (*encode)(&on);
         if (!split || issue.published) s->published();
