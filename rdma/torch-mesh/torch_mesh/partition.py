@@ -297,7 +297,10 @@ def _linear_kernel(*arguments):
 def _fused(x, dim, sizes, group, adds, w=None, repeats=1):
     """allgatherv on the mesh backend (above), or where `adds` the all-reduce's sum (backend.all_reduce, every rank's
     block all of x: sizes x's extent along dim, n times): x contiguous, of 2 or 4 bytes an element; the output a new
-    tensor.  Where `w` (a weight [N, K] of fp16 rows any whole stride apart) is given, the sum's operand is x's
+    region tensor, a held lease (_stream.region_empty's: taken from the leases of its bytes whose tensors were freed and
+    whose stream work has passed, so none is reused while its tensor lives, as autograd keeps a gathered input for its
+    backward), so no call grows torch's MPS heaps (one of 16 MiB takes a whole 1 GiB heap on the Mini, which the GPU
+    wires).  Where `w` (a weight [N, K] of fp16 rows any whole stride apart) is given, the sum's operand is x's
     product with it, x [R, K] (backend.linear_sum): linear.metal's linear_publish computes it into this rank's segment
     and publishes it there through the collective's steps, in place of gather_publish.  The call is repeat j of the
     `repeats` one issue presents, j its calls of this form since the last issue (torch_mesh.compiler)."""
@@ -343,7 +346,7 @@ def _fused(x, dim, sizes, group, adds, w=None, repeats=1):
     pwords[at], lwords[4] = j, j
     fused.encode(publish, [x] + ([] if w is None else [w]) + [segments[rank], held['arrivals']] + ([] if w is None else [x]), pwords, 15,
                  gp, 1, threads, n - 1, publish=crossing)
-    out = torch.empty(held['shape'], dtype=x.dtype, device=x.device)
+    out = _stream.region_empty(list(held['shape']), x, True, True)
     fused.encode(land, [slot, out], lwords, 15, gl, 1, _GATHER_THREADS, n - 1, land=crossing)
     return out
 
