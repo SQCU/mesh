@@ -402,10 +402,11 @@ struct metal_result metal_send_deferred(struct metal_program *program, void *ope
   return record4(program, (id<MTLBuffer>)operand, nil, (id<MTLBuffer>)r->words, nil, release_args(r, offset), bound);
 }
 
-struct metal_result metal_land_deferred(struct metal_program *program, void *landing, size_t offset, const struct metal_wait *w, uint64_t bound[6]) {
+struct metal_result metal_land_deferred(struct metal_program *program, void *landing, size_t offset, size_t bytes, const struct metal_wait *w,
+                                        uint64_t bound[6]) {
   if (!program->ring) return (struct metal_result){EINVAL, "a step run by its caller's kernel is the Metal 4 form's, or a classic stream's with its residency set"};
   return record4(program, (id<MTLBuffer>)landing, (id<MTLBuffer>)landing, (id<MTLBuffer>)w->words, (id<MTLBuffer>)w->violation,
-                 wait_args(w, offset, 0, 0), bound);
+                 wait_args(w, offset, bytes, 0), bound);
 }
 
 /* the tracks being recorded (nccl-mesh-metal.h metal_record): each step's kernel and bindings as its dispatch would bind

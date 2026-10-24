@@ -1101,10 +1101,13 @@ uint64_t ncclMeshRetired(void);
    installed library), and needs no path to one.  The steps' text is the argument record (struct mesh_args), a fused
    step's six bindings as one record (struct mesh_step_binding: ncclMeshFused's order, a classic kernel's form of
    them) and mesh_step_enter, mesh_step_wait, mesh_step_claim, mesh_step_failed,
-   mesh_step_check, mesh_step_counts, mesh_step_await, mesh_step_write, mesh_step_release and mesh_step_read (any element type: a landed
+   mesh_step_check, mesh_step_counts, mesh_step_await, mesh_step_await_pages (a fused landing's first bytes alone: the
+   pages they lie in, a prefix of the holding's `landed`, the record's n its bytes), mesh_step_write, mesh_step_release
+   and mesh_step_read (any element type: a landed
    element, loaded system-coherent from the caller's own landing buffer), on a holding's counts (`ready` to store,
    `landed` to await); the library's own, so the caller compiles them with its kernels and keeps no copy.
-   Every thread of the threadgroup calls mesh_step_await and mesh_step_release (each holds a barrier);
+   Every thread of the threadgroup calls mesh_step_await, mesh_step_await_pages and mesh_step_release (each holds a
+   barrier);
    mesh_step_enter's and mesh_step_await's results are true (no kernel halts on a failure: rdma/NCCL.md "Bounded
    waits"), kept so that a kernel testing them compiles as it is. */
 const char* ncclMeshMetalPrelude(void);

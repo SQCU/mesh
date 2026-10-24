@@ -9,7 +9,7 @@ import torch
 import torch.distributed as dist
 import torch_mesh
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import Shard
+from torch.distributed.tensor import Replicate, Shard
 from torch_mesh import partition
 
 import chain
@@ -49,15 +49,17 @@ def main():
     split = lambda t: partition.distribute_tensor(t, mesh, [Shard(1)], src_data_rank=0)
     held = held or [(torch_mesh.empty(1, 1, shape(l)[2], dtype=torch.half).expand(shape(l)),
                      torch_mesh.empty(1, 1, dtype=torch.half).expand(4, H)) for l in range(L)]
-    tick = lstm.Tick(mesh, [split(w) for w, _ in held], [split(b) for _, b in held], rows, steps)
+    tick = lstm.Tick(mesh, [split(w) for w, _ in held], [split(b) for _, b in held], rows)
     del held
-    X = torch_mesh.empty(steps, rows, KIN, dtype=torch.half)
+    X = partition.declare(torch_mesh.empty(steps, rows, KIN, dtype=torch.half), mesh, [Replicate()], src_data_rank=0)
     O = torch_mesh.empty(steps, rows, H, dtype=torch.half) if rank == 0 else None
-    t, k = torch.empty(1, dtype=torch.int64, device='mps').fill_(L - 1), config['steps_per_replay']
-    recording = torch_mesh.record(tick.stepper(X, O, t), k)
+    at, t = (torch.zeros(1, dtype=torch.int64, device='mps') for _ in range(2))
+    k = config['steps_per_replay']
+    recording = torch_mesh.record(tick.stepper(X, at, O, t), k)
     torch_mesh.replay(recording, min(steps, k + steps % k))
     tick.reset()
-    t.fill_(L - 1)
+    at.zero_()
+    t.zero_()
     if rank == 0:
         X.copy_(torch.from_numpy(inputs[:]))
     torch_mesh.check_memory()
@@ -66,9 +68,9 @@ def main():
     ticks, half = steps + L - 1, steps // k // 2 * k
     middle, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
     began = time.perf_counter()
-    dist.broadcast(X, src=0)
+    partition.deliver(X)
     for s in range(L - 1):
-        tick.starting(s, X[s])
+        tick.starting(s, X, at)
     recording.issue(half)
     middle.record()
     recording.issue(steps - half)

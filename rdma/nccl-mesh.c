@@ -2969,7 +2969,8 @@ static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm
   } else if (!result && g->fused) {
     if (fusing.landed >= fusing.room[1])
       return fail(ncclInvalidUsage, "a fused crossing's landings past the %u its ncclMeshFused has room for (ncclMeshPlan's entries)", fusing.room[1]);
-    result = gpu(metal_land_deferred(program, m->data.buffer, m->data.offset, &wait, fusing.out->land[fusing.landed]), "a fused landing's record");
+    result = gpu(metal_land_deferred(program, m->data.buffer, m->data.offset, m->bytes, &wait, fusing.out->land[fusing.landed]),
+                 "a fused landing's record");
     fusing.landed += !result;
   } else if (!result) result = gpu(metal_spin(program, &wait), "a wait");
   if (result) return result;

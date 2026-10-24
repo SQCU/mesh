@@ -334,6 +334,156 @@ def _fused(x, dim, sizes, group, adds, w=None):
     return out
 
 
+# An input declared once and delivered by pages (declare, deliver, row): the source rank's tensor sent whole to every
+# other rank as the library's in-place broadcast, a fused crossing (_stream.fused_broadcast; nccl.h ncclMeshFused),
+# nothing waiting for it; a reader of row i (row: torch_mesh::row) waits on the landed pages of row i alone, the
+# collective's own device-side wait (mesh_step_await_pages: a landing's pages land in order, and the holding's
+# `landed` counts them as a prefix), and copies the row out system-coherent (the NIC wrote it).  So the first rows are
+# read as soon as they land, and the rest land under the reads of the first.  deliver_publish copies the tensor onto
+# itself through mesh_step_write (the bytes the bridge sends, stored system-coherent) and releases it to every peer
+# from its last threadgroup; deliver_keep copies each landing's record (its arguments, in the argument ring, which
+# later crossings write again) into a held buffer the readers bind, and enters it once (mesh_step_enter).
+_DELIVER_SOURCE = r"""
+template <uint P>
+struct deliver_words { uint count, pad; mesh_step_binding land[P], publish[P]; };
+
+template <uint P, uint THREADS>
+[[max_total_threads_per_threadgroup(THREADS)]]
+kernel void deliver_publish(device const ushort* x [[buffer(0)]], device uchar* send [[buffer(1)]],
+                            device atomic_uint* arrivals [[buffer(2)]], constant deliver_words<P>& w [[buffer(15)]],
+                            uint tid [[thread_index_in_threadgroup]], uint g [[threadgroup_position_in_grid]],
+                            uint groups [[threadgroups_per_grid]]) {
+    threadgroup uint last;
+    for (uint q = 0; q < P; q++) mesh_step_enter(*w.publish[q].p, w.publish[q].v, w.publish[q].progress, g == 0 && tid == 0);
+    for (uint k = g * THREADS + tid; k < w.count; k += groups * THREADS) mesh_step_write<ushort>(send, k, x[k]);
+    threadgroup_barrier(mem_flags::mem_device);
+    if (mesh_last_arrival<true>(arrivals, 0, groups, tid, &last)) {
+        for (uint q = 0; q < P; q++) mesh_step_release(*w.publish[q].p, w.publish[q].a, tid);
+        mesh_arrival_reset(arrivals, 0, tid);
+    }
+}
+
+template <uint P>
+kernel void deliver_keep(device mesh_args* held [[buffer(0)]], constant deliver_words<P>& w [[buffer(15)]],
+                         uint tid [[thread_index_in_threadgroup]]) {
+    if (tid != 0) return;
+    for (uint q = 0; q < P; q++) {
+        held[q] = *w.land[q].p;
+        mesh_step_enter(*w.land[q].p, w.land[q].v, w.land[q].progress, true);
+    }
+}
+
+struct row_land { device uchar *a; device uchar *v; };
+template <uint P>
+struct row_words { uint rows, row_bytes, page, lands; ulong offset; row_land land[P]; };
+
+template <uint P, uint THREADS>
+[[max_total_threads_per_threadgroup(THREADS)]]
+kernel void row_copy(device const uchar* x [[buffer(0)]], device long* at [[buffer(1)]], device ushort* out [[buffer(2)]],
+                     constant mesh_args* held [[buffer(3)]], device atomic_uint* arrivals [[buffer(4)]],
+                     constant row_words<P>& w [[buffer(15)]], uint tid [[thread_index_in_threadgroup]],
+                     uint g [[threadgroup_position_in_grid]], uint groups [[threadgroups_per_grid]]) {
+    threadgroup uint last;
+    const long cursor = at[0];
+    const ulong i = cursor < 0 ? 0 : cursor >= long(w.rows) ? w.rows - 1 : ulong(cursor), end = (i + 1) * w.row_bytes;
+    for (uint q = 0; q < w.lands; q++) {
+        const ulong first = held[q].dst - w.offset;
+        if (end > first) mesh_step_await_pages(held[q], w.land[q].a, w.land[q].v, min(end - first, held[q].n), w.page, tid);
+    }
+    device const uchar* from = x + i * w.row_bytes;
+    if (w.row_bytes % 16 == 0)
+        for (uint k = g * THREADS + tid; k < w.row_bytes / 16; k += groups * THREADS)
+            ((device uint4*)out)[k] = w.lands ? mesh_step_read<uint4>(from, k) : ((device const uint4*)from)[k];
+    else
+        for (uint k = g * THREADS + tid; k < w.row_bytes / 2; k += groups * THREADS)
+            out[k] = w.lands ? mesh_step_read<ushort>(from, k) : ((device const ushort*)from)[k];
+    threadgroup_barrier(mem_flags::mem_device);
+    if (mesh_last_arrival<true>(arrivals, 0, groups, tid, &last)) {
+        if (tid == 0) at[0] = cursor + 1;
+        mesh_arrival_reset(arrivals, 0, tid);
+    }
+}
+"""
+_DELIVERED, _DELIVER_KERNELS, _ROWS = {}, {}, set()
+
+
+def _deliver_kernel(kernel, *arguments):
+    """deliver_publish, deliver_keep or row_copy at `arguments`, compiled once after the library's steps (fused.steps)
+    and argmax.metal's arrival count."""
+    from . import _stream, fused
+    from .argmax import SOURCE
+    from .streamed import instance
+    name, line = instance(kernel, *arguments)
+    if name not in _DELIVER_KERNELS:
+        _DELIVER_KERNELS[name] = _stream.pipeline(fused.steps() + SOURCE + '\n' + _DELIVER_SOURCE + '\n' + line + '\n', name)
+    return _DELIVER_KERNELS[name]
+
+
+def declare(tensor, device_mesh, placements, *, src_data_rank=0):
+    """`tensor`, a program's input on every rank of a one-dimensional mesh (its value src_data_rank's, written before
+    deliver; elsewhere its shape alone), declared once as Replicate: delivered by deliver, read a row at a time by row.
+    Returns the tensor.  A Shard (a scatter by pages) is not implemented (NotImplementedError on every rank alike)."""
+    if device_mesh.ndim != 1 or len(placements) != 1 or not isinstance(placements[0], Replicate):
+        raise NotImplementedError('mesh: declare delivers a tensor as Replicate on a one-dimensional mesh')
+    _DELIVERED[tensor.data_ptr()] = {'group': device_mesh.get_group(0), 'src': src_data_rank}
+    if tensor.device.type == 'mps':
+        _rows(1)
+    return tensor
+
+
+def deliver(tensor):
+    """The declared `tensor` (declare) sent from its source rank to every other, waiting for nothing: on the mesh
+    backend the in-place broadcast as a fused crossing, each later row(tensor, i) waiting on row i's pages alone; on
+    another backend torch's broadcast, whole."""
+    d = _DELIVERED[tensor.data_ptr()]
+    group, src = d['group'], d['src']
+    if group.size() == 1:
+        return
+    if not _region_backed(tensor, group):
+        dist.broadcast(tensor, src=dist.get_global_rank(group, src), group=group)
+        return
+    from . import _stream, fused
+    if tensor.nbytes % 2:
+        raise ValueError('mesh: deliver sends a tensor of a whole number of 16-bit words')
+    publish, land = _stream.fused_broadcast(tensor, src, group.handle, _stream.polls)
+    crossing = fused.Crossing(tuple(map(tuple, publish)), tuple(map(tuple, land)))
+    if group.rank() == src:
+        n, threads = len(publish), _GATHER_THREADS
+        arrivals = torch.zeros(1, dtype=torch.int32, device=tensor.device)
+        fused.encode(_deliver_kernel('deliver_publish', n, threads), [tensor, tensor, arrivals], [tensor.nbytes // 2, 0], 15,
+                     max(1, min(64, -(-tensor.nbytes // 2 // (threads * 8)))), 1, threads, n, publish=crossing)
+        _stream.delivered(tensor, None, [], [], 0)
+        return
+    held = torch.empty(len(land) * 128, dtype=torch.uint8, device=tensor.device)
+    fused.encode(_deliver_kernel('deliver_keep', len(land)), [held], [0, 0], 15, 1, 1, 32, len(land), land=crossing)
+    _rows(len(land))
+    _stream.delivered(tensor, held, [record[3] for record in land], [record[4] for record in land], group.page)
+
+
+def row(x, at):
+    """x's row at the cursor `at` (an int64 tensor of one element on x's device; past the last row, the last), a new
+    contiguous tensor, and `at` advanced past it: a reader of x row by row, its cursor read by nothing else, so a
+    compiled graph of many steps reads and advances it in place.  On MPS torch_mesh::row (_stream.mm), of a tensor
+    delivered on the mesh backend (deliver) once the pages that row lies in have landed (mesh_step_await_pages), loaded
+    system-coherent, else as it is; elsewhere torch's index_select.  Its kernels are loaded by declare."""
+    if x.device.type != 'mps':
+        read = x.index_select(0, at.clamp(0, len(x) - 1))[0]
+        at.add_(1)
+        return read
+    return torch.ops.torch_mesh.row(x, at)
+
+
+def _rows(lands):
+    """torch_mesh::row's kernel for `lands` landings (at least one) named to _stream.mm (row_pipeline), and the op's
+    fake registered, once."""
+    from . import _stream
+    if not _ROWS:
+        torch.library.register_fake('torch_mesh::row')(lambda x, at: x.new_empty(x.shape[1:]))
+    if lands not in _ROWS:
+        _ROWS.add(lands)
+        _stream.row_pipeline(lands, _deliver_kernel('row_copy', lands, _GATHER_THREADS))
+
+
 def _paged(counts, size, group):
     """Segments of `counts` elements of `size` bytes laid end to end, each padded to whole pages of `group`'s region,
     since the library places each segment of a V collective on a page of its own (rdma/nccl.h, Memory; the group's

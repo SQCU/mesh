@@ -54,7 +54,11 @@
    counts awaited by thread 0 and checked, then the threadgroup past a device barrier and one system-scope fence, after
    which its landed bytes are read (a running kernel sees the NIC's stores late without a fence: mesh.metal
    mesh_wait_bounded); every threadgroup of a dispatch may await them, each its own bounded wait, ended at once after any
-   of them failed (mesh_step_counts), calling it from every thread alike; its result is true, kept as mesh_step_enter's.  mesh_step_write: element k of the operand a publication sends, stored system-coherent (a plain store
+   of them failed (mesh_step_counts), calling it from every thread alike; its result is true, kept as mesh_step_enter's.
+   mesh_step_await_pages: as mesh_step_await, of the landing's first `bytes` alone (the landing starts on a page, its
+   pages land in its holding's list order and `landed` counts them as a prefix, so the first ceil(bytes / page) of
+   them have come once `landed` is the landing's target less its later pages; the record's n its bytes: nccl-mesh.c
+   consume): a consumer of a part of a landing waits on that part's pages.  mesh_step_write: element k of the operand a publication sends, stored system-coherent (a plain store
    reaches the NIC only once its command buffer has ended, and the bridge sends as soon as `ready` passes: 2,041,216 of
    4,194,304 plain-stored words read stale on the M5, none stored so, metal-microbench docs/measurement.md, 2026-09-29);
    the caller's kernel stores every element it publishes through it, once.  mesh_step_release: a publication, the
@@ -94,6 +98,12 @@ static NSString *const STEPS =
   "if (p.scalar && !mesh_step_failed(p, vb)) mesh_step_check(p, mesh_step_wait(p, words + p.aux, p.scalar, vb), p.scalar, vb); }\n"
   "static inline bool mesh_step_await(constant mesh_args &p, device uchar *words, device uchar *vb, uint i) { "
   "if (i == 0) mesh_step_counts(p, words, vb); "
+  "threadgroup_barrier(mem_flags::mem_device); "
+  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); return true; }\n"
+  "static inline bool mesh_step_await_pages(constant mesh_args &p, device uchar *words, device uchar *vb, ulong bytes, ulong page, uint i) { "
+  "if (i == 0 && p.scalar && !mesh_step_failed(p, vb)) { "
+  "const ulong all = (p.n + page - 1) / page, target = p.scalar - all + min(all, (bytes + page - 1) / page); "
+  "mesh_step_check(p, mesh_step_wait(p, words + p.aux, target, vb), target, vb); } "
   "threadgroup_barrier(mem_flags::mem_device); "
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); return true; }\n"
   "static inline void mesh_step_release(constant mesh_args &p, device uchar *words, uint i) { "
