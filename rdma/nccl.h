@@ -27,12 +27,9 @@
    ends, as it holds rows (mesh_stream_take: design/transport.md section 14), one communicator a stream (a holding's
    lists and counts are its holder's alone; a link has several, so communicators sharing a node pair hold their own;
    EBUSY where none toward a member's node is free at both ends); the second gather, bounded by mesh.h MESH_PLATFORM_NS
-   a send or receive, carries each rank's holding's status and the pages each of its streams has posted each way, as
-   it took it (the bridge's facts: nothing is posted on a stream but its holders' pages, and a holding ends with
-   nothing of it outstanding or its stream not live for the rest of its link's pairing, so on a live stream the two
-   ends' are equal), whose difference each channel keeps as a statistic that nothing reads to decide anything.  A
-   communicator names nodes and its own pages, never a link, port, lane, frame, queue pair or SEND size.  An init fails
-   as a value where two ranks are on one node (its holdings and the pages posted they exchange are kept a node), a stream is held by another process,
+   a send or receive, carries each rank's holding's status.  A communicator names nodes and its own pages, never a
+   link, port, lane, frame, queue pair or SEND size.  An init fails as a value where two ranks are on one node (its
+   holdings are kept a node), a stream is held by another process,
    or its bridge is still ending its last holding, or gone, or a peer is
    silent past that bound; what it held is then let go and the next init reads the streams as they stand.  A
    connection to the root whose report fails or names no rank still to meet is closed alone and the root meets the

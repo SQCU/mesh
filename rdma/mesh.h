@@ -3,6 +3,9 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdatomic.h>
+#include <stdio.h>
+#include <time.h>
+#include <unistd.h>
 #include <os/os_sync_wait_on_address.h>
 #include "mesh-plan.h"
 /* design/transport.md */
@@ -48,6 +51,24 @@ _Static_assert(!(MESH_STREAM_ENTRIES&(MESH_STREAM_ENTRIES-1)) && !(MESH_STREAM_T
 /* design/transport.md, the operator's deadline (2026-10-18): no DMA or network send/receive channel of the
    mesh is used longer than this without something happening on it or its scope concluding */
 #define MESH_PLATFORM_NS UINT64_C(5000000000)
+/* design/data-model.md section 6: a wait's deadline, fixed when the wait is made, `ns` its caller's (0: none given,
+   MESH_PLATFORM_NS) and `at` the monotonic clock's reading it ends at; `wait` names the wait */
+struct mesh_deadline { const char *wait; uint64_t ns,at; };
+static inline uint64_t mesh_clock_ns(void){ return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
+static inline struct mesh_deadline mesh_deadline(const char *wait,uint64_t ns){
+  const uint64_t now=mesh_clock_ns(),length=ns?ns:MESH_PLATFORM_NS;
+  return (struct mesh_deadline){wait,length,length>UINT64_MAX-now?UINT64_MAX:now+length};
+}
+/* the nanoseconds left before d's deadline; past it the program ends at once, the wait and its deadline on stderr */
+static inline uint64_t mesh_deadline_left(const struct mesh_deadline *d){
+  const uint64_t now=mesh_clock_ns();
+  if(now<d->at)return d->at-now;
+  char text[512];
+  const int n=snprintf(text,sizeof text,"%s: past its deadline of %.3f s; the program ends (design/data-model.md section 6)\n",
+                       d->wait,(double)d->ns/1e9);
+  if(n>0)(void)!write(2,text,(size_t)n<sizeof text?(size_t)n:sizeof text-1);
+  _exit(1);
+}
 /* design/algorithm-sources.md#programtensor */
 enum { MESH_ROW_OWN, MESH_ROW_HOT, MESH_FREE, MESH_PLANES };
 /* design/algorithm-sources.md#programtensor; design/transport.md, #M02: `pages`, on a lease's first row, its arena
@@ -121,8 +142,7 @@ static inline _Atomic uint32_t *mesh_unit_row(void *m,uint64_t rows,int way,int 
    holding it is gone with that process (verbs), so the units outstanding count only while it lives
    (mesh-dataflow.c mesh_pinned).  Nothing is posted on a stream but its holders' entries' pages, and a holding ends with nothing of it
    outstanding or the stream never live again in the pairing, so on a live stream both ends'
-   counts are equal whenever no holder holds it: a holder's communicator reads them as it takes the stream and keeps
-   their difference as a statistic, and nothing reads it to decide anything.  A holding that ended with units
+   counts are equal whenever no holder holds it; no client reads them.  A holding that ended with units
    outstanding leaves its owner word MESH_STREAM_GIVEN alone (naming no client, so none takes it) and the stream not
    live for the rest of its pairing.  The holder presents its
    entries in order: entry e of a list in slot e mod MESH_STREAM_ENTRIES of `lists` (region offsets: the send list,

@@ -436,14 +436,12 @@ statistic, not a data dependent control flow for a collective verb or a bridge t
   stream's pages sent so far and its landing walk at the stream's pages posted so far, in one pass: no unit of an
   earlier holding is outstanding then (a holding's end, below).
 - The facts. The bridge tells each of a stream's two lanes' units over its pairing, each way, posted and completed
-  (`posts`), and the row each unit names (`rows`). By (1) nothing is posted on a stream between holdings, so `posted`
-  is a constant while no holder presents: the taker reads it as it takes the stream, and nothing is read while it moves.
-- The difference, a statistic (version 134). Each rank puts its streams' pages posted in the report its
-  communicator's init already gathers (NCCL's own init exchanges each connection's endpoint the same way: C1), and each
-  channel keeps the two ends' difference (`differ`), which nothing reads to decide anything. On a live stream it is 0
-  by construction: a holding that ends with nothing outstanding at both ends left every SEND completed into a posted
-  receive (TN3205) and every receive landed from a SEND, and one that ends otherwise takes its stream out of the
-  pairing. The filler of version 133 (dud SENDs and receives into the spare page presented first, entries of
+  (`posts`), and the row each unit names (`rows`), for the release of a lease's rows (mesh-dataflow.c mesh_pinned); no
+  communicator reads them. On a live stream both ends' are equal by construction: a holding that ends with nothing
+  outstanding at both ends left every SEND completed into a posted receive (TN3205) and every receive landed from a
+  SEND, and one that ends otherwise takes its stream out of the pairing. The pages posted that communicators once
+  exchanged at their init and kept as a statistic read by nothing (version 134's `differ`) are deleted. The filler of
+  version 133 (dud SENDs and receives into the spare page presented first, entries of
   `MESH_NO_ROW`, and the init's wait for an earlier holding's receives to land) is deleted; the operator, 2026-10-22,
   on waiting for a future communicator's filler: "dispose of".
 - One communicator holds a stream at a time; communicators that share a node pair hold different streams of its link,

@@ -76,14 +76,8 @@ torch-mesh's `_stream`), which compiles them in its own process. Only the librar
 - Both inits hold the communicator's streams at the bootstrap's two gathers. The first carries each rank's node and the
   nodes its bridge reaches; each rank then holds its bridge's stream toward each other member's node it is joined to, as
   it holds rows (the stream's owner word taken from 0 by one compare-and-swap). The second carries each rank's
-  holding's status and the pages each of its streams has posted each way as it took it: the bridge's facts
-  (`mesh.h` `struct mesh_stream` `posts`, each lane's units), constant while no holder presents, since nothing is
-  posted on a stream but its holders' pages. Each channel keeps the two ends' difference as a statistic, which nothing
-  reads to decide anything: on a live stream it is 0, since a holding ends with nothing of it outstanding or takes its
-  stream out of its link's pairing (design/transport.md section 14, "A holding's end"). A communicator names nodes and
-  its own pages alone. An init fails as a value where two ranks are on one node
-  (`ncclInvalidUsage`: its holdings and the pages posted they exchange are kept a node, so two ranks of one node would
-  share one slot), where no stream toward a member's node is free at both ends (EBUSY: a link has up to four, each
+  holding's status. A communicator names nodes and its own pages alone. An init fails as a value where two ranks are on
+  one node (`ncclInvalidUsage`: its holdings are kept a node, so two ranks of one node would share one slot), where no stream toward a member's node is free at both ends (EBUSY: a link has up to four, each
   held by one communicator, and one whose last holding its bridge is still ending is not free) or the link is gone
   (ENOLINK)
   (`ncclSystemError`), or where its bootstrap's phase passes its bound (`ncclRemoteError`, ETIMEDOUT); what it held is

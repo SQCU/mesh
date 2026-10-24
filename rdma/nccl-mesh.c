@@ -1,10 +1,8 @@
 /* libnccl-mesh (nccl.h): NCCL's API on the streams of its node's bridge (design/transport.md section 14).  The process
    is one client of its node's bridge (an attach, whose slot owns the process's leases of the region, ncclMemAlloc, and
    which holds the bridge's stream toward each node its communicators reach, as it holds rows: mesh-call.h
-   mesh_stream_take).  A communicator's init holds the stream toward each other member's node and hands each holding's
-   pages posted so far (the bridge's facts) to its peer through NCCL's bootstrap, keeping the two ends' difference as a
-   statistic (on a live stream they are equal); its channels are those holdings, one communicator a stream
-   (comm_hold), and its map the nodes its members' bridges reach.  It names nodes and its own pages, never a link, port,
+   mesh_stream_take).  A communicator's init holds the stream toward each other member's node; its channels are those
+   holdings, one communicator a stream (comm_hold), and its map the nodes its members' bridges reach.  It names nodes and its own pages, never a link, port,
    lane, frame, queue pair or SEND size.  A group's calls are planned by the one collective planner, each step one entry
    of its holding's send list (the pages it reads) or landing list (the pages it lands in), presented to the bridge,
    published by one count and awaited on another, the receives combined on the host or the GPU: zero copy, an operand
@@ -240,9 +238,7 @@ struct entry { uint64_t below; struct mesh_program program; };
    offset of `ready`, a landing's gate).  Its entries, each list in its own order: `sends` and `lands` laid by the
    groups scheduled, `out` and `in` their pages (the value each count reaches once they are whole), `published` send
    entries published, `consumed` landing entries consumed, `waited` landing entries awaited by the GPU work encoded,
-   and `sent_waited` the most of `sent` a wait encoded has awaited; the two ends' difference as its init took the stream
-   (`differ`: [0] the peer's receives posted less this end's SENDs posted, [1] the peer's SENDs posted less this end's
-   receives posted, each 0 on a live stream: comm_join), a statistic nothing reads to decide anything */
+   and `sent_waited` the most of `sent` a wait encoded has awaited */
 struct channel {
   int peer;
   uint32_t node, stream;
@@ -252,7 +248,6 @@ struct channel {
   size_t ready, sent, landed;
   uint64_t ready_at, sends, lands, published, consumed, waited;
   mesh_pages out, in, sent_waited;
-  int64_t differ[2];
 };
 /* a lease of a communicator's pool (struct ncclComm `spares`): its address and bytes, and the group holding it (its
    number + 1: group_numbered; 0 free) */
@@ -795,16 +790,12 @@ static void comm_leave(struct ncclComm *comm) {
 
 /* a rank's report at a communicator's init (NCCL's bootstrap, below): its status (0, else why it cannot go on, so every
    rank fails alike), its bridge's node and the nodes that bridge reaches with each one's bandwidth, and the streams free
-   to take, each one's node and identity (`frees` of them: reach_read, mesh-call.h mesh_streams_free), and, at the
-   second gather, the pages its stream toward each of them has posted over its pairing as this rank took it
-   (posted[k][0] its SENDs, posted[k][1] its receives: the bridge's facts, mesh.h struct mesh_stream `posts`, its two
-   lanes' units together, constant until this rank presents, whose difference from the peer's the channel keeps as a
-   statistic, comm_join) */
+   to take, each one's node and identity (`frees` of them: reach_read, mesh-call.h mesh_streams_free) */
 struct report {
   int32_t rank, status;
   uint32_t node, count, frees, padding;
   struct mesh_reach reach[MESH_STREAMS];
-  uint64_t posted[MESH_STREAMS][2], free_wire[MESH_STREAMS];
+  uint64_t free_wire[MESH_STREAMS];
   uint32_t free_node[MESH_STREAMS];
 };
 
@@ -1105,9 +1096,9 @@ static uint64_t wire_between(const struct report *mine, const struct report *the
   return least;
 }
 
-/* 0, or EINVAL where two of the `n` gathered reports are of one node: a communicator keeps its holdings and the pages
-   posted its ranks exchange a node (posted[k] by the node's index in a report's reach, comm_hold_toward by node), so
-   two ranks of one node would share one slot, laying both ranks' bytes on one stream; and no stream joins two ranks of one node (a bridge reaches other nodes) */
+/* 0, or EINVAL where two of the `n` gathered reports are of one node: a communicator keeps its holdings a node
+   (comm_hold_toward by node), so two ranks of one node would share one hold, laying both ranks' bytes on one stream;
+   and no stream joins two ranks of one node (a bridge reaches other nodes) */
 static int comm_apart(const struct report *reports, uint32_t n) {
   for (uint32_t a = 0; a < n; a++)
     for (uint32_t b = a + 1; b < n; b++)
@@ -1115,7 +1106,7 @@ static int comm_apart(const struct report *reports, uint32_t n) {
   return 0;
 }
 static ncclResult_t apart_fail(const char *name) {
-  return fail(ncclInvalidUsage, "communicator %s: two of its ranks are on one node (its holdings and their pages posted are kept a node)", name);
+  return fail(ncclInvalidUsage, "communicator %s: two of its ranks are on one node (its holdings are kept a node)", name);
 }
 static ncclResult_t hold_fail(const char *name, int rank, int status) {
   return fail(ncclSystemError, "communicator %s: rank %d could not hold its streams at its bridge (%s: EBUSY, a stream another communicator holds, "
@@ -1144,12 +1135,11 @@ static struct hold *comm_hold_toward(struct ncclComm *comm, uint32_t node) {
 /* design/transport.md section 14: a stream toward each member's node this rank is joined to (joined) held for comm, the
    one of the identity both ranks' reports give free (wire_between: the two ends of a communicator hold the two ends of
    one stream), taken from the bridge as rows are (mesh-call.h mesh_stream_take), comm its one user (`held`, comm_let_go
-   lets it go), its pages posted each way as taken into this rank's report (`posted`, by the index of the node in its
-   reach), which the second gather hands its peer.  One communicator a stream: a holding's lists and counts are one order each, its
+   lets it go).  One communicator a stream: a holding's lists and counts are one order each, its
    holder's alone; a link has several streams, so communicators that share a node pair each hold their own.  0, or
    EBUSY (no stream toward a member's node free at both ends), ENOSPC (no hold vacant), or mesh_stream_take's refusal;
    what it took is let go with comm (comm_leave) */
-static int comm_hold(struct ncclComm *comm, const struct report *reports, struct report *mine) {
+static int comm_hold(struct ncclComm *comm, const struct report *reports) {
   struct attach *a = comm->attach;
   const uint32_t n = (uint32_t)comm->nranks, me = (uint32_t)comm->rank;
   uint64_t bandwidth;
@@ -1157,7 +1147,7 @@ static int comm_hold(struct ncclComm *comm, const struct report *reports, struct
   pthread_mutex_lock(&attach_lock);
   for (uint32_t q = 0; !status && q < n; q++) {
     if (q == me || !joined(reports, me, q, &bandwidth)) continue;
-    const uint32_t node = reports[q].node, k = reach_of(mine, node);
+    const uint32_t node = reports[q].node;
     const uint64_t wire = wire_between(reports + me, reports + q);
     struct hold *h = NULL;
     uint32_t stream = 0;
@@ -1173,10 +1163,7 @@ static int comm_hold(struct ncclComm *comm, const struct report *reports, struct
     if (status) break;
     const uint32_t index = (uint32_t)(h - a->holds);
     h->users++; comm->held |= UINT32_C(1) << index; comm->binding = 1;
-    if (!(status = mesh_stream_view(&a->context, stream, &h->view)))
-      for (int way = 0; way < 2; way++)
-        mine->posted[k][way] = atomic_load_explicit(&h->view.posts[way].posted[0], memory_order_acquire) +
-                               atomic_load_explicit(&h->view.posts[way].posted[1], memory_order_acquire);
+    status = mesh_stream_view(&a->context, stream, &h->view);
   }
   pthread_mutex_unlock(&attach_lock);
   return status;
@@ -1198,14 +1185,12 @@ static int channel_buffer(struct channel *ch, const struct hdr *m) {
 
 static int lease_buffer(const void *ptr, void **buffer, size_t *offset);
 /* design/transport.md section 14: the communicator's channels on the holdings its init took (comm_hold), from every
-   rank's report as the second gather gave them: toward each rank it is joined to, a channel on the holding toward the
-   rank's node, the two ends' difference in pages posted kept as a statistic (`differ`, read by nothing: a holding ends
-   with nothing outstanding or its stream not live, so a live stream's ends are equal); its map (map_of), its page (its
+   rank's report: toward each rank it is joined to, a channel on the holding toward the rank's node; its map (map_of), its page (its
    bridge's region's), its gate (a lease of one page) and its failure words.  0, or ENOMEM; EPROTO where no hold is of a joined node */
 static int comm_join(struct ncclComm *comm, const struct report *reports) {
   struct mesh_ctx *context = &comm->attach->context;
   const struct hdr *m = context->M;
-  const uint32_t n = (uint32_t)comm->nranks, me = (uint32_t)comm->rank, node = reports[me].node;
+  const uint32_t n = (uint32_t)comm->nranks, me = (uint32_t)comm->rank;
   uint64_t bandwidth;
   size_t offset = 0;
   comm->page = (uint64_t)m->block * m->pgsz;
@@ -1226,9 +1211,6 @@ static int comm_join(struct ncclComm *comm, const struct report *reports) {
     struct channel *ch = comm->channels + comm->count++;
     *ch = (struct channel){.peer = (int)q, .node = reports[q].node, .stream = h->stream, .wire = &h->wire, .view = h->view};
     if (!(status = channel_buffer(ch, m))) atomic_store(&comm->attach->wrapped, 1);
-    const uint64_t *own = reports[me].posted[reach_of(reports + me, reports[q].node)], *theirs = reports[q].posted[reach_of(reports + q, node)];
-    ch->differ[0] = (int64_t)(theirs[1] - own[0]);
-    ch->differ[1] = (int64_t)(theirs[0] - own[1]);
   }
   return status;
 }
@@ -1237,9 +1219,8 @@ static int comm_join(struct ncclComm *comm, const struct report *reports) {
    (ncclMeshCommInitRank, blocking or not): its bootstrap's sockets opened (bootstrap_open), then made attached
    (comm_attach) and the nodes its bridge reaches read (reach_read), then every rank's report gathered (two ranks on one
    node fail every rank alike: comm_apart, a bound); each rank holding the stream toward each member's node it is
-   joined to (comm_hold); a second gather carrying each rank's holding's status and its holdings' pages posted
-   (NCCL's own init exchanges each peer's connection through its bootstrap: ncclTransportP2pSetup), whose difference
-   each rank keeps as a statistic as it makes its channels (comm_join).  A rank that cannot go on, a stream held by another (EBUSY) or gone (ENOLINK), a peer silent past
+   joined to (comm_hold); a second gather carrying each rank's holding's status (NCCL's own init exchanges each peer's
+   connection through its bootstrap: ncclTransportP2pSetup), then its channels (comm_join).  A rank that cannot go on, a stream held by another (EBUSY) or gone (ENOLINK), a peer silent past
    its phase's end (bootstrap_open, gather: MESH_PLATFORM_NS) or a revoke fails the init as a value, made holding nothing of its
    bridge's (comm_leave) and its sockets closed; the next init reads the streams as they then stand.  Made, it keeps its
    sockets (closed at comm_free) */
@@ -1265,7 +1246,7 @@ static ncclResult_t comm_init(struct ncclComm *made) {
   for (int r = 0; !result && r < nranks; r++) made->members[r] = reports[r].node;
   if (!result && nranks > 1 && comm_apart(reports, (uint32_t)nranks)) result = apart_fail(made->name);
   if (!result && nranks > 1) {
-    mine->status = comm_hold(made, reports, mine);
+    mine->status = comm_hold(made, reports);
     made->until = now_s() + (double)MESH_PLATFORM_NS / 1e9;
     if ((status = gather(made, nranks, rank, reports, 0))) result = fail(ncclRemoteError, "the bootstrap at %s: %s", made->id, strerror(status));
     for (int r = 0; !result && r < nranks; r++)
@@ -3803,8 +3784,7 @@ static ncclResult_t comm_sub(ncclComm_t comm, const int *ranks, int count, uint3
 /* ncclCommSplit: every rank's (color, key) and its report (reach_read; none for NCCL_SPLIT_NOCOLOR) all-gathered on comm
    (in a lease, each rank's row from a page), the ranks of this color ordered by key, then rank (two of a color on one
    node refused alike: comm_apart), each rank's streams toward its color's nodes held (comm_hold: the streams its parent holds are not free, EBUSY where none is), and a
-   second all-gather on comm carrying each rank's holding's status and its holdings' pages posted, whose difference each
-   rank keeps as a statistic as the child's channels are made (comm_join): NCCL's bootstrapSplit (the child's exchange over its parent's), with the init's
+   second all-gather on comm carrying each rank's holding's status, then the child's channels (comm_join): NCCL's bootstrapSplit (the child's exchange over its parent's), with the init's
    two gathers.  A failure at any rank of a color fails that color's split on each of its ranks as a value, what it held
    let go (comm_free).  Inside a group, its all-gathers run at once, the group's calls set aside until it returns
    (aside) */
@@ -3812,7 +3792,7 @@ static ncclResult_t split(ncclComm_t comm, int color, int key, ncclComm_t *newco
   const int n = comm->nranks;
   const uint32_t split = comm->splits++;
   struct row { int64_t color, key; struct report report; } mine = {color, key, {.rank = comm->rank}}, *every = calloc((size_t)n, sizeof *every);
-  struct binding { int32_t status, padding; uint64_t posted[MESH_STREAMS][2]; } bound = {0, 0, {{0}}}, *binds = calloc((size_t)n, sizeof *binds);
+  struct binding { int32_t status, padding; } bound = {0, 0}, *binds = calloc((size_t)n, sizeof *binds);
   int *ranks = calloc((size_t)n, sizeof *ranks), count = 0;
   struct report *reports = calloc((size_t)n, sizeof *reports);
   /* the all-gathers' rows: a lease, each rank's row from a page of it (an entry starts on a page), in place */
@@ -3836,9 +3816,7 @@ static ncclResult_t split(ncclComm_t comm, int color, int key, ncclComm_t *newco
   for (int i = 0; !result && i < count; i++) reports[i] = every[ranks[i]].report;
   if (!result && count > 1 && comm_apart(reports, (uint32_t)count)) result = apart_fail((*newcomm)->name);
   if (!result && count > 1) {
-    struct report *own = reports + (*newcomm)->rank;
-    bound.status = comm_hold(*newcomm, reports, own);
-    memcpy(bound.posted, own->posted, sizeof bound.posted);
+    bound.status = comm_hold(*newcomm, reports);
   }
   else if (result && count) bound.status = ECANCELED;
   if (gathered) {
@@ -3849,7 +3827,6 @@ static ncclResult_t split(ncclComm_t comm, int color, int key, ncclComm_t *newco
   }
   for (int i = 0; !result && i < count; i++)
     if (binds[ranks[i]].status) result = hold_fail((*newcomm)->name, i, binds[ranks[i]].status);
-  for (int i = 0; !result && i < count; i++) memcpy(reports[i].posted, binds[ranks[i]].posted, sizeof reports[i].posted);
   int status = 0;
   if (!result && count > 1 && (status = comm_join(*newcomm, reports)))
     result = fail(ncclSystemError, "communicator %s: its channels on the streams it held: %s", (*newcomm)->name, strerror(status));
