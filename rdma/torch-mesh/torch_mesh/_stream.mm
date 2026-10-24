@@ -19,6 +19,7 @@
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <map>
@@ -200,11 +201,11 @@ static void publish_boundary() {
 // on unified memory it serves a tensor of about 10 MiB or more from a 1 GiB heap the GPU wires whole (metal-microbench
 // docs/facts.md), and a partials reduce-scatter's workspace wired the Mini's last free GiB under cp.  It runs on torch's
 // queue, and takes nothing of torch's allocator there (rdma/torch-mesh/README.md, the stream's commit state).
-static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps, bool held);
+static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps, bool held = false, bool paced = true);
 static void *workspace(size_t bytes, void *context) {
   auto *s = static_cast<MeshStream *>(context);
   try {
-    s->scratch.push_back(region_empty({(int64_t)bytes}, at::empty({0}, at::TensorOptions().dtype(at::kByte)), true, true));
+    s->scratch.push_back(region_empty({(int64_t)bytes}, at::empty({0}, at::TensorOptions().dtype(at::kByte)), true, true, false));
   } catch (...) {
     return nullptr;
   }
@@ -342,8 +343,6 @@ static c10::intrusive_ptr<c10d::Work> work_of(uint64_t ticket, std::vector<at::T
 }
 
 static ncclComm_t communicator(int64_t comm) { return (ncclComm_t)(uintptr_t)comm; }
-
-static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps, bool held = false);
 
 // One call of a group: its kind, its send and receive tensors (an all-to-all's none where it moves none that way; an
 // all-reduce's, reduce's or broadcast's sends alone where it is in place), its counts (a V call's segment a rank, an
@@ -977,22 +976,63 @@ struct RegionShape {
 };
 
 // Held MPS leases (region_empty's `held`), by their bytes: each released once the stream's work on it had completed.
+// Of each size at most held_cap(bytes) are made while any of them is on its way back (released, the stream not yet
+// past it): a request past that waits, within its Deadline, for the stream's completion handler to return one.  It
+// commits the stream's open buffer first where the oldest on its way back was released into it, or, by the commit rule,
+// where at most one buffer is in flight, so the GPU is fed while the host waits; else the wait leaves the batching be.
+// So a program leasing a tensor a tick runs at most that many ticks ahead of its GPU.  The cap is HELD_BYTES of a size's
+// leases, two at least: a 32 KiB output's 8,192, which a run never meets (a wait cuts a fast step's pipeline: turn19
+// and turn20 in metal-microbench output_data/chain-uninline-20261024), a 128 MiB one's 2 (a GPU-bound step, which a
+// wait costs nothing).  A request whose size has none on its way back (every lease held by a live tensor) is a new
+// lease: the program needs it.  The library's workspaces (on torch's queue, inside an encode) are leased unpaced.
+// held_trim returns every idle lease to the region (partition's reserve, once it has lowered its high mark).
+constexpr size_t HELD_BYTES = size_t(256) << 20;
+static size_t held_cap(size_t bytes) { return std::max<size_t>(HELD_BYTES / bytes, 2); }
 static std::multimap<size_t, void *> held_;
+// by bytes: the leases made, and the command buffer each lease on its way back was released into, oldest first
+struct HeldLeases {
+  size_t made = 0;
+  std::deque<id<MTLCommandBuffer>> returning;
+};
+static std::map<size_t, HeldLeases> held_made_;
+static auto *held_returned_ = new std::condition_variable;
 
-static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps, bool held) {
+static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps, bool held, bool paced) {
   const at::ScalarType dtype = like.scalar_type();
   const size_t bytes = std::max<size_t>(1, (size_t)c10::multiply_integers(sizes) * c10::elementSize(dtype));
   void *memory = nullptr;
-  {
-    std::lock_guard<std::mutex> guard(region_tensors_lock_);
-    auto found = held ? held_.lower_bound(bytes) : held_.end();
-    while (found != held_.end() && found->first == bytes) {
-      int reusable = 0;
-      checked(ncclMeshMemReusable(found->second, &reusable));
-      if (reusable) break;
-      ++found;
+  if (held) {
+    std::unique_lock<std::mutex> guard(region_tensors_lock_);
+    // the first pooled lease of `bytes` whose source DMA has retired (ncclMeshMemReusable), else none
+    const auto reusable = [&] {
+      auto f = held_.lower_bound(bytes);
+      for (; f != held_.end() && f->first == bytes; ++f) {
+        int ready = 0;
+        checked(ncclMeshMemReusable(f->second, &ready));
+        if (ready) return f;
+      }
+      return held_.end();
+    };
+    auto found = reusable();
+    HeldLeases &leases = held_made_[bytes];
+    if (found == held_.end() && paced && mps && leases.made >= held_cap(bytes) && !leases.returning.empty()) {
+      const bool open = leases.returning.front().status < MTLCommandBufferStatusCommitted;
+      guard.unlock();
+      const Deadline deadline("region_empty: a held lease returned by the stream's completion");
+      MeshStream *s = &stream_of(at::mps::getCurrentMPSStream());
+      dispatch_sync(s->mps->queue(), ^{  // the commit rule at the wait: the open buffer committed where the lease waited
+        @autoreleasepool {                // for is in it, or where at most one buffer is in flight (the GPU fed while the
+          if (open || s->committed - s->progress.signaledValue <= 1) {  // host waits), else left to its batching
+            if (s->waiting()) s->signalled(false);
+            else s->mps->synchronize(at::mps::SyncType::COMMIT);
+          }
+        }
+      });
+      guard.lock();
+      // a lease the completion handler has returned whose source DMA has retired too (polled: the library's proof is
+      // nonblocking and signals nothing), within the Deadline
+      while ((found = reusable()) == held_.end()) held_returned_->wait_for(guard, std::chrono::microseconds(100));
     }
-    if (found != held_.end() && found->first != bytes) found = held_.end();
     if (found != held_.end()) {
       memory = found->second;
       held_.erase(found);
@@ -1002,6 +1042,7 @@ static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &lik
     checked(ncclMemAlloc(&memory, bytes));
     std::lock_guard<std::mutex> guard(region_tensors_lock_);
     region_tensors_[(uintptr_t)memory] = bytes;
+    if (held && mps) held_made_[bytes].made++;
   }
   const auto options = at::TensorOptions().dtype(dtype);
   if (!mps) return at::from_blob(memory, sizes, [memory](void *) { returned(memory); }, options.device(at::kCPU));
@@ -1028,15 +1069,41 @@ static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &lik
   };
   return at::fromDLPack(managed, [managed, memory, bytes, held](void *) {
     managed->deleter(managed);
-    at::mps::getCurrentMPSStream()->addCompletedHandler(^(id<MTLCommandBuffer>) {
-      if (!held) {
-        returned(memory);
-        return;
+    at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
+    dispatch_sync(stream->queue(), ^{  // as MPSStream::addCompletedHandler, the buffer it joins kept for a held lease
+      @autoreleasepool {
+        if (held) {
+          std::lock_guard<std::mutex> guard(region_tensors_lock_);
+          held_made_[bytes].returning.push_back([stream->commandBuffer().rootCommandBuffer retain]);
+        }
+        [stream->commandBuffer() addCompletedHandler:^(id<MTLCommandBuffer>) {
+          if (!held) {
+            returned(memory);
+            return;
+          }
+          {
+            std::lock_guard<std::mutex> guard(region_tensors_lock_);
+            held_.emplace(bytes, memory);
+            auto &returning = held_made_[bytes].returning;
+            [returning.front() release];
+            returning.pop_front();
+          }
+          held_returned_->notify_all();
+        }];
       }
-      std::lock_guard<std::mutex> guard(region_tensors_lock_);
-      held_.emplace(bytes, memory);
     });
   });
+}
+
+// every idle held lease (back from the stream, in no tensor) returned to the region; the pool makes them again as asked
+static void held_trim() {
+  std::vector<void *> idle;
+  {
+    std::lock_guard<std::mutex> guard(region_tensors_lock_);
+    for (auto &[bytes, memory] : held_) idle.push_back(memory), held_made_[bytes].made--;
+    held_.clear();
+  }
+  for (void *memory : idle) returned(memory);
 }
 
 // Where a tensor's bytes lie in the region (0: outside it): an MPS tensor's where its MTLBuffer is the Metal buffer of the
@@ -1481,6 +1548,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("records", &records);
   module.def("metal_prelude", &metal_prelude);
   module.def("fused_maker", &fused_maker);
+  module.def("held_trim", &held_trim);
   module.def("fused_release", &fused_release);
   module.def("fused_writes", &fused_writes, pybind11::arg("send"), pybind11::arg("landings"), pybind11::arg("pairs"),
              pybind11::arg("comm"), pybind11::arg("polls"), pybind11::arg("repeats") = 1, pybind11::arg("stride") = 0);
