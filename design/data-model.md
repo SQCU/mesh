@@ -213,6 +213,15 @@ wtihout them". So a wait, a sync, a barrier, a guard, a global or a side effect 
 presents an algorithmic problem that can't be solved any other way. Then exactly the minimum comes in, at the
 operator's demand. None comes in as a precaution.
 
+**Every wait that remains has a deadline.** The operator, 2026-10-23: "no wait may ever run longer than a deadline
+operand presented at the time the wait was constructed; the presumed default is 5 seconds." So each wait that is left
+gets its deadline when it is made. Its caller or its configuration gives it, and 5 s is the default. A GPU kernel has
+no clock, so its deadline is a count of polls (mesh.metal mesh_wait_bounded). When the deadline passes, the program
+ends at once and names the wait and its deadline. It does not try again, wait again or fall back. The operator: "we
+will add bounds and crash programs voluntarily by producing invalid results or exceptions caused by immediate exit
+due to unbounded wait error rather than allow an unbounded wait of any kind anywhere anyhow." This is the minimum the
+operator demanded for the waits that remain. It adds no wait, and code still only loses them.
+
 **Data code and the driver's state.** The bridge turns fast. The driver's completions are a ring that the controller
 writes, and the bridge's thread reads it in user space. That thread saw each completion within about 0.04 µs
 (measurement.md:3169-3170). Data code turns slower. Its step goes through a dispatch, 0.9-1.4 µs, or a command buffer,
