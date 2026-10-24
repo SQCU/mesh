@@ -989,6 +989,8 @@ ncclResult_t ncclMeshCommFabric(ncclComm_t comm, const struct mesh_fabric** fabr
 ncclResult_t ncclMeshCommRoutes(ncclComm_t comm, const struct mesh_trees* trees, const double* cable_weights);
 struct mesh_paths;
 ncclResult_t ncclMeshCommWriteRoutes(ncclComm_t comm, int source, int destination, const struct mesh_paths* paths);
+/* Predicted producer readiness for each rank; used only when compiling immutable writes. */
+ncclResult_t ncclMeshCommWriteRelease(ncclComm_t comm, const double* seconds);
 ncclResult_t ncclMeshWrite(const void* source_buffer, void* landing_buffer, size_t count, ncclDataType_t datatype,
                           int source, int destination, ncclComm_t comm, cudaStream_t stream);
 struct ncclMeshCableSample { uint64_t wire,ready,sent,landed; uint32_t cable,peer; };

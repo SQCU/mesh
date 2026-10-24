@@ -96,9 +96,10 @@ connection; a multi-hop write declares its participating relays collectively.
 `torch_mesh.fused.writes` declares a group of those writes and returns publication
 and landing bindings in physical channel order. Parallel cables remain separate.
 The producer releases one cumulative publication per active cable after writing
-its data; the consumer awaits one final landing prefix per active cable. Relay
-entries continue to use incoming landed prefixes directly. Neither a relay GPU
-wait nor a publication of an unlanded relay page is introduced.
+its data; the consumer awaits the last landing addressed to this rank on each
+cable that carries its inputs. Later relay-only arrivals do not delay that
+consumer. Relay entries use incoming landed prefixes directly. Neither a relay
+GPU wait nor a publication of an unlanded relay page is introduced.
 
 These writes use leases owned by the complete data function. Previous users of
 landing leases must have finished **before the group is encoded**: reception is
@@ -110,11 +111,17 @@ reuse. Its producer publishes from its last threadgroup; its consumer reads the
 received values directly. The ordinary write interface remains available for
 the control comparison.
 
-The plan also compiles the immutable group's per-cable entry order by hop depth,
-then declared call and operand offset. Both ends derive the same order. Local
-first hops precede relays, so a ready local producer is not queued behind an
-unready relay. This is an AOT dependency ordering, with no runtime arbitration
-or additional waits. Ordinary groups retain their existing ordering.
+The plan compiles all ranks' actual path fragments into a common dependency
+graph. `ncclMeshCommWriteRelease` supplies predicted producer release times.
+`mesh_write_order` tracks each directed cable's next free time, and each relay's
+first-page arrival and last-page dependency. It assigns the earliest-starting
+available fragment next, preserving parent-before-child order. Both endpoints
+use this common ordinal; queue order cannot introduce a dependency cycle.
+An early relay can precede a Studio's local producer, while a relay whose input
+is queued upstream can follow an already-ready local transfer. Forwarding is
+streamed, not whole-fragment store-and-forward. This is an AOT list schedule,
+not a proof of optimal ordering. It adds no runtime arbitration or wait.
+Ordinary groups retain their existing ordering.
 
 ## Buffer ownership and GPU payloads
 
@@ -138,19 +145,27 @@ into the published lease using the existing Metal tensor-operation pattern.
 paths. For a declared function's pairwise byte demands, `allocate` solves a
 multi-commodity linear program: each commodity's path flows sum to its bytes,
 and each directed physical cable's aggregate load is bounded by its capacity
-times a common duration. A positive per-path quantum floor reserves flow in
-the fluid model; realization can round a sub-page share to zero. The second
-solve minimizes byte-hops at the first solve's duration.
+times a common duration. A negligible positive latent path weight allows later
+feedback to move onto any path; realization can round a sub-page share to zero.
 It uses [HiGHS through SciPy](https://docs.scipy.org/doc/scipy/reference/optimize.linprog-highs.html).
 The result is the fluid model's constrained optimum, not a claim that a real
 program with dependency release times attains that duration. Integer transport
 quanta, producer times, queues, and dispatch costs remain for measured feedback.
 
-Linear objectives can leave an arbitrary cable busy while equivalent parallel
-cables carry almost nothing. A third, convex AOT solve minimizes
-`sum_e(load_e^2 / capacity_e)` on the same duration and byte-hop optimum face.
-This distributes spare parallel capacity in proportion to capacity, including
-unequal cables. It introduces no measured-candidate acceptance decision.
+On that optimum-duration face, a convex AOT solve minimizes
+`sum_e(load_e/capacity_e - T)^2`. This equalizes service completion times,
+including unequal cables. There is no intervening minimum-hop constraint:
+Mini traffic can traverse the spare Studio links without adding any traffic to
+the Mini cut. In the 4/1/2-cable triangle with equal all-pairs demands, the
+minimum-hop solution leaves Studio cables idle; equal-finish routing can fill
+all fourteen directions at the same fluid duration. The extra hops are reported
+as wire amplification, never extra useful bandwidth. General graphs and demands
+need not admit equal completion or full utilization on every edge.
+Before realization, each node-path's flow is averaged across its parallel
+physical paths in capacity proportion. This preserves its total flow and cannot
+increase the bundle's maximum service time. It also avoids an arbitrary solver
+nullspace assigning one producer to one cable and its relayed complement to
+another, despite those cables having the same release dependencies.
 
 ## Finite differences
 
@@ -170,13 +185,71 @@ There is no control/trial comparison, acceptance threshold, rollback, or winner
 selection. Best attained measurements are reporting statistics and do not steer
 the state. Persisted state contains the vector, moments, and partial stencil.
 
-The current cost is `J = log(T) + w * sum_e(A_e/C_e) / T^2`, where `T` is complete
+The current cost is `J = log(T) + w * sum_e(A_e/C_e) / T^2 + v * F`, where `T` is complete
 function latency, `A_e` is integrated queued bytes on directed cable `e`, and
 `C_e` is that cable's capacity in bytes/second. The congestion term is continuous
 and dimensionless, with default weight `w = 1`. It prices own and relay traffic
 sharing links without equating DMA with GPU arithmetic. Every observation names
 the exact compiled configuration, workload, and completed function. Incorrect or
 partial results are measurement failures, never samples of a slower route.
+`F` is the mean over repeated stages of the variance of directed-cable final
+landing times, divided by that stage's transaction span squared (`v = 1`).
+Clock-bracket midpoints supply this numerical residual; the report retains
+lower and upper completion-spread bounds. Finishes are grouped from repeated
+compiled entry order after the complete function, with no new phase barrier.
+
+The DNN also enables the historical affine `allocate.equal_finish` calculation
+(restored from `fa36bea6^`) and its existing `min_max` tile realization. GPU
+events bracket each local producer, and their durations are read after the
+existing complete-function synchronization. Completed calls fit
+`compute_i(s) = a_i + b_i*s` by exponentially weighted nonnegative least squares,
+separating fixed and work-dependent cost. A weak prior resolves the initially
+underdetermined fit; the record exposes both coefficients rather than claiming
+that one share identifies a slope. Equal-finish uses these producer costs;
+communication remains in the joint whole-function objective. Recorded own
+first-hop delivery windows are diagnostics, not added compute intercepts:
+those windows also contain waits for upstream producers, and including them
+can create circular feedback. Every four-call stencil moves the continuous
+compute centre halfway toward the newly fitted equal-finish solution. Its
+influence does not decay away while measurements continue. Tile rounding uses
+`min_max` and measured slopes, retaining
+fractional latent shares.
+There is no hard-coded Mini fraction and no measured-candidate rejection.
+
+This is reuse of the historical allocation mathematics, not restoration of
+the old `Balancer`/`Coupled` acceptance and trust-region state machines. The
+historical documentation also described RLS which was subsequently documented
+as absent; the present weighted affine fit is a new implementation, not evidence
+that those historical RLS claims were implemented.
+
+The DNN supplies `Fabric.completion_model`, the physical path-incidence matrix
+scaled by each commodity's bytes and each directed cable's capacity. After a
+four-call stencil, `FunctionFlow` also fits the observed completion residual
+`b_e = observed_finish_e - observed_bytes_e/C_e`. The local model is
+`finish(x) = b + A*x`, where each commodity's path fractions sum to one. A convex
+linear program minimizes the maximum predicted finish. On its optimum face,
+a quadratic solve minimizes squared distance from that common finish plus a
+small movement penalty. The latent vector moves halfway to that solution
+after the joint finite-difference update. The next complete calls refresh `b`
+from actual landings; it is not assumed to be a permanent release-time constant.
+The fit and predicted finishes are recorded. This supplies a physical
+preconditioner for fourteen simultaneous finish residuals while finite
+differences retain the full function's measured latency and queue objective.
+It adds neither runtime routing choices nor measured-candidate rejection.
+The harness realizes one canonical configuration on rank zero and distributes
+its serialized values before compilation. Constrained numerical solvers can
+differ by a few floating-point ulps across machines; independently realizing
+those variants is inappropriate for matching page schedules. This planning
+exchange is outside the complete-function execution. Source release predictions
+use mean own-publication times from the preceding four-call stencil, adjusted
+by the fitted compute slope for the next tile allocation. The predictor stays
+fixed within a stencil. Predictions affect only the next
+compiled entry order, never transport's current readiness words.
+
+`ask(explore=False)` realizes the current centre without perturbing or updating
+the optimizer. The harness can measure a fixed number of these complete calls
+after training (`--centre-evaluations`), separately from finite-difference
+samples. It never picks a historical fastest configuration for this validation.
 
 The finite-difference estimate remains subject to timing noise and tile/page
 granularity. This is a measured local descent, not a global-optimality proof or a

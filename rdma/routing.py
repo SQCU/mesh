@@ -46,7 +46,7 @@ class Fabric:
             at = b if at == a else a
         return arcs
 
-    def allocate(self, demands, quantum=16384, units=4096):
+    def allocate(self, demands, units=4096):
         """design/whole-function.md#ahead-of-time"""
         import numpy as np
         from scipy.optimize import linprog, minimize
@@ -62,7 +62,9 @@ class Fabric:
             equality[pairs.index(pair)][k] = 1.0
             for e in self.arcs(pair[0], self.paths[pair][p]):
                 edge[e][k] = 1.0
-            floor = min(float(quantum), demands[pair] / len(self.paths[pair]))
+            # Positive latent weights let feedback move onto any path. They do
+            # not reserve a transport page on every possible path.
+            floor = demands[pair] * 1e-9
             bounds.append((floor / scale, None))
         for e, capacity in enumerate(capacities):
             edge[e][-1] = -capacity / rate
@@ -98,6 +100,24 @@ class Fabric:
         if not centered.success:
             raise RuntimeError(f'physical route service-time minimization: {centered.message}')
         flow = centered.x
+        # Average the nullspace between parallel cables. Equal aggregate loads
+        # alone can put almost all of one producer on one cable and its relayed
+        # complement on another, creating different release-time stalls. This
+        # preserves each node-path's flow and distributes its physical paths in
+        # capacity proportion; it cannot increase a parallel bundle's max load.
+        bundles = {}
+        for k, (pair, p) in enumerate(columns):
+            nodes, at, weight = [pair[0]], pair[0], 1.0
+            for e in self.paths[pair][p]:
+                a, b = self.cables[e]['nodes']
+                at = b if at == a else a
+                nodes.append(at)
+                weight *= capacities[2 * e] / rate
+            bundles.setdefault(tuple(nodes), []).append((k, weight))
+        for bundle in bundles.values():
+            amount, weight = sum(flow[k] for k, _ in bundle), sum(w for _, w in bundle)
+            for k, w in bundle:
+                flow[k] = amount * w / weight
         decisions = {}
         for pair in pairs:
             flows = [float(flow[k]) * scale for k, (commodity, _) in enumerate(columns) if commodity == pair]
@@ -105,7 +125,7 @@ class Fabric:
             wanted = [v / sum(flows) * total for v in flows]
             name = f'route:{pair[0]}:{pair[1]}'
             decisions[name] = {'parts': wanted,
-                               'grain': 0, 'low': [1e-6] * len(flows), 'high': [total] * len(flows),
+                               'grain': 0, 'low': [0] * len(flows), 'high': [total] * len(flows),
                                'edges': sorted({str(e) for path in self.paths[pair] for e in self.arcs(pair[0], path)})}
         return decisions, {'fluid_lower_bound_seconds': optimum * scale / rate,
                            'directed_load_bytes': list(incidence @ flow * scale),
@@ -127,6 +147,12 @@ class Fabric:
             arrays = ffi.new('uint32_t[]', first), ffi.new('uint32_t[]', cable), ffi.new('double[]', [math.log(x) for x in weights])
             routes = ffi.new('struct mesh_paths *', {'count': len(paths), 'first': arrays[0], 'cable': arrays[1], 'log_weight': arrays[2]})
             mesh.check(lib.ncclMeshCommWriteRoutes(comm, source, destination, routes))
+
+    def completion_model(self, demands):
+        """Directed load Jacobian for one repeated stage, before measurement."""
+        return {'capacities': [c['bits_per_second'] / 8 for c in self.cables for _ in range(2)],
+                'paths': {f'route:{a}:{b}': {'bytes': demands[a, b],
+                          'arcs': [self.arcs(a, path) for path in self.paths[a, b]]} for a, b in sorted(demands)}}
 
 
 class QueueSample:

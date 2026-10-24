@@ -50,6 +50,15 @@ class WholeFunctionTests(unittest.TestCase):
         self.assertNotIn('radius', search.state())
         self.assertNotIn('accepted', search.history[0])
 
+    def test_centre_measurement_preserves_optimizer_state(self):
+        search = self.search()
+        before = search.state()
+        request = search.ask(explore=False)
+        self.assertEqual(request['continuous'], search.centre)
+        self.assertEqual(request['offset'], 0)
+        self.assertEqual(request['phase'], 'centre')
+        self.assertEqual(search.state(), before)
+
     def test_congestion_continuously_moves_routes_at_equal_latency(self):
         flow = FunctionFlow({'route': {'parts': [64, 64], 'grain': 0}})
         for _ in range(400):
@@ -111,6 +120,50 @@ class WholeFunctionTests(unittest.TestCase):
             flow.observe({**request, 'scope': 'function', 'complete': True, 'workload': 'dnn',
                           'seconds': 1.0, 'finish_variance': residual})
         self.assertAlmostEqual(flow.centre['route'][0], 90, delta=2)
+
+    def test_physical_finish_correction_handles_unequal_capacity_and_release(self):
+        from routing import Fabric
+        fabric = Fabric(2, [{'nodes': [0, 1], 'bits_per_second': 80}, {'nodes': [0, 1], 'bits_per_second': 160}])
+        demands = {(0, 1): 96, (1, 0): 96}
+        decisions, _ = fabric.allocate(demands)
+        model = fabric.completion_model(demands)
+        flow = FunctionFlow(decisions, routing_model=model)
+
+        def measured(parts):
+            loads = [0.0] * 4
+            for name, spec in model['paths'].items():
+                for weight, arcs in zip(parts[name], spec['arcs']):
+                    for e in arcs:
+                        loads[e] += spec['bytes'] * weight / sum(parts[name])
+            finish = [q / c + delay for q, c, delay in zip(loads, model['capacities'], [0, 0, 0.7, 0.7])]
+            arcs = {str(e): {'bytes': loads[e], 'start_ns': [0, 0], 'finish_ns': [t * 1e9] * 2} for e, t in enumerate(finish)}
+            return finish, arcs
+
+        for _ in range(80):
+            request = flow.ask()
+            finish, arcs = measured(request['parts'])
+            observation = {**request, 'scope': 'function', 'complete': True, 'workload': 'full-program',
+                           'seconds': max(finish), 'finishes': {'stages': [{'arcs': arcs}]}}
+            restored = FunctionFlow.of(flow.state())
+            self.assertEqual(flow.observe(observation), restored.observe(observation))
+        finish, _ = measured(flow.centre)
+        self.assertLess(max(finish) - min(finish), max(finish) * 0.04)
+        self.assertEqual(len(flow.history), 20)
+
+    def test_release_model_is_fixed_during_each_finite_difference_stencil(self):
+        flow = FunctionFlow({'compute': {'parts': [128, 128], 'grain': 64, 'low': [64, 64], 'high': [256, 256]}},
+                            fit_compute=True)
+        requests = []
+        for i in range(12):
+            request = flow.ask()
+            requests.append(request)
+            flow.observe({**request, 'scope': 'function', 'complete': True, 'workload': 'full-dnn', 'seconds': 1.0,
+                          'compute_seconds': [0.01 * x for x in request['parts']['compute']],
+                          'delivery_tail_seconds': [0.1, 0.1], 'producer_release_seconds': [0.001 * i, 0.002 * i],
+                          'finishes': {'stages': [{}]}})
+        for start in (0, 4, 8):
+            self.assertEqual(requests[start]['producer_seconds'], requests[start + 3]['producer_seconds'])
+            self.assertEqual(requests[start + 1]['producer_seconds'], requests[start + 2]['producer_seconds'])
 
 
 if __name__ == '__main__':

@@ -135,19 +135,26 @@ def finishes(cables, ranks, stages, offsets):
             arc = str(2 * cable + (source == c['nodes'][1]))
             for layer in range(stages):
                 part = entries[layer * count:(layer + 1) * count]
-                starts, ends, inner, outer = [], [], [], []
+                starts, ends, inner, outer, own_inner, own_outer, own_starts = [], [], [], [], [], [], []
                 for w in part:
                     dest, landed = arrivals[w['cable'], source, w['first'], w['last']]
                     start = [w['start_lo_ns'] + offsets[str(source)][0], w['start_hi_ns'] + offsets[str(source)][1]]
                     end = [landed['end_lo_ns'] + offsets[str(dest)][0], landed['end_hi_ns'] + offsets[str(dest)][1]]
                     starts.append(start); ends.append(end)
                     inner.append((start[1], end[0])); outer.append((start[0], end[1]))
+                    if not w.get('relay', 0):
+                        own_inner.append((start[1], end[0])); own_outer.append((start[0], end[1]))
+                        own_starts.append(start)
                 groups[layer][arc] = {'source': source, 'bytes': sum(w['bytes'] for w in part),
+                                     'relay_bytes': sum(w['bytes'] for w in part if w.get('relay', 0)),
                                      'start_ns': [min(s[k] for s in starts) for k in (0, 1)],
                                      'finish_ns': [max(e[k] for e in ends) for k in (0, 1)],
+                                     'own_window_seconds_bounds': [union_ns(own_inner) * 1e-9, union_ns(own_outer) * 1e-9],
+                                     'own_start_ns': [min(s[k] for s in own_starts) for k in (0, 1)] if own_starts else None,
                                      'window_seconds_bounds': [union_ns(inner) * 1e-9, union_ns(outer) * 1e-9]}
     report, penalty = [], 0.0
     tails = [0.0] * len(ranks)
+    releases = [0.0] * len(ranks)
     for group in groups:
         if len(group) != 2 * len(cables):
             raise ValueError('equal-finish observation requires traffic on every directed cable')
@@ -161,7 +168,10 @@ def finishes(cables, ranks, stages, offsets):
         spread = [max(0, max(v['finish_ns'][0] for v in group.values()) - min(v['finish_ns'][1] for v in group.values())) * 1e-9,
                   (max(v['finish_ns'][1] for v in group.values()) - min(v['finish_ns'][0] for v in group.values())) * 1e-9]
         for rank in range(len(ranks)):
-            tails[rank] += max(sum(v['window_seconds_bounds']) / 2 for v in group.values() if v['source'] == rank)
+            tails[rank] += max(sum(v['own_window_seconds_bounds']) / 2 for v in group.values() if v['source'] == rank)
+            releases[rank] += min((sum(v['own_start_ns']) / 2 - origin) * 1e-9
+                                  for v in group.values() if v['source'] == rank and v['own_start_ns']) / stages
         report.append({'span_seconds': span, 'spread_seconds_bounds': spread,
                        'rms_finish_seconds': variance ** 0.5, 'arcs': group})
-    return {'stages': report, 'finish_variance': penalty, 'delivery_tail_seconds': tails}
+    return {'stages': report, 'finish_variance': penalty, 'delivery_tail_seconds': tails,
+            'producer_release_seconds': releases}

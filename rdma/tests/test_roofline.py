@@ -3,7 +3,7 @@ import pathlib
 import sys
 import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from roofline import causal_offsets, roofline, union_ns
+from roofline import causal_offsets, roofline, union_ns, finishes
 
 
 def window(cable, start, end, count):
@@ -24,6 +24,36 @@ def landings(cables, ranks):
 
 
 class RooflineTests(unittest.TestCase):
+    def test_relay_wait_does_not_make_compute_give_work_to_its_slow_producer(self):
+        cables = [{'nodes': [0, 1], 'bits_per_second': 80}]
+        ranks = [{'rank': r, 'windows': []} for r in range(2)]
+        for rank in ranks:
+            own = window(0, 1, 3, 20)
+            relay = window(0, 2, 10, 20)
+            relay.update(first=20, last=40, relay=1)
+            rank['windows'] = [own, relay]
+        r = finishes(cables, landings(cables, ranks), 1, {'0': [0, 0], '1': [0, 0]})
+        self.assertEqual(r['delivery_tail_seconds'], [2, 2])
+        self.assertEqual(r['stages'][0]['arcs']['0']['window_seconds_bounds'], [9, 9])
+
+    def test_completion_spread_uses_stage_and_remote_landing(self):
+        cables = [{'nodes': [0, 1], 'bits_per_second': 80}]
+        ranks = [{'rank': r, 'windows': []} for r in range(2)]
+        for r in range(2):
+            for stage in range(2):
+                w = window(0, 1 + stage * 10, 3 + stage * 10, 20)
+                w.update(first=stage * 20, last=(stage + 1) * 20)
+                ranks[r]['windows'].append(w)
+        landings(cables, ranks)
+        for w in ranks[1]['windows']:
+            if w['direction']:
+                w['end_lo_ns'] += 1_000_000_000
+                w['end_hi_ns'] += 1_000_000_000
+        r = finishes(cables, ranks, 2, {'0': [0, 0], '1': [0, 0]})
+        self.assertEqual([s['spread_seconds_bounds'] for s in r['stages']], [[1, 1], [1, 1]])
+        self.assertAlmostEqual(r['finish_variance'], 0.25 / 9)
+        self.assertEqual(r['delivery_tail_seconds'], [6, 4])
+
     def test_idle_links_still_count_and_overlaps_are_not_summed(self):
         cables = [{'nodes': [0, 1], 'bits_per_second': b} for b in (80, 160)]
         ranks = [{'rank': 0, 'windows': [window(0, 1, 3, 20)]}, {'rank': 1, 'windows': []}]

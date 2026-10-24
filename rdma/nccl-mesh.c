@@ -254,6 +254,7 @@ struct ncclComm {
   uint32_t *endpoint;
   double *cable_weights;
   struct mesh_paths *writes;
+  double *write_release;
   uint64_t page;
   struct mesh_trees paths, trees, rooted;
   struct entry *entries, *given;
@@ -374,6 +375,7 @@ static void comm_free(struct ncclComm *comm) {
   free(comm->cable_weights);
   for (int p = 0; comm->writes && p < comm->nranks * comm->nranks; p++) paths_free(&comm->writes[p]);
   free(comm->writes);
+  free(comm->write_release);
   free(comm->ops);
   pthread_mutex_destroy(&comm->guard);
   free(comm->members); free(comm->forms);
@@ -647,6 +649,21 @@ ncclResult_t ncclMeshCommSample(ncclComm_t comm, struct ncclMeshCableSample *sam
   return ncclSuccess;
 }
 
+
+ncclResult_t ncclMeshCommWriteRelease(ncclComm_t comm, const double *seconds) {
+  if (!comm || !seconds) return fail(ncclInvalidArgument, "write producer times are required");
+  for (int r = 0; r < comm->nranks; r++)
+    if (!isfinite(seconds[r]) || seconds[r] < 0)
+      return fail(ncclInvalidArgument, "write producer times must be finite and nonnegative");
+  double *copy = malloc((size_t)comm->nranks * sizeof *copy);
+  if (!copy) return fail(ncclSystemError, "out of memory");
+  memcpy(copy, seconds, (size_t)comm->nranks * sizeof *copy);
+  pthread_mutex_lock(&group_lock);
+  free(comm->write_release); comm->write_release = copy;
+  plan_free(comm, comm->plan); comm->plan = NULL;
+  pthread_mutex_unlock(&group_lock);
+  return ncclSuccess;
+}
 
 ncclResult_t ncclMeshCommWriteRoutes(ncclComm_t comm, int source, int destination, const struct mesh_paths *paths) {
   if (!comm || source < 0 || destination < 0 || mesh_paths_check(&comm->fabric, (uint32_t)source, (uint32_t)destination, paths))
@@ -1954,7 +1971,7 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
    they lie in (`row`); a landing's `need` (the send entries a combine into bytes an earlier SEND of its call on its
    channel reads waits to be published: that entry + 1, 0 none) */
 struct message { struct call *c; uint32_t step; uint64_t entry; mesh_pages pages, end; uint64_t need; size_t offset, bytes;
-                 struct where data; uint64_t row; };
+                 struct where data; uint64_t row; double priority; };
 /* a group's entries on one channel, each list in its order from its first (`first`: [0] the send list's, [1] the
    landing list's), and its landing entries' gate (`word` a region offset, 0 none; `base` the value it reaches: a page
    count of the holding's `ready`, or the number of a group at the communicator's gate word: gate_of) */
@@ -2058,12 +2075,12 @@ static void schedules_free(const struct ncclComm *comm, struct schedule *plans) 
   free(plans);
 }
 
-/* Immutable WRITE groups have no cross-call buffer dependencies. Give the two
-   ends of each cable the same AOT order: first hops before relays, then declared
-   call and operand offset. A ready local producer cannot sit behind a relay
-   waiting for another producer. Relay data still uses the incoming page prefix. */
+/* Immutable WRITE groups use the ordinal of the global AOT streaming schedule.
+   Parent fragments precede their relays in that order, so queue order cannot
+   create a dependency cycle. No runtime arbitration is introduced. */
 static int write_order(const void *left, const void *right) {
   const struct message *a = left, *b = right;
+  if (a->priority != b->priority) return a->priority < b->priority ? -1 : 1;
   const uint32_t ar = a->c->bound->steps[a->step].round, br = b->c->bound->steps[b->step].round;
   if (ar != br) return ar < br ? -1 : 1;
   if (a->c != b->c) return a->c < b->c ? -1 : 1;
@@ -2075,21 +2092,75 @@ static int all_writes(const struct call *list, size_t n) {
   return n != 0;
 }
 
-static void order_writes(const struct ncclComm *comm, struct schedule *plans) {
-  for (uint32_t h = 0; h < comm->count; h++)
-    for (int send = 1; send >= 0; send--) {
-      struct message *items = send ? plans[h].out : plans[h].in;
-      const size_t n = send ? plans[h].outs : plans[h].ins;
-      qsort(items, n, sizeof *items, write_order);
-      mesh_pages end = {0};
-      for (size_t k = 0; k < n; k++) {
-        end = pages_add(end, items[k].pages);
-        items[k].entry = k; items[k].end = end;
-      }
+#include "mesh-write-order.h"
+struct write_fragment { const struct call *call; uint32_t source, cable, hop; size_t offset; };
+
+static ncclResult_t order_writes(const struct ncclComm *comm, const struct call *list, size_t calls, struct schedule *plans) {
+  size_t room = 0;
+  for (size_t i = 0; i < calls; i++) for (int r = 0; r < comm->nranks; r++) {
+    const struct call *c = list + i;
+    const struct mesh_paths *paths = comm->writes + c->root * comm->nranks + c->target - 1;
+    const int n = mesh_write_compile(&comm->fabric, (uint32_t)r, (uint32_t)c->root, (uint32_t)c->target - 1,
+      paths, (struct mesh_operand){(uint32_t)c->type + 1, (uint32_t)SIZE[c->type], c->count}, comm->page, NULL, 0);
+    if (n < 0 || (size_t)n > UINT32_MAX - room) return fail(ncclInvalidUsage, "write schedule extent");
+    room += (size_t)n;
+  }
+  struct mesh_write_task *tasks = calloc(room + 1, sizeof *tasks);
+  struct write_fragment *fragments = calloc(room + 1, sizeof *fragments);
+  struct mesh_transfer *transfers = calloc(room + 1, sizeof *transfers);
+  double *capacity = calloc(2 * comm->fabric.cables + 1, sizeof *capacity);
+  ncclResult_t result = ncclSuccess;
+  if (!tasks || !fragments || !transfers || !capacity) { result = fail(ncclSystemError, "out of memory"); goto done; }
+  for (uint32_t e = 0; e < comm->fabric.cables; e++)
+    capacity[2 * e] = capacity[2 * e + 1] = fmax(comm->fabric.cable[e].bandwidth / 8.0, 1.0);
+  uint32_t count = 0;
+  for (size_t i = 0; i < calls; i++) for (int r = 0; r < comm->nranks; r++) {
+    const struct call *c = list + i;
+    const struct mesh_paths *paths = comm->writes + c->root * comm->nranks + c->target - 1;
+    const int n = mesh_write_compile(&comm->fabric, (uint32_t)r, (uint32_t)c->root, (uint32_t)c->target - 1,
+      paths, (struct mesh_operand){(uint32_t)c->type + 1, (uint32_t)SIZE[c->type], c->count}, comm->page, transfers, (uint32_t)room);
+    if (n < 0) { result = fail(ncclInternalError, "write schedule realization"); goto done; }
+    for (int k = 0; k < n; k++) {
+      const struct mesh_transfer *t = transfers + k;
+      if (t->step.op != MESH_STEP_SEND) continue;
+      fragments[count] = (struct write_fragment){c, (uint32_t)r, t->cable, t->step.round, t->step.first * SIZE[c->type]};
+      tasks[count++] = (struct mesh_write_task){
+        .arc = 2 * t->cable + ((uint32_t)r == comm->fabric.cable[t->cable].node[1]), .parent = UINT32_MAX,
+        .bytes = ceil((double)piece_bytes(&t->step) / comm->page) * comm->page,
+        .release = comm->write_release ? comm->write_release[c->root] : 0};
     }
+  }
+  for (uint32_t k = 0; k < count; k++) if (fragments[k].hop) {
+    for (uint32_t j = 0; j < count; j++)
+      if (fragments[j].call == fragments[k].call && fragments[j].offset == fragments[k].offset &&
+          fragments[j].hop + 1 == fragments[k].hop) { tasks[k].parent = j; break; }
+    if (tasks[k].parent == UINT32_MAX) { result = fail(ncclInternalError, "write relay has no upstream fragment"); goto done; }
+  }
+  const int status = mesh_write_order(tasks, count, capacity, 2 * comm->fabric.cables, (double)comm->page);
+  if (status) { result = fail(ncclInternalError, "write schedule: %s", strerror(status)); goto done; }
+  for (uint32_t h = 0; h < comm->count; h++) for (int send = 1; send >= 0; send--) {
+    struct message *items = send ? plans[h].out : plans[h].in;
+    const size_t n = send ? plans[h].outs : plans[h].ins;
+    for (size_t k = 0; k < n; k++) {
+      const struct mesh_step *step = items[k].c->bound->steps + items[k].step;
+      const uint32_t source = send ? (uint32_t)comm->rank : step->peer;
+      uint32_t j = 0;
+      for (; j < count; j++)
+        if (fragments[j].call == items[k].c && fragments[j].offset == items[k].offset &&
+            fragments[j].source == source && fragments[j].cable == comm->channels[h].cable && fragments[j].hop == step->round) break;
+      if (j == count) { result = fail(ncclInternalError, "write entry has no global fragment"); goto done; }
+      items[k].priority = tasks[j].order;
+    }
+    qsort(items, n, sizeof *items, write_order);
+    mesh_pages end = {0};
+    for (size_t k = 0; k < n; k++) { end = pages_add(end, items[k].pages); items[k].entry = k; items[k].end = end; }
+  }
+done:
+  free(tasks); free(fragments); free(transfers); free(capacity);
+  return result;
 }
 
-static ncclResult_t ordered_writes(const struct ncclComm *comm, const struct schedule *plans, struct schedule **out) {
+static ncclResult_t ordered_writes(const struct ncclComm *comm, const struct call *list, size_t calls, const struct schedule *plans, struct schedule **out) {
   struct schedule *copy = calloc(comm->count + 1, sizeof *copy);
   if (!copy) return fail(ncclSystemError, "out of memory");
   for (uint32_t h = 0; h < comm->count; h++) {
@@ -2100,8 +2171,9 @@ static ncclResult_t ordered_writes(const struct ncclComm *comm, const struct sch
     memcpy(copy[h].out, plans[h].out, plans[h].outs * sizeof *copy[h].out);
     memcpy(copy[h].in, plans[h].in, plans[h].ins * sizeof *copy[h].in);
   }
-  order_writes(comm, copy); *out = copy;
-  return ncclSuccess;
+  const ncclResult_t result = order_writes(comm, list, calls, copy);
+  if (result) { schedules_free(comm, copy); return result; }
+  *out = copy; return ncclSuccess;
 }
 
 /* a group's calls compiled: each crossing call's steps (plan_calls) and the group's entries on each channel, each list
@@ -2136,8 +2208,9 @@ static const struct compiled *group_at(const struct plan *plan, uint64_t holder)
    plan, compiled here (compile_group).  Under group_lock */
 static ncclResult_t group_bound(struct ncclComm *comm, struct call *list, size_t n, uint64_t holder, struct schedule **plans) {
   if (!comm->plan) {
-    const ncclResult_t result = compile_group(comm, list, n, plans);
-    if (!result && list[0].fused && all_writes(list, n)) order_writes(comm, *plans);
+    ncclResult_t result = compile_group(comm, list, n, plans);
+    if (!result && list[0].fused && all_writes(list, n)) result = order_writes(comm, list, n, *plans);
+    if (result) { schedules_free(comm, *plans); *plans = NULL; }
     return result;
   }
   const struct compiled *x = group_at(comm->plan, holder);
@@ -2960,13 +3033,24 @@ static ncclResult_t complete_track(struct metal_program *program, struct infligh
    each an item of its own (nothing credits it; a SEND's step after the consumption of the receive before it), then its
    consumptions (a combine into bytes an earlier SEND of its channel reads after that publication: its `need`); the
    tracks run as one (metal_tracks).  No rank orders anything another rank must share */
+/* Only values addressed to this rank are inputs to its fused consumer. Relay
+   arrivals have their own landed-word dependencies in the transport program;
+   their immutable leases live through the enclosing data function. */
+static uint64_t own_landing(const struct inflight *g, uint32_t h) {
+  const struct schedule *p = g->plans + h;
+  for (size_t k = p->ins; k; k--)
+    if (p->in[k - 1].c->target == g->comm->rank + 1) return g->start[h][1] + k;
+  return g->start[h][1];
+}
+
 static ncclResult_t complete(struct metal_program *program, struct inflight *through, int *published) {
   if (through->fused == 2) {
     /* A group of immutable one-way writes. Relay entries already name their
        incoming landed word; publishing a channel never releases relay bytes
        early. The producer releases each physical channel once. Its consumer
-       needs only that channel's final landing prefix, not one GPU wait per
-       path fragment. All leases belong to the enclosing data function. */
+       needs only that channel's last landing addressed to this rank. A later
+       relay must not delay local compute. All leases belong to the enclosing
+       data function, including relay-only arrivals skipped by this consumer. */
     struct ncclComm *comm = through->comm;
     ncclResult_t result = ncclSuccess;
     touch(comm);
@@ -2975,10 +3059,12 @@ static ncclResult_t complete(struct metal_program *program, struct inflight *thr
       struct channel *ch = comm->channels + h;
       if (ch->published < through->end[h][0])
         result = publish(program, comm, h, through->end[h][0], published);
-      if (!result && ch->consumed < through->end[h][1]) {
-        ch->consumed = through->end[h][1] - 1;
+      const uint64_t own = own_landing(through, h);
+      if (!result && ch->consumed < own) {
+        ch->consumed = own - 1;
         result = consume(program, comm, h, METAL_NONE);
       }
+      if (!result) ch->consumed = through->end[h][1];
     }
     return result;
   }
@@ -3570,7 +3656,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     uint32_t lands = 0, publishes = 0;
     for (uint32_t h = 0; h < comm->count; h++) {
       publishes += g->fused == 2 ? g->end[h][0] > g->start[h][0] : (uint32_t)(g->end[h][0] - g->start[h][0]);
-      lands += g->fused == 2 ? g->end[h][1] > g->start[h][1] : (uint32_t)(g->end[h][1] - g->start[h][1]);
+      lands += g->fused == 2 ? own_landing(g, h) > g->start[h][1] : (uint32_t)(g->end[h][1] - g->start[h][1]);
     }
     /* a fused group is completed at once, issued or not: its steps are records its caller's kernels run, and the
        library encodes no wait of it; the groups in flight before it are completed first, so it completes alone on its
@@ -3893,7 +3979,7 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
   for (uint32_t g = 0; g < groups && !result; g++) {
     struct compiled *x = made->group + g;
     result = compile_group(comm, x->calls, x->n, &x->plans);
-    if (!result && all_writes(x->calls, x->n)) result = ordered_writes(comm, x->plans, &x->write_plans);
+    if (!result && all_writes(x->calls, x->n)) result = ordered_writes(comm, x->calls, x->n, x->plans, &x->write_plans);
     for (uint32_t h = 0; h < comm->count && !result; h++) { made->entries[g][0] += x->plans[h].outs; made->entries[g][1] += x->plans[h].ins; }
   }
   if (!result) {
