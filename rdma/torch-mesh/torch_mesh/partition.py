@@ -278,15 +278,15 @@ def _gather_kernel(kernel, *arguments):
     return _GATHER_KERNELS[name]
 
 
-def _linear_kernel(*arguments):
-    """linear.metal's linear_publish at `arguments`, compiled once after the library's steps (fused.steps) and
-    argmax.metal's arrival count."""
+def _linear_kernel(kernel, *arguments):
+    """linear.metal's `kernel` (linear_publish, linear_landed) at `arguments`, compiled once after the library's steps
+    (fused.steps) and argmax.metal's arrival count."""
     from pathlib import Path
 
     from . import _stream, fused
     from .argmax import SOURCE
     from .streamed import instance
-    name, line = instance('linear_publish', *arguments)
+    name, line = instance(kernel, *arguments)
     if name not in _GATHER_KERNELS:
         text = (Path(__file__).parent / 'linear.metal').read_text()
         _GATHER_KERNELS[name] = _stream.pipeline(fused.steps() + SOURCE + '\n' + text + '\n' + line + '\n', name)
@@ -300,11 +300,26 @@ def _fused(x, dim, sizes, group, adds, w=None, repeats=1):
     product with it, x [R, K] (backend.linear_sum): linear.metal's linear_publish computes it into this rank's segment
     and publishes it there through the collective's steps, in place of gather_publish.  The call is repeat j of the
     `repeats` one issue presents, j its calls of this form since the last issue (torch_mesh.compiler)."""
+    from . import fused
+    if len(sizes) == 1:
+        return x.clone() if w is None else torch.ops.torch_mesh.linear(x, w)
+    held, j, slot, crossing = _crossing(x, dim, sizes, group, adds, w, repeats)
+    land, gl = held['land']
+    lwords = list(held['words'])
+    lwords[4] = j
+    out = torch.empty(held['shape'], dtype=x.dtype, device=x.device)
+    fused.encode(land, [slot, out], lwords, 15, gl, 1, _GATHER_THREADS, len(sizes) - 1, land=crossing)
+    return out
+
+
+def _crossing(x, dim, sizes, group, adds, w=None, repeats=1):
+    """_fused's crossing and publication: its form (made at its first call), this call's repeat j and slot (slot j of
+    a lease of `repeats`, two taken in turn), the exchange issued at j 0, and this rank's part published in slot j by
+    gather_publish or linear_publish; the landing is its caller's (_fused's land kernel, or a product that reads it:
+    linear_landed)."""
     from . import _stream, fused
     n, rank = len(sizes), group.rank()
     operand = tuple(x.shape) if w is None else (x.shape[0], w.shape[0])
-    if n == 1:
-        return x.clone() if w is None else torch.ops.torch_mesh.linear(x, w)
     key = (tuple(x.shape), x.dtype, dim, tuple(sizes), group.group_name, adds, None if w is None else (tuple(w.shape), w.stride()))
     if key not in _FUSED:
         row, half = math.prod(operand) // max(1, operand[dim]), x.element_size() // 2
@@ -319,7 +334,7 @@ def _fused(x, dim, sizes, group, adds, w=None, repeats=1):
         else:
             K, N, ldw = x.shape[1], w.shape[0], w.stride(0)
             split = _stream.linear_split(K, N)
-            publish = (_linear_kernel(4 if ldw % 4 == 0 else 1, 4 if K % 4 == 0 else 1, 2, split, 2, n - 1),
+            publish = (_linear_kernel('linear_publish', 4 if ldw % 4 == 0 else 1, 4 if K % 4 == 0 else 1, 2, split, 2, n - 1),
                        [x.shape[0], K, N, 0, ldw, K, K, K, 0], 8, -(-N // 2), split * 32)
         _FUSED[key] = {'rings': {}, 'turn': 0, 'j': 0, 'words': words, 'shape': shape, 'counts': counts, 'starts': starts,
                        'arrivals': torch.zeros(1, dtype=torch.int32, device=x.device),
@@ -337,14 +352,62 @@ def _fused(x, dim, sizes, group, adds, w=None, repeats=1):
         held['crossing'] = fused.exchange(segments[rank], [segments[q] for q in range(n) if q != rank], _stream.polls, group, repeats,
                                           starts[-1] * x.element_size())
     (slot, segments), crossing = held['slots'][j], held['crossing']
-    (publish, pwords, at, gp, threads), (land, gl) = held['publish'], held['land']
-    pwords, lwords = list(pwords), list(held['words'])
-    pwords[at], lwords[4] = j, j
+    publish, pwords, at, gp, threads = held['publish']
+    pwords = list(pwords)
+    pwords[at] = j
     fused.encode(publish, [x] + ([] if w is None else [w]) + [segments[rank], held['arrivals']] + ([] if w is None else [x]), pwords, 15,
                  gp, 1, threads, n - 1, publish=crossing)
-    out = torch.empty(held['shape'], dtype=x.dtype, device=x.device)
-    fused.encode(land, [slot, out], lwords, 15, gl, 1, _GATHER_THREADS, n - 1, land=crossing)
-    return out
+    return held, j, slot, crossing
+
+
+# The landings a product reads (linear_landed): each published slot's crossing form, repeat and Crossing, by the slot
+_LANDINGS = {}
+
+
+@torch.library.custom_op('torch_mesh::sum_publish', mutates_args=())
+def sum_publish(x: torch.Tensor, w: torch.Tensor, group_name: str, repeats: int = 1) -> torch.Tensor:
+    """linear_sum's publication alone (torch_mesh.compiler, where the next product reads its landing: linear_landed):
+    x w^T published as this rank's part of the crossing's slot, which is returned, every rank's part in it once landed."""
+    group = dist.distributed_c10d._resolve_process_group(group_name)
+    x = x.contiguous()
+    held, j, slot, crossing = _crossing(x, 0, [x.shape[0]] * group.size(), group, True, w, repeats)
+    _LANDINGS[slot.data_ptr()] = (held, j, crossing)
+    return slot
+
+
+@sum_publish.register_fake
+def _(x, w, group_name, repeats=1):
+    group = dist.distributed_c10d._resolve_process_group(group_name)
+    return x.new_empty(_paged([x.shape[0] * w.shape[0]] * group.size(), x.element_size(), group)[1][-1])
+
+
+@torch.library.custom_op('torch_mesh::linear_landed', mutates_args=())
+def linear_landed(x: torch.Tensor | None, slot: torch.Tensor, w: torch.Tensor, bias: torch.Tensor | None, act: int, slot_act: int,
+                  keep: bool, rows: int, group_name: str) -> tuple[torch.Tensor, torch.Tensor]:
+    """torch_mesh::linear of an operand read through a landing (torch_mesh.compiler): act((x + slot_act(the sum of
+    every rank's part in `slot`, sum_publish's)) w^T + bias), x [rows, K] (None: the landing alone), one dispatch
+    (linear.metal linear_landed) that awaits each peer's part at the slot's repeat and reads it in place, so no dispatch
+    lands it; and, where `keep`, slot_act(the sum) [rows, K] for the landing's other users (else an empty tensor)."""
+    from . import _stream, fused
+    held, j, crossing = _LANDINGS[slot.data_ptr()]
+    group = dist.distributed_c10d._resolve_process_group(group_name)
+    n, K, N, ldw = group.size(), w.shape[1], w.shape[0], w.stride(0)
+    x = x.contiguous() if x is not None else None
+    ld0 = x.stride(0) if x is not None else K
+    split = _stream.linear_split(K, N)
+    kernel = _linear_kernel('linear_landed', 4 if ldw % 4 == 0 else 1, 4 if K % 4 == 0 and ld0 % 4 == 0 else 1, 2, split, 2, act, slot_act,
+                            n - 1)
+    y = torch.empty(rows, N, dtype=w.dtype, device=w.device)
+    landed = torch.empty(rows, K, dtype=w.dtype, device=w.device) if keep else torch.empty(0, dtype=w.dtype, device=w.device)
+    words = [rows, K, N, int(bias is not None), ldw, ld0, int(x is not None), group.rank(), int(keep), j] + held['starts'][:n]
+    fused.encode(kernel, [x if x is not None else y, w, y, bias if bias is not None else y, slot, landed if keep else y], words, 15,
+                 -(-N // 2), 1, split * 32, n - 1, land=crossing)
+    return y, landed
+
+
+@linear_landed.register_fake
+def _(x, slot, w, bias, act, slot_act, keep, rows, group_name):
+    return w.new_empty(rows, w.shape[0]), w.new_empty((rows, w.shape[1]) if keep else (0,))
 
 
 def _paged(counts, size, group):

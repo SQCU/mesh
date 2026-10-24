@@ -124,6 +124,64 @@ def compiler(gm, example_inputs):
                     graph.erase_node(m)
             i += len(group)
 
+    def landed(graph, crossing):
+        """A sum's crossing (linear_sum) whose landing reaches a product's x through linear's menu alone, the identity
+        (wait_tensor), an activation of the landing (tanh) and an added tensor of its shape, folded into that product
+        (torch_mesh::linear_landed, its publication torch_mesh::sum_publish): the product awaits and reads the landing,
+        so no dispatch lands it.  Any other user of the (activated) landing reads linear_landed's `landed`; any other op
+        between, no fold.  Whether it folded."""
+        import operator
+
+        import torch.distributed as dist
+        group = crossing.args[2]
+        if dist.distributed_c10d._resolve_process_group(group).size() < 2 or len(crossing.users) != 1:
+            return False
+        chain, v, sact = [crossing], crossing, 0
+        if next(iter(v.users)).target is torch.ops._c10d_functional.wait_tensor.default:
+            v = next(iter(v.users))
+            chain.append(v)
+        if len(v.users) == 1 and next(iter(v.users)).target is aten.tanh.default:
+            v, sact = next(iter(v.users)), 1
+            chain.append(v)
+        product = add = x0 = None
+        others = []
+        for u in v.users:
+            if product is None and u.target is torch.ops.torch_mesh.linear.default and u.args[0] is v:
+                product = u
+            elif (product is None and u.target is aten.add.Tensor and not u.kwargs and v in u.args and len(u.users) == 1
+                    and next(iter(u.users)).target is torch.ops.torch_mesh.linear.default and next(iter(u.users)).args[0] is u):
+                other = u.args[0] if u.args[1] is v else u.args[1]
+                if (hasattr(other, 'meta') and other.meta['val'].shape == v.meta['val'].shape
+                        and other.meta['val'].dtype == v.meta['val'].dtype):
+                    product, add, x0 = next(iter(u.users)), u, other
+                else:
+                    others.append(u)
+            else:
+                others.append(u)
+        if product is None or (len(product.args) > 4 and product.args[4] is not None):
+            return False
+        rows = v.meta['val'].shape[0]
+        args = list(product.args) + [None, 0][len(product.args) - 2:]
+        with graph.inserting_before(crossing):
+            slot = graph.call_function(torch.ops.torch_mesh.sum_publish.default, tuple(crossing.args))
+        x, w = (a.meta['val'] for a in crossing.args[:2])
+        resolved = dist.distributed_c10d._resolve_process_group(group)
+        slot.meta['val'] = x.new_empty(partition._paged([x.shape[0] * w.shape[0]] * resolved.size(), x.element_size(), resolved)[1][-1])
+        with graph.inserting_before(product):
+            made = graph.call_function(torch.ops.torch_mesh.linear_landed.default,
+                                       (x0, slot, args[1], args[2], args[3], sact, bool(others), rows, group))
+            y = graph.call_function(operator.getitem, (made, 0))
+            kept = graph.call_function(operator.getitem, (made, 1))
+        y.meta['val'] = product.meta['val']
+        kept.meta['val'] = v.meta['val'] if others else v.meta['val'].new_empty(0)
+        made.meta['val'] = (y.meta['val'], kept.meta['val'])
+        product.replace_all_uses_with(y)
+        for u in others:
+            u.replace_input_with(v, kept)
+        for node in [product] + ([add] if add is not None else []) + chain[::-1]:
+            graph.erase_node(node)
+        return True
+
     class Leased(CustomGraphPass):
         def __call__(self, graph):
             for node in list(graph.nodes):
@@ -171,9 +229,13 @@ def compiler(gm, example_inputs):
                 if len(nodes) > 1 and len(forms) == 1 and nodes[0].target in CROSSINGS:
                     for n in nodes:
                         told(n, len(nodes))
+            folded = [landed(graph, n) for n in list(graph.nodes) if n.target is torch.ops.torch_mesh.linear_sum.default]
+            if any(folded):
+                from torch._inductor.pattern_matcher import stable_topological_sort
+                stable_topological_sort(graph)
 
         def uuid(self):
-            return 'torch_mesh::all_reduce torch_mesh::linear cat linears repeats allgatherv'
+            return 'torch_mesh::all_reduce torch_mesh::linear cat linears repeats allgatherv landed'
     with config.patch(post_grad_custom_pre_pass=Leased(), size_asserts=False, alignment_asserts=False, scalar_asserts=False):
         return lookup_backend('inductor')(gm, example_inputs)
 
