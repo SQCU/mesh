@@ -379,7 +379,7 @@ def _(partials, root, group_name):
 
 
 @torch.library.custom_op('torch_mesh::all_reduce', mutates_args=())
-def all_reduce(input: torch.Tensor, reduce_op: str, group_name: str, repeats: int) -> torch.Tensor:
+def all_reduce(input: torch.Tensor, reduce_op: str, group_name: str, repeats: int = 1) -> torch.Tensor:
     """torch's functional all_reduce as an op a compiled graph calls (torch_mesh.compiler).  A sum of MPS tensors on a
     mesh group is a fused crossing (partition._fused, as allgatherv's): this rank's part published from a held lease by
     a kernel of partition's own, every peer's awaited and all of them added in rank order by another, the host issuing
@@ -394,12 +394,12 @@ def all_reduce(input: torch.Tensor, reduce_op: str, group_name: str, repeats: in
 
 
 @all_reduce.register_fake
-def _(input, reduce_op, group_name, repeats):
+def _(input, reduce_op, group_name, repeats=1):
     return torch.empty_like(input)
 
 
 @torch.library.custom_op('torch_mesh::linear_sum', mutates_args=())
-def linear_sum(x: torch.Tensor, w: torch.Tensor, group_name: str, repeats: int) -> torch.Tensor:
+def linear_sum(x: torch.Tensor, w: torch.Tensor, group_name: str, repeats: int = 1) -> torch.Tensor:
     """x w^T (torch_mesh::linear's product, x [R, K], w [N, K]) summed over the mesh group named `group_name` as one
     fused crossing (partition._fused), issued once for `repeats` of them (torch_mesh.compiler): linear.metal's
     linear_publish computes this rank's product into its segment and publishes it through the collective's steps,
@@ -411,7 +411,7 @@ def linear_sum(x: torch.Tensor, w: torch.Tensor, group_name: str, repeats: int) 
 
 
 @linear_sum.register_fake
-def _(x, w, group_name, repeats):
+def _(x, w, group_name, repeats=1):
     return x.new_empty(x.shape[0], w.shape[0])
 
 
