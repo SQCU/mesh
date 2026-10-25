@@ -68,8 +68,9 @@ def launcher(mesh_root, microbench_root, output_root):
                            'role': 'pin/export only; target helpers execute from the committed snapshot'}}
     try:
         roots = {'mesh': Path(mesh_root).resolve(), 'metal-microbench': Path(microbench_root).resolve()}
-        # Resolve both before exporting either. Later HEAD changes cannot change these inputs.
-        record['commits'] = {name: pin(root) for name, root in roots.items()}
+        # Resolve both main commits before exporting either. Later commits or
+        # an interactive branch checkout cannot change this invocation's inputs.
+        record['commits'] = {name: pin(root, 'refs/heads/main') for name, root in roots.items()}
         (out / 'commits').write_text(''.join(f'{name} {sha}\n' for name, sha in record['commits'].items()))
         for name, root in roots.items():
             target = out / 'sources' / name

@@ -1501,11 +1501,9 @@ struct CompletionTimings {
     }
     stamps.push_back(stamp);
     const Deadline deadline("observe the existing command buffer");
-    dispatch_sync(stream->queue(), ^{
-      stream->addCompletedHandler(^(id<MTLCommandBuffer> buffer) {
+    stream->addCompletedHandler(^(id<MTLCommandBuffer> buffer) {
         stamp->seconds = now();
         stamp->state.store(buffer.status == MTLCommandBufferStatusError ? -1 : 1, std::memory_order_release);
-      });
     });
   }
   bool ready() const {

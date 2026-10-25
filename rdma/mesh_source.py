@@ -14,8 +14,8 @@ def git(root, *args):
     return subprocess.run(['git', '-C', str(root), *args], check=True, capture_output=True).stdout
 
 
-def pin(root):
-    return git(root, 'rev-parse', '--verify', 'HEAD^{commit}').decode().strip()
+def pin(root, ref='HEAD'):
+    return git(root, 'rev-parse', '--verify', f'{ref}^{{commit}}').decode().strip()
 
 
 def snapshot_path(root, name):
@@ -60,7 +60,7 @@ def export(root, commit, destination):
             target.parent.mkdir(parents=True, exist_ok=True)
             if member.issym():
                 # A committed link is opaque source data, even when its target is
-                # external or absent. Hash/archive its text and never open its target.
+                # external or absent. Archive its text and never open its target.
                 target.symlink_to(member.linkname)
             else:
                 target.write_bytes(tar.extractfile(member).read())
