@@ -2,7 +2,6 @@
 import concurrent.futures
 import contextlib
 import glob
-import hashlib
 import io
 import json
 import os
@@ -75,6 +74,7 @@ class Node:
         self.number, self.addr, self.via, self.ula = number, addr, via, ula
         self.name = NAMES.get(number, number)
         self.source = 'mesh'
+        self.discovered_links = 0
 
     def argv(self, command):
         """The shared administration launcher, also used for resident-rank configuration."""
@@ -145,6 +145,8 @@ def discover(log=None, prepare=None):
     nodes = [Node(str(m), heard.get(str(m)) or management.get(str(m)) or paths.get(str(m), ''),
                   None if str(m) in heard or str(m) in management else a, paths.get(str(m), ''))
              for m in d['map']['nodes']]
+    for node in nodes:
+        node.discovered_links = sum(int(node.number) in link[:2] for link in d['map']['links'])
     note(log, 'map ' + ' '.join(n.number for n in nodes))
     return nodes, candidates
 
@@ -199,19 +201,20 @@ def install(nodes, sha, out):
 def ports(n):
     d = n.stat()[1]
     peers, links = d.get('peers', []), d.get('map', {}).get('links', [])
-    return (n.name, sum(p.get('phase') == 'PAIRED' for p in peers), sum(int(n.number) in x[:2] for x in links),
+    return (n.name, sum(p.get('phase') == 'PAIRED' for p in peers),
+            max(n.discovered_links, sum(int(n.number) in x[:2] for x in links)),
             sum(p.get('node', 0) != 0 or p.get('phase') != 'STOPPED' for p in peers))
 
 
 def wait_paired(nodes, log):
     for k in range(1, 61):
         state = parallel([lambda n=n: ports(n) for n in nodes])
-        ok = all(paired >= links for _, paired, links, _ in state)
+        ok = all(paired >= links and (links > 0 or len(nodes) == 1) for _, paired, links, _ in state)
         if ok or k == 60:
             break
         time.sleep(5)
     note(log, f'{f"paired after {k * 5} s" if ok else "not paired after 300 s"}: ' + ', '.join(
-        f'{name} {paired} of {links} map links PAIRED' + (f', {cabled} ports cabled: degraded' if links < cabled else '')
+        f'{name} {paired} of {links} discovered links PAIRED' + (f', {cabled} ports cabled: degraded' if links < cabled else '')
         for name, paired, links, cabled in state))
     return ok
 
