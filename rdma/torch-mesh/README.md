@@ -133,19 +133,18 @@ rows' attention. Its reproduction target is `cp.py`'s (Uneven nodes, below).
 
 ### Record and replay
 
-`torch_mesh.record(step)` and `torch_mesh.replay(recording, steps)` are a step recorded once and replayed (the CUDA
+`recording = torch_mesh.record(step)` and `recording.issue(steps)` are a step recorded once and replayed (the CUDA
 graph's analogue) through torch's documented compile path: `step` (no arguments, its collectives torch's) is one graph
 (`torch.compile`, `fullgraph=True`) compiled at its first replay by the `"mesh"` backend (its collectives functional,
 each issued on torch's stream under the one commit rule: Performance), every rank's compilation met at the default
 group's store before any of its collectives runs (a rank compiling past a GPU wait's bound would otherwise fail its
-peers' first crossings: [NCCL.md](../NCCL.md#bounded-waits)). `replay` issues its steps back to back on torch's stream,
+peers' first crossings: [NCCL.md](../NCCL.md#bounded-waits)). `issue` submits its steps back to back on torch's stream,
 with no wait between them: the steps are an operand's leading dimension, each reading what the last wrote in the
-stream's order. It waits once, where its time is read: it returns the last step's interval in the stream, the span
-between MPS timing events recorded before and after it. With the steps back to back that span runs from the end of the
-step before it to its own end: the GPU's time or the host's issue, whichever is slower. The steps' outputs are read where the caller reads them (`.item()`, `.cpu()`,
-`torch.mps.synchronize()` commit and wait). Its caller is metal-microbench `tools/torch_parallel/tp.py` with
-`CAPTURE=K`: a training step (its gradients set to none, the forward, `out.sum().backward()`) recorded whole, `Tensor.backward`
-traced by Dynamo under its `trace_autograd_ops`, replayed and checked at each of its parts. Reproduction target
+stream's order. It adds no measurement or completion wait. `Invocation.run` and
+`benchmarks.sequence` own complete-function measurements; asynchronous optimizer
+observations use the same library's completion observer. Outputs are read where the
+caller consumes them (`.item()`, `.cpu()`, `torch.mps.synchronize()` commit and wait).
+Historical reproduction target
 (metal-microbench docs/measurement.md 2026-09-30, parts C and D, the 10-01 form): a replayed tp step 262.7-263.1 ms (SP=1 245.8-246.3, cp 512.3-513.7), a 16.8 MB all-reduce 63-64 us a
 call past the wire against 186-216 eager.
 

@@ -172,8 +172,9 @@ crossing without its math.
 
 The step's graphs are compiled, every rank's compilation met, and each run once before the timed run, which replays
 from the first step again. The whole-run times include the input's broadcast and the first steps' other one-time
-costs. The line also gives the steady step and the rows a second it reaches: the GPU's time from the middle step
-to the last, read from two timing events on torch's stream, over the steps between them. No wait is added to take it.
+costs. `Invocation.run` uses the library's sequence measurement: submit the complete
+function, then read completion once. `Recording.issue` only submits its compiled
+graphs; it adds no timing events. Reported throughput covers the complete invocation.
 
 ## The LSTM
 
@@ -206,9 +207,11 @@ records it as the chain's step is, k ticks unrolled in one graph and the fewer t
 their own, and the run issues every later tick through it (`Recording.issue`); the first L - 1 ticks, while the
 layers above have not begun, run as they are (`Tick.starting`). The service replays it before the run (k ticks and
 the rest, so each graph compiles on every rank) and runs the starting ticks once, so every path the run takes is
-compiled before it begins, then zeroes the state and the counter. Once the input is broadcast it
-declares the gather once (`torch_mesh.plan` of `partition.gathered`, as the chain declares its sum), and a replay's k
-gathers are one crossing issued once, each tick's its repeat (the compiler tells allgatherv its repeats).
+compiled before it begins, then zeroes the state and the counter. The compiler declares
+the complete broadcast, starting gathers and recorded gathers before execution. It
+reads destination-writing operators through PyTorch's functionalization metadata,
+and constructs the declaration before looking up cached numerical code. A replay's k
+gathers are one crossing issued once, each tick its repeat.
 
 **Configuration.** `input`, `weights`, `output`, `input_width`, `width` (H), `layers` and `steps_per_replay`, the k
 ticks one replay runs (the chain's name for its k). The weights directory holds

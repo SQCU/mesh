@@ -19,7 +19,7 @@ its own keys merged by the rows' logsumexp into the attention over all of them; 
 plan() declares a program's collectives on a group once, in their order (libnccl-mesh's ncclMeshCommPlan), each
 compiled then, so none is planned where it is issued.
 
-record() and replay() are a step recorded once and replayed (the CUDA graph's analogue) through torch's documented
+record() and Recording.issue() are a step recorded once and replayed (the CUDA graph's analogue) through torch's documented
 compile path: the step one graph (torch.compile, fullgraph) of the "mesh" backend, its replays issued back to back."""
 
 
@@ -379,24 +379,3 @@ def record(step, k=1):
     global _recordings
     _recordings += 1
     return Recording(step, _recordings, k)
-
-
-def replay(recording, steps=1):
-    """`steps` steps of a record()ed step issued back to back on torch's stream (Recording.issue), with no wait between
-    them: the steps are an operand's leading dimension, each reading what the last wrote in the stream's order; every
-    rank replays alike.  The one wait is where a consumer reads, the time this returns: the last graph's interval in
-    the stream over its steps, the span between two MPS timing events torch records before and after it (each event's
-    time taken as its listener runs, equally late for both), read once the end event has passed.  With the graphs back
-    to back the span runs from the end of the graph before it to its own end, the GPU's time or the host's issue,
-    whichever is slower; as before, a first replay's compile falls inside it.  The steps' outputs are read where the
-    caller reads them (torch commits and waits at .item(), .cpu() and torch.mps.synchronize())."""
-    import torch
-    if steps < 1:
-        return 0.0
-    last = steps % recording.k or min(recording.k, steps)
-    recording.issue(steps - last)
-    begin, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
-    begin.record()
-    recording.issue(last)
-    end.record()
-    return begin.elapsed_time(end) / 1e3 / last

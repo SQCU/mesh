@@ -63,7 +63,7 @@ def main():
     E, O = (torch_mesh.empty(steps, rows, width, dtype=torch.half) for _ in range(2))
     o, t = torch_mesh.empty(rows, width, dtype=torch.half).zero_(), torch.zeros(1, dtype=torch.int64, device='mps')
     recording = torch_mesh.record(chain.stepper(E, O, o, t, at, b), k)
-    torch_mesh.replay(recording, min(steps, k + steps % k))
+    recording.issue(min(steps, k + steps % k))
     o.zero_()
     t.zero_()
     if rank == 0:

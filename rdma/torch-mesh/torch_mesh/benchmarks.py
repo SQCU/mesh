@@ -33,9 +33,9 @@ def function_timings(device):
     return HostTimings()
 
 
-def emit(record):
+def emit(record, *, file=None):
     """One structured record format for examples and the hourly reader."""
-    print(json.dumps(record, sort_keys=True), flush=True)
+    print(json.dumps(record, sort_keys=True), file=file, flush=True)
 
 
 def traffic_delta(before, after):
@@ -160,7 +160,7 @@ def bandwidth(config):
                                             else 1 if what == 'broadcast' else (rank - 1) % size + 1))
                 error = float((output.cpu().float() - expected.float()).abs().max())
                 sent, landed = (sum(row[name] for row in traffic) for name in ('sent', 'landed'))
-                print(json.dumps({'rank': rank, 'size': size, 'what': what, 'calls': calls,
+                emit({'rank': rank, 'size': size, 'what': what, 'calls': calls,
                     'requested_bytes': requested, 'microseconds_per_call': seconds * 1e6 / calls,
                     'useful_output_bytes_per_call_rank': useful,
                     'useful_output_gigabytes_per_second_rank': useful * calls / seconds / 1e9,
@@ -168,8 +168,8 @@ def bandwidth(config):
                     'wire_payload_scope': 'exact completed-byte counter delta across the measurement window; framing unknown',
                     'wire_payload_call_attribution': 'unestablished: warmup/final SEND completions may cross sample boundaries',
                     'traffic': traffic, 'streaming_interval_microseconds': once * 1e6,
-                    'timing_method': 'continuous submission; one local drain after all windows',
-                    'max_abs_error': error}), flush=True)
+                    'timing_method': TIMING_METHOD,
+                    'max_abs_error': error})
             group.plan([])
     finally:
         dist.destroy_process_group()
