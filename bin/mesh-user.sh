@@ -60,9 +60,11 @@ cat > "$launchd_agents/io.mesh.bridge.plist.new" <<PL
 <key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>ThrottleInterval</key><integer>60</integer><key>ExitTimeOut</key><integer>60</integer>
 <key>StandardErrorPath</key><string>$HOME/Library/Logs/io.mesh.bridge.log</string></dict></plist>
 PL
+loaded=
+launchctl print "user/$(id -u)/io.mesh.bridge" >/dev/null 2>&1 && loaded=1
 out=$("$source/bin/mesh-launchd-agent.sh" "$launchd_agents/io.mesh.bridge.plist.new") || { printf '%s\n' "$out"; exit 1; }
 [ -z "$out" ] || printf '%s\n' "$out"
-{ [ -z "$renew" ] && [ "$before" = "$images" ]; } \
+{ [ -z "$loaded" ] || { [ -z "$renew" ] && [ "$before" = "$images" ]; }; } \
   || { launchctl kill SIGHUP "user/$(id -u)/io.mesh.bridge" 2>/dev/null; \
        echo "io.mesh.bridge: its new binaries or configuration are installed; its heartbeat restarts the bridge on them (SIGHUP), the region kept"; }
 printf 'revision=%s\nimages=%s\n' "$(python3 "$source/rdma/mesh_source.py" revision "$source" 2>/dev/null || echo unknown)" "$images" > "$state/facts/io.mesh.bridge"
