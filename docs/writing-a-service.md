@@ -85,7 +85,8 @@ gives every rank the steps and rows; learning the shape needs no message.
 
 Rank 0 distributes A and B as ragged shards of their rows (`partition.distribute_tensor` with `Shard(0)` on the mesh
 dimension `tp`: the backend's scatter, MPI_Scatterv), so each rank holds the block of rows the backend's partition gives
-it ([The step](#the-step)). The inputs are one operand, [steps, rows, width], broadcast whole before the first step.
+it ([The step](#the-step)). The inputs are one operand, [steps, rows, width]. Prepared writes send its frames in
+chunks, with the next chunk posted before the current chunk runs. A step reads only after its own input frame lands.
 The outputs are one region tensor of the same shape on every rank. Each step writes its tanh(z) there. The service
 returns that tensor when the whole call ends. No input, weight or output tensor is written to a file.
 Within a step only the step's sum crosses between ranks.
@@ -156,7 +157,7 @@ seconds together with rows a second and useful output bytes a second. The hourly
 it does not retain tensor contents.
 
 The kernel, tiled weights, page assignments and physical write batches are prepared before the call.
-The whole-run times include the input broadcast and every step through the final output. The caller runs the function directly. A separate observer uses the host clock and ordinary command-buffer
+The whole-run times include all input delivery and every step through the final output. The caller runs the function directly. A separate observer uses the host clock and ordinary command-buffer
 completion state. It does not add GPU timing events or wait for measurements inside the function.
 
 ## The LSTM

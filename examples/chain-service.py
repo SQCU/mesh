@@ -8,7 +8,6 @@ import torch.distributed as dist
 import torch_mesh
 from torch.distributed.device_mesh import DeviceMesh
 from torch_mesh import partition
-from torch_mesh.backend import BROADCAST, Call
 from torch_mesh import chain as sequence
 from torch_mesh.configuration import placement, bind, record
 from torch_mesh import _stream
@@ -69,9 +68,8 @@ def main():
         E.copy_(torch.from_numpy(inputs[:]))
     torch_mesh.check_memory()
     torch.mps.synchronize()
-    bind(configuration, [[Call(BROADCAST, E.numel(), E.dtype, root=0)], *groups], lambda: sequence.prepare(operands))
+    bind(configuration, groups, lambda: sequence.prepare(operands))
     started = time.monotonic()
-    dist.broadcast(E, src=0)
     _stream.chain_run(operands[0])
     completion = _stream.completion()
     _stream.publish_boundary()

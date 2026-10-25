@@ -9,6 +9,7 @@ from pathlib import Path
 import torch
 
 from . import _stream, argmax, empty, fused, partition
+from .backend import Call, WRITE
 from .streamed import instance, node
 
 
@@ -53,7 +54,9 @@ def _form(K, S, rows, ranks, channels):
         handle = _stream.pipeline(source + '\n' + specialization, name)
         available = _stream.pipeline_facts(handle)[0]
         if available >= SG * simd:
-            return handle, G, SG * simd, [rows, *splits(RG, SG)]
+            ready_name, ready_line = instance('chain_input', channels)
+            ready = _stream.pipeline(source + '\n' + ready_line, ready_name)
+            return handle, ready, G, SG * simd, [rows, *splits(RG, SG)]
         if RG > 1:
             RG //= 2
         else:
@@ -80,22 +83,28 @@ def operands(a, b, inputs, outputs, group, batch):
 
     At, Bt = tiled(a.T, (K, S)), tiled(b, (S, K))
     channels = sum(group.rank() in cable['nodes'] for cable in group.fabric.cables)
-    kernel, workers, threads, words = _form(K, S, R, group.size(), channels)
+    kernel, ready, workers, threads, words = _form(K, S, R, group.size(), channels)
     X, Y = empty(R, K, dtype=torch.half), empty(R, S, dtype=torch.half)
     stamps = empty(workers, dtype=torch.int32).zero_()
     arrivals = empty(1, dtype=torch.int32).zero_()
     counts = [min(batch, steps - first) for first in range(0, steps, batch)]
-    calls = [(partition.summed(X, group), count) for count in counts]
-    return calls, (_stream.chain_slot(), kernel, [At, Bt, inputs, outputs, X, Y, X, stamps, arrivals],
+    input_calls = [Call(WRITE, rows * width, inputs.dtype, root=0, destination=rank, fused=True)
+                   for rank in range(1, group.size())]
+    calls = [(input_calls, counts[0])]
+    for turn, count in enumerate(counts):
+        if turn + 1 < len(counts):
+            calls.append((input_calls, counts[turn + 1]))
+        calls.append((partition.summed(X, group), count))
+    return calls, (_stream.chain_slot(), kernel, ready, [At, Bt, inputs, outputs, X, Y, X, stamps, arrivals],
                    [1, 0, *words, 0, width, rows, 0, 0], workers, threads, group.group_name,
                    group.size(), batch, Counter(counts))
 
 
 def prepare(operands):
     """Bind the current physical routes to already allocated numerical pages."""
-    index, kernel, buffers, words, workers, threads, group, ranks, batch, counts = operands
+    index, kernel, ready, buffers, words, workers, threads, group, ranks, batch, counts = operands
     x = buffers[4]
     for repeats, batches in counts.items():
         _stream.fused_prepare(x, None, 0, [x.shape[0]] * ranks, group, True, repeats, batches)
-    _stream.prepare_chain(index, kernel, buffers, words, workers, threads, group, ranks, batch)
+    _stream.prepare_chain(index, kernel, ready, buffers, words, workers, threads, group, ranks, batch)
     return index

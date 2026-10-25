@@ -1398,7 +1398,9 @@ struct PreparedChain {
   std::vector<at::Tensor> held;
   std::array<std::vector<ChainStep>, 2> steps;
   std::array<std::vector<ChainChunk>, 2> chunks;
-  Dispatch dispatch;
+  std::vector<std::unique_ptr<PreparedWrites>> inputs;
+  std::vector<uint32_t> input_last;
+  Dispatch dispatch, input_publication;
   MeshStream *stream;
   uint32_t channels, phase = 0, generation = 0;
 };
@@ -1412,7 +1414,7 @@ static int64_t chain_slot() {
   prepared_chains_->push_back(nullptr);
   return index;
 }
-static void prepare_chain(int64_t index, int64_t kernel, const std::vector<at::Tensor> &operands,
+static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, const std::vector<at::Tensor> &operands,
                           const std::vector<int64_t> &constants, int64_t groups, int64_t threads,
                           const std::string &group, int64_t ranks, int64_t batch) {
   const at::Tensor &input = operands[2], &output = operands[3], &x = operands[4];
@@ -1422,13 +1424,37 @@ static void prepare_chain(int64_t index, int64_t kernel, const std::vector<at::T
   std::vector<std::optional<at::Tensor>> buffers(operands.begin(), operands.end());
   buffers.push_back(x);  // previous landing; replaced by its compiled page below
   std::vector<int64_t> words = constants;
-  words.resize(10 + 24 * f.channels);
-  auto chain = std::make_unique<PreparedChain>(PreparedChain{f.comm, operands, {}, {},
-      encoded(kernel, buffers, words, 15, groups, 1, threads), &stream_of(at::mps::getCurrentMPSStream()), (uint32_t)f.channels});
+  words.resize(10 + 36 * f.channels);
+  auto chain = std::make_unique<PreparedChain>(PreparedChain{f.comm, operands, {}, {}, {}, {},
+      encoded(kernel, buffers, words, 15, groups, 1, threads),
+      encoded(input_kernel, {}, std::vector<int64_t>(2 + 12 * f.channels), 15, 1, 1, 32),
+      &stream_of(at::mps::getCurrentMPSStream()), (uint32_t)f.channels});
   const NSUInteger input_base = input.storage_offset() * input.element_size();
   const NSUInteger output_base = output.storage_offset() * output.element_size();
   const NSUInteger input_pitch = input.stride(0) * input.element_size();
   const NSUInteger output_pitch = output.stride(0) * output.element_size();
+  for (int64_t first = 0; first < steps; first += batch) {
+    const int64_t count = std::min(batch, steps - first);
+    const at::Tensor source = input.select(0, first);
+    auto prepared = std::make_unique<PreparedWrites>();
+    Group g{true};
+    for (int64_t destination = 1; destination < ranks; destination++) {
+      at::Tensor landing = source;
+      size_t stride = input_pitch;
+      if (f.rank != 0 && f.rank != destination) {
+        chain->held.push_back(region_empty({count * source.numel()}, input, true));
+        landing = chain->held.back().narrow(0, 0, source.numel());
+        stride = source.nbytes();
+      }
+      const Operand out = g.moving(source), in = g.moving(landing);
+      prepared->handles.push_back(nullptr);
+      checked(ncclMeshWritePrepare(out.at, (void *)in.at, out.count, out.type, 0, (int)destination,
+                                  communicator(f.comm), 1, (uint32_t)count, stride, 0, &prepared->handles.back()));
+    }
+    prepared->prepare(f.comm, f.polls, count, input_pitch);
+    chain->inputs.push_back(std::move(prepared));
+    chain->input_last.push_back((uint32_t)(count - 1));
+  }
   // Both call generations use the same allocated rings. Continuing their
   // parity keeps the first frame after a final join on the other pages.
   for (uint32_t generation = 0; generation < 2; generation++) {
@@ -1467,10 +1493,10 @@ static void chain_run(int64_t index) {
   const auto &chunks = chain.chunks[chain.generation];
   MeshStream *s = chain.stream;
   at::mps::MPSStream *stream = s->mps;
-  const auto binding = [&](const PreparedWrites *plans, bool publication) {
+  const auto binding = [&](const PreparedWrites *plans, bool publication, size_t part) {
     const uint32_t count = !plans ? 0 : publication ? plans->records.publishes : plans->records.lands;
     const auto *records = !plans ? nullptr : publication ? plans->publish.data() : plans->land.data();
-    const size_t offset = 10 + (publication ? 12 * chain.channels : 0);
+    const size_t offset = 10 + part * 12 * chain.channels;
     for (uint32_t k = 0; k < chain.channels; k++) {
       const auto *record = k < count ? records + k : nullptr;
       for (int word = 0; word < 6; word++) {
@@ -1479,6 +1505,29 @@ static void chain_run(int64_t index) {
         d.words[offset + 12 * k + 2 * word + 1] = value >> 32;
       }
     }
+  };
+  const auto input = [&](size_t index) {
+    PreparedWrites &plans = *chain.inputs[index];
+    execute_fused_writes(plans);
+    Dispatch &ready = chain.input_publication;
+    ready.words[0] = chain.input_last[index];
+    for (uint32_t k = 0; k < chain.channels; k++) {
+      const auto *record = k < plans.records.publishes ? &plans.publish[k] : nullptr;
+      for (int word = 0; word < 6; word++) {
+        const uint64_t value = record ? (*record)[word] : 0;
+        ready.words[2 + 12 * k + 2 * word] = value & 0xffffffffu;
+        ready.words[3 + 12 * k + 2 * word] = value >> 32;
+      }
+    }
+    const Dispatch *item = &ready;
+    dispatch_sync(stream->queue(), ^{
+      @autoreleasepool {
+        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
+        declare_fused(encoder);
+        encode_in(encoder, *item);
+        s->published();
+      }
+    });
   };
   const auto dispatch = [&](const ChainStep &step) {
     const size_t slots[4] = {2, 3, 6, 9};
@@ -1497,12 +1546,16 @@ static void chain_run(int64_t index) {
     });
   };
   const PreparedWrites *previous = nullptr;
-  for (const ChainChunk &chunk : chunks) {
+  input(0);
+  for (size_t turn = 0; turn < chunks.size(); turn++) {
+    const ChainChunk &chunk = chunks[turn];
+    if (turn + 1 < chunks.size()) input(turn + 1);
     execute_fused_writes(*chunk.plans);
-    binding(previous, false);
-    binding(chunk.plans, true);
+    binding(previous, false, 0);
+    binding(chunk.plans, true, 1);
+    binding(chain.inputs[turn].get(), false, 2);
     dispatch(steps[chunk.first]);
-    binding(chunk.plans, false);
+    binding(chunk.plans, false, 0);
     for (size_t j = 1; j < chunk.count; j++) dispatch(steps[chunk.first + j]);
     previous = chunk.plans;
   }

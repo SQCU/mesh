@@ -113,8 +113,20 @@ struct Summand {
 template <uint CHANNELS>
 struct chain_words {
     uint first, phase, rows, ks0, ks1, last, width, actual_rows, previous_j, j;
-    mesh_step_binding land[CHANNELS], publish[CHANNELS];
+    mesh_step_binding land[CHANNELS], publish[CHANNELS], input[CHANNELS];
 };
+
+template <uint CHANNELS>
+struct input_words { uint j, pad; mesh_step_binding publish[CHANNELS]; };
+
+template <uint CHANNELS>
+kernel void chain_input(constant input_words<CHANNELS>& words [[buffer(15)]], uint tid [[thread_index_in_threadgroup]]) {
+    for (uint q = 0; q < CHANNELS; q++) if (words.publish[q].p) {
+        const auto p = words.publish[q];
+        mesh_step_enter(*p.p, p.v, p.progress, tid == 0);
+        mesh_step_release(*p.p, p.a, tid, words.j);
+    }
+}
 
 template <uint TILE, uint K, uint S, uint G, uint RG, uint RB, uint THREADS, uint SIMD, uint RANKS, uint CHANNELS>
 [[max_total_threads_per_threadgroup(THREADS)]]
@@ -140,9 +152,14 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
             mesh_step_enter(*l.p, l.v, l.progress, w == 0 && tid == 0);
             mesh_step_counts(*l.p, l.a, l.v, words.previous_j);
         }
-        threadgroup_barrier(mem_flags::mem_device);
-        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));
     }
+    if (!words.last && tid == 0) for (uint q = 0; q < CHANNELS; q++) if (words.input[q].p) {
+        constant mesh_step_binding& l = words.input[q];
+        mesh_step_enter(*l.p, l.v, l.progress, w == 0);
+        mesh_step_counts(*l.p, l.a, l.v, words.j);
+    }
+    threadgroup_barrier(mem_flags::mem_device);
+    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));
     for (uint q = tid; q < R * xw; q += THREADS) {
         const uint i = (q / xw) * K + x0 + q % xw;
         const uint row = i / K, column = i % K;
@@ -155,7 +172,7 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
             z = tanh(float(half(sum)));
             if (present) out[logical] = half(z);
         }
-        X[i] = half((present ? float(mesh_step_read<half>((device const uchar*)E, logical)) : 0.0f) + z);
+        if (!words.last) X[i] = half((present ? float(mesh_step_read<half>((device const uchar*)E, logical)) : 0.0f) + z);
     }
     if (words.last) return;
     publish(stamps, w, tid, phase);
