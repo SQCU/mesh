@@ -127,11 +127,13 @@ struct MeshStream {
   }
 
   // On torch's queue, as a group's encoding ends, the rule: a publication encoded in torch's open buffer, committed
-  // with every publication waiting there while at most one buffer is in flight (double buffering), else left to join
-  // it.
-  void published() {
+  // with every publication waiting there while at most one buffer is in flight.
+  // A realized repeat batch must submit its last producer before the host can
+  // present the next descriptor train: admission may need those producers to
+  // advance the bridge. This submission never waits for GPU completion.
+  void published(bool batch_end = false) {
     if (!waiting()) open = [mps->commandBuffer().rootCommandBuffer retain];
-    if (committed - progress.signaledValue <= 1) signalled(false);
+    if (batch_end || committed - progress.signaledValue <= 1) signalled(false);
   }
 
   // On the host: the workspace `held` of the group issued as `ticket` kept until the library retires it (0: a group
@@ -1349,7 +1351,7 @@ static at::Tensor fused_step_impl(const at::Tensor &x, const std::optional<at::T
         id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
         declare_fused(encoder);
         encode_in(encoder, publication);
-        s->published();
+        s->published(repeats > 1 && j + 1 == repeats);
         encoder = stream->commandEncoder();
         declare_fused(encoder);
         if (ready) encode_in(encoder, *ready);
