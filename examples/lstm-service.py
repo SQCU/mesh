@@ -62,6 +62,9 @@ def main():
     t, k = torch.empty(1, dtype=torch.int64, device='mps').fill_(L - 1), config['steps_per_replay']
     recording = torch_mesh.record(tick.stepper(X, O, t), k)
     recording.issue(min(steps, k + steps % k))
+    group = mesh.get_group('tp')
+    initial_forms = [(tick.mine, None, 2, tick.sizes, group.group_name, False, 1)] * (L - 1)
+    Preparations(initial_forms)()
     for s in range(L - 1):
         tick.starting(s, X[s])
     tick.reset()
@@ -71,10 +74,8 @@ def main():
     torch_mesh.check_memory()
     torch.mps.synchronize()
     ticks = steps + L - 1
-    group = mesh.get_group('tp')
     groups, forms = recording.schedule(group, steps)
     initial = [partition.gathered(tick.mine, 2, tick.sizes, group)] * (L - 1)
-    initial_forms = [(tick.mine, None, 2, tick.sizes, group.group_name, False, 1)] * (L - 1)
     bind(configuration, [[Call(BROADCAST, X.numel(), X.dtype, root=0)], *initial, *groups],
                        Preparations([*initial_forms, *forms]))
     started = time.monotonic()

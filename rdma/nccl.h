@@ -1022,30 +1022,6 @@ ncclResult_t ncclMeshWritePlanDestroy(ncclMeshWritePlan_t plan);
    function execution should prepare once and use Execute or fused bindings. */
 ncclResult_t ncclMeshWrite(const void* source_buffer, void* landing_buffer, size_t count, ncclDataType_t datatype,
                           int source, int destination, ncclComm_t comm, cudaStream_t stream);
-/* Exact byte prefixes. ready includes completed relay SENDs, which prove their
-   own readiness even if this rank's GPU publication word has not advanced. */
-struct ncclMeshCableSample { uint64_t wire,ready,sent,landed; uint32_t cable,peer; };
-ncclResult_t ncclMeshCommSample(ncclComm_t comm, struct ncclMeshCableSample* samples, int room, int* count);
-/* design/whole-function.md#measurements: observed eligibility-to-completion windows,
-   with transition-time bounds. This observer does not publish, wait on or change transport words. */
-typedef struct ncclMeshTrace *ncclMeshTrace_t;
-struct ncclMeshWindow {
-  /* first/last count DMA units; bytes is their exact payload sum, not allocation
-     pages or rounded hardware credits. SpanLengths supplies their lengths. */
-  uint64_t start_lo_ns,start_hi_ns,end_lo_ns,end_hi_ns,bytes,wire,first,last,peak_queue_bytes,cable_peak_queue_bytes;
-  double queue_byte_seconds;
-  uint32_t cable,peer,direction,relay; /* direction: 0 send, 1 receive; relay: send reads landed prefix */
-};
-struct ncclMeshTraceStats { uint64_t polls,max_gap_ns; uint32_t incomplete; };
-uint64_t ncclMeshTraceClock(void);
-ncclResult_t ncclMeshTraceStart(ncclComm_t comm, int room, ncclMeshTrace_t *out);
-/* Freeze the observer once, then query/copy exact DMA-unit payload lengths in
-   window order. NULL out queries *count; each window consumes last-first values.
-   After copying lengths, TraceStop copies windows/stats and releases the trace.
-   This never changes transport state. New serialized windows must declare
-   unit_kind="byte_extent" and carry their unit_bytes vector. */
-ncclResult_t ncclMeshTraceSpanLengths(ncclMeshTrace_t trace, uint64_t *out, size_t room, size_t *count);
-ncclResult_t ncclMeshTraceStop(ncclMeshTrace_t trace, struct ncclMeshWindow *out, int room, int *count, struct ncclMeshTraceStats *stats);
 /* A call a program declares ahead (ncclMeshCommPlan): `what` (mesh-plan.h MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE,
    MESH_REDUCE_SCATTER, MESH_ALLGATHER, or ncclMeshCallAlltoAllV), its `peer` (a
    send's or a receive's, a reduce's or a broadcast's root), `count` as its call takes it (a reduce-scatter's

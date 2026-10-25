@@ -81,6 +81,8 @@ def compact(record):
             errors.append([item['tag'], item.get('error', 'incomplete')[:160]])
     errors.extend([e.get('stage', 'driver'), e.get('error', e.get('stderr', 'failed'))[-160:]]
                   for e in record['errors'])
+    errors.extend([name, node.get('error', 'installation failed')[-160:]]
+                  for name, node in record['nodes'].items() if node['status'] != 'installed')
     result = {'schema': 3, 'commits': record['commits'], 'unix': int(record['started_unix']),
               'nodes': [r['number'] for r in record['nodes'].values() if r['status'] == 'installed'],
               'us,GB/s': rows}
@@ -295,7 +297,9 @@ def run_workload(item, nodes, paths, record, out, ordinal):
         result['ranks'] = rank_results(outputs)
         result['observations'] = [row for rank in result['ranks'].values() for row in rank.pop('observations')]
         if len(result['ranks']) != len(selected) or any(v['exit'] != 0 for v in result['ranks'].values()):
-            raise RuntimeError('one or more rank processes failed or lack a completion record')
+            failures = [f'{name}: {value["last_lines"][-1] if value["last_lines"] else value["exit"]}'
+                        for name, value in result['ranks'].items() if value['exit']]
+            raise RuntimeError('; '.join(failures) or 'missing rank completion')
         result['status'] = 'completed'
     except Exception as error:
         result['error'] = str(error)

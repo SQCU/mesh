@@ -1,8 +1,7 @@
 """Shared collective measurements over the production mesh backend.
 
-Useful output bytes describe the operation. Physical wire payload comes only from
-native per-cable completed-byte counters; it includes relays, excludes framing and
-is never inferred from world size. All initialization and validation is untimed.
+Useful output bytes and whole-function completion time describe the work.
+Preparation occurs before submission; observations do not change execution.
 """
 import json
 from pathlib import Path
@@ -16,20 +15,6 @@ def emit(record, *, file=None):
     """One structured record format for examples and the hourly reader."""
     records = record if isinstance(record, list) else [record]
     print('\n'.join(json.dumps(row, separators=(',', ':'), sort_keys=True) for row in records), file=file, flush=True)
-
-
-def traffic_delta(before, after):
-    key = lambda row: (row['cable'], row['peer'], row['wire'])
-    old, new = {key(row): row for row in before}, {key(row): row for row in after}
-    if len(old) != len(before) or len(new) != len(after) or old.keys() != new.keys():
-        raise ValueError('native sample cable identity changed')
-    result = []
-    for identity, row in new.items():
-        delta = {name: row[name] - old[identity][name] for name in ('sent', 'landed')}
-        if min(delta.values()) < 0:
-            raise ValueError('native completion byte counter moved backwards')
-        result.append(dict(zip(('cable', 'peer', 'wire'), identity), **delta))
-    return result
 
 
 def completed(record, seconds):

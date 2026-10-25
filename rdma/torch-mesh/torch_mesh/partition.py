@@ -212,7 +212,9 @@ def allgatherv_out(x: torch.Tensor, out: torch.Tensor, dim: int, sizes: list[int
     if len(sizes) == 1:
         out.copy_(x)
     elif _region_backed(x, group):
-        torch.ops.torch_mesh.fused_step_out(x, None, out, dim, list(sizes), group_name, False, repeats)
+        from .declarations import eager_index
+        index = eager_index(x, None, dim, sizes, group_name, False, repeats, True)
+        torch.ops.torch_mesh.indexed_step_out(x, None, out, index)
     else:
         out.copy_(allgatherv(x, dim, sizes, group_name, repeats))
 
@@ -358,18 +360,20 @@ def _linear_kernel(*arguments):
 def _fused(x, dim, sizes, group, adds, w=None, repeats=1):
     """allgatherv on the mesh backend (above), or where `adds` the all-reduce's sum (backend.all_reduce, every rank's
     block all of x: sizes x's extent along dim, n times): x of 2 or 4 bytes an element, its source strides compiled
-    into the publisher; the output a lease of
-    the held pool (above), its own while its tensor lives.  Where `w` (a weight [N, K] of fp16 rows
+    into the publisher; the output pages assigned to this occurrence before the
+    complete function runs. Where `w` (a weight [N, K] of fp16 rows
     any whole stride apart) is given, the sum's operand is x's product with it, x [R, K] (backend.linear_sum):
     linear.metal's linear_publish computes it into this rank's segment and publishes it there through the collective's
     steps, in place of gather_publish.  The call is repeat j of the `repeats` one issue presents, j its calls of this
-    form since the last issue (torch_mesh.compiler).  Native: torch_mesh::fused_step (_stream.mm), its form made here at
-    its first call (_fused_form)."""
+    form since the last issue (torch_mesh.compiler). Native execution uses the
+    indexed crossing prepared from this form before submission."""
     if adds and x.dtype not in (torch.float16, torch.float32):
         raise TypeError('fused sum arithmetic requires float16 or float32; use the general reduction API for other dtypes')
     if len(sizes) == 1:
         return x.clone() if w is None else torch.ops.torch_mesh.linear(x, w)
-    return torch.ops.torch_mesh.fused_step(x, w, dim, list(sizes), group.group_name, adds, repeats)
+    from .declarations import eager_index
+    index = eager_index(x, w, dim, sizes, group.group_name, adds, repeats, False)
+    return torch.ops.torch_mesh.indexed_step(x, w, index)
 
 
 def prepare_gather(x, dim, sizes, group, *, adds=False, w=None, repeats=1, batches=1):
@@ -381,10 +385,8 @@ def prepare_gather(x, dim, sizes, group, *, adds=False, w=None, repeats=1, batch
     """
     if len(sizes) <= 1 or not getattr(group, 'handle', 0):
         return
-    from . import _stream
-    metadata = lambda t: None if t is None else torch.empty_strided(tuple(t.shape), tuple(t.stride()),
-                                                                   dtype=t.dtype, device='meta')
-    _stream.fused_prepare(metadata(x), metadata(w), dim, list(sizes), group.group_name, adds, repeats, batches)
+    from .declarations import Preparations
+    Preparations([(x, w, dim, tuple(sizes), group.group_name, adds, repeats)] * batches)()
 
 
 def _gather_paths(fabric):
@@ -452,6 +454,17 @@ def _fused_form(x, w, dim, sizes, group_name, adds, channels):
 from . import _stream as _native  # noqa: E402  (torch_mesh::fused_step's library)
 
 _native.fused_maker(_fused_form)
+
+
+@torch.library.register_fake('torch_mesh::indexed_step')
+def _(x, w, index):
+    from .declarations import _INDEXED_SHAPES
+    return x.new_empty(_INDEXED_SHAPES[index])
+
+
+@torch.library.register_fake('torch_mesh::indexed_step_out')
+def _(x, w, out, index):
+    return None
 
 
 @torch.library.register_fake('torch_mesh::fused_step')

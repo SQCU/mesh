@@ -178,22 +178,3 @@ class Fabric:
         return {'capacities': [c['bits_per_second'] / 8 for c in self.cables for _ in range(2)],
                 'paths': {f'route:{a}:{b}': {'bytes': demands[a, b],
                           'arcs': [self.arcs(a, path) for path in self.paths[a, b]]} for a, b in sorted(demands)}}
-
-
-class QueueSample:
-    """design/whole-function.md#measurements"""
-
-    def __init__(self, comm, rank):
-        import mesh
-        self.comm, self.rank = comm, int(rank)
-        self.ffi, self.lib, self.check = mesh.ffi, mesh.lib, mesh.check
-        count = self.ffi.new('int *')
-        self.check(self.lib.ncclMeshCommSample(comm, self.ffi.NULL, 0, count))
-        self.count = count[0]
-        self.rows = self.ffi.new('struct ncclMeshCableSample[]', max(self.count, 1))
-        self.n = count
-
-    def read(self):
-        self.check(self.lib.ncclMeshCommSample(self.comm, self.rows, self.count, self.n))
-        return [{'cable': int(s.cable), 'peer': int(s.peer), 'wire': int(s.wire),
-                 'ready': int(s.ready), 'sent': int(s.sent), 'landed': int(s.landed)} for s in self.rows[0:self.count]]

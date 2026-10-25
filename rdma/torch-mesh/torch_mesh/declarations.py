@@ -13,12 +13,70 @@ import torch.distributed as dist
 _CAPTURE = ContextVar('mesh_compiled_declarations', default=None)
 
 
+_INDEXED_SHAPES = {}
+_EAGER_CROSSINGS = {}
+
+
+def tensor_metadata(x):
+    return None if x is None else (tuple(x.shape), tuple(x.stride()), x.dtype)
+
+
+def crossing_key(form):
+    x, w, dim, sizes, name, adds, repeats = form[:7]
+    return tensor_metadata(x), tensor_metadata(w), dim, tuple(sizes), name, adds, repeats
+
+
+def crossing_slot(form, destination):
+    from . import _stream
+    index = _stream.crossing_slot()
+    x, w, dim, sizes, _, adds, _ = form[:7]
+    operand = tuple(x.shape) if w is None else (x.shape[0], w.shape[0])
+    dim %= len(operand)
+    _INDEXED_SHAPES[index] = operand if adds else operand[:dim] + (sum(sizes),) + operand[dim + 1:]
+    return index, destination
+
+
 def compiled_graph(graph):
-    """Called by the library compiler after its communication rewrites."""
+    """Lower configuration, then replace each crossing by its prepared slot."""
+    forms = []
+    declarations = lower(graph, forms=forms)
+    slots = {}
+    fx = graph.graph if hasattr(graph, 'graph') else graph
+    for node in fx.nodes:
+        target, args = operation(node)
+        if target not in (torch.ops.torch_mesh.fused_step.default, torch.ops.torch_mesh.fused_step_out.default):
+            continue
+        into = target is torch.ops.torch_mesh.fused_step_out.default
+        form = (args['x'], args['w'], args['dim'], tuple(args['sizes']), args['group_name'], args['adds'], args['repeats'])
+        index, destination = crossing_slot(form, into)
+        slots.setdefault(crossing_key(form), []).append((index, destination))
+        replacement = torch.ops.torch_mesh.indexed_step_out.default if into else torch.ops.torch_mesh.indexed_step.default
+        if node.target is target:
+            values = {a.name: node.args[i] if i < len(node.args) else node.kwargs.get(a.name, a.default_value)
+                      for i, a in enumerate(target._schema.arguments)}
+            node.target = replacement
+            node.args = (values['x'], values['w'], *((values['out'],) if into else ()), index)
+            node.kwargs = {}
+        else:
+            node.args = (replacement, *node.args[1:])
+            node.kwargs = {key: value for key, value in node.kwargs.items()
+                           if key not in ('dim', 'sizes', 'group_name', 'adds', 'repeats')}
+            node.kwargs['index'] = index
+        node.meta.pop('eager_input_vals', None)
+    forms = [(*form, tuple(slots.get(crossing_key(form), ()))) for form in forms]
     capture = _CAPTURE.get()
     if capture is not None:
-        forms = []
-        capture.append((lower(graph, forms=forms), forms))
+        capture.append((declarations, forms))
+    return forms
+
+
+def eager_index(x, w, dim, sizes, name, adds, repeats, destination):
+    form = (x, w, dim, tuple(sizes), name, adds, repeats)
+    key = (*crossing_key(form), destination)
+    slots, cursor = _EAGER_CROSSINGS[key]
+    index = slots[cursor]
+    _EAGER_CROSSINGS[key][1] = (cursor + 1) % len(slots)
+    return index
 
 
 def _value(argument):
@@ -195,23 +253,49 @@ def trace(function, *arguments, parameters=()):
 
 
 class Preparations:
-    """Immutable shape bindings, called only at a whole-function boundary."""
+    """Page bindings and dispatch operands realized before a complete function."""
     def __init__(self, forms):
         from collections import Counter
-        metadata = lambda x: None if x is None else (tuple(x.shape), tuple(x.stride()), x.dtype)
-        batches = Counter((metadata(x), metadata(w), dim, tuple(sizes), name, adds, repeats)
-                          for x, w, dim, sizes, name, adds, repeats in forms)
-        self.forms = []
+        batches = Counter(crossing_key(form) for form in forms)
         prototype = lambda m: None if m is None else torch.empty_strided(m[0], m[1], dtype=m[2], device='meta')
-        for (x, w, dim, sizes, name, adds, repeats), count in batches.items():
+        self.forms, self.bindings, self.eager = [], {}, {}
+        for key, count in batches.items():
+            x, w, dim, sizes, name, adds, repeats = key
             group = dist.distributed_c10d._resolve_process_group(name)
             if len(sizes) > 1 and getattr(group, 'handle', 0):
-                self.forms.append((prototype(x), prototype(w), dim, list(sizes), name, adds, repeats, count))
+                form = (prototype(x), prototype(w), dim, list(sizes), name, adds, repeats)
+                self.forms.append((*form, count))
+        # Eager declarations retain one output per occurrence in the complete
+        # function. Compiled declarations already carry distinct graph slots.
+        for key, count in Counter(crossing_key(form) for form in forms if len(form) == 7).items():
+            x, w, dim, sizes, name, adds, repeats = key
+            group = dist.distributed_c10d._resolve_process_group(name)
+            if len(sizes) <= 1 or not getattr(group, 'handle', 0):
+                continue
+            form = (prototype(x), prototype(w), dim, list(sizes), name, adds, repeats)
+            for destination in (False, True):
+                eager_key = (*key, destination)
+                slots = list(_EAGER_CROSSINGS.get(eager_key, ([], 0))[0][:count])
+                slots.extend(crossing_slot(form, destination)[0] for _ in range(count - len(slots)))
+                self.eager[eager_key] = slots
+                for index in slots:
+                    self.bindings[index] = (*form, destination)
+        for source in forms:
+            key = crossing_key(source)
+            x, w, dim, sizes, name, adds, repeats = key
+            for index, destination in source[7] if len(source) > 7 else ():
+                self.bindings[index] = (prototype(x), prototype(w), dim, list(sizes), name, adds, repeats, destination)
 
     def __call__(self, repetitions=1):
         from . import _stream
-        for form in self.forms:
-            _stream.fused_prepare(*form[:-1], form[-1] * repetitions)
+        from torch._subclasses.fake_tensor import unset_fake_temporarily
+        with unset_fake_temporarily():
+            for form in self.forms:
+                _stream.fused_prepare(*form[:-1], form[-1] * repetitions)
+            for index, operands in self.bindings.items():
+                _stream.prepare_crossing(index, *operands)
+            for key, slots in self.eager.items():
+                _EAGER_CROSSINGS[key] = [slots, 0]
 
 
 class Function:

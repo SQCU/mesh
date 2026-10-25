@@ -67,14 +67,6 @@ The [client coverage manifest](collective-client-coverage.md) records the NumPy,
 Program, C/Objective-C, Swift, LiteRT and example boundaries, their allocation
 and membership constraints, and which adapter tests have actually run.
 
-`ncclMeshCommSample` exposes byte prefixes supplied, sent, and landed on each
-local cable. Supplied minus sent is the ordinary published backlog. A relay may
-already be eligible through another cable's landed prefix, before its ordinary
-supplied prefix advances, so this sample can undercount relay backlog. It is not
-a measurement of compute interference. Sampling a complete execution can measure peak queued
-bytes and their time integral; endpoint counters alone cannot recover a queue
-that grew and drained during the execution.
-
 The feedback unit is a completed program evaluation, including all layers and
 recurrent timesteps. Compute partitions, route weights, and write ordering
 belong to one configuration. Finite differences must compare full evaluations
@@ -381,61 +373,21 @@ disk staging and per-call file updates cannot stand in for page-to-page DMA.
 
 ## Measurements
 
-`ncclMeshTraceStart/Stop` observes existing entry lists, eligibility words, and
-sent/landed prefixes in a native thread. Relay eligibility comes from each entry's
-actual custom word (normally the incoming landed prefix). For every outgoing
-entry it records first eligibility through completed sending, bytes, queue area,
-and lower/upper timestamps bracketing the observed transitions. Incoming entries
-separately record first arrival and completed landing. The observer
-neither changes those words nor adds a transport wait. Stop joins the observer
-after the complete function's downstream consumers finish. Per-cable byte-prefix
-deltas independently check the traffic totals. Poll gaps and incomplete traces
-remain explicit; sampled queue integrals are estimates.
+A completed function supplies its elapsed time and useful output bytes together. The hourly record stores
+microseconds and useful GB/s; row workloads also store rows/s. The committed workload configuration fixes the
+shape order and useful byte count. Three significant figures fit the coarse host observation.
+
+There is no per-transfer byte ledger, trace observer, timing event, or timing-only GPU gate. The old
+`ncclMeshTrace*`, `ncclMeshCommSample`, and LSTM split-timing interfaces were removed. Their bookkeeping ran on
+transfers even when no trace was requested. Historical trace analysis does not belong in the execution path.
+
+The record contains commit IDs, installed node IDs, and these completion measurements. Optimizer observations
+stay in the application's memory. They are not restored from the hourly ledger. A fresh process starts from the
+compiler's prior; repeated calls in one application can supply their completed observations to the solver.
 
 ## Roofline
 
-Let `W` be the union of each compiled range's first-eligible to last-landed
-interval. It includes stalls within an unfinished transaction and excludes
-compute-only gaps outside every such interval. Let
-`C = sum_e C_e` include **all directed physical cables**, even those idle during
-part of `W`. The ideal capacity during those windows is `C*|W|` bytes. With `V`
-actual payload bytes carried by all hops (including any explicit application padding), report
-attained wire bandwidth `V/|W|`, utilization `V/(C*|W|)`, unused capacity
-`C*|W| - V`, and the all-links ideal duration `V/C`. Also report the tighter bound
-`max_e V_e/C_e` for the measured routing. Useful delivered bytes `U` are reported
-separately, giving `U/|W|` and hop/padding amplification `V/U`. Extra relay traffic
-must not masquerade as extra useful throughput.
-
-`roofline.py` matches outgoing and incoming entries by physical cable, direction,
-and cumulative DMA-unit coverage, validating each unit's exact byte length.
-SEND and receive entry boundaries can differ; matching uses interval coverage,
-not entry ordinals or peer counts. Each transaction window starts with source
-eligibility and ends at the destination's completed landing, rather than
-substituting local send completion. It merges overlapping windows rather than
-adding their durations and reports ingress and egress for each node separately.
-Across nodes, causal TCP request/reply clock observations bound root-minus-local
-offsets immediately before each complete evaluation. It expands and contracts
-windows by those bounds and the polling brackets, retaining the resulting
-latency and bandwidth bounds. Offset constancy is assumed only over that
-evaluation. These transaction windows include clock uncertainty even in their
-per-node summaries because their endpoints are on different nodes. A lower
-duration bound of zero has no finite bandwidth upper bound; uncertainty is not
-silently replaced by a point estimate.
-
-Clock probes now reuse the existing TCPStore connection. Recorded span causality
-also tightens their offset intervals: source eligibility precedes first arrival.
-An all-pairs shortest-path closure propagates these difference constraints.
-No symmetric-delay assumption or assumed attained bandwidth enters the bounds.
-Inconsistent constraints fail the measurement. Reports retain both raw probes
-and refined intervals; historical comparisons apply the same refinement to old
-raw traces, so narrower clock uncertainty is not credited as a transport speedup.
-
-Report best attained whole-function latency and best attained transaction-window
-bandwidth with their evaluation IDs and corresponding other measurements. They
-may belong to different evaluations. The morning microprofile's advertised
-80 Gbit/s per direction on seven cables gave `C = 140 GB/s`; the six paired
-cables observed at 12:57:27 PDT gave `C = 120 GB/s`. Use the actual discovered
-fabric of each execution. These are advertised physical ceilings, not
-demonstrated sustainable payload rates. Positive traffic in every discovered
-direction establishes coverage; utilization measures the gap to that specific
-fabric's capacity. Historical measurements retain their original denominator.
+Use the actual connected fabric's capacities and the function's required work to bound completion time. Relay
+bytes are work needed to deliver the result, not extra useful output. Compare measured whole-function latency
+and useful throughput together against that bound. Extra accounting or clock-probe traffic must not alter the
+function being measured. A compiled schedule alone does not establish that it reaches the bound.

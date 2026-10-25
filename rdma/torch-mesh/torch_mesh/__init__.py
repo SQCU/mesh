@@ -51,7 +51,7 @@ def compiler(gm, example_inputs):
     from torch._inductor import config
     from torch._inductor.compile_fx import compile_fx, compile_fx_inner
     from torch._functorch import config as autograd_config
-    from .declarations import operation, compiled_graph
+    from .declarations import operation, compiled_graph, Preparations, _CAPTURE
 
     from . import _stream, backend, partition  # noqa: F401  (torch_mesh::all_reduce, torch_mesh::allgatherv)
     from .streamed import node
@@ -230,9 +230,12 @@ def compiler(gm, example_inputs):
         # cache hit. Rewrite and capture before Inductor's FX cache lookup; the
         # cache then keys the actual rewritten operators and repeat operands.
         rewrite(graph.graph)
+        forms = compiled_graph(graph)
         graph.recompile()
-        compiled_graph(graph)
-        return compile_fx_inner(graph, inputs, **options)
+        made = compile_fx_inner(graph, inputs, **options)
+        if _CAPTURE.get() is None:
+            Preparations(forms)()
+        return made
 
     # AOTAutograd's cache stores executable code without this communicator's
     # declarations. Always realize that configuration; Inductor still caches
@@ -369,6 +372,8 @@ class Recording:
             store, key = dist.distributed_c10d._get_default_store(), f'mesh/recording/{self.name}/{self.graphs}'
             store.set(f'{key}/{dist.get_rank()}', b'1')
             store.wait([f'{key}/{r}' for r in range(dist.get_world_size())])
+        from .declarations import Preparations
+        Preparations(forms)()
         self.graphs += 1
         return made
 

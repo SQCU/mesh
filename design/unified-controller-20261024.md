@@ -18,7 +18,7 @@ The affine envelope is an estimate of whole-call cost by work share. It is not a
 
 The historical equal-finish solver rounds the fitted allocation. Whole-call finite differences move all compute
 and route coordinates together. A diminishing perturbation supplies new observations. No result is accepted or
-rejected as a candidate. There is no saved controller or hidden solver lifecycle to restore. The saved data is what
+rejected as a candidate. There is no saved controller or hidden solver lifecycle to restore. In-memory observations name what
 ran, its actual operands, and its measured completion interval.
 
 This is an empirical local solver. A small residual, a compiled plan, or a capacity prior does not establish a global
