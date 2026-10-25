@@ -130,16 +130,35 @@ def compiler(gm, example_inputs):
             i += len(group)
 
     def native(node):
-        """A sum's crossing (linear_sum) on a mesh group of two ranks or more called natively, its crossing's form and
-        encodes _stream.mm's (torch_mesh::fused_step), no Python op between the graph and them."""
+        """Lower both a product's sum and a plain sum to the same crossing."""
         import torch.distributed as dist
         group = dist.distributed_c10d._resolve_process_group(node.args[2])
-        if isinstance(group, backend.ProcessGroupMesh) and group.size() > 1:
-            x, w = node.args[:2]
-            repeats = node.args[3] if len(node.args) > 3 else 1
-            node.target = torch.ops.torch_mesh.fused_step.default
-            node.args = (x, w, 0, [x.meta['val'].shape[0]] * group.size(), node.args[2], True, repeats)
-            node.meta.pop('eager_input_vals', None)
+        if not (isinstance(group, backend.ProcessGroupMesh) and group.size() > 1):
+            return
+        x, w = node.args[:2]
+        plain = node.target is torch.ops.torch_mesh.all_reduce.default
+        if plain:
+            if w != 'sum' or x.meta['val'].device.type != 'mps' or x.meta['val'].dtype not in (torch.float16, torch.float32):
+                return
+            w = None
+        scalar = x.meta['val'].ndim == 0
+        output = node.meta['val']
+        if scalar:
+            with node.graph.inserting_before(node):
+                source = node.graph.call_function(aten.view.default, (x, [1]))
+                source.meta['val'] = x.meta['val'].view(1)
+            x = source
+            node.meta['val'] = output.view(1)
+        repeats = node.args[3] if len(node.args) > 3 else 1
+        node.target = torch.ops.torch_mesh.fused_step.default
+        node.args = (x, w, 0, [x.meta['val'].shape[0]] * group.size(), node.args[2], True, repeats)
+        node.meta.pop('eager_input_vals', None)
+        if scalar:
+            with node.graph.inserting_after(node):
+                restored = node.graph.call_function(aten.view.default, (node, []))
+                restored.meta['val'] = output
+            node.replace_all_uses_with(restored)
+            restored.args = (node, [])
 
     def rewrite(graph):
         for node in list(graph.nodes):
@@ -199,7 +218,8 @@ def compiler(gm, example_inputs):
             if len(entries) > 1 and len(forms) == 1 and entries[0][1] in CROSSINGS:
                 for item, _, _ in entries:
                     told(item, len(entries))
-        for item in [n for n in graph.nodes if n.target is torch.ops.torch_mesh.linear_sum.default]:
+        for item in [n for n in graph.nodes if n.target in (torch.ops.torch_mesh.linear_sum.default,
+                                                           torch.ops.torch_mesh.all_reduce.default)]:
             native(item)
         for item in graph.nodes:
             target, values = operation(item)

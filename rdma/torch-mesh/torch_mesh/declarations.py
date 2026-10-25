@@ -63,7 +63,7 @@ def compiled_graph(graph):
                            if key not in ('dim', 'sizes', 'group_name', 'adds', 'repeats')}
             node.kwargs['index'] = index
         node.meta.pop('eager_input_vals', None)
-    forms = [(*form, tuple(slots.get(crossing_key(form), ()))) for form in forms]
+    forms = [(*form, tuple(slots[crossing_key(form)])) if crossing_key(form) in slots else form for form in forms]
     capture = _CAPTURE.get()
     if capture is not None:
         capture.append((declarations, forms))
