@@ -173,9 +173,9 @@ same writes. A function whose answers depend on those values can still keep its 
 fixed. The running call needs only that plan and its inputs. Each step reads its named inputs and writes its
 named results when they are ready. It asks no peer to choose a place or grant permission between steps.
 
-This leaves fewer ways to go wrong. A mask stays within its page. A write has its place before it starts. A
-step waits only for the results it needs. We avoid choices and timing cases that would otherwise need checks
-while the work runs. More time and link capacity are left for the work itself.
+This leaves fewer ways to go wrong. A mask stays within its page. A write has its place before it starts. We
+avoid choices and timing cases that would otherwise need checks while the work runs. More time and link
+capacity are left for the work itself.
 
 A compiled plan can still give us a poor split. Results from whole calls let us adjust shares and routes for
 later calls. Compare both whole-call time and useful bytes per second. Each change becomes a new plan before
