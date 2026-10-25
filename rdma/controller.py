@@ -182,18 +182,20 @@ class WholeFunctionController:
                              'workload': self.workload, 'seconds': seconds})
 
     def completed_rollouts(self, records):
-        """Fit delayed whole-call evidence at its executed coordinates.
+        """Accumulate asynchronous evidence for the common finite-difference solver.
 
-        Probabilities describe sampling from a declared finite set of compiled
-        configurations. Importance is target/behavior probability, never a
-        function of age or whether an observation was faster. This weighted
-        local response model is not an unbiased off-policy gradient guarantee.
+        A proposal can execute many times while its statistics arrive in batches.
+        Average those completed invocations with their sampling importance. Late
+        observations refine any pending stencil point at its original operands;
+        they never masquerade as observations of the currently proposed point.
+        The ordinary +--+ stencil advances configuration, without blocking an
+        executing function or selecting/rejecting measured candidates.
         """
-        from whole import SHARE_TICKS, performance, simplex
-        from routing import weight_ticks
-        import numpy as np
+        from whole import SHARE_TICKS, performance
+        import math
         from fractions import Fraction
         retained = copy.deepcopy(getattr(self, '_rollouts', []))
+        points = copy.deepcopy(getattr(self, '_rollout_points', {}))
         identities = {row['episode'] for row in retained}
         for record in records:
             if record['episode'] in identities:
@@ -222,52 +224,48 @@ class WholeFunctionController:
             retained.append({**copy.deepcopy(record), 'cost': metrics['cost'],
                              'importance': float(Fraction(target, behavior))})
             identities.add(record['episode'])
+            key = str(proposal['id'])
+            point = points.setdefault(key, {'record': copy.deepcopy(record), 'weight': 0.0, 'seconds': 0.0})
+            if point['record']['proposal'] != proposal:
+                raise ValueError('a proposal identity must retain its realized operands')
+            weight = float(Fraction(target, behavior))
+            total = math.fsum((point['weight'], weight))
+            if total:
+                point['seconds'] += weight / total * (record['seconds'] - point['seconds'])
+            point['weight'] = total
         if not records:
             return self.proposal()
         self._rollouts = retained[-self.history_limit:]
-        # A serialized mapping's insertion order is not a numerical axis.
-        # Rebuild every row from the executed, named operands, including old
-        # observations whose cached positional ticks preceded a JSON restart.
-        names = sorted(self.flow.decisions)
-        for row in self._rollouts:
-            row.pop('ticks', None)
-        weights = np.asarray([row['importance'] for row in self._rollouts])
-        before = self.flow.centre
-        gradient = np.zeros(self.flow.dimension)
-        if weights.sum():
-            weights /= weights.sum()
-            x = np.asarray([[tick for name in names for tick in weight_ticks(row['proposal']['parts'][name])]
-                            for row in self._rollouts], dtype=float) / SHARE_TICKS
-            y = np.asarray([row['cost'] for row in self._rollouts])
-            dx, dy = x - weights @ x, y - weights @ y
-            # Positive ridge makes an unexcited/rank-deficient design invertible.
-            # Exactly flat observations have exactly zero gradient, including
-            # different sampling probabilities and arrivals in batches.
-            if np.ptp(y[weights > 0]):
-                gradient = np.linalg.solve(dx.T @ (weights[:, None] * dx) + np.eye(x.shape[1]) / 1024,
-                                           dx.T @ (weights * dy))
-        rate, at = self.flow.learning_rate / (self.flow.round + 1) ** .3, 0
-        gradients = {}
-        for name in names:
-            ticks = self.flow.vector[name]
-            spec = self.flow.decisions[name]
-            g = gradient[at:at + len(ticks)]; at += len(ticks)
-            g = g - g.mean()
-            gradients[name] = g.tolist()
-            scale = 1 + max(abs(g))
-            values = simplex([(tick / SHARE_TICKS - rate * float(v) / scale) * spec['total']
-                              for tick, v in zip(ticks, g)], spec['total'], spec['low'], spec['high'])
-            self.flow.vector[name] = weight_ticks(values)
-        self.flow.history.append({'round': self.flow.round, 'before': before, 'after': self.flow.centre,
-                                  'episodes': [row['episode'] for row in records],
-                                  'gradient': gradients, 'learning_rate': rate,
-                                  'estimator': 'importance-weighted-local-response'})
-        self.flow.history[:] = self.flow.history[-self.history_limit:]
-        self.flow.serial += 1
-        self.flow.round += 1
-        self.flow.samples = []
-        self._proposal = self.flow.ask()
-        return self.proposal()
+        # Retain summaries by configuration, not by arrival batch. A long run
+        # of one proposal must not evict another pending stencil point's mean.
+        self._rollout_points = {key: points[key] for key in
+                                sorted(points, key=int)[-self.history_limit:]}
+
+        def averaged(proposal_id):
+            point = self._rollout_points.get(str(proposal_id))
+            return (point['record'], point['seconds']) if point and point['weight'] else None
+
+        # A late peer batch can improve earlier points of the stencil before its
+        # fourth point arrives. Their coordinates and signs remain unchanged.
+        for sample in self.flow.samples:
+            evidence = averaged(sample['id'])
+            if evidence is not None:
+                row, seconds = evidence
+                metrics = performance({**row.get('metrics', {}), 'seconds': seconds}, self.flow.transaction_weight)
+                sample.update(seconds=seconds, cost=metrics['cost'], performance=metrics)
+        evidence = averaged(self._proposal['id'])
+        if evidence is None:
+            return self.proposal()
+        row, seconds = evidence
+        if row['proposal']['parts'] != self._proposal['parts']:
+            raise ValueError('a proposal identity must retain its realized operands')
+        # Use the same solver as synchronous completed-function observations.
+        # In particular, do not clear its stencil or move its centre after a
+        # single positive probe: that was the global-regression path's defect.
+        return self.observe({**row.get('metrics', {}),
+            'id': self._proposal['id'], 'parts': self._proposal['parts'],
+            'scope': 'function', 'complete': True, 'workload': self.workload,
+            'seconds': seconds})
 
     def failed(self, reason, proposal=None):
         """Record a structural/runtime failure. No rollback and no invented cost."""
@@ -314,7 +312,8 @@ class WholeFunctionController:
                 'topology': copy.deepcopy(self.topology), 'schedule': copy.deepcopy(self.schedule),
                 'history_limit': self.history_limit, 'flow': self.flow.state(),
                 'proposal': self.proposal(), 'failures': copy.deepcopy(self.failures),
-                'rollouts': copy.deepcopy(getattr(self, '_rollouts', []))}
+                'rollouts': copy.deepcopy(getattr(self, '_rollouts', [])),
+                'rollout_points': copy.deepcopy(getattr(self, '_rollout_points', {}))}
 
     @classmethod
     def of(cls, state):
@@ -327,4 +326,5 @@ class WholeFunctionController:
         obj.flow = FunctionFlow.of(state['flow'])
         obj._proposal, obj.failures = copy.deepcopy(state['proposal']), copy.deepcopy(state.get('failures', []))
         obj._rollouts = copy.deepcopy(state.get('rollouts', []))
+        obj._rollout_points = copy.deepcopy(state.get('rollout_points', {}))
         return obj
