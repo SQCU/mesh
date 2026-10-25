@@ -173,7 +173,7 @@ def rank_results(out, tag):
 
 def aggregate_measurements(ranks):
     """Whole-workload intervals and useful delivery rates from actual rank records."""
-    if not ranks or any(rank['exit'] != 0 for rank in ranks.values()):
+    if not ranks:
         return []
     rows = {}
     for rank in ranks.values():
@@ -242,11 +242,13 @@ def run_workload(item, nodes, paths, record, out, ordinal):
         result['ranks'] = rank_results(out, tag)
         if len(result['ranks']) != len(selected) or any(v['exit'] != 0 for v in result['ranks'].values()):
             raise RuntimeError('one or more rank processes failed or lack a completion record')
-        result['metrics'] = aggregate_measurements(result['ranks'])
         result['status'] = 'completed'
     except Exception as error:
         result['error'] = str(error)
         result['ranks'] = rank_results(out, tag)
+    # A later fault does not erase earlier completed observations. Only rows
+    # present for every participating rank can form an aggregate interval.
+    result['metrics'] = aggregate_measurements(result.get('ranks', {}))
     return result
 
 
