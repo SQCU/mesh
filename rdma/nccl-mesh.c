@@ -1838,6 +1838,8 @@ static unsigned char *address_of(struct where w) {
 struct ncclMeshWritePlan {
   _Atomic uint32_t refs;
   struct mesh_span_plan packets;
+  struct mesh_dma_span *spans;
+  size_t *span_first; /* local physical step -> immutable repeated descriptor train */
   struct where source, landing;
   ncclMeshBuffer source_buffer, landing_buffer;
   ncclComm_t comm;
@@ -1861,7 +1863,8 @@ static uint64_t write_displacement(const struct ncclMeshWritePlan *p, uint64_t l
 }
 static void write_plan_drop(struct ncclMeshWritePlan *p) {
   if (p && atomic_fetch_sub_explicit(&p->refs, 1, memory_order_acq_rel) == 1) {
-    mesh_span_plan_free(&p->packets); free(p->view); free(p->view_first); free(p);
+    if (p->spans) ncclMemFree(p->spans);
+    mesh_span_plan_free(&p->packets); free(p->span_first); free(p->view); free(p->view_first); free(p);
   }
 }
 /* First cut strictly after a logical byte offset. */
@@ -2699,6 +2702,13 @@ static ncclResult_t place_group(struct metal_program *program, struct ncclComm *
         if (!valid) return fail(ncclInvalidUsage, "%s on %s: %zu bytes at byte %zu are outside a live local lease",
                                 call_name(x->c), comm->name, x->bytes, x->offset);
         if (!x->pages.n) continue;
+        if (write) {
+          const uint64_t logical = step->first * step->piece.element_bytes;
+          const size_t repeat = write->stride ? (x->offset - logical) / write->stride : 0;
+          x->spans = write->spans + write->span_first[x->step] + repeat * x->pages.n;
+          x->table = (uint64_t)((const unsigned char *)x->spans - region);
+          continue;
+        }
         if (x->pages.n > SIZE_MAX / sizeof *x->spans ||
             !(x->spans = spare_take(comm, x->pages.n * sizeof *x->spans, holder, SPARE_DESCRIPTORS)))
           return fail(ncclSystemError, "allocating exact DMA span descriptors");
@@ -4746,6 +4756,59 @@ static int write_view_packets(const struct write_binding_report *reports, const 
   return 0;
 }
 
+/* Physical bindings, paths and common cuts are all configuration operands.
+   Materialize their local descriptor trains once, including every repetition.
+   Execution borrows these immutable tables; the usual retirement ledger keeps
+   them alive until the bridge has finished reading them after plan destruction. */
+static ncclResult_t write_prepare_spans(struct ncclMeshWritePlan *plan) {
+  const ncclComm_t comm = plan->comm;
+  const struct mesh_paths *paths = comm->writes + plan->from * comm->nranks + plan->to;
+  const struct mesh_operand operand = {(uint32_t)plan->type + 1, (uint32_t)SIZE[plan->type], plan->count};
+  const int count = mesh_write_compile(&comm->fabric, (uint32_t)comm->rank, (uint32_t)plan->from,
+    (uint32_t)plan->to, paths, operand, comm->page, NULL, 0);
+  if (count < 0) return fail(ncclInvalidUsage, "preparing physical write spans: %s", strerror(-count));
+  struct mesh_transfer *transfers = calloc((size_t)count + 1, sizeof *transfers);
+  plan->span_first = calloc((size_t)count + 1, sizeof *plan->span_first);
+  if (!transfers || !plan->span_first) { free(transfers); return fail(ncclSystemError, "allocating write span geometry"); }
+  const int made = mesh_write_compile(&comm->fabric, (uint32_t)comm->rank, (uint32_t)plan->from,
+    (uint32_t)plan->to, paths, operand, comm->page, transfers, (uint32_t)count);
+  ncclResult_t result = made == count ? ncclSuccess : fail(ncclInternalError, "preparing physical write fragments");
+  for (int k = 0; !result && k < count; k++) {
+    const struct mesh_step *s = &transfers[k].step;
+    const uint64_t units = span_units(&plan->packets, s->first * s->piece.element_bytes, piece_bytes(s));
+    if (units > (SIZE_MAX / sizeof *plan->spans - plan->span_first[k]) / plan->repeats)
+      result = fail(ncclInvalidUsage, "prepared write descriptors overflow address space");
+    else plan->span_first[k + 1] = plan->span_first[k] + (size_t)units * plan->repeats;
+  }
+  if (!result && plan->span_first[count])
+    result = ncclMemAlloc((void **)&plan->spans, plan->span_first[count] * sizeof *plan->spans);
+  const struct hdr *m = comm->attach->context.M;
+  const struct where binding = comm->rank == plan->from ? plan->source : plan->landing;
+  const uint64_t origin = count ? (uint64_t)(address_of(binding) - (const unsigned char *)m) : 0;
+  for (int k = 0; !result && k < count; k++) {
+    const struct mesh_step *s = &transfers[k].step;
+    const uint64_t logical = s->first * s->piece.element_bytes, bytes = piece_bytes(s);
+    const size_t units = (plan->span_first[k + 1] - plan->span_first[k]) / plan->repeats;
+    for (uint32_t repeat = 0; !result && repeat < plan->repeats; repeat++) {
+      uint64_t at = 0;
+      size_t cut = span_after(&plan->packets, logical);
+      for (size_t unit = 0; unit < units; unit++) {
+        uint64_t next = plan->packets.cuts[cut++] - logical;
+        if (next > bytes) next = bytes;
+        struct mesh_dma_span span = {origin + write_displacement(plan, logical + at + repeat * plan->stride), next - at};
+        if (!mesh_dma_span_valid(m, span)) {
+          result = fail(ncclInvalidUsage, "prepared write span crosses a registration extent"); break;
+        }
+        plan->spans[plan->span_first[k] + repeat * units + unit] = span;
+        at = next;
+      }
+      if (!result && at != bytes) result = fail(ncclInternalError, "prepared write spans do not cover their fragment");
+    }
+  }
+  free(transfers);
+  return result;
+}
+
 static ncclResult_t write_prepare(const void *source_buffer, void *landing_buffer, size_t count, ncclDataType_t datatype,
     int source, int destination, ncclComm_t comm, int metal, uint32_t repeats, size_t stride, size_t max_packet,
     size_t row_bytes, size_t rows, const ncclMeshSpan *view, size_t views, int indexed, ncclMeshWritePlan_t *out) {
@@ -4843,6 +4906,8 @@ static ncclResult_t write_prepare(const void *source_buffer, void *landing_buffe
   plan->count = count; plan->stride = rows ? 0 : stride; plan->bytes = local.bytes; plan->repeats = repeats;
   plan->row_bytes = row_bytes; plan->rows = rows; plan->pitch = stride;
   plan->type = datatype; plan->from = source; plan->to = destination; plan->metal = metal;
+  const ncclResult_t prepared = write_prepare_spans(plan);
+  if (prepared) { write_plan_drop(plan); return prepared; }
   *out = plan;
   return ncclSuccess;
 }
