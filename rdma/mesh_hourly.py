@@ -130,14 +130,15 @@ def _launch(mesh_root, microbench_root, output_root):
         record['configuration'] = {'path': str(config.relative_to(committed_bench))}
         record['history'] = HISTORY
         child = subprocess.run([sys.executable, str(committed_mesh / 'rdma/mesh_hourly.py'), 'execute'],
-                               cwd=committed_mesh, input=json.dumps(record), capture_output=True, text=True)
+                               cwd=committed_mesh, input=json.dumps(record), stdout=subprocess.PIPE, text=True)
         if child.stdout:
             record = json.loads(child.stdout)
         record.pop('history', None)
         record['driver_exit'] = child.returncode
         if child.returncode:
             record['status'] = 'failed'
-            record['errors'].append({'stage': 'committed-driver', 'exit': child.returncode, 'stderr': child.stderr})
+            if not record['errors'] and not any(item['status'] != 'completed' for item in record['workloads']):
+                record['errors'].append({'stage': 'committed-driver', 'exit': child.returncode})
     except Exception as error:
         record['errors'].append({'stage': 'snapshot/export', 'error': str(error), 'traceback': traceback.format_exc()})
     record['finished_unix'] = time.time()
@@ -226,8 +227,11 @@ def rank_results(outputs):
                     observations.extend(value['observations'])
                 else:
                     values.append(value)
+        failures = [line.strip() for line in lines if ('Error' in line or 'Exception' in line)
+                    and not line.lstrip().startswith(('raise ', 'except '))]
         result[name] = {'exit': code, 'measurements': values, 'observations': observations,
-                        'last_lines': lines[-6:] if code else []}
+                        'error': (failures[-1] if failures else next((line for line in reversed(lines) if line.strip()), f'exit {code}'))
+                                 if code else ''}
     return result
 
 
@@ -297,12 +301,12 @@ def run_workload(item, nodes, paths, record, out, ordinal):
         result['ranks'] = rank_results(outputs)
         result['observations'] = [row for rank in result['ranks'].values() for row in rank.pop('observations')]
         if len(result['ranks']) != len(selected) or any(v['exit'] != 0 for v in result['ranks'].values()):
-            failures = [f'{name}: {value["last_lines"][-1] if value["last_lines"] else value["exit"]}'
-                        for name, value in result['ranks'].items() if value['exit']]
+            failures = list(dict.fromkeys(value['error'] for value in result['ranks'].values() if value['exit']))
             raise RuntimeError('; '.join(failures) or 'missing rank completion')
         result['status'] = 'completed'
     except Exception as error:
         result['error'] = str(error)
+        print(f'{tag}: {result["error"]}', file=sys.stderr, flush=True)
     # A later fault does not erase earlier completed observations. Only rows
     # present for every participating rank can form an aggregate interval.
     result['metrics'] = aggregate_measurements(result.get('ranks', {}))
