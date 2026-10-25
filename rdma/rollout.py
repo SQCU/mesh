@@ -1,6 +1,6 @@
 # design/whole-function.md#observations
 import json
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
 import queue
 import threading
 import time
@@ -14,18 +14,21 @@ def observations(key):
 
 def start(store, key, rank, ranks, history):
     outgoing, stopping = queue.SimpleQueue(), threading.Event()
-    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='mesh-observations')
-    future = executor.submit(_collect, store, key, rank, ranks, history, outgoing, stopping)
-    return outgoing, stopping, executor, future
+    future = Future()
+    def collect():
+        try:
+            future.set_result(_collect(store, key, rank, ranks, history, outgoing, stopping))
+        except BaseException as error:
+            future.set_exception(error)
+    worker = threading.Thread(target=collect, name='mesh-observations', daemon=True)
+    worker.start()
+    return outgoing, stopping, worker, future
 
 
 def close(observer):
-    outgoing, stopping, executor, future = observer
+    outgoing, stopping, worker, future = observer
     stopping.set()
-    try:
-        reports, records = future.result()
-    finally:
-        executor.shutdown()
+    reports, records = future.result()
     from torch_mesh.benchmarks import completed, emit
     emit([*[completed(record, record['seconds']) for record in reports], {'observations': records}])
 
