@@ -1840,6 +1840,10 @@ struct ncclMeshWritePlan {
   struct mesh_span_plan packets;
   struct mesh_dma_span *spans;
   size_t *span_first; /* local physical step -> immutable repeated descriptor train */
+  void *payload;
+  struct mesh_lease_retire_dep *uses; /* fixed channel/direction indices; only end advances */
+  uint32_t channels;
+  int retained;
   struct where source, landing;
   ncclMeshBuffer source_buffer, landing_buffer;
   ncclComm_t comm;
@@ -1863,8 +1867,26 @@ static uint64_t write_displacement(const struct ncclMeshWritePlan *p, uint64_t l
 }
 static void write_plan_drop(struct ncclMeshWritePlan *p) {
   if (p && atomic_fetch_sub_explicit(&p->refs, 1, memory_order_acq_rel) == 1) {
+    if (p->retained) {
+      /* Releasing a realized configuration transfers its final uses to the
+         allocator. No execution performs an ownership search or reuse query. */
+      pthread_mutex_lock(&attach_lock);
+      struct lease *payload = lease_at(p->payload, NULL), *metadata = lease_at(p->spans, NULL);
+      int error = !payload || !metadata ? EINVAL : 0;
+      for (uint32_t k = 0; !error && k < 2 * p->channels; k++) {
+        const struct mesh_lease_retire_dep *d = p->uses + k;
+        error = mesh_lease_retire_mark_use(&payload->reads, d->stream, d->wire, d->holding, d->end, d->direction, 0);
+        if (!error) error = mesh_lease_retire_mark_use(&metadata->reads, d->stream, d->wire, d->holding, d->end, d->direction, 1);
+      }
+      if (!error) {
+        mesh_lease_retire_end(&payload->reads);
+        mesh_lease_retire_end(&metadata->reads);
+      }
+      pthread_mutex_unlock(&attach_lock);
+      if (error) fail(ncclInternalError, "releasing prepared write ownership: %s", strerror(error));
+    }
     if (p->spans) ncclMemFree(p->spans);
-    mesh_span_plan_free(&p->packets); free(p->span_first); free(p->view); free(p->view_first); free(p);
+    mesh_span_plan_free(&p->packets); free(p->uses); free(p->span_first); free(p->view); free(p->view_first); free(p);
   }
 }
 /* First cut strictly after a logical byte offset. */
@@ -2034,6 +2056,7 @@ static size_t sent_bytes(const struct call *c) {
 static ncclResult_t operands_check(const struct call *list, size_t n) {
   for (size_t i = 0; i < n; i++) {
     const struct call *c = list + i;
+    if (c->write_plan) continue; /* bindings and ownership realized with the page table */
     const size_t bytes = crosses(c) ? sent_bytes(c) : 0;
     if (bytes && !in_region(c->comm, c->send_at, bytes))
       return fail(ncclInvalidUsage, "%s on communicator %s: its send buffer (%zu bytes) is not in this node's region: an operand that crosses a "
@@ -2687,6 +2710,13 @@ static ncclResult_t place_group(struct metal_program *program, struct ncclComm *
         else if (step->op == MESH_STEP_REDUCE) { x->data = shifted(area, used); used += page_up(x->bytes, page); }
         else x->data = shifted(origin, displacement);
         const unsigned char *address = address_of(x->data);
+        if (write) {
+          const uint64_t logical = step->first * step->piece.element_bytes;
+          const size_t repeat = write->stride ? (x->offset - logical) / write->stride : 0;
+          x->spans = write->spans + write->span_first[x->step] + repeat * x->pages.n;
+          x->table = (uint64_t)((const unsigned char *)x->spans - region);
+          continue;
+        }
         /* An indexed message may move backwards through its one lease. Its
            first/last logical bytes do not bound its physical addresses. */
         const struct where checked = write && write->views ? origin : x->data;
@@ -2702,13 +2732,6 @@ static ncclResult_t place_group(struct metal_program *program, struct ncclComm *
         if (!valid) return fail(ncclInvalidUsage, "%s on %s: %zu bytes at byte %zu are outside a live local lease",
                                 call_name(x->c), comm->name, x->bytes, x->offset);
         if (!x->pages.n) continue;
-        if (write) {
-          const uint64_t logical = step->first * step->piece.element_bytes;
-          const size_t repeat = write->stride ? (x->offset - logical) / write->stride : 0;
-          x->spans = write->spans + write->span_first[x->step] + repeat * x->pages.n;
-          x->table = (uint64_t)((const unsigned char *)x->spans - region);
-          continue;
-        }
         if (x->pages.n > SIZE_MAX / sizeof *x->spans ||
             !(x->spans = spare_take(comm, x->pages.n * sizeof *x->spans, holder, SPARE_DESCRIPTORS)))
           return fail(ncclSystemError, "allocating exact DMA span descriptors");
@@ -2863,6 +2886,10 @@ static ncclResult_t present_group(struct ncclComm *comm, struct schedule *plans)
       const struct message *items = send ? plans[h].out : plans[h].in;
       for (size_t k = 0; k < count && !retained; k++) {
         const struct message *m = items + k;
+        if (m->c->write_plan) {
+          m->c->write_plan->uses[2 * h + !send].end = m->end.n;
+          continue;
+        }
         struct lease *payload = lease_at(address_of(m->data), NULL);
         struct lease *metadata = lease_at(m->spans, NULL);
         const unsigned direction = send ? MESH_LEASE_SEND : MESH_LEASE_LAND;
@@ -4758,7 +4785,7 @@ static int write_view_packets(const struct write_binding_report *reports, const 
 
 /* Physical bindings, paths and common cuts are all configuration operands.
    Materialize their local descriptor trains once, including every repetition.
-   Execution borrows these immutable tables; the usual retirement ledger keeps
+   Execution indexes these immutable tables; the usual retirement ledger keeps
    them alive until the bridge has finished reading them after plan destruction. */
 static ncclResult_t write_prepare_spans(struct ncclMeshWritePlan *plan) {
   const ncclComm_t comm = plan->comm;
@@ -4806,6 +4833,30 @@ static ncclResult_t write_prepare_spans(struct ncclMeshWritePlan *plan) {
     }
   }
   free(transfers);
+  if (!result && count) {
+    plan->uses = calloc(2 * comm->count, sizeof *plan->uses);
+    if (!plan->uses) return fail(ncclSystemError, "allocating prepared channel ownership");
+    plan->payload = address_of(binding);
+    plan->channels = comm->count;
+    pthread_mutex_lock(&attach_lock);
+    struct lease *payload = lease_at(plan->payload, NULL), *metadata = lease_at(plan->spans, NULL);
+    int error = !payload || !metadata ? EINVAL : mesh_lease_retire_begin(&payload->reads);
+    if (!error) {
+      error = mesh_lease_retire_begin(&metadata->reads);
+      if (error) mesh_lease_retire_end(&payload->reads);
+    }
+    if (!error) {
+      plan->retained = 1;
+      for (uint32_t h = 0; h < comm->count; h++) {
+        const struct channel *ch = comm->channels + h;
+        const struct hold *hold = comm->attach->holds + comm->endpoint[ch->cable];
+        for (unsigned d = 0; d < 2; d++) plan->uses[2 * h + d] = (struct mesh_lease_retire_dep){
+          .stream = ch->stream, .wire = hold->wire, .holding = hold->generation, .direction = d};
+      }
+    }
+    pthread_mutex_unlock(&attach_lock);
+    if (error) result = fail(ncclInvalidUsage, "preparing write ownership: %s", strerror(error));
+  }
   return result;
 }
 
