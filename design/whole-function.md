@@ -87,9 +87,8 @@ configuration and evidence at every participant. M is unchanged by this routing
 interface: its existing ordered stream entries and supplied/landed words remain
 the transport primitive. D retains NCCL and registered buffers as its interface.
 
-Correctness checks do not establish bandwidth or latency improvement. Those
-claims require measured complete-function executions, payload comparison, and
-per-cable evidence on the actual cluster.
+Performance is the complete function's elapsed time and useful output rate on
+the actual cluster. Extra transfer accounting is not required to report that pair.
 
 ## One-way writes
 
