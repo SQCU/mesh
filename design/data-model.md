@@ -103,43 +103,37 @@ code fits the hardware. A 3 KB crossing takes 11.7 µs as plain dispatches in a 
 completion runs a scheduling kernel, the operand is copied to scratch, and the waits read gate words
 (measurement.md:3230-3238).
 
-## 5. Three positions on moving memory
+## 5. Why pages and compilation
 
-The paths in sections 2 and 3 lead to three rules. They concern where bytes can land, how far they must move,
-and what must happen before they move.
+The driver needs a place for bytes to land before they arrive (section 3). We can settle that choice before the
+call. The receiver posts to that place, and the sender sends when its data is ready. No peer needs to ask where
+the bytes should go or wait for permission to send them. This is how SEND and RECV give us one-sided writes.
 
-**1. Pages and a page table are required.** Every byte a program sends belongs to a named page. A page table binds
-that name to storage on each node. The storage is already there. The bindings are fixed before the call starts.
-The program uses an index to find its page.
+**Pages name the places.** Every byte a program sends belongs to a named page. A page table binds that name to
+storage on each node. The storage is already there. The bindings are fixed before the call starts. The program
+uses an index to find its page.
 
-Each end has its own map. Nodes may have different page sizes, data types, and layouts. A page's type defines what
-its indices mean. The compiler maps the data between the two ends. If values need a type change, the plan names
-that step. An address on one node does not name storage on another node.
+Each node has its own map. Nodes may have different page sizes, data types, and layouts. A page's type defines
+what its indices mean. The compiler maps each part to the right local page. If values need a type change, the
+plan names that step. An address on one node does not name storage on another node.
 
-A write names source and target pages. A mask selects parts within one page. It cannot reach another page or
-change which page it names. It uses indices in that page's type. A program cannot give a write a raw pointer and
-byte count in place of a page and a mask. A move across pages names each page in its plan. This does not require a
+A write names source and target pages. A mask selects parts within one page, using indices in that page's type.
+It cannot name another page or reach outside its page. A program cannot give a write a raw pointer and byte
+count in place of a page and a mask. A move across pages names each page in its plan. This does not require a
 separate device call for each page.
 
-**What compilation does.** Before the call, the compiler fixes the work shares, page bindings, masks, and routes.
-It also fixes the data order that permits each read, write, and reuse of a page. A solver may need a hard search to
-find these relations. The result is a plan that names pages by index.
+These limits let us send just the parts we need while keeping each write within its named pages. A value used
+as a mask cannot turn the write into a move to some other place in a peer's memory.
+
+**Compilation settles the choices.** Before the call, the compiler fixes the work shares, page bindings, masks,
+and routes. It records which results each step needs. A solver may need a hard search to choose a good split.
+The result is a plan that names pages by index.
 
 A hard search and a simple rule can yield the same page list. Reading that list takes the same work in either
 case. More pages can mean more work. A harder search does not make each lookup harder. The running program uses
 the result; it does not repeat the choices that found it.
 
-**2. Moving a page across the mesh can beat a local NVMe read.** A small transfer can finish while an SSD read still
-waits for its first byte (sections 2 and 3; Infiniswap). The comparison is between complete paths. A relay adds a hop,
-but it need not add a copy or a request. On this mesh a node can also do arithmetic on partial results as it sends
-them on. Its compute units and DMA engines share the same memory (section 1).
-
-**3. A write planned ahead needs no request and answer during the call.** The target page and its place in the plan
-are already known. The receiver posts there before the bytes arrive. The sender sends when its source data is ready.
-No peer picks a destination from a message or gives permission to proceed. The driver uses SEND and RECV, but the
-program's write is one-sided (section 3).
-
-Take one page going from A to B. There are three ways to place it:
+**One-sided writes spend less on each move.** Take one page going from A to B. There are three ways to place it:
 
 | Method | What crosses the link | What B does after arrival |
 |---|---|---|
@@ -149,50 +143,43 @@ Take one page going from A to B. There are three ways to place it:
 
 The last two forms still need a posted receive for their first message. They add a choice after the first place
 was fixed. Asking adds two crossings. Staging adds a copy, which reads and writes the bytes again. Sections 1-4
-show the costs of those actions on this hardware. More hops repeat those costs.
+show the costs of those actions on this hardware. The page plan lets us avoid them at every hop.
 
-The page table lets us settle the choice before execution. The mask lets us send just the part of a page we need.
-Neither requires a request, a receipt, or a second copy during the call.
+Moving a page across the mesh can even beat a local NVMe read: a small transfer can finish while an SSD read
+still waits for its first byte (sections 2 and 3; Infiniswap). A relay adds a hop, but it need not add a request
+or a staging copy. A node can also compute with partial results as it sends them on. Its compute units and DMA
+engines share the same memory (section 1). These paths let us share both copies and calculations across nodes.
 
-## 6. Why code here only loses waits and guards
+## 6. Sharing work through one-sided writes
 
-The plan in section 5 already says where each result goes and which step needs it. Code follows those relations.
-It does not make a fresh choice about storage or order each time it moves data.
+Nodes have different strengths. One may compute faster; another may have more links or more spare bandwidth.
+We can devise rules to share copies and calculations among them. A fair split gives each node a share suited
+to its rates, so the parts finish near the same time.
 
-**A data need has a cause.** A step cannot read a result before it is produced and has arrived. This fact orders the
-read after the write. It does not require a new request or answer. A fence must serve a named write and read.
-A barrier that waits for other pages adds a need the data itself did not have.
+A routing function needs to know what must move, which pages hold it, and which links join the nodes. It also
+needs their rates and which results each step needs. These are inputs to the function. It returns work shares
+and a plan of page writes. A node's share of calculations and its share of relay traffic can differ.
 
-**Page reuse follows the plan.** A page's next write follows its last use, including any DMA read. The compiler
-establishes that order before the call. A later result may prove that an earlier read has ended, if the data path
-connects them. The end of a source DMA read proves only that read ended. It does not prove the target's consumer
-has finished. The plan must cover both uses without adding a receipt message.
+Some rules let us split a message across a short path and a path through more neighbors. Each path gets a
+share suited to its delay and rate. A relay passes each part on as it arrives. The parts can finish together
+even though they took different numbers of hops. Each hop is still a one-sided write to a page fixed ahead.
 
-The page table holds the result of this work. Looking up a page does not search old uses to decide if it is free.
-The runtime does not find new space, check its own declared types, or repair its plan.
+Other rules tell us when work sent back by our peers means they have finished with a page. We can then reuse
+that page or start the next calculation. The work they send back already tells us what we need to know. We
+do not ask for a separate receipt. These rules are part of the plan, just like the rules that split a message.
 
-**A stored plan is not a new wait.** Tables can stay fixed across calls. Each call can use their indices without a
-lock, a search, or a peer exchange. What we remove is extra work to negotiate or check facts the plan already holds.
-A copy made only to fit an old interface adds a pass over the data. A host sync can leave the GPU idle while the
-host starts its next work. Sections 1-4 show why these costs matter.
+Compilation turns these rules into page lists and steps. Once the plan is set, new input values can follow the
+same writes. A function whose answers depend on those values can still keep its pages, routes, and work shares
+fixed. The running call needs only that plan and its inputs. Each step reads its named inputs and writes its
+named results when they are ready. It asks no peer to choose a place or grant permission between steps.
 
-**Data code reads its pages.** The bridge owns the driver's queues and completions. Data code does not hold them
-still or inspect their private state. It observes the progress of its own page data. If a mark says pages through
-12 have arrived, it also says page 10 arrived. A later mark of 19 preserves that fact while page 10 still holds the
-same result. Page reuse starts a new use with its own place in the plan.
+This leaves fewer ways to go wrong. A mask stays within its page. A write has its place before it starts. A
+step waits only for the results it needs. We avoid choices and timing cases that would otherwise need checks
+while the work runs. More time and link capacity are left for the work itself.
 
-**Compare whole calls.** A new algorithm may change both the data moved and the order of its steps. More steps can
-move fewer bytes. Judge the whole call by its time and useful bytes per second. A count of waits or source lines
-cannot give that pair. This does not permit an extra guard whose fact was known before the call.
-
-**No guard is added as a precaution.** A new guard requires the user's request and a problem that needs it. Then
-only the required guard is added (design/rubrics.md). A wait that remains has a bound fixed when it is made. Its
-caller or configuration supplies that bound; the default deadline is five seconds. These bounds belong to the
-collective and the bridge. Data programs do not add their own guards to enforce them.
-
-If a wait exceeds its bound, the data run ends at once. It does not retry, switch to another path, or run recovery.
-It returns an error or invalid data. The bridge is a separate, lasting service. A failed data call must not make
-the node or its links unavailable to other work (THREAT-MODEL.md).
+A compiled plan can still give us a poor split. Results from whole calls let us adjust shares and routes for
+later calls. Compare both whole-call time and useful bytes per second. Each change becomes a new plan before
+the call that uses it. We can keep making better choices without adding requests and replies to each step.
 
 ## 7. What the bridge must have
 
@@ -203,7 +190,7 @@ region. A data call does not pin memory or register another buffer.
 
 **Post ahead.** The plan fixes where each receive lands and its order (sections 3 and 5). The bridge posts as far
 ahead as its queue space and the planned page uses allow. A fresh target page need not wait for an unrelated local
-write. A reused page follows the last use fixed by the plan (section 6).
+write. The plan also sets when shared results let us use a page again (section 6).
 
 **Keep addresses local.** Before the call, the bridge binds pages and masks to local device addresses and byte
 counts. Programs cannot supply these as write operands. The plan may split or group device transfers. They must
