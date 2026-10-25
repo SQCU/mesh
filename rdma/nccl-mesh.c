@@ -1788,6 +1788,7 @@ struct ncclMeshWritePlan {
   struct mesh_span_plan packets;
   struct mesh_dma_span *spans;
   size_t *span_first; /* local physical step -> immutable repeated descriptor train */
+  mesh_pages *step_units; /* one repetition, indexed by the same compiled step */
   void *payload;
   struct mesh_lease_retire_dep *uses; /* fixed channel/direction indices; only end advances */
   uint32_t channels;
@@ -1834,7 +1835,7 @@ static void write_plan_drop(struct ncclMeshWritePlan *p) {
       if (error) fail(ncclInternalError, "releasing prepared write ownership: %s", strerror(error));
     }
     if (p->spans) ncclMemFree(p->spans);
-    mesh_span_plan_free(&p->packets); free(p->uses); free(p->span_first); free(p->view); free(p->view_first); free(p);
+    mesh_span_plan_free(&p->packets); free(p->uses); free(p->span_first); free(p->step_units); free(p->view); free(p->view_first); free(p);
   }
 }
 /* First cut strictly after a logical byte offset. */
@@ -2317,8 +2318,7 @@ static ncclResult_t schedule_group(struct ncclComm *comm, struct call *list, siz
         struct call *c = list + made[k].call;
         const struct mesh_step *step = c->bound->steps + x->step;
         if (c->bound->cable[x->step] != ch->cable) continue;
-        const mesh_pages pages = c->write_plan ? (mesh_pages){span_units(&c->write_plan->packets,
-          step->first * step->piece.element_bytes, piece_bytes(step))} : pages_of(piece_bytes(step), comm->page);
+        const mesh_pages pages = c->write_plan ? c->write_plan->step_units[x->step] : pages_of(piece_bytes(step), comm->page);
         end = pages_add(end, pages);
         const struct message m = {.c = c, .step = x->step, .entry = send ? p->outs : p->ins, .pages = pages, .end = end,
                                   .offset = step->first * step->piece.element_bytes, .bytes = piece_bytes(step)};
@@ -2527,9 +2527,7 @@ static ncclResult_t group_bound(struct ncclComm *comm, struct call *list, size_t
       mesh_pages end = {0};
       for (size_t k = 0; k < count; k++) {
         struct message *m = items + k;
-        const struct mesh_step *step = m->c->bound->steps + m->step;
-        if (m->c->write_plan) m->pages = (mesh_pages){span_units(&m->c->write_plan->packets,
-            step->first * step->piece.element_bytes, m->bytes)};
+        if (m->c->write_plan) m->pages = m->c->write_plan->step_units[m->step];
         end = pages_add(end, m->pages); m->end = end;
         if (k + 1 == count / repeats) q->each[!send] = end;
       }
@@ -4675,13 +4673,15 @@ static ncclResult_t write_prepare_spans(struct ncclMeshWritePlan *plan) {
   if (count < 0) return fail(ncclInvalidUsage, "preparing physical write spans: %s", strerror(-count));
   struct mesh_transfer *transfers = calloc((size_t)count + 1, sizeof *transfers);
   plan->span_first = calloc((size_t)count + 1, sizeof *plan->span_first);
-  if (!transfers || !plan->span_first) { free(transfers); return fail(ncclSystemError, "allocating write span geometry"); }
+  plan->step_units = calloc((size_t)count + 1, sizeof *plan->step_units);
+  if (!transfers || !plan->span_first || !plan->step_units) { free(transfers); return fail(ncclSystemError, "allocating write span geometry"); }
   const int made = mesh_write_compile(&comm->fabric, (uint32_t)comm->rank, (uint32_t)plan->from,
     (uint32_t)plan->to, paths, operand, comm->page, transfers, (uint32_t)count);
   ncclResult_t result = made == count ? ncclSuccess : fail(ncclInternalError, "preparing physical write fragments");
   for (int k = 0; !result && k < count; k++) {
     const struct mesh_step *s = &transfers[k].step;
     const uint64_t units = span_units(&plan->packets, s->first * s->piece.element_bytes, piece_bytes(s));
+    plan->step_units[k] = (mesh_pages){units};
     if (units > (SIZE_MAX / sizeof *plan->spans - plan->span_first[k]) / plan->repeats)
       result = fail(ncclInvalidUsage, "prepared write descriptors overflow address space");
     else plan->span_first[k + 1] = plan->span_first[k] + (size_t)units * plan->repeats;
