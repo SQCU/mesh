@@ -87,7 +87,8 @@ Rank 0 distributes A and B as ragged shards of their rows (`partition.distribute
 dimension `tp`: the backend's scatter, MPI_Scatterv), so each rank holds the block of rows the backend's partition gives
 it ([The step](#the-step)). The inputs are one operand, [steps, rows, width]. Prepared writes send its frames in
 blocks, with the next block posted before the current block runs. Input blocks and recurrent write batches have
-separate sizes. A step reads only after its own input frame lands.
+separate sizes. One GPU dispatch waits for each input block to land. Its later steps use those pages without
+checking the input again, as the earlier fused chain did.
 The outputs are one region tensor of the same shape on every rank. Each step writes its tanh(z) there. The service
 returns that tensor when the whole call ends. No input, weight or output tensor is written to a file.
 Within a step only the step's sum crosses between ranks.

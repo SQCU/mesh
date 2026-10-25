@@ -112,19 +112,24 @@ struct Summand {
 // prepared write interface; rank count and cable count are separate operands.
 template <uint CHANNELS>
 struct chain_words {
-    uint first, phase, rows, ks0, ks1, last, width, actual_rows, previous_j, j, input_j, pad;
-    mesh_step_binding land[CHANNELS], publish[CHANNELS], input[CHANNELS];
+    uint first, phase, rows, ks0, ks1, last, width, actual_rows, previous_j, j;
+    mesh_step_binding land[CHANNELS], publish[CHANNELS];
 };
 
 template <uint CHANNELS>
-struct input_words { uint j, pad; mesh_step_binding publish[CHANNELS]; };
+struct input_words { uint j, pad; mesh_step_binding channels[CHANNELS]; };
 
-template <uint CHANNELS>
+template <uint CHANNELS, bool PUBLISH>
 kernel void chain_input(constant input_words<CHANNELS>& words [[buffer(15)]], uint tid [[thread_index_in_threadgroup]]) {
-    for (uint q = 0; q < CHANNELS; q++) if (words.publish[q].p) {
-        const auto p = words.publish[q];
+    for (uint q = 0; q < CHANNELS; q++) if (words.channels[q].p) {
+        const auto p = words.channels[q];
         mesh_step_enter(*p.p, p.v, p.progress, tid == 0);
-        mesh_step_release(*p.p, p.a, tid, words.j);
+        if (PUBLISH) mesh_step_release(*p.p, p.a, tid, words.j);
+        else if (tid == 0) mesh_step_counts(*p.p, p.a, p.v, words.j);
+    }
+    if (!PUBLISH) {
+        threadgroup_barrier(mem_flags::mem_device);
+        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));
     }
 }
 
@@ -152,14 +157,9 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
             mesh_step_enter(*l.p, l.v, l.progress, w == 0 && tid == 0);
             mesh_step_counts(*l.p, l.a, l.v, words.previous_j);
         }
+        threadgroup_barrier(mem_flags::mem_device);
+        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));
     }
-    if (!words.last && tid == 0) for (uint q = 0; q < CHANNELS; q++) if (words.input[q].p) {
-        constant mesh_step_binding& l = words.input[q];
-        mesh_step_enter(*l.p, l.v, l.progress, w == 0);
-        mesh_step_counts(*l.p, l.a, l.v, words.input_j);
-    }
-    threadgroup_barrier(mem_flags::mem_device);
-    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));
     for (uint q = tid; q < R * xw; q += THREADS) {
         const uint i = (q / xw) * K + x0 + q % xw;
         const uint row = i / K, column = i % K;

@@ -1381,12 +1381,12 @@ static void indexed_step_out(const at::Tensor &x, const std::optional<at::Tensor
 struct ChainStep {
   std::array<id<MTLBuffer>, 4> buffers;
   std::array<NSUInteger, 4> offsets;
-  uint32_t first, phase, last, previous_j, j, input_j;
+  uint32_t first, phase, last, previous_j, j;
   const std::vector<Dispatch *> *dispatches;
 };
 struct ChainChunk {
   PreparedWrites *plans;
-  size_t first, count, input, prefetch_first, prefetch_count;
+  size_t first, count, input, prefetch_first, prefetch_count, input_first;
 };
 struct PreparedChain {
   int64_t comm;
@@ -1395,11 +1395,11 @@ struct PreparedChain {
   std::array<std::vector<ChainChunk>, 2> chunks;
   std::vector<std::unique_ptr<PreparedWrites>> inputs;
   std::vector<uint32_t> input_last;
-  Dispatch dispatch, input_publication;
+  Dispatch dispatch, input_publication, input_landing;
   std::vector<Dispatch> products;
   std::vector<Dispatch *> regular, final;
   Dispatch *publication;
-  size_t publication_output, publication_j, publication_words;
+  size_t publication_output, publication_j;
   MeshStream *stream;
   uint32_t channels, phase = 0, generation = 0;
 };
@@ -1413,7 +1413,7 @@ static int64_t chain_slot() {
   prepared_chains_->push_back(nullptr);
   return index;
 }
-static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, const std::vector<int64_t> &products,
+static void prepare_chain(int64_t index, int64_t kernel, const std::vector<int64_t> &input_kernels, const std::vector<int64_t> &products,
                           const std::vector<at::Tensor> &operands,
                           const std::vector<int64_t> &constants, int64_t groups, int64_t threads,
                           const std::string &group, int64_t ranks, int64_t batch, int64_t input_frames) {
@@ -1424,11 +1424,12 @@ static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, c
   std::vector<std::optional<at::Tensor>> buffers(operands.begin(), operands.end());
   buffers.push_back(x);  // previous landing; replaced by its compiled page below
   std::vector<int64_t> words = constants;
-  words.resize(12 + 36 * f.channels);
+  words.resize(10 + 24 * f.channels);
   auto chain = std::make_unique<PreparedChain>(PreparedChain{f.comm, operands, {}, {}, {}, {},
       encoded(kernel, buffers, words, 15, groups, 1, threads),
-      encoded(input_kernel, {}, std::vector<int64_t>(2 + 12 * f.channels), 15, 1, 1, 32),
-      {}, {}, {}, nullptr, 6, 9, 12,
+      encoded(input_kernels[0], {}, std::vector<int64_t>(2 + 12 * f.channels), 15, 1, 1, 32),
+      encoded(input_kernels[1], {}, std::vector<int64_t>(2 + 12 * f.channels), 15, 1, 1, 32),
+      {}, {}, {}, nullptr, 6, 9,
       &stream_of(at::mps::getCurrentMPSStream()), (uint32_t)f.channels});
   chain->regular = chain->final = {&chain->dispatch};
   chain->publication = &chain->dispatch;
@@ -1445,7 +1446,6 @@ static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, c
     chain->publication = &chain->products.back();
     chain->publication_output = 2;
     chain->publication_j = 8;
-    chain->publication_words = 10;
   }
   const NSUInteger input_base = input.storage_offset() * input.element_size();
   const NSUInteger output_base = output.storage_offset() * output.element_size();
@@ -1480,7 +1480,7 @@ static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, c
     uint32_t previous_j = 0;
     auto append = [&](int64_t t, int64_t j, const at::Tensor &send, const at::Tensor &land, bool last) {
       const std::array<at::Tensor, 4> bound{input, output, send, land};
-      ChainStep step{{}, {}, (uint32_t)(t == 0), (uint32_t)(2 * t), (uint32_t)last, previous_j, (uint32_t)j, (uint32_t)(t % input_frames),
+      ChainStep step{{}, {}, (uint32_t)(t == 0), (uint32_t)(2 * t), (uint32_t)last, previous_j, (uint32_t)j,
                      last ? &chain->final : &chain->regular};
       for (size_t k = 0; k < bound.size(); k++) {
         step.buffers[k] = at::native::mps::getMTLBufferStorage(bound[k]);
@@ -1495,7 +1495,8 @@ static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, c
       const size_t input = first / input_frames;
       const size_t prefetch = first % input_frames == 0 && input + 1 < chain->inputs.size();
       FusedForm::Ring &ring = f.rings.at(count);
-      chain->chunks[generation].push_back({ring.plans[half].get(), (size_t)first, (size_t)count, input, input + 1, prefetch});
+      chain->chunks[generation].push_back({ring.plans[half].get(), (size_t)first, (size_t)count, input, input + 1, prefetch,
+                                          first % input_frames == 0});
       for (int64_t j = 0; j < count; j++) {
         append(first + j, j, ring.segments[half][j][f.rank], previous, false);
         previous = ring.slots[half][j];
@@ -1519,7 +1520,7 @@ static void chain_run(int64_t index) {
   const auto binding = [&](const PreparedWrites *plans, bool publication, size_t part) {
     const uint32_t count = !plans ? 0 : publication ? plans->records.publishes : plans->records.lands;
     const auto *records = !plans ? nullptr : publication ? plans->publish.data() : plans->land.data();
-    const size_t offset = (publication ? chain.publication_words : 12) + part * 12 * chain.channels;
+    const size_t offset = 10 + part * 12 * chain.channels;
     auto &words = publication ? chain.publication->words : d.words;
     for (uint32_t k = 0; k < chain.channels; k++) {
       const auto *record = k < count ? records + k : nullptr;
@@ -1557,21 +1558,17 @@ static void chain_run(int64_t index) {
     const size_t slots[4] = {2, 3, 6, 9};
     for (size_t k = 0; k < 4; k++) d.bound[slots[k]] = step.buffers[k], d.offsets[slots[k]] = step.offsets[k];
     d.words[0] = step.first, d.words[1] = chain.phase + step.phase, d.words[5] = step.last;
-    d.words[8] = step.previous_j, d.words[9] = step.j, d.words[10] = step.input_j;
+    d.words[8] = step.previous_j, d.words[9] = step.j;
     publication.bound[chain.publication_output] = step.buffers[2];
     publication.offsets[chain.publication_output] = step.offsets[2];
     publication.words[chain.publication_j] = step.j;
-    const auto *items = step.dispatches;
-    const bool publishes = !step.last;
-    dispatch_sync(stream->queue(), ^{
-      @autoreleasepool {
-        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
-        declare_fused(encoder);
-        for (const Dispatch *item : *items) encode_in(encoder, *item);
-        if (publishes) s->published();
-      }
-    });
+    id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
+    declare_fused(encoder);
+    for (const Dispatch *item : *step.dispatches) encode_in(encoder, *item);
+    if (!step.last) s->published();
   };
+  const auto *draw = &dispatch;
+  const auto *bind = &binding;
   const PreparedWrites *previous = nullptr;
   input(0);
   for (size_t turn = 0; turn < chunks.size(); turn++) {
@@ -1580,13 +1577,45 @@ static void chain_run(int64_t index) {
     execute_fused_writes(*chunk.plans);
     binding(previous, false, 0);
     binding(chunk.plans, true, 1);
-    binding(chain.inputs[chunk.input].get(), false, 2);
-    dispatch(steps[chunk.first]);
-    binding(chunk.plans, false, 0);
-    for (size_t j = 1; j < chunk.count; j++) dispatch(steps[chunk.first + j]);
+    const size_t input_first = chunk.input_first;
+    for (size_t j = 0; j < input_first; j++) {
+      Dispatch &land = chain.input_landing;
+      const PreparedWrites &input = *chain.inputs[chunk.input];
+      land.words[0] = chain.input_last[chunk.input];
+      for (uint32_t k = 0; k < chain.channels; k++) {
+        const auto *record = k < input.records.lands ? &input.land[k] : nullptr;
+        for (int word = 0; word < 6; word++) {
+          const uint64_t value = record ? (*record)[word] : 0;
+          land.words[2 + 12 * k + 2 * word] = value & 0xffffffffu;
+          land.words[3 + 12 * k + 2 * word] = value >> 32;
+        }
+      }
+    }
+    const Dispatch *landing = &chain.input_landing;
+    const ChainStep *first = steps.data() + chunk.first;
+    const PreparedWrites *plans = chunk.plans;
+    const size_t count = chunk.count;
+    // Like encode_many, enter the stream queue once for its prepared batch.
+    // Each publication still uses the common commit rule. The next write
+    // reservation submits any pending producer before it asks for ring room.
+    dispatch_sync(stream->queue(), ^{
+      @autoreleasepool {
+        // The historical chain admitted one input block here, then used its
+        // pages for every step in the block without polling them again.
+        for (size_t j = 0; j < input_first; j++) {
+          id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
+          declare_fused(encoder);
+          encode_in(encoder, *landing);
+        }
+        (*draw)(*first);
+        (*bind)(plans, false, 0);
+        for (size_t j = 1; j < count; j++) (*draw)(first[j]);
+      }
+    });
     previous = chunk.plans;
   }
-  dispatch(steps.back());
+  const ChainStep *last = &steps.back();
+  dispatch_sync(stream->queue(), ^{ @autoreleasepool { (*draw)(*last); } });
   chain.phase += 2 * (uint32_t)(steps.size() - 1);
   chain.generation ^= chunks.size() & 1;
 }
