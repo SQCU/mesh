@@ -1070,6 +1070,10 @@ static void execute_fused_writes(PreparedWrites &plans) {
   const uint32_t polls = plans.polls;
   dispatch_sync(stream->queue(), ^{
     @autoreleasepool {
+      // A descriptor reservation can wait for earlier publications. Submit their
+      // producer buffer before reserving the next batch; this does not wait for
+      // GPU completion.
+      if (s->waiting()) s->signalled(false);
       ncclMeshStream on = {(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, nullptr,
                            nullptr, (__bridge void *)residency, polls, records};
       ncclResult_t made = ncclGroupStart();
