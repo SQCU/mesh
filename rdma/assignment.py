@@ -1,8 +1,7 @@
 # design/whole-function.md
 import math
 import numpy as np
-from allocate import equal_finish
-from whole import project, simplex
+from allocate import equal_finish, project, simplex
 
 
 def declare(comm, calls):

@@ -464,7 +464,62 @@ def pareto(rows, coordinate=('ctx_in', 'ctx_out')):
 
 def project_parts(parts, total, grain):
     """Configuration-only proportional projection onto a changed extent."""
-    from whole import project
     scale = total / sum(parts) if sum(parts) else 0
     values = [p * scale for p in parts] if scale else [total / len(parts)] * len(parts)
     return project(values, total, grain, [0] * len(parts), [total] * len(parts))
+
+
+SHARE_TICKS = 1 << 40
+
+
+def project(values, total, grain, low, high):
+    """design/whole-function.md#finite-differences"""
+    grain, total = int(grain), int(total)
+    if grain <= 0 or not values or len(values) != len(low) or len(values) != len(high):
+        raise ValueError('allocation dimensions and grain must be valid')
+    lower = [math.ceil(x / grain) for x in low]
+    upper = [math.floor(x / grain) for x in high]
+    units = total // grain
+    if total % grain or not sum(lower) <= units <= sum(upper):
+        raise ValueError('infeasible allocation lattice')
+    values = [float(x) / grain for x in values]
+    left = min(x - hi for x, hi in zip(values, upper)) - 1
+    right = max(x - lo for x, lo in zip(values, lower)) + 1
+    for _ in range(64):
+        middle = (left + right) / 2
+        if sum(max(lo, min(hi, x - middle)) for x, lo, hi in zip(values, lower, upper)) > units:
+            left = middle
+        else:
+            right = middle
+    real = [max(lo, min(hi, x - right)) for x, lo, hi in zip(values, lower, upper)]
+    result = [math.floor(x) for x in real]
+    order = sorted(range(len(result)), key=lambda i: (-(real[i] - result[i]), i))
+    for i in order:
+        if sum(result) == units:
+            break
+        if result[i] < upper[i]:
+            result[i] += 1
+    if sum(result) != units:
+        raise ArithmeticError('allocation projection lost units')
+    return [x * grain for x in result]
+
+
+def simplex(values, total, low, high):
+    """Project linear shares onto a bounded simplex with 40 fractional bits.
+
+    The precision is explicit (9.1e-13 of a decision), with exact zero/one and
+    conservation, without exponential tails or a positive allocation floor.
+    The transport's coarser allocation is separate.
+    """
+    if not total > 0 or not all(math.isfinite(v) for v in [total, *values, *low, *high]):
+        raise ValueError('simplex operands must be finite with a positive total')
+    ticks = SHARE_TICKS
+    from fractions import Fraction
+    ratio = Fraction(ticks) / Fraction(total)
+    # Tiny operands are explicitly below representation precision. Do not
+    # divide them into subnormals on the way to an inevitable rounded zero.
+    scaled = [0.0 if abs(v) < total / ticks else v / total * ticks for v in values]
+    result = project(scaled, ticks, 1,
+                     [math.ceil(Fraction(v) * ratio) for v in low],
+                     [math.floor(Fraction(v) * ratio) for v in high])
+    return [v / ticks * total for v in result]
