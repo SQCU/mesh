@@ -198,6 +198,9 @@ def aggregate_measurements(ranks):
             result.append({'function_seconds': seconds,
                            'useful_output_bytes': useful,
                            'useful_gigabytes_per_second': useful / seconds / 1e9 if useful is not None else None})
+            if all('rows' in value and 'steps' in value for value in values):
+                result[-1].update(completed_rows=values[0]['rows'] * values[0]['steps'],
+                                  aggregate_rows_per_second=values[0]['rows'] * values[0]['steps'] / seconds)
     return result
 
 
