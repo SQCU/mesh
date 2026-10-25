@@ -871,8 +871,8 @@ def optimization_measures(record_rows):
                 for name, value in update.items():
                     if isinstance(value, (int, float)):
                         update_values[arm][name].append(value)
-            checkpoint = (record.get("artifacts") or {}).get("checkpoint_out") or {}
-            initial = (record.get("artifacts") or {}).get("checkpoint_initial") or {}
+            state_arms = record.get("state_arms", [])
+            initial_arms = record.get("initial_state_arms", [])
             observation = {
                 "record": record.get("id"),
                 "arm": arm,
@@ -880,13 +880,13 @@ def optimization_measures(record_rows):
                 "telemetry_update_counter_measure": scalar_measure(
                     row.get("updates") for row in rows if "updates" in row
                 ),
-                "checkpoint": checkpoint,
-                "initial_checkpoint": initial,
+                "state_available": arm in state_arms,
+                "initial_state_available": arm in initial_arms,
             }
             training.append(observation)
             training_by_arm[arm].append(observation)
         checkpoints = (
-            (record.get("realization_measures") or {}).get("checkpoint_observations") or {}
+            (record.get("realization_measures") or {}).get("state_observations") or {}
         )
         for arm, source in checkpoints.items():
             source_mass = int(source.get("source_weight_mass") or 0)
@@ -920,18 +920,8 @@ def optimization_measures(record_rows):
                 isinstance(value, (int, float)) and np.isfinite(value) and value > 0
                 for value in update_values[arm].get("gradient_norm", ())
             ),
-            "checkpoint_output_exists_mass": sum(
-                bool(row["checkpoint"].get("exists")) for row in training_rows
-            ),
-            "initial_checkpoint_exists_mass": sum(
-                bool(row["initial_checkpoint"].get("exists")) for row in training_rows
-            ),
-            "checkpoint_output_bytes_measure": scalar_measure(
-                row["checkpoint"].get("bytes") for row in training_rows
-            ),
-            "initial_checkpoint_bytes_measure": scalar_measure(
-                row["initial_checkpoint"].get("bytes") for row in training_rows
-            ),
+            "state_available_mass": sum(row["state_available"] for row in training_rows),
+            "initial_state_available_mass": sum(row["initial_state_available"] for row in training_rows),
             "heldout_checkpoint_observation_mass": len(heldout_rows),
             "heldout_loaded_source_weight_fraction_measure": scalar_measure(
                 row.get("loaded_source_weight_fraction") for row in heldout_rows
@@ -1279,8 +1269,7 @@ def fabric_space_measures(rows):
         ),
     }
 
-def fabric_measures(run_dir, records):
-    supervisor = load_jsonl(os.path.join(run_dir, "supervisor.jsonl"))
+def fabric_measures(records, supervisor):
     supervisor_start = next((
         row for row in reversed(supervisor)
         if row.get("event") == "supervisor_start"
@@ -1306,14 +1295,7 @@ def fabric_measures(run_dir, records):
         })
         peak = (record.get("realized") or {}).get("peak_configuration") or {}
         roofline_artifact = (record.get("artifacts") or {}).get("roofline") or {}
-        roofline = None
-        path = roofline_artifact.get("path")
-        if path and os.path.isfile(path):
-            try:
-                with open(path) as stream:
-                    roofline = json.load(stream)
-            except (OSError, json.JSONDecodeError):
-                roofline = None
+        roofline = record.get("roofline")
         execution = record.get("execution") or {}
         realized_players = peak.get("players")
         realized_carts = peak.get("carts")
@@ -1342,8 +1324,7 @@ def fabric_measures(run_dir, records):
         },
     }
 
-def summarize(run_dir):
-    records = load_jsonl(os.path.join(run_dir, "matches.jsonl"))
+def summarize(records, supervisor=()):
     contests = []
     measurements = defaultdict(list)
     outcomes = defaultdict(lambda: defaultdict(lambda: [0.0, 0]))
@@ -1353,7 +1334,7 @@ def summarize(run_dir):
     record_rows = []
     for record in records:
         cfg = record.get("configuration") or {}
-        rows = load_jsonl(telemetry_path(record))
+        rows = record.get("measurements", [])
         record_rows.append((record, rows))
         metrics = arm_metrics(record, rows)
         team_arms = cfg.get("team_policy_arms") or []
@@ -1545,7 +1526,6 @@ def summarize(run_dir):
             "behavior_measure": behavior,
         }
     return {
-        "run_dir": os.path.abspath(run_dir),
         "record_count": len(records),
         "paired_block_count": len(contests),
         "paired_round_count": sum(match["rounds"] for match in contests),
@@ -1565,24 +1545,30 @@ def summarize(run_dir):
         "arms": arms,
         "pairwise": pairs,
         "optimization_measures": optimization_measures(record_rows),
-        "fabric_measures": fabric_measures(run_dir, records),
+        "fabric_measures": fabric_measures(records, supervisor),
     }
 
 def write_report(path, result):
     path = os.path.abspath(os.path.expanduser(path))
-    temporary = path + ".new"
-    with open(temporary, "w") as stream:
-        json.dump(result, stream, indent=2, sort_keys=True)
-        stream.write("\n")
-    os.replace(temporary, path)
+    text = json.dumps(result, sort_keys=True, separators=(',', ':')) + '\n'
+    with open(path, 'w') as stream:
+        stream.write(text)
     return path
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("run_dir")
     parser.add_argument("--output")
     args = parser.parse_args(argv)
-    result = summarize(args.run_dir)
+    records = load_jsonl(os.path.join(args.run_dir, "matches.jsonl"))
+    for record in records:
+        record["measurements"] = load_jsonl(telemetry_path(record))
+        roofline_path = ((record.get("artifacts") or {}).get("roofline") or {}).get("path")
+        if roofline_path:
+            with open(roofline_path) as source:
+                record["roofline"] = json.load(source)
+    result = summarize(records, load_jsonl(os.path.join(args.run_dir, "supervisor.jsonl")))
     encoded = json.dumps(result, indent=2, sort_keys=True)
     if args.output:
         write_report(args.output, result)

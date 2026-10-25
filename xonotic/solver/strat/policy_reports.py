@@ -1,26 +1,8 @@
 import itertools
 import json
-import os
-from pathlib import Path
-import time
 
 import numpy as np
 
-
-
-def publish_active_run(telemetry):
-    run = Path(telemetry).resolve().parent.parent
-    active = run.parent / "active"
-    temporary = run.parent / f".active-{os.getpid()}"
-    temporary.unlink(missing_ok=True)
-    temporary.symlink_to(run)
-    os.replace(temporary, active)
-    registry = Path.home() / '.local/share/mesh/xonotic-active.json'
-    registry.parent.mkdir(parents=True, exist_ok=True)
-    temporary = registry.with_name(f'.xonotic-active-{os.getpid()}.json')
-    temporary.write_text(json.dumps({'schema': 1, 'application': 'xonotic', 'root': str(run),
-        'telemetry': str(Path(telemetry).resolve()), 'producer_pid': os.getpid(), 'published_at': time.time()}))
-    os.replace(temporary, registry)
 
 
 def reporting_coverage(frame, measure, study, composition=None):

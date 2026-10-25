@@ -798,8 +798,7 @@ class Strategy:
     score slice, which is the regression rule in utility form. REINFORCE
     with per-team EMA baselines trains the twelve scalars."""
 
-    def __init__(self, path, seed=SEED, lr=0.1, lr_w=0.5, reg=0.01, qkv=False):
-        self.path = os.path.expanduser(path) if path else ""
+    def __init__(self, state=None, seed=SEED, lr=0.1, lr_w=0.5, reg=0.01, qkv=False):
         self.lr, self.lr_w, self.reg, self.qkv = lr, lr_w, reg, qkv
         self.rng = np.random.default_rng(seed)
         self.names = sorted(THETA)
@@ -809,18 +808,18 @@ class Strategy:
         self.qkvw = 0.0
         self.base = np.zeros(TEAMS + 1, np.float64)
         self.eps = 0
-        if self.path and os.path.exists(self.path):
-            z = np.load(self.path, allow_pickle=False)
+        if state:
+            z = state
             saved = {str(k): float(v) for k, v in zip(z["names"], z["theta"])} \
                 if "names" in z else {}
             for k in self.names:
                 if k in saved:
                     self.theta[k] = saved[k]
-            if "W" in z.files and z["W"].shape == self.W.shape:
+            if "W" in z and z["W"].shape == self.W.shape:
                 self.W = z["W"].astype(np.float32)
-            if "M" in z.files and z["M"].shape == self.M.shape:
+            if "M" in z and z["M"].shape == self.M.shape:
                 self.M = z["M"].astype(np.float32)
-            if "qkvw" in z.files:
+            if "qkvw" in z:
                 self.qkvw = float(z["qkvw"])
             self.base = z["base"].astype(np.float64)
             self.eps = int(z["eps"])
@@ -843,14 +842,9 @@ class Strategy:
         self.ent = {}
         self.ndec = np.zeros(TEAMS + 1, np.int64)
 
-    def save(self):
-        if not self.path:
-            return
-        tmp = self.path + ".tmp.npz"
-        np.savez(tmp, names=np.array(self.names),
-                 theta=np.array([self.theta[k] for k in self.names]),
-                 W=self.W, M=self.M, qkvw=self.qkvw, base=self.base, eps=self.eps)
-        os.replace(tmp, self.path)
+    def state(self):
+        return dict(names=np.array(self.names), theta=np.array([self.theta[k] for k in self.names]),
+                    W=self.W.copy(), M=self.M.copy(), qkvw=self.qkvw, base=self.base.copy(), eps=self.eps)
 
     def _pick_leader(self, j, ids, dom):
         best = int(np.argmax(dom))
@@ -1370,12 +1364,12 @@ def local_backend():
     return "torch" if torch is not None else "np"
 
 
-def run_synth(episodes, T, seed, ep_ticks, hold, lr, theta_path, log=True,
+def run_synth(episodes, T, seed, ep_ticks, hold, lr, theta_values=None, log=True,
               strat=None, train=True, overrides=None, explore=None,
               env_items=True, lr_w=0.5, reg=0.01, qkv=False):
     solver = CtxSolver(T, local_backend())
     if strat is None:
-        strat = Strategy(theta_path, seed, lr, lr_w, reg, qkv)
+        strat = Strategy(theta_values, seed, lr, lr_w, reg, qkv)
     else:
         strat.rng = np.random.default_rng(seed)
     for k, v in (overrides or {}).items():
@@ -1440,7 +1434,6 @@ def run_synth(episodes, T, seed, ep_ticks, hold, lr, theta_path, log=True,
         support.extend(len(v) for v in ep_insts.values())
         if train:
             strat.update(R)
-            strat.save()
         else:
             strat._reset_episode()
         banked.append(float(dbank[1:env.nteams + 1].mean()))
@@ -1763,9 +1756,10 @@ def serve(config):
     report("solver_started", rank=world.rank, size=world.size, backend=config["backend"],
            device=solver.device if config["backend"] == "torch" else "cpu", ctx=config["ctx"], columns=solver.columns,
            flops_per_solve=ctx_flops(config["ctx"], config["maxrows"]))
+    result = None
     try:
         if world.rank == 0:
-            relay(config, world, solver, header, rows, stopping, wake)
+            result = relay(config, world, solver, header, rows, stopping, wake)
         else:
             while True:
                 world.bcast(header)
@@ -1779,9 +1773,13 @@ def serve(config):
         report("solver_finished", rank=world.rank, solves=solver.solves, columns=solver.columns,
                collective_s=round(solver.collective_s, 3), signal=stopping["signal"])
         world.free()
+    return result
 
 
 def relay(config, world, solver, header, rows, stopping, wake):
+    measurements = []
+    def record(event, **fields):
+        measurements.append({'event': event, **fields})
     trained = config["policy"] == "trained"
     pick_of = POLICIES.get(config["policy"], np.argmax)
     response = kind_of(config["response"])
@@ -1794,21 +1792,17 @@ def relay(config, world, solver, header, rows, stopping, wake):
     # (mesh_open(node, NONE, PLAN, 8, maxclients), mesh_scatter_rows into pick, weights and leader, the per-team vote;
     # ef6adb10^) is not restored, so the solver's rows reach no bot. Deferred by the operator 2026-10-17.
     if response is None:
-        report("response_kind_undefined", response=config["response"], wire=str(engine.path),
+        record("response_kind_undefined", response=config["response"], wire=str(engine.path),
                detail="rdma/xonwire.def defines no such kind; the solve runs and its rows are not sent")
     strat = meter = itimer = None
     if trained:
-        strat = Strategy(config["theta"], config["train_seed"], config["lr"], config["lr_w"], config["reg"],
+        strat = Strategy(config.get("theta_values"), config["train_seed"], config["lr"], config["lr_w"], config["reg"],
                          config["qkv"])
         meter = MatchMeter()
         itimer = ItemTracker()
-        report("strategy", dominance=DOM_FORMULA, scalars=strat.table(), episodes=strat.eps,
+        record("strategy", dominance=DOM_FORMULA, scalars=strat.table(), episodes=strat.eps,
                mode="greedy eval, no updates" if config["eval"] else "sampling + online REINFORCE",
                logit_field=NBUCKET * RES * NALLOC)
-    tr = open(config["trace"], "w", buffering=1) if config.get("trace") else None
-    if tr:
-        tr.write("req,tick,live,prog,pick0,pick1,pick2,pick3,pick4,"
-                 "held0,held1,held2,held3,held4,d1,d2,x1,x2,y1,y2\n")
     served, blocks, solve_s = 0, 0, 0.0
     tick_in_ep = 0
     episode = None
@@ -1854,11 +1848,10 @@ def relay(config, world, solver, header, rows, stopping, wake):
                     ent = {j: round(float(np.mean(v)), 2) for j, v in strat.ent.items() if v}
                     if not config["eval"]:
                         strat.update(R)
-                        strat.save()
                     else:
                         strat._reset_episode()
                     present = sorted(set(X[:, 1].astype(np.int32)) & set(range(1, TEAMS + 1)))
-                    report("learn", episode=strat.eps, dprog=[round(float(v), 4) for v in dprog],
+                    record("learn", episode=strat.eps, dprog=[round(float(v), 4) for v in dprog],
                            banked=[round(float(dbank[j]), 1) for j in range(1, TEAMS + 1)],
                            returns=[round(float(R[j]), 3) for j in range(1, TEAMS + 1)], lead=strat.team_lead,
                            policy_entropy=ent, w_max=float(np.abs(strat.W).max()), scalars=strat.table(),
@@ -1880,16 +1873,8 @@ def relay(config, world, solver, header, rows, stopping, wake):
                 engine.send(address, node, frames(response, done["req_id"], tick, out, config["framebytes"], session))
             served += n
             blocks += 1
-            if tr:
-                hist = np.bincount(pick.astype(np.int32) % TEAMS, minlength=TEAMS).tolist()
-                back = np.bincount(np.clip(X[:, 15], 0, K_CARTS * TEAMS - 1).astype(np.int32) % TEAMS,
-                                   minlength=TEAMS).tolist()
-                col = lambda t, c: float(X[X[:, 1] == t, c].mean()) if (X[:, 1] == t).any() else 0.0
-                tr.write(",".join(str(v) for v in
-                         [done["req_id"], tick, int((X[:, 1] > 0).sum()), float(X[0, 20])] + hist + back +
-                         [col(1, 11), col(2, 11), col(1, 5), col(2, 5), col(1, 6), col(2, 6)]) + "\n")
             if not config.get("quiet"):
-                report("plan", request=done["req_id"], tick=tick, rows=n, live=int((X[:, 1] > 0).sum()),
+                record("plan", request=done["req_id"], tick=tick, rows=n, live=int((X[:, 1] > 0).sum()),
                        picks=np.bincount(pick.astype(np.int32) % TEAMS, minlength=TEAMS).tolist(),
                        objective=objective[1:].astype(int).tolist(), columns=solver.columns,
                        solve_ms=round(1e3 * (time.monotonic() - began), 3))
@@ -1897,11 +1882,10 @@ def relay(config, world, solver, header, rows, stopping, wake):
         header[...] = 0
         header[0] = STOP
         world.bcast(header)
-        report("relay_finished", blocks=blocks, rows=served, solve_ms=round(1e3 * solve_s / max(1, blocks), 3),
+        record("relay_finished", blocks=blocks, rows=served, solve_ms=round(1e3 * solve_s / max(1, blocks), 3),
                transport=engine.report(), frames=joined.report())
         engine.close()
-        if tr:
-            tr.close()
+    return {'event': 'solver_result', 'strategy': strat.state() if strat is not None else None, 'measurements': measurements}
 
 
 def main():
@@ -1926,7 +1910,12 @@ def main():
     if a.mode == "serve":
         if not a.config:
             ap.error("serve takes its configuration document (xonotic/README.md \"The solver\")")
-        serve(json.loads(Path(a.config).read_text()))
+        config = json.loads(Path(a.config).read_text())
+        if config.get('theta') and os.path.isfile(config['theta']):
+            with np.load(config['theta'], allow_pickle=False) as source:
+                config['theta_values'] = {name: source[name] for name in source.files}
+        result = serve(config)
+        print(json.dumps(result, default=lambda value: np.asarray(value).tolist()), flush=True)
         return
     if a.check:
         sys.exit(0 if check(a.rows) else 1)
@@ -1936,9 +1925,13 @@ def main():
     if a.synth:
         if a.episode is None or a.hold is None:
             ap.error("--synth takes its episode length and hold in ticks (--episode, --hold)")
+        theta_values = None
+        if a.theta != THETA_PATH:
+            with np.load(a.theta, allow_pickle=False) as source:
+                theta_values = {name: source[name] for name in source.files}
         rets, banked, strat, stats = run_synth(
             a.synth, a.ctx, a.train_seed, a.episode, a.hold, a.lr,
-            a.theta if a.theta != THETA_PATH else "",
+            theta_values,
             lr_w=a.lr_w, reg=a.reg, qkv=a.qkv)
         k = max(1, min(100, a.synth // 4))
         print(f"synth: mean shared-theta return (the REINFORCE objective) first{k} "

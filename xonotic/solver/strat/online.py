@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 from collections import deque
 from contextlib import nullcontext
@@ -14,7 +13,7 @@ from .checkpoint_state import (
     ARCH_KEY, ARCH_SPEC_KEY, POLICY_KEY, POLICY_VERSION_KEY, RNG_KEY,
     REWARD_CONTRACT_KEY, LINEAGE_INITIAL_KEY, POLICY_VERSIONS, architecture_fingerprint,
     architecture_spec, tensor_tree_measurement, whole_tensor_tree,
-    Payload, atomic_save, checkpoint_metadata, checkpoint_parameters, open_checkpoint,
+    Payload, checkpoint_metadata, checkpoint_parameters,
 )
 from .game_value import reward_fingerprint, winner
 from .policy_contract import POLICY_ACTOR_WEIGHT, POLICY_MOE_BALANCE_WEIGHT, POLICY_RATIO_CLIP, POLICY_ROLLOUT_IS_THRESHOLD, POLICY_LOG_RATIO_BOUND
@@ -48,8 +47,7 @@ class OnlineLearner:
         learning_rate: float = 3e-4,
         gradient_clip: float = 1.0,
         gamma: float = 0.95,
-        checkpoint=None,
-        load_checkpoint=None,
+        state=None,
         replay_capacity: int = 1024,
         replay_memory_mb: float = 256.0,
         replay_precision: str = "float32",
@@ -70,7 +68,6 @@ class OnlineLearner:
         self.program = PolicyProgram(self.wally, policy_forward, learner=self, world=world, arm=policy_arm,
                                      device=device, lead=lead)
         self.program.train(learning_rate, OPTIMIZER_WEIGHT_DECAY, gradient_clip, policy_arm)
-        self.checkpoint = checkpoint
         self.updates = 0
         self.replay = Replay(replay_capacity, int(replay_memory_mb * (1 << 20)))
         self.episode = Replay(replay_capacity, int(replay_memory_mb * (1 << 20)))
@@ -109,14 +106,14 @@ class OnlineLearner:
         self.optimizer_moment_measurement = {}
         self.initial_checkpoint_sha256 = None
         self.continuation = {"mode": "fresh", "source": None, "source_updates": None, "exception": None}
-        source = load_checkpoint or checkpoint
-        if source is not None and os.path.exists(source):
-            self._load_full(source)
+        if state is not None:
+            self._load_full(state)
         self.input_arena = InputArena(device)
         self.item_storage = TensorStorage(device=device)
         self.loss_traces = self.update_traces = self.accumulation_traces = 0
 
-    def _load_full(self, source, payload=None):
+    def _load_full(self, payload):
+        source = 'operand'
         initial_parameters = parameters_of(self.wally)
         initial_optimizer = self.program.optimizer.state()
         state = {}
@@ -125,7 +122,7 @@ class OnlineLearner:
         source_metadata = {}
         error = None
         try:
-            with (open_checkpoint(source) if payload is None else nullcontext(Payload(payload))) as data:
+            with nullcontext(Payload(payload)) as data:
                 source_metadata = checkpoint_metadata(data)
                 source_weights = [(key, data[key]) for key in data.files if not key.startswith("__")]
                 weights = tensor_tree_measurement(initial_parameters.items(), source_weights)
@@ -515,9 +512,3 @@ class OnlineLearner:
         for index, pool in enumerate(self.awaiting_outcomes.values()):
             payload.update(pool.export_payload(f"__awaiting_{index}__"))
         return payload
-
-    def save(self, path=None):
-        target = path or self.checkpoint
-        if target is not None:
-            atomic_save(target, self.export_payload())
-            self.program.save_shard(target)

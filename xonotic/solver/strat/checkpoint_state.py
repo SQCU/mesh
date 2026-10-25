@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import base64
+import io
 import json
 import os
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 import numpy as np
 import torch
@@ -26,6 +28,15 @@ class Payload(dict):
     @property
     def files(self):
         return list(self)
+
+def encode_payload(payload):
+    buffer = io.BytesIO()
+    write_payload(buffer, payload)
+    return base64.b64encode(buffer.getvalue()).decode('ascii')
+
+def decode_payload(value):
+    with np.load(io.BytesIO(base64.b64decode(value)), allow_pickle=False) as source:
+        return Payload({name: source[name] for name in source.files})
 
 class CheckpointView:
     # ../../../../design/algorithm-sources.md#canonical-continuation-subtrees
@@ -147,11 +158,11 @@ def whole_tensor_tree(live_items, source_items):
         raise ValueError("checkpoint tensor tree contains non-finite coordinates")
     return {name: source[name] for name in live}, measurement
 
-def load_module_checkpoint(module, path, live_arm, live_reward_contract):
+def load_module_checkpoint(module, payload, live_arm, live_reward_contract):
     live = dict(parameter_items(module))
     measurement = {
-        "path": path,
-        "path_exists": bool(path and os.path.isfile(path)),
+        "path": None,
+        "path_exists": payload is not None,
         "source_weight_mass": 0,
         "live_weight_mass": len(live),
         "loaded_weight_mass": 0,
@@ -176,7 +187,7 @@ def load_module_checkpoint(module, path, live_arm, live_reward_contract):
         return _attach(module, measurement)
     before = list(live.items())
     try:
-        with open_checkpoint(path) as saved:
+        with nullcontext(Payload(payload)) as saved:
             source = [(name, saved[name]) for name in saved.files if not name.startswith('__')]
             tree_measurement = tensor_tree_measurement(live.items(), source)
             metadata = checkpoint_metadata(saved)
@@ -201,9 +212,9 @@ def load_module_checkpoint(module, path, live_arm, live_reward_contract):
         measurement["lineage_initial_sha256"] = None
     return _attach(module, measurement)
 
-def load_policy(module, checkpoint, policy_arm):
+def load_policy(module, payload, policy_arm):
     measurement = load_module_checkpoint(
-        module, checkpoint, policy_arm, reward_fingerprint(policy_arm),
+        module, payload, policy_arm, reward_fingerprint(policy_arm),
     )
     print(json.dumps({"event": "checkpoint_measurement", **measurement}), flush=True)
     return module
@@ -214,8 +225,6 @@ def policy_source(arm, model, checkpoint, mode):
         "arm": arm,
         "mode": mode,
         "checkpoint": checkpoint,
-        "checkpoint_bytes": os.path.getsize(checkpoint_source(checkpoint)) if checkpoint and os.path.exists(checkpoint) else 0,
-        "checkpoint_sha256": checkpoint_sha256(checkpoint),
         "source_weight_mass": 0 if model is None else int(getattr(model, "checkpoint_source_weight_mass", 0)),
         "live_weight_mass": 0 if model is None else int(getattr(model, "checkpoint_live_weight_mass", 0)),
         "loaded_weight_mass": 0 if model is None else int(getattr(model, "checkpoint_loaded_weight_mass", 0)),

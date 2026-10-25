@@ -1,4 +1,3 @@
-import os
 import time
 from typing import NamedTuple
 
@@ -340,40 +339,21 @@ class PolicyProgram:
         return (np.asarray(total.detach().cpu().numpy() if torch.is_tensor(total) else total),
                 np.asarray(parts.detach().cpu().numpy() if torch.is_tensor(parts) else parts), np.asarray(magnitude))
 
-    def save_shard(self, path):
-        """A rank's shard of the parameters and their moments beside rank 0's checkpoint (`path`.rank<r>.npz): the
-        columns a world's parts give it, which no other rank holds."""
-        self.announce('save_shard', path)
+    def export_shard(self):
         sharded = getattr(self.model, 'sharded', frozenset())
-        if not sharded or self.world is None or self.world.rank == 0:
-            return
-        payload = {name: value.detach().cpu().numpy() for name, value in self.model.named_parameters() if name in sharded}
+        payload = {name: value.detach().cpu().numpy().copy()
+                   for name, value in self.model.named_parameters() if name in sharded} if self.model is not None else {}
         if self.optimizer is not None:
             payload.update({'__opt__' + name: value for name, value in self.optimizer.state().items()})
-        payload['__parts__'] = np.asarray(self.world.products.get('scale', []), np.float64)
-        target = f'{path}.rank{self.world.rank}.npz'
-        os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
-        np.savez(target + '.tmp.npz', **payload)
-        os.replace(target + '.tmp.npz', target)
+        return payload
 
-    def load_shard(self, path):
-        """Every other rank loads its shard saved beside rank 0's checkpoint `path` (save_shard): rank 0 announces it
-        once it has loaded `path` itself, so every rank's columns come from the same lineage."""
-        self.announce('load_shard', path)
-        sharded = getattr(self.model, 'sharded', frozenset())
-        target = f'{path}.rank{self.world.rank}.npz' if self.world is not None else None
-        if not sharded or target is None or self.world.rank == 0 or not os.path.isfile(target):
-            return False
-        with np.load(target, allow_pickle=False) as source:
-            if list(source['__parts__']) != list(self.world.products.get('scale', [])):
-                return False
-            with torch.no_grad():
-                for name, value in self.model.named_parameters():
-                    if name in sharded:
-                        value.copy_(torch.from_numpy(source[name]))
-            if self.optimizer is not None:
-                self.optimizer.load({name[7:]: source[name] for name in source.files if name.startswith('__opt__')})
-        return True
+    def restore_shard(self, payload):
+        with torch.no_grad():
+            for name, value in self.model.named_parameters() if self.model is not None else ():
+                if name in payload:
+                    value.copy_(torch.as_tensor(payload[name], device=value.device))
+        if self.optimizer is not None:
+            self.optimizer.load({name[7:]: value for name, value in payload.items() if name.startswith('__opt__')})
 
     def crop(self, out, frame):
         n, width = frame.state.shape
@@ -412,8 +392,6 @@ def serve(world, initialize):
         elif name == 'contribute':
             before, after, item, weights, reset = operands
             program.contribute(before, after, item, weights, reset)
-        elif name in ('save_shard', 'load_shard'):
-            getattr(program, name)(*operands)
         else:
             getattr(program, name)()
     return programs

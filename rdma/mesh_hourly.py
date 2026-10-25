@@ -21,6 +21,9 @@ from mesh_source import MANIFEST, export, pin, verify
 
 REQUIRED = ('rdma/mesh_hourly.py', 'rdma/mesh_nodes.py', 'rdma/mesh_source.py',
             'rdma/mesh_install.py', 'rdma/mesh-install-state.c')
+# Observations belong to the application lifetime, never the measurement ledger.
+HISTORY = {}
+
 FIGURES = ('steady_step_microseconds', 'step_microseconds', 'crossing_microseconds',
            'steady_tick_microseconds', 'tick_microseconds', 'aggregate_rows_per_second',
            'steady_aggregate_rows_per_second', 'per_stream_steps_per_second')
@@ -44,6 +47,14 @@ def measurement_values(record, tag):
     """Read both historical ledger rows and current structured workload results."""
     if 'result' in record:
         record = json.loads(Path(record['result']).read_text())
+    if record.get('schema') == 3:
+        item = record['us,GB/s'].get(tag)
+        if not item or len(item) != 1 or item[0] is None:
+            return {}
+        us, rate, *rows = item[0]
+        return {'function_seconds': [us / 1e6, None],
+                'useful_gigabytes_per_second': [rate, None],
+                **({'aggregate_rows_per_second': [rows[0], None]} if rows else {})}
     if tag in record:
         return record[tag]
     workload = next((item for item in record.get('workloads', []) if item['tag'] == tag), {})
@@ -54,8 +65,28 @@ def measurement_values(record, tag):
     return dict(figures, ranks={name: f'exit {value["exit"]}' for name, value in ranks.items()})
 
 
-def save(path, value):
-    Path(path).write_text(json.dumps(value, separators=(',', ':'), sort_keys=True) + '\n')
+def compact(record):
+    """Completion time and useful rate, in the committed configuration's shape order."""
+    def rounded(value):
+        number = float(format(value, '.3g'))
+        return int(number) if number.is_integer() else number
+    rows, errors = {}, []
+    for item in record['workloads']:
+        rows[item['tag']] = [
+            [rounded(m.get('function_seconds', m.get('amortized_seconds_per_call')) * 1e6),
+             rounded(m['useful_gigabytes_per_second']),
+             *([round(m['aggregate_rows_per_second'])] if 'aggregate_rows_per_second' in m else [])]
+            for m in item['metrics']]
+        if item['status'] != 'completed':
+            errors.append([item['tag'], item.get('error', 'incomplete')[:160]])
+    errors.extend([e.get('stage', 'driver'), e.get('error', e.get('stderr', 'failed'))[-160:]]
+                  for e in record['errors'])
+    result = {'schema': 3, 'commits': record['commits'], 'unix': int(record['started_unix']),
+              'nodes': [r['number'] for r in record['nodes'].values() if r['status'] == 'installed'],
+              'us,GB/s': rows}
+    if record['status'] != 'completed':
+        result['errors'] = errors or [['run', 'incomplete']]
+    return result
 
 
 def launcher(mesh_root, microbench_root, output_root):
@@ -80,7 +111,6 @@ def _launch(mesh_root, microbench_root, output_root):
         # Resolve both main commits before exporting either. Later commits or
         # an interactive branch checkout cannot change this invocation's inputs.
         record['commits'] = {name: pin(root, 'refs/heads/main') for name, root in roots.items()}
-        (out / 'commits').write_text(''.join(f'{name} {sha}\n' for name, sha in record['commits'].items()))
         for name, root in roots.items():
             target = output_root / '.sources' / name / record['commits'][name]
             if not target.exists():
@@ -96,11 +126,7 @@ def _launch(mesh_root, microbench_root, output_root):
             raise RuntimeError(f'pinned mesh commit lacks shared hourly prerequisites: {absent}')
         config = committed_bench / 'tools/mesh/hourly/workloads.json'
         record['configuration'] = {'path': str(config.relative_to(committed_bench))}
-        record['history'] = {}
-        for previous in sorted(output_root.glob('*/result.json'))[-64:]:
-            for item in json.loads(previous.read_text()).get('workloads', []):
-                rows = item.get('observations', [])
-                record['history'].setdefault(item['tag'], []).extend(rows)
+        record['history'] = HISTORY
         child = subprocess.run([sys.executable, str(committed_mesh / 'rdma/mesh_hourly.py'), 'execute'],
                                cwd=committed_mesh, input=json.dumps(record), capture_output=True, text=True)
         if child.stdout:
@@ -113,12 +139,11 @@ def _launch(mesh_root, microbench_root, output_root):
     except Exception as error:
         record['errors'].append({'stage': 'snapshot/export', 'error': str(error), 'traceback': traceback.format_exc()})
     record['finished_unix'] = time.time()
-    save(out / 'result.json', record)
-    summary = {key: record[key] for key in ('run', 'commits', 'status', 'started_unix', 'finished_unix')}
-    summary['workloads'] = [{key: item[key] for key in ('tag', 'status', 'metrics')} for item in record['workloads']]
+    for item in record['workloads']:
+        HISTORY[item['tag']] = (HISTORY.get(item['tag'], []) + item.get('observations', []))[-64:]
+    (out / 'result.json').write_text(json.dumps(compact(record), separators=(',', ':')) + '\n')
     with (output_root / 'log.jsonl').open('a') as log:
-        log.write(json.dumps({'run': record['run'], 'result': str(out / 'result.json')}) + '\n')
-    print(json.dumps(summary, separators=(',', ':')), flush=True)
+        log.write(json.dumps({'result': str(out / 'result.json')}, separators=(',', ':')) + '\n')
     return 0 if record['status'] == 'completed' else 1
 
 

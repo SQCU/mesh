@@ -1,5 +1,4 @@
 import argparse, json, os, select, signal, socket, sys, time, uuid
-from collections import deque
 from itertools import chain
 
 import numpy as np
@@ -19,17 +18,16 @@ from solver.strat.products import World
 from solver.strat.action_history import ActionHistory, source_features, view_observation
 from solver.strat.buffers import ObservationMemory
 from solver.strat.replay import Frame
-from solver.strat.checkpoint_state import Payload, atomic_save, pack_state, unpack_state, load_policy, policy_source, checkpoint_reference
-from solver.strat.journal import TrainingJournal
+from solver.strat.checkpoint_state import Payload, encode_payload, decode_payload, open_checkpoint, load_policy, policy_source
 from solver.strat.strategy import strategy
 from solver.strat.state_steering import PAGE_WIDTH, STATE_HEADER, state_labels, latent_labels, advance_key
-from solver.strat.policy_reports import compare_policies, publish_active_run
+from solver.strat.policy_reports import compare_policies
 from solver.xonwire import (
     Engine, RuntimeFrames, frames,
     CART_KIND, OBSERVATION_KIND, STRATEGY_KIND, TEAM_KIND, STATE_KIND,
 )
 from solver.strat.joracle.probe import LiteralJReporter
-from solver.strat.policy_contract import architecture_arm, is_matrix_fusion_arm, checkpoint_path
+from solver.strat.policy_contract import architecture_arm, is_matrix_fusion_arm
 from solver.strat.runtime import build_runtime_frame
 from solver.strat.work_estimate import strategy_work
 from solver.strat.game_value import formal_value_record, reward_contract
@@ -48,9 +46,6 @@ from payload.tools.strategy_io_schema import (
     OBS_WEAPON_COLUMNS,
 )
 
-CKPT = os.path.join(_HERE, "runs", "policy_ckpt_v6.npz")
-ONLINE_CKPT = os.path.join(_HERE, "runs", "policy_online_v6.npz")
-TELEM = os.path.join(_HERE, "runs", "cartserver_telemetry.jsonl")
 def team_resources(rows, teams):
     out = []
     for team in range(1, teams + 1):
@@ -103,8 +98,10 @@ def place(model, arm, world):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--placement", required=True,
+    ap.add_argument("--placement",
                     help="the call's placement document (xonotic/README.md \"The policy learner\"): device, products, socket, framebytes, strategy_interval, relaxation_time, anticipatory_lead")
+    ap.add_argument("--placement-json")
+    ap.add_argument("--state-stdin", action="store_true")
     ap.add_argument("--train", action="store_true")
     ap.add_argument("--train-arms")
     ap.add_argument("--match-metadata", default="{}")
@@ -119,15 +116,9 @@ def main():
     ap.add_argument("--off-policy-players", type=int, default=0)
     ap.add_argument("--learning-rate", type=float, default=3e-4)
     ap.add_argument("--gradient-clip", type=float, default=1.0)
-    ap.add_argument("--save-every", type=int, default=25)
     ap.add_argument("--checkpoint")
-    ap.add_argument("--online-checkpoint", default=ONLINE_CKPT)
-    ap.add_argument("--initial-checkpoint")
-    ap.add_argument("--resume-checkpoint")
-    ap.add_argument("--telemetry", default=TELEM)
     ap.add_argument("--environment", default="game2_server")
     ap.add_argument("--navigation-realization")
-    ap.add_argument("--append-telemetry", action="store_true")
     ap.add_argument("--model-sample-every", type=int, default=50)
     ap.add_argument("--measure-rows", type=int, default=4000)
     ap.add_argument("--seed", type=int, default=20260829)
@@ -145,12 +136,19 @@ def main():
     ap.add_argument("--replay-steps", type=int, help="deprecated; both policies take one step per fresh attributed group")
     args = ap.parse_args()
     from solver.strat.online import OnlineLearner, OPTIMIZER_WEIGHT_DECAY
-    with open(args.placement) as source:
-        placement = json.load(source)
+    packet = json.loads(sys.stdin.readline()) if args.state_stdin and int(os.environ.get('RANK', '0')) == 0 else {}
+    if args.placement_json:
+        placement = json.loads(args.placement_json)
+    elif 'placement' in packet:
+        placement = packet['placement']
+    else:
+        with open(args.placement) as source:
+            placement = json.load(source)
     device = placement["device"]
     lead = float(placement.get("anticipatory_lead", 0.0))
     interval, relaxation = float(placement["strategy_interval"]), float(placement["relaxation_time"])
     world = World(device, placement.get("products"))
+    state_store = world.dist.distributed_c10d._get_default_store() if world.dist is not None else None
     application = json.loads(os.environ.get('MESH_APPLICATION_IDENTITY', '{"state":"unbundled"}'))
     print(json.dumps({'event': 'application_runtime', 'application': application}), flush=True)
 
@@ -175,6 +173,25 @@ def main():
     for value in args.arm_checkpoint:
         arm, separator, path = value.partition('=')
         checkpoint_sources[arm if separator else args.policy_arm] = path if separator else value
+    states = {arm: decode_payload(value) for arm, value in packet.get('states', {}).items()}
+    shards = {rank: {arm: decode_payload(value) for arm, value in values.items()}
+              for rank, values in packet.get('shards', {}).items()}
+    for arm in evaluation_arms:
+        path = checkpoint_sources.get(arm) or args.checkpoint
+        if arm not in states and path:
+            with open_checkpoint(path) as source:
+                states[arm] = Payload({name: source[name] for name in source.files})
+            for rank in range(1, world.size):
+                target = f'{path}.rank{rank}.npz'
+                if os.path.isfile(target):
+                    with np.load(target, allow_pickle=False) as source:
+                        shards.setdefault(str(rank), {})[arm] = Payload({name: source[name] for name in source.files})
+    navigation_data = packet.get('navigation_realization')
+    if navigation_data is None and args.navigation_realization:
+        with open(args.navigation_realization) as source:
+            navigation_data = json.load(source)
+    navigation = NavigationRows(navigation_data) if navigation_data is not None else None
+    initial_states = {arm: decode_payload(value) for arm, value in packet.get('initial_states', {}).items()}
     def realize(width, schema_id):
         made_models, made_remotes = {}, {}
         widths = strategy_widths(width, args.scale_rank, args.scale_hidden,
@@ -192,204 +209,113 @@ def main():
         return made_models, made_remotes
 
     if world.rank:
-        def initialize_member(width, schema_id):
+        initial_shards = {}
+        def initialize_member(width, schema_id, member_shards):
             made, _ = realize(width, tuple(schema_id))
             out = {}
             for arm, (model, forward, seed) in made.items():
                 program = PolicyProgram(model, forward, world=world, arm=arm, device=device, lead=lead)
                 if arm in train_arms:
                     program.train(args.learning_rate, OPTIMIZER_WEIGHT_DECAY, args.gradient_clip, arm)
+                payload = member_shards.get(str(world.rank), {}).get(arm)
+                if payload is not None:
+                    program.restore_shard(payload)
+                initial_shards.setdefault(arm, {name: np.array(value, copy=True)
+                                               for name, value in program.export_shard().items()})
                 out[arm] = program
             return out
         print(json.dumps({'event': 'policy_member', **world.report()}), flush=True)
         try:
-            serve(world, initialize_member)
+            programs = serve(world, initialize_member)
+            state_store.set(f'mesh/strat/completed/{world.rank}', json.dumps({
+                'initial_shards': {arm: encode_payload(state) for arm, state in initial_shards.items()},
+                'shards': {arm: encode_payload(program.export_shard()) for arm, program in programs.items()}}))
         finally:
             world.close()
         return
     engine = Engine(placement["socket"], placement["framebytes"])
     route = {}
-    backlog = deque()
     inbox = RuntimeFrames(placement["framebytes"])
     models, learners, provenance, programs = {}, {}, {}, {}
     schema = None
     key = np.asarray([(args.seed >> 32) & 0xffffffff, args.seed & 0xffffffff], dtype=np.uint32)
     sampling_key = np.empty_like(key)
-    history = ActionHistory(args.measure_rows, args.replay_memory_mb * (1 << 20),
-                            os.path.abspath(args.online_checkpoint or CKPT) + '.actions', interval)
+    history = ActionHistory(args.measure_rows, args.replay_memory_mb * (1 << 20), interval)
     episode_key = None
     observation_memory = ObservationMemory()
     remotes = {}
     count = 0
     started = time.monotonic()
-    runstate_path = os.path.abspath(args.online_checkpoint or CKPT) + '.runstate.npz'
-    saved, saved_payload = None, None
-    if args.append_telemetry and os.path.isfile(runstate_path):
-        try:
-            with np.load(runstate_path, allow_pickle=False) as source:
-                saved_payload = Payload({name: np.asarray(source[name]) for name in source.files})
-            saved = unpack_state(saved_payload)
-        except (OSError, ValueError, KeyError) as error:
-            print(json.dumps({'event': 'runstate_recovery', 'error': str(error)}), flush=True)
-    generation = int(saved.get('journal_generation', 0)) if saved else 0
-    journal = TrainingJournal(saved['journal_path'] if saved else runstate_path + '.steps.0')
-    if saved is None:
-        open(journal.path, 'wb').close()
-    journal_offset = int(saved['journal_offset']) if saved else 0
-    recovery = deque(journal.read(journal_offset))
-    journal.repair_tail(recovery[-1][0] if recovery else journal_offset)
-    step_complete = True
+    measurements = []
     meter = WorkloadMeter('xonotic.strategy', {'environment': args.environment,
                           'policy_arm': 'mixed' if len(assigned) > 1 else args.policy_arm,
                           'host_role': 'responder', 'host': socket.gethostname()})
-    telemetry_path = os.path.abspath(args.telemetry)
-    os.makedirs(os.path.dirname(telemetry_path), exist_ok=True)
-    reporter = LiteralJReporter(args.measure_rows,
-                               os.path.join(os.path.dirname(telemetry_path), "j-measures." + os.path.basename(telemetry_path))).start()
-    published = False
-    telemetry = open(telemetry_path, 'a')
+    reporter = LiteralJReporter(args.measure_rows).start()
     producer_id = uuid.uuid4().hex
-    def save():
-        nonlocal journal, journal_offset, generation
-        if schema is None:
-            return
-        previous_journal = journal
-        if not recovery:
-            generation += 1
-        next_journal = journal if recovery else TrainingJournal(runstate_path + '.steps.' + str(generation))
-        with open(next_journal.path, 'ab' if recovery else 'wb') as target:
-            target.flush()
-            os.fsync(target.fileno())
-        state = {'model_key': key, 'resp_id': count, 'schema': schema, 'episode_key': episode_key,
-                 'history': history.export_state(),
-                 'observation_memory': observation_memory.export_state(),
-                 'transport': inbox.export_state(), 'backlog': list(backlog),
-                 'journal_path': next_journal.path, 'journal_offset': journal_offset if recovery else 0,
-                 'journal_generation': generation,
-                 'assigned': assigned, 'train_arms': train_arms, 'at': time.time()}
-        payload = pack_state(state)
-        for arm, learning in learners.items():
-            payload.update({f'__learner_{arm}__/{name}': value for name, value in learning.export_payload().items()})
-        atomic_save(runstate_path, payload)
-        history.collect_spills()
-        journal = next_journal
-        journal_offset = state['journal_offset']
-        if previous_journal.path != journal.path and os.path.isfile(previous_journal.path):
-            os.unlink(previous_journal.path)
-        for arm, learning in learners.items():
-            if learning.checkpoint is not None:
-                checkpoint_reference(learning.checkpoint, runstate_path, f'__learner_{arm}__/')
-                learning.program.save_shard(learning.checkpoint)
-        acknowledgements = {arm: learning.outcomes[episode_key] for arm, learning in learners.items() if episode_key in learning.outcomes}
-        if acknowledgements:
-            outcome_path = os.path.join(os.path.dirname(telemetry_path), 'outcome.json')
-            with open(outcome_path + '.new', 'w') as target:
-                json.dump({'episode_id': episode_key, 'event': inbox.outcomes[episode_key],
-                           'learning_outcomes': acknowledgements, 'checkpoint': runstate_path, 'responses': count}, target)
-                target.flush()
-                os.fsync(target.fileno())
-            os.replace(outcome_path + '.new', outcome_path)
-            print(json.dumps({'event': 'outcome_acknowledged', 'episode_id': episode_key, 'path': outcome_path}), flush=True)
-    navigation = None
-    if args.navigation_realization:
-        with open(args.navigation_realization) as source:
-            navigation = NavigationRows(json.load(source))
+    acknowledged = set()
+    def outcomes():
+        for identity, event in inbox.outcomes.items():
+            if identity in acknowledged:
+                continue
+            learning = {arm: learner.outcomes[identity] for arm, learner in learners.items()
+                        if identity in learner.outcomes}
+            if not learners or len(learning) == len(learners):
+                acknowledged.add(identity)
+                print(json.dumps({'event': 'outcome_acknowledged', 'episode_id': identity,
+                                  'outcome': event, 'learning_outcomes': learning, 'responses': count}), flush=True)
     print(json.dumps({'event': 'policy_navigation', 'navigation': navigation.report if navigation else
         {'source': None, 'event_support': 'native_team_observations', 'spatial_geometry': 'unavailable'}}), flush=True)
     def initialize(width, schema_id):
         nonlocal models, learners, provenance, remotes, programs
         models, learners, provenance, programs = {}, {}, {}, {}
-        world.announce('initialize', width, schema_id)
+        world.announce('initialize', width, schema_id, shards)
         made, remotes = realize(width, schema_id)
         for arm in evaluation_arms:
             model, forward, seed = made[arm]
-            source = checkpoint_sources.get(arm) or args.resume_checkpoint or args.checkpoint
-            loaded = None
+            payload = states.get(arm)
+            source = 'operand' if payload is not None else None
             if arm in train_arms:
-                target = checkpoint_path(args.online_checkpoint, arm) if len(train_arms) > 1 else args.online_checkpoint
-                prefix = f'__learner_{arm}__/'
-                resumed = {name[len(prefix):]: value for name, value in (saved_payload or {}).items() if name.startswith(prefix)}
                 learning = OnlineLearner(
                     model, learning_rate=args.learning_rate, gradient_clip=args.gradient_clip,
-                    checkpoint=None if resumed else target, load_checkpoint=None if resumed else source or target,
+                    state=payload,
                     replay_capacity=args.replay_capacity, replay_memory_mb=args.replay_memory_mb,
                     replay_precision=args.replay_precision, replay_batch=args.replay_batch,
                     seed=seed, policy_forward=forward, policy_arm=arm,
                     match_metadata=json.loads(args.match_metadata), replay_weight=args.replay_weight,
                     world=world, device=device, lead=lead,
                 )
-                learning.checkpoint = target
                 learners[arm] = learning
-                if resumed:
-                    learning._load_full(runstate_path, resumed)
-                if learning.continuation['mode'] == 'resumed':
-                    loaded = target if resumed else learning.continuation['source']
-                if args.initial_checkpoint:
-                    learning.save(checkpoint_path(args.initial_checkpoint, arm) if len(train_arms) > 1 else args.initial_checkpoint)
-            elif model is not None and source:
-                load_policy(model, source, arm)
-                loaded = source if getattr(model, 'checkpoint_load_exception', None) is None else None
+                initial_states.setdefault(arm, {name: np.array(value, copy=True)
+                                               for name, value in learning.export_payload().items()})
+            elif model is not None and payload is not None:
+                load_policy(model, payload, arm)
             models[arm] = model
             programs[arm] = learners[arm].program if arm in learners else PolicyProgram(
                 model, forward, world=world, arm=arm, device=device, lead=lead)
             if model is not None:
                 programs[arm].synchronize()
-                if loaded:
-                    programs[arm].load_shard(loaded)
             provenance[arm] = policy_source(arm, model, source, 'online_train' if arm in learners else 'inference')
         history.clear()
         print(json.dumps({"event": "state_schema_realized", "state_width": width,
                           "state_schema": schema_id, "policies": list(models)}), flush=True)
-    if saved is not None:
-        initialize(*saved['schema'])
-        schema = saved['schema']
-        if saved['assigned'] == assigned and saved['train_arms'] == train_arms and all(learning.continuation['mode'] == 'resumed' for learning in learners.values()):
-            np.copyto(key, np.asarray(saved['model_key'], dtype=np.uint32))
-            count, episode_key = int(saved['resp_id']), saved['episode_key']
-            history.restore_state(saved['history'])
-            observation_memory, memory_recovery = ObservationMemory.restore(saved)
-            inbox.restore_state(saved)
-            backlog.extend(saved.get('backlog', ()))
-            print(json.dumps({'event': 'training_continuation', 'mode': 'resumed', 'responses': count,
-                              'history': history.measure(), 'replayed_steps': len(recovery),
-                              'observation_history': memory_recovery}), flush=True)
-        else:
-            print(json.dumps({'event': 'training_continuation', 'mode': 'changed_configuration',
-                              'unreplayed_steps': len(recovery)}), flush=True)
-            recovery.clear()
-        saved_payload = None
     try:
         while stopping['signal'] is None:
-            replaying = bool(recovery)
-            recovered = None
-            if replaying:
-                journal_offset, recovered = recovery.popleft()
-                session, tick_id = recovered['key']
-                records = recovered['records']
-                event_frames = recovered['event_frames']
-                event_batches = event_frames if isinstance(event_frames, dict) else {(session, tick_id, None): recovered['events']}
-                inbox.replay_snapshot(event_frames, recovered['outcomes'])
-            else:
-                readable, _, _ = select.select([engine, wake], [], [])
-                if wake in readable:
-                    os.read(wake, 64)
-                    continue
-                for node, address, buffer in engine.receive():
-                    inbox.feed(buffer)
-                    route['engine'] = (node, address)
-                ready = inbox.take()
-                if ready is None:
-                    resolved = False
-                    for learning in learners.values():
-                        for identity in tuple(learning.awaiting_outcomes):
-                            if identity in inbox.outcomes and identity not in learning.outcomes:
-                                learning.end_episode(inbox.outcomes[identity]['actor_team'], identity)
-                                resolved = True
-                    if resolved:
-                        save()
-                    continue
-                (session, tick_id), records, event_batches = ready
-            step_complete = False
+            readable, _, _ = select.select([engine, wake], [], [])
+            if wake in readable:
+                os.read(wake, 64)
+                continue
+            for node, address, buffer in engine.receive():
+                inbox.feed(buffer)
+                route['engine'] = (node, address)
+            ready = inbox.take()
+            if ready is None:
+                for learning in learners.values():
+                    for identity in tuple(learning.awaiting_outcomes):
+                        if identity in inbox.outcomes and identity not in learning.outcomes:
+                            learning.end_episode(inbox.outcomes[identity]['actor_team'], identity)
+                outcomes()
+                continue
+            (session, tick_id), records, event_batches = ready
             obs_rows = records[OBSERVATION_KIND][1]
             cart_rows = records[CART_KIND][1]
             team_rows = records[TEAM_KIND][1]
@@ -406,19 +332,15 @@ def main():
             state_header = view_pages.headers
             state_rows, residual_rows = chorus.state, chorus.residual
             if not len(state_rows):
-                step_complete = True
-                save()
                 continue
             participant_ids = state_header[:, STATE_HEADER['ID']].astype(np.int64)
             rows = obs_rows[chorus.participant_rows]
             current_schema = (PAGE_WIDTH, tuple(np.unique(state_header[:, STATE_HEADER['SCHEMA']]).astype(np.int64).tolist()))
             if current_schema != schema:
-                save()
                 initialize(*current_schema)
                 schema = current_schema
                 for learning in learners.values():
                     learning.switch_episode(current_episode)
-                save()
             k = len(team_rows)
             tick = build_runtime_frame(rows, cart_rows, team_rows)
             for learning in learners.values():
@@ -440,7 +362,6 @@ def main():
                 realized_events = [event for event in realized_events if event['episode_id'] != current_episode
                                    or event['kind'] not in ('score_win', 'tie')] + [outcome]
             active_learners = {arm: learning for arm, learning in learners.items() if current_episode not in learning.outcomes}
-            terminal_new = terminal is not None and bool(active_learners)
             attributed = history.advance(tick, frame, participant_ids, rows, applied_sequences, active_learners, terminal)
             versions = {arm: learning.updates for arm, learning in learners.items()}
             versions.update({arm: provenance[arm].get('updates') for arm in models if arm not in versions})
@@ -448,18 +369,15 @@ def main():
             advance_key(key, sampling_key)
             response_started = time.perf_counter()
             prepared = prepare_policies(programs, chorus)
-            emission = emit_policies(programs, prepared, chorus, arms, sampling_key, recorded=recovered)
+            emission = emit_policies(programs, prepared, chorus, arms, sampling_key)
             outputs, comparisons = emission.outputs, emission.comparisons
             velocity, behavior_logp, integrated = emission.velocity, emission.logp, emission.residual
             preparation_elapsed, inference_elapsed = emission.preparation_seconds, emission.inference_seconds
             request = records[STATE_KIND][0]['req_id']
             response = view_pages.response(velocity, interval, relaxation, lead)
-            if not replaying:
-                journal_offset = journal.append({'key': (session, tick_id), 'records': records, 'event_frames': event_batches,
-                    'outcomes': inbox.outcomes, 'velocity': velocity, 'behavior_logp': behavior_logp})
-                if 'engine' in route:
-                    node, address = route['engine']
-                    engine.send(address, node, frames(STRATEGY_KIND, request, tick_id, response, placement["framebytes"], session))
+            if 'engine' in route:
+                node, address = route['engine']
+                engine.send(address, node, frames(STRATEGY_KIND, request, tick_id, response, placement["framebytes"], session))
             response_elapsed = time.perf_counter() - response_started
             reporting_started = time.perf_counter()
             assignments, decisions = history.assignments(rows, applied_sequences, request, velocity, integrated,
@@ -522,7 +440,7 @@ def main():
                               'pending_states': len(learner.episode), 'replay_size': len(learner.replay),
                               'awaiting_outcomes': len(learner.awaiting_outcomes), 'episode_id': current_episode,
                               'outcome': learner.outcomes.get(current_episode), 'execution': history.measure(),
-                              'transport': inbox.report(), 'journal_bytes': journal_offset,
+                              'transport': inbox.report(),
                               'view_faults': int(rows[:, OBS['VIEW_FAULTS']].sum()),
                               'snapshots_superseded': int(rows[:, OBS['SNAPSHOTS_SUPERSEDED']].max()),
                               'completed_episodes': learner.completed_episodes,
@@ -530,11 +448,6 @@ def main():
                               'reward_contract': reward_contract(arm), **learner.replay.report()}
                               for arm, learner in learners.items()}
             count += 1
-            step_complete = True
-            if replaying:
-                print(json.dumps({'event': 'training_step_recovered', 'responses': count, 'request_seq': request,
-                                  'updates': {arm: value.updates for arm, value in learners.items()}}), flush=True)
-                continue
             sampled = args.model_sample_every > 0 and count % args.model_sample_every == 0
             comparison_started = time.perf_counter()
             comparison = compare_policies(comparisons, assignments, versions, sampled)
@@ -606,30 +519,26 @@ def main():
                                      'state_width': state_rows.shape[1], 'host_role': 'responder'},
                          measures={**line['j_measures'], 'moe': model_record['moe'], **{f'learning.{arm}': {**state, 'last_update': learning.get(arm, {})}
                                    for arm, state in learning_state.items()}})
-            learning_path = os.path.join(os.path.dirname(telemetry_path), 'learning.json')
-            with open(learning_path + '.new', 'w') as target:
-                json.dump({'at': time.time(), 'environment': args.environment, 'teams': k,
-                           'players': len(rows), 'responses': count, 'learning': learning_state,
-                           'policy_updates': learning}, target)
-            os.replace(learning_path + '.new', learning_path)
-            telemetry.write(json.dumps(line, default=lambda value: np.asarray(value).tolist()) + '\n')
-            telemetry.flush()
-            if not published:
-                publish_active_run(telemetry_path)
-                published = True
-            if terminal is not None and not learners:
-                print(json.dumps({'event': 'outcome_acknowledged', 'episode_id': current_episode, 'path': telemetry_path}), flush=True)
-            if terminal_new or (args.save_every and count % args.save_every == 0):
-                save()
+            measurements.append(line)
+            outcomes()
     finally:
-        if step_complete:
-            save()
         reporter.stop()
         meter.close(reporter.snapshot()[1])
-        telemetry.close()
         world.stop()
+        member_states = {str(rank): json.loads(state_store.get(f'mesh/strat/completed/{rank}'))
+                         for rank in range(1, world.size)}
         world.close()
         engine.close()
+    final_states = {arm: encode_payload(learning.export_payload()) for arm, learning in learners.items()}
+    final_states.update({arm: encode_payload(states[arm]) for arm in models if arm not in learners and arm in states})
+    result = {'event': 'responder_finished', 'states': final_states,
+              'shards': {rank: value['shards'] for rank, value in member_states.items()},
+              'initial_shards': {rank: value['initial_shards'] for rank, value in member_states.items()},
+              'initial_states': {arm: encode_payload(state) for arm, state in initial_states.items()},
+              'measurements': measurements,
+              'j_measures': reporter.snapshot()[1]}
+    print(json.dumps(result, default=lambda value: np.asarray(value).tolist()), flush=True)
+    return result
 
 
 if __name__ == '__main__':

@@ -1,6 +1,5 @@
 from collections import defaultdict
 import json
-import os
 
 import numpy as np
 
@@ -135,11 +134,10 @@ def retained_source_rows(rows):
 
 
 class ActionHistory:
-    def __init__(self, capacity, max_bytes, directory, interval):
+    def __init__(self, capacity, max_bytes, interval):
         self.requests = RowWindow(capacity, lambda entry: len(entry["rows"]))
         self.interval = float(interval)
         self.max_bytes = int(max_bytes)
-        self.directory = directory
         self.previous = None
         self.attribution = {}
         self.first_executions = set()
@@ -182,41 +180,7 @@ class ActionHistory:
         return default if entry is None else entry["rows"]
 
     def items(self):
-        return ((sequence, entry["rows"]) for sequence, entry in self.requests.items() if '_spill' not in entry)
-
-    def materialize(self, entry):
-        from .checkpoint_state import unpack_state
-        path = entry.get('_spill')
-        if path is not None:
-            with np.load(path, allow_pickle=False) as payload:
-                stored = unpack_state(payload)
-            entry.update(state=stored['state'], rows=stored['rows'], _bytes=stored['_bytes'])
-            entry.pop('_spill')
-            self.restore_features(entry)
-        return entry
-
-    def spill(self, sequence):
-        from .checkpoint_state import atomic_save, pack_state
-        entry = self.requests.get(sequence)
-        os.makedirs(self.directory, exist_ok=True)
-        path = os.path.join(self.directory, f'{sequence}.npz')
-        stored = {key: entry[key] for key in ('state', 'rows', '_bytes')}
-        stored['rows'] = retained_source_rows(entry['rows'])
-        atomic_save(path, pack_state(stored))
-        entry['_spill'] = path
-        entry['state'] = {key: value for key, value in entry['state'].items() if key not in ('frame', 'velocity')}
-        entry['rows'] = {participant: {key: value for key, value in row.items() if key not in
-            ('velocity', 'residual', 'features', 'server_state', 'feature_labels', 'state_labels')}
-            for participant, row in entry['rows'].items()}
-        entry['_bytes'] = sum(value.nbytes for value in entry['state'].values() if isinstance(value, np.ndarray))
-
-    def collect_spills(self):
-        if self.directory is not None and os.path.isdir(self.directory):
-            retained = {entry['_spill'] for entry in self.requests.values() if '_spill' in entry}
-            for name in os.listdir(self.directory):
-                path = os.path.join(self.directory, name)
-                if name.endswith('.npz') and path not in retained:
-                    os.unlink(path)
+        return ((sequence, entry["rows"]) for sequence, entry in self.requests.items())
 
     @staticmethod
     def entry_bytes(rows, state):
@@ -237,20 +201,12 @@ class ActionHistory:
                                     "returns": np.zeros(size, dtype=np.float32),
                                     "discount": np.ones(size, dtype=np.float32), '_bytes': self.entry_bytes(rows, state)}, tuple(self.requests.entries))
         self.previous = state
-        retained = {*retain, sequence}
-        while self.nbytes > self.max_bytes:
-            oldest = next((key for key, entry in self.requests.items() if key not in retained and '_spill' not in entry), None)
-            if oldest is None:
-                break
-            self.spill(oldest)
-
     @property
     def nbytes(self):
         return sum(entry.get('_bytes', 0) for entry in self.requests.values())
 
     def measure(self):
         return {**self.requests.measure(), **self.attribution, 'bytes': self.nbytes, 'byte_capacity': self.max_bytes,
-                'spilled_requests': sum('_spill' in entry for entry in self.requests.values()),
                 'retained_over_capacity_bytes': max(0, self.nbytes - self.max_bytes)}
 
     def advance(self, tick, frame, participant_ids, rows, application_sequences, learners, winning_team=None):
@@ -290,7 +246,7 @@ class ActionHistory:
                 missing += int(sequence > 0 and row[OBS["CONTROL"]] >= 0.5)
 
         def transition(state, arm, selected, value_weight):
-            state = self.materialize(self.requests.get(state['request_seq']))['state']
+            state = self.requests.get(state['request_seq'])['state']
             learning = learners[arm]
             ids = state["participant_ids"]
             successors = participant_successors(frame.chorus, state['frame'].chorus)

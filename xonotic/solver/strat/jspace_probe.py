@@ -9,7 +9,7 @@ same architecture and a random projection of the same inputs do not?  Controls, 
 policies (seeds 0 and 7), a random projection of the raw inputs to the IR's width, the raw inputs themselves, and
 shuffled labels (which MUST fail, or the probes are lying).
 
-Provenance.  The input is the responder's training journal (strat_responder.py, TrainingJournal): every step's
+Provenance.  The input is the responder's training journal (strat_responder.py, RecordedSteps): every step's
 OBSERVATION, CART, TEAM and STATE rows and perceived events as the engine published them, rebuilt into the policy's
 frame by the responder's own constructor (inputs.native_inputs).  The IR is each participant's own row of
 Strategy.ir.  The trained policies are the checkpoints the responder saved (each one a point of the old training-budget
@@ -35,10 +35,10 @@ sys.path.insert(0, str(ROOT / "xonotic"))
 
 from payload.tools.strategy_io_schema import CS, OBS, OBS_AMMO_COLUMNS, OBS_WEAPON_COLUMNS
 from solver.strat.cast_header import Wally, parameter_seed
-from solver.strat.checkpoint_state import load_policy
+from solver.strat.checkpoint_state import Payload, load_policy, open_checkpoint
 from solver.strat.game_value import hierarchy_rows
 from solver.strat.inputs import native_inputs
-from solver.strat.journal import TrainingJournal
+from solver.strat.journal import RecordedSteps
 from solver.strat.runtime import build_runtime_frame
 from solver.strat.scale_config import SCALE_EXPERTS, SCALE_HIDDEN, SCALE_RANK, SCALE_TOPK, strategy_widths
 from solver.strat.state_steering import PAGE_WIDTH, STATE_HEADER
@@ -60,8 +60,14 @@ ap.add_argument("--scale-topk", type=int, default=SCALE_TOPK)
 ap.add_argument("--out", required=True)
 args = ap.parse_args()
 
+checkpoint_payloads = {}
+for path in args.checkpoint:
+    with open_checkpoint(path) as source:
+        checkpoint_payloads[path] = Payload({name: source[name] for name in source.files})
+
 recs = []
-for _, step in TrainingJournal(args.journal).read():
+steps = list(RecordedSteps(args.journal).read())
+for _, step in steps:
     records = step["records"]
     obs, cart, team = (records[kind][1] for kind in (OBSERVATION_KIND, CART_KIND, TEAM_KIND))
     events = [rows for rows in (step["event_frames"].values() if isinstance(step["event_frames"], dict) else ())]
@@ -128,7 +134,7 @@ def policy(seed, checkpoint=None):
     model = Wally(WIDTHS)
     model.state_schema = str(recs[0]["schema"])
     if checkpoint:
-        load_policy(model, checkpoint, args.arm)
+        load_policy(model, checkpoint_payloads[checkpoint], args.arm)
     return model.to(args.device)
 
 

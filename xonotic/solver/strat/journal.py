@@ -7,9 +7,9 @@ import struct
 import numpy as np
 
 
-class TrainingJournal:
+class RecordedSteps:
+    """Reader for previously recorded inputs, used only during input preparation."""
     def __init__(self, path):
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         self.path = path
         self.position = 0
 
@@ -37,25 +37,3 @@ class TrainingJournal:
                     state = unpack_state(payload)
                 self.position = source.tell()
                 yield self.position, state
-
-    def append(self, state):
-        from .checkpoint_state import pack_state, write_payload
-        data = io.BytesIO()
-        write_payload(data, pack_state(state))
-        value = data.getvalue()
-        with open(self.path, "ab") as target:
-            target.write(struct.pack("<Q", len(value)) + hashlib.sha256(value).digest() + value)
-            target.flush()
-            os.fsync(target.fileno())
-            self.position = target.tell()
-        return self.position
-
-    def repair_tail(self, valid_position):
-        if os.path.isfile(self.path) and os.path.getsize(self.path) != valid_position:
-            with open(self.path, "r+b") as target:
-                target.seek(valid_position)
-                with open(self.path + '.incomplete', 'wb') as evidence:
-                    evidence.write(target.read())
-                target.truncate(valid_position)
-                target.flush()
-                os.fsync(target.fileno())

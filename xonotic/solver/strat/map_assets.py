@@ -124,6 +124,7 @@ class MapAssets:
             for path in program_files
         }, sort_keys=True).encode()).hexdigest()
         self.entity_realizations = {}
+        self.assets = {}
 
     def archives(self):
         return sorted(glob.glob(os.path.join(self.basedir, "data", "*.pk3")), reverse=True)
@@ -153,11 +154,18 @@ class MapAssets:
 
     def extract_asset(self, found, destination):
         os.makedirs(os.path.dirname(destination), exist_ok=True)
-        if found[0] == "file":
-            shutil.copyfile(found[1], destination)
+        if found[0] == 'file':
+            source = os.path.abspath(found[1])
+        elif found in self.assets:
+            source = self.assets[found]
         else:
-            with zipfile.ZipFile(found[1]) as bundle, open(destination, "wb") as target:
+            with zipfile.ZipFile(found[1]) as bundle, open(destination, 'wb') as target:
                 target.write(bundle.read(found[2]))
+            self.assets[found] = destination
+            return
+        if os.path.lexists(destination):
+            os.unlink(destination)
+        os.symlink(source, destination)
 
     def prepare(self, cfg, directory):
         userdir = os.path.join(directory, "userdir")
@@ -183,7 +191,7 @@ class MapAssets:
                                        ("payload_cfg", payload_cfg, "gamemodes-payload.cfg")):
             destination = os.path.join(data_dir, filename)
             try:
-                shutil.copyfile(source, destination)
+                self.extract_asset(("file", source), destination)
                 record["gamecode"][name] = artifact(destination)
             except OSError as exc:
                 record["gamecode"][name] = {"path": destination, "source": source, "error": f"{type(exc).__name__}: {exc}"}
