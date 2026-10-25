@@ -345,6 +345,14 @@ of an individual logical transaction, before repeats and relay amplification.
 A million repeated one-page writes therefore do not masquerade as one
 million-way divisible write. Projected probes can enter a zero-share path.
 
+Decision names, sorted lexically, define the numerical axes. JSON object order
+does not. Asynchronous rollout fitting rebuilds each row from its executed
+proposal's named parts, and records gradients by name. A positional cache of
+older observations previously survived serialization while the decision map
+was reordered, allowing compute and route coordinates to be confused after a
+restart. The named operands in those records remain the source for the fit;
+no observations are discarded or assigned synthetic costs.
+
 Every stencil updates the centre with a bounded gradient step and a decaying
 step size. The divisor `1 + max(abs(gradient))` is at least one. Flat cost gives
 an exact identity update, without residual momentum. There is no candidate

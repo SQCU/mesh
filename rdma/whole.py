@@ -301,7 +301,7 @@ class FunctionFlow:
 
     def __init__(self, decisions, learning_rate=0.15, perturbation=0.025,
                  fit_compute=False, routing_model=None, transaction_weight=0.0):
-        self.decisions = copy.deepcopy(decisions)
+        self.decisions = {name: copy.deepcopy(decisions[name]) for name in sorted(decisions)}
         self.vector = {}
         self.learning_rate, self.perturbation = float(learning_rate), float(perturbation)
         if not all(math.isfinite(v) and 0 < v <= 1 for v in (self.learning_rate, self.perturbation)):
@@ -357,6 +357,8 @@ class FunctionFlow:
             raise ValueError('optimizer state uses obsolete logarithmic coordinates; realize from its recorded physical allocation')
         obj = cls.__new__(cls)
         obj.__dict__.update(copy.deepcopy(state))
+        obj.decisions = {name: obj.decisions[name] for name in sorted(obj.decisions)}
+        obj.vector = {name: obj.vector[name] for name in sorted(obj.vector)}
         for name, ticks in obj.vector.items():
             if (name not in obj.decisions or len(ticks) != len(obj.decisions[name]['parts'])
                     or any(type(v) is not int or v < 0 for v in ticks) or sum(ticks) != SHARE_TICKS):
@@ -370,7 +372,8 @@ class FunctionFlow:
 
     def _direction(self):
         row, at, result = 1 + self.round % (self.order - 1), 0, {}
-        for name, values in self.vector.items():
+        for name in sorted(self.vector):
+            values = self.vector[name]
             result[name] = [1.0 - 2.0 * ((row & (at + i)).bit_count() % 2) for i in range(len(values))]
             at += len(values)
         return result

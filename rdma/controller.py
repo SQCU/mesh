@@ -203,13 +203,11 @@ class WholeFunctionController:
             proposal = record['proposal']
             if set(proposal['parts']) != set(self.flow.decisions):
                 raise ValueError('rollout operands do not match the controller decisions')
-            ticks = []
             for name, spec in self.flow.decisions.items():
                 parts = proposal['parts'][name]
                 if (len(parts) != len(spec['parts']) or sum(parts) != spec['total']
                         or any(not lo <= value <= hi for value, lo, hi in zip(parts, spec['low'], spec['high']))):
                     raise ValueError('rollout must name feasible, actually applied operands')
-                ticks.extend(weight_ticks(parts))
             behavior = record.get('behavior_probability_ticks', SHARE_TICKS)
             target = record.get('target_probability_ticks', behavior)
             if (type(behavior) is not int or not 0 < behavior <= SHARE_TICKS
@@ -221,18 +219,25 @@ class WholeFunctionController:
             if self.flow.metric_contract is not None and contract != self.flow.metric_contract:
                 raise ValueError('rollouts must have invariant useful work and transaction accounting')
             self.flow.metric_contract = contract
-            retained.append({**copy.deepcopy(record), 'ticks': ticks, 'cost': metrics['cost'],
+            retained.append({**copy.deepcopy(record), 'cost': metrics['cost'],
                              'importance': float(Fraction(target, behavior))})
             identities.add(record['episode'])
         if not records:
             return self.proposal()
         self._rollouts = retained[-self.history_limit:]
+        # A serialized mapping's insertion order is not a numerical axis.
+        # Rebuild every row from the executed, named operands, including old
+        # observations whose cached positional ticks preceded a JSON restart.
+        names = sorted(self.flow.decisions)
+        for row in self._rollouts:
+            row.pop('ticks', None)
         weights = np.asarray([row['importance'] for row in self._rollouts])
         before = self.flow.centre
         gradient = np.zeros(self.flow.dimension)
         if weights.sum():
             weights /= weights.sum()
-            x = np.asarray([row['ticks'] for row in self._rollouts], dtype=float) / SHARE_TICKS
+            x = np.asarray([[tick for name in names for tick in weight_ticks(row['proposal']['parts'][name])]
+                            for row in self._rollouts], dtype=float) / SHARE_TICKS
             y = np.asarray([row['cost'] for row in self._rollouts])
             dx, dy = x - weights @ x, y - weights @ y
             # Positive ridge makes an unexcited/rank-deficient design invertible.
@@ -242,17 +247,20 @@ class WholeFunctionController:
                 gradient = np.linalg.solve(dx.T @ (weights[:, None] * dx) + np.eye(x.shape[1]) / 1024,
                                            dx.T @ (weights * dy))
         rate, at = self.flow.learning_rate / (self.flow.round + 1) ** .3, 0
-        for name, ticks in self.flow.vector.items():
+        gradients = {}
+        for name in names:
+            ticks = self.flow.vector[name]
             spec = self.flow.decisions[name]
             g = gradient[at:at + len(ticks)]; at += len(ticks)
             g = g - g.mean()
+            gradients[name] = g.tolist()
             scale = 1 + max(abs(g))
             values = simplex([(tick / SHARE_TICKS - rate * float(v) / scale) * spec['total']
                               for tick, v in zip(ticks, g)], spec['total'], spec['low'], spec['high'])
             self.flow.vector[name] = weight_ticks(values)
         self.flow.history.append({'round': self.flow.round, 'before': before, 'after': self.flow.centre,
                                   'episodes': [row['episode'] for row in records],
-                                  'gradient': gradient.tolist(), 'learning_rate': rate,
+                                  'gradient': gradients, 'learning_rate': rate,
                                   'estimator': 'importance-weighted-local-response'})
         self.flow.history[:] = self.flow.history[-self.history_limit:]
         self.flow.serial += 1
