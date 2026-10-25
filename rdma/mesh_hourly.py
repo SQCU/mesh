@@ -79,7 +79,7 @@ def compact(record):
             for m in item['metrics']]
         if item['status'] != 'completed':
             errors.append([item['tag'], item.get('error', 'incomplete')[:160]])
-    errors.extend([e.get('stage', 'driver'), e.get('error', e.get('stderr', 'failed'))[-160:]]
+    errors.extend([e.get('stage', 'driver'), (e.get('error') or e.get('stderr') or f'exit {e.get("exit", "unknown")}')[-160:]]
                   for e in record['errors'])
     errors.extend([name, node.get('error', 'installation failed')[-160:]]
                   for name, node in record['nodes'].items() if node['status'] != 'installed')
@@ -193,7 +193,7 @@ def prepare_node(node, paths, record, out, since):
             result['installation'] = output
         result['install_exit'] = code
         if code:
-            raise RuntimeError(f'install failed ({code}); node excluded')
+            raise RuntimeError(f'install failed ({code}): {output.splitlines()[-1] if output else "no diagnostic"}')
         code, _ = node.py('installed', record['commits']['mesh'], '1')
         result['verify_exit'] = code
         if code:
