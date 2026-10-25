@@ -97,7 +97,7 @@ static inline struct ibv_sge dma_span(const struct port *port,struct mesh_dma_sp
   return (struct ibv_sge){.addr=(uintptr_t)port->device.wire+at,.length=(uint32_t)span.bytes,
     .lkey=port->device.extent_mrs[at/MESH_EXTENT]->lkey};
 }
-static void link_failed(struct port *,int64_t,uint32_t);
+static void link_failed(struct port *,int64_t,uint32_t,const char *,...);
 /* the word at region offset `offset`, NULL where the region has none there (0, past its end, or off a word) */
 static inline const _Atomic uint64_t *region_word(uint64_t offset){
   return offset && offset<=M->length-8 && !(offset%8)?stream_words(offset):NULL;
@@ -240,7 +240,8 @@ static void stream_turn(struct port *port,uint32_t t){
     l->landing[t]=(struct walk){.ring=l->landing[t].ring,.base={s[0].posted+s[1].posted}};
   }
   if(owner==l->held[t] && owned(owner)){
-    if(!walk_take(l->sending+t,x,0) || !walk_take(l->landing+t,x,1))link_failed(port,EINVAL,2);
+    if(!walk_take(l->sending+t,x,0))link_failed(port,EINVAL,2,"SEND descriptor table, stream %u",t);
+    else if(!walk_take(l->landing+t,x,1))link_failed(port,EINVAL,3,"receive descriptor table, stream %u",t);
   }
   else l->hold[t]=HOLD_END;
 }
@@ -262,14 +263,15 @@ static void stream_send(struct port *port,uint32_t t,uint32_t served){
     const struct taken *e=walk_unit(w,q);
     if(!e)break;
     if(pinned!=e){metadata_pin(x,e);pinned=e;if(!holding_kept(x,l->held[t]))break;}
-    if(!e->whole){link_failed(port,EINVAL,2);break;}
+    if(!e->whole){link_failed(port,EINVAL,2,"SEND dependency word, stream %u, unit %llu",t,(unsigned long long)q.n);break;}
     const struct mesh_units i=mesh_units_sub(q,e->unit);
     if(!mesh_units_lt(mesh_units_add(e->base,i),mesh_units_load(e->word)))break;
     const struct mesh_dma_span bytes=e->spans[i.n];
-    if(!mesh_dma_span_valid(M,bytes)){link_failed(port,EINVAL,2);break;}
+    if(!mesh_dma_span_valid(M,bytes)){link_failed(port,EINVAL,2,"SEND span, stream %u, unit %llu, offset %llu, bytes %llu",
+      t,(unsigned long long)q.n,(unsigned long long)bytes.offset,(unsigned long long)bytes.bytes);break;}
     const struct frames each=frames_of(bytes.bytes);
     struct send_gate *gate=l->gate+lane;
-    if(each.n>gate->capacity.n){link_failed(port,EMSGSIZE,2);break;}
+    if(each.n>gate->capacity.n){link_failed(port,EMSGSIZE,2,"SEND frame capacity, lane %u",lane);break;}
     if(!gate_holds(gate,each) || !unit_told(x,0,j,state->sent,bytes,l->held[t]))break;
     struct ibv_sge span=dma_span(port,bytes);
     struct ibv_send_wr posting={.wr_id=gate_post(gate,lane,each),.sg_list=&span,.num_sge=1,
@@ -299,12 +301,13 @@ static void stream_post(struct port *port,uint32_t t,uint32_t served){
     const struct taken *e=walk_unit(w,q);
     if(!e)break;
     if(pinned!=e){metadata_pin(x,e);pinned=e;if(!holding_kept(x,l->held[t]))break;}
-    if(!e->whole){link_failed(port,EINVAL,3);break;}
+    if(!e->whole){link_failed(port,EINVAL,3,"receive dependency word, stream %u, unit %llu",t,(unsigned long long)q.n);break;}
     if(e->word && mesh_units_lt(mesh_units_load(e->word),e->base))break;
     const struct mesh_dma_span bytes=e->spans[mesh_units_sub(q,e->unit).n];
-    if(!mesh_dma_span_valid(M,bytes)){link_failed(port,EINVAL,3);break;}
+    if(!mesh_dma_span_valid(M,bytes)){link_failed(port,EINVAL,3,"receive span, stream %u, unit %llu, offset %llu, bytes %llu",
+      t,(unsigned long long)q.n,(unsigned long long)bytes.offset,(unsigned long long)bytes.bytes);break;}
     const struct frames each=frames_of(bytes.bytes);
-    if(each.n>state->frame_capacity){link_failed(port,EMSGSIZE,3);break;}
+    if(each.n>state->frame_capacity){link_failed(port,EMSGSIZE,3,"receive frame capacity, lane %u",lane);break;}
     if(((state->frames_posted-state->frames_retired)&MESH_GATE_MASK)+each.n>state->frame_capacity)break;
     if(!unit_told(x,1,j,state->posted,bytes,l->held[t]))break;
     state->frames_posted+=each.n;
@@ -331,11 +334,15 @@ static __attribute__((always_inline)) inline uint32_t link_lane(const struct lin
 /* design/transport.md: the link's first failed completion, on any lane, or a failed poll: no lane of the
    link served from here, so nothing is posted on it again, and the link lost by the event loop on reading `broken`
    (link_turn), the stream's words ~0 (port_lost) */
-static void link_failed(struct port *port,int64_t code,uint32_t domain){
+static void link_failed(struct port *port,int64_t code,uint32_t domain,const char *format,...){
   struct link *l=&port->link;
   const uint32_t served=atomic_exchange_explicit(&l->served,0,memory_order_acq_rel);
-  if(served)say("link %u (%s): a completion failed (code %lld, domain %u): no lane served, the link toward node %u lost\n",
-                port->index,port->name,(long long)code,domain,port->peer);
+  if(served){
+    char detail[256];
+    va_list arguments;va_start(arguments,format);vsnprintf(detail,sizeof detail,format,arguments);va_end(arguments);
+    say("link %u (%s): %s failed (code %lld, domain %u): no lane served, the link toward node %u lost\n",
+        port->index,port->name,detail,(long long)code,domain,port->peer);
+  }
   atomic_fetch_or_explicit(&l->broken,served,memory_order_release);
   wake();
 }
@@ -349,12 +356,13 @@ static void link_send(struct port *port,uint32_t served){
   struct link *l=&port->link;
   struct ibv_wc done[16];
   const int count=l->provider.poll(l->provider.sent,16,done);
-  if(count<0){link_failed(port,EIO,2);return;}
+  if(count<0){link_failed(port,EIO,2,"SEND completion poll");return;}
   uint32_t completed=0;
   for(int i=0;i<count;i++){
     const uint32_t lane=link_lane(l,done[i].qp_num);
     if(lane>=MESH_LINK_LANES || !(served>>lane&1))continue;
-    if(done[i].status){link_failed(port,(int64_t)done[i].status,2);return;}
+    if(done[i].status){link_failed(port,(int64_t)done[i].status,2,"SEND completion, lane %u, request %llu, vendor %u",
+      lane,(unsigned long long)done[i].wr_id,done[i].vendor_err);return;}
     gate_retire(l->gate+lane,done[i].wr_id);l->lane[lane].done++;completed|=UINT32_C(1)<<lane;
   }
   if(!completed)return;
@@ -376,7 +384,7 @@ static void link_receive(struct port *port,uint32_t served){
   struct link *l=&port->link;
   struct ibv_wc done[16];
   const int count=l->provider.poll(l->provider.completion,16,done);
-  if(count<0){link_failed(port,EIO,3);return;}
+  if(count<0){link_failed(port,EIO,3,"receive completion poll");return;}
   if(count)atomic_thread_fence(memory_order_acquire);
   uint32_t landed=0;
   for(int i=0;i<count;i++){
@@ -384,7 +392,8 @@ static void link_receive(struct port *port,uint32_t served){
     if(lane>=MESH_LINK_LANES || !(served>>lane&1))continue;
     uint64_t status_opcode;
     memcpy(&status_opcode,&done[i].status,sizeof status_opcode);
-    if((uint32_t)status_opcode){link_failed(port,(uint32_t)status_opcode,2);return;}
+    if((uint32_t)status_opcode){link_failed(port,(uint32_t)status_opcode,3,"receive completion, lane %u, request %llu, vendor %u",
+      lane,(unsigned long long)done[i].wr_id,done[i].vendor_err);return;}
     if((status_opcode>>32)&IBV_WC_RECV){lane_landed(port,lane,done[i].wr_id);landed|=UINT32_C(1)<<lane;}
   }
   if(!(landed>>MESH_LANE_FIRST))return;
