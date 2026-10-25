@@ -52,24 +52,6 @@ def traffic_delta(before, after):
     return result
 
 
-def realize_inputs(group):
-    """Finish initial GPU fills before publishing that these bindings exist.
-
-    This is configuration construction, once per new operand set. It is never
-    called between repetitions of a realized function.
-    """
-    import torch
-    import torch.distributed as dist
-    torch.mps.synchronize()
-    store = dist.distributed_c10d._get_default_store()
-    serial = getattr(group, '_measurement_inputs', 0)
-    group._measurement_inputs = serial + 1
-    key = f'mesh/measurement/inputs/{group.group_name}/{serial}'
-    store.set(f'{key}/{group.rank()}', b'1')
-    for peer in range(group.size()):
-        store.get(f'{key}/{peer}')
-
-
 def sequence(call, window_calls, windows, sample=None):
     """Submit every window before draining once; no peer rendezvous or logging.
 
@@ -113,11 +95,46 @@ def exchange_counts(rank, size, count):
             [matrix[source * size + rank] for source in range(size)], matrix)
 
 
+def collective_operands(what, n, rank, size):
+    """Realize fresh bindings; native lease retirement protects earlier DMA.
+
+    Reinitializing the previous operation's source could overwrite unfinished
+    SENDs. Distinct generations let ranks advance without a peer rendezvous.
+    Each returned callable retains its inputs for its entire submitted sequence.
+    """
+    import torch
+    import torch.distributed as dist
+    from . import empty
+    from .backend import Call, ALLREDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL
+    per = max(1, n // size)
+    tensor = lambda count, value: empty(count, dtype=torch.half).fill_(value)
+    if what == 'all_reduce_max':
+        a = tensor(n, rank + 1)
+        # MAX is idempotent under repeated in-place application.
+        return (lambda: dist.all_reduce(a, op=dist.ReduceOp.MAX), a, n * 2,
+                Call(ALLREDUCE, n, a.dtype, op=dist.ReduceOp.MAX))
+    if what == 'broadcast':
+        a = tensor(n, rank + 1)
+        return lambda: dist.broadcast(a, 0), a, n * 2 if rank else 0, Call(BROADCAST, n, a.dtype, root=0)
+    if what == 'all_gather':
+        source, output = tensor(per, rank + 1), tensor(per * size, -1)
+        return (lambda: dist.all_gather_into_tensor(output, source), output, 2 * per * (size - 1),
+                Call(ALLGATHER, per * size, source.dtype, counts=[per] * size))
+    if what == 'reduce_scatter_max':
+        source, output = tensor(per * size, rank + 1), tensor(per, -1)
+        return (lambda: dist.reduce_scatter_tensor(output, source, op=dist.ReduceOp.MAX), output, 2 * per,
+                Call(REDUCE_SCATTER, per * size, source.dtype, op=dist.ReduceOp.MAX, counts=[per] * size))
+    if what == 'exchange':
+        source, output = tensor(n, rank + 1), tensor(n, -1)
+        sends, receives, matrix = exchange_counts(rank, size, n)
+        return (lambda: dist.all_to_all_single(output, source, receives, sends), output, n * 2 if size > 1 else 0,
+                Call(ALLTOALL, n, source.dtype, counts=sends + receives, matrix=matrix))
+    raise ValueError(f'unknown collective measurement: {what}')
+
+
 def bandwidth(config):
     import torch
     import torch.distributed as dist
-    import torch_mesh
-    from .backend import Call, ALLREDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL
     from routing import QueueSample
     dist.init_process_group(backend='mesh', device_id=torch.device('mps', 0))
     try:
@@ -129,28 +146,13 @@ def bandwidth(config):
                 raise ValueError('float16 bandwidth operand bytes must be positive and even')
             n = requested // 2
             per = max(1, n // size)
-            a, b = (torch_mesh.empty(n, dtype=torch.half) for _ in range(2))
-            c, part = torch_mesh.empty(per * size, dtype=torch.half), torch_mesh.empty(per, dtype=torch.half)
             calls = min(config['most_calls'], max(config['least_calls'], config['bytes_per_size'] // requested))
-            # Idempotent MAX prevents repeated in-place reductions overflowing half precision.
-            sends, receives, matrix = exchange_counts(rank, size, n)
-            figures = [('all_reduce_max', lambda: dist.all_reduce(a, op=dist.ReduceOp.MAX), a, n * 2,
-                        Call(ALLREDUCE, n, a.dtype, op=dist.ReduceOp.MAX)),
-                       ('broadcast', lambda: dist.broadcast(a, 0), a, n * 2 if rank else 0,
-                        Call(BROADCAST, n, a.dtype, root=0)),
-                       ('all_gather', lambda: dist.all_gather_into_tensor(c, part), c, 2 * per * (size - 1),
-                        Call(ALLGATHER, per * size, a.dtype, counts=[per] * size)),
-                       ('reduce_scatter_max', lambda: dist.reduce_scatter_tensor(part, c, op=dist.ReduceOp.MAX), part, 2 * per,
-                        Call(REDUCE_SCATTER, per * size, a.dtype, op=dist.ReduceOp.MAX, counts=[per] * size)),
-                       ('exchange', lambda: dist.all_to_all_single(b, a, receives, sends), b, n * 2 if size > 1 else 0,
-                        Call(ALLTOALL, n, a.dtype, counts=sends + receives, matrix=matrix))]
-            for what, call, output, useful, declaration in figures:
+            for what in ('all_reduce_max', 'broadcast', 'all_gather', 'reduce_scatter_max', 'exchange'):
+                call, output, useful, declaration = collective_operands(what, n, rank, size)
                 group.plan([[declaration]])
-                a.fill_(rank + 1)
-                b.fill_(-1)
-                c.fill_(rank + 1)
-                part.fill_(rank + 1)
-                realize_inputs(group)
+                # Finish local input construction before the observation.
+                # There is no message aligning this rank with its peers.
+                torch.mps.synchronize()
                 call()
                 torch.mps.synchronize()
                 seconds, traffic = timed(call, calls, sample, group)
