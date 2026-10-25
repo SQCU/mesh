@@ -63,7 +63,7 @@ def main():
     del folds
     E, O = (torch_mesh.empty(steps, rows, width, dtype=torch.half) for _ in range(2))
     group = mesh.get_group('tp')
-    groups, operands = sequence.operands(a, b, E, O, group, k)
+    groups, operands = sequence.operands(a, b, E, O, group, k, config['resident_tiles'], config['input_frames'])
     if rank == 0:
         E.copy_(torch.from_numpy(inputs[:]))
     torch_mesh.check_memory()

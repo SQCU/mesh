@@ -112,7 +112,7 @@ struct Summand {
 // prepared write interface; rank count and cable count are separate operands.
 template <uint CHANNELS>
 struct chain_words {
-    uint first, phase, rows, ks0, ks1, last, width, actual_rows, previous_j, j;
+    uint first, phase, rows, ks0, ks1, last, width, actual_rows, previous_j, j, input_j, pad;
     mesh_step_binding land[CHANNELS], publish[CHANNELS], input[CHANNELS];
 };
 
@@ -128,7 +128,7 @@ kernel void chain_input(constant input_words<CHANNELS>& words [[buffer(15)]], ui
     }
 }
 
-template <uint TILE, uint K, uint S, uint G, uint RG, uint RB, uint THREADS, uint SIMD, uint RANKS, uint CHANNELS>
+template <uint TILE, uint K, uint S, uint G, uint RG, uint RB, uint THREADS, uint SIMD, uint RANKS, uint CHANNELS, bool PRODUCTS = true>
 [[max_total_threads_per_threadgroup(THREADS)]]
 kernel void chain_step(device const half* At [[buffer(0)]], device const half* Bt [[buffer(1)]], device const half* E [[buffer(2)]],
                        coherent(device) device half* out [[buffer(3)]], coherent(device) device half* X [[buffer(4)]],
@@ -156,7 +156,7 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
     if (!words.last && tid == 0) for (uint q = 0; q < CHANNELS; q++) if (words.input[q].p) {
         constant mesh_step_binding& l = words.input[q];
         mesh_step_enter(*l.p, l.v, l.progress, w == 0);
-        mesh_step_counts(*l.p, l.a, l.v, words.j);
+        mesh_step_counts(*l.p, l.a, l.v, words.input_j);
     }
     threadgroup_barrier(mem_flags::mem_device);
     atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));
@@ -174,7 +174,7 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
         }
         if (!words.last) X[i] = half((present ? float(mesh_step_read<half>((device const uchar*)E, logical)) : 0.0f) + z);
     }
-    if (words.last) return;
+    if (!PRODUCTS || words.last) return;
     publish(stamps, w, tid, phase);
     await_stamps<G, SIMD>(stamps, phase, sgid, lane);
     const uint at = lane_element(lane);

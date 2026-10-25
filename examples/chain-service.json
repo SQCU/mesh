@@ -4,9 +4,11 @@
     1,
     1
   ],
-  "steps_per_replay": 16,
+  "steps_per_replay": 128,
   "steps": 32768,
   "rows": 8,
   "seed": 0,
-  "observations": "~/.cache/mesh/observations/chain.jsonl"
+  "observations": "~/.cache/mesh/observations/chain.jsonl",
+  "resident_tiles": 128,
+  "input_frames": 512
 }

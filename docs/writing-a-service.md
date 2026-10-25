@@ -86,7 +86,8 @@ gives every rank the steps and rows; learning the shape needs no message.
 Rank 0 distributes A and B as ragged shards of their rows (`partition.distribute_tensor` with `Shard(0)` on the mesh
 dimension `tp`: the backend's scatter, MPI_Scatterv), so each rank holds the block of rows the backend's partition gives
 it ([The step](#the-step)). The inputs are one operand, [steps, rows, width]. Prepared writes send its frames in
-chunks, with the next chunk posted before the current chunk runs. A step reads only after its own input frame lands.
+blocks, with the next block posted before the current block runs. Input blocks and recurrent write batches have
+separate sizes. A step reads only after its own input frame lands.
 The outputs are one region tensor of the same shape on every rank. Each step writes its tanh(z) there. The service
 returns that tensor when the whole call ends. No input, weight or output tensor is written to a file.
 Within a step only the step's sum crosses between ranks.
@@ -116,24 +117,31 @@ The chain uses the library's [prepared chain](../rdma/torch-mesh/torch_mesh/chai
 [tiled kernel](../rdma/torch-mesh/torch_mesh/chain.metal). The example supplies weights, inputs, outputs and the
 number of steps. Its transport is the same prepared physical writes used by other library functions.
 
-Each rank gets its assigned rows of A and B. Preparation packs these rows into 8 by 8 tiles, with zeros at a
-partial tile's edge. This keeps all assigned columns, even when one rank's share is not a whole tile. It also
-sets the input, output, source and landing pages for every step before the chain starts.
+Each rank gets its assigned rows of A and B. Preparation pads these rows with zeros at a partial tile's edge.
+This keeps all assigned columns, even when one rank's share is not a whole tile. It also sets the input, output,
+source and landing pages for every step before the chain starts.
 
 One kernel joins the preceding partial sums, writes that step's output, adds the next input, and runs both
 products. The first product's tanh stays inside the kernel. The second product writes its partial sum straight
 into its send pages and marks them ready. The next step reads the landed parts in rank order. A final join
 writes the last output. All rows from all steps stay in the output tensor.
 
-The tiled products are restored from the earlier fused chain. Their page bindings now name physical channels
-rather than peers, so parallel cables and routes through other nodes use the same interface. One step has one
-numerical dispatch; it does not build a graph, choose a route or allocate a result while running.
+The tiled products are restored from the earlier fused chain. For wide products, a long chain of dependent
+tiles was slower than the library's parallel linear kernels. Preparation uses `resident_tiles` to choose the
+geometry from each rank's rows and columns. Wide steps keep the same join and use the existing `linear_rows`
+and `linear_publish` kernels for their two products. The rounding and tanh stay at the same points.
+
+Both geometries use the same physical page bindings, including parallel cables and routes through other
+nodes. Their dispatch lists are fixed before the call; a step does not build a graph, choose a route or
+allocate a result while running.
 
 ## The configuration
 
 The service takes one operand: a configuration file. It gives `steps`, `rows`, `width`, `seed`, the two
-`rotation_blocks`, and `steps_per_replay`, the k steps in one prepared write batch. `observations` supplies completed calls
-used for the next work assignment. It names no tensor files, shares or rank: each rank's block is the
+`rotation_blocks`, `steps_per_replay`, `input_frames`, and `resident_tiles`. The first two scheduling sizes give
+the recurrent frames per prepared write batch and the frames per input block. The third sets the longest
+dependent tile chain used by the fused products. The sample uses 128 recurrent frames and 512 input frames.
+`observations` supplies completed calls used for the next work assignment. It names no tensor files, shares or rank: each rank's block is the
 backend's. [examples/chain-service.json](../examples/chain-service.json) is a sample.
 
 `chain.inputs(configuration, steps, rows)` returns input and weight arrays in region memory: standard normal inputs,
