@@ -1,6 +1,7 @@
 """design/whole-function.md"""
 import copy
 import math
+from routing import weight_ticks
 import statistics
 
 SHARE_TICKS = 1 << 40
@@ -337,7 +338,7 @@ class FunctionFlow:
             if len(quantum) != len(parts) or any(not math.isfinite(q) or not 0 <= q <= total for q in quantum):
                 raise ValueError('coordinate quantum must be in [0, total] and match its parts')
             spec['quantum'] = [round(q / total * SHARE_TICKS) / SHARE_TICKS * total for q in quantum]
-            self.vector[name] = [round(v / total * SHARE_TICKS) for v in simplex(parts, total, spec['low'], spec['high'])]
+            self.vector[name] = weight_ticks(simplex(parts, total, spec['low'], spec['high']))
             self.calibration_parts[name] = [v / SHARE_TICKS * total for v in self.vector[name]]
             if spec['grain']:
                 self.calibration_parts[name] = project(self.calibration_parts[name], int(total), spec['grain'], spec['low'], spec['high'])
@@ -485,9 +486,9 @@ class FunctionFlow:
                 # flat measurements produce exactly no movement of the centre.
                 scale = 1 + max(map(abs, gradient[name]))
                 spec = self.decisions[name]
-                self.vector[name] = [round(v / spec['total'] * SHARE_TICKS) for v in simplex(
+                self.vector[name] = weight_ticks(simplex(
                     [(v / SHARE_TICKS - rate * g / scale) * spec['total'] for v, g in zip(values, gradient[name])],
-                    spec['total'], spec['low'], spec['high'])]
+                    spec['total'], spec['low'], spec['high']))
             if self.fit_compute:
                 self._compute_step()
             if self.routing_model is not None:
@@ -552,7 +553,7 @@ class FunctionFlow:
         # initialization prior whose influence should disappear during descent.
         guide = 0.5
         values = [(1 - guide) * a + guide * b for a, b in zip(self.centre['compute'], target)]
-        self.vector['compute'] = [round(v / total * SHARE_TICKS) for v in simplex(values, total, spec['low'], spec['high'])]
+        self.vector['compute'] = weight_ticks(simplex(values, total, spec['low'], spec['high']))
         self.compute_model = {'fixed': fixed, 'slopes': slopes, 'start_delay': start_delay, 'tails': tails, 'target': target,
                               'tiles': tiles, 'predicted_finish': finish}
         if 'release' in self.compute_samples[-1]:
@@ -668,7 +669,7 @@ class FunctionFlow:
         for name in names:
             values = [x[k] * self.decisions[name]['total'] for k, (n, _) in enumerate(columns) if n == name]
             spec = self.decisions[name]
-            self.vector[name] = [round(v / spec['total'] * SHARE_TICKS) for v in simplex(values, spec['total'], spec['low'], spec['high'])]
+            self.vector[name] = weight_ticks(simplex(values, spec['total'], spec['low'], spec['high']))
         self.routing_fit = {'measured_finish_seconds': measured.tolist(),
                             'residual_seconds': (residual * scale).tolist(),
                             'residual_jacobian_seconds': correction.tolist(),

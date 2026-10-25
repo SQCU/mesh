@@ -190,6 +190,7 @@ class WholeFunctionController:
         local response model is not an unbiased off-policy gradient guarantee.
         """
         from whole import SHARE_TICKS, performance, simplex
+        from routing import weight_ticks
         import numpy as np
         from fractions import Fraction
         retained = copy.deepcopy(getattr(self, '_rollouts', []))
@@ -208,7 +209,7 @@ class WholeFunctionController:
                 if (len(parts) != len(spec['parts']) or sum(parts) != spec['total']
                         or any(not lo <= value <= hi for value, lo, hi in zip(parts, spec['low'], spec['high']))):
                     raise ValueError('rollout must name feasible, actually applied operands')
-                ticks.extend(round(value / spec['total'] * SHARE_TICKS) for value in parts)
+                ticks.extend(weight_ticks(parts))
             behavior = record.get('behavior_probability_ticks', SHARE_TICKS)
             target = record.get('target_probability_ticks', behavior)
             if (type(behavior) is not int or not 0 < behavior <= SHARE_TICKS
@@ -248,7 +249,7 @@ class WholeFunctionController:
             scale = 1 + max(abs(g))
             values = simplex([(tick / SHARE_TICKS - rate * float(v) / scale) * spec['total']
                               for tick, v in zip(ticks, g)], spec['total'], spec['low'], spec['high'])
-            self.flow.vector[name] = [round(value / spec['total'] * SHARE_TICKS) for value in values]
+            self.flow.vector[name] = weight_ticks(values)
         self.flow.history.append({'round': self.flow.round, 'before': before, 'after': self.flow.centre,
                                   'episodes': [row['episode'] for row in records],
                                   'gradient': gradient.tolist(), 'learning_rate': rate,
