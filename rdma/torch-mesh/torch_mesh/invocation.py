@@ -4,7 +4,9 @@ from pathlib import Path
 
 import torch.distributed as dist
 
+import controller as policy
 from controller import WholeFunctionController
+from mesh_source import revision
 from rollout import RolloutStats
 from . import partition
 
@@ -20,6 +22,7 @@ class Invocation:
 
     def __init__(self, mesh, name, workload, state_path):
         self.mesh, self.name, self.workload = mesh, name, workload
+        self.implementation = revision(Path(policy.__file__).resolve().parents[1])
         self.group, self.path = mesh.get_group(name), Path(state_path).expanduser()
         self.rank, self.size = self.group.rank(), self.group.size()
         self.store = dist.distributed_c10d._get_default_store()
@@ -32,6 +35,7 @@ class Invocation:
         self.proposal, self.preparations = None, None
         self.sequence, self.feedback = 0, None
         if self.controller is not None:
+            self.controller.bind_implementation(self.implementation)
             if self.controller.workload != workload:
                 raise ValueError('stored invocation state describes another complete function')
             parts = self.controller.proposal()['parts'][name]
@@ -50,6 +54,7 @@ class Invocation:
             self.controller = WholeFunctionController.from_comm(decisions, self.group.comm, workload=self.workload)
         else:
             self.controller = self.controller.bind_fabric(self.group.comm)
+        self.controller.bind_implementation(self.implementation)
         self.proposal = self.controller.proposal()
         self.group.reset_fused_configuration()
         self.controller.install_routes(self.group.comm, self.proposal)

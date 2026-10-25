@@ -124,9 +124,27 @@ class WholeFunctionController:
                                route_units=route_resolution(comm, fabric.nodes), **options)
 
     def proposal(self, explore=None):
-        if explore is False:
-            return copy.deepcopy(self.flow.ask(explore=False))
-        return copy.deepcopy(self._proposal)
+        proposal = copy.deepcopy(self.flow.ask(explore=False) if explore is False else self._proposal)
+        if hasattr(self, 'implementation'):
+            proposal['implementation'] = self.implementation
+        return proposal
+
+    def bind_implementation(self, identity):
+        """Keep placement, but never difference costs across code revisions.
+
+        Called at configuration realization with the committed implementation's
+        identity. A source change starts a fresh stencil at the same centre;
+        completed history remains available for longitudinal comparisons.
+        """
+        if getattr(self, 'implementation', None) == identity:
+            return self
+        self.implementation = copy.deepcopy(identity)
+        if self.flow.serial:
+            self.flow.serial += 1
+        self.flow.samples = []
+        self._rollout_points = {}
+        self._proposal = self.flow.ask(explore=self._proposal['phase'] != 'centre')
+        return self
 
     def bind_fabric(self, comm):
         """Realize current physical coordinates, retaining the compute allocation.
@@ -313,7 +331,8 @@ class WholeFunctionController:
                 'history_limit': self.history_limit, 'flow': self.flow.state(),
                 'proposal': self.proposal(), 'failures': copy.deepcopy(self.failures),
                 'rollouts': copy.deepcopy(getattr(self, '_rollouts', [])),
-                'rollout_points': copy.deepcopy(getattr(self, '_rollout_points', {}))}
+                'rollout_points': copy.deepcopy(getattr(self, '_rollout_points', {})),
+                'implementation': copy.deepcopy(getattr(self, 'implementation', None))}
 
     @classmethod
     def of(cls, state):
@@ -327,4 +346,5 @@ class WholeFunctionController:
         obj._proposal, obj.failures = copy.deepcopy(state['proposal']), copy.deepcopy(state.get('failures', []))
         obj._rollouts = copy.deepcopy(state.get('rollouts', []))
         obj._rollout_points = copy.deepcopy(state.get('rollout_points', {}))
+        obj.implementation = copy.deepcopy(state.get('implementation'))
         return obj
