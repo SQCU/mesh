@@ -1089,19 +1089,17 @@ def calls(tensor):
             for i, p in enumerate(tensor.placements) if isinstance(p, RaggedShard) and mesh.size(i) > 1]
 
 
-def plan(mesh, name, groups, *, prepare=None):
+def plan(mesh, name, groups):
     """The program's collectives on mesh dimension `name`'s group declared once, in their order (torch_mesh.plan):
     `groups` from the ops' own (calls, gathered, scattered), as a step issues them, or a function of no arguments
     giving them from the parts attached now, called again when the controller moves the parts. A list declares
     invariant counts; use a callable for every declaration whose counts depend on the current partition."""
     from . import plan as declare
     _PLANS[mesh, name] = groups
-    _PREPARATIONS[mesh, name] = prepare
     return declare(mesh.get_group(name), groups() if callable(groups) else groups)
 
 
 _PLANS = {}
-_PREPARATIONS = {}
 
 
 def _replan(mesh, name):
@@ -1110,144 +1108,6 @@ def _replan(mesh, name):
     if groups is not None:
         from . import plan as declare
         declare(mesh.get_group(name), groups() if callable(groups) else groups)
-
-
-# The balancer between evaluations (design/data-model.md section 9: "Between one evaluation and the next, the balancer
-# sets the shares ... A new share is then a new compiled plan ... Within an evaluation, nothing about the shares is
-# chosen"; the operator, 2026-10-23: "it is the collective's job to use every rank to the maximum extent possible and
-# measure the residual in completion time between ranks to allow for cross-function-evaluation rebalancings").
-_BALANCING = {}
-
-
-def evaluations(mesh, name, count, *, workload=None, controller=None):
-    """Yield complete function invocations under immutable configuration operands.
-
-    A yield must enclose the entire declared function, including communication and
-    numerical consumers. Completion observers attach to existing command buffers;
-    they never commit or wait. A local inbox submits delayed statistics to a
-    worker; missing peer statistics never stop this loop. The realized generation
-    stays immutable throughout these count calls. New proposed operands are
-    exposed separately and applied by realize_evaluations at configuration time.
-
-    ``workload`` names the invariant numerical function/shape. A supplied shared
-    controller can include other compute and physical route decision vectors.
-    """
-    from controller import WholeFunctionController
-    group, o = mesh.get_group(name), operand(mesh, name)
-    held = _BALANCING.setdefault((mesh, name), {})
-    workload = workload if workload is not None else {'function': name, 'units': o.units}
-    if 'controller' not in held:
-        n = len(o.capacity)
-        decisions = {name: {'parts': o.parts.tolist(), 'grain': 1, 'low': [0] * n,
-                            'high': [o.units] * n}}
-        if controller is None:
-            controller = (WholeFunctionController.from_comm(decisions, group.comm, workload=workload)
-                          if (mesh, name) in _PLANS and hasattr(group, 'plan_demands')
-                          else WholeFunctionController(decisions, workload=workload))
-        proposal = controller.proposal()
-        if list(proposal['parts'][name]) != o.parts.tolist():
-            raise ValueError('the initial whole-function proposal must describe the attached partition')
-        held.update(controller=controller, realized=proposal, sequence=0,
-                    observed=0, generation=0)
-        held['feedback'] = _rollout_feedback(group, name, controller)
-        if controller.topology is not None:
-            group.reset_fused_configuration()
-            controller.install_routes(group.comm, proposal)
-            _replan(mesh, name)
-    elif (held['controller'].workload != workload
-          or controller is not None and held['controller'] is not controller):
-        raise ValueError('a partition controller cannot mix different whole-function workloads or controllers')
-    if (mesh, name) in _PLANS:
-        group.plan_active(False)
-    prepare = _PREPARATIONS.get((mesh, name))
-    if prepare is not None and count:
-        prepare(count)
-
-    def iterate():
-        from .benchmarks import function_timings
-        for k in range(count):
-            _balance(mesh, name, held, group)
-            proposal = held['realized']
-            sequence, timer = held['sequence'], function_timings(mesh.device_type)
-            held['sequence'] += 1
-            planned, completed = (mesh, name) in _PLANS, False
-            if planned:
-                group.plan_active(True)
-            timer.mark()
-            try:
-                yield k
-                completed = True
-            finally:
-                if completed:
-                    timer.mark()
-                    held['feedback'].observe({'episode': sequence, 'proposal': proposal,
-                        'workload': held['controller'].workload,
-                        **{key: proposal[key] for key in ('behavior_probability_ticks', 'target_probability_ticks')
-                           if key in proposal}}, timer)
-                if planned:
-                    group.plan_active(False)
-            _balance(mesh, name, held, group)
-    return iterate()
-
-
-def _balance(mesh, name, held, group):
-    """Drain ready local evidence only. No collective, store access or replan."""
-    from controller import WholeFunctionController
-    for state in held['feedback'].poll():
-        held['controller'] = WholeFunctionController.of(state['controller'])
-        held['observed'] = state['observed']
-
-
-def realize_evaluations(mesh, name):
-    """Apply the latest proposal when constructing the next compiled generation.
-
-    Call outside evaluations(), after completing the previous generation. This
-    explicit configuration step exchanges metadata and may migrate operands; it
-    is never inserted into an executing rollout loop by the stats observer.
-    """
-    from controller import WholeFunctionController
-    held, group = _BALANCING[mesh, name], mesh.get_group(name)
-    _balance(mesh, name, held, group)
-    store = dist.distributed_c10d._get_default_store()
-    key = f'mesh/rollout/realize/{group.group_name}/{name}/{held["generation"]}'
-    if group.rank() == 0:
-        store.set(key, json.dumps(held['controller'].state()))
-    controller = WholeFunctionController.of(json.loads(store.get(key)))
-    next_proposal = controller.proposal()
-    parts, o = list(map(int, next_proposal['parts'][name])), operand(mesh, name)
-    if controller.topology is not None:
-        group.reset_fused_configuration()
-        controller.install_routes(group.comm, next_proposal)
-    if parts != o.parts.tolist():
-        _attach(mesh, name, parts)
-        _relay(mesh, name)
-        _replan(mesh, name)
-    elif controller.topology is not None:
-        _replan(mesh, name)
-    held['controller'], held['realized'] = controller, next_proposal
-    held['generation'] += 1
-    return next_proposal
-
-
-def evaluation_state(mesh, name):
-    """Serializable controller state and truthful completion counts, without waits."""
-    held = _BALANCING[mesh, name]
-    return {'controller': held['controller'].state(), 'issued': held['sequence'],
-            'observed': held['observed'], 'pending': held['feedback'].pending,
-            'submitted': held['feedback'].submitted, 'realized': held['realized'],
-            'generation': held['generation']}
-
-
-def _rollout_feedback(group, name, controller):
-    from rollout import RolloutStats
-    feedback = RolloutStats(dist.distributed_c10d._get_default_store(),
-                        f'mesh/rollout/stats/{group.group_name}/{name}',
-                        group.rank(), group.size(), controller)
-    workers = getattr(group, '_rollout_workers', None)
-    if workers is None:
-        group._rollout_workers = workers = []
-    workers.append(feedback)
-    return feedback
 
 
 def split(mesh, name, N):

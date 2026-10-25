@@ -12,27 +12,6 @@ import time
 TIMING_METHOD = 'continuous-host-submission-and-final-completion'
 
 
-class HostTimings:
-    def __init__(self):
-        self.times = []
-
-    def mark(self):
-        self.times.append(time.perf_counter())
-
-    def ready(self):
-        return len(self.times) >= 2
-
-    def read(self):
-        return self.times
-
-
-def function_timings(device):
-    if device == 'mps':
-        from . import _stream
-        return _stream.CompletionTimings()
-    return HostTimings()
-
-
 def emit(record, *, file=None):
     """One structured record format for examples and the hourly reader."""
     print(json.dumps(record, sort_keys=True), file=file, flush=True)
@@ -80,6 +59,20 @@ def sequence(call, window_calls, windows, sample=None):
 def timed(call, calls, sample, group):
     result = sequence(call, calls, 1, sample)
     return result['host_ns'] * 1e-9, result['traffic']
+
+
+def measured(invocation, call, steps, *, useful_work_bytes):
+    """design/whole-function.md"""
+    from . import partition
+    result = invocation.run(call, calls=steps, useful_work_bytes=useful_work_bytes)
+    seconds = result['host_ns'] * 1e-9
+    emit({'rank': invocation.rank, 'program': invocation.name, 'size': invocation.size,
+          'steps': steps, 'seconds': seconds, 'step_microseconds': seconds / steps * 1e6,
+          'calls_per_second': steps / seconds,
+          'useful_output_bytes': useful_work_bytes,
+          'useful_gigabytes_per_second': useful_work_bytes / seconds / 1e9,
+          'parts': partition.operand(invocation.mesh, invocation.name).parts.tolist(),
+          'timing_method': result['timing_method'], 'function_feedback': result['feedback']})
 
 
 def latency(call, calls, group):

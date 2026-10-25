@@ -55,16 +55,13 @@ proposal's coordinates, enter the regression. A positive ridge handles an
 unexcited design; flat costs yield exactly zero movement. This local model does
 not claim an unbiased current-policy gradient for arbitrary stale trajectories.
 
-Torch `partition.evaluations` keeps one realized generation for its submitted
-sequence and exposes the learned proposal separately in `evaluation_state`.
-It no longer performs a CPU all-gather or discards old-proposal timings on each
-iteration. `realize_evaluations` explicitly applies a proposal during construction
-of the next generation, after the previous generation's uses have retired. It is
-not inserted between iterations or repeated `evaluations` sequences. Installing new generations concurrently with
-execution still requires a common activation sequence across ranks. Native
-issued bindings now retain their immutable compiler tables, so freeing or
-replacing the compiler plan does not destroy an in-flight issue's tables. This
-is not yet a cross-rank activation protocol.
+Torch `Invocation` keeps one realized plan throughout a complete submitted sequence.
+It restores saved work shares before tensor construction and installs routes before
+execution. The statistics worker saves the next proposal after receiving the complete
+call's records. The next invocation uses it. This is the shared path for TP, EP, CP,
+the chain, and the LSTM; no per-step observer or alternative realization loop remains.
+Native issued bindings retain their immutable compiler tables, so replacing a compiler
+plan does not destroy an in-flight issue's tables.
 
 `declare(comm, calls)` calls the common native `ncclMeshCommPlan` with the complete
 typed graph, retaining count and explicit-demand arrays through configuration.

@@ -14,9 +14,9 @@ from . import partition
 class Invocation:
     """Restore placement before operands are built; observe only the full call.
 
-    Bootstrap realizes configuration. The same asynchronous statistics worker
-    used by partition.evaluations observes completed whole functions and persists
-    the next configuration. Numerical execution never gathers elapsed times.
+    Bootstrap realizes configuration. The asynchronous statistics worker observes
+    completed whole functions and persists the next configuration. Numerical
+    execution never gathers elapsed times.
     """
     serial = 0
 
@@ -86,10 +86,10 @@ class Invocation:
         return {'executed_proposal': self.proposal['id'], 'local_seconds': seconds,
                 'episode': episode, 'proposal': self.proposal, 'metrics': evidence, 'state': str(self.path)}
 
-    def run(self, call, **evidence):
+    def run(self, call, *, calls=1, **evidence):
         """Measure a complete service call through the shared sequence runner."""
         from .benchmarks import sequence
         self.begin()
-        measured = sequence(call, 1, 1)
+        measured = sequence(call, calls, 1)
         measured['feedback'] = self.completed(measured['host_ns'] * 1e-9, **evidence)
         return measured

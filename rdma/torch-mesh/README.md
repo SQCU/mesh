@@ -214,13 +214,12 @@ parallelize_module(block, mesh, {"wq": partition.ColwiseParallel(), "wo": partit
 
 ### Parts from the run's own evidence
 
-The program declares units; the backend initially splits them evenly. `partition.evaluations` drives the existing
-Balancer (`rdma/allocate.py`) between declared function evaluations, using each rank's measured work between
-collectives. A changed partition is attached as a new operand, registered tensors move through `partition.follow`,
-and callable plan declarations are rebuilt. The function's cached plan is enabled only around its evaluation and
-suspended for feedback and migration on the same communicator (`ncclMeshCommPlanActive`), so those calls cannot
-consume the function's plan cursor. This is the existing compute-share feedback implementation; the separate
-whole-function routing objective is documented in [whole-function.md](../../design/whole-function.md).
+The program declares units. `Invocation` restores the next work split before the program builds its tensors.
+It then compiles the declared calls and installs their routes. Work shares and routes stay fixed throughout
+execution. The shared statistics worker uses whole-call time and useful output bytes to update the next plan,
+which it saves for the next invocation. TP, EP, CP, the chain, and the LSTM use this same path. Their measurements
+run through `benchmarks.sequence`, with no per-step timing markers or peer-statistics waits.
+See [whole-function.md](../../design/whole-function.md).
 
 `partition.follow(*ts)` compiles exact migration ranges. Page-aligned remote ranges in declared contiguous region
 layouts write from original source views to final destination views through the common WRITE interface, with

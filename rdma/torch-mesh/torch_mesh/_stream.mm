@@ -1473,53 +1473,9 @@ static void fused_published() {
 }
 
 
-// Observe completion of the command buffers execution already uses. Observation
-// never ends an encoder, signals a GPU event, commits, or waits. Calls sharing a
-// command buffer share its completion granularity. These are host-observed
-// completion times, including callback delivery, not isolated GPU durations.
-struct CompletionTimings {
-  at::mps::MPSStream *const stream = at::mps::getCurrentMPSStream();
-  struct Stamp { double seconds = 0; std::atomic<int> state{0}; };
-  std::vector<std::shared_ptr<Stamp>> stamps;
-  static double now() {
-    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
-  }
-  void mark() {
-    auto stamp = std::make_shared<Stamp>();
-    if (stamps.empty()) {
-      stamp->seconds = now();
-      stamp->state.store(1, std::memory_order_release);
-      stamps.push_back(stamp);
-      return;
-    }
-    stamps.push_back(stamp);
-    const Deadline deadline("observe the existing command buffer");
-    stream->addCompletedHandler(^(id<MTLCommandBuffer> buffer) {
-        stamp->seconds = now();
-        stamp->state.store(buffer.status == MTLCommandBufferStatusError ? -1 : 1, std::memory_order_release);
-    });
-  }
-  bool ready() const {
-    for (const auto &stamp : stamps) {
-      const int state = stamp->state.load(std::memory_order_acquire);
-      TORCH_CHECK(state >= 0, "observed command buffer failed");
-      if (!state) return false;
-    }
-    return stamps.size() > 1;
-  }
-  std::vector<double> read() const {
-    TORCH_CHECK(ready(), "completion observations are still pending");
-    std::vector<double> out;
-    for (const auto &stamp : stamps) out.push_back(stamp->seconds);
-    return out;
-  }
-};
-
 // The group's calls (torch_mesh/backend.py): `issue` a group of calls, issued and not completed where `split` (a
 // MeshWork to wait on, its outputs `outputs`), else None (complete).
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
-  pybind11::class_<CompletionTimings>(module, "CompletionTimings")
-    .def(pybind11::init<>()).def("mark", &CompletionTimings::mark).def("ready", &CompletionTimings::ready).def("read", &CompletionTimings::read);
   module.def("pipeline", &pipeline);
   module.def("linear_source", &linear_source);
   module.def("linear_split", &linear_split);

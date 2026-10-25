@@ -62,9 +62,9 @@ completion of its own outgoing SEND merely to read available input.
 ## Plans, commits, and ownership
 
 `torch_mesh.plan` declares the function's collective order and counts before repeated execution. CP and EP examples
-now supply their declarations as well as TP. `partition.evaluations` enables the function plan around each
-evaluation and suspends it for feedback, repartitioning, and replanning through `ncclMeshCommPlanActive`; resuming
-restarts its cursor. Feedback uses the existing communicator. A cached form first realized lazily is not by itself
+now supply their declarations as well as TP. `Invocation` restores work shares before tensors are built, prepares
+the fixed plan before execution, and sends whole-call observations to the shared statistics worker afterward.
+The next invocation reads the worker's saved proposal. A cached form first realized lazily is not by itself
 proof that every planning cost has been moved out of the measured function; a benchmark must realize and declare
 its complete workload before measuring.
 
