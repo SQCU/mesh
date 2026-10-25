@@ -1396,11 +1396,11 @@ struct ChainChunk {
 struct PreparedChain {
   int64_t comm;
   std::vector<at::Tensor> held;
-  std::vector<ChainStep> steps;
-  std::vector<ChainChunk> chunks;
+  std::array<std::vector<ChainStep>, 2> steps;
+  std::array<std::vector<ChainChunk>, 2> chunks;
   Dispatch dispatch;
   MeshStream *stream;
-  uint32_t channels, phase = 0;
+  uint32_t channels, phase = 0, generation = 0;
 };
 static auto *prepared_chains_ = new std::vector<std::unique_ptr<PreparedChain>>;
 
@@ -1425,40 +1425,46 @@ static void prepare_chain(int64_t index, int64_t kernel, const std::vector<at::T
   words.resize(10 + 24 * f.channels);
   auto chain = std::make_unique<PreparedChain>(PreparedChain{f.comm, operands, {}, {},
       encoded(kernel, buffers, words, 15, groups, 1, threads), &stream_of(at::mps::getCurrentMPSStream()), (uint32_t)f.channels});
-  at::Tensor previous = x;
-  uint32_t previous_j = 0;
   const NSUInteger input_base = input.storage_offset() * input.element_size();
   const NSUInteger output_base = output.storage_offset() * output.element_size();
   const NSUInteger input_pitch = input.stride(0) * input.element_size();
   const NSUInteger output_pitch = output.stride(0) * output.element_size();
-  auto append = [&](int64_t t, int64_t j, const at::Tensor &send, const at::Tensor &land, bool last) {
-    const std::array<at::Tensor, 4> bound{input, output, send, land};
-    ChainStep step{{}, {}, (uint32_t)(t == 0), (uint32_t)(2 * t), (uint32_t)last, previous_j, (uint32_t)j};
-    for (size_t k = 0; k < bound.size(); k++) {
-      step.buffers[k] = at::native::mps::getMTLBufferStorage(bound[k]);
-      step.offsets[k] = bound[k].storage_offset() * bound[k].element_size();
+  // Both call generations use the same allocated rings. Continuing their
+  // parity keeps the first frame after a final join on the other pages.
+  for (uint32_t generation = 0; generation < 2; generation++) {
+    at::Tensor previous = x;
+    uint32_t previous_j = 0;
+    auto append = [&](int64_t t, int64_t j, const at::Tensor &send, const at::Tensor &land, bool last) {
+      const std::array<at::Tensor, 4> bound{input, output, send, land};
+      ChainStep step{{}, {}, (uint32_t)(t == 0), (uint32_t)(2 * t), (uint32_t)last, previous_j, (uint32_t)j};
+      for (size_t k = 0; k < bound.size(); k++) {
+        step.buffers[k] = at::native::mps::getMTLBufferStorage(bound[k]);
+        step.offsets[k] = bound[k].storage_offset() * bound[k].element_size();
+      }
+      step.offsets[0] = input_base + std::min(t, steps - 1) * input_pitch;
+      step.offsets[1] = output_base + std::max<int64_t>(0, t - 1) * output_pitch;
+      chain->steps[generation].push_back(step);
+    };
+    for (int64_t first = 0, turn = 0; first < steps; first += batch, turn++) {
+      const int64_t count = std::min(batch, steps - first), half = (generation + turn) % 2;
+      FusedForm::Ring &ring = f.rings.at(count);
+      chain->chunks[generation].push_back({ring.plans[half].get(), (size_t)first, (size_t)count});
+      for (int64_t j = 0; j < count; j++) {
+        append(first + j, j, ring.segments[half][j][f.rank], previous, false);
+        previous = ring.slots[half][j];
+        previous_j = (uint32_t)j;
+      }
     }
-    step.offsets[0] = input_base + std::min(t, steps - 1) * input_pitch;
-    step.offsets[1] = output_base + std::max<int64_t>(0, t - 1) * output_pitch;
-    chain->steps.push_back(step);
-  };
-  for (int64_t first = 0, turn = 0; first < steps; first += batch, turn++) {
-    const int64_t count = std::min(batch, steps - first), half = turn % 2;
-    FusedForm::Ring &ring = f.rings.at(count);
-    chain->chunks.push_back({ring.plans[half].get(), (size_t)first, (size_t)count});
-    for (int64_t j = 0; j < count; j++) {
-      append(first + j, j, ring.segments[half][j][f.rank], previous, false);
-      previous = ring.slots[half][j];
-      previous_j = (uint32_t)j;
-    }
+    append(steps, 0, x, previous, true);
   }
-  append(steps, 0, x, previous, true);
   (*prepared_chains_)[index] = std::move(chain);
 }
 
 static void chain_run(int64_t index) {
   PreparedChain &chain = *(*prepared_chains_)[index];
   Dispatch &d = chain.dispatch;
+  const auto &steps = chain.steps[chain.generation];
+  const auto &chunks = chain.chunks[chain.generation];
   MeshStream *s = chain.stream;
   at::mps::MPSStream *stream = s->mps;
   const auto binding = [&](const PreparedWrites *plans, bool publication) {
@@ -1491,17 +1497,18 @@ static void chain_run(int64_t index) {
     });
   };
   const PreparedWrites *previous = nullptr;
-  for (const ChainChunk &chunk : chain.chunks) {
+  for (const ChainChunk &chunk : chunks) {
     execute_fused_writes(*chunk.plans);
     binding(previous, false);
     binding(chunk.plans, true);
-    dispatch(chain.steps[chunk.first]);
+    dispatch(steps[chunk.first]);
     binding(chunk.plans, false);
-    for (size_t j = 1; j < chunk.count; j++) dispatch(chain.steps[chunk.first + j]);
+    for (size_t j = 1; j < chunk.count; j++) dispatch(steps[chunk.first + j]);
     previous = chunk.plans;
   }
-  dispatch(chain.steps.back());
-  chain.phase += 2 * (uint32_t)(chain.steps.size() - 1);
+  dispatch(steps.back());
+  chain.phase += 2 * (uint32_t)(steps.size() - 1);
+  chain.generation ^= chunks.size() & 1;
 }
 
 // A declared set of routed writes. Bindings name physical channels, including
