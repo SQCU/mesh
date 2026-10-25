@@ -6,7 +6,6 @@ No client is killed. A failed transition excludes that node from measurement.
 """
 import contextlib
 import fcntl
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -77,13 +76,11 @@ def verify_active(source, commit):
     actual = run('ps', '-o', 'comm=', '-p', pids[0]).stdout.strip()
     if actual != str(source / 'rdma/mesh-flow'):
         raise RuntimeError(f'active bridge runs {actual}, not {source}')
-    binaries = {name: hashlib.sha256((source / 'rdma' / name).read_bytes()).hexdigest()
-                for name in ('mesh-heartbeat', 'mesh-flow', 'libmesh.dylib', 'libnccl-mesh.dylib')}
     check = json.loads(run(source / 'rdma/mesh-stat').stdout.splitlines()[-1])
     if not check.get('up'):
         raise RuntimeError(f'new bridge is not up: {check}')
     return {'commit': commit, 'active_heartbeat': str(expected), 'active_bridge': actual,
-            'built_binary_sha256': binaries, 'topology': check}
+            'topology': check}
 
 
 def install_snapshot(source, allow_source_transition=False):
@@ -173,7 +170,7 @@ def check_package(source):
     for name, record in wanted.items():
         if name.startswith(prefix) and name.endswith(('.py', '.metal')):
             installed = package / name[len(prefix):]
-            if not installed.is_file() or hashlib.sha256(installed.read_bytes()).hexdigest() != record['sha256']:
+            if not installed.is_file() or installed.read_bytes() != (Path(source) / name).read_bytes():
                 raise RuntimeError(f'installed torch_mesh differs from committed source: {name}')
     if not list(package.glob('_stream*.so')):
         raise RuntimeError('installed torch_mesh has no native extension')

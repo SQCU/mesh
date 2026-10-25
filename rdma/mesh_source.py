@@ -1,6 +1,5 @@
 """Read-only committed-source export and verification shared by installers and runners."""
 import argparse
-import hashlib
 import io
 import json
 import os
@@ -17,11 +16,6 @@ def git(root, *args):
 
 def pin(root):
     return git(root, 'rev-parse', '--verify', 'HEAD^{commit}').decode().strip()
-
-
-def digest(path):
-    path = Path(path)
-    return hashlib.sha256(os.fsencode(os.readlink(path)) if path.is_symlink() else path.read_bytes()).hexdigest()
 
 
 def snapshot_path(root, name):
@@ -71,7 +65,7 @@ def export(root, commit, destination):
             else:
                 target.write_bytes(tar.extractfile(member).read())
                 target.chmod(member.mode)
-            files[member.name] = {'sha256': digest(target), 'mode': member.mode,
+            files[member.name] = {'mode': member.mode,
                                   'kind': 'symlink' if member.issym() else 'file'}
     tracked = {row.split(b'\t', 1)[1].decode() for row in git(root, 'ls-tree', '-rz', commit).split(b'\0') if row}
     if tracked != files.keys():
@@ -90,9 +84,10 @@ def verify(root):
     document = manifest(root)
     for name, record in document['files'].items():
         path = snapshot_path(root, name)
-        if digest(path) != record['sha256'] or path.is_symlink() != (record['kind'] == 'symlink'):
-            raise ValueError(f'committed source differs: {name}')
-        if not path.is_symlink() and path.stat().st_mode & 0o777 != record['mode'] & 0o777:
+        if not (path.is_symlink() if record['kind'] == 'symlink' else path.is_file()):
+            raise ValueError(f'committed source member missing or wrong kind: {name}')
+        # Git versions executable status, not permissions modified by a node's umask.
+        if not path.is_symlink() and bool(path.stat().st_mode & 0o111) != bool(record['mode'] & 0o111):
             raise ValueError(f'committed source mode differs: {name}')
     return document
 

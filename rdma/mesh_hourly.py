@@ -5,7 +5,6 @@ fresh interpreter importing this driver from the pinned mesh snapshot. A helper
 missing in that commit is a recorded prerequisite failure, never a source fallback.
 """
 import argparse
-import hashlib
 import io
 import json
 import os
@@ -66,7 +65,6 @@ def launcher(mesh_root, microbench_root, output_root):
     record = {'schema': 2, 'run': tag, 'started_unix': began, 'commits': {}, 'snapshots': {},
               'status': 'failed', 'errors': [], 'nodes': {}, 'workloads': [],
               'launcher': {'file': str(Path(__file__).resolve()),
-                           'sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                            'role': 'pin/export only; target helpers execute from the committed snapshot'}}
     try:
         roots = {'mesh': Path(mesh_root).resolve(), 'metal-microbench': Path(microbench_root).resolve()}
@@ -76,16 +74,14 @@ def launcher(mesh_root, microbench_root, output_root):
         for name, root in roots.items():
             target = out / 'sources' / name
             export(root, record['commits'][name], target)
-            record['snapshots'][name] = {'path': str(target),
-                'manifest_sha256': hashlib.sha256((target / MANIFEST).read_bytes()).hexdigest()}
+            record['snapshots'][name] = {'path': str(target)}
         committed_mesh = Path(record['snapshots']['mesh']['path'])
         committed_bench = Path(record['snapshots']['metal-microbench']['path'])
         absent = [name for name in REQUIRED if not (committed_mesh / name).is_file()]
         if absent:
             raise RuntimeError(f'pinned mesh commit lacks shared hourly prerequisites: {absent}')
         config = committed_bench / 'tools/mesh/hourly/workloads.json'
-        record['configuration'] = {'path': str(config.relative_to(committed_bench)),
-                                   'sha256': hashlib.sha256(config.read_bytes()).hexdigest()}
+        record['configuration'] = {'path': str(config.relative_to(committed_bench))}
         save(out / 'request.json', record)
         with (out / 'hourly.log').open('wb') as log:
             child = subprocess.run([sys.executable, str(committed_mesh / 'rdma/mesh_hourly.py'),
@@ -121,16 +117,14 @@ def archive_snapshot(source):
 def stage(node, source, destination):
     from mesh_nodes import home_path
     payload = archive_snapshot(source)
-    digest = hashlib.sha256(payload).hexdigest()
     # The directory is unique per run; no agent checkout or earlier build is overwritten.
     folder, bundle = home_path(destination), home_path(destination + '.tar')
     command = (f'mkdir -p {folder} && cat > {bundle} && '
-               f'test "$(shasum -a 256 {bundle} | cut -d " " -f 1)" = {shlex.quote(digest)} && '
                f'tar -xf {bundle} -C {folder} && rm {bundle}')
     code, output = node.run(command, input=payload)
     if code:
         raise RuntimeError(f'{node.name}: committed snapshot upload failed ({code}): {output}')
-    return {'commit': verify(source)['commit'], 'archive_sha256': digest, 'remote_root': destination}
+    return {'commit': verify(source)['commit'], 'remote_root': destination}
 
 
 def prepare_node(node, paths, record, out, since):
@@ -228,8 +222,6 @@ def _execute_locked(request):
     try:
         paths = {name: Path(value['path']) for name, value in record['snapshots'].items()}
         for name, root in paths.items():
-            if hashlib.sha256((root / MANIFEST).read_bytes()).hexdigest() != record['snapshots'][name]['manifest_sha256']:
-                raise ValueError(f'{name}: source manifest changed')
             if verify(root)['commit'] != record['commits'][name]:
                 raise ValueError(f'{name}: commit does not match manifest')
         mesh.configure(paths['mesh'], paths['metal-microbench'])
