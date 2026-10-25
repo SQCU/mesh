@@ -27,7 +27,7 @@ assumption that ranks minus one equals channels, or that a channel contains only
 | `fused.write_rows(send, landings, pairs, group, row_bytes, rows, stride)` | Exact affine row views with rank-local pitches; one logical message regardless of row count, using the same prepared WRITE machinery. |
 | `fused.encode(handle, buffers, constants, at, gx, gy, threads, channels, land=None, publish=None)` | Caller words padded to an even count, then `channels` landing records and `channels` publication records; publishes under the stream's commit rule. |
 | `fused.encode_many(calls)` | An ordered list of the same encoding arguments, prepared before one native queue entry; every frame keeps its own constant words. Publication applies the stream's commit policy and the batch ends by submitting any remaining producer command buffer without waiting. |
-| `group.write(source_buffer, landing_buffer, source, destination)` | The common explicit WRITE call; the source rank reads its source argument and other ranks use their landing argument, including relay storage. |
+| `group.prepare_writes(deliveries)` | Realizes local page views and all physical routes before execution; the returned operands execute those fixed writes. |
 
 The former `fused.exchange`, native `fused_exchange`, and collective-specific `fused_gather` paths have been removed.
 Generic data functions and explicit contiguous/affine writes share `execute_fused_writes`. Every operation reaches

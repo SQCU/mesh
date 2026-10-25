@@ -301,10 +301,6 @@ class ProcessGroupMesh(dist.ProcessGroup):
         check(LIB.ncclMeshCommPlanActive(self.comm, bool(active)))
         self._plan_enabled = bool(active)
 
-    def write(self, source_buffer, landing_buffer, source, destination, async_op=False):
-        """design/whole-function.md#one-way-writes"""
-        return self._issue([(WRITE, [source_buffer], [landing_buffer], [destination], 0, source)], landing_buffer, async_op)
-
     def prepare_writes(self, deliveries):
         """Bind exact logical tensor views once to the common physical WRITE plan.
 

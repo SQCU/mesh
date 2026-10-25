@@ -38,7 +38,7 @@
    every physical cable is a separate channel, including all parallel cables (ncclMeshCommFabric),
    and a route crosses members alone, so a node a route is to cross takes part as a member.  The communicator's own
    table makes every member a contributor, so a member on a route combines its own operand into what it sends on; only
-   a program passed to ncclMeshCommInitRank with mesh_compile's contributors, or an explicit ncclMeshWrite path,
+   a program passed to ncclMeshCommInitRank with mesh_compile's contributors, or a prepared WRITE path,
    has a member that sends on what lands alone (the identity, data-model.md section 9's relay).  Two members no path between members
    joins fail a collective, and a call between two members not joined fails, as values (ncclInvalidUsage).  ncclMeshCommInitRank (below) is the same init for a program
    that passes its own programs or paths.  ncclCommSplit and ncclCommShrink make communicators of the ranks they take;
@@ -1018,10 +1018,6 @@ ncclResult_t ncclMeshWriteSpansPrepare(const void* source_buffer, void* landing_
     int metal, size_t max_packet, ncclMeshWritePlan_t* out);
 ncclResult_t ncclMeshWriteExecute(ncclMeshWritePlan_t plan, cudaStream_t stream);
 ncclResult_t ncclMeshWritePlanDestroy(ncclMeshWritePlan_t plan);
-/* Eager convenience: prepares the same capable plan and executes it. Repeated
-   function execution should prepare once and use Execute or fused bindings. */
-ncclResult_t ncclMeshWrite(const void* source_buffer, void* landing_buffer, size_t count, ncclDataType_t datatype,
-                          int source, int destination, ncclComm_t comm, cudaStream_t stream);
 /* A call a program declares ahead (ncclMeshCommPlan): `what` (mesh-plan.h MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE,
    MESH_REDUCE_SCATTER, MESH_ALLGATHER, or ncclMeshCallAlltoAllV), its `peer` (a
    send's or a receive's, a reduce's or a broadcast's root), `count` as its call takes it (a reduce-scatter's

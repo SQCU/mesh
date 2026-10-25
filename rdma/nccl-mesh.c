@@ -1972,7 +1972,7 @@ static uint64_t seg_first(const uint64_t *seg, int q) {
 /* the name of a call's kind, its failures' */
 static const char *call_name(const struct call *c) {
   static const char *const names[] = {"ncclAllReduce", "ncclBroadcast", "ncclReduce", "ncclReduceScatter", "ncclAllGather"};
-  return c->target ? "ncclMeshWrite" : counted(c) ? "ncclMeshAlltoAllV" : names[c->what];
+  return c->target ? "ncclMeshWriteExecute" : counted(c) ? "ncclMeshAlltoAllV" : names[c->what];
 }
 
 /* Whether a call has physical work on a communicator with multiple ranks. */
@@ -4868,17 +4868,6 @@ ncclResult_t ncclMeshWriteExecute(ncclMeshWritePlan_t plan, cudaStream_t stream)
     .count = plan->count, .type = plan->type, .op = ncclSum, .comm = plan->comm, .stream = stream, .write_plan = plan});
 }
 ncclResult_t ncclMeshWritePlanDestroy(ncclMeshWritePlan_t plan) { write_plan_drop(plan); return ncclSuccess; }
-ncclResult_t ncclMeshWrite(const void *source_buffer, void *landing_buffer, size_t count, ncclDataType_t datatype,
-                          int source, int destination, ncclComm_t comm, cudaStream_t stream) {
-  const ncclMeshStream *on = stream;
-  const ncclMeshFused *fused = on ? on->fused : NULL;
-  ncclMeshWritePlan_t plan = NULL;
-  ncclResult_t result = ncclMeshWritePrepare(source_buffer, landing_buffer, count, datatype, source, destination, comm, !!stream,
-    fused && fused->repeats ? fused->repeats : 1, fused ? fused->stride : 0, 0, &plan);
-  if (!result) result = ncclMeshWriteExecute(plan, stream);
-  write_plan_drop(plan);
-  return result;
-}
 
 ncclResult_t ncclReduceScatterConfig(const void *sendbuff, void *recvbuff, size_t recvcount, ncclDataType_t datatype, ncclRedOp_t op,
                                      ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t *config) {

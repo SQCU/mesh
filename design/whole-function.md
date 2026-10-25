@@ -103,8 +103,8 @@ landing buffer is an output. Other ranks' buffers are relay storage.
 `ncclMeshCommWriteRoutes` installs paths in the communicator's configuration.
 `ncclMeshWritePrepare`, `ncclMeshWriteRowsPrepare` and `ncclMeshWriteSpansPrepare` bind exact source/landing
 extents and jointly compile registration/packet cuts before execution;
-`ncclMeshWriteExecute` reuses that plan. The eager `ncclMeshWrite` prepares and
-executes the same representation. A relay's send reads its receive's registered
+`ncclMeshWriteExecute` reuses that plan. The interface that combined preparation
+and execution has been removed. A relay's send reads its receive's registered
 interval directly and uses the incoming stream's landed prefix as its supplied
 word. It can forward a completed span without a host round trip or whole-operand
 join. Path weights describe total flow; realization conserves bytes without a
