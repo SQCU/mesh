@@ -128,6 +128,28 @@ class WholeFunctionController:
             return copy.deepcopy(self.flow.ask(explore=False))
         return copy.deepcopy(self._proposal)
 
+    def bind_fabric(self, comm):
+        """Realize current physical coordinates, retaining the compute allocation.
+
+        A stored route vector names concrete cables and paths. Changed cables
+        require new route coordinates and fresh response observations; old
+        gradients cannot be applied to different paths. Identical fabrics keep
+        their accumulated controller and only refresh the declared demands.
+        """
+        fabric, demands = function_demands(comm)
+        if (self.topology is not None and self.topology.get('nodes') == fabric.nodes
+                and self.topology.get('cables') == fabric.cables):
+            self.topology['demands'] = [[a, b, n] for (a, b), n in demands.items()]
+            return self
+        parts = self.proposal()['parts']
+        decisions = {name: {**copy.deepcopy(spec), 'parts': parts[name]}
+                     for name, spec in self.flow.decisions.items() if not name.startswith('route:')}
+        return self.from_fabric(decisions, fabric, demands, self.workload, schedule=self.schedule,
+                                route_units=route_resolution(comm, fabric.nodes),
+                                history_limit=self.history_limit,
+                                learning_rate=self.flow.learning_rate, perturbation=self.flow.perturbation,
+                                transaction_weight=self.flow.transaction_weight)
+
     ask = proposal
 
     @property

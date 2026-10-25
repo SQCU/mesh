@@ -1022,6 +1022,8 @@ ncclResult_t ncclMeshWritePlanDestroy(ncclMeshWritePlan_t plan);
    function execution should prepare once and use Execute or fused bindings. */
 ncclResult_t ncclMeshWrite(const void* source_buffer, void* landing_buffer, size_t count, ncclDataType_t datatype,
                           int source, int destination, ncclComm_t comm, cudaStream_t stream);
+/* Exact byte prefixes. ready includes completed relay SENDs, which prove their
+   own readiness even if this rank's GPU publication word has not advanced. */
 struct ncclMeshCableSample { uint64_t wire,ready,sent,landed; uint32_t cable,peer; };
 ncclResult_t ncclMeshCommSample(ncclComm_t comm, struct ncclMeshCableSample* samples, int room, int* count);
 /* design/whole-function.md#measurements: observed eligibility-to-completion windows,

@@ -179,6 +179,8 @@ def run_workload(item, nodes, paths, record, out, ordinal):
     try:
         if not selected or None in selected:
             raise RuntimeError('required nodes are absent or did not install the pinned source successfully')
+        if not mesh.wait_paired(nodes, out / f'{tag}-pairing.log'):
+            raise RuntimeError('the discovered fabric has not paired before workload configuration')
         # Workload configuration is committed; generated tensors live outside the source archives.
         folder = f'mesh-runs/hourly/{record["run"]}/{tag}'
         if item['kind'] == 'example':

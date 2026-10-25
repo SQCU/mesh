@@ -49,12 +49,7 @@ class Invocation:
                                     'low': [0] * self.size, 'high': [operand.units] * self.size}}
             self.controller = WholeFunctionController.from_comm(decisions, self.group.comm, workload=self.workload)
         else:
-            topology = self.controller.topology
-            canonical = lambda value: json.dumps(value, sort_keys=True)
-            if (topology is None or topology['nodes'] != self.size
-                    or canonical(topology['cables']) != canonical(self.group.fabric.cables)):
-                raise ValueError('stored invocation routes describe another physical fabric')
-            self.controller.topology['demands'] = [[a, b, count] for (a, b), count in self.group.plan_demands().items()]
+            self.controller = self.controller.bind_fabric(self.group.comm)
         self.proposal = self.controller.proposal()
         self.group.reset_fused_configuration()
         self.controller.install_routes(self.group.comm, self.proposal)

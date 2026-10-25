@@ -21,7 +21,6 @@ struct mesh_byte_chunk {
 struct mesh_byte_account {
   _Atomic(struct mesh_byte_chunk *) head;
   uint64_t first, bytes; /* exact absolute prefix of reclaimed history */
-  uint64_t checkpoint, checkpoint_bytes; /* one unchanged publication may lag relay completion */
 };
 
 static inline int mesh_byte_account_append(struct mesh_byte_account *account, uint64_t first,
@@ -62,7 +61,6 @@ static inline int mesh_byte_account_append(struct mesh_byte_account *account, ui
 }
 
 static inline int mesh_byte_account_at(const struct mesh_byte_account *account, uint64_t units, uint64_t *bytes) {
-  if (units == account->checkpoint) { *bytes = account->checkpoint_bytes; return 0; }
   if (units < account->first) return EINVAL;
   if (units == account->first) { *bytes = account->bytes; return 0; }
   const struct mesh_byte_chunk *chunk = atomic_load_explicit(&account->head, memory_order_acquire);
@@ -78,13 +76,6 @@ static inline int mesh_byte_account_at(const struct mesh_byte_account *account, 
   const struct mesh_byte_run *run = chunk->run + lo;
   *bytes = chunk->base + run->bytes - (run->end - within) * run->each;
   return 0;
-}
-
-static inline int mesh_byte_account_checkpoint(struct mesh_byte_account *account, uint64_t units) {
-  uint64_t bytes;
-  const int error = mesh_byte_account_at(account, units, &bytes);
-  if (!error) { account->checkpoint = units; account->checkpoint_bytes = bytes; }
-  return error;
 }
 
 /* A relative prefix vector, out[0]=0, out[i+1]-out[i] is unit i's length.
@@ -137,6 +128,6 @@ static inline void mesh_byte_account_destroy(struct mesh_byte_account *account) 
   struct mesh_byte_chunk *chunk = atomic_load_explicit(&account->head, memory_order_relaxed);
   while (chunk) { struct mesh_byte_chunk *previous = chunk->previous; free(chunk); chunk = previous; }
   atomic_store_explicit(&account->head, NULL, memory_order_relaxed);
-  account->first = account->bytes = account->checkpoint = account->checkpoint_bytes = 0;
+  account->first = account->bytes = 0;
 }
 #endif

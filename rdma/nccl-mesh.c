@@ -252,11 +252,9 @@ struct channel {
    otherwise samples use it and completed history can safely become a scalar. */
 static void channel_account_prune(struct channel *channel) {
   if (channel->trace_readers) return;
-  const uint64_t ready = atomic_load_explicit(channel->view.ready, memory_order_acquire);
   const uint64_t sent = atomic_load_explicit(channel->view.sent, memory_order_acquire);
   const uint64_t landed = atomic_load_explicit(channel->view.landed, memory_order_acquire);
-  if (ready != UINT64_MAX && sent != UINT64_MAX && !mesh_byte_account_checkpoint(channel->payload, ready))
-    mesh_byte_account_prune(channel->payload, sent);
+  if (sent != UINT64_MAX) mesh_byte_account_prune(channel->payload, sent);
   if (landed != UINT64_MAX) mesh_byte_account_prune(channel->payload + 1, landed);
 }
 /* Called in channel order, before presentation makes the entry observable.
@@ -660,7 +658,11 @@ ncclResult_t ncclMeshCommSample(ncclComm_t comm, struct ncclMeshCableSample *sam
       result = fail(ncclRemoteError, "sampling a lost physical cable %u", c->cable); break;
     }
     samples[h] = (struct ncclMeshCableSample){.wire = *c->wire, .cable = c->cable, .peer = (uint32_t)c->peer};
-    if (mesh_byte_account_at(c->payload, ready, &samples[h].ready) ||
+    /* Relays are enabled by an upstream landing, independently of the local
+       GPU publication word. Every completed SEND is proof of readiness too.
+       Query that proven prefix; a later local publication may legitimately
+       remain behind already retired relay traffic. */
+    if (mesh_byte_account_at(c->payload, ready > sent ? ready : sent, &samples[h].ready) ||
         mesh_byte_account_at(c->payload, sent, &samples[h].sent) ||
         mesh_byte_account_at(c->payload + 1, landed, &samples[h].landed)) {
       result = fail(ncclInternalError, "physical cable %u has a completion outside its compiled payload prefixes", c->cable); break;
