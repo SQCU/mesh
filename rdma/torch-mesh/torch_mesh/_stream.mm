@@ -964,14 +964,7 @@ static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &lik
   void *memory = nullptr;
   {
     std::lock_guard<std::mutex> guard(region_tensors_lock_);
-    auto found = held ? held_.lower_bound(bytes) : held_.end();
-    while (found != held_.end() && found->first == bytes) {
-      int reusable = 0;
-      checked(ncclMeshMemReusable(found->second, &reusable));
-      if (reusable) break;
-      ++found;
-    }
-    if (found != held_.end() && found->first != bytes) found = held_.end();
+    const auto found = held ? held_.find(bytes) : held_.end();
     if (found != held_.end()) {
       memory = found->second;
       held_.erase(found);
