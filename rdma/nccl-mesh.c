@@ -268,7 +268,8 @@ static int channel_account_append(struct channel *channel, int direction, uint64
 }
 /* a lease of a communicator's pool (struct ncclComm `spares`): its address and bytes, and the group holding it (its
    number + 1: comm->groups as it took it; 0 free) */
-struct spare { void *address; size_t bytes; uint64_t holder; };
+enum spare_role { SPARE_PAYLOAD, SPARE_DESCRIPTORS };
+struct spare { void *address; size_t bytes; uint64_t holder; enum spare_role role; };
 
 /* design/whole-function.md#interface */
 struct attach;
@@ -2607,15 +2608,16 @@ static void schedule_laid(struct ncclComm *comm, struct schedule *plans) {
   }
 }
 
-/* a lease of comm's pool of at least `bytes` (its smallest free one that holds them, else a new one: ncclMemAlloc),
+/* a lease of comm's pool of at least `bytes` (its smallest free one of the same
+   access role that holds them, else a new one: ncclMemAlloc),
    held by the group numbered `holder` until that group ends (spares_give); NULL where the region cannot meet it, the
    failure formatted (ncclMemAlloc's).  Under group_lock */
-static void *spare_take(struct ncclComm *comm, size_t bytes, uint64_t holder) {
+static void *spare_take(struct ncclComm *comm, size_t bytes, uint64_t holder, enum spare_role role) {
   struct spare *best = NULL;
   for (uint32_t k = 0; k < comm->nspares; k++) {
     struct spare *x = comm->spares + k;
     int reusable = 0;
-    if (!x->holder && x->bytes >= bytes && (!best || x->bytes < best->bytes) &&
+    if (x->role == role && !x->holder && x->bytes >= bytes && (!best || x->bytes < best->bytes) &&
         !ncclMeshMemReusable(x->address, &reusable) && reusable) best = x;
   }
   if (!best) {
@@ -2625,13 +2627,15 @@ static void *spare_take(struct ncclComm *comm, size_t bytes, uint64_t holder) {
     comm->spares = grown;
     if (ncclMemAlloc(&address, bytes)) return NULL;
     best = comm->spares + comm->nspares++;
-    *best = (struct spare){address, bytes, 0};
+    *best = (struct spare){address, bytes, 0, role};
   }
   best->holder = holder;
   return best->address;
 }
-/* GPU program bookkeeping releases the holder. spare_take separately proves
-   local DMA completion before overwriting any source bytes. */
+/* GPU encoding releases the holder, not the GPU's pending accesses. Payload
+   reuse is ordered on that GPU stream. CPU-written descriptors cannot borrow
+   that ordering and never reuse payload storage. Within either role,
+   spare_take separately proves completion of all prior transport uses. */
 static void spares_give(struct ncclComm *comm, uint64_t holder) {
   for (uint32_t k = 0; holder && k < comm->nspares; k++)
     if (comm->spares[k].holder == holder) comm->spares[k].holder = 0;
@@ -2640,7 +2644,7 @@ static void spares_give(struct ncclComm *comm, uint64_t holder) {
    through the program's residency set where it has one), on the host path its address; {NULL, 0} where none was had,
    the failure formatted */
 static struct where spare_where(struct metal_program *program, struct ncclComm *comm, size_t bytes, uint64_t holder) {
-  void *address = spare_take(comm, bytes ? bytes : 1, holder), *buffer = NULL;
+  void *address = spare_take(comm, bytes ? bytes : 1, holder, SPARE_PAYLOAD), *buffer = NULL;
   size_t offset = 0;
   if (!address) return (struct where){NULL, 0};
   if (!program) return (struct where){NULL, (size_t)address};
@@ -2696,7 +2700,7 @@ static ncclResult_t place_group(struct metal_program *program, struct ncclComm *
                                 call_name(x->c), comm->name, x->bytes, x->offset);
         if (!x->pages.n) continue;
         if (x->pages.n > SIZE_MAX / sizeof *x->spans ||
-            !(x->spans = spare_take(comm, x->pages.n * sizeof *x->spans, holder)))
+            !(x->spans = spare_take(comm, x->pages.n * sizeof *x->spans, holder, SPARE_DESCRIPTORS)))
           return fail(ncclSystemError, "allocating exact DMA span descriptors");
         x->table = (uint64_t)((unsigned char *)x->spans - region);
         const uint64_t logical = step->first * step->piece.element_bytes;

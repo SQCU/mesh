@@ -167,6 +167,15 @@ comparison for continuously submitted calls. Native source retirement follows th
 existing final DMA-read evidence asynchronously; destination consumer lifetime
 is separate. The typed rules below specify exactly which proof is needed.
 
+The native scratch pool distinguishes GPU payload storage from CPU-written DMA
+descriptor storage. Encoding the last GPU use makes a payload available for a
+later use on the same ordered GPU stream; it does not prove that use has already
+executed. Descriptor construction runs on the CPU and cannot borrow this stream
+ordering. A descriptor allocation therefore never reuses a payload allocation.
+Both roles use the same allocator and transport-retirement bookkeeping, with no
+new synchronization, and descriptor reuse requires its preceding transport uses
+to have completed.
+
 A GPU producer stores its published result through `mesh_step_write`, and a GPU
 consumer reads NIC-written bytes through `mesh_step_read`. Ordinary cached stores
 can be invisible to the NIC while a command buffer is running; ordinary loads
