@@ -20,23 +20,9 @@ other projects, such as a game bot, and old dated records; they are not listed h
 
 ## The bridge and transport
 
-- [design/data-model.md](design/data-model.md): the hardware preliminaries of the data model: the M-series
-  accelerator and its caches beside sm90's, memory to NIC to memory on InfiniBand and here, the Thunderbolt RDMA
-  driver's SEND and RECV, and what the chain and the LSTM cost. Section 6 works out from them why code here only loses
-  waits, syncs, barriers, guards, data-dependent control flow, globals and side effects (each is one more crossing,
-  wait or pass, or a fixed cost per step, and nothing in the hardware makes it cheaper), that one comes in only at the
-  operator's demand for an algorithmic problem nothing else solves, and why data code has neither synchronous access
-  to driver state (the driver would wait at its pace) nor asynchronous access (a contradiction), only pages declared
-  before the call and words that land; then the proposals that kept coming back on 2026-10-23, each answered from
-  the sections before it. Section 7 gives what the bridge must have, each
-  requirement tied to the section it follows from. Section 8 works out writes over many hops and many paths: the cut
-  that bounds a transfer, the DMA a receiving node and a relay spend, and the sizes past which more paths win, as facts
-  of the hardware rather than rules the bridge applies; then who balances the load, and the operator's position that
-  the bridge does not care how big a write is. Section 9 explains why a generic backend matches one fused for a single
-  program (shapes and callgraph fixed at compile, so every call's pages and order are compiled ahead and a step is
-  writes posted ahead landing and the program's arithmetic), the per-call planning, size thresholds, locks, waits on
-  driver state and host round trips that rules out, each kind of collective as compiled one-sided writes, the
-  balancer's share change as a new plan, and where today's code is slower.
+- [design/data-model.md](design/data-model.md): the hardware and the paths bytes take through it.
+  These facts explain why writes use pages and masks, and why their work is compiled before a call.
+  The later sections derive the limits on bridge code, routes, and collectives in plain prose near grades 4-6.
 - [design/quiet-link.md](design/quiet-link.md): an adjunct to data-model.md section 3: what a link's first SEND after
   a quiet stretch costs, where mesh runs meet it, and the transfer size above which the cost is under 1%, filed as an
   idiosyncrasy that moves no kernel on the (throughput, latency) frontier.

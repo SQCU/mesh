@@ -11,7 +11,7 @@ Topology is discovered for each realized configuration. The 2026-10-24 morning
 microprofile recorded Studio–Studio/first-Studio–Mini/second-Studio–Mini cable
 counts 4/1/2 and ingress degrees 5/6/3. Read-only discovery at 12:57:27 PDT
 found 4/1/1 paired cables and degrees 5/5/2, with one Studio–Mini pairing
-unavailable. See [data-model.md](data-model.md#8-writes-over-many-hops-and-many-paths)
+unavailable. See [whole-function.md](whole-function.md#fabric)
 for the dated provenance and corresponding 140/120 GB/s advertised wire ceilings.
 Two-peer and infinite-Mini examples below illustrate dependencies; they are not
 topology constraints on either the compiler or its transport interface.

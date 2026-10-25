@@ -38,8 +38,8 @@ degrees 5/6/3. Its wire identities and advertised capacities are recorded in
 Read-only discovery at 12:57:27 PDT found six paired cables, 4/1/1, with
 degrees 5/5/2: second Studio port 2 was `STOPPED` and Mini port 1 `PAIRING`.
 The [dated snapshot](../../../metal-microbench/output_data/review-20261024/interface-refactor/topology-current.json)
-retains those observations; [data-model.md](data-model.md#8-writes-over-many-hops-and-many-paths)
-links the earlier bridge-log event without inferring its cause.
+retains those observations; the [bridge log](../../../metal-microbench/output_data/review-20261024/interface-refactor/bridge-tail-rank2.log)
+records the earlier port termination without establishing its cause.
 Thus its active advertised aggregate wire ceiling was 120 GB/s, versus the
 morning's 140 GB/s. Neither snapshot is a constant in the solver or interface.
 Discovery is authoritative for each realization; retain its actual cable
