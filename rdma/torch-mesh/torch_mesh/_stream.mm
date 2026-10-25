@@ -1429,7 +1429,8 @@ static void prepare_chain(int64_t index, int64_t kernel, const std::vector<at::T
   uint32_t previous_j = 0;
   const NSUInteger input_base = input.storage_offset() * input.element_size();
   const NSUInteger output_base = output.storage_offset() * output.element_size();
-  const NSUInteger pitch = input.stride(0) * input.element_size();
+  const NSUInteger input_pitch = input.stride(0) * input.element_size();
+  const NSUInteger output_pitch = output.stride(0) * output.element_size();
   auto append = [&](int64_t t, int64_t j, const at::Tensor &send, const at::Tensor &land, bool last) {
     const std::array<at::Tensor, 4> bound{input, output, send, land};
     ChainStep step{{}, {}, (uint32_t)(t == 0), (uint32_t)(2 * t), (uint32_t)last, previous_j, (uint32_t)j};
@@ -1437,8 +1438,8 @@ static void prepare_chain(int64_t index, int64_t kernel, const std::vector<at::T
       step.buffers[k] = at::native::mps::getMTLBufferStorage(bound[k]);
       step.offsets[k] = bound[k].storage_offset() * bound[k].element_size();
     }
-    step.offsets[0] = input_base + std::min(t, steps - 1) * pitch;
-    step.offsets[1] = output_base + std::max<int64_t>(0, t - 1) * pitch;
+    step.offsets[0] = input_base + std::min(t, steps - 1) * input_pitch;
+    step.offsets[1] = output_base + std::max<int64_t>(0, t - 1) * output_pitch;
     chain->steps.push_back(step);
   };
   for (int64_t first = 0, turn = 0; first < steps; first += batch, turn++) {
