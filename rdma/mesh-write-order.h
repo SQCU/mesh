@@ -10,7 +10,7 @@
 
 struct mesh_write_task {
   uint32_t arc, parent, order;
-  double bytes, release, start, finish;
+  double bytes, release, start, finish, first_bytes;
 };
 
 static int mesh_write_order(struct mesh_write_task *tasks, uint32_t count,
@@ -21,7 +21,8 @@ static int mesh_write_order(struct mesh_write_task *tasks, uint32_t count,
   for (uint32_t k = 0; k < count; k++) {
     tasks[k].order = UINT32_MAX;
     if (tasks[k].arc >= arcs || (tasks[k].parent != UINT32_MAX && tasks[k].parent >= count) ||
-        !(tasks[k].bytes >= page) || !isfinite(tasks[k].release)) { free(free_at); return EINVAL; }
+        !(tasks[k].bytes > 0) || (tasks[k].first_bytes &&
+          (!(tasks[k].first_bytes > 0) || tasks[k].first_bytes > tasks[k].bytes)) || !isfinite(tasks[k].release)) { free(free_at); return EINVAL; }
   }
   for (uint32_t order = 0; order < count; order++) {
     uint32_t best = UINT32_MAX;
@@ -31,9 +32,9 @@ static int mesh_write_order(struct mesh_write_task *tasks, uint32_t count,
       if (t->order != UINT32_MAX) continue;
       const struct mesh_write_task *p = t->parent == UINT32_MAX ? NULL : tasks + t->parent;
       if (p && p->order == UINT32_MAX) continue;
-      double at = fmax(free_at[t->arc], p ? p->start + page / capacity[p->arc] : t->release);
+      double at = fmax(free_at[t->arc], p ? p->start + (p->first_bytes ? p->first_bytes : fmin(page, p->bytes)) / capacity[p->arc] : t->release);
       double until = at + t->bytes / capacity[t->arc];
-      if (p) until = fmax(until, p->finish + page / capacity[t->arc]);
+      if (p) until = fmax(until, p->finish + (t->first_bytes ? t->first_bytes : fmin(page, t->bytes)) / capacity[t->arc]);
       if (at < begin) { best = k; begin = at; end = until; }
     }
     if (best == UINT32_MAX) { free(free_at); return ELOOP; }

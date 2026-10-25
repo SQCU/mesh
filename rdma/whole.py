@@ -3,6 +3,8 @@ import copy
 import math
 import statistics
 
+SHARE_TICKS = 1 << 40
+
 
 def performance(observation, transaction_weight=0.0):
     """Performance-only objective; design/objective-20261024.md.
@@ -15,10 +17,10 @@ def performance(observation, transaction_weight=0.0):
     seconds = float(observation['seconds'])
     useful = float(observation.get('useful_work_bytes', 1))
     weight = float(transaction_weight)
-    if not math.isfinite(seconds) or seconds <= 0 or not math.isfinite(useful) or useful <= 0:
-        raise ValueError('function latency and fixed useful work must be finite and positive')
-    if not math.isfinite(weight) or weight < 0:
-        raise ValueError('transaction weight must be finite and nonnegative')
+    if not 2 ** -40 <= seconds <= 2 ** 40 or not 2 ** -40 <= useful <= 2 ** 64:
+        raise ValueError('rescale metrics: latency must be in [2^-40, 2^40] seconds and useful work in [2^-40, 2^64] units')
+    if not 0 <= weight <= 2 ** 40:
+        raise ValueError('transaction preference must be a finite value in [0, 2^40]')
     result = {'cost': math.log(seconds) - math.log(useful),
               'useful_work': useful,
               'useful_work_unit': 'logical_output_bytes' if 'useful_work_bytes' in observation else 'functions',
@@ -30,7 +32,8 @@ def performance(observation, transaction_weight=0.0):
         lower, upper = map(float, roof['window_seconds_bounds'])
         transaction_bytes = float(roof['useful_bytes'])
         if (not all(math.isfinite(x) for x in (lower, upper, transaction_bytes))
-                or lower < 0 or upper <= 0 or lower > upper or transaction_bytes <= 0):
+                or lower < 0 or lower > upper or not 2 ** -40 <= upper <= 2 ** 40
+                or not 2 ** -40 <= transaction_bytes <= 2 ** 64):
             raise ValueError('transaction window bounds and useful bytes must describe completed transfers')
         result.update(transaction_window_seconds=upper, useful_transaction_bytes=transaction_bytes,
                       useful_transaction_bandwidth_bytes_per_second=transaction_bytes / upper)
@@ -58,13 +61,12 @@ def delay_observations(cables, ranks, offsets):
     nodes = sorted(r['rank'] for r in ranks)
     labels = [f'node:{r}' for r in nodes] + [f'link:{e}' for e in range(2 * len(cables))] + ['function']
     matches = matched_transfers(ranks)
-    design, values, variances, clock, groups, page_sizes = [], [], [], [], [], set()
+    design, values, variances, clock, groups, page_sizes, first_spans = [], [], [], [], [], set(), []
+    explicit_spans = any('unit_bytes' in m['send'] or m['send'].get('unit_kind') == 'byte_extent' for m in matches)
     for match in matches:
         source, destination, sent = match['source'], match['destination'], match['send']
-        pages = sent['last'] - sent['first']
-        if sent['bytes'] % pages:
-            raise ValueError('delay inference requires an integral physical page size')
-        page_sizes.add(sent['bytes'] // pages)
+        lengths = match['unit_bytes']
+        page_sizes.update(lengths)
         cable = cables[sent['cable']]
         if source == destination or set(cable['nodes']) != {source, destination}:
             raise ValueError('delay observation endpoints disagree with the physical cable')
@@ -74,7 +76,8 @@ def delay_observations(cables, ranks, offsets):
         capacity = cable['bits_per_second'] / 8
         start = (sent['start_lo_ns'] + sent['start_hi_ns']) / 2 + sum(offsets[str(source)]) / 2
         arrival = sum(match['arrival_ns']) / 2 + sum(offsets[str(destination)]) / 2
-        values.append((arrival - start) * 1e-9 - sent['bytes'] / pages / capacity)
+        values.append((arrival - start) * 1e-9 - lengths[0] / capacity)
+        first_spans.append(lengths[0])
         variances.append(((sent['start_hi_ns'] - sent['start_lo_ns']) ** 2
                           + (match['arrival_ns'][1] - match['arrival_ns'][0]) ** 2) * 1e-18 / 12)
         row, clocks = [0.0] * len(labels), [0.0] * len(nodes)
@@ -82,17 +85,22 @@ def delay_observations(cables, ranks, offsets):
         row[len(nodes) + arc] = row[-1] = 1
         clocks[nodes.index(source)], clocks[nodes.index(destination)] = -1, 1
         design.append(row); clock.append(clocks); groups.append(f'link:{arc}')
-    if not design or len(page_sizes) != 1:
+    if not design or (not explicit_spans and len(page_sizes) != 1):
         raise ValueError('delay inference requires a complete set of observed transfers')
     receive_count = sum(w['direction'] == 1 for rank in ranks for w in rank['windows'])
-    return {'labels': labels, 'design': design, 'seconds': values, 'variance': variances,
+    result = {'labels': labels, 'design': design, 'seconds': values, 'variance': variances,
             'clock_design': clock, 'clock_variance': [(offsets[str(r)][1] - offsets[str(r)][0]) ** 2 * 1e-18 / 12 for r in nodes],
-            'groups': groups, 'page_bytes': page_sizes.pop(),
+            'groups': groups,
             'coverage': {'send_entries': len(matches), 'receive_entries': receive_count,
                          'wire_bytes': sum(match['send']['bytes'] for match in matches),
                          'observed_shared_first_boundaries': len(design),
                          'send_entries_without_destination_first_observation': len(matches) - len(design),
                          'receive_entries_without_source_first_observation': receive_count - len(design)}}
+    if explicit_spans:
+        result.update(unit_kind='byte_extent', first_span_bytes=first_spans)
+    else:
+        result['page_bytes'] = page_sizes.pop()
+    return result
 
 
 class DelayPosterior:
@@ -208,13 +216,25 @@ def pipeline_delay_prior(model, posterior, fractions):
     for e, (source, destination) in enumerate(model['directed_nodes']):
         delay.append(sum(mean[labels.index(label)] for label in
                          (f'node:{source}', f'node:{destination}', f'link:{e}', 'function')))
-    page = model.get('page_bytes', 0)
     for k, (name, p) in enumerate(columns):
         prefix = 0.0
-        for e in model['paths'][name]['arcs'][p]:
+        spec = model['paths'][name]
+        arcs = spec['arcs'][p]
+        if 'first_span_bytes' in spec or 'first_span_service_upper_bound_bytes' in spec:
+            # A declared service upper bound is a conservative model prior.
+            # Observed delay residuals always subtract actual trace lengths.
+            key = 'first_span_bytes' if 'first_span_bytes' in spec else 'first_span_service_upper_bound_bytes'
+            sizes = spec[key][p]
+            if len(sizes) != len(arcs) or any(not math.isfinite(n) or n <= 0 for n in sizes):
+                raise ValueError('routing first-span lengths must describe every path arc')
+        elif model.get('unit_kind') == 'byte_extent':
+            raise ValueError('byte-extent routing requires compiled first-span lengths')
+        else:
+            sizes = [model.get('page_bytes', 0)] * len(arcs)
+        for e, span_bytes in zip(arcs, sizes):
             load[e, k] = model['paths'][name]['bytes']
             arrival[e, k] = load[e, k] * (prefix + delay[e])
-            prefix += delay[e] + page / model['capacities'][e]
+            prefix += delay[e] + span_bytes / model['capacities'][e]
     bytes_on_edge, weighted_arrival = load @ fractions, arrival @ fractions
     offset = np.divide(weighted_arrival, bytes_on_edge, out=np.zeros(size), where=bytes_on_edge > 0)
     derivative = np.divide(arrival - offset[:, None] * load, bytes_on_edge[:, None],
@@ -254,40 +274,41 @@ def project(values, total, grain, low, high):
     return [x * grain for x in result]
 
 
-def _sigmoid(x):
-    return 1 / (1 + math.exp(-x)) if x >= 0 else math.exp(x) / (1 + math.exp(x))
-
-
 def simplex(values, total, low, high):
-    """A smooth bounded simplex: one multiplier conserves the total."""
-    if not sum(low) <= total <= sum(high):
-        raise ValueError('infeasible simplex')
-    if total == sum(low):
-        return list(map(float, low))
-    if total == sum(high):
-        return list(map(float, high))
-    left, right = min(values) - 80, max(values) + 80
-    for _ in range(80):
-        multiplier = (left + right) / 2
-        amount = sum(lo + (hi - lo) * _sigmoid(v - multiplier) for v, lo, hi in zip(values, low, high))
-        if amount > total:
-            left = multiplier
-        else:
-            right = multiplier
-    return [lo + (hi - lo) * _sigmoid(v - (left + right) / 2) for v, lo, hi in zip(values, low, high)]
+    """Project linear shares onto a bounded simplex with 40 fractional bits.
+
+    The precision is explicit (9.1e-13 of a decision), with exact zero/one and
+    conservation, without exponential tails or a positive allocation floor.
+    The transport's coarser allocation is separate.
+    """
+    if not total > 0 or not all(math.isfinite(v) for v in [total, *values, *low, *high]):
+        raise ValueError('simplex operands must be finite with a positive total')
+    ticks = SHARE_TICKS
+    from fractions import Fraction
+    ratio = Fraction(ticks) / Fraction(total)
+    # Tiny operands are explicitly below representation precision. Do not
+    # divide them into subnormals on the way to an inevitable rounded zero.
+    scaled = [0.0 if abs(v) < total / ticks else v / total * ticks for v in values]
+    result = project(scaled, ticks, 1,
+                     [math.ceil(Fraction(v) * ratio) for v in low],
+                     [math.floor(Fraction(v) * ratio) for v in high])
+    return [v / ticks * total for v in result]
 
 
 class FunctionFlow:
     """design/whole-function.md#finite-differences"""
 
-    def __init__(self, decisions, learning_rate=0.15, perturbation=0.2,
+    def __init__(self, decisions, learning_rate=0.15, perturbation=0.025,
                  fit_compute=False, routing_model=None, transaction_weight=0.0):
         self.decisions = copy.deepcopy(decisions)
-        self.vector, self.momentum, self.energy = {}, {}, {}
+        self.vector = {}
         self.learning_rate, self.perturbation = float(learning_rate), float(perturbation)
+        if not all(math.isfinite(v) and 0 < v <= 1 for v in (self.learning_rate, self.perturbation)):
+            raise ValueError('step and perturbation must be finite fractions in (0, 1]')
+        self.coordinate_version = 'linear-simplex-q40-v1'
         self.transaction_weight = float(transaction_weight)
-        if not math.isfinite(self.transaction_weight) or self.transaction_weight < 0:
-            raise ValueError('transaction weight must be finite and nonnegative')
+        if not 0 <= self.transaction_weight <= 2 ** 40:
+            raise ValueError('transaction preference must be a finite value in [0, 2^40]')
         self.objective_version, self.metric_contract = 'whole_function_throughput_v2', None
         self.fit_compute = bool(fit_compute)
         self.compute_samples, self.compute_model = [], None
@@ -297,18 +318,30 @@ class FunctionFlow:
         self.delay_model, self.delay_posterior = None, None
         self.serial, self.round, self.workload = 0, 0, None
         self.samples, self.history = [], []
+        self.calibration_parts = {name: list(spec['parts']) for name, spec in self.decisions.items()}
         for name, spec in self.decisions.items():
             parts = list(map(float, spec['parts']))
             total = sum(parts)
+            if not parts or not 2 ** -40 <= total <= 2 ** 52 or any(not math.isfinite(v) or v < 0 for v in parts):
+                raise ValueError('decision shares must be finite, nonnegative; choose units with total in [2^-40, 2^52]')
             spec.update(total=total, grain=int(spec.get('grain', 0)),
                         low=list(map(float, spec.get('low', [0] * len(parts)))),
                         high=list(map(float, spec.get('high', [total] * len(parts)))))
+            if (len(spec['low']) != len(parts) or len(spec['high']) != len(parts)
+                    or any(not math.isfinite(v) or not 0 <= v <= total for v in spec['low'] + spec['high'])):
+                raise ValueError('simplex bounds must match its coordinates and lie within its total')
             if not all(lo <= v <= hi for v, lo, hi in zip(parts, spec['low'], spec['high'])):
                 raise ValueError('initial vector is outside its simplex')
-            fraction = [(v - lo) / (hi - lo) if hi > lo else 0.5 for v, lo, hi in zip(parts, spec['low'], spec['high'])]
-            self.vector[name] = [math.log(max(v, 1e-12) / max(1 - v, 1e-12)) for v in fraction]
-            self.momentum[name] = [0.0] * len(parts)
-            self.energy[name] = [0.0] * len(parts)
+            quantum = spec.get('quantum', spec['grain'])
+            quantum = [quantum] * len(parts) if isinstance(quantum, (float, int)) else quantum
+            if len(quantum) != len(parts) or any(not math.isfinite(q) or not 0 <= q <= total for q in quantum):
+                raise ValueError('coordinate quantum must be in [0, total] and match its parts')
+            spec['quantum'] = [round(q / total * SHARE_TICKS) / SHARE_TICKS * total for q in quantum]
+            self.vector[name] = [round(v / total * SHARE_TICKS) for v in simplex(parts, total, spec['low'], spec['high'])]
+            self.calibration_parts[name] = [v / SHARE_TICKS * total for v in self.vector[name]]
+            if spec['grain']:
+                self.calibration_parts[name] = project(self.calibration_parts[name], int(total), spec['grain'], spec['low'], spec['high'])
+            spec['parts'] = list(self.calibration_parts[name])
         self.dimension = sum(map(len, self.vector.values()))
         self.order = 1 << max(1, (self.dimension - 1).bit_length())
 
@@ -319,8 +352,14 @@ class FunctionFlow:
     def of(cls, state):
         if state.get('objective_version') != 'whole_function_throughput_v2':
             raise ValueError('optimizer state uses the obsolete congestion objective; realize a new controller from its configuration')
+        if state.get('coordinate_version') != 'linear-simplex-q40-v1':
+            raise ValueError('optimizer state uses obsolete logarithmic coordinates; realize from its recorded physical allocation')
         obj = cls.__new__(cls)
         obj.__dict__.update(copy.deepcopy(state))
+        for name, ticks in obj.vector.items():
+            if (name not in obj.decisions or len(ticks) != len(obj.decisions[name]['parts'])
+                    or any(type(v) is not int or v < 0 for v in ticks) or sum(ticks) != SHARE_TICKS):
+                raise ValueError('saved simplex coordinates must be nonnegative integer ticks conserving 2^40')
         for name, value in {'fit_compute': False,
                             'compute_samples': [], 'compute_model': None,
                             'routing_model': None, 'routing_samples': [], 'routing_fit': None, 'schedule_model': None,
@@ -336,10 +375,19 @@ class FunctionFlow:
         return result
 
     def _values(self, sign):
-        c, direction = self.perturbation / (self.round + 1) ** 0.101, self._direction()
-        return {name: simplex([v + sign * c * d for v, d in zip(values, direction[name])],
-                              self.decisions[name]['total'], self.decisions[name]['low'], self.decisions[name]['high'])
-                for name, values in self.vector.items()}
+        direction, result = self._direction(), {}
+        for name, values in self.vector.items():
+            spec, c = self.decisions[name], self._radius(name)
+            result[name] = simplex([(v / SHARE_TICKS + sign * c * d) * spec['total'] for v, d in zip(values, direction[name])],
+                                    spec['total'], spec['low'], spec['high'])
+        return result
+
+    def _radius(self, name):
+        spec = self.decisions[name]
+        # At a boundary, a projected +/- probe has only one inward half.
+        # One declared allocation unit keeps that probe physically observable.
+        return max(self.perturbation / (self.round + 1) ** 0.101,
+                   max(spec['quantum']) / spec['total'], 2 ** -40)
 
     @property
     def centre(self):
@@ -368,6 +416,8 @@ class FunctionFlow:
                 release = [t + b * (new - old) / previous.get('stages', 1) for t, b, new, old in
                            zip(release, self.compute_model['slopes'], parts['compute'], previous['parts'])]
             release = [t - min(release) for t in release]
+        if not explore and self.serial == 0 and hasattr(self, 'calibration_parts'):
+            parts = copy.deepcopy(self.calibration_parts)
         return {'id': self.serial, 'parts': parts, 'continuous': continuous, 'phase': 'finite_difference' if explore else 'centre',
                 'producer_seconds': release,
                 'offset': sign * self.perturbation / (self.round + 1) ** 0.101, 'round': self.round}
@@ -377,7 +427,7 @@ class FunctionFlow:
         return self.ask()['parts']
 
     def observe(self, observation):
-        expected = self.ask()
+        expected = self.ask(explore=observation.get('phase') != 'centre')
         if observation.get('scope') != 'function' or not observation.get('complete'):
             raise ValueError('feedback requires a completed whole function')
         if observation.get('id') != expected['id'] or observation.get('parts') != expected['parts']:
@@ -405,6 +455,8 @@ class FunctionFlow:
             self.delay_model = posterior.state()
             if self.routing_model is not None and 'page_bytes' in batch:
                 self.routing_model['page_bytes'] = batch['page_bytes']
+            if self.routing_model is not None and batch.get('unit_kind') == 'byte_extent':
+                self.routing_model['unit_kind'] = 'byte_extent'
         if self.fit_compute:
             self._compute_observation(observation)
         if self.routing_model is not None:
@@ -412,27 +464,30 @@ class FunctionFlow:
             self.routing_observations.append({'parts': copy.deepcopy(observation['parts']),
                                               'stages': copy.deepcopy(observation['finishes']['stages'])})
             self.routing_observations = self.routing_observations[-64:]
+        if expected['phase'] == 'centre':
+            # A measured calibration/repeat is evidence, not a zero-offset FD sample.
+            self.serial += 1
+            return self.ask()
         self.samples.append({'id': self.serial, 'seconds': seconds, 'cost': metrics['cost'],
                              'performance': metrics, 'offset': expected['offset']})
         self.serial += 1
         if len(self.samples) == 4:
-            c = self.samples[0]['offset']
-            derivative = (self.samples[0]['cost'] - self.samples[1]['cost'] - self.samples[2]['cost'] + self.samples[3]['cost']) / (4 * c)
+            difference = (self.samples[0]['cost'] - self.samples[1]['cost'] - self.samples[2]['cost'] + self.samples[3]['cost']) / 4
             direction, gradient = self._direction(), {}
             before = self.centre
             rate = self.learning_rate / (self.round + 1) ** 0.3
             for name, values in self.vector.items():
+                derivative = difference / self._radius(name)
                 raw = [derivative * d for d in direction[name]]
                 mean = statistics.mean(raw)
                 gradient[name] = [g - mean for g in raw]
-                for i, g in enumerate(gradient[name]):
-                    self.momentum[name][i] = 0.8 * self.momentum[name][i] + 0.2 * g
-                    self.energy[name][i] = 0.95 * self.energy[name][i] + 0.05 * g * g
-                    m = self.momentum[name][i] / (1 - 0.8 ** (self.round + 1))
-                    v = self.energy[name][i] / (1 - 0.95 ** (self.round + 1))
-                    values[i] -= rate * m / math.sqrt(v + 1e-12)
-                centre = statistics.mean(values)
-                self.vector[name] = [v - centre for v in values]
+                # Bounded scaling, without a small denominator or momentum:
+                # flat measurements produce exactly no movement of the centre.
+                scale = 1 + max(map(abs, gradient[name]))
+                spec = self.decisions[name]
+                self.vector[name] = [round(v / spec['total'] * SHARE_TICKS) for v in simplex(
+                    [(v / SHARE_TICKS - rate * g / scale) * spec['total'] for v, g in zip(values, gradient[name])],
+                    spec['total'], spec['low'], spec['high'])]
             if self.fit_compute:
                 self._compute_step()
             if self.routing_model is not None:
@@ -497,8 +552,7 @@ class FunctionFlow:
         # initialization prior whose influence should disappear during descent.
         guide = 0.5
         values = [(1 - guide) * a + guide * b for a, b in zip(self.centre['compute'], target)]
-        fractions = [(v - lo) / (hi - lo) for v, lo, hi in zip(values, spec['low'], spec['high'])]
-        self.vector['compute'] = [math.log(max(v, 1e-12) / max(1 - v, 1e-12)) for v in fractions]
+        self.vector['compute'] = [round(v / total * SHARE_TICKS) for v in simplex(values, total, spec['low'], spec['high'])]
         self.compute_model = {'fixed': fixed, 'slopes': slopes, 'start_delay': start_delay, 'tails': tails, 'target': target,
                               'tiles': tiles, 'predicted_finish': finish}
         if 'release' in self.compute_samples[-1]:
@@ -586,7 +640,7 @@ class FunctionFlow:
         jacobian = sensitivity[:, :len(columns)] / scale
         residual = at_centre / scale - jacobian @ x0
 
-        bounds = [(1e-9, 1)] * len(x0)
+        bounds = [(0, 1)] * len(x0)
         # A learned Jacobian is local. A proximal step evolves the vector
         # continuously; globally minimizing its affine extrapolation could
         # move an entire commodity on the strength of one noisy derivative.
@@ -614,8 +668,7 @@ class FunctionFlow:
         for name in names:
             values = [x[k] * self.decisions[name]['total'] for k, (n, _) in enumerate(columns) if n == name]
             spec = self.decisions[name]
-            fractions = [(v - lo) / (hi - lo) for v, lo, hi in zip(values, spec['low'], spec['high'])]
-            self.vector[name] = [math.log(max(v, 1e-12) / max(1 - v, 1e-12)) for v in fractions]
+            self.vector[name] = [round(v / spec['total'] * SHARE_TICKS) for v in simplex(values, spec['total'], spec['low'], spec['high'])]
         self.routing_fit = {'measured_finish_seconds': measured.tolist(),
                             'residual_seconds': (residual * scale).tolist(),
                             'residual_jacobian_seconds': correction.tolist(),

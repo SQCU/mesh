@@ -18,6 +18,10 @@ if [ $# -lt 1 ] || [ $# -gt 2 ] || [ ! -f "$1" ]; then
 fi
 document=$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")
 source=$(cd "${2:-$HOME/mesh}" && pwd -P) || exit 1
+# Exported sources carry a verified committed-file manifest instead of a mutable .git checkout.
+if [ -f "$source/.mesh-source.json" ]; then
+  python3 "$source/rdma/mesh_source.py" verify "$source" || exit 1
+fi
 venv=$HOME/.venv-mesh-uv
 support="$HOME/Library/Application Support"; state=$HOME/.cache/mesh
 uv=$(command -v uv || echo /usr/local/mesh/bin/uv)
@@ -29,10 +33,10 @@ csum=$({ printf '%s\n' "$bound"; cat "$source/rdma/mesh-plan.h" "$source/rdma/nc
 [ -f "$source/rdma/_mesh_c$bound" ] && [ "$(cat "$venv/mesh-c.sum" 2>/dev/null)" = "$csum" ] \
   || { "$venv/bin/python" "$source/rdma/mesh_c_build.py" >/dev/null && printf '%s\n' "$csum" > "$venv/mesh-c.sum"; } || exit 1
 "$venv/bin/python" -c 'import sys, sysconfig; open(sysconfig.get_paths()["purelib"] + "/mesh.pth", "w").write(sys.argv[1] + "\n")' "$source/rdma" || exit 1
-sum=$({ cat "$source/rdma/libnccl-mesh.dylib"; cd "$source/rdma/torch-mesh" && git ls-files -z | xargs -0 cat; } 2>/dev/null | shasum)
+sum=$({ printf '%s\n' "$source"; cat "$source/rdma/libnccl-mesh.dylib"; cd "$source/rdma/torch-mesh" && python3 "$source/rdma/mesh_source.py" files "$source" rdma/torch-mesh | xargs -0 cat; } 2>/dev/null | shasum)
 if [ "$(cat "$venv/torch-mesh.sum" 2>/dev/null)" != "$sum" ]; then
   build=$(mktemp -d) || exit 1
-  (cd "$source/rdma/torch-mesh" && git ls-files -z | xargs -0 tar -cf -) | tar -xf - -C "$build" || exit 1
+  (cd "$source/rdma/torch-mesh" && python3 "$source/rdma/mesh_source.py" files "$source" rdma/torch-mesh | xargs -0 tar -cf -) | tar -xf - -C "$build" || exit 1
   MESH_RDMA="$source/rdma" "$uv" pip install -q --python "$venv/bin/python" --no-build-isolation --reinstall-package torch-mesh "$build"
   status=$?; rm -rf "$build"
   [ "$status" = 0 ] || exit "$status"
@@ -61,4 +65,4 @@ out=$("$source/bin/mesh-launchd-agent.sh" "$launchd_agents/io.mesh.bridge.plist.
 { [ -z "$renew" ] && [ "$before" = "$images" ]; } \
   || { launchctl kill SIGHUP "user/$(id -u)/io.mesh.bridge" 2>/dev/null; \
        echo "io.mesh.bridge: its new binaries or configuration are installed; its heartbeat restarts the bridge on them (SIGHUP), the region kept"; }
-printf 'revision=%s\nimages=%s\n' "$(git -C "$source" rev-parse HEAD 2>/dev/null || echo unknown)" "$images" > "$state/facts/io.mesh.bridge"
+printf 'revision=%s\nimages=%s\n' "$(python3 "$source/rdma/mesh_source.py" revision "$source" 2>/dev/null || echo unknown)" "$images" > "$state/facts/io.mesh.bridge"

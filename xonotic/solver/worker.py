@@ -199,6 +199,9 @@ class TorchWorld:
         self.dist, self.torch_mesh, self.device = dist, torch_mesh, device
         dist.init_process_group(backend="mesh", **({"device_id": torch.device("mps", 0)} if device == "mps" else {}))
         self.rank, self.size = dist.get_rank(), dist.get_world_size()
+        from torch_mesh import backend
+        group = dist.distributed_c10d._get_default_group()
+        self.native = backend._mesh(group.group_name, 'whole-function controller').comm
 
     def buffer(self, shape, dtype, device=None):
         return self.torch_mesh.empty(shape, dtype={np.float32: torch.float32, np.int64: torch.int64}[dtype],
@@ -215,7 +218,7 @@ class TorchWorld:
 
     def allgatherv(self, value, counts):
         parts = [self.buffer((count,), np.float32) for count in counts]
-        self.dist.all_gather(parts, value.reshape(-1).contiguous())
+        self.dist.all_gather(parts, value.reshape(-1))
         return [part.cpu().numpy() for part in parts]
 
     def free(self):
@@ -230,6 +233,7 @@ class MPIWorld:
         self.mpi = mesh_mpi
         self.comm = mesh_mpi.Comm()
         self.rank, self.size = self.comm.Get_rank(), self.comm.Get_size()
+        self.native = self.comm.comm
 
     def buffer(self, shape, dtype, device=None):
         return self.mpi.empty(shape, dtype)
@@ -244,7 +248,7 @@ class MPIWorld:
 
     def allgatherv(self, value, counts):
         out = self.mpi.empty(sum(counts), np.float32)
-        self.comm.Allgatherv(self.mpi.to_region(np.ascontiguousarray(value).reshape(-1)), [out, counts])
+        self.comm.Allgatherv(value.reshape(-1), [out, counts])
         return np.split(out, np.cumsum(counts)[:-1])
 
     def free(self):
@@ -268,6 +272,9 @@ class CtxSolver:
         self.T, self.backend = T, backend
         self.device = device or default_device()
         self.world, self.balancer = world, balancer
+        self.previous_function = None
+        self.pending_feedback = None
+        self.compiled_proposal = None
         self.columns = list(columns) if columns else [FF]
         if world is not None and len(self.columns) != world.size:
             raise ValueError(f"columns {self.columns}: one part a rank of {world.size}")
@@ -407,13 +414,59 @@ class CtxSolver:
         np.fill_diagonal(Kn, 0.0)
         return np.nan_to_num(Kn).astype(np.float32)
 
+    def configure(self, rows):
+        """Realize all communication and allocation before the complete solve."""
+        if self.balancer is None or self.world is None:
+            return None
+        import mesh
+        from controller import WholeFunctionController, declare
+        workload = {**self.balancer.workload, 'rows': rows}
+        if self.balancer.workload != workload:
+            decisions = {k: {**d, 'parts': self.balancer.parts[k]} for k, d in self.balancer.flow.decisions.items()
+                         if not k.startswith('route:')}
+            self.balancer = WholeFunctionController(decisions, workload=workload)
+            self.previous_function, self.compiled_proposal = None, None
+        proposal = self.balancer.proposal()
+        self.columns = list(proposal['parts']['columns'])
+        widths = [hi - lo for lo, hi in (self.span(RES, rank) for rank in range(self.world.size))]
+        calls = [{'what': mesh.lib.MESH_ALLREDUCE, 'count': (self.T + 1) * RES, 'type': mesh.lib.ncclFloat32,
+                  'op': mesh.lib.ncclSum},
+                 {'what': mesh.lib.MESH_ALLREDUCE, 'count': RES * NOUT + NV * NV, 'type': mesh.lib.ncclFloat32,
+                  'op': mesh.lib.ncclSum},
+                 {'what': mesh.lib.MESH_ALLGATHER, 'count': rows * widths[self.rank()],
+                  'counts': [rows * width for width in widths], 'type': mesh.lib.ncclFloat32}]
+        if self.balancer.topology is None:
+            declare(self.world.native, calls)
+            self.balancer = WholeFunctionController.from_comm(
+                self.balancer.flow.decisions, self.world.native, workload=workload, schedule={'calls': calls})
+            proposal = self.balancer.proposal()
+        if self.compiled_proposal != proposal['id']:
+            self.balancer.realize(self.world.native, calls, proposal)
+            self.compiled_proposal = proposal['id']
+        mesh.check(mesh.lib.ncclMeshCommPlanActive(self.world.native, 1))
+        return proposal
+
     def solve(self, X):
-        Xb = np.ascontiguousarray(X[:, :REQ_WIDTH], np.float32)
-        Xn = (Xb / (1.0 + np.abs(Xb))).astype(np.float32)
-        idx = self._insert(X, Xn)
-        G = self._solve(idx)
-        self.solves += 1
-        return np.nan_to_num(G).astype(np.float32)
+        proposal = self.configure(min(len(X), self.T))
+        started = time.monotonic()
+        try:
+            Xb = np.ascontiguousarray(X[:, :REQ_WIDTH], np.float32)
+            Xn = (Xb / (1.0 + np.abs(Xb))).astype(np.float32)
+            idx = self._insert(X, Xn)
+            G = self._solve(idx)
+            self.solves += 1
+            result = np.nan_to_num(G).astype(np.float32)
+            self.previous_function = {'proposal': proposal, 'seconds': time.monotonic() - started}
+        finally:
+            if proposal is not None:
+                import mesh
+                mesh.check(mesh.lib.ncclMeshCommPlanActive(self.world.native, 0))
+        if self.pending_feedback is not None:
+            previous, seconds = self.pending_feedback
+            self.pending_feedback = None
+            if previous['id'] == self.balancer.proposal()['id']:
+                self.balancer.completed(seconds, proposal=previous)
+        return result
 
     def _solve(self, idx):
         started = time.monotonic()
@@ -434,7 +487,7 @@ class CtxSolver:
             start += c
         if self.backend == "torch" and self.device == "mps":
             torch.mps.synchronize()
-        Y[T, self.rank()] = 1e3 * (time.monotonic() - started)
+        Y[T, self.rank()] = self.previous_function['seconds'] if self.previous_function is not None else 0.0
         self.reduce(Y)
         self.observe(self.host(Y[T]))
         Z = H + Y[:T]
@@ -450,7 +503,14 @@ class CtxSolver:
         GmO = P[:RES * NOUT].reshape(RES, NOUT)
         G = Zcur @ GmO[:, :TEAMS]
         G2 = Zcur @ GmO[:, TEAMS:]
-        Zc = self.gather_columns((Zcur @ Gm) * (RES / tr), len(idx))
+        # Produce the collective source directly into its final region operand.
+        block = self.operand("gather_source", (len(idx), rhi - rlo))
+        if self.backend == "torch":
+            torch.matmul(Zcur, Gm, out=block)
+        else:
+            np.matmul(Zcur, Gm, out=block)
+        block *= RES / tr
+        Zc = self.gather_columns(block, len(idx))
         self.Zc = np.nan_to_num(Zc).astype(np.float32)
         self.G2 = np.nan_to_num(self.host(G2)).astype(np.float32)
         self.kappa = self._kappa_norm(self.host(P[RES * NOUT:]).reshape(NV, NV).astype(np.float64))
@@ -459,10 +519,12 @@ class CtxSolver:
         return self.host(G)
 
     def observe(self, times):
-        if self.balancer is None or self.world is None:
+        # Previous complete solve is carried by an existing numerical reduction.
+        # Never change the columns of the solve that is currently executing.
+        previous = self.previous_function
+        if self.balancer is None or self.world is None or previous is None:
             return
-        self.columns = self.balancer.observe({"tick": {"scales": {"columns": [1.0] * self.world.size},
-                                                       "times": [[float(t) / 1e3] for t in times[:self.world.size]]}})["columns"]
+        self.pending_feedback = previous['proposal'], max(float(t) for t in times[:self.world.size])
 
 
 def softmax(z):
@@ -1686,10 +1748,11 @@ REQUEST, STOP = 1, 2
 
 
 def serve(config):
-    from allocate import Balancer
+    from controller import WholeFunctionController
     world = attach(config)
     shares = config["columns"]
-    balancer = Balancer({"columns": {"parts": list(shares["parts"]), "grain": shares["grain"], "low": shares["low"]}})
+    balancer = WholeFunctionController({"columns": {"parts": list(shares["parts"]), "grain": shares["grain"], "low": shares["low"]}},
+                                       workload={"function": "context solve", "ctx": config["ctx"]})
     solver = CtxSolver(config["ctx"], config["backend"], config.get("device"), world, shares["parts"], balancer)
     header = world.host((4,), np.int64)
     rows = world.host((config["maxrows"], REQUEST_WIDTH), np.float32)

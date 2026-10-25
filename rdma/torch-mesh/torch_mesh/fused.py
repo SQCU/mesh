@@ -6,6 +6,10 @@ landing bindings and publication bindings. Their extent is the realized
 channel count, independently of the number of ranks: parallel cables and
 relay paths have the same representation for every solver.
 
+Generic gather and sum lower to these same prepared writes, with exact rank
+segments and separately owned relay ranges. They do not select a separate
+collective transport or pad each contribution to a page.
+
 The producer stores through mesh_step_write and releases each publication
 once its compiled source range is ready. A consumer observes the landing
 prefixes its data dependency names, then reads through mesh_step_read. An
@@ -50,7 +54,7 @@ def writes(send, landings, pairs, group, polls=0, *, repeats=1, stride=0):
 
     ``repeats`` preposts a train of equal compiled frames once. Tensor arguments
     name the first frame inside backing storage covering all frames; ``stride``
-    is their page-aligned byte displacement. Kernels release/await frame ``j``
+    is their local byte displacement. Kernels release/await frame ``j``
     using the binding's repeat index. Publication must advance in frame order;
     it never certifies an unfinished earlier frame. A zero stride requires a
     separate lifetime proof before overwriting any prior frame's live bytes.
@@ -59,6 +63,19 @@ def writes(send, landings, pairs, group, polls=0, *, repeats=1, stride=0):
                                        int(polls), int(repeats), int(stride))
     return Crossing(tuple(map(tuple, publish)), tuple(map(tuple, land)))
 
+
+
+def write_rows(send, landings, pairs, group, row_bytes, rows, stride):
+    """One exact affine WRITE over original row views, with a rank-local pitch.
+
+    Only useful row bytes cross links. Row and registration boundaries are
+    compiled into a single logical unit sequence; no packing or row-count limit
+    from the stream entry ring is introduced. Ordinary source publication and
+    final landing bindings use repeat index zero.
+    """
+    publish, land = _stream.fused_write_rows(send, list(landings), list(pairs), group.handle,
+                                            int(row_bytes), int(rows), int(stride))
+    return Crossing(tuple(map(tuple, publish)), tuple(map(tuple, land)))
 
 def _encode_words(constants, channels, land, publish):
     words = list(constants) + [0] * (len(constants) % 2)

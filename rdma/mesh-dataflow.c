@@ -433,17 +433,54 @@ static void mesh_reclaim(struct hdr *m){
    start, struct mesh_stream `child`, no longer a live process: its queue pairs, and the requests on them, went with
    it), whichever launch of the bridge spawned it.  Each lane's units completed are read before those posted, every
    read sequentially consistent after the caller's give or retirement */
-static int mesh_pinned(struct hdr *m,uint32_t first,uint32_t count){
+/* Actual registered-memory overlap, independent of the row/alias that named
+   a DMA. A racing pin snapshot conservatively keeps storage for a later reap. */
+static int mesh_interval_pinned(struct hdr *m,struct mesh_dma_span allocation){
   for(uint32_t s=0;s<m->streams && s<MESH_STREAMS;s++){
     const struct mesh_stream *x=mesh_stream_at(m,s);
     int live=-1;
+    const struct mesh_cpu_pin *cpu=&x->metadata;
+    const uint64_t before=atomic_load_explicit(&cpu->sequence,memory_order_seq_cst);
+    const struct mesh_dma_span table={atomic_load_explicit(&cpu->offset,memory_order_seq_cst),
+                                     atomic_load_explicit(&cpu->bytes,memory_order_seq_cst)};
+    const uint64_t word=atomic_load_explicit(&cpu->word,memory_order_seq_cst);
+    const int racing=(before&1) || before!=atomic_load_explicit(&cpu->sequence,memory_order_seq_cst);
+    if(racing || table.bytes || word){
+      const pid_t child=(pid_t)atomic_load(&x->child);live=mesh_holds(child,x->child_start);
+      if(live && (racing || mesh_span_overlaps(allocation,table) ||
+                  (word && mesh_span_overlaps(allocation,(struct mesh_dma_span){word,8}))))return 1;
+    }
     for(int way=0;x->rows && way<2;way++)
       for(int lane=0;lane<2;lane++){
         const uint64_t done=atomic_load(&x->posts[way].done[lane]),posted=atomic_load(&x->posts[way].posted[lane]);
         if(done<posted && live<0){const pid_t child=(pid_t)atomic_load(&x->child);live=mesh_holds(child,x->child_start);}
-        for(uint64_t u=done;live>0 && u<posted && u-done<MESH_LANE_UNITS;u++)
-          if(atomic_load(mesh_unit_row(m,x->rows,way,lane,u))-first<count)return 1;
+        if(live<=0)continue;
+        if(posted-done>MESH_LANE_UNITS)return 1;
+        for(uint64_t u=done;u<posted;u++){
+          struct mesh_dma_span pin;
+          if(!mesh_pin_load(mesh_unit_pin(m,x->rows,way,lane,u),u,&pin)){
+            if(atomic_load(&x->posts[way].done[lane])>u)continue;
+            return 1;
+          }
+          if(mesh_span_overlaps(allocation,pin))return 1;
+        }
       }
+  }
+  return 0;
+}
+static int mesh_pinned(struct hdr *m,uint32_t first,uint32_t count){
+  /* Lease backing, not a table's logical row IDs, is what reclaim frees.
+     Coalescing physical runs scans each allocation row once in the usual
+     contiguous case; scatter allocations retain each intersected run. */
+  for(uint32_t i=0;i<count;){
+    const uint32_t page=(uint32_t)atomic_load_explicit(&mesh_page(m)[first+i].mapping,memory_order_acquire);
+    if(page==MESH_ABSENT){i++;continue;}
+    uint32_t run=1;
+    while(run<count-i &&
+          (uint32_t)atomic_load_explicit(&mesh_page(m)[first+i+run].mapping,memory_order_acquire)==(uint64_t)page+(uint64_t)run*m->block)run++;
+    const struct mesh_dma_span allocation={m->data_off+(uint64_t)page*m->pgsz,(uint64_t)run*m->block*m->pgsz};
+    if(mesh_interval_pinned(m,allocation))return 1;
+    i+=run;
   }
   return 0;
 }

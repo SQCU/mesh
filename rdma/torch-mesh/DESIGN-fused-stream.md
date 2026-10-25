@@ -14,7 +14,7 @@ publishes or consumes those ranges; it does not select a different fabric or dis
 must emit this same representation. Unsupported fused forms fail instead of silently reading the source through
 an ordinary collective before its producer runs.
 
-Rank metadata and physical bindings have different extents. `sizes`, padded `counts`, and segment `starts` have
+Rank metadata and physical bindings have different extents. `sizes`, exact `counts`, and segment `starts` have
 one entry per rank. Publication and landing bindings have room for the communicator's physical channel count,
 obtained from `ncclMeshCommSample`. Each binding holds six GPU addresses in `mesh_step_binding` order; channels
 without applicable work have null records. Kernels test the record before entering or releasing it. There is no
@@ -23,19 +23,21 @@ assumption that ranks minus one equals channels, or that a channel contains only
 | Interface | Current contract |
 |---|---|
 | `fused.steps()` | The loaded library's Metal prelude and step definitions, used to compile the caller's kernels. |
-| `fused.writes(send, landings, pairs, group, polls=0, repeats=1, stride=0)` | Immutable source ranges and disjoint landing leases for declared source/destination pairs, lowered to physical WRITE records; returns `Crossing(publish, land)` in physical channel order. Repeated frames occupy distinct page-aligned displacements in the full backing leases. |
+| `fused.writes(send, landings, pairs, group, polls=0, repeats=1, stride=0)` | Immutable source ranges and disjoint landing leases for declared source/destination pairs, lowered to physical WRITE records; returns `Crossing(publish, land)` in physical channel order. Repeated frames use declared byte displacements in the full backing leases; registration cuts are agreed once before execution. |
+| `fused.write_rows(send, landings, pairs, group, row_bytes, rows, stride)` | Exact affine row views with rank-local pitches; one logical message regardless of row count, using the same prepared WRITE machinery. |
 | `fused.encode(handle, buffers, constants, at, gx, gy, threads, channels, land=None, publish=None)` | Caller words padded to an even count, then `channels` landing records and `channels` publication records; publishes under the stream's commit rule. |
 | `fused.encode_many(calls)` | An ordered list of the same encoding arguments, prepared before one native queue entry; every frame keeps its own constant words. Publication applies the stream's commit policy and the batch ends by submitting any remaining producer command buffer without waiting. |
 | `group.write(source_buffer, landing_buffer, source, destination)` | The common explicit WRITE call; the source rank reads its source argument and other ranks use their landing argument, including relay storage. |
 
-The former `fused.exchange` and native `fused_exchange` entry points have been removed. The private native
-`fused_gather` is collective lowering: it issues one `ncclMeshAllGatherV` over page-padded rank segments through the
-same physical compiler and binding executor. It is not a second peer-sized transport interface.
+The former `fused.exchange`, native `fused_exchange`, and collective-specific `fused_gather` paths have been removed.
+Generic data functions and explicit contiguous/affine writes share `execute_fused_writes`. Every operation reaches
+`ncclMeshWritePrepare`/`ncclMeshWriteExecute`, using the same per-pair physical routes and registration-boundary cuts.
 
 ## Generic gather, sum, and persistent outputs
 
-`partition.gathered` and `partition.summed` each declare one fused ALLGATHER, with the exact padded counts used by
-the native lowering. Sum gathers the ranks' partials and folds them in the consumer. `_fused_form` compiles the
+`partition.gathered` and `partition.summed` declare exact source-major WRITE groups: each nonempty source sends
+its contribution to every other rank. Empty sources emit no dummy packet. Sum gathers the ranks' partials and folds
+them in the consumer. `_fused_form` compiles the
 publisher, consumer, shapes, original source strides, and physical channel extent once per form; native caches
 include those strides. `gather_publish` reads a strided source directly, without a hidden `contiguous()` tensor.
 `linear_publish` computes directly into its publication segment; unsupported column strides raise at realization.
@@ -44,7 +46,7 @@ The generic publisher still writes a source segment in the collective's common l
 assembles the logical output. This path is not a claim that every existing tensor is sent from its original bytes
 or that all layout copies have disappeared. `allgatherv_out`/`fused_step_out` let the consumer write a supplied
 destination, removing the additional copy from an allocated result. `examples/lstm.py` uses this for persistent
-hidden state `h`; `examples/chain.py` reaches the same collective lowering through its tensor operations.
+hidden state `h`; `examples/chain.py` reaches the same routed writes through its tensor operations.
 
 For a consumer with one threadgroup, its compile-time `WAIT` specialization observes the incoming prefixes inline.
 For multiple threadgroups, one `gather_ready` dispatch observes all relevant physical prefixes, then performs one
@@ -54,7 +56,7 @@ dependencies, not network acknowledgments. The generic operation still joins its
 can name narrower dependencies through the common physical representation.
 
 Source publications release only actual source fragments. Relay fragments become sendable from their incoming
-landed prefixes, forwarding those same pages. A final consumer does not wait for later relay-only entries or for
+landed prefixes, forwarding those same exact byte spans. A final consumer does not wait for later relay-only entries or for
 completion of its own outgoing SEND merely to read available input.
 
 ## Plans, commits, and ownership
@@ -65,6 +67,12 @@ evaluation and suspends it for feedback, repartitioning, and replanning through 
 restarts its cursor. Feedback uses the existing communicator. A cached form first realized lazily is not by itself
 proof that every planning cost has been moved out of the measured function; a benchmark must realize and declare
 its complete workload before measuring.
+
+Generic recurring forms keep prepared WRITE handles with each of their two bound storage generations. Each
+source/destination pair owns a distinct relay lease; final landings use compact source-rank segments. Preparation
+exchanges registration metadata only when a generation is realized. Repeated execution uses the retained handles
+and performs no metadata exchange. Zero-share forms retain fresh generations and therefore prepare their new
+addresses at each batch boundary, rather than claiming a recurrence proof they do not have.
 
 GPU producers publish through the stream's commit rule. For configuration-time migration from tensors written by
 ordinary Torch GPU kernels, `_stream.publish_boundary()` commits the preceding producer command buffer without
@@ -85,41 +93,25 @@ immutable WRITE contract. A reused range needs proof that every previous reader 
   Dropping a Python tensor or completing its producer alone does not release its bytes for reuse. Destination
   readers have their own lifetime dependencies. No receipt all-gather or remote ACK establishes these lifetimes.
 
-## Indexed migration and masked frames
+## Exact indexed migration
 
-`partition.follow` uses `migration.compile_migration` at the configuration boundary to derive exact original-source
-and final-destination byte ranges for a changed partition, including interior tensor axes and zero-share ranks.
-For declared contiguous region layouts whose remote offsets and lengths are page aligned, it coalesces those
-ranges into common `group.write` calls. Source and terminal buffers are views of the real tensors; each relay span
-gets a distinct fresh lease. A retained contiguous interval with no remote incoming pieces aliases the original;
-other retained pieces copy locally once. This path has no remote pack/unpack staging or receipt collective.
+`partition.follow` uses `migration.compile_rows` at the configuration boundary to derive compact affine ranges
+between the original sources and final destinations, including interior tensor axes and zero-share ranks. For
+contiguous region layouts, `_follow_bytes` binds each remote range through `fused.write_rows`: source and final
+landing arguments are views of the real tensors, while intermediate ranks own separate compact relay leases.
+Only useful row bytes cross the links. There is no page padding, remote packing kernel, unpacking kernel, or receipt
+collective in this path. A 5,003-row range remains one logical WRITE instead of 5,003 stream-ring entries.
 
-The bridge's current entry format addresses whole pages. For contiguous tensor layouts whose ranges cut pages,
-`migration.compile_rows` builds one affine descriptor per nonempty partition intersection: source/destination
-offsets, row length, row count, and source/destination strides. It does not first enumerate all prefix rows. Payload
-byte `i` maps to `offset + (i // row_bytes) * stride + i % row_bytes`; the frame's validity mask is its global payload
-index below the run's useful byte count. The descriptor therefore stays small even for a billion prefix rows.
+Each descriptor holds source/destination offsets, row length, row count, and local pitches. Native preparation
+agrees cuts at row boundaries and every participating registration boundary before execution. No DMA span writes
+neighboring bytes outside the declared rows. Original publications are encoded before incoming readiness waits.
+A retained contiguous interval with no incoming ranges aliases its original storage; other retained pieces copy
+locally once. Unsupported non-contiguous layouts still use `follow`'s older whole-operand staging fallback.
 
-`_follow_masked` binds one repeated WRITE train per remote descriptor. Producers read the original bytes directly
-into each frame's own page-aligned ingress layout, preserving raw bits with vector loads/stores where alignment
-permits. Padding is written only in owned frame storage. Consumers observe their frame prefix, then store only valid
-payload bytes into the final destination; they never DMA padding across neighboring live final bytes. Local retained
-runs use the same affine map, or alias when possible. Whole-operand packing, a whole-operand landing join, and a
-receipt collective are absent from this path. Its producer/consumer stores are the explicitly compiled streaming
-data function, not a claim of zero GPU memory traffic.
-
-Frame grain uses the page size and number of physical paths for the commodity, capped to the padded useful extent
-when smaller. This exposes multiple routing quanta without replacing the common route allocation. Each source train
-is bound and published before that rank begins any incoming wait; incoming consumers are then encoded round-robin
-by frame. `encode_many` batches each producer train and the consumer sequence without a host queue roundtrip per
-frame. Its final nonblocking producer flush prevents a later descriptor reservation from waiting for data whose
-GPU producer is still in an unsubmitted command buffer. Unsupported native descriptor capacity is an explicit
-error, not a change to a different protocol.
-
-Every frame has distinct source/relay/landing storage. The current realization allocates the complete train and
-retires it asynchronously; it is not a bounded-memory recycling ring. Padding contributes to wire bytes and is
-reported separately from useful bytes. Unsupported non-contiguous layouts still use `follow`'s older whole-operand
-staging fallback. The frame grain and vector choices are realizations to measure, not an optimality proof.
+The earlier padded/masked frame implementation is superseded for these contiguous layouts. Its measurements below
+remain historical evidence: they describe the implementation tested at that time and do not describe current wire
+payloads. Masked stores remain a possible data-function lowering where arithmetic needs them; they are no longer
+required solely because a pure-copy range cuts a transport page.
 
 ## Evidence and remaining performance work
 
@@ -139,7 +131,18 @@ cluster run passed 184 calls per rank, including eight guarded masked migrations
 collective patched to raise. Original bytes and poisoned neighbors remained exact, and all six cables carried
 traffic. Each odd-row commodity used three frames: 229,397 useful bytes occupied 245,760 transport bytes. The tiny
 three-byte case occupied one 16,384-byte page; this page-grain amplification is reported, not counted as useful
-bandwidth. The added batch-boundary flush and extended two-rank run require their subsequent regression results.
+bandwidth. The final row-specialized kernels and batch-boundary flush passed the same 120 local GPU checks and
+184 calls per rank on both two- and three-rank cluster runs. The recorded results are
+`metal-microbench/output_data/review-20261024/interface-refactor/masked-row-specialized-two-summary.json` and
+`masked-row-specialized-three-summary.json`. The two-rank odd-row commodity used four frames and 262,144 transport
+bytes for the same 229,397 useful bytes; these successful runs retain the stated page-padding cost.
+
+The exact-byte successor passed `rdma/tests/byte-writes.py` on three ranks, including unaligned three-byte writes,
+odd rows, 5,003 rows, all six cables, and a 1 GiB+19-byte registered span. Five trials of 128 complete numerical
+functions observed median 31.290039 microseconds for exact-byte transport and 35.569336 microseconds for the padded
+control. Those are full function observations, not isolated NIC latency. The later generic gather/sum consolidation
+has local declaration tests, ASan/UBSan generation-cache tests, and a successful extension build; its live regression
+must be recorded separately rather than inferred from the earlier collective or byte-write runs.
 
 These establish correctness and route use for those cases. They do not establish maximum useful bandwidth or
 minimum whole-function latency. Performance claims require complete-function timings, invariant useful output

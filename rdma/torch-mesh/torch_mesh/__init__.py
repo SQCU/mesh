@@ -185,6 +185,8 @@ def compiler(gm, example_inputs):
                         told(n, len(nodes))
             for node in [n for n in graph.nodes if n.target is torch.ops.torch_mesh.linear_sum.default]:
                 native(node)
+            from .declarations import compiled_graph
+            compiled_graph(graph)
 
         def uuid(self):
             return 'torch_mesh::all_reduce torch_mesh::linear cat linears repeats allgatherv native'
@@ -197,12 +199,17 @@ def empty(*size, dtype=None, device='mps'):
     the library reads its operands in place.  An 'mps' one is an MPS tensor whose storage is the lease's Metal buffer
     (ncclMeshMemBuffer), made through DLPack; it returns its lease once the GPU's work before its release is done."""
     import torch
+    from torch._guards import detect_fake_mode
 
     from . import _stream
     sizes = list(size[0] if len(size) == 1 and isinstance(size[0], (list, tuple, torch.Size)) else size)
     kind = torch.device(device).type
     if kind not in ('cpu', 'mps'):
         raise ValueError(f'mesh: empty() makes cpu or mps tensors, not {device}')
+    fake = detect_fake_mode()
+    if fake is not None:
+        with fake:
+            return torch.empty(sizes, dtype=dtype or torch.get_default_dtype(), device=kind)
     return _stream.region_empty(sizes, torch.empty(0, dtype=dtype or torch.get_default_dtype()), kind == 'mps')
 
 
@@ -268,6 +275,7 @@ class Recording:
 
     def __init__(self, step, name, k):
         self.step, self.name, self.k, self.graphs, self.replays, self.unrolled = step, name, k, 0, 0, {}
+        self.declarations = {}
 
     def issue(self, steps):
         """`steps` steps issued back to back on torch's stream with no wait: steps // k replays of the k-step graph,
@@ -286,16 +294,28 @@ class Recording:
         def steps():
             for _ in range(n):
                 self.step()
-        return torch.compile(steps, backend=self._backend, fullgraph=True, dynamic=False)
+        return torch.compile(steps, backend=lambda gm, inputs: self._backend(gm, inputs, n), fullgraph=True, dynamic=False)
 
-    def _backend(self, gm, example_inputs):
+    def _backend(self, gm, example_inputs, n):
         """compiler's graph, then every rank's compilation of it met at the default group's store (a rank's compile
         outlasting the library's silent-link bound would cancel a peer's first crossings): bounded by the store's
         timeout.  The meeting is a host wait, so a publication waiting in torch's open buffer is committed first."""
         import torch.distributed as dist
 
         from . import _stream
-        made = compiler(gm, example_inputs)
+        from .declarations import _CAPTURE
+        captured = []
+        token = _CAPTURE.set(captured)
+        try:
+            made = compiler(gm, example_inputs)
+        finally:
+            _CAPTURE.reset(token)
+        groups, forms = {}, []
+        for lowered, prepared in captured:
+            forms.extend(prepared)
+            for name, calls in lowered.items():
+                groups.setdefault(name, []).extend(calls)
+        self.declarations[n] = groups, forms
         if dist.is_initialized():
             _stream.commit()
             store, key = dist.distributed_c10d._get_default_store(), f'mesh/recording/{self.name}/{self.graphs}'
@@ -303,6 +323,18 @@ class Recording:
             store.wait([f'{key}/{r}' for r in range(dist.get_world_size())])
         self.graphs += 1
         return made
+
+    def schedule(self, group, steps):
+        """The actual compiled chunks of one invocation, before timing starts."""
+        groups, forms = [], []
+        full, rest = divmod(steps, self.k)
+        for n in [self.k] * full + [rest] * bool(rest):
+            if n not in self.declarations:
+                raise ValueError(f'recording chunk {n} must be compiled before declaring an invocation')
+            declared, prepared = self.declarations[n]
+            groups.extend(declared.get(group.group_name, []))
+            forms.extend(prepared)
+        return groups, forms
 
 
 _recordings = 0

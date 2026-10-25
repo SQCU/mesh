@@ -10,8 +10,8 @@ members place its crossings.  Recording builds the graph; realize() (start(), Sw
 host writes its inputs (write), each publication firing what it completes (a pending count reaching zero, the old
 executor's rule, design/deliverables.md L3), and reads its results (export, Result.ready, consume).  Kernels run
 on one compute thread; crossings and collectives are libnccl-mesh's (mesh._native), issued in one order every
-member computes from the graph (each queue its own communicator), so their positions pair (rdma/NCCL.md "Rules a
-program keeps").  A failure is a value (Program.report, MeshError); every wait ends at an event (a call completing, a
+member computes from the graph on one full physical communicator. Logical participant masks keep all other nodes
+available for forwarding (rdma/NCCL.md "Rules a program keeps").  A failure is a value (Program.report, MeshError); every wait ends at an event (a call completing, a
 failure, close), never at a time, and close() abandoning work in flight revokes the program's communicators, so its
 crossings end with an error here (its peers' at their own close or revoke).
 
@@ -377,6 +377,8 @@ class _Task:
     fired: bool = False
     done: bool = False
     event: object = None
+    prepared: object = None
+    participants: tuple = ()
 
     # design/algorithm-sources.md#programkernel_call
     def __lt__(self, other):
@@ -486,12 +488,13 @@ class Program:
                       dtype, transferable, contiguous)
 
     # design/algorithm-sources.md#programkernel_call
-    def _record(self, kind, owners, row, roles, run, *, queue=0, crossing=False, members=None):
+    def _record(self, kind, owners, row, roles, run, *, queue=0, crossing=False, members=None, participants=None):
         if self._realized:
             raise RuntimeError('A realized program takes no more calls')
         owners = tuple(sorted(set(owners)))
         task = _Task(len(self._tasks), kind, owners, row, roles, run, queue, crossing,
-                     tuple(sorted(set(members))) if members is not None else owners)
+                     tuple(sorted(set(members))) if members is not None else owners,
+                     participants=tuple(participants) if participants is not None else owners)
         self._tasks.append(task)
         return task
 
@@ -576,9 +579,10 @@ class Program:
             if src is not dst and src.key != dst.key:
                 self._record('copy', (sender,), dst.origin[0], ((src,), (dst,), ()), ('materialize', ((src, 0, 0),), dst))
         else:
-            roles = {sender: ((src,), (), ()), receiver: ((), (dst,), ())}
-            self._record('copy', (sender, receiver), src.origin[0], roles, (Program._issue_copy, src, sender, dst, receiver),
-                         queue=queue, crossing=True, members=range(self.size))
+            from .collective import _exchange
+            if src.shape != dst.shape:
+                raise ValueError('Transfer shapes must match')
+            _exchange(self, [[(src, sender, dst, receiver)]], queue)
         dst.partial = src.partial
 
     send = recv = copy
@@ -673,7 +677,7 @@ class Program:
     def _roles(self, task, rank):
         if rank not in task.owners:
             return (), (), ()
-        return task.roles[rank] if isinstance(task.roles, dict) else task.roles
+        return task.roles.get(rank, ((), (), ())) if isinstance(task.roles, dict) else task.roles
 
     # design/algorithm-sources.md#programkernel_call
     def _graph(self, rank, tasks):
@@ -774,12 +778,32 @@ class Program:
             for ref in itertools.chain(*self._roles(task, self.rank)):
                 ref.backing.flat()
         self._world.prepare((task.queue, task.members) for task in self._tasks if task.crossing)
+        # Views, temporary leases and the native configuration belong to
+        # realization. A repeated row executes its retained bindings directly.
+        for task in self._local:
+            prepare = getattr(task.run[0], 'prepare', None) if task.crossing else None
+            if prepare is not None:
+                task.prepared = prepare(self, task)
+        # Constant-only work is a distinct configuration graph. Hoisting it
+        # preserves the dependency order and leaves one immutable recurrent
+        # declaration, instead of skipping slots in its later iterations.
+        initial = [task for task in order if not task.cyclic]
+        recurrent = [task for task in order if task.cyclic]
+        self._world.declare(initial)
+        for task in initial:
+            if self.rank in task.owners:
+                if not self._ready(task):
+                    raise RuntimeError('constant initialization has an unresolved dependency')
+                works = self._execute(task)
+                with self._cond:
+                    self._complete(task, works)
+        self._world.declare(recurrent)
         self._compute = [task for task in self._local if not task.crossing]
-        queues = defaultdict(list)
-        for task in order:
-            if task.crossing and self.rank in task.owners:
-                queues[task.queue].append(task)
-        self._orders = [_Order(queues[queue]) for queue in sorted(queues)]
+        # One common physical declaration has one SPMD order. Logical queues
+        # do not acquire independent communicators or race their plan cursors.
+        # Native physical schedules overlap the issued groups on all cables.
+        crossings = [task for task in recurrent if task.crossing and self.rank in task.owners]
+        self._orders = [_Order(crossings)] if crossings else []
         self._candidates = set(self._compute)
         self._realized = True
         if self.device == 'mps':
@@ -939,16 +963,6 @@ class Program:
                 self._complete(task, works)
                 order.advance()
 
-    # design/algorithm-sources.md#programcopy
-    def _issue_copy(self, task):
-        _, src, sender, dst, receiver = task.run
-        group = self._world.of(task.queue, task.members)
-        if self.rank == sender:
-            work = _native.send(src.tensor, task.members.index(receiver), group)
-            work.wait()
-            return ()
-        return (_native.recv(dst.tensor, task.members.index(sender), group),)
-
     # design/algorithm-sources.md#collectivesync_on_remote_fill
     def _wait_results(self, results, every=True):
         with self._cond:
@@ -976,6 +990,8 @@ class Program:
         for thread in self._threads:
             thread.join()
         self._world.close()
+        for task in self._tasks:
+            task.prepared = None
         self._replicated.clear()
 
     # design/algorithm-sources.md#program

@@ -4,6 +4,11 @@ This is the description of how data moves between nodes, who may touch what, how
 answers, in terms of the objects the code holds, the operator's questions of 2026-10-19. Where it and older text in
 this repository disagree, this text is the description and the older text is history.
 
+The 2026-10-24 exact-byte revision below is wire version **135**, region layout **154**. It passed local build,
+sanitized/mock ownership tests, and the [live validation below](#exact-byte-validation-on-2026-10-24). The cluster
+deployment was temporary; the preceding bridge was restored after testing. These results do not describe a permanent
+deployment or establish that all workloads attain their bandwidth bounds.
+
 Incident records it cites: [RDMA-KERNEL-RECOVERY.md](RDMA-KERNEL-RECOVERY.md) (September 5, October 16-18). Apple's
 transport note: [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt).
 
@@ -17,7 +22,8 @@ transport note: [TN3205](https://developer.apple.com/documentation/technotes/tn3
   it.
 - **The page table.** The region's rows (one row is one block, 16 KiB on the pair) and, per row, an owner word and the
   arena page it maps (`mesh_buffer`, `mesh_page_entry`), claimed by compare-and-swap on bitmaps. A client's memory is
-  rows whose owner word is its own. "Lease" in the code means only this: rows owned. It has no term, renewal or expiry.
+  rows whose owner word is its own. This allocation granularity is not a minimum transfer size. "Lease" in the code
+  means only this: rows owned. It has no term, renewal or expiry.
 - **A link.** The two ports at the ends of one cable and the queue pairs the bridges make on them at each pairing:
   the unreliable-connected queue pairs of its plan, ten where both ends' devices hold ten (macOS 26's) and fewer where
   either holds fewer (the M5 Ultra's macOS 27 devices report max_qp 3, two usable by the max_qp − 1 rule:
@@ -30,13 +36,20 @@ transport note: [TN3205](https://developer.apple.com/documentation/technotes/tn3
   next arriving SEND fills the oldest posted receive. Its completion is an entry in the receive completion queue.
 - **A SEND.** An `ibv_send_wr` with one SGE naming a range of the region. TN3205: only SEND and RECV exist on this
   transport (no RDMA WRITE or READ), a SEND and the receive it fills must cover the same number of 4 KiB frames, and a
-  SEND is held by the hardware's credit until the peer has a receive posted.
-- **A readiness word.** A 64-bit count in shared memory with exactly one writer and one or more readers, in pages: a
-  holding's `ready` (the holder's: the pages it supplied) and its `sent` and `landed` (the bridge's: the pages whose
-  SENDs completed, the pages landed), each in its list's order (section 14). All-ones (~0) in `sent` or `landed` is a
-  lost link; a page whose data never came lands as a dud (section 10).
+  SEND is held by the hardware's credit until the peer has a receive posted. The compiled plan makes the SGE lengths
+  equal exactly. `ceil(length / 4096)` is the credit charge, not padding read from or written to application memory.
+- **A resolved byte span.** `mesh_dma_span {uint64_t offset, bytes}` is 16 bytes of local immutable metadata; offset
+  is relative to the region base. It names the actual registered interval, can start inside an allocation page, and
+  never crosses a 1 GiB MR boundary. No copy, header or descriptor travels with the payload. Physical wire framing
+  overhead is separate and is not inferred by treating a credit frame as 4096 transmitted payload bytes.
+- **A readiness word.** A 64-bit contiguous count of compiled span units, with one writer and one or more readers:
+  `ready` counts produced units, `sent` completed SEND units, and `landed` completed receive units. Both hardware
+  lanes contribute to the same contiguous prefix. These counts are neither byte counts nor allocation-page counts.
+  All-ones (~0) in a completion prefix means loss, not completed work. Invalid descriptors fail validation; the
+  byte-extent revision does not substitute an all-ones payload (section 10).
 
-Nothing else is needed to move data: rows, requests naming rows, completions, and readiness words.
+The compiler binds storage and dependencies; the bridge realizes exact spans, requests, completion prefixes and
+queue capacity. It need not know tensor dimensions or the arithmetic performed on the bytes.
 
 ## 2. Who owns what
 
@@ -51,8 +64,8 @@ bridge stopped by SIGHUP (its heartbeat's restart, a deploy) or ended by a crash
 bridge adopts the region, the same memory, where its layout is that bridge's:
 - clients' slots, rows and leases stand, and the GPU buffers over them stay valid;
 - the port children register the same pages again, so nothing is wired twice and nothing is reloaded;
-- the bridge's own pages (each port's link pages, its streams' lists and rings of rows, the duds' block, the map) are
-  recorded in the region and taken again;
+- the bridge's own pages (each port's link pages, its streams' lists and physical-interval pin rings, the map, and
+  the reserved all-ones block retained from older layouts) are recorded in the region and taken again;
 - every stream is set not live and held by none, its landed words ~0, so a communicator of the old pairing fails and is
   made again, and the next pairing opens each stream new;
 - a retirement a dead process left half done is finished.
@@ -130,20 +143,53 @@ and Van Horn, 1966):
 4. *State that outlives a client.* Posted receives, SENDs in flight, which landing belongs to whom. Others' progress
    cannot hang on a party that can vanish. Only a single owner can always finish what it started.
 
-The only words both sides touch are single-writer readiness words: the client writes "supplied", the bridge writes
-"landed".
+Execution readiness uses single-writer prefixes: the client writes "supplied"; the bridge writes "sent" and
+"landed". Local ownership and list-publication metadata have their own atomic protocols, independent of payload
+readiness. None is an application receipt sent across the cable.
 
-## 3. There is no protocol, except a link's pairing
+## 3. Execution has no request/ACK protocol
 
 A protocol is needed only where one side must learn something neither side can know beforehand. Here that is the
 queue-pair numbers, packet sequence numbers and GIDs the hardware assigns at each pairing (TN3205's out-of-band
 endpoint exchange): HELLO and LINK on the control socket, once a pairing. RECORD carries each node's links and memory
 (the map), which is data, not a dialogue.
 
-Everything about a call is known before it runs: both ends compile the same schedule, so each position's length and
-order are known at both ends. Data goes SEND into a posted receive. A side that supplies nothing is replaced by a dud,
-an all-ones page (section 10). A lost link is a driver event (link off, an error completion, the control
-socket's end). There are no requests, acknowledgements, handshakes, agreements, digests, sessions, meetings or stamps.
+Before execution, both ends have equal payload lengths and unit order. `ncclMeshWritePrepare` and
+`ncclMeshWriteRowsPrepare` exchange placement/shape metadata through the existing bootstrap while realizing the
+plan, then retain fixed bindings. `ncclMeshWriteExecute` exchanges neither that metadata nor acknowledgments.
+The row API describes an entire affine run in one call and one span table. Its participants may have different
+pitches; common cuts include each row's actual registration boundaries and the packet-size limit. A full-page
+operand uses the same span descriptor. See the [API](../rdma/nccl.h), [span compiler](../rdma/mesh-span-plan.h), and
+[row compiler](../rdma/mesh-row-span-plan.h).
+
+Data executes as SEND into an AOT-bound, preposted receive. There is no payload header, receive-address request,
+receipt all-gather or remote ACK. A lost link remains a driver/control-socket event. Prepared bindings carry a
+configuration-time agreement; this is not a claim that creating a plan involves no metadata exchange.
+
+### Exact-byte validation on 2026-10-24
+
+The three-rank [byte-write test](../rdma/tests/byte-writes.py) passed all five cases: 3 bytes; seven 257-byte rows;
+5,003 three-byte rows; 4 MiB + 13 bytes; and 1 GiB + 19 bytes crossing registration boundaries. It verified exact
+payload accounting and preserved leading, trailing and inter-row neighbor guards. The larger transfers carried
+payload over all six discovered cables. Separately, [fused-physical](../rdma/tests/fused-physical.py) passed 14 cases
+and 94 calls per rank in each of the two-node and three-node runs.
+
+The complete numerical function `seed -> remote uint8 affine transform -> local xor` used five trials of 128 calls
+per mode. Median amortized function latency was **31.290 µs with exact spans**, versus **35.569 µs with padded
+transfers**. Each transfer's payload was 3 bytes versus 16,384 bytes. These are whole-function GPU observations,
+including computation and communication; they are not measurements of isolated NIC latency, nor does the payload
+ratio imply the same latency ratio. Preparation, compilation, allocation and diagnostics were outside timing.
+
+The subsystem improvement is established by preserved results with fewer payload bytes and removal of the remote
+packing/unpacking passes. It does not require a visible speedup in every complete function. Lower interconnect
+overhead frees resources that dependent computations can use; the observed latency effect depends on how much
+that overhead contributes to the workload. Whole-function measurements characterize that effect and check for
+regressions. In the separate large-DNN replay every observed span was already 16 KiB, so it exercised the revised
+transport and accounting without exercising the short-span padding savings.
+
+The [validation logs](/Users/mdot/metal-microbench/output_data/review-20261024/byte-extents) record this temporary
+wire-135/layout-154 deployment and its restoration. The historical measurements elsewhere in this document remain
+evidence for their respective revisions.
 
 ## 4. SEND and RECV do not fail
 
@@ -241,8 +287,8 @@ nothing starts it. Since the bridge makes no call that waits on a termination (s
    power goes first, its kernel state goes with it, and a machine that is off cannot hang.
 2. **The node staying up** (the M5). It reads FAREWELL, or the link-off event, or the peer interface's termination.
    It stops serving that link and makes no verbs call on it. The termination finishes because nothing of the bridge
-   holds the provider's gate. Calls with positions on that link get duds (section 10) and fail as values; every other
-   port, process and service is untouched.
+   holds the provider's gate. Calls with positions on that link observe failure metadata; the byte-span path does
+   not fabricate replacement payloads (section 10). Other ports continue independently.
 
 ## 8. A crushed cable
 
@@ -279,21 +325,15 @@ Nothing of the node's brings a fabric port down: a port whose cable link is up w
 objects. A job an operator disables (`launchctl disable`) stays off: the installers load no disabled job
 (`bin/mesh-launchd-agent.sh`).
 
-## 10. Duds
+## 10. Invalid descriptors and historical duds
 
-A dud is the whole page of all-ones. The bridge chooses which page every SEND names, so a dud is a SEND whose SGE
-names a page of the bridge's own all-ones block (written once at its start): nothing is copied into the client's rows
-or anywhere else. The receiving bridge's receive fills as for any SEND.
+Earlier page-only versions could replace an invalid row with a whole page of all-ones, sent from the bridge's
+preinitialized block. That history does not describe the byte-span path. `mesh_stream_present` validates the span
+table, dependency word, arena bounds and exact registration-contained extents before publication. A bad span seen
+by the bridge fails the link; it is not converted into filler or a padded write to unrelated storage.
 
-The bridge sends a dud only for a page of an entry whose rows lie outside the page table or hold no page (a holder's
-error). It sends none of its own: none at a deadline (a holding has none) and none for a holding that ended (the
-operator, 2026-10-22: "the bridge has as little code as possible and does as little as possible").
-
-All-ones reads as failed wherever it lands: it is NaN in fp16 (0xFFFF) and fp32 (0xFFFFFFFF), and ~0 in a landed
-word. A dud is a client error, recorded against the client and its call, never a transport error.
-
-Pages received for a holder that is gone land in its rows: a row a receive posted and not landed names stays held until
-the receive lands or its port's child exits (section 14, "A holding's end").
+Previously posted receives retain their actual destination intervals until completion or the posting child's
+queue pairs cease to exist. Failure and an all-ones completion prefix never prove those accesses completed.
 
 ## 11. Reliability: three nines
 
@@ -302,12 +342,14 @@ transport level errors. you need to transmit 1000 frames which are *normal* and 
 for every 1 *error* wrt the bridge application. sending an all-1 dud buffer is not a transport error, but a client
 error".
 
-- **A frame** is one 4 KiB frame of a SEND the bridge posted for a scheduled position.
-- **A normal frame** arrives intact in the receive the schedule gave it.
+- **A frame**, for the accounting below, is a hardware credit unit charged to a posted SEND. A short span consumes
+  one credit unit without transferring 4 KiB of application data. Physical framing bytes require separate measurement.
+- **A normal frame** is a credit unit of a payload that arrives intact in the receive the schedule gave it.
 - **A transport error** is a frame that does not: lost, cut short, landed in another position's receive, held by the
   bridge past its deadline, or cancelled because a link was lost or concluded. Every frame in flight on a link when it
   is lost counts, and so does every frame scheduled on it until the calls on it end.
-- **Not transport errors:** duds (a client's), and positions of calls that ended before they were sent.
+- **Not transport errors:** the client's historical dud substitutions, and positions of calls that ended before
+  they were sent. The byte-span path introduces no dud substitutions.
 - **The requirement:** at least 1,000 normal frames per transport error, counted per bridge.
 
 What it rules out: any link loss the bridge causes itself. One link loss in a decode call at the pair's rate (on the
@@ -316,8 +358,9 @@ costs tens of thousands, which then requires tens of millions of clean frames to
 document the bridge concluded a link at every rank renewal and at every failed call (section 12), which no workload
 can meet. After it, only physical events (a cable pulled or crushed, a node losing power) lose links.
 
-Counted by the bridge, per port: frames posted, frames landed, duds sent, and transport-error frames by cause. A
-summary of the four is part of each node's record.
+Keep posted and landed credit-frame counts, actual payload bytes, and transport-error counts distinct in each
+node's record. Historical dud counts belong to the versions that emitted them; they are not useful payload or an
+exact-byte failure recovery mechanism.
 
 ## 12. The code before this document
 
@@ -372,40 +415,48 @@ clients copy into the bridge's rings and count positions against them (a lag cre
 the fix of version 125's real defect (clients holding work requests and queue pairs) had moved the data itself into the
 bridge. A client naming its own pages holds no DMA state, and needs no ring.
 
-**The stream.**
-- Each link carries up to `MESH_LINK_STREAMS` (4) streams toward its peer node, each on a lane pair of its own (as
-  many streams as the link's plan has lane pairs for: [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)). Every unit on
-  a stream's lanes is a whole page: page p of the stream's sequence over its pairing goes on its lane p mod 2, as unit
-  p div 2 there, and each end posts the sequence in order.
-- Each stream has an identity, `wire`, which both bridges compute alike from its first lane's two ends (each port's
-  GID and queue pair number) and which no other stream between the two nodes has.
-- A holding has two lists of entries the holder presents in order: a send list and a landing list. An entry is a
-  range of the holder's rows (`struct mesh_entry {row, pages, word, base}`: `pages` rows from row `row`), each row a
-  page, read in order through the page table: the range is the entry's block table (design/pages-and-functions.md).
-  Each list is a sequence of pages, and page i of a send list lands as page i of the peer's landing list. Each end
-  lays its own pages where its plan put them, a scattered buffer being several entries: scattered pages in one client
-  may land as one run in another, and one buffer may go to several runs in several clients, with nothing copied. No
-  entry names a byte offset, so none can lie off a page. Every placement is the holder's plan, fixed
-  before the holding's first call (the operator, 2026-10-21: "all placements can be demanded as ahead of time known
-  compiled plans which do not change dynamically during a chain of function calls"). Three page counts over the
-  holding, each in its list's order with every page before: `ready` (the holder's: produced), `sent` and `landed` (the
-  bridge's: SENDs completed; landed). A send entry's page k is ready once the word at `word` (0: the holding's
-  `ready`) reads at least `base` + k + 1; a landing entry is received into once the word at `word` (0: none) reads at
-  least `base`. The holder never sees a lane, a unit, a frame or a queue pair.
-- Every SEND and every receive is one whole page, the page its row names (the bridge reads the row's page as it posts
-  it: one read a page). A send entry whose rows lie outside the page table, or a row that holds no page, goes as duds,
-  and such a landing entry's pages land in the spare page (the port's link page). So a SEND always fills its receive
-  exactly (TN3205), ends whose lists differ garble their own pages and never fail the link, and neither end knows the
-  other's addresses.
-- A port's one progress thread posts a unit from its page once the entry's word says the page is ready, posts
-  each receive straight into its page (at most a window ahead) once the entry's word says the page's reader released
-  it (a page is written again only after release), and raises `landed` once every page before has landed, whichever
-  lane carried it. A SEND whose receive is not yet posted waits in the hardware's credit (TN3205): posting a receive is
-  the credit, and nothing else paces a holding (no lag).
-- The words only the bridge writes: `live`, `sent`, `landed`, `taken`, `posts` (each of the stream's two lanes' units
-  over its pairing each way, posted and completed), `rows` (the rings of the row each unit names, `MESH_LANE_UNITS` a
-  lane each way). The two time rings each stream had (`posted_at`, `landed_at`: an entry's first SEND posted and its
-  last page landed), which the bridge wrote every pass, are deleted with their last reader (mesh 670349e1).
+**The stream (wire 135, layout 154).**
+- Each physical cable carries up to `MESH_LINK_STREAMS` streams, according to its negotiated queue-pair budget.
+  Unit p goes on lane p mod 2 as unit p div 2 there; both ends post equal exact payload lengths in this order.
+- Each stream has a `wire` identity derived from its pairing. Local holding generations distinguish later users
+  of the same pairing and its reset completion words.
+- A holding presents SEND and landing lists of `mesh_entry {spans, units, word, base}`. `spans` is a region offset
+  of an immutable `mesh_dma_span {offset, bytes}` array; `units` is its count. A table can describe contiguous,
+  unaligned or scattered intervals and arbitrarily many affine rows. Descriptor count follows actual packet cuts,
+  not one host call or one list entry per row. List entries are 32 bytes; span records are 16 bytes, all local metadata.
+- The compiled plan gives both endpoints matching units. Each SGE names its exact byte interval with the proper
+  1 GiB registration key; payload does not round to an allocation page or hardware credit frame. Parallel paths
+  and relay buffers use the same descriptor. Storage ownership must hold for every physical reader.
+- A SEND unit k is available when its selected word (0 selects `ready`) reaches `base+k+1`. A receive's optional
+  word permits first write at `base`; fresh disjoint destinations need no reciprocal publication. `landed` advances
+  only through the completed prefix across both lanes, enabling the actual dependent consumer without a receipt.
+- Queue accounting retains two separate limits: `ceil(actual_length / 4096)` frames per request, and the outstanding
+  request slots in the `MESH_LANE_UNITS` pin ring. Receive completions retire their actual cumulative frame charge.
+  Frame capacity is not permission to send padded application bytes.
+- Before a post, the bridge records its actual physical `{offset, bytes}` pin and slot generation, publishes the
+  posted count, and rechecks the holding. Reclamation intersects that interval with every backing allocation run;
+  logical row IDs or alias tables cannot hide an overlap. The historical stream field `rows` now locates interval
+  pin records, not a single row ID per DMA unit. A racing snapshot conservatively retains storage.
+- `taken` releases a list slot, not the immutable array named by it. Tables remain live through every future use
+  and final SEND/LAND completion. On give, their CPU readers require the bridge's subsequent owner transition to
+  0 or GIVEN-alone before incomplete table uses can detach. Payload request pins do not cover CPU metadata reads.
+- Abrupt client exit uses a separate bridge CPU-read pin. Before dereferencing a table or external dependency word,
+  the progress thread publishes those exact intervals and then rechecks the holding/client with sequentially
+  consistent atomics. Retirement either observes that pin or wins the recheck, preventing the read. A monotonic
+  sequence makes a torn snapshot conservative; clearing the scope or the posting child's exit ends the CPU reads.
+  This retains table/word storage without keeping unrelated allocations and without any remote acknowledgment.
+  The pin occupies unused stream padding; existing field offsets, span descriptors and the 384-byte stream ABI stay
+  unchanged. The sequence does not reset at a new holding or pairing.
+
+Diagnostic span-length history has a separate lifetime from the DMA descriptor table. Active trace observers
+retain the lengths needed to reconstruct their windows, even after completed DMA descriptors retire. Without an
+observer, completed history is pruned under the native group lock, retaining cumulative unit/byte baselines and
+the readiness checkpoint. Trace stop joins its observer before releasing history; overlapping traces keep it until
+the last observer ends. This bookkeeping neither retains payload bytes nor sends a receipt.
+
+The bridge's HELLO still requires equal allocation-block sizes because generic collective front ends retain a
+common packet grid. Exact byte DMA itself imposes no such equality. Remove this remaining compatibility check
+only after every front end prepares matching cuts for unequal block sizes.
 
 **Holding it** (version 133; the operator, 2026-10-22, on the holding's start of 129-132: "something is sampled
 diachronically four times then we do a funny little guess ... this entire code path needs to be remove and rewritten
@@ -417,18 +468,18 @@ is transduced simply from a configuration operand and several invariants?"; "thi
 fails"; and "the collective layer gets to optimize data placement and movement, and finally the bridge has as little
 code as possible and does as little as possible", which may tell consumers facts, "an error channel return kind of
 statistic, not a data dependent control flow for a collective verb or a bridge transaction").
-- Two invariants. (1) A stream's lanes carry its holders' entries' pages and nothing else: no keepalive, no spare
+- Two invariants. (1) A stream's lanes carry its holders' declared byte spans and nothing else: no keepalive, no spare
   receive between holdings, no dud of the bridge's own. (2) Both ends' lanes count from 0 when the port's child makes
-  its queue pairs, and each end posts the stream's pages in the sequence's order. So a SEND's n-th unit on a lane
-  fills the peer's n-th receive there (TN3205), and a page's place is a function of the two ends' entries alone.
-  Posting in order keeps both lanes' counts a function of one number, the stream's pages posted: two lanes posted
-  apart could leave a holding that ended at counts that no sequence of pages fills.
+  its queue pairs, and each end posts the stream's units in the sequence's order. So a SEND's n-th unit on a lane
+  fills the peer's n-th receive there (TN3205), and a payload's place is a function of the two ends' entries alone.
+  Posting in order keeps both lanes' counts a function of one number, the stream's units posted: two lanes posted
+  apart could leave a holding that ended at counts that no sequence of units fills.
 - A process holds a stream as it holds rows: it takes the owner word from 0 to its own by one compare-and-swap
   (`mesh_stream_take`), nothing awaited. The port's progress thread then begins the holding, its send walk at the
-  stream's pages sent so far and its landing walk at the stream's pages posted so far, in one pass: no unit of an
+  stream's units sent so far and its landing walk at the stream's units posted so far, in one pass: no unit of an
   earlier holding is outstanding then (a holding's end, below).
 - The facts. The bridge tells each of a stream's two lanes' units over its pairing, each way, posted and completed
-  (`posts`), and the row each unit names (`rows`), for the release of a lease's rows (mesh-dataflow.c mesh_pinned); no
+  (`posts`), and the physical interval each unit names (`rows`, the historical field name), for release of backing storage (mesh-dataflow.c mesh_pinned); no
   communicator reads them. On a live stream both ends' are equal by construction: a holding that ends with nothing
   outstanding at both ends left every SEND completed into a posted receive (TN3205) and every receive landed from a
   SEND, and one that ends otherwise takes its stream out of the pairing. The pages posted that communicators once
@@ -436,9 +487,11 @@ statistic, not a data dependent control flow for a collective verb or a bridge t
   version 133 (dud SENDs and receives into the spare page presented first, entries of
   `MESH_NO_ROW`, and the init's wait for an earlier holding's receives to land) is deleted; the operator, 2026-10-22,
   on waiting for a future communicator's filler: "dispose of".
-- One communicator holds a stream at a time; communicators that share a node pair hold different streams of its link,
-  each end taking the stream of the least `wire` free at both. An init is refused (EBUSY) only where none is.
-- A SEND is posted when its row's word (`ready`) passes it; a receive when its row's word says its reader released it.
+- One communicator holds a particular physical stream at a time. It can bind streams on every available cable
+  between a node pair, with a matching free `wire` at both ends of each cable. Sharing a peer does not collapse
+  those bindings to one cable. A binding is refused (EBUSY) when its physical link has no stream free at both ends.
+- A SEND is posted when its compiled producer prefix permits it. A receive is preposted once its declared
+  first-write dependency and queue capacity permit it; fresh disjoint storage needs no producer gate.
   Both are data, and neither has a deadline.
 
 **A holding's end** (version 134; the operator, 2026-10-22: "if we have a graph serializaiton that we know tells us
@@ -452,7 +505,7 @@ W(t) those requests already handed to the hardware reference, the plan's window 
 - The holder gives the stream by setting bit 63 of its owner word (`MESH_STREAM_GIVEN`), and the event loop does so for
   a holder gone (its exit, the event loop's EVFILT_PROC: the death is that event, not a poll). The progress thread ends the
   holding at once at the give, or at its client's retirement: nothing more of it is posted, and its entries taken and
-  not posted are dropped. Each unit is told before it is posted (its row in its lane's
+  not posted are dropped. Each unit is told before it is posted (its stable physical interval in its lane's
   ring, then its lane's count, sequentially consistent) and posted only while its holding is still its holder's (its
   owner word not given, its client's slot its own: mesh-link.c `unit_told`). A client that gives or retires and then
   reads the lanes' units therefore sees every unit that will ever be posted for the holding. Nothing in the bridge
@@ -472,17 +525,19 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   `MESH_LANE_UNITS`. An end is decided at each end alone, so a stream can be live at one end and not at the other; an
   init takes only a stream free at both ends, so such a stream serves no communicator, and a link whose every stream
   is so is not lost by this rule while each end keeps one live (open, for the operator: the peer is told nothing).
-- Rows. A row is held only while it is in W(t): a unit outstanding on some lane names its page, a receive posted and
-  not landed or a SEND posted and not done (mesh-dataflow.c `mesh_pinned`). That is the plan's window in flight, at
-  most a lane's queue each way, and nothing else is held. A holder's halt (its give or its death) leaves L(P, t) empty,
-  so it frees every row outside W(t) at once (design/extents-and-liveness.md, d): a lease of it is released at once,
-  by the client's return (`mesh_lease_return`) or the bridge's release of a retired client's
-  (`mesh_retired_release`). A lease with a row in W(t) is closed instead and released at the bridge's next turn after
-  its units complete, or once the port child that posted them is gone: a work request's buffer is the hardware's until
-  it completes or until the queue pair holding it is gone with the process that owns it (verbs), so each stream records
-  that child's pid and start (`child`, `child_start`, as the client slots identify processes) and its units count only
-  while that process lives. A lease returned while its holder still holds the stream and its presented entries still name it
-  is in L(P, t): returning it is the holder's error, as a use of a freed buffer is.
+- Backing storage. A posted request pins every allocation intersecting its actual interval, including spans
+  crossing row boundaries or resolved from aliases/scatter tables. A returned lease with any such overlap stays
+  closed until the requests complete or their posting child's queue pairs cease to exist. Link loss alone is not
+  completion. The stream records that child's pid and start, so reused process IDs do not supply retirement proof.
+  Future unposted reads are also live uses: native `ncclMemFree` is a logical asynchronous free and retains all
+  registered future physical readers before presentation. Its allocation pool separately needs completed GPU uses
+  and destination-consumer proofs before overwrite. For a dead payload, giving every relevant holding permits
+  outstanding requests to retain it through bridge pins; this is not an application overwrite proof.
+- Immutable descriptor tables have local CPU readers in addition to their SEND/LAND direction obligations.
+  `client|GIVEN` prevents a future hardware post but does not itself prove the progress thread stopped reading the
+  table. Until the bridge transitions that owner to 0 or GIVEN-alone, descriptor storage remains retained. This
+  observation is asynchronous local ownership bookkeeping and introduces no remote ACK.
+
 - The flush. The operator permitted it on 2026-10-22: "'The standard way to complete outstanding requests without the
   peer is to move the queue pair to the Error state. Every pending request is then flushed with IBV_WC_WR_FLUSH_ERR,
   and buffers are reused only after those flush completions are polled.' you can do this and nothing else with error

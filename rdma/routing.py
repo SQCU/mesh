@@ -1,6 +1,27 @@
 """design/whole-function.md#ahead-of-time"""
 import math
 
+
+def weight_ticks(values):
+    """Canonical Q40 path operands; exact zeros and integer conservation.
+
+    Convert the binary input ratios using integer arithmetic. Even a very small
+    finite input becomes an explicit zero, without producing subnormal ratios.
+    """
+    from fractions import Fraction
+    if not values or any(not math.isfinite(v) or v < 0 for v in values):
+        raise ValueError('route shares must be finite and nonnegative')
+    ratios = [Fraction(v) for v in values]
+    total = sum(ratios)
+    if not total:
+        raise ValueError('at least one route share must be positive')
+    exact = [v * (1 << 40) / total for v in ratios]
+    ticks = [v.numerator // v.denominator for v in exact]
+    remaining = (1 << 40) - sum(ticks)
+    for i in sorted(range(len(ticks)), key=lambda i: (-(exact[i] - ticks[i]), i))[:remaining]:
+        ticks[i] += 1
+    return ticks
+
 class Fabric:
     def __init__(self, nodes, cables):
         self.nodes, self.cables = int(nodes), list(cables)
@@ -62,10 +83,7 @@ class Fabric:
             equality[pairs.index(pair)][k] = 1.0
             for e in self.arcs(pair[0], self.paths[pair][p]):
                 edge[e][k] = 1.0
-            # Positive latent weights let feedback move onto any path. They do
-            # not reserve a transport page on every possible path.
-            floor = demands[pair] * 1e-9
-            bounds.append((floor / scale, None))
+            bounds.append((0, None))
         for e, capacity in enumerate(capacities):
             edge[e][-1] = -capacity / rate
         rhs = [demands[pair] / scale for pair in pairs]
@@ -122,7 +140,7 @@ class Fabric:
         for pair in pairs:
             flows = [float(flow[k]) * scale for k, (commodity, _) in enumerate(columns) if commodity == pair]
             total = max(units, len(flows))
-            wanted = [v / sum(flows) * total for v in flows]
+            wanted = [v / (1 << 40) * total for v in weight_ticks(flows)]
             name = f'route:{pair[0]}:{pair[1]}'
             decisions[name] = {'parts': wanted,
                                'grain': 0, 'low': [0] * len(flows), 'high': [total] * len(flows),
@@ -132,6 +150,13 @@ class Fabric:
                            'demand_bytes': {f'{a}:{b}': demands[a, b] for a, b in pairs}}
 
     def install(self, comm, parts):
+        """Override selected default route weights at a configuration boundary.
+
+        Native communicator realization already installs every simple physical
+        path for every ordered pair. Unspecified pairs keep those defaults (or
+        their previous solver weights); no process-global address cache records
+        whether a communicator is usable.
+        """
         import mesh
         ffi, lib = mesh.ffi, mesh.lib
         for (source, destination), paths in self.paths.items():
@@ -139,30 +164,20 @@ class Fabric:
             if name not in parts:
                 continue
             weights = parts[name]
-            if len(weights) != len(paths) or min(weights) <= 0:
-                raise ValueError(f'{name}: one positive weight per physical path required')
+            if len(weights) != len(paths):
+                raise ValueError(f'{name}: one weight per physical path required')
             first, cable = [0], []
             for path in paths:
                 cable.extend(path); first.append(len(cable))
-            arrays = ffi.new('uint32_t[]', first), ffi.new('uint32_t[]', cable), ffi.new('double[]', [math.log(x) for x in weights])
-            routes = ffi.new('struct mesh_paths *', {'count': len(paths), 'first': arrays[0], 'cable': arrays[1], 'log_weight': arrays[2]})
+            arrays = ffi.new('uint32_t[]', first), ffi.new('uint32_t[]', cable), ffi.new('uint64_t[]', weight_ticks(weights))
+            routes = ffi.new('struct mesh_paths *', {'count': len(paths), 'first': arrays[0], 'cable': arrays[1], 'weight': arrays[2]})
             mesh.check(lib.ncclMeshCommWriteRoutes(comm, source, destination, routes))
-        ROUTED.add(int(ffi.cast('uintptr_t', comm)))
 
     def completion_model(self, demands):
         """Directed load Jacobian for one repeated stage, before measurement."""
         return {'capacities': [c['bits_per_second'] / 8 for c in self.cables for _ in range(2)],
                 'paths': {f'route:{a}:{b}': {'bytes': demands[a, b],
                           'arcs': [self.arcs(a, path) for path in self.paths[a, b]]} for a, b in sorted(demands)}}
-
-
-ROUTED = set()  # the communicators (their addresses) install() gave one-way write routes
-
-
-def routed(comm):
-    """Whether install() gave communicator `comm` its one-way write routes (a write compiles only along them)."""
-    import mesh
-    return int(mesh.ffi.cast('uintptr_t', comm)) in ROUTED
 
 
 class QueueSample:

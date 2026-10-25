@@ -1,7 +1,9 @@
 # libnccl-mesh
 
-NCCL's C API over the mesh: Macs joined by Thunderbolt 5 RDMA, a bridge process (`mesh-flow`) on each. Code
-written against NCCL's `nccl.h` compiles against `rdma/nccl.h`. Its header comment is the contract; this page is
+NCCL-style collective signatures over the mesh: Macs joined by Thunderbolt 5 RDMA,
+a bridge process (`mesh-flow`) on each. Supported collective callers compile
+against `rdma/nccl.h`; directed transfers use its declared WRITE interface.
+Its header comment is the contract; this page is
 how to run it. PyTorch programs use it through [torch-mesh](torch-mesh/README.md). NumPy programs use it through
 `mesh_mpi.py` (below). Uneven nodes and links: [design/heterogeneity.md](../design/heterogeneity.md).
 
@@ -124,13 +126,12 @@ every cable between members. A busy or nonreciprocal cable fails initialization 
 of silently reducing the fabric to one channel per peer. Later communicators discover
 the then-current fabric.
 
-`ncclMeshCommFabric` exposes that table. Logical collective routes aggregate parallel
-capacities, and `mesh_fabric_stripe` lowers each crossing to explicit cable/range records.
-Their positive weights and transport quanta determine the split before execution. A
-crossing uses every parallel cable when it has enough quanta; there is no size threshold
-choosing a separate single-cable executor. Multihop `ncclMeshWrite` paths name physical
-cables, including their parallel alternatives. A relay forwards received pages directly
-from its landing rows. See [whole-function routing](../design/whole-function.md).
+`ncclMeshCommFabric` exposes that table. The complete logical collective graph
+is lowered by `mesh_routed_compile` through `mesh_write_compile`, using the
+same physical paths and weights as directed WRITEs. Every fragment retains its
+cable and exact interval. There is no size threshold selecting a separate
+single-cable executor. A relay forwards exact received spans directly from its
+landing storage. See [whole-function routing](../design/whole-function.md).
 
 The bridges' records are a map whatever reaches what: a node that still has a record may be reached by no bridge,
 and the whole map (`mesh.current()` with no members, `mesh_map` over none, mesh-stat's `map`) holds it as it is.
@@ -153,23 +154,27 @@ for its reduce and broadcast; every link in use, each tree's part its flow's sha
 - the reduce-scatter and the all-gather, segment s up and down s's trees;
 - each root's reduce and broadcast, up and down the root's own packed trees, toward its min cut.
 
-Each is uncut: a step's piece is one entry of its holding's list, any size, which the bridge alone cuts into SENDs. A
-relay sends on what it received as it lands, page by page: the SEND of a piece a COPY landed is presented with that
-landing's holding's `landed` as its supplied count (`struct mesh_entry` `word` and `base`), so no count of chunks
-exists (4 chunks ran the all-gather, the reduce-scatter and the all-reduce 15 to 50% slower from 256 KiB to 4 MiB on
-three nodes). A program's own cuts (a two-phase all-reduce's segments, a tree's shares) lie on the region's pages
-(`mesh_program_steps_cut`), so every piece starts on a page wherever its buffer does ([Memory](#memory)). A call runs
+Each logical piece is lowered into immutable physical span descriptors before
+execution. A relay's supplied prefix comes from its actual incoming `landed`
+prefix (`mesh_entry.word` and `.base`), so it forwards each ready span without
+a whole-operand join or an application handshake. Compiler packet cuts are
+separate from allocation pages: exact origins, odd segment lengths and final
+tails do not require page padding. Ordinary collective declarations currently
+lack binding-aware joint cuts for arbitrary unaligned buffers crossing 1 GiB
+registrations; the prepared WRITE interfaces provide those cuts
+([Memory](#memory)). A call runs
 its table's first program of its collective (and root) whose size bound its operand is under. Nothing about a program
 is decided where a call runs.
 
 **All-to-all with host counts.** `ncclMeshAlltoAllV(send, sendcounts, recv, recvcounts, type, comm, stream)` is
 MPI_Alltoallv with its counts on the host: rank r sends `sendcounts[q]` elements to rank q and receives
-`recvcounts[q]` from it, both packed in rank order (rank r's `sendcounts[q]` is rank q's `recvcounts[r]`; its own
-segment copied, the lesser of `sendcounts[rank]` and `recvcounts[rank]` elements). Its counts
-known to both ends, no count crosses, and each pair's elements move as one entry of their own size, one call a group,
-each segment starting on a page of its buffer (else the call fails as a value). NCCL's `ncclAlltoAll` is it with every count `count`, and `ncclGather` and
-`ncclScatter` its rooted forms (every count 0 but toward or from the root), where they were each rank's sends and
-receives in a group (NCCL's own lowering, `classifyCollToP2pTasks`).
+`recvcounts[q]` from it, both packed in rank order. The complete source-major
+count matrix is declared through `ncclMeshCall.matrix`, or exchanged once at
+configuration and checked against every local send/receive count. Planned
+execution exchanges no count metadata. Each directed transaction uses the
+common WRITE graph, including available relays and parallel cables. Local
+segments copy directly. NCCL's `ncclAlltoAll` derives the equal-count matrix;
+`ncclGather` and `ncclScatter` derive its rooted forms.
 
 **The partials merge.** `ncclMeshRedOpCreatePartials(&op, dim, ncclFloat32, comm)` makes a reduction operator, as
 `ncclRedOpCreatePreMulSum` makes one (freed by `ncclRedOpDestroy`): split-KV attention partials merged by their
@@ -204,8 +209,9 @@ docs/principles.md section 6: a decision is structure, a measurement the calls m
 history). With no forms nothing changes: the structural table as above. Every rank passes the same forms at the same
 point between its groups, taken at the communicator's next group; splits and shrinks keep them; a communicator over the
 caller's own programs compiles them ahead of its programs. A share is 0 or more: a tree of share 0 carries none of its
-root's segment, and a form whose root's trees all take 0 fails as a value where it is compiled. A form that cuts a broadcast's or an all-gather's operand (chunked) does not fuse
-(both its counts 0); its cuts lie on pages. Reproduction target: simulated 0.51x the default's time at 1 GiB on six-node maps and 0.58x at 16 MiB, the ring4
+root's segment, and a form whose root's trees all take 0 fails as a value where it is compiled.
+Fused bindings retain physical channels and fragments rather than restricting
+the program to one piece per peer. Historical reproduction target: simulated 0.51x the default's time at 1 GiB on six-node maps and 0.58x at 16 MiB, the ring4
 16 MiB all-reduce 2.18 to 1.71 ms, a six-node full mesh's 1 GiB all-gather 158.1 to 20.5 ms (metal-microbench
 output_data/library-20261015/pass2/sims), and the pair's 256 and 512 KiB calls 57.4 to 31.2-36.2 us
 (pair_programs.json): never measured on more than two nodes.
@@ -214,8 +220,9 @@ output_data/library-20261015/pass2/sims), and the pair's 256 and 512 KiB calls 5
 `ncclMeshReduceScatterV(send, recv, counts, type, op, comm, stream)` are MPI_Allgatherv and MPI_Reduce_scatter: rank
 r's segment is `counts[r]` elements (any of them 0), packed in rank order. Each is one program, the communicator's
 all-gather or reduce-scatter, its operand cut into those segments (`mesh-plan.h` `mesh_program_steps_cut`: a part
-within segment s takes its tree's share of `counts[s]` in pages: a configured form's `shares`, else equal; each
-segment starts on a page of its buffer, else the call fails as a value), so a capacity-shaped division of the work (metal-microbench
+within segment s takes its configured tree share, with packet granularity an
+explicit compiler operand). Segment origins and final payloads can lie inside
+allocation pages; exact byte-span lowering retains them, so a capacity-shaped division of the work (metal-microbench
 docs/placement.md) is one tree program over unequal segments rather than a rooted broadcast or reduce a rank. Every
 rank passes the same counts; equal counts are NCCL's own calls. Reproduction target (metal-microbench docs/measurement.md
 2026-09-30): tp SP=1 at capacity-shaped parts 255-256 ms a step; per call, the SP=1 all-gather 214-229 us and
@@ -223,11 +230,14 @@ reduce-scatter 196-212 us; one uneven all-gather against the same segments as N 
 
 ## Two paths
 
-Both paths move a crossing's bytes the same way: zero copy. Each step of a program is one entry of its holding's send
-list (the rows of the pages its bytes lie in) or landing list (the rows of the pages they land in): `mesh.h` `struct
-mesh_entry` `{row, pages, word, base}`, a range of page-table rows, each row a page, and every count in pages. The
-bridge sends each page as one SEND from the page its row names, and posts each receive into the page its row names; the
-library never learns a lane, a frame or a queue pair (design/transport.md section 14).
+Both paths move the same exact registered byte intervals. `mesh.h` defines
+`mesh_entry {spans, units, word, base}`; `spans` is the region offset of an
+immutable array of `mesh_dma_span {offset, bytes}`. Each span names one exact
+SGE payload and may begin inside an allocation page. Prefix counts are DMA
+units, not bytes or allocation pages. The 16-byte span descriptors are local
+metadata, not extra wire payload. Hardware SEND/RECV posting remains the
+bridge's mechanism; the application interface is a declared one-sided WRITE.
+See [transport.md](../design/transport.md) for registration and credit units.
 
 - **Host path.** A NULL stream: host pointers into the region (leases), sent from and landed in in place, combined on
   the host. Each call is synchronous and returns once its landings are consumed, its SENDs perhaps not yet done
@@ -235,11 +245,12 @@ library never learns a lane, a frame or a queue pair (design/transport.md sectio
   bridge runs (NumPy, CPU region tensors). It is functional, not the measured path.
 - **Metal path.** An `ncclMeshStream`: the group is encoded into a Metal command buffer, and every buffer is an
   `ncclMeshBuffer` (an `MTLBuffer` and a byte offset into it). A publication is one kernel's system fence and one store
-  of the holding's `ready` (a count of pages). A landing is its combine page by page as its pages land: each
+  of the holding's `ready` (a count of compiled DMA units). A landing combines
+  ready intervals as their units land: each
   threadgroup of the landing kernel combines a block of four elements a thread (a vector where the operand and the
-  landed bytes are both aligned to one), its thread 0 first making a bounded wait on `landed` for the block's last page
-  wherever the count it last read falls short; on a track, the landing's item awaits its first r pages (r * r at
-  least its pages) and the kernel the rest. A COPY lands in place, so its consumption is the wait alone.
+  landed bytes are both aligned to one), using the compiled unit prefix needed
+  by that block. A COPY lands in place, so its consumer needs readiness and no
+  transport staging copy.
   - torch-mesh runs MPS region tensors here.
   - A group can be issued and completed later (`issue`, `ncclMeshComplete`).
   - **Gates and first-write ownership.** Ordinary NCCL calls with in-place aliases retain receive gates so an incoming
@@ -284,19 +295,19 @@ library never learns a lane, a frame or a queue pair (design/transport.md sectio
     local binding, not permission to change the publication contract.
     - The producer stores source bytes coherently and its last threadgroup releases every active source publication
       with `mesh_step_release`. Relay fragments instead become ready from their actual incoming landed prefixes and
-      forward those pages; a source publication cannot announce an unlanded relay range ready.
+      forward those spans; a source publication cannot announce an unlanded relay range ready.
     - A consumer observes the final incoming prefixes required by its local uses and reads payload with
       `mesh_step_read`. It need not wait for later relay-only entries or local SEND completion. Observation can be
       shared before parallel readers: torch-mesh uses one `gather_ready` dispatch followed by consumers without
       repeated waits, or inlines observation when the consumer has one threadgroup.
-    - The send and landing buffers are region leases satisfying the compiled page layout. Source/relay bytes remain
+    - The send and landing buffers are region leases satisfying the compiled exact span layout. Source/relay bytes remain
       immutable through their declared reads. Fresh disjoint landings are preposted without reciprocal producer
       gates. The recurrent all-gather has a two-slot lifetime proof when every rank's next publication follows its
       consumption of the previous pieces. A zero-share rank lacks that natural return edge; torch-mesh then allocates
       fresh generations and retires them asynchronously. See [whole-function.md](../design/whole-function.md).
     - `repeats` crossings at once (`ncclMeshFused`'s `repeats` and `stride`: torch-mesh's compiled graphs, one a graph's
       sums on a group): the group's entries laid that many times, repeat j's buffers j strides on, as that many of the
-      communicator's groups; one record each, its count's stride the pages a repeat adds, so the caller's kernels run
+      communicator's groups; one record each, its count's stride the DMA units a repeat adds, so the caller's kernels run
       repeat j by `mesh_step_release` and `mesh_step_await` at j, and the host issues one call for them all.
     - Either form: a Metal 4 kernel binds them through its argument table; a classic one takes them as one
       `mesh_step_binding` record, and its stream names a `residencySet`, which the library fills with the buffers the
@@ -320,7 +331,7 @@ output_data/transport-buffers-20261021/LIBRARY.md ranks the changes of 2026-10-2
 - **The library**, by NCCL's contract: the caller touches no buffer of a collective in flight and issues the same
   collectives in the same order on every rank; the library delivers correct bytes. So the order of every read and
   write of a group is known from the programs every rank compiled, and the library encodes it in the stream's order.
-  It names its own pages and four counts, credits nothing (TN3205's credit holds a SEND until its receive is posted),
+  It names its own byte intervals and prefix counts, credits nothing (TN3205's credit holds a SEND until its receive is posted),
   publishes with one fence, waits on required `landed` dependencies, and bounds each wait by a
   count of polls, since a GPU spin with no end halts the node.
 - **The data function**: its own buffers and their order.
@@ -483,28 +494,40 @@ Porting:
 - `ncclMeshMemBuffer(ptr, &buffer, &offset)` is the Metal buffer over the whole lease holding `ptr` (any byte of it)
   and ptr's offset in it, made once and released by `ncclMemFree`: the buffer a tensor allocator makes MPS tensors over
   (torch-mesh's region tensors).
-- **Zero copy, always.** The operator, 2026-10-21: "zero copy methods must always be used over access by copy because
+- **Direct transport.** The operator, 2026-10-21: "zero copy methods must always be used over access by copy because
   memory bandwidth and flops are too scarce on this hardware api"; "good performance cannot be opt-in ... code which
   can't perform well can fail instead of being run". The bridge sends a crossing's bytes from the pages they lie in and
   lands them in the pages they belong in: a COPY lands in its destination, and a combine lands in a landing area of the
-  communicator's and is combined from there. Each step is one entry, a range of page-table rows (`struct mesh_entry`),
-  so it starts on a page by construction: nothing in the transport is a byte offset. Each SEND is one whole page with
-  one SGE (`max_sge` is 1). The bridge registers the region in extents of `MESH_EXTENT` (1 GiB, its own choice) inside
-  the 4 GiB banks no registration may cross (`tbt_post_recv` keeps only an address's low 32 bits:
-  `rdma/mesh-verbs.h`), so no page crosses an extent. So:
+  communicator's and is combined from there. The 2026-10-24 operator amendment
+  permits explicit masked streaming data functions; those functions are
+  numerical producers/consumers, not hidden native transport repair. Current
+  native transport uses immutable exact byte spans and one SGE per span
+  (`max_sge` is 1). The bridge registers the region in `MESH_EXTENT` (1 GiB)
+  extents inside the 4 GiB banks no registration may cross (`tbt_post_recv`
+  keeps only an address's low 32 bits: `mesh-verbs.h`). Prepared WRITE
+  configuration jointly cuts source, relay and destination intervals at their
+  registration bounds, including indexed views.
+  Therefore:
   - every crossing call's send buffer, and every buffer it sends from or lands in, is a lease's (in this node's region);
-  - every piece starts on a page;
-  - the program's own cuts lie on pages (`mesh_program_steps_cut`).
-  A cut NCCL's call fixes (a reduce-scatter's and an all-gather's segment r at r x count, an all-to-all's segments, a
-  send's or receive's buffer) that is not on a page, or an operand outside the region, fails the call as a value
-  (`ncclInvalidUsage`, naming the piece and its buffer) before anything is presented; nothing is copied to make it
-  fit.
+  - an interval can begin or end inside an allocation page;
+  - each resulting SGE stays inside one registered extent;
+  - hardware credits round span service to 4 KiB frames without adding bytes
+    to its SGE payload.
+  Odd collective cuts and small exact payloads are valid. Out-of-lease bounds
+  or inconsistent declarations fail at configuration; native execution does
+  not copy or pad values to repair them. Ordinary collective `CommPlan`
+  describes logical ranges without exchanging actual bindings. Arbitrary
+  unaligned collective buffers crossing registered extents therefore still
+  require a shared binding-aware preparation stage; this is an outstanding
+  interface constraint, not provider scatter/gather support. Multiple exact
+  spans are separate DMA units, each with one SGE.
 - A collective whose send buffer lies apart from its result reads it in place where its program allows: a SEND of a
   range no step of the rank wrote reads the send buffer, the first combine of such a range writes send op piece
   (`combine3_*`), the result's ranges no step writes are copied from it after the publications, and no scratch buffer
   no step writes is made. Otherwise its operand is made in place in the region: a premultiply, or a copy within the
-  region. The two-rank all-reduce in place makes no copy: its program sends the operand from the operand itself, and
-  buffer-reuse schedule must account for outgoing readers ([One track](#one-track)). Historical reproduction (metal-microbench
+  region. A single-phase all-reduce preserves an immutable original source
+  binding separately from any result that incoming reductions can change;
+  publishing a SEND does not retire its DMA read. Historical reproduction (metal-microbench
   docs/measurement.md 2026-09-30 part A, 95967e6..42a16ed): per 16.8 MB all-reduce, the library's copies of the
   operand 16.78 MB to 0; tp 271.5-272.2 ms a step. The slot copy into the rings, which that left, is gone too.
 - The NIC reads a SEND's pages until it finishes. A local group's end does not establish
@@ -517,27 +540,28 @@ Porting:
 
 ## Routes between unlinked ranks
 
-A communicator's init holds a stream only toward the members whose nodes its bridge reaches and whose bridges reach its
-node, and its channels go only toward those members. A collective
-whose members no path between members joins fails at its first call that needs its programs, naming two, and a call
-whose program or point-to-point step moves bytes between two members not joined fails at that call
-(`ncclInvalidUsage`). A node a route would cross between two members takes part as a member of the communicator. In the
-communicator's own table it contributes its operand like every member (`compile_entry` compiles with no
-`contributors`), so it combines its own operand into what it sends on. A program a C caller passes to
-`ncclMeshCommInitRank`, compiled with `mesh-plan.h` `mesh_compile`'s `contributors`, may have it contribute nothing; it
-then runs the identity: it copies its first child's partial as it comes, combines the rest, and sends the result on. No
-NCCL call and no binding declares such a member, where design/data-model.md section 9 ("A relay") has every relay be
-the identity at a rank.
+A communicator retains every paired physical cable between its admitted ranks.
+Every node used as a relay participates in that physical communicator, while
+`ncclMeshCall.contributors` and `.recipients` separately declare numerical
+input and output roles. `mesh_compile_members` preserves those roles and the
+selected tree weights/phase; `mesh_routed_compile` lowers the resulting graph
+through the same physical paths as declared WRITEs. A root may receive a
+reduction without contributing an input. Relay-only ranks use COPY for their
+first partial and REDUCE only after that interval is defined. Raw caller
+programs are checked against the declared initialized intervals at
+configuration, not silently replaced with another topology. An unreachable
+required endpoint is a configuration error.
 
 ## Rules a program keeps
 
 - One rank a node.
-- Each direction between two ranks is its own list, so a rank's k-th send to a peer pairs with the peer's k-th receive
-  from it, as NCCL's do. A blocking exchange with one peer is still one group (`ncclGroupStart`/`End`; torch's
-  `batch_isend_irecv`): two blocking sends before the receives would wait on each other's group. The library does not
-  detect unequal counts or different collectives on two ranks: no landed payload is checked, so these are the
-  caller's error.
-- Every buffer a crossing reads or writes is a lease, and every piece starts on a page ([Memory](#memory)).
+- All ranks declare the same complete function and physical participants.
+  Each directed cable has a compiled sequence of exact payload intervals.
+  Local entry splitting need not agree one-for-one, but byte coverage and DMA
+  unit order must agree. Directed exchange uses declared WRITEs; no separate
+  paired Send/Recv protocol exists.
+- Every buffer a crossing reads or writes is a lease. Exact spans retain
+  sub-page origins and lengths ([Memory](#memory)).
 - Communicators know nothing of one another, and no two hold one stream: a link has up to four (`MESH_LINK_STREAMS`;
   fewer where its plan has fewer lane pairs, design/HETEROGENEOUS-LINKS.md), so that many communicators use a node
   pair at once, and one more is refused (EBUSY) until one of them is destroyed.
@@ -612,7 +636,7 @@ by its import:
 ```python
 from mesh_mpi import Comm, SUM, MAX     # sys.path: ~/mesh/rdma
 comm = Comm()                           # RANK of WORLD_SIZE, NCCL's bootstrap at MASTER_ADDR:MASTER_PORT
-comm.Allreduce(local, total, op=SUM)    # Allgather, Bcast, Reduce, Reduce_scatter_block, Alltoall, Send, Recv,
+comm.Allreduce(local, total, op=SUM)    # Allgather, Bcast, Reduce, Reduce_scatter_block, Alltoall
 best = comm.allreduce(x.max(), op=MAX)  # Barrier; IN_PLACE as a send buffer
 comm.Allgatherv(part, [whole, counts])  # a count a rank: ncclMeshAllGatherV
 comm.Reduce_scatter(full, mine, counts) # ncclMeshReduceScatterV
@@ -621,8 +645,44 @@ comm.Reduce_scatter(full, mine, counts) # ncclMeshReduceScatterV
 Subcommunicators are `Split(color, key)` and a Cartesian grid: `grid = comm.Create_cart([2, 2])`, `grid.Sub([False,
 True])` its row, `grid.Shift(0, 1)` the neighbours, as mpi4py spells them.
 
-metal-microbench `tools/mesh/numpy_power.py` is a ported power iteration, and `tools/mesh/numpy_summa.py` SUMMA on a
-2-D grid (row and column broadcasts).
+`comm.Plan(calls)` declares the complete function through the shared controller's
+native `ncclMeshCall` descriptors; `comm.PlanDemands()` returns the physical
+fabric and compiler-reported directed payload demands. These methods add no
+NumPy planner or traffic estimate. Declare the entire function, including
+repeats, before constructing its joint compute/routing controller.
+
+Current NumPy callers include `xonotic/planner/plan.py` and
+`xonotic/solver/worker.py:MPIWorld`. The former declares the complete planner
+tick; the latter supplies broadcast, all-reduce and ragged gather adapters.
+
+Exact one-way bindings use the same native WRITE API as other front ends:
+`comm.Write_prepare(sendbuf, landingbuf, source, destination)` for contiguous
+arrays, `comm.Write_rows_prepare(..., row_bytes=257, rows=5003)` for affine
+rows, `comm.Write_spans_prepare(..., spans=[(offset, bytes), ...])` for an
+explicit ordered view, or `comm.Write_view_prepare(...)` for ndarray shape and
+byte strides. All ranks prepare the same sequence; the source supplies its original
+send view and other ranks supply destination/relay landing storage. Unused
+arguments may be `None`. Used arrays come from `mesh_mpi.empty` or its views.
+Row widths/counts agree, while local pitches may differ. Indexed lists may
+differ in count, order and physical offsets, with equal logical byte totals.
+Negative strides and repeated source intervals are valid; overlapping landing
+intervals fail configuration. All intervals belong to one lease; multiple
+leases use ordered shared WRITE declarations. Preparation copies metadata,
+validates lease bounds and jointly cuts view/registration boundaries. It
+performs no tensor packing.
+
+The returned `WritePlan` retains those array owners. `plan.Execute()` executes
+its fixed native bindings; `plan.Free()` destroys them. Repeated invocations
+must respect the compiled source-read and destination-consumer lifetimes:
+returning from a source-only invocation does not prove a remote consumer has
+finished, or permit mutation before every scheduled DMA read retires. A `with` block
+also frees the plan. The indexed wrappers use the shared `views.byte_spans`
+metadata mapper and the native span preparation; see the
+[client coverage manifest](../design/collective-client-coverage.md#numpy-fixed-bindings-and-indexed-views).
+
+Directed exchange declares independent WRITEs for the two directions, retaining
+all physical ranks for relaying. The NumPy interface has no separate Send,
+Recv or Sendrecv protocol.
 
 ## Not implemented
 

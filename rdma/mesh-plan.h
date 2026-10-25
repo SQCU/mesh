@@ -48,7 +48,7 @@ int mesh_busy(uint64_t *busy,uint64_t *idle_since);
    other, so the route from b to a is the one from a to b reversed (mesh_route_path).  With a table, two of the map's
    nodes are linked where the route between them crosses no other of them (relays alone), and that hop's bytes cross
    every link of it (mesh_trees_pack).  Without one, two nodes are linked where a link joins them.  Several links listed
-   between one pair are parallel: the planner counts them together at n times the slowest one's bandwidth (mesh_routes,
+   between one pair are parallel: the planner adds their individual bandwidths (mesh_routes,
    mesh_trees_pack); mesh_map lists a link a cable.  `link`, `bandwidth`, `next` and `mark` are the caller's
    storage. */
 enum { MESH_LINKS_MESH, MESH_LINKS_RING, MESH_LINKS_TREE, MESH_LINKS_GRAPH };
@@ -130,7 +130,7 @@ int mesh_trees_check(const struct mesh_link_map *,const struct mesh_trees *);
    along minimum-length arborescences [Chu & Liu 1965; Edmonds 1967] of the map's hops, a hop's length the sum of the
    lengths of the links it crosses, each one way: with a table every link a hop's route crosses, so the hops of a tree
    that cross one link charge it each (hops through relays share the links they cross); a link's length one way grows by
-   (1 + eps x flow/capacity) and its capacity is its pair's parallel links' count times the slowest one's bandwidth
+   (1 + eps x flow/capacity) and its capacity is the sum of its pair's parallel links' bandwidths
    (where the map gives some pair no bandwidth, its parallel links' count: every link alike).  A root's equal trees
    merged, its `most` heaviest kept and their flows' shares their log weights, so a part cut by them crosses every
    route and the routes end together.  Writes root, parent (nodes a tree) and log_weight
@@ -158,8 +158,12 @@ struct mesh_cable { uint64_t wire,bandwidth; uint32_t node[2]; };
 struct mesh_fabric { uint32_t nodes,cables; const struct mesh_cable *cable; };
 struct mesh_transfer { struct mesh_step step; uint32_t cable,padding; };
 int mesh_fabric_check(const struct mesh_fabric *);
+/* Logical-edge adapter to mesh_write_compile with all directly joining cables
+   supplied as its path configuration. Copies/reductions retain their typed
+   logical operation, buffer, round and offset. No independent allocation
+   algorithm or first-cable transport implementation lives in this adapter. */
 int mesh_fabric_stripe(const struct mesh_fabric *,uint32_t rank,const struct mesh_step *,uint64_t page,
-                       const double *weights,struct mesh_transfer *,uint32_t room);
+                       const uint64_t *weights,struct mesh_transfer *,uint32_t room);
 /* Refine physical SENDs where their latest preceding receive changes: a COPY's
    interval is an identity source; REDUCE or no receive is not. Only receives in
    the same buffer with the same element size participate. Adjacent pieces with
@@ -176,11 +180,47 @@ int mesh_fabric_stripe(const struct mesh_fabric *,uint32_t rank,const struct mes
    receive gate, payload copy or synchronization is introduced. */
 int mesh_fabric_refine(const struct mesh_transfer *,uint32_t count,uint64_t page,
                        struct mesh_transfer *out,uint32_t room);
-struct mesh_paths { uint32_t count; const uint32_t *first,*cable; const double *log_weight; };
+/* Exact linear allocation weights. Zero disables allocation to a path without
+   deleting its capability; at least one weight is positive. The checked sum
+   fits uint64_t. Allocation uses uint128_t products and integer remainders. */
+struct mesh_paths { uint32_t count; const uint32_t *first,*cable; const uint64_t *weight; };
 int mesh_paths_check(const struct mesh_fabric *,uint32_t source,uint32_t destination,const struct mesh_paths *);
 int mesh_write_compile(const struct mesh_fabric *,uint32_t rank,uint32_t source,uint32_t destination,
                         const struct mesh_paths *,struct mesh_operand,uint64_t page,
                         struct mesh_transfer *,uint32_t room);
+
+/* Physical lowering of a complete typed dataflow. first/steps contain every
+   rank's logical steps in dependency order, including matching endpoint-only
+   SEND/COPY declarations. Offsets and buffer numbers may differ at the two
+   endpoints. paths is the nodes*nodes table used by mesh_write_compile.
+   Logical reductions remain reductions only at their destination; intermediate
+   ranks forward immutable fragments in separate, compact, uninitialized leases.
+   initialized[r] is the number of the rank's logical buffers. The returned
+   transfer lists preserve local dependency order; their round fields give the
+   common AOT publication order on every directed cable. consume gives the
+   local consumption event order, which may differ from physical arrival order. No runtime
+   control exchange, payload copy, or remote acknowledgement is introduced.
+   demand[s*nodes+d] counts useful logical bytes before physical relay expansion.
+   The result owns its storage; release it with mesh_routed_free. Returns errno.
+   This is the common lowering for standard, counted, and declared point calls. */
+struct mesh_routed_rank {
+  uint32_t count,buffers,initialized,padding;
+  struct mesh_transfer *transfer;
+  uint32_t *consume; /* per-step AOT consumption event order, distinct from wire order */
+  uint32_t *retired_first,*retired; /* prior local SENDs whose source read precedes this COPY arrival */
+  uint64_t *extent;
+};
+struct mesh_routed_program {
+  uint32_t nodes,padding;
+  struct mesh_routed_rank *rank;
+  uint64_t *demand;
+  uint64_t *route_units; /* largest logical transaction's independently allocatable units, per pair */
+};
+int mesh_routed_compile(const struct mesh_fabric *,const struct mesh_paths *,
+                         const uint32_t *first,const struct mesh_step *,
+                         const uint32_t *initialized,uint64_t page,
+                         struct mesh_routed_program *);
+void mesh_routed_free(struct mesh_routed_program *);
 
 /* A compiled collective, the operand a call runs: every rank's moves, as MSCCL-IR is the program the MSCCL runtime
    interprets [Cowan et al., ASPLOS 2023].  `what` it computes (MESH_*), its `root` (a reduce's or a broadcast's) and
@@ -192,11 +232,23 @@ int mesh_write_compile(const struct mesh_fabric *,uint32_t rank,uint32_t source,
    scratch buffers a rank uses.  Every rank runs the same program; nothing about it is decided where it runs. */
 enum { MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE, MESH_REDUCE_SCATTER, MESH_ALLGATHER };
 struct mesh_move { uint32_t op,peer,round,buffer,part,parts; };
-struct mesh_program { uint32_t what,root,nodes,parts,scratch,padding; const uint32_t *segment; const double *log_weight;
+struct mesh_program { uint32_t what,root,nodes,parts,scratch,segments; const uint32_t *segment; const double *log_weight;
                       const uint32_t *first; const struct mesh_move *move; };
 
 /* The room mesh_compile needs: parts and moves. */
 void mesh_compile_room(const struct mesh_trees *,uint32_t *parts,uint32_t *moves);
+/* Separate operand contributors and result recipients; excluded physical ranks
+   remain available as identity relays. Gather/ReduceScatter segments retain
+   full rank numbering, including trailing zero-size owners. NULL masks mean
+   every rank. A rooted Reduce's root may lie outside its contributor set. */
+int mesh_compile_members(const struct mesh_trees *,uint32_t what,uint32_t root,int whole,
+                           const uint64_t *contributors,const uint64_t *recipients,
+                           struct mesh_program *,uint32_t *segment,double *log_weight,
+                           uint32_t *first,struct mesh_move *move);
+/* Validate a fixed program's initialized ranges and required outputs against
+   the operand roles at configuration. No topology or transfer is replaced. */
+int mesh_program_check_members(const struct mesh_program *,struct mesh_operand,const uint64_t *cut,uint64_t page,
+                                const uint64_t *contributors,const uint64_t *recipients);
 /* A collective compiled along `trees` into `program` (arrays of mesh_compile_room's room: segment and log_weight a
    part, first nodes + 1, move a move):
      MESH_REDUCE           the whole operand up root's trees, a part a tree (its weight);
@@ -205,13 +257,10 @@ void mesh_compile_room(const struct mesh_trees *,uint32_t *parts,uint32_t *moves
      MESH_ALLREDUCE        whole 0: the reduce-scatter and then the all-gather (each link a share once each way; its
                            dependent crossings twice the trees' heights) [Patarasuk & Yuan 2009; Blink];
                            whole 1: the whole operand reduced toward every contributor at once, up its heaviest tree,
-                           a node forwarding its partial for another from a scratch buffer of its own and its own
-                           operand from a copy, or, where it sends that to one node only and forwards nothing (two
-                           nodes, the direct exchange), from the operand itself: its one SEND and its one REDUCE
-                           then meet in the operand on one channel, unordered: the executors combine into it
-                           once the peer's bytes land, and nothing orders that after the NIC's read of the SEND, so
-                           the peer may receive the partial sum in the SEND's last pages (its dependent crossings the heaviest trees'
-                           height, 1 where they are stars, the direct exchange; each node
+                           a node forwarding each partial from distinct scratch. Its original contribution has a
+                           separate immutable source binding whenever its result can change concurrently; publishing
+                           a SEND does not prove its DMA source was read. Its dependent crossings are the heaviest
+                           trees' height, 1 where they are stars; each node
                            sends the whole operand once for every other) [single-phase all-reduce: Trivance 2026].
    A tree's part is one move a hop, uncut: a node that sends on unchanged what it received (a COPY, the identity at a
    rank, design/data-model.md section 9) sends each page as it lands (libnccl-mesh presents the SEND gated page by page
@@ -254,27 +303,13 @@ struct mesh_place { uint32_t step,send; uint64_t entry; };
    order both ends make of their ranks' logical steps; physical SEND refinement
    preserves that order and the peer's exact wire-page sequence (libnccl-mesh schedule_group). */
 uint64_t mesh_lay(const struct mesh_step *steps,uint32_t count,uint32_t peer,int send,uint64_t at,struct mesh_place *made,uint32_t *placed);
-/* Each step's receive before it (by round, then the steps' order) of any bytes, -1 where none: a step's first event
-   waits until that receive is consumed, and so, by induction, every receive before it.  0, or ENOMEM. */
-int mesh_steps_before(const struct mesh_step *steps,uint32_t count,int32_t *before);
-/* design/transport.md, a group's calls on one communicator, as libnccl-mesh issues them between ncclGroupStart and
-   ncclGroupEnd: call i of kind MESH_GROUP_*, its steps at rank r steps[r][0 .. count[r]) (a point-to-point call's at its
-   own rank alone, its physical pieces of one logical SEND or COPY; a row of none where count[r] is 0), every rank's collectives and counted
-   all-to-alls in one call order, and `page` the bytes an entry starts on (0: not read).  mesh_group_lay: the entries
-   rank `rank`'s calls take on its list toward `peer` (send 1: its send list; 0: its landing list) from `at`, each
-   collective's in call order (mesh_lay), then each counted all-to-all's
-   (HOSTED), then its point-to-point calls in call order, retaining every physical piece; each placement its call and
-   mesh_lay's place in made[*placed ..], scratch the room of the most steps a call has at the rank; the end.
-   So separate send and receive calls pair as NCCL's do: a rank's j-th point-to-point SEND to a peer is the peer's j-th
-   point-to-point receive from it.  HOSTED: a counted all-to-all whose counts both ends hold (ncclAlltoAll, ncclGather,
-   ncclScatter, ncclMeshAlltoAllV), NCCL's sends and receives of it (classifyCollToP2pTasks), each receive into its own
-   segment. */
-enum { MESH_GROUP_COLLECTIVE, MESH_GROUP_POINT, MESH_GROUP_HOSTED };
-/* The receive before each step of a call of kind `kind` (mesh_steps_before; the walk's rule, a step's first event
-   waiting until that receive is consumed): none before a HOSTED call's, whose receives each progress alone, as NCCL's
-   per-peer sends and receives do, so no event of it waits on another channel's.  0, or ENOMEM. */
-int mesh_group_before(uint32_t kind,const struct mesh_step *steps,uint32_t count,int32_t *before);
-struct mesh_group_call { uint32_t kind,padding; const uint32_t *count; const struct mesh_step *const *steps; };
+/* A declared group preserves call order for every operation. Each rank's
+   physical steps have the compiler's dependency-safe ordinal. mesh_group_lay
+   assigns entries on the directed peer list from `at`, retaining every stripe;
+   scratch holds the largest local call and made holds the complete local group.
+   Runtime dependencies are overlapping prior receives, not an operation-kind
+   ordering rule or a whole-operand join. */
+struct mesh_group_call { const uint32_t *count; const struct mesh_step *const *steps; };
 struct mesh_group { uint32_t nodes,calls; const struct mesh_group_call *call; uint64_t page; };
 struct mesh_group_place { uint32_t call,padding; struct mesh_place place; };
 uint64_t mesh_group_lay(const struct mesh_group *,uint32_t rank,uint32_t peer,int send,uint64_t at,struct mesh_place *scratch,

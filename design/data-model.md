@@ -68,14 +68,15 @@ System-coherent stores reach it at once (design/hardware-and-discipline.md).
 
 The driver has SEND and RECV on unreliable-connected queue pairs. It has no remote write, no remote read and no atomics
 (TN3205; design/HETEROGENEOUS-LINKS.md section 1). A SEND fills the oldest receive posted on its queue pair. Both must
-span the same number of 4 KB frames. The hardware holds the SEND in credit until that receive is posted, and it sends
-no acknowledgement (TN3205; design/transport.md section 1). Each request names one range (max_sge 1). A device takes
+span the same number of 4 KB credit frames. These credits do not require page-sized SGE payloads: the byte-extent
+plan gives both sides equal exact lengths, and the driver credit charge is `ceil(length / 4096)`. The hardware holds the SEND in credit until that receive is posted, and it sends
+no acknowledgement (TN3205; design/transport.md section 1). Each request names one contiguous registered range (max_sge 1); the range cannot cross its 1 GiB MR boundary. A device takes
 100 registrations (max_mr 100). The driver keeps only an address's low 32 bits. So a registration across a 4 GiB
 boundary lands its receives 4 GiB low (design/transport.md section 1). A device reports max_qp 3 on the Studios' macOS
 27, and 11 on macOS 26 (design/HETEROGENEOUS-LINKS.md section 1). One queue pair carries one line of receives. There is
 no shared receive queue.
 
-So the receiver fixes where each frame lands, and in what order, before it comes. A program that picks addresses just in
+So the receiver fixes each exact receive interval and its order before the payload comes. A program that picks addresses just in
 time has two ways to send. It can ask first, which costs a round trip: 10.29 µs for 3 KB between hosts
 (measurement.md:363). Or it can land the bytes in staging with a header, then copy them. That spends memory bandwidth
 twice. A quiet controller is slow too. After 40-50 µs with nothing sent, a SEND took 6.2 µs to complete. On a link kept
@@ -105,8 +106,9 @@ completion runs a scheduling kernel, the operand is copied to scratch, and the w
 
 These three hold on CUDA clusters and on Apple silicon alike.
 
-**1. Paging and a memory abstraction are a hard requirement.** Every byte a program moves lives in a page of a page table
-that both ends know before the call. A page lands in a free page, and its row says which page it is. Without the table,
+**1. Destination bindings and storage ownership are required.** The compiler knows each byte interval and its
+backing allocation before execution. Logical page tables can express this memory model; transport descriptors
+resolve it into exact byte spans. A span lands in storage whose prior uses are proved finished. Without a prior binding,
 each move has to be asked for or described at run time. That costs a round trip or a header every time, and the cost
 grows with every hop and every step.
 
@@ -118,8 +120,8 @@ memory beats local NVMe there too (Infiniswap, NSDI 2017). On the Mac mesh each 
 adds its own few µs, and 20 hops are still faster than one random NVMe read.
 
 **3. One-sided writes are faster than two-sided writes that run a protocol at run time.** A one-sided write needs 1. It
-puts bytes in a page that the receiver named before the call, in the table both ends hold, and nobody answers. Without
-that table there is no page to name, so there is no one-sided write. InfiniBand's RDMA WRITE is the same: the sender
+puts bytes in the interval the receiver bound before the call, and nobody answers.
+Without a prior destination binding, an extra address-selection exchange would be needed. InfiniBand's RDMA WRITE is the same: the sender
 must hold the receiver's address and key before it writes (IBTA). The Thunderbolt driver only has SEND and RECV. But
 when every receive is posted ahead, in an order both ends fixed, a SEND lands like a one-sided write. Nothing on the
 receiving side decides anything at run time. That holds only while every hop stays preposted and one-way, whatever else
@@ -165,16 +167,59 @@ The availability of a needed input is already a data dependency. Observing an al
 does not require another network crossing. Realizing that observation once instead of in every consumer threadgroup
 can remove repeated fences. Price these mechanisms in the complete graph, including overlap and resource occupancy.
 
-**Sub-page values have compiled masks.** A transport page can contain values whose final destinations are smaller
-or strided intervals. The compiler can pack those intervals into padded, separately owned ingress frames and emit
-an affine masked store for each frame at its destination. The addresses and masks are fixed before execution;
-there is no header-selected destination or request/answer exchange. An invalid source element is masked before
-its load, and padding never names a final-output byte. Each frame's consumer depends on that frame's landing,
-without joining the entire tensor. This explicitly permitted realization spends packing/unpacking work and padded
-wire bytes to expose finer transport scheduling; measure those costs against direct placement in the whole graph.
-It does not justify a fixed frame-size restriction on another solver. Full padded frames remain transport-owned
-storage until their reads end. A one-way train without a returning causal dependency uses distinct landing
-generations; source DMA completion does not prove that the destination's masked stores have finished.
+**Measurement does not grant permission to execute.** A TCPStore arrival exchange or a fabric barrier before each
+trial adds a two-sided control prerequisite even when the payload primitive is one-sided. Moving that exchange just
+outside a timer does not remove its effect on submission, overlap or link utilization. A realized sequence submits
+without peer start/finish rendezvous. Initial operand construction and final evidence collection are separate from
+that sequence. Local observations of input availability and typed retirement remain actual data dependencies.
+
+Whole-function statistics are asynchronous rollout evidence. Each record retains its episode, realized proposal,
+operands and sampling probabilities. Late peer records may arrive several episodes together; missing records cannot
+halt execution. Importance weights are target/behavior sampling probabilities, not a penalty for age or congestion.
+The optimizer's proposed vector and the executing generation are distinct: statistics do not authorize unilateral
+changes to remote destination bindings. Preparing a new generation belongs to configuration construction.
+
+**Exact sub-page writes are compiled spans.** The 2026-10-24 byte-extent revision uses
+`mesh_dma_span {uint64_t offset, bytes}` and `mesh_entry {spans, units, word, base}`
+([mesh.h](../rdma/mesh.h), wire version 135, region layout 154). A span names the exact source or destination byte
+interval, including an unaligned start or short tail. Its 16-byte descriptor is local immutable metadata, not a
+header carried with the payload. A full allocation page uses the same interface. Each SGE transfers exactly its
+span length; a 19-byte span does not read or overwrite the other bytes of its allocation page.
+
+The compiler fixes equal SEND/receive lengths and order across endpoints and relays, with cuts at physical
+registration boundaries and its selected packet limit. `ncclMeshWritePrepare` binds repeated extents;
+`ncclMeshWriteRowsPrepare` binds affine rows with each participant's own pitch; `ncclMeshWriteSpansPrepare` binds
+an ordered list of exact intervals within one lease. Each participant may use different span counts and offsets,
+with the same total logical bytes. Common cuts include every participant's view boundaries and registration
+boundaries. Repeated source intervals are valid; overlapping destination intervals are rejected at configuration.
+These interfaces prepare one plan before
+execution; `ncclMeshWriteExecute` reuses it without exchanging placement metadata or acknowledgments
+([API](../rdma/nccl.h)). An affine row maps packed byte k to `(k / row_bytes) * pitch + k % row_bytes`.
+One immutable span table describes all rows. The compiler uses each row's actual registration phase, so an odd
+pitch does not impose every other row's boundary cuts on this row.
+
+This binding-aware preparation is not yet supplied by every ordinary collective signature. Its logical-only
+`CommPlan` cannot jointly cut arbitrary unaligned bindings crossing 1 GiB registrations. Such layouts require
+the shared prepared WRITE binding stage; a provider SGE list or hidden packing copy is not a substitute.
+
+The earlier masked pack/unpack implementation is a dated intermediate realization. It demonstrated frame-local
+ownership but is not a reason to force padded copies on byte ranges the bridge can name directly. Arithmetic
+functions may still have explicit masks; transport does not add a hidden packing pass. Exact extent payload bytes,
+`ceil(bytes / 4096)` credit frames, and physical wire framing are different quantities. Charge actual payload once
+per hop, report credit frames separately, and leave physical framing overhead unknown until measured.
+
+All future and posted physical readers retain their backing allocations. DMA completion can retire source reads;
+it cannot retire the destination's arithmetic consumer. Immutable span tables have separate SEND/LAND completion
+obligations and bridge CPU-read lifetimes. On a give, the bridge's subsequent local owner transition proves its
+CPU reader quiescent; payload DMA pins alone do not prove that. This adds no remote ACK.
+
+The [2026-10-24 live validation](transport.md#exact-byte-validation-on-2026-10-24) passed three-rank exact-byte,
+ragged-row, registration-crossing and neighbor-preservation checks, including all six cables on larger transfers.
+Two-node and three-node fused runs each passed 14 cases and 94 calls per rank. A complete three-byte numerical
+function measured median 31.290 µs with exact writes versus 35.569 µs with 16,384-byte padded transfers, across five
+trials of 128 calls per mode. That is whole-function latency, not isolated NIC latency. Wire 135/layout 154 was
+temporarily deployed for validation, then the preceding bridge was restored. The earlier cluster measurements below
+are not measurements of this revision.
 
 ## 6. Why code here only loses waits and guards
 
@@ -362,8 +407,8 @@ a large share of that, about a quarter.
 ## 8. Writes over many hops and many paths
 
 This section works out what a write costs when it takes more than one path. It uses three figures. B is one cable's
-rate, about 9.2 GB/s each way with both ways in use (9.21 and 9.25 GB/s on 2026-10-01, measurement.md:364). P is a
-page, 16 KiB. Δ is what each hop past the first adds, about 4.2 µs: 3.6 µs from post to landing, then a poll
+rate, about 9.2 GB/s each way with both ways in use (9.21 and 9.25 GB/s on 2026-10-01, measurement.md:364). P is the
+16 KiB packet assumed by the earlier page-based measurements, not a minimum byte-extent payload. Δ is what each hop past the first adds, about 4.2 µs: 3.6 µs from post to landing, then a poll
 (section 5).
 
 **What a write over many hops is.**
@@ -437,7 +482,9 @@ S bytes so that all paths end together, provided each calculated share is nonneg
 - All N paths take T_N = S/(N·B) + mean(L).
 
 All the paths beat the direct one once S > Δ·B, about 38.6 KB. That holds for any N. Now say each path carries at
-least one page. Then all N paths are in use from S_min(N) = Δ·B + N·P up.
+least one packet of P useful bytes. Under that packet assumption all N paths are in use from
+S_min(N) = Δ·B + N·P up. The historical table uses P = 16 KiB; exact byte spans require recomputing it from the
+actual compiled packet sizes, without substituting rounded credit frames for useful payload.
 
 | N | S_min | Time saved at S_min |
 |---|---|---|

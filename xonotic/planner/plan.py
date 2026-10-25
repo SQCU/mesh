@@ -8,8 +8,9 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'rdma'))
-from allocate import Balancer
+from controller import WholeFunctionController, declare
 from mesh_mpi import Comm, empty
+import mesh
 
 TEAMS = 5
 EXPERTS = 8
@@ -54,16 +55,22 @@ def main():
         parser.error(f'--columns must sum to {FF}')
     if args.width < len(columns):
         parser.error('--width must hold one segment time per rank')
-    # The operand's last row carries each rank's segment time in its own column and zeros
-    # elsewhere, so the reduction sums it exactly and every rank reads every rank's time from the
-    # tick's result: the balancer (rdma/allocate.py Balancer) is duplicated on every rank and
-    # observes identical inputs, and its shares are the next tick's configuration operand.
+    # The existing numerical reduction carries the prior completed tick's
+    # elapsed time, identical evidence for every replicated controller. The
+    # current tick retains its exact proposal until all its computations end.
     comm = Comm()
     rank = comm.Get_rank()
     local = empty((args.bots + 1, args.width), np.float32)
     local[...] = 0
     total = empty(local.shape, local.dtype)
-    balancer = Balancer({'columns': {'parts': columns, 'grain': split['grain'], 'low': split['low']}})
+    calls = [{'what': mesh.lib.MESH_ALLREDUCE, 'count': local.size, 'type': mesh.lib.ncclFloat32,
+              'op': mesh.lib.ncclSum}]
+    declare(comm.comm, calls)
+    balancer = WholeFunctionController.from_comm(
+        {'columns': {'parts': columns, 'grain': split['grain'], 'low': split['low']}}, comm.comm,
+        workload={'function': 'planner tick', 'bots': args.bots, 'width': args.width}, schedule={'calls': calls})
+    installed = None
+    previous = None
     shares = columns
     route, up, down, objective = model(args.width)
     positions = np.random.default_rng(7).standard_normal((args.bots, args.width)).astype(np.float32) * .1
@@ -74,26 +81,34 @@ def main():
                       'experts': EXPERTS, 'columns': columns[rank]}), flush=True)
     start = ready = time.monotonic()
     for tick in range(args.ticks):
-        began = time.monotonic()
+        proposal = balancer.proposal()
+        shares = proposal['parts']['columns']
+        if installed != proposal['id']:
+            balancer.realize(comm.comm, calls, proposal)
+            installed = proposal['id']
+        function_started = began = time.monotonic()
         low = sum(shares[:rank])
         share = slice(low, low + shares[rank])
         solve(positions, route, up[:, :, share], down[:, share], local[:args.bots])
         solving += time.monotonic() - began
-        # this rank's segment: from the last reduction's return to entering this one
+        # Previous completed tick latency rides the existing numerical reduction.
+        # It is consumed only under its immutable proposal; this tick's shares stay fixed.
         local[args.bots] = 0
-        local[args.bots, rank] = 1e3 * (time.monotonic() - ready)
+        local[args.bots, rank] = previous['seconds'] if previous is not None else 0.0
         began = time.monotonic()
         comm.Allreduce(local, total)
         ready = time.monotonic()
         collective += ready - began
-        shares = balancer.observe({'tick': {'scales': {'columns': [1.0] * len(columns)},
-                                            'times': [[float(t) / 1e3] for t in total[args.bots, :len(columns)]]}})['columns']
+        feedback = (previous['proposal'], float(max(total[args.bots, :len(columns)]))) if previous is not None else None
         experts = total[:args.bots]
         picks = np.argmax(experts @ objective, axis=1)
         switches += int(np.count_nonzero(objectives != picks))
         objectives = picks
         positions[:, 1:] += .35 * objective[1:, picks].T
         positions[:, 1:] *= .98
+        previous = {'proposal': proposal, 'seconds': time.monotonic() - function_started}
+        if feedback is not None and feedback[0]['id'] == balancer.proposal()['id']:
+            balancer.completed(feedback[1], proposal=feedback[0])
     elapsed = time.monotonic() - start
     comm.Free()
     print(json.dumps({'event': 'planner_finished', 'rank': rank, 'ticks': args.ticks,

@@ -12,7 +12,8 @@ program): an all-gather and a reduce-scatter are ncclMeshAllGatherV and ncclMesh
 all_to_all_single, gather and scatter are ncclMeshAlltoAllV, MPI_Alltoallv with its counts on the host (a gather and a
 scatter of any sizes the rooted V, MPI's Gatherv and Scatterv: every count 0 but toward or from the root, as NCCL's
 gather and scatter are its forms); a list that is not the pieces of one tensor is staged through one flat tensor
-(packed).  send and recv are the library's point to point.  The partials merge (merge_partials) is an all-reduce,
+(packed). Directed transfers are declared writes or sparse counted exchanges on the full physical communicator.
+The partials merge (merge_partials) is an all-reduce,
 reduce or V reduce-scatter by the library's partials operator.
 
 A group's communicator is NCCL's bootstrap's (ncclCommInitRank, rank 0's ncclGetUniqueId passed through the group's
@@ -20,6 +21,7 @@ store, as ProcessGroupNCCL does), its sessions each on the map the bridges keep 
 read.
 The silent-link bound is the library's (nccl.h)."""
 import collections
+import contextlib
 import math
 
 import torch
@@ -30,18 +32,20 @@ from torch.futures import Future
 from . import _stream, empty, evidence  # _stream's kernels for torch's functional collectives on MPS register as it loads
 
 import mesh  # noqa: E402  (rdma/mesh.py, on the path the mesh's install gives the environment: its _mesh_c)
+from routing import Fabric
 
 ffi, LIB, check = mesh.ffi, mesh.lib, mesh.check
 OPS = ((ReduceOp.SUM, LIB.ncclSum), (ReduceOp.PRODUCT, LIB.ncclProd), (ReduceOp.MAX, LIB.ncclMax), (ReduceOp.MIN, LIB.ncclMin),
        (ReduceOp.AVG, LIB.ncclAvg))
 # a call's kind (_stream.mm Kind)
-ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL, SEND, RECV, WRITE = range(9)
+ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL = range(6)
+WRITE = 8
 # a declared call (ProcessGroupMesh.plan): its kind, its elements, its dtype, its root or peer, its operator and, for an
 # all-gather or a reduce-scatter, each rank's elements (an all-to-all's to each rank, then from each)
-Call = collections.namedtuple('Call', 'kind count dtype root op counts destination fused', defaults=(0, ReduceOp.SUM, None, 0, False))
+Call = collections.namedtuple('Call', 'kind count dtype root op counts destination fused contributors matrix recipients',
+                              defaults=(0, ReduceOp.SUM, None, 0, False, None, None, None))
 WHAT = {ALLREDUCE: LIB.MESH_ALLREDUCE, REDUCE: LIB.MESH_REDUCE, BROADCAST: LIB.MESH_BROADCAST, ALLGATHER: LIB.MESH_ALLGATHER,
-        REDUCE_SCATTER: LIB.MESH_REDUCE_SCATTER, ALLTOALL: LIB.ncclMeshCallAlltoAllV, SEND: LIB.ncclMeshCallSend,
-        RECV: LIB.ncclMeshCallRecv, WRITE: LIB.ncclMeshCallWrite}
+        REDUCE_SCATTER: LIB.MESH_REDUCE_SCATTER, ALLTOALL: LIB.ncclMeshCallAlltoAllV, WRITE: LIB.ncclMeshCallWrite}
 TYPES = {torch.int8: LIB.ncclInt8, torch.uint8: LIB.ncclUint8, torch.bool: LIB.ncclUint8, torch.int32: LIB.ncclInt32,
          torch.uint32: LIB.ncclUint32, torch.int64: LIB.ncclInt64, torch.uint64: LIB.ncclUint64, torch.float16: LIB.ncclFloat16,
          torch.float32: LIB.ncclFloat32, torch.float64: LIB.ncclFloat64, torch.bfloat16: LIB.ncclBfloat16,
@@ -111,7 +115,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     def _get_backend(self, device):
         """The group itself, its one backend on every device it runs (torch asks a group's backend by device:
-        batch_isend_irecv coalesces through it, init_process_group's device_id reads it)."""
+        init_process_group's device_id reads it)."""
         return self
 
     def __init__(self, rank, size, store):
@@ -127,8 +131,17 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     def _held(self, rank, size, comm):
         self._rank, self._size, self._pending, self._operators = rank, size, None, {}
+        self._declaration, self._plan_enabled = [], False
         self.comm = comm
         self.handle = int(ffi.cast('uintptr_t', self.comm))
+        # Native realization installs default routes over every physical path.
+        # Keep this communicator's topology snapshot for configuration lowering;
+        # migrations neither rediscover it nor guess route state from an address.
+        try:
+            self.fabric = Fabric.of(comm)
+        except Exception:
+            LIB.ncclCommDestroy(comm)
+            raise
         _stream.attach(self, self.handle)
 
     @property
@@ -177,6 +190,8 @@ class ProcessGroupMesh(dist.ProcessGroup):
     def shutdown(self):
         """torch's end of this group (destroy_process_group): the fused crossings' forms on its communicator released,
         their leases back to the region once the stream has passed them (_stream.mm fused_release)."""
+        for worker in getattr(self, '_rollout_workers', ()):
+            worker.close()
         _stream.fused_release(self.handle)
         super().shutdown()
 
@@ -219,6 +234,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
         times in a row, the order repeated from this group's next collective on.  Each is compiled now, so none is
         planned where it is issued, and none is compared with its declaration.  [] drops the plan.  Returns each
         declared group's (send entries, landing entries) on this rank's lists."""
+        groups = list(groups)
         rows = [(g, *(group if isinstance(group, tuple) else (group, 1))) for g, group in enumerate(groups)]
         rows = [(g, repeat, call) for g, calls, repeat in rows for call in calls]
         made, kept = [], []
@@ -229,19 +245,87 @@ class ProcessGroupMesh(dist.ProcessGroup):
             if c.dtype == torch.bool and reduces:
                 code = LIB.ncclMax if code == LIB.ncclSum else LIB.ncclMin if code == LIB.ncclProd else code
             kept.append(ffi.new('size_t[]', [n * per for n in c.counts]) if c.counts is not None else ffi.NULL)
-            made.append({'what': WHAT[c.kind], 'peer': c.root, 'count': c.count * per, 'counts': kept[-1], 'type': nccl, 'op': code,
-                         'group': g, 'repeat': repeat, 'destination': c.destination, 'fused': int(c.fused)})
+            counts = kept[-1]
+            if c.matrix is not None and len(c.matrix) != self._size * self._size:
+                raise ValueError('counted collective matrix must cover every ordered physical rank pair')
+            kept.append(ffi.new('size_t[]', [n * per for n in c.matrix]) if c.matrix is not None else ffi.NULL)
+            matrix = kept[-1]
+            masks = []
+            for participants in (c.contributors, c.recipients):
+                bits = [0] * ((self._size + 63) // 64)
+                if participants is not None:
+                    for rank in participants:
+                        if rank < 0 or rank >= self._size:
+                            raise ValueError('collective participant is outside the physical communicator')
+                        bits[rank // 64] |= 1 << (rank % 64)
+                kept.append(ffi.new('uint64_t[]', bits) if participants is not None else ffi.NULL)
+                masks.append(kept[-1])
+            made.append({'what': WHAT[c.kind], 'peer': c.root, 'count': c.count * per, 'type': nccl, 'op': code,
+                         'group': g, 'repeat': repeat, 'destination': c.destination, 'fused': int(c.fused),
+                         'counts': counts, 'matrix': matrix, 'contributors': masks[0], 'recipients': masks[1]})
         view = ffi.new('ncclMeshPlan **')
         check(LIB.ncclMeshCommPlan(self.comm, ffi.new('ncclMeshCall[]', made or 1), len(made), view))
+        self._declaration, self._plan_enabled = groups, bool(groups)
         return [] if view[0] == ffi.NULL else [tuple(view[0].entries[g]) for g in range(view[0].groups)]
+
+    @contextlib.contextmanager
+    def configuration(self, groups):
+        """Execute a declared configuration transfer, then restore the function graph.
+
+        Repartition/scatter invokes this outside the numerical function. Its
+        metadata is compiled once for that configuration transition, never by
+        each data-path invocation of a variable-count exchange.
+        """
+        previous, enabled = self._declaration, self._plan_enabled
+        self.plan(groups)
+        try:
+            yield
+        finally:
+            self.plan(previous)
+            self.plan_active(enabled)
+
+    def plan_demands(self):
+        """Compiler-derived useful deliveries for the entire declared graph.
+
+        This configuration query includes repeats and every collective's actual
+        lowered destinations; it never counts forwarding bytes as useful work.
+        An undeclared or unsupported native graph raises its native error.
+        """
+        n = self.size()
+        values = ffi.new('uint64_t[]', n * n)
+        check(LIB.ncclMeshCommPlanDemands(self.comm, values, n * n))
+        return {(a, b): int(values[a * n + b]) for a in range(n) for b in range(n)
+                if a != b and values[a * n + b]}
+
+    def reset_fused_configuration(self):
+        """Retire cached physical WRITE generations before route re-realization."""
+        _stream.fused_reconfigure(self.handle)
 
     def plan_active(self, active):
         """Suspend the function declaration for feedback; resume at its first group."""
         check(LIB.ncclMeshCommPlanActive(self.comm, bool(active)))
+        self._plan_enabled = bool(active)
 
     def write(self, source_buffer, landing_buffer, source, destination, async_op=False):
         """design/whole-function.md#one-way-writes"""
         return self._issue([(WRITE, [source_buffer], [landing_buffer], [destination], 0, source)], landing_buffer, async_op)
+
+    def prepare_writes(self, deliveries):
+        """Bind exact logical tensor views once to the common physical WRITE plan.
+
+        Each delivery is ``(local_view, source, destination)``. On the source it
+        names original values, on the destination final output bytes, and on a
+        forwarding rank a distinct relay lease. Local strides and span counts
+        may differ; native preparation agrees their common logical byte units.
+        """
+        from views import byte_spans
+        bindings = []
+        for view, source, destination in deliveries:
+            size = view.element_size()
+            shift, spans = byte_spans(tuple(view.shape), [s * size for s in view.stride()], size)
+            base = (view.as_strided((1,), (1,), view.storage_offset() + shift // size) if shift else view)
+            bindings.append((base, spans, int(source), int(destination)))
+        return _stream.SpanWrites(bindings, self.handle)
 
     def _alltoall(self, sends, receives, result, opts):
         """MPI_Alltoallv (ncclMeshAlltoAllV): sends[q] to rank q and receives[q] from it, None moving none."""
@@ -327,12 +411,6 @@ class ProcessGroupMesh(dist.ProcessGroup):
         sends = list(inputs[0]) if self._rank == opts.rootRank else [None] * self._size
         return self._alltoall(sends, self._rooted(opts.rootRank, outputs[0]), outputs, opts)
 
-    def send(self, tensors, dst, tag):
-        return self._issue([(SEND, [t], [], [], 0, dst) for t in tensors], tensors, True)
-
-    def recv(self, tensors, src, tag):
-        return self._issue([(RECV, [], [t], [], 0, src) for t in tensors], tensors, True)
-
     def partials_operator(self, width):
         """Realize a partial-row reduction operator before declaring a function."""
         if width not in self._operators:
@@ -400,10 +478,11 @@ def all_reduce(input: torch.Tensor, reduce_op: str, group_name: str, repeats: in
     the crossing (once for `repeats` of them: the graph's, torch_mesh.compiler) and two encodes; any other its
     functional kernel's, its work waited where the graph waits on it (wait_tensor)."""
     group = dist.distributed_c10d._resolve_process_group(group_name)
-    if reduce_op == 'sum' and isinstance(group, ProcessGroupMesh) and input.device.type == 'mps':
+    if (reduce_op == 'sum' and isinstance(group, ProcessGroupMesh) and input.device.type == 'mps'
+            and input.dtype in (torch.float16, torch.float32)):
         from .partition import _fused
-        x = input.contiguous().view(-1)
-        return _fused(x, 0, [x.numel()] * group.size(), group, True, None, repeats).view(input.shape)
+        x = input if input.ndim else input.view(1)
+        return _fused(x, 0, [x.shape[0]] * group.size(), group, True, None, repeats).view(input.shape)
     return torch.ops._c10d_functional.all_reduce.default(input, reduce_op, group_name)
 
 

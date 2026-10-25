@@ -34,10 +34,9 @@ _Static_assert(sizeof(pthread_t)==8,"M17");
 
 /* design/transport.md section 14: a link's queue pairs, made once at its child's one pairing, are the lanes of its plan
    (link_plan, design/HETEROGENEOUS-LINKS.md), of this layout: lanes 0 and 1, on which nothing is posted, and from
-   MESH_LANE_FIRST pairs, stream s on pair s (lanes MESH_LANE_FIRST + 2 s and + 2 s + 1).  Page p of a stream's sequence
-   over its pairing, the whole page, is on its lane p mod MESH_STREAM_LANES (lane_page), posted in the sequence's order
-   at each end, sent from the page its row names and landing in the page the receiver's row names
-   (design/pages-and-functions.md); a lane's units land in the order its SENDs were posted */
+   MESH_LANE_FIRST pairs, stream s on pair s (lanes MESH_LANE_FIRST + 2 s and + 2 s + 1).  Unit p of a stream's sequence
+   is on lane p mod MESH_STREAM_LANES (lane_page), posted in equal order at each endpoint
+   with equal exact byte lengths from their immutable compiled span tables; a lane's units land in the order its SENDs were posted */
 #define MESH_LINK_LANES 10u
 #define MESH_LANE_FIRST 2u
 #define MESH_LANE_PAIRS ((MESH_LINK_LANES-MESH_LANE_FIRST)/2)
@@ -104,22 +103,16 @@ static inline uint64_t gate_post(struct send_gate *gate,uint32_t k,struct frames
 }
 /* a request's completion: the frames posted through it retired */
 static inline void gate_retire(struct send_gate *gate,uint64_t id){ gate->retired.n=id&MESH_GATE_MASK;gate->completions++; }
-/* design/transport.md section 14: a data lane's progress over its pairing, its port's progress thread's alone, in the
-   lane's units: the SENDs it has posted (`sent`) and those completed (`done`); the receives posted (`posted`) and landed
-   (`got`), at most `window` receives ahead (the fewer frames of the lane's share and its receive queue, over a unit's
-   frames: mesh-link.c lane_reset).  A lane's units outstanding one way are at most a ring of MESH_LANE_UNITS rows (the
-   window, and the SEND gate's capacity, bounded by it: mesh-link.c lane_reset, link_connect), so the ring holds every
-   one's row (mesh.h struct mesh_posts) */
-struct lane_state { uint64_t sent,done,posted,got; uint32_t window; };
-/* design/transport.md section 14: an entry a progress thread has taken from a holding's list, its own copy, typed: its
-   rows (`row`, `pages`), its `base`, its word (`word`: a send entry's naming none the holding's `ready`; NULL for a
-   landing entry naming none, or one not whole), and the index of its first page over the holding (`page`); `whole` 0
-   where it is not the holder's to name (rows past the page table, or its word not one of the region): its pages go as
-   duds, or land in the spare page */
-struct taken { struct mesh_row row; struct mesh_pages pages,base,page; const _Atomic uint64_t *word; uint32_t whole; };
-/* design/transport.md section 14: the lanes of its pair a stream's pages go on, its page p over its pairing on its lane
-   p mod MESH_STREAM_LANES as that lane's unit p div MESH_STREAM_LANES (lane_page); its pages posted are its lanes' units
-   together, and its pages done in order run to the least of its lanes' next pages (lanes_through) */
+/* A lane counts requests and frame credits separately. Variable byte lengths
+   consume ceil(bytes/MESH_FRAME) frames; the interval-pin ring also limits
+   outstanding requests independently to MESH_LANE_UNITS. Receive WR IDs carry
+   the cumulative frame prefix retired by each completion. */
+struct lane_state { uint64_t sent,done,posted,got,frames_posted,frames_retired,frame_capacity; };
+/* A taken entry keeps its immutable resolved span table. `unit` is its first
+   unit over this holding; every dependency/completion prefix counts units. */
+struct taken { const struct mesh_dma_span *spans; struct mesh_units units,base,unit; const _Atomic uint64_t *word; uint32_t whole; };
+/* Unit p goes on lane p mod MESH_STREAM_LANES as unit p/lanes there.
+   Only the contiguous completed prefix across both lanes becomes available. */
 #define MESH_STREAM_LANES 2u
 _Static_assert(MESH_STREAM_LANES>=1 && MESH_STREAM_LANES<=2*MESH_STREAM_PAIRS,"a stream's lanes, of its pair");
 static inline uint64_t lane_page(uint32_t j,uint64_t u){ return MESH_STREAM_LANES*u+j; }
@@ -128,12 +121,10 @@ static inline uint64_t lanes_through(const uint64_t *u){
   for(uint32_t j=1;j<MESH_STREAM_LANES;j++)g=MIN(g,lane_page(j,u[j]));
   return g;
 }
-/* design/transport.md section 14: a holding's walk of one of its lists, its port's progress thread's: a ring of
-   MESH_STREAM_ENTRIES entries taken (`taken`) of which `done` have all gone (or landed), `at` the
-   entry its next page is in, the list's pages so far (`pages`), the stream's pages posted at the holding's first
-   (`base`: the holding's page p is the stream's page base + p), and the count last stored (`count`: `sent` or
-   `landed`, in pages) */
-struct walk { struct taken *ring; uint64_t taken,done,at; struct mesh_pages pages,base,count; };
+/* A taken-entry ring; units/base/count refer to transport units. `base` is
+   the pairing-wide prefix before this holding. Tables stay immutable through
+   final unit completion; taking an entry releases only its list slot. */
+struct walk { struct taken *ring; uint64_t taken,done,at; struct mesh_units units,base,count; };
 /* design/transport.md section 14: a holding's state on its stream at its port's progress thread: none (`HOLD_NONE`);
    served (`HOLD_SERVE`); ended (its owner word given, or its client retired), until the next pass has taken its lanes'
    completions (`HOLD_END`); ended with units outstanding on the stream's lanes, the stream not live and nothing served

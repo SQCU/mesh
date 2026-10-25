@@ -11,13 +11,19 @@ Another communicator occupying a cable is an explicit initialization failure;
 initialization must not silently discard that cable. Every participant builds
 the same ordered cable table. Local endpoint bindings index this table.
 
-`mesh_fabric_stripe` lowers a logical crossing into `mesh_transfer` records,
-each with an explicit cable index and buffer interval. Parallel capacities add.
-The compiler apportions whole transport quanta by weighted largest remainder,
-reserving one quantum per cable when the crossing has at least that many quanta.
-Smaller crossings cannot use more cables than their number of quanta without
-duplicating payload or changing the transport framing. There is no byte-size
-threshold selecting a special single-cable implementation.
+`mesh_routed_compile` lowers the complete typed collective graph through
+`mesh_write_compile` into `mesh_transfer` records, each with an explicit cable
+index and buffer interval. Parallel capacities add. `mesh_fabric_stripe` is a
+direct-edge adapter to that same write allocator, not a second collective
+transport or an application routing interface.
+The compiler apportions payload using the selected path weights and preserves
+the total exactly. It does not reserve a mandatory page or quantum for every
+cable: a forced floor changes the solver's vector and can introduce unnecessary
+relay work. Exact byte spans can be smaller than allocation pages or hardware
+credit frames. Packet and datatype constraints are explicit realization inputs;
+all-link use is assessed across a complete function's transactions, rather than
+duplicating a tiny operand to manufacture cable activity. There is no byte-size
+threshold selecting a separate single-cable implementation.
 
 The native executor binds a transfer by cable index. It never resolves a peer
 to a preferred channel. Both ends independently compile identical per-cable
@@ -43,20 +49,23 @@ solver-imposed restriction, and it must not be counted as an active resource.
 ## Interface
 
 The NCCL calls remain the data-program interface. The collective compiler can
-read the immutable physical fabric with `ncclMeshCommFabric`, install spanning
-routes and positive per-cable weights with `ncclMeshCommRoutes`, and compile a
+read the immutable physical fabric with `ncclMeshCommFabric`, install complete
+physical paths and their weights with `ncclMeshCommWriteRoutes`, and compile a
 complete call sequence with `ncclMeshCommPlan`. Installing routes invalidates
 the previous compiled sequence. The caller completes its previous function,
 installs the next routes, and compiles the next sequence before starting it.
 No route decision belongs inside a tensor operation or recurrent timestep.
 
 All collective front ends must lower into the same physical fragment, relay,
-page-range and lifetime representation. A solver with a different objective
+byte-range and lifetime representation. A solver with a different objective
 retains the same placement and routing capabilities. A peer-sized publication
 array, a single-cable fused form, or an operation that excludes declared relays
 is an interface defect; preserving it is not a permitted bandwidth tradeoff.
-Physical constraints such as page granularity belong in realization, with the
+Physical constraints such as registration boundaries belong in realization, with the
 attainable bound reported. They do not justify discarding representable routes.
+The [client coverage manifest](collective-client-coverage.md) records the NumPy,
+Program, C/Objective-C, Swift, LiteRT and example boundaries, their allocation
+and membership constraints, and which adapter tests have actually run.
 
 `ncclMeshCommSample` exposes byte prefixes supplied, sent, and landed on each
 local cable. Supplied minus sent is the ordinary published backlog. A relay may
@@ -100,20 +109,19 @@ and element count; each supplies a registered landing buffer of that extent.
 Only the source reads its source buffer and only the destination's complete
 landing buffer is an output. Other ranks' buffers are relay storage.
 
-`ncclMeshCommWriteRoutes` installs the paths before `ncclMeshCommPlan` compiles
-the function's calls. `ncclMeshWrite` executes that declaration. A relay's send
-entry reads its receive's registered rows directly and uses the incoming
-stream's landed prefix as its supplied word. The bridge can forward a page as
-soon as it lands; it need not wait for a host round trip or for the whole range.
-There is no chunk-size parameter or extra per-chunk publication in the interface.
-Path weights describe total flow. The compiler rounds those shares to page
-counts by largest remainder, conserving the operand exactly. It does not add a
-mandatory page to every possible path: that would distort the requested vector
-and create relay dependencies for shares smaller than a page. Physical cable
-coverage is assessed across the function's complete set of writes.
+`ncclMeshCommWriteRoutes` installs paths in the communicator's configuration.
+`ncclMeshWritePrepare`, `ncclMeshWriteRowsPrepare` and `ncclMeshWriteSpansPrepare` bind exact source/landing
+extents and jointly compile registration/packet cuts before execution;
+`ncclMeshWriteExecute` reuses that plan. The eager `ncclMeshWrite` prepares and
+executes the same representation. A relay's send reads its receive's registered
+interval directly and uses the incoming stream's landed prefix as its supplied
+word. It can forward a completed span without a host round trip or whole-operand
+join. Path weights describe total flow; realization conserves bytes without a
+mandatory page for every possible path. Physical cable coverage is assessed
+across the function's complete set of writes.
 Multi-hop execution declares its participating relays in the compiled fabric.
-A two-party source call must be lowered into that declaration when necessary;
-the endpoint signature must not silently reduce execution to a direct cable.
+Directed transfers use that declaration. There is no separate paired
+Send/Recv executor with endpoint-only participation.
 
 ### Fused physical writes
 
@@ -130,8 +138,9 @@ landing leases must have finished **before the group is encoded**: reception is
 posted immediately, without waiting for that node's own producer. Source and
 relay leases remain immutable through downstream uses. Overlapping landing
 ranges, or landing ranges overlapping local sources, fail during realization.
-The DNN uses distinct leases per layer and a complete-function rendezvous before
-reuse. Its producer publishes from its last threadgroup; its consumer reads the
+The DNN uses distinct leases per layer. Reuse requires the compiled source-read
+and destination-consumer retirement proofs below, not a peer rendezvous.
+Its producer publishes from its last threadgroup; its consumer reads the
 received values directly. The ordinary write interface remains available for
 the control comparison.
 
@@ -151,11 +160,10 @@ Ordinary groups retain their existing ordering.
 
 Publication is not send completion. There are no waits on `sent`. The data program
 keeps each source and relay lease alive and unmodified through its downstream
-uses; independent layers can have independent leases. A complete-function
-rendezvous in a test establishes safe reuse between evaluations without adding
-per-send synchronization to the executor. That test boundary is not a universal
-ownership proof for arbitrary asymmetric programs, nor a requirement to add a
-rendezvous to applications. Native source retirement can follow the bridge's
+uses; independent layers can have independent leases. Earlier tests used a
+complete-function rendezvous between evaluations. That boundary changes overlap
+and cannot serve as the runtime ownership proof or as a valid performance
+comparison for continuously submitted calls. Native source retirement follows the bridge's
 existing final DMA-read evidence asynchronously; destination consumer lifetime
 is separate. The typed rules below specify exactly which proof is needed.
 
@@ -230,7 +238,7 @@ these counterexamples, multiple physical fragments, independent channel
 generations, returning data, local readers, and remote sinks with no return.
 
 `mesh-lease-retire.h` supplies native source ownership bookkeeping. It records
-the maximum final **page** prefix for each physical stream/holding before
+the maximum final **DMA-unit** prefix for each physical stream/holding before
 presentation, including unposted SENDs. The bridge's `sent` prefix is contiguous
 completed reads across both hardware lanes (`mesh-link.c:link_send/walk_count`).
 All dependencies must complete; one peer's progress cannot release another's.
@@ -241,36 +249,44 @@ Such a dependency stays retained until an explicit actual-DMA/quiescent-driver
 proof. The helper is nonblocking and adds no transport traffic. Its metadata
 destructor is not a proof that the underlying pages may be overwritten.
 
-### Compiled masked sub-page writes
+### Exact sub-page writes and historical masked frames
 
 `migration.compile_rows` represents a partition intersection by an affine byte
-map: base, row width, row count and stride at each endpoint. A frame carries a
-contiguous interval of that logical payload. Its final-frame mask excludes
-padding before the original-source load and before the final-destination store.
-Padding lives in separate transport storage, so a partial output page never
-overwrites another writer's neighboring values. Descriptor count depends on
-partition intersections rather than the number of rows or transport pages.
+map: base, row width, row count and stride at each endpoint. The current
+`ncclMeshWriteRowsPrepare` lowering resolves that map directly into immutable
+`mesh_dma_span {offset, bytes}` descriptors, with one exact payload SGE per
+span. It splits actual registration crossings at each participant's row phase;
+allocation pages and 4 KiB hardware credit charges do not pad the payload.
+One table covers all rows, with no per-row host execution call. See
+[the transport contract](transport.md#1-the-objects) and
+[live byte-span validation](transport.md#exact-byte-validation-on-2026-10-24).
 
-The physical WRITE plan for a repeated frame train is realized once. Producers
-publish each complete frame's contiguous prefix; consumers read each landed
-frame and apply its precompiled mask. Frame size, vector width and GPU dispatch
-structure are realization choices whose whole-function cost must be measured.
-They do not narrow the available physical routes or authorize a fixed size rule
-that another solver cannot change. Useful bytes exclude padding; wire bytes
-include every padded frame on every hop, and packing/unpacking contributes to
-end-to-end latency.
+`ncclMeshWriteSpansPrepare` extends that same plan with an ordered interval
+list inside one lease. Local lists can have different counts, gaps, and physical
+ordering while naming the same logical byte sequence. Common cuts are the
+union of all participants' view boundaries, packet cuts and actual registration
+crossings. Repeated source bytes are permitted; overlapping landing intervals
+are rejected. The metadata-only `views.byte_spans` helper maps ndarray/tensor
+shapes and byte strides to this contract, including negative strides. Distinct
+leases use ordered shared WRITE declarations. Neither form adds a numerical
+packing pass or runtime metadata exchange. Indexed preparation has local
+sanitizer tests; the live results above cover the contiguous/affine forms.
 
-Ownership needs no new event kind. The original operand has one read use for
-each pack; the full padded source and relay frames have their physical DMA
-uses; each destination frame has its masked-consumer read. Descriptors are
-ordinary closure inputs retained through all their uses. The final output's
-publication follows all stores required by the declared output extent. For an
-isolated one-way train, serial receiver consumers do not order remote writes,
-and source DMA retirement does not retire the destination's pending consumer.
-The current lowering therefore allocates distinct frame generations instead
-of assuming the recurrent gather's two-slot proof. The lifetime tests exercise
-these counterexamples; affine coverage and mask geometry require their own
-migration compiler and GPU checks.
+The earlier masked-frame implementation carried logical payload intervals in
+separate padded transport storage. GPU pack/unpack masks preserved neighboring
+values, and its measured cost included those extra memory passes and padding
+on every hop. Those tests remain evidence for that historical realization;
+they do not require the exact-span path to introduce padding or copies.
+
+Ownership needs no new event kind. Original sources and relay intervals retain
+all future and posted DMA reads; destination intervals retain their arithmetic
+consumers independently. Immutable descriptors are ordinary closure inputs
+retained through every bridge CPU read and SEND/LAND obligation. The final
+output's publication follows all stores required by its declared extent. In an
+isolated one-way stream, serial receiver consumers do not order already
+preposted remote writes, and source DMA retirement does not retire a destination
+consumer. Distinct landing generations or an existing causal descendant proof
+are required; the recurrent gather's two-slot theorem cannot be assumed.
 
 ## Ahead of time
 
@@ -278,8 +294,8 @@ migration compiler and GPU checks.
 paths. For a declared function's pairwise byte demands, `allocate` solves a
 multi-commodity linear program: each commodity's path flows sum to its bytes,
 and each directed physical cable's aggregate load is bounded by its capacity
-times a common duration. A negligible positive latent path weight allows later
-feedback to move onto any path; realization can round a sub-page share to zero.
+times a common duration. Zero is an exact allocation value; all paths remain
+coordinates of the empirical solver even when their initial allocation is zero.
 It uses [HiGHS through SciPy](https://docs.scipy.org/doc/scipy/reference/optimize.linprog-highs.html).
 The result is the fluid model's constrained optimum, not a claim that a real
 program with dependency release times attains that duration. Integer transport
@@ -302,21 +318,48 @@ another, despite those cables having the same release dependencies.
 
 ## Finite differences
 
-`whole.FunctionFlow` evolves a continuous vector jointly representing compute
-shares and physical path shares. For each allocation, a bounded logistic map
-`x_i = low_i + (high_i - low_i) sigmoid(z_i - lambda)` chooses the single
-multiplier that conserves its total. Routing weights stay continuous through
-installation. Only realization into physical pages or indivisible compute tiles
-rounds them; the latent vector retains changes smaller than a tile.
+`whole.FunctionFlow` uses normalized linear shares stored as nonnegative integer
+counts summing to `2^40` for each decision. The declared numerical precision is
+one part in `2^40`; this is independent of the compiler's page/tile granularity.
+Zero and one are exact. There are no logits, epsilon path shares, exponential
+tails, or gradient moments. Euclidean simplex projection enforces bounds and
+conservation. Fixed coordinates need no division by their width. Natural units
+must give a total within `[2^-40, 2^52]`; invalid dimensions or nonfinite inputs
+fail during configuration. Recorded state names this coordinate version and
+cannot silently reinterpret old logarithmic states.
+
+Physical route operands are unsigned integer weights, including exact zeros.
+The common C allocator computes each `units * weight / sum(weights)` with
+128-bit integer products, then assigns residual units by exact integer
+remainders in path order. A zero-weight path gets zero units; it remains
+available to the next solver proposal. Overflowing sums and all-zero vectors
+fail explicitly. Python configuration uses canonical weights summing to `2^40`.
+Thus normalization and transport apportionment cannot create subnormals,
+underflow-dependent ties, or `log(0)` singularities.
 
 A fixed Hadamard sequence supplies joint directions. Four complete executions
-at `z + c*d, z - c*d, z - c*d, z + c*d` measure the directional derivative
-`(J_0 - J_1 - J_2 + J_3)/(4*c)`. This cancels additive linear drift in the measured
-cost across that stencil. Every stencil unconditionally updates the vector with
-bias-corrected first and second gradient moments and a decaying step size.
-There is no control/trial comparison, acceptance threshold, rollback, or winner
-selection. Best attained measurements are reporting statistics and do not steer
-the state. Persisted state contains the vector, moments, and partial stencil.
+form a `+--+` stencil, canceling additive linear drift in measured cost. Each
+allocation's perturbation is at least one unit reported by
+`ncclMeshCommPlanRouteUnits`: the greatest independently allocatable unit count
+of an individual logical transaction, before repeats and relay amplification.
+A million repeated one-page writes therefore do not masquerade as one
+million-way divisible write. Projected probes can enter a zero-share path.
+
+Every stencil updates the centre with a bounded gradient step and a decaying
+step size. The divisor `1 + max(abs(gradient))` is at least one. Flat cost gives
+an exact identity update, without residual momentum. There is no candidate
+acceptance, rollback, or winner selection. Latencies are represented in seconds
+within `[2^-40, 2^40]`, and useful work in `[2^-40, 2^64]` declared units, keeping
+log costs and reported throughput finite. These are numerical domain checks,
+not bandwidth restrictions; an input outside them needs explicit rescaling.
+
+A fluid LP bound certifies its declared model. Empirical finite differences do
+not certify the unknown hardware's global optimum in a finite number of noisy
+observations. Report attained whole-function latency/useful throughput against
+the bound for each shape/depth, plus every executed proposal. A static seed is
+not evidence of empirical convergence. Logical tree decomposition and its
+shares also affect the feasible program; a route-only feedback run cannot be
+reported as optimization over all collective decompositions.
 
 The current default cost is `J = log(T/U)`, where `T` is complete function
 latency and `U` is fixed useful numerical work. The DNN uses one logical final
@@ -431,7 +474,7 @@ interval. It includes stalls within an unfinished transaction and excludes
 compute-only gaps outside every such interval. Let
 `C = sum_e C_e` include **all directed physical cables**, even those idle during
 part of `W`. The ideal capacity during those windows is `C*|W|` bytes. With `V`
-actual wire bytes (each hop and padded transport page counted once), report
+actual payload bytes carried by all hops (including any explicit application padding), report
 attained wire bandwidth `V/|W|`, utilization `V/(C*|W|)`, unused capacity
 `C*|W| - V`, and the all-links ideal duration `V/C`. Also report the tighter bound
 `max_e V_e/C_e` for the measured routing. Useful delivered bytes `U` are reported
@@ -439,7 +482,9 @@ separately, giving `U/|W|` and hop/padding amplification `V/U`. Extra relay traf
 must not masquerade as extra useful throughput.
 
 `roofline.py` matches outgoing and incoming entries by physical cable, direction,
-and cumulative page range. Each pages-to-pages window starts with source
+and cumulative DMA-unit coverage, validating each unit's exact byte length.
+SEND and receive entry boundaries can differ; matching uses interval coverage,
+not entry ordinals or peer counts. Each transaction window starts with source
 eligibility and ends at the destination's completed landing, rather than
 substituting local send completion. It merges overlapping windows rather than
 adding their durations and reports ingress and egress for each node separately.
@@ -447,12 +492,12 @@ Across nodes, causal TCP request/reply clock observations bound root-minus-local
 offsets immediately before each complete evaluation. It expands and contracts
 windows by those bounds and the polling brackets, retaining the resulting
 latency and bandwidth bounds. Offset constancy is assumed only over that
-evaluation. These pages-to-pages windows include clock uncertainty even in their
+evaluation. These transaction windows include clock uncertainty even in their
 per-node summaries because their endpoints are on different nodes. A lower
 duration bound of zero has no finite bandwidth upper bound; uncertainty is not
 silently replaced by a point estimate.
 
-Clock probes now reuse the existing TCPStore connection. Recorded page causality
+Clock probes now reuse the existing TCPStore connection. Recorded span causality
 also tightens their offset intervals: source eligibility precedes first arrival.
 An all-pairs shortest-path closure propagates these difference constraints.
 No symmetric-delay assumption or assumed attained bandwidth enters the bounds.
