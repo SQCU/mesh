@@ -59,9 +59,9 @@ def compiled_graph(graph):
             node.kwargs = {}
         else:
             node.args = (replacement, *node.args[1:])
-            node.kwargs = {key: value for key, value in node.kwargs.items()
-                           if key not in ('dim', 'sizes', 'group_name', 'adds', 'repeats')}
-            node.kwargs['index'] = index
+            node.kwargs = {**{key: value for key, value in node.kwargs.items()
+                              if key not in ('dim', 'sizes', 'group_name', 'adds', 'repeats')},
+                           'index': index}
         node.meta.pop('eager_input_vals', None)
     forms = [(*form, tuple(slots[crossing_key(form)])) if crossing_key(form) in slots else form for form in forms]
     capture = _CAPTURE.get()
