@@ -6,7 +6,7 @@
 // handed to the kernel's store.  Each weight element is read once a pass.  x may be two segments, x0 [R, K0] and x1
 // [R, K - K0], rows LD0 and LD1 apart (a cat of the two along K, never made: x0 = x1 and K0 = K where there is one),
 // each segment's span of a simdgroup's K slice its own loop, no branch a load.
-// VW and VX are 4 where rows have half4 alignment, else 1 (packed half4, half alignment).  linear_rows stores into y, ACT its activation (0 none, 1
+// VW and VX are 4 where w's and x's rows lie on whole 4-element loads, else 1 (four loads of one).  linear_rows stores into y, ACT its activation (0 none, 1
 // tanh); linear_publish (compiled after the library's steps, fused.steps(), and argmax.metal) stores each output into a
 // fused crossing's send segment through the collective's mesh_step_write and publishes it from its last threadgroup
 // (mesh_step_enter, mesh_step_release at its repeat j: partition._fused, which runs the crossing).
@@ -17,13 +17,12 @@ struct linear_dims { uint R, K, N, B, LDW, K0, LD0, LD1; };
 
 template <uint V> inline float4 linear_load(device const half* p);
 template <> inline float4 linear_load<4>(device const half* p) { return float4(*(device const half4*)p); }
-template <> inline float4 linear_load<1>(device const half* p) { return float4(half4(*(device const packed_half4*)p)); }
+template <> inline float4 linear_load<1>(device const half* p) { return float4(p[0], p[1], p[2], p[3]); }
 
-// Only a segment's final vector needs masking. Unaligned ragged row starts
-// still use vector loads throughout its interior; they do not make every
-// element a separately guarded scalar load. Aligned segments end on vectors.
+// elements k to k + 3 of a row, those at or past `hi` zero (a 1-element load's group may cross a segment's end; a
+// 4-element load's never does: K0 and the slices are whole groups there)
 template <uint V> inline float4 linear_part(device const half* p, uint k, uint hi) {
-    if (V == 4 || k + 3 < hi) return linear_load<V>(p + k);
+    if (V == 4) return linear_load<4>(p + k);
     float4 v;
     for (uint j = 0; j < 4; j++) v[j] = k + j < hi ? float(p[k + j]) : 0.0f;
     return v;
