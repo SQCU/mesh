@@ -1123,8 +1123,8 @@ def evaluations(mesh, name, count, *, workload=None, controller=None):
     """Yield complete function invocations under immutable configuration operands.
 
     A yield must enclose the entire declared function, including communication and
-    numerical consumers. Markers commit without waiting; between invocations only
-    completed markers are polled. A local inbox submits delayed statistics to a
+    numerical consumers. Completion observers attach to existing command buffers;
+    they never commit or wait. A local inbox submits delayed statistics to a
     worker; missing peer statistics never stop this loop. The realized generation
     stays immutable throughout these count calls. New proposed operands are
     exposed separately and applied by realize_evaluations at configuration time.

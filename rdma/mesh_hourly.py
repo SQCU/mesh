@@ -194,7 +194,7 @@ def aggregate_measurements(ranks):
                            'useful_gigabytes_per_second': useful / interval / 1e9})
         else:
             seconds = max(value['seconds'] for value in values)
-            useful = values[0].get('function_feedback', {}).get('metrics', {}).get('useful_work_bytes')
+            useful = (values[0].get('function_feedback') or {}).get('metrics', {}).get('useful_work_bytes')
             result.append({'function_seconds': seconds,
                            'useful_output_bytes': useful,
                            'useful_gigabytes_per_second': useful / seconds / 1e9 if useful is not None else None})

@@ -185,16 +185,16 @@
    Invalid source loads and destination stores are masked; padding never overwrites neighboring final-output values.
    This is explicit arithmetic in the data graph, not a native transport repair or a receiver's address-selection
    protocol. Its copies, padding and dispatch costs count in whole-function latency and useful bandwidth.
-   The native transport remains direct and page-granular: the bridge sends a crossing's bytes from their declared
-   source pages and lands them in their declared destination pages (a
-   COPY in its destination, a combine in a landing area of the communicator's, combined from there), each step one entry
-   that starts on a page (design/transport.md section 14: max_sge 1, and registrations in extents no page crosses).  So
-   every crossing call's send buffer, and every buffer it sends from or lands in, is in this node's region, and every
-   piece starts on a page: the program's own cuts lie on pages (mesh-plan.h mesh_program_steps_cut), and a cut NCCL's
-   call fixes (a reduce-scatter's and an all-gather's segment r at r x count, an all-to-all's segments, a send's or a
-   receive's buffer) that is not on one, or an operand outside the region, fails the call as a value
-   (ncclInvalidUsage, naming the piece) before anything is presented; nothing is copied to make it fit ("good
-   performance cannot be opt-in ... code which can't perform well can fail instead of being run").  A collective whose
+   The native transport writes exact byte spans from their declared sources to their declared destinations.
+   A COPY lands in its destination; a reduction lands in a separate area before its data function combines it.
+   Allocation pages, DMA units, and hardware credit frames are distinct. Each request has one SGE and must stay
+   inside its registered-memory extent. Prepared WRITE bindings jointly compile packet, registration, indexed-view
+   and affine-row cuts during configuration; execution transmits only their declared payload, without a metadata
+   exchange or a staging repair. Every crossing source and destination remains in this node's region.
+   Generic collective bindings must preserve those same physical constraints. Their current relative packet grid
+   does not yet compile registration cuts for every ragged placement: place_group reports an invalid span before
+   presentation if it crosses an extent. That integration gap is not a page-alignment requirement on the data model.
+   A collective whose
    send buffer lies apart from its result reads it in place where its program allows (a SEND of a range no step of the
    rank wrote reads it, the first combine of such a range writes send op piece, the ranges of the result no step writes
    are copied from it after the publications, and no scratch buffer no step writes is made); else its operand is made in
