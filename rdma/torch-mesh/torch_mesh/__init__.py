@@ -48,9 +48,10 @@ def compiler(gm, example_inputs):
     from pathlib import Path
 
     import torch
-    from torch._dynamo import lookup_backend
     from torch._inductor import config
-    from torch._inductor.custom_graph_pass import CustomGraphPass
+    from torch._inductor.compile_fx import compile_fx, compile_fx_inner
+    from torch._functorch import config as autograd_config
+    from .declarations import operation, compiled_graph
 
     from . import _stream, backend, partition  # noqa: F401  (torch_mesh::all_reduce, torch_mesh::allgatherv)
     from .streamed import node
@@ -71,6 +72,10 @@ def compiler(gm, example_inputs):
     def told(node, repeats):
         """A crossing's node told its repeats (the argument after its group's name), the fake values Inductor records
         for its call alike."""
+        if node.target not in CROSSINGS:
+            node.kwargs = dict(node.kwargs, repeats=repeats)
+            node.meta.pop('eager_input_vals', None)
+            return
         i = CROSSINGS[node.target] + 1
         node.args = (*node.args[:i], repeats)
         if 'eager_input_vals' in node.meta:
@@ -136,62 +141,82 @@ def compiler(gm, example_inputs):
             node.args = (x, w, 0, [x.meta['val'].shape[0]] * group.size(), node.args[2], True, repeats)
             node.meta.pop('eager_input_vals', None)
 
-    class Leased(CustomGraphPass):
-        def __call__(self, graph):
-            for node in list(graph.nodes):
-                if node.target is torch.ops._c10d_functional.all_reduce.default:
-                    node.target = torch.ops.torch_mesh.all_reduce.default
-                    told(node, 1)
-                    made = node.args[0]
-                    if (node.args[1] == 'sum' and made.target is torch.ops.torch_mesh.linear.default and len(made.users) == 1
-                            and made.args[2:] in ((), (None,), (None, 0))):
-                        with graph.inserting_before(node):
-                            summed = graph.call_function(torch.ops.torch_mesh.linear_sum.default, (*made.args[:2], node.args[2], 1))
-                        summed.meta['val'] = node.meta['val']
-                        node.replace_all_uses_with(summed)
-                        graph.erase_node(node)
-                        graph.erase_node(made)
-                    continue
-                mm = node.target is aten.mm.default and rows(*node.args)
-                addmm = (node.target is aten.addmm.default and not node.kwargs and len(node.args) == 3 and rows(*node.args[1:])
-                         and node.args[0].meta['val'].dim() == 1)
-                if mm or addmm:
-                    x, w = node.args[-2:]
-                    parts = joined(x)
+    def rewrite(graph):
+        for node in list(graph.nodes):
+            if node.target is torch.ops._c10d_functional.all_reduce.default:
+                node.target = torch.ops.torch_mesh.all_reduce.default
+                told(node, 1)
+                made = node.args[0]
+                if (node.args[1] == 'sum' and made.target is torch.ops.torch_mesh.linear.default and len(made.users) == 1
+                        and made.args[2:] in ((), (None,), (None, 0))):
                     with graph.inserting_before(node):
-                        weight = graph.call_function(aten.permute.default, (w, [1, 0]))
-                        weight.meta['val'] = w.meta['val'].permute(1, 0)
-                        made = graph.call_function(torch.ops.torch_mesh.linear.default,
-                                                   (parts[0] if parts else x, weight, node.args[0] if addmm else None, 0) +
-                                                   ((parts[1],) if parts else ()))
-                    made.meta['val'] = node.meta['val']
-                    node.replace_all_uses_with(made)
+                        summed = graph.call_function(torch.ops.torch_mesh.linear_sum.default, (*made.args[:2], node.args[2], 1))
+                    summed.meta['val'] = node.meta['val']
+                    node.replace_all_uses_with(summed)
                     graph.erase_node(node)
-                    if parts:
-                        graph.erase_node(x)
-                    users = list(made.users)
-                    if len(users) == 1 and users[0].target is aten.tanh.default:
-                        made.args = made.args[:3] + (1,) + made.args[4:]
-                        users[0].replace_all_uses_with(made)
-                        graph.erase_node(users[0])
-            grouped(graph)
-            for name in {node.args[CROSSINGS[node.target]] for node in graph.nodes if node.target in CROSSINGS}:
-                nodes = [node for node in graph.nodes if any(isinstance(a, str) and a == name for a in node.args)]
-                forms = {(n.target, *((a.meta['val'].shape, a.meta['val'].stride(), a.meta['val'].dtype) if hasattr(a, 'meta')
-                                      else tuple(a) if isinstance(a, list) else a for a in n.args[:CROSSINGS.get(n.target, 2)]))
-                         for n in nodes}
-                if len(nodes) > 1 and len(forms) == 1 and nodes[0].target in CROSSINGS:
-                    for n in nodes:
-                        told(n, len(nodes))
-            for node in [n for n in graph.nodes if n.target is torch.ops.torch_mesh.linear_sum.default]:
-                native(node)
-            from .declarations import compiled_graph
-            compiled_graph(graph)
+                    graph.erase_node(made)
+                continue
+            mm = node.target is aten.mm.default and rows(*node.args)
+            addmm = (node.target is aten.addmm.default and not node.kwargs and len(node.args) == 3 and rows(*node.args[1:])
+                     and node.args[0].meta['val'].dim() == 1)
+            if mm or addmm:
+                x, w = node.args[-2:]
+                parts = joined(x)
+                with graph.inserting_before(node):
+                    weight = graph.call_function(aten.permute.default, (w, [1, 0]))
+                    weight.meta['val'] = w.meta['val'].permute(1, 0)
+                    made = graph.call_function(torch.ops.torch_mesh.linear.default,
+                                               (parts[0] if parts else x, weight, node.args[0] if addmm else None, 0) +
+                                               ((parts[1],) if parts else ()))
+                made.meta['val'] = node.meta['val']
+                node.replace_all_uses_with(made)
+                graph.erase_node(node)
+                if parts:
+                    graph.erase_node(x)
+                users = list(made.users)
+                if len(users) == 1 and users[0].target is aten.tanh.default:
+                    made.args = made.args[:3] + (1,) + made.args[4:]
+                    users[0].replace_all_uses_with(made)
+                    graph.erase_node(users[0])
+        grouped(graph)
 
-        def uuid(self):
-            return 'torch_mesh::all_reduce torch_mesh::linear cat linears repeats allgatherv native'
-    with config.patch(post_grad_custom_pre_pass=Leased(), size_asserts=False, alignment_asserts=False, scalar_asserts=False):
-        return lookup_backend('inductor')(gm, example_inputs)
+        def form(value):
+            if isinstance(value, torch.Tensor):
+                return (tuple(value.shape), tuple(value.stride()), value.dtype, value.device.type)
+            if isinstance(value, (list, tuple)):
+                return tuple(map(form, value))
+            return value
+
+        crossings = {}
+        for item in graph.nodes:
+            target, args = operation(item)
+            name = args.get('group_name')
+            if name is not None:
+                crossings.setdefault(name, []).append((item, target, args))
+        for entries in crossings.values():
+            forms = {(target, tuple((key, form(value)) for key, value in args.items() if key != 'repeats'))
+                     for _, target, args in entries}
+            if len(entries) > 1 and len(forms) == 1 and entries[0][1] in CROSSINGS:
+                for item, _, _ in entries:
+                    told(item, len(entries))
+        for item in [n for n in graph.nodes if n.target is torch.ops.torch_mesh.linear_sum.default]:
+            native(item)
+
+    def realize(graph, inputs, **options):
+        # Declaration is configuration output, needed even on a numerical code
+        # cache hit. Rewrite and capture before Inductor's FX cache lookup; the
+        # cache then keys the actual rewritten operators and repeat operands.
+        rewrite(graph.graph)
+        graph.recompile()
+        compiled_graph(graph)
+        return compile_fx_inner(graph, inputs, **options)
+
+    # AOTAutograd's cache stores executable code without this communicator's
+    # declarations. Always realize that configuration; Inductor still caches
+    # the resulting numerical executable and kernels in compile_fx_inner.
+    with autograd_config.patch(enable_autograd_cache=False), config.patch(
+            size_asserts=False, alignment_asserts=False, scalar_asserts=False):
+        return compile_fx(gm, example_inputs, inner_compile=realize)
 
 
 def empty(*size, dtype=None, device='mps'):

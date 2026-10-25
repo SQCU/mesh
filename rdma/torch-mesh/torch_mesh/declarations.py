@@ -29,6 +29,39 @@ def _value(argument):
     return argument
 
 
+def operation(node):
+    """The underlying operator and metadata, including functionalized writes.
+
+    PyTorch wraps mutating custom operators until its final reinplacing pass.
+    Read those wrappers through PyTorch's own view metadata so an out-parameter
+    write has the same declaration as its eager call, without executing it.
+    """
+    from torch.utils._pytree import tree_map
+    from torch._higher_order_ops.auto_functionalize import (
+        auto_functionalized, auto_functionalized_v2, _generate_new_op_kwargs_from_bases)
+    if node.op != 'call_function':
+        return None, {}
+    wrapped = node.target in (auto_functionalized, auto_functionalized_v2)
+    target = node.args[0] if wrapped else node.target
+    schema = getattr(target, '_schema', None)
+    if schema is None:
+        return None, {}
+    if schema.name.split('::', 1)[0] not in ('torch_mesh', '_c10d_functional', '_c10d_functional_autograd'):
+        return target, {}
+    if wrapped:
+        values = tree_map(_value, dict(node.kwargs))
+        if node.target is auto_functionalized_v2:
+            bases = values.pop('_all_bases', [])
+            values, _ = _generate_new_op_kwargs_from_bases(
+                schema, values, bases, (), torch._library.utils.is_out(target))
+        args = {a.name: values.get(a.name, a.default_value) for a in schema.arguments}
+    else:
+        args = {a.name: tree_map(_value, node.args[i] if i < len(node.args)
+                                else node.kwargs.get(a.name, a.default_value))
+                for i, a in enumerate(schema.arguments)}
+    return target, args
+
+
 def _operation(name):
     names = {'sum': 'SUM', 'product': 'PRODUCT', 'max': 'MAX', 'min': 'MIN', 'avg': 'AVG'}
     if name not in names:
@@ -45,17 +78,15 @@ def lower(graph, *, forms=None):
     from . import backend, partition
     groups, trains = {}, {}
     for node in (graph.graph if hasattr(graph, 'graph') else graph).nodes:
-        schema = getattr(node.target, '_schema', None)
-        if node.op != 'call_function' or schema is None:
+        target, args = operation(node)
+        schema = getattr(target, '_schema', None)
+        if schema is None:
             continue
         namespace, name = schema.name.split('::', 1)
         if namespace not in ('_c10d_functional', '_c10d_functional_autograd', 'torch_mesh'):
             continue
         if name == 'wait_tensor':
             continue
-        args = {argument.name: (_value(node.args[i]) if i < len(node.args)
-                               else _value(node.kwargs.get(argument.name, argument.default_value)))
-                for i, argument in enumerate(schema.arguments)}
         group_name = args.get('group_name')
         if group_name is None:
             if namespace == 'torch_mesh':
