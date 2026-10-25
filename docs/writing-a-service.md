@@ -111,39 +111,28 @@ Both examples call it once, after they make their tensors.
 
 ## The step
 
-The step is a program on torch-mesh's tensor-parallel backend
-([rdma/torch-mesh/torch_mesh/partition.py](../rdma/torch-mesh/torch_mesh/partition.py)) over the mesh backend of
-torch.distributed ([examples/chain.py](../examples/chain.py), `step`). It holds the math. Everything that crosses ranks
-is the library's.
+The chain uses the library's [prepared chain](../rdma/torch-mesh/torch_mesh/chain.py) and
+[tiled kernel](../rdma/torch-mesh/torch_mesh/chain.metal). The example supplies weights, inputs, outputs and the
+number of steps. Its transport is the same prepared physical writes used by other library functions.
 
-- **Shares.** The rows of A and B are the mesh dimension `tp`, attached with the backend
-  (`partition.attach(mesh, tp=width)`, a unit a row). Each rank's block is the backend's (`partition.split`), never
-  the configuration's. The program makes no call about them: the collective's balancer sets them.
-- **y = tanh(x Aᵀ), column-parallel.** x is replicated and Aᵀ is a `RaggedShard(1)`, so the backend's dispatch gives
-  each rank its own columns of y, with no crossing.
-- **z = y B, row-parallel.** y's columns and B's rows are the same ragged shards, so each rank's product is a partial
-  sum of z (`Partial`). `redistribute` to `Replicate` adds the partials on every rank: the library's all-reduce, the one
-  crossing a step.
-- **x_{t+1} = e_{t+1} + tanh(z).** Every rank writes tanh(z), the step's output, and makes the next x from it on its
-  own.
-- **One graph.** The step is recorded once (`torch_mesh.record(step, k)`: torch.compile by the "mesh" backend of k
-  steps unrolled in one graph, and of the fewer that k does not divide in a graph of their own) and replayed
-  (`Recording.issue`). The backend's dispatch runs when a graph is compiled, never between its ops, and a replay's host
-  cost is paid once for k steps. The recorded step (`chain.stepper`) reads e_t from the input operand and writes
-  tanh(z) into the output operand at a step counter it holds on the GPU, so every replay is the same graph.
-- **The products.** The compile backend runs both products as `torch_mesh::linear`, torch-mesh's small-rows linear
-  kernel, one dispatch each at a host cost of about 2 µs where MPS's matmul costs about 12, with y's tanh folded in. It
-  reads a weight laid out as nn.Linear's, so the chain holds B transposed, its rows padded to whole 4-element loads.
-- **The crossing.** The all-reduce is partition's fused crossing (`partition._fused`), declared once for the run
-  (`torch_mesh.plan` with `partition.summed`): z's product publishes itself (`torch_mesh::linear_sum`: linear's
-  `linear_publish` writes each rank's part into its send segment through the collective's `mesh_step_write` and
-  releases it from its last threadgroup), and `sum_land` adds every rank's part, in rank order, once they land.
+Each rank gets its assigned rows of A and B. Preparation packs these rows into 8 by 8 tiles, with zeros at a
+partial tile's edge. This keeps all assigned columns, even when one rank's share is not a whole tile. It also
+sets the input, output, source and landing pages for every step before the chain starts.
+
+One kernel joins the preceding partial sums, writes that step's output, adds the next input, and runs both
+products. The first product's tanh stays inside the kernel. The second product writes its partial sum straight
+into its send pages and marks them ready. The next step reads the landed parts in rank order. A final join
+writes the last output. All rows from all steps stay in the output tensor.
+
+The tiled products are restored from the earlier fused chain. Their page bindings now name physical channels
+rather than peers, so parallel cables and routes through other nodes use the same interface. One step has one
+numerical dispatch; it does not build a graph, choose a route or allocate a result while running.
 
 ## The configuration
 
 The service takes one operand: a configuration file. It gives `steps`, `rows`, `width`, `seed`, the two
-`rotation_blocks`, and `steps_per_replay`, the k steps one replay runs. `observations` names the small record of
-completed calls used for the next work assignment. It names no tensor files, shares or rank: each rank's block is the
+`rotation_blocks`, and `steps_per_replay`, the k steps in one prepared write batch. `observations` supplies completed calls
+used for the next work assignment. It names no tensor files, shares or rank: each rank's block is the
 backend's. [examples/chain-service.json](../examples/chain-service.json) is a sample.
 
 `chain.inputs(configuration, steps, rows)` returns input and weight arrays in region memory: standard normal inputs,
@@ -166,9 +155,8 @@ Each rank prints one record at the end. It gives the backend's blocks, the rows,
 seconds together with rows a second and useful output bytes a second. The hourly record retains these numbers;
 it does not retain tensor contents.
 
-The step's graphs are compiled, every rank's compilation met, and each run once before the timed run, which replays
-from the first step again. The whole-run times include the input's broadcast and the first steps' other one-time
-costs. The caller runs the function directly. A separate observer uses the host clock and ordinary command-buffer
+The kernel, tiled weights, page assignments and physical write batches are prepared before the call.
+The whole-run times include the input broadcast and every step through the final output. The caller runs the function directly. A separate observer uses the host clock and ordinary command-buffer
 completion state. It does not add GPU timing events or wait for measurements inside the function.
 
 ## The LSTM
@@ -198,7 +186,7 @@ run.
 **The recorded tick.** Every tick after the first L - 1 runs every layer, so it is one function of no arguments
 (`Tick.stepper`): it reads its input at a step counter held on the GPU, runs each layer and the gather, writes the top
 layer's h into the output at the counter less L - 1 (rank 0), and advances the counter. `torch_mesh.record(step, k)`
-records it as the chain's step is, k ticks unrolled in one graph and the fewer that k does not divide in a graph of
+records k ticks unrolled in one graph and the fewer that k does not divide in a graph of
 their own, and the run issues every later tick through it (`Recording.issue`); the first L - 1 ticks, while the
 layers above have not begun, run as they are (`Tick.starting`). The service replays it before the run (k ticks and
 the rest, so each graph compiles on every rank) and runs the starting ticks once, so every path the run takes is

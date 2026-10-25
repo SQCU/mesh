@@ -1161,12 +1161,14 @@ static FusedForm &fused_form_of(const at::Tensor &x, const std::optional<at::Ten
 }
 
 static void release_crossings(int64_t comm);
+static void release_chains(int64_t comm);
 
 // every form on communicator `comm` released, its leases back to the region once the stream has passed them (the
 // group's shutdown: ProcessGroupMesh.shutdown, as destroy_process_group ends it)
 static void fused_release(int64_t comm) {
   std::lock_guard<std::mutex> guard(*fused_lock_);
   release_crossings(comm);
+  release_chains(comm);
   for (auto f = fused_forms_->begin(); f != fused_forms_->end();) f = f->second.comm == comm ? fused_forms_->erase(f) : std::next(f);
 }
 
@@ -1175,6 +1177,7 @@ static void fused_release(int64_t comm) {
 static void fused_reconfigure(int64_t comm) {
   std::lock_guard<std::mutex> guard(*fused_lock_);
   release_crossings(comm);
+  release_chains(comm);
   for (const auto &entry : *fused_forms_)
     TORCH_CHECK(entry.second.comm != comm || entry.second.j == 0,
                 "route reconfiguration requires a complete fused repeat train");
@@ -1377,6 +1380,129 @@ static void indexed_step_out(const at::Tensor &x, const std::optional<at::Tensor
   run_crossing(call, x, w, out);
 }
 
+// A complete recurrent chain uses the same prepared physical writes as a
+// crossing. Its restored processing kernel consumes the preceding landing and
+// publishes the next product in one dispatch. All buffers and offsets are
+// assigned here before execution.
+struct ChainStep {
+  std::array<id<MTLBuffer>, 4> buffers;
+  std::array<NSUInteger, 4> offsets;
+  uint32_t first, phase, last, previous_j, j;
+};
+struct ChainChunk {
+  PreparedWrites *plans;
+  size_t first, count;
+};
+struct PreparedChain {
+  int64_t comm;
+  std::vector<at::Tensor> held;
+  std::vector<ChainStep> steps;
+  std::vector<ChainChunk> chunks;
+  Dispatch dispatch;
+  MeshStream *stream;
+  uint32_t channels, phase = 0;
+};
+static auto *prepared_chains_ = new std::vector<std::unique_ptr<PreparedChain>>;
+
+static void release_chains(int64_t comm) {
+  for (auto &chain : *prepared_chains_) if (chain && chain->comm == comm) chain.reset();
+}
+static int64_t chain_slot() {
+  const int64_t index = prepared_chains_->size();
+  prepared_chains_->push_back(nullptr);
+  return index;
+}
+static void prepare_chain(int64_t index, int64_t kernel, const std::vector<at::Tensor> &operands,
+                          const std::vector<int64_t> &constants, int64_t groups, int64_t threads,
+                          const std::string &group, int64_t ranks, int64_t batch) {
+  const at::Tensor &input = operands[2], &output = operands[3], &x = operands[4];
+  const int64_t steps = input.size(0);
+  std::unique_lock<std::mutex> held(*fused_lock_);
+  FusedForm &f = fused_form_of(x, std::nullopt, 0, std::vector<int64_t>(ranks, x.size(0)), group, true, held);
+  std::vector<std::optional<at::Tensor>> buffers(operands.begin(), operands.end());
+  buffers.push_back(x);  // previous landing; replaced by its compiled page below
+  std::vector<int64_t> words = constants;
+  words.resize(10 + 24 * f.channels);
+  auto chain = std::make_unique<PreparedChain>(PreparedChain{f.comm, operands, {}, {},
+      encoded(kernel, buffers, words, 15, groups, 1, threads), &stream_of(at::mps::getCurrentMPSStream()), (uint32_t)f.channels});
+  at::Tensor previous = x;
+  uint32_t previous_j = 0;
+  const NSUInteger input_base = input.storage_offset() * input.element_size();
+  const NSUInteger output_base = output.storage_offset() * output.element_size();
+  const NSUInteger pitch = input.stride(0) * input.element_size();
+  auto append = [&](int64_t t, int64_t j, const at::Tensor &send, const at::Tensor &land, bool last) {
+    const std::array<at::Tensor, 4> bound{input, output, send, land};
+    ChainStep step{{}, {}, (uint32_t)(t == 0), (uint32_t)(2 * t), (uint32_t)last, previous_j, (uint32_t)j};
+    for (size_t k = 0; k < bound.size(); k++) {
+      step.buffers[k] = at::native::mps::getMTLBufferStorage(bound[k]);
+      step.offsets[k] = bound[k].storage_offset() * bound[k].element_size();
+    }
+    step.offsets[0] = input_base + std::min(t, steps - 1) * pitch;
+    step.offsets[1] = output_base + std::max<int64_t>(0, t - 1) * pitch;
+    chain->steps.push_back(step);
+  };
+  for (int64_t first = 0, turn = 0; first < steps; first += batch, turn++) {
+    const int64_t count = std::min(batch, steps - first), half = turn % 2;
+    FusedForm::Ring &ring = f.rings.at(count);
+    chain->chunks.push_back({ring.plans[half].get(), (size_t)first, (size_t)count});
+    for (int64_t j = 0; j < count; j++) {
+      append(first + j, j, ring.segments[half][j][f.rank], previous, false);
+      previous = ring.slots[half][j];
+      previous_j = (uint32_t)j;
+    }
+  }
+  append(steps, 0, x, previous, true);
+  (*prepared_chains_)[index] = std::move(chain);
+}
+
+static void chain_run(int64_t index) {
+  PreparedChain &chain = *(*prepared_chains_)[index];
+  Dispatch &d = chain.dispatch;
+  MeshStream *s = chain.stream;
+  at::mps::MPSStream *stream = s->mps;
+  const auto binding = [&](const PreparedWrites *plans, bool publication) {
+    const uint32_t count = !plans ? 0 : publication ? plans->records.publishes : plans->records.lands;
+    const auto *records = !plans ? nullptr : publication ? plans->publish.data() : plans->land.data();
+    const size_t offset = 10 + (publication ? 12 * chain.channels : 0);
+    for (uint32_t k = 0; k < chain.channels; k++) {
+      const auto *record = k < count ? records + k : nullptr;
+      for (int word = 0; word < 6; word++) {
+        const uint64_t value = record ? (*record)[word] : 0;
+        d.words[offset + 12 * k + 2 * word] = value & 0xffffffffu;
+        d.words[offset + 12 * k + 2 * word + 1] = value >> 32;
+      }
+    }
+  };
+  const auto dispatch = [&](const ChainStep &step) {
+    const size_t slots[4] = {2, 3, 6, 9};
+    for (size_t k = 0; k < 4; k++) d.bound[slots[k]] = step.buffers[k], d.offsets[slots[k]] = step.offsets[k];
+    d.words[0] = step.first, d.words[1] = chain.phase + step.phase, d.words[5] = step.last;
+    d.words[8] = step.previous_j, d.words[9] = step.j;
+    const Dispatch *item = &d;
+    const bool publishes = !step.last;
+    dispatch_sync(stream->queue(), ^{
+      @autoreleasepool {
+        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
+        declare_fused(encoder);
+        encode_in(encoder, *item);
+        if (publishes) s->published();
+      }
+    });
+  };
+  const PreparedWrites *previous = nullptr;
+  for (const ChainChunk &chunk : chain.chunks) {
+    execute_fused_writes(*chunk.plans);
+    binding(previous, false);
+    binding(chunk.plans, true);
+    dispatch(chain.steps[chunk.first]);
+    binding(chunk.plans, false);
+    for (size_t j = 1; j < chunk.count; j++) dispatch(chain.steps[chunk.first + j]);
+    previous = chunk.plans;
+  }
+  dispatch(chain.steps.back());
+  chain.phase += 2 * (uint32_t)(chain.steps.size() - 1);
+}
+
 // A declared set of routed writes. Bindings name physical channels, including
 // parallel cables; relay readiness stays in the compiled stream entries.
 static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> fused_writes_impl(
@@ -1545,6 +1671,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("fused_reconfigure", &fused_reconfigure);
   module.def("crossing_slot", &crossing_slot);
   module.def("prepare_crossing", &prepare_crossing);
+  module.def("chain_slot", &chain_slot);
+  module.def("prepare_chain", &prepare_chain);
+  module.def("chain_run", &chain_run);
   module.def("fused_prepare", &fused_prepare, pybind11::arg("x"), pybind11::arg("w"), pybind11::arg("dim"),
              pybind11::arg("sizes"), pybind11::arg("group"), pybind11::arg("adds"),
              pybind11::arg("repeats") = 1, pybind11::arg("batches") = 1);

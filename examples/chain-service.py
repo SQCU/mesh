@@ -8,8 +8,8 @@ import torch.distributed as dist
 import torch_mesh
 from torch.distributed.device_mesh import DeviceMesh
 from torch_mesh import partition
-from torch_mesh.backend import BROADCAST, ALLREDUCE, Call
-from torch_mesh.declarations import Preparations
+from torch_mesh.backend import BROADCAST, Call
+from torch_mesh import chain as sequence
 from torch_mesh.configuration import placement, bind, record
 from torch_mesh import _stream
 import time
@@ -60,24 +60,19 @@ def main():
     configuration = placement(mesh, 'tp', {'function': 'chain_sequence', 'width': width, 'steps': steps, 'rows': rows},
                             config['observations'])
     k = config['steps_per_replay']
-    at, b = chain.weights(mesh, folds, width)
+    a, b = chain.weights(mesh, folds, width)
     del folds
     E, O = (torch_mesh.empty(steps, rows, width, dtype=torch.half) for _ in range(2))
-    o, t = torch_mesh.empty(rows, width, dtype=torch.half).zero_(), torch.zeros(1, dtype=torch.int64, device='mps')
-    recording = torch_mesh.record(chain.stepper(E, O, o, t, at, b), k)
-    recording.issue(min(steps, k + steps % k))
-    o.zero_()
-    t.zero_()
+    group = mesh.get_group('tp')
+    groups, operands = sequence.operands(a, b, E, O, group, k)
     if rank == 0:
         E.copy_(torch.from_numpy(inputs[:]))
     torch_mesh.check_memory()
     torch.mps.synchronize()
-    group = mesh.get_group('tp')
-    groups, forms = recording.schedule(group, steps)
-    bind(configuration, [[Call(BROADCAST, E.numel(), E.dtype, root=0)], *groups], Preparations(forms))
+    bind(configuration, [[Call(BROADCAST, E.numel(), E.dtype, root=0)], *groups], lambda: sequence.prepare(operands))
     started = time.monotonic()
     dist.broadcast(E, src=0)
-    recording.issue(steps)
+    _stream.chain_run(operands[0])
     completion = _stream.completion()
     _stream.publish_boundary()
     summary = dict(blocks=partition.split(mesh, 'tp', width), rows=rows, width=width, steps=steps,
