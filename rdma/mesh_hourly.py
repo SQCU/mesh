@@ -171,6 +171,36 @@ def rank_results(out, tag):
     return result
 
 
+def aggregate_measurements(ranks):
+    """Whole-workload intervals and useful delivery rates from actual rank records."""
+    if not ranks or any(rank['exit'] != 0 for rank in ranks.values()):
+        return []
+    rows = {}
+    for rank in ranks.values():
+        for value in rank['measurements']:
+            key = (value.get('what'), value.get('requested_bytes'))
+            if 'seconds' in value or 'microseconds_per_call' in value:
+                rows.setdefault(key, []).append(value)
+    result = []
+    for (operation, requested), values in rows.items():
+        if len(values) != len(ranks):
+            continue
+        if operation is not None:
+            interval = max(value['microseconds_per_call'] for value in values) * 1e-6
+            useful = sum(value['useful_output_bytes_per_call_rank'] for value in values)
+            result.append({'operation': operation, 'requested_bytes': requested,
+                           'amortized_seconds_per_call': interval,
+                           'useful_bytes_per_call': useful,
+                           'useful_gigabytes_per_second': useful / interval / 1e9})
+        else:
+            seconds = max(value['seconds'] for value in values)
+            useful = values[0].get('function_feedback', {}).get('metrics', {}).get('useful_work_bytes')
+            result.append({'function_seconds': seconds,
+                           'useful_output_bytes': useful,
+                           'useful_gigabytes_per_second': useful / seconds / 1e9 if useful is not None else None})
+    return result
+
+
 def run_workload(item, nodes, paths, record, out, ordinal):
     import mesh_nodes as mesh
     tag = item['tag']
@@ -212,6 +242,7 @@ def run_workload(item, nodes, paths, record, out, ordinal):
         result['ranks'] = rank_results(out, tag)
         if len(result['ranks']) != len(selected) or any(v['exit'] != 0 for v in result['ranks'].values()):
             raise RuntimeError('one or more rank processes failed or lack a completion record')
+        result['metrics'] = aggregate_measurements(result['ranks'])
         result['status'] = 'completed'
     except Exception as error:
         result['error'] = str(error)
