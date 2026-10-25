@@ -1,7 +1,6 @@
 import json
 import os
 import sys
-import time
 
 import numpy as np
 import torch
@@ -12,6 +11,7 @@ from torch_mesh import partition
 from torch_mesh.backend import BROADCAST, ALLREDUCE, Call
 from torch_mesh.declarations import Preparations
 from torch_mesh.invocation import Invocation
+from torch_mesh.benchmarks import sequence, emit
 
 import chain
 
@@ -70,45 +70,31 @@ def main():
         E.copy_(torch.from_numpy(inputs[:]))
     torch_mesh.check_memory()
     torch.mps.synchronize()
-    dist.barrier()
-    half = steps // k // 2 * k
-    middle, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
     group = mesh.get_group('tp')
     groups, forms = recording.schedule(group, steps)
     invocation.realize([[Call(BROADCAST, E.numel(), E.dtype, root=0)], *groups], Preparations(forms))
-    invocation.begin()
-    began = time.perf_counter()
-    dist.broadcast(E, src=0)
-    recording.issue(half)
-    middle.record()
-    recording.issue(steps - half)
-    end.record()
-    hosted = time.perf_counter() - began
-    torch.mps.synchronize()
-    seconds = time.perf_counter() - began
-    feedback = invocation.completed(seconds, useful_work_bytes=O.numel() * O.element_size())
+    def execute():
+        dist.broadcast(E, src=0)
+        recording.issue(steps)
+
+    measured = invocation.run(execute, useful_work_bytes=O.numel() * O.element_size())
+    seconds, hosted = measured['host_ns'] * 1e-9, measured['submitted_ns'] * 1e-9
     torch_mesh.plan(mesh.get_group('tp'), [])
-    steady = middle.elapsed_time(end) / 1e3 / (steps - half)
     if rank == 0:
         torch.from_numpy(np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, width))).copy_(O)
     p = torch_mesh.empty(rows, width, dtype=torch.half).zero_()
-    dist.barrier()
     torch.mps.synchronize()
     torch_mesh.plan(group, [[Call(ALLREDUCE, p.numel(), p.dtype)]])
-    began = time.perf_counter()
-    for _ in range(steps):
-        dist.all_reduce(p)
-    torch.mps.synchronize()
-    crossing = time.perf_counter() - began
+    crossing = sequence(lambda: dist.all_reduce(p), steps, 1)['host_ns'] * 1e-9
     torch_mesh.plan(group, [])
     summary = dict(rank=rank, size=size, blocks=partition.split(mesh, 'tp', width), rows=rows, width=width, steps=steps,
                    steps_per_replay=k,
                    seconds=seconds, aggregate_rows_per_second=steps * rows / seconds,
-                   steady_aggregate_rows_per_second=rows / steady, per_stream_steps_per_second=steps / seconds,
-                   step_microseconds=seconds / steps * 1e6, steady_step_microseconds=steady * 1e6,
+                   per_stream_steps_per_second=steps / seconds,
+                   step_microseconds=seconds / steps * 1e6,
                    host_microseconds=hosted / steps * 1e6, crossing_microseconds=crossing / steps * 1e6,
-                   function_feedback=feedback)
-    print(json.dumps(summary), flush=True)
+                   function_feedback=measured['feedback'], timing_method=measured['timing_method'])
+    emit(summary)
     dist.destroy_process_group()
 
 

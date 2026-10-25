@@ -7,6 +7,7 @@ import copy
 import json
 import queue
 import threading
+from pathlib import Path
 
 
 class RolloutInbox:
@@ -50,17 +51,27 @@ class RolloutStats:
     object cannot install routes or change a live generation's page bindings.
     Store operations, including readiness queries, run only on the worker.
     """
-    def __init__(self, store, key, rank, ranks, controller):
+    def __init__(self, store, key, rank, ranks, controller, state_path=None):
         from controller import WholeFunctionController
         self.store, self.key, self.rank, self.ranks = store, key, rank, ranks
         self.controller = WholeFunctionController.of(controller.state()) if rank == 0 else None
+        self.state_path = Path(state_path) if state_path is not None and rank == 0 else None
         self.outgoing, self.incoming = queue.SimpleQueue(), queue.SimpleQueue()
         self.stopped = threading.Event()
+        self.wake = threading.Event()
+        self.pending, self.submitted = 0, 0
         self.thread = threading.Thread(target=self._run, name='mesh-rollout-stats', daemon=True)
         self.thread.start()
 
     def submit(self, records):
-        self.outgoing.put(copy.deepcopy(records))
+        self.outgoing.put((copy.deepcopy(records), None))
+        self.wake.set()
+
+    def observe(self, record, timer):
+        """Transfer observation ownership; even the final timer drains on the worker."""
+        self.pending += 1
+        self.outgoing.put(([copy.deepcopy(record)], timer))
+        self.wake.set()
 
     def poll(self):
         records = []
@@ -74,20 +85,45 @@ class RolloutStats:
             records.append(record)
 
     def close(self):
+        """Drain statistics at process shutdown, after all numerical work has ended.
+
+        No invocation calls this. Nonroots only publish their own final batch;
+        the store owner remains alive to consume those publications and persist
+        the model used by the next service invocation.
+        """
         self.stopped.set()
+        self.wake.set()
+        self.thread.join()
+        self.poll()
 
     def _run(self):
         sent, published, received, observed = 0, 0, [0] * self.ranks, 0
         inbox = RolloutInbox(self.ranks) if self.rank == 0 else None
+        waiting, announced = [], False
         try:
-            while not self.stopped.is_set():
+            while True:
                 while True:
                     try:
-                        records = self.outgoing.get_nowait()
+                        records, timer = self.outgoing.get_nowait()
                     except queue.Empty:
                         break
+                    waiting.append((records, timer))
+                remaining = []
+                for records, timer in waiting:
+                    if timer is not None:
+                        if not timer.ready():
+                            remaining.append((records, timer))
+                            continue
+                        start, end = timer.read()
+                        records[0]['seconds'] = end - start
+                        self.pending -= 1
                     self.store.set(f'{self.key}/rank/{self.rank}/{sent}', json.dumps(records))
                     sent += 1
+                    self.submitted += len(records)
+                waiting = remaining
+                if self.stopped.is_set() and not waiting and not announced:
+                    self.store.set(f'{self.key}/finished/{self.rank}', str(sent))
+                    announced = True
                 if self.rank == 0:
                     for rank in range(self.ranks):
                         key = f'{self.key}/rank/{rank}/{received[rank]}'
@@ -103,14 +139,30 @@ class RolloutStats:
                         state = {'controller': self.controller.state(), 'observed': observed,
                                  'episodes': [row['episode'] for row in completed]}
                         self.store.set(f'{self.key}/state/{published}', json.dumps(state))
+                        if self.state_path is not None:
+                            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+                            temporary = self.state_path.with_suffix(self.state_path.suffix + '.tmp')
+                            temporary.write_text(json.dumps(state['controller'], sort_keys=True) + '\n')
+                            temporary.replace(self.state_path)
                         published += 1
                         self.incoming.put(state)
+                    final_keys = [f'{self.key}/finished/{rank}' for rank in range(self.ranks)]
+                    if announced and self.store.check(final_keys):
+                        if all(received[r] == int(self.store.get(key)) for r, key in enumerate(final_keys)):
+                            if inbox.pending:
+                                raise ValueError('terminated rollouts have incomplete rank evidence')
+                            break
                 else:
+                    if announced:
+                        break
                     key = f'{self.key}/state/{published}'
                     while self.store.check([key]):
                         self.incoming.put(json.loads(self.store.get(key)))
                         published += 1
                         key = f'{self.key}/state/{published}'
-                self.stopped.wait(.005)
+                # A shutdown Event is already set during final draining; it must
+                # not turn this observer into a busy loop.
+                self.wake.wait(.005)
+                self.wake.clear()
         except Exception as exc:
             self.incoming.put(exc)

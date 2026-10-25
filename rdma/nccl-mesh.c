@@ -1875,6 +1875,8 @@ static uint64_t span_units(const struct mesh_span_plan *p, uint64_t offset, uint
 }
 
 struct steps {
+  _Atomic uint32_t references;
+  struct steps *source; /* immutable compiler tables retained by an issued binding */
   struct mesh_step *steps;
   uint32_t count;
   unsigned char *done;
@@ -2037,39 +2039,38 @@ static ncclResult_t operands_check(const struct call *list, size_t n) {
 
 static void steps_free(struct steps *s) {
   if (!s) return;
-  free(s->buffer); free(s->steps); free(s->done); free(s->channel); free(s->entry); free(s->cable); free(s->prior_first); free(s->prior); free(s->read); free(s->fresh);
-  free(s->needed); free(s->extent); free(s->demand); free(s->route_units); free(s->consume_order); free(s->consumption); free(s->retired_first); free(s->retired);
+  if (atomic_fetch_sub_explicit(&s->references, 1, memory_order_acq_rel) != 1) return;
+  free(s->buffer); free(s->done); free(s->channel); free(s->entry); free(s->read); free(s->fresh);
+  free(s->needed); free(s->consumption);
+  if (s->source) steps_free(s->source);
+  else {
+    free(s->steps); free(s->cable); free(s->prior_first); free(s->prior);
+    free(s->extent); free(s->demand); free(s->route_units); free(s->consume_order);
+    free(s->retired_first); free(s->retired);
+  }
   free(s);
 }
 
-/* a compiled call's steps for one issue of it (group_bound): its steps, their range dependencies and its receives of no
-   bytes done, copied; its buffers, channels and entries the issue's own (place_group, schedule_laid) */
-static struct steps *steps_copy(const struct steps *from) {
+/* An issue owns mutable bindings only. Compiler instructions and dependency
+   proofs remain shared, retaining their generation even after a plan swap. */
+static struct steps *steps_copy(struct steps *from) {
   const size_t most = from->count + 1;
   struct steps *s = calloc(1, sizeof *s);
-  if (s) *s = (struct steps){.count = from->count, .buffers = from->buffers, .initialized = from->initialized, .priors = from->priors};
-  if (!s || !(s->steps = malloc(most * sizeof *s->steps)) || !(s->done = malloc(most)) || !(s->cable = malloc(most * sizeof *s->cable)) ||
-      !(s->prior_first = malloc(most * sizeof *s->prior_first)) || !(s->prior = malloc((from->priors + 1) * sizeof *s->prior)) ||
+  if (s) {
+    *s = (struct steps){.references = 1, .source = from, .count = from->count, .buffers = from->buffers,
+      .initialized = from->initialized, .priors = from->priors, .steps = from->steps, .cable = from->cable,
+      .prior_first = from->prior_first, .prior = from->prior, .extent = from->extent,
+      .consume_order = from->consume_order, .retired_first = from->retired_first, .retired = from->retired};
+    atomic_fetch_add_explicit(&from->references, 1, memory_order_relaxed);
+  }
+  if (!s || !(s->done = malloc(most)) ||
       !(s->channel = calloc(most, sizeof *s->channel)) || !(s->entry = calloc(most, sizeof *s->entry)) ||
       !(s->buffer = calloc(s->buffers, sizeof *s->buffer)) ||
-      !(s->consumption = calloc(most, sizeof *s->consumption)) ||
-      (from->consume_order && !(s->consume_order = malloc(most * sizeof *s->consume_order))) ||
-      (from->retired_first && (!(s->retired_first = malloc(most * sizeof *s->retired_first)) ||
-        !(s->retired = malloc(((size_t)from->retired_first[from->count] + 1) * sizeof *s->retired)))) ||
-      (from->extent && !(s->extent = malloc(s->buffers * sizeof *s->extent)))) {
+      !(s->consumption = calloc(most, sizeof *s->consumption))) {
     steps_free(s);
     return NULL;
   }
-  memcpy(s->steps, from->steps, from->count * sizeof *s->steps); memcpy(s->done, from->done, from->count);
-  memcpy(s->cable, from->cable, from->count * sizeof *s->cable);
-  memcpy(s->prior_first, from->prior_first, (from->count + 1) * sizeof *s->prior_first);
-  memcpy(s->prior, from->prior, from->priors * sizeof *s->prior);
-  if (from->extent) memcpy(s->extent, from->extent, s->buffers * sizeof *s->extent);
-  if (from->consume_order) memcpy(s->consume_order, from->consume_order, from->count * sizeof *s->consume_order);
-  if (from->retired_first) {
-    memcpy(s->retired_first, from->retired_first, most * sizeof *s->retired_first);
-    memcpy(s->retired, from->retired, from->retired_first[from->count] * sizeof *s->retired);
-  }
+  memcpy(s->done, from->done, from->count);
   return s;
 }
 
@@ -2086,7 +2087,7 @@ static ncclResult_t write_steps(struct call *c) {
   const size_t room = (size_t)count + 1;
   struct steps *s = calloc(1, sizeof *s);
   struct mesh_transfer *transfers = malloc(room * sizeof *transfers);
-  if (s) *s = (struct steps){.count = (uint32_t)count, .buffers = 1, .initialized = 1};
+  if (s) *s = (struct steps){.references = 1, .count = (uint32_t)count, .buffers = 1, .initialized = 1};
   if (!s || !transfers || !(s->steps = calloc(room, sizeof *s->steps)) || !(s->done = calloc(room, 1)) ||
       !(s->channel = calloc(room, sizeof *s->channel)) || !(s->entry = calloc(room, sizeof *s->entry)) ||
       !(s->cable = calloc(room, sizeof *s->cable)) || !(s->consumption = calloc(room, sizeof *s->consumption)) ||
@@ -2120,7 +2121,7 @@ static ncclResult_t bind_routed_steps(struct call *c, const uint32_t *first, con
     struct mesh_routed_rank *rank = physical.rank + comm->rank;
     const size_t room = (size_t)rank->count + 1;
     struct steps *s = calloc(1, sizeof *s);
-    if (s) *s = (struct steps){.count = rank->count, .buffers = rank->buffers, .initialized = rank->initialized};
+    if (s) *s = (struct steps){.references = 1, .count = rank->count, .buffers = rank->buffers, .initialized = rank->initialized};
     if (!s || !(s->steps = calloc(room, sizeof *s->steps)) || !(s->done = calloc(room, 1)) ||
         !(s->channel = calloc(room, sizeof *s->channel)) || !(s->entry = calloc(room, sizeof *s->entry)) ||
         !(s->cable = calloc(room, sizeof *s->cable)) || !(s->consumption = calloc(room, sizeof *s->consumption)) ||

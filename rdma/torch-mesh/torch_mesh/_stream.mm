@@ -19,6 +19,7 @@
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <deque>
 #include <functional>
 #include <map>
@@ -236,31 +237,11 @@ static void checked(int64_t result) {
   TORCH_CHECK(!result, "libnccl-mesh: ", ncclGetErrorString((ncclResult_t)result), ": ", ncclGetLastError(nullptr));
 }
 
-// The evidence torch_mesh/evidence.py reads (design/heterogeneity.md R2, R3): on a watched communicator, a timing
-// event of torch's pool recorded on its stream as each collective is issued (0: the GPU has finished the work before
-// it) and once its issue, and an issued group's wait, are encoded (1: the GPU has passed it), as an issued group's wait
-// begins (0: the work between its issue and its wait), and at each step's boundary (2), in order.  Each mark commits
-// torch's command buffer (the pool's synchronizing record), so no stretch holds the GPU idle while work encoded before
-// a mark waits for a later commit: on cp under the balancer such waits read as the Mini's work, 150 ms of its 180 at
-// one of 32 units.
-static std::unordered_map<int64_t, std::vector<std::pair<int64_t, int64_t>>> marks_;
-
-static void mark(int64_t comm, int64_t kind) {
-  if (marks_.empty()) return;
-  auto found = marks_.find(comm);
-  if (found == marks_.end()) return;
-  auto pool = at::mps::getMPSEventPool();
-  const auto id = pool->acquireEvent(true);
-  pool->recordEvent(id, true);
-  found->second.emplace_back(kind, (int64_t)id);
-}
-
 // A group encoded in one turn of torch's stream queue: its command buffer and open encoder, the group encoded into them,
 // and the commit rule applied where it published.  Its workspace (`held`) is held:
 // split, it is issued and not completed, its ticket (0: complete at once) keeping them until the library retires it.
 static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &call, bool split, int64_t comm, std::vector<at::Tensor> held) {
   const auto *encode = &call;
-  mark(comm, 0);
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
   MeshStream *s = &stream_of(stream);
   s->scratch = std::move(held);
@@ -279,7 +260,6 @@ static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &c
   s->streamed = true;
   s->retire(issue.ticket && !result ? issue.ticket : 0, std::exchange(s->scratch, {}));
   checked(result);
-  mark(comm, 1);
   return issue.ticket;
 }
 
@@ -327,9 +307,7 @@ class MeshWork : public c10d::Work {
   void finish(uint64_t ns = 0) {
     if (finished_) return;
     finished_ = true;
-    mark(comm_, 0);
     complete(ticket_, ns);
-    mark(comm_, 1);
   }
   uint64_t ticket_;
   std::vector<at::Tensor> outputs_;
@@ -1502,46 +1480,46 @@ static void fused_published() {
 }
 
 
-// Optional whole-function microprofile. Markers commit without waiting; read
-// after ready() reports completion, without a synchronization. Use Metal's GPU timestamps,
-// not the scheduling time of a CPU event callback. Each buffer is retained
-// until the profile is destroyed, and repeated reads do not consume a signal.
-struct GPUTimings {
+// Observe completion of the command buffers execution already uses. Observation
+// never ends an encoder, signals a GPU event, commits, or waits. Calls sharing a
+// command buffer share its completion granularity. These are host-observed
+// completion times, including callback delivery, not isolated GPU durations.
+struct CompletionTimings {
   at::mps::MPSStream *const stream = at::mps::getCurrentMPSStream();
-  id<MTLSharedEvent> event = [stream->device() newSharedEvent];
-  std::vector<id<MTLCommandBuffer>> buffers;
-  ~GPUTimings() {
-    for (id<MTLCommandBuffer> buffer : buffers) [buffer release];
-    [event release];
+  struct Stamp { double seconds = 0; std::atomic<int> state{0}; };
+  std::vector<std::shared_ptr<Stamp>> stamps;
+  static double now() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
   }
   void mark() {
-    const Deadline deadline("GPU timing marker: a turn of torch's queue");
+    auto stamp = std::make_shared<Stamp>();
+    if (stamps.empty()) {
+      stamp->seconds = now();
+      stamp->state.store(1, std::memory_order_release);
+      stamps.push_back(stamp);
+      return;
+    }
+    stamps.push_back(stamp);
+    const Deadline deadline("observe the existing command buffer");
     dispatch_sync(stream->queue(), ^{
-      @autoreleasepool {
-        stream->endKernelCoalescing();
-        id<MTLCommandBuffer> buffer = stream->commandBuffer().rootCommandBuffer;
-        [buffer encodeSignalEvent:event value:buffers.size() + 1];
-        buffers.push_back([buffer retain]);
-        stream->synchronize(at::mps::SyncType::COMMIT);
-      }
+      stream->addCompletedHandler(^(id<MTLCommandBuffer> buffer) {
+        stamp->seconds = now();
+        stamp->state.store(buffer.status == MTLCommandBufferStatusError ? -1 : 1, std::memory_order_release);
+      });
     });
   }
   bool ready() const {
-    for (id<MTLCommandBuffer> buffer : buffers) {
-      TORCH_CHECK(buffer.status != MTLCommandBufferStatusError, "GPU timing command buffer failed: ",
-                  buffer.error ? buffer.error.localizedDescription.UTF8String : "unknown Metal error");
-      if (buffer.status != MTLCommandBufferStatusCompleted) return false;
+    for (const auto &stamp : stamps) {
+      const int state = stamp->state.load(std::memory_order_acquire);
+      TORCH_CHECK(state >= 0, "observed command buffer failed");
+      if (!state) return false;
     }
-    return !buffers.empty();
+    return stamps.size() > 1;
   }
   std::vector<double> read() const {
+    TORCH_CHECK(ready(), "completion observations are still pending");
     std::vector<double> out;
-    for (id<MTLCommandBuffer> buffer : buffers) {
-      TORCH_CHECK(buffer.status == MTLCommandBufferStatusCompleted, "GPU timings require completed function markers");
-      const double end = buffer.GPUEndTime;
-      TORCH_CHECK(end > 0 && (out.empty() || end >= out.back()), "GPU timing markers are not monotone");
-      out.push_back(end);
-    }
+    for (const auto &stamp : stamps) out.push_back(stamp->seconds);
     return out;
   }
 };
@@ -1549,8 +1527,8 @@ struct GPUTimings {
 // The group's calls (torch_mesh/backend.py): `issue` a group of calls, issued and not completed where `split` (a
 // MeshWork to wait on, its outputs `outputs`), else None (complete).
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
-  pybind11::class_<GPUTimings>(module, "GPUTimings")
-    .def(pybind11::init<>()).def("mark", &GPUTimings::mark).def("ready", &GPUTimings::ready).def("read", &GPUTimings::read);
+  pybind11::class_<CompletionTimings>(module, "CompletionTimings")
+    .def(pybind11::init<>()).def("mark", &CompletionTimings::mark).def("ready", &CompletionTimings::ready).def("read", &CompletionTimings::read);
   module.def("pipeline", &pipeline);
   module.def("linear_source", &linear_source);
   module.def("linear_split", &linear_split);
@@ -1561,14 +1539,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
              pybind11::arg("gx"), pybind11::arg("gy"), pybind11::arg("threads"), pybind11::arg("fused") = false);
   module.def("timed", &timed);
   module.def("sequence", &sequence);
-  module.def("watch", [](int64_t comm) { marks_.try_emplace(comm); });
-  module.def("mark", &mark);
-  module.def("take", [](int64_t comm) {
-    auto found = marks_.find(comm);
-    std::vector<std::pair<int64_t, int64_t>> out;
-    if (found != marks_.end()) out.swap(found->second);
-    return out;
-  });
   module.def("issue", [](const std::vector<Call> &calls, int64_t comm, bool split, std::vector<at::Tensor> outputs) {
     return work_of(issue(calls, comm, split, true), std::move(outputs), comm);
   });

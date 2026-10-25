@@ -30,6 +30,22 @@ blocking newer complete episodes behind an older missing record. The in-process
 records and polls a local inbox; a missing peer does not stop function execution.
 Several completed episodes can enter one update.
 
+The worker also owns pending completion observations, so the last submitted
+function is collected without another call to the numerical iterator. Observation
+attaches a host completion handler to the command buffers already in use. It
+does not signal an event, end an encoder, commit or synchronize the GPU. Its
+precision is command-buffer completion, including callback delivery; coalesced
+calls are not assigned fictitious isolated GPU timings. The old per-collective
+event observer has been removed. Statistics drain at process shutdown, after
+numerical execution, so rank zero can persist the model before its store exits.
+
+Chain and LSTM invocations use this same worker and the shared sequence timing
+function. Their former blocking elapsed-time gather and private timing loops
+are removed. The next service invocation restores the learned compute and route
+operands; hourly records include the operands actually executed. TP/EP/CP use
+the same sequence observer, and configuration realizes the declared number of
+calls before entering that sequence.
+
 The delayed estimator fits a local response model with weights
 `target_probability / behavior_probability` over the declared compiled-plan
 sampling support. Probabilities use Q40 integer masses; behavior support must be
@@ -45,8 +61,10 @@ It no longer performs a CPU all-gather or discards old-proposal timings on each
 iteration. `realize_evaluations` explicitly applies a proposal during construction
 of the next generation, after the previous generation's uses have retired. It is
 not inserted between iterations or repeated `evaluations` sequences. Installing new generations concurrently with
-execution still requires independently retained compiled bindings; the present
-mutable communicator does not yet provide that activation interface.
+execution still requires a common activation sequence across ranks. Native
+issued bindings now retain their immutable compiler tables, so freeing or
+replacing the compiler plan does not destroy an in-flight issue's tables. This
+is not yet a cross-rank activation protocol.
 
 `declare(comm, calls)` calls the common native `ncclMeshCommPlan` with the complete
 typed graph, retaining count and explicit-demand arrays through configuration.

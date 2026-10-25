@@ -177,10 +177,10 @@ class Preparations:
             if len(sizes) > 1 and getattr(group, 'handle', 0):
                 self.forms.append((prototype(x), prototype(w), dim, list(sizes), name, adds, repeats, count))
 
-    def __call__(self):
+    def __call__(self, repetitions=1):
         from . import _stream
         for form in self.forms:
-            _stream.fused_prepare(*form)
+            _stream.fused_prepare(*form[:-1], form[-1] * repetitions)
 
 
 class Function:
@@ -236,9 +236,9 @@ class Function:
         self.preparations = Preparations(forms)
         return declarations.get(group.group_name, [])
 
-    def prepare(self):
+    def prepare(self, repetitions=1):
         """Bind source/landing generations before entering the numerical call."""
-        self.preparations()
+        self.preparations(repetitions)
 
     def __call__(self):
         if self.run is None:

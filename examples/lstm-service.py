@@ -1,7 +1,6 @@
 import json
 import os
 import sys
-import time
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +13,7 @@ from torch_mesh import partition
 from torch_mesh.backend import BROADCAST, Call
 from torch_mesh.declarations import Preparations
 from torch_mesh.invocation import Invocation
+from torch_mesh.benchmarks import emit
 
 import chain
 import lstm
@@ -70,42 +70,34 @@ def main():
         X.copy_(torch.from_numpy(inputs[:]))
     torch_mesh.check_memory()
     torch.mps.synchronize()
-    dist.barrier()
-    ticks, half = steps + L - 1, steps // k // 2 * k
-    middle, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
+    ticks = steps + L - 1
     group = mesh.get_group('tp')
     groups, forms = recording.schedule(group, steps)
     initial = [partition.gathered(tick.mine, 2, tick.sizes, group)] * (L - 1)
     initial_forms = [(tick.mine, None, 2, tick.sizes, group.group_name, False, 1)] * (L - 1)
     invocation.realize([[Call(BROADCAST, X.numel(), X.dtype, root=0)], *initial, *groups],
                        Preparations([*initial_forms, *forms]))
-    invocation.begin()
-    began = time.perf_counter()
-    dist.broadcast(X, src=0)
-    for s in range(L - 1):
-        tick.starting(s, X[s])
-    recording.issue(half)
-    middle.record()
-    recording.issue(steps - half)
-    end.record()
-    hosted = time.perf_counter() - began
-    torch.mps.synchronize()
-    seconds = time.perf_counter() - began
-    feedback = invocation.completed(seconds, useful_work_bytes=steps * rows * H * torch.half.itemsize)
+    def execute():
+        dist.broadcast(X, src=0)
+        for s in range(L - 1):
+            tick.starting(s, X[s])
+        recording.issue(steps)
+
+    measured = invocation.run(execute, useful_work_bytes=steps * rows * H * torch.half.itemsize)
+    seconds, hosted = measured['host_ns'] * 1e-9, measured['submitted_ns'] * 1e-9
     torch_mesh.plan(mesh.get_group('tp'), [])
-    steady = middle.elapsed_time(end) / 1e3 / (steps - half)
     if O is not None:
         torch.from_numpy(np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, H))).copy_(O)
     blocks = partition.split(mesh, 'tp', H)
     summary = dict(rank=rank, size=size, blocks=blocks, steps_per_replay=k, layers=L, rows=rows,
                    input_width=KIN, width=H, steps=steps, ticks=ticks, seconds=seconds,
                    aggregate_rows_per_second=steps * rows / seconds,
-                   steady_aggregate_rows_per_second=rows / steady, per_stream_steps_per_second=steps / seconds,
-                   tick_microseconds=seconds / ticks * 1e6, steady_tick_microseconds=steady * 1e6,
+                   per_stream_steps_per_second=steps / seconds,
+                   tick_microseconds=seconds / ticks * 1e6,
                    host_microseconds=hosted / ticks * 1e6, latency_ticks=L,
                    sent_bytes_per_tick=(size - 1) * rows * L * blocks[rank] * torch.half.itemsize,
-                   function_feedback=feedback)
-    print(json.dumps(summary), flush=True)
+                   function_feedback=measured['feedback'], timing_method=measured['timing_method'])
+    emit(summary)
     dist.destroy_process_group()
 
 

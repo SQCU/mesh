@@ -1,37 +1,36 @@
 """Persistent whole-sequence feedback at a service's invocation boundary."""
-import hashlib
 import json
 from pathlib import Path
 
 import torch.distributed as dist
 
 from controller import WholeFunctionController
+from rollout import RolloutStats
 from . import partition
 
 
 class Invocation:
     """Restore placement before operands are built; observe only the full call.
 
-    The bootstrap store carries configuration/state and completed elapsed times.
-    It carries no tensor-consumption receipts and supplies no page-reuse proof.
-    A proposal is persisted for the next invocation; it never changes a running
-    sequence or ranks alternatives by accepting/rejecting a measured candidate.
+    Bootstrap realizes configuration. The same asynchronous statistics worker
+    used by partition.evaluations observes completed whole functions and persists
+    the next configuration. Numerical execution never gathers elapsed times.
     """
     serial = 0
 
     def __init__(self, mesh, name, workload, state_path):
         self.mesh, self.name, self.workload = mesh, name, workload
-        self.group, self.path = mesh.get_group(name), Path(state_path)
+        self.group, self.path = mesh.get_group(name), Path(state_path).expanduser()
         self.rank, self.size = self.group.rank(), self.group.size()
         self.store = dist.distributed_c10d._get_default_store()
         Invocation.serial += 1
-        identity = hashlib.sha256(str(self.path).encode()).hexdigest()[:16]
-        self.key = f'mesh/invocation/{self.group.group_name}/{identity}/{Invocation.serial}'
+        self.key = f'mesh/invocation/{self.group.group_name}/{name}/{Invocation.serial}'
         if self.rank == 0:
             self.store.set(self.key + '/state', self.path.read_bytes() if self.path.exists() else b'null')
         state = json.loads(self.store.get(self.key + '/state'))
         self.controller = WholeFunctionController.of(state) if state is not None else None
         self.proposal, self.preparations = None, None
+        self.sequence, self.feedback = 0, None
         if self.controller is not None:
             if self.controller.workload != workload:
                 raise ValueError('stored invocation state describes another complete function')
@@ -64,6 +63,12 @@ class Invocation:
         self.preparations = prepare
         if prepare is not None:
             prepare()
+        self.feedback = RolloutStats(self.store, self.key + '/rollouts', self.rank, self.size,
+                                     self.controller, state_path=self.path)
+        workers = getattr(self.group, '_rollout_workers', None)
+        if workers is None:
+            self.group._rollout_workers = workers = []
+        workers.append(self.feedback)
         return self.proposal
 
     def begin(self):
@@ -72,16 +77,19 @@ class Invocation:
         self.group.plan_active(True)
 
     def completed(self, seconds, **evidence):
-        """Submit completed rank-max latency, then persist the next configuration."""
+        """Enqueue this rank's evidence without accessing the store or peers."""
         self.group.plan_active(False)
-        self.store.set(f'{self.key}/seconds/{self.rank}', json.dumps(float(seconds)).encode())
-        durations = [float(self.store.get(f'{self.key}/seconds/{rank}')) for rank in range(self.size)]
-        next_proposal = self.controller.completed(max(durations), proposal=self.proposal,
-                                                   finishes={'ranks': durations}, **evidence)
-        if self.rank == 0:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.path.with_name(self.path.name + '.tmp')
-            temporary.write_text(json.dumps(self.controller.state(), sort_keys=True) + '\n')
-            temporary.replace(self.path)
-        return {'executed_proposal': self.proposal['id'], 'seconds': max(durations),
-                'next_proposal': next_proposal['id'], 'state': str(self.path)}
+        episode = f'{self.proposal["id"]}:{self.sequence}'
+        self.sequence += 1
+        self.feedback.submit([{'episode': episode, 'proposal': self.proposal,
+                               'workload': self.workload, 'seconds': float(seconds), 'metrics': evidence}])
+        return {'executed_proposal': self.proposal['id'], 'local_seconds': seconds,
+                'episode': episode, 'proposal': self.proposal, 'metrics': evidence, 'state': str(self.path)}
+
+    def run(self, call, **evidence):
+        """Measure a complete service call through the shared sequence runner."""
+        from .benchmarks import sequence
+        self.begin()
+        measured = sequence(call, 1, 1)
+        measured['feedback'] = self.completed(measured['host_ns'] * 1e-9, **evidence)
+        return measured

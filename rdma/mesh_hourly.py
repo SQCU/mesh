@@ -183,7 +183,9 @@ def run_workload(item, nodes, paths, record, out, ordinal):
         folder = f'mesh-runs/hourly/{record["run"]}/{tag}'
         if item['kind'] == 'example':
             configuration = paths['metal-microbench'] / item['configuration']
-            mesh.send(selected, folder, {'configuration.json': configuration.read_bytes()})
+            operands = json.loads(configuration.read_text())
+            operands['controller_state'] = f'~/.cache/mesh/controllers/{tag}.json'
+            mesh.send(selected, folder, {'configuration.json': json.dumps(operands).encode()})
             build = (f'cd {mesh.home_path(folder)} && PYTHONPATH={mesh.home_path(selected[0].source + "/rdma")} '
                      f'{mesh.PY} -m mesh_workloads build {mesh.home_path(selected[0].source + "/examples")} '
                      f'{shlex.quote(item["program"].removesuffix("-service"))} configuration.json '

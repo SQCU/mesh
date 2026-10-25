@@ -29,7 +29,7 @@ import torch.distributed as dist
 from torch._C._distributed_c10d import ReduceOp, _create_work_from_future
 from torch.futures import Future
 
-from . import _stream, empty, evidence  # _stream's kernels for torch's functional collectives on MPS register as it loads
+from . import _stream, empty  # _stream's kernels for torch's functional collectives on MPS register as it loads
 
 import mesh  # noqa: E402  (rdma/mesh.py, on the path the mesh's install gives the environment: its _mesh_c)
 from routing import Fabric
@@ -211,19 +211,13 @@ class ProcessGroupMesh(dist.ProcessGroup):
     def _issue(self, calls, result, split=False, backs=()):
         """One NCCL group of `calls` (_stream.mm issue), `result` what its Work holds: issued and not completed where
         `split` (an async op) and nothing is to be written back after it, else complete; `backs` then run.  Between
-        start_coalescing and end_coalescing the calls join the coalesced group instead.  The evidence's marks of a
-        host-path group are taken here (a Metal-path group's on torch's stream, by _stream.mm)."""
+        start_coalescing and end_coalescing the calls join the coalesced group instead."""
         if self._pending is not None:
             self._pending.append((calls, result, backs))
             return done(result)
-        host = not any(t is not None and t.device.type == 'mps' for call in calls for t in (*call[1], *call[2]))
-        if host:
-            evidence.mark(self, True)
         work = _stream.issue(calls, self.handle, bool(split) and not backs, _flat(result))
         for back in backs:
             back()
-        if host:
-            evidence.mark(self, False)
         if work is None:
             return done(result)
         return work

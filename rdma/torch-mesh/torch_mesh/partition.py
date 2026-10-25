@@ -1119,30 +1119,7 @@ def _replan(mesh, name):
 _BALANCING = {}
 
 
-class _HostFunctionTimings:
-    """Synchronous CPU functions use the same complete-call timing contract."""
-    def __init__(self):
-        self.times = []
-
-    def mark(self):
-        import time
-        self.times.append(time.perf_counter())
-
-    def ready(self):
-        return len(self.times) == 2
-
-    def read(self):
-        return self.times
-
-
-def _function_timings(mesh):
-    if mesh.device_type == 'mps':
-        from . import _stream
-        return _stream.GPUTimings()
-    return _HostFunctionTimings()
-
-
-def evaluations(mesh, name, count, *, workload=None, controller=None, feedback=None):
+def evaluations(mesh, name, count, *, workload=None, controller=None):
     """Yield complete function invocations under immutable configuration operands.
 
     A yield must enclose the entire declared function, including communication and
@@ -1170,9 +1147,9 @@ def evaluations(mesh, name, count, *, workload=None, controller=None, feedback=N
         proposal = controller.proposal()
         if list(proposal['parts'][name]) != o.parts.tolist():
             raise ValueError('the initial whole-function proposal must describe the attached partition')
-        held.update(controller=controller, realized=proposal, sequence=0, pending=[],
-                    observed=0, submitted=0, generation=0)
-        held['feedback'] = feedback if feedback is not None else _rollout_feedback(group, name, controller)
+        held.update(controller=controller, realized=proposal, sequence=0,
+                    observed=0, generation=0)
+        held['feedback'] = _rollout_feedback(group, name, controller)
         if controller.topology is not None:
             group.reset_fused_configuration()
             controller.install_routes(group.comm, proposal)
@@ -1182,47 +1159,40 @@ def evaluations(mesh, name, count, *, workload=None, controller=None, feedback=N
         raise ValueError('a partition controller cannot mix different whole-function workloads or controllers')
     if (mesh, name) in _PLANS:
         group.plan_active(False)
-    for k in range(count):
-        _balance(mesh, name, held, group)
-        proposal = held['realized']
-        sequence, timer = held['sequence'], _function_timings(mesh)
-        held['sequence'] += 1
-        planned, completed = (mesh, name) in _PLANS, False
-        prepare = _PREPARATIONS.get((mesh, name))
-        if prepare is not None:
-            prepare()
-        if planned:
-            group.plan_active(True)
-        timer.mark()
-        try:
-            yield k
-            completed = True
-        finally:
-            if completed:
-                timer.mark()
-                held['pending'].append((sequence, proposal, timer))
+    prepare = _PREPARATIONS.get((mesh, name))
+    if prepare is not None and count:
+        prepare(count)
+
+    def iterate():
+        from .benchmarks import function_timings
+        for k in range(count):
+            _balance(mesh, name, held, group)
+            proposal = held['realized']
+            sequence, timer = held['sequence'], function_timings(mesh.device_type)
+            held['sequence'] += 1
+            planned, completed = (mesh, name) in _PLANS, False
             if planned:
-                group.plan_active(False)
-        _balance(mesh, name, held, group)
+                group.plan_active(True)
+            timer.mark()
+            try:
+                yield k
+                completed = True
+            finally:
+                if completed:
+                    timer.mark()
+                    held['feedback'].observe({'episode': sequence, 'proposal': proposal,
+                        'workload': held['controller'].workload,
+                        **{key: proposal[key] for key in ('behavior_probability_ticks', 'target_probability_ticks')
+                           if key in proposal}}, timer)
+                if planned:
+                    group.plan_active(False)
+            _balance(mesh, name, held, group)
+    return iterate()
 
 
 def _balance(mesh, name, held, group):
     """Drain ready local evidence only. No collective, store access or replan."""
     from controller import WholeFunctionController
-    records, pending = [], []
-    for sequence, executed, timer in held['pending']:
-        if not timer.ready():
-            pending.append((sequence, executed, timer))
-            continue
-        start, finish = timer.read()
-        records.append({'episode': sequence, 'proposal': executed,
-                        'workload': held['controller'].workload, 'seconds': finish - start,
-                        **{key: executed[key] for key in ('behavior_probability_ticks', 'target_probability_ticks')
-                           if key in executed}})
-    held['pending'] = pending
-    if records:
-        held['feedback'].submit(records)
-        held['submitted'] += len(records)
     for state in held['feedback'].poll():
         held['controller'] = WholeFunctionController.of(state['controller'])
         held['observed'] = state['observed']
@@ -1263,8 +1233,8 @@ def evaluation_state(mesh, name):
     """Serializable controller state and truthful completion counts, without waits."""
     held = _BALANCING[mesh, name]
     return {'controller': held['controller'].state(), 'issued': held['sequence'],
-            'observed': held['observed'], 'pending': len(held['pending']),
-            'submitted': held['submitted'], 'realized': held['realized'],
+            'observed': held['observed'], 'pending': held['feedback'].pending,
+            'submitted': held['feedback'].submitted, 'realized': held['realized'],
             'generation': held['generation']}
 
 

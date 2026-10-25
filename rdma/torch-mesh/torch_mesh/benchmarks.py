@@ -9,6 +9,34 @@ from pathlib import Path
 import sys
 import time
 
+TIMING_METHOD = 'continuous-host-submission-and-final-completion'
+
+
+class HostTimings:
+    def __init__(self):
+        self.times = []
+
+    def mark(self):
+        self.times.append(time.perf_counter())
+
+    def ready(self):
+        return len(self.times) >= 2
+
+    def read(self):
+        return self.times
+
+
+def function_timings(device):
+    if device == 'mps':
+        from . import _stream
+        return _stream.CompletionTimings()
+    return HostTimings()
+
+
+def emit(record):
+    """One structured record format for examples and the hourly reader."""
+    print(json.dumps(record, sort_keys=True), flush=True)
+
 
 def traffic_delta(before, after):
     key = lambda row: (row['cable'], row['peer'], row['wire'])
@@ -57,10 +85,12 @@ def sequence(call, window_calls, windows, sample=None):
     for _ in range(windows):
         for _ in range(window_calls):
             call()
+    submitted_ns = time.perf_counter_ns() - began
     torch.mps.synchronize()
     host_ns = time.perf_counter_ns() - began
     after = sample.read() if sample is not None else None
-    return {'host_ns': host_ns, 'window_calls': window_calls, 'windows': windows,
+    return {'host_ns': host_ns, 'submitted_ns': submitted_ns, 'timing_method': TIMING_METHOD,
+            'window_calls': window_calls, 'windows': windows,
             'submitted_calls': window_calls * windows,
             'traffic': traffic_delta(before, after) if sample is not None else None}
 
