@@ -22,20 +22,6 @@ static const uint8_t TYPED[OPS][METAL_MERGE + 1] = {
 static const uint8_t COPY[2][METAL_LAND + 1] = {{KIND_copy_plain_4, KIND_copy_land_4}, {KIND_copy_plain_1, KIND_copy_land_1}};
 
 ARGS(args, uint64_t, uint32_t);
-/* a program: the classic form's command buffer and compute encoder (made here, or the caller's: `borrowed`) and what it
-   keeps until the program's end; or the Metal 4 form's caller's encoder and argument table; the caller's residency set
-   and the device's argument ring (the Metal 4 form's, and a fused classic program's: metal_begin's residency), and
-   whether a buffer was made resident since the set's last commit; and either form's
-   failure words, those of the communicator whose group it encodes (metal_gate; none: nothing recorded), and
-   its waits' bound (`polls`, never 0); its device's kernels (`kernels`, found at its first step: program_kernels) */
-struct ring;
-struct recording;
-struct kernels;
-struct metal_program { id<MTLCommandBuffer> buffer; id<MTLComputeCommandEncoder> encoder; NSMutableArray *kept; int borrowed;
-                       id<MTL4ComputeCommandEncoder> encoder4; id<MTL4ArgumentTable> table; id<MTLResidencySet> residency;
-                       id<MTLBuffer> violation; struct ring *ring; int added; uint32_t polls; struct recording *recording;
-                       struct kernels *kernels; };
-
 /* a device's kernels: the device and its pipelines by kind (kernels_of); and its argument ring (the Metal 4 form's
    arguments, and either form's deferred steps': RECORDS records of RECORD bytes in `records`, the `next` one written, which the GPU's dispatch of sequence q reads from record (q - 1) mod RECORDS, `progress` the sequence of the last
    dispatch the GPU began, every one before it finished) */
@@ -179,14 +165,13 @@ int metal_ended(void *command) {
    (design/transport.md) */
 static uint32_t bound_of(uint32_t polls) { return polls && polls < NCCL_MESH_POLLS ? polls : NCCL_MESH_POLLS; }
 
-struct metal_program *metal_begin(void *command_buffer, void *encoder, void *residency, void *violation, uint32_t polls, const char **message) {
+struct metal_program *metal_begin(struct metal_program *program, void *command_buffer, void *encoder, void *residency, void *violation, uint32_t polls, const char **message) {
   struct ring *ring = residency ? ring_of(((id<MTLResidencySet>)residency).device, message) : NULL;
   if (residency && !ring) return NULL;
-  struct metal_program *program = calloc(1, sizeof *program);
-  if (!program) { *message = "out of memory"; return NULL; }
+  *program = (struct metal_program){0};
   program->buffer = [(id<MTLCommandBuffer>)command_buffer retain];
   if (encoder) { program->encoder = [(id<MTLComputeCommandEncoder>)encoder retain]; program->borrowed = 1; }
-  program->kept = [NSMutableArray new];
+  if (!encoder) program->kept = [NSMutableArray new];
   program->violation = [(id<MTLBuffer>)violation retain];
   program->polls = bound_of(polls);
   /* a fused group's: the ring its deferred steps' records are written to, its progress word and the failure words,
@@ -201,11 +186,10 @@ struct metal_program *metal_begin(void *command_buffer, void *encoder, void *res
   return program;
 }
 
-struct metal_program *metal_begin4(void *encoder, void *table, void *residency, void *violation, uint32_t polls, const char **message) {
+struct metal_program *metal_begin4(struct metal_program *program, void *encoder, void *table, void *residency, void *violation, uint32_t polls, const char **message) {
   struct ring *ring = ring_of(((id<MTLResidencySet>)residency).device, message);
   if (!ring) return NULL;
-  struct metal_program *program = calloc(1, sizeof *program);
-  if (!program) { *message = "out of memory"; return NULL; }
+  *program = (struct metal_program){0};
   program->encoder4 = [(id<MTL4ComputeCommandEncoder>)encoder retain];
   program->table = [(id<MTL4ArgumentTable>)table retain];
   program->residency = [(id<MTLResidencySet>)residency retain];
@@ -653,7 +637,6 @@ void metal_end(struct metal_program *program, void *event, uint64_t value) {
   [program->kept release];
   [program->buffer release];
   [program->encoder4 release]; [program->table release]; [program->residency release]; [program->violation release];
-  free(program);
 }
 
 void metal_collect(void *event) {

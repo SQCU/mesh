@@ -3915,8 +3915,9 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   if (finished) metal_collect(finished);
   void *const violation = remote ? comm->violation : NULL;
   const char *message = NULL;
-  struct metal_program *program = metal4 ? metal_begin4(list[0].encoder, list[0].table, list[0].residency, violation, polls, &message)
-                                         : metal_begin(list[0].command, list[0].encoder, fused ? list[0].residency : NULL, violation,
+  struct metal_program operands;
+  struct metal_program *program = metal4 ? metal_begin4(&operands, list[0].encoder, list[0].table, list[0].residency, violation, polls, &message)
+                                         : metal_begin(&operands, list[0].command, list[0].encoder, fused ? list[0].residency : NULL, violation,
                                                        polls, &message);
   if (!program) {
     pthread_mutex_unlock(&group_lock); schedules_free(comm, plans); calls_free(list, n);
@@ -4072,9 +4073,10 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int
     while (through->next_group && through->next_group->ticket <= ticket) through = through->next_group;
     if (finished) metal_collect(finished);
     const char *message = NULL;
+    struct metal_program operands;
     struct metal_program *program = stream->argumentTable
-      ? metal_begin4(stream->commandEncoder, stream->argumentTable, stream->residencySet, inflight->comm->violation, stream->polls, &message)
-      : metal_begin(stream->commandBuffer, stream->commandEncoder, NULL, inflight->comm->violation, stream->polls, &message);
+      ? metal_begin4(&operands, stream->commandEncoder, stream->argumentTable, stream->residencySet, inflight->comm->violation, stream->polls, &message)
+      : metal_begin(&operands, stream->commandBuffer, stream->commandEncoder, NULL, inflight->comm->violation, stream->polls, &message);
     if (!program) result = fail(ncclSystemError, "%s", message);
     else {
       for (struct inflight *g = inflight; g; g = g == through ? NULL : g->next_group) {

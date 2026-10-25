@@ -30,7 +30,33 @@ static inline mesh_pages pages_from_word(uint64_t word) { return (mesh_pages){wo
 
 /* a copy's loads: plain, or coherent (METAL_LAND: bytes the NIC may have landed in the same command buffer) */
 enum { METAL_PLAIN, METAL_LAND };
-struct metal_program;
+/* Fixed encoding operands live in the caller's frame. Objective-C sees the
+   Metal handle types; the C half only passes the same pointer fields back. */
+#ifdef __OBJC__
+#import <Metal/Metal.h>
+#define METAL_HANDLE(type) type
+#else
+#define METAL_HANDLE(type) void *
+#endif
+struct ring;
+struct recording;
+struct kernels;
+struct metal_program {
+  METAL_HANDLE(id<MTLCommandBuffer>) buffer;
+  METAL_HANDLE(id<MTLComputeCommandEncoder>) encoder;
+  METAL_HANDLE(NSMutableArray *) kept;
+  int borrowed;
+  METAL_HANDLE(id<MTL4ComputeCommandEncoder>) encoder4;
+  METAL_HANDLE(id<MTL4ArgumentTable>) table;
+  METAL_HANDLE(id<MTLResidencySet>) residency;
+  METAL_HANDLE(id<MTLBuffer>) violation;
+  struct ring *ring;
+  int added;
+  uint32_t polls;
+  struct recording *recording;
+  struct kernels *kernels;
+};
+#undef METAL_HANDLE
 /* A step's result and its message beside it (design/rubrics.md, Strings are messages): `status` 0, or an errno, and
    with an errno `message`, what failed (a literal, or text the same thread's next failure here writes over), which its
    caller carries (nccl-mesh.c gpu) and reads for no decision; with 0, NULL.  METAL_DONE the step done; metal_failed an
@@ -83,7 +109,7 @@ int metal_ended(void *command);
    were not: nccl.h ncclMeshStream residencySet), since the caller's kernels reach them by address.  NULL where it cannot
    be made (memory, or that device's kernels or argument ring), *message then what failed (struct metal_result's
    message) */
-struct metal_program *metal_begin(void *command_buffer, void *encoder, void *residency, void *violation, uint32_t polls, const char **message);
+struct metal_program *metal_begin(struct metal_program *, void *command_buffer, void *encoder, void *residency, void *violation, uint32_t polls, const char **message);
 /* The Metal 4 form: the kernels encoded into the caller's id<MTL4ComputeCommandEncoder> (left open, nothing committed,
    nothing signalled), on pipelines of the residency set's device, every binding through the caller's id<MTL4ArgumentTable>
    (each dispatch's arguments a record of the library's argument ring, never setBytes), each dispatch after the one
@@ -92,7 +118,7 @@ struct metal_program *metal_begin(void *command_buffer, void *encoder, void *res
    caller's id<MTLResidencySet> (added, and the set committed, where it was not).  Its waits bounded by `polls` as
    metal_begin's (0: NCCL_MESH_POLLS).  NULL where memory runs out or the device's kernels or argument ring cannot be
    made, *message then what failed. */
-struct metal_program *metal_begin4(void *encoder, void *table, void *residency, void *violation, uint32_t polls, const char **message);
+struct metal_program *metal_begin4(struct metal_program *, void *encoder, void *table, void *residency, void *violation, uint32_t polls, const char **message);
 int metal_metal4(const struct metal_program *);
 /* A buffer of the program's made resident through its residency set (the Metal 4 form's, or a classic program's begun with
    one; a classic program without one needs none, its dispatches binding their buffers). */
