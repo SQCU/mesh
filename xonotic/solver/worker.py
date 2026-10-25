@@ -266,15 +266,15 @@ class CtxSolver:
     window's second moment. All state is a deterministic function of
     (seed, request history).  `backend` is "torch" (its `device`) or "np";
     `world` (TorchWorld, MPIWorld or None for one process) and `columns` (the
-    ranks' parts of FF, the Balancer's operand `balancer`) divide it."""
+    ranks' parts of FF, the Balancer's operand `assignment_data`) divide it."""
 
-    def __init__(self, T=CTX, backend="torch", device=None, world=None, columns=None, balancer=None):
+    def __init__(self, T=CTX, backend="torch", device=None, world=None, columns=None, assignment_data=None):
         self.T, self.backend = T, backend
         self.device = device or default_device()
-        self.world, self.balancer = world, balancer
+        self.world, self.assignment_data = world, assignment_data
         self.previous_function = None
         self.pending_feedback = None
-        self.compiled_proposal = None
+        self.compiled_assignment = None
         self.columns = list(columns) if columns else [FF]
         if world is not None and len(self.columns) != world.size:
             raise ValueError(f"columns {self.columns}: one part a rank of {world.size}")
@@ -415,19 +415,12 @@ class CtxSolver:
         return np.nan_to_num(Kn).astype(np.float32)
 
     def configure(self, rows):
-        """Realize all communication and allocation before the complete solve."""
-        if self.balancer is None or self.world is None:
+        # design/whole-function.md
+        if self.assignment_data is None or self.world is None:
             return None
         import mesh
-        from controller import WholeFunctionController, declare
-        workload = {**self.balancer.workload, 'rows': rows}
-        if self.balancer.workload != workload:
-            decisions = {k: {**d, 'parts': self.balancer.parts[k]} for k, d in self.balancer.flow.decisions.items()
-                         if not k.startswith('route:')}
-            self.balancer = WholeFunctionController(decisions, workload=workload)
-            self.previous_function, self.compiled_proposal = None, None
-        proposal = self.balancer.proposal()
-        self.columns = list(proposal['parts']['columns'])
+        import assignment
+        data = self.assignment_data
         widths = [hi - lo for lo, hi in (self.span(RES, rank) for rank in range(self.world.size))]
         calls = [{'what': mesh.lib.MESH_ALLREDUCE, 'count': (self.T + 1) * RES, 'type': mesh.lib.ncclFloat32,
                   'op': mesh.lib.ncclSum},
@@ -435,14 +428,17 @@ class CtxSolver:
                   'op': mesh.lib.ncclSum},
                  {'what': mesh.lib.MESH_ALLGATHER, 'count': rows * widths[self.rank()],
                   'counts': [rows * width for width in widths], 'type': mesh.lib.ncclFloat32}]
-        if self.balancer.topology is None:
-            declare(self.world.native, calls)
-            self.balancer = WholeFunctionController.from_comm(
-                self.balancer.flow.decisions, self.world.native, workload=workload, schedule={'calls': calls})
-            proposal = self.balancer.proposal()
-        if self.compiled_proposal != proposal['id']:
-            self.balancer.realize(self.world.native, calls, proposal)
-            self.compiled_proposal = proposal['id']
+        assignment.declare(self.world.native, calls)
+        decisions = assignment.domains(data['decisions'], {'world': assignment.graph(self.world.native)})
+        observations = [row for row in data['observations'] if row['workload'] == {'rows': rows}]
+        proposal = assignment.assign(decisions, observations)
+        proposal['workload'] = {'rows': rows}
+        self.columns = list(proposal['parts']['columns'])
+        widths = [hi - lo for lo, hi in (self.span(RES, rank) for rank in range(self.world.size))]
+        calls[2].update(count=rows * widths[self.rank()], counts=[rows * width for width in widths])
+        data['decisions'] = decisions
+        assignment.install(self.world.native, proposal['parts'], 'world')
+        assignment.declare(self.world.native, calls)
         mesh.check(mesh.lib.ncclMeshCommPlanActive(self.world.native, 1))
         return proposal
 
@@ -464,8 +460,8 @@ class CtxSolver:
         if self.pending_feedback is not None:
             previous, seconds = self.pending_feedback
             self.pending_feedback = None
-            if previous['id'] == self.balancer.proposal()['id']:
-                self.balancer.completed(seconds, proposal=previous)
+            self.assignment_data['observations'].append({'parts': previous['parts'], 'workload': previous['workload'], 'seconds': seconds,
+                                                        'implementation': 'loaded-program', 'costs': {}})
         return result
 
     def _solve(self, idx):
@@ -522,7 +518,7 @@ class CtxSolver:
         # Previous complete solve is carried by an existing numerical reduction.
         # Never change the columns of the solve that is currently executing.
         previous = self.previous_function
-        if self.balancer is None or self.world is None or previous is None:
+        if self.assignment_data is None or self.world is None or previous is None:
             return
         self.pending_feedback = previous['proposal'], max(float(t) for t in times[:self.world.size])
 
@@ -1748,12 +1744,11 @@ REQUEST, STOP = 1, 2
 
 
 def serve(config):
-    from controller import WholeFunctionController
     world = attach(config)
     shares = config["columns"]
-    balancer = WholeFunctionController({"columns": {"parts": list(shares["parts"]), "grain": shares["grain"], "low": shares["low"]}},
-                                       workload={"function": "context solve", "ctx": config["ctx"]})
-    solver = CtxSolver(config["ctx"], config["backend"], config.get("device"), world, shares["parts"], balancer)
+    assignment_data = {'decisions': {"columns": {"parts": list(shares["parts"]), "grain": shares["grain"],
+                                                 "low": shares["low"]}}, 'observations': []}
+    solver = CtxSolver(config["ctx"], config["backend"], config.get("device"), world, shares["parts"], assignment_data)
     header = world.host((4,), np.int64)
     rows = world.host((config["maxrows"], REQUEST_WIDTH), np.float32)
     stopping = {"signal": None}

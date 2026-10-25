@@ -247,12 +247,12 @@ class Comm:
         where required. This is configuration metadata, not a Python schedule or
         a collective decomposition. Every rank declares the same function.
         """
-        from controller import declare
+        from assignment import declare
         return declare(self.comm, calls)
 
     def PlanDemands(self):
         """Exact compiler-reported directed bytes for the declared complete function."""
-        from controller import function_demands
+        from assignment import function_demands
         return function_demands(self.comm)
 
     def Write_prepare(self, sendbuf, landingbuf, source, destination, *, max_packet=0):

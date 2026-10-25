@@ -1,11 +1,4 @@
-"""AOT allocation math, measured-point models and report-only Pareto summaries.
-
-The online policy lives exclusively in controller.WholeFunctionController.
-min_max/equal_finish quantize a declared physical model; Points retains measured
-resource evidence; project_parts realizes fractional operands on a new extent.
-These helpers do not accept/reject whole-call executions or choose an online
-standing configuration. Historical Balancer/Coupled interfaces were removed.
-"""
+# design/whole-function.md
 import heapq
 import math
 

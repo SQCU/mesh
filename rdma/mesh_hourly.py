@@ -194,7 +194,7 @@ def aggregate_measurements(ranks):
                            'useful_gigabytes_per_second': useful / interval / 1e9})
         else:
             seconds = max(value['seconds'] for value in values)
-            useful = (values[0].get('function_feedback') or {}).get('metrics', {}).get('useful_work_bytes')
+            useful = values[0].get('useful_output_bytes')
             result.append({'function_seconds': seconds,
                            'useful_output_bytes': useful,
                            'useful_gigabytes_per_second': useful / seconds / 1e9 if useful is not None else None})
@@ -220,7 +220,7 @@ def run_workload(item, nodes, paths, record, out, ordinal):
         if item['kind'] == 'example':
             configuration = paths['metal-microbench'] / item['configuration']
             operands = json.loads(configuration.read_text())
-            operands['controller_state'] = f'~/.cache/mesh/controllers/{tag}.json'
+            operands['observations'] = f'~/.cache/mesh/observations/{tag}.jsonl'
             mesh.send(selected, folder, {'configuration.json': json.dumps(operands).encode()})
             build = (f'cd {mesh.home_path(folder)} && PYTHONPATH={mesh.home_path(selected[0].source + "/rdma")} '
                      f'{mesh.PY} -m mesh_workloads build {mesh.home_path(selected[0].source + "/examples")} '

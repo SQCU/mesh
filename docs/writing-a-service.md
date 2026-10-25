@@ -172,9 +172,8 @@ crossing without its math.
 
 The step's graphs are compiled, every rank's compilation met, and each run once before the timed run, which replays
 from the first step again. The whole-run times include the input's broadcast and the first steps' other one-time
-costs. `Invocation.run` uses the library's sequence measurement: submit the complete
-function, then read completion once. `Recording.issue` only submits its compiled
-graphs; it adds no timing events. Reported throughput covers the complete invocation.
+costs. The caller runs the function directly. A separate observer uses the host clock and ordinary command-buffer
+completion state. It does not add GPU timing events or wait for measurements inside the function.
 
 ## The LSTM
 

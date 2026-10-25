@@ -325,151 +325,50 @@ increase the bundle's maximum service time. It also avoids an arbitrary solver
 nullspace assigning one producer to one cable and its relayed complement to
 another, despite those cables having the same release dependencies.
 
-## Finite differences
+## Numerical operands
 
-`whole.FunctionFlow` uses normalized linear shares stored as nonnegative integer
-counts summing to `2^40` for each decision. The declared numerical precision is
-one part in `2^40`; this is independent of the compiler's page/tile granularity.
-Zero and one are exact. There are no logits, epsilon path shares, exponential
-tails, or gradient moments. Euclidean simplex projection enforces bounds and
-conservation. Fixed coordinates need no division by their width. Natural units
-must give a total within `[2^-40, 2^52]`; invalid dimensions or nonfinite inputs
-fail during configuration. Recorded state names this coordinate version and
-cannot silently reinterpret old logarithmic states.
+`assignment.assign(decisions, observations)` uses bounded linear shares. The compiler rounds compute shares to
+whole tiles and path shares to Q40 units. Projection preserves each declared total. The numerical fits have positive
+regularization; they use neither logarithms of shares nor division by a share that can vanish.
 
-Physical route operands are unsigned integer weights, including exact zeros.
-The common C allocator computes each `units * weight / sum(weights)` with
-128-bit integer products, then assigns residual units by exact integer
-remainders in path order. A zero-weight path gets zero units; it remains
-available to the next solver proposal. Overflowing sums and all-zero vectors
-fail explicitly. Python configuration uses canonical weights summing to `2^40`.
-Thus normalization and transport apportionment cannot create subnormals,
-underflow-dependent ties, or `log(0)` singularities.
+A compute share starts from declared capacity, with equal capacity where none is known. Torch configuration reads
+each node's GPU core count as a prior, not as a performance measurement. Every solve fits fixed and work-dependent
+costs from complete-call observations. A fixed cost per code version separates changes in the implementation from
+changes in its operands. Resource samples, when already present in the input records, constrain the same fit.
+The affine envelope is an estimate of whole-call cost by work share. It is not an isolated measurement of arithmetic.
 
-A fixed Hadamard sequence supplies joint directions. Four complete executions
-form a `+--+` stencil, canceling additive linear drift in measured cost. Each
-allocation's perturbation is at least one unit reported by
-`ncclMeshCommPlanRouteUnits`: the greatest independently allocatable unit count
-of an individual logical transaction, before repeats and relay amplification.
-A million repeated one-page writes therefore do not masquerade as one
-million-way divisible write. Projected probes can enter a zero-share path.
+The historical equal-finish solver rounds the fitted allocation. Whole-call finite differences move all compute
+and route coordinates together. A diminishing perturbation supplies new observations. No result is accepted or
+rejected as a candidate. There is no saved controller or hidden solver lifecycle to restore. The saved data is what
+ran, its actual operands, and its measured completion interval.
 
-Decision names, sorted lexically, define the numerical axes. JSON object order
-does not. Asynchronous rollout fitting rebuilds each row from its executed
-proposal's named parts, and records gradients by name. A positional cache of
-older observations previously survived serialization while the decision map
-was reordered, allowing compute and route coordinates to be confused after a
-restart. The named operands in those records remain the source for the fit;
-no observations are discarded or assigned synthetic costs.
+This is an empirical local solver. A small residual, a compiled plan, or a capacity prior does not establish a global
+optimum. The required evidence remains lower whole-function elapsed time and higher useful output per second.
 
-Every stencil updates the centre with a bounded gradient step and a decaying
-step size. The divisor `1 + max(abs(gradient))` is at least one. Flat cost gives
-an exact identity update, without residual momentum. There is no candidate
-acceptance, rollback, or winner selection. Latencies are represented in seconds
-within `[2^-40, 2^40]`, and useful work in `[2^-40, 2^64]` declared units, keeping
-log costs and reported throughput finite. These are numerical domain checks,
-not bandwidth restrictions; an input outside them needs explicit rescaling.
+## Compilation
 
-A fluid LP bound certifies its declared model. Empirical finite differences do
-not certify the unknown hardware's global optimum in a finite number of noisy
-observations. Report attained whole-function latency/useful throughput against
-the bound for each shape/depth, plus every executed proposal. A static seed is
-not evidence of empirical convergence. Logical tree decomposition and its
-shares also affect the feasible program; a route-only feedback run cannot be
-reported as optimization over all collective decompositions.
+`configuration.placement` reads observations before tensors are built. `configuration.bind` declares the complete
+function and installs the resulting page placements and routes. The numerical function is absent from execution.
+More routes change the compiled tables; they do not add a controller around each transfer.
 
-The current default cost is `J = log(T/U)`, where `T` is complete function
-latency and `U` is fixed useful numerical work. The DNN uses one logical final
-output (`rows * width * 4` bytes), independent of replicated partials, relays,
-padding or collective decomposition. With fixed `U`, lower latency and higher
-whole-function useful throughput are the same objective. Empty queues or
-smaller finish variance cannot compensate for a slower function. Queue area,
-completion residuals and clock-bracketed finish spread remain model inputs and
-reported evidence, not independent rewards. Every observation names the exact
-compiled configuration, workload and completed function.
+`rates.step`, the engine example, and the Xonotic planner and solver consume the same assignment operands. They keep
+observations as data. They do not reconstruct a controller from a JSON object. A failed invocation is a record, not
+a fabricated duration or an instruction to roll back its allocation.
 
-An explicit `transaction_weight = w > 0` selects
-`J = log(T/U) + w*log(W/U_transaction)`, where `W` is the conservative upper
-bound on the transaction-window union and `U_transaction` is fixed under its
-declared contract. This is an explicit throughput tradeoff, not an inferred
-congestion preference or strict lexicographic guarantee. The default is zero.
-See [objective-20261024.md](objective-20261024.md) for the derivation, unchanged
-continuous updates, accounting invariants, and the distinction between final
-numerical work and implementation-specific transaction bytes.
+## Observations
 
-The DNN also enables the historical affine `allocate.equal_finish` calculation
-(restored from `fa36bea6^`) and its existing `min_max` tile realization. GPU
-events bracket each local producer, and their durations are read after the
-existing complete-function synchronization. Completed calls fit
-`compute_i(s) = a_i + b_i*s` by exponentially weighted nonnegative least squares,
-separating fixed and work-dependent cost. A weak prior resolves the initially
-underdetermined fit; the record exposes both coefficients rather than claiming
-that one share identifies a slope. The previous stencil also supplies input
-release offsets: subtract each rank's measured producer duration from its own
-publication time, then express those inferred start times relative to the
-earliest rank. Equal-finish uses `start_delay_i + a_i + b_i*s`. Thus a rank whose
-inputs arrive later receives a shorter compute stretch even if its arithmetic
-rate is otherwise equal. The repeated-stage observer averages these offsets
-over stages; it is not a per-layer timing model for arbitrary programs.
-Communication also remains in the joint whole-function objective. Recorded own
-first-hop delivery windows are diagnostics, not added compute intercepts:
-those windows also contain waits for upstream producers, and including them
-can create circular feedback. Every four-call stencil moves the continuous
-compute centre halfway toward the newly fitted equal-finish solution. Its
-influence does not decay away while measurements continue. Tile rounding uses
-`min_max` and measured slopes, retaining
-fractional latent shares.
-There is no hard-coded Mini fraction and no measured-candidate rejection.
+Programs execute their own function calls. There is no measurement runner taking a callable. Whole-function
+observations use a host clock and ordinary command-buffer completion state. No GPU timing event, timestamp shader,
+completion callback, or timing-only host drain is added. The stream's existing publication operation submits output
+writes without waiting for their completion.
 
-This is reuse of the historical allocation mathematics, not restoration of
-the old `Balancer`/`Coupled` acceptance and trust-region state machines. The
-historical documentation also described RLS which was subsequently documented
-as absent; the present weighted affine fit is a new implementation, not evidence
-that those historical RLS claims were implemented.
+A separate statistics thread polls that state. It records the interval between its last pending observation and its
+first completed observation. Reported elapsed time uses the upper end, so useful bandwidth uses the conservative
+lower end. Completion at a shared command-buffer boundary is coarse. Pending records and several late peer records
+can coexist; observing them does not halt a subsequent function. Shutdown drains the records after submission ends.
 
-The DNN supplies `Fabric.completion_model`, the physical path-incidence matrix
-scaled by each commodity's bytes and each directed cable's capacity. After a
-four-call stencil, `FunctionFlow` fits the observed completion residual beyond
-the physical path-load model. The last 64 complete calls fit a weighted ridge
-Jacobian of those residuals against joint route and compute fractions. The
-physical capacity Jacobian is the prior in directions not yet identified by
-the observations; changed upstream queuing can introduce cross-flow derivatives.
-The local model is anchored at the preceding stencil's measured mean finish,
-then adjusted for the next compute centre. Its route coordinates satisfy
-`finish(x) = b + J*x`, with each commodity's path fractions summing to one.
-A convex proximal step minimizes a monotone smooth maximum finish plus
-`||x-x0||^2/(2*rate)`, with the same decaying learning rate as the joint
-finite differences. This is an incremental step in a local model, not global
-minimization of its extrapolation. Finish times are normalized by the preceding
-stencil's longest finish; smooth-maximum sharpness is 64. The result becomes
-the next vector unconditionally. The next complete calls refresh `b` and `J`
-from actual landings; neither delay nor its sensitivity is assumed constant
-across executions. Residual fit error, Jacobian, and predicted finishes are
-recorded. This supplies a physical
-preconditioner for fourteen simultaneous finish residuals while finite
-differences retain the full function's measured useful-throughput objective.
-The finish-variance term was removed: delaying an early completion must not
-improve the predicted performance score. Model corrections and quantized
-finite differences do not establish descent on every actual evaluation.
-It adds neither runtime routing choices nor measured-candidate rejection.
-The harness realizes one canonical configuration on rank zero and distributes
-its serialized values before compilation. Constrained numerical solvers can
-differ by a few floating-point ulps across machines; independently realizing
-those variants is inappropriate for matching page schedules. This planning
-exchange is outside the complete-function execution. Source release predictions
-use mean own-publication times from the preceding four-call stencil, adjusted
-by the fitted compute slope for the next tile allocation. The predictor stays
-fixed within a stencil. Predictions affect only the next
-compiled entry order, never transport's current readiness words.
-
-`ask(explore=False)` realizes the current centre without perturbing or updating
-the optimizer. The harness can measure a fixed number of these complete calls
-after training (`--centre-evaluations`), separately from finite-difference
-samples. It never picks a historical fastest configuration for this validation.
-
-The finite-difference estimate remains subject to timing noise and tile/page
-granularity. This is a measured local descent, not a global-optimality proof or a
-promise that each individual evaluation will be faster than its predecessor.
+Records contain whole-call time and useful bytes together. Relays do not increase the useful byte count. The hourly
+runner uses committed main and the same library functions as the examples. Its scripts supply configuration operands.
 
 ## Measurements
 

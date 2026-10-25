@@ -10,7 +10,7 @@ in tiles).  No one engine is fastest for every operation, the fastest set change
 at once slow each other (power, performance cores and memory shared), so an operation's final backend is resolved
 here, per operation and row count, as one joint decision: its units shared among the configured engines like a mesh
 dimension among ranks, each engine holding its shard of the weights resident, the shares running at once on unified
-memory. All operation allocations are components of one WholeFunctionController
+memory. All operation allocations are components of one page assignment
 vector, updated from measured completion of the entire enclosing graph. Primitive
 operation timings describe resource use; they are not separate objectives.
 
@@ -45,7 +45,7 @@ in its time).
   pool = engines.Engines(['mps', 'cpu', 'ane'], ane={'tile': 128, 'block': 4096})
   ffn = engines.FFN(gate, up, down, engines=pool, name='layer3.ffn')
   y = ffn(x)                # x [..., H] on MPS: every configured engine its share of the neurons
-  engines.rebalance(pool, completed_function_observation)  # one objective for the entire graph"""
+  engines.placement(pool, observations)  # one objective for the entire graph"""
 import concurrent.futures
 import ctypes
 import hashlib
@@ -412,7 +412,7 @@ class Engines:
     """The engines one node's operations may share their units among, in order (the order of their shares along an
     operation's units), each with its options; the evidence of the operations using them; each decision's search."""
 
-    def __init__(self, names, window=3, sample=16, **options):
+    def __init__(self, names, **options):
         names = [names] if isinstance(names, str) else list(names)
         unknown = [n for n in names if n not in ENGINES]
         if unknown:
@@ -420,10 +420,10 @@ class Engines:
         lacking = {n: ENGINES[n].missing() for n in names if ENGINES[n].missing()}
         if lacking:
             raise RuntimeError(f'engines: this node lacks {lacking}')
-        self.names, self.window, self.sample = names, int(window), int(sample)
+        self.names = names
         self.engines = [ENGINES[n](**options.get(n, {})) for n in names]
         self.workers = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(names) - 1), initializer=_interactive)
-        self.operations, self.decisions, self.evidence, self.last = [], {}, {}, {}
+        self.operations, self.decisions = [], {}
         self.separated = {}
 
 
@@ -489,15 +489,6 @@ class Operation:
         bounds = [sum(parts[:i]) for i in range(len(parts) + 1)]
         held = [i for i, p in enumerate(parts) if p]
         shards = {i: self._shard(engines[i], bounds[i], bounds[i + 1], rows) for i in held}
-        first = {(engines[i].name, bounds[i], bounds[i + 1], rows) for i in held} - self.warm
-        prepared = any(p for _, p in shards.values()) or bool(first)
-        self.warm |= first
-        self.calls[key] = self.calls.get(key, 0) + 1
-        measured = not prepared and self.calls[key] % self.engines.sample == 0
-        alone = len(held) == 1 and not engines[held[0]].host_side
-        if measured:
-            span = (torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True))
-            span[0].record()
         prologue = {'fp32': x2.float()} if any(engines[i].name == 'cpu' for i in held) else {}
         outs = {i: torch.empty(rows, parts[i] if self.combine == 'concat' else self.width, device=x2.device,
                                dtype=engines[i].out_dtype(dtype)) for i in held}
@@ -505,16 +496,8 @@ class Operation:
         if hosted:
             ready = torch.mps.Event(enable_timing=False)
             ready.record()
-        marks = {}
         for i in (i for i in held if not engines[i].host_side):
-            timing = measured and not alone
-            if timing:
-                begin, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
-                begin.record()
             engines[i].run(self, shards[i][0], x2, prologue, outs[i])
-            if timing:
-                end.record()
-                marks[i] = (begin, end)
         if hosted:
             ready.synchronize()
         futures = {i: self.engines.workers.submit(engines[i].run, self, shards[i][0], x2, prologue, outs[i]) for i in hosted}
@@ -529,11 +512,6 @@ class Operation:
             y = y.to(dtype)
         self._separate(key)
         y = self.finish(y)
-        if measured:
-            span[1].record()
-            if alone:
-                marks[held[0]] = span
-            self.engines.evidence.setdefault(key, []).append((marks, seconds, span))
         return y.reshape(*lead, -1)
 
     def finish(self, y):
@@ -579,21 +557,6 @@ class FFN(Operation):
         return ffn(x.reshape(-1, x.shape[-1]), self.gate, self.up, self.down).reshape(*x.shape[:-1], -1)
 
 
-def controller(engines, workload):
-    """All operation/shape decisions in one enclosing-function vector."""
-    from controller import WholeFunctionController
-    found = getattr(engines, 'controller', None)
-    decisions = {key: {k: d[k] for k in ('parts', 'grain', 'low', 'high')}
-                 for key, d in engines.decisions.items()}
-    if found is None:
-        found = engines.controller = WholeFunctionController(
-            decisions, workload=workload,
-            schedule={'shared_resources': {k: sorted(v) for k, v in engines.separated.items()}})
-    elif found.workload != workload or set(found.parts) != set(decisions):
-        raise ValueError('declare all engine operation shapes before timing one fixed whole function')
-    return found
-
-
 def prepare(engines):
     """Realize every declared operation/shape's shards before the next function."""
     for operation in engines.operations:
@@ -606,36 +569,13 @@ def prepare(engines):
                 start += count
 
 
-def rebalance(engines, observation):
-    """Move every engine decision from one actually completed whole function.
-
-    Caller supplies scope/function, complete, workload and seconds measured across
-    the entire graph (including projections, joins and communication). Primitive
-    events are diagnostics. No transport synchronization or per-operation policy
-    is inserted here.
-    """
-    if observation.get('scope') != 'function' or not observation.get('complete'):
-        raise ValueError('engine allocation requires completed whole-function evidence')
-    flow = controller(engines, observation['workload'])
-    engines.last = {}
-    for key in engines.decisions:
-        calls = engines.evidence.pop(key, [])
-        width = len(engines.engines)
-        times, spans = [[] for _ in range(width)], []
-        for marks, seconds, span in calls:
-            if not span[1].query():
-                continue
-            whole = span[0].elapsed_time(span[1]) / 1e3
-            for i, pair in marks.items():
-                times[i].append(whole if pair is span else pair[0].elapsed_time(pair[1]) / 1e3)
-            for i, value in seconds.items():
-                times[i].append(value)
-            spans.append(whole)
-        engines.last[key] = {'ms': [round(sorted(t)[len(t) // 2] * 1e3, 3) if t else None for t in times],
-                             'call_ms': round(sorted(spans)[len(spans) // 2] * 1e3, 3) if spans else None}
-    next_ = flow.completed(observation['seconds'], proposal=observation.get('proposal'),
-                           engine_diagnostics=engines.last)
-    for key, parts in next_['parts'].items():
-        engines.decisions[key]['parts'] = list(parts)
+def placement(engines, observations):
+    # design/whole-function.md#numerical-operands
+    from assignment import assign
+    decisions = {k: {field: d[field] for field in ('parts', 'grain', 'low', 'high')}
+                 for k, d in engines.decisions.items()}
+    assigned = assign(decisions, observations)
+    for key, parts in assigned['parts'].items():
+        engines.decisions[key]['parts'] = parts
     prepare(engines)
-    return next_['parts']
+    return assigned

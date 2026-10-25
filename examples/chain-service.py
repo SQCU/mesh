@@ -10,8 +10,9 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch_mesh import partition
 from torch_mesh.backend import BROADCAST, ALLREDUCE, Call
 from torch_mesh.declarations import Preparations
-from torch_mesh.invocation import Invocation
-from torch_mesh.benchmarks import sequence, emit
+from torch_mesh.configuration import placement, bind, record
+from torch_mesh import _stream
+import time
 
 import chain
 
@@ -55,8 +56,8 @@ def main():
     mesh = DeviceMesh.from_group(dist.group.WORLD, 'mps', mesh_dim_names=('tp',))
     partition.attach(mesh, tp=width)
     steps, rows, inputs = chain.operand(config['input'], rank, width)
-    invocation = Invocation(mesh, 'tp', {'function': 'chain_sequence', 'width': width, 'steps': steps, 'rows': rows},
-                            config.get('controller_state', config['output'] + '.controller.json'))
+    configuration = placement(mesh, 'tp', {'function': 'chain_sequence', 'width': width, 'steps': steps, 'rows': rows},
+                            config.get('observations', config['output'] + '.observations.jsonl'))
     k = config['steps_per_replay']
     at, b = chain.weights(mesh, folds, width)
     del folds
@@ -72,29 +73,17 @@ def main():
     torch.mps.synchronize()
     group = mesh.get_group('tp')
     groups, forms = recording.schedule(group, steps)
-    invocation.realize([[Call(BROADCAST, E.numel(), E.dtype, root=0)], *groups], Preparations(forms))
-    def execute():
-        dist.broadcast(E, src=0)
-        recording.issue(steps)
-
-    measured = invocation.run(execute, useful_work_bytes=O.numel() * O.element_size())
-    seconds, hosted = measured['host_ns'] * 1e-9, measured['submitted_ns'] * 1e-9
-    torch_mesh.plan(mesh.get_group('tp'), [])
+    bind(configuration, [[Call(BROADCAST, E.numel(), E.dtype, root=0)], *groups], Preparations(forms))
+    started = time.monotonic()
+    dist.broadcast(E, src=0)
+    recording.issue(steps)
+    completion = _stream.completion()
+    _stream.publish_boundary()
+    summary = dict(blocks=partition.split(mesh, 'tp', width), rows=rows, width=width, steps=steps,
+                   steps_per_replay=k)
+    record(configuration, completion, started, O.numel() * O.element_size(), summary)
     if rank == 0:
         torch.from_numpy(np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, width))).copy_(O)
-    p = torch_mesh.empty(rows, width, dtype=torch.half).zero_()
-    torch.mps.synchronize()
-    torch_mesh.plan(group, [[Call(ALLREDUCE, p.numel(), p.dtype)]])
-    crossing = sequence(lambda: dist.all_reduce(p), steps, 1)['host_ns'] * 1e-9
-    torch_mesh.plan(group, [])
-    summary = dict(rank=rank, size=size, blocks=partition.split(mesh, 'tp', width), rows=rows, width=width, steps=steps,
-                   steps_per_replay=k,
-                   seconds=seconds, aggregate_rows_per_second=steps * rows / seconds,
-                   per_stream_steps_per_second=steps / seconds,
-                   step_microseconds=seconds / steps * 1e6,
-                   host_microseconds=hosted / steps * 1e6, crossing_microseconds=crossing / steps * 1e6,
-                   function_feedback=measured['feedback'], timing_method=measured['timing_method'])
-    emit(summary)
     dist.destroy_process_group()
 
 

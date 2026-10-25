@@ -190,8 +190,9 @@ class ProcessGroupMesh(dist.ProcessGroup):
     def shutdown(self):
         """torch's end of this group (destroy_process_group): the fused crossings' forms on its communicator released,
         their leases back to the region once the stream has passed them (_stream.mm fused_release)."""
-        for worker in getattr(self, '_rollout_workers', ()):
-            worker.close()
+        for observer in getattr(self, '_observers', ()):
+            from rollout import close
+            close(observer)
         _stream.fused_release(self.handle)
         super().shutdown()
 

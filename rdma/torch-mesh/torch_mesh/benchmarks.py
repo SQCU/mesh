@@ -31,53 +31,21 @@ def traffic_delta(before, after):
     return result
 
 
-def sequence(call, window_calls, windows, sample=None):
-    """Submit every window before draining once; no peer rendezvous or logging.
-
-    Host duration covers the entire submission and drain, including dependency
-    stalls. No timing markers split the command buffers. A window is an
-    observation interval, not a maximum in-flight call count.
-    """
-    import torch
-    if window_calls <= 0 or windows <= 0:
-        raise ValueError('measurement windows and call counts must be positive')
-    before = sample.read() if sample is not None else None
-    began = time.perf_counter_ns()
-    for _ in range(windows):
-        for _ in range(window_calls):
-            call()
-    submitted_ns = time.perf_counter_ns() - began
-    torch.mps.synchronize()
-    host_ns = time.perf_counter_ns() - began
-    after = sample.read() if sample is not None else None
-    return {'host_ns': host_ns, 'submitted_ns': submitted_ns, 'timing_method': TIMING_METHOD,
-            'window_calls': window_calls, 'windows': windows,
-            'submitted_calls': window_calls * windows,
-            'traffic': traffic_delta(before, after) if sample is not None else None}
-
-
-def timed(call, calls, sample, group):
-    result = sequence(call, calls, 1, sample)
-    return result['host_ns'] * 1e-9, result['traffic']
-
-
-def measured(invocation, call, steps, *, useful_work_bytes):
-    """design/whole-function.md"""
-    from . import partition
-    result = invocation.run(call, calls=steps, useful_work_bytes=useful_work_bytes)
-    seconds = result['host_ns'] * 1e-9
-    emit({'rank': invocation.rank, 'program': invocation.name, 'size': invocation.size,
-          'steps': steps, 'seconds': seconds, 'step_microseconds': seconds / steps * 1e6,
-          'calls_per_second': steps / seconds,
-          'useful_output_bytes': useful_work_bytes,
-          'useful_gigabytes_per_second': useful_work_bytes / seconds / 1e9,
-          'parts': partition.operand(invocation.mesh, invocation.name).parts.tolist(),
-          'timing_method': result['timing_method'], 'function_feedback': result['feedback']})
-
-
-def latency(call, calls, group):
-    """Amortized host interval; this is not an isolated call latency."""
-    return sequence(call, 1, calls)['host_ns'] * 1e-9 / calls
+def completed(record, seconds):
+    # design/whole-function.md#observations
+    result = {**record['report'], 'rank': record['rank'], 'size': record['size'], 'seconds': seconds,
+              'useful_output_bytes': record['useful_work_bytes'],
+              'useful_gigabytes_per_second': record['useful_work_bytes'] / seconds / 1e9,
+              'timing_method': 'host-clock-poll-of-ordinary-completion', 'function_feedback': record}
+    if 'steps' in result:
+        result.update(step_microseconds=seconds / result['steps'] * 1e6,
+                      calls_per_second=result['steps'] / seconds)
+        if 'rows' in result:
+            result['aggregate_rows_per_second'] = result['steps'] * result['rows'] / seconds
+    if 'calls' in result:
+        result['microseconds_per_call'] = seconds * 1e6 / result['calls']
+        result['useful_output_gigabytes_per_second_rank'] = record['useful_work_bytes'] / seconds / 1e9
+    return result
 
 
 def exchange_counts(rank, size, count):
@@ -100,7 +68,11 @@ def collective_operands(what, n, rank, size):
     from . import empty
     from .backend import Call, ALLREDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL
     per = max(1, n // size)
-    tensor = lambda count, value: empty(count, dtype=torch.half).fill_(value)
+    def tensor(count, value):
+        from .engines import host
+        result = empty(count, dtype=torch.half)
+        host(result).fill_(value)
+        return result
     if what == 'all_reduce_max':
         a = tensor(n, rank + 1)
         # MAX is idempotent under repeated in-place application.
@@ -126,48 +98,37 @@ def collective_operands(what, n, rank, size):
 
 
 def bandwidth(config):
+    # design/whole-function.md#observations
     import torch
     import torch.distributed as dist
-    from routing import QueueSample
+    import rollout
+    from . import _stream
     dist.init_process_group(backend='mesh', device_id=torch.device('mps', 0))
-    try:
-        rank, size = dist.get_rank(), dist.get_world_size()
-        group = dist.distributed_c10d._get_default_group()._get_backend(torch.device('mps'))
-        sample = QueueSample(group.comm, rank)
-        for requested in config['sizes']:
-            if requested <= 0 or requested % 2:
-                raise ValueError('float16 bandwidth operand bytes must be positive and even')
-            n = requested // 2
-            per = max(1, n // size)
-            calls = min(config['most_calls'], max(config['least_calls'], config['bytes_per_size'] // requested))
-            for what in ('all_reduce_max', 'broadcast', 'all_gather', 'reduce_scatter_max', 'exchange'):
-                call, output, useful, declaration = collective_operands(what, n, rank, size)
-                group.plan([[declaration]])
-                # Finish local input construction before the observation.
-                # There is no message aligning this rank with its peers.
-                torch.mps.synchronize()
-                call()
-                torch.mps.synchronize()
-                seconds, traffic = timed(call, calls, sample, group)
-                once = latency(call, config['latency_calls'], group)
-                expected = (torch.arange(1, size + 1).repeat_interleave(per) if what == 'all_gather'
-                            else torch.full((output.numel(),), size if what.endswith('_max')
-                                            else 1 if what == 'broadcast' else (rank - 1) % size + 1))
-                error = float((output.cpu().float() - expected.float()).abs().max())
-                sent, landed = (sum(row[name] for row in traffic) for name in ('sent', 'landed'))
-                emit({'rank': rank, 'size': size, 'what': what, 'calls': calls,
-                    'requested_bytes': requested, 'microseconds_per_call': seconds * 1e6 / calls,
-                    'useful_output_bytes_per_call_rank': useful,
-                    'useful_output_gigabytes_per_second_rank': useful * calls / seconds / 1e9,
-                    'wire_payload_bytes_sent_rank': sent, 'wire_payload_bytes_landed_rank': landed,
-                    'wire_payload_scope': 'exact completed-byte counter delta across the measurement window; framing unknown',
-                    'wire_payload_call_attribution': 'unestablished: warmup/final SEND completions may cross sample boundaries',
-                    'traffic': traffic, 'streaming_interval_microseconds': once * 1e6,
-                    'timing_method': TIMING_METHOD,
-                    'max_abs_error': error})
-            group.plan([])
-    finally:
-        dist.destroy_process_group()
+    rank, size = dist.get_rank(), dist.get_world_size()
+    group = dist.distributed_c10d._get_default_group()._get_backend(torch.device('mps'))
+    cases = []
+    for requested in config['sizes']:
+        n = requested // 2
+        calls = min(config['most_calls'], max(config['least_calls'], config['bytes_per_size'] // requested))
+        for what in ('all_reduce_max', 'broadcast', 'all_gather', 'reduce_scatter_max', 'exchange'):
+            call, output, useful, declaration = collective_operands(what, n, rank, size)
+            cases.append((call, output, useful, declaration, calls, what, requested))
+    group.plan([([declaration], calls) for _, _, _, declaration, calls, _, _ in cases])
+    observer = rollout.start(dist.distributed_c10d._get_default_store(), 'mesh/bandwidth', rank, size,
+                             Path('~/.cache/mesh/observations/bandwidth.jsonl').expanduser())
+    group._observers = [observer]
+    for index, (call, output, useful, declaration, calls, what, requested) in enumerate(cases):
+        started = time.monotonic()
+        for _ in range(calls):
+            call()
+        completion = _stream.completion()
+        _stream.publish_boundary()
+        observer[0].put((completion, {'episode': str(index), 'parts': {}, 'graphs': {}, 'costs': {},
+            'workload': {'collective': what, 'bytes': requested, 'calls': calls}, 'implementation': 'loaded-program',
+            'started': started, 'rank': rank, 'size': size, 'useful_work_bytes': useful * calls,
+            'report': {'what': what, 'requested_bytes': requested, 'calls': calls,
+                       'useful_output_bytes_per_call_rank': useful}}))
+    dist.destroy_process_group()
 
 
 def bandwidth_main(argv=None):

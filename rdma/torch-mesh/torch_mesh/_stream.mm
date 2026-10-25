@@ -1473,9 +1473,30 @@ static void fused_published() {
 }
 
 
+// design/whole-function.md#observations
+static pybind11::capsule completion() {
+  auto stream = at::mps::getCurrentMPSStream();
+  __block id<MTLCommandBuffer> buffer = nil;
+  at::mps::dispatch_sync_with_rethrow(stream->queue(), ^{
+    buffer = [stream->commandBuffer().rootCommandBuffer retain];
+  });
+  return pybind11::capsule((void *)buffer, "mesh.command-buffer", [](PyObject *capsule) {
+    [(id<MTLCommandBuffer>)PyCapsule_GetPointer(capsule, "mesh.command-buffer") release];
+  });
+}
+
+static bool completed(pybind11::capsule token) {
+  id<MTLCommandBuffer> buffer = (id<MTLCommandBuffer>)token.get_pointer();
+  if (buffer.status == MTLCommandBufferStatusError)
+    throw std::runtime_error(buffer.error.localizedDescription.UTF8String);
+  return buffer.status == MTLCommandBufferStatusCompleted;
+}
+
 // The group's calls (torch_mesh/backend.py): `issue` a group of calls, issued and not completed where `split` (a
 // MeshWork to wait on, its outputs `outputs`), else None (complete).
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
+  module.def("completion", &completion);
+  module.def("completed", &completed);
   module.def("pipeline", &pipeline);
   module.def("linear_source", &linear_source);
   module.def("linear_split", &linear_split);

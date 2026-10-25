@@ -140,10 +140,8 @@ each issued on torch's stream under the one commit rule: Performance), every ran
 group's store before any of its collectives runs (a rank compiling past a GPU wait's bound would otherwise fail its
 peers' first crossings: [NCCL.md](../NCCL.md#bounded-waits)). `issue` submits its steps back to back on torch's stream,
 with no wait between them: the steps are an operand's leading dimension, each reading what the last wrote in the
-stream's order. It adds no measurement or completion wait. `Invocation.run` and
-`benchmarks.sequence` own complete-function measurements; asynchronous optimizer
-observations use the same library's completion observer. Outputs are read where the
-caller consumes them (`.item()`, `.cpu()`, `torch.mps.synchronize()` commit and wait).
+stream's order. It adds no measurement or completion wait. The caller issues its function directly. A statistics thread observes ordinary completion state with a host
+clock; it cannot submit numerical work, add GPU timing events, or drain the stream for a measurement.
 Historical reproduction target
 (metal-microbench docs/measurement.md 2026-09-30, parts C and D, the 10-01 form): a replayed tp step 262.7-263.1 ms (SP=1 245.8-246.3, cp 512.3-513.7), a 16.8 MB all-reduce 63-64 us a
 call past the wire against 186-216 eager.
@@ -214,12 +212,9 @@ parallelize_module(block, mesh, {"wq": partition.ColwiseParallel(), "wo": partit
 
 ### Parts from the run's own evidence
 
-The program declares units. `Invocation` restores the next work split before the program builds its tensors.
-It then compiles the declared calls and installs their routes. Work shares and routes stay fixed throughout
-execution. The shared statistics worker uses whole-call time and useful output bytes to update the next plan,
-which it saves for the next invocation. TP, EP, CP, the chain, and the LSTM use this same path. Their measurements
-run through `benchmarks.sequence`, with no per-step timing markers or peer-statistics waits.
-See [whole-function.md](../../design/whole-function.md).
+The program declares units. `configuration.placement` computes the next work split before tensors are built.
+`configuration.bind` compiles the declared calls and installs their routes. The function then runs directly.
+Observations are data for the next compilation, not a saved controller to restore.
 
 `partition.follow(*ts)` compiles exact migration ranges. Page-aligned remote ranges in declared contiguous region
 layouts write from original source views to final destination views through the common WRITE interface, with
@@ -257,7 +252,7 @@ from torch_mesh import engines
 pool = engines.Engines(["mps", "cpu", "ane"], ane={"block": 4096})   # the program's engines, an operand
 ffn = engines.FFN(gate, up, down, engines=pool, name="ffn")          # without engines: torch's own
 y = ffn(x)
-engines.rebalance(pool)                                    # every few steps
+engines.placement(pool, observations)                                    # every few steps
 ```
 
 - Operations: `Linear` shares its output features (they concatenate), `FFN` its intermediate neurons (each engine a

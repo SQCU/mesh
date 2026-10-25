@@ -8,7 +8,8 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'rdma'))
-from controller import WholeFunctionController, declare
+import assignment
+from assignment import declare
 from mesh_mpi import Comm, empty
 import mesh
 
@@ -66,10 +67,10 @@ def main():
     calls = [{'what': mesh.lib.MESH_ALLREDUCE, 'count': local.size, 'type': mesh.lib.ncclFloat32,
               'op': mesh.lib.ncclSum}]
     declare(comm.comm, calls)
-    balancer = WholeFunctionController.from_comm(
-        {'columns': {'parts': columns, 'grain': split['grain'], 'low': split['low']}}, comm.comm,
-        workload={'function': 'planner tick', 'bots': args.bots, 'width': args.width}, schedule={'calls': calls})
-    installed = None
+    decisions = assignment.domains(
+        {'columns': {'parts': columns, 'grain': split['grain'], 'low': split['low']}},
+        {'world': assignment.graph(comm.comm)})
+    observations = []
     previous = None
     shares = columns
     route, up, down, objective = model(args.width)
@@ -81,11 +82,10 @@ def main():
                       'experts': EXPERTS, 'columns': columns[rank]}), flush=True)
     start = ready = time.monotonic()
     for tick in range(args.ticks):
-        proposal = balancer.proposal()
+        proposal = assignment.assign(decisions, observations)
         shares = proposal['parts']['columns']
-        if installed != proposal['id']:
-            balancer.realize(comm.comm, calls, proposal)
-            installed = proposal['id']
+        assignment.install(comm.comm, proposal['parts'], 'world')
+        declare(comm.comm, calls)
         function_started = began = time.monotonic()
         low = sum(shares[:rank])
         share = slice(low, low + shares[rank])
@@ -107,12 +107,14 @@ def main():
         positions[:, 1:] += .35 * objective[1:, picks].T
         positions[:, 1:] *= .98
         previous = {'proposal': proposal, 'seconds': time.monotonic() - function_started}
-        if feedback is not None and feedback[0]['id'] == balancer.proposal()['id']:
-            balancer.completed(feedback[1], proposal=feedback[0])
+        if feedback is not None:
+            observations.append({'parts': feedback[0]['parts'], 'seconds': feedback[1],
+                                 'implementation': 'loaded-program', 'costs': {}})
     elapsed = time.monotonic() - start
     comm.Free()
     print(json.dumps({'event': 'planner_finished', 'rank': rank, 'ticks': args.ticks,
-                      'bot_plans': args.ticks * args.bots, 'seconds': elapsed, 'tick_ms': 1e3 * elapsed / args.ticks,
+                      'bot_plans': args.ticks * args.bots, 'seconds': elapsed,
+                      'bot_plans_per_second': args.ticks * args.bots / elapsed, 'tick_ms': 1e3 * elapsed / args.ticks,
                       'solve_ms': 1e3 * solving / args.ticks, 'collective_ms': 1e3 * collective / args.ticks,
                       'switches': switches,
                       'objective_split': np.bincount(objectives, minlength=TEAMS).tolist(),

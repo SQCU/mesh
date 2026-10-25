@@ -12,8 +12,9 @@ from torch.distributed.tensor import Shard
 from torch_mesh import partition
 from torch_mesh.backend import BROADCAST, Call
 from torch_mesh.declarations import Preparations
-from torch_mesh.invocation import Invocation
-from torch_mesh.benchmarks import emit
+from torch_mesh.configuration import placement, bind, record
+from torch_mesh import _stream
+import time
 
 import chain
 import lstm
@@ -48,9 +49,9 @@ def main():
     mesh = DeviceMesh.from_group(dist.group.WORLD, 'mps', mesh_dim_names=('tp',))
     partition.attach(mesh, tp=H)
     steps, rows, inputs = chain.operand(config['input'], rank, KIN)
-    invocation = Invocation(mesh, 'tp', {'function': 'lstm_sequence', 'layers': L, 'input_width': KIN,
+    configuration = placement(mesh, 'tp', {'function': 'lstm_sequence', 'layers': L, 'input_width': KIN,
                                         'width': H, 'steps': steps, 'rows': rows},
-                            config.get('controller_state', config['output'] + '.controller.json'))
+                            config.get('observations', config['output'] + '.observations.jsonl'))
     shape = lambda l: (4, H, (KIN if l == 0 else H) + H)
     split = lambda t: partition.distribute_tensor(t, mesh, [Shard(1)], src_data_rank=0)
     held = held or [(torch_mesh.empty(1, 1, shape(l)[2], dtype=torch.half).expand(shape(l)),
@@ -75,29 +76,21 @@ def main():
     groups, forms = recording.schedule(group, steps)
     initial = [partition.gathered(tick.mine, 2, tick.sizes, group)] * (L - 1)
     initial_forms = [(tick.mine, None, 2, tick.sizes, group.group_name, False, 1)] * (L - 1)
-    invocation.realize([[Call(BROADCAST, X.numel(), X.dtype, root=0)], *initial, *groups],
+    bind(configuration, [[Call(BROADCAST, X.numel(), X.dtype, root=0)], *initial, *groups],
                        Preparations([*initial_forms, *forms]))
-    def execute():
-        dist.broadcast(X, src=0)
-        for s in range(L - 1):
-            tick.starting(s, X[s])
-        recording.issue(steps)
-
-    measured = invocation.run(execute, useful_work_bytes=steps * rows * H * torch.half.itemsize)
-    seconds, hosted = measured['host_ns'] * 1e-9, measured['submitted_ns'] * 1e-9
-    torch_mesh.plan(mesh.get_group('tp'), [])
+    started = time.monotonic()
+    dist.broadcast(X, src=0)
+    for s in range(L - 1):
+        tick.starting(s, X[s])
+    recording.issue(steps)
+    completion = _stream.completion()
+    _stream.publish_boundary()
+    blocks = partition.split(mesh, 'tp', H)
+    summary = dict(blocks=blocks, steps_per_replay=k, layers=L, rows=rows,
+                   input_width=KIN, width=H, steps=steps, ticks=ticks, latency_ticks=L)
+    record(configuration, completion, started, steps * rows * H * torch.half.itemsize, summary)
     if O is not None:
         torch.from_numpy(np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, H))).copy_(O)
-    blocks = partition.split(mesh, 'tp', H)
-    summary = dict(rank=rank, size=size, blocks=blocks, steps_per_replay=k, layers=L, rows=rows,
-                   input_width=KIN, width=H, steps=steps, ticks=ticks, seconds=seconds,
-                   aggregate_rows_per_second=steps * rows / seconds,
-                   per_stream_steps_per_second=steps / seconds,
-                   tick_microseconds=seconds / ticks * 1e6,
-                   host_microseconds=hosted / ticks * 1e6, latency_ticks=L,
-                   sent_bytes_per_tick=(size - 1) * rows * L * blocks[rank] * torch.half.itemsize,
-                   function_feedback=measured['feedback'], timing_method=measured['timing_method'])
-    emit(summary)
     dist.destroy_process_group()
 
 
