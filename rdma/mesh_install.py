@@ -70,7 +70,13 @@ def verify_active(source, commit):
     expected = source / 'rdma/mesh-heartbeat'
     if active_program(service) != str(expected):
         raise RuntimeError('loaded heartbeat executable is not the requested committed snapshot')
-    pids = run('pgrep', '-x', '-U', str(os.getuid()), 'mesh-flow').stdout.split()
+    job = run('launchctl', 'print', service).stdout
+    heartbeat = re.search(r'^\s*pid = ([0-9]+)$', job, re.M)
+    if heartbeat is None:
+        raise RuntimeError('loaded heartbeat has no running pid')
+    # The bridge forks a mesh-flow child per physical port. Its direct parent
+    # is the heartbeat; those link workers are children of the bridge itself.
+    pids = run('pgrep', '-x', '-P', heartbeat.group(1), 'mesh-flow').stdout.split()
     if len(pids) != 1:
         raise RuntimeError(f'expected exactly one bridge process, found {pids}')
     actual = run('ps', '-o', 'comm=', '-p', pids[0]).stdout.strip()
