@@ -370,6 +370,15 @@ can coexist; observing them does not halt a subsequent function. Shutdown drains
 Records contain whole-call time and useful bytes together. Relays do not increase the useful byte count. The hourly
 runner uses committed main and the same library functions as the examples. Its scripts supply configuration operands.
 
+Configuration and observation state stays in memory while functions run. A statistics worker never opens a log or
+rewrites a configuration file. Rank reports travel over pipes into memory. The hourly writes its complete metric
+record only after all workloads end. Seeded inputs, weights and full outputs stay in memory; they have no file format
+or disk path. Code installation and compilation happen before execution. Unchanged committed code is reused.
+
+Blocking filesystem reads also stay outside execution. Load source and configuration during preparation, then pass
+memory operands to the running function. A page transfer may beat an SSD's first-byte delay (data-model.md section 5);
+disk staging and per-call file updates cannot stand in for page-to-page DMA.
+
 ## Measurements
 
 `ncclMeshTraceStart/Stop` observes existing entry lists, eligibility words, and

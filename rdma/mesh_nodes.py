@@ -47,7 +47,7 @@ def sh(argv, input=None, out=None, append=False, timeout=None):
     if out is not None:
         with open(out, 'ab' if append else 'wb') as f:
             return subprocess.run(argv, stdout=f, stderr=subprocess.STDOUT, timeout=timeout, **io_).returncode, ''
-    p = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout, **io_)
+    p = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout, **io_)
     return p.returncode, p.stdout.decode(errors='replace')
 
 
@@ -232,24 +232,26 @@ def send(nodes, folder, files):
             raise RuntimeError(f'{n.name}: source/config upload failed ({code}): {output}')
 
 
-def ranks(nodes, out, tag, folder, command, port, append=False, alarm=300, env='', timed=False, guard=None):
+def ranks(nodes, out, tag, folder, command, port, append=False, alarm=300, env='', timed=False, guard=None, input=None):
     master, time_ = nodes[0].ula, '/usr/bin/time -p ' if timed else ''
 
     def rank(k):
-        log = out / f'{tag}-rank{k}.log'
-        # Each surviving node keeps its own durable rank log, including its actual exit code.
+        log = out / f'{tag}-rank{k}.log' if out is not None else None
         invoke = (f'RANK={k} WORLD_SIZE={len(nodes)} MASTER_ADDR={shlex.quote(master)} MASTER_PORT={port} '
                   f"{env}{time_}perl -e 'alarm {alarm}; exec @ARGV' {command}")
-        remote = (f'cd {home_path(folder)} && set -o pipefail && {{ {invoke}; mesh_rank_status=$?; '
-                  f'printf "exit %s\\n" "$mesh_rank_status"; exit "$mesh_rank_status"; }} '
-                  f'2>&1 | tee rank{k}.log')
-        code = nodes[k].run(remote, out=log, append=append)[0]
-        note(log, f'exit {code}')
+        remote = f'cd {home_path(folder)} && {invoke}'
+        code, output = nodes[k].run(remote, input=input)
+        if log is not None:
+            with log.open('a' if append else 'w') as destination:
+                destination.write(output + f'\nexit {code}\n')
+        return {'exit': code, 'output': output}
 
     jobs = [lambda k=k: rank(k) for k in range(len(nodes))]
     pattern = f'^[^ ]*python [^ ]*{guard}'
     jobs += [lambda n=n: n.py('guard', pattern, out=out / f'guard-{tag}-{n.name}.log') for n in nodes] if guard else []
-    parallel(jobs)
+    results = parallel(jobs)
+    if out is None:
+        return {f'rank{k}': row for k, row in enumerate(results[:len(nodes)])}
     return [line for n in nodes if guard for line in (out / f'guard-{tag}-{n.name}.log').read_text().splitlines()
             if 'GUARD' in line]
 
@@ -258,16 +260,14 @@ def demo(up_nodes, out, tag, program, config, steps, rows, numbers, port, build_
     folder, nodes = f'mesh-runs/{config}', [at(up_nodes, n) for n in numbers]
     if None in nodes:
         return note(out / f'{tag}-rank0.log', f'not run: node {numbers[nodes.index(None)]} has no bridge up')
-    for n in nodes:
-        n.run(f'mkdir -p ~/{folder} && cat > ~/{folder}/{program}.json', input=(HOURLY / f'{config}.json').read_bytes())
-    nodes[0].run(f'cd ~/{folder} && PYTHONPATH={home_path(nodes[0].source + "/rdma")} {PY} -m mesh_workloads build '
-                 f'{home_path(nodes[0].source + "/examples")} {program.removesuffix("-service")} {program}.json {steps} {rows}',
-                 out=build_log or out / f'{tag}-rank0.log')
-    command = f'{PY} {home_path(nodes[0].source + "/examples/" + program + ".py")} {program}.json'
+    operands = json.loads((HOURLY / f'{config}.json').read_text())
+    operands.update(steps=steps, rows=rows)
+    command = f'{PY} {home_path(nodes[0].source + "/examples/" + program + ".py")} -'
     if script:
         send(nodes, folder, {script.name: script.read_bytes()})
-        command = f'{PY} {script.name} {home_path(nodes[0].source + "/examples")} {program}.json {args}'
-    return ranks(nodes, out, tag, folder, command, port, append=build_log is None, **kw)
+        command = f'{PY} {home_path(folder + "/" + script.name)} {home_path(nodes[0].source + "/examples")} - {args}'
+    return ranks(nodes, out, tag, '.', command, port, append=build_log is None,
+                 input=json.dumps(operands).encode(), **kw)
 
 
 def hourly_running():
@@ -333,17 +333,6 @@ def lock(owner, start=None, after=None, latest=None, by=None, log=None):
 
 def run(*argv, **kw):
     return subprocess.run([str(a) for a in argv], capture_output=True, text=True, stdin=subprocess.DEVNULL, **kw)
-
-
-def lanes(text):
-    opened, nodes = False, set()
-    for line in text.decode(errors='replace').splitlines():
-        if re.search(r'heartbeat: bridge [0-9]+ opened', line):
-            opened, nodes = True, set()
-        f = line.split()
-        if 'lanes up toward node' in line:
-            nodes |= {f[i + 1] for i in range(1, len(f) - 1) if f[i] == 'node' and f[i - 1] == 'toward' and f[i + 1][:1].isdigit()}
-    return opened, nodes
 
 
 def node_install(commit, transition='0'):

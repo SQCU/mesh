@@ -80,7 +80,7 @@ static void map_put(const struct mesh_record *record){
   struct mesh_record *next=malloc(count*sizeof *next);
   unsigned char *reached=calloc(count,1);
   uint32_t *order=malloc(count*sizeof *order),head=0,tail=0;
-  if(!next || !reached || !order){free(next);free(reached);free(order);say("map: no memory to put node %u's record\n",record->node);return;}
+  if(!next || !reached || !order){free(next);free(reached);free(order);return;}
   memcpy(next,r,(size_t)n*sizeof *r);
   memcpy(next+at,record,sizeof *record);
   for(uint64_t k=0;k<count;k++)if(next[k].node==M->node){reached[k]=1;order[tail++]=(uint32_t)k;}
@@ -88,17 +88,11 @@ static void map_put(const struct mesh_record *record){
     uint32_t a=order[head++];double beta;
     for(uint64_t b=0;b<count;b++)if(!reached[b] && mesh_joined(next+a,next+b,&beta)){reached[b]=1;order[tail++]=(uint32_t)b;}
   }
-  /* design/transport.md: a node the prune drops is logged (one put now and never reached yet is not a loss) */
-  for(uint64_t k=0;k<count;k++)if(!reached[k] && !(at==n && k==at)){
-    struct known *gone=known_at(next[k].node);
-    say("node %u unreachable, heard %.1f s before\n",next[k].node,gone && gone->heard?(double)(now-gone->heard)/1e9:-1.0);
-    if(gone)gone->gone=now;
-  }
   uint64_t kept=0;
   for(uint64_t k=0;k<count;k++)if(reached[k])memmove(next+kept++,next+k,sizeof *next);
   if(kept!=n || memcmp(next,r,(size_t)n*sizeof *r)){
     mesh_notify(&M->map);
-    if(map_grow(kept))say("map: no lease for %llu records; %llu kept\n",(unsigned long long)kept,(unsigned long long)map_room);
+    map_grow(kept);
     if(kept>map_room)kept=map_room;
     memcpy(mesh_records(M),next,(size_t)kept*sizeof *next);
     atomic_store(&M->map_nodes,kept);
@@ -178,10 +172,7 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
     return;
   }
   if(held && (heard.boot<held->boot || (heard.boot==held->boot && heard.sequence<=held->sequence)))return;
-  /* design/transport.md: a node that joins or comes back is logged here */
-  if(!held && k && k->gone)say("node %u back after %.1f s\n",heard.node,(double)(now-k->gone)/1e9);
-  else if(!held && k && !k->heard)say("node %u joined\n",heard.node);
-  if(k){k->heard=now;k->gone=0;k->boot=heard.boot;k->sequence=heard.sequence;}
+  if(k){k->heard=now;k->boot=heard.boot;k->sequence=heard.sequence;}
   if(held && record_links_same(held,&heard))health_put(held,&heard);
   else map_put(&heard);
   for(uint32_t p=0;p<port_count;p++)if(ports+p!=from && ports[p].greeted)port_say(ports+p,(struct message){.kind=RECORD},&heard,sizeof heard);

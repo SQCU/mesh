@@ -69,7 +69,7 @@ it holds outlives that service.
 ## Program three: the data processing service
 
 The service is your program. One copy runs on each node, and every copy runs the same code (SPMD). It holds the
-function and its own slice of the weights. It reads the inputs, runs the chain and writes the outputs. At each
+function and its own slice of the weights. It takes input tensors, runs the chain and fills the output tensors. At each
 crossing it calls the collective client. Everything about the data is the service's job.
 
 The service never opens a device, and it names no address, port or region. It does not ssh to a peer or start a
@@ -79,17 +79,16 @@ The rank service in metal-microbench is a service of this kind for a language mo
 
 ## How the example moves its data
 
-Rank 0 holds the files. Before the communicator exists it reads A and B memory-mapped and folds their rotations in, into
-region tensors, in float16: seconds of host work at a large width, which no peer's wait may span (a wait on the GPU ends
-at its stream's bound, about the platform's 5 s), while the other ranks wait in torch's rendezvous. Then it reads the
-input's shape and broadcasts two numbers, the steps and the rows, so every rank knows them.
+Rank 0 draws the inputs and weights in region tensors from the configuration's seed. It folds A and B's
+rotations before the communicator exists, so no peer's device wait spans that host work. The same configuration
+gives every rank the steps and rows; learning the shape needs no message.
 
 Rank 0 distributes A and B as ragged shards of their rows (`partition.distribute_tensor` with `Shard(0)` on the mesh
 dimension `tp`: the backend's scatter, MPI_Scatterv), so each rank holds the block of rows the backend's partition gives
-it ([The step](#the-step)). The inputs are one operand, [steps, rows, width]. Rank 0 copies them from its file into a
-region tensor and broadcasts it whole to every rank before the first step. The outputs are one operand of the same shape
-on every rank. Each step writes its tanh(z) there, and after the last step rank 0 copies it into the output file's
-memory. Within a step only the step's sum crosses between ranks.
+it ([The step](#the-step)). The inputs are one operand, [steps, rows, width], broadcast whole before the first step.
+The outputs are one region tensor of the same shape on every rank. Each step writes its tanh(z) there. The service
+returns that tensor when the whole call ends. No input, weight or output tensor is written to a file.
+Within a step only the step's sum crosses between ranks.
 
 The example puts its shared tensors in the region with `torch_mesh.empty`. Collectives then read and write them in
 place, with no copy. They also use memory the bridge already holds, so no second copy of anything is made.
@@ -142,17 +141,15 @@ is the library's.
 
 ## The configuration
 
-The service takes one operand: a configuration file. It names the input, the weights (a directory holding `a.npy` and
-`b.npy`, each [width, width]) and the output. It gives the width, the two rotations' blocks, and `steps_per_replay`,
-the k steps one replay of the recorded step runs. Its paths are read from
-the directory the service runs in, the checkout's root in the sample. The input file says how many steps and rows there
-are, so the configuration does not. It names no shares and no rank: each rank's block is the backend's. Every value must
-be there. The service has no defaults, and a missing value is an error.
-[examples/chain-service.json](../examples/chain-service.json) is a sample.
+The service takes one operand: a configuration file. It gives `steps`, `rows`, `width`, `seed`, the two
+`rotation_blocks`, and `steps_per_replay`, the k steps one replay runs. `observations` names the small record of
+completed calls used for the next work assignment. It names no tensor files, shares or rank: each rank's block is the
+backend's. [examples/chain-service.json](../examples/chain-service.json) is a sample.
 
-`chain.inputs(configuration, steps, rows)` makes sample inputs and weights for it from a fixed seed: standard normal
-inputs, and A and B standard normal over the square root of the width. Each is composed in a CPU region tensor
-(`chain.region`), drawn into it a chunk at a time through a region scratch, and written to its file from there.
+`chain.inputs(configuration, steps, rows)` returns input and weight arrays in region memory: standard normal inputs,
+and A and B standard normal over the square root of the width. The draw order and float16 values are the same as
+in the earlier file-backed runs. They are drawn a chunk at a time through a region scratch. The seed is 0 in the
+shipped configurations. Neither drawing these arrays nor consuming the outputs needs a file write.
 
 ## Running it
 
@@ -165,10 +162,9 @@ RANK=0 WORLD_SIZE=2 MASTER_ADDR=<rank 0's cable address> MASTER_PORT=29500 \
   ~/.venv-mesh-uv/bin/python examples/chain-service.py examples/chain-service.json
 ```
 
-Each rank prints one line at the end. It gives the backend's blocks, the rows, the steps and the seconds. It gives the
-rows a second of all streams together and the steps a second of each stream. It gives three times a step: the whole
-step, the host's own time to issue it, and a plain all-reduce of the step's sum alone (the library's), the step's
-crossing without its math.
+Each rank prints one record at the end. It gives the backend's blocks, the rows, the steps and the whole call's
+seconds together with rows a second and useful output bytes a second. The hourly record retains these numbers;
+it does not retain tensor contents.
 
 The step's graphs are compiled, every rank's compilation met, and each run once before the timed run, which replays
 from the first step again. The whole-run times include the input's broadcast and the first steps' other one-time
@@ -189,7 +185,7 @@ after its input.
 
 **Split.** The hidden units are the mesh dimension `tp`, attached with the backend (`partition.attach(mesh, tp=H)`),
 which splits them evenly; each rank's block of them is the backend's (`partition.split`), never the configuration's.
-Each layer's weights are the files' own [4H, K] (w_ih and w_hh side by side), held as [4, H, K]: each gate's units in
+Each layer's weights are [4H, K] (w_ih and w_hh side by side), held as [4, H, K]: each gate's units in
 turn. The backend's scatter (`partition.distribute_tensor`, `Shard(1)`) gives each rank its units of every gate, and
 the rank holds them from load as [4 x its units, K]. Its gates are then torch's linear of u by its own rows: a column
 split, so nothing crosses for it (in the recorded graph, torch_mesh::linear). The layers' gates are stacked and their
@@ -212,12 +208,12 @@ reads destination-writing operators through PyTorch's functionalization metadata
 and constructs the declaration before looking up cached numerical code. A replay's k
 gathers are one crossing issued once, each tick its repeat.
 
-**Configuration.** `input`, `weights`, `output`, `input_width`, `width` (H), `layers` and `steps_per_replay`, the k
-ticks one replay runs (the chain's name for its k). The weights directory holds
-`w_ih_<l>` [4H, its input], `w_hh_<l>` [4H, H] and `b_<l>` [4H] in torch's gate order, one .npy file an array.
-`lstm.inputs(configuration, steps, rows)` makes sample ones with torch's initialization. Rank 0 reads them
-memory-mapped into region tensors before the communicator exists, so no peer's wait spans that host work; every other
-rank passes the global shape alone to the scatter. The input is broadcast once into a region tensor.
+**Configuration.** `steps`, `rows`, `seed`, `input_width`, `width` (H), `layers`, `steps_per_replay` and
+`observations`. `lstm.inputs(configuration, steps, rows)` returns the input and weights in region memory, using
+Torch's initialization: `w_ih_<l>` [4H, its input], `w_hh_<l>` [4H, H] and `b_<l>` [4H] in Torch's gate order.
+Rank 0 arranges them before the communicator exists, so no peer's wait spans that host work; every other rank
+passes the global shape alone to the scatter. The input is broadcast once. The top layer's full output sequence
+stays in its region tensor, returned by rank 0 after the call. Neither example writes tensors to disk.
 
 ## What to read next
 

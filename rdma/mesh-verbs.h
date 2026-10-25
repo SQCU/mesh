@@ -126,27 +126,17 @@ static __attribute__((unused)) int wire_map(struct wire_mapping *wire,struct hdr
 }
 /* the stop flag, defined once in mesh-link.c (design/transport.md) */
 extern _Atomic sig_atomic_t stop;
-/* design/transport.md: every line the bridge writes, stamped with the wall clock (UTC, to the millisecond) and
-   the node's uptime in seconds, in one write so that no thread splits another's line */
-static __attribute__((unused)) void say(const char *format,...){
-  struct timespec t;clock_gettime(CLOCK_REALTIME,&t);
-  struct tm utc;gmtime_r(&t.tv_sec,&utc);
-  char line[2048];
-  size_t n=strftime(line,sizeof line,"%Y-%m-%dT%H:%M:%S",&utc);
-  n+=(size_t)snprintf(line+n,sizeof line-n,".%03ldZ %.3f ",t.tv_nsec/1000000,(double)clock_gettime_nsec_np(CLOCK_MONOTONIC)/1e9);
-  va_list arguments;va_start(arguments,format);vsnprintf(line+n,sizeof line-n,format,arguments);va_end(arguments);
-  fputs(line,stderr);
-}
-static __attribute__((unused)) void die(const char*m){ say("%s\n",m); exit(1); }
+/* design/transport.md */
+static __attribute__((unused)) void die(const char *message){ fprintf(stderr,"%s\n",message);exit(1); }
 
 /* design/algorithm-sources.md#programcopy */
 /* design/transport.md */
 /* design/transport.md: the port's device opened (by its name, the device list read again) and its port
    active, its protection domain, the whole region registered on it and its capacities read once a context, before any
    queue pair exists (design/transport.md), on the port's own queue (design/transport.md).  0, or the
-   errno (ENETDOWN: the port is not active; ENODEV: no such device now).  A registration the device refuses sets
-   *refused to its code (EFBIG: the region's extents past the device's max_mr; else ibv_reg_mr's errno), logged with
-   the extent, and keeps the device and the extents it registered, so its next turn registers the rest
+   errno (ENETDOWN: the port is not active; ENODEV: no such device now). A registration the device refuses sets
+   *refused to its code (EFBIG: the region's extents past the device's max_mr; else ibv_reg_mr's errno),
+   and keeps the device and the extents it registered, so its next turn registers the rest
    (design/transport.md). */
 static __attribute__((unused)) int device_up(struct mesh_device *device,struct wire_mapping *wire,int *refused){
   *refused=0;
@@ -164,26 +154,17 @@ static __attribute__((unused)) int device_up(struct mesh_device *device,struct w
   if(!device->domain && !(device->domain=ibv_alloc_pd(device->context)))return errno?errno:EIO;
   const uint32_t extents=(uint32_t)((wire->length+MESH_EXTENT-1)/MESH_EXTENT);
   if((uint64_t)extents>(uint64_t)(capabilities.max_mr>0?capabilities.max_mr:0)){
-    say("%s: the region of %zu bytes is %u extents of %zu bytes, past the device's max_mr %d: refused\n",device->name,
-      wire->length,extents,MESH_EXTENT,capabilities.max_mr);
     *refused=EFBIG;return EFBIG;
   }
   if(!device->extent_mrs && !(device->extent_mrs=calloc(extents,sizeof *device->extent_mrs)))return ENOMEM;
   device->extents=extents;
-  const uint64_t began=clock_gettime_nsec_np(CLOCK_MONOTONIC);
   for(size_t e=0,first=0;e<extents;e++,first+=MESH_EXTENT){
     const size_t bytes=wire->length-first<MESH_EXTENT?wire->length-first:MESH_EXTENT;
     if(!device->extent_mrs[e] && !(device->extent_mrs[e]=ibv_reg_mr(device->domain,wire->data+first,bytes,IBV_ACCESS_LOCAL_WRITE))){
       const int error=errno?errno:EIO;
-      uint32_t held=0;
-      for(uint32_t k=0;k<extents;k++)held+=device->extent_mrs[k]!=NULL;
-      say("%s: extent %zu of %u (%zu bytes at %zu) refused: %s; %u of the region's extents registered, max_mr %d\n",
-        device->name,e,extents,bytes,first,strerror(error),held,capabilities.max_mr);
       *refused=error;return error;
     }
   }
-  say("%s: region of %zu bytes (%u extents) registered in %.3f s\n",device->name,wire->length,device->extents,
-    (double)(clock_gettime_nsec_np(CLOCK_MONOTONIC)-began)/1e9);
   device->wire=wire->data;device->max_pairs=capabilities.max_qp>1?(uint32_t)capabilities.max_qp-1:0;
   uint32_t capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
   if(capabilities.max_cqe<=1 || !capacity)return EOPNOTSUPP;

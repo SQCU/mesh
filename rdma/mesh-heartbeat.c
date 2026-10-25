@@ -27,7 +27,6 @@
 #include <mach-o/dyld.h>
 #include <signal.h>
 #include <spawn.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -46,32 +45,17 @@ extern char **environ;
 enum { TIMER_OPEN=1, TIMER_END=2 };
 enum { TAG_BRIDGE=1, TAG_HOLDER=2 };
 
-/* a line of the log: its time and the message, one write (stderr is line-buffered from main) */
-static void say(const char *format,...){
-  struct timespec t;clock_gettime(CLOCK_REALTIME,&t);
-  struct tm utc;gmtime_r(&t.tv_sec,&utc);
-  fprintf(stderr,"%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ %.3f heartbeat: ",utc.tm_year+1900,utc.tm_mon+1,utc.tm_mday,utc.tm_hour,
-          utc.tm_min,utc.tm_sec,t.tv_nsec/1000000,(double)clock_gettime_nsec_np(CLOCK_MONOTONIC)/1e9);
-  va_list arguments;va_start(arguments,format);vfprintf(stderr,format,arguments);va_end(arguments);
-}
-static uint64_t wall_us(void){return clock_gettime_nsec_np(CLOCK_REALTIME)/1000u;}
-
 static int events;
 static char self[PATH_MAX];
 static char *const *arguments;
 static const char *image,*configuration;
 static const int heard[]={SIGHUP,SIGUSR1,SIGTERM,SIGINT};
-/* the bridge this heartbeat opened or found serving (0: none), whether it is this heartbeat's child (its status
-   reaped), what this heartbeat asked of it, and since when it served (wall microseconds) */
+/* design/transport.md */
 static pid_t bridge;
 static int child;
 static enum { ASKED_NONE, ASKED_RESTART, ASKED_RELEASE, ASKED_END } asked;
-static uint64_t opened_at;
-/* whether a bridge is wanted (SIGHUP; a release none), whether an expired region waits to be unlinked (its holders
-   watched), whether a reopen waits REOPEN_S, and the holders last told */
+/* design/transport.md */
 static int wanted=1,replacing,timer_open;
-static pid_t told[3*MESH_PORTS+MESH_CLIENTS];
-static uint32_t told_count;
 
 /* the node's region by name, mapped (read-only, or read-write where `writable`) and its descriptor closed at once:
    NULL where none is named */
@@ -115,7 +99,6 @@ static void region_expire(void){
   if(m)munmap(m,size);
 }
 static void reopen_later(void){
-  say("a bridge opened in %u s\n",REOPEN_S);
   timer_open=1;
   struct kevent64_s t;
   EV_SET64(&t,TIMER_OPEN,EVFILT_TIMER,EV_ADD|EV_ONESHOT,0,(int64_t)(1000ull*REOPEN_S),0,0,0);
@@ -133,7 +116,7 @@ static void replace_turn(void){
   struct mesh_bridge_pages *own=m?region_own(m,size):NULL;
   if(!own || __atomic_load_n(&m->version,__ATOMIC_ACQUIRE)!=0){
     if(m)munmap(m,size);
-    replacing=0;told_count=0;
+    replacing=0;
     return;
   }
   pid_t holders[3*MESH_PORTS+MESH_CLIENTS];
@@ -150,23 +133,13 @@ static void replace_turn(void){
   }
   munmap(m,size);
   if(!count){
-    replacing=0;told_count=0;
-    if(!shm_unlink(MESH_NAME) || errno==ENOENT)say("region %s unlinked: none of its holders lives, and its memory is the system's\n",MESH_NAME);
-    else {
-      say("region %s not unlinked: %s\n",MESH_NAME,strerror(errno));
+    replacing=0;
+    if(shm_unlink(MESH_NAME) && errno!=ENOENT){
       if(!timer_open)reopen_later();
     }
     return;
   }
   replacing=1;
-  int same=count==told_count;
-  for(uint32_t k=0;k<count && same;k++)same=holders[k]==told[k];
-  if(!same){
-    say("region %s is expired; it is unlinked, and a bridge opened, once each of its %u holders ends or lets it go:",MESH_NAME,count);
-    for(uint32_t k=0;k<count;k++)fprintf(stderr," %d",(int)holders[k]);
-    fputc('\n',stderr);
-    memcpy(told,holders,count*sizeof *holders);told_count=count;
-  }
   for(uint32_t k=0;k<count;k++){
     struct kevent64_s watch;
     EV_SET64(&watch,(uint64_t)holders[k],EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,TAG_HOLDER,0,0);
@@ -201,9 +174,7 @@ static void run_again(void){
   for(int n;(n=kevent64(events,NULL,0,left,8,0,&none))>0;)
     for(int i=0;i<n;i++)if(left[i].filter==EVFILT_SIGNAL)sigaddset(&again,(int)left[i].ident);
   for(size_t i=0;i<sizeof heard/sizeof *heard;i++)if(sigismember(&again,heard[i]))kill(getpid(),heard[i]);
-  say("the heartbeat runs its image again (%s)\n",self);
   execv(self,arguments);
-  say("the heartbeat's image %s not run again: %s\n",self,strerror(errno));
   sigprocmask(SIG_UNBLOCK,&held,NULL);
 }
 
@@ -234,12 +205,10 @@ static void open_bridge(void){
   posix_spawn_file_actions_destroy(&actions);
   posix_spawnattr_destroy(&attributes);
   if(failed){
-    say("bridge %s not opened: %s\n",image,strerror(failed));
     reopen_later();
     return;
   }
-  bridge=pid;child=1;asked=ASKED_NONE;opened_at=wall_us();
-  say("bridge %d opened (%s %s)\n",(int)pid,image,configuration);
+  bridge=pid;child=1;asked=ASKED_NONE;
   if(bridge_watch(pid,1))bridge_ended();
 }
 
@@ -257,14 +226,10 @@ static void bridge_ended(void){
   const int reaped=child && waitpid(was,&status,0)==was;
   bridge=0;child=0;
   const int expired=reaped && WIFEXITED(status) && WEXITSTATUS(status)==EX_TEMPFAIL;
-  if(!reaped)say("bridge %d ended\n",(int)was);
-  else if(WIFEXITED(status))say("bridge %d exited %d\n",(int)was,WEXITSTATUS(status));
-  else say("bridge %d ended by signal %d\n",(int)was,WIFSIGNALED(status)?WTERMSIG(status):0);
   switch(asked){
   case ASKED_END:
     region_expire();
     replace_turn();
-    say("the heartbeat ends\n");
     exit(0);
   case ASKED_RESTART:
     asked=ASKED_NONE;
@@ -274,9 +239,7 @@ static void bridge_ended(void){
     region_expire();
     break;
   case ASKED_NONE:
-    if(expired)say("its region is expired: a bridge is opened once the region is unlinked\n");
-    else {
-      say("it ended unasked after %.0f s\n",(double)(wall_us()-opened_at)/1e6);
+    if(!expired){
       reopen_later();
     }
     break;
@@ -289,23 +252,19 @@ static void close_bridge(int how,int signal_number){
   if(!bridge)return;
   if(asked==ASKED_END || (asked==ASKED_RELEASE && how!=ASKED_END))return;
   asked=how;
-  say("bridge %d asked to close (%s)\n",(int)bridge,signal_number==SIGHUP?"SIGHUP: restarted, its region kept":"SIGTERM: released");
   kill(bridge,signal_number);
 }
 
 static void noted(int number){(void)number;}
 
 int main(int argc,char **argv){
-  setvbuf(stderr,NULL,_IOLBF,0);
   if(argc!=3){
-    say("usage: mesh-heartbeat BRIDGE CONFIGURATION: the bridge's image (rdma/mesh-flow) and its configuration's property "
-        "list (bin/mesh-user.sh writes both into the job's definition; etc/bridge/README.md)\n");
     return 1;
   }
   arguments=argv;image=argv[1];configuration=argv[2];
   uint32_t room=sizeof self;
   char resolved[PATH_MAX];
-  if(_NSGetExecutablePath(self,&room) || !realpath(self,resolved)){say("the heartbeat's own image not read\n");return 1;}
+  if(_NSGetExecutablePath(self,&room) || !realpath(self,resolved)){return 1;}
   memcpy(self,resolved,sizeof self);
   /* the operator's signals: blocked while their filters are added (a run_again leaves them blocked and pending across
      the exec), each then given a handler that does nothing (an ignored signal is discarded, a pending one too), and
@@ -313,11 +272,11 @@ int main(int argc,char **argv){
   sigset_t held,pending;sigemptyset(&held);
   for(size_t i=0;i<sizeof heard/sizeof *heard;i++)sigaddset(&held,heard[i]);
   sigprocmask(SIG_BLOCK,&held,NULL);
-  if((events=kqueue())<0 || fcntl(events,F_SETFD,FD_CLOEXEC)){say("events: %s\n",strerror(errno));return 1;}
+  if((events=kqueue())<0 || fcntl(events,F_SETFD,FD_CLOEXEC)){return 1;}
   for(size_t i=0;i<sizeof heard/sizeof *heard;i++){
     struct kevent64_s e;
     EV_SET64(&e,(uint64_t)heard[i],EVFILT_SIGNAL,EV_ADD,0,0,0,0,0);
-    if(kevent64(events,&e,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)){say("events: %s\n",strerror(errno));return 1;}
+    if(kevent64(events,&e,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)){return 1;}
     struct sigaction action={.sa_handler=noted,.sa_flags=SA_RESTART};
     sigaction(heard[i],&action,NULL);
   }
@@ -328,8 +287,7 @@ int main(int argc,char **argv){
   uint64_t start=0;
   const pid_t serving=region_bridge(&start);
   if(serving && !bridge_watch(serving,0)){
-    bridge=serving;child=0;asked=ASKED_NONE;opened_at=start?start:wall_us();
-    say("bridge %d found serving region %s; watched\n",(int)serving,MESH_NAME);
+    bridge=serving;child=0;asked=ASKED_NONE;
   }
   else open_bridge();
   int ending=0;
@@ -337,7 +295,7 @@ int main(int argc,char **argv){
     struct kevent64_s ready[8];
     struct timespec tick={REPLACE_TICK_MS/1000,(long)(REPLACE_TICK_MS%1000)*1000000};
     const int count=kevent64(events,NULL,0,ready,8,0,replacing?&tick:NULL);
-    if(count<0 && errno!=EINTR){say("events: %s\n",strerror(errno));return 1;}
+    if(count<0 && errno!=EINTR){return 1;}
     if(count==0 && replacing)turn();
     for(int i=0;i<count;i++){
       const struct kevent64_s *e=ready+i;
@@ -358,7 +316,7 @@ int main(int argc,char **argv){
       }
       else if(e->filter==EVFILT_SIGNAL){
         wanted=0;
-        if(!bridge){region_expire();replace_turn();say("signal %d: the heartbeat ends\n",(int)e->ident);return 0;}
+        if(!bridge){region_expire();replace_turn();return 0;}
         close_bridge(ASKED_END,SIGTERM);
         if(!ending){
           ending=1;
@@ -369,8 +327,6 @@ int main(int argc,char **argv){
       }
       else if(e->filter==EVFILT_TIMER && e->ident==TIMER_OPEN){timer_open=0;turn();}
       else if(e->filter==EVFILT_TIMER && e->ident==TIMER_END){
-        say("bridge %d has not ended %.0f s after it was asked; the heartbeat ends without it\n",(int)bridge,
-            (double)(3*MESH_PLATFORM_NS)/1e9);
         region_expire();
         return 0;
       }

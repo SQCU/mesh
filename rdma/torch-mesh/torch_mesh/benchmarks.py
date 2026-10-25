@@ -14,7 +14,8 @@ TIMING_METHOD = 'continuous-host-submission-and-final-completion'
 
 def emit(record, *, file=None):
     """One structured record format for examples and the hourly reader."""
-    print(json.dumps(record, sort_keys=True), file=file, flush=True)
+    records = record if isinstance(record, list) else [record]
+    print('\n'.join(json.dumps(row, separators=(',', ':'), sort_keys=True) for row in records), file=file, flush=True)
 
 
 def traffic_delta(before, after):
@@ -36,7 +37,7 @@ def completed(record, seconds):
     result = {**record['report'], 'rank': record['rank'], 'size': record['size'], 'seconds': seconds,
               'useful_output_bytes': record['useful_work_bytes'],
               'useful_gigabytes_per_second': record['useful_work_bytes'] / seconds / 1e9,
-              'timing_method': 'host-clock-poll-of-ordinary-completion', 'function_feedback': record}
+              'timing_method': 'host-clock-poll-of-ordinary-completion'}
     if 'steps' in result:
         result.update(step_microseconds=seconds / result['steps'] * 1e6,
                       calls_per_second=result['steps'] / seconds)
@@ -115,7 +116,7 @@ def bandwidth(config):
             cases.append((call, output, useful, declaration, calls, what, requested))
     group.plan([([declaration], calls) for _, _, _, declaration, calls, _, _ in cases])
     observer = rollout.start(dist.distributed_c10d._get_default_store(), 'mesh/bandwidth', rank, size,
-                             Path('~/.cache/mesh/observations/bandwidth.jsonl').expanduser())
+                             'bandwidth')
     group._observers = [observer]
     for index, (call, output, useful, declaration, calls, what, requested) in enumerate(cases):
         started = time.monotonic()
@@ -133,7 +134,7 @@ def bandwidth(config):
 
 def bandwidth_main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    bandwidth(json.loads(Path(argv[0]).read_text()))
+    bandwidth(json.load(sys.stdin) if argv[0] == '-' else json.loads(Path(argv[0]).read_text()))
 
 
 if __name__ == '__main__':

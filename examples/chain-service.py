@@ -36,10 +36,7 @@ def rotated(w, block, axis):
 
 
 # docs/writing-a-service.md#how-the-example-moves-its-data
-def folded(config):
-    full = tuple(np.load(f'{config["weights"]}/{name}.npy', mmap_mode='r') for name in ('a', 'b'))
-    if any(w.shape != (config['width'],) * 2 for w in full):
-        raise ValueError('The weights a and b are [width, width] each')
+def folded(config, full):
     blocks = config['rotation_blocks']
     held = tuple(chain.region(w.shape, torch.half) for w in full)
     for h, w, block, axis in zip(held, full, blocks, (1, 0)):
@@ -49,15 +46,19 @@ def folded(config):
 
 # docs/writing-a-service.md#the-configuration
 def main():
-    config = json.loads(open(sys.argv[1]).read())
-    folds = folded(config) if os.environ['RANK'] == '0' else None
+    config = json.load(sys.stdin if sys.argv[1] == '-' else open(sys.argv[1]))
+    steps, rows = config['steps'], config['rows']
+    inputs, folds = None, None
+    if os.environ['RANK'] == '0':
+        inputs, full = chain.inputs(config, steps, rows)
+        folds = folded(config, full)
+        del full
     dist.init_process_group(backend='mesh', device_id=torch.device('mps', 0))
     rank, size, width = dist.get_rank(), dist.get_world_size(), config['width']
     mesh = DeviceMesh.from_group(dist.group.WORLD, 'mps', mesh_dim_names=('tp',))
     partition.attach(mesh, tp=width)
-    steps, rows, inputs = chain.operand(config['input'], rank, width)
     configuration = placement(mesh, 'tp', {'function': 'chain_sequence', 'width': width, 'steps': steps, 'rows': rows},
-                            config.get('observations', config['output'] + '.observations.jsonl'))
+                            config['observations'])
     k = config['steps_per_replay']
     at, b = chain.weights(mesh, folds, width)
     del folds
@@ -82,9 +83,8 @@ def main():
     summary = dict(blocks=partition.split(mesh, 'tp', width), rows=rows, width=width, steps=steps,
                    steps_per_replay=k)
     record(configuration, completion, started, O.numel() * O.element_size(), summary)
-    if rank == 0:
-        torch.from_numpy(np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, width))).copy_(O)
     dist.destroy_process_group()
+    return O
 
 
 if __name__ == '__main__':

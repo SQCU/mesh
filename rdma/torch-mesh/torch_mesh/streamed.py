@@ -170,6 +170,10 @@ def evidence_path():
     return Path(os.environ.get('MESH_INSTANCES') or Path.home() / '.cache/mesh/instances.json')
 
 
+_EVIDENCE_PATH = evidence_path()
+_EVIDENCE = json.loads(_EVIDENCE_PATH.read_text()) if _EVIDENCE_PATH.exists() else None
+
+
 def slice_units(m):
     """A slice's units: outputs, columns, tiles, nonzero tiles, planes (the sum of the widths), 1-bit tiles, bytes."""
     words = m.tiles.long() & 0xFFFFFFFF
@@ -229,8 +233,8 @@ class Fit:
         instance shapes the evidence observed (none: every admissible one). A node without evidence, whose file another
         chip or core count made, or one fitted before the file held its readings, is refused: no prior or other node's
         coefficients price its instances (metal-microbench docs/kernels.md#the-instance-fit, Evidence)."""
-        path, (chip, cores) = evidence_path(), node()
-        known = json.loads(path.read_text()) if path.exists() else None
+        path, (chip, cores) = _EVIDENCE_PATH, node()
+        known = _EVIDENCE
         if known is None:
             raise RuntimeError(f'{path}: no instance evidence on this {chip} ({cores} GPU cores): `python -m torch_mesh.streamed bandwidth`, '
                                f'`observe` and `fit` make it, or another {chip} of {cores} GPU cores gives its file (metal-microbench '

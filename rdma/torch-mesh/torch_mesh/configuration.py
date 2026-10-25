@@ -1,6 +1,8 @@
 # design/whole-function.md
 import itertools
 import json
+import os
+import sys
 from pathlib import Path
 
 import torch.distributed as dist
@@ -18,12 +20,12 @@ def placement(mesh, name, workload, observations):
     rank, size = group.rank(), group.size()
     store = dist.distributed_c10d._get_default_store()
     key = f'mesh/configuration/{group.group_name}/{name}/{next(_serial)}'
-    path = Path(observations).expanduser()
+    history = (json.load(sys.stdin) if os.environ.get('MESH_OBSERVATIONS_STDIN') else
+               observations if isinstance(observations, list) else rollout.observations(observations))
     store.set(f'{key}/capacity/{rank}', str(node()[1]))
     capacities = [int(store.get(f'{key}/capacity/{p}')) for p in range(size)]
     if rank == 0:
-        records = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
-        records = [row for row in records if row['workload'] == workload][-64:]
+        records = [row for row in history if row['workload'] == workload][-64:]
         store.set(key + '/observations', json.dumps(records))
     records = json.loads(store.get(key + '/observations'))
     operand = partition.operand(mesh, name)
@@ -37,7 +39,7 @@ def placement(mesh, name, workload, observations):
     operands = assignment.assign(decisions, records)
     partition._attach(mesh, name, operands['parts'][name])
     return {'mesh': mesh, 'name': name, 'group': group, 'rank': rank, 'size': size,
-            'store': store, 'key': key, 'path': path, 'workload': workload, 'records': records,
+            'store': store, 'key': key, 'history': history, 'workload': workload, 'records': records,
             'decisions': decisions, 'assignment': operands, 'graphs': graphs,
             'implementation': revision(Path(assignment.__file__).resolve().parents[1]), 'sequence': 0}
 
@@ -56,7 +58,7 @@ def bind(configuration, groups, prepare):
     prepare()
     group.plan_active(True)
     c.update(decisions=decisions, graphs={name: graph}, assignment={**c['assignment'], 'parts': operands})
-    c['observer'] = rollout.start(c['store'], c['key'] + '/observations', c['rank'], c['size'], c['path'])
+    c['observer'] = rollout.start(c['store'], c['key'] + '/observations', c['rank'], c['size'], c['history'])
     group._observers = getattr(group, '_observers', []) + [c['observer']]
 
 

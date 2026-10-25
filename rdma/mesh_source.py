@@ -3,6 +3,7 @@ import argparse
 import io
 import json
 import os
+import shutil
 from pathlib import Path, PurePosixPath
 import subprocess
 import tarfile
@@ -105,9 +106,15 @@ def revision(root):
     return manifest(root)['commit'] if (Path(root) / MANIFEST).exists() else pin(root)
 
 
+def prune(root, keep):
+    for path in Path(root).iterdir():
+        if path.name != keep:
+            shutil.rmtree(path)
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=('files', 'revision', 'verify'))
+    parser.add_argument('action', choices=('files', 'revision', 'verify', 'prune'))
     parser.add_argument('root', type=Path)
     parser.add_argument('relative', nargs='?', default='.')
     args = parser.parse_args()
@@ -116,6 +123,8 @@ def main():
         sys.stdout.buffer.write(b''.join(os.fsencode(p) + b'\0' for p in files(args.root, args.relative)))
     elif args.action == 'revision':
         print(revision(args.root))
+    elif args.action == 'prune':
+        prune(args.root, args.relative)
     else:
         print(json.dumps({'verified_commit': verify(args.root)['commit']}))
 

@@ -96,6 +96,7 @@ import json
 import math
 import resource
 import weakref
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -117,6 +118,7 @@ from torch.utils import _pytree as pytree
 from torch.utils._python_dispatch import return_and_correct_aliasing
 
 aten = torch.ops.aten
+_LINEAR_SOURCE = Path(__file__).with_name('linear.metal').read_text()
 
 
 class _Operand:
@@ -344,15 +346,12 @@ def _gather_kernel(kernel, *arguments):
 def _linear_kernel(*arguments):
     """linear.metal's linear_publish at `arguments`, compiled once after the library's steps (fused.steps) and
     argmax.metal's arrival count."""
-    from pathlib import Path
-
     from . import _stream, fused
     from .argmax import SOURCE
     from .streamed import instance
     name, line = instance('linear_publish', *arguments)
     if name not in _GATHER_KERNELS:
-        text = (Path(__file__).parent / 'linear.metal').read_text()
-        _GATHER_KERNELS[name] = _stream.pipeline(fused.steps() + SOURCE + '\n' + text + '\n' + line + '\n', name)
+        _GATHER_KERNELS[name] = _stream.pipeline(fused.steps() + SOURCE + '\n' + _LINEAR_SOURCE + '\n' + line + '\n', name)
     return _GATHER_KERNELS[name]
 
 

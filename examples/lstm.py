@@ -1,5 +1,3 @@
-import os
-
 import numpy as np
 import torch
 import torch_mesh
@@ -73,14 +71,16 @@ class Tick:
 
 # docs/writing-a-service.md#the-lstm
 def inputs(config, steps, rows):
-    g, H, KIN = np.random.default_rng(0), config['width'], config['input_width']
-    k, part, scratch = 1 / np.sqrt(H), config['weights'] + '.part', chain.region(chain.CHUNK, torch.float64)
+    g, H, KIN = np.random.default_rng(config['seed']), config['width'], config['input_width']
+    k, scratch = 1 / np.sqrt(H), chain.region(chain.CHUNK, torch.float64)
     normal = lambda b: g.standard_normal(out=b)
     uniform = lambda b: np.add(np.multiply(g.random(out=b), 2 * k, out=b), -k, out=b)
-    np.save(config['input'], chain._drawn(chain.region((steps, rows, KIN), torch.half), normal, scratch))
-    os.makedirs(part, exist_ok=True)
+    x = chain._drawn(chain.region((steps, rows, KIN), torch.half), normal, scratch)
+    weights = {}
     for l in range(config['layers']):
         for name, columns in ((f'w_ih_{l}', KIN if l == 0 else H), (f'w_hh_{l}', H)):
-            np.save(f'{part}/{name}.npy', chain._drawn(chain.region((4 * H, columns), torch.half), uniform, scratch))
-        np.save(f'{part}/b_{l}.npy', (g.uniform(-k, k, 4 * H) + g.uniform(-k, k, 4 * H)).astype(np.float16))
-    os.replace(part, config['weights'])
+            weights[name] = chain._drawn(chain.region((4 * H, columns), torch.half), uniform, scratch)
+        bias = chain.region((4 * H,), torch.half)
+        bias[...] = (g.uniform(-k, k, 4 * H) + g.uniform(-k, k, 4 * H)).astype(np.float16)
+        weights[f'b_{l}'] = bias
+    return x, weights
