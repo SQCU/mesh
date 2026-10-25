@@ -227,11 +227,14 @@ def rank_results(outputs):
                     observations.extend(value['observations'])
                 else:
                     values.append(value)
-        failures = [line.strip() for line in lines if ('Error' in line or 'Exception' in line)
+        failures = [line.strip() for line in lines if any(word in line.lower()
+                    for word in ('error', 'exception', 'expired', 'deadline', 'abort', 'killed', 'segmentation'))
                     and not line.lstrip().startswith(('raise ', 'except '))]
+        detail = failures[-1] if failures else '; '.join(line.strip() for line in lines[-12:]
+                 if line.strip() and 'resource_tracker' not in line and 'warnings.warn' not in line)
         result[name] = {'exit': code, 'measurements': values, 'observations': observations,
-                        'error': (failures[-1] if failures else next((line for line in reversed(lines) if line.strip()), f'exit {code}'))
-                                 if code else ''}
+                        'error': f'exit {code}: {detail}' if code else ''}
+
     return result
 
 
