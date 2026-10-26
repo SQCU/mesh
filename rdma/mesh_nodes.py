@@ -234,6 +234,8 @@ def ranks(nodes, out, tag, folder, command, port, append=False, alarm=300, env='
         except subprocess.TimeoutExpired as error:
             code = 124
             output = (error.output or b'').decode(errors='replace') + '\nremote process did not exit after its deadline\n'
+        if code:
+            print(f'{tag} rank{k} (exit {code}):\n{output}', file=sys.stderr, flush=True)
         if log is not None:
             with log.open('a' if append else 'w') as destination:
                 destination.write(output + f'\nexit {code}\n')

@@ -182,13 +182,6 @@ def rank_results(outputs):
     for name, output in outputs.items():
         lines = output['output'].splitlines()
         code = output['exit']
-        if code:
-            # Diagnostics go to the caller's console. Durable hourly records
-            # retain only the compact failure and paired performance values.
-            import itertools
-            diagnostic = [line for line, _ in itertools.groupby(lines)
-                          if any(token in line for token in ('File ', 'Error', 'Exception', 'error:', 'assertion', 'Context leak'))]
-            print(f'{name}:\n' + '\n'.join(diagnostic[-40:]), file=sys.stderr, flush=True)
         values, observations = [], []
         for line in lines:
             try:

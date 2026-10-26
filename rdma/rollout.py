@@ -28,15 +28,14 @@ def start(store, key, rank, ranks, history):
 def close(observer):
     outgoing, stopping, worker, future = observer
     stopping.set()
-    reports, records = future.result()
-    emit([*[completed(record, record['seconds']) for record in reports], {'observations': records}])
+    emit([{'observations': future.result()}])
 
 
 def _collect(store, key, rank, ranks, history, outgoing, stopping):
     sent, received, pending = 0, [0] * ranks, {}
     waiting, idle = [], threading.Event()
     announced = False
-    reports, records = [], []
+    records = []
     while True:
         while True:
             try:
@@ -55,7 +54,7 @@ def _collect(store, key, rank, ranks, history, outgoing, stopping):
             seconds = observed - record['started']
             record['seconds'] = seconds
             record['completion_seconds_bounds'] = [record.get('last_pending', record['started']) - record['started'], seconds]
-            reports.append(record)
+            emit([completed(record, seconds)])
             if rank == 0:
                 pending.setdefault(record['episode'], {})[0] = record
                 received[0] += 1
@@ -88,4 +87,4 @@ def _collect(store, key, rank, ranks, history, outgoing, stopping):
         elif announced:
             break
         idle.wait(.005)
-    return reports, records
+    return records
