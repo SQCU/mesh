@@ -1,57 +1,15 @@
-"""A node's compute engines as members of one tensor operation: its units shared among them, moved on the calls' own
-measurements (design/heterogeneity.md: raggedness within a node is the raggedness between nodes; metal-microbench
-docs/soc_compute_backends.md for the engines' measured envelopes).
+"""Compute-share declarations for the common whole-function compiler.
 
-An Apple SoC holds several matrix engines with their own rates by shape, dtype and operand form: the GPU (torch's MPS
-queue; on an M4 Pro about 6 TFLOP/s at fp16 and fp32 alike, on an M5 its neural accelerators), the CPU's matrix units
-(SME/AMX, one a cluster, reached through Accelerate by torch's fp32 CPU products: about 3 TFLOP/s on an M4 Pro's two
-performance clusters) and the Neural Engine (Core ML's static graphs of 1x1 convolutions with constant weights, rows
-in tiles).  No one engine is fastest for every operation, the fastest set changes with the shape, and engines running
-at once slow each other (power, performance cores and memory shared), so an operation's final backend is resolved
-here, per operation and row count, as one joint decision: its units shared among the configured engines like a mesh
-dimension among ranks, each engine holding its shard of the weights resident, the shares running at once on unified
-memory. All operation allocations are components of one page assignment
-vector, updated from measured completion of the entire enclosing graph. Primitive
-operation timings describe resource use; they are not separate objectives.
-
-An operation states how its shares combine, the mesh's crossing rule for its split axis (tools/mesh/programs.py
-points): `Linear` (y = x W^T + b) shares its output features, which concatenate; `FFN` (y = down(act(x Wg^T) *
-(x Wu^T)), Megatron's column-then-row split) shares its intermediate neurons, each engine giving a partial of the whole
-output, which sum.  Each engine lowers each kind its own way (the Neural Engine an FFN share as one fused graph).
-
-AOT realization prepares the next vector's shards between function executions.
-Timing events within operations are optional diagnostics. The controller receives
-the whole graph's elapsed time, including joins, projections and communication.
-
-Each engine states the resources it occupies (Engine.occupies). Overlapping
-resources are schedule metadata: the controller can retain a time-sharing
-allocation when it improves the complete function. Occupancy does not forbid
-otherwise legal allocations.
-
-Nothing is implicit.  An operation takes its engines as an operand (`Engines`, from the program: its engines' names
-and each one's options); without one it is torch's own operation on its input's device.  An engine the program names
-and the node lacks is an
-error (design/rubrics.md D2, the operator 10-19: "functions should throw ... before they try to guess parametric
-values"; a resolver's fallback path ranks below none).  An engine's limits are data (`Engine.limits`): its operand dtypes and whether its
-weights must be constants (the Neural Engine's: a share there is compiled); an operand an engine cannot take gives it
-no units for that decision.
-
-The data path is zero-copy where the memory allows: torch's MPS tensors live in shared Metal memory, so the CPU and
-Neural Engine shares read their inputs in place (the GPU's prologue converts the input to fp32 for the CPU's products;
-the Neural Engine's graph reads it row-major as it is) and write their outputs into MPS tensors in place; the GPU
-combines the shares.  The Neural Engine's binding through coremltools copies its input and output once each (counted
-in its time).
-
-  pool = engines.Engines(['mps', 'cpu', 'ane'], ane={'tile': 128, 'block': 4096})
-  ffn = engines.FFN(gate, up, down, engines=pool, name='layer3.ffn')
-  y = ffn(x)                # x [..., H] on MPS: every configured engine its share of the neurons
-  engines.placement(pool, observations)  # one objective for the entire graph"""
-import concurrent.futures
+Declare shapes and choose shares before execution. ``Operation.prepare`` binds
+weights, outputs and host views. GPU spans use ``declarations.Function``; host
+shares use ``MetalScheduleHost`` through the same native scheduler. Only result
+consumers depend on host completion. No operation times itself, chooses shares,
+loads a model, or joins a future while it runs.
+"""
 import ctypes
 import hashlib
 import os
 import shutil
-import time
 from pathlib import Path
 
 import torch
@@ -95,9 +53,11 @@ def _coreml():
             lib = ctypes.CDLL(os.path.join(RDMA, 'libmesh-coreml.dylib'))
             lib.mesh_coreml_load.restype = ctypes.c_long
             lib.mesh_coreml_load.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
-            lib.mesh_coreml_predict.restype = ctypes.c_int
-            lib.mesh_coreml_predict.argtypes = [ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int,
-                                                ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int]
+            lib.mesh_coreml_bind.restype = ctypes.c_void_p
+            lib.mesh_coreml_bind.argtypes = [ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int,
+                                             ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int]
+            lib.mesh_coreml_run.restype, lib.mesh_coreml_run.argtypes = ctypes.c_int, [ctypes.c_void_p]
+            lib.mesh_coreml_unbind.argtypes = [ctypes.c_void_p]
             lib.mesh_coreml_error.restype = ctypes.c_char_p
             lib.mesh_coreml_placement.restype = ctypes.c_long
             lib.mesh_coreml_placement.argtypes = [ctypes.c_long, ctypes.c_char_p, ctypes.c_size_t]
@@ -129,7 +89,7 @@ class Engine:
     """One engine of the node.  `limits`: dtypes (the operand dtypes it takes), constants (its weights must be
     constants).  `occupies`: the physical units it runs on (the configuration's `occupies` option, '+'-separated, in
     place of the engine's own).  It lowers each operation kind by its prepare_<kind> (its resident shard of units
-    [start, end)) and run_<kind> (its share into `out`, its seconds or None where the GPU's events time it)."""
+    [start, end)) and run_<kind> (its share into `out`)."""
     name, limits = None, {'dtypes': (torch.float16, torch.bfloat16, torch.float32), 'constants': False}
     host_side, occupies = True, frozenset()
 
@@ -144,7 +104,7 @@ class Engine:
         return None
 
     def takes(self, op, dtype):
-        return hasattr(self, 'run_' + op.kind) and dtype in self.limits['dtypes']
+        return hasattr(self, 'prepare_' + op.kind) and dtype in self.limits['dtypes']
 
     def out_dtype(self, dtype):
         return dtype
@@ -157,7 +117,7 @@ class Engine:
 
 
 class Mps(Engine):
-    """torch's MPS queue: the share enqueued as the GPU's own products, timed by events on its stream."""
+    """GPU products declared to the whole-function compiler."""
     name, host_side, occupies = 'mps', False, frozenset({'gpu'})
 
     @classmethod
@@ -188,47 +148,40 @@ class Cpu(Engine):
     def prepare_linear(self, op, start, end):
         return op.weight[start:end].detach().float().cpu().contiguous()
 
-    def run_linear(self, op, shard, x, prologue, out):
-        began = time.perf_counter()
-        torch.mm(host(prologue['fp32']), shard.T, out=host(out))
-        return time.perf_counter() - began
-
     def prepare_ffn(self, op, start, end):
         cpu = lambda t: t.detach().float().cpu().contiguous()
         return cpu(op.gate[start:end]), cpu(op.up[start:end]), cpu(op.down[:, start:end])
 
-    def run_ffn(self, op, shard, x, prologue, out):
-        began = time.perf_counter()
-        gate, up, down = shard
-        x32 = host(prologue['fp32'])
-        h = _gelu(torch.mm(x32, gate.T)).mul_(torch.mm(x32, up.T))
-        torch.mm(h, down.T, out=host(out))
-        return time.perf_counter() - began
+    def bind(self, op, shard, x, prologue, out, repetitions):
+        source, target = host(prologue['fp32']), host(out)
+        if op.kind == 'linear':
+            weight = shard.T
+            return lambda: torch.mm(source, weight, out=target)
+        gate, up, down = (w.T for w in shard)
+        g = torch.empty(source.shape[0], gate.shape[1], dtype=torch.float32)
+        u = torch.empty_like(g)
+        def run():
+            torch.mm(source, gate, out=g)
+            torch.mm(source, up, out=u)
+            torch.ops.aten.gelu.out(g, approximate='tanh', out=g)
+            torch.mul(g, u, out=g)
+            torch.mm(g, down, out=target)
+        return run
 
 
 class _Compiled:
     """A Neural Engine share: its operation kind, its fp16 weights and their compiled models by row count."""
 
     def __init__(self, kind, arrays):
-        self.kind, self.arrays, self.models = kind, arrays, {}
+        self.kind, self.arrays = kind, arrays
 
 
 class Ane(Engine):
-    """The Neural Engine through Core ML: a share a graph of 1x1 convolutions with its weights constant (a linear's
-    one; an FFN's gate and up, the activation, their product and down, fused), rows in tiles of `tile` (default 128,
-    metal-microbench docs/soc_compute_backends.md, September 7: at 1024 rows on an M4 Pro 7.4 ms against the flat
-    graph's 15.3 and 64- and 256-row tiles' 14.6 and 15.3), the last tile the rows' remainder, its input and output
-    row-major (the transposes to and from channels-first inside the graph: on an M4 Pro 4.5 ms against 5.9 with them
-    on the GPU), compiled and loaded once a share and row count, its package kept in ~/.cache/mesh-engines; its
-    predictions through rdma/mesh-coreml.m on the operands' own memory (no CPU copy on its critical path: through
-    coremltools' copies a 3 ms prediction took 9 once the CPU clocked down beside a busy GPU), coremltools' own where
-    that binding cannot load; fp16 operands and activation.  Its outputs carry an
-    absolute error floor (on an M4 Pro and an M5 Max about 3e-4 RMS for a 3840-wide contraction, whatever the input's
-    scale; above unit-scale activations its error is fp16's relative 2e-4): accurate on normalized activations,
-    inaccurate on small ones (a sixteenth-scale input's linear 5e-3 relative), which conditioning answers, not routing.
-    (Its compiler folds a constant scaling of the weights into the convolution, so no rescaling in the graph moves the
-    floor.)  `block` is the units a convolution of its graph takes, the configuration's (the Neural Engine's compiler
-    refuses a convolution past a weight size: neural_engine_share)."""
+    """Core ML graph shares with explicit tile and channel block configuration.
+
+    Compilation and model loading happen during preparation. Predictions bind
+    shared input/output views and fail if Core ML does not honor output backing.
+    """
     name, limits, occupies = 'ane', {'dtypes': (torch.float16,), 'constants': True}, frozenset({'ane'})
 
     def __init__(self, **options):
@@ -250,60 +203,34 @@ class Ane(Engine):
         numpy = lambda t: t.detach().to('cpu', torch.float16).contiguous().numpy()
         return _Compiled('ffn', (numpy(op.gate[start:end]), numpy(op.up[start:end]), numpy(op.down[:, start:end])))
 
-    def ready(self, shard, rows):
-        return rows in shard.models
-
-    def load(self, shard, rows):
-        import numpy as np
-        tile = self.tile
-        width = shard.arrays[0].shape[1]
-        n = shard.arrays[0].shape[0] if shard.kind == 'linear' else shard.arrays[2].shape[0]
+    def bind(self, op, shard, x, prologue, out, repetitions):
         native = _coreml()
-        handle, model = None, None
-        if native:
-            compiled, shard.block, _ = neural_engine_share(shard.kind, shard.arrays, rows, tile, self.block)
-            inputs, outputs = '', ''
-            handle = native.mesh_coreml_load(str(compiled).encode(), b'', b'', 0)
-            if handle < 0:
-                raise RuntimeError(f'Neural Engine share: {native.mesh_coreml_error().decode()}')
-            placed = ctypes.create_string_buffer(1 << 20)
-            if native.mesh_coreml_placement(handle, placed, len(placed)) >= 0:
-                devices = {line.split('=')[1] for line in placed.value.decode().split('\n') if '=' in line}
-                shard.placement = sorted(devices - {'unknown'})
-                self.occupies = self.occupies | frozenset(devices - {'unknown'})
-        else:
-            model = neural_engine_model(shard.kind, shard.arrays, rows, tile)
-            spec = model.get_spec().description
-            inputs, outputs = spec.input[0].name, spec.output[0].name
-        shard.models[rows] = (model, inputs, outputs, handle, n)
-        warm = torch.zeros(rows, width, dtype=torch.float16)
-        self._predict(shard, warm, torch.empty(rows, n, dtype=torch.float16))
+        if native is None:
+            raise RuntimeError('Neural Engine requires the native shared-memory binding')
+        rows = x.shape[0]
+        compiled, shard.block, _ = neural_engine_share(shard.kind, shard.arrays, rows, self.tile, self.block)
+        handle = native.mesh_coreml_load(str(compiled).encode(), b'', b'', 0)
+        if handle < 0:
+            raise RuntimeError(native.mesh_coreml_error().decode())
+        return Prediction(native, handle, host(x), host(out))
 
-    def _predict(self, shard, source, target):
-        """One prediction from `source` into `target` (CPU tensors over the operands' memory): natively on that memory
-        where the binding loads, else through coremltools (a copy each way)."""
-        model, name, output, handle, n = shard.models[source.shape[0]]
-        if handle is None:
-            target.copy_(torch.from_numpy(model.predict({name: source.numpy()})[output]))
-            return
-        shape_in = (ctypes.c_int64 * 2)(*source.shape)
-        shape_out = (ctypes.c_int64 * 2)(*target.shape)
-        native = _coreml()
-        backed = native.mesh_coreml_predict(handle, source.data_ptr(), shape_in, 2, target.data_ptr(), shape_out, 2)
-        if backed < 0:
-            raise RuntimeError(f'Neural Engine share: {native.mesh_coreml_error().decode()}')
-        self.backed = backed
 
-    def _run(self, shard, x, out):
-        began = time.perf_counter()
-        self._predict(shard, host(x), host(out))
-        return time.perf_counter() - began
+class Prediction:
+    """One Core ML invocation's views, bound before the numerical function."""
+    def __init__(self, native, model, source, target):
+        self.native, self.source, self.target = native, source, target
+        shape_in, shape_out = (ctypes.c_int64 * 2)(*source.shape), (ctypes.c_int64 * 2)(*target.shape)
+        self.binding = native.mesh_coreml_bind(model, source.data_ptr(), shape_in, 2, target.data_ptr(), shape_out, 2)
+        if not self.binding:
+            raise RuntimeError(native.mesh_coreml_error().decode())
 
-    def run_linear(self, op, shard, x, prologue, out):
-        return self._run(shard, x, out)
+    def __call__(self):
+        if self.native.mesh_coreml_run(self.binding):
+            raise RuntimeError(self.native.mesh_coreml_error().decode())
 
-    def run_ffn(self, op, shard, x, prologue, out):
-        return self._run(shard, x, out)
+    def __del__(self):
+        if getattr(self, 'binding', None):
+            self.native.mesh_coreml_unbind(self.binding)
 
 
 def neural_engine_model(kind, arrays, rows, tile=128, block=None):
@@ -398,16 +325,6 @@ def neural_engine_share(kind, arrays, rows, tile, block):
 ENGINES = {e.name: e for e in (Mps, Cpu, Ane)}
 
 
-def _interactive():
-    """A worker thread at user-interactive QoS: the scheduler keeps it, Core ML's host work and Accelerate's
-    products on the performance cores (at the default QoS a Core ML prediction took 5.2 ms against 4.7 on an M4
-    Pro)."""
-    try:
-        ctypes.CDLL(None).pthread_set_qos_class_self_np(0x21, 0)
-    except (OSError, AttributeError):
-        pass
-
-
 class Engines:
     """The engines one node's operations may share their units among, in order (the order of their shares along an
     operation's units), each with its options; the evidence of the operations using them; each decision's search."""
@@ -422,109 +339,115 @@ class Engines:
             raise RuntimeError(f'engines: this node lacks {lacking}')
         self.names = names
         self.engines = [ENGINES[n](**options.get(n, {})) for n in names]
-        self.workers = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(names) - 1), initializer=_interactive)
         self.operations, self.decisions = [], {}
-        self.separated = {}
+
+
+def _gpu(function, repetitions):
+    from .declarations import Function
+    made = Function(function)
+    made.declare(None)
+    made.prepare(repetitions)
+    return made
 
 
 class Operation:
-    """A column-separable operation: `units` shared among `engines` (Engines; None: torch's own) in grains of `grain` (a
-    remainder of less than a grain the first able engine's),
-    a decision a name and row count (operations of one name, a stack's layers of one shape, share it and pool their
-    evidence: the allocation is measured where the program runs it, between its other operations); its shares concatenate (`combine` 'concat', the shared axis the output's) or sum ('sum',
-    the shared axis contracted); `constant` states that its weights do not change (an engine whose weights are
-    constants takes a share only then).  The allocation follows the times alone."""
+    """An operation declaration. Shares and shapes are configuration operands.
+
+    ``prepare`` binds an input, its final output and every engine's scratch and
+    model. The returned call uses those bindings; it never chooses or loads a
+    shard. Placement changes require preparing the next whole function.
+    """
     kind = combine = None
 
     def __init__(self, units, width, engines, name, grain, constant):
         self.units, self.width, self.engines, self.grain, self.constant = units, width, engines, grain, constant
         self.name = name or f'{self.kind}{id(self):x}'
-        self.shards, self.warm, self.calls = {}, set(), {}
         if engines is not None:
             engines.operations.append(self)
 
-    def torch(self, x):
-        raise NotImplementedError
-
-    @property
-    def decisions(self):
-        """The decisions this operation's name holds (shared by every operation of its name: its layers')."""
-        prefix = self.name + '@'
-        return {k: d for k, d in (self.engines.decisions if self.engines else {}).items() if k.startswith(prefix)}
-
-    def _decision(self, rows, dtype):
+    def declare(self, rows, dtype):
         key = f'{self.name}@{rows}'
-        if key not in self.engines.decisions:
-            able = [e.takes(self, dtype) and (self.constant or not e.limits['constants']) for e in self.engines.engines]
-            if not any(able):
-                raise ValueError(f'{key}: no configured engine takes {dtype}{"" if self.constant else " with weights that change"}')
-            share = (self.units // self.grain) // sum(able)
-            parts = [share * self.grain if a else 0 for a in able]
-            parts[able.index(True)] += self.units - sum(parts)
-            self.engines.decisions[key] = {'parts': parts, 'grain': self.grain, 'low': [0] * len(able),
-                                           'high': [self.units if a else 0 for a in able], 'units': self.units}
-            self._separate(key)
+        able = [e.takes(self, dtype) and (self.constant or not e.limits['constants']) for e in self.engines.engines]
+        if not any(able):
+            raise ValueError(f'{key}: no configured engine takes {dtype}')
+        share = (self.units // self.grain) // sum(able)
+        parts = [share * self.grain if a else 0 for a in able]
+        parts[able.index(True)] += self.units - sum(parts)
+        self.engines.decisions.setdefault(key, {'parts': parts, 'grain': self.grain, 'low': [0] * len(able),
+                                               'high': [self.units if a else 0 for a in able], 'units': self.units})
         return key
 
-    def _shard(self, engine, start, end, rows):
-        key = (engine.name, start, end)
-        prepared = key not in self.shards
-        if prepared:
-            self.shards = {k: v for k, v in self.shards.items() if k[0] != engine.name}
-            self.shards[key] = engine.prepare(self, start, end)
-        shard = self.shards[key]
-        if hasattr(engine, 'ready') and not engine.ready(shard, rows):
-            engine.load(shard, rows)
-            prepared = True
-        return shard, prepared
-
-    def __call__(self, x):
-        if self.engines is None:
-            return self.torch(x)
-        lead = x.shape[:-1]
-        x2 = x.reshape(-1, x.shape[-1]).contiguous()
-        rows, dtype, engines = x2.shape[0], x2.dtype, self.engines.engines
-        key = self._decision(rows, dtype)
-        parts = self.engines.decisions[key]['parts']
-        bounds = [sum(parts[:i]) for i in range(len(parts) + 1)]
-        held = [i for i, p in enumerate(parts) if p]
-        shards = {i: self._shard(engines[i], bounds[i], bounds[i + 1], rows) for i in held}
-        prologue = {'fp32': x2.float()} if any(engines[i].name == 'cpu' for i in held) else {}
-        outs = {i: torch.empty(rows, parts[i] if self.combine == 'concat' else self.width, device=x2.device,
-                               dtype=engines[i].out_dtype(dtype)) for i in held}
-        hosted = [i for i in held if engines[i].host_side]
-        if hosted:
-            ready = torch.mps.Event(enable_timing=False)
-            ready.record()
-        for i in (i for i in held if not engines[i].host_side):
-            engines[i].run(self, shards[i][0], x2, prologue, outs[i])
-        if hosted:
-            ready.synchronize()
-        futures = {i: self.engines.workers.submit(engines[i].run, self, shards[i][0], x2, prologue, outs[i]) for i in hosted}
-        seconds = {i: f.result() for i, f in futures.items()}
-        pieces = [outs[i] for i in held]
-        if self.combine == 'concat':
-            y = torch.cat([p.to(dtype) for p in pieces], dim=1) if len(pieces) > 1 else pieces[0].to(dtype)
-        else:
-            y = pieces[0].float() if len(pieces) > 1 else pieces[0].to(dtype)
-            for p in pieces[1:]:
-                y = y + p.float()
-            y = y.to(dtype)
-        self._separate(key)
-        y = self.finish(y)
-        return y.reshape(*lead, -1)
+    def prepare(self, x, *, parts, repetitions=1):
+        return Prepared(self, x, parts, repetitions)
 
     def finish(self, y):
         return y
 
-    def _separate(self, key):
-        """Record shared resources; time sharing is a measured feasible schedule."""
-        engines = self.engines.engines
-        shared = self.engines.separated.setdefault(key, set())
-        for i in range(len(engines)):
-            for j in range(i + 1, len(engines)):
-                if engines[i].occupies & engines[j].occupies:
-                    shared.add((i, j))
+
+class Prepared:
+    """Fixed engine operands and data events for the declared invocations."""
+    def __init__(self, op, x, parts, repetitions):
+        from . import _stream
+        self.op, self.x = op, x
+        rows, dtype = x.shape[0], x.dtype
+        if len(parts) != len(op.engines.engines) or sum(parts) != op.units or min(parts) < 0:
+            raise ValueError('engine shares must partition the declared units')
+        self.output = torch.empty(rows, op.width, device=x.device, dtype=dtype)
+        prologue = {}
+        self.prologue = None
+        if any(count and engine.name == 'cpu' for engine, count in zip(op.engines.engines, parts)):
+            prologue['fp32'] = torch.empty_like(x, dtype=torch.float32)
+            self.prologue = _gpu(lambda: prologue['fp32'].copy_(x), repetitions)
+        self.gpu, self.host = [], []
+        pieces, start = [], 0
+        for engine, count in zip(op.engines.engines, parts):
+            end = start + count
+            if count:
+                if not engine.takes(op, dtype) or (engine.limits['constants'] and not op.constant):
+                    raise ValueError(f'{engine.name} cannot execute the declared operation')
+                shard = engine.prepare(op, start, end)
+                shape = (rows, count if op.combine == 'concat' else op.width)
+                out = torch.empty(shape, device=x.device, dtype=engine.out_dtype(dtype))
+                pieces.append(out)
+                if engine.host_side:
+                    bound = engine.bind(op, shard, x, prologue, out, repetitions)
+                    invocations = []
+                    for _ in range(repetitions):
+                        schedule = _stream.Schedule(mps=True)
+                        schedule.host(bound)
+                        schedule.finish()
+                        invocations.append(schedule)
+                    self.host.append(invocations)
+                else:
+                    self.gpu.append(_gpu(lambda e=engine, w=shard, y=out: e.run(op, w, x, prologue, y), repetitions))
+            start = end
+        def combine():
+            if op.combine == 'concat':
+                y = torch.cat([p.to(dtype) for p in pieces], dim=1)
+            else:
+                y = pieces[0].float()
+                for p in pieces[1:]:
+                    y = y + p.float()
+                y = y.to(dtype)
+            return self.output.copy_(op.finish(y))
+        self.combine = _gpu(combine, repetitions)
+        self.invocations = tuple(zip(*self.host)) if self.host else ((),) * repetitions
+        self.next = 0
+        self.completions = tuple(s.completion() for items in self.host for s in items)
+
+    def __call__(self):
+        tasks = self.invocations[self.next]
+        self.next += 1
+        if self.prologue is not None:
+            self.prologue()
+        for task in tasks:
+            task.start()
+        for function in self.gpu:
+            function()
+        for task in tasks:
+            task.join()
+        self.combine()
+        return self.output
 
 
 class Linear(Operation):
@@ -557,18 +480,6 @@ class FFN(Operation):
         return ffn(x.reshape(-1, x.shape[-1]), self.gate, self.up, self.down).reshape(*x.shape[:-1], -1)
 
 
-def prepare(engines):
-    """Realize every declared operation/shape's shards before the next function."""
-    for operation in engines.operations:
-        for key, decision in operation.decisions.items():
-            rows = int(key.rsplit('@', 1)[1])
-            start = 0
-            for engine, count in zip(engines.engines, decision['parts']):
-                if count:
-                    operation._shard(engine, start, start + count, rows)
-                start += count
-
-
 def placement(engines, observations):
     # design/whole-function.md#numerical-operands
     from assignment import assign
@@ -577,5 +488,4 @@ def placement(engines, observations):
     assigned = assign(decisions, observations)
     for key, parts in assigned['parts'].items():
         engines.decisions[key]['parts'] = parts
-    prepare(engines)
     return assigned

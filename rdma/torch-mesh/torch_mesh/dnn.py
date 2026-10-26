@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import torch_mesh
 from . import _stream, fused
+from .engines import host
 
 class DNN:
     """docs/measurement.md#physical-fabric-dnn"""
@@ -11,11 +12,9 @@ class DNN:
         self.args, self.group = args, group
         self.channels = len(fabric.adjacent[group.rank()])
         B, H, K, L = args.rows, args.width, args.expansion, args.layers
-        self.input = torch_mesh.empty(B, H, device='cpu')
+        self.input = torch_mesh.empty(B, H)
         rng = np.random.default_rng(1729)
-        rng.standard_normal(out=self.input.numpy(), dtype=np.float32)
-        self.negative_input = torch_mesh.empty(B, H, device='cpu')
-        torch.neg(self.input, out=self.negative_input)
+        rng.standard_normal(out=host(self.input).numpy(), dtype=np.float32)
         self.weights = []
         for _ in range(L):
             a, b = torch_mesh.empty(H, K, device='cpu'), torch_mesh.empty(K, H, device='cpu')
@@ -32,8 +31,7 @@ class DNN:
         addition = ' + '.join(['own[i]'] + [f'mesh_payload(p{k} + i)' for k in range(peers)])
         vectors = ' + '.join(['((device const float4 *)own)[i / 4]'] +
                              [f'mesh_payload((volatile coherent(system) device const float4 *)p{k} + i / 4)' for k in range(peers)])
-        fold_args = 'struct FoldArgs { uint n, pad; };'
-        ready_args = 'struct ReadyArgs { uint n, pad; mesh_step_binding land[CHANNELS], publish[CHANNELS]; };'
+        fold_args = 'struct FoldArgs { uint n, pad; mesh_step_binding land[CHANNELS], publish[CHANNELS]; };'
         fold_wait = r'''
     for (uint k = 0; k < CHANNELS; k++) if (s.land[k].p) {
         auto b = s.land[k];
@@ -43,14 +41,11 @@ class DNN:
     threadgroup_barrier(mem_flags::mem_device);
     atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));
 '''
-        source = fused.steps() + f'#define CHANNELS {self.channels}\n' + fold_args + ready_args + f'''
-kernel void land_ready(constant ReadyArgs &s [[buffer(0)]], uint tid [[thread_position_in_grid]],
-                       uint local [[thread_position_in_threadgroup]]) {{
-    {fold_wait}
-}}
+        source = fused.steps() + f'#define CHANNELS {self.channels}\n' + fold_args + f'''
 kernel void fold(device const float *own [[buffer(0)]], {inputs}, device float *out [[buffer({peers + 1})]],
                  constant FoldArgs &s [[buffer({peers + 2})]], uint tid [[thread_position_in_grid]],
                  uint local [[thread_position_in_threadgroup]], uint stride [[threads_per_grid]]) {{
+    {fold_wait}
     for (uint i = 4 * tid; i < s.n; i += 4 * stride) {{
         if (i + 3 < s.n) ((device float4 *)out)[i / 4] = tanh({vectors});
         else for (; i < s.n; i++) out[i] = tanh({addition});
@@ -58,7 +53,6 @@ kernel void fold(device const float *own [[buffer(0)]], {inputs}, device float *
 }}
 '''
         self.fold = _stream.pipeline(source, 'fold')
-        self.land_ready = _stream.pipeline(source, 'land_ready')
         # The producer stores its result once, through the existing transport
         # payload accessor. No staging copy or per-operation host wait.
         product = fused.steps() + f"#define CHANNELS {self.channels}\n#define FUSED 1\n" + r"""
@@ -93,7 +87,7 @@ kernel void product(device float *X [[buffer(0)]], device float *W [[buffer(1)]]
     for(int at=0;at<K;at+=32){auto a=A.slice<32,32>(at,row);auto b=B.slice<32,32>(col,at);op.run(a,b,acc);}
     for(uint i=0;i<acc.get_capacity();i++)if(acc.is_valid_element(i)){
         auto e=acc.get_multidimensional_index(i);
-        if(row+e[1]<M && col+e[0]<N)mesh_step_write<float>(Y,(row+e[1])*N+col+e[0],acc[i]);
+        if(row+e[1]<M && col+e[0]<N)mesh_step_write<float>(Y,(row+e[1])*N+col+e[0],ACTIVATE ? tanh(acc[i]) : acc[i]);
     }
 #if FUSED
     atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));
@@ -111,8 +105,10 @@ kernel void product(device float *X [[buffer(0)]], device float *W [[buffer(1)]]
 }
 """
         self.arrivals = [torch.zeros(1, dtype=torch.int32, device='mps') for _ in range(L)]
-        self.product = _stream.pipeline(product, 'product')
+        self.product = _stream.pipeline('#define ACTIVATE 0\n' + product, 'product')
+        self.activation = _stream.pipeline('#define ACTIVATE 1\n' + product.replace('#define FUSED 1', '#define FUSED 0'), 'product')
         self.parts = None
+        self.tiles = [(first, min(args.tile_rows, B - first)) for first in range(0, B, args.tile_rows)]
 
     def prepare(self, parts):
         rank, B, H = self.group.rank(), self.args.rows, self.args.width
@@ -126,21 +122,36 @@ kernel void product(device float *X [[buffer(0)]], device float *W [[buffer(1)]]
                 self.local.append((ag, bg))
             self.hidden = torch_mesh.empty(B, width)
             self.parts = list(share)
-        self.crossings = [fused.writes(partial, landings, self.pairs, self.group)
-                          for partial, landings in zip(self.partial, self.landing)]
+        schedule = _stream.Schedule()
+        for first, rows in self.tiles:
+            x = self.input.narrow(0, first, rows)
+            result = self.x.narrow(0, first, rows)
+            hidden = self.hidden.narrow(0, first, rows)
+            for layer, (a, b) in enumerate(self.local):
+                partial = self.partial[layer].narrow(0, first, rows)
+                landings = [t.narrow(0, first, rows) for t in self.landing[layer]]
+                crossing = fused.writes(schedule, partial, landings, self.pairs, self.group)
+                schedule.compute(self.activation, [x, a, hidden, self.arrivals[layer]],
+                                 [rows, self.args.width, hidden.shape[1], 0], 4,
+                                 (rows + 63) // 64, (hidden.shape[1] + 63) // 64, 128,
+                                 3 | (1 << (32 + 2)))
+                schedule.compute(self.product, [hidden, b, partial, self.arrivals[layer]],
+                                 fused._encode_words([rows, hidden.shape[1], self.args.width, 0], self.channels, None, crossing),
+                                 4, (rows + 63) // 64, (self.args.width + 63) // 64, 128,
+                                 3 | (12 << 32))
+                inputs = [t for (_, destination), t in zip(self.pairs, landings) if destination == rank]
+                output = len(inputs) + 1
+                schedule.compute(self.fold, [partial, *inputs, result],
+                                 fused._encode_words([result.numel(), 0], self.channels, crossing, None),
+                                 output + 1, (result.numel() + 1023) // 1024, 1, 256,
+                                 ((1 << output) - 1) | (1 << (32 + output)))
+                x = result
+        schedule.finish()
+        self.schedule = schedule
+        self.completion = schedule.completion()
+        self.run = schedule.enqueue
 
-    def run(self):
-        self.x.copy_(self.input)
-        for layer, (a, b) in enumerate(self.local):
-            partial, landings, crossing = self.partial[layer], self.landing[layer], self.crossings[layer]
-            torch.mm(self.x, a, out=self.hidden)
-            self.hidden.tanh_()
-            fused.encode(self.product, [self.hidden, b, partial, self.arrivals[layer]],
-                         [self.args.rows, self.hidden.shape[1], self.args.width, 0], 4,
-                         (self.args.rows + 63) // 64, (self.args.width + 63) // 64, 128,
-                         self.channels, publish=crossing)
-            inputs = [t for (_, destination), t in zip(self.pairs, landings) if destination == self.group.rank()]
-            fused.encode(self.land_ready, [], [self.x.numel(), 0], 0, 1, 1, 32,
-                         self.channels, land=crossing)
-            _stream.encode(self.fold, [partial, *inputs, self.x], [self.x.numel(), 0], len(inputs) + 2,
-                           (self.x.numel() + 1023) // 1024, 1, 256)
+    def declare(self):
+        from .backend import Call, WRITE
+        return [([Call(WRITE, rows * self.args.width, torch.float32, root=a, destination=b)
+                  for a, b in self.pairs], self.args.layers) for _, rows in self.tiles]

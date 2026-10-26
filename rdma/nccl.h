@@ -1176,6 +1176,15 @@ ncclResult_t ncclMeshRegionExpired(int* expired);
    segment that does not start on a page in its buffer fails the call as a value (Memory, above). */
 ncclResult_t ncclMeshAllGatherV(const void* sendbuff, void* recvbuff, const size_t* counts, ncclDataType_t datatype, ncclComm_t comm,
                                 cudaStream_t stream);
+/* Gather bindings in logical rank order. Each receive names its final contiguous
+   segment. The same collective graph routes directly into these bindings; no
+   packed receive buffer or copy-back operation is constructed. */
+ncclResult_t ncclMeshAllGatherBuffers(const void* sendbuff, void* const* recvbuffs, const size_t* counts,
+    ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
+ncclResult_t ncclMeshReduceScatterBuffers(void* const* sendbuffs, void* recvbuff, const size_t* counts,
+    ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream);
+ncclResult_t ncclMeshAlltoAllBuffers(void* const* sendbuffs, const size_t* sendcounts, void* const* recvbuffs,
+    const size_t* recvcounts, ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
 ncclResult_t ncclMeshReduceScatterV(const void* sendbuff, void* recvbuff, const size_t* counts, ncclDataType_t datatype, ncclRedOp_t op,
                                     ncclComm_t comm, cudaStream_t stream);
 /* MPI_Alltoallv with counts on the host: rank r sends sendcounts[q] elements to rank q, its segments packed in rank order

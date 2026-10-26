@@ -806,27 +806,25 @@ def _follow_bytes(placement, local, logical_shape, logical_stride, key, rank, gr
             relay = _empty((run.bytes,), local, group, torch.uint8)
             first, stride, kernel = relay.narrow(0, 0, run.row_bytes), run.row_bytes, None
         jobs.append((run, kernel, _migration_words(run, run.row_bytes, 1), 1, first, stride))
-    if any(run.source != run.destination for run in program.runs):
-        # End ordinary producers' command buffer without waiting. Their plain
-        # stores are visible before release-only kernels in the next buffer.
-        publish_boundary()
+    schedule = _stream.Schedule(mps=True)
     consumers = []
     for run, kernel, words, groups, first, stride in jobs:
         if run.source == run.destination:
-            fused.encode(kernel, [local, result], words, 15, groups, 1, _GATHER_THREADS, channels)
+            schedule.compute(kernel, [local, result], fused._encode_words(words, channels, None, None),
+                             15, groups, 1, _GATHER_THREADS, 1 | (2 << 32))
             continue
-        crossing = fused.write_rows(first, [first], [(run.source, run.destination)], group,
+        crossing = fused.write_rows(schedule, first, [first], [(run.source, run.destination)], group,
                                     row_bytes=run.row_bytes, rows=run.rows, stride=stride)
         if rank == run.source:
-            # One publication certifies all original rows, already produced.
-            # Submit it before preparing later commodities so descriptors drain.
-            fused.encode_many([(kernel, [], words, 15, 1, 1, _GATHER_THREADS, channels, None, crossing)])
+            schedule.compute(kernel, [], fused._encode_words(words, channels, None, crossing),
+                             15, 1, 1, _GATHER_THREADS, 0)
         elif rank == run.destination:
-            consumers.append((kernel, [], words, 15, 1, 1, _GATHER_THREADS, channels, crossing, None))
-    # Original source publications precede every incoming dependency. Subsequent
-    # ordinary tensor readers need these incoming bytes, so observe each final
-    # commodity prefix once. There is no unpack pass or per-row GPU/host loop.
-    fused.encode_many(consumers)
+            consumers.append((kernel, words, crossing))
+    for kernel, words, crossing in consumers:
+        schedule.compute(kernel, [], fused._encode_words(words, channels, crossing, None),
+                         15, 1, 1, _GATHER_THREADS, 0)
+    schedule.finish()
+    schedule.enqueue()
     return result
 
 
@@ -844,7 +842,7 @@ def _copy_view(source, destination):
     words = [word for value in values for word in (value & 0xFFFFFFFF, value >> 32)]
     kernel = _migration_kernel('migration_local_views', source.ndim, units, width)
     groups = max(1, -(-(source.numel() * units) // (_GATHER_THREADS * 8)))
-    _stream.encode(kernel, [source, destination], words, 15, groups, 1, _GATHER_THREADS, False)
+    _stream.encode(kernel, [source, destination], words, 15, groups, 1, _GATHER_THREADS)
 
 
 def _scatter_spans(tensor, dim, sizes, rank, source, group):
@@ -879,6 +877,7 @@ def _scatter_spans(tensor, dim, sizes, rank, source, group):
         if tensor.device.type == 'mps':
             _stream.publish_boundary()
         with group.configuration([calls]):
+            prepared.realize()
             prepared.enqueue()
     return result
 
@@ -923,6 +922,7 @@ def _follow_spans(placement, local, logical_shape, key, rank, group, publish_bou
             publish_boundary()
         # Repartition is a configuration transition. Ordinary native stream
         # completion orders next consumers; no application receipt is emitted.
+        prepared.realize()
         prepared.enqueue()
     return result
 
@@ -1754,9 +1754,6 @@ def context_parallel_buffers(mesh, name, buffers, seq_dims, load_balance=True):
     return shards
 
 
-_JOINED = {}
-
-
 def _sequence_extent(o, rank, local, sequence_length=None):
     """Preserve declared logical extent even on a rank with no sequence tiles."""
     if sequence_length is None:
@@ -1787,17 +1784,14 @@ def context_parallel_unshard(mesh, name, buffers, seq_dims, load_balance=True, *
     for b, dim in zip(buffers, seq_dims):
         dim %= b.ndim
         shape = b.shape[:dim] + (S,) + b.shape[dim + 1:]
-        key = (tuple(b.shape), tuple(lengths), dim, halves, b.dtype, group.group_name)
-        if key not in _JOINED:
-            gathered = _empty(shape, b, group)
-            _JOINED[key] = gathered, gathered if halves == 1 else _empty(shape, b, group)
-        gathered, whole = _JOINED[key]
-        allgatherv_out(b, gathered, dim, lengths, group.group_name)
+        gathered = allgatherv(b, dim, lengths, group.group_name)
+        whole = gathered
         if halves != 1:
+            pieces = []
             for r, (at, size) in enumerate(zip(itertools.accumulate(lengths, initial=0), lengths)):
-                block = gathered.narrow(dim, at, size)
                 for half, (lo, hi) in enumerate(_spans(o, r, S, halves)):
-                    whole.narrow(dim, lo, hi - lo).copy_(block.narrow(dim, half * (size // halves), hi - lo))
+                    pieces.append((lo, gathered.narrow(dim, at + half * (size // halves), hi - lo)))
+            whole = torch.cat([value for _, value in sorted(pieces, key=lambda item: item[0])], dim)
         joined.append(whole)
     return joined
 
@@ -1810,27 +1804,6 @@ def ring_attention(mesh, name, query, key, value, is_causal=False, scale=None, l
     o = operand(mesh, name)
     S = _sequence_extent(o, mesh.get_local_rank(name), query.size(2), sequence_length)
     return _ring_attention(mesh.get_group(name), o.key, query, key, value, is_causal, scale, _halves(o, S, load_balance), S)
-
-
-def ring_calls(mesh, name, query_shape, dtype, value_width, *, sequence_length=None):
-    """The split-KV function's query gather and partials reduce-scatter.
-
-    Shapes are metadata at realization: [batch, heads, local positions, dim].
-    The same custom reduction operator is used by declaration and execution.
-    A callable partition.plan rebuilds these counts after a share change.
-    """
-    from .backend import ALLGATHER, REDUCE_SCATTER, Call
-    group, o, rank = mesh.get_group(name), operand(mesh, name), mesh.get_local_rank(name)
-    batch, heads, local, dim = query_shape
-    total = _sequence_extent(o, rank, local, sequence_length)
-    lengths = _blocks(o, total)[0]
-    counts = [batch * heads * length * dim for length in lengths]
-    width = 2 + value_width
-    partials = [batch * heads * length * width for length in lengths]
-    return [[Call(ALLGATHER, counts[rank], dtype, counts=counts)],
-            [Call(REDUCE_SCATTER, sum(partials), torch.float32,
-                  op=group.partials_operator(width), counts=partials,
-                  contributors=tuple(r for r, length in enumerate(lengths) if length))]]
 
 
 def unshard_calls(mesh, name, shapes, dims, dtype, *, sequence_length=None):
@@ -1847,117 +1820,59 @@ def unshard_calls(mesh, name, shapes, dims, dtype, *, sequence_length=None):
 
 
 SCORES = 1 << 26
-_HELD = {}
-
-
-def _held(group, what, shape, like, dtype=None):
-    """A region lease held for the group, by what it holds and its shape (the ring's scores, and each chunk's mask, row
-    maxima, sums and outputs): made at its first use and written again by every later one, so a step queued behind the
-    GPU holds no memory of its own (torch's MPS allocator keeps every queued step's temporaries until its command
-    buffer completes)."""
-    key = (group.group_name, what, tuple(shape), dtype or like.dtype)
-    if key not in _HELD:
-        _HELD[key] = _empty(shape, like, group, dtype)
-    return _HELD[key]
-
-
-def _block(query, key, value, into, group, scale=None, queries=None, keys=None, valid=None):
-    """Each query row's attention over these keys as the library's partials, written into `into` (rows of [m, l, O]:
-    the row's greatest score, its sum of exponentials and its unnormalized output, nccl.h ncclMeshRedOpCreatePartials;
-    l 0 where it sees no key), the scores SCORES at a time, every pass over them in place, and every result of a chunk
-    in a lease held for the group (_held): keys where `valid` (a bool a key) is False masked, and where `queries` (each
-    query's logical position) is given each key past its query (`keys`: each key's)."""
+def _block(query, key, value, scale=None, queries=None, keys=None, valid=None):
+    """Declare bounded score tiles and their [m,l,O] rows for the common compiler."""
     scale = query.shape[-1] ** -0.5 if scale is None else scale
     lead, rows, n = query.shape[:-2], query.shape[-2], key.shape[-2]
-    step, kt = max(1, SCORES // (math.prod(lead) * n)), key.transpose(-2, -1)
-    scores = _held(group, 'scores', (SCORES,), query, torch.float32)
+    if not n:
+        return query.new_zeros((*lead, rows, value.shape[-1] + 2), dtype=torch.float32)
+    step = max(1, SCORES // max(1, math.prod(lead) * n))
+    parts = []
     for at in range(0, rows, step):
-        q, part = query[..., at:at + step, :], into[..., at:at + step, :]
-        c = q.shape[-2]
-        s = scores[:math.prod(lead) * c * n].view(lead + (c, n))
-        torch.matmul(q, kt, out=s) if q.dtype == s.dtype else s.copy_(q @ kt)
-        s.mul_(scale)
+        q = query[..., at:at + step, :]
+        scores = (q @ key.transpose(-2, -1)).float() * scale
         if queries is not None:
-            s.masked_fill_(torch.gt(keys, queries[at:at + step, None], out=_held(group, 'mask', (c, n), query, torch.bool)), -math.inf)
+            scores = scores.masked_fill(keys > queries[at:at + step, None], -math.inf)
         if valid is not None:
-            s.masked_fill_(~valid, -math.inf)
-        top, total = (_held(group, what, lead + (c, 1), query, torch.float32) for what in ('top', 'total'))
-        part[..., :1] = torch.amax(s, -1, keepdim=True, out=top).masked_fill_(top == -math.inf, 0)
-        part[..., 1:2] = torch.sum(s.sub_(top).exp_(), -1, keepdim=True, out=total)
-        part[..., 2:] = torch.matmul(s.to(value.dtype), value, out=_held(group, 'out', lead + (c, value.size(-1)), value))
-
-
-_RINGS = {}
-
-
-def _ring(query, value, lengths, rows, rank, group):
-    """The ring's region leases for a shape, made once and held, so no call leases or wraps one: the gathered query
-    blocks, the partials (zeroed once: a row no block of the shape writes stays [0, 0, 0], and every row one writes is
-    written whole at every call), the merged rows and the output, [batch, positions, heads, dim] (held: the next call
-    of the shape writes it again)."""
-    key = (tuple(query.shape), tuple(lengths), query.dtype, value.size(-1), group.group_name)
-    if key not in _RINGS:
-        width = 2 + value.size(-1)
-        row = math.prod(query.shape[:2] + query.shape[3:])
-        _RINGS[key] = (_empty((sum(lengths) * row,), query, group),
-                       _empty((sum(rows) if lengths[rank] else 0, width), query, group, torch.float32).zero_(),
-                       _empty((rows[rank], width), query, group, torch.float32),
-                       _empty((query.size(0), lengths[rank], query.size(1), value.size(-1)), query, group))
-    return _RINGS[key]
+            scores = scores.masked_fill(~valid, -math.inf)
+        top = scores.amax(-1, keepdim=True)
+        top = torch.where(torch.isfinite(top), top, 0)
+        probabilities = (scores - top).exp()
+        parts.append(torch.cat((top, probabilities.sum(-1, keepdim=True),
+                                (probabilities.to(value.dtype) @ value).float()), -1))
+    return torch.cat(parts, -2) if parts else query.new_empty((*lead, 0, value.shape[-1] + 2), dtype=torch.float32)
 
 
 def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=None, halves=1, sequence_length=None):
-    """Ring attention over capacity blocks as split-KV partials: every rank's query block gathered (one Allgatherv,
-    static counts, into a region tensor on the mesh backend: _empty, this rank's copied into its place there and the
-    call run in place, mesh f9898875); each block's attention over this rank's own keys and values written as its
-    owner's rows of the partials (_block, in place in the region; keys past their valid extents masked, a causal one by
-    the logical positions of its queries and keys, a half of the block attending only to the halves of this rank's keys
-    it can see, none where it sees none); and the partials reduce-scattered by the library's partials operator, each
-    owner's rows merged at it by their log-sum-exp (ProcessGroupMesh.merge_partials, ncclMeshReduceScatterV); the
-    partials' rows laid out position-major (each position's heads together), so the output O / l is one gather of the
-    merged rows into a region lease laid out [batch, positions, heads, dim] and divided there in place (a caller's
-    view of it as [batch, positions, heads x dim] is no copy), the logsumexp m + log l.  This rank's own block is
-    computed while the gather is in flight.  Its leases are held for the shape (_ring).  Padded query rows compute
-    garbage that the unshard drops.  Forward only."""
-    from .backend import ProcessGroupMesh
-    if not isinstance(group, ProcessGroupMesh):
-        raise TypeError('mesh: the ring\'s merge is the mesh backend\'s partials operator (torch_mesh::merge_partials)')
+    """Declare query movement, split-KV work and the configured partial-row reduction.
+
+    The whole function is traced before execution. Its tensor operations and
+    crossings share the same compiler; there is no eager ring scheduler.
+    """
+    from .backend import merge_partials, attention
     o = _OPERANDS[key_name]
-    if is_causal and query.size(2) != key.size(2):
-        raise NotImplementedError('is_causal requires the same query and context sequence lengths')
-    if not is_causal and halves == 2:
-        raise RuntimeError('Load balancing requires `is_causal=True`.')
-    rank, size = dist.get_rank(group), dist.get_world_size(group)
+    rank = dist.get_rank(group)
     S = _sequence_extent(o, rank, query.size(2), sequence_length)
-    lengths, lead, width = _blocks(o, S)[0], tuple(query.shape[:2]), 2 + value.size(-1)
-    row, rows = math.prod(query.shape[:2] + query.shape[3:]), [math.prod(lead) * s for s in lengths]
-    gathered_lease, packed, merged, out = _ring(query, value, lengths, rows, rank, group)
-    blocks = list(gathered_lease.split([s * row for s in lengths]))
-    blocks[rank].view(query.shape).copy_(query)
-    gathered = dist.all_gather(blocks, blocks[rank], group=group, async_op=True)
-    owners = list(packed.split(rows)) if lengths[rank] else None
+    lengths, lead = _blocks(o, S)[0], tuple(query.shape[:2])
+    rows = [math.prod(lead) * length for length in lengths]
+    gathered = allgatherv(query, 2, lengths, group.group_name)
+    blocks = gathered.split(lengths, dim=2)
     keys, valid = _positions(key_name, rank, S, halves, query.device)
     mine, step = _spans(o, rank, S, halves), lengths[rank] // halves
-
-    def owned(j):
-        """Block j's queries' attention over this rank's keys, as owner j's rows of the partials."""
-        if not lengths[rank] or not lengths[j]:
-            return
-        into = owners[j].view(lead[0], lengths[j], lead[1], width).transpose(1, 2)
-        q = blocks[j].view(lead + (lengths[j],) + query.shape[3:])
-        queries, height = _positions(key_name, j, S, halves, query.device)[0], lengths[j] // halves
-        for a, (_, hi) in enumerate(_spans(o, j, S, halves)):
+    partials = []
+    for owner, q in enumerate(blocks):
+        positions = _positions(key_name, owner, S, halves, query.device)[0]
+        height = lengths[owner] // halves
+        local = []
+        for half, (_, hi) in enumerate(_spans(o, owner, S, halves)):
             seen = [b for b, (lo, _) in enumerate(mine) if not is_causal or lo < hi]
-            if seen:
-                at, cols = slice(a * height, (a + 1) * height), slice(seen[0] * step, (seen[-1] + 1) * step)
-                _block(q[:, :, at], key[:, :, cols], value[:, :, cols], into[:, :, at], group, scale,
-                       queries[at] if is_causal else None, keys[cols], valid[cols])
-    owned(rank)
-    gathered.wait()
-    for j in range(size):
-        if j != rank:
-            owned(j)
-    group.merge_partials(merged, packed, rows)
-    m, l = (t.view(lead[0], lengths[rank], lead[1]) for t in (merged[:, 0], merged[:, 1]))
-    out.view(-1, value.size(-1)).copy_(merged[:, 2:]).view(out.shape).div_(l[..., None]).masked_fill_((l == 0)[..., None], 0)
-    return out.transpose(1, 2), torch.where(l > 0, m + l.log(), -math.inf).transpose(1, 2)
+            at = slice(half * height, (half + 1) * height)
+            first, end = (seen[0] * step, (seen[-1] + 1) * step) if seen else (0, 0)
+            local.append(_block(q[:, :, at], key[:, :, first:end], value[:, :, first:end], scale,
+                                positions[at] if is_causal else None, keys[first:end], valid[first:end]))
+        block = torch.cat(local, 2)
+        partials.append(block.transpose(1, 2).reshape(rows[owner], value.shape[-1] + 2))
+    merged = merge_partials(torch.cat(partials, 0), -1, group.group_name, rows)
+    output, lse = attention(merged)
+    return (output.view(lead[0], lengths[rank], lead[1], value.shape[-1]).transpose(1, 2),
+            lse.view(lead[0], lengths[rank], lead[1]).transpose(1, 2))

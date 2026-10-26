@@ -1,7 +1,7 @@
 # design/transport.md: the node's images, built in .build by `all`, which installs nothing; `install` renames
 # each that changed into rdma/, in this order: the libraries first, the bridge's binary last, then libnccl-mesh with its
 # kernels (install-nccl, below)
-IMAGES = libmesh.dylib libnccl-mesh.dylib libmesh-coreml.dylib mesh-stat mesh-heartbeat mesh-flow
+IMAGES = libmesh.dylib libnccl-mesh.dylib libmesh-coreml.dylib libmesh-statistics.dylib mesh-stat mesh-heartbeat mesh-flow
 MESH_CODESIGN_IDENTITY ?= Mesh Bridge
 # every warning an error, but a deprecation in the installed binaries, which each node builds with its own SDK (a newer
 # one's deprecation must not leave a node's bridge unbuilt)
@@ -116,16 +116,23 @@ kernels: .build/libnccl-mesh.metallib
 .build/libnccl-mesh.binarchive: .build/nccl-mesh-kernels .build/libnccl-mesh.metallib
 	rm -f $@ && .build/nccl-mesh-kernels .build/libnccl-mesh.metallib $@
 .PHONY: .build/libnccl-mesh.binarchive kernels install-images install-nccl clean-kernels
-.build/libnccl-mesh.dylib: nccl-mesh.c mesh-write-order.h mesh-write-routes.h mesh-span-plan.h mesh-row-span-plan.h mesh-lease-retire.h nccl-mesh-metal.m nccl-mesh-metal.h nccl-mesh-kernels.h .build/libnccl-mesh.sha256 .build/mesh_metal.h nccl.h \
+.build/libnccl-mesh.dylib: nccl-mesh.c mesh-statistics.c mesh-statistics.h metal-recording.m metal-recording.h mesh-write-order.h mesh-write-routes.h mesh-span-plan.h mesh-row-span-plan.h mesh-lease-retire.h nccl-mesh-metal.m nccl-mesh-metal.h nccl-mesh-kernels.h .build/libnccl-mesh.sha256 .build/mesh_metal.h nccl.h \
   mesh-call.h mesh-dataflow.h mesh.h mesh-plan.h .build/libmesh.dylib Makefile
 	cc -fblocks -O2 $(WARN) -dynamiclib -I .build -DKERNELS_SHA256=\"$$(cat .build/libnccl-mesh.sha256)\" \
 	  -Wl,-install_name,@rpath/libnccl-mesh.dylib -Wl,-rpath,@loader_path \
-	  $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ nccl-mesh.c nccl-mesh-metal.m -L.build -lmesh \
+	  $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ nccl-mesh.c mesh-statistics.c nccl-mesh-metal.m metal-recording.m -L.build -lmesh \
 	  -framework Metal -framework Foundation
 .build/libmesh-coreml.dylib: mesh-coreml.m Makefile
 	mkdir -p .build
 	cc -fobjc-arc -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh-coreml.dylib -o $@ mesh-coreml.m \
 	  -framework CoreML -framework Foundation
+.build/libmesh-statistics.dylib: mesh-statistics.c mesh-statistics.h Makefile
+	mkdir -p .build
+	cc -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh-statistics.dylib -o $@ mesh-statistics.c
+# The reporting host needs only this ordinary library dependency, not a bridge.
+statistics: .build/libmesh-statistics.dylib
+	cp $< libmesh-statistics.dylib
+.PHONY: statistics
 .build/libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-fabric.c mesh-routed.c mesh-diagnostics.c mesh-diagnostics.h mesh.h mesh-plan.h Makefile
 	mkdir -p .build
 	cc -fblocks -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c mesh-fabric.c mesh-routed.c mesh-diagnostics.c

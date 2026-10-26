@@ -9,9 +9,9 @@
    mesh_coreml_load(package, input, output, units): compiles a model package (MLModel compileModelAtURL; a compiled
    .mlmodelc loads as it is) and loads it on `units` (0 CPU and Neural Engine, 1 all, 2 CPU only), its input and output
    named (empty: the model's own first); its handle, or -1 (mesh_coreml_error).
-   mesh_coreml_predict(handle, in, in_shape, in_rank, out, out_shape, out_rank): one prediction, the input read from
-   `in` and the output written to `out` (row-major float16 of those shapes); 1 where Core ML wrote the output into
-   `out` itself, 0 where it was copied there from Core ML's own, -1 on an error. */
+   mesh_coreml_bind fixes the input and output views before execution.
+   mesh_coreml_run executes that binding; an incompatible output backing fails the call.
+   There is no copied-output execution substitute. */
 #import <CoreML/CoreML.h>
 #import <Foundation/Foundation.h>
 #include <stdint.h>
@@ -57,34 +57,44 @@ static MLMultiArray *wrap(void *data, const int64_t *shape, int rank, NSError **
                                        deallocator:nil error:error];
 }
 
-int mesh_coreml_predict(long handle, void *in, const int64_t *in_shape, int in_rank, void *out, const int64_t *out_shape,
-                        int out_rank) {
+@interface MeshPrediction : NSObject
+@property(retain) MLModel *model;
+@property(retain) MLDictionaryFeatureProvider *features;
+@property(retain) MLPredictionOptions *options;
+@property(retain) NSString *output;
+@property void *destination;
+@end
+@implementation MeshPrediction
+@end
+
+void *mesh_coreml_bind(long handle, void *in, const int64_t *in_shape, int in_rank,
+                      void *out, const int64_t *out_shape, int out_rank) {
   @autoreleasepool {
-    if (handle < 0 || handle >= (long)models_.count) { snprintf(error_, sizeof error_, "no model %ld", handle); return -1; }
-    MLModel *model = models_[handle];
-    NSArray *names = names_[handle];
-    NSError *error = nil;
-    MLMultiArray *input = wrap(in, in_shape, in_rank, &error), *backing = wrap(out, out_shape, out_rank, &error);
-    if (!input || !backing) { snprintf(error_, sizeof error_, "arrays: %s", error.localizedDescription.UTF8String); return -1; }
-    MLDictionaryFeatureProvider *features = [[MLDictionaryFeatureProvider alloc]
-        initWithDictionary:@{names[0]: [MLFeatureValue featureValueWithMultiArray:input]} error:&error];
-    if (!features) { snprintf(error_, sizeof error_, "features: %s", error.localizedDescription.UTF8String); return -1; }
-    MLPredictionOptions *options = [MLPredictionOptions new];
-    options.outputBackings = @{names[1]: backing};
-    id<MLFeatureProvider> result = [model predictionFromFeatures:features options:options error:&error];
-    if (!result) { snprintf(error_, sizeof error_, "predict: %s", error.localizedDescription.UTF8String); return -1; }
-    MLMultiArray *got = [result featureValueForName:names[1]].multiArrayValue;
-    if (got.dataPointer == out) return 1;
-    int64_t count = 1;
-    for (int i = 0; i < out_rank; i++) count *= out_shape[i];
-    __block int copied = 0;
-    [got getBytesWithHandler:^(const void *bytes, NSInteger size) {
-      if ((int64_t)size >= count * 2) { memcpy(out, bytes, (size_t)count * 2); copied = 1; }
-    }];
-    if (!copied) { snprintf(error_, sizeof error_, "output: %ld elements, %lld expected", (long)got.count, (long long)count); return -1; }
+    if (handle < 0 || handle >= (long)models_.count) { snprintf(error_, sizeof error_, "no model %ld", handle); return NULL; }
+    NSArray *names=names_[handle];NSError *error=nil;
+    MLMultiArray *input=wrap(in,in_shape,in_rank,&error), *backing=wrap(out,out_shape,out_rank,&error);
+    if(!input||!backing){snprintf(error_,sizeof error_,"arrays: %s",error.localizedDescription.UTF8String);return NULL;}
+    MeshPrediction *p=[MeshPrediction new];p.model=models_[handle];p.output=names[1];p.destination=out;
+    p.features=[[MLDictionaryFeatureProvider alloc] initWithDictionary:@{names[0]:[MLFeatureValue featureValueWithMultiArray:input]} error:&error];
+    p.options=[MLPredictionOptions new];p.options.outputBackings=@{names[1]:backing};
+    if(!p.features){snprintf(error_,sizeof error_,"features: %s",error.localizedDescription.UTF8String);return NULL;}
+    return (__bridge_retained void *)p;
+  }
+}
+
+int mesh_coreml_run(void *binding) {
+  @autoreleasepool {
+    MeshPrediction *p=(__bridge MeshPrediction *)binding;NSError *error=nil;
+    id<MLFeatureProvider> result=[p.model predictionFromFeatures:p.features options:p.options error:&error];
+    if(!result){snprintf(error_,sizeof error_,"predict: %s",error.localizedDescription.UTF8String);return -1;}
+    if([result featureValueForName:p.output].multiArrayValue.dataPointer!=p.destination){
+      snprintf(error_,sizeof error_,"Core ML did not use the configured output backing");return -1;
+    }
     return 0;
   }
 }
+
+void mesh_coreml_unbind(void *binding) { CFRelease(binding); }
 
 /* Where Core ML places each operation of a loaded model (MLComputePlan): "operator=device" a line, the device cpu, gpu,
    ane or unknown, written to `out` (at most `size` bytes); the operations' count, or -1.  Placement is Core ML's own

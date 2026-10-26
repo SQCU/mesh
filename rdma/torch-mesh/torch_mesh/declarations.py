@@ -62,7 +62,16 @@ def compiled_graph(graph):
                               if key not in ('dim', 'sizes', 'group_name', 'adds', 'repeats')},
                            'index': index}
         node.meta.pop('eager_input_vals', None)
-    forms = [(*form, tuple(slots[crossing_key(form)])) if crossing_key(form) in slots else form for form in forms]
+    ordered = []
+    for form in forms:
+        key = crossing_key(form)
+        if key in slots:
+            count = form[6]
+            ordered.append((*form, tuple(slots[key][:count])))
+            del slots[key][:count]
+        else:
+            ordered.append(form)
+    forms = ordered
     capture = _CAPTURE.get()
     if capture is not None:
         capture.append((declarations, forms))
@@ -163,8 +172,10 @@ def lower(graph, *, forms=None):
         elif namespace == 'torch_mesh' and name == 'merge_partials':
             operator = group.partials_operator(x.shape[-1])
             root = args['root']
-            calls = [backend.Call(backend.ALLREDUCE if root < 0 else backend.REDUCE,
-                                  x.numel(), x.dtype, root=max(0, root), op=operator)]
+            rows = args.get('rows', [])
+            calls = [backend.Call(backend.REDUCE_SCATTER if rows else backend.ALLREDUCE if root < 0 else backend.REDUCE,
+                                  x.numel(), x.dtype, root=max(0, root), op=operator,
+                                  counts=[r * x.shape[-1] for r in rows] if rows else None)]
         elif name in ('all_reduce', 'all_reduce_'):
             calls = [backend.Call(backend.ALLREDUCE, x.numel(), x.dtype, op=_operation(reduction))]
         elif name in ('broadcast', 'broadcast_'):
@@ -248,7 +259,7 @@ class Preparations:
         from collections import Counter
         batches = Counter(crossing_key(form) for form in forms)
         prototype = lambda m: None if m is None else torch.empty_strided(m[0], m[1], dtype=m[2], device='meta')
-        self.forms, self.bindings = [], {}
+        self.forms, self.bindings, self.order = [], {}, []
         for key, count in batches.items():
             x, w, dim, sizes, name, adds, repeats = key
             group = dist.distributed_c10d._resolve_process_group(name)
@@ -262,6 +273,7 @@ class Preparations:
                 raise ValueError('crossings must have compiler-assigned indices before preparation')
             for index, destination in source[7] if len(source) == 8 else ():
                 self.bindings[index] = (prototype(x), prototype(w), dim, list(sizes), name, adds, repeats, destination)
+                self.order.append(index)
 
     def __call__(self, repetitions=1):
         from . import _stream
@@ -271,6 +283,9 @@ class Preparations:
                 _stream.fused_prepare(*form[:-1], form[-1] * repetitions)
             for index, operands in self.bindings.items():
                 _stream.prepare_crossing(index, *operands)
+            for _ in range(repetitions):
+                for index in self.order:
+                    _stream.compile_crossing(index)
 
 
 class Function:

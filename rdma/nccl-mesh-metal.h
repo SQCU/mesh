@@ -38,7 +38,6 @@ enum { METAL_PLAIN, METAL_LAND };
 #else
 #define METAL_HANDLE(type) void *
 #endif
-struct ring;
 struct recording;
 struct kernels;
 struct metal_program {
@@ -50,7 +49,6 @@ struct metal_program {
   METAL_HANDLE(id<MTL4ArgumentTable>) table;
   METAL_HANDLE(id<MTLResidencySet>) residency;
   METAL_HANDLE(id<MTLBuffer>) violation;
-  struct ring *ring;
   int added;
   uint32_t polls;
   struct recording *recording;
@@ -104,19 +102,19 @@ int metal_ended(void *command);
 #define METAL_REVOKED 4
 /* The classic form: the kernels encoded into the caller's id<MTLCommandBuffer>, in its compute encoder (`encoder`, left
    open) or one made here, each dispatch's arguments its setBytes.  With `residency` (an id<MTLResidencySet>; NULL: none),
-   a fused group's: its deferred steps' records are the device's argument ring's, as the Metal 4 form's are, and the
+   a fused group's: its deferred steps' records are the function's immutable pages, as the Metal 4 form's are, and the
    ring and every buffer their bindings name are made resident through it (added, and the set committed, where they
    were not: nccl.h ncclMeshStream residencySet), since the caller's kernels reach them by address.  NULL where it cannot
-   be made (memory, or that device's kernels or argument ring), *message then what failed (struct metal_result's
+   be made (memory, or that device's kernels), *message then what failed (struct metal_result's
    message) */
 struct metal_program *metal_begin(struct metal_program *, void *command_buffer, void *encoder, void *residency, void *violation, uint32_t polls, const char **message);
 /* The Metal 4 form: the kernels encoded into the caller's id<MTL4ComputeCommandEncoder> (left open, nothing committed,
    nothing signalled), on pipelines of the residency set's device, every binding through the caller's id<MTL4ArgumentTable>
-   (each dispatch's arguments a record of the library's argument ring, never setBytes), each dispatch after the one
+   (each dispatch's arguments a record of the function's immutable argument pages, never setBytes), each dispatch after the one
    before it (an intra-encoder barrier, and one before the first and after the last, so the caller's commands on either
    side are ordered with them), and every buffer of the library's the program touches made resident through the
    caller's id<MTLResidencySet> (added, and the set committed, where it was not).  Its waits bounded by `polls` as
-   metal_begin's (0: NCCL_MESH_POLLS).  NULL where memory runs out or the device's kernels or argument ring cannot be
+   metal_begin's (0: NCCL_MESH_POLLS).  NULL where memory runs out or the device's kernels cannot be
    made, *message then what failed. */
 struct metal_program *metal_begin4(struct metal_program *, void *encoder, void *table, void *residency, void *violation, uint32_t polls, const char **message);
 int metal_metal4(const struct metal_program *);
@@ -168,7 +166,7 @@ struct metal_result metal_spin(struct metal_program *, const struct metal_wait *
 struct metal_result metal_land(struct metal_program *, int type, int op, void *dst, size_t dst_offset, size_t n, mesh_pages pages, uint64_t page,
                                const struct metal_wait *);
 /* the same two steps run by the caller's kernel (nccl.h ncclMeshFused: the Metal 4 form, or a classic program begun with
-   a residency set): each one's record written to the device's argument ring as a Metal 4 dispatch's would be, the
+   a residency set): each one's record written to the function's immutable argument pages as a Metal 4 dispatch's would be, the
    buffers it names made resident, and its six bindings' addresses given in `bound` (0 d, 1 s, 2 the record, 3 a, 4 v,
    5 progress), nothing dispatched; EINVAL on a program with no ring.  The publication: d its operand (at dst), a the
    holding's counts (mesh_step_release stores `ready`).  The landing: d and s its landing
@@ -199,6 +197,11 @@ struct metal_result metal_tracks(struct metal_program *, uint32_t tracks, const 
    bindings as one record (mesh_step_binding) and mesh_step_*; what a caller's kernel compiles after */
 const char *metal_prelude(void);
 void metal_keep(struct metal_program *, void *object);
+/* Publish a compiled descriptor list. Its only dependency is reuse of slots
+   already read by the local bridge; no peer acknowledgement is introduced. */
+struct metal_result metal_present(struct metal_program *, void *lists, size_t list_offset,
+    void *records, size_t record_offset, size_t count, uint64_t first,
+    void *words, size_t taken, size_t presented);
 void metal_end(struct metal_program *, void *event, uint64_t value);
 void metal_collect(void *event);
 #pragma GCC visibility pop

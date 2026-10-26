@@ -13,7 +13,7 @@ from torch_mesh.backend import BROADCAST, Call
 from torch_mesh.declarations import Function, Preparations
 from torch_mesh.configuration import placement, bind, record
 from torch_mesh import _stream
-import time
+from mesh_statistics import now
 
 import chain
 import lstm
@@ -80,7 +80,7 @@ def main():
     torch_mesh.check_memory()
     ticks = steps + L - 1
     bind(configuration, [[Call(BROADCAST, X.numel(), X.dtype, root=0)], *groups], Preparations(forms))
-    started = time.monotonic()
+    started = now()
     dist.broadcast(X, src=0)
     for run in runs:
         run()

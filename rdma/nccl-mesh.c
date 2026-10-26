@@ -240,7 +240,7 @@ struct channel {
   uint32_t node, stream, cable;
   const uint64_t *wire;
   struct mesh_stream_view view;
-  void *buffer;
+  void *buffer, *lists;
   size_t ready, landed, sent;
   uint64_t ready_at, sends, lands, published, consumed, waited;
   mesh_pages out, in;
@@ -375,7 +375,7 @@ static void comm_free(struct ncclComm *comm) {
   routes_free(comm, 1);
   for (uint32_t k = 0; k < comm->scratches; k++) metal_release(comm->scratch[k]);
   for (uint32_t k = 0; k < comm->spents; k++) metal_release(comm->spent[k]);
-  for (uint32_t h = 0; h < comm->count; h++) metal_release(comm->channels[h].buffer);
+  for (uint32_t h = 0; h < comm->count; h++) { metal_release(comm->channels[h].buffer); metal_release(comm->channels[h].lists); }
   if (comm->violation) metal_release(comm->violation);
   metal_release(comm->command);
   comm_leave(comm);
@@ -1917,6 +1917,7 @@ struct call {
   ncclMeshIssue *issue;
   ncclMeshFused *fused;
   struct where send_at, recv_at, sum;
+  struct where *send_views, *receive_views; /* original/final segments, in rank order */
   struct ncclMeshWritePlan *write_plan;
 };
 
@@ -1963,6 +1964,18 @@ static size_t segment_at(const struct call *c, int r, size_t *length) {
   *length = c->segments ? c->segments[r] : c->count;
   return c->segments ? seg_first(c->segments, r) : (size_t)r * c->count;
 }
+/* Logical collective offsets become final local bindings during realization. */
+static struct where view_at(const struct call *c, int send, size_t offset) {
+  const struct where *views = send ? c->send_views : c->receive_views;
+  if (!views) return shifted(send ? c->send_at : counted(c) ? c->recv_at : c->sum, offset);
+  const uint64_t *counts = c->segments ? c->segments + (counted(c) && !send ? c->comm->nranks : 0) : NULL;
+  for (int rank = 0; rank < c->comm->nranks; rank++) {
+    const size_t bytes = (counts ? counts[rank] : c->count) * SIZE[c->type];
+    if (offset < bytes) return shifted(views[rank], offset);
+    offset -= bytes;
+  }
+  return views[c->comm->rank]; /* empty local contribution */
+}
 /* the entries before rank q's segment of a count a rank (an all-to-all's sendcounts or recvcounts) */
 static uint64_t seg_first(const uint64_t *seg, int q) {
   uint64_t at = 0;
@@ -2006,6 +2019,14 @@ static ncclResult_t operands_check(const struct call *list, size_t n) {
   for (size_t i = 0; i < n; i++) {
     const struct call *c = list + i;
     if (c->write_plan) continue; /* bindings and ownership realized with the page table */
+    if (c->send_views) {
+      for (int rank=0;rank<c->comm->nranks;rank++) {
+        const size_t bytes=(c->segments?c->segments[rank]:c->count)*SIZE[c->type];
+        if (bytes&&!in_region(c->comm,c->send_views[rank],bytes))
+          return fail(ncclInvalidUsage,"collective source binding is outside its configured region");
+      }
+      continue;
+    }
     const size_t bytes = crosses(c) ? sent_bytes(c) : 0;
     if (bytes && !in_region(c->comm, c->send_at, bytes))
       return fail(ncclInvalidUsage, "%s on communicator %s: its send buffer (%zu bytes) is not in this node's region: an operand that crosses a "
@@ -2652,6 +2673,8 @@ static ncclResult_t place_group(struct metal_program *program, struct ncclComm *
         if (send) x->data = shifted(origin, displacement);
         else if (step->op == MESH_STEP_REDUCE) { x->data = shifted(area, used); used += page_up(x->bytes, page); }
         else x->data = shifted(origin, displacement);
+        if (counted(x->c) && step->buffer < 2) x->data = view_at(x->c, step->buffer == 0, x->offset);
+        else if (x->c->receive_views && step->buffer == 0) x->data = view_at(x->c, 0, x->offset);
         const unsigned char *address = address_of(x->data);
         if (write) {
           const uint64_t logical = step->first * step->piece.element_bytes;
@@ -2801,7 +2824,7 @@ static ncclResult_t room_wait(struct ncclComm *comm, const struct channel *ch, i
    every wait killable; design/data-model.md section 6).  0; ncclSystemError where a list's entries are more than the bridge ever takes, the wait's
    failure (a revoke, the holding's end, comm's failure: nothing presented, the call's failure alone); a refused
    presentation fails comm (its lists stand mid-group).  Under group_lock */
-static ncclResult_t present_group(struct ncclComm *comm, struct schedule *plans) {
+static ncclResult_t present_group(struct metal_program *program, struct ncclComm *comm, struct schedule *plans) {
   struct mesh_ctx *context = &comm->attach->context;
   for (uint32_t h = 0; h < comm->count; h++)
     for (int list = 0; list < 2; list++) {
@@ -2811,7 +2834,7 @@ static ncclResult_t present_group(struct ncclComm *comm, struct schedule *plans)
         return fail(ncclSystemError, "communicator %s: the group lays %llu entries on its %s list toward node %u, and its bridge takes at most %u "
                     "not yet done (mesh.h MESH_STREAM_ENTRIES); none was presented", comm->name, (unsigned long long)need, list ? "landing" : "send",
                     ch->node, MESH_STREAM_ENTRIES);
-      if (need && !room_for(ch, list, need)) {
+      if (!program && need && !room_for(ch, list, need)) {
         const ncclResult_t result = room_wait(comm, ch, list, need);
         if (result) return result;
       }
@@ -2845,9 +2868,14 @@ static ncclResult_t present_group(struct ncclComm *comm, struct schedule *plans)
   pthread_mutex_unlock(&attach_lock);
   if (retained) return comm_fail(comm, ncclSystemError, "registering DMA lifetimes: %s", strerror(retained));
   for (uint32_t h = 0; h < comm->count; h++) {
-    const struct channel *ch = comm->channels + h;
+    struct channel *ch = comm->channels + h;
     const struct schedule *p = plans + h;
     int status = 0;
+    if (!p->outs && !p->ins) continue;
+    void *compiled = program ? metal_shared((p->outs+p->ins)*sizeof(struct mesh_entry)) : NULL;
+    struct mesh_entry *records = compiled ? metal_contents(compiled) : NULL;
+    if (program && !compiled) return fail(ncclSystemError,"allocating compiled descriptor operands");
+
     for (size_t k = 0; !status && k < p->outs; k++) {
       const struct message *m = p->out + k;
       struct mesh_entry entry = {m->table, pages_to_word(m->pages), 0, pages_to_word(pages_sub(m->end, m->pages))};
@@ -2867,10 +2895,28 @@ static ncclResult_t present_group(struct ncclComm *comm, struct schedule *plans)
           before->first * before->piece.element_bytes, delta)} : pages_of(delta, comm->page);
         entry.base = pages_to_word(pages_add(pages_sub(from->end, from->pages), units));
       }
-      status = mesh_stream_present(context, ch->stream, 0, entry);
+      if (program) records[k]=entry;
+      else status = mesh_stream_present(context, ch->stream, 0, entry);
     }
-    for (size_t k = 0; !status && k < p->ins; k++)
-      status = mesh_stream_present(context, ch->stream, 1, (struct mesh_entry){p->in[k].table, pages_to_word(p->in[k].pages), p->word, p->base});
+    for (size_t k = 0; !status && k < p->ins; k++) {
+      const struct mesh_entry entry={p->in[k].table,pages_to_word(p->in[k].pages),p->word,p->base};
+      if(program)records[p->outs+k]=entry;
+      else status=mesh_stream_present(context,ch->stream,1,entry);
+    }
+    if(program) {
+      if(!ch->lists)ch->lists=metal_wrap(ch->view.list[0],2*MESH_STREAM_ENTRIES*sizeof(struct mesh_entry));
+      if(!ch->lists){metal_release(compiled);return fail(ncclSystemError,"binding bridge descriptor lists");}
+      metal_resident(program,ch->lists);metal_resident(program,compiled);
+      const char *words=(const char *)ch->view.ready-ch->ready;
+      for(int list=0;list<2&&!status;list++) {
+        const size_t count=list?p->ins:p->outs;
+        struct metal_result placed=metal_present(program,ch->lists,list*MESH_STREAM_ENTRIES*sizeof(struct mesh_entry),
+          compiled,list?p->outs*sizeof(struct mesh_entry):0,count,p->first[list],ch->buffer,
+          (const char *)ch->view.taken[list]-words,(const char *)ch->view.presented[list]-words);
+        status=placed.status;
+      }
+      metal_release(compiled);
+    }
     if (status)
       return comm_fail(comm, status == ENOLINK || status == EPERM ? ncclRemoteError : ncclSystemError, "communicator %s: an entry toward node %u "
                        "presented to its bridge: %s", comm->name, ch->node, strerror(status));
@@ -2899,7 +2945,7 @@ static ncclResult_t schedule(struct metal_program *program, struct ncclComm *com
   ncclResult_t result = place_group(program, comm, plans, holder);
   if (!result) result = bind_retirements(comm, plans);
   if (!result && program && !immutable_writes) gate_of(comm, plans, gate);
-  if (!result) result = present_group(comm, plans);
+  if (!result) result = present_group(program, comm, plans);
   if (result) return result;
   if (*gate) comm->gates++;
   commit_group(comm, plans);
@@ -2992,25 +3038,33 @@ static void stage(const struct call *c, unsigned char *own) {
   const size_t z = SIZE[c->type], n = c->count;
   if (reducing(c->what)) {
     const size_t all = elements(c);
-    if (c->premultiplied) premultiply(c->type, own, c->send, c->pre, all);
+    if(c->send_views) {
+      size_t offset=0;
+      for(int rank=0;rank<c->comm->nranks;rank++) {
+        const size_t count=c->segments?c->segments[rank]:c->count;
+        if(c->premultiplied)premultiply(c->type,own+offset,address_of(c->send_views[rank]),c->pre,count);
+        else if(count)memmove(own+offset,address_of(c->send_views[rank]),count*z);
+        offset+=count*z;
+      }
+    } else if (c->premultiplied) premultiply(c->type, own, c->send, c->pre, all);
     else memmove(own, c->send, all * z);
   } else if (c->what == MESH_BROADCAST && c->root == c->comm->rank) memmove(own, c->send, n * z);
   else if (c->what == MESH_ALLGATHER) {
     size_t length;
     const size_t before = segment_at(c, c->comm->rank, &length);
-    if (length) memmove(own + before * z, c->send, length * z);
+    if (length) memmove(address_of(view_at(c, 0, before * z)), c->send, length * z);
   }
 }
 
 /* the result into recvbuff on the host: a call reading its send buffer in place, its ranges no step wrote first */
 static void finish(const struct call *c) {
-  if (!call_receives(c)) return;
+  if (!call_receives(c) || c->receive_views) return;
   const size_t z = SIZE[c->type], n = c->count;
   const uint32_t nranks = call_participants(c);
   unsigned char *sum = address_of(c->sum), *recv = c->recv;
   for (uint32_t k = 0; k < c->complements; k++) {
     const uint64_t *x = c->complement + 3 * k;
-    memmove(address_of((struct where){c->sum.buffer, (size_t)x[0]}), address_of((struct where){c->send_at.buffer, (size_t)x[1]}), x[2]);
+    memmove(address_of((struct where){c->sum.buffer, (size_t)x[0]}), address_of(view_at(c,1,x[1])), x[2]);
   }
   if (!sum) return;
   if (c->what == MESH_ALLREDUCE || (c->what == MESH_REDUCE && c->root == c->comm->rank)) {
@@ -3178,7 +3232,11 @@ static ncclResult_t launch(struct call *list, size_t n) {
         if (c->direct && !s->needed[b]) continue;
         const size_t extent = b < s->initialized ? bytes : s->extent[b];
         if (!named(s->buffer[b] = spare_where(NULL, comm, extent, holder))) result = fail(ncclSystemError, "a scratch buffer: %s", last.text);
-        else if (!c->direct && call_contributes(c) && b < s->initialized) memcpy(address_of(s->buffer[b]), address_of(own), bytes);
+        else if (!c->direct && call_contributes(c) && b < s->initialized) {
+          if (c->receive_views) { size_t length; const size_t before=segment_at(c,comm->rank,&length);
+            if (length) memcpy(address_of(s->buffer[b])+before*SIZE[c->type],c->send,length*SIZE[c->type]); }
+          else memcpy(address_of(s->buffer[b]),address_of(own),bytes);
+        }
       }
     }
     if (!result && counted(c)) result = relay_buffers(NULL, c, holder);
@@ -3200,7 +3258,7 @@ static ncclResult_t launch(struct call *list, size_t n) {
       struct call *c = list + i;
       if (counted(c)) {
         size_t sent, landed, own = own_segment(c, &sent, &landed);
-        if (own) memmove((unsigned char *)c->recv + landed, (const unsigned char *)c->send + sent, own);
+        if (own) memmove(address_of(view_at(c,0,landed)),address_of(view_at(c,1,sent)),own);
       } else finish(c);
     }
   }
@@ -3257,6 +3315,7 @@ static void call_parts_free(struct call *c) {
   write_plan_drop(c->write_plan);
   steps_free(c->bound);
   free(c->result);
+  free(c->send_views); free(c->receive_views);
   free(c->segments);
   free(c->matrix);
   free(c->contributors); free(c->recipients);
@@ -3701,21 +3760,29 @@ static int plan_direct(struct call *c, struct where own) {
   struct steps *st = c->bound;
   const size_t z = SIZE[c->type];
   uint64_t lo = 0, hi = elements(c);
-  if (!st || !call_contributes(c) || counted(c) || c->fused || c->premultiplied || unit_of(c) > 1 || !st->count) return 0;
+  if (c->receive_views || !st || !call_contributes(c) || counted(c) || c->fused || c->premultiplied || unit_of(c) > 1 || !st->count) return 0;
   if (c->what == MESH_BROADCAST && c->root != c->comm->rank) return 0;
   if (c->what == MESH_ALLGATHER) { size_t length; lo = segment_at(c, c->comm->rank, &length); hi = lo + length; }
   const struct where send = c->send_at;
   const size_t sent = (size_t)(hi - lo) * z, made = elements(c) * z;
   const unsigned char *a = address_of(send), *b = address_of(own);
-  if (!in_region(c->comm, send, sent) || !b || (a < b + made && b < a + sent)) return 0;
+  if (!b) return 0;
+  if (c->send_views) {
+    for (int rank=0;rank<c->comm->nranks;rank++) {
+      const size_t bytes=(c->segments?c->segments[rank]:c->count)*z;
+      const unsigned char *source=address_of(c->send_views[rank]);
+      if (bytes&&(!in_region(c->comm,c->send_views[rank],bytes)||(source<b+made&&b<source+bytes)))return 0;
+    }
+  } else if (!in_region(c->comm, send, sent) || (a < b + made && b < a + sent)) return 0;
   const uint32_t B = st->buffers;
   struct spans *w = calloc(B, sizeof *w);
   st->read = calloc(st->count, sizeof *st->read); st->fresh = calloc(st->count, 1); st->needed = calloc(B, 1);
   int direct = w && st->read && st->fresh && st->needed;
-  const struct where map = {send.buffer, send.offset - (size_t)lo * z};
   for (uint32_t k = 0; direct && k < st->count; k++) {
     const struct mesh_step *step = st->steps + k;
     const uint64_t from = step->first, to = step->first + step->piece.elements;
+    const struct where source=view_at(c,1,(size_t)(from-lo)*z);
+    const struct where map={source.buffer,source.offset-(size_t)from*z};
     const int meet = spans_meet(w + step->buffer, from, to), inside = from >= lo && to <= hi;
     if (meet < 0 || (!meet && step->op != MESH_STEP_COPY && !inside)) direct = 0;
     else if (step->op == MESH_STEP_SEND) { if (!meet) st->read[k] = map; }
@@ -3736,7 +3803,7 @@ static int plan_direct(struct call *c, struct where own) {
       const uint64_t end = k < w[0].count ? (w[0].span[k][0] < last ? w[0].span[k][0] : last) : last;
       if (end > at) {
         uint64_t *x = c->complement + 3 * c->complements++;
-        x[0] = own.offset + at * z; x[1] = send.offset + (at - lo) * z; x[2] = (end - at) * z;
+        x[0] = own.offset + at * z; x[1] = (at - lo) * z; x[2] = (end - at) * z;
       }
       if (k >= w[0].count) break;
       if (w[0].span[k][1] > at) at = w[0].span[k][1];
@@ -3757,7 +3824,8 @@ static ncclResult_t complement_copy(struct metal_program *program, const struct 
   ncclResult_t result = ncclSuccess;
   for (uint32_t k = 0; k < c->complements && !result; k++) {
     const uint64_t *x = c->complement + 3 * k;
-    result = gpu(metal_copy(program, METAL_PLAIN, c->sum.buffer, x[0], c->send_at.buffer, x[1], x[2]), "the operand's own ranges");
+    const struct where source=view_at(c,1,x[1]);
+    result = gpu(metal_copy(program, METAL_PLAIN, c->sum.buffer, x[0], source.buffer, source.offset, x[2]), "the operand's own ranges");
   }
   return result;
 }
@@ -3779,7 +3847,7 @@ static ncclResult_t epilogue(struct metal_program *program, const struct call *l
   for (size_t i = 0; i < n && !result; i++) {
     const struct call *c = list + i;
     const size_t z = SIZE[c->type], count = c->count;
-    if (c->target || !call_receives(c)) continue;
+    if (c->target || c->receive_views || !call_receives(c)) continue;
     const struct where recv = c->recv_at, sum = c->sum;
     if (counted(c)) continue;
     else if (c->what == MESH_ALLREDUCE || (c->what == MESH_REDUCE && c->root == comm->rank) || c->what == MESH_REDUCE_SCATTER) {
@@ -4001,23 +4069,37 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     if (c->target) continue;
     if (counted(c)) {
       size_t sent, landed, part = own_segment(c, &sent, &landed);
-      if (part && !same((struct where){send.buffer, send.offset + sent}, (struct where){c->recv_at.buffer, c->recv_at.offset + landed}))
-        result = gpu(metal_copy(program, METAL_PLAIN, c->recv_at.buffer, c->recv_at.offset + landed, send.buffer, send.offset + sent, part),
+      const struct where source=view_at(c,1,sent),destination=view_at(c,0,landed);
+      if (part && !same(source,destination))
+        result = gpu(metal_copy(program,METAL_PLAIN,destination.buffer,destination.offset,source.buffer,source.offset,part),
                      "an all-to-all's own segment");
       continue;
     }
     if (!call_contributes(c)) continue;
     size_t length = c->count;
     const size_t before = c->what == MESH_ALLGATHER ? segment_at(c, (int)r, &length) : 0;
-    const struct where segment = {own.buffer, own.offset + before * z};
-    if (!c->direct && reducing(c->what) && c->premultiplied)
+    const struct where segment = view_at(c, 0, before * z);
+    if (!c->direct && c->send_views && reducing(c->what)) {
+      size_t offset=0;
+      for(int rank=0;rank<comm->nranks&&!result;rank++) {
+        const size_t count=c->segments?c->segments[rank]:c->count;
+        const struct where source=c->send_views[rank];
+        if(count)result=c->premultiplied
+          ?gpu(metal_premultiply(program,c->type,own.buffer,own.offset+offset,source.buffer,source.offset,count,scalar_bits(c)),"the operand")
+          :gpu(metal_copy(program,METAL_PLAIN,own.buffer,own.offset+offset,source.buffer,source.offset,count*z),"the operand");
+        offset+=count*z;
+      }
+    } else if (!c->direct && reducing(c->what) && c->premultiplied)
       result = gpu(metal_premultiply(program, c->type, own.buffer, own.offset, send.buffer, send.offset, all, scalar_bits(c)), "the operand");
     else if (!c->direct && (reducing(c->what) || (c->what == MESH_BROADCAST && c->root == comm->rank) || c->what == MESH_ALLGATHER) &&
              !same(segment, send))
       result = gpu(metal_copy(program, METAL_PLAIN, segment.buffer, segment.offset, send.buffer, send.offset, reducing(c->what) ? bytes : length * z),
                    "the operand");
-    for (uint32_t b = 1; st && b < st->initialized && !result && !c->direct; b++)
-      result = gpu(metal_copy(program, METAL_PLAIN, st->buffer[b].buffer, st->buffer[b].offset, own.buffer, own.offset, bytes), "a scratch copy");
+    for (uint32_t b = 1; st && b < st->initialized && !result && !c->direct; b++) {
+      const struct where from=c->receive_views?send:own;
+      result = gpu(metal_copy(program, METAL_PLAIN, st->buffer[b].buffer, st->buffer[b].offset+(c->receive_views?before*z:0),
+                             from.buffer, from.offset, c->receive_views?length*z:bytes), "a scratch copy");
+    }
   }
   for (uint32_t h = 0; !result && gate && g && h < comm->count; h++)
     for (size_t k = 0; k < g->plans[h].ins; k++) metal_uses(program, &g->plans[h].in[k].data.buffer, 1, 1);
@@ -4896,7 +4978,7 @@ static ncclResult_t enqueue_counts(struct call c, const size_t *counts) {
   for (int r = 0; r < n; r++) equal &= counts[r] == counts[0];
   c.count = counts[c.comm->rank];
   if (equal) return enqueue(c);
-  if (!(c.segments = malloc((size_t)n * sizeof *c.segments))) return fail(ncclSystemError, "out of memory");
+  if (!(c.segments = malloc((size_t)n * sizeof *c.segments))) { call_parts_free(&c); return fail(ncclSystemError, "out of memory"); }
   for (int r = 0; r < n; r++) { c.segments[r] = counts[r]; c.total += counts[r]; }
   return enqueue(c);
 }
@@ -4905,6 +4987,20 @@ ncclResult_t ncclMeshAllGatherV(const void *sendbuff, void *recvbuff, const size
   return enqueue_counts((struct call){.what = MESH_ALLGATHER, .send = sendbuff, .recv = recvbuff, .type = datatype, .op = ncclSum, .comm = comm,
                                       .stream = stream}, counts);
 }
+static struct where *bind_views(void *const *buffers,ncclComm_t comm,cudaStream_t stream) {
+  struct where *views=calloc((size_t)comm->nranks,sizeof *views);
+  for(int rank=0;views&&rank<comm->nranks;rank++)
+    views[rank]=stream?where_of(buffers[rank]):(struct where){NULL,(size_t)buffers[rank]};
+  return views;
+}
+ncclResult_t ncclMeshAllGatherBuffers(const void *sendbuff, void *const *recvbuffs, const size_t *counts,
+    ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) {
+  if (!comm || !recvbuffs || !counts) return fail(ncclInvalidArgument, "gather requires its configured final bindings");
+  struct where *views=bind_views(recvbuffs,comm,stream);
+  if (!views) return fail(ncclSystemError, "out of memory");
+  return enqueue_counts((struct call){.what=MESH_ALLGATHER,.send=sendbuff,.recv=recvbuffs[0],.type=datatype,
+    .op=ncclSum,.comm=comm,.stream=stream,.receive_views=views}, counts);
+}
 ncclResult_t ncclMeshReduceScatterV(const void *sendbuff, void *recvbuff, const size_t *counts, ncclDataType_t datatype, ncclRedOp_t op,
                                     ncclComm_t comm, cudaStream_t stream) {
   return enqueue_counts((struct call){.what = MESH_REDUCE_SCATTER, .send = sendbuff, .recv = recvbuff, .type = datatype, .op = op, .comm = comm,
@@ -4912,11 +5008,20 @@ ncclResult_t ncclMeshReduceScatterV(const void *sendbuff, void *recvbuff, const 
 }
 
 
+ncclResult_t ncclMeshReduceScatterBuffers(void *const *sendbuffs,void *recvbuff,const size_t *counts,
+    ncclDataType_t datatype,ncclRedOp_t op,ncclComm_t comm,cudaStream_t stream) {
+  if(!comm||!sendbuffs||!counts)return fail(ncclInvalidArgument,"reduction requires its configured source bindings");
+  struct where *views=bind_views(sendbuffs,comm,stream);if(!views)return fail(ncclSystemError,"out of memory");
+  return enqueue_counts((struct call){.what=MESH_REDUCE_SCATTER,.send=sendbuffs[0],.recv=recvbuff,.type=datatype,
+    .op=op,.comm=comm,.stream=stream,.send_views=views},counts);
+}
+
 /* nccl.h ncclMeshAlltoAllV, and NCCL's ncclAlltoAll, ncclGather and ncclScatter as its forms: a counted all-to-all whose
    counts are the host's (hosted), the call's own copy of them (the elements to each rank, then from each: sendcounts
    and recvcounts where given, else `count` from rank `from` to rank `to`, -1 every rank), its `count` those crossing */
 static ncclResult_t routed(const void *sendbuff, void *recvbuff, const size_t *sendcounts, const size_t *recvcounts, size_t count, int from, int to,
-                           ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) {
+                           ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream,
+                           void *const *send_views,void *const *receive_views) {
   if (!comm) return fail(ncclInvalidArgument, "comm is NULL");
   const int n = comm->nranks, me = comm->rank, root = from < 0 ? to : from;
   if (root < -1 || root >= n) return fail(ncclInvalidArgument, "root %d of %d ranks", root, n);
@@ -4933,15 +5038,23 @@ static ncclResult_t routed(const void *sendbuff, void *recvbuff, const size_t *s
     c.segments[n + q] = recvcounts ? recvcounts[q] : (from < 0 || from == q) && (to < 0 || to == me) ? count : 0;
     if (q != me) c.count += c.segments[q] + c.segments[n + q];
   }
+  c.send_views=send_views?bind_views(send_views,comm,stream):NULL;
+  c.receive_views=receive_views?bind_views(receive_views,comm,stream):NULL;
+  if((send_views&&!c.send_views)||(receive_views&&!c.receive_views)){call_parts_free(&c);return fail(ncclSystemError,"out of memory");}
   return enqueue(c);
 }
 ncclResult_t ncclMeshAlltoAllV(const void *sendbuff, const size_t *sendcounts, void *recvbuff, const size_t *recvcounts, ncclDataType_t datatype,
                                ncclComm_t comm, cudaStream_t stream) {
   if (!sendcounts || !recvcounts) return fail(ncclInvalidArgument, "ncclMeshAlltoAllV: sendcounts or recvcounts is NULL");
-  return routed(sendbuff, recvbuff, sendcounts, recvcounts, 0, -1, -1, datatype, comm, stream);
+  return routed(sendbuff, recvbuff, sendcounts, recvcounts, 0, -1, -1, datatype, comm, stream, NULL, NULL);
+}
+ncclResult_t ncclMeshAlltoAllBuffers(void *const *sendbuffs,const size_t *sendcounts,void *const *recvbuffs,
+    const size_t *recvcounts,ncclDataType_t type,ncclComm_t comm,cudaStream_t stream) {
+  if(!sendbuffs||!recvbuffs||!sendcounts||!recvcounts)return fail(ncclInvalidArgument,"exchange requires its configured bindings");
+  return routed(sendbuffs[0],recvbuffs[0],sendcounts,recvcounts,0,-1,-1,type,comm,stream,sendbuffs,recvbuffs);
 }
 ncclResult_t ncclAlltoAll(const void *sendbuff, void *recvbuff, size_t count, ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) {
-  return routed(sendbuff, recvbuff, NULL, NULL, count, -1, -1, datatype, comm, stream);
+  return routed(sendbuff, recvbuff, NULL, NULL, count, -1, -1, datatype, comm, stream, NULL, NULL);
 }
 ncclResult_t ncclAlltoAllConfig(const void *sendbuff, void *recvbuff, size_t count, ncclDataType_t datatype, ncclComm_t comm,
                                 cudaStream_t stream, const ncclCollConfig_t *config) {
@@ -4950,7 +5063,7 @@ ncclResult_t ncclAlltoAllConfig(const void *sendbuff, void *recvbuff, size_t cou
 }
 ncclResult_t ncclGather(const void *sendbuff, void *recvbuff, size_t count, ncclDataType_t datatype, int root, ncclComm_t comm,
                         cudaStream_t stream) {
-  return routed(sendbuff, recvbuff, NULL, NULL, count, -1, root == -1 ? -2 : root, datatype, comm, stream);
+  return routed(sendbuff, recvbuff, NULL, NULL, count, -1, root == -1 ? -2 : root, datatype, comm, stream, NULL, NULL);
 }
 ncclResult_t ncclGatherConfig(const void *sendbuff, void *recvbuff, size_t count, ncclDataType_t datatype, int root, ncclComm_t comm,
                               cudaStream_t stream, const ncclCollConfig_t *config) {
@@ -4959,7 +5072,7 @@ ncclResult_t ncclGatherConfig(const void *sendbuff, void *recvbuff, size_t count
 }
 ncclResult_t ncclScatter(const void *sendbuff, void *recvbuff, size_t count, ncclDataType_t datatype, int root, ncclComm_t comm,
                          cudaStream_t stream) {
-  return routed(sendbuff, recvbuff, NULL, NULL, count, root == -1 ? -2 : root, -1, datatype, comm, stream);
+  return routed(sendbuff, recvbuff, NULL, NULL, count, root == -1 ? -2 : root, -1, datatype, comm, stream, NULL, NULL);
 }
 ncclResult_t ncclScatterConfig(const void *sendbuff, void *recvbuff, size_t count, ncclDataType_t datatype, int root, ncclComm_t comm,
                                cudaStream_t stream, const ncclCollConfig_t *config) {

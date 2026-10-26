@@ -51,9 +51,9 @@ model there, else of the fit's prices (every served measurement moves the coeffi
 copies, each checked against float64, were deleted 2026-10-22 with the other test code (the fit reads served
 readings).
 
-  python -m torch_mesh.streamed bandwidth --mib M --rounds N --out ROWS
+  python examples/memory-read.py --mib M --rounds N
                                                                 this node's DRAM read bandwidth (streamed_read), a row of
-                                                                kind bandwidth appended to ROWS
+                                                                kind bandwidth reported through mesh_statistics
   python -m torch_mesh.streamed fit OBSERVATIONS ...            this node's evidence fitted from records read on it (JSON
                                                                 lines: bandwidth's, observe's, the decode attention plans' rows
                                                                 kind attention), the bandwidth its reads' (else, a refit,
@@ -236,7 +236,7 @@ class Fit:
         path, (chip, cores) = _EVIDENCE_PATH, node()
         known = _EVIDENCE
         if known is None:
-            raise RuntimeError(f'{path}: no instance evidence on this {chip} ({cores} GPU cores): `python -m torch_mesh.streamed bandwidth`, '
+            raise RuntimeError(f'{path}: no instance evidence on this {chip} ({cores} GPU cores): `python examples/memory-read.py`, '
                                f'`observe` and `fit` make it, or another {chip} of {cores} GPU cores gives its file (metal-microbench '
                                f'docs/kernels.md#the-instance-fit, Evidence)')
         if (known.get('node'), known.get('cores')) != (chip, cores) or not known.get('gbps') or not known.get('coefficients'):
@@ -1236,12 +1236,12 @@ def _fit(args):
     path = evidence_path()
     kept = json.loads(path.read_text()) if path.exists() else {}
     if bandwidth:
-        gbps, source = sorted(r['gbps'] for r in bandwidth)[len(bandwidth) // 2], 'read'
+        gbps, source = sorted(r['useful_gigabytes_per_second'] for r in bandwidth)[len(bandwidth) // 2], 'read'
     elif [kept.get('node'), kept.get('cores')] == list(here) and kept.get('gbps'):
         gbps, source = kept['gbps'], f'kept ({path})'
     else:
         raise SystemExit(f'no bandwidth read of this {here[0]} ({here[1]} GPU cores) among the observations, and no fit of it at {path} '
-                         f'(`python -m torch_mesh.streamed bandwidth --mib M --rounds N --out ROWS` reads it, a row of the observations)')
+                         f'(`python examples/memory-read.py --mib M --rounds N` reads it, a row of the observations)')
     fit = Fit(here[1], gbps)
     loss = fit.fit(obs)
     errors = sorted(abs(math.log(fit.time(spec, s, n) / t)) for spec, s, n, t, _ in obs)
@@ -1440,34 +1440,15 @@ def _admit(args):
     print(json.dumps(known['forms_at_bar']))
 
 
-def _gpu_busy():
-    """The GPU's utilization now (ioreg's Device Utilization %), or None where its registry names none."""
-    import re
-    import subprocess
-    out = subprocess.run(['ioreg', '-r', '-d', '1', '-w', '0', '-c', 'IOAccelerator'], capture_output=True, text=True).stdout
-    found = re.search(r'"Device Utilization %"=([0-9]+)', out)
-    return int(found.group(1)) if found else None
-
-
-def _bandwidth(args):
-    """This node's DRAM read bandwidth, the fit's bytes term (Fit: bytes / bandwidth): streamed_read over --mib MiB (more
-    than the system cache holds) by 2^18 threads in threadgroups of 256, --rounds reads each a command buffer of its own
-    (_stream.timed) after one not kept, the least time the reading (GB/s: 1e9 bytes a second) and the median beside it;
-    a JSON line of kind bandwidth naming this node, appended to --out, which fit takes among its observations, with the
-    GPU's utilization before and after (a reading is taken on an idle GPU: metal-microbench docs/measurement.md)."""
+def prepare_read(data, output, count, repetitions):
+    """Bind a complete streamed memory-read function before submission."""
     from . import _stream
-    torch.set_grad_enabled(False)
-    here, busy = list(node()), _gpu_busy()
-    count = args.mib << 16
-    data = torch.full((count * 8,), 0x5a5a, dtype=torch.int16, device='mps')
-    out = torch.zeros(1024, dtype=torch.int32, device='mps')
-    torch.mps.synchronize()
-    times = sorted(_stream.timed(_pipeline('streamed_read'), [data, out], _dims(count=count), 15, 1024, 1, 256, args.rounds + 1)[1:])
-    row = {'kind': 'bandwidth', 'node': here, 'bytes': count * 16, 'rounds': args.rounds, 'gbps': count * 16 / times[0] / 1e9,
-           'median_gbps': count * 16 / times[len(times) // 2] / 1e9, 'busy': [busy, _gpu_busy()]}
-    with open(args.out, 'a') as f:
-        f.write(json.dumps(row) + '\n')
-    print(json.dumps(row))
+    kernel = _pipeline('streamed_read')
+    schedule = _stream.Schedule()
+    for _ in range(repetitions):
+        schedule.compute(kernel, [data, output], _dims(count=count), 15, 1024, 1, 256, 1 | (2 << 32))
+    schedule.finish()
+    return schedule
 
 
 def lattice(record, axis, key=None):
@@ -1745,10 +1726,6 @@ def _resolve(args):
 def main():
     parser = argparse.ArgumentParser(prog='python -m torch_mesh.streamed')
     sub = parser.add_subparsers(dest='command', required=True)
-    bandwidth = sub.add_parser('bandwidth')
-    bandwidth.add_argument('--mib', type=int, required=True, help='the bytes read, MiB: more than the system cache holds')
-    bandwidth.add_argument('--rounds', type=int, required=True, help='the reads, each a command buffer of its own')
-    bandwidth.add_argument('--out', required=True, help='JSON lines the reading is appended to (an observation of fit)')
     fit = sub.add_parser('fit')
     fit.add_argument('observations', nargs='+')
     resolve = sub.add_parser('resolve')
@@ -1791,7 +1768,7 @@ def main():
     admit.add_argument('form', help='the form, H<h>')
     admit.add_argument('bar', type=float, help='the KL bar the record must be at or below (the operator\'s)')
     args = parser.parse_args()
-    {'bandwidth': _bandwidth, 'fit': _fit, 'resolve': _resolve,
+    {'fit': _fit, 'resolve': _resolve,
      'observe': _observe, 'epilogue': _epilogue, 'admit': _admit}[args.command](args)
 
 

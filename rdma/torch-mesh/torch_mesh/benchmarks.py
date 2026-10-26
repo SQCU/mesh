@@ -6,32 +6,8 @@ Preparation occurs before submission; observations do not change execution.
 import json
 from pathlib import Path
 import sys
-import time
 
-TIMING_METHOD = 'continuous-host-submission-and-final-completion'
-
-
-def emit(record, *, file=None):
-    """One structured record format for examples and the hourly reader."""
-    records = record if isinstance(record, list) else [record]
-    print('\n'.join(json.dumps(row, separators=(',', ':'), sort_keys=True) for row in records), file=file, flush=True)
-
-
-def completed(record, seconds):
-    # design/whole-function.md#observations
-    result = {**record['report'], 'rank': record['rank'], 'size': record['size'], 'seconds': seconds,
-              'useful_output_bytes': record['useful_work_bytes'],
-              'useful_gigabytes_per_second': record['useful_work_bytes'] / seconds / 1e9,
-              'timing_method': 'host-clock-poll-of-ordinary-completion'}
-    if 'steps' in result:
-        result.update(step_microseconds=seconds / result['steps'] * 1e6,
-                      calls_per_second=result['steps'] / seconds)
-        if 'rows' in result:
-            result['aggregate_rows_per_second'] = result['steps'] * result['rows'] / seconds
-    if 'calls' in result:
-        result['microseconds_per_call'] = seconds * 1e6 / result['calls']
-        result['useful_output_gigabytes_per_second_rank'] = record['useful_work_bytes'] / seconds / 1e9
-    return result
+from mesh_statistics import now, completed, emit
 
 
 def exchange_counts(rank, size, count):
@@ -104,7 +80,7 @@ def bandwidth(config):
                              'bandwidth')
     group._observers = [observer]
     for index, (call, output, useful, declaration, calls, what, requested) in enumerate(cases):
-        started = time.monotonic()
+        started = now()
         for _ in range(calls):
             call()
         completion = _stream.completion()

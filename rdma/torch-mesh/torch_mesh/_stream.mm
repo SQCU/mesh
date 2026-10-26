@@ -1,12 +1,7 @@
-// torch's MPS stream and the host as libnccl-mesh's streams (nccl.h): every collective of torch_mesh/backend.py and
-// torch's functional collectives on MPS is one call of `issue`, a group of calls each one kind (an all-reduce, reduce,
-// broadcast, the V all-gather, reduce-scatter and all-to-all, a directed write; a reduction by
-// any of the library's operators, the partials merge among them).  On MPS tensors the group is encoded in torch's stream's command buffer and open compute encoder (its kernels
-// join torch's own) with a workspace allocator (MPS tensors from torch's caching allocator, held until the group is
-// complete, then reused in the stream's order), committed by the one commit rule (below) without waiting; on CPU
-// tensors it is the host path, complete where it returns.  A group issued and not completed (an async op, a functional
-// collective) is a MeshWork: its wait encodes the rest (its landings, later rounds and results) on the stream where it
-// is waited.
+// PyTorch frontend bindings to the common collective compiler and native
+// Metal schedule. Prepared calls resolve routes, pages and dispatch operands
+// before submission. The compatibility MPS stream is flushed at a whole
+// function boundary; it has no publication-driven buffering policy.
 #include <torch/extension.h>
 #include <torch/library.h>
 #include <ATen/DLConvertor.h>
@@ -31,40 +26,17 @@
 #include <array>
 #include <vector>
 #include <unistd.h>
+#include "metal-recording.h"
 #include "nccl.h"
 #include "mesh-plan.h"
 
-// The commit rule (README, Performance), one for every caller: eager calls and compiled graphs, the library's own
-// callers and a user's program alike, with no region, mode or counter a caller enters.  Its work is throughput: the GPU
-// fed with the fewest command buffers while the host keeps issuing.  The GPU starts a command buffer at most every
-// 13-19 us whatever it holds (metal-microbench docs/measurement.md, 2026-10-02), so a buffer for each publication (work
-// a peer waits on) is a floor of its own.  Each buffer the library commits signals its count on `progress` as the GPU
-// reaches its end (a shared event's value is the GPU's progress at once; a completion handler runs 7-9 us later, at the
-// 99th percentile 20-60).  A publication is committed at once while at most one of those buffers is still in flight,
-// read from the event's value then: double buffering, one committed buffer queued behind the one the GPU runs, so a
-// commit overlaps the GPU's work (the 10-02 rule, mesh 3c00d37: 12.7 us a crossing compiled); otherwise it joins
-// torch's open command buffer.  The next
-// publication applies the rule again, and a host wait commits the open buffer, since nothing else would: the
-// library's (commit, host_wait) and torch's own (torch.mps.synchronize, torch.accelerator.synchronize, .item() and
-// .cpu() commit torch's open buffer and wait: MPSStream::synchronize COMMIT_AND_WAIT).  A host that blocks outside
-// torch while a publication waits stalls its peer, which is the program's to avoid.
-// In flight counts the buffers this library committed, not torch's own.
-
-// One torch MPS stream's commits and group workspace, held by the stream (made at its first group and never freed:
-// torch's streams live as long as the process, and the library's workspace allocator holds it as its context).  Its
-// commit state (committed, open) is read and written by the host inside torch's queue (dispatch_sync), where torch
-// encodes its own work, so it takes no lock, no caller enters it, and no thread but the host's touches torch's stream.
-// The rest (streamed, scratch, holders) is the host's, and workspace is freed outside torch's queue (a free may enter
-// that queue: torch's MPSAllocator adds completed handlers through it).
+// Framework stream dependencies and compatibility-call storage. The shared
+// native schedule owns prepared execution; this state names MPS data events.
 struct MeshStream {
   at::mps::MPSStream *const mps;
   id<MTLSharedEvent> const progress;
   // the buffers this stream committed, the k-th signalling k on progress as the GPU reaches its end
   uint64_t committed = 0;
-  // the root command buffer a publication joined (MPSCommandBuffer rootCommandBuffer, which commitAndContinue
-  // commits), retained until it is committed by this stream or by torch's own commits, which carry the publication
-  // with them; nil while none waits
-  id<MTLCommandBuffer> open = nil;
   // whether a group was issued on this stream since the host path last waited for it
   bool streamed = false;
   // the workspace of the group being encoded (the library's workspace allocator's context is the MeshStream, which
@@ -74,30 +46,11 @@ struct MeshStream {
 
   explicit MeshStream(at::mps::MPSStream *stream) : mps(stream), progress([stream->device() newSharedEvent]) {}
 
-  // On torch's queue: whether a publication still waits in torch's open buffer, the root it joined not yet committed
-  // (one torch committed needs no buffer of ours, which would cost the GPU a start of its own).
-  bool waiting() {
-    if (open && open.status < MTLCommandBufferStatusCommitted) return true;
-    [open release];
-    open = nil;
-    return false;
-  }
-
   // On torch's queue: the open buffer committed (and waited for, where `wait`), its end signalling the next count.
   void signalled(bool wait) {
     mps->endKernelCoalescing();
     [mps->commandBuffer() encodeSignalEvent:progress value:++committed];
     mps->synchronize(wait ? at::mps::SyncType::COMMIT_AND_WAIT : at::mps::SyncType::COMMIT);
-    [open release];
-    open = nil;
-  }
-
-  // On torch's queue, as a group's encoding ends, the rule: a publication encoded in torch's open buffer, committed
-  // with every publication waiting there while at most one buffer is in flight (double buffering), else left to join
-  // it.
-  void published() {
-    if (!waiting()) open = [mps->commandBuffer().rootCommandBuffer retain];
-    if (committed - progress.signaledValue <= 1) signalled(false);
   }
 
   // On the host: the workspace `held` of the group issued as `ticket` kept until the library retires it (0: a group
@@ -138,8 +91,7 @@ static void host_wait(MeshStream &s, bool wait) {
   MeshStream *self = &s;
   at::mps::dispatch_sync_with_rethrow(s.mps->queue(), ^{
     @autoreleasepool {
-      if (self->waiting()) self->signalled(wait);
-      else if (wait) self->mps->synchronize(at::mps::SyncType::COMMIT_AND_WAIT);
+      self->signalled(wait);
     }
   });
 }
@@ -202,7 +154,7 @@ static void checked(int64_t result) {
 }
 
 // A group encoded in one turn of torch's stream queue: its command buffer and open encoder, the group encoded into them,
-// and the commit rule applied where it published.  Its workspace (`held`) is held:
+// with the enclosing function responsible for submission. Its workspace is held:
 // split, it is issued and not completed, its ticket (0: complete at once) keeping them until the library retires it.
 static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &call, bool split, int64_t comm, std::vector<at::Tensor> held) {
   const auto *encode = &call;
@@ -216,7 +168,6 @@ static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &c
       @autoreleasepool {
         ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, split ? &issue : nullptr};
         result = (*encode)(&on);
-        if (!split || issue.published) s->published();
       }
     });
   }
@@ -239,7 +190,6 @@ static void complete(uint64_t ticket, uint64_t ns = 0) {
         ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, nullptr};
         int published = 0;
         result = ncclMeshComplete(ticket, &on, &published);
-        if (published) s->published();
       }
     });
   }
@@ -346,6 +296,8 @@ struct Issue {
   int64_t kind, op, root;
   std::vector<Operand> sends, receives;
   std::vector<size_t> counts;
+  std::vector<void *> source_views, destination_views;
+  ncclDataType_t type = ncclUint8;
 };
 
 static Issue prepare(const Call &call, Group &g) {
@@ -360,33 +312,43 @@ static Issue prepare(const Call &call, Group &g) {
     i.sends = {g.reducing(tensor(sends, 0), i.op)};
     if (!receives.empty()) i.receives = {g.reducing(tensor(receives, 0), i.op)};
     break;
-  case BROADCAST: i.sends = {g.moving(tensor(sends, 0))}; break;
+  case BROADCAST:
+    i.sends = {g.moving(tensor(sends, 0))};
+    if (!receives.empty()) i.receives = {g.moving(tensor(receives, 0))};
+    break;
   case ALLGATHER: case REDUCE_SCATTER: {
     // MPI_Allgatherv and MPI_Reduce_scatter (nccl.h ncclMeshAllGatherV, ncclMeshReduceScatterV): rank r's segment is
     // counts[r] elements, the segments packed in rank order in the whole operand (the receive's, the send's), counted
     // in the operand's NCCL elements; equal counts are the library's equal program
     const bool reduces = what == REDUCE_SCATTER;
     const at::Tensor &whole = reduces ? tensor(sends, 0) : tensor(receives, 0);
-    i.sends = {reduces ? g.reducing(tensor(sends, 0), i.op) : g.moving(tensor(sends, 0))};
-    i.receives = {reduces ? g.reducing(tensor(receives, 0), i.op) : g.moving(tensor(receives, 0))};
-    const size_t per = whole.numel() ? (reduces ? i.sends : i.receives)[0].count / (size_t)whole.numel() : 1;
+    for (size_t rank=0;rank<sends.size();rank++)
+      i.sends.push_back(reduces ? g.reducing(tensor(sends,rank),i.op) : g.moving(tensor(sends,rank)));
+    if (reduces) i.receives = {g.reducing(tensor(receives, 0), i.op)};
+    else for (size_t rank = 0; rank < receives.size(); rank++) i.receives.push_back(g.moving(tensor(receives, rank)));
+    const size_t per = reduces && whole.is_complex() ? 2 : kind(whole.scalar_type()) == ncclNumTypes ? whole.element_size() : 1;
     for (auto c : counts) i.counts.push_back((size_t)c * per);
     break;
   }
   case ALLTOALL: {
-    // MPI_Alltoallv with its counts on the host (nccl.h ncclMeshAlltoAllV; NCCL's all-to-all, gather and scatter its
-    // forms, a gather and a scatter of any sizes the rooted V): segments packed in rank order, a buffer that moves none
-    // absent
-    TORCH_CHECK(sends.size() == 1 && receives.size() == 1 && (sends[0] || receives[0]), "an all-to-all names its send and receive buffers");
-    i.sends = {sends[0] ? g.moving(*sends[0]) : Operand{}};
-    i.receives = {receives[0] ? g.moving(*receives[0]) : Operand{}};
-    const at::Tensor &whole = sends[0] ? *sends[0] : *receives[0];
-    const size_t per = whole.numel() ? (sends[0] ? i.sends : i.receives)[0].count / (size_t)whole.numel() : 1;
-    for (auto c : counts) i.counts.push_back((size_t)c * per);
+    size_t per=1;
+    for(const Tensors *list : {&sends,&receives}) {
+      auto &bindings=list==&sends?i.sends:i.receives;
+      for(const auto &tensor:*list) {
+        bindings.push_back(tensor?g.moving(*tensor):Operand{});
+        if(tensor) {
+          i.type=bindings.back().type;
+          per=kind(tensor->scalar_type())==ncclNumTypes?tensor->element_size():1;
+        }
+      }
+    }
+    for(auto count:counts)i.counts.push_back((size_t)count*per);
     break;
   }
   default: TORCH_CHECK(false, "no collective of kind ", what);
   }
+  for(const auto &view:i.sends)i.source_views.push_back((void *)view.at);
+  for(const auto &view:i.receives)i.destination_views.push_back((void *)view.at);
   return i;
 }
 
@@ -402,10 +364,19 @@ static ncclResult_t encoded(const std::vector<Issue> &issues, ncclComm_t comm, n
     case ALLREDUCE: result = ncclAllReduce(a.at, b, a.count, a.type, op, comm, s); break;
     case REDUCE: result = ncclReduce(a.at, b, a.count, a.type, op, (int)i.root, comm, s); break;
     case BROADCAST: result = ncclBroadcast(a.at, b, a.count, a.type, (int)i.root, comm, s); break;
-    case ALLGATHER: result = ncclMeshAllGatherV(a.at, b, i.counts.data(), a.type, comm, s); break;
-    case REDUCE_SCATTER: result = ncclMeshReduceScatterV(a.at, b, i.counts.data(), a.type, op, comm, s); break;
+    case ALLGATHER:
+      if (i.receives.size() == 1) result = ncclMeshAllGatherV(a.at, b, i.counts.data(), a.type, comm, s);
+      else result = ncclMeshAllGatherBuffers(a.at, i.destination_views.data(), i.counts.data(), a.type, comm, s);
+      break;
+    case REDUCE_SCATTER:
+      result = i.sends.size()==1 ? ncclMeshReduceScatterV(a.at,b,i.counts.data(),a.type,op,comm,s)
+        : ncclMeshReduceScatterBuffers(i.source_views.data(),b,i.counts.data(),a.type,op,comm,s);
+      break;
     case ALLTOALL:
-      result = ncclMeshAlltoAllV(a.at, i.counts.data(), b, i.counts.data() + i.counts.size() / 2, a.at ? a.type : i.receives[0].type, comm, s);
+      result = i.sends.size()==1 && i.receives.size()==1
+        ? ncclMeshAlltoAllV(a.at,i.counts.data(),b,i.counts.data()+i.counts.size()/2,i.type,comm,s)
+        : ncclMeshAlltoAllBuffers(i.source_views.data(),i.counts.data(),i.destination_views.data(),
+                                 i.counts.data()+i.counts.size()/2,i.type,comm,s);
       break;
     }
   }
@@ -452,6 +423,58 @@ static uint64_t issue(const std::vector<Call> &calls, int64_t comm, bool split, 
                 g.metal, split, comm, {}, unlock);
 }
 
+using Schedule = std::shared_ptr<MetalSchedule>;
+
+static Schedule schedule_after_inputs() {
+  at::mps::MPSStream *stream=at::mps::getCurrentMPSStream();
+  Schedule schedule(MetalScheduleCreate(stream->device(),MetalFormEncoded),MetalScheduleFree);
+  TORCH_CHECK(schedule,"creating the prepared function command stream");
+  MeshStream *source=&stream_of(stream);
+  at::mps::dispatch_sync_with_rethrow(stream->queue(), ^{ source->signalled(false); });
+  MetalScheduleAfter(schedule.get(),source->progress,source->committed);
+  return schedule;
+}
+
+static pybind11::capsule schedule_completion(const Schedule &schedule) {
+  return pybind11::capsule(new Schedule(schedule),"mesh.prepared-function",[](PyObject *token) {
+    delete static_cast<Schedule *>(PyCapsule_GetPointer(token,"mesh.prepared-function"));
+  });
+}
+
+// Static input/output dependencies between a prepared native segment and its
+// PyTorch neighbours. The native schedule owns execution; this binding only
+// puts the two data events into the framework's existing stream.
+struct TorchSchedule {
+  Schedule schedule;
+  MeshStream *source;
+  id<MTLSharedEvent> ready, done;
+  TorchSchedule():source(&stream_of(at::mps::getCurrentMPSStream())) {
+    auto device=source->mps->device();
+    ready=[device newSharedEvent];done=[device newSharedEvent];
+    schedule=Schedule(MetalScheduleCreate(device,MetalFormEncoded),MetalScheduleFree);
+    TORCH_CHECK(schedule,"creating the prepared crossing command stream");
+    MetalScheduleAfter(schedule.get(),ready,1);MetalScheduleSignal(schedule.get(),done,1);
+  }
+  ~TorchSchedule(){[ready release];[done release];}
+  void start() {
+    MeshStream *s=source;id<MTLSharedEvent> input=ready;
+    at::mps::dispatch_sync_with_rethrow(s->mps->queue(), ^{
+      s->mps->endKernelCoalescing();
+      [s->mps->commandBuffer() encodeSignalEvent:input value:1];
+      s->signalled(false);
+    });
+    MetalScheduleEnqueue(schedule.get());
+  }
+  void join() {
+    MeshStream *s=source;id<MTLSharedEvent> output=done;
+    at::mps::dispatch_sync_with_rethrow(s->mps->queue(), ^{
+      s->mps->endKernelCoalescing();
+      [s->mps->commandBuffer() encodeWaitForEvent:output value:1];
+    });
+  }
+  void enqueue() { start();join(); }
+};
+
 // Fixed operands for a declared block graph. Preparation uses the same operand
 // conversion as issue(); submission uses the same encoder, without a Work or a
 // second task scheduler. The enclosing function retains these tensor bindings.
@@ -464,9 +487,22 @@ struct Collectives {
       : comm(comm), operands(std::move(operands)) {
     for (const Call &call : calls) issues.push_back(prepare(call, group));
   }
-  void enqueue() {
-    on_stream([&](ncclMeshStream *stream) { return encoded(issues, communicator(comm), stream); }, false, comm, {});
+  std::vector<std::unique_ptr<TorchSchedule>> executions;
+  size_t next=0;
+  void realize() {
+    auto made=std::make_unique<TorchSchedule>();
+    const auto *list=&issues;const ncclComm_t handle=communicator(comm);
+    checked(MetalScheduleCross(made->schedule.get(),^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
+        id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
+      ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
+        .residencySet=(__bridge void *)residency};
+      return (int)encoded(*list,handle,&on);
+    }));
+    const auto held=operands;
+    MetalScheduleFinish(made->schedule.get(),^(NSError *){(void)held;});executions.push_back(std::move(made));
   }
+  void enqueue() { executions[next++]->enqueue(); }
+
 };
 
 // torch's functional collectives (_c10d_functional, what DTensor and a compiled graph call) on MPS tensors: kernels
@@ -616,7 +652,6 @@ static std::tuple<int64_t, int64_t, int64_t> pipeline_facts(int64_t handle) {
           (int64_t)state.staticThreadgroupMemoryLength};
 }
 
-static id<MTLResidencySet> fused_residency_;
 // A kernel that runs a fused crossing's steps (`fused`) reaches the library's counts, landing buffers and records by
 // address, through the residency set, which Metal does not hazard-track: its encoder declares every buffer of the set,
 // so its pass is ordered against the library's dispatches that name them (nccl-mesh-metal.h metal_uses).
@@ -625,7 +660,7 @@ static id<MTLResidencySet> fused_residency_;
 struct Dispatch {
   id<MTLComputePipelineState> state;
   std::vector<id<MTLBuffer>> bound;
-  std::vector<NSUInteger> offsets;
+  std::vector<NSUInteger> offsets, lengths;
   std::vector<uint32_t> words;
   NSUInteger at;
   MTLSize grid, group;
@@ -633,7 +668,7 @@ struct Dispatch {
 static Dispatch encoded(int64_t handle, const std::vector<std::optional<at::Tensor>> &buffers, const std::vector<int64_t> &constants,
                         int64_t at, int64_t gx, int64_t gy, int64_t threads) {
   if (handle < 0 || handle >= (int64_t)pipelines_.size()) throw std::runtime_error("encode: no kernel " + std::to_string(handle));
-  Dispatch d{pipelines_[handle], std::vector<id<MTLBuffer>>(buffers.size(), nil), std::vector<NSUInteger>(buffers.size(), 0),
+  Dispatch d{pipelines_[handle], std::vector<id<MTLBuffer>>(buffers.size(), nil), std::vector<NSUInteger>(buffers.size(), 0), std::vector<NSUInteger>(buffers.size(), 0),
              std::vector<uint32_t>(constants.begin(), constants.end()), (NSUInteger)at, MTLSizeMake((NSUInteger)gx, (NSUInteger)gy, 1),
              MTLSizeMake((NSUInteger)threads, 1, 1)};
   for (size_t i = 0; i < buffers.size(); i++)
@@ -642,6 +677,7 @@ static Dispatch encoded(int64_t handle, const std::vector<std::optional<at::Tens
       if (!t.is_mps()) throw std::runtime_error("encode: buffer " + std::to_string(i) + " is not an MPS tensor");
       d.bound[i] = at::native::mps::getMTLBufferStorage(t);
       d.offsets[i] = (NSUInteger)(t.storage_offset() * t.element_size());
+      d.lengths[i] = t.nbytes();
     }
   return d;
 }
@@ -652,58 +688,25 @@ static void encode_in(id<MTLComputeCommandEncoder> encoder, const Dispatch &d) {
   [encoder setBytes:d.words.data() length:d.words.size() * sizeof(uint32_t) atIndex:d.at];
   [encoder dispatchThreadgroups:d.grid threadsPerThreadgroup:d.group];
 }
-// The residency set's allocations declared on the encoder (fused: its kernels reach them by address), once an encoder
-// and its count of allocations: a declaration holds for the encoder's every later dispatch.  On torch's queue
-static void declare_fused(id<MTLComputeCommandEncoder> encoder) {
-  static id<MTLComputeCommandEncoder> declared = nil;  // held, so no later encoder takes its address
-  static NSUInteger count = 0;
-  if (!fused_residency_ || (encoder == declared && fused_residency_.allocationCount == count)) return;
-  for (id<MTLAllocation> held in fused_residency_.allAllocations)
-    [encoder useResource:(id<MTLResource>)held usage:MTLResourceUsageRead | MTLResourceUsageWrite];
-  [declared release];
-  declared = [encoder retain];
-  count = fused_residency_.allocationCount;
+// Configuration binds kernels from the Torch frontend into the native recorder.
+// Access modes are explicit operands; the recorder orders the declared byte views.
+static void prepare_dispatch(MetalSchedule *schedule,const Dispatch &d,uint64_t access) {
+  std::vector<MetalCommandBinding> bindings;
+  for(size_t j=0;j<d.bound.size();j++)if(d.bound[j])
+    bindings.push_back({d.bound[j],d.offsets[j],d.lengths[j],(uint32_t)j,
+      (uint32_t)(((access>>j)&1?MetalReachRead:0)|((access>>(32+j))&1?MetalReachWritten:0))});
+  bindings.push_back(MetalScheduleData(schedule,d.words.data(),d.words.size()*sizeof(uint32_t),(uint32_t)d.at));
+  MetalScheduleCompute(schedule,d.state,bindings.data(),bindings.size(),d.grid,d.group);
+
 }
+
 static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> &buffers, const std::vector<int64_t> &constants,
-                   int64_t at, int64_t gx, int64_t gy, int64_t threads, bool fused) {
+                   int64_t at, int64_t gx, int64_t gy, int64_t threads) {
   const Dispatch d = encoded(handle, buffers, constants, at, gx, gy, threads);
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
   dispatch_sync(stream->queue(), ^{
     id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
-    if (fused) declare_fused(encoder);
     encode_in(encoder, d);
-  });
-}
-
-// An AOT sequence of data-function dispatches in one host queue entry. The
-// GPU's serial dispatch order keeps frame publication prefixes contiguous;
-// Publication commits use the single-dispatch stream policy, then flush any
-// remaining publications at the end of the batch without waiting. A later
-// descriptor reservation must never wait on a producer still unsubmitted here.
-using EncodedCall = std::tuple<int64_t, std::vector<std::optional<at::Tensor>>, std::vector<int64_t>,
-                               int64_t, int64_t, int64_t, int64_t, bool, bool>;
-static void encode_many(const std::vector<EncodedCall> &calls) {
-  struct Item { Dispatch dispatch; bool fused, publish; };
-  std::vector<Item> prepared;
-  prepared.reserve(calls.size());
-  for (const auto &[handle, buffers, words, at, gx, gy, threads, fused, publish] : calls)
-    prepared.push_back({encoded(handle, buffers, words, at, gx, gy, threads), fused, publish});
-  if (prepared.empty()) return;
-  const Item *const items = prepared.data();
-  const size_t count = prepared.size();
-  const bool publishes = std::any_of(prepared.begin(), prepared.end(), [](const Item &item) { return item.publish; });
-  at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
-  MeshStream *s = &stream_of(stream);
-  at::mps::dispatch_sync_with_rethrow(stream->queue(), ^{
-    @autoreleasepool {
-      for (size_t i = 0; i < count; i++) {
-        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
-        if (items[i].fused) declare_fused(encoder);
-        encode_in(encoder, items[i].dispatch);
-        if (items[i].publish) s->published();
-      }
-      if (publishes && s->waiting()) s->signalled(false);
-    }
   });
 }
 
@@ -782,7 +785,7 @@ static at::Tensor linear(const at::Tensor &x, const at::Tensor &w, const std::op
   const auto handle = linear_pipeline(key);
   at::Tensor y = at::empty({R, N}, x.options());
   encode(handle, {xc, wc, y, bias ? std::optional<at::Tensor>(bias->contiguous()) : y, std::nullopt, x1c},
-         {R, K, N, bias ? 1 : 0, ldw, K0, ld0, ld1}, 4, groups, 1, split * 32, false);
+         {R, K, N, bias ? 1 : 0, ldw, K0, ld0, ld1}, 4, groups, 1, split * 32);
   return y;
 }
 
@@ -824,7 +827,7 @@ static std::vector<at::Tensor> linears(const std::vector<at::Tensor> &xs, const 
   }
   const int64_t split = linear_fit(least, first);
   const auto key = std::make_tuple(wide_w ? 4 : 1, wide_x ? 4 : 1, (int)split, -1);
-  encode(linear_pipeline(key), buffers, words, 20, first, 1, split * 32, false);
+  encode(linear_pipeline(key), buffers, words, 20, first, 1, split * 32);
   return ys;
 }
 
@@ -843,81 +846,6 @@ TORCH_LIBRARY_IMPL(torch_mesh, MPS, m) {
   m.impl("linears", &linears);
   m.impl("indexed_step", &indexed_step);
   m.impl("indexed_step_out", &indexed_step_out);
-}
-
-// The same dispatch in a command buffer of its own on torch's queue, committed and waited `repeats` times: each one's
-// GPU time (GPUEndTime - GPUStartTime), the measure the engine's kernel harness reports.  Torch's stream is synchronized
-// by the caller first.
-static std::vector<double> timed(int64_t handle, const std::vector<std::optional<at::Tensor>> &buffers,
-                                 const std::vector<int64_t> &constants, int64_t at, int64_t gx, int64_t gy, int64_t threads,
-                                 int64_t repeats) {
-  if (handle < 0 || handle >= (int64_t)pipelines_.size()) throw std::runtime_error("timed: no kernel " + std::to_string(handle));
-  id<MTLComputePipelineState> state = pipelines_[handle];
-  std::vector<id<MTLBuffer>> bound(buffers.size(), nil);
-  std::vector<NSUInteger> offsets(buffers.size(), 0);
-  for (size_t i = 0; i < buffers.size(); i++)
-    if (buffers[i]) {
-      const at::Tensor &t = *buffers[i];
-      bound[i] = at::native::mps::getMTLBufferStorage(t);
-      offsets[i] = (NSUInteger)(t.storage_offset() * t.element_size());
-    }
-  std::vector<uint32_t> words(constants.begin(), constants.end());
-  id<MTLCommandQueue> queue = at::mps::getCurrentMPSStream()->commandQueue();
-  std::vector<double> out;
-  for (int64_t r = 0; r < repeats; r++) {
-    id<MTLCommandBuffer> buffer = [queue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [buffer computeCommandEncoder];
-    [encoder setComputePipelineState:state];
-    for (size_t i = 0; i < bound.size(); i++)
-      if (bound[i]) [encoder setBuffer:bound[i] offset:offsets[i] atIndex:i];
-    [encoder setBytes:words.data() length:words.size() * sizeof(uint32_t) atIndex:(NSUInteger)at];
-    [encoder dispatchThreadgroups:MTLSizeMake((NSUInteger)gx, (NSUInteger)gy, 1) threadsPerThreadgroup:MTLSizeMake((NSUInteger)threads, 1, 1)];
-    [encoder endEncoding];
-    [buffer commit];
-    [buffer waitUntilCompleted];
-    if (buffer.error) throw std::runtime_error(std::string("timed: ") + buffer.error.localizedDescription.UTF8String);
-    out.push_back(buffer.GPUEndTime - buffer.GPUStartTime);
-  }
-  return out;
-}
-
-// `count` dispatches of one kernel in one command buffer on torch's queue, each after a buffer barrier, dispatch i bound to
-// sets[i % sets.size()]: the command buffer's GPU time over `count`, the measure tools/native_bench (metal-microbench
-// 3a2f72a) takes of the recorded LiteRT kernels, so weights rotated over sets totalling more than the system cache are
-// read from DRAM by every dispatch.  Torch's stream is synchronized by the caller first.
-static double sequence(int64_t handle, const std::vector<std::vector<std::optional<at::Tensor>>> &sets,
-                       const std::vector<int64_t> &constants, int64_t at, int64_t gx, int64_t gy, int64_t threads, int64_t count) {
-  if (handle < 0 || handle >= (int64_t)pipelines_.size()) throw std::runtime_error("sequence: no kernel " + std::to_string(handle));
-  if (sets.empty() || count < 1) throw std::runtime_error("sequence: no buffer sets or dispatches");
-  std::vector<std::vector<id<MTLBuffer>>> bound;
-  std::vector<std::vector<NSUInteger>> offsets;
-  for (const auto &set : sets) {
-    bound.emplace_back(set.size(), nil);
-    offsets.emplace_back(set.size(), 0);
-    for (size_t i = 0; i < set.size(); i++)
-      if (set[i]) {
-        bound.back()[i] = at::native::mps::getMTLBufferStorage(*set[i]);
-        offsets.back()[i] = (NSUInteger)(set[i]->storage_offset() * set[i]->element_size());
-      }
-  }
-  std::vector<uint32_t> words(constants.begin(), constants.end());
-  id<MTLCommandQueue> queue = at::mps::getCurrentMPSStream()->commandQueue();
-  id<MTLCommandBuffer> buffer = [queue commandBuffer];
-  id<MTLComputeCommandEncoder> encoder = [buffer computeCommandEncoder];
-  [encoder setComputePipelineState:pipelines_[handle]];
-  [encoder setBytes:words.data() length:words.size() * sizeof(uint32_t) atIndex:(NSUInteger)at];
-  for (int64_t r = 0; r < count; r++) {
-    const size_t s = (size_t)r % bound.size();
-    for (size_t i = 0; i < bound[s].size(); i++)
-      if (bound[s][i]) [encoder setBuffer:bound[s][i] offset:offsets[s][i] atIndex:i];
-    [encoder dispatchThreadgroups:MTLSizeMake((NSUInteger)gx, (NSUInteger)gy, 1) threadsPerThreadgroup:MTLSizeMake((NSUInteger)threads, 1, 1)];
-    [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
-  }
-  [encoder endEncoding];
-  [buffer commit];
-  [buffer waitUntilCompleted];
-  if (buffer.error) throw std::runtime_error(std::string("sequence: ") + buffer.error.localizedDescription.UTF8String);
-  return (buffer.GPUEndTime - buffer.GPUStartTime) / (double)count;
 }
 
 // Region tensors (torch_mesh.empty, records, address): a tensor whose bytes are a lease of this node's bridge's region
@@ -1025,26 +953,6 @@ static std::vector<std::pair<uint64_t, uint64_t>> records() {
 // compiled relay path. Producers publish source ranges; consumers observe
 // only their data dependencies. Registration cuts are agreed at realization,
 // and no buffer must begin on a transport page. Unsupported inputs fail.
-static std::vector<void *> fused_queues_;
-
-static id<MTLResidencySet> fused_residency(at::mps::MPSStream *stream) {
-  if (!fused_residency_) {
-    NSError *error = nil;
-    fused_residency_ = [stream->device() newResidencySetWithDescriptor:[MTLResidencySetDescriptor new] error:&error];
-    TORCH_CHECK(fused_residency_, "fused crossing: torch's device made no residency set: ",
-                error ? error.localizedDescription.UTF8String : "no reason given");
-  }
-  void *queue = (__bridge void *)stream->commandQueue();
-  bool added = false;
-  for (void *q : fused_queues_) added |= q == queue;
-  if (!added) {
-    id<MTLResidencySet> set = fused_residency_;
-    dispatch_sync(stream->queue(), ^{ [stream->commandQueue() addResidencySet:set]; });
-    fused_queues_.push_back(queue);
-  }
-  return fused_residency_;
-}
-
 // The library's Metal prelude (ncclMeshMetalPrelude): rdma/mesh.metal as the loaded library was built with it, then its
 // steps; the text a kernel that runs them is compiled after.
 static std::string metal_prelude() { return ncclMeshMetalPrelude(); }
@@ -1066,52 +974,29 @@ struct PreparedWrites {
   std::vector<ncclMeshWritePlan_t> handles;
   std::vector<std::array<uint64_t, 6>> publish, land;
   ncclMeshFused records{};
-  MeshStream *stream = nullptr;
-  id<MTLResidencySet> residency = nil;
   uint32_t polls = 0;
   void prepare(int64_t comm, int64_t waiting, int64_t repeats, int64_t stride) {
     const int channels = physical_channels(communicator(comm));
     publish.resize(channels), land.resize(channels);
     records = {reinterpret_cast<uint64_t(*)[6]>(publish.data()), reinterpret_cast<uint64_t(*)[6]>(land.data()),
                (uint32_t)channels, (uint32_t)channels, (uint32_t)repeats, (size_t)stride};
-    stream = &stream_of(at::mps::getCurrentMPSStream());
-    residency = fused_residency(stream->mps);
     polls = (uint32_t)waiting;
   }
   ~PreparedWrites() { for (auto plan : handles) ncclMeshWritePlanDestroy(plan); }
 };
 
-static void execute_fused_writes(PreparedWrites &plans) {
-  plans.records.publishes = plans.publish.size(), plans.records.lands = plans.land.size();
-  ncclMeshFused *const records = &plans.records;
-  const ncclMeshWritePlan_t *const handles = plans.handles.data();
-  const size_t count = plans.handles.size();
-  if (!count) {
-    plans.records.publishes = plans.records.lands = 0;
-    return;
-  }
-  __block ncclResult_t result = ncclSuccess;
-  MeshStream *s = plans.stream;
-  at::mps::MPSStream *stream = s->mps;
-  id<MTLResidencySet> residency = plans.residency;
-  const uint32_t polls = plans.polls;
-  dispatch_sync(stream->queue(), ^{
-    @autoreleasepool {
-      // A descriptor reservation can wait for earlier publications. Submit their
-      // producer buffer before reserving the next batch; this does not wait for
-      // GPU completion.
-      if (s->waiting()) s->signalled(false);
-      ncclMeshStream on = {(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, nullptr,
-                           nullptr, (__bridge void *)residency, polls, records};
-      ncclResult_t made = ncclGroupStart();
-      for (size_t i = 0; i < count && !made; i++) made = ncclMeshWriteExecute(handles[i], &on);
-      const ncclResult_t ended = ncclGroupEnd();
-      result = made ? made : ended;
-    }
-  });
-  s->streamed = true;
-  s->retire(0, std::exchange(s->scratch, {}));
-  checked(result);
+static void prepare_fused_writes(MetalSchedule *schedule,PreparedWrites &plans) {
+  plans.records.publishes=plans.publish.size();plans.records.lands=plans.land.size();
+  if(plans.handles.empty()){plans.records.publishes=plans.records.lands=0;return;}
+  PreparedWrites *p=&plans;
+  checked(MetalScheduleCross(schedule,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
+      id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
+    ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
+      .residencySet=(__bridge void *)residency,.polls=p->polls,.fused=&p->records};
+    ncclResult_t result=ncclGroupStart();
+    for(auto handle:p->handles)if(!result)result=ncclMeshWriteExecute(handle,&on);
+    ncclResult_t ended=ncclGroupEnd();return (int)(result?result:ended);
+  }));
 }
 
 // Configuration retains the kernels, page generations and channel bindings of a
@@ -1141,6 +1026,7 @@ struct FusedForm {
   Ring *ring = nullptr;
   int64_t turn = 0, j = 0, half = 0;
   std::vector<int64_t> pbind, lbind;
+  Schedule transport;
 };
 static auto *fused_forms_ = new std::map<std::vector<int64_t>, FusedForm>;
 static auto *fused_lock_ = new std::mutex;
@@ -1292,26 +1178,13 @@ static void put_binding(int64_t *words, const std::array<uint64_t, 6> *record) {
   }
 }
 
-static int64_t fused_turn(FusedForm &f, FusedForm::Sequence &sequence, int64_t repeats) {
-  const int64_t j = f.j;
-  if (j == 0) {
-    FusedForm::Ring &ring = *sequence.rings[sequence.cursor];
-    sequence.cursor += sequence.stride;
-    const int64_t half = f.turn % 2;
-    PreparedWrites &plans = *ring.plans[half];
-    execute_fused_writes(plans);
-    for (int64_t k = 0; k < f.channels; k++) {
-      put_binding(f.pbind.data() + 12 * k, nullptr);
-      put_binding(f.pbind.data() + 12 * (f.channels + k), k < plans.records.publishes ? &plans.publish[k] : nullptr);
-      put_binding(f.lbind.data() + 12 * k, k < plans.records.lands ? &plans.land[k] : nullptr);
-      put_binding(f.lbind.data() + 12 * (f.channels + k), nullptr);
-    }
-    f.ring = &ring, f.half = half, f.turn++;
-  }
-  f.j = (j + 1) % repeats;
-  return j;
-}
-
+struct CrossingFrame {
+  Schedule transport;
+  bool starts;
+  Dispatch publish, land;
+  std::optional<Dispatch> ready;
+  std::vector<id<MTLResource>> resources;
+};
 struct IndexedCrossing {
   FusedForm *form;
   FusedForm::Sequence *sequence;
@@ -1321,10 +1194,15 @@ struct IndexedCrossing {
   Dispatch publish, land;
   std::optional<Dispatch> ready;
   MeshStream *stream;
+  std::vector<CrossingFrame> frames;
+  size_t next=0;
 };
+static auto *metadata_after_=new std::map<int64_t,id<MTLSharedEvent>>;
 static auto *indexed_crossings_ = new std::vector<std::unique_ptr<IndexedCrossing>>;
 
 static void release_crossings(int64_t comm) {
+  auto event=metadata_after_->find(comm);
+  if(event!=metadata_after_->end()){[event->second release];metadata_after_->erase(event);}
   for (auto &call : *indexed_crossings_)
     if (call && call->form->comm == comm) call.reset();
 }
@@ -1360,36 +1238,64 @@ static void prepare_crossing(int64_t index, const at::Tensor &x, const std::opti
 static void tensor_binding(Dispatch &dispatch, size_t index, const at::Tensor &tensor) {
   dispatch.bound[index] = at::native::mps::getMTLBufferStorage(tensor);
   dispatch.offsets[index] = tensor.storage_offset() * tensor.element_size();
+  dispatch.lengths[index] = tensor.nbytes();
+}
+
+static void compile_crossing(int64_t index) {
+  IndexedCrossing &call=*(*indexed_crossings_)[index];FusedForm &f=*call.form;
+  const int64_t j=f.j;
+  Schedule transport;
+  if(j==0) {
+    auto &sequence=*call.sequence;
+    FusedForm::Ring &ring=*sequence.rings[sequence.cursor];sequence.cursor+=sequence.stride;
+    const int64_t half=f.turn%2;
+    PreparedWrites &plans=*ring.plans[half];
+    auto device=call.stream->mps->device();
+    transport=Schedule(MetalScheduleCreate(device,MetalFormEncoded),MetalScheduleFree);
+    id<MTLSharedEvent> before=(*metadata_after_)[f.comm],done=[device newSharedEvent];
+    if(before)MetalScheduleAfter(transport.get(),before,1);
+    MetalScheduleSignal(transport.get(),done,1);
+    [before release];(*metadata_after_)[f.comm]=done;
+    prepare_fused_writes(transport.get(),plans);
+    MetalScheduleFinish(transport.get(),nil);
+    for(int64_t k=0;k<f.channels;k++) {
+      put_binding(f.pbind.data()+12*k,nullptr);
+      put_binding(f.pbind.data()+12*(f.channels+k),k<plans.records.publishes?&plans.publish[k]:nullptr);
+      put_binding(f.lbind.data()+12*k,k<plans.records.lands?&plans.land[k]:nullptr);
+      put_binding(f.lbind.data()+12*(f.channels+k),nullptr);
+    }
+    f.ring=&ring;f.half=half;f.turn++;f.transport=transport;
+  }
+  f.j=(j+1)%call.repeats;
+  CrossingFrame frame{f.transport,j==0,call.publish,call.land,call.ready};
+  frame.publish.words[f.pj]=j;frame.land.words[f.lj]=j;
+  std::copy(f.pbind.begin(),f.pbind.end(),frame.publish.words.begin()+call.publish_words);
+  std::copy(f.lbind.begin(),f.lbind.end(),frame.land.words.begin()+call.land_words);
+  tensor_binding(frame.publish,call.output_binding,f.ring->segments[f.half][j][f.rank]);
+  tensor_binding(frame.land,0,f.ring->slots[f.half][j]);
+  if(frame.ready)std::copy(frame.land.words.begin(),frame.land.words.end(),frame.ready->words.begin());
+  for(id allocation in MetalScheduleResources(frame.transport.get()).allAllocations)
+    frame.resources.push_back((id<MTLResource>)allocation);
+  call.frames.push_back(std::move(frame));
 }
 
 static void run_crossing(IndexedCrossing &call, const at::Tensor &x, const std::optional<at::Tensor> &w, const at::Tensor &out) {
-  FusedForm &f = *call.form;
-  const int64_t j = fused_turn(f, *call.sequence, call.repeats);
-  const FusedForm::Ring &ring = *f.ring;
-  call.publish.words[f.pj] = j, call.land.words[f.lj] = j;
-  std::copy(f.pbind.begin(), f.pbind.end(), call.publish.words.begin() + call.publish_words);
-  std::copy(f.lbind.begin(), f.lbind.end(), call.land.words.begin() + call.land_words);
-  tensor_binding(call.publish, 0, x);
-  if (w) {
-    tensor_binding(call.publish, 1, *w);
-    tensor_binding(call.publish, 4, x);
-  }
-  tensor_binding(call.publish, call.output_binding, ring.segments[f.half][j][f.rank]);
-  tensor_binding(call.land, 0, ring.slots[f.half][j]);
-  tensor_binding(call.land, 1, out);
-  if (call.ready) std::copy(call.land.words.begin(), call.land.words.end(), call.ready->words.begin());
-  const Dispatch *publication = &call.publish, *landing = &call.land;
-  const Dispatch *ready = call.ready ? &*call.ready : nullptr;
-  MeshStream *s = call.stream;
-  at::mps::MPSStream *stream = s->mps;
+  CrossingFrame &frame=call.frames[call.next++];
+  if(frame.starts)MetalScheduleEnqueue(frame.transport.get());
+  tensor_binding(frame.publish,0,x);
+  if(w){tensor_binding(frame.publish,1,*w);tensor_binding(frame.publish,4,x);}
+  tensor_binding(frame.land,1,out);
+  id<MTLResidencySet> records=MetalScheduleResources(frame.transport.get());
+  const Dispatch *publication = &frame.publish, *landing = &frame.land;
+  const Dispatch *ready = frame.ready ? &*frame.ready : nullptr;
+  at::mps::MPSStream *stream = call.stream->mps;
+  const auto *resources=frame.resources.data();const size_t resource_count=frame.resources.size();
   dispatch_sync(stream->queue(), ^{
     @autoreleasepool {
+      [stream->commandBuffer() useResidencySet:records];
       id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
-      declare_fused(encoder);
+      [encoder useResources:resources count:resource_count usage:MTLResourceUsageRead|MTLResourceUsageWrite];
       encode_in(encoder, *publication);
-      s->published();
-      encoder = stream->commandEncoder();
-      declare_fused(encoder);
       if (ready) encode_in(encoder, *ready);
       encode_in(encoder, *landing);
     }
@@ -1413,7 +1319,7 @@ static void indexed_step_out(const at::Tensor &x, const std::optional<at::Tensor
 // assigned here before execution.
 struct ChainStep {
   std::array<id<MTLBuffer>, 4> buffers;
-  std::array<NSUInteger, 4> offsets;
+  std::array<NSUInteger, 4> offsets, lengths;
   uint32_t first, phase, last, previous_j, j;
   const std::vector<Dispatch *> *dispatches;
 };
@@ -1435,7 +1341,9 @@ struct PreparedChain {
   size_t publication_output, publication_j;
   MeshStream *stream;
   uint32_t channels, phase = 0, generation = 0;
+  Schedule schedule;
 };
+static void compile_chain(PreparedChain &chain);
 static auto *prepared_chains_ = new std::vector<std::unique_ptr<PreparedChain>>;
 
 static void release_chains(int64_t comm) {
@@ -1513,12 +1421,14 @@ static void prepare_chain(int64_t index, int64_t kernel, const std::vector<int64
     uint32_t previous_j = 0;
     auto append = [&](int64_t t, int64_t j, const at::Tensor &send, const at::Tensor &land, bool last) {
       const std::array<at::Tensor, 4> bound{input, output, send, land};
-      ChainStep step{{}, {}, (uint32_t)(t == 0), (uint32_t)(2 * t), (uint32_t)last, previous_j, (uint32_t)j,
+      ChainStep step{{}, {}, {}, (uint32_t)(t == 0), (uint32_t)(2 * t), (uint32_t)last, previous_j, (uint32_t)j,
                      last ? &chain->final : &chain->regular};
       for (size_t k = 0; k < bound.size(); k++) {
         step.buffers[k] = at::native::mps::getMTLBufferStorage(bound[k]);
         step.offsets[k] = bound[k].storage_offset() * bound[k].element_size();
+        step.lengths[k] = bound[k].nbytes();
       }
+      step.lengths[0] = input_pitch; step.lengths[1] = output_pitch;
       step.offsets[0] = input_base + std::min(t, steps - 1) * input_pitch;
       step.offsets[1] = output_base + std::max<int64_t>(0, t - 1) * output_pitch;
       chain->steps[generation].push_back(step);
@@ -1539,17 +1449,17 @@ static void prepare_chain(int64_t index, int64_t kernel, const std::vector<int64
     }
     append(steps, 0, x, previous, true);
   }
+  compile_chain(*chain);
   (*prepared_chains_)[index] = std::move(chain);
 }
 
-static void chain_run(int64_t index) {
-  PreparedChain &chain = *(*prepared_chains_)[index];
+static void compile_chain(PreparedChain &chain) {
+  chain.schedule=schedule_after_inputs();
+  MetalSchedule *schedule=chain.schedule.get();
   Dispatch &d = chain.dispatch;
   Dispatch &publication = *chain.publication;
   const auto &steps = chain.steps[chain.generation];
   const auto &chunks = chain.chunks[chain.generation];
-  MeshStream *s = chain.stream;
-  at::mps::MPSStream *stream = s->mps;
   const auto binding = [&](const PreparedWrites *plans, bool publication, size_t part) {
     const uint32_t count = !plans ? 0 : publication ? plans->records.publishes : plans->records.lands;
     const auto *records = !plans ? nullptr : publication ? plans->publish.data() : plans->land.data();
@@ -1566,7 +1476,7 @@ static void chain_run(int64_t index) {
   };
   const auto input = [&](size_t index) {
     PreparedWrites &plans = *chain.inputs[index];
-    execute_fused_writes(plans);
+    prepare_fused_writes(schedule,plans);
     Dispatch &ready = chain.input_publication;
     ready.words[0] = chain.input_last[index];
     for (uint32_t k = 0; k < chain.channels; k++) {
@@ -1577,37 +1487,36 @@ static void chain_run(int64_t index) {
         ready.words[3 + 12 * k + 2 * word] = value >> 32;
       }
     }
-    const Dispatch *item = &ready;
-    dispatch_sync(stream->queue(), ^{
-      @autoreleasepool {
-        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
-        declare_fused(encoder);
-        encode_in(encoder, *item);
-        s->published();
-      }
-    });
+    prepare_dispatch(schedule,ready,0);
+
   };
   const auto dispatch = [&](const ChainStep &step) {
     const size_t slots[4] = {2, 3, 6, 9};
-    for (size_t k = 0; k < 4; k++) d.bound[slots[k]] = step.buffers[k], d.offsets[slots[k]] = step.offsets[k];
+    for (size_t k = 0; k < 4; k++) { d.bound[slots[k]] = step.buffers[k]; d.offsets[slots[k]] = step.offsets[k]; d.lengths[slots[k]]=step.lengths[k]; }
     d.words[0] = step.first, d.words[1] = chain.phase + step.phase, d.words[5] = step.last;
     d.words[8] = step.previous_j, d.words[9] = step.j;
     publication.bound[chain.publication_output] = step.buffers[2];
     publication.offsets[chain.publication_output] = step.offsets[2];
+    publication.lengths[chain.publication_output] = step.lengths[2];
     publication.words[chain.publication_j] = step.j;
-    id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
-    declare_fused(encoder);
-    for (const Dispatch *item : *step.dispatches) encode_in(encoder, *item);
-    if (!step.last) s->published();
+    // Input, state and weights are reads; the fused step writes X, Y, its
+    // output frame, arrivals and publication pages. The linear forms name
+    // their own destination bindings through the same record interface.
+    for(const Dispatch *item:*step.dispatches) {
+      uint64_t access=0;
+      for(size_t k=0;k<item->bound.size();k++)if(item->bound[k])access|=UINT64_C(1)<<k;
+      const uint64_t writes=item==&d ? ((UINT64_C(1)<<3)|(UINT64_C(1)<<4)|(UINT64_C(1)<<5)|(UINT64_C(1)<<6)|(UINT64_C(1)<<7)|(UINT64_C(1)<<8)) :
+        item==chain.publication ? ((UINT64_C(1)<<2)|(UINT64_C(1)<<3)) : (UINT64_C(1)<<2);
+      prepare_dispatch(schedule,*item,access|(writes<<32));
+    }
+
   };
-  const auto *draw = &dispatch;
-  const auto *bind = &binding;
   const PreparedWrites *previous = nullptr;
   input(0);
   for (size_t turn = 0; turn < chunks.size(); turn++) {
     const ChainChunk &chunk = chunks[turn];
     for (size_t j = 0; j < chunk.prefetch_count; j++) input(chunk.prefetch_first + j);
-    execute_fused_writes(*chunk.plans);
+    prepare_fused_writes(schedule,*chunk.plans);
     binding(previous, false, 0);
     binding(chunk.plans, true, 1);
     const size_t input_first = chunk.input_first;
@@ -1624,39 +1533,28 @@ static void chain_run(int64_t index) {
         }
       }
     }
-    const Dispatch *landing = &chain.input_landing;
-    const ChainStep *first = steps.data() + chunk.first;
-    const PreparedWrites *plans = chunk.plans;
-    const size_t count = chunk.count;
-    // Like encode_many, enter the stream queue once for its prepared batch.
-    // Each publication still uses the common commit rule. The next write
-    // reservation submits any pending producer before it asks for ring room.
-    dispatch_sync(stream->queue(), ^{
-      @autoreleasepool {
-        // The historical chain admitted one input block here, then used its
-        // pages for every step in the block without polling them again.
-        for (size_t j = 0; j < input_first; j++) {
-          id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
-          declare_fused(encoder);
-          encode_in(encoder, *landing);
-        }
-        (*draw)(*first);
-        (*bind)(plans, false, 0);
-        for (size_t j = 1; j < count; j++) (*draw)(first[j]);
-      }
-    });
+    for(size_t j=0;j<input_first;j++)prepare_dispatch(schedule,chain.input_landing,0);
+    const ChainStep *first=steps.data()+chunk.first;
+    dispatch(*first);
+    binding(chunk.plans,false,0);
+    for(size_t j=1;j<chunk.count;j++)dispatch(first[j]);
     previous = chunk.plans;
   }
-  const ChainStep *last = &steps.back();
-  dispatch_sync(stream->queue(), ^{ @autoreleasepool { (*draw)(*last); } });
-  chain.phase += 2 * (uint32_t)(steps.size() - 1);
-  chain.generation ^= chunks.size() & 1;
+  dispatch(steps.back());
+  MetalScheduleFinish(schedule,nil);
+}
+
+static void chain_run(int64_t index) {
+  MetalScheduleEnqueue((*prepared_chains_)[index]->schedule.get());
+}
+static pybind11::capsule chain_completion(int64_t index) {
+  return schedule_completion((*prepared_chains_)[index]->schedule);
 }
 
 // A declared set of routed writes. Bindings name physical channels, including
 // parallel cables; relay readiness stays in the compiled stream entries.
 static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> fused_writes_impl(
-    const at::Tensor &send, const std::vector<at::Tensor> &landings,
+    MetalSchedule *schedule, const at::Tensor &send, const std::vector<at::Tensor> &landings,
     const std::vector<std::array<int, 2>> &pairs, int64_t comm, int64_t polls, int64_t repeats, int64_t stride,
     int64_t row_bytes, int64_t rows) {
   TORCH_CHECK(landings.size() == pairs.size(), "fused writes: one landing lease per declared write");
@@ -1696,24 +1594,68 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
                                       (uint32_t)repeats, (size_t)stride, 0, &plans.handles[i]));
   }
   plans.prepare(comm, polls, repeats, rows ? 0 : stride);
-  execute_fused_writes(plans);
+  prepare_fused_writes(schedule,plans);
   std::vector<std::vector<uint64_t>> published, landed;
   for (uint32_t k = 0; k < plans.records.publishes; k++) published.emplace_back(plans.publish[k].begin(), plans.publish[k].end());
   for (uint32_t k = 0; k < plans.records.lands; k++) landed.emplace_back(plans.land[k].begin(), plans.land[k].end());
   return {published, landed};
 }
 
-static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> fused_writes(
-    const at::Tensor &send, const std::vector<at::Tensor> &landings,
-    const std::vector<std::array<int, 2>> &pairs, int64_t comm, int64_t polls, int64_t repeats, int64_t stride) {
-  return fused_writes_impl(send, landings, pairs, comm, polls, repeats, stride, 0, 0);
-}
-static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> fused_write_rows(
-    const at::Tensor &send, const std::vector<at::Tensor> &landings,
-    const std::vector<std::array<int, 2>> &pairs, int64_t comm, int64_t row_bytes, int64_t rows, int64_t stride) {
-  TORCH_CHECK(rows > 0, "affine writes require positive rows");
-  return fused_writes_impl(send, landings, pairs, comm, 0, 1, stride, row_bytes, rows);
-}
+// A Python binding of the shared native schedule. All methods except enqueue
+// receive configuration; enqueue is the native header's submission operation.
+struct ScheduleBinding {
+  Schedule schedule;
+  std::unique_ptr<TorchSchedule> bridge;
+  explicit ScheduleBinding(bool mps=false) {
+    if(mps){bridge=std::make_unique<TorchSchedule>();schedule=bridge->schedule;}
+    else schedule=schedule_after_inputs();
+  }
+  std::vector<at::Tensor> operands;
+  void host(pybind11::function function) {
+    TORCH_CHECK(bridge,"host work requires its framework input/output events");
+    auto held=std::shared_ptr<pybind11::function>(new pybind11::function(std::move(function)),
+        [](pybind11::function *f){pybind11::gil_scoped_acquire gil;delete f;});
+    MetalScheduleHost(schedule.get(),^NSError * {
+      pybind11::gil_scoped_acquire gil;
+      try { (*held)(); return nil; }
+      catch(pybind11::error_already_set &error) {
+        NSString *message=@(error.what());error.restore();PyErr_Clear();
+        return [NSError errorWithDomain:@"mesh.host-operation" code:1 userInfo:@{NSLocalizedDescriptionKey:message}];
+      }
+    });
+  }
+  void compute(int64_t kernel,const Tensors &buffers,const std::vector<int64_t> &words,
+      int64_t at,int64_t gx,int64_t gy,int64_t threads,uint64_t access) {
+    for(const auto &buffer:buffers)if(buffer)operands.push_back(*buffer);
+    if(!gx||!gy)return;
+    prepare_dispatch(schedule.get(),encoded(kernel,buffers,words,at,gx,gy,threads),access);
+  }
+  auto writes(const at::Tensor &send,const std::vector<at::Tensor> &landings,
+      const std::vector<std::array<int,2>> &pairs,int64_t comm,int64_t polls,int64_t repeats,int64_t stride,
+      int64_t row_bytes,int64_t rows) {
+    operands.push_back(send);operands.insert(operands.end(),landings.begin(),landings.end());
+    return fused_writes_impl(schedule.get(),send,landings,pairs,comm,polls,repeats,stride,row_bytes,rows);
+  }
+  void collectives(const std::vector<Call> &calls,int64_t comm) {
+    Group group{true};std::vector<Issue> issues;
+    for(const auto &call:calls) {
+      issues.push_back(prepare(call,group));
+      for(const auto *list:{&std::get<1>(call),&std::get<2>(call)})for(const auto &t:*list)if(t)operands.push_back(*t);
+    }
+    const auto *list=&issues;
+    checked(MetalScheduleCross(schedule.get(),^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
+        id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
+      ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
+        .residencySet=(__bridge void *)residency};
+      return (int)encoded(*list,communicator(comm),&on);
+    }));
+  }
+  void finish() { const auto held=operands; MetalScheduleFinish(schedule.get(),^(NSError *){(void)held;}); }
+  void enqueue() { if(bridge)bridge->enqueue();else MetalScheduleEnqueue(schedule.get()); }
+  void start() { bridge->start(); }
+  void join() { bridge->join(); }
+  pybind11::capsule completion() { return schedule_completion(schedule); }
+};
 
 // Immutable exact-span bindings use the same preparation/execution contract
 // as affine and contiguous WRITEs. All source/destination address selection is
@@ -1751,22 +1693,23 @@ struct SpanWrites {
     const ncclResult_t ended = ncclGroupEnd();
     return result ? result : ended;
   }
-  void enqueue() {
-    submit([&](ncclMeshStream *stream) { return encode(stream); }, metal, false, comm, {}, true);
+  std::vector<std::unique_ptr<TorchSchedule>> executions;
+  size_t next=0;
+  void realize() {
+    TORCH_CHECK(metal,"prepared distributed writes require the Metal backend");
+    auto made=std::make_unique<TorchSchedule>();SpanWrites *self=this;
+    checked(MetalScheduleCross(made->schedule.get(),^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
+        id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
+      ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
+        .residencySet=(__bridge void *)residency};
+      return (int)self->encode(&on);
+    }));
+    const auto held=leases;
+    MetalScheduleFinish(made->schedule.get(),^(NSError *){(void)held;});executions.push_back(std::move(made));
   }
+  void enqueue() { executions[next++]->enqueue(); }
+
 };
-
-// A fused crossing's publishing kernel just encoded on torch's stream (fused.encode): a publication under the stream's
-// one commit rule (MeshStream::published), as a group that published is.
-static void fused_published() {
-  MeshStream *s = &stream_of(at::mps::getCurrentMPSStream());
-  dispatch_sync(s->mps->queue(), ^{
-    @autoreleasepool {
-      s->published();
-    }
-  });
-}
-
 
 // design/whole-function.md#observations
 static pybind11::capsule completion() {
@@ -1780,7 +1723,17 @@ static pybind11::capsule completion() {
   });
 }
 
-static bool completed(pybind11::capsule token) {
+static bool completed(pybind11::object observation) {
+  if(pybind11::isinstance<pybind11::tuple>(observation)) {
+    bool done=true;
+    for(auto item:observation.cast<pybind11::tuple>())done=completed(pybind11::reinterpret_borrow<pybind11::object>(item))&&done;
+    return done;
+  }
+  auto token=observation.cast<pybind11::capsule>();
+  if(!strcmp(token.name(),"mesh.prepared-function")) {
+    int status=MetalScheduleStatus(static_cast<Schedule *>(token.get_pointer())->get());
+    TORCH_CHECK(status>=0,"the prepared function failed");return status==1;
+  }
   id<MTLCommandBuffer> buffer = (id<MTLCommandBuffer>)token.get_pointer();
   if (buffer.status == MTLCommandBufferStatusError)
     throw std::runtime_error(buffer.error.localizedDescription.UTF8String);
@@ -1800,9 +1753,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("pipeline_facts", &pipeline_facts);
   module.attr("polls") = (int64_t)NCCL_MESH_POLLS;
   module.def("encode", &encode, pybind11::arg("handle"), pybind11::arg("buffers"), pybind11::arg("constants"), pybind11::arg("at"),
-             pybind11::arg("gx"), pybind11::arg("gy"), pybind11::arg("threads"), pybind11::arg("fused") = false);
-  module.def("timed", &timed);
-  module.def("sequence", &sequence);
+             pybind11::arg("gx"), pybind11::arg("gy"), pybind11::arg("threads"));
   module.def("issue", [](const std::vector<Call> &calls, int64_t comm, bool split, std::vector<at::Tensor> outputs) {
     return work_of(issue(calls, comm, split, true), std::move(outputs), comm);
   });
@@ -1816,25 +1767,34 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("metal_prelude", &metal_prelude);
   module.def("fused_maker", &fused_maker);
   module.def("fused_release", &fused_release);
+  pybind11::class_<ScheduleBinding>(module,"Schedule")
+    .def(pybind11::init<bool>(),pybind11::arg("mps")=false)
+    .def("compute",&ScheduleBinding::compute)
+    .def("writes",&ScheduleBinding::writes)
+    .def("collectives",&ScheduleBinding::collectives)
+    .def("host",&ScheduleBinding::host)
+    .def("finish",&ScheduleBinding::finish)
+    .def("enqueue",&ScheduleBinding::enqueue)
+    .def("start",&ScheduleBinding::start)
+    .def("join",&ScheduleBinding::join)
+    .def("completion",&ScheduleBinding::completion);
   pybind11::class_<SpanWrites, std::shared_ptr<SpanWrites>>(module, "SpanWrites")
     .def(pybind11::init<const std::vector<SpanBinding> &, int64_t>())
+    .def("realize", &SpanWrites::realize)
     .def("enqueue", &SpanWrites::enqueue);
   pybind11::class_<Collectives, std::shared_ptr<Collectives>>(module, "Collectives")
     .def(pybind11::init<const std::vector<Call> &, int64_t, std::vector<at::Tensor>>())
+    .def("realize", &Collectives::realize)
     .def("enqueue", &Collectives::enqueue);
   module.def("fused_reconfigure", &fused_reconfigure);
   module.def("crossing_slot", &crossing_slot);
   module.def("prepare_crossing", &prepare_crossing);
+  module.def("compile_crossing", &compile_crossing);
   module.def("chain_slot", &chain_slot);
   module.def("prepare_chain", &prepare_chain);
   module.def("chain_run", &chain_run);
+  module.def("chain_completion", &chain_completion);
   module.def("fused_prepare", &fused_prepare, pybind11::arg("x"), pybind11::arg("w"), pybind11::arg("dim"),
              pybind11::arg("sizes"), pybind11::arg("group"), pybind11::arg("adds"),
              pybind11::arg("repeats") = 1, pybind11::arg("batches") = 1);
-  module.def("fused_writes", &fused_writes, pybind11::arg("send"), pybind11::arg("landings"), pybind11::arg("pairs"),
-             pybind11::arg("comm"), pybind11::arg("polls"), pybind11::arg("repeats") = 1, pybind11::arg("stride") = 0);
-  module.def("fused_write_rows", &fused_write_rows, pybind11::arg("send"), pybind11::arg("landings"), pybind11::arg("pairs"),
-             pybind11::arg("comm"), pybind11::arg("row_bytes"), pybind11::arg("rows"), pybind11::arg("stride"));
-  module.def("encode_many", &encode_many);
-  module.def("fused_published", &fused_published);
 }

@@ -3,7 +3,7 @@ import json
 from concurrent.futures import Future
 import queue
 import threading
-import time
+from mesh_statistics import now, completed, emit
 
 _history = {}
 
@@ -29,7 +29,6 @@ def close(observer):
     outgoing, stopping, worker, future = observer
     stopping.set()
     reports, records = future.result()
-    from torch_mesh.benchmarks import completed, emit
     emit([*[completed(record, record['seconds']) for record in reports], {'observations': records}])
 
 
@@ -47,12 +46,12 @@ def _collect(store, key, rank, ranks, history, outgoing, stopping):
         remaining = []
         from torch_mesh import _stream
         for completion, record in waiting:
-            pending_at = time.monotonic()
+            pending_at = now()
             if not _stream.completed(completion):
                 record['last_pending'] = pending_at
                 remaining.append((completion, record))
                 continue
-            observed = time.monotonic()
+            observed = now()
             seconds = observed - record['started']
             record['seconds'] = seconds
             record['completion_seconds_bounds'] = [record.get('last_pending', record['started']) - record['started'], seconds]

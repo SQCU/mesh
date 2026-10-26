@@ -38,8 +38,8 @@ def workload_configuration(microbench_root):
 def comparison_configuration(microbench_root):
     items = workload_configuration(microbench_root)
     runs = tuple((item['tag'], item['program'], item.get('reference', 'no record yet'),
-                  item['steps'], item['rows'], tuple(item['nodes'])) for item in items if item['kind'] == 'example')
-    scripts = tuple(Path(item['script']).name for item in items if item['kind'] == 'script')
+                  item['steps'], item['rows'], tuple(item['nodes'])) for item in items if 'steps' in item and 'nodes' in item)
+    scripts = tuple(item['program'] + '.py' for item in items if 'steps' not in item or 'nodes' not in item)
     return runs, scripts, Path(microbench_root) / 'output_data/hourly/log.jsonl'
 
 
@@ -129,6 +129,8 @@ def _launch(mesh_root, microbench_root, output_root):
         config = committed_bench / 'tools/mesh/hourly/workloads.json'
         record['configuration'] = {'path': str(config.relative_to(committed_bench))}
         record['history'] = HISTORY
+        subprocess.run(['make', '-s', '-C', str(committed_mesh / 'rdma'), 'statistics'],
+                       check=True, stdout=subprocess.DEVNULL)
         child = subprocess.run([sys.executable, str(committed_mesh / 'rdma/mesh_hourly.py'), 'execute'],
                                cwd=committed_mesh, input=json.dumps(record), stdout=subprocess.PIPE, text=True)
         if child.stdout:
@@ -242,41 +244,10 @@ def rank_results(outputs):
     return result
 
 
-def aggregate_measurements(ranks):
-    """Whole-workload intervals and useful delivery rates from actual rank records."""
-    if not ranks:
-        return []
-    rows = {}
-    for rank in ranks.values():
-        for value in rank['measurements']:
-            key = (value.get('what'), value.get('requested_bytes'))
-            if 'seconds' in value or 'microseconds_per_call' in value:
-                rows.setdefault(key, []).append(value)
-    result = []
-    for (operation, requested), values in rows.items():
-        if len(values) != len(ranks):
-            continue
-        if operation is not None:
-            interval = max(value['microseconds_per_call'] for value in values) * 1e-6
-            useful = sum(value['useful_output_bytes_per_call_rank'] for value in values)
-            result.append({'operation': operation, 'requested_bytes': requested,
-                           'amortized_seconds_per_call': interval,
-                           'useful_bytes_per_call': useful,
-                           'useful_gigabytes_per_second': useful / interval / 1e9})
-        else:
-            seconds = max(value['seconds'] for value in values)
-            useful = values[0].get('useful_output_bytes')
-            result.append({'function_seconds': seconds,
-                           'useful_output_bytes': useful,
-                           'useful_gigabytes_per_second': useful / seconds / 1e9 if useful is not None else None})
-            if all('rows' in value and 'steps' in value for value in values):
-                result[-1].update(completed_rows=values[0]['rows'] * values[0]['steps'],
-                                  aggregate_rows_per_second=values[0]['rows'] * values[0]['steps'] / seconds)
-    return result
-
 
 def run_workload(item, nodes, paths, record, out, ordinal):
     import mesh_nodes as mesh
+    from mesh_statistics import aggregate
     tag = item['tag']
     selected = ([mesh.at(nodes, str(n)) for n in item['nodes']] if item.get('nodes')
                 else nodes[:item.get('rank_limit', len(nodes))])
@@ -288,21 +259,15 @@ def run_workload(item, nodes, paths, record, out, ordinal):
             raise RuntimeError('the discovered fabric has not paired before workload configuration')
         history = record.get('history', {}).get(tag, [])[-64:]
         env = f'PYTHONPATH={mesh.home_path(selected[0].source + "/rdma")} PYTHONDONTWRITEBYTECODE=1 '
-        if item['kind'] == 'example':
-            configuration = paths['metal-microbench'] / item['configuration']
-            operands = json.loads(configuration.read_text())
-            operands.update(steps=item['steps'], rows=item['rows'], observations=history)
-            command = f'{mesh.PY} {mesh.home_path(selected[0].source + "/examples/" + item["program"] + ".py")} -'
+        command = f'{mesh.PY} {mesh.home_path(selected[0].source + "/examples/" + item["program"] + ".py")}'
+        if item.get('configuration'):
+            operands = json.loads((paths['metal-microbench'] / item['configuration']).read_text())
+            operands.update({key: item[key] for key in ('steps', 'rows') if key in item})
+            operands['observations'] = history
+            command += ' -'
         else:
-            bench = f'.cache/mesh-hourly/sources/metal-microbench/{record["commits"]["metal-microbench"]}'
-            command = f'{mesh.PY} {mesh.home_path(bench + "/" + item["script"])}'
-            if item.get('configuration'):
-                operands = json.loads((paths['metal-microbench'] / item['configuration']).read_text())
-                operands['observations'] = history
-                command += ' -'
-            else:
-                operands = history
-                env += 'MESH_OBSERVATIONS_STDIN=1 '
+            operands = history
+            env += 'MESH_OBSERVATIONS_STDIN=1 '
         outputs = mesh.ranks(selected, None, tag, '.', command, 29600 + ordinal,
                              env=env, alarm=item.get('timeout', 300), input=json.dumps(operands).encode())
         result['ranks'] = rank_results(outputs)
@@ -316,7 +281,7 @@ def run_workload(item, nodes, paths, record, out, ordinal):
         print(f'{tag}: {result["error"]}', file=sys.stderr, flush=True)
     # A later fault does not erase earlier completed observations. Only rows
     # present for every participating rank can form an aggregate interval.
-    result['metrics'] = aggregate_measurements(result.get('ranks', {}))
+    result['metrics'] = aggregate(result.get('ranks', {}))
     return result
 
 

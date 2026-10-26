@@ -21,9 +21,57 @@ It is not a claim that every line in both repositories has been reviewed. An exi
 each removal. Where it lacks a complete replacement, that gap is explicit. A matching name or an older date
 does not establish that an implementation is faster or meets the model.
 
-## Interfaces to remove from numerical execution
+## Integration update — 2026-10-25T22:24:51-07:00
 
-### R01. Per-operation engine orchestration
+The native recorder now lives in `rdma/metal-recording.h` and `.m`, linked into
+`libnccl-mesh`. Microbench imports that header and no longer builds a second
+recorder library. Torch's prepared transport bindings use this same schedule.
+
+- Python list gathers bind each final destination in the collective compiler.
+  Native column gathers use row views in the shared indexed-write compiler.
+  Their packed receive/copy-back and padded-column staging paths are removed.
+- TP, EP and CP examples use `declarations.Function`; CP no longer constructs
+  incomplete crossing preparations by hand. Hourly workloads invoke ordinary
+  files in `mesh/examples`, and aggregation comes from `mesh_statistics`.
+- `Collectives` and `SpanWrites` realize commands before `enqueue`. Indexed
+  fused crossings compile their route bindings in graph order before a call.
+  `execute_fused_writes` and `fused_turn` are removed from execution.
+- Chain command bindings are compiled before submission. The fabric DNN uses
+  explicit row-block configuration and the same native schedule for products,
+  publication, landing and reduction. It no longer runs an eager Torch matrix
+  product plus a separate transport executor inside its layer loop.
+- Fixed argument/track rings are replaced by immutable compiled records.
+  Bridge descriptor insertion is a compiled command; descriptor slot reuse
+  depends on the local bridge's reader, without a host reservation wait.
+- Native crossing dtype and attention merge width/lowering are configuration
+  operands. Element width no longer selects the data type.
+- Intrusive GPU timers, SparseLinear's private timing optimizer, and the MPS
+  double-buffer publication policy are removed. `mesh-statistics.h` supplies
+  the host clock and paired elapsed-time/useful-rate arithmetic.
+
+The LM server now uses shared submission with asynchronous completion. Intake,
+cancellation and reload changes are applied between its batches. Engine shares
+are bound before execution; the old `Operation.__call__`, `_decision`, `_shard`,
+`_separate`, private worker pool and future joins are removed. Prepared host
+shares use `MetalScheduleHost`; their GPU consumers depend on the output event.
+Core ML features and output backings are prepared once, without a copied-output
+substitute.
+
+Open boundaries remain explicit: general PyTorch-generated numerical spans
+still encode through its framework queue and can use compiler-managed temporary
+storage. Generic eager collective APIs still realize their calls on invocation.
+Native model crossings do not yet all publish partial results from inside the
+producer kernel. Whole-input joins in the recurrent kernel also remain.
+The constrained data-model document is unchanged. Compilation and source
+inspection do not establish a performance improvement; only committed-main
+hourly records can establish that comparison.
+
+## Reviewed interfaces
+
+The bullets below preserve the removal rationale. The integration update above
+records the current status; unmarked entries remain outstanding.
+
+### R01. Per-operation engine orchestration — replaced with prepared bindings
 
 - **Remove:** the execution contract of `Operation.__call__`, `_decision`, `_shard` and `_separate` in
   [engines.py](../rdma/torch-mesh/torch_mesh/engines.py). It chooses shares, prepares or loads shards, allocates
@@ -38,7 +86,7 @@ does not establish that an implementation is faster or meets the model.
   it is evidence of reusable storage and kernels, not a finished replacement executor. Preserve `Linear`/`FFN`
   mathematics and the engine capabilities while deleting the hidden execution policy.
 
-### R02. SparseLinear's private optimizer and timer
+### R02. SparseLinear's private optimizer and timer — removed
 
 - **Remove:** `SparseLinear.route`, `_settle`, and the timing/selection state and branches in `forward` in
   [sparse.py](../rdma/torch-mesh/torch_mesh/sparse.py). They alternate implementations, create timing events,
@@ -106,7 +154,7 @@ the synchronous CPU transport is not used as a fallback. Shared native stream co
   implementation had it. The historical fast `9a167a57` also used `dispatch_sync` for host encoding, so that
   queue call alone is not a bisection explanation for the later performance loss.
 
-### R08. DNN's whole-output join and handwritten dispatch loop
+### R08. DNN's whole-output join and handwritten dispatch loop — replaced with recorded row blocks
 
 - **Remove:** `DNN.run`'s repeated binding/list construction and its `land_ready` whole-operand join in
   [dnn.py](../rdma/torch-mesh/torch_mesh/dnn.py).
@@ -262,7 +310,7 @@ The [graph history](aot-graphs-and-pytorch.md) explains the connections and prio
 | `_stream.mm`, `PreparedWrites`, `FusedForm`, `PreparedChain`; [fused.py](../rdma/torch-mesh/torch_mesh/fused.py) | Shared storage and fused crossings from PyTorch | Keep the bindings and numerical fusion; remove per-operation realization and excess joins (R07–R09). |
 | `linear.metal`, `streamed.metal`, `sparse.metal`, `structured.metal` | Dense/grouped products, coded-weight streaming, tile masks and rotations | Reusable numerical bodies, including native callers. Their Python wrappers still have R02/R05/R06 work. |
 | `attention.metal`, `argmax.metal`, `drafter.metal`, `speculate.metal` | Online attention partials, selection and speculative state | Keep numerical semantics and indexed state. Decode attention does not supply training backward automatically. |
-| [metal_recording.h](../../../metal-microbench/metal_recording.h), `MetalReplay`, `MetalOperand`, `MetalReach` | Record commands, bind invocation slots, derive access order and residency | Major AOT foundation; R12/R14 removed. ICB, encoded and serial forms share this representation. |
+| [metal_recording.h](../rdma/metal-recording.h), `MetalReplay`, `MetalOperand`, `MetalReach` | Record commands, bind invocation slots, derive access order and residency | Major AOT foundation; R12/R14 removed. ICB, encoded and serial forms share this representation. |
 | [matrix_operations.swift](../../../metal-microbench/matrix_operations.swift), `MatrixView`, `MetalDispatch`, `MetalProgram` | Strides, partial access descriptions and prepared numerical commands | Reuse the preparation interface; remove intrusive timing modes (R15). |
 | [metal_native.h](../../../metal-microbench/metal_native.h), [metal_runtime.swift](../../../metal-microbench/metal_runtime.swift), `Generation`, `Placement` | Shared kernel source, pipeline preparation, model dimensions and ragged placement | Configuration work already exists. Callers must complete it before the numerical function. |
 | [instance_fit.swift](../../../metal-microbench/instance_fit.swift), `InstanceSpec`, `SliceUnits`, `InstanceFit`, `AttentionPlan` | Represent kernel work and choose prepared product/attention geometry | Useful configuration metadata. A fitted choice must feed prepared operands and whole-call feedback; it is not authority for another operation timer. |

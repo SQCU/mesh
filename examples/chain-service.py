@@ -11,7 +11,7 @@ from torch_mesh import partition
 from torch_mesh import chain as sequence
 from torch_mesh.configuration import placement, bind, record
 from torch_mesh import _stream
-import time
+from mesh_statistics import now
 
 import chain
 
@@ -67,12 +67,10 @@ def main():
     if rank == 0:
         E.copy_(torch.from_numpy(inputs[:]))
     torch_mesh.check_memory()
-    torch.mps.synchronize()
     bind(configuration, groups, lambda: sequence.prepare(operands))
-    started = time.monotonic()
+    completion = _stream.chain_completion(operands[0])
+    started = now()
     _stream.chain_run(operands[0])
-    completion = _stream.completion()
-    _stream.publish_boundary()
     summary = dict(blocks=partition.split(mesh, 'tp', width), rows=rows, width=width, steps=steps,
                    steps_per_replay=k)
     record(configuration, completion, started, O.numel() * O.element_size(), summary)

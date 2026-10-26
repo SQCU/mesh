@@ -11,8 +11,8 @@ bind the same physical compiler through their native lowering, described below. 
 reduce-scatter are always the V calls (`ncclMeshAllGatherV`, `ncclMeshReduceScatterV`; the library takes equal
 segments as its equal program). `all_to_all`, `all_to_all_single`, `gather` and `scatter` are `ncclMeshAlltoAllV`,
 MPI_Alltoallv with its counts on the host (a gather or scatter of any sizes is the rooted V, MPI's `Gatherv` and
-`Scatterv`: every count 0 but toward or from the root, as NCCL's gather and scatter are its forms); a list that is not
-the pieces of one tensor goes through one flat tensor. `send` and `recv` are the library's point to point; the
+`Scatterv`: every count 0 but toward or from the root, as NCCL's gather and scatter are its forms).
+List operands bind their original buffers through the same fragment compiler; no packed receive or copy-back path remains. `send` and `recv` are the library's point to point; the
 partials merge is a reduction by the library's partials operator.
 
 ## Install
@@ -52,7 +52,7 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   whose ranks no such path joins fails at its first collective that crosses a link
   ([NCCL.md](../NCCL.md#routes-between-unlinked-ranks)).
 - Memory ([NCCL.md](../NCCL.md#memory)): the backend's own CPU tensors (a
-  barrier's tensor, the flattened operands of the list `all_gather` and `reduce_scatter`) are leases of the node's
+  barrier's tensor and explicitly declared outputs) are leases of the node's
   bridge's region (`torch_mesh.empty`). A program's CPU tensor in the region is
   `torch_mesh.empty(shape, dtype=..., device="cpu")`.
 - Region MPS tensors: `torch_mesh.empty(shape, dtype=..., device="mps")` is an MPS tensor whose storage is a lease's
@@ -90,7 +90,7 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 | all_to_all, all_to_all_single | uneven splits, empty inputs (`ncclMeshAlltoAllV`) |
 | send, recv, isend, irecv, batch_isend_irecv | |
 | barrier, async_op works, coalescing | |
-| functional collectives under torch.compile | one graph; `backend="mesh"` is Inductor with the library's collectives, under the one commit rule (Performance) |
+| functional collectives under torch.compile | one graph; `backend="mesh"` is Inductor with the library's collectives, with explicit function submission (Performance) |
 | DDP | |
 | ring attention | `partition.ring_attention` on capacity blocks (equal parts: torch's equal shards), and SDPA on a `RaggedShard` of the sequence, forward only, in place of `context_parallel`: split-KV partials merged by the library (below) |
 | partials merge | `torch_mesh.merge_partials(out, lse, group)`: each member's attention over its own keys merged into the attention over all of them (the operator `torch_mesh::merge_partials`, below) |
@@ -378,34 +378,33 @@ w = s["lm_head"].to("cpu")                        # decoded
 - The MPS path is the measured path; async ops hide the crossing behind compute.
 - Two-rank direct-exchange all-reduces stripe their crossing over the physical parallel cables according to the
   compiled form. Rank count does not select one cable or establish that a particular collective form is optimal.
-- One commit rule for every caller (`_stream.mm`, "The commit rule"): eager calls and compiled graphs, the library's
-  own callers and user programs alike. Nothing is entered, wrapped or opted into, and how a program is written does
-  not decide how fast its collectives are. The rule's work is throughput, the GPU fed with the fewest command buffers
-  while the host keeps issuing: the GPU starts a command buffer at most every 13-19 us whatever it holds
-  (metal-microbench docs/measurement.md, 2026-10-02), so a buffer for each publication is a floor of its own.
-  - Each buffer the library commits signals its count on a shared event as the GPU reaches its end. A shared event's
-    value is the GPU's progress at once, while a completion handler runs 7-9 us later (20-60 at the 99th percentile).
-  - A publication (work a peer waits on) is committed at once, with every publication waiting in the open buffer,
-    while at most one of those buffers is in flight, read from the event's value then: double buffering, one committed
-    buffer queued behind the one the GPU runs, so a commit overlaps the GPU's work (the 10-02 rule, mesh 3c00d37).
-    Otherwise it joins torch's open command buffer. In flight counts the library's buffers, not torch's own. The depth
-    is the rule's structure, not a setting: nothing is read from a file or the environment, and no node is configured.
-  - The next publication applies the rule again. A host wait commits the open buffer, since nothing else would. The
-    library's: the host path, a recording's compile meeting. torch's own: `torch.mps.synchronize()`,
-    `torch.accelerator.synchronize()`, `.item()` and `.cpu()` commit torch's open buffer and wait
-    (`MPSStream::synchronize` with `COMMIT_AND_WAIT`).
-  - A host that blocks outside torch while a publication waits in the open buffer stalls its peer. Avoiding that is
-    the program's responsibility; the peer's wait ends at its deadline, which ends its program
-    ([NCCL.md](../NCCL.md#bounded-waits)).
-  - The stream's commit state is one object a torch stream owns (`_stream.mm` `MeshStream`), read and written by the
-    host inside torch's queue, with no counter a caller enters, so no caller's exception leaves it deferring. No thread
-    but the host's touches torch's stream. A group's workspace is held until the library retires the group
-    (`ncclMeshRetired`), never by the commit. The workspace is allocated on torch's queue, so under memory pressure
-    torch's allocator, freeing its cached buffers, enters that queue again (`MPSAllocator.mm`
-    `release_cached_buffers`): a deadlock, not an exception. A fix needs the library to report a group's scratch bytes
-    before encoding, or a pool grown off the queue: an `nccl.h` change.
+- Prepared transport and numerical calls use `rdma/metal-recording.h`, the same
+  command representation and submission path as native Metal and LiteRT. A
+  prepared invocation owns its immutable bindings through completion. It
+  submits the finished command stream without reconstructing its routes.
+- A function still containing PyTorch-generated numerical commands commits
+  its framework stream at the function boundary. Per-publication double
+  buffering has been removed. Native segments between framework operations
+  carry explicit input and output data events; these do not wait on the host.
+- `mesh-statistics.h` and `mesh_statistics.py` calculate elapsed time and useful
+  rate from ordinary completion observations. Statistics do not drain queues
+  or choose when work runs.
+
 - `torch.compile(f, backend="mesh")` (`torch_mesh.compiler`, registered through torch's `torch_dynamo_backends` entry
   point) is Inductor's compilation with the library's collectives, with nothing wrapped around its run. Reproduction
   targets: metal-microbench `crossing.py`, 17.4 us a crossing eager and 12.7 compiled with `COMPILE=1 COMPILER=mesh`
   (mesh 3c00d37). No reading of this rule has been taken yet.
 - Readings and their records: metal-microbench `docs/measurement.md`.
+
+## Prepared engine shares
+
+`engines.Linear` and `engines.FFN` are declarations. Call `declare(rows, dtype)`
+before choosing the allocation, then `prepare(input, parts=..., repetitions=...)`.
+The prepared call owns its fixed outputs and host views. CPU/ANE work runs through
+`MetalScheduleHost`, and GPU consumers name its result dependency. The old
+operation-call allocator, shard loader, thread pool and future joins are removed.
+`examples/engines.py` uses the same interface as an application.
+
+`mesh-statistics.h` is the host clock and time/useful-rate arithmetic for native
+users; `mesh_statistics.py` binds the same C source for Python and hourly reports.
+Neither interface submits numerical work or drains an engine.

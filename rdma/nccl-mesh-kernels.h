@@ -190,7 +190,15 @@ static NSString *const KERNELS =
   "for (uint j = 1; j < u; j++) x[j] = (a > 0.0f ? mesh_payload(xs + j) * a : 0.0f) + (b > 0.0f ? mesh_payload(y + j) * b : 0.0f); }\n"
   "#define MERGE volatile coherent(system) device float *x = (volatile coherent(system) device float *)(d + p.dst); volatile coherent(system) device const float *y = (volatile coherent(system) device const float *)(s + p.src); "
   "for (ulong r = i; r < p.n; r += g) merge_row(x + r * p.op, y + r * p.op, p.op);\n"
-  "HEAD(land_merge) { ENTER(i == 0) AWAIT MERGE }\n";
+  "HEAD(land_merge) { ENTER(i == 0) AWAIT MERGE }\n"
+  "GROUP(present) { ENTER_G const ulong end = p.scalar + p.n; "
+  "if (i == 0) { const ulong need = end > p.count ? end - p.count : 0; "
+  "const ulong got = mesh_step_wait(p, a + p.aux, need, vb); mesh_step_check(p, got, need, vb); tg[0] = got >= need; } "
+  "threadgroup_barrier(mem_flags::mem_threadgroup); if (!tg[0]) return; "
+  "volatile coherent(system) device ulong *dst = (volatile coherent(system) device ulong *)(d + p.dst); "
+  "device const ulong *src = (device const ulong *)(s + p.src); "
+  "for (ulong k = i; k < p.n * 4; k += g) dst[((p.scalar + k / 4) % p.count) * 4 + k % 4] = src[k]; "
+  "threadgroup_barrier(mem_flags::mem_device); if (i == 0) mesh_publish((volatile coherent(system) device ulong *)(a + p.at), end); }\n";
 
 /* every kernel a track may record, by its kind: one list, the one numbering of the host's steps (struct host_op kind,
    a device's pipelines' index: nccl-mesh-metal.m kernels_of) and of the track kernel's switch (TRACKS' enum and TRACK_KERNEL's cases, made
@@ -210,7 +218,7 @@ enum { WORD_D = 1, WORD_A, WORD_P };
   X(land_f16, WORD_P) X(combine3_f16, 0) X(premul_f16, 0) X(land_f32, WORD_P) X(combine3_f32, 0) X(premul_f32, 0) \
   X(land_bf16, WORD_P) X(combine3_bf16, 0) X(premul_bf16, 0) X(land_e4m3, WORD_P) X(combine3_e4m3, 0) X(premul_e4m3, 0) \
   X(land_e5m2, WORD_P) X(combine3_e5m2, 0) X(premul_e5m2, 0) \
-  X(publish, 0) X(spin, WORD_D) X(land_merge, WORD_A)
+  X(publish, 0) X(spin, WORD_D) X(land_merge, WORD_A) X(present, 0)
 #define KIND_ENUM(name, word) KIND_##name,
 #define KIND_NAME(name, word) #name,
 #define KIND_WORD(name, word) word,

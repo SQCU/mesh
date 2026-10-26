@@ -42,7 +42,7 @@ def _words(addresses):
     return [w for a in addresses for w in (a & 0xFFFFFFFF, a >> 32)]
 
 
-def writes(send, landings, pairs, group, polls=0, *, repeats=1, stride=0):
+def writes(schedule, send, landings, pairs, group, polls=0, *, repeats=1, stride=0):
     """Immutable routed writes, one landing lease per (source, destination).
 
     The producer releases every returned publication after making its operand.
@@ -59,13 +59,13 @@ def writes(send, landings, pairs, group, polls=0, *, repeats=1, stride=0):
     it never certifies an unfinished earlier frame. A zero stride requires a
     separate lifetime proof before overwriting any prior frame's live bytes.
     """
-    publish, land = _stream.fused_writes(send, list(landings), list(pairs), group.handle,
-                                       int(polls), int(repeats), int(stride))
+    publish, land = schedule.writes(send, list(landings), list(pairs), group.handle,
+                                    int(polls), int(repeats), int(stride), 0, 0)
     return Crossing(tuple(map(tuple, publish)), tuple(map(tuple, land)))
 
 
 
-def write_rows(send, landings, pairs, group, row_bytes, rows, stride):
+def write_rows(schedule, send, landings, pairs, group, row_bytes, rows, stride):
     """One exact affine WRITE over original row views, with a rank-local pitch.
 
     Only useful row bytes cross links. Row and registration boundaries are
@@ -73,8 +73,8 @@ def write_rows(send, landings, pairs, group, row_bytes, rows, stride):
     from the stream entry ring is introduced. Ordinary source publication and
     final landing bindings use repeat index zero.
     """
-    publish, land = _stream.fused_write_rows(send, list(landings), list(pairs), group.handle,
-                                            int(row_bytes), int(rows), int(stride))
+    publish, land = schedule.writes(send, list(landings), list(pairs), group.handle,
+                                    0, 1, int(stride), int(row_bytes), int(rows))
     return Crossing(tuple(map(tuple, publish)), tuple(map(tuple, land)))
 
 def _encode_words(constants, channels, land, publish):
@@ -85,28 +85,3 @@ def _encode_words(constants, channels, land, publish):
             raise ValueError('kernel binding extent is smaller than its physical crossing')
         words += [w for k in range(channels) for w in _words(records[k] if k < len(records) else _NONE)]
     return words
-
-
-def encode(handle, buffers, constants, at, gx, gy, threads, channels, land=None, publish=None):
-    """_stream.encode of kernel `handle`, its constants followed by `land`'s `channels` landing bindings and `publish`'s
-    `channels` publication bindings (module docstring); one that publishes is committed by the stream's rule for a
-    publication."""
-    words = _encode_words(constants, channels, land, publish)
-    _stream.encode(handle, buffers, words, at, gx, gy, threads, bool(land or publish))
-    if publish:
-        _stream.fused_published()
-
-
-def encode_many(calls):
-    """Encode an ordered data-function sequence in one native queue entry.
-
-    Each tuple supplies all ten ``encode`` arguments, including ``land`` and
-    ``publish`` (None where absent). Frame constants must be independent values.
-    This batches host encoding; it preserves every GPU data dependency and
-    ordered publication. Any remaining producer command buffer is committed
-    at the batch boundary without a host wait for frame completion.
-    """
-    prepared = [(handle, buffers, _encode_words(constants, channels, land, publish), at, gx, gy, threads,
-                 bool(land or publish), bool(publish))
-                for handle, buffers, constants, at, gx, gy, threads, channels, land, publish in calls]
-    _stream.encode_many(prepared)

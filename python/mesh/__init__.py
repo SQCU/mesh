@@ -585,7 +585,7 @@ class Program:
         function.prepare()
         return function
 
-    def realize(self):
+    def realize(self, repetitions=1):
         """Compile the block graph to numerical spans and bound native calls.
 
         No payload is executed here. There is no alternate eager executor if
@@ -627,6 +627,10 @@ class Program:
             if task.crossing:
                 task.prepared = task.run[0](self, task)
         self._world.declare(order)
+        for _ in range(repetitions):
+            for task in local:
+                if task.crossing:
+                    task.prepared[0].realize()
 
         # FX generates a fixed sequence. Numerical spans use Function's mesh
         # compiler; native crossings use their existing prepared bindings.
