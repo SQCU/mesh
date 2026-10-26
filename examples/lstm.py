@@ -56,11 +56,11 @@ class Tick:
         self.gather()
 
     # docs/writing-a-service.md#the-lstm
-    def stepper(self, X, O, t, steps=1):
+    def stepper(self, X, O, steps=1):
         """A fixed number of later ticks for AOT declaration: the input at the step counter t held on
         the GPU (the last one past the input's end), every layer, the gather, the top layer's h of step t - L + 1 into
         the output O (where this rank holds it), t advanced."""
-        def chunk():
+        def chunk(t):
             for _ in range(steps):
                 self.layers(self.L, X.index_select(0, t.clamp(max=self.steps - 1))[0])
                 self.gather()

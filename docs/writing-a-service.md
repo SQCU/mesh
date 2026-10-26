@@ -193,8 +193,8 @@ every rank along that dimension: one fused crossing a tick. This is Megatron's s
 last), c and rank 0's output are region tensors made at load (`torch_mesh.empty`), and the blocks hold for the whole
 run.
 
-**The prepared tick.** Every tick after the first L - 1 runs every layer. `Tick.stepper(X, O, t, k)` returns
-one function containing k such ticks. Each tick reads its input at the GPU counter, runs the layers and gather,
+**The prepared tick.** Every tick after the first L - 1 runs every layer. `Tick.stepper(X, O, k)` returns
+one function containing k such ticks, with the counter as its explicit tensor operand. Each tick reads its input at the GPU counter, runs the layers and gather,
 writes the top layer's output on rank 0, and advances the counter. The service uses `declarations.Function`
 with the `mesh` compiler to trace each distinct chunk size with fake tensors and compile it during configuration.
 The full chunks and any shorter final chunk share that declaration path. Their prepared `.run` functions are

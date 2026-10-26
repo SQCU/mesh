@@ -172,8 +172,9 @@ Sources: [declarations.py](../rdma/torch-mesh/torch_mesh/declarations.py),
 
 ### Whole-function declaration
 
-`Function(function, *, parameters=(), compiler=None)` holds a numerical callable and its preparation results.
-The callable closes over already selected operands. If training is intended, it must include the desired
+`Function(function, *arguments, parameters=(), compiler=None)` holds a numerical callable, its bound operands
+and its preparation results. The tracer receives those operands explicitly as fake inputs; `run` binds them
+once for execution. The callable can also close over selected weights and layout metadata. If training is intended, it must include the desired
 backward operations; supplying parameters alone does not invent a backward graph.
 
 | Member | Work performed |

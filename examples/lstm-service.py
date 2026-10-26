@@ -65,7 +65,7 @@ def main():
     chunks = [k] * full + [rest] * bool(rest)
     functions = {}
     for count in dict.fromkeys(chunks):
-        function = Function(tick.stepper(X, O, t, count), compiler='mesh')
+        function = Function(tick.stepper(X, O, count), t, compiler='mesh')
         function.declare(group)
         functions[count] = function
     runs = tuple(functions[count].run for count in chunks)

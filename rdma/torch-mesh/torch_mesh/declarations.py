@@ -307,27 +307,29 @@ class Function:
     function is executed to discover communication. Eager execution keeps its
     ordinary Python callable; compiled execution uses the realized FX callable.
     """
-    def __init__(self, function, *, parameters=(), compiler=None):
+    def __init__(self, function, *arguments, parameters=(), compiler=None):
         self.function, self.parameters, self.compiler = function, tuple(parameters), compiler
+        self.arguments = arguments
         self.graph, self.groups, self.run, self.output_spec = None, {}, None, None
         self.forms, self.preparations = [], None
 
     def declare(self, group):
+        from functools import partial
         from torch.utils._pytree import tree_flatten
         from torch.distributed.tensor import DTensor
 
-        def recorded():
-            output = self.function()
+        def recorded(*arguments):
+            output = self.function(*arguments)
             values, self.output_spec = tree_flatten(output)
             gradients = [None if p.grad is None else p.grad.to_local() if isinstance(p.grad, DTensor) else p.grad
                          for p in self.parameters]
             return (*values, *gradients)
 
-        graph, declarations = trace(recorded, parameters=self.parameters)
+        graph, declarations = trace(recorded, *self.arguments, parameters=self.parameters)
         forms = []
         declarations = lower(graph, forms=forms)
         if self.compiler is None:
-            run = self.function
+            run = partial(self.function, *self.arguments)
         else:
             from torch._dynamo import lookup_backend
             captured = []
@@ -336,7 +338,7 @@ class Function:
                 # Backward is already explicit in this graph. A second autograd
                 # layer would add unrelated saved tensors and gradient work.
                 with torch.no_grad():
-                    run = lookup_backend(self.compiler)(graph, [])
+                    run = partial(lookup_backend(self.compiler)(graph, list(self.arguments)), *self.arguments)
             finally:
                 _CAPTURE.reset(token)
             if captured:
