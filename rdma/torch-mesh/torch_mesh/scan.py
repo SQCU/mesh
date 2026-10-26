@@ -5,6 +5,7 @@ from pathlib import Path
 
 import torch
 from . import _stream, empty
+from .native import row_offset
 
 
 @lru_cache(None)
@@ -43,15 +44,8 @@ def cumsum(x, dim, *, dtype=None):
                        INPUT_STRIDE=source.stride(dim), OUTPUT_STRIDE=target.stride(dim),
                        EXTENT=extent, BLOCKS=blocks, THREADS=threads)
 
-    def offset(name, strides):
-        terms, divisor = [], 1
-        for axis in range(source.ndim - 1, -1, -1):
-            if axis != dim:
-                terms.append(f'(ulong(row) / {divisor} % {source.shape[axis]}) * {strides[axis]}')
-                divisor *= source.shape[axis]
-        return f'inline ulong {name}(uint row) {{ return ' + (' + '.join(terms) or '0') + '; }\n'
-
-    handles = pipelines(tuple(definitions.items()), offset('source_base', source.stride()) + offset('output_base', target.stride()))
+    offsets = row_offset('source_base', source.shape, source.stride(), dim) + row_offset('output_base', source.shape, target.stride(), dim)
+    handles = pipelines(tuple(definitions.items()), offsets)
     for handle in handles:
         maximum, _, fixed = _stream.pipeline_facts(handle)
         if threads > maximum or fixed > memory:

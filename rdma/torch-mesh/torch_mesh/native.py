@@ -23,6 +23,16 @@ def empty_strided(shape, stride, dtype, device):
     return empty((extent,), dtype=dtype, device=device).as_strided(shape, stride)
 
 
+def row_offset(name, shape, strides, axis):
+    """Emit the base of a tensor view's rows along one declared axis."""
+    terms, divisor = [], 1
+    for dim in range(len(shape) - 1, -1, -1):
+        if dim != axis:
+            terms.append(f'(ulong(row) / {divisor} % {shape[dim]}) * {strides[dim]}')
+            divisor *= shape[dim]
+    return f'inline ulong {name}(uint row) {{ return ' + (' + '.join(terms) or '0') + '; }\n'
+
+
 @lru_cache(None)
 def shader(source, name, access):
     from pathlib import Path

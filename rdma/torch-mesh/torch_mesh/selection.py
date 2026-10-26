@@ -6,6 +6,7 @@ import struct
 
 import torch
 from . import _stream, empty
+from .native import row_offset
 
 
 @lru_cache(None)
@@ -40,15 +41,7 @@ def topk(x, k, dim=-1, largest=True, sorted=True):
                        EXTENT=x.shape[dim], COUNT=k, PAD=pad, THREADS=threads,
                        LARGEST=int(largest), SORTED=int(sorted), LOCAL=int(local))
 
-    def offset(name, strides):
-        terms, divisor = [], 1
-        for axis in range(x.ndim - 1, -1, -1):
-            if axis != dim:
-                terms.append(f'(ulong(row) / {divisor} % {x.shape[axis]}) * {strides[axis]}')
-                divisor *= x.shape[axis]
-        return f'inline ulong {name}(uint row) {{ return ' + (' + '.join(terms) or '0') + '; }\n'
-
-    offsets = offset('source_base', x.stride()) + offset('output_base', values.stride())
+    offsets = row_offset('source_base', x.shape, x.stride(), dim) + row_offset('output_base', x.shape, values.stride(), dim)
     external = sorted and not local
     names = ('select_top', 'order_top', 'write_top') if external else ('select_top',)
     handles = pipelines(tuple(definitions.items()), offsets, names)
