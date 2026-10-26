@@ -91,9 +91,10 @@ partition adapter emits a numerical operation, copy, wait, route or new executio
 
 ## Tensor views in command dependencies
 
-FX command operands now carry their accessed byte ranges into the shared recorder. The layout
-calculation reuses `views.byte_spans`, which partial tensors and transport already use. Transfer lists
-keep logical element order; `views.access_spans` computes the union needed for dependency ordering.
+FX and native command operands carry their accessed byte ranges into the shared recorder.
+`MetalViewReaches` computes their union from shape, byte strides and element width during preparation.
+Both frontends call this function; the former Python `views.access_spans` implementation is removed.
+Transfer lists still use `views.byte_spans` to retain logical element order.
 A dense transpose is one range, broadcast dimensions add no repeated range, and holes in a strided
 view are not reads or writes. Empty views declare no bytes instead of the remainder of their buffer.
 
@@ -108,6 +109,13 @@ This changes dependency metadata and prepared barriers, not the numerical kernel
 transport routes. The range lists are consumed during preparation. No range search, allocation or extra
 submission runs with the payload. Generic native commands which supply only a buffer still describe its
 remaining extent; those callers need their actual layouts supplied before they have FX's precision.
+
+Native normalization, residual add, scalar scale, GELU, ordinary format products and stacked products
+now supply their layouts. `MatrixView` includes column strides and grouped rows. Packed weights use
+their block format, row group and pitch. Head outputs name their actual query-column slice and KV rows.
+Fused epilogues keep the standalone command's declared ranges when capturing its addresses, removing
+the original argument indices because those indices name different bindings in the fused command.
+See [native accesses and tile publication](native-access-publication.md) for the boundaries still open.
 
 Validation on 2026-10-26: the native library, Torch extension and Swift/LiteRT rank built. The existing
 transformer example's block prepared its complete forward/backward graph at batch 2, sequence 1,024,

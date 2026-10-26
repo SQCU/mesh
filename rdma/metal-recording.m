@@ -3,6 +3,65 @@
 #import <objc/runtime.h>
 #include <stdatomic.h>
 
+struct MetalViewAxis { NSUInteger count, stride; };
+struct MetalViewSpan { NSUInteger offset, length; };
+static int MetalViewAxisOrder(const void *a,const void *b) {
+    const NSUInteger x=((const struct MetalViewAxis *)a)->stride,y=((const struct MetalViewAxis *)b)->stride;
+    return (x>y)-(x<y);
+}
+static int MetalViewSpanOrder(const void *a,const void *b) {
+    const NSUInteger x=((const struct MetalViewSpan *)a)->offset,y=((const struct MetalViewSpan *)b)->offset;
+    return (x>y)-(x<y);
+}
+
+NSData *MetalViewReaches(id<MTLBuffer> buffer,NSUInteger offset,const NSUInteger *shape,
+    const NSInteger *strides,size_t rank,NSUInteger elementBytes,uint32_t access,int32_t binding) {
+    NSMutableData *axes=[NSMutableData dataWithLength:rank*sizeof(struct MetalViewAxis)];
+    struct MetalViewAxis *axis=axes.mutableBytes;
+    BOOL empty=!elementBytes;
+    NSInteger base=(NSInteger)offset;
+    for(size_t i=0;i<rank;i++) {
+        empty|=!shape[i];
+        if(shape[i]&&strides[i]<0)base+=(NSInteger)(shape[i]-1)*strides[i];
+        axis[i]=(struct MetalViewAxis){strides[i]?shape[i]:MIN(shape[i],1),
+            (NSUInteger)(strides[i]<0?-strides[i]:strides[i])};
+    }
+    struct MetalReach reach={buffer,empty?offset:(NSUInteger)base,0,access|MetalReachBinding,binding};
+    if(empty)return [NSData dataWithBytes:&reach length:sizeof reach];
+    qsort(axis,rank,sizeof *axis,MetalViewAxisOrder);
+    const struct MetalViewSpan first={0,elementBytes};
+    NSMutableData *spans=[NSMutableData dataWithBytes:&first length:sizeof first];
+    for(size_t i=0;i<rank;i++) {
+        if(axis[i].count<=1)continue;
+        struct MetalViewSpan *values=spans.mutableBytes;
+        const NSUInteger count=spans.length/sizeof *values;
+        if(count==1&&axis[i].stride<=values[0].length) {
+            values[0].length+=(axis[i].count-1)*axis[i].stride;
+            continue;
+        }
+        NSMutableData *next=[NSMutableData dataWithLength:spans.length*axis[i].count];
+        struct MetalViewSpan *out=next.mutableBytes;
+        for(NSUInteger n=0;n<axis[i].count;n++)for(NSUInteger j=0;j<count;j++)
+            out[n*count+j]=(struct MetalViewSpan){values[j].offset+n*axis[i].stride,values[j].length};
+        const NSUInteger total=count*axis[i].count;
+        qsort(out,total,sizeof *out,MetalViewSpanOrder);
+        NSUInteger used=0;
+        for(NSUInteger j=0;j<total;j++) {
+            if(used&&out[j].offset<=out[used-1].offset+out[used-1].length)
+                out[used-1].length=MAX(out[used-1].length,out[j].offset+out[j].length-out[used-1].offset);
+            else out[used++]=out[j];
+        }
+        next.length=used*sizeof *out;spans=next;
+    }
+    NSMutableData *result=[NSMutableData data];
+    const struct MetalViewSpan *values=spans.bytes;
+    for(NSUInteger i=0;i<spans.length/sizeof *values;i++) {
+        reach.offset=(NSUInteger)base+values[i].offset;reach.length=values[i].length;
+        [result appendBytes:&reach length:sizeof reach];
+    }
+    return result;
+}
+
 struct MetalRecordedDispatch {
     id<MTLComputePipelineState> pipeline;
     id<MTLBuffer> buffers[MESH_BUFFER_BINDINGS];

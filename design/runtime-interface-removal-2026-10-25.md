@@ -81,6 +81,12 @@ use the same interface. See [compiler-pipeline.md](../docs/compiler-pipeline.md#
 This closes that metadata loss; it does not implement early producer publication or remove the remaining
 native commands' coarse buffer declarations.
 
+Further update 2026-10-26: `MetalViewReaches` now performs the access-union calculation for both native
+and FX descriptions. Native normalization, ordinary packed matrix products, stacked products, pointwise
+row operations and head outputs supply their layouts. Fused epilogues preserve those declarations when
+capturing addresses. [The publication review](../docs/native-access-publication.md) distinguishes these
+completed changes from the still-open binding of native tile completion to physical WRITE prefixes.
+
 ## Reviewed interfaces
 
 The bullets below preserve the removal rationale. The integration update above

@@ -675,7 +675,6 @@ struct Commands {
     auto device=at::mps::MPSDevice::getInstance()->device();
     std::vector<std::vector<MetalCommandBinding>> bindings(records.size());
     std::vector<std::vector<MetalReach>> reaches(records.size());
-    auto access_spans=pybind11::module_::import("views").attr("access_spans");
     std::vector<MetalCommandDescription> descriptions;
     std::vector<id<MTLBuffer>> constants;
     for(size_t k=0;k<records.size();k++) {
@@ -691,15 +690,12 @@ struct Commands {
         const uint32_t mode=((access>>j)&1?MetalReachRead:0)|((access>>(MESH_ACCESS_WRITE_SHIFT+j))&1?MetalReachWritten:0);
         bound.push_back({buffer,offset,t.nbytes(),(uint32_t)j,mode});
         if(mode) {
-          std::vector<int64_t> strides=t.strides().vec();
+          std::vector<NSUInteger> shape(t.sizes().begin(),t.sizes().end());
+          std::vector<NSInteger> strides(t.strides().begin(),t.strides().end());
           for(auto &stride:strides)stride*=t.element_size();
-          auto [shift,spans]=access_spans(t.sizes().vec(),strides,t.element_size())
-              .cast<std::pair<int64_t,std::vector<std::pair<int64_t,int64_t>>>>();
-          // An empty view still declares its binding; it must not turn into
-          // the recorder's unspecified extent (the remainder of a buffer).
-          if(spans.empty())spans.emplace_back(0,0);
-          for(const auto &[at,bytes]:spans)
-            ranges.push_back({buffer,(NSUInteger)((int64_t)offset+shift+at),(NSUInteger)bytes,mode|MetalReachBinding,(int32_t)j});
+          NSData *data=MetalViewReaches(buffer,offset,shape.data(),strides.data(),shape.size(),t.element_size(),mode,(int32_t)j);
+          const auto *spans=(const MetalReach *)data.bytes;
+          ranges.insert(ranges.end(),spans,spans+data.length/sizeof *spans);
         }
         operands.push_back(t);
       }

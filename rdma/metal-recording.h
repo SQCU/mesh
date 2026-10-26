@@ -53,6 +53,11 @@ struct MetalReach {
     uint32_t access;
     int32_t binding;
 };
+// Preparation only: the union of a strided view's byte accesses, returned as
+// packed MetalReach records. Strides are bytes; traversal order is irrelevant
+// to dependencies. Empty views retain a zero-length binding declaration.
+NSData *MetalViewReaches(id<MTLBuffer>, NSUInteger offset, const NSUInteger *shape,
+    const NSInteger *strides, size_t rank, NSUInteger elementBytes, uint32_t access, int32_t binding);
 // Preparation only: carry declared page accesses across encoders on the supplied
 // queue. Prepare and enqueue its functions in the same order. Disjoint ranges
 // add no dependency. Transport uses this declaration for its shared counters.
