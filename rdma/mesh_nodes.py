@@ -70,14 +70,17 @@ def parallel(jobs):
 
 
 class Node:
-    def __init__(self, number, addr, via=None, ula=''):
+    def __init__(self, number, addr, via=None, ula='', *, local=False):
         self.number, self.addr, self.via, self.ula = number, addr, via, ula
+        self.local = local
         self.name = NAMES.get(number, number)
         self.source = 'mesh'
         self.discovered_links = 0
 
     def argv(self, command):
         """The shared administration launcher, also used for resident-rank configuration."""
+        if self.local:
+            return ['/bin/sh', '-c', command]
         proxy = ['-o', f"ProxyCommand=ssh {' '.join(SSHO)} -W '[%h]:%p' mdot@{self.via}"] if self.via else []
         return ['ssh', *SSHO, *proxy, f'mdot@{self.addr}', command]
 
@@ -142,8 +145,8 @@ def discover(log=None, prepare=None):
     if not entry:
         return None, candidates
     a, d, paths = entry
-    nodes = [Node(str(m), management.get(str(m)) or paths.get(str(m), ''),
-                  None if str(m) in management else a, paths.get(str(m), ''))
+    nodes = [Node(str(m), 'localhost' if str(m) == me else management.get(str(m)) or paths.get(str(m), ''),
+                  None if str(m) == me or str(m) in management else a, paths.get(str(m), ''), local=str(m) == me)
              for m in d['map']['nodes']]
     for node in nodes:
         node.discovered_links = sum(int(node.number) in link[:2] for link in d['map']['links'])

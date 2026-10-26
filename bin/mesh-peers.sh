@@ -14,6 +14,7 @@ jq -r '.nodes // {} | to_entries[] | select((.key | test("^[0-9A-Fa-f]{8}(-[0-9A
 named(){ grep -qxF "$1" "$T/named" && return 0; printf '%s\n' "$1" >> "$T/named"
   nm=$(awk -v n="$1" '$1 == n {$1 = ""; sub(/^ /, ""); print; exit}' "$T/names")
   printf 'node %s %s%s\n' "$1" "$([ "$1" = "$me" ] && echo self || echo peer)" "${nm:+ name=$nm}"; }
+named "$me"
 stat=$("$here/mesh-stat" 2>/dev/null | tail -1)
 i=0
 while n=$(printf '%s' "$stat" | plutil -extract "nodes.$i.node" raw -o - - 2>/dev/null); do
