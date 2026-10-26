@@ -62,17 +62,17 @@ inline void partial(thread const A& src, uint row0, device const half* wp, uint 
 }
 
 template <uint RG, uint RB, uint KIN, uint SG, typename A, typename Epi>
-inline void stage(thread const A& src, device const half* Wt, uint2 tiles, uint groups, uint ks, uint sgid,
+inline void stage(thread const A& src, device const half* Wt, uint2 tasks, uint groups, uint ks, uint sgid,
                   threadgroup float* red, thread Epi& epi) {
     constexpr uint KT = KIN / 8;
-    const uint items = tiles.y * groups, per = SG / ks;
+    const uint items = tasks.y, per = SG / ks;
     for (uint pass = 0; pass < items; pass += per) {
         uint item = pass + sgid / ks, seg = sgid % ks;
         bool active = item < items && sgid < per * ks;
-        uint ct = item / groups, g = item % groups;
+        uint ct = (tasks.x + item) / groups, g = (tasks.x + item) % groups;
         simdgroup_float8x8 acc[RG];
         for (uint r = 0; r < RG; r++) acc[r] = simdgroup_float8x8(0.0f);
-        if (active) partial<RG>(src, g * RG * 8, Wt + (tiles.x + ct) * KT * 64, seg * KT / ks, (seg + 1) * KT / ks, acc);
+        if (active) partial<RG>(src, g * RG * 8, Wt + ct * KT * 64, seg * KT / ks, (seg + 1) * KT / ks, acc);
         for (uint r0 = 0; r0 < RG && ks > 1; r0 += RB) {
             for (uint r = 0; r < RB; r++) simdgroup_store(acc[r0 + r], red + (sgid * RB + r) * 64, 8);
             threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -128,7 +128,7 @@ kernel void chain_publish_input(constant input_words<CHANNELS>& words [[buffer(1
     }
 }
 
-template <uint TILE, uint K, uint S, uint G, uint RG, uint RB, uint THREADS, uint SIMD, uint RANKS, uint CHANNELS, bool PRODUCTS = true>
+template <uint TILE, uint K, uint S, uint R, uint G, uint RG, uint RB, uint THREADS, uint SIMD, uint RANKS, uint CHANNELS, bool PRODUCTS = true>
 [[max_total_threads_per_threadgroup(THREADS)]]
 kernel void chain_step(device const half* At [[buffer(0)]], device const half* Bt [[buffer(1)]], device const half* E [[buffer(2)]],
                        coherent(device) device half* out [[buffer(3)]], coherent(device) device half* X [[buffer(4)]],
@@ -143,9 +143,10 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
     threadgroup float red[SG * RB * 64];
     threadgroup uint last;
     uint phase = words.phase;
-    const uint R = words.rows, groups = R / (TILE * RG), ks0 = words.ks0, ks1 = words.ks1;
-    const uint2 xs = share<K / TILE, G>(w), ys = share<S / TILE, G>(w);
-    const uint x0 = xs.x * TILE, xw = xs.y * TILE;
+    constexpr uint groups = R / (TILE * RG);
+    const uint ks0 = words.ks0, ks1 = words.ks1;
+    const uint2 xs = share<K / TILE * groups, G>(w), ys = share<S / TILE * groups, G>(w);
+    const uint2 elements = share<R * K, G>(w);
     if (!words.last && tid == 0) for (uint q = 0; q < CHANNELS; q++) if (words.input[q].p) {
         constant mesh_step_binding& input = words.input[q];
         mesh_step_enter(*input.p, input.v, input.progress, w == 0);
@@ -160,8 +161,8 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
     }
     threadgroup_barrier(mem_flags::mem_device);
     atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));
-    for (uint q = tid; q < R * xw; q += THREADS) {
-        const uint i = (q / xw) * K + x0 + q % xw;
+    for (uint q = tid; q < elements.y; q += THREADS) {
+        const uint i = elements.x + q;
         const uint row = i / K, column = i % K;
         const bool present = row < words.actual_rows && column < words.width;
         const uint logical = row * words.width + column;
@@ -178,12 +179,12 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
     publish(stamps, w, tid, phase);
     await_stamps<G, SIMD>(stamps, phase, sgid, lane);
     const uint at = lane_element(lane);
-    Activated activated{Y, ys.x * TILE, S, at};
+    Activated activated{Y, 0, S, at};
     const Rows xs_rows{X, K, at};
     stage<RG, RB, K, SG>(xs_rows, At, ys, groups, ks0, sgid, red, activated);
     publish(stamps, w, tid, phase);
     await_stamps<G, SIMD>(stamps, phase, sgid, lane);
-    Summand summand{P, x0, K, at};
+    Summand summand{P, 0, K, at};
     const Rows ys_rows{Y, S, at};
     stage<RG, RB, S, SG>(ys_rows, Bt, xs, groups, ks1, sgid, red, summand);
     for (uint q = 0; q < CHANNELS; q++) if (words.publish[q].p)

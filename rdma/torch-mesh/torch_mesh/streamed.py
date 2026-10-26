@@ -139,16 +139,9 @@ def _dims(tiles=0, outputs=0, rows=0, per=0, stride=0, shares=0, split=0, finish
 def node():
     """This node's name (its chip) and GPU cores, the one count its registry names (a node whose registry names none, or
     several, is refused: the fit prices a node by its cores)."""
-    import re
-    import subprocess
-    if 'node' not in _PIPELINES:
-        chip = subprocess.run(['sysctl', '-n', 'machdep.cpu.brand_string'], capture_output=True, text=True).stdout.strip()
-        listing = subprocess.run(['ioreg', '-r', '-c', 'AGXAccelerator', '-d', '1'], capture_output=True).stdout.decode('utf-8', 'replace')
-        cores = set(re.findall(r'"gpu-core-count" = ([0-9]+)', listing))
-        if len(cores) != 1:
-            raise RuntimeError(f'{chip or "this node"}: its registry names GPU core counts {sorted(cores)}, not one (ioreg gpu-core-count)')
-        _PIPELINES['node'] = (chip, int(cores.pop()))
-    return _PIPELINES['node']
+    from mesh_compute import hardware
+    facts = hardware()
+    return facts['chip'], facts['gpu']['cores']
 
 
 FIT_FEATURES = ('tiles', 'rowwork', 'planes', 'sg', 'partials', 'bytes', 'steps', 'chain_rows', 'passes', 'pressure')

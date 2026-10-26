@@ -10,7 +10,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch_mesh import partition
 from torch_mesh import chain as sequence
 from torch_mesh.configuration import placement, bind, record
-from torch_mesh import _stream
+from torch_mesh import _stream, compute
 from mesh_statistics import now
 
 import chain
@@ -46,6 +46,7 @@ def folded(config, full):
 # docs/writing-a-service.md#the-configuration
 def main():
     config = json.load(sys.stdin if sys.argv[1] == '-' else open(sys.argv[1]))
+    capabilities = compute.metal(config['capabilities'])
     steps, rows = config['steps'], config['rows']
     inputs, folds = None, None
     if os.environ['RANK'] == '0':
@@ -63,7 +64,7 @@ def main():
     del folds
     E, O = (torch_mesh.empty(steps, rows, width, dtype=torch.half) for _ in range(2))
     group = mesh.get_group('tp')
-    groups, operands = sequence.operands(a, b, E, O, group, k, config['resident_tiles'], config['input_frames'])
+    groups, operands = sequence.operands(a, b, E, O, group, k, config['resident_tiles'], config['input_frames'], capabilities)
     if rank == 0:
         E.copy_(torch.from_numpy(inputs[:]))
     torch_mesh.check_memory()

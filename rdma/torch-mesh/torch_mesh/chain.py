@@ -10,7 +10,7 @@ import torch
 
 from . import _stream, argmax, empty, fused, partition
 from .backend import Call, WRITE
-from .streamed import instance, node
+from .streamed import instance
 
 
 def _ksplit(items, ktiles, simdgroups):
@@ -24,32 +24,37 @@ def _floor2(n):
     return 1 << (n.bit_length() - 1)
 
 
-def _form(K, S, rows, ranks, channels, resident_tiles):
-    _, threads, memory = _stream.device_facts()
+def _form(K, S, rows, ranks, channels, resident_tiles, capabilities):
+    threads, memory = (capabilities[k] for k in ('max_threads_per_threadgroup', 'threadgroup_memory_bytes'))
     source = fused.steps() + argmax.SOURCE + '\n' + Path(__file__).with_suffix('.metal').read_text()
-    tile = 8  # simdgroup_half8x8's intrinsic matrix extent
+    tile = capabilities['simdgroup_matrix_edge']
     probe = _stream.pipeline('kernel void width_probe(device uint* x [[buffer(0)]]) { x[0] = 0; }', 'width_probe')
-    simd, cores = _stream.pipeline_facts(probe)[1], node()[1]
+    simd, cores = _stream.pipeline_facts(probe)[1], capabilities['hardware']['gpu']['cores']
     kt, st, rt = K // tile, S // tile, rows // tile
-    G = min(cores, max(kt, st))
+    # The cooperative kernel joins its resident groups. Independent row tiles
+    # are work too: do not restrict a large batch to its number of column tiles.
+    G = min(cores, max(kt, st) * rt)
     most = threads // simd
 
     def simdgroups(rg):
         groups = rt // rg
-        return min(most, _floor2(max(-(-st // G) * groups * kt, -(-kt // G) * groups * st)))
+        return min(most, _floor2(max(-(-st * groups // G) * kt, -(-kt * groups // G) * st)))
 
     def splits(rg, sg):
         groups = rt // rg
-        return _ksplit(-(-st // G) * groups, kt, sg), _ksplit(-(-kt // G) * groups, st, sg)
+        return _ksplit(-(-st * groups // G), kt, sg), _ksplit(-(-kt * groups // G), st, sg)
 
     SG = simdgroups(1)
     RG = max(rg for rg in (1 << i for i in range(rt.bit_length()))
-             if rt % rg == 0 and simdgroups(rg) == SG and splits(rg, SG) == splits(1, SG))
+             if rt % rg == 0 and max(kt, st) * (rt // rg) >= G
+             and simdgroups(rg) == SG and splits(rg, SG) == splits(1, SG))
     while True:
         RB = RG
-        while SG * RB * tile * tile * 4 + 32 > memory:
+        while RB and SG * RB * tile * tile * 4 + 2 * capabilities['threadgroup_memory_alignment_bytes'] > memory:
             RB //= 2
-        args = (tile, K, S, G, RG, RB, SG * simd, simd, ranks, channels)
+        if not RB:
+            raise ValueError(f'chain: {SG} SIMD groups do not fit the manifest\'s {memory} bytes of threadgroup memory')
+        args = (tile, K, S, rows, G, RG, RB, SG * simd, simd, ranks, channels)
         name, specialization = instance('chain_step', *args)
         handle = _stream.pipeline(source + '\n' + specialization, name)
         available = _stream.pipeline_facts(handle)[0]
@@ -74,10 +79,12 @@ def _form(K, S, rows, ranks, channels, resident_tiles):
         if RG > 1:
             RG //= 2
         else:
+            if available < simd:
+                raise RuntimeError(f'chain: pipeline holds {available} threads, fewer than one {simd}-thread SIMD group')
             SG = _floor2(available // simd)
 
 
-def operands(a, b, inputs, outputs, group, batch, resident_tiles, input_frames):
+def operands(a, b, inputs, outputs, group, batch, resident_tiles, input_frames, capabilities):
     """Realize numerical operands and declarations before the sequence runs.
 
     ``a`` and ``b`` hold this rank's rows of the two weights. Zero-padded tiles
@@ -88,7 +95,8 @@ def operands(a, b, inputs, outputs, group, batch, resident_tiles, input_frames):
     ``batch`` set independent input and recurrent publication intervals.
     """
     steps, rows, width = inputs.shape
-    round_tile = lambda n: max(8, -(-n // 8) * 8)
+    tile = capabilities['simdgroup_matrix_edge']
+    round_tile = lambda n: max(tile, -(-n // tile) * tile)
     K, S, R = round_tile(width), round_tile(a.shape[0]), round_tile(rows)
 
     def weight_pages(weight, shape, tiled):
@@ -96,12 +104,12 @@ def operands(a, b, inputs, outputs, group, batch, resident_tiles, input_frames):
         padded[:weight.shape[0], :weight.shape[1]].copy_(weight)
         if not tiled:
             return padded
-        result = empty(shape[1] // 8, shape[0] // 8, 8, 8, dtype=weight.dtype)
-        result.copy_(padded.reshape(shape[0] // 8, 8, shape[1] // 8, 8).permute(2, 0, 1, 3))
+        result = empty(shape[1] // tile, shape[0] // tile, tile, tile, dtype=weight.dtype)
+        result.copy_(padded.reshape(shape[0] // tile, tile, shape[1] // tile, tile).permute(2, 0, 1, 3))
         return result
 
     channels = sum(group.rank() in cable['nodes'] for cable in group.fabric.cables)
-    kernel, ready, products, workers, threads, words = _form(K, S, R, group.size(), channels, resident_tiles)
+    kernel, ready, products, workers, threads, words = _form(K, S, R, group.size(), channels, resident_tiles, capabilities)
     if products:
         At, Bt = weight_pages(a, (S, K), False), weight_pages(b.T, (K, S), False)
     else:

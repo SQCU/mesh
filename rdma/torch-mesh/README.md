@@ -242,16 +242,20 @@ each other. `torch_mesh/engines.py` resolves an operation's backend as one joint
 node's configured engines (`mps`: torch's GPU queue; `cpu`: fp32 products through Accelerate, the CPU's matrix units;
 `ane`: the Neural Engine, Core ML graphs of 1x1 convolutions with constant weights through `rdma/mesh-coreml.m`, which
 predicts on torch's shared MPS memory with no CPU copy), each holding its shard of the weights resident, the shares
-running at once on unified memory, and `allocate.Coupled` moving the allocation: a compass search over allocations
-whose measure is the call's measured time (the engines' slowing of each other in it), the allocation moving only to one
-measured faster beyond the measurement's resolution, the step halving down to a grain, where it stands.
+running at once on unified memory. Required work-rate operands seed the shares for each declared operation and shape.
+`assignment.assign` adjusts them from whole-function observations, using the same numerical interface as routing.
+CPU core classes and GPU counts come from `mesh_compute.hardware`; counts are not interchangeable work rates.
 
 ```python
 from torch_mesh import engines
-pool = engines.Engines(["mps", "cpu", "ane"], ane={"block": 4096})   # the program's engines, an operand
+pool = engines.Engines(["mps", "cpu", "ane"], ane={"tile": 128, "block": 4096})
 ffn = engines.FFN(gate, up, down, engines=pool, name="ffn")          # without engines: torch's own
-y = ffn(x)
-engines.placement(pool, observations)                                    # every few steps
+key = ffn.declare(x.shape[0], x.dtype, capacities=configuration["work_rates"])
+assigned = engines.placement(pool, observations)
+call = ffn.prepare(x, parts=assigned["parts"][key], repetitions=invocations)
+# The whole function uses this prepared call and its fixed output.
+call()
+y = call.output
 ```
 
 - Operations: `Linear` shares its output features (they concatenate), `FFN` its intermediate neurons (each engine a
@@ -398,12 +402,15 @@ w = s["lm_head"].to("cpu")                        # decoded
 
 ## Prepared engine shares
 
-`engines.Linear` and `engines.FFN` are declarations. Call `declare(rows, dtype)`
+`engines.Linear` and `engines.FFN` are declarations. Call `declare(rows, dtype, capacities=work_rates)`
 before choosing the allocation, then `prepare(input, parts=..., repetitions=...)`.
 The prepared call owns its fixed outputs and host views. CPU/ANE work runs through
 `MetalScheduleHost`, and GPU consumers name its result dependency. The old
 operation-call allocator, shard loader, thread pool and future joins are removed.
 `examples/engines.py` uses the same interface as an application.
+Its required `ENGINE_CAPACITIES` JSON object supplies one work rate per named engine for the configured shape.
+Missing rates fail before tensors or models are prepared; no equal-rate fallback is used. Zero explicitly excludes
+an engine. Accelerate remains one CPU backend; the inventory's core classes do not promise per-class CPU affinity.
 
 `mesh-statistics.h` is the host clock and time/useful-rate arithmetic for native
 users; `mesh_statistics.py` binds the same C source for Python and hourly reports.

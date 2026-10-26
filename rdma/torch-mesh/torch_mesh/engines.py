@@ -8,6 +8,7 @@ loads a model, or joins a future while it runs.
 """
 import ctypes
 import hashlib
+import math
 import os
 import shutil
 from pathlib import Path
@@ -186,7 +187,7 @@ class Ane(Engine):
 
     def __init__(self, **options):
         super().__init__(**options)
-        self.tile, self.block = int(options.get('tile', 128)), int(options['block'])
+        self.tile, self.block = int(options['tile']), int(options['block'])
 
     @classmethod
     def missing(cls):
@@ -330,6 +331,8 @@ class Engines:
     operation's units), each with its options; the evidence of the operations using them; each decision's search."""
 
     def __init__(self, names, **options):
+        from mesh_compute import hardware
+        self.hardware = hardware()
         names = [names] if isinstance(names, str) else list(names)
         unknown = [n for n in names if n not in ENGINES]
         if unknown:
@@ -365,16 +368,28 @@ class Operation:
         if engines is not None:
             engines.operations.append(self)
 
-    def declare(self, rows, dtype):
+    def declare(self, rows, dtype, *, capacities):
+        """Work rates for this operation and shape, in the configured engine order.
+
+        Rates are supplied operands, not CPU/GPU/ANE core counts. Whole-call
+        observations refine them through the same assignment solver as routes.
+        A zero explicitly excludes an engine from this declaration.
+        """
         key = f'{self.name}@{rows}'
-        able = [e.takes(self, dtype) and (self.constant or not e.limits['constants']) for e in self.engines.engines]
-        if not any(able):
-            raise ValueError(f'{key}: no configured engine takes {dtype}')
-        share = (self.units // self.grain) // sum(able)
-        parts = [share * self.grain if a else 0 for a in able]
-        parts[able.index(True)] += self.units - sum(parts)
-        self.engines.decisions.setdefault(key, {'parts': parts, 'grain': self.grain, 'low': [0] * len(able),
-                                               'high': [self.units if a else 0 for a in able], 'units': self.units})
+        total = sum(capacities)
+        if (len(capacities) != len(self.engines.engines) or not all(math.isfinite(c) and c >= 0 for c in capacities)
+                or not math.isfinite(total) or total <= 0):
+            raise ValueError(f'{key}: supply a nonnegative work rate per engine, with a positive total')
+        able = [c > 0 for c in capacities]
+        for engine, active in zip(self.engines.engines, able):
+            if active and (not engine.takes(self, dtype) or (engine.limits['constants'] and not self.constant)):
+                raise ValueError(f'{key}: configured engine {engine.name} cannot take this operation at {dtype}')
+        from assignment import project
+        parts = project([self.units * (c / total) for c in capacities], self.units, self.grain,
+                        [0] * len(able), [self.units if a else 0 for a in able])
+        self.engines.decisions[key] = {'parts': parts, 'grain': self.grain, 'low': [0] * len(able),
+                                      'high': [self.units if a else 0 for a in able], 'units': self.units,
+                                      'capacity': list(capacities)}
         return key
 
     def prepare(self, x, *, parts, repetitions=1):
@@ -483,7 +498,7 @@ class FFN(Operation):
 def placement(engines, observations):
     # design/whole-function.md#numerical-operands
     from assignment import assign
-    decisions = {k: {field: d[field] for field in ('parts', 'grain', 'low', 'high')}
+    decisions = {k: {field: d[field] for field in ('parts', 'grain', 'low', 'high', 'capacity')}
                  for k, d in engines.decisions.items()}
     assigned = assign(decisions, observations)
     for key, parts in assigned['parts'].items():

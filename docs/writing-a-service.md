@@ -136,10 +136,17 @@ Both geometries use the same physical page bindings, including parallel cables a
 nodes. Their dispatch lists are fixed before the call; a step does not build a graph, choose a route or
 allocate a result while running.
 
+The fused kernel splits its output tiles across both rows and columns. Its eight-wide matrix instruction
+does not limit the batch to eight rows. Preparation uses the GPU's discovered core count and the selected
+Metal family manifest. CPU core counts do not set GPU launch sizes. The fused kernel joins its resident
+groups between products, so adding queued groups beyond that resident budget is not a way to widen it.
+
 ## The configuration
 
 The service takes one operand: a configuration file. It gives `steps`, `rows`, `width`, `seed`, the two
-`rotation_blocks`, `steps_per_replay`, `input_frames`, and `resident_tiles`. The first two scheduling sizes give
+`rotation_blocks`, `steps_per_replay`, `input_frames`, `resident_tiles`, and `capabilities`. The last field names
+the Metal capability manifest directory, relative to the loaded mesh source (`etc/compute` in the sample).
+Missing manifests, required fields or device facts fail preparation. The first two scheduling sizes give
 the recurrent frames per prepared write batch and the frames per input block. The third sets the longest
 dependent tile chain used by the fused products. The sample uses 128 recurrent frames and 512 input frames.
 `observations` supplies completed calls used for the next work assignment. It names no tensor files, shares or rank: each rank's block is the

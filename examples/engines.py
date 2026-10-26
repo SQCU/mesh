@@ -5,6 +5,7 @@ Shapes, engine options and shares are configuration. Every call uses the
 prepared spans; observations arrive through the ordinary whole-function module.
 """
 import os
+import json
 
 import torch
 from torch_mesh import engines
@@ -15,6 +16,8 @@ from mesh_statistics import now
 env = lambda key, default: int(os.environ.get(key, default))
 rows, k, n, steps, every, layers = env('ROWS', 1024), env('K', 3840), env('N', 3456), env('STEPS', 40), env('EVERY', 1), env('LAYERS', 4)
 names, kind = os.environ.get('ENGINES', 'mps,cpu,ane'), os.environ.get('OP', 'ffn')
+rates = json.loads(os.environ['ENGINE_CAPACITIES'])
+capacities = [rates[name] for name in names.split(',')]
 codes, first = os.environ.get('CODES'), env('FIRST', 0)
 if codes:
     from torch_mesh import streamed
@@ -39,9 +42,9 @@ for layer in range(layers):
             gate, up = ((torch.randn(n, k) / k ** 0.5).half().to('mps') for _ in range(2))
             down = (torch.randn(k, n) / n ** 0.5).half().to('mps')
         shared.append(engines.FFN(gate, up, down, engines=pool, name=kind, grain=128))
-key = shared[0].declare(rows, x.dtype)
+key = shared[0].declare(rows, x.dtype, capacities=capacities)
 for operation in shared[1:]:
-    operation.declare(rows, x.dtype)
+    operation.declare(rows, x.dtype, capacities=capacities)
 observations = []
 observer = rollout.start(None, 'engines', 0, 1, observations)
 from torch_mesh.declarations import Function
