@@ -1,115 +1,72 @@
-"""Read-only committed-source export and verification shared by installers and runners."""
+"""Git checkouts used by installation and process launch, before numerical work."""
 import argparse
-import io
-import json
 import os
-import shutil
-from pathlib import Path, PurePosixPath
+from pathlib import Path
+import shlex
 import subprocess
-import tarfile
-
-MANIFEST = '.mesh-source.json'
 
 
 def git(root, *args):
     return subprocess.run(['git', '-C', str(root), *args], check=True, capture_output=True).stdout
 
 
-def pin(root, ref='HEAD'):
+def revision(root, ref='HEAD'):
     return git(root, 'rev-parse', '--verify', f'{ref}^{{commit}}').decode().strip()
 
 
-def snapshot_path(root, name):
-    """A member's lexical path; parents must never redirect into a symlink target."""
-    path = PurePosixPath(name)
-    if path.is_absolute() or '..' in path.parts:
-        raise ValueError(f'unsupported archive member {name}')
-    parent = Path(root)
-    for part in path.parts[:-1]:
-        parent /= part
-        if parent.is_symlink():
-            raise ValueError(f'archive member has symlink parent: {name}')
-    return Path(root) / path
-
-
-def export(root, commit, destination):
-    """Export exactly one resolved commit; no index, worktree, refs or remote changes."""
-    destination = Path(destination)
-    destination.mkdir(parents=True, exist_ok=False)
-    archive = git(root, 'archive', '--format=tar', commit)
-    files = {}
-    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-        members = tar.getmembers()
-        links = {PurePosixPath(member.name) for member in members if member.issym()}
-        names = [PurePosixPath(member.name) for member in members]
-        if len(set(names)) != len(names):
-            raise ValueError('archive contains duplicate member names')
-        # Validate the entire namespace before extraction, regardless of entry order.
-        for member in members:
-            path = PurePosixPath(member.name)
-            if any(parent in links for parent in path.parents):
-                raise ValueError(f'archive member has symlink parent: {member.name}')
-        for member in members:
-            path = PurePosixPath(member.name)
-            if path.is_absolute() or '..' in path.parts or member.islnk():
-                raise ValueError(f'unsupported archive member {member.name}')
-            if member.isdir():
-                continue
-            if not (member.isfile() or member.issym()):
-                raise ValueError(f'unsupported archive type {member.name}')
-            target = snapshot_path(destination, member.name)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if member.issym():
-                # A committed link is opaque source data, even when its target is
-                # external or absent. Archive its text and never open its target.
-                target.symlink_to(member.linkname)
-            else:
-                target.write_bytes(tar.extractfile(member).read())
-                target.chmod(member.mode)
-            files[member.name] = {'mode': member.mode,
-                                  'kind': 'symlink' if member.issym() else 'file'}
-    tracked = {row.split(b'\t', 1)[1].decode() for row in git(root, 'ls-tree', '-rz', commit).split(b'\0') if row}
-    if tracked != files.keys():
-        raise ValueError(f'archive did not export every committed file: {sorted(tracked - files.keys())}')
-    manifest = {'schema': 1, 'commit': commit, 'files': files}
-    (destination / MANIFEST).write_text(json.dumps(manifest, sort_keys=True) + '\n')
-    return manifest
-
-
-def manifest(root):
-    return json.loads((Path(root) / MANIFEST).read_text())
+def upstream(root):
+    return git(root, 'remote', 'get-url', 'origin').decode().strip()
 
 
 def verify(root):
-    root = Path(root)
-    document = manifest(root)
-    for name, record in document['files'].items():
-        path = snapshot_path(root, name)
-        if not (path.is_symlink() if record['kind'] == 'symlink' else path.is_file()):
-            raise ValueError(f'committed source member missing or wrong kind: {name}')
-        # Git versions executable status, not permissions modified by a node's umask.
-        if not path.is_symlink() and bool(path.stat().st_mode & 0o111) != bool(record['mode'] & 0o111):
-            raise ValueError(f'committed source mode differs: {name}')
-    return document
+    if git(root, 'status', '--porcelain').strip():
+        raise RuntimeError(f'{root}: commit source changes before installation')
+    return revision(root)
+
+
+def checkout_command(origin, commit, destination):
+    """The node fetches Git objects from origin; the caller supplies only operands."""
+    def path(value):
+        value = str(value)
+        return '"$HOME"/' + shlex.quote(value[2:]) if value.startswith('~/') else shlex.quote(value)
+    repository = Path(destination).parent / 'repository.git'
+    return '\n'.join((
+        'set -eu',
+        'export GIT_TERMINAL_PROMPT=0',
+        f'repository={path(repository)}',
+        f'destination={path(destination)}',
+        'if [ ! -d "$repository" ]; then',
+        f'  git clone --quiet --bare --single-branch --branch main {shlex.quote(origin)} "$repository"',
+        'fi',
+        f'[ "$(git --git-dir="$repository" config --get remote.origin.url)" = {shlex.quote(origin)} ]',
+        'git --git-dir="$repository" fetch --quiet --no-tags origin main',
+        f'git --git-dir="$repository" merge-base --is-ancestor {shlex.quote(commit)} FETCH_HEAD',
+        'if [ ! -e "$destination" ]; then',
+        f'  git --git-dir="$repository" worktree add --quiet --detach "$destination" {shlex.quote(commit)}',
+        'fi',
+        f'[ "$(git -C "$destination" rev-parse HEAD)" = {shlex.quote(commit)} ]',
+        '[ -z "$(git -C "$destination" status --porcelain)" ]',
+    ))
+
+
+def checkout(origin, commit, destination):
+    result = subprocess.run(['/bin/sh', '-c', checkout_command(origin, commit, destination)],
+                            capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(f'Git checkout {commit} from {origin} failed ({result.returncode}): {result.stderr.strip()}')
 
 
 def files(root, relative):
-    root, relative = Path(root), Path(relative)
-    if (root / MANIFEST).exists():
-        names = manifest(root)['files']
-        return sorted(str(Path(name).relative_to(relative)) for name in names
-                      if Path(name).is_relative_to(relative))
-    return git(root / relative, 'ls-files', '-z').decode().rstrip('\0').split('\0')
-
-
-def revision(root):
-    return manifest(root)['commit'] if (Path(root) / MANIFEST).exists() else pin(root)
+    return git(Path(root) / relative, 'ls-files', '-z').decode().rstrip('\0').split('\0')
 
 
 def prune(root, keep):
-    for path in Path(root).iterdir():
-        if path.name != keep:
-            shutil.rmtree(path)
+    """Remove superseded build worktrees after the new installation is active."""
+    root = Path(root)
+    for path in root.iterdir():
+        if path.name != keep and (path / '.git').is_file():
+            verify(path)
+            git(root / keep, 'worktree', 'remove', '--force', str(path))
 
 
 def main():
@@ -126,7 +83,7 @@ def main():
     elif args.action == 'prune':
         prune(args.root, args.relative)
     else:
-        print(json.dumps({'verified_commit': verify(args.root)['commit']}))
+        print(verify(args.root))
 
 
 if __name__ == '__main__':

@@ -2,7 +2,6 @@
 import concurrent.futures
 import contextlib
 import glob
-import io
 import json
 import os
 import re
@@ -11,7 +10,6 @@ import signal
 import socket
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
 from pathlib import Path
@@ -145,9 +143,10 @@ def discover(log=None, prepare=None):
     if not entry:
         return None, candidates
     a, d, paths = entry
+    numbers = list(dict.fromkeys([*(str(m) for m in d['map']['nodes']), *([me] if me else [])]))
     nodes = [Node(str(m), 'localhost' if str(m) == me else management.get(str(m)) or paths.get(str(m), ''),
                   None if str(m) == me or str(m) in management else a, paths.get(str(m), ''), local=str(m) == me)
-             for m in d['map']['nodes']]
+             for m in numbers]
     for node in nodes:
         node.discovered_links = sum(int(node.number) in link[:2] for link in d['map']['links'])
     note(log, 'map ' + ' '.join(n.number for n in nodes))
@@ -176,19 +175,19 @@ def resolve(ref, repo=MESH):
                           text=True).stdout.strip()
 
 
+def fetch(node, origin, commit, destination):
+    from mesh_source import checkout_command
+    code, output = node.run(checkout_command(origin, commit, '~/' + destination))
+    if code:
+        raise RuntimeError(f'{node.name}: Git checkout failed ({code}): {output}')
+    return {'commit': commit, 'remote_root': destination, 'upstream': origin}
+
+
 def install_one(n, sha, log):
-    from mesh_hourly import stage
-    from mesh_source import export
-    # Historical callers use the same immutable deployment; they never checkout a target repo.
-    with tempfile.TemporaryDirectory(prefix='mesh-install-') as temporary:
-        source = Path(temporary) / 'source'
-        export(MESH, sha, source)
-        for helper in ('mesh_nodes.py', 'mesh_source.py', 'mesh_install.py'):
-            if not (source / 'rdma' / helper).exists():
-                raise RuntimeError(f'{sha}: shared install helper {helper} is absent; no uncommitted helper injected')
-        n.source = f'.cache/mesh-installs/{sha}'
-        stage(n, source, n.source)
-        code = n.py('install', sha, '1', out=log)[0]
+    from mesh_source import upstream
+    n.source = f'.cache/mesh-checkouts/mesh/{sha}'
+    fetch(n, upstream(MESH), sha, n.source)
+    code = n.py('install', sha, '1', out=log)[0]
     note(log, f'exit {code}')
     return code
 
@@ -220,19 +219,6 @@ def wait_paired(nodes, log):
         f'{name} {paired} of {links} discovered links PAIRED' + (f', {cabled} ports cabled: degraded' if links < cabled else '')
         for name, paired, links, cabled in state))
     return ok
-
-
-def send(nodes, folder, files):
-    data = io.BytesIO()
-    with tarfile.open(fileobj=data, mode='w') as tar:
-        for name, body in files.items():
-            info = tarfile.TarInfo(name)
-            info.size, info.mode, info.mtime = len(body), 0o644, time.time()
-            tar.addfile(info, io.BytesIO(body))
-    for n in nodes:
-        code, output = n.run(f'mkdir -p {home_path(folder)} && tar -C {home_path(folder)} -xf -', input=data.getvalue())
-        if code:
-            raise RuntimeError(f'{n.name}: source/config upload failed ({code}): {output}')
 
 
 def ranks(nodes, out, tag, folder, command, port, append=False, alarm=300, env='', guard=None, input=None):
@@ -329,12 +315,12 @@ def run(*argv, **kw):
 
 
 def node_install(commit, transition='0'):
-    from mesh_install import install_snapshot
+    from mesh_install import install_checkout
     from mesh_source import revision
     source = Path(__file__).resolve().parent.parent
     if revision(source) != commit:
-        raise ValueError('requested install commit differs from the imported snapshot')
-    install_snapshot(source, allow_source_transition=transition == '1')
+        raise ValueError('requested install commit differs from the imported checkout')
+    install_checkout(source, allow_source_transition=transition == '1')
 
 
 def node_installed(commit, exact_imported_source='0'):
@@ -343,8 +329,8 @@ def node_installed(commit, exact_imported_source='0'):
     active = HOME / '.cache/mesh/active-source'
     source = (Path(active.read_text().strip()) if exact_imported_source != '1' and active.exists()
               else Path(__file__).resolve().parent.parent)
-    if verify(source)['commit'] != commit:
-        raise ValueError('requested commit differs from source manifest')
+    if verify(source) != commit:
+        raise ValueError('requested commit differs from the Git checkout')
     check_package(source)
     print(json.dumps({'installed': verify_active(source, commit)}))
     return 0

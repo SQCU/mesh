@@ -1,4 +1,4 @@
-"""Explicit source-root transition for committed snapshot installation.
+"""Explicit source-root transition for committed Git checkout installation.
 
 Normal mesh-user.sh installs retain their existing behavior. The hourly driver calls
 this entrypoint under the cluster lease; a node-local flock serializes installers.
@@ -14,7 +14,7 @@ import re
 import subprocess
 import time
 
-from mesh_source import verify
+from mesh_source import files, verify
 
 
 def run(*args, check=True):
@@ -69,7 +69,7 @@ def verify_active(source, commit):
     service = f'user/{os.getuid()}/io.mesh.bridge'
     expected = source / 'rdma/mesh-heartbeat'
     if active_program(service) != str(expected):
-        raise RuntimeError('loaded heartbeat executable is not the requested committed snapshot')
+        raise RuntimeError('loaded heartbeat executable is not the requested Git checkout')
     job = run('launchctl', 'print', service).stdout
     heartbeat = re.search(r'^\s*pid = ([0-9]+)$', job, re.M)
     if heartbeat is None:
@@ -89,20 +89,20 @@ def verify_active(source, commit):
             'topology': check}
 
 
-def install_snapshot(source, allow_source_transition=False):
+def install_checkout(source, allow_source_transition=False):
     source = Path(source).resolve()
-    document = verify(source)
+    commit = verify(source)
     cache = Path.home() / '.cache/mesh'
     cache.mkdir(parents=True, exist_ok=True)
     with (cache / 'install.lock').open('a') as lease:
         fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return _install_locked(source, document['commit'], allow_source_transition)
+        return _install_locked(source, commit, allow_source_transition)
 
 
 def _install_locked(source, commit, allow_source_transition):
     domain, service = f'user/{os.getuid()}', f'user/{os.getuid()}/io.mesh.bridge'
     if disabled(domain):
-        raise RuntimeError('operator-disabled bridge retained; snapshot not installed')
+        raise RuntimeError('operator-disabled bridge retained; checkout not installed')
     before = active_program(service)
     target = str(source / 'rdma/mesh-heartbeat')
     changing = before is not None and before != target
@@ -137,10 +137,9 @@ def _install_locked(source, commit, allow_source_transition):
         print(output.stdout, end='', flush=True)
         wait_for(lambda: json.loads(run(source / 'rdma/mesh-stat').stdout.splitlines()[-1]),
                  lambda v: v.get('up') is True, 60, 'installed bridge did not start')
-        # A module loaded from this immutable source must verify the installed package too.
+        # Check the installed package against this Git checkout.
         check_package(source)
         result = verify_active(source, commit)
-        (source / '.mesh-install.json').write_text(json.dumps(result, sort_keys=True) + '\n')
         active = Path.home() / '.cache/mesh/active-source'
         active.parent.mkdir(parents=True, exist_ok=True)
         active.write_text(str(source) + '\n')
@@ -148,7 +147,7 @@ def _install_locked(source, commit, allow_source_transition):
         return result
     except BaseException:
         if unloaded:
-            # Roll back the old executable roots, which were never overwritten by this snapshot.
+            # Roll back the old executable roots, which were never overwritten by this checkout.
             with contextlib.suppress(Exception):
                 if active_program(service):
                     run('launchctl', 'kill', 'SIGUSR1', service)
@@ -171,12 +170,11 @@ def _install_locked(source, commit, allow_source_transition):
 def check_package(source):
     import glob
     package = Path(next(iter(glob.glob(str(Path.home() / '.venv-mesh-uv/lib/python*/site-packages/torch_mesh'))), '-'))
-    wanted = verify(source)['files']
     prefix = 'rdma/torch-mesh/torch_mesh/'
-    for name, record in wanted.items():
-        if name.startswith(prefix) and name.endswith(('.py', '.metal')):
-            installed = package / name[len(prefix):]
-            if not installed.is_file() or installed.read_bytes() != (Path(source) / name).read_bytes():
+    for name in files(source, prefix):
+        if name.endswith(('.py', '.metal')):
+            installed = package / name
+            if not installed.is_file() or installed.read_bytes() != (Path(source) / prefix / name).read_bytes():
                 raise RuntimeError(f'installed torch_mesh differs from committed source: {name}')
     if not list(package.glob('_stream*.so')):
         raise RuntimeError('installed torch_mesh has no native extension')

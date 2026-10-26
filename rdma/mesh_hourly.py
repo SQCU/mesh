@@ -1,23 +1,16 @@
-"""Run committed mesh/microbench snapshots and retain failures without changing Git state.
-
-The live launcher only pins/exports and records its own provenance. Execution is a
-fresh interpreter importing this driver from the pinned mesh snapshot. A helper
-missing in that commit is a recorded prerequisite failure, never a source fallback.
-"""
+"""Run committed mesh/microbench Git checkouts fetched from each repository's origin."""
 import argparse
-import io
 import json
 import os
 from pathlib import Path
 import shlex
-import shutil
 import subprocess
 import sys
-import tarfile
 import time
 import traceback
 
-from mesh_source import MANIFEST, export, pin, verify
+from mesh_nodes import fetch
+from mesh_source import checkout, revision, upstream, verify
 
 REQUIRED = ('rdma/mesh_hourly.py', 'rdma/mesh_nodes.py', 'rdma/mesh_source.py',
             'rdma/mesh_install.py', 'rdma/mesh-install-state.c')
@@ -98,31 +91,28 @@ def launcher(mesh_root, microbench_root, output_root):
 
 
 def _launch(mesh_root, microbench_root, output_root):
-    """The only working-tree code used is this explicitly identified export launcher."""
+    """Select main commits and launch the driver from its upstream Git checkout."""
     output_root = Path(output_root).resolve()
     began = time.time()
     tag = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(began)) + f'-{time.time_ns() % 1000000000:09d}'
     out = output_root / tag
     out.mkdir(parents=True)
-    record = {'schema': 2, 'run': tag, 'started_unix': began, 'commits': {}, 'snapshots': {},
+    record = {'schema': 2, 'run': tag, 'started_unix': began, 'commits': {}, 'checkouts': {},
               'status': 'failed', 'errors': [], 'nodes': {}, 'workloads': [],
               'launcher': {'file': str(Path(__file__).resolve()),
-                           'role': 'pin/export only; target helpers execute from the committed snapshot'}}
+                           'role': 'select commits; target helpers execute from upstream Git checkouts'}}
     try:
         roots = {'mesh': Path(mesh_root).resolve(), 'metal-microbench': Path(microbench_root).resolve()}
-        # Resolve both main commits before exporting either. Later commits or
+        # Resolve both main commits before fetching either. Later commits or
         # an interactive branch checkout cannot change this invocation's inputs.
-        record['commits'] = {name: pin(root, 'refs/heads/main') for name, root in roots.items()}
+        record['commits'] = {name: revision(root, 'refs/heads/main') for name, root in roots.items()}
+        record['upstreams'] = {name: upstream(root) for name, root in roots.items()}
         for name, root in roots.items():
-            target = output_root / '.sources' / name / record['commits'][name]
-            if not target.exists():
-                export(root, record['commits'][name], target)
-            for previous in target.parent.iterdir():
-                if previous != target:
-                    shutil.rmtree(previous)
-            record['snapshots'][name] = {'path': str(target)}
-        committed_mesh = Path(record['snapshots']['mesh']['path'])
-        committed_bench = Path(record['snapshots']['metal-microbench']['path'])
+            target = Path.home() / '.cache/mesh-checkouts' / name / record['commits'][name]
+            checkout(record['upstreams'][name], record['commits'][name], target)
+            record['checkouts'][name] = {'path': str(target)}
+        committed_mesh = Path(record['checkouts']['mesh']['path'])
+        committed_bench = Path(record['checkouts']['metal-microbench']['path'])
         absent = [name for name in REQUIRED if not (committed_mesh / name).is_file()]
         if absent:
             raise RuntimeError(f'pinned mesh commit lacks shared hourly prerequisites: {absent}')
@@ -142,7 +132,7 @@ def _launch(mesh_root, microbench_root, output_root):
             if not record['errors'] and not any(item['status'] != 'completed' for item in record['workloads']):
                 record['errors'].append({'stage': 'committed-driver', 'exit': child.returncode})
     except Exception as error:
-        record['errors'].append({'stage': 'snapshot/export', 'error': str(error), 'traceback': traceback.format_exc()})
+        record['errors'].append({'stage': 'git-checkout', 'error': str(error), 'traceback': traceback.format_exc()})
     record['finished_unix'] = time.time()
     for item in record['workloads']:
         HISTORY[item['tag']] = (HISTORY.get(item['tag'], []) + item.get('observations', []))[-64:]
@@ -152,39 +142,13 @@ def _launch(mesh_root, microbench_root, output_root):
     return 0 if record['status'] == 'completed' else 1
 
 
-def archive_snapshot(source):
-    """Include only verified committed files and their manifest, never build leftovers."""
-    source = Path(source)
-    document = verify(source)
-    stream = io.BytesIO()
-    with tarfile.open(fileobj=stream, mode='w') as tar:
-        for name in [*document['files'], MANIFEST]:
-            tar.add(source / name, arcname=name, recursive=False)
-    return stream.getvalue()
-
-
-def stage(node, source, destination):
-    from mesh_nodes import home_path
-    document = verify(source)
-    code, existing = node.run('cat ' + home_path(destination + '/' + MANIFEST))
-    if code == 0 and json.loads(existing)['commit'] == document['commit']:
-        return {'commit': document['commit'], 'remote_root': destination, 'written_source_bytes': 0}
-    payload = archive_snapshot(source)
-    folder = home_path(destination)
-    command = f'mkdir -p {folder} && tar -xf - -C {folder}'
-    code, output = node.run(command, input=payload)
-    if code:
-        raise RuntimeError(f'{node.name}: committed snapshot upload failed ({code}): {output}')
-    return {'commit': document['commit'], 'remote_root': destination, 'written_source_bytes': len(payload)}
-
-
 def prepare_node(node, paths, record, out, since):
     """Only successfully verified installs enter measurements; stale packages are never used."""
     result = {'number': node.number, 'status': 'failed', 'sources': {}}
     try:
-        for name, source in paths.items():
-            destination = f'.cache/mesh-hourly/sources/{name}/{record["commits"][name]}'
-            result['sources'][name] = stage(node, source, destination)
+        for name in paths:
+            destination = f'.cache/mesh-checkouts/{name}/{record["commits"][name]}'
+            result['sources'][name] = fetch(node, record['upstreams'][name], record['commits'][name], destination)
             if name == 'mesh':
                 node.source = destination
         code, resets = node.py('resets', str(int(since)))
@@ -205,7 +169,7 @@ def prepare_node(node, paths, record, out, since):
         from mesh_nodes import PY, home_path
         for name in paths:
             code, output = node.run(f'{PY} {home_path(node.source + "/rdma/mesh_source.py")} prune '
-                                    f'{home_path(".cache/mesh-hourly/sources/" + name)} {record["commits"][name]}')
+                                    f'{home_path(".cache/mesh-checkouts/" + name)} {record["commits"][name]}')
             if code:
                 raise RuntimeError(output)
     except Exception as error:
@@ -296,17 +260,17 @@ def _execute_locked(record):
     import mesh_nodes as mesh
     out = None
     try:
-        paths = {name: Path(value['path']) for name, value in record['snapshots'].items()}
+        paths = {name: Path(value['path']) for name, value in record['checkouts'].items()}
         for name, root in paths.items():
-            if verify(root)['commit'] != record['commits'][name]:
-                raise ValueError(f'{name}: commit does not match manifest')
+            if verify(root) != record['commits'][name]:
+                raise ValueError(f'{name}: checkout differs from the selected commit')
         mesh.configure(paths['mesh'], paths['metal-microbench'])
         items = workload_configuration(paths['metal-microbench'])
         # Discovery observes the currently running bridge, explicitly before installation.
         # It is not evidence that the tested revision has been installed.
         def bootstrap(candidate):
-            destination = f'.cache/mesh-hourly/sources/mesh/{record["commits"]["mesh"]}'
-            stage(candidate, paths['mesh'], destination)
+            destination = f'.cache/mesh-checkouts/mesh/{record["commits"]["mesh"]}'
+            fetch(candidate, record['upstreams']['mesh'], record['commits']['mesh'], destination)
             candidate.source = destination
 
         found, candidates = mesh.discover(None, prepare=bootstrap)
@@ -316,7 +280,7 @@ def _execute_locked(record):
                                   for n in found])
         record['nodes'] = {f'{node.number}@{node.addr}': result for node, result in zip(found, installs)}
         if any(node.number == '-' for node in found):
-            # Read the newly installed topology; staged helpers stay at the same per-run path.
+            # Read the newly installed topology using the selected checkout's helpers.
             found, _ = mesh.discover(None, prepare=bootstrap)
             found = found or []
             installs = mesh.parallel([lambda n=n: prepare_node(n, paths, record, out, record['started_unix'] - 3600)

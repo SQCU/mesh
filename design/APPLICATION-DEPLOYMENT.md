@@ -1,9 +1,14 @@
 # Canonical application deployment
 
-`bin/mesh-application.py` synchronizes committed `main` checkouts and builds each
-participant's canonical `rdma` source. It transfers Git objects, verifies matching
-revisions, and activates the checkout through a `current` symlink. It does not
-copy application source snapshots or create alternate numerical runtimes.
+`bin/mesh-application.py` selects a committed revision and asks each participant
+to fetch it from that participant's Git `origin`. Each node builds its `rdma`
+source and activates the checkout through a `current` symlink.
+
+The hourly uses the same source path for its ordinary examples: each node fetches
+the selected mesh and microbench commits from their Git upstreams. Git worktrees
+hold the build directories. The installer removes an older worktree after its
+replacement is active. SSH starts processes and passes configuration operands;
+it does not carry source archives. Commits must be published before the run.
 
 `deploy` synchronizes/builds and activates the checkout. `activate` publishes an
 existing canonical checkout. `run` executes a retained module from the activated
