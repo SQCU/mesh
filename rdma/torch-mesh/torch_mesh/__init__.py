@@ -123,6 +123,7 @@ def compiler(gm, example_inputs):
     from torch._subclasses.fake_tensor import FakeTensorMode
     from torch.fx.experimental.proxy_tensor import make_fx
     from torch._inductor.decomposition import select_decomp_table
+    from .algebra import decompositions
     from torch._subclasses.functional_tensor import dispatch_functionalize
     from torch.utils._pytree import tree_map, tree_flatten
     # Functionalization receives every tensor as an operand, including
@@ -154,7 +155,7 @@ def compiler(gm, example_inputs):
     operands = [*example_inputs, *constants]
     inputs = tree_map(lambda value: mode.from_tensor(value) if isinstance(value, torch.Tensor) else value, operands)
     with mode:
-        lowered = make_fx(dispatch_functionalize(lifted, propagate_input_mutations=True), decomposition_table=select_decomp_table(),
+        lowered = make_fx(dispatch_functionalize(lifted, propagate_input_mutations=True), decomposition_table=select_decomp_table() | decompositions,
                           tracing_mode='fake', _allow_non_fake_inputs=True)(*inputs)
     output = next(node for node in lowered.graph.nodes if node.op == 'output')
     if not isinstance(output.args[0], (tuple, list)):

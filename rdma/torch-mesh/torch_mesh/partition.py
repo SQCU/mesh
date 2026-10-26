@@ -1514,13 +1514,9 @@ def _mean(op_call, args, kwargs):
 
 
 def _linear_backward(op_call, args, kwargs):
-    """aten.linear_backward (MPS's linear, which DTensor has no sharding of) as the matmuls it is: grad @ weight,
-    grad^T @ input, grad summed."""
-    named = _named(op_call, args, kwargs)
-    x, grad, weight, mask = named['self'], named['grad_output'], named['weight'], named['output_mask']
-    rows = grad.flatten(0, -2)
-    return (grad @ weight if mask[0] else None, rows.t() @ x.flatten(0, -2) if mask[1] else None,
-            rows.sum(0) if mask[2] else None)
+    """Use the same linear-gradient graph as ordinary FX tensors."""
+    from .algebra import linear_backward
+    return linear_backward(**_named(op_call, args, kwargs))
 
 
 def _spec_like(spec, shape, dtype):

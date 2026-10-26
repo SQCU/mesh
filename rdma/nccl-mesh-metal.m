@@ -576,10 +576,10 @@ struct metal_result metal_present(struct metal_program *program,void *lists,size
     const size_t slot=first%MESH_STREAM_ENTRIES;
     const size_t head=count<MESH_STREAM_ENTRIES-slot?count:MESH_STREAM_ENTRIES-slot;
     const struct MetalReach reaches[]={
-      {(id)lists,list_offset+slot*sizeof(struct mesh_entry),head*sizeof(struct mesh_entry),MetalReachWritten},
-      {(id)lists,list_offset,(count-head)*sizeof(struct mesh_entry),MetalReachWritten},
-      {(id)words,taken,sizeof(uint64_t),MetalReachRead},
-      {(id)words,presented,sizeof(uint64_t),MetalReachWritten}};
+      {(id)lists,list_offset+slot*sizeof(struct mesh_entry),head*sizeof(struct mesh_entry),MetalReachWritten,-1},
+      {(id)lists,list_offset,(count-head)*sizeof(struct mesh_entry),MetalReachWritten,-1},
+      {(id)words,taken,sizeof(uint64_t),MetalReachRead,-1},
+      {(id)words,presented,sizeof(uint64_t),MetalReachWritten,-1}};
     MetalEncoderReaches(program->encoder4,reaches,sizeof reaches/sizeof *reaches);
   }
   return dispatch(program,KIND_present,lists,records,words,NULL,

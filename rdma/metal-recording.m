@@ -28,6 +28,7 @@ struct MetalRecordedDispatch {
 static _Thread_local MetalCapture *activeCapture;
 static _Thread_local const struct MetalBindingView *bindingViews;
 static _Thread_local size_t bindingViewCount;
+static void MetalDispatchAccesses(id<MTLComputeCommandEncoder>,MTLSize,MTLSize,BOOL,const struct MetalReach *,size_t);
 
 void MetalRecordViews(const struct MetalBindingView *views,size_t count,void (^encode)(void)) {
     const struct MetalBindingView *previous=bindingViews;size_t before=bindingViewCount;
@@ -116,11 +117,10 @@ static void MetalAccesses(const struct MetalRecordedDispatch *command, const str
     }
     for(uint32_t k=0;k<command->reaches;k++) {
         const struct MetalReach *reach=reaches+command->reach+k;
+        if(!reach->length)continue;
         NSUInteger offset=reach->offset;
-        if(reach->access&MetalReachBinding)for(NSUInteger j=0;j<MESH_BUFFER_BINDINGS;j++)
-            if(command->buffers[j]==reach->buffer && command->offsets[j]==reach->offset) {
-                offset=MetalInvocationOffset(offset,command->strides[j],command->instances[j],invocation);break;
-            }
+        if(reach->access&MetalReachBinding)
+            offset=MetalInvocationOffset(offset,command->strides[reach->binding],command->instances[reach->binding],invocation);
         each(reach->buffer,offset,reach->length,(reach->access&MetalReachRead)!=0,(reach->access&MetalReachWritten)!=0);
     }
 }
@@ -200,7 +200,7 @@ void MetalEncoderReaches(id<MTL4ComputeCommandEncoder> encoder,const struct Meta
 static void MetalEncoderAccesses(id<MTL4ComputeCommandEncoder> encoder,const struct MetalRecordedDispatch *command,
     const struct MetalReach *reaches,NSUInteger invocation) {
     MetalAccesses(command,reaches,invocation,^(id<MTLBuffer> buffer,NSUInteger offset,NSUInteger bytes,BOOL load,BOOL store){
-        const struct MetalReach r={buffer,offset,bytes,(load?MetalReachRead:0)|(store?MetalReachWritten:0)};
+        const struct MetalReach r={buffer,offset,bytes,(load?MetalReachRead:0)|(store?MetalReachWritten:0),-1};
         MetalEncoderReaches(encoder,&r,1);
     });
 }
@@ -261,7 +261,7 @@ static void MetalDataflow(MetalCapture *capture) {
 @public MetalCapture *capture;
     struct MetalRecordedDispatch state;
 }
-- (void)dispatchThreadgroups:(MTLSize)grid threadsPerThreadgroup:(MTLSize)group reaches:(const struct MetalReach *)reaches count:(size_t)count;
+- (void)dispatchGrid:(MTLSize)grid threadsPerThreadgroup:(MTLSize)group threadGrid:(BOOL)threads reaches:(const struct MetalReach *)reaches count:(size_t)count;
 @end
 @interface MetalCommandRecorder : MetalForwarder
 @end
@@ -387,8 +387,8 @@ static void MetalDataflow(MetalCapture *capture) {
     [self recordDispatch];
 }
 // docs/kernels.md Any program: the reaches kept with the capture (their buffers held resident by the replay)
-- (void)dispatchThreadgroups:(MTLSize)grid threadsPerThreadgroup:(MTLSize)group reaches:(const struct MetalReach *)reaches count:(size_t)count {
-    state.grid = grid; state.group = group; state.threads = NO;
+- (void)dispatchGrid:(MTLSize)grid threadsPerThreadgroup:(MTLSize)group threadGrid:(BOOL)threads reaches:(const struct MetalReach *)reaches count:(size_t)count {
+    state.grid = grid; state.group = group; state.threads = threads;
     state.reach = (uint32_t)(capture->reaches.length / sizeof *reaches); state.reaches = (uint32_t)count;
     if (count) [capture->reaches appendBytes:reaches length:count * sizeof *reaches];
     for (size_t k = 0; k < count; k++) { [capture->resources addObject:reaches[k].buffer]; [capture->owners addObject:reaches[k].buffer]; }
@@ -397,8 +397,8 @@ static void MetalDataflow(MetalCapture *capture) {
 // ../dox/mesh/design/prepared-machine.md#M06
 // docs/kernels.md Any program: a pipeline of the recording device, whose reflection shows what its
 // bindings read and write; one whose arguments hold addresses declares what they reach, and is
-// refused where it declares nothing.  A reach marked MetalReachBinding is the extent of the bindings
-// starting at its buffer and offset, and is refused where none does.  Threadgroup memory the pipeline does not declare is not bound.  A pipeline the
+// refused where it declares nothing. Binding reaches describe the named argument's
+// access ranges, including holes and aliases. Threadgroup memory the pipeline does not declare is not bound. A pipeline the
 // recording device did not make is refused.
 - (void)recordDispatch {
     NSNumber *declared = objc_getAssociatedObject(state.pipeline, &pipelineBindingsKey);
@@ -422,20 +422,9 @@ static void MetalDataflow(MetalCapture *capture) {
                 index, name, k, reach->buffer.label ?: @"unnamed", (unsigned long)reach->length, (unsigned long)reach->offset,
                 (unsigned long)reach->buffer.length, reach->access, (unsigned long)slots];
         if (!(reach->access & MetalReachBinding)) continue;
-        BOOL bound = NO;
-        for (NSUInteger j = 0; j < MESH_BUFFER_BINDINGS; j++) {
-            if (state.buffers[j] != reach->buffer || state.offsets[j] != reach->offset || !(((state.access | (state.access >> MESH_ACCESS_WRITE_SHIFT)) >> j) & 1))
-                continue;
-            if (((state.access >> (MESH_ACCESS_WRITE_SHIFT + j)) & 1) && !(reach->access & MetalReachWritten))
-                [NSException raise:NSInvalidArgumentException format:@"command %lu (%@): reach %u declares the extent of binding %lu, "
-                    "which its pipeline writes, unwritten (docs/kernels.md Any program)", index, name, k, (unsigned long)j];
-            state.extents |= UINT32_C(1) << j;
-            bound = YES;
-        }
-        if (!bound)
-            [NSException raise:NSInvalidArgumentException format:@"command %lu (%@): reach %u (%@ at %lu) declares a binding's extent and "
-                "starts at none of its bindings (docs/kernels.md Any program)", index, name, k, reach->buffer.label ?: @"unnamed",
-                (unsigned long)reach->offset];
+        if (reach->binding < 0 || reach->binding >= MESH_BUFFER_BINDINGS || state.buffers[reach->binding] != reach->buffer)
+            [NSException raise:NSInvalidArgumentException format:@"command %lu (%@): reach %u names no matching buffer binding", index, name, k];
+        state.extents |= UINT32_C(1) << reach->binding;
     }
     struct MetalRecordedDispatch recorded = state;
     for(NSUInteger j=0;j<MESH_BUFFER_BINDINGS;j++) {
@@ -670,7 +659,7 @@ static void MetalRecordReplay(id<MTLDevice> device,void (^encode)(void),NSUInteg
                 struct MetalReach *reaches=capture->reaches.mutableBytes;
                 for(uint32_t k=0;k<prepared[i].reaches;k++) {
                     struct MetalReach *reach=reaches+prepared[i].reach+k;
-                    if((reach->access&MetalReachBinding)&&reach->buffer==prepared[i].buffers[j]&&reach->offset==prepared[i].offsets[j])
+                    if((reach->access&MetalReachBinding)&&reach->binding==(int32_t)j)
                         reach->offset+=shift;
                 }
                 prepared[i].offsets[j]+=shift;
@@ -731,9 +720,8 @@ static void MetalReplayDispatch(id<MTLComputeCommandEncoder> encoder, struct Met
         }
     for (NSUInteger j = 0; j < replay->memory; j++)
         if (source->memory[j]) [encoder setThreadgroupMemoryLength:source->memory[j] atIndex:j];
-    if (source->threads) [encoder dispatchThreads:source->grid threadsPerThreadgroup:source->group];
-    else if(reaches)MetalDispatchReaching(encoder,source->grid,source->group,reaches+source->reach,source->reaches);
-    else [encoder dispatchThreadgroups:source->grid threadsPerThreadgroup:source->group];
+    MetalDispatchAccesses(encoder,source->grid,source->group,source->threads,
+        reaches?reaches+source->reach:NULL,reaches?source->reaches:0);
 }
 
 struct MetalReplay *MetalReplayCommands(id<MTLDevice> device,const struct MetalCommandDescription *commands,size_t count,enum MetalForm form) {
@@ -762,8 +750,11 @@ struct MetalReplay *MetalReplayCommands(id<MTLDevice> device,const struct MetalC
             for(size_t k=0;k<description->reachCount;k++) {
                 const struct MetalReach reach=description->reaches[k];
                 [capture->resources addObject:reach.buffer];
-                if(reach.access&MetalReachBinding)for(size_t j=0;j<MESH_BUFFER_BINDINGS;j++)
-                    if(command.buffers[j]==reach.buffer&&command.offsets[j]==reach.offset)command.extents|=UINT32_C(1)<<j;
+                if(reach.access&MetalReachBinding) {
+                    if(reach.binding<0||reach.binding>=MESH_BUFFER_BINDINGS||command.buffers[reach.binding]!=reach.buffer)
+                        [NSException raise:NSInvalidArgumentException format:@"command reach names no matching buffer binding"];
+                    command.extents|=UINT32_C(1)<<reach.binding;
+                }
             }
             [capture->dispatches appendBytes:&command length:sizeof command];
         }
@@ -1167,17 +1158,23 @@ id<MTLDevice> MetalRecordingDevice(id<MTLDevice> device,BOOL indirectPipelines) 
 
 // docs/kernels.md Any program: recorded with the dispatch on a recording encoder; on any other, each reach but a
 // binding's extent (bound already) a resource the dispatch uses as its access says
-void MetalDispatchReaching(id<MTLComputeCommandEncoder> encoder, MTLSize groups, MTLSize threads,
-    const struct MetalReach *reaches, size_t count) {
+static void MetalDispatchAccesses(id<MTLComputeCommandEncoder> encoder, MTLSize groups, MTLSize threads,
+    BOOL threadGrid, const struct MetalReach *reaches, size_t count) {
     if (object_getClass(encoder) == [MetalComputeRecorder class]) {
-        [(MetalComputeRecorder *)encoder dispatchThreadgroups:groups threadsPerThreadgroup:threads reaches:reaches count:count];
+        [(MetalComputeRecorder *)encoder dispatchGrid:groups threadsPerThreadgroup:threads threadGrid:threadGrid reaches:reaches count:count];
         return;
     }
     for (size_t k = 0; k < count; k++)
         if (!(reaches[k].access & MetalReachBinding))
             [encoder useResource:reaches[k].buffer usage:((reaches[k].access & MetalReachRead) ? MTLResourceUsageRead : 0) |
                 ((reaches[k].access & MetalReachWritten) ? MTLResourceUsageWrite : 0)];
-    [encoder dispatchThreadgroups:groups threadsPerThreadgroup:threads];
+    if(threadGrid)[encoder dispatchThreads:groups threadsPerThreadgroup:threads];
+    else [encoder dispatchThreadgroups:groups threadsPerThreadgroup:threads];
+}
+
+void MetalDispatchReaching(id<MTLComputeCommandEncoder> encoder, MTLSize groups, MTLSize threads,
+    const struct MetalReach *reaches, size_t count) {
+    MetalDispatchAccesses(encoder,groups,threads,NO,reaches,count);
 }
 
 NSUInteger MetalRecordMark(void) {

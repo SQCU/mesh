@@ -23,7 +23,9 @@ and peer computers; a model name must not select another runtime.
    Numerical outputs bind directly to consumers, including output aliases.
 4. `torch_mesh.compiler` lifts captured tensor attributes into explicit operands. These include weights,
    constants and prebound destinations, so functionalization can see their storage relationships.
-5. The compiler functionalizes mutations and uses the selected PyTorch decomposition table. Input
+5. The compiler functionalizes mutations and extends the selected PyTorch decomposition table with the
+   shared rules in `algebra.py`. The linear-gradient rule now serves ordinary FX, ragged DTensor and
+   coded-weight declarations; it expands into existing products and reductions. Input
    mutations remain represented as writes to those inputs. Shapes and views remain available to lowering.
 6. Existing rewrites recognize eligible matrix products as native linears; replace a two-part input
    concatenation with two views; fuse a following `tanh`; and group independent products up to the
@@ -87,6 +89,32 @@ LiteRT supplies tensor indices, graph outputs and configured crossing cuts to th
 function. Its adapter serializes the resulting subgraphs and typed constants. Neither frontend's
 partition adapter emits a numerical operation, copy, wait, route or new execution interface.
 
+## Tensor views in command dependencies
+
+FX command operands now carry their accessed byte ranges into the shared recorder. The layout
+calculation reuses `views.byte_spans`, which partial tensors and transport already use. Transfer lists
+keep logical element order; `views.access_spans` computes the union needed for dependency ordering.
+A dense transpose is one range, broadcast dimensions add no repeated range, and holes in a strided
+view are not reads or writes. Empty views declare no bytes instead of the remainder of their buffer.
+
+Each binding reach names its argument index. Multiple ranges can belong to that argument, and two
+arguments can alias one buffer without losing their separate invocation offsets. The shared replay
+compiler carries these declarations through both thread-count and threadgroup-count launches, including
+when a prepared program is recorded into a larger program. Previously thread-count replay dropped them.
+The native streamed panel's direct output rows use the same range interface instead of their enclosing
+rectangle. LiteRT's contiguous external tensor views still enter through `MetalRecordViews`.
+
+This changes dependency metadata and prepared barriers, not the numerical kernels, tensor values or
+transport routes. The range lists are consumed during preparation. No range search, allocation or extra
+submission runs with the payload. Generic native commands which supply only a buffer still describe its
+remaining extent; those callers need their actual layouts supplied before they have FX's precision.
+
+Validation on 2026-10-26: the native library, Torch extension and Swift/LiteRT rank built. The existing
+transformer example's block prepared its complete forward/backward graph at batch 2, sequence 1,024,
+width 2,048 and float16, including native schedule realization. No numerical submission was made.
+That preparation exposed the missing ordinary-FX use of the linear-gradient rewrite already present
+in the ragged frontend; `algebra.py` now supplies it to all three tensor declarations.
+
 ## Native and LiteRT preparation
 
 | Frontend | Description supplied | Common destination |
@@ -141,9 +169,9 @@ should instantiate these bodies and their schedules, not transcribe them into se
 
 ## Remaining compiler work
 
-1. Connect index maps, aliases, value versions, accumulation types, quantization metadata and incomplete
-   reduction terms with page-range reads and writes. `BlockSpec`, partial tensors, native reaches and
-   routed transfers already provide parts of this description.
+1. Extend the shared view-to-access lowering to the remaining native command builders, and connect value
+   versions, accumulation types, quantization metadata and incomplete reduction terms with those ranges.
+   `BlockSpec`, partial tensors, native reaches and routed transfers already provide parts of this description.
 2. Extend functionalization and view simplification so destinations are assigned before emission and
    views remain index maps wherever consumers can use them directly.
 3. Recognize numerical patterns and apply their algebraic rules. A split product may combine partial sums;

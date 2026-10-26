@@ -39,6 +39,32 @@ def byte_spans(shape, strides, itemsize):
     return lowest, spans
 
 
+def access_spans(shape, strides, itemsize):
+    """The bytes a view touches, independent of its logical traversal order.
+
+    Transfer lists preserve logical order through ``byte_spans``. Dependency
+    ordering needs the union instead: broadcasts name one range and a dense
+    transpose still names one range. All work here happens during preparation.
+    """
+    shape, strides = tuple(shape), tuple(strides)
+    if len(shape) != len(strides):
+        raise ValueError('an access view needs one stride per dimension')
+    axes = sorted(range(len(shape)), key=lambda i: abs(strides[i]), reverse=True)
+    shift, spans = byte_spans([min(shape[i], 1) if not strides[i] else shape[i] for i in axes],
+                             [abs(strides[i]) for i in axes], itemsize)
+    if not spans:
+        return 0, []
+    shift += sum((n - 1) * step for n, step in zip(shape, strides) if n and step < 0)
+    union = []
+    for offset, width in sorted(spans):
+        if union and offset <= union[-1][0] + union[-1][1]:
+            lo, size = union[-1]
+            union[-1] = lo, max(lo + size, offset + width) - lo
+        else:
+            union.append((offset, width))
+    return shift, union
+
+
 def alias_runs(segments):
     """Concatenate described views in logical order, without reading their data.
 

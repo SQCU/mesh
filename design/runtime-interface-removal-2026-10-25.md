@@ -73,6 +73,14 @@ FX use the shared `views.alias_runs`/`cut_runs` calculation and the same configu
 cut agreement, then the native reduction compiler. The duplicated partial-layout walker is removed.
 The constrained data-model document is unchanged.
 
+Updated 2026-10-26: FX numerical records now use the existing logical view calculation to declare exact
+access ranges in the shared recorder. Strided holes, broadcast repeats and empty views no longer become
+whole enclosing accesses. Binding reaches name argument indices and follow their prepared invocation slots.
+Thread-count replay retains reaches when recorded into another program. Native streamed panel output rows
+use the same interface. See [compiler-pipeline.md](../docs/compiler-pipeline.md#tensor-views-in-command-dependencies).
+This closes that metadata loss; it does not implement early producer publication or remove the remaining
+native commands' coarse buffer declarations.
+
 ## Reviewed interfaces
 
 The bullets below preserve the removal rationale. The integration update above

@@ -44,7 +44,15 @@ struct MetalBindingView { __unsafe_unretained id<MTLBuffer> buffer; NSUInteger o
 void MetalRecordViews(const struct MetalBindingView *, size_t count, void (^encode)(void));
 // docs/kernels.md Any program
 enum { MetalReachRead = 1, MetalReachWritten = 2, MetalReachBinding = 4, MetalReachResident = 8 };
-struct MetalReach { __unsafe_unretained id<MTLBuffer> buffer; NSUInteger offset, length; uint32_t access; };
+// Binding reaches name their actual argument index. Several disjoint ranges
+// can describe one view; all follow that argument's prepared invocation slot.
+// A non-binding reach uses binding = -1 (memory addressed through an operand).
+struct MetalReach {
+    __unsafe_unretained id<MTLBuffer> buffer;
+    NSUInteger offset, length;
+    uint32_t access;
+    int32_t binding;
+};
 // Preparation only: carry declared page accesses across encoders on the supplied
 // queue. Prepare and enqueue its functions in the same order. Disjoint ranges
 // add no dependency. Transport uses this declaration for its shared counters.

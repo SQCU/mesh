@@ -950,9 +950,9 @@ def _linear(x, weight, bias=None):
 
 
 def _linear_backward(x, grad, weight, mask):
+    from .algebra import linear_backward
     assert not mask[1], f'{weight.label}: a coded matrix is a constant (no gradient for its codes)'
-    flat = grad.reshape(-1, grad.shape[-1])
-    return (weight.times(flat).reshape(x.shape) if mask[0] else None, None, flat.sum(0) if mask[2] else None)
+    return linear_backward(x, grad, weight, mask)
 
 
 _OPERATIONS = {
