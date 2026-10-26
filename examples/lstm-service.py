@@ -10,7 +10,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Shard
 from torch_mesh import partition
 from torch_mesh.backend import BROADCAST, Call
-from torch_mesh.declarations import Preparations
+from torch_mesh.declarations import Function, Preparations
 from torch_mesh.configuration import placement, bind, record
 from torch_mesh import _stream
 import time
@@ -60,21 +60,22 @@ def main():
     X = torch_mesh.empty(steps, rows, KIN, dtype=torch.half)
     O = torch_mesh.empty(steps, rows, H, dtype=torch.half) if rank == 0 else None
     t, k = torch.empty(1, dtype=torch.int64, device='mps').fill_(L - 1), config['steps_per_replay']
-    recording = torch_mesh.record(tick.stepper(X, O, t), k)
-    recording.issue(min(steps, k + steps % k))
     group = mesh.get_group('tp')
+    full, rest = divmod(steps, k)
+    chunks = [k] * full + [rest] * bool(rest)
+    functions = {}
+    for count in dict.fromkeys(chunks):
+        function = Function(tick.stepper(X, O, t, count), compiler='mesh')
+        function.declare(group)
+        functions[count] = function
+    runs = tuple(functions[count].run for count in chunks)
+    groups = [calls for count in chunks for calls in functions[count].groups.get(group.group_name, [])]
+    forms = [form for count in chunks for form in functions[count].forms]
     initial_forms = [(tick.mine, None, 2, tick.sizes, group.group_name, False, 1)] * (L - 1)
-    Preparations(initial_forms)()
-    for s in range(L - 1):
-        tick.starting(s, X[s])
-    tick.reset()
-    t.fill_(L - 1)
     if rank == 0:
         X.copy_(torch.from_numpy(inputs[:]))
     torch_mesh.check_memory()
-    torch.mps.synchronize()
     ticks = steps + L - 1
-    groups, forms = recording.schedule(group, steps)
     initial = [partition.gathered(tick.mine, 2, tick.sizes, group)] * (L - 1)
     bind(configuration, [[Call(BROADCAST, X.numel(), X.dtype, root=0)], *initial, *groups],
                        Preparations([*initial_forms, *forms]))
@@ -82,7 +83,8 @@ def main():
     dist.broadcast(X, src=0)
     for s in range(L - 1):
         tick.starting(s, X[s])
-    recording.issue(steps)
+    for run in runs:
+        run()
     completion = _stream.completion()
     _stream.publish_boundary()
     blocks = partition.split(mesh, 'tp', H)

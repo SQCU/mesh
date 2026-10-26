@@ -19,8 +19,8 @@ its own keys merged by the rows' logsumexp into the attention over all of them; 
 plan() declares a program's collectives on a group once, in their order (libnccl-mesh's ncclMeshCommPlan), each
 compiled then, so none is planned where it is issued.
 
-record() and Recording.issue() are a step recorded once and replayed (the CUDA graph's analogue) through torch's documented
-compile path: the step one graph (torch.compile, fullgraph) of the "mesh" backend, its replays issued back to back."""
+declarations.Function traces a complete numerical function with fake tensors and compiles it before execution.
+Its run attribute is the prepared callable; declaration and preparation do not execute the numerical payload."""
 
 
 def _autoload():
@@ -337,93 +337,3 @@ def merge_partials(out, lse, group=None, root=-1):
     group = group or dist.distributed_c10d._get_default_group()
     attended, lse = backend.attention(torch.ops.torch_mesh.merge_partials(backend.partial(out, lse), root, group.group_name))
     return attended.to(out.dtype), lse
-
-
-class Recording:
-    """A record()ed step: `k` steps unrolled in one graph compiled whole by the "mesh" backend at its first issue, and
-    the fewer a count k does not divide in a graph of their own, compiled at its first issue; each rank's compilation
-    met by every rank's before any of its collectives runs; `graphs` the graphs compiled so far."""
-
-    def __init__(self, step, name, k):
-        self.step, self.name, self.k, self.graphs, self.replays, self.unrolled = step, name, k, 0, 0, {}
-        self.declarations = {}
-
-    def issue(self, steps):
-        """`steps` steps issued back to back on torch's stream with no wait: steps // k replays of the k-step graph,
-        then one of the rest's."""
-        full, rest = divmod(steps, self.k)
-        for n in [self.k] * full + [rest] * bool(rest):
-            if n not in self.unrolled:
-                self.unrolled[n] = self._graph(n)
-            self.unrolled[n]()
-        self.replays += steps
-
-    def _graph(self, n):
-        """n steps unrolled in one graph (torch.compile with fullgraph), compiled at its first call."""
-        import torch
-
-        def steps():
-            for _ in range(n):
-                self.step()
-        return torch.compile(steps, backend=lambda gm, inputs: self._backend(gm, inputs, n), fullgraph=True, dynamic=False)
-
-    def _backend(self, gm, example_inputs, n):
-        """compiler's graph, then every rank's compilation of it met at the default group's store (a rank's compile
-        outlasting the library's silent-link bound would cancel a peer's first crossings): bounded by the store's
-        timeout.  The meeting is a host wait, so a publication waiting in torch's open buffer is committed first."""
-        import torch.distributed as dist
-
-        from . import _stream
-        from .declarations import _CAPTURE
-        captured = []
-        token = _CAPTURE.set(captured)
-        try:
-            made = compiler(gm, example_inputs)
-        finally:
-            _CAPTURE.reset(token)
-        groups, forms = {}, []
-        for lowered, prepared in captured:
-            forms.extend(prepared)
-            for name, calls in lowered.items():
-                groups.setdefault(name, []).extend(calls)
-        self.declarations[n] = groups, forms
-        if dist.is_initialized():
-            _stream.commit()
-            store, key = dist.distributed_c10d._get_default_store(), f'mesh/recording/{self.name}/{self.graphs}'
-            store.set(f'{key}/{dist.get_rank()}', b'1')
-            store.wait([f'{key}/{r}' for r in range(dist.get_world_size())])
-        from .declarations import Preparations
-        Preparations(forms)()
-        self.graphs += 1
-        return made
-
-    def schedule(self, group, steps):
-        """The actual compiled chunks of one invocation, before timing starts."""
-        groups, forms = [], []
-        full, rest = divmod(steps, self.k)
-        for n in [self.k] * full + [rest] * bool(rest):
-            if n not in self.declarations:
-                raise ValueError(f'recording chunk {n} must be compiled before declaring an invocation')
-            declared, prepared = self.declarations[n]
-            groups.extend(declared.get(group.group_name, []))
-            forms.extend(prepared)
-        return groups, forms
-
-
-_recordings = 0
-
-
-def record(step, k=1):
-    """`step` (a function of no arguments that runs one step on MPS tensors, its collectives torch's) recorded, the
-    CUDA graph's analogue, through torch's documented compile path (A53: no interposition): one graph of `k` steps
-    unrolled (torch.compile with fullgraph, its collectives functional ones), so a replay's host cost (the graph's
-    guards, its subclass wrapping, Inductor's wrapper) is paid once for k steps, compiled at its first replay by the "mesh"
-    backend (compiler: Inductor's kernels, the graph's collectives each issued on torch's stream under the one commit
-    rule and completed where it is waited) after every rank has compiled it.  Nothing runs while it records:
-    its tensors keep what they held, and each replay writes them.  Every rank records the same steps in the same
-    order.  What the 10-01 form (mesh 4cbe704, metal-microbench 35c30a9 metal_recording.m) did beyond this needs an
-    interposed recorder of torch's Metal commands, which has no documented extension point (README, Record and
-    replay)."""
-    global _recordings
-    _recordings += 1
-    return Recording(step, _recordings, k)

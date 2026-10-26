@@ -131,20 +131,18 @@ its caller: every rank's query block gathered, each block's attention over the r
 rows (a half of a block that sees none of the rank's keys left at none), and one reduce-scatter, so each owner holds its
 rows' attention. Its reproduction target is `cp.py`'s (Uneven nodes, below).
 
-### Record and replay
+### Prepare and call a whole function
 
-`recording = torch_mesh.record(step)` and `recording.issue(steps)` are a step recorded once and replayed (the CUDA
-graph's analogue) through torch's documented compile path: `step` (no arguments, its collectives torch's) is one graph
-(`torch.compile`, `fullgraph=True`) compiled at its first replay by the `"mesh"` backend (its collectives functional,
-each issued on torch's stream under the one commit rule: Performance), every rank's compilation met at the default
-group's store before any of its collectives runs (a rank compiling past a GPU wait's bound would otherwise fail its
-peers' first crossings: [NCCL.md](../NCCL.md#bounded-waits)). `issue` submits its steps back to back on torch's stream,
-with no wait between them: the steps are an operand's leading dimension, each reading what the last wrote in the
-stream's order. It adds no measurement or completion wait. The caller issues its function directly. A statistics thread observes ordinary completion state with a host
-clock; it cannot submit numerical work, add GPU timing events, or drain the stream for a measurement.
-Historical reproduction target
-(metal-microbench docs/measurement.md 2026-09-30, parts C and D, the 10-01 form): a replayed tp step 262.7-263.1 ms (SP=1 245.8-246.3, cp 512.3-513.7), a 16.8 MB all-reduce 63-64 us a
-call past the wire against 186-216 eager.
+`declarations.Function(function, compiler="mesh")` traces the supplied numerical function with fake tensors.
+`declare(group)` compiles its complete graph and collects its communication declarations before execution.
+The caller plans those declarations and binds storage with `Preparations` (or `Function.prepare`), then calls the
+prepared `.run` function directly. `Function.__call__` also restores structured outputs and parameter gradients
+for callers that need them. Tracing includes backward operations when the supplied function contains them.
+
+The LSTM service prepares its fixed-size chunks and any remainder through this interface. It does not execute
+a chunk to compile it, wait for peer compilation at first issue, or retain a second recording executor.
+A statistics thread observes ordinary completion state with a host clock; it cannot submit numerical work,
+add GPU timing events, or drain the stream for a measurement.
 
 The 10-01 form (mesh 4cbe704 `record`/`replay`, metal-microbench 35c30a9 `metal_recording.m`) also recorded every Metal
 command the step encoded, from any thread, and replayed them as one program; had torch's own copy kernels that store a
@@ -152,7 +150,7 @@ send buffer publish it by range (`MetalRecordPublish`), so its sends started as 
 replay's command buffers on the calls' landings (`MetalRecordGate`); and made each call persistent, its receives posted
 ahead from the replay's leading cut (`ncclMeshPersistentStart`). Those need the recorder interposed on Metal
 (`DYLD_INSERT_LIBRARIES`), which acceptance A53 forbids, and torch documents no MPS command capture to take its place
-(no MPS analogue of `torch.cuda.graph`; its MPS kernels encode into its own stream's encoder). So a replay here runs
+(no MPS analogue of `torch.cuda.graph`; its MPS kernels encode into its own stream's encoder). The FX callable here runs
 Inductor's wrapper and torch's MPS kernels each time; the posting ahead is the bridges' (a bridge posts a holding's
 receives into the holder's own landing pages, a window ahead of the data: [design/transport.md](../../design/transport.md)
 section 14), and the planning once is the communicator's compiled programs'. A training step's backward, run by

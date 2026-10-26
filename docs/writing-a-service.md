@@ -193,18 +193,17 @@ every rank along that dimension: one fused crossing a tick. This is Megatron's s
 last), c and rank 0's output are region tensors made at load (`torch_mesh.empty`), and the blocks hold for the whole
 run.
 
-**The recorded tick.** Every tick after the first L - 1 runs every layer, so it is one function of no arguments
-(`Tick.stepper`): it reads its input at a step counter held on the GPU, runs each layer and the gather, writes the top
-layer's h into the output at the counter less L - 1 (rank 0), and advances the counter. `torch_mesh.record(step, k)`
-records k ticks unrolled in one graph and the fewer that k does not divide in a graph of
-their own, and the run issues every later tick through it (`Recording.issue`); the first L - 1 ticks, while the
-layers above have not begun, run as they are (`Tick.starting`). The service replays it before the run (k ticks and
-the rest, so each graph compiles on every rank) and runs the starting ticks once, so every path the run takes is
-compiled before it begins, then zeroes the state and the counter. The compiler declares
-the complete broadcast, starting gathers and recorded gathers before execution. It
-reads destination-writing operators through PyTorch's functionalization metadata,
-and constructs the declaration before looking up cached numerical code. A replay's k
-gathers are one crossing issued once, each tick its repeat.
+**The prepared tick.** Every tick after the first L - 1 runs every layer. `Tick.stepper(X, O, t, k)` returns
+one function containing k such ticks. Each tick reads its input at the GPU counter, runs the layers and gather,
+writes the top layer's output on rank 0, and advances the counter. The service uses `declarations.Function`
+with the `mesh` compiler to trace each distinct chunk size with fake tensors and compile it during configuration.
+The full chunks and any shorter final chunk share that declaration path. Their prepared `.run` functions are
+called directly in the numerical loop. No numerical warmup, state reset or peer-compilation barrier is needed.
+
+The first L - 1 ticks, while the upper layers have not begun, use `Tick.starting`. The service declares the
+broadcast, starting gathers and compiled gathers together and binds their storage before execution. The compiler
+reads destination-writing operators through PyTorch's functionalization metadata and constructs the declaration
+before looking up cached numerical code. A chunk's k gathers are one crossing issued once, each tick its repeat.
 
 **Configuration.** `steps`, `rows`, `seed`, `input_width`, `width` (H), `layers`, `steps_per_replay` and
 `observations`. `lstm.inputs(configuration, steps, rows)` returns the input and weights in region memory, using

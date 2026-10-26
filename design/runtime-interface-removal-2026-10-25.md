@@ -220,6 +220,15 @@ does not establish that an implementation is faster or meets the model.
   current common compiler is reusable; a complete asynchronous prepared CPU executor is not established here.
   Historical `3d32355e` is a reference for prebound CPU operands, not permission to restore a deleted scheduler.
 
+### R18. First-issue compilation and its peer barrier — removed
+
+Added 2026-10-25T17:22:35-07:00. Removed `torch_mesh.record`, `Recording` and their first-issue graph cache,
+TCPStore compilation rendezvous, warm execution and state reset in the LSTM service. The service now prepares
+each configured chunk through the existing `declarations.Function` interface. It binds the complete declaration
+and calls the compiled functions directly. The numerical tick body and common collective compiler are retained.
+This closes the duplicate graph-preparation path; it does not close the native submission and crossing issues
+listed above. Whole-function performance is recorded by the canonical hourly.
+
 ## Existing capabilities to preserve and connect
 
 “Aligned” below describes the named mechanism, not a blanket performance certification of its callers.
