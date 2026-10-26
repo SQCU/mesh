@@ -179,6 +179,7 @@ backward operations; supplying parameters alone does not invent a backward graph
 | Member | Work performed |
 |---|---|
 | `declare(group)` | Fake-traces the whole callable, retains parameter gradients as graph outputs, lowers communication, and invokes the chosen compiler now. Returns this group's ordered `Call` groups. |
+| `operands` | Captured tensors lifted to explicit compiler inputs and bound once, including mutable state and aliases. |
 | `graph`, `groups` | The FX graph and declarations keyed by process-group name. |
 | `forms`, `preparations` | Crossing metadata and the storage-binding preparation built from it. |
 | `run` | The prepared numerical callable. With no compiler it is the original Python function. With a compiler it is the compiled FX callable returning flattened outputs and gradients. |

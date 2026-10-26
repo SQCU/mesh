@@ -310,6 +310,7 @@ class Function:
     def __init__(self, function, *, parameters=(), compiler=None):
         self.function, self.parameters, self.compiler = function, tuple(parameters), compiler
         self.graph, self.groups, self.run, self.output_spec = None, {}, None, None
+        self.operands = ()
         self.forms, self.preparations = [], None
 
     def declare(self, group):
@@ -329,14 +330,37 @@ class Function:
         if self.compiler is None:
             run = self.function
         else:
+            from functools import partial
+            from operator import attrgetter
             from torch._dynamo import lookup_backend
+            # Captured tensors are operands, including mutable state and its
+            # aliases. Leaving them as module constants changes AOTAutograd's
+            # mutation handling and prevents the same reinplacing as explicit
+            # frontend inputs. Bind their storage once, before compilation.
+            operands = []
+            first = next(iter(graph.graph.nodes))
+            for node in list(graph.graph.nodes):
+                if node.op != 'get_attr':
+                    continue
+                value = attrgetter(node.target)(graph)
+                if isinstance(value, torch.Tensor):
+                    with graph.graph.inserting_before(first):
+                        operand = graph.graph.placeholder(f'operand_{len(operands)}')
+                    operand.meta = node.meta.copy()
+                    node.replace_all_uses_with(operand)
+                    graph.graph.erase_node(node)
+                    if node is first:
+                        first = next(n for n in graph.graph.nodes if n.op != 'placeholder')
+                    operands.append(value)
+            graph = torch.fx.GraphModule(graph, graph.graph)
+            self.operands = tuple(operands)
             captured = []
             token = _CAPTURE.set(captured)
             try:
                 # Backward is already explicit in this graph. A second autograd
                 # layer would add unrelated saved tensors and gradient work.
                 with torch.no_grad():
-                    run = lookup_backend(self.compiler)(graph, [])
+                    run = partial(lookup_backend(self.compiler)(graph, operands), *self.operands)
             finally:
                 _CAPTURE.reset(token)
             if captured:
