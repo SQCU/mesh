@@ -5,6 +5,7 @@ completion observations can be collected without changing numerical execution.
 """
 import json
 import ctypes
+import contextlib
 from pathlib import Path
 
 class _Value(ctypes.Structure):
@@ -29,6 +30,42 @@ def measure(started, observed, useful_bytes, units=0):
 def emit(record, *, file=None):
     records = record if isinstance(record, list) else [record]
     print('\n'.join(json.dumps(row, separators=(',', ':'), sort_keys=True) for row in records), file=file, flush=True)
+
+
+@contextlib.contextmanager
+def serving(state, address):
+    """Read-only live administration state. Its owner updates ordinary operands.
+
+    Requests neither wait for a rank nor interact with numerical execution.
+    Output stays in memory and is visible before the producing process exits.
+    """
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path != '/STATS':
+                self.send_error(404)
+                return
+            body = json.dumps(state, separators=(',', ':')).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    with ThreadingHTTPServer(tuple(address), Handler) as server:
+        worker = threading.Thread(target=server.serve_forever, name='mesh-stats', daemon=True)
+        worker.start()
+        try:
+            yield
+        finally:
+            server.shutdown()
+            worker.join()
 
 
 def recorded_values(records):

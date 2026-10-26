@@ -144,7 +144,8 @@ def _launch(mesh_root, microbench_root, output_root):
 
 def prepare_node(node, paths, record, out, since):
     """Only successfully verified installs enter measurements; stale packages are never used."""
-    result = {'number': node.number, 'status': 'failed', 'sources': {}}
+    result = {'number': node.number, 'status': 'installing', 'sources': {}, 'commands': node.commands}
+    record['nodes'][f'{node.number}@{node.addr}'] = result
     try:
         for name in paths:
             destination = f'.cache/mesh-checkouts/{name}/{record["commits"][name]}'
@@ -173,6 +174,7 @@ def prepare_node(node, paths, record, out, since):
             if code:
                 raise RuntimeError(output)
     except Exception as error:
+        result['status'] = 'failed'
         result['error'] = str(error)
     return result
 
@@ -183,16 +185,11 @@ def rank_results(outputs):
         lines = output['output'].splitlines()
         code = output['exit']
         values, observations = [], []
-        for line in lines:
-            try:
-                value = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(value, dict):
-                if 'observations' in value:
-                    observations.extend(value['observations'])
-                else:
-                    values.append(value)
+        for value in output['records']:
+            if 'observations' in value:
+                observations.extend(value['observations'])
+            else:
+                values.append(value)
         failures = [line.strip() for line in lines if any(word in line.lower()
                     for word in ('error', 'exception', 'expired', 'deadline', 'abort', 'killed', 'segmentation'))
                     and not line.lstrip().startswith(('raise ', 'except ', 'frame #', 'Exception raised from '))]
@@ -215,7 +212,8 @@ def run_workload(item, nodes, paths, record, out, ordinal):
     tag = item['tag']
     selected = ([mesh.at(nodes, str(n)) for n in item['nodes']] if item.get('nodes')
                 else nodes[:item.get('rank_limit', len(nodes))])
-    result = {'tag': tag, 'configuration': item, 'status': 'failed'}
+    result = {'tag': tag, 'configuration': item, 'status': 'preparing', 'metrics': []}
+    record['workloads'].append(result)
     try:
         if not selected or None in selected:
             raise RuntimeError('required nodes are absent or did not install the pinned source successfully')
@@ -232,8 +230,9 @@ def run_workload(item, nodes, paths, record, out, ordinal):
         else:
             operands = history
             env += 'MESH_OBSERVATIONS_STDIN=1 '
+        result.update(status='running', ranks={f'rank{k}': {} for k in range(len(selected))})
         outputs = mesh.ranks(selected, None, tag, '.', command, 29600 + ordinal,
-                             env=env, alarm=item.get('timeout', 300), input=json.dumps(operands).encode())
+                             env=env, alarm=item.get('timeout', 300), input=json.dumps(operands).encode(), states=result['ranks'])
         result['ranks'] = rank_results(outputs)
         result['observations'] = [row for rank in result['ranks'].values() for row in rank.pop('observations')]
         if len(result['ranks']) != len(selected) or any(v['exit'] != 0 for v in result['ranks'].values()):
@@ -241,6 +240,7 @@ def run_workload(item, nodes, paths, record, out, ordinal):
             raise RuntimeError('; '.join(failures) or 'missing rank completion')
         result['status'] = 'completed'
     except Exception as error:
+        result['status'] = 'failed'
         result['error'] = str(error)
         print(f'{tag}: {result["error"]}', file=sys.stderr, flush=True)
     # A later fault does not erase earlier completed observations. Only rows
@@ -252,6 +252,7 @@ def run_workload(item, nodes, paths, record, out, ordinal):
 def _execute_locked(record):
     import mesh_nodes as mesh
     out = None
+    record['status'] = 'running'
     try:
         paths = {name: Path(value['path']) for name, value in record['checkouts'].items()}
         for name, root in paths.items():
@@ -259,9 +260,11 @@ def _execute_locked(record):
                 raise ValueError(f'{name}: checkout differs from the selected commit')
         mesh.configure(paths['mesh'], paths['metal-microbench'])
         items = workload_configuration(paths['metal-microbench'])
+        record.update(stage='discovery', discovery={})
         # Discovery observes the currently running bridge, explicitly before installation.
         # It is not evidence that the tested revision has been installed.
         def bootstrap(candidate):
+            record['discovery'][candidate.addr] = candidate.commands
             destination = f'.cache/mesh-checkouts/mesh/{record["commits"]["mesh"]}'
             fetch(candidate, record['upstreams']['mesh'], record['commits']['mesh'], destination)
             candidate.source = destination
@@ -269,6 +272,7 @@ def _execute_locked(record):
         found, candidates = mesh.discover(None, prepare=bootstrap)
         if not found:
             found = [mesh.Node('-', address) for address in candidates]
+        record['stage'] = 'installation'
         installs = mesh.parallel([lambda n=n: prepare_node(n, paths, record, out, record['started_unix'] - 3600)
                                   for n in found])
         record['nodes'] = {f'{node.number}@{node.addr}': result for node, result in zip(found, installs)}
@@ -288,15 +292,17 @@ def _execute_locked(record):
             record['errors'].append({'stage': 'pairing', 'error': 'not all current topology links paired'})
             ready = []
         for ordinal, item in enumerate(items):
+            record['stage'] = item['tag']
             result = run_workload(item, ready, paths, record, out, ordinal)
-            record['workloads'].append(result)
             if result['status'] != 'completed':
                 raise RuntimeError(f'{item["tag"]} did not complete; no further workloads submitted')
         record['status'] = 'completed' if (ready and not record['errors'] and
             all(value['status'] == 'completed' for value in record['workloads'])) else 'failed'
     except Exception as error:
+        record['status'] = 'failed'
         record['errors'].append({'stage': 'execute', 'error': str(error), 'traceback': traceback.format_exc()})
     record.pop('history', None)
+    record['stage'] = 'finished'
     return record
 
 
@@ -306,7 +312,13 @@ def main(argv=None):
     parser.add_argument('paths', nargs='*')
     args = parser.parse_args(argv)
     if args.action == 'execute':
-        record = _execute_locked(json.load(sys.stdin))
+        from mesh_statistics import serving
+        record = json.load(sys.stdin)
+        address = json.loads((Path(__file__).resolve().parents[1] / 'etc/statistics.json').read_text())['listen']
+        record['statistics'] = {'listen': address, 'pid': os.getpid()}
+        with serving(record, address):
+            print(f'Live state: http://{address[0]}:{address[1]}/STATS', file=sys.stderr, flush=True)
+            record = _execute_locked(record)
         print(json.dumps(record, separators=(',', ':')))
         return 0 if record['status'] == 'completed' else 1
     return launcher(*args.paths)

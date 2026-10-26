@@ -1,7 +1,9 @@
 """Shared node discovery, deployment and rank execution; runners supply operands only."""
 import concurrent.futures
 import contextlib
+import codecs
 import glob
+import io
 import json
 import os
 import re
@@ -11,6 +13,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -40,13 +43,65 @@ def home_path(relative):
 
 
 
-def sh(argv, input=None, out=None, append=False, timeout=None):
-    io_ = {'input': input} if input is not None else {'stdin': subprocess.DEVNULL}
+def sh(argv, input=None, out=None, append=False, timeout=None, state=None):
+    state = {} if state is None else state
+    state.clear()
+    state.update(command=argv, status='starting', started_unix=time.time(), output=[], records=[])
+    p = subprocess.Popen(argv, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    state.update(pid=p.pid, status='running')
+
+    def read():
+        decode = codecs.getincrementaldecoder('utf-8')('replace')
+        pending = ''
+        while raw := p.stdout.read1(io.DEFAULT_BUFFER_SIZE):
+            text = decode.decode(raw)
+            state['output'].append(text)
+            state['updated_unix'] = time.time()
+            lines = (pending + text).split('\n')
+            pending = lines.pop()
+            for line in lines:
+                try:
+                    value = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(value, dict):
+                    state['records'].append(value)
+        state['output'].append(decode.decode(b'', final=True))
+        p.stdout.close()
+
+    def write():
+        try:
+            p.stdin.write(input)
+            p.stdin.close()
+        except BrokenPipeError:
+            pass
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    writer = threading.Thread(target=write, daemon=True) if input is not None else None
+    if writer:
+        writer.start()
+    try:
+        p.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        p.wait()
+        state['status'] = 'timed-out'
+    else:
+        state['status'] = 'exited'
+    state.update(exit=p.returncode, finished_unix=time.time())
+    reader.join()
+    if writer:
+        writer.join()
+    output = ''.join(state['output'])
+    if state['status'] == 'timed-out':
+        raise subprocess.TimeoutExpired(argv, timeout, output=output.encode())
     if out is not None:
-        with open(out, 'ab' if append else 'wb') as f:
-            return subprocess.run(argv, stdout=f, stderr=subprocess.STDOUT, timeout=timeout, **io_).returncode, ''
-    p = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout, **io_)
-    return p.returncode, p.stdout.decode(errors='replace')
+        with open(out, 'a' if append else 'w') as f:
+            f.write(output)
+        return p.returncode, ''
+    return p.returncode, output
 
 
 def loads(text):
@@ -74,6 +129,7 @@ class Node:
         self.name = NAMES.get(number, number)
         self.source = 'mesh'
         self.discovered_links = 0
+        self.commands = []
 
     def argv(self, command):
         """The shared administration launcher, also used for resident-rank configuration."""
@@ -82,8 +138,10 @@ class Node:
         proxy = ['-o', f"ProxyCommand=ssh {' '.join(SSHO)} -W '[%h]:%p' mdot@{self.via}"] if self.via else []
         return ['ssh', *SSHO, *proxy, f'mdot@{self.addr}', command]
 
-    def run(self, command, **kw):
-        return sh(self.argv(command), **kw)
+    def run(self, command, state=None, **kw):
+        state = {} if state is None else state
+        self.commands.append(state)
+        return sh(self.argv(command), state=state, **kw)
 
     def py(self, *args, **kw):
         return self.run(f'PYTHONPATH={home_path(self.source + "/rdma")} {PY} -m mesh_nodes node '
@@ -221,16 +279,18 @@ def wait_paired(nodes, log):
     return ok
 
 
-def ranks(nodes, out, tag, folder, command, port, append=False, alarm=300, env='', guard=None, input=None):
+def ranks(nodes, out, tag, folder, command, port, append=False, alarm=300, env='', guard=None, input=None, states=None):
     master = nodes[0].ula
+    states = {} if states is None else states
 
     def rank(k):
+        state = states.setdefault(f'rank{k}', {})
         log = out / f'{tag}-rank{k}.log' if out is not None else None
         invoke = (f'RANK={k} WORLD_SIZE={len(nodes)} MASTER_ADDR={shlex.quote(master)} MASTER_PORT={port} '
                   f"{env}perl -e 'alarm {alarm}; exec @ARGV' {command}")
         remote = f'cd {home_path(folder)} && {invoke}'
         try:
-            code, output = nodes[k].run(remote, input=input, timeout=alarm + 30)
+            code, output = nodes[k].run(remote, input=input, timeout=alarm + 30, state=state)
         except subprocess.TimeoutExpired as error:
             code = 124
             output = (error.output or b'').decode(errors='replace') + '\nremote process did not exit after its deadline\n'
@@ -239,7 +299,7 @@ def ranks(nodes, out, tag, folder, command, port, append=False, alarm=300, env='
         if log is not None:
             with log.open('a' if append else 'w') as destination:
                 destination.write(output + f'\nexit {code}\n')
-        return {'exit': code, 'output': output}
+        return {'exit': code, 'output': output, 'records': state['records']}
 
     jobs = [lambda k=k: rank(k) for k in range(len(nodes))]
     pattern = f'^[^ ]*python [^ ]*{guard}'
