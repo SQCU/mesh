@@ -162,17 +162,19 @@ the synchronous CPU transport is not used as a fallback. Shared native stream co
   without an arbitrary host admission loop. The current `MetalReplaySubmit` still creates command objects;
   the recorder is a useful foundation, not proof that native execution is already free of runtime overhead.
 
-### R13. LiteRT's implicit late preparation and blocking stage executor
+### R13. LiteRT's implicit late preparation and blocking stage executor — removed
 
-- **Remove:** `recorded_run`'s fallback to `record_phases`, repeated `bind`/`split` during a call, and the
-  unrecorded Metal stage path through `run_stages`/`flush` in
-  [litert_program.m](../../../metal-microbench/litert_program.m). `flush` commits and waits; stage execution
-  repeatedly resolves descriptions and operands.
-- **Use:** `LiteRtProgramDeclare`, `record_phases`, shared external buffers and `MeshRankDeclareReplay`, all
-  already present. Native stages and captured upstream commands must use the same prepared records.
-- **Integration still required:** preserve non-Metal provider capability through an appropriate prepared
-  adapter; the Metal recorder cannot capture arbitrary CPU/ANE work. Delete implicit execution fallbacks,
-  not those engines. Make provider limitations explicit during configuration.
+Updated 2026-10-26 02:01 UTC. `LiteRtProgramDeclare` now owns binding, stage warmup and command recording.
+`LiteRtProgramRun` consumes prepared replay, including the speculative closing step, through `MeshRankRun`.
+The unrecorded stage executor, late recording fallback, WebGPU host executor and `MeshRankDeclareHost` are gone.
+`MeshRankCross` declares a crossing during recording; it no longer selects eager execution outside a recording.
+The call explicitly configures Metal recorded execution; an unsupported provider fails preparation.
+
+The importer consumes the shared phase parts and KV handoff declarations. Model configuration states transfer
+type, width and axis order. Existing graph tensors supply the source and destination head views, and the
+receiver reuses the export's cache-update fragment. Whole-phase placement and imported tensor metadata do not
+select an execution backend at runtime. Shared native submission overhead (R12) and adopted access declarations
+(R14) remain separate work.
 
 ### R14. Whole-buffer ordering in place of known partial accesses
 
@@ -259,7 +261,7 @@ The [graph history](aot-graphs-and-pytorch.md) explains the connections and prio
 | [engine_recording.swift](../../../metal-microbench/engine_recording.swift), `RankCall`, `RankRecording`, `EngineRecording`, `EngineProgram` | Whole native prefill/decode phases over shared operand slots | Uses the recorder already; inherits the submission loop in R12. |
 | [dense_execution.swift](../../../metal-microbench/dense_execution.swift), `Network`, `StepProgram`; [streamed_weights.swift](../../../metal-microbench/streamed_weights.swift) | Compose native model steps and coded/dense matrix work | Existing composition layer to reuse, not a reason to introduce PyTorch into the native engine. |
 | [decode_crossings.swift](../../../metal-microbench/decode_crossings.swift), `CrossingPoint`, `StepCrossings`, `SpecOperands` | Collective operands, shared-prefix descriptors and GPU speculative state | Useful prepared data. Crossings still inherit common collective executor gaps. |
-| [litert_program.h](../../../metal-microbench/litert_program.h), `LiteRtProgram`, `LiteRtPositions` | Upstream model compiler plus native command capture and shared tensors | Separate frontend using the same recorder; R13/R14 remain. |
+| [litert_program.h](../../../metal-microbench/litert_program.h), `LiteRtProgram`, `LiteRtPositions` | Upstream model compiler plus native command capture and shared tensors | Separate frontend using the same recorder; R13 removed, R14 remains. |
 | [neural_engine.swift](../../../metal-microbench/neural_engine.swift), `NeuralEngineShares`, `NeuralEnginePartner` | Prebound CPU/GPU/ANE shared work | Storage and numerical adapters are reusable; coordination still needs review against whole-call execution (R01). |
 | [mesh-coreml.m](../rdma/mesh-coreml.m), `mesh_coreml_predict`; `engines.Ane` | CoreML model execution over shared tensor storage | Retain the engine capability. Model preparation must be outside the call; the current wrapper is not certified as allocation-free native execution. |
 | Native `PageManager`, prefix trie; [dsv41.swift](../../../metal-microbench/dsv41.swift) model composition | Paged model state, shared prefixes, another model's native phases | Capability identified. Session management is not certified as a fixed numerical schedule; it is not a replacement transport. |

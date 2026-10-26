@@ -377,6 +377,24 @@ a peer handshake, or another runtime route selector.
 
 ## Native partial views and command preparation
 
+The LiteRT frontend joins the same native preparation interface. Microbench's `tools/prepare_e2b.py` reads a
+FlatBuffer graph, cuts its dependency graph, applies the shared planner's phase parts, and emits numerical stages
+and collective declarations. `tools/mesh/programs.py:phase_ranks` resolves both disjoint phase membership and
+per-phase layer overrides. A PyTorch/FX description is another frontend; importing LiteRT does not require
+translating its operators into PyTorch or Inductor.
+
+`handoff(prefill, decode, S, bs, rows, layout)` intersects KV head ranges. The model configuration supplies
+`layout = {type, element, axes}` explicitly. `crossed_heads` checks those declarations against the graph and emits
+a `view = {name, shape, heads, axis, element}` over an existing tensor. Source and destination consume that same
+format declaration. The receiver uses the export's cache-update fragment; no packing graph is inserted.
+
+`LiteRtProgramCreate` compiles the stages and names their buffers. `LiteRtProgramDeclare` binds those buffers,
+records native commands and crossing marks, and declares them through `MeshRankDeclareReplay`. `LiteRtProgramRun`
+uses `MeshRankRun`, including its prepared speculative epilogue. It has no host-stage executor or late recording
+fallback. `MeshRankCross` is now a recording interface; its eager numerical execution path and
+`MeshRankDeclareHost` were removed. Shared submission overhead and coarse adopted-command accesses remain in
+the removal manifest (R12 and R14).
+
 The earlier Swift surface `swift/Mesh.swift` was deleted in `a8952de9`; it is historical source, not an API
 available to import today. The Python surface preserves its block-oriented contract. The native numerical
 composition types that remain are in microbench's
