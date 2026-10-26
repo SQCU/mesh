@@ -17,6 +17,8 @@ _Static_assert(_Alignof(struct MetalReplay) == 32, "prepared native replay align
 
 // docs/kernels.md E2, Any program
 enum MetalForm { MetalFormIndirect, MetalFormEncoded, MetalFormSerial };
+// Build operands from the selected Metal configuration, shared by frontends.
+MTLCompileOptions *MetalCompilerOptions(void);
 
 // docs/kernels.md Any program.  A host program's operand whose storage holds `instances` slots of
 // `stride` bytes: invocation t binds slot t % instances (0 instances: slot t), its writes landing
@@ -61,18 +63,13 @@ typedef int (^MetalCrossing)(id<MTL4ComputeCommandEncoder> encoder, id<MTL4Argum
     NSUInteger invocation, NSUInteger mark);
 // docs/kernels.md#collectives
 struct MetalSchedule;
-struct MetalSchedule *MetalScheduleCreate(id<MTLDevice>, enum MetalForm);
-// Related prepared invocations share their configured queue. Queue creation
-// belongs to the function's preparation, not to each invocation slot.
+// The execution context supplies its queue. Preparing invocation slots cannot
+// create more queues; the number of slots is not a hardware resource count.
 struct MetalSchedule *MetalScheduleCreateOn(id queue, enum MetalForm);
 // An already encoded command from an external frontend enters the same
 // submission and completion path. The command has not been committed.
 struct MetalSchedule *MetalScheduleCommand(id<MTLCommandBuffer>);
 void MetalScheduleAfter(struct MetalSchedule *, id<MTLEvent>, uint64_t value);
-void MetalScheduleSignal(struct MetalSchedule *, id<MTLEvent>, uint64_t value);
-// A prepared CPU/ANE operation follows this schedule's input commands. Its
-// output event is published after the operation; unrelated GPU work proceeds.
-void MetalScheduleHost(struct MetalSchedule *, NSError *(^operation)(void));
 // Bind a host producer now and its data consumers later. The returned event is
 // owned by the caller. Unrelated commands between these declarations can run
 // while the CPU/ANE produces the result.

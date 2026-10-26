@@ -11,7 +11,7 @@
    peer node, phase and bandwidth, a port one the bridge found (its phase not MESH_UNKNOWN), the bridge finding them in
    index order; the port count (at most `capacity` written), or -errno (ESRCH: no bridge runs) */
 struct port_view { uint32_t peer,phase; uint64_t bandwidth; };
-static int ports_read(struct port_view *out,uint32_t capacity,uint32_t *node){
+static int ports_read(struct port_view *out,uint32_t capacity,uint32_t *node,uint32_t *layout){
   const int file=shm_open(MESH_NAME,O_RDONLY,0);
   if(file<0)return -errno;
   struct stat info;
@@ -19,6 +19,7 @@ static int ports_read(struct port_view *out,uint32_t capacity,uint32_t *node){
   struct hdr *m=mmap(NULL,(size_t)info.st_size,PROT_READ,MAP_SHARED,file,0);
   close(file);
   if(m==MAP_FAILED)return -errno;
+  *layout=m->version;
   int count=m->magic!=MESH_MAGIC || m->version!=MESH_LAYOUT?-EINVAL:mesh_gone((pid_t)atomic_load(&m->bridge_pid))?-ESRCH:0;
   if(!count)*node=m->node;
   for(uint32_t i=0;count>=0 && i<MESH_PORTS;i++){
@@ -40,10 +41,10 @@ static int ports_read(struct port_view *out,uint32_t capacity,uint32_t *node){
    available memory (mesh_nodes_health, design/transport.md) */
 int main(void){
   struct port_view port[MESH_PORTS];
-  uint32_t node=0,*nodes=NULL,(*link)[2]=NULL,room=64,links=64;
+  uint32_t node=0,layout=0,*nodes=NULL,(*link)[2]=NULL,room=64,links=64;
   uint64_t *bandwidth=NULL;
-  const int ports=ports_read(port,MESH_PORTS,&node);
-  if(ports<0){printf("{\"up\":false,\"errno\":%d}\n",-ports);return 0;}
+  const int ports=ports_read(port,MESH_PORTS,&node,&layout);
+  if(ports<0){printf("{\"up\":false,\"errno\":%d,\"region_layout\":%u,\"expected_layout\":%u}\n",-ports,layout,MESH_LAYOUT);return 0;}
   struct mesh_link_map map={0};
   int count=-ENOSPC;
   while(count==-ENOSPC){

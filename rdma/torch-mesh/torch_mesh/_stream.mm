@@ -46,7 +46,12 @@ struct MeshStream {
   std::map<uint64_t, std::vector<at::Tensor>> holders;
 
   explicit MeshStream(at::mps::MPSStream *stream) : mps(stream), progress([stream->device() newSharedEvent]),
-      prepared([stream->device() newMTL4CommandQueue]) {}
+      prepared([stream->device() newMTL4CommandQueue]) {
+    if (!progress || !prepared) {
+      [progress release]; [prepared release];
+      TORCH_CHECK(false,"preparing Metal context: shared event or command queue unavailable");
+    }
+  }
 
   // On torch's queue: the open buffer committed (and waited for, where `wait`), its end signalling the next count.
   void signalled(bool wait) {
@@ -593,8 +598,7 @@ static std::vector<id<MTLComputePipelineState>> pipelines_;
 
 static int64_t pipeline(const std::string &source, const std::string &name) {
   id<MTLDevice> device = at::mps::MPSDevice::getInstance()->device();
-  MTLCompileOptions *options = [MTLCompileOptions new];
-  options.languageVersion = MTLLanguageVersion4_0;
+  MTLCompileOptions *options = MetalCompilerOptions();
   NSError *error = nil;
   id<MTLLibrary> library = [device newLibraryWithSource:@(source.c_str()) options:options error:&error];
   if (!library) throw std::runtime_error(std::string("kernel source: ") + error.localizedDescription.UTF8String);
@@ -602,7 +606,7 @@ static int64_t pipeline(const std::string &source, const std::string &name) {
   if (!function) throw std::runtime_error("kernel source: no function " + name);
   id<MTLComputePipelineState> state = [device newComputePipelineStateWithFunction:function error:&error];
   if (!state) throw std::runtime_error(std::string("kernel pipeline: ") + error.localizedDescription.UTF8String);
-  [function release]; [library release]; [options release];
+  [function release]; [library release];
   pipelines_.push_back(state);
   return (int64_t)pipelines_.size() - 1;
 }

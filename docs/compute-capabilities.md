@@ -16,6 +16,24 @@ Read from the live nodes on 2026-10-26:
 | Studio 521750041 | 10 Super, 20 Performance | 64 |
 | Studio 455770905 | 10 Super, 20 Performance | 64 |
 | Mini 1974797816 | 8 Performance, 4 Efficiency | 16 |
+| Laptop 1980260065 | 6 Super, 12 Performance | 40 |
+
+The shared build operands are in `etc/compute/metal.mk`: macOS 26.0 and Metal 4.0. The bridge libraries,
+Torch extension and native Swift build consume that file. Numerical shader frontends use `MetalCompilerOptions`;
+transport AIR uses the same language setting. Numerical floating-point options keep the language's existing default;
+the transport build's explicit safe math setting remains separate. `METAL_CONFIGURATION` names a different file when
+a host needs a different build. A missing file fails the build. The extension passes the deployment target explicitly
+to both compilation and linking; Python's own macOS 11 build flags cannot silently set this library's API floor.
+
+`etc/bridge/thunderbolt.mk` supplies the provider's reserved queue-pair count. `ibv_query_device` supplies each port's
+total. The bridge derives usable pairs from those inputs before making a link. Frame capacity also has to fit the
+bridge's completion-record table. The planner does not choose capacities from an OS version or a model name.
+
+A prepared schedule now requires the execution context's queue as an operand. There is no schedule constructor that
+creates a queue from a device. Native rank calls share their process queue; FX invocations share their stream context's
+queue. Invocation slots do not multiply queues. Required queues and host-result events fail preparation if unavailable.
+This does not establish a GPU residency guarantee for a cooperative grid. Core count alone cannot supply that guarantee.
+The remaining crash investigation is recorded in `design/metal-resource-failures-2026-10-26.md`.
 
 The chain requires the `capabilities` directory in its configuration. `torch_mesh.compute.metal` loads the matching
 `etc/compute/appleN.json` and reads the device's live resource limits. Matrix extent and memory alignment come from

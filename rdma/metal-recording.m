@@ -755,13 +755,13 @@ struct MetalSchedule {
     NSError *(^host)(void);
 };
 
-static struct MetalSchedule *MetalScheduleTail(struct MetalSchedule *s) { return s->tail?:s; }
-
-struct MetalSchedule *MetalScheduleCreate(id<MTLDevice> device, enum MetalForm form) {
-    if(object_getClass(device)==[MetalDeviceRecorder class])device=((MetalForwarder *)device)->target;
-    id queue=form==MetalFormSerial?(id)[device newCommandQueue]:(id)[device newMTL4CommandQueue];
-    struct MetalSchedule *s=MetalScheduleCreateOn(queue,form);[queue release];return s;
+MTLCompileOptions *MetalCompilerOptions(void) {
+    MTLCompileOptions *options=[MTLCompileOptions new];
+    options.languageVersion=MESH_METAL_LANGUAGE;
+    return [options autorelease];
 }
+
+static struct MetalSchedule *MetalScheduleTail(struct MetalSchedule *s) { return s->tail?:s; }
 
 struct MetalSchedule *MetalScheduleCreateOn(id queue, enum MetalForm form) {
     if(!queue)return NULL;
@@ -808,11 +808,6 @@ void MetalScheduleAfter(struct MetalSchedule *s,id<MTLEvent> after,uint64_t valu
     if(s->form==MetalFormSerial&&after)[(id<MTLCommandBuffer>)s->command encodeWaitForEvent:after value:value];
 }
 
-void MetalScheduleSignal(struct MetalSchedule *s,id<MTLEvent> event,uint64_t value) {
-    s=MetalScheduleTail(s);
-    s->signal=[event retain];s->signalValue=value;
-}
-void MetalScheduleHost(struct MetalSchedule *s,NSError *(^operation)(void)) { MetalScheduleTail(s)->host=[operation copy]; }
 id<MTLResidencySet> MetalScheduleResources(struct MetalSchedule *s) { return MetalScheduleTail(s)->residency; }
 
 struct MetalCommandBinding MetalScheduleData(struct MetalSchedule *s,const void *data,size_t bytes,uint32_t index) {
@@ -865,7 +860,6 @@ static struct MetalSchedule *MetalScheduleAdvance(struct MetalSchedule *root,
     NSError *(^operation)(void),id<MTLSharedEvent> signal) {
     struct MetalSchedule *before=MetalScheduleTail(root),*next=MetalScheduleCreateOn(before->queue,before->form);
     if(!next)[NSException raise:NSMallocException format:@"preparing host-share continuation"];
-    next->signal=before->signal;next->signalValue=before->signalValue;
     before->signal=[signal retain];before->signalValue=signal?1:0;
     before->host=[operation copy];
     MetalScheduleFinish(before,nil);
@@ -875,6 +869,7 @@ static struct MetalSchedule *MetalScheduleAdvance(struct MetalSchedule *root,
 
 id<MTLSharedEvent> MetalScheduleHostProducer(struct MetalSchedule *root,NSError *(^operation)(void)) {
     id<MTLSharedEvent> event=[root->device newSharedEvent];
+    if(!event)[NSException raise:NSMallocException format:@"preparing host-share output event"];
     MetalScheduleAdvance(root,operation,event);
     return event;
 }
@@ -976,7 +971,6 @@ void MetalScheduleFinish(struct MetalSchedule *root,void (^completed)(NSError *)
     }
     [s->encoder endEncoding];s->finished=YES;
     if(s->form==MetalFormSerial) {
-        if(s->signal&&!s->host)[(id<MTLCommandBuffer>)s->command encodeSignalEvent:s->signal value:s->signalValue];
         [(id<MTLCommandBuffer>)s->command addCompletedHandler:^(id<MTLCommandBuffer> done){
             NSError *error=done.error;
             if(s->host&&!error)error=s->host();
@@ -1008,14 +1002,17 @@ int MetalScheduleStatus(const struct MetalSchedule *s) {
 
 void MetalScheduleEnqueue(struct MetalSchedule *s) {
     if(s->next)atomic_fetch_add_explicit(&s->references,1,memory_order_relaxed);
-    for(;s;s=s->next) {
+    while(s) {
+        // Completion may resume the owner and release the whole function
+        // before commit returns. Read the compiled successor before commit.
+        struct MetalSchedule *next=s->next;
         atomic_fetch_add_explicit(&s->references,1,memory_order_relaxed);
         if(s->form==MetalFormSerial)[(id<MTLCommandBuffer>)s->command commit];
         else {
             if(s->after)[(id<MTL4CommandQueue>)s->queue waitForEvent:s->after value:s->value];
             [(id<MTL4CommandQueue>)s->queue commit:(id<MTL4CommandBuffer> *)&s->command count:1 options:s->options];
-            if(s->signal&&!s->host)[(id<MTL4CommandQueue>)s->queue signalEvent:s->signal value:s->signalValue];
         }
+        s=next;
     }
 }
 

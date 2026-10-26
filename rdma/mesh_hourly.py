@@ -331,7 +331,10 @@ def _execute_locked(record):
             record['errors'].append({'stage': 'pairing', 'error': 'not all current topology links paired'})
             ready = []
         for ordinal, item in enumerate(items):
-            record['workloads'].append(run_workload(item, ready, paths, record, out, ordinal))
+            result = run_workload(item, ready, paths, record, out, ordinal)
+            record['workloads'].append(result)
+            if result['status'] != 'completed':
+                raise RuntimeError(f'{item["tag"]} did not complete; no further workloads submitted')
         record['status'] = 'completed' if (ready and not record['errors'] and
             all(value['status'] == 'completed' for value in record['workloads'])) else 'failed'
     except Exception as error:

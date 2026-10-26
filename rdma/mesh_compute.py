@@ -43,6 +43,8 @@ def hardware():
     if len(counts) != 1 or next(iter(counts)) <= 0:
         raise RuntimeError(f'compute capability: expected one positive gpu-core-count, got {sorted(counts)}')
     return {'model': _sysctl('hw.model'), 'chip': _sysctl('machdep.cpu.brand_string'),
+            'os': {'version': _read('sw_vers', '-productVersion').decode().strip(),
+                   'build': _read('sw_vers', '-buildVersion').decode().strip()},
             'cpu': {'physical_cores': physical, 'logical_cores': logical, 'levels': levels},
             'gpu': {'cores': counts.pop()}}
 

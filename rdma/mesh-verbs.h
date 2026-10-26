@@ -16,7 +16,6 @@
 #include <pthread.h>
 #include <time.h>
 
-#define QD 4095
 /* design/RDMA-KERNEL-RECOVERY.md#tbt_post_recv */
 /* tbt_post_recv loads only the low 32 address bits of an SGE, so no registration may cross a 4 GiB
    virtual-address boundary.  The region is mapped at a bank-aligned base and registered in extents of
@@ -165,8 +164,12 @@ static __attribute__((unused)) int device_up(struct mesh_device *device,struct w
       *refused=error;return error;
     }
   }
-  device->wire=wire->data;device->max_pairs=capabilities.max_qp>1?(uint32_t)capabilities.max_qp-1:0;
-  uint32_t capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
+  device->wire=wire->data;
+  device->max_pairs=capabilities.max_qp>MESH_PROVIDER_RESERVED_QPS?
+    (uint32_t)capabilities.max_qp-MESH_PROVIDER_RESERVED_QPS:0;
+  /* In-flight units must also fit the bridge's compiled completion records. */
+  uint32_t capacity=capabilities.max_qp_wr<(int)MESH_LANE_UNITS?
+    capabilities.max_qp_wr:MESH_LANE_UNITS-1;
   if(capabilities.max_cqe<=1 || !capacity)return EOPNOTSUPP;
   device->frame_capacity=capacity>=(uint32_t)capabilities.max_cqe?(uint32_t)capabilities.max_cqe-1:capacity;
   return 0;

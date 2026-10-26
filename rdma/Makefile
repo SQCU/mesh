@@ -2,16 +2,23 @@
 # each that changed into rdma/, in this order: the libraries first, the bridge's binary last, then libnccl-mesh with its
 # kernels (install-nccl, below)
 IMAGES = libmesh.dylib libnccl-mesh.dylib libmesh-coreml.dylib libmesh-statistics.dylib mesh-stat mesh-heartbeat mesh-flow
+.DEFAULT_GOAL := all
+METAL_CONFIGURATION ?= ../etc/compute/metal.mk
+include $(METAL_CONFIGURATION)
+METAL_DEFINES = -DMESH_METAL_LANGUAGE=$(MESH_METAL_LANGUAGE_ENUM)
+RDMA_CONFIGURATION ?= ../etc/bridge/thunderbolt.mk
+include $(RDMA_CONFIGURATION)
 MESH_CODESIGN_IDENTITY ?= Mesh Bridge
 # every warning an error, but a deprecation in the installed binaries, which each node builds with its own SDK (a newer
 # one's deprecation must not leave a node's bridge unbuilt)
 WARN = -Wall -Wextra -Werror -Wno-error=deprecated-declarations
+$(IMAGES:%=.build/%) .build/nccl-mesh-kernels: $(METAL_CONFIGURATION)
 all: $(IMAGES:%=.build/%)
 # the bridge and mesh-stat read the region through libmesh: beside them once installed, and at ../rdma from $MESH_ROOT/bin
 LIBMESH = -L.build -lmesh -Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../rdma
 # design/transport.md: the bridge, mesh-link.c and mesh-records.c over mesh-bridge.h
-.build/mesh-flow: mesh-link.c mesh-records.c mesh-bridge.h mesh-verbs.h mesh.h mesh-plan.h mesh-dataflow.h mesh-call.h .build/libmesh.dylib Makefile
-	cc $(CPPFLAGS) -fblocks -O2 $(WARN) -o $@ mesh-link.c mesh-records.c $(LIBMESH) -lrdma -framework CoreFoundation -framework IOKit
+.build/mesh-flow: mesh-link.c mesh-records.c mesh-bridge.h mesh-verbs.h mesh.h mesh-plan.h mesh-dataflow.h mesh-call.h .build/libmesh.dylib Makefile $(RDMA_CONFIGURATION) $(METAL_CONFIGURATION)
+	cc $(CPPFLAGS) -DMESH_PROVIDER_RESERVED_QPS=$(MESH_PROVIDER_RESERVED_QPS) -fblocks -O2 $(WARN) -o $@ mesh-link.c mesh-records.c $(LIBMESH) -lrdma -framework CoreFoundation -framework IOKit
 	codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge $@ || codesign --force --sign - --identifier io.mesh.bridge $@
 # design/transport.md section 2: the heartbeat, the job launchd keeps alive, which opens and closes the bridge
 .build/mesh-heartbeat: mesh-heartbeat.c mesh.h mesh-plan.h mesh-dataflow.h mesh-observe.h Makefile
@@ -75,7 +82,7 @@ KERNEL_FILES = metallib binarchive
 	cc -O2 $(WARN) -I .build -o $@ nccl-mesh-kernels.m -framework Metal -framework Foundation
 .build/libnccl-mesh.metal: .build/nccl-mesh-kernels
 	.build/nccl-mesh-kernels $@
-.build/libnccl-mesh.sha256: .build/libnccl-mesh.metal Makefile
+.build/libnccl-mesh.sha256: .build/libnccl-mesh.metal Makefile $(METAL_CONFIGURATION)
 	h=$$({ echo '$(METAL)'; cat $<; } | shasum -a 256) && echo "$${h%% *}" > $@
 # kernels: the kernels' AIR, which every Apple GPU's driver takes: vendor/libnccl-mesh.metallib, committed with
 # vendor/libnccl-mesh.sha256 (the kernels' SHA-256 it was compiled from, then the AIR's own; vendor/PROVENANCE.md), so
@@ -90,7 +97,7 @@ KERNEL_FILES = metallib binarchive
 # its branch's: a pull is never blocked by a rewritten vendor/), `kernels` puts them in vendor/ for a commit, and a
 # machine that cannot compile fails naming that build: never an AIR of other kernels.  Not in `all`, so that no image
 # waits on it (install-nccl takes it)
-METAL = xcrun metal -std=metal4.0 -fmetal-math-mode=safe -mmacosx-version-min=26.0 -Wall -Werror -Wno-unused-function \
+METAL = xcrun metal -std=metal$(MESH_METAL_LANGUAGE) -fmetal-math-mode=$(MESH_METAL_MATH) -mmacosx-version-min=$(MESH_MACOS_MIN) -Wall -Werror -Wno-unused-function \
   -Wno-error=deprecated-declarations
 XCODE = DEVELOPER_DIR=$(or $(DEVELOPER_DIR),$(lastword $(wildcard /Applications/Xcode*.app/Contents/Developer))) \
   SDKROOT=macosx
@@ -117,8 +124,8 @@ kernels: .build/libnccl-mesh.metallib
 	rm -f $@ && .build/nccl-mesh-kernels .build/libnccl-mesh.metallib $@
 .PHONY: .build/libnccl-mesh.binarchive kernels install-images install-nccl clean-kernels
 .build/libnccl-mesh.dylib: nccl-mesh.c mesh-statistics.c mesh-statistics.h metal-recording.m metal-recording.h mesh-write-order.h mesh-write-routes.h mesh-span-plan.h mesh-row-span-plan.h mesh-lease-retire.h nccl-mesh-metal.m nccl-mesh-metal.h nccl-mesh-kernels.h .build/libnccl-mesh.sha256 .build/mesh_metal.h nccl.h \
-  mesh-call.h mesh-dataflow.h mesh.h mesh-plan.h .build/libmesh.dylib Makefile
-	cc -fblocks -O2 $(WARN) -dynamiclib -I .build -DKERNELS_SHA256=\"$$(cat .build/libnccl-mesh.sha256)\" \
+  mesh-call.h mesh-dataflow.h mesh.h mesh-plan.h .build/libmesh.dylib Makefile $(METAL_CONFIGURATION)
+	cc -fblocks -O2 $(WARN) $(METAL_DEFINES) -dynamiclib -I .build -DKERNELS_SHA256=\"$$(cat .build/libnccl-mesh.sha256)\" \
 	  -Wl,-install_name,@rpath/libnccl-mesh.dylib -Wl,-rpath,@loader_path \
 	  $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ nccl-mesh.c mesh-statistics.c nccl-mesh-metal.m metal-recording.m -L.build -lmesh \
 	  -framework Metal -framework Foundation
