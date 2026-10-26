@@ -35,6 +35,7 @@
 struct MeshStream {
   at::mps::MPSStream *const mps;
   id<MTLSharedEvent> const progress;
+  id<MTL4CommandQueue> const prepared;
   // the buffers this stream committed, the k-th signalling k on progress as the GPU reaches its end
   uint64_t committed = 0;
   // whether a group was issued on this stream since the host path last waited for it
@@ -44,7 +45,8 @@ struct MeshStream {
   std::vector<at::Tensor> scratch;
   std::map<uint64_t, std::vector<at::Tensor>> holders;
 
-  explicit MeshStream(at::mps::MPSStream *stream) : mps(stream), progress([stream->device() newSharedEvent]) {}
+  explicit MeshStream(at::mps::MPSStream *stream) : mps(stream), progress([stream->device() newSharedEvent]),
+      prepared([stream->device() newMTL4CommandQueue]) {}
 
   // On torch's queue: the open buffer committed (and waited for, where `wait`), its end signalling the next count.
   void signalled(bool wait) {
@@ -427,9 +429,9 @@ using Schedule = std::shared_ptr<MetalSchedule>;
 
 static Schedule schedule_after_inputs() {
   at::mps::MPSStream *stream=at::mps::getCurrentMPSStream();
-  Schedule schedule(MetalScheduleCreate(stream->device(),MetalFormEncoded),MetalScheduleFree);
-  TORCH_CHECK(schedule,"creating the prepared function command stream");
   MeshStream *source=&stream_of(stream);
+  Schedule schedule(MetalScheduleCreateOn(source->prepared,MetalFormEncoded),MetalScheduleFree);
+  TORCH_CHECK(schedule,"creating the prepared function command stream");
   at::mps::dispatch_sync_with_rethrow(stream->queue(), ^{ source->signalled(false); });
   MetalScheduleAfter(schedule.get(),source->progress,source->committed);
   return schedule;
@@ -448,10 +450,10 @@ struct TorchSchedule {
   Schedule schedule;
   MeshStream *source;
   id<MTLSharedEvent> ready, done;
-  TorchSchedule(id<MTL4CommandQueue> queue=nil):source(&stream_of(at::mps::getCurrentMPSStream())) {
+  TorchSchedule():source(&stream_of(at::mps::getCurrentMPSStream())) {
     auto device=source->mps->device();
     ready=[device newSharedEvent];done=[device newSharedEvent];
-    schedule=Schedule(queue?MetalScheduleCreateOn(queue,MetalFormEncoded):MetalScheduleCreate(device,MetalFormEncoded),MetalScheduleFree);
+    schedule=Schedule(MetalScheduleCreateOn(source->prepared,MetalFormEncoded),MetalScheduleFree);
     TORCH_CHECK(schedule,"creating the prepared crossing command stream");
     MetalScheduleAfter(schedule.get(),ready,1);MetalScheduleSignal(schedule.get(),done,1);
   }
@@ -483,17 +485,14 @@ struct Collectives {
   Group group{true};
   std::vector<Issue> issues;
   std::vector<at::Tensor> operands;
-  id<MTL4CommandQueue> queue;
   Collectives(const std::vector<Call> &calls, int64_t comm, std::vector<at::Tensor> operands)
       : comm(comm), operands(std::move(operands)) {
-    queue=[at::mps::getCurrentMPSStream()->device() newMTL4CommandQueue];
     for (const Call &call : calls) issues.push_back(prepare(call, group));
   }
-  ~Collectives(){[queue release];}
   std::vector<std::unique_ptr<TorchSchedule>> executions;
   size_t next=0;
   void realize(size_t repetitions=1) {
-    auto made=std::make_unique<TorchSchedule>(queue);
+    auto made=std::make_unique<TorchSchedule>();
     const auto *list=&issues;const ncclComm_t handle=communicator(comm);
     checked(MetalScheduleCross(made->schedule.get(),^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
         id<MTLResidencySet> residency,NSUInteger,NSUInteger) {

@@ -116,8 +116,7 @@ static void MetalAccesses(const struct MetalRecordedDispatch *command, const str
         id<MTLBuffer> buffer=command->buffers[j];
         const BOOL load=(command->access>>j)&1,store=(command->access>>(32+j))&1;
         if(!buffer||(!load&&!store)||((command->extents>>j)&1))continue;
-        const NSUInteger slots=command->instances[j], slot=slots?invocation%slots:invocation;
-        const NSUInteger offset=command->offsets[j]+slot*command->strides[j];
+        const NSUInteger offset=MetalInvocationOffset(command->offsets[j],command->strides[j],command->instances[j],invocation);
         each(buffer,offset,command->lengths[j]?command->lengths[j]:command->strides[j]?command->strides[j]:buffer.length>offset?buffer.length-offset:0,load,store);
     }
     for(uint32_t k=0;k<command->reaches;k++) {
@@ -125,7 +124,7 @@ static void MetalAccesses(const struct MetalRecordedDispatch *command, const str
         NSUInteger offset=reach->offset;
         if(reach->access&MetalReachBinding)for(NSUInteger j=0;j<METAL_RECORDING_BUFFERS;j++)
             if(command->buffers[j]==reach->buffer && command->offsets[j]==reach->offset) {
-                NSUInteger slots=command->instances[j];offset+=(slots?invocation%slots:invocation)*command->strides[j];break;
+                offset=MetalInvocationOffset(offset,command->strides[j],command->instances[j],invocation);break;
             }
         each(reach->buffer,offset,reach->length,(reach->access&MetalReachRead)!=0,(reach->access&MetalReachWritten)!=0);
     }
@@ -532,9 +531,8 @@ static void MetalReplayBuild(MetalCapture *capture,id<MTLDevice> device,NSUInteg
         // (t % instances), and instances == repetitions is a bare t.
         for (NSUInteger j = 0; j < capture->buffers; ++j)
             if (((source->access | (source->access >> 32)) >> j) & 1) {
-                NSUInteger slots = source->instances[j], slot = slots ? t % slots : t;
                 [command setKernelBuffer:source->buffers[j]
-                    offset:source->offsets[j]+slot*source->strides[j] atIndex:j];
+                    offset:MetalInvocationOffset(source->offsets[j],source->strides[j],source->instances[j],t) atIndex:j];
             }
         for (NSUInteger j = 0; j < capture->memory; ++j)
             if (source->memory[j]) [command setThreadgroupMemoryLength:source->memory[j] atIndex:j];
@@ -644,8 +642,7 @@ static void MetalReplayDispatch4(id<MTL4ComputeCommandEncoder> encoder,id<MTL4Ar
     struct MetalReplay *replay,const struct MetalRecordedDispatch *source,NSUInteger t) {
     [encoder setArgumentTable:table];[encoder setComputePipelineState:source->pipeline];
     for(NSUInteger j=0;j<replay->buffers;j++)if(((source->access|(source->access>>32))>>j)&1) {
-        NSUInteger slots=source->instances[j],slot=slots?t%slots:t;
-        [table setAddress:source->buffers[j].gpuAddress+source->offsets[j]+slot*source->strides[j] atIndex:j];
+        [table setAddress:source->buffers[j].gpuAddress+MetalInvocationOffset(source->offsets[j],source->strides[j],source->instances[j],t) atIndex:j];
     }
     for(NSUInteger j=0;j<replay->memory;j++)if(source->memory[j])[encoder setThreadgroupMemoryLength:source->memory[j] atIndex:j];
     if(source->threads)[encoder dispatchThreads:source->grid threadsPerThreadgroup:source->group];
@@ -658,8 +655,7 @@ static void MetalReplayDispatch(id<MTLComputeCommandEncoder> encoder, struct Met
     [encoder setComputePipelineState:source->pipeline];
     for (NSUInteger j = 0; j < replay->buffers; j++)
         if (((source->access | (source->access >> 32)) >> j) & 1) {
-            NSUInteger slots = source->instances[j], slot = slots ? t % slots : t;
-            [encoder setBuffer:source->buffers[j] offset:source->offsets[j] + slot * source->strides[j] atIndex:j];
+            [encoder setBuffer:source->buffers[j] offset:MetalInvocationOffset(source->offsets[j],source->strides[j],source->instances[j],t) atIndex:j];
         }
     for (NSUInteger j = 0; j < replay->memory; j++)
         if (source->memory[j]) [encoder setThreadgroupMemoryLength:source->memory[j] atIndex:j];

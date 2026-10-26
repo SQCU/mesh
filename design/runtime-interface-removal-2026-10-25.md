@@ -45,7 +45,11 @@ TP, EP and CP declare whole functions. The CP example supplies compiler crossing
 Hourly workload bodies live in `mesh/examples`; the hourly supplies configurations. The former
 A/B runner is now a reader of canonical hourly records, with no installer, script substitution,
 private timer or numerical loop. `mesh-statistics.h` supplies ordinary host time and paired
-latency/useful-rate arithmetic; Python and native callers import it.
+latency/useful-rate arithmetic; Python and native callers import it. LM serving reuses the same latency/rate record
+for display and history; speculative submissions also enter the shared scheduler.
+Prepared Torch crossings use one native queue per framework stream. Native crossing
+bindings now advance through the declared invocation slots with the same offset
+calculation as recorded compute; strided WRITE views realize the peers' agreed slot period.
 
 Collective repetitions, recurrent chain commands and DNN row blocks are prepared before enqueue.
 FX native bindings and fused crossings share `Preparations` and its ordered operands; the LSTM

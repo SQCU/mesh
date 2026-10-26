@@ -23,6 +23,9 @@ enum MetalForm { MetalFormIndirect, MetalFormEncoded, MetalFormSerial };
 // `outputOffset` bytes past it (a stride: the next invocation's input).  Any buffer the block binds
 // that is not named is bound as recorded, at every invocation.
 struct MetalOperand { const char *name; __unsafe_unretained id<MTLBuffer> buffer; NSUInteger stride, instances, outputOffset; };
+static inline NSUInteger MetalInvocationOffset(NSUInteger offset, NSUInteger stride, NSUInteger instances, NSUInteger invocation) {
+    return offset + (instances ? invocation % instances : invocation) * stride;
+}
 // A recording device over `device`, which the caller makes and passes in: the command queues and
 // compute pipelines made from it record the dispatches their compute encoders issue inside
 // MetalRecord's `encode` (each pipeline's reflection kept for the dataflow, with the reaches each
