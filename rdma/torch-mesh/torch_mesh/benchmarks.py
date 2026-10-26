@@ -75,16 +75,14 @@ def bandwidth(config):
     prepared = []
     for source, output, useful, declaration, calls, what, requested in cases:
         binding, _ = prepare_fragments([(declaration, source, output)], group)
-        for _ in range(calls):
-            binding.realize()
+        binding.realize(calls)
         prepared.append((binding, useful, calls, what, requested))
     observer = rollout.start(dist.distributed_c10d._get_default_store(), 'mesh/bandwidth', rank, size,
                              'bandwidth')
     group._observers = [observer]
     for index, (binding, useful, calls, what, requested) in enumerate(prepared):
         started = now()
-        for _ in range(calls):
-            binding.enqueue()
+        binding.enqueue()
         completion = _stream.completion()
         _stream.publish_boundary()
         observer[0].put((completion, {'episode': str(index), 'parts': {}, 'graphs': {}, 'costs': {},

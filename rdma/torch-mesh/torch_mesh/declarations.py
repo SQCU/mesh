@@ -319,7 +319,14 @@ _BOUND = {'all_to_all_single', 'merge_partials', 'reduce_scatterv',
 def _bound(node):
     target, args = operation(node)
     schema = getattr(target, '_schema', None)
-    return schema is not None and args.get('group_name') is not None and schema.name.split('::')[-1] in _BOUND
+    if schema is None or args.get('group_name') is None:
+        return False
+    name = schema.name.split('::')[-1]
+    if name in ('all_reduce', 'all_reduce_'):
+        x = args.get('input', args.get('x', args.get('self')))
+        reduction = args.get('reduce_op', args.get('op', 'sum'))
+        return not (reduction == 'sum' and x.device.type == 'mps' and x.dtype in (torch.float16, torch.float32))
+    return name in _BOUND
 
 
 class BoundGraph:
@@ -392,14 +399,28 @@ class BoundGraph:
                 targets = map_arg(outputs, storage)
                 crossing = next((n for n in module.graph.nodes if _bound(n)), None)
                 if crossing is None:
-                    def numerical(*operands, module=module, targets=targets):
-                        results = module(*operands)
-                        for target, result in zip(tree_flatten(targets)[0], tree_flatten(results)[0]):
-                            if isinstance(target, torch.Tensor):
-                                target.copy_(result)
-                        return targets
-                    made = Function(numerical, *args)
-                    made.declare(group)
+                    # Keep the graph and its one FakeTensor shape environment.
+                    # Retracing a split graph creates a second set of symbols
+                    # for the same internal values and loses their bindings.
+                    output_node = next(n for n in module.graph.nodes if n.op == 'output')
+                    leaves, specification = tree_flatten(outputs)
+                    destinations = tree_flatten(targets)[0]
+                    bound = []
+                    with module.graph.inserting_before(output_node):
+                        for k, (result, destination) in enumerate(zip(leaves, destinations)):
+                            if not isinstance(destination, torch.Tensor):
+                                bound.append(result)
+                                continue
+                            name = f'_mesh_output_{k}'
+                            module.register_buffer(name, destination)
+                            into = module.graph.get_attr(name)
+                            bound.append(module.graph.call_function(torch.ops.aten.copy_.default, (into, result)))
+                    from torch.utils._pytree import tree_unflatten
+                    output_node.args = (tree_unflatten(bound, specification),)
+                    module.recompile()
+                    made = Function(module, *args)
+                    made.output_spec = tree_flatten(targets)[1]
+                    made.declare_graph(module, group)
                     self.steps.append((made, 'run'));self.order.append(made.preparations.order)
                     self.forms.extend(made.forms)
                     declarations = made.groups
@@ -410,7 +431,7 @@ class BoundGraph:
                     actual = map_arg(crossing.args, live.__getitem__)
                     named = {a.name: actual[i] if i < len(actual) else crossing.kwargs.get(a.name, a.default_value)
                              for i, a in enumerate(target._schema.arguments)}
-                    source = named.get('input', named.get('x', named.get('partials')))
+                    source = named.get('input', named.get('x', named.get('self', named.get('partials'))))
                     if metadata.get('dim', 0) != 0:
                         raise NotImplementedError('nonleading reduction axes require partial tensor views')
                     native = dist.distributed_c10d._resolve_process_group(metadata['group_name'])
@@ -476,6 +497,12 @@ class Function:
             return (*values, *gradients)
 
         graph, declarations = trace(recorded, *self.arguments, parameters=self.parameters)
+        return self.declare_graph(graph, group, declarations)
+
+    def declare_graph(self, graph, group, declarations=None):
+        """Compile an existing complete graph without retracing its operators."""
+        from functools import partial
+        declarations = lower(graph) if declarations is None else declarations
         if any(_bound(node) for node in graph.graph.nodes):
             prepared = BoundGraph(graph, self.arguments, group)
             self.graph, self.groups, self.run, self.forms = prepared.graph, prepared.groups, prepared.run, prepared.forms

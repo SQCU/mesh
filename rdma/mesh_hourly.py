@@ -221,7 +221,10 @@ def rank_results(outputs):
         if code:
             # Diagnostics go to the caller's console. Durable hourly records
             # retain only the compact failure and paired performance values.
-            print(f'{name}:\n' + '\n'.join(lines[-160:]), file=sys.stderr, flush=True)
+            import itertools
+            diagnostic = [line for line, _ in itertools.groupby(lines)
+                          if any(token in line for token in ('File ', 'Error', 'Exception', 'error:', 'assertion', 'Context leak'))]
+            print(f'{name}:\n' + '\n'.join(diagnostic[-40:]), file=sys.stderr, flush=True)
         values, observations = [], []
         for line in lines:
             try:

@@ -55,6 +55,9 @@ typedef int (^MetalCrossing)(id<MTL4ComputeCommandEncoder> encoder, id<MTL4Argum
 // docs/kernels.md#collectives
 struct MetalSchedule;
 struct MetalSchedule *MetalScheduleCreate(id<MTLDevice>, enum MetalForm);
+// Related prepared invocations share their configured queue. Queue creation
+// belongs to the function's preparation, not to each invocation slot.
+struct MetalSchedule *MetalScheduleCreateOn(id queue, enum MetalForm);
 // An already encoded command from an external frontend enters the same
 // submission and completion path. The command has not been committed.
 struct MetalSchedule *MetalScheduleCommand(id<MTLCommandBuffer>);

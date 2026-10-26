@@ -448,10 +448,10 @@ struct TorchSchedule {
   Schedule schedule;
   MeshStream *source;
   id<MTLSharedEvent> ready, done;
-  TorchSchedule():source(&stream_of(at::mps::getCurrentMPSStream())) {
+  TorchSchedule(id<MTL4CommandQueue> queue=nil):source(&stream_of(at::mps::getCurrentMPSStream())) {
     auto device=source->mps->device();
     ready=[device newSharedEvent];done=[device newSharedEvent];
-    schedule=Schedule(MetalScheduleCreate(device,MetalFormEncoded),MetalScheduleFree);
+    schedule=Schedule(queue?MetalScheduleCreateOn(queue,MetalFormEncoded):MetalScheduleCreate(device,MetalFormEncoded),MetalScheduleFree);
     TORCH_CHECK(schedule,"creating the prepared crossing command stream");
     MetalScheduleAfter(schedule.get(),ready,1);MetalScheduleSignal(schedule.get(),done,1);
   }
@@ -483,20 +483,27 @@ struct Collectives {
   Group group{true};
   std::vector<Issue> issues;
   std::vector<at::Tensor> operands;
+  id<MTL4CommandQueue> queue;
   Collectives(const std::vector<Call> &calls, int64_t comm, std::vector<at::Tensor> operands)
       : comm(comm), operands(std::move(operands)) {
+    queue=[at::mps::getCurrentMPSStream()->device() newMTL4CommandQueue];
     for (const Call &call : calls) issues.push_back(prepare(call, group));
   }
+  ~Collectives(){[queue release];}
   std::vector<std::unique_ptr<TorchSchedule>> executions;
   size_t next=0;
-  void realize() {
-    auto made=std::make_unique<TorchSchedule>();
+  void realize(size_t repetitions=1) {
+    auto made=std::make_unique<TorchSchedule>(queue);
     const auto *list=&issues;const ncclComm_t handle=communicator(comm);
     checked(MetalScheduleCross(made->schedule.get(),^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
         id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
       ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
         .residencySet=(__bridge void *)residency};
-      return (int)encoded(*list,handle,&on);
+      for(size_t k=0;k<repetitions;k++) {
+        const int result=(int)encoded(*list,handle,&on);
+        if(result)return result;
+      }
+      return 0;
     }));
     const auto held=operands;
     MetalScheduleFinish(made->schedule.get(),^(NSError *){(void)held;});executions.push_back(std::move(made));
@@ -1197,12 +1204,12 @@ struct IndexedCrossing {
   std::vector<CrossingFrame> frames;
   size_t next=0;
 };
-static auto *metadata_after_=new std::map<int64_t,id<MTLSharedEvent>>;
+static auto *metadata_queues_=new std::map<int64_t,id<MTL4CommandQueue>>;
 static auto *indexed_crossings_ = new std::vector<std::unique_ptr<IndexedCrossing>>;
 
 static void release_crossings(int64_t comm) {
-  auto event=metadata_after_->find(comm);
-  if(event!=metadata_after_->end()){[event->second release];metadata_after_->erase(event);}
+  auto queue=metadata_queues_->find(comm);
+  if(queue!=metadata_queues_->end()){[queue->second release];metadata_queues_->erase(queue);}
   for (auto &call : *indexed_crossings_)
     if (call && call->form->comm == comm) call.reset();
 }
@@ -1241,7 +1248,7 @@ static void tensor_binding(Dispatch &dispatch, size_t index, const at::Tensor &t
   dispatch.lengths[index] = tensor.nbytes();
 }
 
-static void compile_crossing(int64_t index) {
+static void compile_crossing(int64_t index) { @try {
   IndexedCrossing &call=*(*indexed_crossings_)[index];FusedForm &f=*call.form;
   const int64_t j=f.j;
   Schedule transport;
@@ -1251,11 +1258,10 @@ static void compile_crossing(int64_t index) {
     const int64_t half=f.turn%2;
     PreparedWrites &plans=*ring.plans[half];
     auto device=call.stream->mps->device();
-    transport=Schedule(MetalScheduleCreate(device,MetalFormEncoded),MetalScheduleFree);
-    id<MTLSharedEvent> before=(*metadata_after_)[f.comm],done=[device newSharedEvent];
-    if(before)MetalScheduleAfter(transport.get(),before,1);
-    MetalScheduleSignal(transport.get(),done,1);
-    [before release];(*metadata_after_)[f.comm]=done;
+    id<MTL4CommandQueue> &queue=(*metadata_queues_)[f.comm];
+    if(!queue)queue=[device newMTL4CommandQueue];
+    transport=Schedule(MetalScheduleCreateOn(queue,MetalFormEncoded),MetalScheduleFree);
+    TORCH_CHECK(transport,"creating the prepared metadata command stream");
     prepare_fused_writes(transport.get(),plans);
     MetalScheduleFinish(transport.get(),nil);
     for(int64_t k=0;k<f.channels;k++) {
@@ -1277,6 +1283,9 @@ static void compile_crossing(int64_t index) {
   for(id allocation in MetalScheduleResources(frame.transport.get()).allAllocations)
     frame.resources.push_back((id<MTLResource>)allocation);
   call.frames.push_back(std::move(frame));
+} @catch(NSException *error) {
+  throw std::runtime_error(error.reason.UTF8String);
+}
 }
 
 static void run_crossing(IndexedCrossing &call, const at::Tensor &x, const std::optional<at::Tensor> &w, const at::Tensor &out) {
@@ -1318,27 +1327,27 @@ static void indexed_step_out(const at::Tensor &x, const std::optional<at::Tensor
 struct ChainStep {
   std::array<id<MTLBuffer>, 4> buffers;
   std::array<NSUInteger, 4> offsets, lengths;
-  uint32_t first, phase, last, previous_j, j;
+  uint32_t first, phase, last, previous_j, j, input_j;
   const std::vector<Dispatch *> *dispatches;
 };
 struct ChainChunk {
   PreparedWrites *plans;
-  size_t first, count, input, prefetch_first, prefetch_count, input_first;
+  size_t first, count, input, prefetch_first, prefetch_count;
 };
 struct PreparedChain {
   int64_t comm;
   std::vector<at::Tensor> held;
-  std::array<std::vector<ChainStep>, 2> steps;
-  std::array<std::vector<ChainChunk>, 2> chunks;
+  std::vector<ChainStep> steps;
+  std::vector<ChainChunk> chunks;
   std::vector<std::unique_ptr<PreparedWrites>> inputs;
   std::vector<uint32_t> input_last;
-  Dispatch dispatch, input_publication, input_landing;
+  Dispatch dispatch, input_publication;
   std::vector<Dispatch> products;
   std::vector<Dispatch *> regular, final;
   Dispatch *publication;
   size_t publication_output, publication_j;
   MeshStream *stream;
-  uint32_t channels, phase = 0, generation = 0;
+  uint32_t channels;
   Schedule schedule;
 };
 static void compile_chain(PreparedChain &chain);
@@ -1352,7 +1361,7 @@ static int64_t chain_slot() {
   prepared_chains_->push_back(nullptr);
   return index;
 }
-static void prepare_chain(int64_t index, int64_t kernel, const std::vector<int64_t> &input_kernels, const std::vector<int64_t> &products,
+static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, const std::vector<int64_t> &products,
                           const std::vector<at::Tensor> &operands,
                           const std::vector<int64_t> &constants, int64_t groups, int64_t threads,
                           const std::string &group, int64_t ranks, int64_t batch, int64_t input_frames) {
@@ -1363,11 +1372,10 @@ static void prepare_chain(int64_t index, int64_t kernel, const std::vector<int64
   std::vector<std::optional<at::Tensor>> buffers(operands.begin(), operands.end());
   buffers.push_back(x);  // previous landing; replaced by its compiled page below
   std::vector<int64_t> words = constants;
-  words.resize(10 + 24 * f.channels);
+  words.resize(12 + 36 * f.channels);
   auto chain = std::make_unique<PreparedChain>(PreparedChain{f.comm, operands, {}, {}, {}, {},
       encoded(kernel, buffers, words, 15, groups, 1, threads),
-      encoded(input_kernels[0], {}, std::vector<int64_t>(2 + 12 * f.channels), 15, 1, 1, 32),
-      encoded(input_kernels[1], {}, std::vector<int64_t>(2 + 12 * f.channels), 15, 1, 1, 32),
+      encoded(input_kernel, {}, std::vector<int64_t>(2 + 12 * f.channels), 15, 1, 1, 32),
       {}, {}, {}, nullptr, 6, 9,
       &stream_of(at::mps::getCurrentMPSStream()), (uint32_t)f.channels});
   chain->regular = chain->final = {&chain->dispatch};
@@ -1412,14 +1420,12 @@ static void prepare_chain(int64_t index, int64_t kernel, const std::vector<int64
     chain->inputs.push_back(std::move(prepared));
     chain->input_last.push_back((uint32_t)(count - 1));
   }
-  // Both call generations use the same allocated rings. Continuing their
-  // parity keeps the first frame after a final join on the other pages.
-  for (uint32_t generation = 0; generation < 2; generation++) {
+  {
     at::Tensor previous = x;
     uint32_t previous_j = 0;
     auto append = [&](int64_t t, int64_t j, const at::Tensor &send, const at::Tensor &land, bool last) {
       const std::array<at::Tensor, 4> bound{input, output, send, land};
-      ChainStep step{{}, {}, {}, (uint32_t)(t == 0), (uint32_t)(2 * t), (uint32_t)last, previous_j, (uint32_t)j,
+      ChainStep step{{}, {}, {}, (uint32_t)(t == 0), (uint32_t)(2 * t), (uint32_t)last, previous_j, (uint32_t)j, (uint32_t)(t % input_frames),
                      last ? &chain->final : &chain->regular};
       for (size_t k = 0; k < bound.size(); k++) {
         step.buffers[k] = at::native::mps::getMTLBufferStorage(bound[k]);
@@ -1429,15 +1435,14 @@ static void prepare_chain(int64_t index, int64_t kernel, const std::vector<int64
       step.lengths[0] = input_pitch; step.lengths[1] = output_pitch;
       step.offsets[0] = input_base + std::min(t, steps - 1) * input_pitch;
       step.offsets[1] = output_base + std::max<int64_t>(0, t - 1) * output_pitch;
-      chain->steps[generation].push_back(step);
+      chain->steps.push_back(step);
     };
     for (int64_t first = 0, turn = 0; first < steps; turn++) {
-      const int64_t count = std::min({batch, steps - first, input_frames - first % input_frames}), half = (generation + turn) % 2;
+      const int64_t count = std::min({batch, steps - first, input_frames - first % input_frames}), half = turn % 2;
       const size_t input = first / input_frames;
       const size_t prefetch = first % input_frames == 0 && input + 1 < chain->inputs.size();
       FusedForm::Ring &ring = f.rings.at(count);
-      chain->chunks[generation].push_back({ring.plans[half].get(), (size_t)first, (size_t)count, input, input + 1, prefetch,
-                                          first % input_frames == 0});
+      chain->chunks.push_back({ring.plans[half].get(), (size_t)first, (size_t)count, input, input + 1, prefetch});
       for (int64_t j = 0; j < count; j++) {
         append(first + j, j, ring.segments[half][j][f.rank], previous, false);
         previous = ring.slots[half][j];
@@ -1456,12 +1461,12 @@ static void compile_chain(PreparedChain &chain) {
   MetalSchedule *schedule=chain.schedule.get();
   Dispatch &d = chain.dispatch;
   Dispatch &publication = *chain.publication;
-  const auto &steps = chain.steps[chain.generation];
-  const auto &chunks = chain.chunks[chain.generation];
+  const auto &steps = chain.steps;
+  const auto &chunks = chain.chunks;
   const auto binding = [&](const PreparedWrites *plans, bool publication, size_t part) {
     const uint32_t count = !plans ? 0 : publication ? plans->records.publishes : plans->records.lands;
     const auto *records = !plans ? nullptr : publication ? plans->publish.data() : plans->land.data();
-    const size_t offset = 10 + part * 12 * chain.channels;
+    const size_t offset = (publication && chain.publication != &d ? 10 : 12) + part * 12 * chain.channels;
     auto &words = publication ? chain.publication->words : d.words;
     for (uint32_t k = 0; k < chain.channels; k++) {
       const auto *record = k < count ? records + k : nullptr;
@@ -1491,8 +1496,9 @@ static void compile_chain(PreparedChain &chain) {
   const auto dispatch = [&](const ChainStep &step) {
     const size_t slots[4] = {2, 3, 6, 9};
     for (size_t k = 0; k < 4; k++) { d.bound[slots[k]] = step.buffers[k]; d.offsets[slots[k]] = step.offsets[k]; d.lengths[slots[k]]=step.lengths[k]; }
-    d.words[0] = step.first, d.words[1] = chain.phase + step.phase, d.words[5] = step.last;
+    d.words[0] = step.first, d.words[1] = step.phase, d.words[5] = step.last;
     d.words[8] = step.previous_j, d.words[9] = step.j;
+    d.words[10] = step.input_j;
     publication.bound[chain.publication_output] = step.buffers[2];
     publication.offsets[chain.publication_output] = step.offsets[2];
     publication.lengths[chain.publication_output] = step.lengths[2];
@@ -1517,21 +1523,7 @@ static void compile_chain(PreparedChain &chain) {
     prepare_fused_writes(schedule,*chunk.plans);
     binding(previous, false, 0);
     binding(chunk.plans, true, 1);
-    const size_t input_first = chunk.input_first;
-    for (size_t j = 0; j < input_first; j++) {
-      Dispatch &land = chain.input_landing;
-      const PreparedWrites &input = *chain.inputs[chunk.input];
-      land.words[0] = chain.input_last[chunk.input];
-      for (uint32_t k = 0; k < chain.channels; k++) {
-        const auto *record = k < input.records.lands ? &input.land[k] : nullptr;
-        for (int word = 0; word < 6; word++) {
-          const uint64_t value = record ? (*record)[word] : 0;
-          land.words[2 + 12 * k + 2 * word] = value & 0xffffffffu;
-          land.words[3 + 12 * k + 2 * word] = value >> 32;
-        }
-      }
-    }
-    for(size_t j=0;j<input_first;j++)prepare_dispatch(schedule,chain.input_landing,0);
+    binding(chain.inputs[chunk.input].get(),false,2);
     const ChainStep *first=steps.data()+chunk.first;
     dispatch(*first);
     binding(chunk.plans,false,0);
@@ -1782,7 +1774,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def("enqueue", &SpanWrites::enqueue);
   pybind11::class_<Collectives, std::shared_ptr<Collectives>>(module, "Collectives")
     .def(pybind11::init<const std::vector<Call> &, int64_t, std::vector<at::Tensor>>())
-    .def("realize", &Collectives::realize)
+    .def("realize", &Collectives::realize, pybind11::arg("repetitions")=1)
     .def("enqueue", &Collectives::enqueue);
   module.def("fused_reconfigure", &fused_reconfigure);
   module.def("crossing_slot", &crossing_slot);

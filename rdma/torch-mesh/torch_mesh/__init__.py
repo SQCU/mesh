@@ -269,7 +269,8 @@ def compiler(gm, example_inputs):
     # declarations. Always realize that configuration; Inductor still caches
     # the resulting numerical executable and kernels in compile_fx_inner.
     with autograd_config.patch(enable_autograd_cache=False), config.patch(
-            size_asserts=False, alignment_asserts=False, scalar_asserts=False):
+            size_asserts=False, alignment_asserts=False, scalar_asserts=False,
+            max_fusion_unique_io_buffers=31):  # Metal's buffer-argument capacity
         return compile_fx(gm, example_inputs, inner_compile=realize)
 
 

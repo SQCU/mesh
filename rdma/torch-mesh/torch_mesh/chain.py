@@ -68,10 +68,8 @@ def _form(K, S, rows, ranks, channels, resident_tiles):
                 product = _stream.pipeline(partition._LINEAR_SOURCE + '\n' + specialization, name)
                 publication = partition._linear_kernel(4, 4, 2, second, 2, channels)
                 products = [product, publication, first, second]
-            ready = []
-            for publish in (True, False):
-                ready_name, ready_line = instance('chain_input', channels, publish)
-                ready.append(_stream.pipeline(source + '\n' + ready_line, ready_name))
+            ready_name, ready_line = instance('chain_publish_input', channels)
+            ready = _stream.pipeline(source + '\n' + ready_line, ready_name)
             return handle, ready, products, G, SG * simd, [rows, ks0, ks1]
         if RG > 1:
             RG //= 2

@@ -693,20 +693,26 @@ struct MetalSchedule {
 
 struct MetalSchedule *MetalScheduleCreate(id<MTLDevice> device, enum MetalForm form) {
     if(object_getClass(device)==[MetalDeviceRecorder class])device=((MetalForwarder *)device)->target;
+    id queue=form==MetalFormSerial?(id)[device newCommandQueue]:(id)[device newMTL4CommandQueue];
+    struct MetalSchedule *s=MetalScheduleCreateOn(queue,form);[queue release];return s;
+}
+
+struct MetalSchedule *MetalScheduleCreateOn(id queue, enum MetalForm form) {
+    if(!queue)return NULL;
+    id<MTLDevice> device=[queue device];
     struct MetalSchedule *s=calloc(1,sizeof *s);
     if(!s)return NULL;
     atomic_init(&s->references,1);
     atomic_init(&s->status,0);
-    s->device=[device retain];s->form=form;
+    s->device=[device retain];s->form=form;s->queue=[queue retain];
     s->owners=[NSMutableSet new];s->read=[NSMutableDictionary new];s->written=[NSMutableDictionary new];
     MTLResidencySetDescriptor *resident=[MTLResidencySetDescriptor new];
     s->residency=[device newResidencySetWithDescriptor:resident error:nil];[resident release];
     if(form==MetalFormSerial) {
-        s->queue=[device newCommandQueue];
         s->command=[[(id<MTLCommandQueue>)s->queue commandBufferWithUnretainedReferences] retain];
         // The serial encoder is opened at the first append, after the external input event.
     } else {
-        s->queue=[device newMTL4CommandQueue];s->allocator=[device newCommandAllocator];
+        s->allocator=[device newCommandAllocator];
         MTL4ArgumentTableDescriptor *descriptor=[MTL4ArgumentTableDescriptor new];descriptor.maxBufferBindCount=METAL_RECORDING_BUFFERS;
         s->table=[device newArgumentTableWithDescriptor:descriptor error:nil];[descriptor release];
         s->command=[device newCommandBuffer];

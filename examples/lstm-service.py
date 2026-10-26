@@ -79,9 +79,15 @@ def main():
         X.copy_(torch.from_numpy(inputs[:]))
     torch_mesh.check_memory()
     ticks = steps + L - 1
-    bind(configuration, [[Call(BROADCAST, X.numel(), X.dtype, root=0)], *groups], Preparations(forms))
+    from torch_mesh.backend import prepare_fragments
+    broadcast = Call(BROADCAST, X.numel(), X.dtype, root=0)
+    inputs, _ = prepare_fragments([(broadcast, X, X)], group)
+    def prepare():
+        inputs.realize()
+        Preparations(forms)()
+    bind(configuration, [[broadcast], *groups], prepare)
     started = now()
-    dist.broadcast(X, src=0)
+    inputs.enqueue()
     for run in runs:
         run()
     completion = _stream.completion()
