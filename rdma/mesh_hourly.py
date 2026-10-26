@@ -232,6 +232,10 @@ def rank_results(outputs):
                     and not line.lstrip().startswith(('raise ', 'except ', 'frame #', 'Exception raised from '))]
         detail = failures[-1] if failures else '; '.join(line.strip() for line in lines[-12:]
                  if line.strip() and 'resource_tracker' not in line and 'warnings.warn' not in line)
+        for index, line in enumerate(lines):
+            if line.startswith('Exception raised from '):
+                detail = next((prior.strip() for prior in reversed(lines[:index]) if prior.strip()), detail)
+                break
         result[name] = {'exit': code, 'measurements': values, 'observations': observations,
                         'error': f'exit {code}: {detail}' if code else ''}
 
