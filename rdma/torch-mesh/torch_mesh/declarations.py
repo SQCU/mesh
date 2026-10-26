@@ -445,8 +445,6 @@ class BoundGraph:
                              for i, a in enumerate(target._schema.arguments)}
                     source = named.get('input', named.get('x', named.get('self', named.get('partials'))))
                     gather = target in (torch.ops.torch_mesh.allgatherv.default, torch.ops.torch_mesh.allgatherv_out.default)
-                    if not gather and metadata.get('dim', 0) != 0:
-                        raise NotImplementedError('nonleading reduction axes require partial tensor views')
                     native = dist.distributed_c10d._resolve_process_group(metadata['group_name'])
                     declarations = lower(module)
                     if gather:
@@ -461,6 +459,14 @@ class BoundGraph:
                             self.steps.append((prepared, 'enqueue')); self.order.append(prepared)
                         for name, calls in declarations.items():
                             self.groups.setdefault(name, []).extend(calls)
+                        values[node] = targets
+                        continue
+                    if target is torch.ops.torch_mesh.reduce_scatterv.default:
+                        destination = tree_flatten(targets)[0][0]
+                        made, calls = backend.bind_scatter_views(source, destination, named['dim'], named['sizes'],
+                                                                 _operation(named['op']), native)
+                        self.steps.append((made, 'enqueue')); self.order.append(made)
+                        self.groups.setdefault(metadata['group_name'], []).append(calls)
                         values[node] = targets
                         continue
                     calls = declarations[metadata['group_name']]

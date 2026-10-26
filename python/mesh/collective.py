@@ -46,29 +46,10 @@ def _buffer(program, dtype, numel):
 
 def _alias_fragments(program, task, refs):
     """AOT union cuts, each interval aliasing contiguous original operand bytes."""
-    runs, cursor = [], 0
-    for ref in refs:
-        # Ref layout is metadata; excluded ranks do not allocate these backings.
-        if ref.column_stride == 1 and ref.row_stride == ref.columns:
-            runs.append((cursor, cursor + ref.rows * ref.columns, ref, ref.offset))
-            cursor += ref.rows * ref.columns
-        else:
-            for row in range(ref.rows):
-                width = ref.columns if ref.column_stride == 1 else 1
-                for column in range(0, ref.columns, width):
-                    start = ref.offset + row * ref.row_stride + column * ref.column_stride
-                    runs.append((cursor, cursor + width, ref, start))
-                    cursor += width
+    from views import alias_runs, cut_runs
+    runs, cursor = alias_runs((ref, ref.shape, (ref.row_stride, ref.column_stride), ref.offset) for ref in refs)
     cuts = program._world.union_cuts(task.index, [0, cursor, *(end for _, end, _, _ in runs)])
-    pieces, index = [], 0
-    for first, last in zip(cuts, cuts[1:]):
-        while runs[index][1] <= first:
-            index += 1
-        lo, hi, ref, offset = runs[index]
-        if last > hi:
-            raise ValueError('common fragment crosses a local contiguous alias')
-        pieces.append((ref, offset + first - lo, last - first))
-    return pieces
+    return cut_runs(runs, cuts)
 
 
 def _alias(ref, offset, count):

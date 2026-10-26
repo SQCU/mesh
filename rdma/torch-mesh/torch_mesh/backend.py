@@ -284,6 +284,20 @@ class ProcessGroupMesh(dist.ProcessGroup):
             bindings.append((base, spans, int(source), int(destination)))
         return _stream.SpanWrites(bindings, self.handle)
 
+    def union_cuts(self, cuts):
+        """Agree view boundaries during configuration, before the function runs."""
+        import json
+        cuts = sorted(set(cuts))
+        serial = getattr(self, '_view_serial', 0)
+        self._view_serial = serial + 1
+        store = dist.distributed_c10d._get_default_store()
+        key = f'mesh/views/{self.group_name}/{serial}'
+        store.set(f'{key}/{self.rank()}', json.dumps(cuts))
+        rows = [json.loads(store.get(f'{key}/{rank}')) for rank in range(self.size())]
+        if any(row[0] != 0 or row[-1] != cuts[-1] for row in rows):
+            raise ValueError('collective views have different logical extents across ranks')
+        return sorted(set(cut for row in rows for cut in row))
+
     def _alltoall(self, sends, receives, result, opts):
         """MPI_Alltoallv (ncclMeshAlltoAllV): sends[q] to rank q and receives[q] from it, None moving none."""
         counts = [0 if t is None else t.numel() for t in (*sends, *receives)]
@@ -421,6 +435,33 @@ def bind_gather_views(source, output, dim, sizes, group):
                     empty(segment.numel() * segment.element_size(), dtype=torch.uint8, device=source.device.type))
             deliveries.append((view, a, b))
     return (group.prepare_writes(deliveries) if deliveries else None), local
+
+
+def bind_scatter_views(source, output, dim, sizes, reduction, group):
+    """Reduce original strided fragments into their owners' final tensor views.
+
+    The partial-tensor API uses the same alias/cut calculation and native
+    reductions. No transpose, packed operand or received-result copy is made.
+    """
+    from views import alias_runs, cut_runs
+    views = list(source.split(sizes, dim))
+    runs, total = alias_runs((rank, view.shape, view.stride(), view.storage_offset()) for rank, view in enumerate(views))
+    local, extent = alias_runs([(group.rank(), output.shape, output.stride(), output.storage_offset())])
+    start = sum(view.numel() for view in views[:group.rank()])
+    cuts = group.union_cuts([0, total, *(end for _, end, _, _ in runs), start,
+                             *(start + end for _, end, _, _ in local)])
+    own_cuts = [cut - start for cut in cuts if start <= cut <= start + extent]
+    own = iter(cut_runs(local, own_cuts))
+    absent = empty(0, dtype=source.dtype, device=source.device.type)
+    bindings = []
+    for root, offset, count in cut_runs(runs, cuts):
+        send = source.as_strided((count,), (1,), offset)
+        receive = absent
+        if root == group.rank():
+            _, at, length = next(own)
+            receive = output.as_strided((length,), (1,), at)
+        bindings.append((Call(REDUCE, count, source.dtype, root=root, op=reduction), send, receive))
+    return prepare_fragments(bindings, group)
 
 
 def partial(out, lse):

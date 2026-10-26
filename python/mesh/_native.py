@@ -5,7 +5,6 @@ The compiled graph enqueues them on the numerical stream, including the native
 consumer dependencies. No Work objects or host waits are used by this frontend.
 """
 import os
-import json
 
 import numpy as np
 import torch
@@ -40,11 +39,7 @@ class World:
     ncclCommInitRank through torch_mesh), else a lone rank with no communicator. Logical participant sets and queues
     retain the same full physical communicator, so every machine remains available for forwarding."""
 
-    serial = 0
-
     def __init__(self, device, group):
-        World.serial += 1
-        self.serial = World.serial
         self.device, self.owned = device, False
         if group is None and dist.is_available() and dist.is_initialized():
             group = dist.group.WORLD
@@ -62,13 +57,7 @@ class World:
         cuts = sorted(set(cuts))
         if self.group is None or self.size == 1:
             return cuts
-        store = dist.distributed_c10d._get_default_store()
-        key = f'mesh/program/{self.group.group_name}/{self.serial}/cuts/{task}'
-        store.set(f'{key}/{self.rank}', json.dumps(cuts).encode())
-        rows = [json.loads(store.get(f'{key}/{rank}')) for rank in range(self.size)]
-        if any(row[0] != 0 or row[-1] != cuts[-1] for row in rows):
-            raise ValueError('Program collective operands have different logical extents across ranks')
-        return sorted(set(cut for row in rows for cut in row))
+        return self.group._get_backend(torch.device(self.device)).union_cuts(cuts)
 
     # design/algorithm-sources.md#independent-native-queues
     def prepare(self, keys):

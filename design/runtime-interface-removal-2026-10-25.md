@@ -64,6 +64,9 @@ Open work includes native producer-kernel publication, generic
 Torch numerical spans' framework encoding and temporary storage, and the eager CPU compatibility
 executor. Shared code and successful builds do not establish maximum performance. Canonical
 hourlies have recorded failures; completion of all seven assigned items is not claimed here.
+Nonleading FX reduce-scatter axes use original and final view fragments. Partial tensors and
+FX use the shared `views.alias_runs`/`cut_runs` calculation and the same configuration-time
+cut agreement, then the native reduction compiler. The duplicated partial-layout walker is removed.
 The constrained data-model document is unchanged.
 
 ## Reviewed interfaces
