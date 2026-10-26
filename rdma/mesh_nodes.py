@@ -142,8 +142,8 @@ def discover(log=None, prepare=None):
     if not entry:
         return None, candidates
     a, d, paths = entry
-    nodes = [Node(str(m), heard.get(str(m)) or management.get(str(m)) or paths.get(str(m), ''),
-                  None if str(m) in heard or str(m) in management else a, paths.get(str(m), ''))
+    nodes = [Node(str(m), management.get(str(m)) or paths.get(str(m), ''),
+                  None if str(m) in management else a, paths.get(str(m), ''))
              for m in d['map']['nodes']]
     for node in nodes:
         node.discovered_links = sum(int(node.number) in link[:2] for link in d['map']['links'])

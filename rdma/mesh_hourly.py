@@ -323,6 +323,10 @@ def _execute_locked(record):
                                       for n in found])
             record['nodes'].update({f'{node.number}@{node.addr}': result for node, result in zip(found, installs)})
         ready = [node for node, result in zip(found, installs) if result['status'] == 'installed']
+        required = {str(number) for item in items for number in item.get('nodes', ())}
+        missing = required - {node.number for node in ready}
+        if missing:
+            raise RuntimeError(f'configured cluster is incomplete; no workloads submitted: missing {sorted(missing)}')
         if ready and not mesh.wait_paired(ready, None):
             record['errors'].append({'stage': 'pairing', 'error': 'not all current topology links paired'})
             ready = []
