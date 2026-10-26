@@ -1160,7 +1160,7 @@ static void fused_prepare(const at::Tensor &x, const std::optional<at::Tensor> &
 struct ChainStep {
   std::array<id<MTLBuffer>, 4> buffers;
   std::array<NSUInteger, 4> offsets, lengths;
-  uint32_t first, phase, last, previous_j, j, input_j;
+  uint32_t first, last, previous_j, j, input_j;
   const std::vector<Dispatch *> *dispatches;
 };
 struct ChainChunk {
@@ -1178,7 +1178,7 @@ struct PreparedChain {
   std::vector<Dispatch> products;
   std::vector<Dispatch *> regular, final;
   Dispatch *publication;
-  size_t publication_output, publication_j;
+  size_t publication_output, publication_j, publication_words;
   MeshStream *stream;
   uint32_t channels;
   Schedule schedule;
@@ -1194,7 +1194,7 @@ static int64_t chain_slot() {
   prepared_chains_->push_back(nullptr);
   return index;
 }
-static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, const std::vector<int64_t> &products,
+static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, const std::vector<int64_t> &products, bool linear,
                           const std::vector<at::Tensor> &operands,
                           const std::vector<int64_t> &constants, int64_t groups, int64_t threads,
                           const std::string &group, int64_t ranks, int64_t batch, int64_t input_frames) {
@@ -1209,24 +1209,27 @@ static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, c
   auto chain = std::make_unique<PreparedChain>(PreparedChain{f.comm, operands, {}, {}, {}, {},
       encoded(kernel, buffers, words, 15, groups, 1, threads),
       encoded(input_kernel, {}, std::vector<int64_t>(2 + 12 * f.channels), 15, 1, 1, 32),
-      {}, {}, {}, nullptr, 6, 9,
+      {}, {}, {}, nullptr, 6, 9, 12,
       &stream_of(at::mps::getCurrentMPSStream()), (uint32_t)f.channels});
   chain->regular = chain->final = {&chain->dispatch};
-  chain->publication = &chain->dispatch;
-  if (!products.empty()) {
+  if (linear) {
     const at::Tensor &y = operands[5];
     const int64_t R = x.size(0), K = x.size(1), S = y.size(1);
     chain->products.push_back(encoded(products[0], {x, operands[0], y, y, std::nullopt, x},
         {R, K, S, 0, K, K, K, K}, 4, (S + LINEAR_COLUMNS - 1) / LINEAR_COLUMNS, 1, products[2] * 32));
     std::vector<int64_t> publication{R, S, K, 0, S, S, S, S, 0, 0};
     publication.resize(10 + 24 * f.channels);
-    chain->products.push_back(encoded(products[1], {y, operands[1], x, operands[8], y},
+    chain->products.push_back(encoded(products[1], {y, operands[1], x, operands[7], y},
         publication, 15, (K + LINEAR_COLUMNS - 1) / LINEAR_COLUMNS, 1, products[3] * 32));
-    for (auto &product : chain->products) chain->regular.push_back(&product);
-    chain->publication = &chain->products.back();
     chain->publication_output = 2;
     chain->publication_j = 8;
+    chain->publication_words = 10;
+  } else {
+    for (auto product : products)
+      chain->products.push_back(encoded(product, buffers, words, 15, groups, 1, threads));
   }
+  for (auto &product : chain->products) chain->regular.push_back(&product);
+  chain->publication = &chain->products.back();
   const NSUInteger input_base = input.storage_offset() * input.element_size();
   const NSUInteger output_base = output.storage_offset() * output.element_size();
   const NSUInteger input_pitch = input.stride(0) * input.element_size();
@@ -1258,7 +1261,7 @@ static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, c
     uint32_t previous_j = 0;
     auto append = [&](int64_t t, int64_t j, const at::Tensor &send, const at::Tensor &land, bool last) {
       const std::array<at::Tensor, 4> bound{input, output, send, land};
-      ChainStep step{{}, {}, {}, (uint32_t)(t == 0), (uint32_t)(2 * t), (uint32_t)last, previous_j, (uint32_t)j, (uint32_t)(t % input_frames),
+      ChainStep step{{}, {}, {}, (uint32_t)(t == 0), (uint32_t)last, previous_j, (uint32_t)j, (uint32_t)(t % input_frames),
                      last ? &chain->final : &chain->regular};
       for (size_t k = 0; k < bound.size(); k++) {
         step.buffers[k] = at::native::mps::getMTLBufferStorage(bound[k]);
@@ -1299,7 +1302,7 @@ static void compile_chain(PreparedChain &chain) {
   const auto binding = [&](const PreparedWrites *plans, bool publication, size_t part) {
     const uint32_t count = !plans ? 0 : publication ? plans->records.publishes : plans->records.lands;
     const auto *records = !plans ? nullptr : publication ? plans->publish.data() : plans->land.data();
-    const size_t offset = (publication && chain.publication != &d ? 10 : 12) + part * 12 * chain.channels;
+    const size_t offset = (publication ? chain.publication_words : 12) + part * 12 * chain.channels;
     auto &words = publication ? chain.publication->words : d.words;
     for (uint32_t k = 0; k < chain.channels; k++) {
       const auto *record = k < count ? records + k : nullptr;
@@ -1327,24 +1330,28 @@ static void compile_chain(PreparedChain &chain) {
 
   };
   const auto dispatch = [&](const ChainStep &step) {
-    const size_t slots[4] = {2, 3, 6, 9};
+    const size_t slots[4] = {2, 3, 6, 8};
     for (size_t k = 0; k < 4; k++) { d.bound[slots[k]] = step.buffers[k]; d.offsets[slots[k]] = step.offsets[k]; d.lengths[slots[k]]=step.lengths[k]; }
-    d.words[0] = step.first, d.words[1] = step.phase, d.words[5] = step.last;
+    d.words[0] = step.first, d.words[5] = step.last;
     d.words[8] = step.previous_j, d.words[9] = step.j;
     d.words[10] = step.input_j;
     publication.bound[chain.publication_output] = step.buffers[2];
     publication.offsets[chain.publication_output] = step.offsets[2];
     publication.lengths[chain.publication_output] = step.lengths[2];
     publication.words[chain.publication_j] = step.j;
-    // Input, state and weights are reads; the fused step writes X, Y, its
-    // output frame, arrivals and publication pages. The linear forms name
-    // their own destination bindings through the same record interface.
+    // Phase 0 reads the incoming pages and writes X. The products consume X
+    // then Y. These declarations compile their two data edges; groups within
+    // a phase need no residency assumption or cross-group spin barrier.
     for(const Dispatch *item:*step.dispatches) {
       uint64_t access=0;
-      for(size_t k=0;k<item->bound.size();k++)if(item->bound[k])access|=UINT64_C(1)<<k;
-      const uint64_t writes=item==&d ? ((UINT64_C(1)<<3)|(UINT64_C(1)<<4)|(UINT64_C(1)<<5)|(UINT64_C(1)<<6)|(UINT64_C(1)<<7)|(UINT64_C(1)<<8)) :
-        item==chain.publication ? ((UINT64_C(1)<<2)|(UINT64_C(1)<<3)) : (UINT64_C(1)<<2);
-      prepare_dispatch(schedule,*item,access|(writes<<32));
+      if(item==&d)access=UINT64_C(260)|(UINT64_C(24)<<32);
+      else if(chain.publication_words==12)access=item==chain.publication ?
+        UINT64_C(162)|(UINT64_C(192)<<32) : UINT64_C(17)|(UINT64_C(32)<<32);
+      else {
+        for(size_t k=0;k<item->bound.size();k++)if(item->bound[k])access|=UINT64_C(1)<<k;
+        access|=(item==chain.publication?UINT64_C(12):UINT64_C(4))<<32;
+      }
+      prepare_dispatch(schedule,*item,access);
     }
 
   };

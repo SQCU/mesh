@@ -44,6 +44,10 @@ void MetalRecordViews(const struct MetalBindingView *, size_t count, void (^enco
 // docs/kernels.md Any program
 enum { MetalReachRead = 1, MetalReachWritten = 2, MetalReachBinding = 4, MetalReachResident = 8 };
 struct MetalReach { __unsafe_unretained id<MTLBuffer> buffer; NSUInteger offset, length; uint32_t access; };
+// Preparation only: carry declared page accesses across encoders on the supplied
+// queue. Prepare and enqueue its functions in the same order. Disjoint ranges
+// add no dependency. Transport uses this declaration for its shared counters.
+void MetalEncoderReaches(id<MTL4ComputeCommandEncoder>, const struct MetalReach *, size_t count);
 // docs/kernels.md Any program
 void MetalDispatchReaching(id<MTLComputeCommandEncoder> encoder, MTLSize groups, MTLSize threads,
     const struct MetalReach *reaches, size_t count);

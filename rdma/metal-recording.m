@@ -133,6 +133,83 @@ static void MetalAccesses(const struct MetalRecordedDispatch *command, const str
 // docs/kernels.md Any program: bytes [lo, hi) of an allocation, accessed by commands of levels below `done`
 struct MetalSpan { NSUInteger lo, hi, done; };
 
+// Accesses still relevant to later encoders. Weak allocation keys avoid keeping
+// a finished function's pages alive through its queue. The function itself owns
+// every buffer until completion. Overlapping ranges are merged at preparation.
+@interface MetalQueueAccess : NSObject {
+@public NSMapTable *read, *written;
+}
+@end
+@implementation MetalQueueAccess
+- (instancetype)init {
+    self=[super init];
+    read=[[NSMapTable weakToStrongObjectsMapTable] retain];
+    written=[[NSMapTable weakToStrongObjectsMapTable] retain];return self;
+}
+- (void)dealloc { [read release];[written release];[super dealloc]; }
+@end
+static char queueAccessKey,encoderAccessKey;
+
+static BOOL MetalRangeOverlaps(NSMapTable *map,id allocation,NSUInteger lo,NSUInteger hi) {
+    NSData *data=[map objectForKey:allocation];const struct MetalSpan *spans=data.bytes;
+    for(NSUInteger i=0;i<data.length/sizeof(*spans);i++)
+        if(spans[i].lo<hi&&lo<spans[i].hi)return YES;
+    return NO;
+}
+
+static void MetalRangeAdd(NSMapTable *map,id allocation,NSUInteger lo,NSUInteger hi) {
+    if(lo==hi)return;
+    NSMutableData *data=[map objectForKey:allocation];
+    if(!data){data=[NSMutableData data];[map setObject:data forKey:allocation];}
+    struct MetalSpan *spans=data.mutableBytes;
+    for(NSUInteger i=0;i<data.length/sizeof(*spans);) {
+        if(spans[i].lo<=hi&&lo<=spans[i].hi) {
+            lo=MIN(lo,spans[i].lo);hi=MAX(hi,spans[i].hi);
+            spans[i]=spans[data.length/sizeof(*spans)-1];data.length-=sizeof(*spans);
+            spans=data.mutableBytes;i=0;
+        } else i++;
+    }
+    const struct MetalSpan span={lo,hi,0};[data appendBytes:&span length:sizeof span];
+}
+
+static void MetalRangesMerge(NSMapTable *into,NSMapTable *from) {
+    for(id allocation in from.keyEnumerator) {
+        NSData *data=[from objectForKey:allocation];const struct MetalSpan *spans=data.bytes;
+        for(NSUInteger i=0;i<data.length/sizeof(*spans);i++)MetalRangeAdd(into,allocation,spans[i].lo,spans[i].hi);
+    }
+}
+
+void MetalEncoderReaches(id<MTL4ComputeCommandEncoder> encoder,const struct MetalReach *reaches,size_t count) {
+    NSArray *scope=objc_getAssociatedObject(encoder,&encoderAccessKey);
+    if(!scope)[NSException raise:NSInvalidArgumentException format:@"Metal accesses require a prepared schedule encoder"];
+    MetalQueueAccess *previous=scope[0],*current=scope[1];
+    BOOL dependency=NO;
+    for(size_t i=0;i<count;i++) {
+        const struct MetalReach r=reaches[i];if(!r.length||!(r.access&3))continue;
+        id allocation=(id)r.buffer.heap?:r.buffer;NSUInteger lo=MetalAllocationBase(r.buffer)+r.offset;
+        dependency|=MetalRangeOverlaps(previous->written,allocation,lo,lo+r.length)||
+            ((r.access&MetalReachWritten)&&MetalRangeOverlaps(previous->read,allocation,lo,lo+r.length));
+    }
+    if(dependency) {
+        [encoder barrierAfterQueueStages:MTLStageDispatch beforeStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+        [previous->read removeAllObjects];[previous->written removeAllObjects];
+    }
+    for(size_t i=0;i<count;i++) {
+        const struct MetalReach r=reaches[i];if(!r.length||!(r.access&3))continue;
+        id allocation=(id)r.buffer.heap?:r.buffer;NSUInteger lo=MetalAllocationBase(r.buffer)+r.offset;
+        if(r.access&MetalReachRead)MetalRangeAdd(current->read,allocation,lo,lo+r.length);
+        if(r.access&MetalReachWritten)MetalRangeAdd(current->written,allocation,lo,lo+r.length);
+    }
+}
+
+static void MetalEncoderAccesses(id<MTL4ComputeCommandEncoder> encoder,const struct MetalRecordedDispatch *command,
+    const struct MetalReach *reaches,NSUInteger invocation) {
+    MetalAccesses(command,reaches,invocation,^(id<MTLBuffer> buffer,NSUInteger offset,NSUInteger bytes,BOOL load,BOOL store){
+        const struct MetalReach r={buffer,offset,bytes,(load?MetalReachRead:0)|(store?MetalReachWritten:0)};
+        MetalEncoderReaches(encoder,&r,1);
+    });
+}
+
 // docs/kernels.md Any program: the greatest `done` of the spans overlapping [lo, hi), each span no later command can
 // wait on (its `done` at most `phase`, every later level's floor) dropped
 static NSUInteger MetalSpansAfter(NSMutableData *spans, NSUInteger lo, NSUInteger hi, NSUInteger phase) {
@@ -732,7 +809,7 @@ static NSError *MetalReplayFailure(NSInteger code, NSString *reason) {
 // One prepared function owns its command stream. Append and Finish run during preparation;
 // Enqueue only commits the finished stream. The observer never controls subsequent work.
 struct MetalSchedule {
-    struct MetalSchedule *next, *tail;
+    struct MetalSchedule *next, *tail, *root;
     id<MTLDevice> device;
     enum MetalForm form;
     BOOL finished;
@@ -750,6 +827,9 @@ struct MetalSchedule {
     uint64_t signalValue;
     _Atomic int status;
     _Atomic unsigned references;
+    _Atomic unsigned pending;
+    NSError *error;
+    void (^completed)(NSError *);
     id<MTLBuffer> data;
     NSUInteger used;
     NSError *(^host)(void);
@@ -769,6 +849,7 @@ struct MetalSchedule *MetalScheduleCreateOn(id queue, enum MetalForm form) {
     struct MetalSchedule *s=calloc(1,sizeof *s);
     if(!s)return NULL;
     atomic_init(&s->references,1);
+    atomic_init(&s->pending,1);s->root=s;
     atomic_init(&s->status,0);
     s->device=[device retain];s->form=form;s->queue=[queue retain];
     s->owners=[NSMutableSet new];s->read=[NSMutableDictionary new];s->written=[NSMutableDictionary new];
@@ -785,6 +866,14 @@ struct MetalSchedule *MetalScheduleCreateOn(id queue, enum MetalForm form) {
         if(s->command&&s->allocator) {
             [(id<MTL4CommandBuffer>)s->command beginCommandBufferWithAllocator:s->allocator];
             s->encoder=[[(id<MTL4CommandBuffer>)s->command computeCommandEncoder] retain];
+            MetalQueueAccess *previous=objc_getAssociatedObject(queue,&queueAccessKey);
+            if(!previous) {
+                previous=[MetalQueueAccess new];
+                objc_setAssociatedObject(queue,&queueAccessKey,previous,OBJC_ASSOCIATION_RETAIN_NONATOMIC);[previous release];
+            }
+            MetalQueueAccess *current=[MetalQueueAccess new];
+            objc_setAssociatedObject(s->encoder,&encoderAccessKey,@[previous,current],OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [current release];
         }
     }
     if(!s->queue||!s->command||!s->residency||(form!=MetalFormSerial&&(!s->allocator||!s->table||!s->encoder))) {
@@ -796,7 +885,7 @@ struct MetalSchedule *MetalScheduleCreateOn(id queue, enum MetalForm form) {
 struct MetalSchedule *MetalScheduleCommand(id<MTLCommandBuffer> command) {
     struct MetalSchedule *s=calloc(1,sizeof *s);
     if(!s)return NULL;
-    atomic_init(&s->references,1);atomic_init(&s->status,0);
+    atomic_init(&s->references,1);atomic_init(&s->status,0);atomic_init(&s->pending,1);s->root=s;
     s->device=[command.device retain];s->queue=[command.commandQueue retain];
     s->command=[command retain];s->form=MetalFormSerial;
     return s;
@@ -843,6 +932,7 @@ void MetalScheduleCompute(struct MetalSchedule *s,id<MTLComputePipelineState> pi
         if(!s->encoder)s->encoder=[[(id<MTLCommandBuffer>)s->command computeCommandEncoderWithDispatchType:MTLDispatchTypeSerial] retain];
         MetalReplayDispatch(s->encoder,&view,&command,0,NULL);
     } else {
+        MetalEncoderAccesses(s->encoder,&command,NULL,0);
         if(barrier)[(id<MTL4ComputeCommandEncoder>)s->encoder barrierAfterEncoderStages:MTLStageDispatch
             beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
         MetalReplayDispatch4(s->encoder,s->table,&view,&command,0);
@@ -860,6 +950,7 @@ static struct MetalSchedule *MetalScheduleAdvance(struct MetalSchedule *root,
     NSError *(^operation)(void),id<MTLSharedEvent> signal) {
     struct MetalSchedule *before=MetalScheduleTail(root),*next=MetalScheduleCreateOn(before->queue,before->form);
     if(!next)[NSException raise:NSMallocException format:@"preparing host-share continuation"];
+    next->root=root;atomic_fetch_add_explicit(&root->pending,1,memory_order_relaxed);
     before->signal=[signal retain];before->signalValue=signal?1:0;
     before->host=[operation copy];
     MetalScheduleFinish(before,nil);
@@ -894,6 +985,7 @@ static void MetalScheduleRange(struct MetalSchedule *root,struct MetalReplay *re
     NSUInteger pending=t*n+from;
     for(NSUInteger c=pending;c<t*n+to;c++) @autoreleasepool {
         const struct MetalRecordedDispatch *source=records+c%n;
+        if(s->form!=MetalFormSerial)MetalEncoderAccesses(encoder,source,reaches,t);
         BOOL barrier=MetalOrder(s->read,s->written,&s->phase,source,reaches,t);
         if(s->form==MetalFormSerial)MetalReplayDispatch(s->encoder,replay,source,t,NULL);
         else if(s->form==MetalFormEncoded) {
@@ -956,39 +1048,47 @@ NSError *MetalScheduleAppend(struct MetalSchedule *root,struct MetalReplay *repl
     return nil;
 }
 
+static void MetalScheduleCompleted(struct MetalSchedule *s,NSError *error) {
+    struct MetalSchedule *root=s->root;
+    if(s->host&&!error)error=s->host();
+    s->error=[error retain];
+    atomic_store_explicit(&s->status,error?-1:1,memory_order_release);
+    if(s->host)[(id<MTLSharedEvent>)s->signal setSignaledValue:s->signalValue];
+    // Completion reports the whole function, including independent earlier
+    // encoders. This counter observes callbacks; it never gates GPU submission.
+    if(atomic_fetch_sub_explicit(&root->pending,1,memory_order_acq_rel)==1) {
+        NSError *failure=nil;
+        for(struct MetalSchedule *part=root;part&&!failure;part=part->next)failure=part->error;
+        if(root->completed)root->completed(failure);
+        if(root->next)MetalScheduleFree(root);
+    }
+    MetalScheduleFree(s);
+}
+
 void MetalScheduleFinish(struct MetalSchedule *root,void (^completed)(NSError *)) {
     struct MetalSchedule *s=MetalScheduleTail(root);
-    void (^finished)(NSError *)=^(NSError *error){
-        if(!error)for(struct MetalSchedule *part=root;part&&part!=s;part=part->next)
-            if(atomic_load_explicit(&part->status,memory_order_acquire)<0){error=MetalReplayFailure(EIO,@"a declared host share failed");break;}
-        if(completed)completed(error);
-        if(root!=s)MetalScheduleFree(root);
-    };
+    if(completed){[root->completed release];root->completed=[completed copy];}
     [s->residency commit];[s->residency requestResidency];
     if(s->residency) {
         if(s->form==MetalFormSerial)[(id<MTLCommandBuffer>)s->command useResidencySet:s->residency];
         else [(id<MTL4CommandBuffer>)s->command useResidencySet:s->residency];
     }
+    if(s->form!=MetalFormSerial) {
+        NSArray *scope=objc_getAssociatedObject(s->encoder,&encoderAccessKey);
+        MetalQueueAccess *previous=scope[0],*current=scope[1];
+        MetalRangesMerge(previous->read,current->read);MetalRangesMerge(previous->written,current->written);
+        objc_setAssociatedObject(s->encoder,&encoderAccessKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
     [s->encoder endEncoding];s->finished=YES;
     if(s->form==MetalFormSerial) {
         [(id<MTLCommandBuffer>)s->command addCompletedHandler:^(id<MTLCommandBuffer> done){
-            NSError *error=done.error;
-            if(s->host&&!error)error=s->host();
-            atomic_store_explicit(&s->status,error?-1:1,memory_order_release);
-            if(s->host)[(id<MTLSharedEvent>)s->signal setSignaledValue:s->signalValue];
-            finished(error);
-            MetalScheduleFree(s);
+            MetalScheduleCompleted(s,done.error);
         }];
     } else {
         [(id<MTL4CommandBuffer>)s->command endCommandBuffer];
         s->options=[MTL4CommitOptions new];
         [s->options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback){
-            NSError *error=feedback.error;
-            if(s->host&&!error)error=s->host();
-            atomic_store_explicit(&s->status,error?-1:1,memory_order_release);
-            if(s->host)[(id<MTLSharedEvent>)s->signal setSignaledValue:s->signalValue];
-            finished(error);
-            MetalScheduleFree(s);
+            MetalScheduleCompleted(s,feedback.error);
         }];
     }
     [s->read release];s->read=nil;[s->written release];s->written=nil;
@@ -1026,7 +1126,7 @@ void MetalScheduleFree(struct MetalSchedule *s) {
     }
     [s->encoder release];[s->command release];[s->queue release];[s->allocator release];[s->table release];[s->data release];[s->signal release];
     [s->residency release];[s->owners release];[s->options release];[s->read release];[s->written release];
-    [s->host release];[s->after release];[s->device release];free(s);
+    [s->host release];[s->completed release];[s->error release];[s->after release];[s->device release];free(s);
 }
 
 id<MTLDevice> MetalRecordingDevice(id<MTLDevice> device,BOOL indirectPipelines) {

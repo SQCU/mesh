@@ -31,8 +31,8 @@ def _form(K, S, rows, ranks, channels, resident_tiles, capabilities):
     probe = _stream.pipeline('kernel void width_probe(device uint* x [[buffer(0)]]) { x[0] = 0; }', 'width_probe')
     simd, cores = _stream.pipeline_facts(probe)[1], capabilities['hardware']['gpu']['cores']
     kt, st, rt = K // tile, S // tile, rows // tile
-    # The cooperative kernel joins its resident groups. Independent row tiles
-    # are work too: do not restrict a large batch to its number of column tiles.
+    # Independent row tiles and columns share the observed cores. These groups
+    # may run in waves: no numerical phase requires them to reside together.
     G = min(cores, max(kt, st) * rt)
     most = threads // simd
 
@@ -55,18 +55,19 @@ def _form(K, S, rows, ranks, channels, resident_tiles, capabilities):
         if not RB:
             raise ValueError(f'chain: {SG} SIMD groups do not fit the manifest\'s {memory} bytes of threadgroup memory')
         args = (tile, K, S, rows, G, RG, RB, SG * simd, simd, ranks, channels)
-        name, specialization = instance('chain_step', *args)
-        handle = _stream.pipeline(source + '\n' + specialization, name)
-        available = _stream.pipeline_facts(handle)[0]
+        ks0, ks1 = splits(RG, SG)
+        linear = max(-(-kt // ks0), -(-st // ks1)) > resident_tiles
+        phases = []
+        for phase in ((0,) if linear else (0, 1, 2)):
+            name, specialization = instance('chain_step', *args, phase)
+            phases.append(_stream.pipeline(source + '\n' + specialization, name))
+        available = min(_stream.pipeline_facts(handle)[0] for handle in phases)
         if available >= SG * simd:
-            ks0, ks1 = splits(RG, SG)
-            products = []
+            products = phases[1:]
             # Long dependent matrix chains lose to the existing distributed
             # linear geometry at the wide hourly shapes. This is a compilation
             # operand, not a runtime alternative or a change of transport.
-            if max(-(-kt // ks0), -(-st // ks1)) > resident_tiles:
-                name, specialization = instance('chain_step', *args, False)
-                handle = _stream.pipeline(source + '\n' + specialization, name)
+            if linear:
                 _stream.linear_source(partition._LINEAR_SOURCE, cores)
                 first, second = _stream.linear_split(K, S), _stream.linear_split(S, K)
                 name, specialization = instance('linear_rows', 4, 4, 2, first, 2, 1)
@@ -75,7 +76,7 @@ def _form(K, S, rows, ranks, channels, resident_tiles, capabilities):
                 products = [product, publication, first, second]
             ready_name, ready_line = instance('chain_publish_input', channels)
             ready = _stream.pipeline(source + '\n' + ready_line, ready_name)
-            return handle, ready, products, G, SG * simd, [rows, ks0, ks1]
+            return phases[0], ready, products, linear, G, SG * simd, [rows, ks0, ks1]
         if RG > 1:
             RG //= 2
         else:
@@ -109,13 +110,12 @@ def operands(a, b, inputs, outputs, group, batch, resident_tiles, input_frames, 
         return result
 
     channels = sum(group.rank() in cable['nodes'] for cable in group.fabric.cables)
-    kernel, ready, products, workers, threads, words = _form(K, S, R, group.size(), channels, resident_tiles, capabilities)
-    if products:
+    kernel, ready, products, linear, workers, threads, words = _form(K, S, R, group.size(), channels, resident_tiles, capabilities)
+    if linear:
         At, Bt = weight_pages(a, (S, K), False), weight_pages(b.T, (K, S), False)
     else:
         At, Bt = weight_pages(a.T, (K, S), True), weight_pages(b, (S, K), True)
     X, Y = empty(R, K, dtype=torch.half), empty(R, S, dtype=torch.half)
-    stamps = empty(workers, dtype=torch.int32).zero_()
     arrivals = empty(1, dtype=torch.int32).zero_()
     counts = []
     input_calls = [Call(WRITE, rows * width, inputs.dtype, root=0, destination=rank, fused=True)
@@ -129,16 +129,16 @@ def operands(a, b, inputs, outputs, group, batch, resident_tiles, input_frames, 
         calls.append((partition.summed(X, group), count))
         counts.append(count)
         first += count
-    return calls, (_stream.chain_slot(), kernel, ready, products, [At, Bt, inputs, outputs, X, Y, X, stamps, arrivals],
+    return calls, (_stream.chain_slot(), kernel, ready, products, linear, [At, Bt, inputs, outputs, X, Y, X, arrivals],
                    [1, 0, *words, 0, width, rows, 0, 0], workers, threads, group.group_name,
                    group.size(), batch, input_frames, Counter(counts))
 
 
 def prepare(operands):
     """Bind the current physical routes to already allocated numerical pages."""
-    index, kernel, ready, products, buffers, words, workers, threads, group, ranks, batch, input_frames, counts = operands
+    index, kernel, ready, products, linear, buffers, words, workers, threads, group, ranks, batch, input_frames, counts = operands
     x = buffers[4]
     for repeats, batches in counts.items():
         _stream.fused_prepare(x, None, 0, [x.shape[0]] * ranks, group, True, repeats, batches)
-    _stream.prepare_chain(index, kernel, ready, products, buffers, words, workers, threads, group, ranks, batch, input_frames)
+    _stream.prepare_chain(index, kernel, ready, products, linear, buffers, words, workers, threads, group, ranks, batch, input_frames)
     return index

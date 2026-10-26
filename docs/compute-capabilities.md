@@ -32,8 +32,9 @@ bridge's completion-record table. The planner does not choose capacities from an
 A prepared schedule now requires the execution context's queue as an operand. There is no schedule constructor that
 creates a queue from a device. Native rank calls share their process queue; FX invocations share their stream context's
 queue. Invocation slots do not multiply queues. Required queues and host-result events fail preparation if unavailable.
-This does not establish a GPU residency guarantee for a cooperative grid. Core count alone cannot supply that guarantee.
-The remaining crash investigation is recorded in `design/metal-resource-failures-2026-10-26.md`.
+Core count does not establish a residency guarantee for a cooperative grid. The chain now compiles its existing
+numerical stages as separate dispatches ordered by their X/Y accesses, removing its cross-group spin barrier.
+The source changes and crash evidence are recorded in `design/metal-resource-failures-2026-10-26.md`.
 
 The chain requires the `capabilities` directory in its configuration. `torch_mesh.compute.metal` loads the matching
 `etc/compute/appleN.json` and reads the device's live resource limits. Matrix extent and memory alignment come from
@@ -44,8 +45,8 @@ The original chain already used these manifests before `1c0afa53`. Restoration `
 hardcoded the matrix extent and memory allowance. The eight in `K/8` was the matrix instruction's width, never a
 CPU-count estimate. Both versions capped groups by columns alone. The current split includes independent row tiles;
 register tiling cannot fold those rows back together if that would leave its chosen groups without work. The fused
-kernel still joins resident groups between products. Queuing more groups than can reside is not a valid way to widen
-that kernel. Its larger products also have the existing prepared linear geometry.
+kernels can run their groups in waves. The compiler checks each phase's pipeline limit, rather than treating a
+core count as a guarantee that all groups fit at once. Larger products also have the existing prepared linear geometry.
 
 The engine declaration requires work rates for its configured operation and shape. It no longer silently seeds CPU,
 GPU and ANE shares with equal rates, or removes an incompatible positive-rate engine. CPU Accelerate still owns an

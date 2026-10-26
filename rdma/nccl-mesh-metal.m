@@ -4,6 +4,7 @@
 #include "nccl-mesh-kernels.h"
 #include "mesh_metal.h"
 #include "nccl.h"
+#include "metal-recording.h"
 #include <dlfcn.h>
 #include <errno.h>
 #include <stdarg.h>
@@ -567,6 +568,18 @@ void metal_keep(struct metal_program *program, void *object) { [program->kept ad
 
 struct metal_result metal_present(struct metal_program *program,void *lists,size_t list_offset,
     void *records,size_t record_offset,size_t count,uint64_t first,void *words,size_t taken,size_t presented) {
+  if(program->encoder4&&count) {
+    // The bridge consumes this list in order. A later prepared function must
+    // not replace its publication count before an earlier encoder uses it.
+    const size_t slot=first%MESH_STREAM_ENTRIES;
+    const size_t head=count<MESH_STREAM_ENTRIES-slot?count:MESH_STREAM_ENTRIES-slot;
+    const struct MetalReach reaches[]={
+      {(id)lists,list_offset+slot*sizeof(struct mesh_entry),head*sizeof(struct mesh_entry),MetalReachWritten},
+      {(id)lists,list_offset,(count-head)*sizeof(struct mesh_entry),MetalReachWritten},
+      {(id)words,taken,sizeof(uint64_t),MetalReachRead},
+      {(id)words,presented,sizeof(uint64_t),MetalReachWritten}};
+    MetalEncoderReaches(program->encoder4,reaches,sizeof reaches/sizeof *reaches);
+  }
   return dispatch(program,KIND_present,lists,records,words,NULL,
     (struct args){.dst=list_offset,.src=record_offset,.n=count,.scalar=first,.aux=taken,
                   .at=presented,.count=MESH_STREAM_ENTRIES},count,1);

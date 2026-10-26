@@ -122,8 +122,8 @@ Each rank gets its assigned rows of A and B. Preparation pads these rows with ze
 This keeps all assigned columns, even when one rank's share is not a whole tile. It also sets the input, output,
 source and landing pages for every step before the chain starts.
 
-One kernel joins the preceding partial sums, writes that step's output, adds the next input, and runs both
-products. The first product's tanh stays inside the kernel. The second product writes its partial sum straight
+One stage joins the preceding partial sums, writes that step's output, and adds the next input. Two stages run
+the products. The first product's tanh stays inside its stage. The second product writes its partial sum straight
 into its send pages and marks them ready. The next step reads the landed parts in rank order. A final join
 writes the last output. All rows from all steps stay in the output tensor.
 
@@ -136,10 +136,10 @@ Both geometries use the same physical page bindings, including parallel cables a
 nodes. Their dispatch lists are fixed before the call; a step does not build a graph, choose a route or
 allocate a result while running.
 
-The fused kernel splits its output tiles across both rows and columns. Its eight-wide matrix instruction
+The tiled kernels split their output tiles across both rows and columns. Their eight-wide matrix instruction
 does not limit the batch to eight rows. Preparation uses the GPU's discovered core count and the selected
-Metal family manifest. CPU core counts do not set GPU launch sizes. The fused kernel joins its resident
-groups between products, so adding queued groups beyond that resident budget is not a way to widen it.
+Metal family manifest. CPU core counts do not set GPU launch sizes. The compiler orders the two products
+through their X and Y accesses. Groups can run in waves; none spins waiting for another group to become resident.
 
 ## The configuration
 

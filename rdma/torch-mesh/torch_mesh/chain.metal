@@ -2,29 +2,6 @@
 #include <metal_simdgroup_matrix>
 using namespace metal;
 
-inline void publish(device atomic_uint* stamps, uint w, uint tid, thread uint& phase) {
-    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
-    if (tid == 0) {
-        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
-        atomic_store_explicit(&stamps[w], phase + 1, memory_order_relaxed);
-    }
-    phase++;
-}
-
-template <uint G, uint SIMD>
-inline void await_stamps(device atomic_uint* stamps, uint target, uint sgid, uint lane) {
-    if (sgid == 0) {
-        for (;;) {
-            bool seen = true;
-            for (uint i = lane; i < G; i += SIMD)
-                seen = seen && int(atomic_load_explicit(&stamps[i], memory_order_relaxed) - target) >= 0;
-            if (simd_all(seen)) break;
-        }
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
-}
-
 template <uint N, uint G>
 inline uint2 share(uint w) {
     constexpr uint q = N / G, r = N % G;
@@ -112,7 +89,7 @@ struct Summand {
 // prepared write interface; rank count and cable count are separate operands.
 template <uint CHANNELS>
 struct chain_words {
-    uint first, phase, rows, ks0, ks1, last, width, actual_rows, previous_j, j, input_j, pad;
+    uint first, pad0, rows, ks0, ks1, last, width, actual_rows, previous_j, j, input_j, pad;
     mesh_step_binding land[CHANNELS], publish[CHANNELS], input[CHANNELS];
 };
 
@@ -128,13 +105,13 @@ kernel void chain_publish_input(constant input_words<CHANNELS>& words [[buffer(1
     }
 }
 
-template <uint TILE, uint K, uint S, uint R, uint G, uint RG, uint RB, uint THREADS, uint SIMD, uint RANKS, uint CHANNELS, bool PRODUCTS = true>
+template <uint TILE, uint K, uint S, uint R, uint G, uint RG, uint RB, uint THREADS, uint SIMD, uint RANKS, uint CHANNELS, uint PHASE>
 [[max_total_threads_per_threadgroup(THREADS)]]
 kernel void chain_step(device const half* At [[buffer(0)]], device const half* Bt [[buffer(1)]], device const half* E [[buffer(2)]],
                        coherent(device) device half* out [[buffer(3)]], coherent(device) device half* X [[buffer(4)]],
                        coherent(device) device half* Y [[buffer(5)]], device half* P [[buffer(6)]],
-                       device atomic_uint* stamps [[buffer(7)]], device atomic_uint* arrivals [[buffer(8)]],
-                       device const uchar* previous [[buffer(9)]], constant chain_words<CHANNELS>& words [[buffer(15)]],
+                       device atomic_uint* arrivals [[buffer(7)]],
+                       device const uchar* previous [[buffer(8)]], constant chain_words<CHANNELS>& words [[buffer(15)]],
                        uint tid [[thread_index_in_threadgroup]], uint sgid [[simdgroup_index_in_threadgroup]],
                        uint lane [[thread_index_in_simdgroup]], uint w [[threadgroup_position_in_grid]]) {
     static_assert(TILE == 8, "simdgroup matrices are 8 x 8");
@@ -142,48 +119,50 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
     constexpr uint SG = THREADS / SIMD;
     threadgroup float red[SG * RB * 64];
     threadgroup uint last;
-    uint phase = words.phase;
     constexpr uint groups = R / (TILE * RG);
     const uint ks0 = words.ks0, ks1 = words.ks1;
     const uint2 xs = share<K / TILE * groups, G>(w), ys = share<S / TILE * groups, G>(w);
     const uint2 elements = share<R * K, G>(w);
-    if (!words.last && tid == 0) for (uint q = 0; q < CHANNELS; q++) if (words.input[q].p) {
-        constant mesh_step_binding& input = words.input[q];
-        mesh_step_enter(*input.p, input.v, input.progress, w == 0);
-        mesh_step_counts(*input.p, input.a, input.v, words.input_j);
-    }
-    if (!words.first) {
-        if (tid == 0) for (uint q = 0; q < CHANNELS; q++) if (words.land[q].p) {
-            constant mesh_step_binding& l = words.land[q];
-            mesh_step_enter(*l.p, l.v, l.progress, w == 0 && tid == 0);
-            mesh_step_counts(*l.p, l.a, l.v, words.previous_j);
+    // Each phase uses the existing numerical body. Dispatch dependencies are
+    // compiled from X/Y accesses; no group waits for another to be scheduled.
+    if constexpr (PHASE == 0) {
+        if (!words.last && tid == 0) for (uint q = 0; q < CHANNELS; q++) if (words.input[q].p) {
+            constant mesh_step_binding& input = words.input[q];
+            mesh_step_enter(*input.p, input.v, input.progress, w == 0);
+            mesh_step_counts(*input.p, input.a, input.v, words.input_j);
         }
-    }
-    threadgroup_barrier(mem_flags::mem_device);
-    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));
-    for (uint q = tid; q < elements.y; q += THREADS) {
-        const uint i = elements.x + q;
-        const uint row = i / K, column = i % K;
-        const bool present = row < words.actual_rows && column < words.width;
-        const uint logical = row * words.width + column;
-        float z = 0.0f;
         if (!words.first) {
-            float sum = 0.0f;
-            for (uint rank = 0; rank < RANKS; rank++) sum += float(mesh_step_read<half>(previous, ulong(rank) * R * K + i));
-            z = tanh(float(half(sum)));
-            if (present) out[logical] = half(z);
+            if (tid == 0) for (uint q = 0; q < CHANNELS; q++) if (words.land[q].p) {
+                constant mesh_step_binding& l = words.land[q];
+                mesh_step_enter(*l.p, l.v, l.progress, w == 0 && tid == 0);
+                mesh_step_counts(*l.p, l.a, l.v, words.previous_j);
+            }
         }
-        if (!words.last) X[i] = half((present ? float(mesh_step_read<half>((device const uchar*)E, logical)) : 0.0f) + z);
+        threadgroup_barrier(mem_flags::mem_device);
+        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));
+        for (uint q = tid; q < elements.y; q += THREADS) {
+            const uint i = elements.x + q;
+            const uint row = i / K, column = i % K;
+            const bool present = row < words.actual_rows && column < words.width;
+            const uint logical = row * words.width + column;
+            float z = 0.0f;
+            if (!words.first) {
+                float sum = 0.0f;
+                for (uint rank = 0; rank < RANKS; rank++) sum += float(mesh_step_read<half>(previous, ulong(rank) * R * K + i));
+                z = tanh(float(half(sum)));
+                if (present) out[logical] = half(z);
+            }
+            if (!words.last) X[i] = half((present ? float(mesh_step_read<half>((device const uchar*)E, logical)) : 0.0f) + z);
+        }
+        return;
     }
-    if (!PRODUCTS || words.last) return;
-    publish(stamps, w, tid, phase);
-    await_stamps<G, SIMD>(stamps, phase, sgid, lane);
     const uint at = lane_element(lane);
-    Activated activated{Y, 0, S, at};
-    const Rows xs_rows{X, K, at};
-    stage<RG, RB, K, SG>(xs_rows, At, ys, groups, ks0, sgid, red, activated);
-    publish(stamps, w, tid, phase);
-    await_stamps<G, SIMD>(stamps, phase, sgid, lane);
+    if constexpr (PHASE == 1) {
+        Activated activated{Y, 0, S, at};
+        const Rows xs_rows{X, K, at};
+        stage<RG, RB, K, SG>(xs_rows, At, ys, groups, ks0, sgid, red, activated);
+        return;
+    }
     Summand summand{P, 0, K, at};
     const Rows ys_rows{Y, S, at};
     stage<RG, RB, S, SG>(ys_rows, Bt, xs, groups, ks1, sgid, red, summand);
