@@ -790,16 +790,19 @@ NSError *MetalScheduleAppend(struct MetalSchedule *s,struct MetalReplay *replay,
     if(replay&&[held[2] unsignedIntegerValue]!=s->form)return MetalReplayFailure(EINVAL,@"mixed replay forms in one function");
     if(s->form==MetalFormSerial&&marks.count)return MetalReplayFailure(EINVAL,@"crossings require the configured Metal 4 form");
     if(replay&&NSMaxRange(invocations)>[held[4] unsignedIntegerValue])return MetalReplayFailure(EINVAL,@"invocations exceed the recorded slots");
-    id<MTLResidencySet> residency=replay?replay->residency:s->residency;
-    [s->owners addObject:residency];if(replay)[s->owners addObject:replay->owner];
+    id<MTLResidencySet> residency=s->residency;
+    if(replay) {
+        [s->owners addObject:replay->owner];
+        for(id<MTLAllocation> allocation in replay->residency.allAllocations)
+            [residency addAllocation:allocation];
+    }
     const struct MetalRecordedDispatch *records=[held[0] bytes];
     const struct MetalReach *reaches=[held[3] bytes];
     const uint8_t *barriers=[held[1] bytes];
     const NSUInteger n=replay?replay->count:0;
     if(s->form==MetalFormSerial) {
-        [(id<MTLCommandBuffer>)s->command useResidencySet:residency];
         if(!s->encoder)s->encoder=[[(id<MTLCommandBuffer>)s->command computeCommandEncoderWithDispatchType:MTLDispatchTypeSerial] retain];
-    } else [(id<MTL4CommandBuffer>)s->command useResidencySet:residency];
+    }
     id<MTL4ComputeCommandEncoder> encoder=s->encoder;
     for(NSUInteger t=invocations.location;t<NSMaxRange(invocations);t++) {
         NSUInteger from=0;
@@ -834,7 +837,7 @@ NSError *MetalScheduleAppend(struct MetalSchedule *s,struct MetalReplay *replay,
             from=to;
         }
     }
-    [residency commit];[residency requestResidency];return nil;
+    return nil;
 }
 
 void MetalScheduleFinish(struct MetalSchedule *s,void (^completed)(NSError *)) {

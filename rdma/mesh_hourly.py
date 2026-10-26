@@ -218,6 +218,10 @@ def rank_results(outputs):
     for name, output in outputs.items():
         lines = output['output'].splitlines()
         code = output['exit']
+        if code:
+            # Diagnostics go to the caller's console. Durable hourly records
+            # retain only the compact failure and paired performance values.
+            print(f'{name}:\n' + '\n'.join(lines[-160:]), file=sys.stderr, flush=True)
         values, observations = [], []
         for line in lines:
             try:

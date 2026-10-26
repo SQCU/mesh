@@ -1285,14 +1285,12 @@ static void run_crossing(IndexedCrossing &call, const at::Tensor &x, const std::
   tensor_binding(frame.publish,0,x);
   if(w){tensor_binding(frame.publish,1,*w);tensor_binding(frame.publish,4,x);}
   tensor_binding(frame.land,1,out);
-  id<MTLResidencySet> records=MetalScheduleResources(frame.transport.get());
   const Dispatch *publication = &frame.publish, *landing = &frame.land;
   const Dispatch *ready = frame.ready ? &*frame.ready : nullptr;
   at::mps::MPSStream *stream = call.stream->mps;
   const auto *resources=frame.resources.data();const size_t resource_count=frame.resources.size();
   dispatch_sync(stream->queue(), ^{
     @autoreleasepool {
-      [stream->commandBuffer() useResidencySet:records];
       id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
       [encoder useResources:resources count:resource_count usage:MTLResourceUsageRead|MTLResourceUsageWrite];
       encode_in(encoder, *publication);

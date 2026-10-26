@@ -337,7 +337,13 @@ class BoundGraph:
         from . import backend, empty
         # Waiting on a functional collective describes its result edge. The
         # prepared native binding already supplies that stream dependency.
+        attributes = {}
         for node in list(graph.graph.nodes):
+            if node.op == 'get_attr':
+                if node.target in attributes:
+                    node.replace_all_uses_with(attributes[node.target]);graph.graph.erase_node(node)
+                    continue
+                attributes[node.target] = node
             target, _ = operation(node)
             if getattr(getattr(target, '_schema', None), 'name', '') == '_c10d_functional::wait_tensor':
                 node.replace_all_uses_with(node.args[0]);graph.graph.erase_node(node)
