@@ -5,13 +5,13 @@ Recorded: **2026-10-25T16:50:37-07:00** (America/Los_Angeles).
 Source reviewed: mesh `c42333365618a777c920572a67ce6aae1aa379db`; metal-microbench
 `8d508ea59b99c0be17b8b234688ff601011eedb7`, both on `main`.
 
-Status: **removal scope recorded; the removals below have not been made by this document**.
+Status: **R01–R17 remain removal scope; R18 was removed in `18be9473`.**
 
 The assignment is to remove execution interfaces which redo work that the library can already settle before
 a call. Keep the numerical operations. Use the existing declarations, page plans, partial tensors and command
 records to express them. Do not replace each deleted executor with another executor of the same kind.
 
-The governing rules are [data-model.md](data-model.md), especially sections 5–9, and the operator's current
+The governing rules are [data-model.md](data-model.md), especially sections 5–6, and the operator's current
 instructions: allocation and routing happen before a data call; runtime uses prepared indices; feedback changes
 operands between whole calls; measurements do not own or alter execution. The older
 [partial-tensor requirements](collective-goals-2026-09-14.md) also require early use of partial inputs.

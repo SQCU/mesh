@@ -152,3 +152,7 @@ authority to pause, time or wrap each operation.
 The existing code supplies much of this structure. The removal manifest records where a caller still bypasses
 it or where the common implementation remains incomplete. The remaining work is to connect and simplify these
 pieces while preserving the best numerical algorithms and all physical routing capabilities.
+
+The [partial tensor and FX reference](../docs/partial-tensors-and-fx.md) documents the current interfaces.
+It includes the `18be9473` consolidation of LSTM chunk preparation into `declarations.Function`, replacing
+the separate first-issue compilation and peer-compilation barrier.
