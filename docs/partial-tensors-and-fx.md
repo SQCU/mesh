@@ -389,11 +389,10 @@ a `view = {name, shape, heads, axis, element}` over an existing tensor. Source a
 format declaration. The receiver uses the export's cache-update fragment; no packing graph is inserted.
 
 `LiteRtProgramCreate` compiles the stages and names their buffers. `LiteRtProgramDeclare` binds those buffers,
-records native commands and crossing marks, and declares them through `MeshRankDeclareReplay`. `LiteRtProgramRun`
-uses `MeshRankRun`, including its prepared speculative epilogue. It has no host-stage executor or late recording
-fallback. `MeshRankCross` is now a recording interface; its eager numerical execution path and
-`MeshRankDeclareHost` were removed. Shared submission overhead and coarse adopted-command accesses remain in
-the removal manifest (R12 and R14).
+records native commands and crossing marks, and declares them through `MeshRankDeclareReplay`. `MeshRankPrepare`
+encodes all phases and the speculative epilogue into one command stream. `MeshRankRun` enqueues it; completion
+reports the whole function. Relay-only ranks use this same path. The host-stage executor, late recording,
+eager crossing path, host relay executor and per-batch submission waits are removed (manifest R12–R14).
 
 The earlier Swift surface `swift/Mesh.swift` was deleted in `a8952de9`; it is historical source, not an API
 available to import today. The Python surface preserves its block-oriented contract. The native numerical
@@ -410,16 +409,19 @@ composition types that remain are in microbench's
 | `MatrixStep` | `(MTLCommandBuffer) -> Void`, a bound numerical encoding function. |
 
 [metal_recording.h](../../../metal-microbench/metal_recording.h) provides `MetalRecordingDevice`,
-`MetalDispatchReaching`, `MetalRecord`, `MetalReplaySubmit` and `MetalReplayFree`. `MetalRecordingAdopt` admits
-commands from a library using the supplied queue; its current accesses are conservative. `MetalRecordMark`
-marks crossing positions. `MetalOperand` supplies buffer slots, stride, instance count and output offset.
-`MetalReach` supplies subranges and read/write/binding/residency flags. `MetalReplay` retains commands,
-residency and their owner. `MetalForm` selects indirect, encoded or serial preparation; `MetalCrossing` is the
-callback binding a collective at a recorded mark.
+`MetalDispatchReaching`, `MetalRecord`, `MetalSchedule` and `MetalReplayFree`. LiteRT receives the recording
+device and queue, so its pipelines retain reflected read/write modes. `MetalBindingView` and `MetalRecordViews`
+carry its declared external tensor extents into capture. `MetalRecordMark` marks crossings. `MetalOperand`
+supplies slots, stride, instance count and output offset. `MetalReach` supplies subranges and access flags.
+`MetalReplay` retains commands and residency. `MetalForm` selects indirect, encoded or serial preparation;
+`MetalCrossing` binds a collective at a recorded mark during preparation.
+
+`MetalScheduleCreate`, `After`, `Append` and `Finish` prepare one function. `MetalScheduleEnqueue` commits it.
+`MetalScheduleFree` retires it after completion. The configured replay form and state operands are bound before execution.
 
 These types already carry information that later wrappers must reuse. They do not establish that all current
-callers use fine-grained reaches or that every submission is allocation-free. Profiling helpers such as
-`StepProfile` and `MetalReplayGPUNanoseconds` remain removal targets under manifest R15, not the measurement
+callers use fine-grained reaches or that every submission is allocation-free. The native GPU interval counter was removed.
+`StepProfile` remains a removal target under manifest R15, not the measurement
 contract for this integration.
 
 ## Current integration boundary

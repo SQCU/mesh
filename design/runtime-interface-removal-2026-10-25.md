@@ -5,7 +5,7 @@ Recorded: **2026-10-25T16:50:37-07:00** (America/Los_Angeles).
 Source reviewed: mesh `c42333365618a777c920572a67ce6aae1aa379db`; metal-microbench
 `8d508ea59b99c0be17b8b234688ff601011eedb7`, both on `main`.
 
-Status: **R01–R17 remain removal scope; R18 was removed in `18be9473`.**
+Status: **See each item below. R12–R14 now use the common prepared native submission path; R18 was removed in `18be9473`.**
 
 The assignment is to remove execution interfaces which redo work that the library can already settle before
 a call. Keep the numerical operations. Use the existing declarations, page plans, partial tensors and command
@@ -151,21 +151,29 @@ the synchronous CPU transport is not used as a fallback. Shared native stream co
   helpers. Local device bindings may contain addresses and lengths; application write operands must not.
   NCCL/PyTorch compatibility is a frontend lowering responsibility, not permission for a competing transport.
 
-### R12. Native submission throttling and allocation
+### R12. Native submission throttling and allocation — removed
 
-- **Remove:** `run_submissions`, `submission_commit` and `submission_result`'s execution contract in
-  [mesh_rank.m](../../../metal-microbench/mesh_rank.m): per-run arrays, a semaphore per submission, unconditional
-  host waits and a fixed two-submission window.
-- **Use:** `MeshRankDeclareReplay`/`MeshRankPlan`, `MetalReplay`, prepared invocation slots and existing
-  asynchronous completion callbacks from `MetalReplaySubmit`.
-- **Integration still required:** bind submission records before execution and preserve actual dependencies
-  without an arbitrary host admission loop. The current `MetalReplaySubmit` still creates command objects;
-  the recorder is a useful foundation, not proof that native execution is already free of runtime overhead.
+Updated 2026-10-26 03:06 UTC; implemented in metal-microbench `e539114e`. `MeshRankPrepare` encodes the complete declared call, including relay-only
+ranks and speculative epilogues, before execution. `MeshRankRun` commits that stream. `MetalSchedule`
+holds its command buffer, argument table, residency and completion observer. There is no submission array,
+per-batch semaphore, two-batch cap, host relay executor or callback that releases the next batch.
+Native, DSV41 and LiteRT callers use this interface. DSV41 prefill writes decode's input operand directly.
+
+Provenance: `92f8de55` (2026-09-25) introduced the two-window loop in `tools/e2b_replay.m`; `a542178b`
+(2026-09-26) moved it into this shared library. Both name zyzzyva as author and Claude Opus 5.5 as co-author.
+`22589255` (2026-10-16) carried it into encoded collective crossings; `caa90712` (2026-10-21) renamed
+windows to submissions. `b1633730` removed the argument-ring bound on October 22 but kept the two-batch cap.
+The original rationale was streamed token reporting and stopping at window boundaries. These commits give
+no hardware requirement or performance result establishing that the cap was necessary.
+
+Whole-function completion supplies elapsed time and useful-output rates. The per-phase host timing loop,
+`runs_ms`, `submission_steps` launch option and native GPU interval counter are removed. Build validation
+alone does not establish a performance gain.
 
 ### R13. LiteRT's implicit late preparation and blocking stage executor — removed
 
 Updated 2026-10-26 02:01 UTC. `LiteRtProgramDeclare` now owns binding, stage warmup and command recording.
-`LiteRtProgramRun` consumes prepared replay, including the speculative closing step, through `MeshRankRun`.
+The phase declarations and speculative closing step are prepared by `MeshRankPrepare` and submitted by `MeshRankRun`.
 The unrecorded stage executor, late recording fallback, WebGPU host executor and `MeshRankDeclareHost` are gone.
 `MeshRankCross` declares a crossing during recording; it no longer selects eager execution outside a recording.
 The call explicitly configures Metal recorded execution; an unsupported provider fails preparation.
@@ -173,19 +181,19 @@ The call explicitly configures Metal recorded execution; an unsupported provider
 The importer consumes the shared phase parts and KV handoff declarations. Model configuration states transfer
 type, width and axis order. Existing graph tensors supply the source and destination head views, and the
 receiver reuses the export's cache-update fragment. Whole-phase placement and imported tensor metadata do not
-select an execution backend at runtime. Shared native submission overhead (R12) and adopted access declarations
-(R14) remain separate work.
+select an execution backend at runtime. R12 and R14 describe their common execution and access contract.
 
-### R14. Whole-buffer ordering in place of known partial accesses
+### R14. Whole-buffer ordering in place of known partial accesses — removed
 
-- **Remove:** blanket read/write ordering as the final access contract for adopted commands, and
-  allocation-identity-only repetition boundaries where exact ranges are available, in
-  `MetalRecordingAdopt`, `MetalDataflow` and `MetalReplayBuild` in
-  [metal_recording.m](../../../metal-microbench/metal_recording.m).
-- **Use:** existing `MetalReach`, `MetalReachBinding`, `MetalDispatchReaching` and the partial graph's
-  region information. They already express more precise accesses.
-- **Integration still required:** supply the missing access declarations when adopting a pipeline. Removing
-  a barrier without replacing its coarse relation with the actual relation is not the requested change.
+LiteRT receives the shared recording device and queue. Pipelines retain their reflected read/write modes;
+`MetalRecordingAdopt` and its blanket serialization are deleted. The LiteRT binding stage supplies
+`MetalBindingView` records with each external tensor's buffer, offset and byte extent. `MetalRecordViews`
+applies those declarations during capture. Internal buffers use their binding extent; pointer reaches still
+require `MetalDispatchReaching` declarations. An unreflected pipeline fails preparation.
+
+One access-order calculation serves individual records, repeated slots and the complete function. It uses
+byte overlap and the actual invocation's slot, including output offsets. It does not equate sharing an
+allocation with a dependency. Known native subranges continue through `MetalReach` and `MetalReachBinding`.
 
 ### R15. Measurement modes that change the program they observe
 
@@ -254,14 +262,14 @@ The [graph history](aot-graphs-and-pytorch.md) explains the connections and prio
 | `_stream.mm`, `PreparedWrites`, `FusedForm`, `PreparedChain`; [fused.py](../rdma/torch-mesh/torch_mesh/fused.py) | Shared storage and fused crossings from PyTorch | Keep the bindings and numerical fusion; remove per-operation realization and excess joins (R07–R09). |
 | `linear.metal`, `streamed.metal`, `sparse.metal`, `structured.metal` | Dense/grouped products, coded-weight streaming, tile masks and rotations | Reusable numerical bodies, including native callers. Their Python wrappers still have R02/R05/R06 work. |
 | `attention.metal`, `argmax.metal`, `drafter.metal`, `speculate.metal` | Online attention partials, selection and speculative state | Keep numerical semantics and indexed state. Decode attention does not supply training backward automatically. |
-| [metal_recording.h](../../../metal-microbench/metal_recording.h), `MetalReplay`, `MetalOperand`, `MetalReach` | Record commands, bind invocation slots, derive access order and residency | Major AOT foundation; R12/R14 remain. ICB, encoded and serial forms share this representation. |
+| [metal_recording.h](../../../metal-microbench/metal_recording.h), `MetalReplay`, `MetalOperand`, `MetalReach` | Record commands, bind invocation slots, derive access order and residency | Major AOT foundation; R12/R14 removed. ICB, encoded and serial forms share this representation. |
 | [matrix_operations.swift](../../../metal-microbench/matrix_operations.swift), `MatrixView`, `MetalDispatch`, `MetalProgram` | Strides, partial access descriptions and prepared numerical commands | Reuse the preparation interface; remove intrusive timing modes (R15). |
 | [metal_native.h](../../../metal-microbench/metal_native.h), [metal_runtime.swift](../../../metal-microbench/metal_runtime.swift), `Generation`, `Placement` | Shared kernel source, pipeline preparation, model dimensions and ragged placement | Configuration work already exists. Callers must complete it before the numerical function. |
 | [instance_fit.swift](../../../metal-microbench/instance_fit.swift), `InstanceSpec`, `SliceUnits`, `InstanceFit`, `AttentionPlan` | Represent kernel work and choose prepared product/attention geometry | Useful configuration metadata. A fitted choice must feed prepared operands and whole-call feedback; it is not authority for another operation timer. |
-| [engine_recording.swift](../../../metal-microbench/engine_recording.swift), `RankCall`, `RankRecording`, `EngineRecording`, `EngineProgram` | Whole native prefill/decode phases over shared operand slots | Uses the recorder already; inherits the submission loop in R12. |
+| [engine_recording.swift](../../../metal-microbench/engine_recording.swift), `RankCall`, `RankRecording`, `EngineRecording`, `EngineProgram` | Whole native prefill/decode phases over shared operand slots | Uses the recorder already; uses the prepared submission in R12. |
 | [dense_execution.swift](../../../metal-microbench/dense_execution.swift), `Network`, `StepProgram`; [streamed_weights.swift](../../../metal-microbench/streamed_weights.swift) | Compose native model steps and coded/dense matrix work | Existing composition layer to reuse, not a reason to introduce PyTorch into the native engine. |
 | [decode_crossings.swift](../../../metal-microbench/decode_crossings.swift), `CrossingPoint`, `StepCrossings`, `SpecOperands` | Collective operands, shared-prefix descriptors and GPU speculative state | Useful prepared data. Crossings still inherit common collective executor gaps. |
-| [litert_program.h](../../../metal-microbench/litert_program.h), `LiteRtProgram`, `LiteRtPositions` | Upstream model compiler plus native command capture and shared tensors | Separate frontend using the same recorder; R13 removed, R14 remains. |
+| [litert_program.h](../../../metal-microbench/litert_program.h), `LiteRtProgram`, `LiteRtPositions` | Upstream model compiler plus native command capture and shared tensors | Separate frontend using the same recorder; R12–R14 removed. |
 | [neural_engine.swift](../../../metal-microbench/neural_engine.swift), `NeuralEngineShares`, `NeuralEnginePartner` | Prebound CPU/GPU/ANE shared work | Storage and numerical adapters are reusable; coordination still needs review against whole-call execution (R01). |
 | [mesh-coreml.m](../rdma/mesh-coreml.m), `mesh_coreml_predict`; `engines.Ane` | CoreML model execution over shared tensor storage | Retain the engine capability. Model preparation must be outside the call; the current wrapper is not certified as allocation-free native execution. |
 | Native `PageManager`, prefix trie; [dsv41.swift](../../../metal-microbench/dsv41.swift) model composition | Paged model state, shared prefixes, another model's native phases | Capability identified. Session management is not certified as a fixed numerical schedule; it is not a replacement transport. |

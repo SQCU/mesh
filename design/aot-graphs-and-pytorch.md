@@ -40,7 +40,7 @@ limited by only one resource.
 | Ragged placement | [partition.py](../rdma/torch-mesh/torch_mesh/partition.py), `RaggedShard`, `Preparations`; [configuration.py](../rdma/torch-mesh/torch_mesh/configuration.py) | Map uneven tensor shares to a device mesh and declare their communication | Generic collective launch still reconstructs metadata; some examples impose whole-operand joins. |
 | Physical write compiler | [mesh-plan.h](../rdma/mesh-plan.h), `mesh_routed_compile`, span/row planners, [routing.py](../rdma/routing.py) | Turn logical data needs into many-cable routes, relay slots, packet cuts and ordering | Raw pointer/extent write contracts and generic registration cuts are not fully reconciled with the page/mask model. |
 | Native numerical composition | [matrix_operations.swift](../../../metal-microbench/matrix_operations.swift): `MetalProgram`, `MetalDispatch`, `MatrixView`, `Reach` | Compose kernels, bind constants and describe accessed ranges | Some callers and profiling modes still change work during execution. |
-| Native graph record/replay | [metal_recording.h](../../../metal-microbench/metal_recording.h): `MetalRecord`, `MetalReplay`, `MetalOperand`, `MetalReach` | Capture command bindings, prepare repeated slots, derive access order, retain residency | Broad adopted-command accesses and submission orchestration still add avoidable work. |
+| Native graph record/replay | [metal_recording.h](../../../metal-microbench/metal_recording.h): `MetalRecord`, `MetalReplay`, `MetalOperand`, `MetalReach` | Capture command bindings, prepare repeated slots, derive access order, retain residency | Shared prepared submission and byte-range access ordering replace the former host batch loop. |
 | Native model adapters | [engine_recording.swift](../../../metal-microbench/engine_recording.swift), [litert_program.h](../../../metal-microbench/litert_program.h), [mesh_rank.h](../../../metal-microbench/mesh_rank.h) | Declare prefill/decode phases and their collective crossings using shared records | LiteRT now consumes phase parts and explicit handoff formats, then declares native replay. `MeshRankRun` still waits and allocates. |
 | Feedback as data | [assignment.py](../rdma/assignment.py), [rollout.py](../rdma/rollout.py), [lifetimes.py](../rdma/lifetimes.py) | Use whole-call observations to emit the next shares, routes and storage relations | Existing capability is not proof of convergence or optimality. Some relevant metadata is not yet connected to the active solver. |
 
@@ -88,11 +88,11 @@ different collective implementations. [Kernel design](../../../metal-microbench/
 documents why direct recorded dispatches were introduced: stage barriers can be cheaper than ICB drains.
 Some captured pipelines do not support ICBs at all.
 
-The existing recorder is substantial, but its caller is not automatically efficient. `MeshRankRun` currently
-allocates submission arrays and waits on semaphores while keeping at most two submissions in flight.
-`MetalReplaySubmit` still builds command objects and invokes collective crossings on the host. Adopted LiteRT
-commands are conservatively treated as reading and writing every bound buffer. Those facts belong in the
-removal work; “recorded” is not a performance certificate.
+`MeshRankPrepare` now encodes the complete declared function. `MeshRankRun` enqueues it without a batch
+admission loop. The completion observer reports results asynchronously. LiteRT uses the recording device's
+pipeline reflection and supplies external tensor byte views during capture. Repeated slots are ordered by
+actual byte overlap. These changes remove manifest R12–R14; performance remains an empirical property of
+the completed function, paired with its useful-output rate.
 
 The PyTorch extension is a separate adapter. Its `dispatch_sync` hands a host encoding closure to the MPS
 stream queue and waits for that closure. Encoding sets pipeline/buffer bindings and dispatch geometry; it does
