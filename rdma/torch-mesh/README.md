@@ -142,7 +142,8 @@ for callers that need them. Tracing includes backward operations when the suppli
 The LSTM service prepares its fixed-size chunks and any remainder through this interface. It does not execute
 a chunk to compile it, wait for peer compilation at first issue, or retain a second recording executor.
 A statistics thread observes ordinary completion state with a host clock; it cannot submit numerical work,
-add GPU timing events, or drain the stream for a measurement.
+add GPU timing events, or drain the stream for a measurement. See the
+[partial tensor and FX reference](../../docs/partial-tensors-and-fx.md) for interfaces and preparation order.
 
 The 10-01 form (mesh 4cbe704 `record`/`replay`, metal-microbench 35c30a9 `metal_recording.m`) also recorded every Metal
 command the step encoded, from any thread, and replayed them as one program; had torch's own copy kernels that store a

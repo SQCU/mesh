@@ -204,6 +204,7 @@ The first L - 1 ticks, while the upper layers have not begun, use `Tick.starting
 broadcast, starting gathers and compiled gathers together and binds their storage before execution. The compiler
 reads destination-writing operators through PyTorch's functionalization metadata and constructs the declaration
 before looking up cached numerical code. A chunk's k gathers are one crossing issued once, each tick its repeat.
+See the [partial tensor and FX reference](partial-tensors-and-fx.md) for the complete interfaces.
 
 **Configuration.** `steps`, `rows`, `seed`, `input_width`, `width` (H), `layers`, `steps_per_replay` and
 `observations`. `lstm.inputs(configuration, steps, rows)` returns the input and weights in region memory, using
