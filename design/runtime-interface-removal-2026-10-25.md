@@ -348,7 +348,7 @@ with useful bandwidth across the configured shapes. This manifest reports source
 claim that every proposed substitution already improves that curve.
 
 
-## FX integration update — 2026-10-26T17:35:00Z
+## FX integration update — 2026-10-26T17:30:31Z
 
 `TorchSchedule`, its framework/native start/join handoff, indexed crossing execution, `Preparations`, and
 `_CAPTURE` are removed. `native.compile_graph` uses numerical IR and Metal source generation during

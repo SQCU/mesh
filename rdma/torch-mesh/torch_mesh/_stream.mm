@@ -661,7 +661,7 @@ static Dispatch encoded(int64_t handle, const std::vector<std::optional<at::Tens
 // FX's output is the native recorder's input. This constructor only binds
 // storage and constant operands; it neither runs nor records a framework call.
 using CommandRecord = std::tuple<int64_t, std::vector<std::optional<at::Tensor>>,
-    std::map<uint32_t,std::string>, std::array<NSUInteger,3>, std::array<NSUInteger,3>, bool, uint64_t>;
+    std::map<uint32_t,pybind11::bytes>, std::array<NSUInteger,3>, std::array<NSUInteger,3>, bool, uint64_t>;
 struct Commands {
   MetalReplay *replay=nullptr;
   std::vector<at::Tensor> operands;
@@ -685,7 +685,8 @@ struct Commands {
           (uint32_t)(((access>>j)&1?MetalReachRead:0)|((access>>(32+j))&1?MetalReachWritten:0))});
         operands.push_back(t);
       }
-      for(const auto &[index,bytes]:scalars) {
+      for(const auto &[index,scalar]:scalars) {
+        const std::string bytes=scalar;
         id<MTLBuffer> buffer=[device newBufferWithBytes:bytes.data() length:bytes.size() options:MTLResourceStorageModeShared];
         constants.push_back(buffer);
         bound.push_back({buffer,0,bytes.size(),index,MetalReachRead});
@@ -811,14 +812,14 @@ static std::vector<CommandRecord> linear_commands(const std::vector<at::Tensor> 
     buffers.resize(6);buffers[5]=buffers[4];buffers[4]=std::nullopt;
     std::vector<uint32_t> packed(words.begin(),words.begin()+8);
     return {{linear_pipeline(std::make_tuple(wide_w?4:1,wide_x?4:1,(int)split,(int)acts[0])),buffers,
-        {{4,std::string((char *)packed.data(),packed.size()*sizeof(uint32_t))}},
+        {{4,pybind11::bytes((char *)packed.data(),packed.size()*sizeof(uint32_t))}},
         {(NSUInteger)first,1,1},{(NSUInteger)(split*32),1,1},false,UINT64_C(43)|(UINT64_C(4)<<32)}};
   }
   const auto key = std::make_tuple(wide_w ? 4 : 1, wide_x ? 4 : 1, (int)split, -1);
   std::vector<uint32_t> packed(words.begin(),words.end());
   uint64_t access=0;
   for(size_t p=0;p<P;p++)access|=(UINT64_C(27)<<(5*p))|(UINT64_C(4)<<(32+5*p));
-  return {{linear_pipeline(key),buffers,{{20,std::string((char *)packed.data(),packed.size()*sizeof(uint32_t))}},
+  return {{linear_pipeline(key),buffers,{{20,pybind11::bytes((char *)packed.data(),packed.size()*sizeof(uint32_t))}},
       {(NSUInteger)first,1,1},{(NSUInteger)(split*32),1,1},false,access}};
 }
 
