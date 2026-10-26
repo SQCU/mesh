@@ -1,0 +1,28 @@
+// Build-time Metal capabilities and initial compilation policy. This file is
+// consumed by the native recorder, FX compiler, Swift engine and Metal source.
+// Values are explicit operands, not facts to repeat in an algorithm.
+// Hardware/ABI: Apple Metal feature tables and the recorder's access-word ABI.
+MESH_METAL_VALUE(BUFFER_BINDINGS, 31)
+MESH_METAL_VALUE(MEMORY_BINDINGS, 31)
+MESH_METAL_VALUE(INDIRECT_COMMANDS, 4194304)
+MESH_METAL_VALUE(SIMD_WIDTH, 32)
+MESH_METAL_VALUE(ACCESS_WRITE_SHIFT, 32)
+// Linear geometry: initial choices, not limits on the function's row count.
+MESH_METAL_VALUE(LINEAR_ROWS, 8)
+MESH_METAL_VALUE(LINEAR_COLUMNS, 2)
+MESH_METAL_VALUE(LINEAR_LOADS, 2)
+MESH_METAL_VALUE(LINEAR_VECTOR, 4)
+MESH_METAL_VALUE(LINEAR_SIMDGROUPS, 8)
+MESH_METAL_VALUE(LINEAR_GROUPS_PER_CORE, 256)
+MESH_METAL_VALUE(LINEAR_MIN_INNER, 1024)
+MESH_METAL_VALUE(LINEAR_ROW_CROSSOVER, 8)
+// Cooperative matrix geometry: each SIMD group computes one tile.
+MESH_METAL_VALUE(MATRIX_ROWS, 32)
+MESH_METAL_VALUE(MATRIX_COLUMNS, 32)
+MESH_METAL_VALUE(MATRIX_INNER, 32)
+MESH_METAL_VALUE(MATRIX_ROW_GROUPS, 2)
+MESH_METAL_VALUE(MATRIX_COLUMN_GROUPS, 2)
+// Copy/fold preparation. Work is distributed over the discovered GPU cores.
+MESH_METAL_VALUE(GATHER_THREADS, 256)
+MESH_METAL_VALUE(GATHER_ELEMENTS_PER_THREAD, 8)
+MESH_METAL_VALUE(GATHER_GROUPS_PER_CORE, 1)

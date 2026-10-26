@@ -1,0 +1,48 @@
+#pragma once
+/* Shared-region, wire and administrative configuration. All peers in one
+   deployment build from this contract. Change a version when its layout changes,
+   not when source is refactored. Capacities here are explicit build operands. */
+#define MESH_MAGIC 0x4d455348u
+#define MESH_NAME "/mesh0"
+#define MESH_PORT "18519"
+#define MESH_ULA_PREFIX "fd6d:6573:68:"
+#define MESH_MODE 0666
+#define MESH_VERSION 135u
+#define MESH_LAYOUT 154u
+#define MESH_STREAMS 32
+#define MESH_CLIENTS 64
+#define MESH_STREAM_ENTRIES 4096u
+#define MESH_LANE_UNITS 4096u
+#define MESH_PAUSE_NS UINT64_C(3000000000)
+#define MESH_PLATFORM_NS UINT64_C(5000000000)
+#define MESH_LINK_STREAMS 4u
+#define MESH_LANE_FIRST 2u
+#define MESH_STREAM_LANES 2u
+#define MESH_CHILD_VERSION 2u
+#define MESH_KNOWN 256
+#define MESH_HEALTH_NS UINT64_C(10000000000)
+#define MESH_MODEL_BYTES 32
+
+#define MESH_OWNER_PROCESS_BITS 32
+#define MESH_OWNER_CLIENT_BITS 6
+#define MESH_OWNER_GENERATION_BITS 25
+#define MESH_OWNER_GENERATION_SHIFT (MESH_OWNER_PROCESS_BITS + MESH_OWNER_CLIENT_BITS)
+#define MESH_GATE_COUNT_BITS 48
+#define MESH_METAL_ARGUMENT_BYTES 128u
+
+#define MESH_OWNER_FLAG_BIT 63
+#define MESH_RECORD_ALIGNMENT 64
+
+/* Declared ABI facts, checked by the build against its headers. */
+#define MESH_SIZEOF_MESH_BUFFER 32
+#define MESH_ALIGNOF_MESH_BUFFER 32
+#define MESH_SIZEOF_MESH_PAGE_ENTRY 16
+#define MESH_ALIGNOF_MESH_PAGE_ENTRY 16
+#define MESH_SIZEOF_MESH_DMA_SPAN 16
+#define MESH_SIZEOF_MESH_ENTRY 32
+#define MESH_SIZEOF_MESH_STREAM 384
+#define MESH_OFFSET_MESH_PAGE_ENTRY_ADDRESS 8
+#define MESH_OFFSET_MESH_STREAM_METADATA 88
+#define MESH_OFFSET_MESH_STREAM_READY 128
+#define XMAGIC (0x4d595048u+131u+(1u<<12))
+#define TAG_CHILD (UINT64_C(1)<<58)

@@ -40,11 +40,11 @@ def compiler(gm, example_inputs):
     aten = torch.ops.aten
 
     def rows(x, w):
-        """Whether x @ w is linear's: on MPS (its one implementation), fp16, x [R <= 8, K] contiguous, w the transposed
+        """Whether x @ w is linear's: on MPS (its one implementation), fp16, x [R, K] contiguous, w the transposed
         view of a [N, K] whose rows lie apart by K or more."""
         x, w = x.meta.get('val'), w.meta.get('val')
         return (x is not None and w is not None and x.device.type == 'mps' and x.dtype == w.dtype == torch.half and x.dim() == w.dim() == 2
-                and x.shape[0] <= 8 and x.is_contiguous() and w.stride(0) == 1 and w.stride(1) >= w.shape[0])
+                and x.is_contiguous() and w.stride(0) == 1 and w.stride(1) >= w.shape[0])
 
     def joined(x):
         """The two fp16 rows-segments x is the cat of along its last dimension, where that cat has no other use."""
@@ -56,7 +56,7 @@ def compiler(gm, example_inputs):
         return x.args[0]
 
     def grouped(graph):
-        """Consecutive products of torch_mesh::linear, up to four, none reading another's output nor any of their outputs
+        """Consecutive products of torch_mesh::linear, within the manifest binding capacity, none reading another's output nor any of their outputs
         used before the last of them, as one torch_mesh::linears: one dispatch."""
         import operator
         order = {n: i for i, n in enumerate(graph.nodes)}
@@ -76,7 +76,7 @@ def compiler(gm, example_inputs):
         i = 0
         while i < len(products):
             group = [products[i]]
-            for m in products[i + 1:4 + i]:
+            for m in products[i + 1:_stream.compilation['LINEAR_PRODUCTS'] + i]:
                 if any(g in ancestors(m) for g in group) or any(order[u] < order[m] for g in group for u in g.users):
                     break
                 group.append(m)

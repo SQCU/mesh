@@ -25,7 +25,7 @@ def placement(mesh, name, workload, observations):
     store.set(f'{key}/capacity/{rank}', str(node()[1]))
     capacities = [int(store.get(f'{key}/capacity/{p}')) for p in range(size)]
     if rank == 0:
-        records = [row for row in history if row['workload'] == workload][-64:]
+        records = [row for row in history if row['workload'] == workload][-assignment.NUMERICS['observation_window']:]
         store.set(key + '/observations', json.dumps(records))
     records = json.loads(store.get(key + '/observations'))
     operand = partition.operand(mesh, name)

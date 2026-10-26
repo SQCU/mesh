@@ -69,10 +69,12 @@ def _form(K, S, rows, ranks, channels, resident_tiles, capabilities):
             # operand, not a runtime alternative or a change of transport.
             if linear:
                 _stream.linear_source(partition._LINEAR_SOURCE, cores)
-                first, second = _stream.linear_split(K, S), _stream.linear_split(S, K)
-                name, specialization = instance('linear_rows', 4, 4, 2, first, 2, 1)
+                first, second = _stream.linear_split(K, S, rows), _stream.linear_split(S, K, rows)
+                geometry = _stream.compilation
+                vector, columns, loads = (geometry[k] for k in ('LINEAR_VECTOR', 'LINEAR_COLUMNS', 'LINEAR_LOADS'))
+                name, specialization = instance('linear_rows', vector, vector, columns, first, loads, 1)
                 product = _stream.pipeline(partition._LINEAR_SOURCE + '\n' + specialization, name)
-                publication = partition._linear_kernel(4, 4, 2, second, 2, channels)
+                publication = partition._linear_kernel(vector, vector, columns, second, loads, channels)
                 products = [product, publication, first, second]
             ready_name, ready_line = instance('chain_publish_input', channels)
             ready = _stream.pipeline(source + '\n' + ready_line, ready_name)

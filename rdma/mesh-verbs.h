@@ -21,8 +21,7 @@
    virtual-address boundary.  The region is mapped at a bank-aligned base and registered in extents of
    MESH_EXTENT bytes, which divides the bank: every extent lies inside one bank, however many banks the
    region spans.  1 GiB is the registration the provider takes. */
-#define MESH_BANK ((size_t)1<<32)
-#define MESH_EXTENT ((size_t)1<<30)
+#define MESH_EXTENT MESH_DMA_EXTENT
 struct wire_mapping { char *data; size_t length; };
 /* design/transport.md: a port's device: its context, protection domain and the whole region's `extents`
    registered on it (design/transport.md), the queue pairs it holds against those it can use (`max_pairs`:
@@ -49,7 +48,7 @@ struct mesh_device {
    27 rdma_en3 (2026-10-21) held [0] 23ff:9f:174a:401d:8d37:9dff:16ac:4594, [1] its interface's fe80:: link-local, [2]
    its fd6d ULA, and the Mini (macOS 26) failed every lane's connection toward [0] with EIO */
 static __attribute__((unused)) int device_gid(struct mesh_device *device,const char *interface){
-  enum { HELD=16, ENTRIES=256 };
+  enum { HELD=MESH_GID_ADDRESSES, ENTRIES=MESH_GID_ENTRIES };
   struct in6_addr held[HELD];
   union ibv_gid table[ENTRIES];
   int helds=0,chosen=-1,matched=0,linklocal=-1,first=-1;
@@ -235,7 +234,7 @@ static __attribute__((unused)) int queue_send(struct mesh_verbs *provider,int q)
 }
 /* design/algorithm-sources.md#link */
 static __attribute__((unused)) uint64_t port_bandwidth(const struct ibv_port_attr *port){
-  static const uint64_t speeds[256]={[1]=2500000000,[2]=5000000000,[4]=10000000000,[8]=10000000000,[16]=14000000000,[32]=25000000000,[64]=50000000000,[128]=100000000000};
-  static const uint8_t widths[256]={[1]=1,[2]=4,[4]=8,[8]=12};
+  static const uint64_t speeds[UINT8_MAX+1]=MESH_PORT_SPEEDS;
+  static const uint8_t widths[UINT8_MAX+1]=MESH_PORT_WIDTHS;
   return speeds[port->active_speed]*widths[port->active_width];
 }

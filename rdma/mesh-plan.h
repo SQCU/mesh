@@ -1,6 +1,7 @@
 #ifndef MESH_PLAN_H
 #define MESH_PLAN_H
 #include <stdint.h>
+#include "../etc/bridge/layout.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -327,7 +328,6 @@ struct mesh_health { uint64_t booted,available; };
 /* A node's record as its bridge last sent it: its bridge's node, its bridge's region (bytes its clients may hold), the node's
    memory (hw.memsize) and model (hw.model, NUL-terminated, MESH_MODEL_BYTES with its NUL; mesh.h struct mesh_record),
    and its health. */
-#define MESH_MODEL_BYTES 32
 struct mesh_node_health { uint32_t node; uint64_t region,memory; char model[MESH_MODEL_BYTES];
                           struct mesh_health health; };
 /* Every node's record the bridge holds (mesh_map's nodes, this node's own among them): their count (at most `capacity`

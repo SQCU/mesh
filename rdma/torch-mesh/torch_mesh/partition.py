@@ -295,7 +295,8 @@ kernel void sum_land(device const uchar* lease [[buffer(0)]], device metal::cond
     }
 }
 """
-_GATHER_KERNELS, _GATHER_THREADS = {}, 256
+from . import _stream
+_GATHER_KERNELS, _GATHER_THREADS = {}, _stream.compilation['GATHER_THREADS']
 
 
 def _gather_kernel(kernel, *arguments):
@@ -365,7 +366,11 @@ def _fused_form(x, w, dim, sizes, group_name, adds, channels):
     words = ([math.prod(operand) * half, math.prod(operand[:dim]), math.prod(operand[dim + 1:]) * half, rank, 0] + list(sizes) +
              starts[:-1])
     shape = operand
-    spread = lambda count: max(1, min(16, -(-count // (_GATHER_THREADS * 8))))
+    from .streamed import node
+    geometry = _stream.compilation
+    capacity = node()[1] * geometry['GATHER_GROUPS_PER_CORE']
+    grain = _GATHER_THREADS * geometry['GATHER_ELEMENTS_PER_THREAD']
+    spread = lambda count: max(1, min(capacity, -(-count // grain)))
     groups = spread(math.prod(shape) * half)
     inline_wait = groups == 1
     land = _gather_kernel('sum_land', x.element_size(), n, channels, inline_wait)
@@ -377,9 +382,10 @@ def _fused_form(x, w, dim, sizes, group_name, adds, channels):
         K, N, ldw = x.shape[1], w.shape[0], w.stride(0)
         if x.stride(1) != 1:
             raise ValueError('mesh: linear publication requires contiguous columns; realize a strided producer kernel')
-        split = _stream.linear_split(K, N)
-        publish = (_linear_kernel(4 if ldw % 4 == 0 else 1, 4 if x.stride(0) % 4 == 0 else 1, 2, split, 2, channels),
-                   [x.shape[0], K, N, 0, ldw, K, x.stride(0), x.stride(0), 0], 8, -(-N // 2), split * 32)
+        split = _stream.linear_split(K, N, x.shape[0])
+        vector, columns, loads = (geometry[k] for k in ('LINEAR_VECTOR', 'LINEAR_COLUMNS', 'LINEAR_LOADS'))
+        publish = (_linear_kernel(vector if ldw % vector == 0 else 1, vector if x.stride(0) % vector == 0 else 1, columns, split, loads, channels),
+                   [x.shape[0], K, N, 0, ldw, K, x.stride(0), x.stride(0), 0], 8, _stream.linear_groups(x.shape[0], N), split * geometry['SIMD_WIDTH'])
     return (group.handle, _stream.polls, n, rank, *publish, land, words, 4, groups, _GATHER_THREADS,
             starts, counts, list(shape), torch.zeros(1, dtype=torch.int32, device='mps'),
             -1 if inline_wait else _gather_kernel('gather_ready', n, channels), channels)

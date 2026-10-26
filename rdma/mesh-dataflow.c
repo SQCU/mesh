@@ -267,10 +267,10 @@ void mesh_retire(struct hdr *m,uint64_t client){
 }
 
 int mesh_slot_take(struct mesh_ctx *c,struct hdr *m){
-  uint64_t generation=(atomic_fetch_add_explicit(&m->serial,1,memory_order_relaxed)+1)&((UINT64_C(1)<<25)-1);
+  uint64_t generation=(atomic_fetch_add_explicit(&m->serial,1,memory_order_relaxed)+1)&((UINT64_C(1)<<MESH_OWNER_GENERATION_BITS)-1);
   for(uint32_t s=0;s<MESH_CLIENTS;s++){
     struct mesh_client *slot=(struct mesh_client *)((char *)m+m->client_off)+s;
-    uint64_t vacant=0,owner=(generation<<38)|((uint64_t)s<<32)|(uint32_t)getpid();
+    uint64_t vacant=0,owner=(generation<<MESH_OWNER_GENERATION_SHIFT)|((uint64_t)s<<MESH_OWNER_PROCESS_BITS)|(uint32_t)getpid();
     if(!atomic_compare_exchange_strong(&slot->owner,&vacant,owner))continue;
     slot->start=mesh_started(getpid());
     *c=(struct mesh_ctx){.M=m,.len=c->len,.client=owner,.fd=c->fd};

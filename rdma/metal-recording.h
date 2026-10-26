@@ -1,5 +1,6 @@
 #pragma once
 #import <Metal/Metal.h>
+#include "metal-capabilities.h"
 
 #ifdef __cplusplus
 extern "C" {

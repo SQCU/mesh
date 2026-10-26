@@ -58,3 +58,24 @@ In metal-microbench, `MetalGPUCores` used IORegistry but silently returned eight
 restored verbatim, and the attention planner throws on a missing count during preparation. The build and compilation
 checks establish that these inputs are connected. Performance
 claims still require the committed-main hourly's whole-call duration and useful throughput.
+
+The shared `etc/compute/metal.def` manifest supplies binding and indirect-command limits, SIMD width, matrix tiles,
+linear tiles and the initial launch policy. `metal-capabilities.h` exposes the same operands to C, Swift and the
+Python extension; `MetalCompilerOptions` and the transport source builder supply them to Metal. No frontend keeps
+its own copy. The linear compiler derives the grouped-product count from the binding capacity. Each row tile gets
+its own grid work, and FX fusion includes wide products. The row crossover selects a compiled geometry; it does not
+limit the number of rows in a function. Gather grids use the discovered GPU core count and configured work per thread.
+
+`etc/bridge/layout.h` holds the shared-region and wire contract, including capacities and ABI checks.
+`etc/bridge/thunderbolt.h` holds credit size, address-bank and registration limits, request size and provider codes.
+The registration planner and DMA span compiler use the same extent. Changing a layout still requires its version to
+change and its peers to be rebuilt; moving these values into the manifest does not change the existing layout.
+
+`etc/compute/solver.json` supplies routing precision, tolerances, regularization, fit effort and observation policy.
+The compiler loads it before numerical execution. These are initial numerical choices, with the existing empirical
+updates still operating on the resulting page assignments.
+
+The Swift engine consumes `metal-microbench/configs/structure.json`'s engine section, which its planner already reads.
+Batch, KV capacity, page layout, classes and queue capacity now come from that operand. The eight-row MoE assertion
+and silent KV-pool clamp have been removed. Page addressing in the engine's shaders consumes the same configured
+page extent. Preparation still sizes storage from the requested shape and the device's available resource limits.

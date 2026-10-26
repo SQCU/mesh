@@ -3,6 +3,7 @@
 #include "nccl-mesh-metal.h"
 #include "nccl-mesh-kernels.h"
 #include "mesh_metal.h"
+#include "metal-capabilities.h"
 #include "nccl.h"
 #include "metal-recording.h"
 #include <dlfcn.h>
@@ -26,7 +27,7 @@ static const uint8_t COPY[2][METAL_LAND + 1] = {{KIND_copy_plain_4, KIND_copy_la
 ARGS(args, uint64_t, uint32_t);
 /* Kernel lookup is shared; compiled argument pages belong to their function's
    residency set and are never recycled while that function can execute. */
-#define RECORD 128u
+#define RECORD MESH_METAL_ARGUMENT_BYTES
 struct kernels { id<MTLDevice> device; id<MTLComputePipelineState> pipelines[PIPELINES]; };
 @interface MeshArgumentPages : NSObject {
 @public
@@ -559,6 +560,7 @@ const char *metal_prelude(void) {
   static dispatch_once_t once;
   dispatch_once(&once, ^{
     NSString *words = [[[NSString alloc] initWithBytes:mesh_metal length:mesh_metal_len encoding:NSUTF8StringEncoding] autorelease];
+    words = [@(MetalCompilationPrelude()) stringByAppendingString:words];
     text = [[NSString alloc] initWithFormat:@"%@\n%@", words, STEPS];
   });
   return text.UTF8String;

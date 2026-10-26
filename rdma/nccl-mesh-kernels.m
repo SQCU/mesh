@@ -8,6 +8,7 @@
 #import <Metal/Metal.h>
 #include "nccl-mesh-kernels.h"
 #include "mesh_metal.h"
+#include "metal-capabilities.h"
 #include <stdio.h>
 
 static int failed(const char *what, NSError *error) {
@@ -17,7 +18,7 @@ static int failed(const char *what, NSError *error) {
 
 static int text(const char *path) {
   NSString *primitives = [[[NSString alloc] initWithBytes:mesh_metal length:mesh_metal_len encoding:NSUTF8StringEncoding] autorelease];
-  NSString *source = [@[primitives, STEPS, KERNELS, TRACKS, TRACK_KERNEL] componentsJoinedByString:@""];
+  NSString *source = [@[@(MetalCompilationPrelude()), primitives, STEPS, KERNELS, TRACKS, TRACK_KERNEL] componentsJoinedByString:@""];
   NSError *error = nil;
   return [source writeToFile:@(path) atomically:YES encoding:NSUTF8StringEncoding error:&error] ? 0 : failed(path, error);
 }

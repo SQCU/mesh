@@ -13,6 +13,7 @@ MESH_CODESIGN_IDENTITY ?= Mesh Bridge
 # one's deprecation must not leave a node's bridge unbuilt)
 WARN = -Wall -Wextra -Werror -Wno-error=deprecated-declarations
 $(IMAGES:%=.build/%) .build/nccl-mesh-kernels: $(METAL_CONFIGURATION)
+$(IMAGES:%=.build/%) .build/nccl-mesh-kernels: metal-capabilities.h ../etc/compute/metal.def ../etc/bridge/layout.h ../etc/bridge/thunderbolt.h
 all: $(IMAGES:%=.build/%)
 # the bridge and mesh-stat read the region through libmesh: beside them once installed, and at ../rdma from $MESH_ROOT/bin
 LIBMESH = -L.build -lmesh -Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../rdma

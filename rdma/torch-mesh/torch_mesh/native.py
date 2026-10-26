@@ -48,7 +48,7 @@ def linear(x, w, bias=None, act=0, x1=None, *, out=None):
 def linears(xs, ws, biases, acts, x1s, *, outputs=None):
     outputs = outputs if outputs is not None else [torch.empty((x.shape[0], w.shape[0]), dtype=x.dtype, device=x.device)
                                                    for x, w in zip(xs, ws)]
-    if all(x.dtype == w.dtype == torch.half and x.shape[0] <= 8 and x.stride(1) == w.stride(1) == 1
+    if all(x.dtype == w.dtype == torch.half and x.shape[0] <= _stream.compilation['LINEAR_ROW_CROSSOVER'] and x.stride(1) == w.stride(1) == 1
            and (part is None or part.stride(1) == 1) and (bias is None or bias.is_contiguous()) and out.is_contiguous()
            for x, w, part, bias, out in zip(xs, ws, x1s, biases, outputs)):
         _records.get().extend(_stream.linear_commands(xs, ws, biases, acts, x1s, outputs))
@@ -145,7 +145,7 @@ def compile_graph(module, metadata, operands):
     if mode is None:
         raise ValueError('native lowering requires the declaration\'s fake tensor metadata')
     with config.patch(size_asserts=False, alignment_asserts=False, scalar_asserts=False,
-                      max_fusion_unique_io_buffers=31, max_autotune=False,
+                      max_fusion_unique_io_buffers=_stream.compilation['BUFFER_BINDINGS'], max_autotune=False,
                       max_autotune_gemm=False, assert_indirect_indexing=False), \
             V.set_fake_mode(mode), DebugContext():
         graph = NativeGraph(module, metadata, shape_env=mode.shape_env, is_inference=True)

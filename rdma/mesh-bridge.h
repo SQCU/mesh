@@ -37,8 +37,7 @@ _Static_assert(sizeof(pthread_t)==8,"M17");
    MESH_LANE_FIRST pairs, stream s on pair s (lanes MESH_LANE_FIRST + 2 s and + 2 s + 1).  Unit p of a stream's sequence
    is on lane p mod MESH_STREAM_LANES (lane_page), posted in equal order at each endpoint
    with equal exact byte lengths from their immutable compiled span tables; a lane's units land in the order its SENDs were posted */
-#define MESH_LINK_LANES 10u
-#define MESH_LANE_FIRST 2u
+#define MESH_LINK_LANES (MESH_LANE_FIRST + MESH_LINK_STREAMS * MESH_STREAM_LANES)
 #define MESH_LANE_PAIRS ((MESH_LINK_LANES-MESH_LANE_FIRST)/2)
 #define MESH_STREAM_PAIRS (MESH_LANE_PAIRS/MESH_LINK_STREAMS)
 _Static_assert(MESH_LANE_FIRST+2*MESH_LANE_PAIRS==MESH_LINK_LANES,"the lanes' pairs");
@@ -48,7 +47,6 @@ static inline uint32_t lane_class(uint32_t k){ return (k-MESH_LANE_FIRST)&1; }
 static inline uint32_t lane_stream(uint32_t k){ return (k-MESH_LANE_FIRST)/2; }
 /* TN3205 (README.md): a SEND and the receive it fills cover the same number of frames of MESH_FRAME bytes, a SEND held by
    the hardware's credit until its receive is posted; the bridge's alone */
-#define MESH_FRAME 4096u
 /* a count of frames: a queue's capacity, a lane's share of its completion queues, a SEND's and the send gate's, a type
    of its own so no count of pages, units or bytes passes for one; a SEND of `bytes` covers frames_of(bytes) */
 struct frames { uint64_t n; };
@@ -70,11 +68,11 @@ static inline uint32_t plan_lanes(uint32_t plan){ return (uint32_t)__builtin_pop
 static inline uint32_t plan_streams(uint32_t plan){ return (uint32_t)__builtin_popcount(plan>>MESH_LANE_FIRST)/(2*MESH_STREAM_PAIRS); }
 _Static_assert(MESH_LINK_LANES<32,"a bit a lane");
 
-_Static_assert(sizeof(struct ibv_send_wr)==128,"M06");
-_Static_assert(sizeof(struct ibv_sge)==16,"M07 M09");
-_Static_assert(sizeof(struct ibv_recv_wr)==32,"M08");
-_Static_assert(sizeof(struct ibv_wc)==48,"M11");
-_Static_assert(offsetof(struct ibv_wc,status)==8 && offsetof(struct ibv_wc,opcode)==12 &&
+_Static_assert(sizeof(struct ibv_send_wr)==MESH_SIZEOF_IBV_SEND_WR,"M06");
+_Static_assert(sizeof(struct ibv_sge)==MESH_SIZEOF_IBV_SGE,"M07 M09");
+_Static_assert(sizeof(struct ibv_recv_wr)==MESH_SIZEOF_IBV_RECV_WR,"M08");
+_Static_assert(sizeof(struct ibv_wc)==MESH_SIZEOF_IBV_WC,"M11");
+_Static_assert(offsetof(struct ibv_wc,status)==MESH_OFFSET_IBV_WC_STATUS && offsetof(struct ibv_wc,opcode)==MESH_OFFSET_IBV_WC_OPCODE &&
   sizeof(((struct ibv_wc *)0)->status)==4 && sizeof(((struct ibv_wc *)0)->opcode)==4,"M11");
 _Static_assert(sizeof(struct ibv_send_wr *)==8,"M15");
 /* design/transport.md */
@@ -86,9 +84,9 @@ _Static_assert(sizeof(union mesh_network_event)==48,"M24");
 /* A queue pair's SEND gate: the progress thread's frames posted and retired (each request carries its lane
    and the frames posted through it, mod 2^48, which its completion returns), the queue's capacity in frames, and the
    census's requests and completions */
-#define MESH_GATE_MASK ((UINT64_C(1)<<48)-1)
+#define MESH_GATE_MASK ((UINT64_C(1)<<MESH_GATE_COUNT_BITS)-1)
 struct send_gate {
-  _Alignas(64) struct frames posted,retired;
+  _Alignas(MESH_RECORD_ALIGNMENT) struct frames posted,retired;
   uint64_t requests,completions;
   struct frames capacity;
 };
@@ -99,7 +97,7 @@ static inline int gate_holds(const struct send_gate *gate,struct frames f){
 /* `f` frames posted through the gate on lane k: the request's id */
 static inline uint64_t gate_post(struct send_gate *gate,uint32_t k,struct frames f){
   gate->posted.n+=f.n;
-  return ((uint64_t)k<<48)|(gate->posted.n&MESH_GATE_MASK);
+  return ((uint64_t)k<<MESH_GATE_COUNT_BITS)|(gate->posted.n&MESH_GATE_MASK);
 }
 /* a request's completion: the frames posted through it retired */
 static inline void gate_retire(struct send_gate *gate,uint64_t id){ gate->retired.n=id&MESH_GATE_MASK;gate->completions++; }
@@ -113,7 +111,6 @@ struct lane_state { uint64_t sent,done,posted,got,frames_posted,frames_retired,f
 struct taken { const struct mesh_dma_span *spans; struct mesh_units units,base,unit; const _Atomic uint64_t *word; uint32_t whole; };
 /* Unit p goes on lane p mod MESH_STREAM_LANES as unit p/lanes there.
    Only the contiguous completed prefix across both lanes becomes available. */
-#define MESH_STREAM_LANES 2u
 _Static_assert(MESH_STREAM_LANES>=1 && MESH_STREAM_LANES<=2*MESH_STREAM_PAIRS,"a stream's lanes, of its pair");
 static inline uint64_t lane_page(uint32_t j,uint64_t u){ return MESH_STREAM_LANES*u+j; }
 static inline uint64_t lanes_through(const uint64_t *u){
@@ -145,7 +142,6 @@ static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_L
    2026-10-21: "rejection filter removal. categorical. all of them without sanction in rubric"; "even this fake limit
    too must go away").  A message states its sender's MESH_VERSION in `version` (0 from a bridge before it), which no
    reader tests */
-#define XMAGIC (0x4d595048u+131u+(1u<<12))
 /* design/transport.md section 14: a port's link lanes (MESH_LINK_LANES), its queue pairs made once and connected once
    in its child's life ("A process a port": `lanes` once the child was asked for them, the parent's; a link lost after it
    pairs again with the port's next child), on the two completion queues its device's context holds, each lane's share of them (`share`
@@ -205,7 +201,6 @@ struct link {
    for every version, so a bridge finds a child of any version that holds a device: child_elsewhere), and struct
    child_message.  It changes only where that contract does; a build of the same contract is the same child, whatever
    its bytes (the operator, 2026-10-21) */
-#define MESH_CHILD_VERSION 2u
 /* the code a link's loss is booked with where no stream of it is live, each holding on it having ended with units
    outstanding (mesh-link.c stream_end): the ends of its clients' holdings, not a failure of its lanes (EIO) or its
    hardware (design/rubrics.md M10: a fact named as what it is), told the parent in CHILD_BROKEN's `result` (version
@@ -221,7 +216,6 @@ struct child_message {
   uint8_t gid[16];
   uint64_t bandwidth;
 };
-#define TAG_CHILD (UINT64_C(1)<<58)
 /* design/transport.md: a port, its link, its control socket's queues each way, its verbs work's queue (its
    open's job `job`, dispatched at `job_at`; `stuck` once a job of the port outlived MESH_PLATFORM_NS, or a progress
    thread did not hold within it, and the port was concluded around it, until the call returns and each progress thread
@@ -275,14 +269,12 @@ struct port {
 /* design/transport.md section 9: why this bridge stops, the code its FAREWELL carries (a signal's number) */
 /* design/transport.md: the most nanoseconds between two samples of this node's available memory, each sent
    with its record (mesh-program.c health_turn) */
-#define MESH_HEALTH_NS UINT64_C(10000000000)
 
 /* design/transport.md; design/transport.md: the nodes this bridge has heard of, when it last
    heard each one's record (this node's clock), when it lost each, and the newest record it ever heard of each (its boot
    and sequence), held apart from the map: RFC 2328 s13's database, so a record the map dropped is never taken, nor sent
    on, again (a node's later boot is always newer); a full table gives the longest unheard of those its place */
 struct known { uint32_t node; uint64_t heard,gone,boot,sequence; };
-#define MESH_KNOWN 256
 
 /* the state both translation units read, defined in mesh-link.c */
 extern struct hdr *M;

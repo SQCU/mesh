@@ -1,5 +1,12 @@
 """design/whole-function.md#ahead-of-time"""
 import math
+import json
+from pathlib import Path
+
+# Preparation operands, loaded once when the compiler is imported. A missing
+# manifest is an error; numerical execution never reads it.
+NUMERICS = json.loads((Path(__file__).resolve().parents[1] / 'etc/compute/solver.json').read_text())
+WEIGHT_TOTAL = 1 << NUMERICS['route_weight_bits']
 
 
 def weight_ticks(values):
@@ -15,9 +22,9 @@ def weight_ticks(values):
     total = sum(ratios)
     if not total:
         raise ValueError('at least one route share must be positive')
-    exact = [v * (1 << 40) / total for v in ratios]
+    exact = [v * WEIGHT_TOTAL / total for v in ratios]
     ticks = [v.numerator // v.denominator for v in exact]
-    remaining = (1 << 40) - sum(ticks)
+    remaining = WEIGHT_TOTAL - sum(ticks)
     for i in sorted(range(len(ticks)), key=lambda i: (-(exact[i] - ticks[i]), i))[:remaining]:
         ticks[i] += 1
     return ticks
@@ -67,7 +74,7 @@ class Fabric:
             at = b if at == a else a
         return arcs
 
-    def allocate(self, demands, units=4096):
+    def allocate(self, demands, units=NUMERICS['route_units']):
         """design/whole-function.md#ahead-of-time"""
         import numpy as np
         from scipy.optimize import linprog, minimize
@@ -93,7 +100,7 @@ class Fabric:
         if not solved.success:
             raise RuntimeError(f'physical route allocation: {solved.message}')
         optimum = float(solved.x[-1])
-        bounds[-1] = (0, optimum * (1 + 1e-8) + 1e-10)
+        bounds[-1] = (0, optimum * (1 + NUMERICS['route_relative_tolerance']) + NUMERICS['route_absolute_tolerance'])
         # Equalize finish times on the optimum-duration face. Minimizing hops
         # first excludes relaying on spare cables, even when it adds no load
         # at the bottleneck. Wire bytes remain distinct from useful bytes.
@@ -104,17 +111,17 @@ class Fabric:
 
         def potential(x):
             t = service @ x - optimum
-            return float(t @ t + 1e-8 * (x @ x))
+            return float(t @ t + NUMERICS['route_regularization'] * (x @ x))
 
         def gradient(x):
-            return 2 * (service.T @ (service @ x - optimum) + 1e-8 * x)
+            return 2 * (service.T @ (service @ x - optimum) + NUMERICS['route_regularization'] * x)
 
         centered = minimize(potential, solved.x[:-1], jac=gradient, method='SLSQP', bounds=bounds[:-1],
                             constraints=[{'type': 'eq', 'fun': lambda x: conservation @ x - rhs,
                                           'jac': lambda x: conservation},
                                          {'type': 'ineq', 'fun': lambda x: limit - incidence @ x,
                                           'jac': lambda x: -incidence}],
-                            options={'ftol': 1e-12, 'maxiter': 1000})
+                            options={'ftol': NUMERICS['route_function_tolerance'], 'maxiter': NUMERICS['route_iterations']})
         if not centered.success:
             raise RuntimeError(f'physical route service-time minimization: {centered.message}')
         flow = centered.x
@@ -140,7 +147,7 @@ class Fabric:
         for pair in pairs:
             flows = [float(flow[k]) * scale for k, (commodity, _) in enumerate(columns) if commodity == pair]
             total = max(units, len(flows))
-            wanted = [v / (1 << 40) * total for v in weight_ticks(flows)]
+            wanted = [v / WEIGHT_TOTAL * total for v in weight_ticks(flows)]
             name = f'route:{pair[0]}:{pair[1]}'
             decisions[name] = {'parts': wanted,
                                'grain': 0, 'low': [0] * len(flows), 'high': [total] * len(flows),

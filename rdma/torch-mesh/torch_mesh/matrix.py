@@ -48,10 +48,16 @@ def product(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, public
                        A1M=x1.stride(-2) if x1 is not None else 0,
                        A1K=x1.stride(-1) if x1 is not None else 0,
                        A1BATCH=stride(x1) if x1 is not None else 0)
+    geometry = _stream.compilation
+    definitions.update((key, geometry['MATRIX_' + key])
+                       for key in ('ROWS', 'COLUMNS', 'INNER', 'ROW_GROUPS', 'COLUMN_GROUPS'))
+    row_tile = definitions['ROWS'] * definitions['ROW_GROUPS']
+    column_tile = definitions['COLUMNS'] * definitions['COLUMN_GROUPS']
+    threads = definitions['ROW_GROUPS'] * definitions['COLUMN_GROUPS'] * geometry['SIMD_WIDTH']
     words = [rows, inner, columns, batches]
     if publication is not None:
         words = fused._encode_words(words, channels, None, publication)
     return (pipeline(tuple(definitions.items())), [x, w, out, arrivals, None, bias, x1],
-            {4: struct.pack(f'{len(words)}I', *words)}, ((rows + 63)//64, (columns + 63)//64, batches),
-            (128, 1, 1), False, 3 | (32 if bias is not None else 0) | (64 if x1 is not None else 0)
+            {4: struct.pack(f'{len(words)}I', *words)}, (-(-rows // row_tile), -(-columns // column_tile), batches),
+            (threads, 1, 1), False, 3 | (32 if bias is not None else 0) | (64 if x1 is not None else 0)
             | ((12 if publication is not None else 4) << 32))

@@ -2,6 +2,7 @@
 import math
 import numpy as np
 from allocate import equal_finish, project, simplex
+from routing import NUMERICS
 
 
 def declare(comm, calls):
@@ -77,6 +78,7 @@ def install(comm, parts, name):
 def assign(decisions, observations):
     # design/whole-function.md#numerical-operands
     from scipy.optimize import nnls, least_squares
+    prior_scale = NUMERICS['fit_prior_scale']
     names = sorted(decisions)
     totals = {k: sum(decisions[k]['parts']) for k in names}
     bounds = {k: (decisions[k].get('low', [0] * len(decisions[k]['parts'])),
@@ -108,9 +110,9 @@ def assign(decisions, observations):
         for i in range(count):
             samples = [(o['parts'][k][i] / total, o['costs'][k][i] / scale)
                        for o in rows if k in o['costs'] and o['costs'][k][i] is not None]
-            prior = np.array([0.0, 1.0 / max(capacities[i], 1 / (1 << 40))])
-            x = np.array([[1.0, u] for u, t in samples] + [[1 / 32, 0], [0, 1 / 32]])
-            y = np.array([t for u, t in samples] + (prior / 32).tolist())
+            prior = np.array([0.0, 1.0 / max(capacities[i], 2.0 ** -NUMERICS['capacity_floor_bits'])])
+            x = np.array([[1.0, u] for u, t in samples] + [[prior_scale, 0], [0, prior_scale]])
+            y = np.array([t for u, t in samples] + (prior * prior_scale).tolist())
             fit, _ = nnls(x, y)
             coefficients.append(fit)
             uncertainty.append(np.linalg.inv(x.T @ x).diagonal().tolist())
@@ -129,17 +131,17 @@ def assign(decisions, observations):
                     differences.extend((predicted[indices] - durations[indices]
                                         - np.mean(predicted[indices] - durations[indices])).tolist())
                 differences.append(float(np.mean(predicted) - np.mean(durations)))
-                return np.r_[differences, ((coefficients - prior) / 32).ravel()]
-            fit = least_squares(residual, prior.ravel(), bounds=(0, np.inf), max_nfev=64)
+                return np.r_[differences, ((coefficients - prior) * prior_scale).ravel()]
+            fit = least_squares(residual, prior.ravel(), bounds=(0, np.inf), max_nfev=NUMERICS['fit_evaluations'])
             coefficients = fit.x.reshape(count, 2)
-            uncertainty = np.linalg.inv(fit.jac.T @ fit.jac + np.eye(2 * count) / 1024).diagonal().reshape(count, 2).tolist()
+            uncertainty = np.linalg.inv(fit.jac.T @ fit.jac + np.eye(2 * count) * prior_scale ** 2).diagonal().reshape(count, 2).tolist()
         models[k] = {'fixed': [v[0] * scale for v in coefficients],
                      'per_unit': [v[1] * scale / total for v in coefficients],
                      'uncertainty': uncertainty}
         if k.startswith('flow:'):
             seed[k] = list(d['parts'])
         else:
-            a, b = [v[0] for v in coefficients], [max(v[1], 1 / (1 << 20)) / total for v in coefficients]
+            a, b = [v[0] for v in coefficients], [max(v[1], 2.0 ** -NUMERICS['slope_floor_bits']) / total for v in coefficients]
             if d.get('grain', 0):
                 seed[k] = equal_finish(total, d['grain'], *bounds[k], a, b)[0]
             else:
@@ -153,16 +155,16 @@ def assign(decisions, observations):
                 x.append(vector(current['parts']) - vector(previous['parts']))
                 y.append((current['seconds'] - previous['seconds']) / scale)
         dimension = len(centre)
-        design = np.array(x + (np.eye(dimension) / 32).tolist())
+        design = np.array(x + (np.eye(dimension) * prior_scale).tolist())
         target = np.array(y + [0.0] * dimension)
         gradient = np.linalg.solve(design.T @ design, design.T @ target)
-        centre = vector(rows[-1]['parts']) - gradient * (0.25 / max(1.0, np.linalg.norm(gradient)))
+        centre = vector(rows[-1]['parts']) - gradient * (NUMERICS['gradient_step'] / max(NUMERICS['gradient_norm_floor'], np.linalg.norm(gradient)))
         for k in names:
             if not k.startswith('flow:'):
                 start = sum(len(decisions[n]['parts']) for n in names[:names.index(k)])
                 centre[start:start + len(seed[k])] += vector(seed)[start:start + len(seed[k])] - vector(rows[-1]['parts'])[start:start + len(seed[k])]
     iteration = len(rows)
-    radius = 0.125 / math.sqrt(1 + iteration) if iteration else 0.0
+    radius = NUMERICS['probe_radius'] / math.sqrt(1 + iteration) if iteration else 0.0
     direction = np.array([1 if ((i + 1) & (1 + iteration // 2)).bit_count() % 2 else -1
                           for i in range(len(centre))], dtype=np.float64)
     return {'parts': parts(centre + (-1 if iteration % 2 else 1) * radius * direction),

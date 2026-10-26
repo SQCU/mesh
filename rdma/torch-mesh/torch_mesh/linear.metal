@@ -1,7 +1,7 @@
 // torch_mesh::linear (_stream.mm linear; backend.py): y[R, N] = act(x[R, K] w[N, K]^T (+ bias[N])), fp16 in and out, fp32
 // accumulation, w's rows `ldw` apart (nn.Linear's layout, or rows padded to whole 4-element loads), for the few rows of a
-// step: one dispatch, a threadgroup per COLS output columns, its NSG simdgroups each a K slice of them, a simdgroup's
-// lanes across its slice four elements at a time, U loads of each row in flight, eight rows a pass; a simdgroup's sums
+// step: one dispatch, a threadgroup per row tile and COLS output columns, its NSG simdgroups each a K slice of them, a simdgroup's
+// lanes across its slice four elements at a time, U loads of each row in flight, one configured row tile per threadgroup; a simdgroup's sums
 // reduced across its lanes (simd_sum), then the simdgroups' through threadgroup memory (linear_body), each output then
 // handed to the kernel's store.  Each weight element is read once a pass.  x may be two segments, x0 [R, K0] and x1
 // [R, K - K0], rows LD0 and LD1 apart (a cat of the two along K, never made: x0 = x1 and K0 = K where there is one),
@@ -15,73 +15,70 @@ using namespace metal;
 
 struct linear_dims { uint R, K, N, B, LDW, K0, LD0, LD1; };
 
-template <uint V> inline float4 linear_load(device const half* p);
-template <> inline float4 linear_load<4>(device const half* p) { return float4(*(device const half4*)p); }
-template <> inline float4 linear_load<1>(device const half* p) { return float4(p[0], p[1], p[2], p[3]); }
-
-// elements k to k + 3 of a row, those at or past `hi` zero (a 1-element load's group may cross a segment's end; a
-// 4-element load's never does: K0 and the slices are whole groups there)
-template <uint V> inline float4 linear_part(device const half* p, uint k, uint hi) {
-    if (V == 4) return linear_load<4>(p + k);
-    float4 v;
-    for (uint j = 0; j < 4; j++) v[j] = k + j < hi ? float(p[k + j]) : 0.0f;
-    return v;
-}
+template <uint V> inline vec<float, MESH_LINEAR_VECTOR> linear_load(device const half* p);
+template <> inline vec<float, MESH_LINEAR_VECTOR> linear_load<MESH_LINEAR_VECTOR>(device const half* p) { return vec<float, MESH_LINEAR_VECTOR>(*(device const vec<half, MESH_LINEAR_VECTOR>*)p); }
+template <> inline vec<float, MESH_LINEAR_VECTOR> linear_load<1>(device const half* p) { vec<float, MESH_LINEAR_VECTOR> v;
+    for (uint j = 0; j < MESH_LINEAR_VECTOR; j++) v[j] = float(p[j]);
+    return v; }
 
 template <uint VW, uint VX, uint COLS, uint NSG, uint U, typename Store>
 inline void linear_body(device const half* x, device const half* x1, device const half* w, const linear_dims d, thread const Store& store,
                         threadgroup float* part, uint sg, uint lane, uint tg, uint tid) {
-    const uint R = d.R, K = d.K, N = d.N, n0 = tg * COLS, K4 = K & ~3u;
-    const uint span = (K4 / 4 + NSG - 1) / NSG * 4, k0 = sg * span, k1 = min(K4, k0 + span);
+    const uint R = d.R, K = d.K, N = d.N;
+    const uint columns = (N + COLS - 1) / COLS;
+    const uint n0 = (tg % columns) * COLS, r0 = (tg / columns) * MESH_LINEAR_ROWS;
+    const uint span = (K + NSG * MESH_LINEAR_VECTOR - 1) / (NSG * MESH_LINEAR_VECTOR) * MESH_LINEAR_VECTOR;
+    const uint k0 = sg * span, k1 = min(K, k0 + span);
     device const half* wr[COLS];
     for (uint c = 0; c < COLS; c++) wr[c] = w + ulong(min(n0 + c, N - 1)) * d.LDW;
-    for (uint r0 = 0; r0 < R; r0 += 8) {
-        float acc[8][COLS];
-        for (uint r = 0; r < 8; r++)
+    {
+        float acc[MESH_LINEAR_ROWS][COLS];
+        for (uint r = 0; r < MESH_LINEAR_ROWS; r++)
             for (uint c = 0; c < COLS; c++) acc[r][c] = 0.0f;
-        device const half* xr[8];
-        device const half* xs[8];
-        for (uint r = 0; r < 8; r++) {
+        device const half* xr[MESH_LINEAR_ROWS];
+        device const half* xs[MESH_LINEAR_ROWS];
+        for (uint r = 0; r < MESH_LINEAR_ROWS; r++) {
             xr[r] = x + ulong(min(r0 + r, R - 1)) * d.LD0;
             xs[r] = x1 + ulong(min(r0 + r, R - 1)) * d.LD1;
         }
         for (uint seg = 0; seg < 2; seg++) {
             const uint lo = seg ? max(k0, d.K0) : k0, hi = seg ? k1 : min(k1, d.K0), off = seg ? d.K0 : 0;
             device const half* const* xx = seg ? xs : xr;
-            uint k = lo + lane * 4;
-            for (; k + 128 * (U - 1) < hi; k += 128 * U) {
-                float4 wv[U][COLS];
+            const uint full = lo + (hi > lo ? (hi - lo) / MESH_LINEAR_VECTOR * MESH_LINEAR_VECTOR : 0);
+            uint k = lo + lane * MESH_LINEAR_VECTOR;
+            for (; k + (MESH_SIMD_WIDTH * MESH_LINEAR_VECTOR) * (U - 1) < full; k += (MESH_SIMD_WIDTH * MESH_LINEAR_VECTOR) * U) {
+                vec<float, MESH_LINEAR_VECTOR> wv[U][COLS];
                 for (uint u = 0; u < U; u++)
-                    for (uint c = 0; c < COLS; c++) wv[u][c] = linear_part<VW>(wr[c], k + 128 * u, hi);
+                    for (uint c = 0; c < COLS; c++) wv[u][c] = linear_load<VW>(wr[c] + k + (MESH_SIMD_WIDTH * MESH_LINEAR_VECTOR) * u);
                 for (uint u = 0; u < U; u++)
-                    for (uint r = 0; r < 8; r++) {
-                        const float4 xv = linear_part<VX>(xx[r] - off, k + 128 * u, hi);
+                    for (uint r = 0; r < MESH_LINEAR_ROWS; r++) {
+                        const vec<float, MESH_LINEAR_VECTOR> xv = linear_load<VX>(xx[r] + k - off + (MESH_SIMD_WIDTH * MESH_LINEAR_VECTOR) * u);
                         for (uint c = 0; c < COLS; c++) acc[r][c] += dot(xv, wv[u][c]);
                     }
             }
-            for (; k < hi; k += 128) {
-                float4 wv[COLS];
-                for (uint c = 0; c < COLS; c++) wv[c] = linear_part<VW>(wr[c], k, hi);
-                for (uint r = 0; r < 8; r++) {
-                    const float4 xv = linear_part<VX>(xx[r] - off, k, hi);
+            for (; k < full; k += (MESH_SIMD_WIDTH * MESH_LINEAR_VECTOR)) {
+                vec<float, MESH_LINEAR_VECTOR> wv[COLS];
+                for (uint c = 0; c < COLS; c++) wv[c] = linear_load<VW>(wr[c] + k);
+                for (uint r = 0; r < MESH_LINEAR_ROWS; r++) {
+                    const vec<float, MESH_LINEAR_VECTOR> xv = linear_load<VX>(xx[r] + k - off);
                     for (uint c = 0; c < COLS; c++) acc[r][c] += dot(xv, wv[c]);
                 }
             }
+            if (full + lane < hi)
+                for (uint r = 0; r < MESH_LINEAR_ROWS; r++)
+                    for (uint c = 0; c < COLS; c++)
+                        acc[r][c] += float(xx[r][full + lane - off]) * float(wr[c][full + lane]);
         }
-        if (sg == 0 && K4 + lane < K)
-            for (uint r = 0; r < 8; r++)
-                for (uint c = 0; c < COLS; c++)
-                    acc[r][c] += float(K4 + lane < d.K0 ? xr[r][K4 + lane] : xs[r][K4 + lane - d.K0]) * float(wr[c][K4 + lane]);
-        for (uint r = 0; r < 8; r++)
+        for (uint r = 0; r < MESH_LINEAR_ROWS; r++)
             for (uint c = 0; c < COLS; c++) {
                 const float s = simd_sum(acc[r][c]);
-                if (lane == 0) part[(sg * 8 + r) * COLS + c] = s;
+                if (lane == 0) part[(sg * MESH_LINEAR_ROWS + r) * COLS + c] = s;
             }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (tid < 8 * COLS) {
-            const uint r = tid / COLS, c = tid % COLS;
+        for (uint output = tid; output < MESH_LINEAR_ROWS * COLS; output += NSG * MESH_SIMD_WIDTH) {
+            const uint r = output / COLS, c = output % COLS;
             float s = 0.0f;
-            for (uint g = 0; g < NSG; g++) s += part[(g * 8 + r) * COLS + c];
+            for (uint g = 0; g < NSG; g++) s += part[(g * MESH_LINEAR_ROWS + r) * COLS + c];
             if (r0 + r < R && n0 + c < N) store(r0 + r, n0 + c, s);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -100,19 +97,15 @@ struct linear_store {
 };
 
 template <uint VW, uint VX, uint COLS, uint NSG, uint U, uint ACT>
-[[max_total_threads_per_threadgroup(NSG * 32)]]
+[[max_total_threads_per_threadgroup(NSG * MESH_SIMD_WIDTH)]]
 kernel void linear_rows(device const half* x [[buffer(0)]], device const half* w [[buffer(1)]], device half* y [[buffer(2)]],
                         device const half* bias [[buffer(3)]], constant linear_dims& d [[buffer(4)]], device const half* x1 [[buffer(5)]],
                         uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
                         uint tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
-    threadgroup float part[NSG * 8 * COLS];
+    threadgroup float part[NSG * MESH_LINEAR_ROWS * COLS];
     const linear_store<ACT> store{y, bias, d.N, d.B};
     linear_body<VW, VX, COLS, NSG, U>(x, x1, w, d, store, part, sg, lane, tg, tid);
 }
-
-// Up to four products in one dispatch (torch_mesh::linears): problem p's threadgroups follow the ones before it
-// (first[p]), its buffers 5p to 5p + 4 (x, w, y, bias, x1), its dims d[p] and activation act[p].
-struct linear_group_words { linear_dims d[4]; uint first[4], act[4]; };
 
 struct linear_act_store {
     device half* y;
@@ -124,34 +117,7 @@ struct linear_act_store {
     }
 };
 
-// problem P through its own inlined body, its buffers the kernel's own arguments: pointers selected by p cost the Mini
-// 1.3 to 1.7 % of the two products' time at the LSTM's h16384 n3 shares and 16 to 18 % at h1024, the Studios 1 us or
-// less (gbench3, 2026-10-24)
-#define LINEAR_GROUP_CASE(P, X_, W_, Y_, B_, S_) case P: { const linear_act_store store{Y_, B_, g.d[P].N, g.d[P].B, g.act[P]}; \
-    linear_body<VW, VX, COLS, NSG, U>(X_, S_, W_, g.d[P], store, part, sg, lane, tg - g.first[P], tid); break; }
-
-template <uint VW, uint VX, uint COLS, uint NSG, uint U>
-[[max_total_threads_per_threadgroup(NSG * 32)]]
-kernel void linear_group(device const half* x0 [[buffer(0)]], device const half* w0 [[buffer(1)]], device half* y0 [[buffer(2)]],
-                         device const half* b0 [[buffer(3)]], device const half* s0 [[buffer(4)]],
-                         device const half* x1 [[buffer(5)]], device const half* w1 [[buffer(6)]], device half* y1 [[buffer(7)]],
-                         device const half* b1 [[buffer(8)]], device const half* s1 [[buffer(9)]],
-                         device const half* x2 [[buffer(10)]], device const half* w2 [[buffer(11)]], device half* y2 [[buffer(12)]],
-                         device const half* b2 [[buffer(13)]], device const half* s2 [[buffer(14)]],
-                         device const half* x3 [[buffer(15)]], device const half* w3 [[buffer(16)]], device half* y3 [[buffer(17)]],
-                         device const half* b3 [[buffer(18)]], device const half* s3 [[buffer(19)]],
-                         constant linear_group_words& g [[buffer(20)]],
-                         uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
-                         uint tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
-    threadgroup float part[NSG * 8 * COLS];
-    const uint p = tg >= g.first[3] ? 3 : tg >= g.first[2] ? 2 : tg >= g.first[1] ? 1 : 0;
-    switch (p) {
-        LINEAR_GROUP_CASE(0, x0, w0, y0, b0, s0)
-        LINEAR_GROUP_CASE(1, x1, w1, y1, b1, s1)
-        LINEAR_GROUP_CASE(2, x2, w2, y2, b2, s2)
-        default: LINEAR_GROUP_CASE(3, x3, w3, y3, b3, s3)
-    }
-}
+// linear_group is specialized by the compiler from the manifest binding capacity.
 
 #ifdef MESH_METAL
 template <uint CHANNELS>
@@ -164,14 +130,14 @@ struct linear_step_store {
 };
 
 template <uint VW, uint VX, uint COLS, uint NSG, uint U, uint CHANNELS>
-[[max_total_threads_per_threadgroup(NSG * 32)]]
+[[max_total_threads_per_threadgroup(NSG * MESH_SIMD_WIDTH)]]
 kernel void linear_publish(device const half* x [[buffer(0)]], device const half* w [[buffer(1)]], device uchar* send [[buffer(2)]],
                            device atomic_uint* arrivals [[buffer(3)]], device const half* x1 [[buffer(4)]],
                            constant linear_publish_words<CHANNELS>& p [[buffer(15)]],
                            uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
                            uint tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
                            uint groups [[threadgroups_per_grid]]) {
-    threadgroup float part[NSG * 8 * COLS];
+    threadgroup float part[NSG * MESH_LINEAR_ROWS * COLS];
     threadgroup uint last;
     for (uint q = 0; q < CHANNELS; q++) if (p.publish[q].p)
         mesh_step_enter(*p.publish[q].p, p.publish[q].v, p.publish[q].progress, tg == 0 && tid == 0);

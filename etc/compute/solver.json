@@ -1,0 +1,17 @@
+{
+  "route_weight_bits": 40,
+  "route_units": 4096,
+  "route_relative_tolerance": 1e-8,
+  "route_absolute_tolerance": 1e-10,
+  "route_regularization": 1e-8,
+  "route_function_tolerance": 1e-12,
+  "route_iterations": 1000,
+  "fit_prior_scale": 0.03125,
+  "fit_evaluations": 64,
+  "capacity_floor_bits": 40,
+  "slope_floor_bits": 20,
+  "gradient_step": 0.25,
+  "gradient_norm_floor": 1.0,
+  "probe_radius": 0.125,
+  "observation_window": 64
+}

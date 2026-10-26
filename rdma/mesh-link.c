@@ -300,7 +300,7 @@ static void stream_post(struct port *port,uint32_t t,uint32_t served){
     if(!unit_told(x,1,j,state->posted,bytes,l->held[t]))break;
     state->frames_posted+=each.n;
     struct ibv_sge span=dma_span(port,bytes);
-    struct ibv_recv_wr request={.wr_id=((uint64_t)lane<<48)|(state->frames_posted&MESH_GATE_MASK),.sg_list=&span,.num_sge=1},*bad;
+    struct ibv_recv_wr request={.wr_id=((uint64_t)lane<<MESH_GATE_COUNT_BITS)|(state->frames_posted&MESH_GATE_MASK),.sg_list=&span,.num_sge=1},*bad;
     const struct mesh_queue *queue=l->provider.queues+lane;
     const int error=queue->receive(queue->pair,&request,&bad);
     if(error){lane_lost(port,lane,error<0?-error:error);break;}
@@ -1889,7 +1889,7 @@ int main(int argc,char **argv){
   const uint16_t service=(uint16_t)atoi(MESH_PORT);
   const uint32_t pg=(uint32_t)getpagesize();
   /* design/transport.md */
-  if((uint64_t)pg+4096>16773120)die("transport chunk exceeds native request capacity");
+  if((uint64_t)pg+MESH_FRAME>MESH_REQUEST_BYTES)die("transport chunk exceeds native request capacity");
   if(region_bytes<pg || region_bytes/pg>UINT32_MAX){exit(1);}
   struct hdr geometry={0};
   mesh_layout(&geometry,pg,1,(uint32_t)(region_bytes/pg));

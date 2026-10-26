@@ -21,19 +21,19 @@ kernel void product(device INPUT *X [[buffer(0)]], device INPUT *W [[buffer(1)]]
         mesh_step_enter(*b.p, b.v, b.progress, tg.x == 0 && tg.y == 0 && tg.z == 0 && local == 0);
     }
 #endif
-    const int row=int(tg.x)*64+(sg/2)*32, col=int(tg.y)*64+(sg%2)*32;
+    const int row=int(tg.x)*ROWS*ROW_GROUPS+(sg/COLUMN_GROUPS)*ROWS, col=int(tg.y)*COLUMNS*COLUMN_GROUPS+(sg%COLUMN_GROUPS)*COLUMNS;
     auto A=tensor(X + tg.z * ABATCH, dextents<int,2>{K0,M}, array<int,2>{AK,AM});
     auto B=tensor(W + tg.z * BBATCH, dextents<int,2>{N,K0}, array<int,2>{BN,BK});
-    constexpr auto desc=matmul2d_descriptor(32,32,32,false,false,false,matmul2d_descriptor::mode::multiply_accumulate);
+    constexpr auto desc=matmul2d_descriptor(ROWS,COLUMNS,INNER,false,false,false,matmul2d_descriptor::mode::multiply_accumulate);
     matmul2d<desc, execution_simdgroup> op;
     auto acc=op.get_destination_cooperative_tensor<decltype(A),decltype(B),float>();
     for(uint i=0;i<acc.get_capacity();i++)acc[i]=0;
-    for(int at=0;at<K0;at+=32){auto a=A.slice<32,32>(at,row);auto b=B.slice<32,32>(col,at);op.run(a,b,acc);}
+    for(int at=0;at<K0;at+=INNER){auto a=A.slice<INNER,ROWS>(at,row);auto b=B.slice<COLUMNS,INNER>(col,at);op.run(a,b,acc);}
 #if SEGMENTED
     const int K=s.shape.y;
     auto A1=tensor(X1 + tg.z * A1BATCH, dextents<int,2>{K-K0,M}, array<int,2>{A1K,A1M});
     auto B1=tensor(W + tg.z * BBATCH + K0 * BK, dextents<int,2>{N,K-K0}, array<int,2>{BN,BK});
-    for(int at=0;at<K-K0;at+=32){auto a=A1.slice<32,32>(at,row);auto b=B1.slice<32,32>(col,at);op.run(a,b,acc);}
+    for(int at=0;at<K-K0;at+=INNER){auto a=A1.slice<INNER,ROWS>(at,row);auto b=B1.slice<COLUMNS,INNER>(col,at);op.run(a,b,acc);}
 #endif
     for(uint i=0;i<acc.get_capacity();i++)if(acc.is_valid_element(i)){
         auto e=acc.get_multidimensional_index(i);
@@ -50,7 +50,7 @@ kernel void product(device INPUT *X [[buffer(0)]], device INPUT *W [[buffer(1)]]
     atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));
     threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
     threadgroup uint last[1];
-    if (local == 0) last[0] = atomic_fetch_add_explicit(arrivals, 1u, memory_order_relaxed) == uint(((M+63)/64)*((N+63)/64)*s.shape.w-1);
+    if (local == 0) last[0] = atomic_fetch_add_explicit(arrivals, 1u, memory_order_relaxed) == uint(((M+ROWS*ROW_GROUPS-1)/(ROWS*ROW_GROUPS))*((N+COLUMNS*COLUMN_GROUPS-1)/(COLUMNS*COLUMN_GROUPS))*s.shape.w-1);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (last[0]) {
         atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));
