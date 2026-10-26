@@ -60,9 +60,9 @@ to `indexed_step` or `indexed_step_out`. `Preparations` allocates occurrence slo
 before execution. Thus the useful extension is already more than a Python call to an ordinary eager collective:
 the frontend can supply enough information to remove repeated crossing discovery.
 
-The optional compiler is looked up in `Function.declare`, during configuration. It receives the explicit FX
-graph. A supported backend must publish its final collective graph there, so later transformations cannot hide
-or reorder communication after the transport plan has been made. The `Function` interface now requires the common compiler and has no eager execution option.
+`Function.declare` invokes the shared compiler during configuration with the explicit FX graph. The compiler
+publishes its final collective graph there, so later transformations cannot hide or reorder communication after
+the transport plan has been made. The interface has no eager execution option.
 
 PyTorch tensor notation, autograd and DTensor placement can therefore serve as an authoring interface for an
 alternative compiler. They do not require a CUDA execution stack or a particular default `torch.compile`
