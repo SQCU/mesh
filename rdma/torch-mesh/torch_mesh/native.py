@@ -80,6 +80,13 @@ def addmm(bias, x, w, *, out, alpha=1, beta=1):
         _records.get().append(product(x, w, out, bias=bias, alpha=alpha, beta=beta))
 
 
+def topk(x, k, dim=-1, largest=True, sorted=True):
+    from .selection import topk as prepare
+    output, commands = prepare(x, k, dim, largest, sorted)
+    _records.get().extend(commands)
+    return output
+
+
 class Program:
     """Bound numerical command records; composition happens during preparation."""
     def __init__(self, commands, output):
@@ -115,7 +122,8 @@ def compile_graph(module, metadata, operands):
 
         def _generate_extern_kernel_alloc_helper(self, node, args):
             names = {'torch.ops.torch_mesh.linear.default': 'linear',
-                     'torch.ops.torch_mesh.linears.default': 'linears'}
+                     'torch.ops.torch_mesh.linears.default': 'linears',
+                     'torch.ops.aten.topk.default': 'topk'}
             name = node.get_kernel_name()
             if name not in names:
                 raise NotImplementedError(f'no native preparation for {name}; a framework fallback is not an executor')

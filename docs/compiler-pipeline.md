@@ -52,6 +52,14 @@ Sources: [declarations.py](../rdma/torch-mesh/torch_mesh/declarations.py),
 [native.py](../rdma/torch-mesh/torch_mesh/native.py),
 [partition.py](../rdma/torch-mesh/torch_mesh/partition.py).
 
+Floating `topk` binds the shared `argmax.metal` radix selector through
+`selection.py`. Tensor views, the selection dimension, output order and launch
+geometry are preparation operands. The existing sampling API retains its
+finite-only order; tensor selection includes infinities and NaNs. Sorted
+outputs use the same bitonic pair steps in threadgroup storage when the device
+has room, or in prepared device storage otherwise. Those steps enter ordinary
+command records; no framework selection call runs with the payload.
+
 ## Shared ordered graph passes
 
 [mesh_graph.py](../rdma/mesh_graph.py) receives operation reads and writes as value identities,

@@ -149,13 +149,13 @@ __attribute__((always_inline)) static inline uint mesh_order(float x) {
     return o - 0x00800000u < 0xff000000u ? o : 0u;
 }
 
-// The n greatest of candidates [lo, hi) by key(c) in mesh_take's order (a non-finite key no candidate), in one threadgroup:
+// The n greatest of candidates [lo, hi) by integer key(c), with zero excluded, in one threadgroup:
 // radix selection of the n-th key's order word, a byte a pass over a 256-bin histogram, then the candidates in ascending
 // order, each thread a contiguous span, put(i, c) at their places (put(i, 0xffffffff) past the last when fewer than n are
-// finite) [PyTorch topk: radix select, then gather]. Returns (o, c): the set is the candidates whose (order word, c) is
+// eligible) [PyTorch topk: radix select, then gather]. Returns (o, c): the set is the candidates whose (order word, c) is
 // (o, c) or precedes it in that order. w: mesh_selection_words<T> words.
 template <uint T, typename K, typename P>
-__attribute__((always_inline)) static inline uint2 mesh_top(K key, uint lo, uint hi, uint n, uint lid, threadgroup uint *w, P put) {
+__attribute__((always_inline)) static inline uint2 mesh_top_ordered(K key, uint lo, uint hi, uint n, uint lid, threadgroup uint *w, P put) {
     if (n == 0) return uint2(0xffffffffu, 0u);
     threadgroup atomic_uint *bins = (threadgroup atomic_uint *)w;
     threadgroup uint *said = w + MESH_SELECTION_BINS, *sums = w + MESH_SELECTION_BINS + MESH_SELECTION_STATE_WORDS;
@@ -164,7 +164,7 @@ __attribute__((always_inline)) static inline uint2 mesh_top(K key, uint lo, uint
         for (uint d = lid; d < MESH_SELECTION_BINS; d += T) atomic_store_explicit(&bins[d], 0u, memory_order_relaxed);
         threadgroup_barrier(mem_flags::mem_threadgroup);
         for (uint c = lo + lid; c < hi; c += T) {
-            const uint o = mesh_order(key(c));
+            const uint o = key(c);
             if (o != 0u && (o & mask) == prefix) atomic_fetch_add_explicit(&bins[(o >> shift) & (MESH_SELECTION_BINS - 1)], 1u, memory_order_relaxed);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -195,14 +195,14 @@ __attribute__((always_inline)) static inline uint2 mesh_top(K key, uint lo, uint
     const uint span = (hi - lo + T - 1) / T, a = min(lo + lid * span, hi), b = min(a + span, hi);
     uint above = 0, ties = 0, greater, tied;
     for (uint c = a; c < b; c++) {
-        const uint o = mesh_order(key(c));
+        const uint o = key(c);
         above += o > prefix;
         ties += o == prefix && o != 0u;
     }
     uint at = scan(above, greater), t = scan(ties, tied);
     at += min(t, need);
     for (uint c = a; c < b; c++) {
-        const uint o = mesh_order(key(c));
+        const uint o = key(c);
         if (o == 0u || o < prefix || (o == prefix && t >= need)) continue;
         if (o == prefix && ++t == need) said[2] = c;
         put(at++, c);
@@ -210,6 +210,13 @@ __attribute__((always_inline)) static inline uint2 mesh_top(K key, uint lo, uint
     for (uint i = greater + min(tied, need) + lid; i < n; i += T) put(i, 0xffffffffu);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     return uint2(prefix, said[2]);
+}
+
+// Float selection retains its finite-only sampling contract. Other tensor
+// operations supply their own integer order to the same radix selection.
+template <uint T, typename K, typename P>
+__attribute__((always_inline)) static inline uint2 mesh_top(K key, uint lo, uint hi, uint n, uint lid, threadgroup uint *w, P put) {
+    return mesh_top_ordered<T>([&](uint c) { return mesh_order(key(c)); }, lo, hi, n, lid, w, put);
 }
 
 // The retained set of a row's candidates [lo, hi) in one threadgroup: ids[i], zs[i] the head, the `head` greatest z, then
