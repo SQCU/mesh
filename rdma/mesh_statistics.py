@@ -31,6 +31,14 @@ def emit(record, *, file=None):
     print('\n'.join(json.dumps(row, separators=(',', ':'), sort_keys=True) for row in records), file=file, flush=True)
 
 
+def recorded_values(records):
+    """Paired values already recorded by the canonical hourly, without running code."""
+    return [{'commits': record['commits'], 'unix': record['unix'], 'workload': name, 'configuration_index': index,
+             'seconds': pair[0] * 1e-6, 'useful_gigabytes_per_second': pair[1],
+             **({'aggregate_rows_per_second': pair[2]} if len(pair) > 2 else {})}
+            for record in records for name, pairs in record['us,GB/s'].items() for index, pair in enumerate(pairs)]
+
+
 def completed(record, seconds):
     measured = measure(0, seconds, record['useful_work_bytes'], record['report'].get('steps', 0))
     result = {**record['report'], 'rank': record['rank'], 'size': record['size'],

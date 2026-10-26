@@ -250,6 +250,11 @@ def trace(function, *arguments, parameters=()):
     finally:
         for parameter, gradient in zip(parameters, gradients):
             parameter.grad = gradient
+    # Framework layout queries can leave unused tensor operations in make_fx's
+    # graph (including a mesh-coordinate nonzero). They are configuration work,
+    # not part of the declared function or its explicit gradient outputs.
+    graph.graph.eliminate_dead_code()
+    graph.recompile()
     return graph, lower(graph)
 
 

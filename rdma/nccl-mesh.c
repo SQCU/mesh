@@ -1611,18 +1611,6 @@ static struct lease *lease_at(const void *ptr, struct attach **held) {
   return NULL;
 }
 
-/* Allocator pools may reuse only after all registered local DMA reads. GPU
-   users must separately have completed; torch's completion handler proves that. */
-ncclResult_t ncclMeshMemReusable(const void *ptr, int *ready) {
-  if (!ptr || !ready) return fail(ncclInvalidArgument, "ncclMeshMemReusable: NULL argument");
-  pthread_mutex_lock(&attach_lock);
-  struct attach *a = NULL;
-  struct lease *l = lease_at(ptr, &a);
-  *ready = l && !l->returned && mesh_lease_retire_ready(&l->reads, lease_read_sample, a);
-  pthread_mutex_unlock(&attach_lock);
-  return l ? ncclSuccess : fail(ncclInvalidArgument, "ncclMeshMemReusable: no lease at %p", ptr);
-}
-
 static int lease_buffer(const void *ptr, void **buffer, size_t *offset) {
   pthread_mutex_lock(&attach_lock);
   struct attach *a = NULL;
@@ -2602,7 +2590,8 @@ static void schedule_laid(struct ncclComm *comm, struct schedule *plans) {
    immutable until communicator release. Payload generations also remain
    distinct; transport dependencies, not live allocator observations, order them. */
 static void *binding_storage(struct ncclComm *comm, size_t bytes, enum storage_role role) {
-  const size_t length=(bytes+63)&~(size_t)63;
+  const size_t alignment=role==STORAGE_PAYLOAD?comm->page:64;
+  const size_t length=(bytes+alignment-1)/alignment*alignment;
   const uint32_t index=comm->storage_current[role];
   struct storage_page *page=index?comm->storage+index-1:NULL;
   if(!page || length>page->bytes-page->used) {

@@ -279,6 +279,7 @@ def compiler(gm, example_inputs, *, whole_graph=False):
             from torch._subclasses.fake_tensor import FakeTensorMode
             from torch.fx.experimental.proxy_tensor import make_fx
             from torch._inductor.decomposition import select_decomp_table
+            from torch._subclasses.functional_tensor import dispatch_functionalize
             # Functionalization receives every tensor as an operand, including
             # weights and prebound outputs. It can then lower out= operations
             # while retaining their writes to those exact destinations.
@@ -308,7 +309,7 @@ def compiler(gm, example_inputs, *, whole_graph=False):
             inputs = [mode.from_tensor(value) if isinstance(value, torch.Tensor) else value
                       for value in [*example_inputs, *constants]]
             with mode:
-                lowered = make_fx(torch.func.functionalize(lifted), decomposition_table=select_decomp_table(),
+                lowered = make_fx(dispatch_functionalize(lifted, propagate_input_mutations=True), decomposition_table=select_decomp_table(),
                                   tracing_mode='fake', _allow_non_fake_inputs=True)(*inputs)
             output = next(node for node in lowered.graph.nodes if node.op == 'output')
             if not isinstance(output.args[0], (tuple, list)):

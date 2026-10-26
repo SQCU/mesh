@@ -21,55 +21,44 @@ It is not a claim that every line in both repositories has been reviewed. An exi
 each removal. Where it lacks a complete replacement, that gap is explicit. A matching name or an older date
 does not establish that an implementation is faster or meets the model.
 
-## Integration update — 2026-10-25T22:24:51-07:00
+## Integration status — 2026-10-26T01:00:00-07:00
 
-The native recorder now lives in `rdma/metal-recording.h` and `.m`, linked into
-`libnccl-mesh`. Microbench imports that header and no longer builds a second
-recorder library. Torch's prepared transport bindings use this same schedule.
+The native recorder, access ordering, replay compiler and submission scheduler live in
+`rdma/metal-recording.h` and `.m`. Native command descriptions, captured LiteRT commands,
+prepared Torch transport and native CPU/ANE shares use that implementation. Native ANE's
+predictor and marker threads, private semaphores, per-layer timers and copied-output substitute
+are removed. Goal A now declares its whole tiled pipeline through `MetalProgram` and
+`MeshRankRecord`; its separate two-queue loop, submission throttle and tile timers are removed.
+Ragged reduce-scatter is a configured operation of the same rank crossing interface.
 
-- Python list gathers bind each final destination in the collective compiler.
-  Native column gathers use row views in the shared indexed-write compiler.
-  Their packed receive/copy-back and padded-column staging paths are removed.
-- TP, EP and CP examples use `declarations.Function`; CP no longer constructs
-  incomplete crossing preparations by hand. Hourly workloads invoke ordinary
-  files in `mesh/examples`, and aggregation comes from `mesh_statistics`.
-- `Collectives` and `SpanWrites` realize commands before `enqueue`. Indexed
-  fused crossings compile their route bindings in graph order before a call.
-  `execute_fused_writes` and `fused_turn` are removed from execution.
-- Chain command bindings are compiled before submission. The fabric DNN uses
-  explicit row-block configuration and the same native schedule for products,
-  publication, landing and reduction. It no longer runs an eager Torch matrix
-  product plus a separate transport executor inside its layer loop.
-- Fixed argument/track rings are replaced by immutable compiled records.
-  Bridge descriptor insertion is a compiled command; descriptor slot reuse
-  depends on the local bridge's reader, without a host reservation wait.
-- Native crossing dtype and attention merge width/lowering are configuration
-  operands. Element width no longer selects the data type.
-- Intrusive GPU timers, SparseLinear's private timing optimizer, and the MPS
-  double-buffer publication policy are removed. `mesh-statistics.h` supplies
-  the host clock and paired elapsed-time/useful-rate arithmetic.
+Python list gathers bind final output buffers. Native column gathers bind final row views.
+KV handoff now declares each sender's and receiver's own row pitch and head offset to the same
+write planner; its staging buffer, `placeColumnsCommand` and `place_columns` kernel are removed.
+The coded drafter's gather permutation and compiled FX gather publication/landing copies still
+need consolidation; these changes do not establish that every gather copy has been removed.
 
-The LM server now uses shared submission with asynchronous completion. Intake,
-cancellation and reload changes are applied between its batches. Engine shares
-are bound before execution; the old `Operation.__call__`, `_decision`, `_shard`,
-`_separate`, private worker pool and future joins are removed. Prepared host
-shares use `MetalScheduleHost`; their GPU consumers depend on the output event.
-Core ML features and output backings are prepared once, without a copied-output
-substitute.
+TP, EP and CP declare whole functions. The CP example supplies compiler crossing indices.
+Hourly workload bodies live in `mesh/examples`; the hourly supplies configurations. The former
+A/B runner is now a reader of canonical hourly records, with no installer, script substitution,
+private timer or numerical loop. `mesh-statistics.h` supplies ordinary host time and paired
+latency/useful-rate arithmetic; Python and native callers import it.
 
-Open boundaries remain explicit: general PyTorch-generated numerical spans
-still encode through its framework queue and can use compiler-managed temporary
-storage. Ordinary all-to-all, partial-row reductions and the supported functional
-collectives now split into bound native crossings during `Function.declare`.
-Their producer/consumer spans use the same fixed FX sequence builder and
-fragment bindings as the partial tensor API. Raw eager compatibility calls
-still realize their operands on invocation; nonleading reduction axes require
-explicit partial tensor views at preparation.
-Native model crossings do not yet all publish partial results from inside the
-producer kernel. Whole-input joins in the recurrent kernel also remain.
-The constrained data-model document is unchanged. Compilation and source
-inspection do not establish a performance improvement; only committed-main
-hourly records can establish that comparison.
+Collective repetitions, recurrent chain commands and DNN row blocks are prepared before enqueue.
+Recurrent inputs name the frame each step consumes. Invocation storage uses assigned ranges in
+region pages; the free-buffer scan and `ncclMeshMemReusable` API are removed. Payload ranges keep
+page alignment. The preceding 64-byte payload alignment caused a registration-boundary failure
+in the canonical hourly and has been corrected. Descriptor storage keeps its separate alignment.
+
+Complete forward/backward graphs use functionalization for mutating custom operators before
+kernel lowering. Dead framework coordinate queries are removed from the graph; they previously
+introduced a dynamic `nonzero` into TP lowering. These are preparation changes, not measured
+performance claims.
+
+Open work includes native producer-kernel publication, the remaining gather copies, generic
+Torch numerical spans' framework encoding and temporary storage, and the eager CPU compatibility
+executor. Shared code and successful builds do not establish maximum performance. Canonical
+hourlies have recorded failures; completion of all seven assigned items is not claimed here.
+The constrained data-model document is unchanged.
 
 ## Reviewed interfaces
 
@@ -87,8 +76,7 @@ records the current status; unmarked entries remain outstanding.
   Native [NeuralEngineShares](../../../metal-microbench/neural_engine.swift) also already binds shared input,
   result and progress storage before execution.
 - **Integration still required:** declare all operation shapes, allocate their results, load their models and
-  bind CPU/GPU/ANE work before the call. Native ANE coordination itself still has locks and per-layer observation;
-  it is evidence of reusable storage and kernels, not a finished replacement executor. Preserve `Linear`/`FFN`
+  bind CPU/GPU/ANE work before the call. Native ANE coordination now uses recorded host-producer and consumer edges in the shared schedule. Preserve `Linear`/`FFN`
   mathematics and the engine capabilities while deleting the hidden execution policy.
 
 ### R02. SparseLinear's private optimizer and timer — removed
@@ -323,7 +311,7 @@ The [graph history](aot-graphs-and-pytorch.md) explains the connections and prio
 | [dense_execution.swift](../../../metal-microbench/dense_execution.swift), `Network`, `StepProgram`; [streamed_weights.swift](../../../metal-microbench/streamed_weights.swift) | Compose native model steps and coded/dense matrix work | Existing composition layer to reuse, not a reason to introduce PyTorch into the native engine. |
 | [decode_crossings.swift](../../../metal-microbench/decode_crossings.swift), `CrossingPoint`, `StepCrossings`, `SpecOperands` | Collective operands, shared-prefix descriptors and GPU speculative state | Useful prepared data. Crossings still inherit common collective executor gaps. |
 | [litert_program.h](../../../metal-microbench/litert_program.h), `LiteRtProgram`, `LiteRtPositions` | Upstream model compiler plus native command capture and shared tensors | Separate frontend using the same recorder; R12–R14 removed. |
-| [neural_engine.swift](../../../metal-microbench/neural_engine.swift), `NeuralEngineShares`, `NeuralEnginePartner` | Prebound CPU/GPU/ANE shared work | Storage and numerical adapters are reusable; coordination still needs review against whole-call execution (R01). |
+| [neural_engine.swift](../../../metal-microbench/neural_engine.swift), `NeuralEngineShares`, `NeuralEnginePartner` | Prebound CPU/GPU/ANE shared work | Storage, numerical adapters and declared host dependencies use the shared recorded schedule (R01). |
 | [mesh-coreml.m](../rdma/mesh-coreml.m), `mesh_coreml_predict`; `engines.Ane` | CoreML model execution over shared tensor storage | Retain the engine capability. Model preparation must be outside the call; the current wrapper is not certified as allocation-free native execution. |
 | Native `PageManager`, prefix trie; [dsv41.swift](../../../metal-microbench/dsv41.swift) model composition | Paged model state, shared prefixes, another model's native phases | Capability identified. Session management is not certified as a fixed numerical schedule; it is not a replacement transport. |
 | [rollout.py](../rdma/rollout.py), [store.py](../rdma/store.py), `configuration.bind`/`record` | Asynchronous whole-call observations and in-memory feedback | Correct separation of observations from numerical execution. Observation history currently has process lifetime; late records do not drive a new per-op controller. |

@@ -201,8 +201,8 @@
    place in the region (a premultiply, or a copy within the region). The NIC reads a SEND's pages until the SEND is
    done, and a group completes without waiting for that. Published source bytes are immutable until every registered
    physical DMA reader has finished, including readers on parallel cables, relay paths and not-yet-posted entries.
-   Mutating them earlier is invalid. ncclMeshMemReusable supplies a nonblocking source-DMA proof; local GPU reads,
-   incoming writes and destination consumers require separate ownership proofs before overwrite. A natural landing
+   Mutating them earlier is invalid. The compiled page assignment includes local GPU reads,
+   incoming writes and destination consumers before it assigns an overwrite. A natural landing
    is an alternative witness only if its actual causal ancestry proves every relevant reader finished; merely being
    later or coming from each peer is insufficient. Logical free defers physical reuse under these source obligations
    without adding a receipt, acknowledgment or data-program wait.
@@ -1082,11 +1082,6 @@ ncclResult_t ncclMeshCommPlanRouteUnits(ncclComm_t comm, uint64_t* units, size_t
 /* Configuration boundary only: suspend the cached function order for feedback or
    placement; resuming begins at its first group without dropping the plan. */
 ncclResult_t ncclMeshCommPlanActive(ncclComm_t comm, int active);
-/* Nonblocking allocator proof: all registered local source DMA reads have completed,
-   including scheduled reads not yet posted when their ownership was registered.
-   This proves neither GPU completion nor incoming-write/destination-consumer safety;
-   the allocator must establish those separate obligations before overwriting pages. */
-ncclResult_t ncclMeshMemReusable(const void* ptr, int* ready);
 /* Every issued group through `ticket` that is not complete, completed on `stream` (its commandBuffer and
    commandEncoder, or the Metal 4 form's, and its polls; issue and workspace not read); *published (may be NULL)
    whether a publication was encoded.  A ticket already complete encodes nothing; one whose communicator failed returns
@@ -1150,8 +1145,8 @@ const char* ncclMeshMetalPrelude(void);
    its bridge sends from and lands in and its kernels read in place (Memory, above); once its group is complete in the
    stream's order, its encoded GPU uses have ended, but registered source SENDs can still be unposted or reading it.
    ncclMemFree is a logical asynchronous release that retains those obligations, not permission to mutate the source.
-   ncclMeshMemReusable proves source DMA retirement only; the caller separately proves all GPU uses and destination
-   writes/consumers finished before reuse. Explicit masked data functions may produce padded ingress frames and read
+   Compiled bindings account for every GPU use and destination consumer.
+   Explicit masked data functions may produce padded ingress frames and read
    only their valid intervals; this API and the native transport introduce no hidden copy to repair an operand.
    ncclInvalidArgument where ptr is in no lease of this process. */
 ncclResult_t ncclMeshMemBuffer(const void* ptr, void** buffer, size_t* offset);
