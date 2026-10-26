@@ -9,6 +9,31 @@ import math
 import torch
 import torch.distributed as dist
 
+
+def spans(graph, cuts=()):
+    """Adapt FX values and effects to the common ordered dependency slicer."""
+    from mesh_graph import needed
+    graph.lint()
+    nodes = list(graph.nodes)
+    random_effects = True
+    if torch._guards.TracingContext.try_get():
+        from torch._inductor import config
+        random_effects = config.fallback_random
+    selected = needed([node.all_input_nodes for node in nodes], [(node,) for node in nodes], (), cuts,
+                      [i for i, node in enumerate(nodes) if node.is_impure(random_effects)])
+    live = {i for span in selected for i in span}
+    for i in range(len(nodes) - 1, -1, -1):
+        if i not in live:
+            graph.erase_node(nodes[i])
+    if graph.owning_module is not None:
+        attributes = {node.target for node in graph.nodes if node.op == 'get_attr'}
+        for name, child in graph.owning_module.named_children():
+            if name in attributes and isinstance(child, torch.fx.GraphModule):
+                spans(child.graph)
+                child.recompile()
+    return [[nodes[i] for i in span] for span in selected]
+
+
 def _value(argument):
     if isinstance(argument, torch.fx.Node):
         if 'val' not in argument.meta:
@@ -182,7 +207,7 @@ def trace(function, *arguments, parameters=()):
     # Framework layout queries can leave unused tensor operations in make_fx's
     # graph (including a mesh-coordinate nonzero). They are configuration work,
     # not part of the declared function or its explicit gradient outputs.
-    graph.graph.eliminate_dead_code()
+    spans(graph.graph)
     graph.recompile()
     return graph, lower(graph)
 
@@ -255,12 +280,8 @@ class BoundGraph:
             target, _ = operation(node)
             if getattr(getattr(target, '_schema', None), 'name', '') == '_c10d_functional::wait_tensor':
                 node.replace_all_uses_with(node.args[0]);graph.graph.erase_node(node)
-        parts, phase = {}, 0
-        for node in graph.graph.nodes:
-            if _bound(node):
-                phase += 1;parts[node] = phase;phase += 1
-            else:
-                parts[node] = phase
+        cuts = [at for i, node in enumerate(graph.graph.nodes) if _bound(node) for at in (i, i + 1)]
+        parts = {node: phase for phase, span in enumerate(spans(graph.graph, cuts)) for node in span}
         divided = split_module(graph, graph, lambda node: parts[node], keep_original_order=True)
         values, arguments = {}, iter(arguments)
         self.groups, self.steps = {}, []

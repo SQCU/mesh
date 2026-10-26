@@ -221,6 +221,9 @@ appends its input broadcast, starting ticks and all chunks into one complete nat
 
 ### Tracing and lowering interfaces
 
+The complete transformation inventory and native/LiteRT correspondence are in
+[the compiler pipeline reference](compiler-pipeline.md).
+
 | Interface | Inputs and outputs |
 |---|---|
 | `trace(function, *arguments, parameters=())` | Fake-traces the function and explicit backward, saves/restores real gradient references, returns the graph and communication declarations. |
