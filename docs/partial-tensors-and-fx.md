@@ -226,11 +226,28 @@ appends its input broadcast, starting ticks and all chunks into one complete nat
 | `trace(function, *arguments, parameters=())` | Fake-traces the function and explicit backward, saves/restores real gradient references, returns the graph and communication declarations. |
 | `operation(node)` | Reads operators and named operands, including functionalization wrappers. |
 | `lower(graph)` | Produces ordered common `Call` groups; unknown communication fails preparation. |
-| `BoundGraph` | Splits the declaration at communication, binds final output views and compiles numerical spans. It does not execute those spans. |
+| `BoundGraph` | Splits the declaration at communication and binds consumers directly to prepared numerical outputs and their aliases. It adds no publication copy or separate numerical output allocation. |
 | `compiler(graph, operands)` | Functionalizes the declaration, preserves the existing small-row linear fusions, and calls the native emitter. |
 | `native.compile_graph` | Uses Inductor's tensor IR, fusion and Metal source generator. Its generated Python runs once to allocate and bind commands, not to execute data. Unknown external kernels fail preparation. |
+| `native.empty_strided(shape, stride, dtype, device)` | Assigns a compiler-declared view to bridge region storage during preparation. Both ordinary intermediates and custom linear outputs use it. |
 | `_stream.Commands` | Converts pipelines, tensor views, constants, access modes and dispatch dimensions into `MetalCommandDescription` records. |
 | `Execution` | Appends numerical and transport records to the common schedule before execution. |
+
+PyTorch supplies tensor descriptions, graph capture and differentiation. Our compiler owns placement,
+storage, kernel choice, collective plans and submission. Compiler passes can be reused or extended without
+adopting PyTorch's runtime or its device choices. This is a general tensor interface; model names do not
+select another executor.
+
+The current generic FX emitter still borrows Inductor's numerical IR and Metal source generator.
+Products already lower to our shared native matrix bodies. Other numerical lowerings can replace upstream
+source generation while retaining the same graph metadata and command interface. Generic CPU FX lowering
+remains missing; CPU/ANE shares currently enter through `engines.Prepared` and the common native recorder.
+Joint graph placement across those capabilities remains integration work.
+
+Training attention now declares its forward math and lets autograd include the backward. Its runtime
+workspace pool, saved-score ownership machinery and lazy mask cache are removed. The shared preparation
+allocator supplies its buffers, so numerical execution needs neither that pool nor PyTorch's MPS heap
+allocator. The same storage change applies to other FX numerical spans and their collective outputs.
 
 `compiled_graph`, `Preparations`, `_CAPTURE`, crossing-key lookup and indexed crossing runtime operators
 are removed. Mathematical kernel choice remains preparation work. `linear.metal` serves the existing

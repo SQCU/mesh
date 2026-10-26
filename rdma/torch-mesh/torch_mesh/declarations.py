@@ -296,34 +296,23 @@ class BoundGraph:
                             return value.as_strided(tuple(metadata.shape), tuple(metadata.stride()),
                                 value.storage_offset() + metadata.storage_offset() - described.storage_offset())
                     return empty(tuple(metadata.shape), dtype=metadata.dtype, device=metadata.device.type)
-                targets = map_arg(outputs, storage)
                 crossing = next((n for n in module.graph.nodes if _bound(n)), None)
                 if crossing is None:
                     # Keep the graph and its one FakeTensor shape environment.
                     # Retracing a split graph creates a second set of symbols
                     # for the same internal values and loses their bindings.
-                    output_node = next(n for n in module.graph.nodes if n.op == 'output')
-                    leaves, specification = tree_flatten(outputs)
-                    destinations = tree_flatten(targets)[0]
-                    bound = []
-                    with module.graph.inserting_before(output_node):
-                        for k, (result, destination) in enumerate(zip(leaves, destinations)):
-                            if not isinstance(destination, torch.Tensor):
-                                bound.append(result)
-                                continue
-                            name = f'_mesh_output_{k}'
-                            module.register_buffer(name, destination)
-                            into = module.graph.get_attr(name)
-                            bound.append(module.graph.call_function(torch.ops.aten.copy_.default, (into, result)))
+                    # Native preparation already assigns region storage. Bind
+                    # the next consumer to those outputs, including aliases;
+                    # no separate destination or publication copy is needed.
                     from torch.utils._pytree import tree_unflatten
-                    output_node.args = (tree_unflatten(bound, specification),)
-                    module.recompile()
                     made = Function(module, *args)
-                    made.output_spec = tree_flatten(targets)[1]
+                    made.output_spec = tree_flatten(outputs)[1]
                     made.declare_graph(module, group)
+                    targets = tree_unflatten(tree_flatten(made.execution.output)[0], made.output_spec)
                     self.steps.append(made)
                     declarations = made.groups
                 else:
+                    targets = map_arg(outputs, storage)
                     target, metadata = operation(crossing)
                     if crossing.target is not target:
                         raise NotImplementedError('bound collectives require functional graph operands')

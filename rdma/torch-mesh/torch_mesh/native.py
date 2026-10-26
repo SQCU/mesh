@@ -6,6 +6,7 @@ No generated wrapper, ATen fallback or shader launcher runs with the payload.
 """
 from contextvars import ContextVar
 from functools import lru_cache
+import math
 import struct
 
 import torch
@@ -13,6 +14,13 @@ import torch
 from . import _stream
 
 _records = ContextVar('mesh_native_commands')
+
+
+def empty_strided(shape, stride, dtype, device):
+    """Bind a compiler-assigned view to bridge storage during preparation."""
+    from . import empty
+    extent = 0 if math.prod(shape) == 0 else 1 + sum((n - 1) * s for n, s in zip(shape, stride))
+    return empty((extent,), dtype=dtype, device=device).as_strided(shape, stride)
 
 
 @lru_cache(None)
@@ -46,7 +54,7 @@ def linear(x, w, bias=None, act=0, x1=None, *, out=None):
 
 
 def linears(xs, ws, biases, acts, x1s, *, outputs=None):
-    outputs = outputs if outputs is not None else [torch.empty((x.shape[0], w.shape[0]), dtype=x.dtype, device=x.device)
+    outputs = outputs if outputs is not None else [empty_strided((x.shape[0], w.shape[0]), (w.shape[0], 1), x.dtype, x.device)
                                                    for x, w in zip(xs, ws)]
     if all(x.dtype == w.dtype == torch.half and x.shape[0] <= _stream.compilation['LINEAR_ROW_CROSSOVER'] and x.stride(1) == w.stride(1) == 1
            and (part is None or part.stride(1) == 1) and (bias is None or bias.is_contiguous()) and out.is_contiguous()
@@ -94,6 +102,17 @@ def compile_graph(module, metadata, operands):
     from torch._inductor.debug import DebugContext
 
     class Preparation(PythonWrapperCodegen):
+        def make_allocation(self, name, device, dtype, shape, stride, allocation_shape=None, is_pinned=False):
+            if is_pinned:
+                raise NotImplementedError('native graph storage uses the bridge region, not a separate pinned allocator')
+            allocation_shape = shape if allocation_shape is None else allocation_shape
+            sizes = self.codegen_python_shape_tuple(allocation_shape)
+            strides = self.codegen_python_shape_tuple(stride)
+            made = f'{name} = mesh_native.empty_strided({sizes}, {strides}, {dtype}, {str(device)!r})'
+            if tuple(shape) != tuple(allocation_shape):
+                made += f'.as_strided({self.codegen_python_shape_tuple(shape)}, {strides})'
+            return made
+
         def _generate_extern_kernel_alloc_helper(self, node, args):
             names = {'torch.ops.torch_mesh.linear.default': 'linear',
                      'torch.ops.torch_mesh.linears.default': 'linears'}

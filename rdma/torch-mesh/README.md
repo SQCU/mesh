@@ -94,7 +94,7 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 | DDP | |
 | ring attention | `partition.ring_attention` on capacity blocks (equal parts: torch's equal shards), and SDPA on a `RaggedShard` of the sequence, forward only, in place of `context_parallel`: split-KV partials merged by the library (below) |
 | partials merge | `torch_mesh.merge_partials(out, lse, group)`: each member's attention over its own keys merged into the attention over all of them (the operator `torch_mesh::merge_partials`, below) |
-| training attention | `torch_mesh.attention.attention`: SDPA's (no mask, dropout or GQA) under autograd, its scores and their gradient in region leases reused per shape, where torch's SDPA on MPS makes each a tensor of torch's (from 10 MiB a 1 GiB heap the GPU wires) |
+| training attention | `torch_mesh.attention.attention`: SDPA's math (no mask, dropout or GQA), including autograd's backward in the whole-function declaration. Native preparation assigns region storage to scores, gradients and other intermediates; no runtime workspace pool. |
 | pipeline parallelism | torch.distributed.pipelining, GPipe and 1F1B, gradients checked |
 | expert parallelism | all_to_all_single (below) |
 

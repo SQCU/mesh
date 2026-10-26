@@ -113,16 +113,23 @@ spans and native prepared bindings. It executes no initialization payload. Input
 tensor without NumPy staging or implicit publication. Distributed CPU partial graphs fail preparation;
 the synchronous CPU transport is not used as a fallback. Shared native stream concerns remain R17.
 
-### R04. Attention's runtime workspace pool
+### R04. Attention's runtime workspace pool — removed
 
-- **Remove:** `_lease`, `_returned`, `_FREE` and lazy `_MASKS` management as the execution contract of
-  [attention.py](../rdma/torch-mesh/torch_mesh/attention.py).
-- **Use:** whole forward/backward graph declarations and [lifetimes.py](../rdma/lifetimes.py)'s compile-time
-  storage relations to assign existing pages before execution.
-- **Integration still required:** preserve this module's training gradients. The online/split attention bodies
-  in [attention.metal](../rdma/torch-mesh/torch_mesh/attention.metal) already solve a related streaming problem,
-  but are decode kernels; they are not a complete training-backward replacement. Removing a pool must not
-  silently remove training or replace its math with an incompatible kernel.
+Updated 2026-10-26T20:42:55Z. `_lease`, `_returned`, `_FREE`, `_MASKS` and the custom backward's storage
+management are deleted from [attention.py](../rdma/torch-mesh/torch_mesh/attention.py). Attention declares
+its math; autograd includes all three input gradients in the complete function graph. The causal mask is
+an index relation in that graph, with no lazy cache.
+
+[native.py](../rdma/torch-mesh/torch_mesh/native.py) now binds every compiler-created intermediate and
+linear output to region storage during preparation. This replaces the oversized MPS heaps that motivated
+the old pool in `00d2b32c`; it does not return score allocation to that allocator. Storage reuse is assigned
+by the preparation program before native command recording. Numerical execution does not call that program.
+
+`BoundGraph` also binds subsequent spans and collectives directly to those native outputs. Its separate
+destination allocations and inserted output `copy_` operations are removed; output aliases remain views.
+Preparation compiled a causal training graph at the TP example's `[2, 5, 1024, 128]` shape with a collective
+boundary and an aliased result, as well as rectangular query/key/value shapes. No numerical work was
+submitted, so this records integration and compilation evidence, not attained latency or bandwidth.
 
 ### R05. Coded-matrix calls that choose and allocate while executing
 
