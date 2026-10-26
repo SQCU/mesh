@@ -9,7 +9,6 @@ import sys
 import time
 import traceback
 
-from mesh_nodes import fetch
 from mesh_source import checkout, revision, upstream, verify
 
 REQUIRED = ('rdma/mesh_hourly.py', 'rdma/mesh_nodes.py', 'rdma/mesh_source.py',
@@ -110,7 +109,7 @@ def _launch(mesh_root, microbench_root, output_root):
         record['commits'] = {name: revision(root, 'refs/heads/main') for name, root in roots.items()}
         record['upstreams'] = {name: upstream(root) for name, root in roots.items()}
         for name, root in roots.items():
-            target = Path.home() / '.cache/mesh-checkouts' / name / record['commits'][name]
+            target = Path.home() / '.cache/mesh-checkouts' / name / 'current'
             checkout(record['upstreams'][name], record['commits'][name], target)
             record['checkouts'][name] = {'path': str(target)}
         committed_mesh = Path(record['checkouts']['mesh']['path'])
@@ -144,40 +143,33 @@ def _launch(mesh_root, microbench_root, output_root):
     return 0 if record['status'] == 'completed' else 1
 
 
-def prepare_node(node, paths, record, out, since):
-    """Only successfully verified installs enter measurements; stale packages are never used."""
+def prepare_node(node, paths, record):
+    """One node-local Git/build transaction; existing build products stay in place."""
+    from mesh_nodes import PY, home_path
+    from mesh_source import checkout_command
     result = {'number': node.number, 'status': 'installing', 'sources': {}, 'commands': node.commands}
     record['nodes'][f'{node.number}@{node.addr}'] = result
     try:
+        commands = []
         for name in paths:
-            destination = f'.cache/mesh-checkouts/{name}/{record["commits"][name]}'
-            result['sources'][name] = fetch(node, record['upstreams'][name], record['commits'][name], destination)
+            destination = f'.cache/mesh-checkouts/{name}/current'
+            result['sources'][name] = {'commit': record['commits'][name], 'remote_root': destination,
+                                       'upstream': record['upstreams'][name]}
+            commands.append(checkout_command(record['upstreams'][name], record['commits'][name], '~/' + destination))
             if name == 'mesh':
                 node.source = destination
-        code, resets = node.py('resets', str(int(since)))
-        result['resets_exit'] = code
-        result['resets'] = resets
-        code, _ = node.py('installed', record['commits']['mesh'], '1')
-        if code:
-            code, output = node.py('install', record['commits']['mesh'], '1')
-            result['installation'] = output
+        commands.append(f'PYTHONPATH={home_path(node.source + "/rdma")} {PY} -m mesh_nodes node prepare '
+                        + shlex.quote(record['commits']['mesh']) + ' ' + shlex.quote(node.number))
+        for name in paths:
+            commands.append(f'{PY} {home_path(node.source + "/rdma/mesh_source.py")} prune '
+                            f'{home_path(".cache/mesh-checkouts/" + name)} current')
+        code, output = node.run('\n'.join(commands))
         result['install_exit'] = code
         if code:
-            raise RuntimeError(f'install failed ({code}): {output.splitlines()[-1] if output else "no diagnostic"}')
-        code, _ = node.py('installed', record['commits']['mesh'], '1')
-        result['verify_exit'] = code
-        if code:
-            raise RuntimeError(f'installed provenance verification failed ({code}); node excluded')
+            raise RuntimeError(f'preparation failed ({code}): {output}')
         result['status'] = 'installed'
-        from mesh_nodes import PY, home_path
-        for name in paths:
-            code, output = node.run(f'{PY} {home_path(node.source + "/rdma/mesh_source.py")} prune '
-                                    f'{home_path(".cache/mesh-checkouts/" + name)} {record["commits"][name]}')
-            if code:
-                raise RuntimeError(output)
     except Exception as error:
-        result['status'] = 'failed'
-        result['error'] = str(error)
+        result.update(status='failed', error=str(error))
     return result
 
 
@@ -263,28 +255,11 @@ def _execute_locked(record):
         mesh.configure(paths['mesh'], paths['metal-microbench'])
         items = workload_configuration(paths['metal-microbench'])
         record.update(stage='discovery', discovery={})
-        # Discovery observes the currently running bridge, explicitly before installation.
-        # It is not evidence that the tested revision has been installed.
-        def bootstrap(candidate):
-            record['discovery'][candidate.addr] = candidate.commands
-            destination = f'.cache/mesh-checkouts/mesh/{record["commits"]["mesh"]}'
-            fetch(candidate, record['upstreams']['mesh'], record['commits']['mesh'], destination)
-            candidate.source = destination
-
-        found, candidates = mesh.discover(None, prepare=bootstrap)
-        if not found:
-            found = [mesh.Node('-', address) for address in candidates]
+        found, _ = mesh.discover(state=record['discovery'])
         record['stage'] = 'installation'
-        installs = mesh.parallel([lambda n=n: prepare_node(n, paths, record, out, record['started_unix'] - 3600)
+        installs = mesh.parallel([lambda n=n: prepare_node(n, paths, record)
                                   for n in found])
         record['nodes'] = {f'{node.number}@{node.addr}': result for node, result in zip(found, installs)}
-        if any(node.number == '-' for node in found):
-            # Read the newly installed topology using the selected checkout's helpers.
-            found, _ = mesh.discover(None, prepare=bootstrap)
-            found = found or []
-            installs = mesh.parallel([lambda n=n: prepare_node(n, paths, record, out, record['started_unix'] - 3600)
-                                      for n in found])
-            record['nodes'].update({f'{node.number}@{node.addr}': result for node, result in zip(found, installs)})
         ready = [node for node, result in zip(found, installs) if result['status'] == 'installed']
         required = {str(number) for item in items for number in item.get('nodes', ())}
         missing = required - {node.number for node in ready}

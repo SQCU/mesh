@@ -33,6 +33,21 @@ owner's state directly. It has no numerical executor, synchronization command,
 disk cache or write endpoint. Other administrative callers can serve their own
 state with the same function and an explicit listen address.
 
+Discovery reads the local bridge's existing cluster map and binds the administration
+and fabric addresses in `etc/mesh-nodes.json`. Each command is visible in
+`discovery` as it runs. It does not browse DNS, probe unrelated Tailnet hosts, or
+fetch source to discover a machine. A missing configured node fails preparation.
+The parallel installation commands verify each endpoint's actual bridge identity.
+
+Each node keeps one `current` Git build checkout per repository. It fetches a
+selected commit from origin when needed and retains incremental build products.
+One administration command prepares both repositories and the installation.
+An installation receipt names the commit, OS build, SDK build and Python ABI;
+unchanged inputs reuse the installation after live bridge and package checks.
+Changed inputs enter the ordinary build dependencies. The Metal binary archive
+also depends on the OS/SDK record, rather than rebuilding on every invocation.
+Source revisions replace installer content hashes and temporary source copies.
+
 The application observer emits each completed whole-call record through
 `mesh_statistics.emit`. Late peer observations still enter the existing
 feedback collector. An unfinished later call does not hide an earlier completed

@@ -39,13 +39,15 @@ def checkout_command(origin, commit, destination):
         f'  git clone --quiet --bare --single-branch --branch main {shlex.quote(origin)} "$repository"',
         'fi',
         f'[ "$(git --git-dir="$repository" config --get remote.origin.url)" = {shlex.quote(origin)} ]',
-        'git --git-dir="$repository" fetch --quiet --no-tags origin main',
-        f'git --git-dir="$repository" merge-base --is-ancestor {shlex.quote(commit)} FETCH_HEAD',
+        'if ! git --git-dir="$repository" merge-base --is-ancestor ' + shlex.quote(commit) + ' refs/remotes/origin/main 2>/dev/null; then',
+        '  git --git-dir="$repository" fetch --quiet --no-tags origin main:refs/remotes/origin/main',
+        'fi',
+        f'git --git-dir="$repository" merge-base --is-ancestor {shlex.quote(commit)} refs/remotes/origin/main',
         'if [ ! -e "$destination" ]; then',
         f'  git --git-dir="$repository" worktree add --quiet --detach "$destination" {shlex.quote(commit)}',
         'fi',
-        f'[ "$(git -C "$destination" rev-parse HEAD)" = {shlex.quote(commit)} ]',
         '[ -z "$(git -C "$destination" status --porcelain)" ]',
+        f'git -C "$destination" checkout --quiet --detach {shlex.quote(commit)}',
     ))
 
 

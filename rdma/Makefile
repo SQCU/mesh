@@ -123,7 +123,12 @@ kernels: .build/libnccl-mesh.metallib
 # person or agent who runs it; a process looks each pipeline up in it and compiles none
 .build/libnccl-mesh.binarchive: .build/nccl-mesh-kernels .build/libnccl-mesh.metallib
 	rm -f $@ && .build/nccl-mesh-kernels .build/libnccl-mesh.metallib $@
-.PHONY: .build/libnccl-mesh.binarchive kernels install-images install-nccl clean-kernels
+# A changed OS or SDK invalidates native products; an unchanged install retains them.
+.build/metal-environment: FORCE
+	@mkdir -p .build; environment="$$(sw_vers -buildVersion) $$(xcrun --show-sdk-build-version)"; \
+	  [ "$$(cat $@ 2>/dev/null)" = "$$environment" ] || printf '%s\n' "$$environment" > $@
+$(IMAGES:%=.build/%) .build/nccl-mesh-kernels .build/libnccl-mesh.binarchive: .build/metal-environment
+.PHONY: FORCE kernels install-images install-nccl clean-kernels
 .build/libnccl-mesh.dylib: nccl-mesh.c mesh-statistics.c mesh-statistics.h metal-recording.m metal-recording.h mesh-write-order.h mesh-write-routes.h mesh-span-plan.h mesh-row-span-plan.h mesh-lease-retire.h nccl-mesh-metal.m nccl-mesh-metal.h nccl-mesh-kernels.h .build/libnccl-mesh.sha256 .build/mesh_metal.h nccl.h \
   mesh-call.h mesh-dataflow.h mesh.h mesh-plan.h .build/libmesh.dylib Makefile $(METAL_CONFIGURATION)
 	cc -fblocks -O2 $(WARN) $(METAL_DEFINES) -dynamiclib -I .build -DKERNELS_SHA256=\"$$(cat .build/libnccl-mesh.sha256)\" \

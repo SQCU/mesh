@@ -9,10 +9,8 @@ import os
 import re
 import shlex
 import signal
-import socket
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -165,63 +163,25 @@ class Node:
         return line, loads(line)
 
 
-def routed(text):
-    paths = {}
-    for f in (line.split() for line in text.splitlines()):
-        if len(f) > 3 and f[0] == 'path' and f[2] == 'kind=fabric-routed':
-            paths.setdefault(f[1], f[3][5:])
-    return paths
-
-
-def discover(log=None, prepare=None):
-    with tempfile.TemporaryFile() as f:
-        p = subprocess.Popen([MESH / 'bin/mesh-peers.sh'], stdout=f, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
-                             start_new_session=True)
-        try:
-            p.wait(timeout=8)
-        except subprocess.TimeoutExpired:
-            with contextlib.suppress(OSError):
-                os.killpg(p.pid, signal.SIGTERM)
-            p.kill()
-            p.wait()
-        f.seek(0)
-        text = f.read()
-    lines = [f.split() for f in text.decode(errors='replace').splitlines()]
-    me = next((f[1] for f in lines if len(f) > 2 and f[2] == 'self'), None)
-    heard = {f[1]: f[3][5:] for f in lines if len(f) > 3 and f[0] == 'path' and f[2] == 'kind=lan' and f[1] != me}
-    tailnet = loads(sh(['/Applications/Tailscale.app/Contents/MacOS/Tailscale', 'status', '--json'])[1])
-    candidates, entry, management = [], None, {}
-    for n, a in [*heard.items(), *(('-', p['TailscaleIPs'][0]) for p in tailnet.get('Peer', {}).values() if p.get('Online'))]:
-        candidates.append(a)
-        candidate = Node(n, a)
-        if prepare:
-            try:
-                prepare(candidate)
-            except Exception as error:
-                note(log, f'candidate {n} {a}: committed discovery helper unavailable: {error}')
-                continue
-        line, d = candidate.stat()
-        if d.get('node'):
-            management[str(d['node'])] = a
-        note(log, f'candidate {n} {a}: {line or "no reply"}')
-        if len(d.get('map', {}).get('nodes', [])) < 2:
-            continue
-        paths = routed(candidate.run(f"perl -e 'alarm 10; exec @ARGV' {home_path(candidate.source + '/bin/mesh-peers.sh')}")[1])
-        entry = entry or (a, d, paths)
-        if all(str(m) in paths for m in d['map']['nodes']):
-            entry = (a, d, paths)
-    note(log, f'entry {entry[0] if entry else "none"}')
-    if not entry:
-        return None, candidates
-    a, d, paths = entry
-    numbers = list(dict.fromkeys([*(str(m) for m in d['map']['nodes']), *([me] if me else [])]))
-    nodes = [Node(str(m), 'localhost' if str(m) == me else management.get(str(m)) or paths.get(str(m), ''),
-                  None if str(m) == me or str(m) in management else a, paths.get(str(m), ''), local=str(m) == me)
-             for m in numbers]
+def discover(log=None, state=None):
+    """Read the local bridge's existing cluster map and bind configured endpoints."""
+    configuration = json.loads((MESH / 'etc/mesh-nodes.json').read_text())['nodes']
+    local = Node('-', 'localhost', local=True)
+    if state is not None:
+        state['localhost'] = local.commands
+    report = local.stat()[1]
+    if not report.get('up'):
+        raise RuntimeError(f'local bridge topology is unavailable: {report}')
+    expected = {row['node'] for row in configuration.values()}
+    found = set(report['map']['nodes'])
+    if found != expected:
+        raise RuntimeError(f'live topology differs from configured nodes: missing {expected - found}, unconfigured {found - expected}')
+    nodes = [Node(str(row['node']), 'localhost' if row['node'] == report['node'] else row['management'],
+                  ula=row['fabric'], local=row['node'] == report['node']) for row in configuration.values()]
     for node in nodes:
-        node.discovered_links = sum(int(node.number) in link[:2] for link in d['map']['links'])
-    note(log, 'map ' + ' '.join(n.number for n in nodes))
-    return nodes, candidates
+        node.discovered_links = sum(int(node.number) in link[:2] for link in report['map']['links'])
+    note(log, 'map ' + ' '.join(node.number for node in nodes))
+    return nodes, [node.addr for node in nodes]
 
 
 def up(nodes, log=None):
@@ -256,7 +216,7 @@ def fetch(node, origin, commit, destination):
 
 def install_one(n, sha, log):
     from mesh_source import upstream
-    n.source = f'.cache/mesh-checkouts/mesh/{sha}'
+    n.source = '.cache/mesh-checkouts/mesh/current'
     fetch(n, upstream(MESH), sha, n.source)
     code = n.py('install', sha, '1', out=log)[0]
     note(log, f'exit {code}')
@@ -400,14 +360,33 @@ def node_install(commit, transition='0'):
     install_checkout(source, allow_source_transition=transition == '1')
 
 
+def node_prepare(commit, number):
+    from mesh_install import environment, install_checkout
+    from mesh_source import verify
+    source = Path(__file__).resolve().parent.parent
+    if verify(source) != commit:
+        raise ValueError('preparation source differs from the requested commit')
+    if str(loads(run(source / 'bin/mesh-stat').stdout).get('node')) != number:
+        raise ValueError('the administration endpoint does not own the configured bridge node')
+    receipt = source / 'rdma/.build/installed.json'
+    wanted = {'commit': commit, 'environment': environment()}
+    if not receipt.exists() or json.loads(receipt.read_text()) != wanted:
+        install_checkout(source, allow_source_transition=True)
+    else:
+        node_installed(commit, '1')
+
+
 def node_installed(commit, exact_imported_source='0'):
-    from mesh_install import check_package, verify_active
+    from mesh_install import check_package, verify_active, environment
     from mesh_source import verify
     active = HOME / '.cache/mesh/active-source'
     source = (Path(active.read_text().strip()) if exact_imported_source != '1' and active.exists()
               else Path(__file__).resolve().parent.parent)
     if verify(source) != commit:
         raise ValueError('requested commit differs from the Git checkout')
+    receipt = source / 'rdma/.build/installed.json'
+    if not receipt.exists() or json.loads(receipt.read_text()) != {'commit': commit, 'environment': environment()}:
+        raise ValueError('requested source and build environment have not been installed')
     check_package(source)
     print(json.dumps({'installed': verify_active(source, commit)}))
     return 0
@@ -477,7 +456,7 @@ def main(argv=None):
     remote = bool(argv and argv[0] == 'node')
     if remote:
         argv.pop(0)
-    commands = {'install': node_install, 'installed': node_installed, 'resets': node_resets, 'guard': node_guard} \
+    commands = {'install': node_install, 'prepare': node_prepare, 'installed': node_installed, 'resets': node_resets, 'guard': node_guard} \
         if remote else {'installed': installed, 'discover': show}
     return commands[argv[0]](*argv[1:])
 

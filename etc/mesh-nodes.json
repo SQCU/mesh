@@ -4,22 +4,34 @@
     "D7377D82-2E96-5084-A5D3-3139FDF3D6CE": {
       "name": "Ms-MacBook-Pro",
       "model": "Mac17,6",
-      "serial": "KHQ5KXR9XG"
+      "serial": "KHQ5KXR9XG",
+      "node": 1980260065,
+      "management": "100.102.120.16",
+      "fabric": "fd6d:6573:68:b5d5:b9dc:d628:b4e3:3141"
     },
     "06594A7A-3279-5A27-9099-11169DE0D270": {
       "name": "Ms-Mac-mini",
       "model": "Mac16,11",
-      "serial": "C9XKWJYXWP"
+      "serial": "C9XKWJYXWP",
+      "node": 1974797816,
+      "management": "100.77.188.102",
+      "fabric": "fd6d:6573:68:3af8:1a3c:9700:3034:715d"
     },
     "E8F9C574-257D-5425-8501-E5BF6981BEA6": {
       "name": "m5ult1",
       "model": "Mac17,15",
-      "serial": "WP6Q97X9Y3"
+      "serial": "WP6Q97X9Y3",
+      "node": 521750041,
+      "management": "100.103.69.53",
+      "fabric": "fd6d:6573:68:577f:d1f4:93fc:f466:51a6"
     },
     "519B8DC8-FF1D-551F-9FC8-0A3168B1ED6A": {
       "name": "m5ult2",
       "model": "Mac17,15",
-      "serial": "CJ473V7FJV"
+      "serial": "CJ473V7FJV",
+      "node": 455770905,
+      "management": "100.86.148.87",
+      "fabric": "fd6d:6573:68:91e1:fbe5:72df:9c0b:bf0b"
     }
   }
 }

@@ -12,9 +12,16 @@ from pathlib import Path
 import plistlib
 import re
 import subprocess
+import sysconfig
 import time
 
 from mesh_source import files, verify
+
+
+def environment():
+    return {'os': run('sw_vers', '-buildVersion').stdout.strip(),
+            'sdk': run('xcrun', '--show-sdk-build-version').stdout.strip(),
+            'python': sysconfig.get_config_var('EXT_SUFFIX')}
 
 
 def run(*args, check=True):
@@ -96,7 +103,9 @@ def install_checkout(source, allow_source_transition=False):
     cache.mkdir(parents=True, exist_ok=True)
     with (cache / 'install.lock').open('a') as lease:
         fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return _install_locked(source, commit, allow_source_transition)
+        result = _install_locked(source, commit, allow_source_transition)
+        (source / 'rdma/.build/installed.json').write_text(json.dumps({'commit': commit, 'environment': environment()}) + '\n')
+        return result
 
 
 def _install_locked(source, commit, allow_source_transition):
