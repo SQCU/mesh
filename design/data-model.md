@@ -3,11 +3,11 @@
 These sections say what the hardware is. Each number names its source. The files measurement.md and facts.md and the
 folder output_data/ are in the metal-microbench repo. The papers are listed at the end.
 
-The hardware paths explain why programs here use pages and compile their writes before a call. Sections 5-9 derive
-the limits this puts on code. The aim is the least whole-call time and the most useful bytes per second.
+The hardware paths explain how we share work through one-sided writes. Sections 5 and 6 connect that work to
+page lists and compilation.
 
 This document uses plain prose as close as possible to Flesch-Kincaid grades 4-6. A section may fall above or below
-that range. Explain the hardware first, then the work it requires, then the choices that work rules out.
+that range. Explain the hardware first, then how we use it to share work.
 
 ## 1. The M-series accelerator
 
@@ -103,54 +103,7 @@ code fits the hardware. A 3 KB crossing takes 11.7 µs as plain dispatches in a 
 completion runs a scheduling kernel, the operand is copied to scratch, and the waits read gate words
 (measurement.md:3230-3238).
 
-## 5. Why pages and compilation
-
-The driver needs a place for bytes to land before they arrive (section 3). We can settle that choice before the
-call. The receiver posts to that place, and the sender sends when its data is ready. No peer needs to ask where
-the bytes should go or wait for permission to send them. This is how SEND and RECV give us one-sided writes.
-
-**Pages name the places.** Every byte a program sends belongs to a named page. A page table binds that name to
-storage on each node. The storage is already there. The bindings are fixed before the call starts. The program
-uses an index to find its page.
-
-Each node has its own map. Nodes may have different page sizes, data types, and layouts. A page's type defines
-what its indices mean. The compiler maps each part to the right local page. If values need a type change, the
-plan names that step. An address on one node does not name storage on another node.
-
-A write names source and target pages. A mask selects parts within one page, using indices in that page's type.
-It cannot name another page or reach outside its page. A program cannot give a write a raw pointer and byte
-count in place of a page and a mask. A move across pages names each page in its plan. This does not require a
-separate device call for each page.
-
-These limits let us send just the parts we need while keeping each write within its named pages. A value used
-as a mask cannot turn the write into a move to some other place in a peer's memory.
-
-**Compilation settles the choices.** Before the call, the compiler fixes the work shares, page bindings, masks,
-and routes. It records which results each step needs. A solver may need a hard search to choose a good split.
-The result is a plan that names pages by index.
-
-A hard search and a simple rule can yield the same page list. Reading that list takes the same work in either
-case. More pages can mean more work. A harder search does not make each lookup harder. The running program uses
-the result; it does not repeat the choices that found it.
-
-**One-sided writes spend less on each move.** Take one page going from A to B. There are three ways to place it:
-
-| Method | What crosses the link | What B does after arrival |
-|---|---|---|
-| Place fixed ahead | The data | Uses the page where it landed |
-| Ask first | A request, an answer, then the data | Uses the agreed page |
-| Send a header with the data | The header and data | Reads the header, picks a page, and copies the data there |
-
-The last two forms still need a posted receive for their first message. They add a choice after the first place
-was fixed. Asking adds two crossings. Staging adds a copy, which reads and writes the bytes again. Sections 1-4
-show the costs of those actions on this hardware. The page plan lets us avoid them at every hop.
-
-Moving a page across the mesh can even beat a local NVMe read: a small transfer can finish while an SSD read
-still waits for its first byte (sections 2 and 3; Infiniswap). A relay adds a hop, but it need not add a request
-or a staging copy. A node can also compute with partial results as it sends them on. Its compute units and DMA
-engines share the same memory (section 1). These paths let us share both copies and calculations across nodes.
-
-## 6. Sharing work through one-sided writes
+## 5. Sharing work through one-sided writes
 
 Nodes have different strengths. One may compute faster; another may have more links or more spare bandwidth.
 We can devise rules to share copies and calculations among them. A fair split gives each node a share suited
@@ -181,109 +134,31 @@ A compiled plan can still give us a poor split. Results from whole calls let us 
 later calls. Compare both whole-call time and useful bytes per second. Each change becomes a new plan before
 the call that uses it. We can keep making better choices without adding requests and replies to each step.
 
-## 7. What the bridge must have
+## 6. Page lists and steps
 
-Each requirement follows from the hardware path and the page plan above.
+The driver needs a place for bytes to land before they arrive (section 3). The memory in section 2 is already
+set aside. We give each part of that memory a page name. A page table tells each node where to find a page by
+its name.
 
-**Register once.** Register the region when the port opens (section 2). Every page used by a call lies in that
-region. A data call does not pin memory or register another buffer.
+A page list names the pages a step reads and writes, in the order it uses them. For a send, it names a page on
+the source node and a page on the next node. Each node uses its own table to find its page. The pages can be
+stored in different places on the two nodes. A mask picks values within one page, so we can send just those
+values. It cannot name a place outside that page.
 
-**Post ahead.** The plan fixes where each receive lands and its order (sections 3 and 5). The bridge posts as far
-ahead as its queue space and the planned page uses allow. A fresh target page need not wait for an unrelated local
-write. The plan also sets when shared results let us use a page again (section 6).
+Our PyTorch code can already record a whole function as a graph of steps before it runs. The graph shows
+which results each step needs. It can include the work that finds an answer and the work used to train the
+model. With that graph, we can choose which nodes do each part of the work before we run it.
 
-**Keep addresses local.** Before the call, the bridge binds pages and masks to local device addresses and byte
-counts. Programs cannot supply these as write operands. The plan may split or group device transfers. They must
-still cover only the bytes selected by the page masks. No header tells the bridge to pick a new page during the call.
+We turn those choices into page lists and steps. This is compilation. A hard rule and a simple rule can give
+the same list, which takes the same time to read. The work spent choosing the list is done before the call.
+Each step then finds its data through the list.
 
-**One writer per device.** The bridge posts on the device and tracks its queue space (section 3). Data programs
-cannot post around it or inspect its private queues. The bridge passes pages onward through DMA; its CPU does not
-copy their payload.
+The receiver uses the lists to set the places where data will land (section 3). The sender can then write
+there as each part is ready. This gives us one-sided writes. A node can use a part or send it on from that
+same page, since its compute units and links share memory (section 1).
 
-**Keep links across calls.** Queue pairs belong to the link's life, not to one data call. Make them when the link
-opens. Keep their setup and teardown out of the data path. The driver limits how they can be flushed or released
-(design/transport.md, sections 5 and 14).
-
-**Do no extra work per step.** The page plan already holds the facts needed to place the bytes. Do not add a search,
-a copy, a request, or a guard to rediscover them. The hardware costs in sections 1-4 make each such step costly.
-
-## 8. Writes over many hops and many paths
-
-A long transfer can use direct links and links through other nodes at once. The same page plan covers all of them.
-Each hop lands at a place fixed before the call. Each relay sends from that same memory as its input arrives.
-It does no CPU copy and asks no peer where the bytes should go.
-
-**Hops can overlap.** Piece one moves onward while piece two arrives. More hops add startup delay. That delay also
-counts toward the end of a finite transfer. Once the path is full, its slowest link bounds its rate. Other traffic
-on that link shares the same capacity. A relay needs one DMA write and one DMA read per byte (section 2).
-
-**Paths share physical links.** Two paths that use the same cable share its bandwidth. Drawing a second path does
-not add a second cable. A cut is a set of links that all traffic between two sides must cross. The sum of those
-links' rates bounds the flow across that cut (Ford and Fulkerson). The source's outgoing links and the target's
-incoming links are two such limits.
-
-The compiler uses the connected links and their capacities. It must not assume two nodes, one cable per pair, or
-equal ports. Several transfers may use the same links. Plan their work together so each link's capacity is counted
-once. A relay is a node that passes the data on unchanged. Its pages and links are part of the same plan.
-
-**More paths can shorten the transfer.** Take two paths that share no cable. They each move B bytes per second.
-One starts at time L. The other starts at time L plus d, due to its extra hop. A transfer of S bytes on the direct
-path takes L + S/B. If S is greater than B times d, some bytes can use the other path and both paths can finish
-sooner. The split gives more bytes to the path that starts first.
-
-This example explains why an extra hop can help. It is not a rule that bars a path below a fixed size. The real
-plan includes all paths, their shared links, page masks, and data needs. The solver must be able to shift writes
-among them. Its goal is to make the whole call finish sooner and raise its useful bytes per second.
-
-**Compute shares and routes change together.** A node can do less arithmetic and relay more data. DMA relays use
-little arithmetic, though they still use links and memory. Do not infer their cost from a node's compute share.
-Use the measured gaps between nodes' finish times to adjust the plan between whole calls.
-
-Hop costs are measured too. Start nodes with the same estimate. Record both the mean delay and its spread, then
-update them from new runs. A busy link or a slow estimate is a reason to improve the plan, not to hide that link
-from the solver.
-
-The bridge moves data as fast as the plan and hardware allow. The collective sets the work shares and routes.
-Data code declares its work through the collective. It does not manage links or add a second transport path.
-
-## 9. Any collective as compiled one-sided writes
-
-A complete call has known shapes and a known graph of steps. These are fixed before it starts (design/rubrics.md,
-D2). A library can use those facts just as code written for one program can. Its compiler must turn them into page
-bindings and a write plan, rather than leave their meaning to be worked out during each step (section 5).
-
-A plan's being compiled does not make its routes or work shares best. It makes the chosen plan cheap to enact.
-Later whole-call results guide the next plan. Within a call, the work shares, page bindings, and routes stay fixed.
-Every collective and solver uses this same page-and-mask model.
-
-**Gather and scatter.** In an all-gather, each node's share goes into its place in every output. Shares may have
-different sizes. Their pages and masks fix where each part goes. In a reduce-scatter, each node sends its partial
-results to the nodes that own the result pages. A node can sum partials as they pass through it.
-
-**Reduce and broadcast.** A reduce sends partials toward the root and sums them on the way. A broadcast sends a
-root's data to all the other nodes. An all-reduce can reduce-scatter first, then all-gather the sums. This can move
-fewer bytes than sending every full partial to every node. Its two phases still use the same one-sided writes.
-The compiler must express either form and compare whole-call costs.
-
-**Expert routing.** Each expert's input rows go to the node that holds it. The results go to the pages that need
-them. Counts may be fixed, or the plan may reserve space for their known bounds. A mask selects the used parts
-within each page. No peer must pick a new destination after the data arrives.
-
-**Attention.** A ring can pass key and value blocks among nodes that hold query blocks. Another form can gather
-query blocks and reduce-scatter partial results. Each form has a known sequence of writes. The compiler must use
-that sequence and its real data needs, rather than add a barrier for the whole operand at each step.
-
-**Tensor splits.** A column split gives each node a share of a layer's outputs. A row split gives it partial sums
-that must be combined. The next step's needs fix which result pages go where. The same rule applies when nodes
-have different compute rates, memory rates, or numbers of links.
-
-**Results guide later calls.** Measure the time and useful bytes per second of the complete function. Count output
-data once; extra relay hops do not create more useful output. Use those results to adjust work shares and routes
-between calls across the measured shapes. Each new choice becomes another compiled page plan.
-
-The records arrive on their own. Late peer records can describe several past calls at once. Each record names the
-call and plan it measured. The solver uses them when they arrive. Their absence does not stop data execution or
-make peers meet at a start or finish barrier. A new plan is bound before the call that will use it.
+We can use a good plan for many sets of inputs. If we change who does which work, we compile new lists and
+steps before the next run.
 
 ## Sources
 
@@ -303,5 +178,3 @@ make peers meet at a start or finish barrier. A new plan is bound before the cal
 - C. Zhao et al. Insights into DeepSeek-V3: Scaling Challenges and Reflections on Hardware for AI Architectures. ISCA
   2025.
 - InfiniBand Trade Association. InfiniBand Architecture Specification, Volume 1.
-- J. Gu et al. Efficient Memory Disaggregation with Infiniswap. NSDI 2017.
-- L. R. Ford and D. R. Fulkerson. Maximal flow through a network. Canadian Journal of Mathematics 8, 1956.
