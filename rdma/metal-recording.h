@@ -19,7 +19,7 @@ _Static_assert(_Alignof(struct MetalReplay) == MESH_REPLAY_ALIGNMENT, "prepared 
 // docs/kernels.md E2, Any program
 enum MetalForm { MetalFormIndirect, MetalFormEncoded, MetalFormSerial };
 // Build operands from the selected Metal configuration, shared by frontends.
-MTLCompileOptions *MetalCompilerOptions(id<MTLDevice> device);
+MTLCompileOptions *MetalDeviceCompilerOptions(id<MTLDevice> device);
 
 // docs/kernels.md Any program.  A host program's operand whose storage holds `instances` slots of
 // `stride` bytes: invocation t binds slot t % instances (0 instances: slot t), its writes landing

@@ -598,7 +598,7 @@ static std::vector<id<MTLComputePipelineState>> pipelines_;
 
 static int64_t pipeline(const std::string &source, const std::string &name) {
   id<MTLDevice> device = at::mps::MPSDevice::getInstance()->device();
-  MTLCompileOptions *options = MetalCompilerOptions(device);
+  MTLCompileOptions *options = MetalDeviceCompilerOptions(device);
   NSError *error = nil;
   id<MTLLibrary> library = [device newLibraryWithSource:@(source.c_str()) options:options error:&error];
   if (!library) throw std::runtime_error(std::string("kernel source: ") + error.localizedDescription.UTF8String);

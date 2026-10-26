@@ -19,7 +19,7 @@ Read from the live nodes on 2026-10-26:
 | Laptop 1980260065 | 6 Super, 12 Performance | 40 |
 
 The shared build operands are in `etc/compute/metal.mk`: macOS 26.0 and Metal 4.0. The bridge libraries,
-Torch extension and native Swift build consume that file. Numerical shader frontends use `MetalCompilerOptions(device)`;
+Torch extension and native Swift build consume that file. Numerical shader frontends use `MetalDeviceCompilerOptions(device)`;
 transport AIR uses the same language setting. Numerical floating-point options keep the language's existing default;
 the transport build's explicit safe math setting remains separate. `METAL_CONFIGURATION` names a different file when
 a host needs a different build. A missing file fails the build. The extension passes the deployment target explicitly
@@ -61,7 +61,7 @@ claims still require the committed-main hourly's whole-call duration and useful 
 
 The shared `etc/compute/metal.def` manifest supplies binding and indirect-command limits, SIMD width, matrix tiles,
 linear tiles and the initial launch policy. `metal-capabilities.h` exposes the same operands to C, Swift and the
-Python extension; `MetalCompilerOptions(device)` and the transport source builder supply them to Metal. These consumers read one definition of each moved operand.
+Python extension; `MetalDeviceCompilerOptions(device)` and the transport source builder supply them to Metal. These consumers read one definition of each moved operand.
 The linear compiler derives the grouped-product count from the binding capacity. Each row tile gets
 its own grid work, and FX fusion includes wide products. The row crossover selects a compiled geometry; it does not
 limit the number of rows in a function. Gather grids use the discovered GPU core count and configured work per thread.

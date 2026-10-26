@@ -829,7 +829,7 @@ struct MetalSchedule {
     NSError *(^host)(void);
 };
 
-MTLCompileOptions *MetalCompilerOptions(id<MTLDevice> device) {
+MTLCompileOptions *MetalDeviceCompilerOptions(id<MTLDevice> device) {
     MTLCompileOptions *options=[MTLCompileOptions new];
     options.languageVersion=MESH_METAL_LANGUAGE;
     options.preprocessorMacros=@{
