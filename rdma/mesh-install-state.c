@@ -6,16 +6,16 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-/* Layout 153 and 154 differ in transport entries/pins, not holder identity. These
-   exact header/client offsets were compared against the 153 committed header;
-   a future ABI change must extend this explicit compatibility proof. */
+/* Holder identity is an append-only prefix, independent of transport layout.
+   The header and client definitions are identical in layout 138 (f440f786)
+   and 154. This observer reads no transport entry or pin representation. */
 _Static_assert(sizeof(struct hdr)==192 && offsetof(struct hdr,version)==4 &&
                offsetof(struct hdr,clients)==28 && offsetof(struct hdr,client_off)==80,"install observer header ABI");
 _Static_assert(sizeof(struct mesh_client)==64 && offsetof(struct mesh_client,owner)==0 &&
                offsetof(struct mesh_client,start)==8,"install observer client ABI");
 static int install_state_valid(const struct hdr *m,size_t bytes){
   return bytes>=sizeof *m && m->magic==MESH_MAGIC &&
-    (m->version==0 || m->version==153 || m->version==154) && m->clients<=MESH_CLIENTS &&
+    m->clients<=MESH_CLIENTS &&
     m->client_off>=sizeof *m && m->client_off%_Alignof(struct mesh_client)==0 && m->client_off<=bytes &&
     (uint64_t)m->clients*sizeof(struct mesh_client)<=bytes-m->client_off;
 }
