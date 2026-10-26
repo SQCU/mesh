@@ -479,7 +479,7 @@ struct Collectives {
   void realize(size_t repetitions=1) {
     auto made=schedule_after_inputs();append(made.get(),repetitions);
     const auto held=operands;
-    MetalScheduleFinish(made.get(),^(NSError *){(void)held;});executions.push_back(std::move(made));
+    checked(MetalScheduleFinish(made.get(),^(NSError *){(void)held;}));executions.push_back(std::move(made));
   }
   void enqueue() { MetalScheduleEnqueue(executions[next++].get()); }
   pybind11::capsule completion() { return schedule_completion(executions[next-1]); }
@@ -1399,7 +1399,7 @@ static void compile_chain(PreparedChain &chain) {
     previous = chunk.plans;
   }
   dispatch(steps.back());
-  MetalScheduleFinish(schedule,nil);
+  checked(MetalScheduleFinish(schedule,nil));
 }
 
 static void chain_run(int64_t index) {
@@ -1508,7 +1508,7 @@ struct ScheduleBinding {
       return (int)encoded(*list,communicator(comm),&on);
     }));
   }
-  void finish() { const auto held=operands; MetalScheduleFinish(schedule.get(),^(NSError *){(void)held;}); }
+  void finish() { const auto held=operands; checked(MetalScheduleFinish(schedule.get(),^(NSError *){(void)held;})); }
   void enqueue() { MetalScheduleEnqueue(schedule.get()); }
   pybind11::capsule completion() { return schedule_completion(schedule); }
 };
@@ -1582,7 +1582,7 @@ struct SpanWrites {
   void realize() {
     auto made=schedule_after_inputs();append(made.get());
     const auto held=leases;
-    MetalScheduleFinish(made.get(),^(NSError *){(void)held;});executions.push_back(std::move(made));
+    checked(MetalScheduleFinish(made.get(),^(NSError *){(void)held;}));executions.push_back(std::move(made));
   }
   void enqueue() { MetalScheduleEnqueue(executions[next++].get()); }
   pybind11::capsule completion(){return schedule_completion(executions[next-1]);}

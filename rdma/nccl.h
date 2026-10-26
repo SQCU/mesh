@@ -983,6 +983,10 @@ ncclResult_t ncclMeshCommWritePaths(ncclComm_t comm, int source, int destination
    bytes gathered into rank-major reports. Uses the retained configuration
    channel, with the communicator's deadline; never a payload receipt. */
 ncclResult_t ncclMeshCommConfigGather(ncclComm_t comm, const void* local, void* reports, size_t bytes);
+/* Finish realization after encoding the complete function. Peers exchange the
+   compiled send/landing list ends on every cable and match both directions.
+   This is a compiler operation, before submission; no runtime invocation calls it. */
+ncclResult_t ncclMeshCommRealized(ncclComm_t comm);
 /* Predicted producer readiness for each rank; used only when compiling immutable writes. */
 ncclResult_t ncclMeshCommWriteRelease(ncclComm_t comm, const double* seconds);
 /* AOT exact-byte bindings. Every rank prepares in the same order. metal=1

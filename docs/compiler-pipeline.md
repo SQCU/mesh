@@ -36,6 +36,17 @@ and peer computers; a model name must not select another runtime.
 9. Numerical commands and prepared collective bindings append to the common native schedule. Execution
    submits the already prepared commands. Feedback changes operands for a subsequent compilation.
 
+`MetalScheduleFinish` closes the local commands, then uses the existing configuration channel to
+exchange the compiled send and landing list ends for every cable. The two endpoints must agree before
+preparation returns. GPU counts, work shares and command counts may differ across ranks. Internal
+CPU/ANE graph cuts only finish their local command part; they do not exchange metadata. Execution
+does not call this compiler step. Native and FX use the same boundary.
+
+This closes a gap observed on 2026-10-26: the laptop reached its first GPU data dependency while a
+Studio was still realizing its commands. The bounded wait expired. Command completion had previously
+hidden that collective failure from the Torch observer. Shared outcome observation now reports it,
+and final preparation exchanges actual compiled list ends instead of assuming peers compile equally fast.
+
 Sources: [declarations.py](../rdma/torch-mesh/torch_mesh/declarations.py),
 [compiler](../rdma/torch-mesh/torch_mesh/__init__.py),
 [native.py](../rdma/torch-mesh/torch_mesh/native.py),

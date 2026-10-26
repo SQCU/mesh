@@ -4385,6 +4385,33 @@ ncclResult_t ncclMeshCommConfigGather(ncclComm_t comm, const void *local, void *
   return bytes ? prepare_exchange(comm, local, bytes, reports) : ncclSuccess;
 }
 
+ncclResult_t ncclMeshCommRealized(ncclComm_t comm) {
+  if (!comm) return fail(ncclInvalidArgument, "realization requires a communicator");
+  const size_t fields = 2 * (size_t)comm->fabric.cables;
+  uint64_t *local = calloc(fields + 1, sizeof *local);
+  uint64_t *reports = calloc(fields * (size_t)comm->nranks + 1, sizeof *reports);
+  if (!local || !reports) { free(local); free(reports); return fail(ncclSystemError, "allocating compiled list ends"); }
+  pthread_mutex_lock(&group_lock);
+  for (uint32_t h = 0; h < comm->count; h++) {
+    const struct channel *ch = comm->channels + h;
+    local[2 * ch->cable] = ch->sends;
+    local[2 * ch->cable + 1] = ch->lands;
+  }
+  pthread_mutex_unlock(&group_lock);
+  ncclResult_t result = prepare_exchange(comm, local, fields * sizeof *local, reports);
+  for (uint32_t e = 0; !result && e < comm->fabric.cables; e++) {
+    const struct mesh_cable *c = comm->fabric.cable + e;
+    const uint64_t *a = reports + fields * c->node[0] + 2 * e;
+    const uint64_t *b = reports + fields * c->node[1] + 2 * e;
+    if (a[0] != b[1] || b[0] != a[1])
+      result = fail(ncclInvalidUsage, "compiled cable %u list ends differ: rank %u send/land %llu/%llu, rank %u send/land %llu/%llu",
+                    e, c->node[0], (unsigned long long)a[0], (unsigned long long)a[1],
+                    c->node[1], (unsigned long long)b[0], (unsigned long long)b[1]);
+  }
+  free(local); free(reports);
+  return result;
+}
+
 static ncclResult_t prepare_counted(struct call *c, const size_t *given) {
   const size_t N = (size_t)c->comm->nranks;
   if (N > SIZE_MAX / N / (2 * sizeof(uint64_t))) return fail(ncclInvalidArgument, "count matrix extent overflow");

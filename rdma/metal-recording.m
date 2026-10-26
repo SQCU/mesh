@@ -814,7 +814,7 @@ struct MetalSchedule {
     id<MTLResidencySet> residency;
     MTL4CommitOptions *options;
     NSMutableSet *owners;
-    NSMutableSet *communicators;
+    NSMutableOrderedSet *communicators;
     NSMutableDictionary *read, *written;
     NSUInteger phase;
     id<MTLEvent> after;
@@ -902,7 +902,7 @@ void MetalScheduleAfter(struct MetalSchedule *s,id<MTLEvent> after,uint64_t valu
 
 void MetalScheduleCommunicator(struct MetalSchedule *s,struct ncclComm *comm) {
     s=s->root;
-    if(!s->communicators)s->communicators=[NSMutableSet new];
+    if(!s->communicators)s->communicators=[NSMutableOrderedSet new];
     [s->communicators addObject:[NSValue valueWithPointer:comm]];
 }
 
@@ -955,6 +955,8 @@ int MetalScheduleCross(struct MetalSchedule *s,MetalCrossing cross) {
     return error;
 }
 
+static void MetalScheduleFinishPart(struct MetalSchedule *,void (^completed)(NSError *));
+
 static struct MetalSchedule *MetalScheduleAdvance(struct MetalSchedule *root,
     NSError *(^operation)(void),id<MTLSharedEvent> signal) {
     struct MetalSchedule *before=MetalScheduleTail(root),*next=MetalScheduleCreateOn(before->queue,before->form);
@@ -962,7 +964,7 @@ static struct MetalSchedule *MetalScheduleAdvance(struct MetalSchedule *root,
     next->root=root;atomic_fetch_add_explicit(&root->pending,1,memory_order_relaxed);
     before->signal=[signal retain];before->signalValue=signal?1:0;
     before->host=[operation copy];
-    MetalScheduleFinish(before,nil);
+    MetalScheduleFinishPart(before,nil);
     before->next=next;root->tail=next;
     return next;
 }
@@ -1074,7 +1076,7 @@ static void MetalScheduleCompleted(struct MetalSchedule *s,NSError *error) {
     MetalScheduleFree(s);
 }
 
-void MetalScheduleFinish(struct MetalSchedule *root,void (^completed)(NSError *)) {
+static void MetalScheduleFinishPart(struct MetalSchedule *root,void (^completed)(NSError *)) {
     struct MetalSchedule *s=MetalScheduleTail(root);
     if(completed){[root->completed release];root->completed=[completed copy];}
     [s->residency commit];[s->residency requestResidency];
@@ -1101,6 +1103,15 @@ void MetalScheduleFinish(struct MetalSchedule *root,void (^completed)(NSError *)
         }];
     }
     [s->read release];s->read=nil;[s->written release];s->written=nil;
+}
+
+int MetalScheduleFinish(struct MetalSchedule *root,void (^completed)(NSError *)) {
+    MetalScheduleFinishPart(root,completed);
+    for(NSValue *value in root->communicators) {
+        const ncclResult_t error=ncclMeshCommRealized(value.pointerValue);
+        if(error)return error;
+    }
+    return 0;
 }
 
 int MetalScheduleStatus(const struct MetalSchedule *s,NSError **error) {

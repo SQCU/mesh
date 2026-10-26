@@ -71,7 +71,9 @@ def compact(record):
              *([round(m['aggregate_rows_per_second'])] if 'aggregate_rows_per_second' in m else [])]
             for m in item['metrics']]
         if item['status'] != 'completed':
-            errors.append([item['tag'], item.get('error', 'incomplete')[:160]])
+            failures = [[item['tag'] + '/' + rank, value['error'][:160]]
+                        for rank, value in item.get('ranks', {}).items() if value.get('error')]
+            errors.extend(failures or [[item['tag'], item.get('error', 'incomplete')[:160]]])
     errors.extend([e.get('stage', 'driver'), (e.get('error') or e.get('stderr') or f'exit {e.get("exit", "unknown")}')[-160:]]
                   for e in record['errors'])
     errors.extend([name, node.get('error', 'installation failed')[-160:]]

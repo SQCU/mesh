@@ -113,7 +113,9 @@ void MetalScheduleCompute(struct MetalSchedule *, id<MTLComputePipelineState>,
 int MetalScheduleCross(struct MetalSchedule *, MetalCrossing);
 NSError *MetalScheduleAppend(struct MetalSchedule *, struct MetalReplay *, NSRange invocations,
     NSArray<NSNumber *> *marks, MetalCrossing);
-void MetalScheduleFinish(struct MetalSchedule *, void (^completed)(NSError *error));
+// Finish all local parts and exchange their compiled list ends with peers.
+// Returns the collective preparation error, or zero. Enqueue does no exchange.
+int MetalScheduleFinish(struct MetalSchedule *, void (^completed)(NSError *error));
 void MetalScheduleEnqueue(struct MetalSchedule *);
 // Ordinary completion observation: 0 pending, 1 complete, -1 failed.
 int MetalScheduleStatus(const struct MetalSchedule *, NSError **error);
