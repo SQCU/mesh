@@ -229,7 +229,7 @@ def rank_results(outputs):
                     values.append(value)
         failures = [line.strip() for line in lines if any(word in line.lower()
                     for word in ('error', 'exception', 'expired', 'deadline', 'abort', 'killed', 'segmentation'))
-                    and not line.lstrip().startswith(('raise ', 'except '))]
+                    and not line.lstrip().startswith(('raise ', 'except ', 'frame #'))]
         detail = failures[-1] if failures else '; '.join(line.strip() for line in lines[-12:]
                  if line.strip() and 'resource_tracker' not in line and 'warnings.warn' not in line)
         result[name] = {'exit': code, 'measurements': values, 'observations': observations,
