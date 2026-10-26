@@ -696,8 +696,7 @@ static void encode_many(const std::vector<EncodedCall> &calls) {
 // stride apart (w.stride(0)), one dispatch of linear_rows encoded in torch's open compute encoder (encode), its output a
 // new tensor of torch's.  Its K split, the simdgroups a threadgroup, is fitted to K, N and the GPU's cores: about 256
 // simdgroups a core over the N / 2 threadgroups, a power of two from 1 to 8 (rounded up), each simdgroup at least 1,024
-// elements of K.  Its pipelines (by load width
-// and split) compile at their first call from the source backend.py hands over as it loads (linear_source).
+// elements of K. Its pipelines compile from the final FX metadata before execution (prepare_linear).
 static std::string linear_source_;
 static int64_t linear_cores_ = 0;
 static std::map<std::tuple<int, int, int, int>, int64_t> linear_pipelines_;
@@ -715,6 +714,41 @@ static int64_t linear_fit(int64_t K, int64_t groups) {
 }
 static int64_t linear_split(int64_t K, int64_t N) { return linear_fit(K, (N + LINEAR_COLUMNS - 1) / LINEAR_COLUMNS); }
 
+static int64_t linear_pipeline(const std::tuple<int, int, int, int> &key) {
+  const auto found = linear_pipelines_.find(key);
+  if (found != linear_pipelines_.end()) return found->second;
+  const int64_t split = std::get<2>(key), act = std::get<3>(key);
+  std::string args = std::to_string(std::get<0>(key)) + ", " + std::to_string(std::get<1>(key)) + ", " +
+                     std::to_string(LINEAR_COLUMNS) + ", " + std::to_string(split) + ", " + std::to_string(LINEAR_LOADS);
+  const std::string kernel = act < 0 ? "linear_group" : "linear_rows";
+  if (act >= 0) args += ", " + std::to_string(act);
+  std::string name = kernel + "_" + args;
+  for (auto &ch : name) ch = ch == ',' || ch == ' ' ? '_' : ch;
+  return linear_pipelines_.emplace(key, pipeline(linear_source_ + "\ntemplate [[host_name(\"" + name + "\")]] [[kernel]] decltype(" +
+                                         kernel + "<" + args + ">) " + kernel + "<" + args + ">;\n", name)).first->second;
+}
+
+// Metadata only: the compiler prepares the exact row/group specialization.
+static void prepare_linear(const std::vector<at::Tensor> &xs, const std::vector<at::Tensor> &ws,
+                           const std::vector<std::optional<at::Tensor>> &x1s, int64_t act) {
+  int64_t groups = 0, least = INT64_MAX;
+  bool wide_w = true, wide_x = true;
+  for (size_t p = 0; p < xs.size(); p++) {
+    const auto &x = xs[p], &w = ws[p];
+    const int64_t K0 = x.size(1), K = K0 + (x1s[p] ? x1s[p]->size(1) : 0);
+    const int64_t ldw = w.stride(1) == 1 ? w.stride(0) : w.size(1);
+    const int64_t ld0 = x.stride(1) == 1 ? x.stride(0) : K0;
+    const int64_t ld1 = !x1s[p] ? ld0 : x1s[p]->stride(1) == 1 ? x1s[p]->stride(0) : x1s[p]->size(1);
+    groups += (w.size(0) + LINEAR_COLUMNS - 1) / LINEAR_COLUMNS;
+    least = std::min(least, K);
+    wide_w &= ldw % 4 == 0 && K0 % 4 == 0;
+    wide_x &= K0 % 4 == 0 && ld0 % 4 == 0 && ld1 % 4 == 0;
+  }
+  const int64_t split = linear_fit(least, groups);
+  const auto key = std::make_tuple(wide_w ? 4 : 1, wide_x ? 4 : 1, (int)split, (int)act);
+  linear_pipeline(key);
+}
+
 static at::Tensor linear(const at::Tensor &x, const at::Tensor &w, const std::optional<at::Tensor> &bias, int64_t act,
                          const std::optional<at::Tensor> &x1) {
   const int64_t K0 = x.size(1), K = K0 + (x1 ? x1->size(1) : 0);
@@ -728,18 +762,9 @@ static at::Tensor linear(const at::Tensor &x, const at::Tensor &w, const std::op
   const int64_t groups = (N + LINEAR_COLUMNS - 1) / LINEAR_COLUMNS;
   const int split = (int)linear_split(K, N);
   const auto key = std::make_tuple(ldw % 4 || K0 % 4 ? 1 : 4, K0 % 4 || ld0 % 4 || ld1 % 4 ? 1 : 4, split, (int)act);
-  auto found = linear_pipelines_.find(key);
-  if (found == linear_pipelines_.end()) {
-    const std::string args = std::to_string(std::get<0>(key)) + ", " + std::to_string(std::get<1>(key)) + ", " +
-                             std::to_string(LINEAR_COLUMNS) + ", " + std::to_string(split) + ", " + std::to_string(LINEAR_LOADS) + ", " +
-                             std::to_string(act);
-    std::string name = "linear_rows_" + args;
-    for (auto &ch : name) ch = ch == ',' || ch == ' ' ? '_' : ch;
-    found = linear_pipelines_.emplace(key, pipeline(linear_source_ + "\ntemplate [[host_name(\"" + name + "\")]] [[kernel]] decltype(linear_rows<" +
-                                                    args + ">) linear_rows<" + args + ">;\n", name)).first;
-  }
+  const auto handle = linear_pipeline(key);
   at::Tensor y = at::empty({R, N}, x.options());
-  encode(found->second, {xc, wc, y, bias ? std::optional<at::Tensor>(bias->contiguous()) : y, std::nullopt, x1c},
+  encode(handle, {xc, wc, y, bias ? std::optional<at::Tensor>(bias->contiguous()) : y, std::nullopt, x1c},
          {R, K, N, bias ? 1 : 0, ldw, K0, ld0, ld1}, 4, groups, 1, split * 32, false);
   return y;
 }
@@ -782,16 +807,7 @@ static std::vector<at::Tensor> linears(const std::vector<at::Tensor> &xs, const 
   }
   const int64_t split = linear_fit(least, first);
   const auto key = std::make_tuple(wide_w ? 4 : 1, wide_x ? 4 : 1, (int)split, -1);
-  auto found = linear_pipelines_.find(key);
-  if (found == linear_pipelines_.end()) {
-    const std::string args = std::to_string(std::get<0>(key)) + ", " + std::to_string(std::get<1>(key)) + ", " +
-                             std::to_string(LINEAR_COLUMNS) + ", " + std::to_string(split) + ", " + std::to_string(LINEAR_LOADS);
-    std::string name = "linear_group_" + args;
-    for (auto &ch : name) ch = ch == ',' || ch == ' ' ? '_' : ch;
-    found = linear_pipelines_.emplace(key, pipeline(linear_source_ + "\ntemplate [[host_name(\"" + name + "\")]] [[kernel]] decltype(linear_group<" +
-                                                    args + ">) linear_group<" + args + ">;\n", name)).first;
-  }
-  encode(found->second, buffers, words, 20, first, 1, split * 32, false);
+  encode(linear_pipeline(key), buffers, words, 20, first, 1, split * 32, false);
   return ys;
 }
 
@@ -1761,6 +1777,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("completed", &completed);
   module.def("pipeline", &pipeline);
   module.def("linear_source", &linear_source);
+  module.def("prepare_linear", &prepare_linear);
   module.def("linear_split", &linear_split);
   module.def("device_facts", &device_facts);
   module.def("pipeline_facts", &pipeline_facts);

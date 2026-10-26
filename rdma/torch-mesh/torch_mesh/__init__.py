@@ -250,6 +250,14 @@ def compiler(gm, example_inputs):
         # cache hit. Rewrite and capture before Inductor's FX cache lookup; the
         # cache then keys the actual rewritten operators and repeat operands.
         rewrite(graph.graph)
+        for node in graph.graph.nodes:
+            target, args = operation(node)
+            if target is torch.ops.torch_mesh.linear.default:
+                _stream.prepare_linear([args['x']], [args['w']], [args['x1']], args['act'])
+            elif target is torch.ops.torch_mesh.linears.default:
+                _stream.prepare_linear(args['x'], args['w'], args['x1'], -1)
+            elif target is torch.ops.torch_mesh.linear_sum.default:
+                _stream.prepare_linear([args['x']], [args['w']], [None], 0)
         forms = compiled_graph(graph)
         graph.recompile()
         made = compile_fx_inner(graph, inputs, **options)

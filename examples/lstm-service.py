@@ -68,21 +68,20 @@ def main():
         function = Function(tick.stepper(X, O, count), t, compiler='mesh')
         function.declare(group)
         functions[count] = function
-    runs = tuple(functions[count].run for count in chunks)
-    groups = [calls for count in chunks for calls in functions[count].groups.get(group.group_name, [])]
-    forms = [form for count in chunks for form in functions[count].forms]
-    initial_forms = [(tick.mine, None, 2, tick.sizes, group.group_name, False, 1)] * (L - 1)
+    initial = [Function(tick.starting, s, X[s], compiler='mesh') for s in range(L - 1)]
+    for function in initial:
+        function.declare(group)
+    ordered = [*initial, *(functions[count] for count in chunks)]
+    runs = tuple(function.run for function in ordered)
+    groups = [calls for function in ordered for calls in function.groups.get(group.group_name, [])]
+    forms = [form for function in ordered for form in function.forms]
     if rank == 0:
         X.copy_(torch.from_numpy(inputs[:]))
     torch_mesh.check_memory()
     ticks = steps + L - 1
-    initial = [partition.gathered(tick.mine, 2, tick.sizes, group)] * (L - 1)
-    bind(configuration, [[Call(BROADCAST, X.numel(), X.dtype, root=0)], *initial, *groups],
-                       Preparations([*initial_forms, *forms]))
+    bind(configuration, [[Call(BROADCAST, X.numel(), X.dtype, root=0)], *groups], Preparations(forms))
     started = time.monotonic()
     dist.broadcast(X, src=0)
-    for s in range(L - 1):
-        tick.starting(s, X[s])
     for run in runs:
         run()
     completion = _stream.completion()

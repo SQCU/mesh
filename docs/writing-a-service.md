@@ -200,7 +200,8 @@ with the `mesh` compiler to trace each distinct chunk size with fake tensors and
 The full chunks and any shorter final chunk share that declaration path. Their prepared `.run` functions are
 called directly in the numerical loop. No numerical warmup, state reset or peer-compilation barrier is needed.
 
-The first L - 1 ticks, while the upper layers have not begun, use `Tick.starting`. The service declares the
+The first L - 1 ticks, while the upper layers have not begun, are compiled from `Tick.starting` through the
+same interface. The compiler also prepares the native linear pipelines from their final graph metadata. The service declares the
 broadcast, starting gathers and compiled gathers together and binds their storage before execution. The compiler
 reads destination-writing operators through PyTorch's functionalization metadata and constructs the declaration
 before looking up cached numerical code. A chunk's k gathers are one crossing issued once, each tick its repeat.

@@ -195,8 +195,9 @@ for the examples. A function used on several groups must have every group's decl
 The LSTM service prepares a function for each distinct chunk length, including its remainder. It constructs
 its tuple of compiled callables before execution. The former `torch_mesh.record` / `Recording` interface was
 removed in `18be9473`: there is no first-issue compilation, store rendezvous for peer compilation, throwaway
-numerical replay, or warmup reset in that service. Its starting ticks and native operators still use their
-existing implementations; this change does not establish native command-buffer replay for FX.
+numerical replay, or warmup reset in that service. Its starting ticks use the same declaration and compilation path. The compiler prepares the native
+linear pipelines from graph metadata, so this path does not need to execute a product to compile it. This
+change does not establish native command-buffer replay for FX.
 
 ### Tracing and lowering interfaces
 
@@ -238,6 +239,10 @@ A cached numerical binary therefore does not substitute for declaring the commun
 | `torch_mesh::linear`, `linears` | Existing small-row dense/grouped numerical kernels. |
 | `torch_mesh::fused_step`, `fused_step_out` | Metadata-rich forms consumed during preparation/lowering. |
 | `torch_mesh::indexed_step`, `indexed_step_out` | Execution forms naming the prepared crossing index; the latter writes supplied output storage. |
+
+`_stream.prepare_linear(xs, ws, x1s, act)` prepares the native row/group specialization from tensor metadata
+(`act=-1` selects the grouped kernel). The compiler invokes it for the final product nodes. Unprepared eager
+callers still have the older lazy pipeline lookup, and output allocation remains part of manifest R06.
 
 Fake implementations describe output metadata for tracing. Native implementations and slot storage are in
 [_stream.mm](../rdma/torch-mesh/torch_mesh/_stream.mm). `PreparedWrites`, `FusedForm` and `IndexedCrossing`
