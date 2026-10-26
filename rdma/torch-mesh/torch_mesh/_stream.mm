@@ -464,6 +464,7 @@ struct Collectives {
   size_t next=0;
   void append(MetalSchedule *schedule,size_t repetitions=1) {
     const auto *list=&issues;const ncclComm_t handle=communicator(comm);
+    MetalScheduleCommunicator(schedule,handle);
     checked(MetalScheduleCross(schedule,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
         id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
       ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
@@ -985,7 +986,9 @@ struct PreparedWrites {
   std::vector<std::array<uint64_t, 6>> publish, land;
   ncclMeshFused records{};
   uint32_t polls = 0;
+  ncclComm_t comm = nullptr;
   void prepare(int64_t comm, int64_t waiting, int64_t repeats, int64_t stride) {
+    this->comm=communicator(comm);
     const int channels = physical_channels(communicator(comm));
     publish.resize(channels), land.resize(channels);
     records = {reinterpret_cast<uint64_t(*)[6]>(publish.data()), reinterpret_cast<uint64_t(*)[6]>(land.data()),
@@ -996,6 +999,7 @@ struct PreparedWrites {
 };
 
 static void prepare_fused_writes(MetalSchedule *schedule,PreparedWrites &plans) {
+  MetalScheduleCommunicator(schedule,plans.comm);
   plans.records.publishes=plans.publish.size();plans.records.lands=plans.land.size();
   if(plans.handles.empty()){plans.records.publishes=plans.records.lands=0;return;}
   PreparedWrites *p=&plans;
@@ -1490,6 +1494,7 @@ struct ScheduleBinding {
     return fused_writes_impl(schedule.get(),send,landings,pairs,comm,polls,repeats,stride,row_bytes,rows);
   }
   void collectives(const std::vector<Call> &calls,int64_t comm) {
+    MetalScheduleCommunicator(schedule.get(),communicator(comm));
     Group group{true};std::vector<Issue> issues;
     for(const auto &call:calls) {
       issues.push_back(prepare(call,group));
@@ -1564,6 +1569,7 @@ struct SpanWrites {
   size_t next=0;
   void append(MetalSchedule *schedule) {
     TORCH_CHECK(metal,"prepared distributed writes require the Metal backend");
+    MetalScheduleCommunicator(schedule,communicator(comm));
     prepare();
     SpanWrites *self=this;
     checked(MetalScheduleCross(schedule,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
@@ -1603,8 +1609,9 @@ static bool completed(pybind11::object observation) {
   }
   auto token=observation.cast<pybind11::capsule>();
   if(!strcmp(token.name(),"mesh.prepared-function")) {
-    int status=MetalScheduleStatus(static_cast<Schedule *>(token.get_pointer())->get());
-    TORCH_CHECK(status>=0,"the prepared function failed");return status==1;
+    NSError *error=nil;
+    int status=MetalScheduleStatus(static_cast<Schedule *>(token.get_pointer())->get(),&error);
+    TORCH_CHECK(status>=0,"the prepared function failed: ",error.localizedDescription.UTF8String);return status==1;
   }
   id<MTLCommandBuffer> buffer = (id<MTLCommandBuffer>)token.get_pointer();
   if (buffer.status == MTLCommandBufferStatusError)

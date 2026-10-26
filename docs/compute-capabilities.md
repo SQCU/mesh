@@ -25,6 +25,15 @@ the transport build's explicit safe math setting remains separate. `METAL_CONFIG
 a host needs a different build. A missing file fails the build. The extension passes the deployment target explicitly
 to both compilation and linking; Python's own macOS 11 build flags cannot silently set this library's API floor.
 
+The 2026-10-26 check of the four installed ranks found Torch 2.14.0 throughout.
+Each extension loaded `libnccl-mesh` and `libmesh` from checkout `e104975a`,
+which also supplied each running bridge. The Studios used SDK 27.0 on OS 27.0;
+the Mini used SDK 26.5 on OS 26.5.1; the laptop used SDK 26.4 on OS 26.3.2.
+All four extensions declared minimum OS 26.0. These are observed build inputs,
+not proof of equal driver behavior. The mixed cluster must execute its shared
+page contract with each node's capabilities. An OS release name alone does not
+choose a route or a numerical algorithm.
+
 `etc/bridge/thunderbolt.mk` supplies the provider's reserved queue-pair count. `ibv_query_device` supplies each port's
 total. The bridge derives usable pairs from those inputs before making a link. Frame capacity also has to fit the
 bridge's completion-record table. The planner does not choose capacities from an OS version or a model name.

@@ -68,6 +68,7 @@ typedef int (^MetalCrossing)(id<MTL4ComputeCommandEncoder> encoder, id<MTL4Argum
     NSUInteger invocation, NSUInteger mark);
 // docs/kernels.md#collectives
 struct MetalSchedule;
+struct ncclComm;
 // The execution context supplies its queue. Preparing invocation slots cannot
 // create more queues; the number of slots is not a hardware resource count.
 struct MetalSchedule *MetalScheduleCreateOn(id queue, enum MetalForm);
@@ -75,6 +76,9 @@ struct MetalSchedule *MetalScheduleCreateOn(id queue, enum MetalForm);
 // submission and completion path. The command has not been committed.
 struct MetalSchedule *MetalScheduleCommand(id<MTLCommandBuffer>);
 void MetalScheduleAfter(struct MetalSchedule *, id<MTLEvent>, uint64_t value);
+// Preparation records the function's collective result sources. Observers read
+// their existing failure state; this adds no command or transfer-time check.
+void MetalScheduleCommunicator(struct MetalSchedule *, struct ncclComm *);
 // Bind a host producer now and its data consumers later. The returned event is
 // owned by the caller. Unrelated commands between these declarations can run
 // while the CPU/ANE produces the result.
@@ -112,7 +116,7 @@ NSError *MetalScheduleAppend(struct MetalSchedule *, struct MetalReplay *, NSRan
 void MetalScheduleFinish(struct MetalSchedule *, void (^completed)(NSError *error));
 void MetalScheduleEnqueue(struct MetalSchedule *);
 // Ordinary completion observation: 0 pending, 1 complete, -1 failed.
-int MetalScheduleStatus(const struct MetalSchedule *);
+int MetalScheduleStatus(const struct MetalSchedule *, NSError **error);
 void MetalScheduleFree(struct MetalSchedule *);
 // A replay MetalRecord returned, destroyed and freed.
 void MetalReplayFree(struct MetalReplay *);

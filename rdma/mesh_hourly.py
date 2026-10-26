@@ -182,7 +182,7 @@ def prepare_node(node, paths, record, out, since):
 def rank_results(outputs):
     result = {}
     for name, output in outputs.items():
-        lines = output['output'].splitlines()
+        lines = output['diagnostics']
         code = output['exit']
         values, observations = [], []
         for value in output['records']:

@@ -1,4 +1,5 @@
 #import "metal-recording.h"
+#include "nccl.h"
 #import <objc/runtime.h>
 #include <stdatomic.h>
 
@@ -813,6 +814,7 @@ struct MetalSchedule {
     id<MTLResidencySet> residency;
     MTL4CommitOptions *options;
     NSMutableSet *owners;
+    NSMutableSet *communicators;
     NSMutableDictionary *read, *written;
     NSUInteger phase;
     id<MTLEvent> after;
@@ -896,6 +898,12 @@ void MetalScheduleAfter(struct MetalSchedule *s,id<MTLEvent> after,uint64_t valu
     s=MetalScheduleTail(s);
     s->after=[after retain];s->value=value;
     if(s->form==MetalFormSerial&&after)[(id<MTLCommandBuffer>)s->command encodeWaitForEvent:after value:value];
+}
+
+void MetalScheduleCommunicator(struct MetalSchedule *s,struct ncclComm *comm) {
+    s=s->root;
+    if(!s->communicators)s->communicators=[NSMutableSet new];
+    [s->communicators addObject:[NSValue valueWithPointer:comm]];
 }
 
 id<MTLResidencySet> MetalScheduleResources(struct MetalSchedule *s) { return MetalScheduleTail(s)->residency; }
@@ -1059,7 +1067,7 @@ static void MetalScheduleCompleted(struct MetalSchedule *s,NSError *error) {
     // encoders. This counter observes callbacks; it never gates GPU submission.
     if(atomic_fetch_sub_explicit(&root->pending,1,memory_order_acq_rel)==1) {
         NSError *failure=nil;
-        for(struct MetalSchedule *part=root;part&&!failure;part=part->next)failure=part->error;
+        MetalScheduleStatus(root,&failure);
         if(root->completed)root->completed(failure);
         if(root->next)MetalScheduleFree(root);
     }
@@ -1095,9 +1103,19 @@ void MetalScheduleFinish(struct MetalSchedule *root,void (^completed)(NSError *)
     [s->read release];s->read=nil;[s->written release];s->written=nil;
 }
 
-int MetalScheduleStatus(const struct MetalSchedule *s) {
+int MetalScheduleStatus(const struct MetalSchedule *s,NSError **error) {
+    *error=nil;
+    const struct MetalSchedule *root=s->root;
     int result=1;
-    for(;s;s=s->next){int state=atomic_load_explicit(&s->status,memory_order_acquire);if(state<0)return -1;if(!state)result=0;}
+    for(;s;s=s->next){int state=atomic_load_explicit(&s->status,memory_order_acquire);if(state<0){*error=s->error;return -1;}if(!state)result=0;}
+    for(NSValue *value in root->communicators) {
+        ncclResult_t status=ncclSuccess;
+        ncclResult_t call=ncclCommGetAsyncError(value.pointerValue,&status);
+        if(call||status!=ncclSuccess) {
+            *error=MetalReplayFailure(ENOTCONN,@(ncclGetLastError(value.pointerValue)));
+            return -1;
+        }
+    }
     return result;
 }
 
@@ -1127,7 +1145,7 @@ void MetalScheduleFree(struct MetalSchedule *s) {
     }
     [s->encoder release];[s->command release];[s->queue release];[s->allocator release];[s->table release];[s->data release];[s->signal release];
     [s->residency release];[s->owners release];[s->options release];[s->read release];[s->written release];
-    [s->host release];[s->completed release];[s->error release];[s->after release];[s->device release];free(s);
+    [s->host release];[s->completed release];[s->error release];[s->after release];[s->device release];[s->communicators release];free(s);
 }
 
 id<MTLDevice> MetalRecordingDevice(id<MTLDevice> device,BOOL indirectPipelines) {

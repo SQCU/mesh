@@ -18,6 +18,8 @@ states by rank. Each process exposes:
 - `updated_unix`: when output most recently arrived.
 - `records`: complete JSON records decoded from that output, including paired
   whole-call latency and useful throughput.
+- `diagnostics`: non-record output, also used for failure reporting without
+  printing all numerical records again.
 
 Output does not wait for a newline, process exit or another rank. Exit status
 does not wait for the other ranks. A quiet process is reported as running;
@@ -36,3 +38,9 @@ The application observer emits each completed whole-call record through
 feedback collector. An unfinished later call does not hide an earlier completed
 call's record. At driver exit, the existing compact hourly record stores the
 aggregate measurements and failures; the live endpoint ends with its owner.
+
+A Metal command's completion alone does not establish that its collective
+finished. Preparation attaches the function's communicators to its shared
+schedule. Both native callbacks and the Torch observer read the same command
+and collective outcome. This reads existing error records; it adds no
+acknowledgment, GPU command or wait to the numerical function.

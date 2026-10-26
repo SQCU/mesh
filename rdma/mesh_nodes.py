@@ -46,14 +46,30 @@ def home_path(relative):
 def sh(argv, input=None, out=None, append=False, timeout=None, state=None):
     state = {} if state is None else state
     state.clear()
-    state.update(command=argv, status='starting', started_unix=time.time(), output=[], records=[])
-    p = subprocess.Popen(argv, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
-                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    state.update(command=argv, status='starting', started_unix=time.time(), output=[], records=[], diagnostics=[])
+    try:
+        p = subprocess.Popen(argv, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except OSError as error:
+        state.update(status='failed', finished_unix=time.time())
+        state['diagnostics'].append(str(error))
+        raise
     state.update(pid=p.pid, status='running')
 
     def read():
         decode = codecs.getincrementaldecoder('utf-8')('replace')
         pending = ''
+
+        def line_record(line):
+            try:
+                value = json.loads(line)
+            except ValueError:
+                if line.strip():
+                    state['diagnostics'].append(line)
+            else:
+                if isinstance(value, dict):
+                    state['records'].append(value)
+
         while raw := p.stdout.read1(io.DEFAULT_BUFFER_SIZE):
             text = decode.decode(raw)
             state['output'].append(text)
@@ -61,13 +77,10 @@ def sh(argv, input=None, out=None, append=False, timeout=None, state=None):
             lines = (pending + text).split('\n')
             pending = lines.pop()
             for line in lines:
-                try:
-                    value = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(value, dict):
-                    state['records'].append(value)
-        state['output'].append(decode.decode(b'', final=True))
+                line_record(line)
+        tail = decode.decode(b'', final=True)
+        state['output'].append(tail)
+        line_record(pending + tail)
         p.stdout.close()
 
     def write():
@@ -293,13 +306,15 @@ def ranks(nodes, out, tag, folder, command, port, append=False, alarm=300, env='
             code, output = nodes[k].run(remote, input=input, timeout=alarm + 30, state=state)
         except subprocess.TimeoutExpired as error:
             code = 124
-            output = (error.output or b'').decode(errors='replace') + '\nremote process did not exit after its deadline\n'
+            reason = 'remote process did not exit after its deadline'
+            state['diagnostics'].append(reason)
+            output = (error.output or b'').decode(errors='replace') + '\n' + reason + '\n'
         if code:
-            print(f'{tag} rank{k} (exit {code}):\n{output}', file=sys.stderr, flush=True)
+            print(f'{tag} rank{k} (exit {code}):\n' + '\n'.join(state['diagnostics']), file=sys.stderr, flush=True)
         if log is not None:
             with log.open('a' if append else 'w') as destination:
                 destination.write(output + f'\nexit {code}\n')
-        return {'exit': code, 'output': output, 'records': state['records']}
+        return {'exit': code, 'output': output, 'records': state['records'], 'diagnostics': state['diagnostics']}
 
     jobs = [lambda k=k: rank(k) for k in range(len(nodes))]
     pattern = f'^[^ ]*python [^ ]*{guard}'
