@@ -277,11 +277,45 @@ def compiler(gm, example_inputs, *, whole_graph=False):
             # a second AOTAutograd pass would derive its gradients again.
             from torch._guards import detect_fake_mode
             from torch._subclasses.fake_tensor import FakeTensorMode
+            from torch.fx.experimental.proxy_tensor import make_fx
+            from torch._inductor.decomposition import select_decomp_table
+            # Functionalization receives every tensor as an operand, including
+            # weights and prebound outputs. It can then lower out= operations
+            # while retaining their writes to those exact destinations.
+            copied = torch.fx.Graph()
+            copied.output(copied.graph_copy(gm.graph, {}))
+            lifted = torch.fx.GraphModule(gm, copied)
+            constants = []
+            first = next(node for node in copied.nodes if node.op != 'placeholder')
+            for node in list(copied.nodes):
+                if node.op != 'get_attr':
+                    continue
+                value = lifted
+                for name in node.target.split('.'):
+                    value = getattr(value, name)
+                if isinstance(value, torch.Tensor):
+                    with copied.inserting_before(first):
+                        operand = copied.placeholder(f'_mesh_constant_{len(constants)}')
+                    operand.meta = node.meta.copy()
+                    constants.append(value)
+                    node.replace_all_uses_with(operand)
+                    if node is first:
+                        first = node.next
+                    copied.erase_node(node)
+            lifted.recompile()
             described = [node.meta['val'] for node in gm.graph.nodes if 'val' in node.meta]
             mode = detect_fake_mode(described) or FakeTensorMode(allow_non_fake_inputs=True)
-            inputs = [mode.from_tensor(value) if isinstance(value, torch.Tensor) else value for value in example_inputs]
-            made = realize(gm, inputs, is_inference=True)
-            return lambda *values: made(list(values))
+            inputs = [mode.from_tensor(value) if isinstance(value, torch.Tensor) else value
+                      for value in [*example_inputs, *constants]]
+            with mode:
+                lowered = make_fx(torch.func.functionalize(lifted), decomposition_table=select_decomp_table(),
+                                  tracing_mode='fake', _allow_non_fake_inputs=True)(*inputs)
+            output = next(node for node in lowered.graph.nodes if node.op == 'output')
+            if not isinstance(output.args[0], (tuple, list)):
+                output.args = ((output.args[0],),)
+                lowered.recompile()
+            made = realize(lowered, inputs, is_inference=True)
+            return lambda *values: made([*values, *constants])
         return compile_fx(gm, example_inputs, inner_compile=realize)
 
 

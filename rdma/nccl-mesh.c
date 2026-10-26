@@ -245,10 +245,10 @@ struct channel {
   uint64_t ready_at, sends, lands, published, consumed, waited;
   mesh_pages out, in;
 };
-/* a lease of a communicator's pool (struct ncclComm `spares`): its address and bytes, and the group holding it (its
-   number + 1: comm->groups as it took it; 0 free) */
-enum spare_role { SPARE_PAYLOAD, SPARE_DESCRIPTORS };
-struct spare { void *address; size_t bytes; uint64_t holder; enum spare_role role; };
+/* Storage assigned while compiling invocation bindings. Each invocation owns
+   its indices; neither execution nor later preparation searches for reuse. */
+enum storage_role { STORAGE_PAYLOAD, STORAGE_DESCRIPTORS };
+struct storage_page { void *address; size_t bytes, used; };
 
 /* design/whole-function.md#interface */
 struct attach;
@@ -280,8 +280,8 @@ struct ncclComm {
   struct attach *attach;
   uint32_t held;
   struct channel *channels;
-  struct spare *spares;
-  uint32_t nspares;
+  struct storage_page *storage;
+  uint32_t storage_count, storage_current[2];
   void *gate, *gate_word;
   uint64_t gate_at, gates;
   _Atomic uint64_t *words;
@@ -364,11 +364,11 @@ static void paths_free(struct mesh_paths *paths) {
 /* comm's pool and its gate returned to the region (ncclMemFree), after its holdings are given back (comm_leave: the
    bridge posts nothing more of a given holding, so only rows a unit already posted names stay held, mesh-dataflow.c
    mesh_pinned) */
-static void comm_spares_free(struct ncclComm *comm) {
-  for (uint32_t k = 0; k < comm->nspares; k++) ncclMemFree(comm->spares[k].address);
+static void comm_storage_free(struct ncclComm *comm) {
+  for (uint32_t k = 0; k < comm->storage_count; k++) ncclMemFree(comm->storage[k].address);
   if (comm->gate_word) ncclMemFree(comm->gate_word);
-  free(comm->spares);
-  comm->spares = NULL; comm->nspares = 0; comm->gate_word = comm->gate = NULL;
+  free(comm->storage);
+  comm->storage = NULL; comm->storage_count = 0; memset(comm->storage_current, 0, sizeof comm->storage_current); comm->gate_word = comm->gate = NULL;
 }
 static void comm_free(struct ncclComm *comm) {
   bootstrap_close(comm);
@@ -828,13 +828,13 @@ static void comm_let_go(struct ncclComm *comm) {
   comm->held = 0;
   leases_reap(comm->attach);
 }
-/* a communicator's holds let go (comm_let_go), its pool's leases returned (comm_spares_free), and its hold of its
+/* a communicator's holds let go (comm_let_go), its pool's leases returned (comm_storage_free), and its hold of its
    attach let go */
 static void comm_leave(struct ncclComm *comm) {
   pthread_mutex_lock(&attach_lock);
   if (comm->attach) comm_let_go(comm);
   pthread_mutex_unlock(&attach_lock);
-  comm_spares_free(comm);
+  comm_storage_free(comm);
   pthread_mutex_lock(&attach_lock);
   if (comm->attach) {
     comm->attach->comms--;
@@ -2598,43 +2598,31 @@ static void schedule_laid(struct ncclComm *comm, struct schedule *plans) {
   }
 }
 
-/* a lease of comm's pool of at least `bytes` (its smallest free one of the same
-   access role that holds them, else a new one: ncclMemAlloc),
-   held by the group numbered `holder` until that group ends (spares_give); NULL where the region cannot meet it, the
-   failure formatted (ncclMemAlloc's).  Under group_lock */
-static void *spare_take(struct ncclComm *comm, size_t bytes, uint64_t holder, enum spare_role role) {
-  struct spare *best = NULL;
-  for (uint32_t k = 0; k < comm->nspares; k++) {
-    struct spare *x = comm->spares + k;
-    int reusable = 0;
-    if (x->role == role && !x->holder && x->bytes >= bytes && (!best || x->bytes < best->bytes) &&
-        !ncclMeshMemReusable(x->address, &reusable) && reusable) best = x;
+/* A fixed range in the current compiled-storage page. Descriptor tables stay
+   immutable until communicator release. Payload generations also remain
+   distinct; transport dependencies, not live allocator observations, order them. */
+static void *binding_storage(struct ncclComm *comm, size_t bytes, enum storage_role role) {
+  const size_t length=(bytes+63)&~(size_t)63;
+  const uint32_t index=comm->storage_current[role];
+  struct storage_page *page=index?comm->storage+index-1:NULL;
+  if(!page || length>page->bytes-page->used) {
+    const size_t extent=length>65536?length:65536;
+    struct storage_page *grown=realloc(comm->storage,(comm->storage_count+1)*sizeof *grown);
+    if(!grown){fail(ncclSystemError,"out of memory");return NULL;}
+    comm->storage=grown;
+    void *address=NULL;
+    if(ncclMemAlloc(&address,extent))return NULL;
+    page=comm->storage+comm->storage_count++;
+    *page=(struct storage_page){address,extent,0};
+    comm->storage_current[role]=comm->storage_count;
   }
-  if (!best) {
-    struct spare *grown = realloc(comm->spares, (comm->nspares + 1) * sizeof *grown);
-    void *address = NULL;
-    if (!grown) { fail(ncclSystemError, "out of memory"); return NULL; }
-    comm->spares = grown;
-    if (ncclMemAlloc(&address, bytes)) return NULL;
-    best = comm->spares + comm->nspares++;
-    *best = (struct spare){address, bytes, 0, role};
-  }
-  best->holder = holder;
-  return best->address;
+  void *address=(char *)page->address+page->used;page->used+=length;return address;
 }
-/* GPU encoding releases the holder, not the GPU's pending accesses. Payload
-   reuse is ordered on that GPU stream. CPU-written descriptors cannot borrow
-   that ordering and never reuse payload storage. Within either role,
-   spare_take separately proves completion of all prior transport uses. */
-static void spares_give(struct ncclComm *comm, uint64_t holder) {
-  for (uint32_t k = 0; holder && k < comm->nspares; k++)
-    if (comm->spares[k].holder == holder) comm->spares[k].holder = 0;
-}
-/* a lease of comm's pool (spare_take) as a where: on the Metal path its Metal buffer (lease_buffer, made resident
+/* A compiled storage range as a where: on the Metal path its Metal buffer (lease_buffer, made resident
    through the program's residency set where it has one), on the host path its address; {NULL, 0} where none was had,
    the failure formatted */
-static struct where spare_where(struct metal_program *program, struct ncclComm *comm, size_t bytes, uint64_t holder) {
-  void *address = spare_take(comm, bytes ? bytes : 1, holder, SPARE_PAYLOAD), *buffer = NULL;
+static struct where binding_where(struct metal_program *program, struct ncclComm *comm, size_t bytes) {
+  void *address = binding_storage(comm, bytes ? bytes : 1, STORAGE_PAYLOAD), *buffer = NULL;
   size_t offset = 0;
   if (!address) return (struct where){NULL, 0};
   if (!program) return (struct where){NULL, (size_t)address};
@@ -2651,7 +2639,7 @@ static size_t page_up(size_t bytes, uint64_t page) { return (size_t)((bytes + pa
    table; the bridge reads each row's page in the range's order).  0, else the
    call fails as a value, naming the piece (ncclInvalidUsage: the piece's buffer is no lease, or its cut, NCCL's, does
    not lie on a page; nothing is copied to move it), nothing presented */
-static ncclResult_t place_group(struct metal_program *program, struct ncclComm *comm, struct schedule *plans, uint64_t holder) {
+static ncclResult_t place_group(struct metal_program *program, struct ncclComm *comm, struct schedule *plans) {
   const struct hdr *m = comm->attach->context.M;
   const unsigned char *region = (const unsigned char *)m;
   const uint64_t page = comm->page;
@@ -2660,7 +2648,7 @@ static ncclResult_t place_group(struct metal_program *program, struct ncclComm *
     for (size_t k = 0; k < plans[h].ins; k++)
       if (plans[h].in[k].c->bound->steps[plans[h].in[k].step].op == MESH_STEP_REDUCE) landing += page_up(plans[h].in[k].bytes, page);
   struct where area = {NULL, 0};
-  if (landing && !named(area = spare_where(program, comm, landing, holder))) return fail(ncclSystemError, "the group's landing area: %s", last.text);
+  if (landing && !named(area = binding_where(program, comm, landing))) return fail(ncclSystemError, "the group's landing area: %s", last.text);
   for (uint32_t h = 0; h < comm->count; h++)
     for (int send = 1; send >= 0; send--)
       for (size_t k = 0; k < (send ? plans[h].outs : plans[h].ins); k++) {
@@ -2699,7 +2687,7 @@ static ncclResult_t place_group(struct metal_program *program, struct ncclComm *
                                 call_name(x->c), comm->name, x->bytes, x->offset);
         if (!x->pages.n) continue;
         if (x->pages.n > SIZE_MAX / sizeof *x->spans ||
-            !(x->spans = spare_take(comm, x->pages.n * sizeof *x->spans, holder, SPARE_DESCRIPTORS)))
+            !(x->spans = binding_storage(comm, x->pages.n * sizeof *x->spans, STORAGE_DESCRIPTORS)))
           return fail(ncclSystemError, "allocating exact DMA span descriptors");
         x->table = (uint64_t)((unsigned char *)x->spans - region);
         const uint64_t logical = step->first * step->piece.element_bytes;
@@ -2939,10 +2927,10 @@ static void commit_group(struct ncclComm *comm, const struct schedule *plans) {
    gate_of, *gate whether its first dispatch stores the communicator's gate), presented (present_group) and counted
    (commit_group); a failure before any entry is presented is the call's alone, one after it the communicator's (its
    lists stand mid-group) */
-static ncclResult_t schedule(struct metal_program *program, struct ncclComm *comm, struct schedule *plans, uint64_t holder, int *gate,
+static ncclResult_t schedule(struct metal_program *program, struct ncclComm *comm, struct schedule *plans, int *gate,
                              int immutable_writes) {
   schedule_laid(comm, plans);
-  ncclResult_t result = place_group(program, comm, plans, holder);
+  ncclResult_t result = place_group(program, comm, plans);
   if (!result) result = bind_retirements(comm, plans);
   if (!result && program && !immutable_writes) gate_of(comm, plans, gate);
   if (!result) result = present_group(program, comm, plans);
@@ -3178,10 +3166,10 @@ static ncclResult_t gpu_finished(struct ncclComm *comm) {
    communicator's (comm_fail: its lists stand mid-group) */
 static int comm_issued(const struct ncclComm *comm);
 static void calls_free(struct call *list, size_t n);
-static ncclResult_t relay_buffers(struct metal_program *program, struct call *c, uint64_t holder) {
+static ncclResult_t relay_buffers(struct metal_program *program, struct call *c) {
   struct steps *s = c->bound;
   for (uint32_t b = s ? s->initialized : 0; s && b < s->buffers; b++)
-    if (!named(s->buffer[b] = spare_where(program, c->comm, s->extent[b], holder)))
+    if (!named(s->buffer[b] = binding_where(program, c->comm, s->extent[b])))
       return fail(ncclSystemError, "a relay generation: %s", last.text);
   return ncclSuccess;
 }
@@ -3219,7 +3207,7 @@ static ncclResult_t launch(struct call *list, size_t n) {
     else {
       const int in_place = call_receives(c) && c->what != MESH_REDUCE_SCATTER;
       struct where own = c->recv_at;
-      if (!in_place && s && !named(own = spare_where(NULL, comm, bytes, holder))) { result = fail(ncclSystemError, "its operand: %s", last.text); break; }
+      if (!in_place && s && !named(own = binding_where(NULL, comm, bytes))) { result = fail(ncclSystemError, "its operand: %s", last.text); break; }
       if (!in_place && !s) {
         if (!(c->result = malloc(bytes ? bytes : 1))) { result = fail(ncclSystemError, "out of memory"); break; }
         own = (struct where){NULL, (size_t)c->result};
@@ -3231,7 +3219,7 @@ static ncclResult_t launch(struct call *list, size_t n) {
       for (uint32_t b = 1; s && b < s->buffers && !result; b++) {
         if (c->direct && !s->needed[b]) continue;
         const size_t extent = b < s->initialized ? bytes : s->extent[b];
-        if (!named(s->buffer[b] = spare_where(NULL, comm, extent, holder))) result = fail(ncclSystemError, "a scratch buffer: %s", last.text);
+        if (!named(s->buffer[b] = binding_where(NULL, comm, extent))) result = fail(ncclSystemError, "a scratch buffer: %s", last.text);
         else if (!c->direct && call_contributes(c) && b < s->initialized) {
           if (c->receive_views) { size_t length; const size_t before=segment_at(c,comm->rank,&length);
             if (length) memcpy(address_of(s->buffer[b])+before*SIZE[c->type],c->send,length*SIZE[c->type]); }
@@ -3239,10 +3227,10 @@ static ncclResult_t launch(struct call *list, size_t n) {
         }
       }
     }
-    if (!result && counted(c)) result = relay_buffers(NULL, c, holder);
+    if (!result && counted(c)) result = relay_buffers(NULL, c);
   }
   int gate = 0, running = 0;
-  if (!result && remote && !(result = schedule(NULL, comm, plans, holder, &gate, 0))) { running = 1; atomic_fetch_add(&comm->runs, 1); }
+  if (!result && remote && !(result = schedule(NULL, comm, plans, &gate, 0))) { running = 1; atomic_fetch_add(&comm->runs, 1); }
   pthread_mutex_unlock(&group_lock);
   if (running) {
     if ((result = run(comm, plans))) {
@@ -3263,7 +3251,6 @@ static ncclResult_t launch(struct call *list, size_t n) {
     }
   }
   pthread_mutex_lock(&group_lock);
-  spares_give(comm, holder);
   pthread_mutex_unlock(&group_lock);
   return result;
 }
@@ -3278,10 +3265,10 @@ static ncclResult_t gpu(struct metal_result step, const char *what) {
 /* a group issued and not complete: its communicator, its calls, its schedule, its entries [start, end) of each list on
    each of its communicator's channels ([h][0] the send list's, [h][1] the landing list's), the one channel they lie on
    (`lone`: lone_of, read where the group is planned; comm->count where it has none, METAL_NONE where they lie on two
-   or more), its number (`holder`: the leases of its communicator's pool it holds), whether it is a fused crossing, and
+   or more), whether it is a fused crossing, and
    its repeats; the groups in flight are in issue order, a communicator's holding consecutive entries on every list */
 struct inflight {
-  uint64_t ticket, holder;
+  uint64_t ticket;
   struct ncclComm *comm;
   struct call *list;
   size_t n;
@@ -3328,7 +3315,6 @@ static void calls_free(struct call *list, size_t n) {
 
 /* a group done with: its schedule, its calls, and the leases of its communicator's pool it held made free */
 static void inflight_free(struct inflight *g) {
-  spares_give(g->comm, g->holder);
   schedules_free(g->comm, g->plans);
   free(g->start);
   calls_free(g->list, g->n);
@@ -4009,11 +3995,11 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     }
     if (counted(c)) {
       if (st) { st->buffer[0] = c->send_at; st->buffer[1] = c->recv_at; }
-      result = relay_buffers(program, c, holder); continue;
+      result = relay_buffers(program, c); continue;
     }
     const int in_place = call_receives(c) && c->what != MESH_REDUCE_SCATTER;
     struct where own = c->recv_at;
-    if (!in_place && st && !named(own = spare_where(program, comm, bytes, holder))) { result = fail(ncclSystemError, "its operand: %s", last.text); break; }
+    if (!in_place && st && !named(own = binding_where(program, comm, bytes))) { result = fail(ncclSystemError, "its operand: %s", last.text); break; }
     if (!in_place && !st) {
       void *scratch = workspace(program, c, bytes);
       if (!scratch) { result = fail(ncclSystemError, "out of GPU memory"); break; }
@@ -4028,7 +4014,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     for (uint32_t b = 1; st && b < st->buffers && !result; b++) {
       if (c->direct && !st->needed[b]) continue;
       const size_t extent = b < st->initialized ? bytes : st->extent[b];
-      if (!named(st->buffer[b] = spare_where(program, comm, extent, holder))) result = fail(ncclSystemError, "a scratch buffer: %s", last.text);
+      if (!named(st->buffer[b] = binding_where(program, comm, extent))) result = fail(ncclSystemError, "a scratch buffer: %s", last.text);
     }
   }
   struct inflight *g = NULL, *before = NULL;
@@ -4037,13 +4023,13 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   if (!result && remote) {
     if (!(g = calloc(1, sizeof *g)) || !(g->start = calloc(2 * (size_t)comm->count + 1, sizeof *g->start))) result = fail(ncclSystemError, "out of memory");
     else {
-      g->comm = comm; g->holder = holder; g->fused = fused_kind; g->repeats = repeats;
+      g->comm = comm; g->fused = fused_kind; g->repeats = repeats;
       g->end = g->start + comm->count;
       for (uint32_t h = 0; h < comm->count; h++) { g->start[h][0] = comm->channels[h].sends; g->start[h][1] = comm->channels[h].lands; }
       /* Indexed writes carry immutable source/landing generations. Their
          destinations need no local publication handshake, whether the GPU
          producer is fused or was encoded before this call. */
-      if (!(result = schedule(program, comm, plans, holder, &gate, fused_kind != 0 || all_writes(list, n)))) {
+      if (!(result = schedule(program, comm, plans, &gate, fused_kind != 0 || all_writes(list, n)))) {
         g->plans = plans; plans = NULL;
       }
     }
@@ -4134,7 +4120,6 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   program_end(program, list[0].encoder != NULL, result);
   if (result && scheduled) walk_failed(comm, issue && !fused ? 0 : ticket, result);
   if (issue && !result) { issue->ticket = ticket > atomic_load(&retired) ? ticket : 0; issue->published = published; }
-  if (!scheduled) spares_give(comm, holder);
   pthread_mutex_unlock(&group_lock);
   schedules_free(comm, plans);
   if (!scheduled) calls_free(list, n);
@@ -4163,10 +4148,10 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int
     else {
       for (struct inflight *g = inflight; g; g = g == through ? NULL : g->next_group) {
         for (uint32_t h = 0; h < g->comm->count; h++) metal_resident(program, g->comm->channels[h].buffer);
-        for (uint32_t k = 0; k < g->comm->nspares; k++) {
+        for (uint32_t k = 0; k < g->comm->storage_count; k++) {
           void *buffer = NULL;
           size_t offset = 0;
-          if (g->comm->spares[k].holder && !lease_buffer(g->comm->spares[k].address, &buffer, &offset)) metal_resident(program, buffer);
+          if (!lease_buffer(g->comm->storage[k].address, &buffer, &offset)) metal_resident(program, buffer);
         }
       }
       result = walk(program, NULL, through, &any);

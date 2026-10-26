@@ -49,6 +49,10 @@ struct MetalReplay *MetalRecord(id<MTLDevice> device, void (^encode)(void), cons
     size_t count, NSUInteger invocations, enum MetalForm form);
 // docs/kernels.md#collectives
 NSUInteger MetalRecordMark(void);
+// A configured host share starts after its input commands. Only its declared
+// consumers depend on completion. These declarations are captured with the
+// numerical graph and use the same prepared schedule at execution.
+void MetalRecordHost(id identity, BOOL consume, NSError *(^operation)(void));
 // docs/kernels.md#collectives
 typedef int (^MetalCrossing)(id<MTL4ComputeCommandEncoder> encoder, id<MTL4ArgumentTable> table, id<MTLResidencySet> residency,
     NSUInteger invocation, NSUInteger mark);
