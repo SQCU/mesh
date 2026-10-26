@@ -35,9 +35,9 @@ limited by only one resource.
 
 | Layer | Existing code | Role before execution | Remaining gap |
 |---|---|---|---|
-| Partial tensor declarations | [python/mesh](../python/mesh/__init__.py): `Partial`, `Tensor`, `Ref`, `BlockSpec`, `Program.kernel_call`, `realize` | Name tile regions, contributions, kernel calls and their dependencies | The current Python executor still chooses ready tasks, handles guards and waits at runtime. Keep the declarations and lower them. |
-| PyTorch graph declarations | [declarations.py](../rdma/torch-mesh/torch_mesh/declarations.py): `trace`, `lower`, `compiled_graph`, `Function`, `Preparations` | Trace a complete function with fake tensors; describe collective calls; bind indexed crossings | An optional compiler and eager execution still coexist. This is not yet one complete native graph executor. |
-| Ragged placement | [partition.py](../rdma/torch-mesh/torch_mesh/partition.py), `RaggedShard`, `prepare_gather`; [configuration.py](../rdma/torch-mesh/torch_mesh/configuration.py) | Map uneven tensor shares to a device mesh and declare their communication | Generic collective launch still reconstructs metadata; some examples impose whole-operand joins. |
+| Partial tensor declarations | [python/mesh](../python/mesh/__init__.py): `Partial`, `Tensor`, `Ref`, `BlockSpec`, `Program.kernel_call`, `realize` | Name tile regions, contributions, kernel calls and their dependencies | Realization now generates a fixed FX sequence of compiled numerical spans and bound native crossings. The worker executor is removed. |
+| PyTorch graph declarations | [declarations.py](../rdma/torch-mesh/torch_mesh/declarations.py): `trace`, `lower`, `compiled_graph`, `Function`, `Preparations` | Trace a complete function with fake tensors; describe collective calls; bind indexed crossings | Function compilation is mandatory and crossings have prepared indices. FX still does not lower to the native Metal recorder. |
+| Ragged placement | [partition.py](../rdma/torch-mesh/torch_mesh/partition.py), `RaggedShard`, `Preparations`; [configuration.py](../rdma/torch-mesh/torch_mesh/configuration.py) | Map uneven tensor shares to a device mesh and declare their communication | Generic collective launch still reconstructs metadata; some examples impose whole-operand joins. |
 | Physical write compiler | [mesh-plan.h](../rdma/mesh-plan.h), `mesh_routed_compile`, span/row planners, [routing.py](../rdma/routing.py) | Turn logical data needs into many-cable routes, relay slots, packet cuts and ordering | Raw pointer/extent write contracts and generic registration cuts are not fully reconciled with the page/mask model. |
 | Native numerical composition | [matrix_operations.swift](../../../metal-microbench/matrix_operations.swift): `MetalProgram`, `MetalDispatch`, `MatrixView`, `Reach` | Compose kernels, bind constants and describe accessed ranges | Some callers and profiling modes still change work during execution. |
 | Native graph record/replay | [metal_recording.h](../../../metal-microbench/metal_recording.h): `MetalRecord`, `MetalReplay`, `MetalOperand`, `MetalReach` | Capture command bindings, prepare repeated slots, derive access order, retain residency | Broad adopted-command accesses and submission orchestration still add avoidable work. |
@@ -62,8 +62,7 @@ the frontend can supply enough information to remove repeated crossing discovery
 
 The optional compiler is looked up in `Function.declare`, during configuration. It receives the explicit FX
 graph. A supported backend must publish its final collective graph there, so later transformations cannot hide
-or reorder communication after the transport plan has been made. With `compiler=None`, the current code keeps
-the Python callable; that does **not** make all its numerical work AOT.
+or reorder communication after the transport plan has been made. The `Function` interface now requires the common compiler and has no eager execution option.
 
 PyTorch tensor notation, autograd and DTensor placement can therefore serve as an authoring interface for an
 alternative compiler. They do not require a CUDA execution stack or a particular default `torch.compile`

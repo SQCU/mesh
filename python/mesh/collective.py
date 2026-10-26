@@ -14,7 +14,7 @@ from . import BlockSpec, Program, ShapeDtypeStruct, _native
 
 __all__ = ['SUM', 'MAX', 'MIN', 'PARTIALS', 'send', 'recv', 'recv_like', 'broadcast', 'scatter', 'gather',
            'all_gather', 'all_to_all', 'reduce', 'reduce_scatter', 'sum_scatter',
-           'all_reduce', 'all_sum', 'all_max', 'all_min', 'sync_on_remote_fill', 'sync_on_some_remote_fill']
+           'all_reduce', 'all_sum', 'all_max', 'all_min']
 
 SUM, MAX, MIN, PARTIALS = 'sum', 'max', 'min', 'partials'
 send = recv = Program.copy
@@ -75,11 +75,6 @@ def _alias(ref, offset, count):
     return ref.backing.flat().narrow(0, offset, count)
 
 
-def _issue_fragments(program, task):
-    bindings, group = task.prepared
-    return (_native.fragments(bindings, group),)
-
-
 def _prepare_all_gather(program, task):
     _, segments = task.run
     moves = [(ref, source, ref, destination) for source, segment in enumerate(segments) for ref in segment
@@ -88,7 +83,7 @@ def _prepare_all_gather(program, task):
 
 
 def _prepare_moves(program, task, moves):
-    """Exact original/final views; distinct compact forwarding leases per write."""
+    """Original/final views and distinct forwarding storage, prepared once."""
     deliveries, calls = [], []
     for source, a, destination, b in moves:
         count = source.rows * source.columns * source.dtype.itemsize
@@ -114,16 +109,8 @@ def all_gather(program, value, *, peers, owners, queue=0):
         segments = _segments(range(program.size), row, value, owners)
         roles = {m: (mine, tuple(ref for other in segments if other is not mine for ref in other), ())
                  for m, mine in enumerate(segments) if m in members}
-        _record(program, 'all_gather', members, roles, (_issue_all_gather, segments), queue)
+        _record(program, 'all_gather', members, roles, (_prepare_all_gather, segments), queue)
     return value
-
-
-# design/algorithm-sources.md#collective-movement
-def _issue_all_gather(program, task):
-    return (task.prepared[0].execute(async_op=True),)
-
-
-_issue_all_gather.prepare = _prepare_all_gather
 
 
 # design/algorithm-sources.md#collective-movement
@@ -141,20 +128,12 @@ def _exchange(program, rows, queue):
         members = tuple(sorted({move[1] for move in moves} | {move[3] for move in moves}))
         roles = {m: (tuple(s for s, a, _, _ in moves if a == m), tuple(d for _, _, d, b in moves if b == m), ())
                  for m in members}
-        _record(program, 'all_to_all', members, roles, (_issue_exchange, moves), queue)
-
-
-# design/algorithm-sources.md#collective-movement
-def _issue_exchange(program, task):
-    return (task.prepared[0].execute(async_op=True),)
+        _record(program, 'all_to_all', members, roles, (_prepare_exchange, moves), queue)
 
 
 def _prepare_exchange(program, task):
     _, moves = task.run
     return _prepare_moves(program, task, moves)
-
-
-_issue_exchange.prepare = _prepare_exchange
 
 
 # design/algorithm-sources.md#collective-movement
@@ -187,15 +166,10 @@ def reduce_scatter(program, value, *, peers, owners, op=SUM, queue=0):
                 continue
             others = tuple(ref for other in segments if other is not mine for ref in other)
             roles[m] = (others, (), mine) if m in peers else ((), mine, ())
-        run = (_issue_partials, tuple(value[i] for i in row), tuple(owners[i] for i in row), peers) \
-            if op == PARTIALS else (_issue_reduce_scatter, segments, op, peers)
+        run = (_prepare_partials, tuple(value[i] for i in row), tuple(owners[i] for i in row), peers) \
+            if op == PARTIALS else (_prepare_reduce_scatter, segments, op, peers)
         _record(program, 'reduce', members, roles, run, queue)
     return value
-
-
-# design/algorithm-sources.md#collectivereduce_scatter
-def _issue_reduce_scatter(program, task):
-    return _issue_fragments(program, task)
 
 
 def _prepare_reduce_scatter(program, task):
@@ -211,15 +185,7 @@ def _prepare_reduce_scatter(program, task):
                             contributors=tuple(peers), recipients=(owner,))
         bindings.append((call, alias if program.rank in peers else empty,
                          alias if program.rank == owner else empty))
-    return bindings, program._world.of(task.queue, task.members)
-
-
-_issue_reduce_scatter.prepare = _prepare_reduce_scatter
-
-
-# design/algorithm-sources.md#collectivereduce_scatter
-def _issue_partials(program, task):
-    return _issue_fragments(program, task)
+    return _native.prepare_fragments(bindings, program._world.of(task.queue, task.members))
 
 
 def _prepare_partials(program, task):
@@ -248,10 +214,7 @@ def _prepare_partials(program, task):
                             op=backend.partials_operator(ref.columns), root=0 if root is None else root,
                             contributors=tuple(peers), recipients=task.participants if root is None else (root,))
         bindings.append((call, alias if program.rank in peers else empty, alias if receives else empty))
-    return bindings, group
-
-
-_issue_partials.prepare = _prepare_partials
+    return _native.prepare_fragments(bindings, group)
 
 
 # design/algorithm-sources.md#collectivereduce_scatter
@@ -292,14 +255,9 @@ def all_reduce(program, value, *, peers, owners=None, op=SUM, queue=0):
                           peers=peers, owners=owners, queue=queue)
     for row in _rows(value.blocks):
         refs = tuple(value[i] for i in row)
-        run = (_issue_partials, refs, (None,) * len(refs), peers) if op == PARTIALS else (_issue_all_reduce, refs, op)
+        run = (_prepare_partials, refs, (None,) * len(refs), peers) if op == PARTIALS else (_prepare_all_reduce, refs, op)
         _record(program, 'all_reduce', peers, {m: ((), (), refs) for m in peers}, run, queue)
     return value
-
-
-# design/algorithm-sources.md#collectivereduce_scatter
-def _issue_all_reduce(program, task):
-    return _issue_fragments(program, task)
 
 
 def _prepare_all_reduce(program, task):
@@ -311,51 +269,10 @@ def _prepare_all_reduce(program, task):
         call = _native.call('ALLREDUCE', count, ref.dtype, op=op,
                             contributors=task.participants, recipients=task.participants)
         bindings.append((call, alias, alias))
-    return bindings, program._world.of(task.queue, task.members)
-
-
-_issue_all_reduce.prepare = _prepare_all_reduce
-
-
-def _declaration(task):
-    """The same bound counts/operators execution passes to the native library."""
-    issue = task.run[0]
-    if issue in (_issue_all_gather, _issue_exchange):
-        return [task.prepared[1]]
-    if issue in (_issue_reduce_scatter, _issue_all_reduce, _issue_partials):
-        bindings, _ = task.prepared
-        return [[call for call, _, _ in bindings]]
-    raise TypeError('unknown Program collective declaration')
-
-
-for _issue in (_issue_all_gather, _issue_exchange, _issue_reduce_scatter, _issue_all_reduce, _issue_partials):
-    _issue.declaration = _declaration
+    return _native.prepare_fragments(bindings, program._world.of(task.queue, task.members))
 
 
 sum_scatter = reduce_scatter
 all_sum = all_reduce
 all_max = partial(all_reduce, op=MAX)
 all_min = partial(all_reduce, op=MIN)
-
-
-# design/algorithm-sources.md#collectivesync_on_remote_fill
-def sync_on_remote_fill(*results):
-    """Waits until every result is filled, or its program failed (MeshError); where a result is never filled it waits
-    forever (design/collective-goals-2026-09-14.md: slower, and it can deadlock forever).  Explicit, diegetic and never
-    a default: no verb calls it."""
-    programs = {}
-    for result in results:
-        programs.setdefault(id(result.ref.program), (result.ref.program, []))[1].append(result)
-    for program, waited in programs.values():
-        program._wait_results(waited)
-
-
-# design/algorithm-sources.md#collectivesync_on_remote_fill
-def sync_on_some_remote_fill(*results):
-    """Waits until at least one of `results`, all of one program, is filled, or the program failed (MeshError): the
-    filled ones, in their order (MPI_Waitsome); where none is ever filled it waits forever.  Explicit as
-    sync_on_remote_fill is."""
-    programs = {result.ref.program for result in results}
-    if len(programs) != 1:
-        raise ValueError('sync_on_some_remote_fill waits on the results of one program')
-    return programs.pop()._wait_results(results, every=False)

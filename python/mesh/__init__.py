@@ -1,22 +1,12 @@
-"""The partial-tensor library's Python surface (design/algorithm-sources.md#program; design/deliverables.md section 5,
-program type B): higher-order functions over partial tensors and the partial tensors' collectives, zero-copy and
-asynchronous once the call graph is known, spelled as Pallas spells it:
-Program.kernel_call over a grid with BlockSpecs, Refs to sections, Partial contribution sets that a function refuses
-before their sum completes unless it declares itself their combine, and the collective verbs (mesh.collective).  It
-holds no numerics: every kernel and combine is a supplied callable.
+"""Partial tensors as AOT graph declarations.
 
-A program is SPMD: every member records the same calls; `peer=` places a kernel, a copy's two ends and a collective's
-members place its crossings.  Recording builds the graph; realize() (start(), Swift's name) prepares it; then the
-host writes its inputs (write), each publication firing what it completes (a pending count reaching zero, the old
-executor's rule, design/deliverables.md L3), and reads its results (export, Result.ready, consume).  Kernels run
-on one compute thread; crossings and collectives are libnccl-mesh's (mesh._native), issued in one order every
-member computes from the graph on one full physical communicator. Logical participant masks keep all other nodes
-available for forwarding (rdma/NCCL.md "Rules a program keeps").  A failure is a value (Program.report, MeshError); every wait ends at an event (a call completing, a
-failure, close), never at a time, and close() abandoning work in flight revokes the program's communicators, so its
-crossings end with an error here (its peers' at their own close or revoke).
+Every rank records the same block operations. ``realize`` resolves ownership,
+dependencies, storage and crossings, and compiles numerical spans with the common
+FX frontend. ``run`` is the resulting fixed call graph. Input writes do not start
+workers, and results do not hold reader tokens or issue acknowledgments.
 
-The package is `mesh`, the import name rdma/mesh.py also takes: importing it loads that module from this checkout's
-rdma/ and carries its names (ffi, lib, lease, current, ...), so torch_mesh and mesh_mpi find what they import."""
+The package also exposes the bridge module in rdma/mesh.py.
+"""
 import importlib.util
 import sys
 import types
@@ -30,27 +20,23 @@ try:
     sys.modules[_spec.name] = _SUBSTRATE
     _spec.loader.exec_module(_SUBSTRATE)
     globals().update({name: value for name, value in vars(_SUBSTRATE).items()
-                      if not name.startswith('_') and not isinstance(value, types.ModuleType)})
+                      if not name.startswith('_') and (name == 'lib' or not isinstance(value, types.ModuleType))})
 except (ImportError, OSError) as _missing:
     sys.modules.pop('mesh._substrate', None)
     _SUBSTRATE, _MISSING = None, _missing
 
-import errno  # noqa: E402
 import heapq  # noqa: E402
 import itertools  # noqa: E402
-import os  # noqa: E402
-import threading  # noqa: E402
-import time  # noqa: E402
 from collections import defaultdict  # noqa: E402
 from contextlib import contextmanager  # noqa: E402
-from dataclasses import dataclass, field, replace  # noqa: E402
+from dataclasses import dataclass, replace  # noqa: E402
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 from . import _native  # noqa: E402
 
-__all__ = ['Program', 'Tensor', 'Ref', 'Partial', 'BlockSpec', 'ShapeDtypeStruct', 'Result', 'MeshError', 'Report']
+__all__ = ['Program', 'Tensor', 'Ref', 'Partial', 'BlockSpec', 'ShapeDtypeStruct', 'Result']
 
 
 # design/algorithm-sources.md#meshobserve
@@ -58,29 +44,6 @@ def __getattr__(name):
     if _SUBSTRATE is None and _MISSING is not None:
         raise ImportError(f'mesh.{name}: rdma/mesh.py did not load: {_MISSING}') from _MISSING
     raise AttributeError(f'module mesh has no attribute {name}')
-
-
-# design/algorithm-sources.md#mesherror
-class MeshError(Exception):
-    """A failure: `kind` busy, link (`peer` the member across it) or function
-    (`call` the task's record index); `code` an errno."""
-
-    def __init__(self, kind, code, *, peer=None, call=None, detail=''):
-        super().__init__(f'{kind}: {os.strerror(code) if code > 0 else code}'
-                         + (f' (peer {peer})' if peer is not None else '') + (f' (call {call})' if call is not None else '')
-                         + (f': {detail}' if detail else ''))
-        self.kind, self.code, self.peer, self.call = kind, code, peer, call
-
-
-@dataclass
-class Report:
-    code: int = 0
-    kind: str = ''
-    peer: object = None
-    call: object = None
-    detail: str = ''
-    kernels: int = 0
-    crossings: int = 0
 
 
 @dataclass(frozen=True)
@@ -192,11 +155,6 @@ class Ref:
     # design/algorithm-sources.md#program
     def on(self, peer):
         return (self, peer)
-
-    @property
-    # design/algorithm-sources.md#programwrite
-    def writable(self):
-        return self.program._writable(self)
 
     # design/algorithm-sources.md#programcopy
     def _overlaps(self, other):
@@ -368,99 +326,26 @@ class _Task:
     queue: int = 0
     crossing: bool = False
     members: tuple = ()
-    inputs: list = field(default_factory=list)
-    outputs: list = field(default_factory=list)
-    guards: list = field(default_factory=list)
-    guarding: list = field(default_factory=list)
-    cyclic: bool = True
-    running: bool = False
-    fired: bool = False
-    done: bool = False
-    event: object = None
     prepared: object = None
     participants: tuple = ()
 
-    # design/algorithm-sources.md#programkernel_call
     def __lt__(self, other):
         return (self.row, self.index) < (other.row, other.index)
 
 
-class _Edge:
-    __slots__ = ('source', 'target', 'tokens', 'sticky', 'works', 'waited')
-
-    def __init__(self, source, target, sticky=False):
-        self.source, self.target = source, target
-        self.tokens, self.sticky, self.works, self.waited = 0, sticky, (), True
-
-
 class Result:
-    # design/algorithm-sources.md#programexport
-    def __init__(self, ref, task):
-        self.ref, self._task = ref, task
+    """A declared output view; completion belongs to the whole submitted call."""
+    def __init__(self, ref):
+        self.ref = ref
 
     @property
-    # design/algorithm-sources.md#programexport
-    def ready(self):
-        program = self.ref.program
-        with program._cond:
-            program._raise()
-            if not self._task.done:
-                return False
-            event = self._task.event
-        return event is None or event.query()
-
-    @property
-    # design/algorithm-sources.md#program
     def tensor(self):
-        if not self.ready:
-            raise BlockingIOError(errno.EAGAIN, 'Result region is not published')
         return self.ref.tensor
-
-    @property
-    # design/algorithm-sources.md#program
-    def array(self):
-        result = self.tensor
-        result = result.numpy() if result.device.type == 'cpu' else result.cpu().numpy()
-        result.flags.writeable = False
-        return result
-
-    # design/algorithm-sources.md#programexport
-    def consume(self):
-        program = self.ref.program
-        with program._cond:
-            task = self._task
-            if task.done:
-                for edge in task.inputs:
-                    if not edge.sticky:
-                        edge.tokens -= 1
-                    program._drained(edge.source)
-                task.done, task.event = False, None
-                program._touch(task)
-                program._cond.notify_all()
-
-
-class _Order:
-    """A queue's crossings in the order every member computed: the first round all of them, each later round those
-    that a host write can feed again (a crossing whose inputs are all constants runs once)."""
-
-    def __init__(self, tasks):
-        self.first, self.later = list(tasks), [task for task in tasks if task.cyclic]
-        self.sequence, self.position = self.first, 0
-
-    # design/algorithm-sources.md#independent-native-queues
-    def head(self):
-        return self.sequence[self.position] if self.position < len(self.sequence) else None
-
-    # design/algorithm-sources.md#independent-native-queues
-    def advance(self):
-        self.position += 1
-        if self.position == len(self.sequence) and self.later:
-            self.sequence, self.position = self.later, 0
 
 
 class Program:
     # design/algorithm-sources.md#program
-    def __init__(self, backend='cpu', *, functions=None, group=None, trace=False):
+    def __init__(self, backend='cpu', *, functions=None, group=None):
         self.device = _native.DEVICES[backend]
         self._functions = dict(functions or {})
         self._world = _native.World(self.device, group)
@@ -469,12 +354,8 @@ class Program:
         self._backings, self._blocks, self._constants = [], defaultdict(list), set()
         self._replicated = {}
         self._tasks, self._exports = [], []
-        self._cond = threading.Condition()
-        self._threads, self._published, self._sources = [], set(), defaultdict(list)
-        self._candidates, self._heap = set(), []
-        self.report = Report()
-        self.trace = [] if trace else None
-        self._realized = self._closed = False
+        self._realized = False
+        self.graph, self.run = None, None
 
     @property
     # design/algorithm-sources.md#independent-native-queues
@@ -618,8 +499,7 @@ class Program:
             raise ValueError('Reference belongs to another program')
         if self._realized:
             raise RuntimeError('A realized program takes no more calls')
-        task = _Task(-1 - len(self._exports), 'export', (self.rank,), ref.origin[0], ((ref,), (), ()), ('export', ref))
-        result = Result(ref, task)
+        result = Result(ref)
         self._exports.append(result)
         return result
 
@@ -629,37 +509,16 @@ class Program:
             raise ValueError('Publication requires a whole block of a tensor; allocate smaller blocks for finer progress')
         return ref.key
 
-    # design/algorithm-sources.md#programwrite
-    def _writable(self, ref):
-        key = self._block_key(ref)
-        with self._cond:
-            self._raise()
-            return not self._realized or all(edge.tokens == 0 for edge in self._sources.get(key, ()))
-
     @contextmanager
-    # design/algorithm-sources.md#programwrite
     def write(self, ref):
+        """The input's existing storage, with no publication or staging buffer.
+
+        The caller fills inputs before submitting the prepared call. Changes to
+        inputs between calls follow the enclosing function's page schedule.
+        """
         if ref.program is not self:
             raise ValueError('Reference belongs to another program')
-        key = self._block_key(ref)
-        with self._cond:
-            self._raise()
-            if self._realized and any(edge.tokens for edge in self._sources.get(key, ())):
-                raise BlockingIOError(errno.EAGAIN, 'Producer region still has readers')
-        if ref.tensor.device.type == 'cpu':
-            yield ref.tensor.numpy()
-        else:
-            staged = np.empty(ref.shape, _native.numpy_dtype(ref.dtype))
-            yield staged
-            ref.tensor.copy_(torch.from_numpy(staged))
-        with self._cond:
-            if self._realized:
-                for edge in self._sources.get(key, ()):
-                    edge.tokens = 1
-                    self._touch(edge.target)
-                self._cond.notify_all()
-            else:
-                self._published.add(key)
+        yield ref.tensor
 
     # design/algorithm-sources.md#program
     def constant(self, ref, value=None):
@@ -679,325 +538,129 @@ class Program:
             return (), (), ()
         return task.roles.get(rank, ((), (), ())) if isinstance(task.roles, dict) else task.roles
 
-    # design/algorithm-sources.md#programkernel_call
-    def _graph(self, rank, tasks):
-        """The dependencies on member `rank`: a region's definition, then the collectives that update it in place in
-        record order, its readers taking the last; host-written blocks (no definition on `rank`, not constants) before
-        their readers; and each writer's guards, the later updaters of what it writes, whose readers it must not
-        overwrite."""
-        writers = defaultdict(list)
-        for task in tasks:
-            _, defs, updates = self._roles(task, rank)
-            for ref in defs:
-                writers[ref.backing.index].append((task, ref, False))
-            for ref in updates:
-                writers[ref.backing.index].append((task, ref, True))
-        for found in writers.values():
-            definitions = [w for w in found if not w[2]]
-            for (a, x, _), (b, y, _) in itertools.combinations(definitions, 2):
-                if a is not b and x._overlaps(y):
-                    raise ValueError(f'calls {a.index} and {b.index} both define one region on member {rank}')
-        edges, sources, guards = set(), set(), defaultdict(set)
-        for task in tasks:
-            reads, _, updates = self._roles(task, rank)
-            for ref in reads + updates:
-                found = [w for w in writers[ref.backing.index] if w[0] is not task and w[1]._overlaps(ref)]
-                updating = any(ref is u for u in updates)
-                for writer, region, _ in found:
-                    if updating and writer.index > task.index:
-                        continue
-                    if not any(update and u.index > writer.index and other._overlaps(region)
-                               and (not updating or u.index < task.index) for u, other, update in found):
-                        edges.add((writer.index, task.index))
-                for block in self._blocks[ref.backing.index]:
-                    if (block.key not in self._constants and block._overlaps(ref)
-                            and not any(not update and region._overlaps(block)
-                                        for _, region, update in writers[ref.backing.index])):
-                        sources.add((block.key, task.index))
-        for found in writers.values():
-            for writer, region, _ in found:
-                for updater, other, update in found:
-                    if update and updater.index > writer.index and other._overlaps(region):
-                        guards[writer.index].add(updater.index)
-        return edges, sources, guards
+    def _graph(self, rank):
+        """Resolve overlapping reads and writes once, in declaration order."""
+        edges, prior = set(), []
+        for task in self._tasks:
+            reads, definitions, updates = self._roles(task, rank)
+            reads, writes = reads + updates, definitions + updates
+            for earlier, used, changed in prior:
+                if (any(a._overlaps(b) for a in changed for b in reads + writes)
+                        or any(a._overlaps(b) for a in used for b in writes)):
+                    edges.add((earlier.index, task.index))
+            prior.append((task, reads, writes))
+        return edges
 
-    # design/algorithm-sources.md#programkernel_call
+    def _numerical(self, tasks):
+        """Compile a maximal local numerical span, binding its storage once."""
+        from torch_mesh.declarations import Function
+        backings = tuple(dict.fromkeys(ref.backing for task in tasks
+                                       for refs in self._roles(task, self.rank) for ref in refs))
+        stored = tuple(backing.flat() for backing in backings)
+
+        def operations(*operands):
+            # This callable is used only by fake tracing. The compiled graph
+            # receives the original backings as explicit, fixed arguments.
+            for backing, operand in zip(backings, operands):
+                backing.storage = operand
+            try:
+                for task in tasks:
+                    if task.kind == 'kernel':
+                        kernel, sources, targets, coordinate = task.run
+                        self._functions.get(kernel, kernel)(self, sources, targets, coordinate)
+                    else:
+                        _, regions, target = task.run
+                        out = target.tensor
+                        for ref, row, column in regions:
+                            out[row:row + ref.rows, column:column + ref.columns].copy_(ref.tensor)
+                return operands
+            finally:
+                for backing, value in zip(backings, stored):
+                    backing.storage = value
+
+        function = Function(operations, *stored)
+        function.declare(self.group)
+        if any(function.groups.values()):
+            raise ValueError('partial kernels declare communication through block collective operands')
+        function.prepare()
+        return function
+
     def realize(self):
-        """Every member's dependencies, from the calls all members recorded: the order of the crossings (a
-        topological order of the calls, the earliest row first, then the earliest record), which calls a host write
-        feeds again (cyclic), and this member's edges, pending counts and storage; then the threads start."""
+        """Compile the block graph to numerical spans and bound native calls.
+
+        No payload is executed here. There is no alternate eager executor if
+        tracing, compilation or native preparation cannot realize the graph.
+        """
         if self._realized:
             return self
-        graphs = {rank: self._graph(rank, self._tasks) for rank in range(self.size)}
-        edges = set().union(*(graph[0] for graph in graphs.values()))
-        fed = {index for graph in graphs.values() for _, index in graph[1]}
-        after, before, incoming = defaultdict(set), defaultdict(set), defaultdict(int)
+        if self.device == 'cpu' and any(task.crossing for task in self._tasks):
+            raise NotImplementedError('distributed partial graphs require the prepared Metal transport')
+        edges = set().union(*(self._graph(rank) for rank in range(self.size)))
+        after, incoming = defaultdict(set), defaultdict(int)
         for a, b in edges:
             after[a].add(b)
-            before[b].add(a)
-        for b, sources in before.items():
-            incoming[b] = len(sources)
+            incoming[b] += 1
         heap = [task for task in self._tasks if not incoming[task.index]]
         heapq.heapify(heap)
         order = []
         while heap:
             task = heapq.heappop(heap)
             order.append(task)
-            task.cyclic = task.index in fed or any(self._tasks[a].cyclic for a in before[task.index])
             for b in after[task.index]:
                 incoming[b] -= 1
                 if not incoming[b]:
                     heapq.heappush(heap, self._tasks[b])
         if len(order) != len(self._tasks):
             raise ValueError('The calls depend on one another in a cycle')
-        exports = [result._task for result in self._exports]
-        local = self._tasks + exports
-        mine, sources, guards = self._graph(self.rank, local)
-        named = {task.index: task for task in local}
-        for task in exports:
-            task.cyclic = True
-        for a, b in sorted(mine):
-            edge = _Edge(named[a], named[b], sticky=not named[a].cyclic)
-            named[a].outputs.append(edge)
-            named[b].inputs.append(edge)
-        for key, b in sorted(sources):
-            edge = _Edge(None, named[b])
-            edge.tokens = 1 if key in self._published else 0
-            self._sources[key].append(edge)
-            named[b].inputs.append(edge)
-        for a, updaters in guards.items():
-            named[a].guards = [named[u] for u in sorted(updaters)]
-            for u in updaters:
-                named[u].guarding.append(named[a])
-        self._local = [task for task in local if self.rank in task.owners]
-        for task in self._local:
+        local = [task for task in order if self.rank in task.owners]
+        for task in local:
             if task.crossing:
                 for ref in itertools.chain(*self._roles(task, self.rank)):
                     ref.backing.in_region = True
-        for task in self._local:
+        for task in local:
             for ref in itertools.chain(*self._roles(task, self.rank)):
                 ref.backing.flat()
-        self._world.prepare((task.queue, task.members) for task in self._tasks if task.crossing)
-        # Views, temporary leases and the native configuration belong to
-        # realization. A repeated row executes its retained bindings directly.
-        for task in self._local:
-            prepare = getattr(task.run[0], 'prepare', None) if task.crossing else None
-            if prepare is not None:
-                task.prepared = prepare(self, task)
-        # Constant-only work is a distinct configuration graph. Hoisting it
-        # preserves the dependency order and leaves one immutable recurrent
-        # declaration, instead of skipping slots in its later iterations.
-        initial = [task for task in order if not task.cyclic]
-        recurrent = [task for task in order if task.cyclic]
-        self._world.declare(initial)
-        for task in initial:
-            if self.rank in task.owners:
-                if not self._ready(task):
-                    raise RuntimeError('constant initialization has an unresolved dependency')
-                works = self._execute(task)
-                with self._cond:
-                    self._complete(task, works)
-        self._world.declare(recurrent)
-        self._compute = [task for task in self._local if not task.crossing]
-        # One common physical declaration has one SPMD order. Logical queues
-        # do not acquire independent communicators or race their plan cursors.
-        # Native physical schedules overlap the issued groups on all cables.
-        crossings = [task for task in recurrent if task.crossing and self.rank in task.owners]
-        self._orders = [_Order(crossings)] if crossings else []
-        self._candidates = set(self._compute)
+        for result in self._exports:
+            result.ref.backing.flat()
+        self._world.prepare((task.queue, task.members) for task in order if task.crossing)
+        for task in local:
+            if task.crossing:
+                task.prepared = task.run[0](self, task)
+        self._world.declare(order)
+
+        # FX generates a fixed sequence. Numerical spans use Function's mesh
+        # compiler; native crossings use their existing prepared bindings.
+        # No runtime task walk, dependency queries, result guards or workers.
+        graph, bindings, numerical = torch.fx.Graph(), {}, []
+
+        def append(value, method):
+            name = f'step_{len(bindings)}'
+            bindings[name] = value
+            graph.call_method(method, (graph.get_attr(name),))
+
+        for task in local:
+            if task.crossing:
+                if numerical:
+                    append(self._numerical(tuple(numerical)), 'run')
+                    numerical.clear()
+                append(task.prepared[0], 'enqueue')
+            else:
+                numerical.append(task)
+        if numerical:
+            append(self._numerical(tuple(numerical)), 'run')
+        graph.output(None)
+        self.graph = torch.fx.GraphModule(bindings, graph, 'PartialFunction')
+        self.run = self.graph.forward
         self._realized = True
-        if self.device == 'mps':
-            self._threads = [threading.Thread(target=self._serve, args=(self._orders,), daemon=True)]
-        else:
-            self._threads = [threading.Thread(target=self._serve, args=((),), daemon=True)]
-            self._threads += [threading.Thread(target=self._stream, args=(order,), daemon=True) for order in self._orders]
-        for thread in self._threads:
-            thread.start()
         return self
 
     start = realize
 
-    # design/algorithm-sources.md#mesherror
-    def _raise(self):
-        if self.report.code:
-            raise MeshError(self.report.kind, self.report.code, peer=self.report.peer, call=self.report.call,
-                            detail=self.report.detail)
-
-    # design/algorithm-sources.md#mesherror
-    def _fail(self, task, error):
-        with self._cond:
-            if not self.report.code:
-                self.report.code = errno.EIO
-                self.report.kind = 'link' if task.crossing else 'function'
-                self.report.peer = tuple(r for r in task.owners if r != self.rank) if task.crossing else None
-                self.report.call, self.report.detail = task.index, f'{type(error).__name__}: {error}'
-            self._cond.notify_all()
-
-    # design/algorithm-sources.md#programkernel_call
-    def _touch(self, task):
-        if task is not None and not task.crossing and self._realized:
-            self._candidates.add(task)
-
-    # design/algorithm-sources.md#programkernel_call
-    def _drained(self, task):
-        if task is not None:
-            self._touch(task)
-            for other in task.guarding:
-                self._touch(other)
-
-    # design/algorithm-sources.md#programkernel_call
-    def _ready(self, task):
-        if task.running or task.done or (task.fired and not task.cyclic):
-            return False
-        if any(edge.tokens < 1 for edge in task.inputs) or any(edge.tokens > 0 for edge in task.outputs):
-            return False
-        return not any(other.running or any(edge.tokens > 0 for edge in other.outputs) for other in task.guards)
-
-    # design/algorithm-sources.md#programkernel_call
-    def _complete(self, task, works=()):
-        task.running, task.fired = False, True
-        if task.kind == 'export':
-            task.done = True
-        else:
-            for edge in task.inputs:
-                if not edge.sticky:
-                    edge.tokens -= 1
-                self._drained(edge.source)
-            for edge in task.outputs:
-                edge.tokens, edge.works, edge.waited = 1, works, not works
-                self._touch(edge.target)
-        self._drained(task)
-        self._cond.notify_all()
-
-    # design/algorithm-sources.md#programkernel_call
-    def _next(self):
-        for task in self._candidates:
-            if self._ready(task):
-                heapq.heappush(self._heap, (any(not edge.waited for edge in task.inputs), task.row, task.index, task))
-        self._candidates.clear()
-        while self._heap:
-            *_, task = heapq.heappop(self._heap)
-            if self._ready(task):
-                return task
-        return None
-
-    # design/algorithm-sources.md#programkernel_call
-    def _execute(self, task):
-        began = time.perf_counter_ns() if self.trace is not None else 0
-        for edge in task.inputs:
-            if not edge.waited:
-                for work in edge.works:
-                    work.wait()
-                edge.waited = True
-        what, works = task.run, ()
-        if task.kind == 'kernel':
-            kernel, sources, targets, coordinate = what
-            self._functions.get(kernel, kernel)(self, sources, targets, coordinate)
-            self.report.kernels += 1
-        elif what[0] == 'materialize':
-            _, regions, target = what
-            out = target.tensor
-            for ref, row, column in regions:
-                out[row:row + ref.rows, column:column + ref.columns].copy_(ref.tensor)
-        elif what[0] == 'export':
-            if self.device == 'mps':
-                task.event = torch.mps.Event()
-                task.event.record()
-        else:
-            works = tuple(work for work in what[0](self, task) if work is not None)
-            works = works if self.device == 'mps' else ()
-            self.report.crossings += 1
-        if self.trace is not None:
-            self.trace.append((task.kind, task.index, task.row, began, time.perf_counter_ns(), threading.get_ident()))
-        return works
-
-    # design/algorithm-sources.md#programkernel_call
-    def _serve(self, orders):
-        """The compute thread: the ready call earliest by (waits on an issued receive, row, record); on MPS also each
-        queue's next crossing in its order, issued once ready (there its calls are encoded and never block)."""
-        while True:
-            with self._cond:
-                while True:
-                    if self._closed or self.report.code:
-                        return
-                    chosen = next(((order, order.head()) for order in orders
-                                   if order.head() is not None and self._ready(order.head())), None)
-                    if chosen is None:
-                        task = self._next()
-                        chosen = (None, task) if task is not None else None
-                    if chosen is not None:
-                        chosen[1].running = True
-                        break
-                    self._cond.wait()
-            order, task = chosen
-            try:
-                works = self._execute(task)
-            except Exception as error:
-                self._fail(task, error)
-                return
-            with self._cond:
-                self._complete(task, works)
-                if order is not None:
-                    order.advance()
-
-    # design/algorithm-sources.md#independent-native-queues
-    def _stream(self, order):
-        """A queue's crossings on the CPU, one thread: in the order every member computed, round after round; each
-        waits for its local inputs, then its host-path call completes where it returns."""
-        while True:
-            with self._cond:
-                while True:
-                    task = order.head()
-                    if self._closed or self.report.code or task is None:
-                        return
-                    if self._ready(task):
-                        task.running = True
-                        break
-                    self._cond.wait()
-            try:
-                works = self._execute(task)
-            except Exception as error:
-                self._fail(task, error)
-                return
-            with self._cond:
-                self._complete(task, works)
-                order.advance()
-
-    # design/algorithm-sources.md#collectivesync_on_remote_fill
-    def _wait_results(self, results, every=True):
-        with self._cond:
-            while True:
-                filled = [result for result in results if result._task.done]
-                if len(filled) == len(results) or filled and not every:
-                    break
-                self._raise()
-                self._cond.wait()
-        for result in filled:
-            if result._task.event is not None:
-                result._task.event.synchronize()
-        return filled
-
-    # design/algorithm-sources.md#program
     def close(self):
-        if self._closed:
-            return
-        with self._cond:
-            self._closed = True
-            abandoned = bool(self.report.code) or any(task.running for task in self._tasks)
-            self._cond.notify_all()
-        if abandoned:
-            self._world.revoke()
-        for thread in self._threads:
-            thread.join()
         self._world.close()
-        for task in self._tasks:
-            task.prepared = None
-        self._replicated.clear()
 
-    # design/algorithm-sources.md#program
     def __enter__(self):
         return self
 
-    # design/algorithm-sources.md#program
     def __exit__(self, *error):
         self.close()

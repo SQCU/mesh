@@ -65,10 +65,10 @@ def main():
     chunks = [k] * full + [rest] * bool(rest)
     functions = {}
     for count in dict.fromkeys(chunks):
-        function = Function(tick.stepper(X, O, count), t, compiler='mesh')
+        function = Function(tick.stepper(X, O, count), t)
         function.declare(group)
         functions[count] = function
-    initial = [Function(tick.starting, s, X[s], compiler='mesh') for s in range(L - 1)]
+    initial = [Function(tick.starting, s, X[s]) for s in range(L - 1)]
     for function in initial:
         function.declare(group)
     ordered = [*initial, *(functions[count] for count in chunks)]

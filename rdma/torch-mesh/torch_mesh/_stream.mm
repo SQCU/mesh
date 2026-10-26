@@ -452,6 +452,23 @@ static uint64_t issue(const std::vector<Call> &calls, int64_t comm, bool split, 
                 g.metal, split, comm, {}, unlock);
 }
 
+// Fixed operands for a declared block graph. Preparation uses the same operand
+// conversion as issue(); submission uses the same encoder, without a Work or a
+// second task scheduler. The enclosing function retains these tensor bindings.
+struct Collectives {
+  int64_t comm;
+  Group group{true};
+  std::vector<Issue> issues;
+  std::vector<at::Tensor> operands;
+  Collectives(const std::vector<Call> &calls, int64_t comm, std::vector<at::Tensor> operands)
+      : comm(comm), operands(std::move(operands)) {
+    for (const Call &call : calls) issues.push_back(prepare(call, group));
+  }
+  void enqueue() {
+    on_stream([&](ncclMeshStream *stream) { return encoded(issues, communicator(comm), stream); }, false, comm, {});
+  }
+};
+
 // torch's functional collectives (_c10d_functional, what DTensor and a compiled graph call) on MPS tensors: kernels
 // for the MPS dispatch key, as torch/csrc/distributed/c10d/Functional.cpp implements them for every device but
 // issuing their group directly, the group's communicator found by the group (attach) with no Python between.
@@ -1728,14 +1745,14 @@ struct SpanWrites {
       leases.push_back(base);
     }
   }
-  c10::intrusive_ptr<c10d::Work> execute(bool split) {
-    const uint64_t ticket = submit([&](ncclMeshStream *stream) {
-      ncclResult_t result = ncclGroupStart();
-      for (auto plan : plans.handles) if (!result) result = ncclMeshWriteExecute(plan, stream);
-      const ncclResult_t ended = ncclGroupEnd();
-      return result ? result : ended;
-    }, metal, split, comm, leases, true);
-    return work_of(ticket, leases, comm);
+  ncclResult_t encode(ncclMeshStream *stream) {
+    ncclResult_t result = ncclGroupStart();
+    for (auto plan : plans.handles) if (!result) result = ncclMeshWriteExecute(plan, stream);
+    const ncclResult_t ended = ncclGroupEnd();
+    return result ? result : ended;
+  }
+  void enqueue() {
+    submit([&](ncclMeshStream *stream) { return encode(stream); }, metal, false, comm, {}, true);
   }
 };
 
@@ -1801,7 +1818,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("fused_release", &fused_release);
   pybind11::class_<SpanWrites, std::shared_ptr<SpanWrites>>(module, "SpanWrites")
     .def(pybind11::init<const std::vector<SpanBinding> &, int64_t>())
-    .def("execute", &SpanWrites::execute, pybind11::arg("async_op") = false);
+    .def("enqueue", &SpanWrites::enqueue);
+  pybind11::class_<Collectives, std::shared_ptr<Collectives>>(module, "Collectives")
+    .def(pybind11::init<const std::vector<Call> &, int64_t, std::vector<at::Tensor>>())
+    .def("enqueue", &Collectives::enqueue);
   module.def("fused_reconfigure", &fused_reconfigure);
   module.def("crossing_slot", &crossing_slot);
   module.def("prepare_crossing", &prepare_crossing);

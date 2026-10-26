@@ -185,18 +185,10 @@ def _in_region(y):
 
 @torch.library.custom_op('torch_mesh::allgatherv', mutates_args=())
 def allgatherv(x: torch.Tensor, dim: int, sizes: list[int], group_name: str, repeats: int = 1) -> torch.Tensor:
-    """The blocks gathered along `dim` from x's block, an opaque op, so a compiled graph calls it as torch's
-    functional collectives are called.  On the mesh backend (_region_backed) it is a fused crossing (_fused):
-    this rank's block published from an exact-sized region segment, the physical landing prefixes
-    observed once and parallel readers joining the segments along `dim`, the crossing issued once for `repeats` of
-    them (a graph's, torch_mesh.compiler); else out of place from x's block by dist.all_gather."""
-    group = dist.distributed_c10d._resolve_process_group(group_name)
-    if not _region_backed(x, group):
-        y = x.movedim(dim, 0).contiguous()
-        out = _empty((sum(sizes),) + y.shape[1:], y)
-        dist.all_gather(list(out.split(sizes)), y, group=group)
-        return out.movedim(0, dim).contiguous()
-    return _fused(x, dim, sizes, group, False, None, repeats)
+    """A graph declaration; the compiler binds each multi-rank occurrence."""
+    if len(sizes) == 1:
+        return x.clone()
+    raise RuntimeError('allgatherv must be lowered to an indexed crossing before execution')
 
 
 @torch.library.custom_op('torch_mesh::allgatherv_out', mutates_args=('out',))
@@ -208,15 +200,10 @@ def allgatherv_out(x: torch.Tensor, out: torch.Tensor, dim: int, sizes: list[int
     previous readers must precede this call on the MPS stream; its next readers
     follow it. No intermediate output lease and copy into `out` are encoded.
     """
-    group = dist.distributed_c10d._resolve_process_group(group_name)
     if len(sizes) == 1:
         out.copy_(x)
-    elif _region_backed(x, group):
-        from .declarations import eager_index
-        index = eager_index(x, None, dim, sizes, group_name, False, repeats, True)
-        torch.ops.torch_mesh.indexed_step_out(x, None, out, index)
     else:
-        out.copy_(allgatherv(x, dim, sizes, group_name, repeats))
+        raise RuntimeError('allgatherv_out must be lowered to an indexed crossing before execution')
 
 
 @allgatherv_out.register_fake
@@ -357,38 +344,6 @@ def _linear_kernel(*arguments):
     return _GATHER_KERNELS[name]
 
 
-def _fused(x, dim, sizes, group, adds, w=None, repeats=1):
-    """allgatherv on the mesh backend (above), or where `adds` the all-reduce's sum (backend.all_reduce, every rank's
-    block all of x: sizes x's extent along dim, n times): x of 2 or 4 bytes an element, its source strides compiled
-    into the publisher; the output pages assigned to this occurrence before the
-    complete function runs. Where `w` (a weight [N, K] of fp16 rows
-    any whole stride apart) is given, the sum's operand is x's product with it, x [R, K] (backend.linear_sum):
-    linear.metal's linear_publish computes it into this rank's segment and publishes it there through the collective's
-    steps, in place of gather_publish.  The call is repeat j of the `repeats` one issue presents, j its calls of this
-    form since the last issue (torch_mesh.compiler). Native execution uses the
-    indexed crossing prepared from this form before submission."""
-    if adds and x.dtype not in (torch.float16, torch.float32):
-        raise TypeError('fused sum arithmetic requires float16 or float32; use the general reduction API for other dtypes')
-    if len(sizes) == 1:
-        return x.clone() if w is None else torch.ops.torch_mesh.linear(x, w)
-    from .declarations import eager_index
-    index = eager_index(x, w, dim, sizes, group.group_name, adds, repeats, False)
-    return torch.ops.torch_mesh.indexed_step(x, w, index)
-
-
-def prepare_gather(x, dim, sizes, group, *, adds=False, w=None, repeats=1, batches=1):
-    """Realize exact WRITE bindings from shape/stride metadata, without payload work.
-
-    Positive recurrent contributions keep their proved two-generation ring.
-    A graph with an empty contribution gets distinct queued generations for
-    every batch; no missing return publication is treated as a reuse proof.
-    """
-    if len(sizes) <= 1 or not getattr(group, 'handle', 0):
-        return
-    from .declarations import Preparations
-    Preparations([(x, w, dim, tuple(sizes), group.group_name, adds, repeats)] * batches)()
-
-
 def _gather_paths(fabric):
     """Node paths for the realized physical fabric, retaining parallel fragments."""
     routes = {}
@@ -406,7 +361,7 @@ def _gather_paths(fabric):
 
 
 def _fused_form(x, w, dim, sizes, group_name, adds, channels):
-    """A fused crossing's form for torch_mesh::fused_step, made at its first call (_stream.mm fused_maker): the
+    """A fused crossing's form for torch_mesh::fused_step, made during preparation (_stream.mm fused_maker): the
     communicator and the waits' bound; this rank and the ranks; the publication's kernel (gather_publish, or
     linear_publish where `w`), constant words, its repeat's word and grid; the landing's (sum_land or gather_land, and
     this rank's segment's start and each rank's sizes in its words); every rank's exact segment start and count
@@ -924,7 +879,7 @@ def _scatter_spans(tensor, dim, sizes, rank, source, group):
         if tensor.device.type == 'mps':
             _stream.publish_boundary()
         with group.configuration([calls]):
-            prepared.execute()
+            prepared.enqueue()
     return result
 
 
@@ -968,7 +923,7 @@ def _follow_spans(placement, local, logical_shape, key, rank, group, publish_bou
             publish_boundary()
         # Repartition is a configuration transition. Ordinary native stream
         # completion orders next consumers; no application receipt is emitted.
-        prepared.execute()
+        prepared.enqueue()
     return result
 
 

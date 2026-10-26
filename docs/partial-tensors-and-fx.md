@@ -1,7 +1,7 @@
 # Partial tensors and the FX declaration path
 
 This is the interface reference for `python/mesh`, the ragged PyTorch frontend, and the native headers they
-use. It describes the source on `main` after `18be9473` (2026-10-25). The [data model](../design/data-model.md)
+use. It describes the source on `main` on 2026-10-25. The [data model](../design/data-model.md)
 explains why the project uses pages, compilation and one-sided writes. This document names the existing types,
 their operands, and the work each interface performs. The [graph history](../design/aot-graphs-and-pytorch.md)
 records how the native and PyTorch paths acquired their roles.
@@ -10,7 +10,7 @@ records how the native and PyTorch paths acquired their roles.
 
 | Input | Preparation | Execution |
 |---|---|---|
-| `mesh.Program`, tensor blocks and kernel declarations | Build read/write relationships; allocate local backings; declare collective groups and bind native writes | The current Python task executor runs kernels and prepared crossings. It still has dynamic scheduling work. |
+| `mesh.Program`, tensor blocks and kernel declarations | Build read/write relationships; allocate local backings; declare collective groups and bind native writes | A fixed FX call graph invokes compiled numerical spans and prebound native crossings. |
 | A PyTorch function, including backward when the function calls it | `declarations.Function` fake-traces the function; the `mesh` compiler lowers its communication and gives crossings fixed indices | Call the prepared numerical function. Its custom operators reach `_stream.mm` and the same collective library. |
 | Native `MatrixView`, `MetalProgram`, or recorded Metal commands | Bind dispatches, operand slots, accesses and residency | Native command submission/replay. FX does not currently lower into this recorder. |
 
@@ -31,7 +31,7 @@ contract required by the data model; the existence of those interfaces does not 
 ## Python partial tensor API
 
 Source: [python/mesh/__init__.py](../python/mesh/__init__.py). The package exports `Program`, `Tensor`, `Ref`,
-`Partial`, `BlockSpec`, `ShapeDtypeStruct`, `Result`, `MeshError`, and `Report`. It also carries the bridge module's
+`Partial`, `BlockSpec`, `ShapeDtypeStruct`, and `Result`. It also carries the bridge module's
 names from [rdma/mesh.py](../rdma/mesh.py), so existing users of `mesh.ffi`, `mesh.lib`, and region storage use the
 same substrate. Put the checkout's `python/` before `rdma/` on the import path when using this surface.
 
@@ -53,7 +53,6 @@ same substrate. Put the checkout's `python/` before `rdma/` on the import path w
 | `Ref.T`, `Ref.broadcast(rows, columns)` | View transformations; broadcast uses zero strides. |
 | `Ref.on(peer)` | The pair `(ref, peer)` used to place a copy. |
 | `Ref.whole()` | Requires a contiguous view covering its entire backing. This helper's restriction is not the rule for all current remote movement. |
-| `Ref.writable` | Queries the current executor's reader state. This is runtime bookkeeping, not a page-table lookup. |
 | `_Backing` | Internal storage record: program, element count, scalar type, transferability, index, storage and region membership. `flat()` creates storage if absent; realization forces the local backings it needs. |
 | `ShapeDtypeStruct(shape, dtype=np.float32)` | Describes a kernel's output before its storage exists. |
 | `Partial(required, terms)` | Frozen sets of required and present term labels. `merge(refs)` unions terms, rejects duplicate terms, and returns `None` when the result is complete. |
@@ -65,7 +64,7 @@ buffer/extent descriptions, so this alone does not establish the final constrain
 ### Block selection and numerical kernels
 
 `BlockSpec(block_shape, index_map=None, region_map=None)` connects an operand to a kernel's grid. Its
-`index_map(*coordinate)` selects a block origin, multiplied by `block_shape`; edge extents are clipped to the
+`index_map(*coordinate)`, required for a non-`None` block shape, selects a block origin, multiplied by `block_shape`; edge extents are clipped to the
 tensor. `region_map(ref, *coordinate)` can further select the reference passed to the kernel. A `None` block
 shape passes the operand through. `_bind(tensor)` and `resolve(coordinate)` bind and resolve that metadata while
 recording calls.
@@ -88,35 +87,62 @@ Here `sources` and `targets` are the references resolved by the block specificat
 input term metadata into output metadata. This mechanism does not automatically infer missing terms from an
 arbitrary matrix multiply.
 
+For example, a matrix product can name four output tiles. The input references include each tile's full
+inner dimension, so the following declaration needs no reduction of partial sums:
+
+```python
+from mesh import Program, BlockSpec, ShapeDtypeStruct
+
+def product(program, sources, targets, coordinate):
+    targets[0].tensor.copy_(sources[0].tensor @ sources[1].tensor)
+
+p = Program('cpu')
+a = p.tensor((64, 64), block_shape=(32, 64))
+b = p.tensor((64, 64), block_shape=(64, 32))
+c = p.kernel_call(
+    product, out_shape=ShapeDtypeStruct((64, 64)), grid=(2, 2),
+    in_specs=(BlockSpec((32, 64), lambda i, j: (i, 0)),
+              BlockSpec((64, 32), lambda i, j: (0, j))),
+    out_specs=BlockSpec((32, 32), lambda i, j: (i, j)),
+)(a, b)
+p.realize()
+```
+
+This compiles the numerical span without executing it. Fill the input views and call `p.run()` to submit
+the prepared function. There is no implicit launch when an input write ends. The distributed form also
+records the collective declarations and rank ownership before `realize`.
+
 ### Program lifecycle and host access
 
 | Interface | Behavior |
 |---|---|
-| `Program(backend='cpu', *, functions=None, group=None, trace=False)` | Creates the SPMD declaration surface. Backends are `cpu`, `metal` and its alias `mps`. Every rank records the same program; ownership operands place work. |
+| `Program(backend='cpu', *, functions=None, group=None)` | Creates the SPMD declaration surface. Backends are `cpu`, `metal` and its alias `mps`. Every rank records the same program; ownership operands place work. |
 | `tensor(shape, block_shape=None, dtype=np.float32, transferable=True, *, contiguous=False)` | Declares blocked storage. `contiguous=True` gives blocks one shared backing. |
 | `copy(source.on(a), destination.on(b), *, queue=0)` | Records a local copy or native remote movement. Tensor copies intersect source and destination block cuts. Remote preparation binds original source and final destination views. |
 | `send`, `recv` | Aliases of `copy`. They are two names for the same graph declaration, not a runtime request/response pair. |
 | `replicate(source, peer)` | Declares and caches a copy of the source backing at another peer, retaining the source view's layout. |
 | `constant(ref, value=None)`, `is_constant(ref)` | Mark storage as constant, optionally fill it, and query that declaration. |
-| `write(ref)` | Host write context for a registered block. It checks current readers; CPU gives a NumPy view, while MPS currently stages through a NumPy buffer and copies on exit. Exit publishes the host input to the executor. |
+| `write(ref)` | Yields the input's existing torch tensor. It allocates no staging buffer and starts no execution. Fill inputs before submitting their prepared call. |
 | `export(ref)` | Records a local result use and returns a `Result`. Declare it before realization. |
-| `realize()`, alias `start()` | Builds dependencies, allocates local storage, prepares crossings, declares their order and starts worker threads. It also executes constant-only initial work. It is not a preparation-only function. |
-| `close()` | Ends the executor and releases its owned resources; unfinished activity may cause communicator revocation. Context-manager exit calls it. |
-| `group`, `rank`, `size`, `report`, `trace` | The communication group, physical rank information, failure report and optional execution trace. |
+| `realize()`, alias `start()` | Resolves read/write order, allocates storage, binds native crossings, and compiles numerical spans through `Function`. It executes no payload and starts no threads. |
+| `run` | The generated FX function, bound by `realize`. Its calls are fixed; it neither walks task state nor waits on work handles. |
+| `close()` | Ends owned group lifecycle. Context-manager exit calls it. |
+| `group`, `rank`, `size`, `graph` | The communicator, physical rank information and generated FX call graph. |
 
-`Result.ready` observes its task and event. `Result.tensor` returns the view when ready and raises `EAGAIN`
-otherwise. `Result.array` returns a read-only CPU view or conversion. `Result.consume()` releases the local
-export use in the executor. It is not a remote receipt acknowledgment.
+`Result.tensor` is the declared output view. Completion is observed for the whole submitted function,
+using the same external completion mechanism as the other compiled examples. There is no per-result
+readiness guard, consume acknowledgment, reader token, failure controller or execution trace.
 
-`MeshError(kind, code, *, peer=None, call=None, detail='')` reports a failed call. `Report` contains `code`,
-`kind`, `peer`, `call`, `detail`, `kernels` and `crossings`. The last two describe executor progress, not a
-performance measurement or an enumerated correctness suite.
+`_Task` retains declaration metadata only. `realize` computes overlapping read/write dependencies and a
+single order across all ranks. Maximal numerical spans use the common `Function` compiler. Crossings
+retain their original and final storage and use native `enqueue` calls. FX generates that fixed sequence;
+no Python scheduler chooses which task to run. Compilation failure propagates without running the source
+callable. Distributed CPU partial graphs currently fail at realization because the shared CPU transport
+blocks; they cannot select the deleted worker executor. Local CPU numerical graphs remain compilable.
 
-The internal `_Task` stores ownership, roles, input/output edges, guards, execution state, event and prepared
-bindings. `_Edge` stores its source, target, tokens, sticky state and outstanding work. `_Order` maintains a
-cyclic crossing order. The executor still uses a ready heap, conditions and reader tokens. These are the
-specific runtime interfaces listed for replacement in [manifest R03](../design/runtime-interface-removal-2026-10-25.md#r03-the-python-partial-tensor-executors-second-scheduling-system).
-The useful block and access descriptions do not require retaining that executor.
+A numerical kernel uses tensor operations that the FX compiler can trace. NumPy conversion or opaque host
+work is not an alternate execution path. Constants are input declarations; preparation does not execute a
+separate constant-only numerical graph. Repeated complete calls follow the same compiled graph.
 
 ### Collective declarations over blocks
 
@@ -144,13 +170,9 @@ each row, with at least `[m, l, O]`; gaps between rows are allowed. An associati
 an owner and combines them with a tree of kernel calls. It must declare `combine`, and custom `all_reduce`
 requires an owner map.
 
-`sync_on_remote_fill(*results)` explicitly waits for every result. `sync_on_some_remote_fill(*results)` waits
-for any result from one program. These are existing blocking host APIs, not preparation steps or requirements
-of one-sided transport. They are not the model for a numerical runtime.
-
 The movement preparation hooks build `SpanWrites` from original/final views and compact relay storage.
 Reduction preparation computes common logical cuts, then binds contiguous aliases of the original operands.
-`_declaration(task)` exports the ordered common `Call` groups. The full physical communicator remains present
+Each preparation returns its native bindings and common `Call` group. The full physical communicator remains present
 when some ranks only relay. [The `_native` adapter](../python/mesh/_native.py) supplies:
 
 | Interface | Role |
@@ -159,10 +181,10 @@ when some ranks only relay. [The `_native` adapter](../python/mesh/_native.py) s
 | `World.union_cuts(task, cuts)` | Exchange layout cuts during preparation. |
 | `World.prepare(keys)`, `World.of(queue, members)` | Bind logical queue/member keys to the physical communicator. |
 | `World.declare(tasks)` | Plan the prepared task declarations through the common library. |
-| `World.revoke()`, `World.close()` | Group lifecycle. |
+| `World.close()` | Group lifecycle. |
 | `dtype`, `numpy_dtype` | Normalize scalar types; NumPy conversion does not provide a bfloat16 dtype here. |
 | `allocate(numel, scalar, device, in_region)` | Prepare CPU/MPS storage, using region storage when required. |
-| `call(...)`, `prepare_writes(deliveries, group)`, `fragments(bindings, group)` | Adapt metadata, prepare native writes, and issue prepared reduction fragments. |
+| `call(...)`, `prepare_writes(deliveries, group)`, `prepare_fragments(bindings, group)` | Adapt metadata, prepare native writes, and prepare native reduction fragments. |
 
 ## The FX path
 
@@ -172,17 +194,17 @@ Sources: [declarations.py](../rdma/torch-mesh/torch_mesh/declarations.py),
 
 ### Whole-function declaration
 
-`Function(function, *arguments, parameters=(), compiler=None)` holds a numerical callable, its bound operands
+`Function(function, *arguments, parameters=())` holds a numerical callable, its bound operands
 and its preparation results. The tracer receives those operands explicitly as fake inputs; `run` binds them
 once for execution. The callable can also close over selected weights and layout metadata. If training is intended, it must include the desired
 backward operations; supplying parameters alone does not invent a backward graph.
 
 | Member | Work performed |
 |---|---|
-| `declare(group)` | Fake-traces the whole callable, retains parameter gradients as graph outputs, lowers communication, and invokes the chosen compiler now. Returns this group's ordered `Call` groups. |
+| `declare(group)` | Fake-traces the whole callable, retains parameter gradients as graph outputs, lowers communication, and invokes the shared mesh compiler now. Returns this group's ordered `Call` groups. |
 | `graph`, `groups` | The FX graph and declarations keyed by process-group name. |
 | `forms`, `preparations` | Crossing metadata and the storage-binding preparation built from it. |
-| `run` | The prepared numerical callable. With no compiler it is the original Python function with its arguments bound. With a compiler it is the compiled FX callable returning flattened outputs and gradients. |
+| `run` | The compiled FX callable with its arguments bound, returning flattened outputs and gradients. There is no eager execution option. |
 | `output_spec` | The output tree description needed to reconstruct the user's structured result. |
 | `prepare(repetitions=1)` | Bind the crossing storage and repeated forms before numerical execution, after the communicator's plan is installed. |
 | `__call__()` | Call `run`, restore parameter gradients and reconstruct structured outputs. Call `run` directly when those adaptations are unnecessary. |
@@ -210,8 +232,7 @@ change does not establish native command-buffer replay for FX.
 | `tensor_metadata(x)` | `None` or `(shape, stride, dtype)`. |
 | `crossing_key(form)` | The tensor metadata, dimension, rank sizes, group name, addition flag and repeat count that identify a crossing form. |
 | `crossing_slot(form, destination)` | Allocates an indexed native slot; records output shape; returns `(index, destination)`. |
-| `Preparations(forms)` | Collects repeated forms, eager slots and compiler-assigned bindings. Calling it prepares storage and native crossings; `repetitions` expands their count. |
-| `eager_index(...)` | Looks up a metadata key and advances an eager slot cursor. This remains a runtime alternative identified for removal in manifest R16. Compiled indexed nodes do not need this lookup. |
+| `Preparations(forms)` | Collects repeated forms and compiler-assigned bindings; an unindexed crossing fails preparation. Calling it prepares storage and native crossings; `repetitions` expands their count. |
 
 A form's first seven entries are `(x, w, dim, sizes, group_name, adds, repeats)`. Compiled forms also carry a
 sequence of `(index, destination)` bindings. `w=None` means no fused product; `destination=True` denotes the
@@ -251,7 +272,9 @@ hold prepared native state. `prepare_crossing` prepares an indexed dispatch and 
 yet the same as a fully prerecorded native numerical command stream.
 
 `SpanWrites` takes bindings `(tensor, [(offset, bytes), ...], source, destination)` and provides
-`execute(async_op=False)`. `ProcessGroupMesh.prepare_writes` constructs these from local tensor views.
+`enqueue()`. `ProcessGroupMesh.prepare_writes` constructs these from local tensor views.
+`Collectives` binds reduction `Call` operands through the same native preparation and encoder as generic
+collectives. Its `enqueue()` includes the GPU consumer dependencies without creating a host Work handle.
 `views.byte_spans(shape, byte_strides, itemsize)` returns a base displacement and logical-order byte spans;
 it reads metadata, not tensor values. Reversed and broadcast dimensions retain their mappings.
 
@@ -281,7 +304,6 @@ placement and parallel styles. It is not the `mesh.Tensor` type above.
 | `calls(tensor)` | Declare the gathers that this ragged tensor’s `full_tensor()` would issue. |
 | `plan(mesh, name, groups)` | Install ordered collective groups, or a callable producing those groups from the current split. `_replan` realizes a changed configuration. |
 | `gathered(x, dim, sizes, group)`, `summed(x, group)`, `scattered(x, dim, sizes, op='sum')` | Produce common collective declarations for the corresponding operations. |
-| `prepare_gather(x, dim, sizes, group, *, adds=False, w=None, repeats=1, batches=1)` | Prepare fused gathering/summing forms before execution. |
 | `ColwiseParallel`, `RowwiseParallel`, `SequenceParallel` | PyTorch parallel styles with ragged parameter and activation placement. |
 | `context_parallel_buffers(mesh, name, buffers, seq_dims, load_balance=True)` | Select each rank's sequence pieces. |
 | `context_parallel_unshard(mesh, name, buffers, seq_dims, load_balance=True, *, sequence_length=None)` | Reconstruct those sequences. |
@@ -385,8 +407,8 @@ contract for this integration.
 ## Current integration boundary
 
 The shared declarations preserve routes, unequal work shares, partial views and physical channel counts.
-The LSTM now uses the common AOT function preparation. The remaining work is concrete: replace the partial
-API's dynamic executor, remove eager crossing lookup, finish the constrained page/mask boundary, and connect
+The LSTM uses common AOT function preparation. The partial API compiles its execution order; eager crossing
+lookup is removed. Remaining work includes the constrained page/mask boundary and connecting
 prepared numerical commands without per-operation allocation or encoding waits. Those scopes are recorded
 in the [dated removal manifest](../design/runtime-interface-removal-2026-10-25.md).
 

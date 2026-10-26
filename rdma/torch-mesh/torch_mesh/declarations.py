@@ -14,7 +14,6 @@ _CAPTURE = ContextVar('mesh_compiled_declarations', default=None)
 
 
 _INDEXED_SHAPES = {}
-_EAGER_CROSSINGS = {}
 
 
 def tensor_metadata(x):
@@ -68,15 +67,6 @@ def compiled_graph(graph):
     if capture is not None:
         capture.append((declarations, forms))
     return forms
-
-
-def eager_index(x, w, dim, sizes, name, adds, repeats, destination):
-    form = (x, w, dim, tuple(sizes), name, adds, repeats)
-    key = (*crossing_key(form), destination)
-    slots, cursor = _EAGER_CROSSINGS[key]
-    index = slots[cursor]
-    _EAGER_CROSSINGS[key][1] = (cursor + 1) % len(slots)
-    return index
 
 
 def _value(argument):
@@ -258,32 +248,19 @@ class Preparations:
         from collections import Counter
         batches = Counter(crossing_key(form) for form in forms)
         prototype = lambda m: None if m is None else torch.empty_strided(m[0], m[1], dtype=m[2], device='meta')
-        self.forms, self.bindings, self.eager = [], {}, {}
+        self.forms, self.bindings = [], {}
         for key, count in batches.items():
             x, w, dim, sizes, name, adds, repeats = key
             group = dist.distributed_c10d._resolve_process_group(name)
             if len(sizes) > 1 and getattr(group, 'handle', 0):
                 form = (prototype(x), prototype(w), dim, list(sizes), name, adds, repeats)
                 self.forms.append((*form, count))
-        # Eager declarations retain one output per occurrence in the complete
-        # function. Compiled declarations already carry distinct graph slots.
-        for key, count in Counter(crossing_key(form) for form in forms if len(form) == 7).items():
-            x, w, dim, sizes, name, adds, repeats = key
-            group = dist.distributed_c10d._resolve_process_group(name)
-            if len(sizes) <= 1 or not getattr(group, 'handle', 0):
-                continue
-            form = (prototype(x), prototype(w), dim, list(sizes), name, adds, repeats)
-            for destination in (False, True):
-                eager_key = (*key, destination)
-                slots = list(_EAGER_CROSSINGS.get(eager_key, ([], 0))[0][:count])
-                slots.extend(crossing_slot(form, destination)[0] for _ in range(count - len(slots)))
-                self.eager[eager_key] = slots
-                for index in slots:
-                    self.bindings[index] = (*form, destination)
         for source in forms:
             key = crossing_key(source)
             x, w, dim, sizes, name, adds, repeats = key
-            for index, destination in source[7] if len(source) > 7 else ():
+            if len(sizes) > 1 and getattr(dist.distributed_c10d._resolve_process_group(name), 'handle', 0) and len(source) != 8:
+                raise ValueError('crossings must have compiler-assigned indices before preparation')
+            for index, destination in source[7] if len(source) == 8 else ():
                 self.bindings[index] = (prototype(x), prototype(w), dim, list(sizes), name, adds, repeats, destination)
 
     def __call__(self, repetitions=1):
@@ -294,8 +271,6 @@ class Preparations:
                 _stream.fused_prepare(*form[:-1], form[-1] * repetitions)
             for index, operands in self.bindings.items():
                 _stream.prepare_crossing(index, *operands)
-            for key, slots in self.eager.items():
-                _EAGER_CROSSINGS[key] = [slots, 0]
 
 
 class Function:
@@ -305,11 +280,11 @@ class Function:
     realized callable. ``declare`` retraces after placement changes. Compilation operates on the
     complete explicit forward/backward graph, with parameter gradients retained
     as outputs; a compiler cannot discard the backward as unused work. No payload
-    function is executed to discover communication. Eager execution keeps its
-    ordinary Python callable; compiled execution uses the realized FX callable.
+    function is executed to discover communication. Execution uses only the
+    realized FX callable; compilation failures propagate to the caller.
     """
-    def __init__(self, function, *arguments, parameters=(), compiler=None):
-        self.function, self.parameters, self.compiler = function, tuple(parameters), compiler
+    def __init__(self, function, *arguments, parameters=()):
+        self.function, self.parameters = function, tuple(parameters)
         self.arguments = arguments
         self.graph, self.groups, self.run, self.output_spec = None, {}, None, None
         self.forms, self.preparations = [], None
@@ -327,32 +302,26 @@ class Function:
             return (*values, *gradients)
 
         graph, declarations = trace(recorded, *self.arguments, parameters=self.parameters)
-        forms = []
-        declarations = lower(graph, forms=forms)
-        if self.compiler is None:
-            run = partial(self.function, *self.arguments)
-        else:
-            from torch._dynamo import lookup_backend
-            captured = []
-            token = _CAPTURE.set(captured)
-            try:
-                # Backward is already explicit in this graph. A second autograd
-                # layer would add unrelated saved tensors and gradient work.
-                with torch.no_grad():
-                    run = partial(lookup_backend(self.compiler)(graph, list(self.arguments)), *self.arguments)
-            finally:
-                _CAPTURE.reset(token)
-            if captured:
-                declarations, forms = {}, []
-                for lowered, prepared in captured:
-                    forms.extend(prepared)
-                    for name, calls in lowered.items():
-                        declarations.setdefault(name, []).extend(calls)
-            elif self.compiler not in ('eager', 'aot_eager'):
-                raise ValueError('this compiler must publish its final collective graph at configuration')
+        from . import compiler
+        captured = []
+        token = _CAPTURE.set(captured)
+        try:
+            # Backward is explicit in this graph. No numerical execution or
+            # alternative eager function is used to discover its declarations.
+            with torch.no_grad():
+                run = partial(compiler(graph, list(self.arguments)), *self.arguments)
+        finally:
+            _CAPTURE.reset(token)
+        if declarations and not captured:
+            raise RuntimeError('the compiler did not publish the complete communication graph')
+        declarations, forms = {}, []
+        for lowered, prepared in captured:
+            forms.extend(prepared)
+            for name, calls in lowered.items():
+                declarations.setdefault(name, []).extend(calls)
         self.graph, self.groups, self.run, self.forms = graph, declarations, run, forms
         self.preparations = Preparations(forms)
-        return declarations.get(group.group_name, [])
+        return declarations.get(group.group_name, []) if group is not None else []
 
     def prepare(self, repetitions=1):
         """Bind source/landing generations before entering the numerical call."""
@@ -361,8 +330,6 @@ class Function:
     def __call__(self):
         if self.run is None:
             raise RuntimeError('realize the function declaration before execution')
-        if self.compiler is None:
-            return self.run()
         from torch.utils._pytree import tree_unflatten
         from torch.distributed.tensor import DTensor
         from . import partition

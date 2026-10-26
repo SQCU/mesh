@@ -1,10 +1,9 @@
-"""The partial-tensor library's binding to the mesh's own (design/algorithm-sources.md#program): operands are torch
-tensors, the region's where they cross (torch_mesh.empty: rdma/NCCL.md "Memory"); every
-crossing and collective is libnccl-mesh's, through torch.distributed's "mesh" backend (rdma/torch-mesh/README.md):
-exact indexed WRITE plans and native reductions, including the split-KV partials merge
-(ncclMeshRedOpCreatePartials's operator). Host-path calls
-complete where they return, MPS ones are encoded on torch's stream and waited where their consumer runs.  It computes
-nothing: a program's numerics are its supplied kernels'."""
+"""Bindings from partial declarations to the common native transport.
+
+Preparation fixes operand views, collective metadata and physical write plans.
+The compiled graph enqueues them on the numerical stream, including the native
+consumer dependencies. No Work objects or host waits are used by this frontend.
+"""
 import os
 import json
 
@@ -82,23 +81,10 @@ class World:
 
     def declare(self, tasks):
         """Realize the common physical communicator's complete ordered graph."""
-        calls = []
-        for task in tasks:
-            declaration = getattr(task.run[0], 'declaration', None) if task.crossing else None
-            if declaration is not None:
-                if self.rank in task.members:
-                    calls.extend(declaration(task))
+        calls = [task.prepared[1] for task in tasks if task.crossing and self.rank in task.members]
         if self.group is not None:
             from torch_mesh import plan
             plan(self.group, calls)
-
-    # design/algorithm-sources.md#mesherror
-    def revoke(self):
-        """Every communicator's work in flight here ends with an error, and none is issued after it (torch_mesh
-        ProcessGroupMesh.revoke: ncclCommRevoke); its peers' waits end at their own revoke."""
-        groups = {g for g in self.groups.values() if g is not None} | ({self.group} if self.group is not None else set())
-        for group in groups:
-            group._get_backend(torch.device(self.device)).revoke()
 
     # design/algorithm-sources.md#program
     def close(self):
@@ -133,14 +119,13 @@ def allocate(numel, scalar, device, in_region):
     return torch.empty(max(1, numel), dtype=scalar, device=device)
 
 
-def fragments(bindings, group):
+def prepare_fragments(bindings, group):
     """One group of canonical native collectives over retained alias slices."""
     from torch_mesh import backend
-    calls, outputs = [], []
+    calls, operands = [], []
     for declaration, source, destination in bindings:
         code = declaration.op if isinstance(declaration.op, int) else backend.op(declaration.op)
         calls.append((declaration.kind, [source], [destination], declaration.counts or [], code, declaration.root))
-        if destination is not None:
-            outputs.append(destination)
-    device = next(t.device for _, source, destination in bindings for t in (source, destination) if t is not None)
-    return group._get_backend(device)._issue(calls, outputs, True)
+        operands.extend(t for t in (source, destination) if t is not None)
+    from torch_mesh import _stream
+    return _stream.Collectives(calls, group.handle, operands), [call for call, _, _ in bindings]

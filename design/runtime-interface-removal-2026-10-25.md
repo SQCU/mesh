@@ -49,16 +49,15 @@ does not establish that an implementation is faster or meets the model.
   Keep both numerical capabilities where useful. Delete their independent runtime selection interface.
   This path is exposed as a library module; this review does not establish that the current hourly calls it.
 
-### R03. The Python partial-tensor executor's second scheduling system
+### R03. The Python partial-tensor executor's second scheduling system — removed
 
-- **Remove:** `Program._ready`, `_next`, `_serve`, `_stream` and the runtime scheduling/guard/wait portions of
-  `_execute` and `_complete` in [python/mesh](../python/mesh/__init__.py). They repeatedly inspect token state,
-  maintain a heap and condition variables, and issue dependency waits while running the graph.
-- **Use:** that same module's `Partial`, `Tensor`, `Ref`, `BlockSpec`, `kernel_call` and `realize` declarations;
-  [collective.py](../python/mesh/collective.py)'s prepared transfers; native recorded command bindings.
-- **Integration still required:** lower the declared partial graph to the prepared backend. Historical
-  `929abb80`, `f531113f` and `3d32355e` contain prebound publication/operand work. They are source references,
-  not authority to restore their obsolete executor wholesale. The partial-tensor frontend must survive.
+The worker threads, condition variables, token edges, ready heap, runtime guards, per-edge Work waits,
+result-consume interface and blocking result helpers have been deleted. `Partial`, `Tensor`, `Ref`,
+`BlockSpec`, `kernel_call` and the collective declarations remain. Realization resolves their dependencies,
+compiles numerical spans with `declarations.Function`, and generates a fixed FX call sequence over those
+spans and native prepared bindings. It executes no initialization payload. Input access exposes the existing
+tensor without NumPy staging or implicit publication. Distributed CPU partial graphs fail preparation;
+the synchronous CPU transport is not used as a fallback. Shared native stream concerns remain R17.
 
 ### R04. Attention's runtime workspace pool
 
@@ -198,15 +197,13 @@ does not establish that an implementation is faster or meets the model.
   completion callback differs from inserting counter samples, forcing direct execution or draining for a
   precise timestamp. This item does not classify every existing completion counter as a synchronization.
 
-### R16. Runtime FX crossing lookup alongside prepared indices
+### R16. Runtime FX crossing lookup alongside prepared indices — removed
 
-- **Remove:** `eager_index`'s per-call metadata-key construction and `_EAGER_CROSSINGS` cursor lookup as the
-  execution interface in [declarations.py](../rdma/torch-mesh/torch_mesh/declarations.py).
-- **Use:** `compiled_graph`, `crossing_slot` and `Preparations`: graph occurrences already lower to
-  `indexed_step`/`indexed_step_out` with their prepared index.
-- **Integration still required:** a PyTorch callable must retain its semantics through a declared graph, with
-  output/gradient bindings prepared. PyTorch support does not require routing lookup or Python orchestration
-  for each operation. The existing optional compiler path is not a complete common native backend yet.
+`eager_index`, `_EAGER_CROSSINGS`, their occurrence cursor, and `prepare_gather` have been deleted.
+`Preparations` requires compiler-assigned indices. `Function` always uses the shared mesh compiler;
+its optional eager/compiler construction contract is removed. Unlowered multi-rank gather and fused-sum
+operations fail instead of running a metadata lookup or a generic gather substitute. The LSTM caller uses
+the compulsory compiler interface. Single-rank copies and products remain their ordinary numerical forms.
 
 ### R17. Implicit stream drains and a synchronous host collective executor
 
@@ -248,9 +245,9 @@ The [graph history](aot-graphs-and-pytorch.md) explains the connections and prio
 | [nccl-mesh-metal.h](../rdma/nccl-mesh-metal.h), `metal_program`, `metal_wait`, `metal_release` | Bind collective numerical operations into Metal encoders | Shared backend machinery, with current allocation and coarse dependency gaps. Callers should supply the compiled relation, not an independent wait policy. |
 | [routing.py](../rdma/routing.py), `Fabric`; [assignment.py](../rdma/assignment.py); [allocate.py](../rdma/allocate.py) | All-simple-path capacity model, shares, finite-difference feedback and projections | Configuration-side operands fit the model. Active measured hop mean/spread integration was not found; `completion_model` had no external caller in the searched scope. |
 | [lifetimes.py](../rdma/lifetimes.py), `Event`, `Read`, `Transfer`, `LifetimePlan` | Compile causal page-reuse relations | Preserve static analysis; remove runtime storage choice under R10. |
-| [python/mesh](../python/mesh/__init__.py), `Partial`, `Tensor`, `Ref`, `BlockSpec`, `Program` | Partial sums, slices and recorded tile calls | Strong existing declaration vocabulary; its current executor conflicts with the intended runtime (R03). |
+| [python/mesh](../python/mesh/__init__.py), `Partial`, `Tensor`, `Ref`, `BlockSpec`, `Program` | Partial sums, slices and recorded tile calls | Strong existing declaration vocabulary; its former runtime scheduler is replaced by compiled spans and native bindings (R03). |
 | [collective.py](../python/mesh/collective.py) | Gather, scatter, reduce, partials and prepared strided moves | Preserve semantic operations and common transport. Whole-fill synchronization is explicit, not a default. |
-| [partition.py](../rdma/torch-mesh/torch_mesh/partition.py), `RaggedShard`; [declarations.py](../rdma/torch-mesh/torch_mesh/declarations.py) | Ragged DTensor integration; fake tracing; full forward/backward declarations; indexed crossings | Valuable PyTorch frontend work. It does not yet make all eager callers or all backend launches AOT (R09, R16). |
+| [partition.py](../rdma/torch-mesh/torch_mesh/partition.py), `RaggedShard`; [declarations.py](../rdma/torch-mesh/torch_mesh/declarations.py) | Ragged DTensor integration; fake tracing; full forward/backward declarations; indexed crossings | Valuable PyTorch frontend work. It does not yet make all eager callers or all backend launches AOT (R09); indexed crossing lookup is now mandatory (R16). |
 | [mesh.py](../rdma/mesh.py), [mesh_mpi.py](../rdma/mesh_mpi.py), `WritePlan`, `Comm`; [backend.py](../rdma/torch-mesh/torch_mesh/backend.py), `ProcessGroupMesh` | Python, NumPy/MPI-style and PyTorch access to the same native collective library | Preserve frontend compatibility; raw extent contracts and synchronous host execution remain R11/R17. |
 | `_stream.mm`, `PreparedWrites`, `FusedForm`, `PreparedChain`; [fused.py](../rdma/torch-mesh/torch_mesh/fused.py) | Shared storage and fused crossings from PyTorch | Keep the bindings and numerical fusion; remove per-operation realization and excess joins (R07–R09). |
 | `linear.metal`, `streamed.metal`, `sparse.metal`, `structured.metal` | Dense/grouped products, coded-weight streaming, tile masks and rotations | Reusable numerical bodies, including native callers. Their Python wrappers still have R02/R05/R06 work. |
