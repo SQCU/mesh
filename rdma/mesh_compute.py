@@ -3,6 +3,24 @@ from functools import cache
 import json
 import plistlib
 import subprocess
+from pathlib import Path
+import re
+
+
+@cache
+def compilation():
+    """The native build manifest, for offline graph importers without Metal."""
+    path = Path(__file__).resolve().parents[1] / 'etc/compute/metal.def'
+    fields = {}
+    for line in path.read_text().splitlines():
+        line = line.split('//', 1)[0].strip()
+        if not line:
+            continue
+        field = re.fullmatch(r'MESH_METAL_VALUE\(([A-Z_]+),\s*([0-9]+)\)', line)
+        if field is None:
+            raise ValueError(f'{path}: invalid compilation operand {line!r}')
+        fields[field[1]] = int(field[2])
+    return fields
 
 
 def _read(*command):

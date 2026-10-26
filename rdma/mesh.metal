@@ -29,9 +29,9 @@ __attribute__((always_inline)) static inline W mesh_wait_bounded(volatile cohere
     W seen;
     uint k = 0u;
     do {
-        metal::atomic_thread_fence(metal::mem_flags::mem_device, metal::memory_order_seq_cst, static_cast<metal::thread_scope>(3));
+        metal::atomic_thread_fence(metal::mem_flags::mem_device, metal::memory_order_seq_cst, static_cast<metal::thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
         seen = *word;
-    } while (seen < target && ++k < polls && ((k & 1023u) != 0u || !stop || metal::atomic_load_explicit(stop, metal::memory_order_relaxed) == 0u));
+    } while (seen < target && ++k < polls && ((k % MESH_STOP_POLL_PERIOD) != 0u || !stop || metal::atomic_load_explicit(stop, metal::memory_order_relaxed) == 0u));
     return seen;
 }
 
@@ -71,7 +71,7 @@ __attribute__((always_inline)) static inline T mesh_payload(volatile coherent(sy
 // design/transport.md section 14; a failure word).
 template <typename W>
 __attribute__((always_inline)) static inline void mesh_publish(volatile coherent(system) device W *cell, ulong value) {
-    metal::atomic_thread_fence(metal::mem_flags::mem_device, metal::memory_order_seq_cst, static_cast<metal::thread_scope>(3));
+    metal::atomic_thread_fence(metal::mem_flags::mem_device, metal::memory_order_seq_cst, static_cast<metal::thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
     *cell = W(value);
 }
 

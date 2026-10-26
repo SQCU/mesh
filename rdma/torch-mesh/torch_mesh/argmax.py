@@ -27,7 +27,7 @@ from . import _stream
 from .streamed import instance
 
 SOURCE = Path(__file__).with_name('argmax.metal').read_text()
-THREADS = 256
+THREADS = _stream.compilation['DRAW_THREADS']
 _PIPELINES = {}
 
 
@@ -47,7 +47,7 @@ def draw(z, seed, keys, first=0, min_p=0):
     """Each row's token, int64 [...] (module docstring)."""
     z2, keys = _rows(z, keys)
     rows, v = z2.shape
-    blocks = max(1, min(256, v // 2048))
+    blocks = max(1, min(_stream.compilation['DRAW_MAX_BLOCKS'], v // _stream.compilation['DRAW_COLUMNS_PER_BLOCK']))
     cutoff = z2.amax(1) + math.log(min_p) if min_p > 0 else torch.full((rows,), -math.inf, device=z2.device)
     ids = torch.empty(rows, dtype=torch.int64, device=z2.device)
     parts = torch.empty(2 * rows * blocks, device=z2.device)
@@ -56,7 +56,7 @@ def draw(z, seed, keys, first=0, min_p=0):
     return ids.reshape(z.shape[:-1])
 
 
-def retain(z, seed, positions, head=2 ** 6, tail=2 ** 6):
+def retain(z, seed, positions, head=_stream.compilation['KEPT_HEAD'], tail=_stream.compilation['KEPT_TAIL']):
     """Each row's retained set (module docstring): ids int64 [..., head + tail], their z float32 [..., head + tail], and
     log Z float32 [...]."""
     if not all(n > 0 and n & (n - 1) == 0 for n in (head, tail)) or head + tail >= z.shape[-1]:

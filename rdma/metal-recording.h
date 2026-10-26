@@ -7,19 +7,19 @@ extern "C" {
 #endif
 
 struct MetalReplay {
-    _Alignas(32) id<MTLIndirectCommandBuffer> commands;
+    _Alignas(MESH_REPLAY_ALIGNMENT) id<MTLIndirectCommandBuffer> commands;
     id<MTLResidencySet> residency;
     id owner;
     uint32_t count;
     uint16_t buffers, memory;
 };
-_Static_assert(sizeof(struct MetalReplay) == 32, "prepared native replay");
-_Static_assert(_Alignof(struct MetalReplay) == 32, "prepared native replay alignment");
+_Static_assert(sizeof(struct MetalReplay) == MESH_REPLAY_BYTES, "prepared native replay");
+_Static_assert(_Alignof(struct MetalReplay) == MESH_REPLAY_ALIGNMENT, "prepared native replay alignment");
 
 // docs/kernels.md E2, Any program
 enum MetalForm { MetalFormIndirect, MetalFormEncoded, MetalFormSerial };
 // Build operands from the selected Metal configuration, shared by frontends.
-MTLCompileOptions *MetalCompilerOptions(void);
+MTLCompileOptions *MetalCompilerOptions(id<MTLDevice> device);
 
 // docs/kernels.md Any program.  A host program's operand whose storage holds `instances` slots of
 // `stride` bytes: invocation t binds slot t % instances (0 instances: slot t), its writes landing

@@ -13,6 +13,8 @@
 #define TORCH_MESH_ARGMAX
 #include <metal_stdlib>
 using namespace metal;
+constant constexpr uint MESH_SELECTION_BINS = 1u << MESH_SELECTION_RADIX_BITS;
+template <uint T> constant constexpr uint mesh_selection_words = MESH_SELECTION_BINS + MESH_SELECTION_STATE_WORDS + T / MESH_SIMD_WIDTH;
 
 // The draw's noise: the greatest z_v + g(seed, position, v) is a sample of softmax(z) [Gumbel 1954; the Gumbel-max trick,
 // Maddison, Tarlow & Minka 2014], and the greatest k a sample of k without replacement [Kool, van Hoof & Welling 2019];
@@ -56,7 +58,7 @@ __attribute__((always_inline)) static inline void mesh_take(thread float &m, thr
 // done (mesh_arrival_reset: metal-microbench docs/kernels.md, counts left by a cut dispatch), off the merge's path.
 template <bool System = false>
 __attribute__((always_inline)) static inline void mesh_arrival_fence() {
-    if constexpr (System) atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));
+    if constexpr (System) atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
     else atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
 }
 
@@ -81,21 +83,21 @@ __attribute__((always_inline)) static inline void mesh_arrival_reset(device atom
 }
 
 // A row's split reduction under mesh_take (a candidate (v, k) to the greatest, a normaliser (m, l) to the row's): the
-// threadgroup's into thread 0's (with All, into every thread's; tv, tk T / 32 each), and with `blocks` > 1 every block's
+// threadgroup's into thread 0's (with All, into every thread's; tv, tk T / MESH_SIMD_WIDTH each), and with `blocks` > 1 every block's
 // into the last arriver's thread 0 (slot: row * blocks + block of the records pv, pk; arrival: the row's word). True for
 // the threads holding the row's.
 template <uint T, bool All = false, typename V, typename K>
 __attribute__((always_inline)) static inline bool mesh_argmax(thread V &v, thread K &k, uint lid, threadgroup V *tv, threadgroup K *tk,
                                                               coherent(device) device V *pv = nullptr, coherent(device) device K *pk = nullptr,
                                                               device atomic_uint *arrival = nullptr, uint slot = 0, uint blocks = 1) {
-    for (ushort d = 16; d > 0; d /= 2) mesh_take(v, k, simd_shuffle_down(v, d), simd_shuffle_down(k, d));
-    if (T > 32) {
-        if (lid % 32 == 0) { tv[lid / 32] = v; tk[lid / 32] = k; }
+    for (ushort d = MESH_SIMD_WIDTH / 2; d > 0; d /= 2) mesh_take(v, k, simd_shuffle_down(v, d), simd_shuffle_down(k, d));
+    if (T > MESH_SIMD_WIDTH) {
+        if (lid % MESH_SIMD_WIDTH == 0) { tv[lid / MESH_SIMD_WIDTH] = v; tk[lid / MESH_SIMD_WIDTH] = k; }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (lid == 0) for (uint q = 1; q < T / 32; q++) mesh_take(v, k, tv[q], tk[q]);
+        if (lid == 0) for (uint q = 1; q < T / MESH_SIMD_WIDTH; q++) mesh_take(v, k, tv[q], tk[q]);
     }
     if (All) {
-        if (T > 32) {
+        if (T > MESH_SIMD_WIDTH) {
             if (lid == 0) { tv[0] = v; tk[0] = k; }
             threadgroup_barrier(mem_flags::mem_threadgroup);
             v = tv[0]; k = tk[0];
@@ -151,23 +153,23 @@ __attribute__((always_inline)) static inline uint mesh_order(float x) {
 // radix selection of the n-th key's order word, a byte a pass over a 256-bin histogram, then the candidates in ascending
 // order, each thread a contiguous span, put(i, c) at their places (put(i, 0xffffffff) past the last when fewer than n are
 // finite) [PyTorch topk: radix select, then gather]. Returns (o, c): the set is the candidates whose (order word, c) is
-// (o, c) or precedes it in that order. w: 260 + T / 32 words.
+// (o, c) or precedes it in that order. w: mesh_selection_words<T> words.
 template <uint T, typename K, typename P>
 __attribute__((always_inline)) static inline uint2 mesh_top(K key, uint lo, uint hi, uint n, uint lid, threadgroup uint *w, P put) {
     if (n == 0) return uint2(0xffffffffu, 0u);
     threadgroup atomic_uint *bins = (threadgroup atomic_uint *)w;
-    threadgroup uint *said = w + 256, *sums = w + 260;
+    threadgroup uint *said = w + MESH_SELECTION_BINS, *sums = w + MESH_SELECTION_BINS + MESH_SELECTION_STATE_WORDS;
     uint prefix = 0, need = n, mask = 0;
-    for (int shift = 24; shift >= 0 && need != 0xffffffffu; shift -= 8) {
-        for (uint d = lid; d < 256; d += T) atomic_store_explicit(&bins[d], 0u, memory_order_relaxed);
+    for (int shift = sizeof(uint) * 8 - MESH_SELECTION_RADIX_BITS; shift >= 0 && need != 0xffffffffu; shift -= MESH_SELECTION_RADIX_BITS) {
+        for (uint d = lid; d < MESH_SELECTION_BINS; d += T) atomic_store_explicit(&bins[d], 0u, memory_order_relaxed);
         threadgroup_barrier(mem_flags::mem_threadgroup);
         for (uint c = lo + lid; c < hi; c += T) {
             const uint o = mesh_order(key(c));
-            if (o != 0u && (o & mask) == prefix) atomic_fetch_add_explicit(&bins[(o >> shift) & 255u], 1u, memory_order_relaxed);
+            if (o != 0u && (o & mask) == prefix) atomic_fetch_add_explicit(&bins[(o >> shift) & (MESH_SELECTION_BINS - 1)], 1u, memory_order_relaxed);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         if (lid == 0) {
-            uint d = 256, above = 0;
+            uint d = MESH_SELECTION_BINS, above = 0;
             for (; d > 0; d--) {
                 const uint h = atomic_load_explicit(&bins[d - 1], memory_order_relaxed);
                 if (above + h >= need) break;
@@ -178,15 +180,15 @@ __attribute__((always_inline)) static inline uint2 mesh_top(K key, uint lo, uint
             said[2] = 0xffffffffu;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        prefix = said[0]; need = said[1]; mask |= 255u << shift;
+        prefix = said[0]; need = said[1]; mask |= (MESH_SELECTION_BINS - 1) << shift;
     }
     auto scan = [&](uint x, thread uint &total) {
         const uint inner = simd_prefix_exclusive_sum(x);
-        if (lid % 32 == 31) sums[lid / 32] = inner + x;
+        if (lid % MESH_SIMD_WIDTH == MESH_SIMD_WIDTH - 1) sums[lid / MESH_SIMD_WIDTH] = inner + x;
         threadgroup_barrier(mem_flags::mem_threadgroup);
         uint before = 0;
         total = 0;
-        for (uint q = 0; q < T / 32; q++) { before += q < lid / 32 ? sums[q] : 0u; total += sums[q]; }
+        for (uint q = 0; q < T / MESH_SIMD_WIDTH; q++) { before += q < lid / MESH_SIMD_WIDTH ? sums[q] : 0u; total += sums[q]; }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         return before + inner;
     };
@@ -214,7 +216,7 @@ __attribute__((always_inline)) static inline uint2 mesh_top(K key, uint lo, uint
 // the tail, the `tail` greatest z + g(seed, key, id) outside the head (the Gumbel-top-k with the draw's own noise, so two
 // models' tails at a position coincide where their distributions do), each in ascending candidate order, so no place
 // names the greatest; an absent entry (fewer finite z) is (-1, -inf). True in thread 0, holding the row's (m, l).
-// w: 260 + T / 32 words.
+// w: mesh_selection_words<T> words.
 template <uint T, typename Z, typename Id, typename I>
 __attribute__((always_inline)) static inline bool mesh_retain(thread float &m, thread float &l, Z z, uint seed, uint key, Id id, uint head,
                                                               uint tail, uint lo, uint hi, uint lid, threadgroup uint *w, device I *ids,
@@ -226,7 +228,7 @@ __attribute__((always_inline)) static inline bool mesh_retain(thread float &m, t
         const uint o = mesh_order(x);
         return o > top.x || (o == top.x && c <= top.y) ? -INFINITY : x + mesh_gumbel(seed, key, id(c));
     }, lo, hi, tail, lid, w, [&](uint i, uint c) { put(head + i, c); });
-    return mesh_normaliser<T>(m, l, z, lo, hi, lid, (threadgroup float *)w, (threadgroup float *)w + T / 32);
+    return mesh_normaliser<T>(m, l, z, lo, hi, lid, (threadgroup float *)w, (threadgroup float *)w + T / MESH_SIMD_WIDTH);
 }
 
 // argmax.py's draw: row group.y of z [rows, v] in blocks (group.x), each row's token first + c (words: v, seed, first,
@@ -237,8 +239,8 @@ kernel void mesh_draw_rows(device const float *z [[buffer(0)]], device const uin
                            device atomic_uint *arrivals [[buffer(5)]], constant uint *words [[buffer(6)]],
                            uint2 group [[threadgroup_position_in_grid]], uint2 groups [[threadgroups_per_grid]],
                            uint lid [[thread_index_in_threadgroup]]) {
-    threadgroup float tv[T / 32];
-    threadgroup uint tk[T / 32];
+    threadgroup float tv[T / MESH_SIMD_WIDTH];
+    threadgroup uint tk[T / MESH_SIMD_WIDTH];
     const uint v = words[0], first = words[2], blocks = words[3], r = group.y, span = (v + blocks - 1) / blocks,
                lo = min(v, group.x * span), hi = min(v, lo + span);
     float best;
@@ -254,7 +256,7 @@ template <uint T, uint H, uint M>
 kernel void mesh_retain_rows(device const float *z [[buffer(0)]], device const uint *positions [[buffer(1)]], device long *ids [[buffer(2)]],
                              device float *kept [[buffer(3)]], device float *log_z [[buffer(4)]], constant uint *words [[buffer(5)]],
                              uint2 group [[threadgroup_position_in_grid]], uint lid [[thread_index_in_threadgroup]]) {
-    threadgroup uint w[260 + T / 32];
+    threadgroup uint w[mesh_selection_words<T>];
     const uint v = words[0], r = group.y;
     float m, l;
     if (mesh_retain<T>(m, l, [&](uint c) { return z[ulong(r) * v + c]; }, words[1], positions[r], [&](uint c) { return c; }, H, M, 0, v, lid,

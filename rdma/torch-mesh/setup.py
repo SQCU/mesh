@@ -21,7 +21,7 @@ from setuptools import setup  # noqa: E402
 from torch.utils.cpp_extension import BuildExtension, CppExtension  # noqa: E402
 
 setup(name='torch-mesh', version='0.4', packages=['torch_mesh'], package_data={'torch_mesh': ['*.metal']},
-      ext_modules=[CppExtension('torch_mesh._stream', ['torch_mesh/_stream.mm'], include_dirs=[RDMA], library_dirs=[RDMA],
+      ext_modules=[CppExtension('torch_mesh._stream', ['torch_mesh/_stream.mm'], include_dirs=[RDMA, str(Path(RDMA).parent / 'etc/compute')], library_dirs=[RDMA],
                                 libraries=['nccl-mesh'],
                                 extra_compile_args=[target, '-Werror=unguarded-availability-new'],
                                 extra_link_args=[target, f'-Wl,-rpath,{RDMA}', '-framework', 'Metal', '-framework', 'Foundation'])],

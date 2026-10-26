@@ -33,7 +33,7 @@ enum { COMBINE_SUM, COMBINE_PROD, COMBINE_MAX, COMBINE_MIN, COMBINE_MERGE };
 static const size_t SIZE[ncclNumTypes] = {1, 1, 4, 4, 8, 8, 2, 4, 8, 2, 1, 1};
 /* a failure's message: its text, and `id`, where the message is kept with its failure (a communicator's, comm_fail; a
    non-blocking init's, init_run), the count of messages the process had kept when it was (`messages`), else 0 */
-struct said { uint64_t id; char text[512]; };
+struct said { uint64_t id; char text[MESH_NCCL_DIAGNOSTIC_BYTES]; };
 static _Atomic uint64_t messages;
 /* this thread's last failure's message (ncclGetLastError): formatted by fail (id 0), or a copy of a kept one (told) */
 static _Thread_local struct said last;
@@ -1029,15 +1029,14 @@ ncclResult_t ncclGetUniqueId(ncclUniqueId *id) {
 
 /* whether comm was revoked; a group on it failed naming it */
 static int revoked(ncclComm_t comm) { return __atomic_load_n(&comm->revoked, __ATOMIC_SEQ_CST); }
-/* design/rubrics.md M3, C5: each wait of a bootstrap a slice of BOOTSTRAP_SLICE_MS (a poll's timeout, a placed socket's
+/* design/rubrics.md M3, C5: each wait of a bootstrap a slice of MESH_BOOTSTRAP_SLICE_MS (a poll's timeout, a placed socket's
    SO_RCVTIMEO and SO_SNDTIMEO), after which the revoke and the phase's deadline (`until`) are read again: no wait of an
    init lasts past its phase's deadline, blocking or not, the program ending there (design/data-model.md section 6),
    and a revoke ends a non-blocking one within a slice */
-#define BOOTSTRAP_SLICE_MS 100
 /* a poll's timeout in ms: a slice, or what is left of the phase's deadline where less (past it, the program ends) */
 static int bootstrap_slice(const struct ncclComm *comm) {
   const uint64_t left = mesh_deadline_left(&comm->until);
-  return left < (uint64_t)BOOTSTRAP_SLICE_MS * 1000000 ? (int)((left + 999999) / 1000000) : BOOTSTRAP_SLICE_MS;
+  return left < (uint64_t)MESH_BOOTSTRAP_SLICE_MS * 1000000 ? (int)((left + 999999) / 1000000) : MESH_BOOTSTRAP_SLICE_MS;
 }
 /* `size` bytes sent or received whole on comm's bootstrap socket `fd`: 0, ECANCELED (revoked), ECONNRESET (the peer
    closed), or the errno; past the phase's deadline the program ends */
@@ -1059,10 +1058,10 @@ static ncclResult_t revoked_fail(ncclComm_t comm) {
 }
 
 /* socket `fd` of comm's init placed at peers[r] (-1: the one there closed), blocking in slices (an accepted one takes
-   its listener's O_NONBLOCK; each send and receive returns within BOOTSTRAP_SLICE_MS: whole), under comm's guard, where
+   its listener's O_NONBLOCK; each send and receive returns within MESH_BOOTSTRAP_SLICE_MS: whole), under comm's guard, where
    a revoke shuts it down (ncclCommRevoke), a send on it after that or a peer's reset an error, never SIGPIPE */
 static void bootstrap_put(struct ncclComm *comm, int r, int fd) {
-  const struct timeval slice = {0, BOOTSTRAP_SLICE_MS * 1000};
+  const struct timeval slice = {0, MESH_BOOTSTRAP_SLICE_MS * 1000};
   if (fd >= 0) {
     fcntl(fd, F_SETFL, 0);
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &(int){1}, sizeof(int));
@@ -2590,12 +2589,12 @@ static void schedule_laid(struct ncclComm *comm, struct schedule *plans) {
    immutable until communicator release. Payload generations also remain
    distinct; transport dependencies, not live allocator observations, order them. */
 static void *binding_storage(struct ncclComm *comm, size_t bytes, enum storage_role role) {
-  const size_t alignment=role==STORAGE_PAYLOAD?comm->page:64;
+  const size_t alignment=role==STORAGE_PAYLOAD?comm->page:MESH_RECORD_ALIGNMENT;
   const size_t length=(bytes+alignment-1)/alignment*alignment;
   const uint32_t index=comm->storage_current[role];
   struct storage_page *page=index?comm->storage+index-1:NULL;
   if(!page || length>page->bytes-page->used) {
-    const size_t extent=length>65536?length:65536;
+    const size_t extent=length>MESH_COMPILED_STORAGE_BYTES?length:MESH_COMPILED_STORAGE_BYTES;
     struct storage_page *grown=realloc(comm->storage,(comm->storage_count+1)*sizeof *grown);
     if(!grown){fail(ncclSystemError,"out of memory");return NULL;}
     comm->storage=grown;

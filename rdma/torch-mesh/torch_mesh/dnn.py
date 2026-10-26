@@ -39,7 +39,7 @@ class DNN:
         if (local == 0) mesh_step_counts(*b.p, b.a, b.v);
     }
     threadgroup_barrier(mem_flags::mem_device);
-    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));
+    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
 '''
         source = fused.steps() + f'#define CHANNELS {self.channels}\n' + fold_args + f'''
 kernel void fold(device const float *own [[buffer(0)]], {inputs}, device float *out [[buffer({peers + 1})]],

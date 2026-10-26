@@ -47,13 +47,13 @@ kernel void product(device INPUT *X [[buffer(0)]], device INPUT *W [[buffer(1)]]
         }
     }
 #if FUSED
-    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));
+    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
     threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
     threadgroup uint last[1];
     if (local == 0) last[0] = atomic_fetch_add_explicit(arrivals, 1u, memory_order_relaxed) == uint(((M+ROWS*ROW_GROUPS-1)/(ROWS*ROW_GROUPS))*((N+COLUMNS*COLUMN_GROUPS-1)/(COLUMNS*COLUMN_GROUPS))*s.shape.w-1);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (last[0]) {
-        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));
+        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
         for (uint k = 0; k < CHANNELS; k++) if (s.publish[k].p)
             mesh_step_release(*s.publish[k].p, s.publish[k].a, local);
         if (local == 0) atomic_store_explicit(arrivals, 0u, memory_order_relaxed);

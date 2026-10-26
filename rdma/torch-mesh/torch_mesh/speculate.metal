@@ -149,7 +149,7 @@ kernel void mesh_spec_steps(device uint *state [[buffer(0)]], device uint *histo
     mesh_spec_step<R, ORDER, T>(state, history, selected, teacher, taught, capacity, context, words, stride, record, shared, lane);
 }
 #ifdef MESH_SPEC_ROWS
-template [[host_name("mesh_spec_steps_rows")]] [[kernel]] decltype(mesh_spec_steps<MESH_SPEC_ROWS, MESH_SPEC_ORDER, 1024>)
-    mesh_spec_steps<MESH_SPEC_ROWS, MESH_SPEC_ORDER, 1024>;
+template [[host_name("mesh_spec_steps_rows")]] [[kernel]] decltype(mesh_spec_steps<MESH_SPEC_ROWS, MESH_SPEC_ORDER, MESH_SPEC_THREADS>)
+    mesh_spec_steps<MESH_SPEC_ROWS, MESH_SPEC_ORDER, MESH_SPEC_THREADS>;
 #endif
 #endif

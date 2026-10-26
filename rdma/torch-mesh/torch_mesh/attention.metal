@@ -214,7 +214,8 @@ __attribute__((always_inline)) static inline void mesh_merge_row(P parts, uint i
 //   simdgroup's column blocks, m and l its rows'.
 template <typename A>
 __attribute__((always_inline)) static inline void mesh_attention_tile(thread A &a) {
-    constexpr uint D = A::dims, NSG = A::simdgroups, PAGE = 16, C = NSG * PAGE, DB = D / 8, OB = DB / NSG, RS = 8 / NSG > 0 ? 8 / NSG : 1;
+    constexpr uint D = A::dims, NSG = A::simdgroups, PAGE = A::page_extent, C = NSG * PAGE, DB = D / 8, OB = DB / NSG, RS = 8 / NSG > 0 ? 8 / NSG : 1;
+    static_assert(PAGE == MESH_ATTENTION_TILE_PAGE, "attention kernel and declared KV page layout disagree");
     const uint s = a.s, lane = a.lane, stride = a.stride;
     for (uint e = a.t; e < 64; e += NSG * 32) a.diag[e] = 0.0f;
     a.load_q();
@@ -319,7 +320,7 @@ struct mesh_unmasked {
 // which the merge passes over).
 template <uint D, typename KV, typename F = device float *, typename F4 = device float4 *, typename M = mesh_unmasked>
 struct mesh_tile {
-    enum : uint { dims = D, simdgroups = 4, region = 8 * D > 4 * D + 12 * 64 ? 8 * D : 4 * D + 12 * 64 };
+    enum : uint { dims = D, page_extent = KV::page_extent, simdgroups = 4, region = 8 * D > 4 * D + 12 * 64 ? 8 * D : 4 * D + 12 * 64 };
     KV kv;
     device const half *Q;
     F mp;
@@ -347,8 +348,8 @@ struct mesh_tile {
         for (uint r = 0; r < 8; ++r)
             if (rows[r] != 0xFFFFFFFFu && hi[r] > lo[r]) { low = min(low, lo[r]); high = max(high, hi[r]); }
         if (high == 0u) low = 0u;
-        base = low / 16;
-        pages = (high + 15) / 16 - base;
+        base = low / page_extent;
+        pages = (high + page_extent - 1) / page_extent - base;
         J = splits;
     }
 
@@ -367,7 +368,7 @@ struct mesh_tile {
         return p < pages && kv.at(base + p, k, v);
     }
 
-    __attribute__((always_inline)) uint first(uint i, uint w) { return (base + j + J * (simdgroups * i + w)) * 16; }
+    __attribute__((always_inline)) uint first(uint i, uint w) { return (base + j + J * (simdgroups * i + w)) * page_extent; }
 
     __attribute__((always_inline)) bool live(uint r, uint position) {
         return position >= lo[r] && position < hi[r] && (M::exact || mod.keep(query[r].x, query[r].y, position));

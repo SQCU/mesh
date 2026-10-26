@@ -139,7 +139,7 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
             }
         }
         threadgroup_barrier(mem_flags::mem_device);
-        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));
+        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
         for (uint q = tid; q < elements.y; q += THREADS) {
             const uint i = elements.x + q;
             const uint row = i / K, column = i % K;

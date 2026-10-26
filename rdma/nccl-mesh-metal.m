@@ -46,7 +46,7 @@ static NSMutableDictionary *kernels_;
 static NSMutableArray *retiring_;
 /* the text of this thread's last failure here that is composed (say): a result's message (struct metal_result), its
    caller's to carry before the thread's next step */
-static _Thread_local char said_[512];
+static _Thread_local char said_[MESH_NCCL_DIAGNOSTIC_BYTES];
 
 static const char *say(const char *format, ...) __attribute__((format(printf, 1, 2)));
 static const char *say(const char *format, ...) {
@@ -216,7 +216,7 @@ static struct metal_result record4(struct metal_program *program, id<MTLBuffer> 
   }
   if(!pages->page || pages->used+RECORD>pages->page.length) {
     [pages->page release];
-    pages->page=[program->residency.device newBufferWithLength:65536 options:MTLResourceStorageModeShared];
+    pages->page=[program->residency.device newBufferWithLength:MESH_COMMAND_DATA_BYTES options:MTLResourceStorageModeShared];
     pages->used=0;
     if(!pages->page)return metal_failed(ENOMEM);
     metal_resident(program,pages->page);
@@ -243,9 +243,9 @@ static struct metal_result dispatch4(struct metal_program *program, id<MTLComput
   id<MTL4ComputeCommandEncoder> encoder = program->encoder4;
   [encoder setComputePipelineState:state];
   [encoder setArgumentTable:program->table];
-  const NSUInteger most = group ? 1024 : 256, width = state.maxTotalThreadsPerThreadgroup < most ? state.maxTotalThreadsPerThreadgroup : most;
+  const NSUInteger most = group ? MESH_TRANSPORT_GROUP_THREADS : MESH_TRANSPORT_ELEMENT_THREADS, width = state.maxTotalThreadsPerThreadgroup < most ? state.maxTotalThreadsPerThreadgroup : most;
   if (group) [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
-  else [encoder dispatchThreads:MTLSizeMake(units < (1u << 20) ? (NSUInteger)units : (1u << 20), 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+  else [encoder dispatchThreads:MTLSizeMake(units < MESH_TRANSPORT_GRID_THREADS ? (NSUInteger)units : MESH_TRANSPORT_GRID_THREADS, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
   [encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
   return METAL_DONE;
 }
@@ -253,7 +253,7 @@ static struct metal_result dispatch4(struct metal_program *program, id<MTLComput
 /* kernel `kind` (KINDS_OF) on buffers d, s, a and v (0, 1, 3 and 4; an absent one d, and v, where none is given, the
    program's failure words: metal_gate) and the arguments p (2, its polls the program's where v is such words), the
    progress word (5; the classic form binds d there, which no kernel then writes): a GROUP kernel (`group`: publish,
-   spin) as one threadgroup of up to 1024 threads, any other over `units` threads */
+   spin) as one threadgroup of the configured width, any other over `units` threads */
 static struct metal_result record_step(struct metal_program *program, uint32_t kind, void *d, void *s, void *a, void *v, struct args p);
 static int recording_on(const struct metal_program *program);
 static struct metal_result dispatch(struct metal_program *program, uint32_t kind, void *d, void *s, void *a, void *v, struct args p,
@@ -278,9 +278,9 @@ static struct metal_result dispatch(struct metal_program *program, uint32_t kind
     [encoder setBuffer:(id<MTLBuffer>)(a ? a : d) offset:0 atIndex:3];
     [encoder setBuffer:(id<MTLBuffer>)(v ? v : d) offset:0 atIndex:4];
     [encoder setBuffer:(id<MTLBuffer>)d offset:0 atIndex:5];
-    const NSUInteger most = group ? 1024 : 256, width = state.maxTotalThreadsPerThreadgroup < most ? state.maxTotalThreadsPerThreadgroup : most;
+    const NSUInteger most = group ? MESH_TRANSPORT_GROUP_THREADS : MESH_TRANSPORT_ELEMENT_THREADS, width = state.maxTotalThreadsPerThreadgroup < most ? state.maxTotalThreadsPerThreadgroup : most;
     if (group) [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
-    else [encoder dispatchThreads:MTLSizeMake(units < (1u << 20) ? (NSUInteger)units : (1u << 20), 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+    else [encoder dispatchThreads:MTLSizeMake(units < MESH_TRANSPORT_GRID_THREADS ? (NSUInteger)units : MESH_TRANSPORT_GRID_THREADS, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
   }
   return METAL_DONE;
 }
@@ -526,7 +526,7 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
     for (size_t x = 0; x < r->deps; x++) dep[x] = (struct track_dep){r->dep[x].count, r->dep[x].other, 0};
     uint64_t *count = (uint64_t *)(base + at_count);
     for (uint32_t t = 0; t < T; t++) count[t] = t < tracks ? consumed[t] : 0;
-    const NSUInteger width = state.maxTotalThreadsPerThreadgroup < 1024 ? state.maxTotalThreadsPerThreadgroup : 1024;
+    const NSUInteger width = state.maxTotalThreadsPerThreadgroup < MESH_TRANSPORT_GROUP_THREADS ? state.maxTotalThreadsPerThreadgroup : MESH_TRANSPORT_GROUP_THREADS;
     if (program->encoder4) {
       metal_resident(program, records);
       for (id b in r->named) metal_resident(program, (void *)b);

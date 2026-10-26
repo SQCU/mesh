@@ -653,20 +653,20 @@ kernel void streamed_scale_rows(device const T *x [[buffer(0)]], device half *ou
                                 uint2 group [[threadgroup_position_in_grid]], uint2 local [[thread_position_in_threadgroup]],
                                 uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
     const streamed_dims d = dims_of(dims);
-    threadgroup float most[8];
+    threadgroup float most[MESH_STREAMED_SCALE_THREADS / MESH_SIMD_WIDTH];
     const ulong base = ulong(group.x) * d.columns;
     float m = 0.0f;
-    for (uint j = local.x; j < d.columns; j += 256) m = max(m, fabs(float(x[base + j])));
+    for (uint j = local.x; j < d.columns; j += MESH_STREAMED_SCALE_THREADS) m = max(m, fabs(float(x[base + j])));
     m = simd_max(m);
     if (lane == 0) most[simd] = m;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     m = most[0];
-    for (uint s = 1; s < 8; s++) m = max(m, most[s]);
+    for (uint s = 1; s < MESH_STREAMED_SCALE_THREADS / MESH_SIMD_WIDTH; s++) m = max(m, most[s]);
     int e = 0;
     frexp(m, e);
     const float scale = m > 0.0f ? ldexp(1.0f, -e) : 1.0f;
     if (local.x == 0) factor[group.x] = scale;
-    for (uint j = local.x; j < d.columns; j += 256) out[base + j] = half(float(x[base + j]) * scale);
+    for (uint j = local.x; j < d.columns; j += MESH_STREAMED_SCALE_THREADS) out[base + j] = half(float(x[base + j]) * scale);
 }
 
 template [[host_name("streamed_scale_rows_float")]] [[kernel]] decltype(streamed_scale_rows<float>) streamed_scale_rows<float>;
@@ -926,7 +926,7 @@ static inline __attribute__((always_inline)) void fragment_coop(W w, half h, thr
 
 // A tile of width B into a ring slot in natural order, value (k, n) at slot[k * FRAGMENT_RING + n], times half its step
 // (fragment_coop's values: the same right input, its slots the canonical lanes').
-#define FRAGMENT_RING 40u
+#define FRAGMENT_RING (MESH_WEIGHT_ROW_GROUP + MESH_STREAMED_RING_PADDING)
 template <uint B, typename W>
 static inline __attribute__((always_inline)) void fragment_ring(W w, half h, threadgroup half *slot, uint lane) {
     const uint c = fragment_c(lane), kb = fragment_kb(lane);
@@ -989,13 +989,13 @@ kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const u
                           uint lane [[thread_index_in_simdgroup]], uint thread_id [[thread_index_in_threadgroup]]) {
     const streamed_dims d = dims_of(dims);
     using namespace mpp::tensor_ops;
-    constexpr bool SPLIT = RING >= 8;
+    constexpr bool SPLIT = RING >= MESH_COOPERATIVE_MIN_ROWS;
     constexpr uint PER = (TILES + J - 1) / J, STEPS = (PER + SK - 1) / SK, SUMS = SPLIT ? 0 : BANDS * SK * M * 32;
     constexpr uint RR = RING ? RING : 1, GROUP = SPLIT ? SK + M / RR : (RING ? 2 : 1) * SK, OM = SPLIT ? RING : M;
-    static_assert(RING <= 1 || (RING >= 8 && RING <= 64 && (RING & (RING - 1)) == 0 && M % RR == 0),
+    static_assert(RING <= 1 || (RING >= MESH_COOPERATIVE_MIN_ROWS && RING <= MESH_COOPERATIVE_MAX_ROWS && (RING & (RING - 1)) == 0 && M % RR == 0),
                   "RING 0, 1 (the paired ring) or the role split's consumer rows, a power of two from 8 to 64 dividing M");
-    static_assert(BANDS * GROUP <= 32, "a threadgroup of at most 1024 threads");
-    static_assert(!SPLIT || 2 * BANDS * SK * (32 * FRAGMENT_RING * 2 + 4) + 4 * E::stage <= 32768, "the role split's ring in 32 KB");
+    static_assert(BANDS * GROUP * MESH_SIMD_WIDTH <= MESH_DEVICE_THREADGROUP_THREADS, "threadgroup exceeds the compilation device limit");
+    static_assert(!SPLIT || 2 * BANDS * SK * (32 * FRAGMENT_RING * 2 + 4) + 4 * E::stage <= MESH_DEVICE_THREADGROUP_BYTES, "role-split storage exceeds the compilation device limit");
     threadgroup float region[SUMS > E::stage ? SUMS : E::stage];
     threadgroup float (*sums)[SK][M * 32] = (threadgroup float (*)[SK][M * 32])region;
     threadgroup half ring[RING ? 2 : 1][BANDS][SK][RING ? 32 * FRAGMENT_RING : 1];
@@ -1167,29 +1167,30 @@ kernel void streamed_panel(device const uint *codes [[buffer(0)]], device const 
                            uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
     const streamed_dims d = dims_of(dims);
     using namespace mpp::tensor_ops;
-    const uint KN = 40, outputs = d.outputs, rows = d.rows, per = d.per, finish = d.finish, pitch = d.pitch ? d.pitch : TILES;
+    constexpr uint KN = MESH_WEIGHT_ROW_GROUP + MESH_STREAMED_RING_PADDING;
+    const uint outputs = d.outputs, rows = d.rows, per = d.per, finish = d.finish, pitch = d.pitch ? d.pitch : TILES;
     const uint stride = finish ? d.stride : d.split;
     const float cap = d.cap;
-    threadgroup half panel[256 * 40];
+    threadgroup half panel[(MESH_STREAMED_PANEL_TILES * MESH_WEIGHT_ROW_GROUP) * KN];
     const uint blocks = (rows + M - 1) / M, row0 = (group.y % blocks) * M, share = group.y / blocks, bw = bands[group.x];
     xs += streamed_slab(bw, d.inputs, TILES * 32);
     // matmul2d takes no const element type: the view is the read-only binding's (xs is never written)
     auto X = tensor(const_cast<device half *>(xs), dextents<int, 2>{int(TILES * 32), int(rows)}, array<int, 2>{1, int(TILES * 32)});
-    auto W = tensor(panel, dextents<int, 2>{32, 256}, array<int, 2>{1, int(KN)});
-    constexpr auto descriptor = matmul2d_descriptor(M, 32, 256, false, false, false, matmul2d_descriptor::mode::multiply_accumulate);
-    matmul2d<descriptor, execution_simdgroups<8>> op;
+    auto W = tensor(panel, dextents<int, 2>{32, (MESH_STREAMED_PANEL_TILES * MESH_WEIGHT_ROW_GROUP)}, array<int, 2>{1, int(KN)});
+    constexpr auto descriptor = matmul2d_descriptor(M, 32, (MESH_STREAMED_PANEL_TILES * MESH_WEIGHT_ROW_GROUP), false, false, false, matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<descriptor, execution_simdgroups<MESH_STREAMED_PANEL_TILES>> op;
     auto acc = op.template get_destination_cooperative_tensor<decltype(X), decltype(W), float>();
     for (uint i = 0; i < acc.get_capacity(); ++i) acc[i] = 0;
     device const uint *words = tiles + group.x * pitch;
     const uint base = streamed_base(bw);
     for (uint p = share * per; p < share * per + per; p++) {
-        const uint t0 = p * 8;
+        const uint t0 = p * MESH_STREAMED_PANEL_TILES;
         if (t0 >= TILES) break;
         threadgroup_barrier(mem_flags::mem_threadgroup);
         fragment_panel<TILES, WIDTHS, true, LOADS>(codes, words, base, t0, simd, lane, panel, KN);
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        auto weights = W.slice<32, 256>(0, 0);
-        if (t0 + 8 > TILES) {
+        auto weights = W.slice<32, (MESH_STREAMED_PANEL_TILES * MESH_WEIGHT_ROW_GROUP)>(0, 0);
+        if (t0 + MESH_STREAMED_PANEL_TILES > TILES) {
             const uint width = (TILES - t0) * 32;
             for (uint i = 0; i < acc.get_capacity(); ++i) {
                 if (!acc.is_valid_element(i)) continue;
@@ -1202,7 +1203,7 @@ kernel void streamed_panel(device const uint *codes [[buffer(0)]], device const 
                 acc[i] += sum;
             }
         } else if (row0 + M <= rows) {
-            auto a = X.slice<256, M>(int(t0 * 32), int(row0));
+            auto a = X.slice<(MESH_STREAMED_PANEL_TILES * MESH_WEIGHT_ROW_GROUP), M>(int(t0 * 32), int(row0));
             op.run(a, weights, acc);
         } else {
             auto a = X.slice(int(t0 * 32), int(row0));
@@ -1234,22 +1235,23 @@ kernel void streamed_panel_t(device const uint *codes [[buffer(0)]], device cons
                              uint lane [[thread_index_in_simdgroup]]) {
     const streamed_dims d = dims_of(dims);
     using namespace mpp::tensor_ops;
-    const uint NK = 264, COLUMNS = TILES * 32, outputs = d.outputs, rows = d.rows, per = d.per, pitch = d.pitch ? d.pitch : TILES;
-    threadgroup half panel[32 * 264];
+    constexpr uint NK = MESH_STREAMED_PANEL_TILES * MESH_WEIGHT_ROW_GROUP + MESH_STREAMED_RING_PADDING;
+    const uint COLUMNS = TILES * 32, outputs = d.outputs, rows = d.rows, per = d.per, pitch = d.pitch ? d.pitch : TILES;
+    threadgroup half panel[32 * NK];
     const uint blocks = (rows + M - 1) / M, row0 = (group.y % blocks) * M, share = group.y / blocks;
-    auto W = tensor(panel, dextents<int, 2>{256, 32}, array<int, 2>{1, int(NK)});
+    auto W = tensor(panel, dextents<int, 2>{(MESH_STREAMED_PANEL_TILES * MESH_WEIGHT_ROW_GROUP), 32}, array<int, 2>{1, int(NK)});
     using Operand = decltype(tensor(const_cast<device half *>(xs), dextents<int, 2>{32, int(rows)}, array<int, 2>{1, 32}));
-    constexpr auto descriptor = matmul2d_descriptor(M, 256, 32, false, false, false, matmul2d_descriptor::mode::multiply_accumulate);
-    matmul2d<descriptor, execution_simdgroups<8>> op;
+    constexpr auto descriptor = matmul2d_descriptor(M, (MESH_STREAMED_PANEL_TILES * MESH_WEIGHT_ROW_GROUP), 32, false, false, false, matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<descriptor, execution_simdgroups<MESH_STREAMED_PANEL_TILES>> op;
     auto acc = op.template get_destination_cooperative_tensor<Operand, decltype(W), float>();
     for (uint i = 0; i < acc.get_capacity(); ++i) acc[i] = 0;
     const uint last = min(outputs / 32, share * per + per);
     for (uint band = share * per; band < last; band++) {
         auto X = tensor(const_cast<device half *>(xs) + ulong(band) * rows * 32, dextents<int, 2>{32, int(rows)}, array<int, 2>{1, 32});
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        fragment_panel<TILES, WIDTHS, false, LOADS>(codes, tiles + band * pitch, streamed_base(bands[band]), group.x * 8, simd, lane, panel, NK);
+        fragment_panel<TILES, WIDTHS, false, LOADS>(codes, tiles + band * pitch, streamed_base(bands[band]), group.x * MESH_STREAMED_PANEL_TILES, simd, lane, panel, NK);
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        auto weights = W.slice<256, 32>(0, 0);
+        auto weights = W.slice<(MESH_STREAMED_PANEL_TILES * MESH_WEIGHT_ROW_GROUP), 32>(0, 0);
         if (row0 + M <= rows) {
             auto a = X.slice<32, M>(0, int(row0));
             op.run(a, weights, acc);
@@ -1261,7 +1263,7 @@ kernel void streamed_panel_t(device const uint *codes [[buffer(0)]], device cons
     for (uint i = 0; i < acc.get_capacity(); ++i) {
         if (!acc.is_valid_element(i)) continue;
         auto e = acc.get_multidimensional_index(i);
-        const uint n = row0 + uint(e[1]), j = group.x * 256 + uint(e[0]);
+        const uint n = row0 + uint(e[1]), j = group.x * (MESH_STREAMED_PANEL_TILES * MESH_WEIGHT_ROW_GROUP) + uint(e[0]);
         if (n < rows && j < COLUMNS) partials[ulong(share) * d.split + ulong(n) * COLUMNS + j] = acc[i];
     }
 }

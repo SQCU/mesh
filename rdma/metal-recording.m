@@ -829,10 +829,12 @@ struct MetalSchedule {
     NSError *(^host)(void);
 };
 
-MTLCompileOptions *MetalCompilerOptions(void) {
+MTLCompileOptions *MetalCompilerOptions(id<MTLDevice> device) {
     MTLCompileOptions *options=[MTLCompileOptions new];
     options.languageVersion=MESH_METAL_LANGUAGE;
     options.preprocessorMacros=@{
+        @"MESH_DEVICE_THREADGROUP_THREADS": @(device.maxThreadsPerThreadgroup.width),
+        @"MESH_DEVICE_THREADGROUP_BYTES": @(device.maxThreadgroupMemoryLength),
 #define MESH_METAL_VALUE(name, value) @"MESH_" #name: @(value),
 #include "../etc/compute/metal.def"
 #undef MESH_METAL_VALUE
@@ -900,9 +902,9 @@ id<MTLResidencySet> MetalScheduleResources(struct MetalSchedule *s) { return Met
 
 struct MetalCommandBinding MetalScheduleData(struct MetalSchedule *s,const void *data,size_t bytes,uint32_t index) {
     s=MetalScheduleTail(s);
-    NSUInteger size=(bytes+15)&~(NSUInteger)15;
+    NSUInteger size=(bytes+MESH_COMMAND_DATA_ALIGNMENT-1)/MESH_COMMAND_DATA_ALIGNMENT*MESH_COMMAND_DATA_ALIGNMENT;
     if(!s->data || s->used+size>s->data.length) {
-        [s->data release];s->data=[s->device newBufferWithLength:MAX((NSUInteger)65536,size) options:MTLResourceStorageModeShared];
+        [s->data release];s->data=[s->device newBufferWithLength:MAX((NSUInteger)MESH_COMMAND_DATA_BYTES,size) options:MTLResourceStorageModeShared];
         s->used=0;[s->owners addObject:s->data];[s->residency addAllocation:s->data];
     }
     struct MetalCommandBinding result={s->data,s->used,bytes,index,MetalReachRead};

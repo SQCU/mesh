@@ -52,7 +52,7 @@ static inline struct mesh_deadline mesh_deadline(const char *wait,uint64_t ns){
 }
 /* the wait `wait` past its deadline of `ns`: the program ends at once, the wait and its deadline on stderr */
 __attribute__((noreturn)) static inline void mesh_expired(const char *wait,uint64_t ns){
-  char text[640];
+  char text[MESH_DIAGNOSTIC_BYTES];
   const int n=snprintf(text,sizeof text,"%s: past its deadline of %.3f s; the program ends (design/data-model.md section 6)\n",
                        wait,(double)ns/1e9);
   if(n>0)(void)!write(2,text,(size_t)n<sizeof text?(size_t)n:sizeof text-1);
@@ -216,7 +216,7 @@ struct hdr {
   _Atomic uint64_t bridge_pid,serial,control,map,map_off,map_nodes,health,busy,idle_since,stopping;
 };
 /* the header within its own first page at any page size (mesh_layout) */
-_Static_assert(sizeof(struct hdr)<=4096,"struct hdr");
+_Static_assert(sizeof(struct hdr)<=MESH_HEADER_BYTES,"struct hdr");
 /* design/transport.md */
 _Static_assert(sizeof(((struct hdr *)0)->control)==8 && offsetof(struct hdr,control)%8==0,"M26");
 /* design/transport.md */

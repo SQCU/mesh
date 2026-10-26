@@ -270,7 +270,7 @@ inline void gather_observe(constant gather_words<N, CHANNELS>& w, uint tid) {
             mesh_step_counts(*w.land[q].p, w.land[q].a, w.land[q].v, w.j);
         }
     threadgroup_barrier(mem_flags::mem_device);
-    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));
+    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
 }
 
 template <uint N, uint CHANNELS, uint THREADS>
@@ -655,7 +655,7 @@ inline void migration_observe(constant migration_words<CHANNELS>& w, uint tid) {
             mesh_step_counts(*w.land[q].p, w.land[q].a, w.land[q].v, w.j);
         }
     threadgroup_barrier(mem_flags::mem_device);
-    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));
+    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
 }
 template <uint CHANNELS, uint THREADS>
 [[max_total_threads_per_threadgroup(THREADS)]]
@@ -787,7 +787,7 @@ def _follow_bytes(placement, local, logical_shape, logical_stride, key, rank, gr
     for run, kernel, words, groups, first, stride in jobs:
         if run.source == run.destination:
             schedule.compute(kernel, [local, result], fused._encode_words(words, channels, None, None),
-                             15, groups, 1, _GATHER_THREADS, 1 | (2 << 32))
+                             15, groups, 1, _GATHER_THREADS, 1 | (2 << _stream.compilation['ACCESS_WRITE_SHIFT']))
             continue
         crossing = fused.write_rows(schedule, first, [first], [(run.source, run.destination)], group,
                                     row_bytes=run.row_bytes, rows=run.rows, stride=stride)

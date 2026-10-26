@@ -119,7 +119,7 @@ def compile_graph(module, metadata, operands):
                 raise NotImplementedError('runtime index assertions must be resolved in the declared graph')
             outputs = [name for name in kernel.args.output_buffers if name not in kernel.removed_buffers]
             inputs = list(kernel.args.input_buffers)
-            access = (1 << (len(outputs) + len(inputs))) - 1 | ((1 << len(outputs)) - 1) << 32
+            access = (1 << (len(outputs) + len(inputs))) - 1 | ((1 << len(outputs)) - 1) << _stream.compilation['ACCESS_WRITE_SHIFT']
             name = f'mesh_kernel_{wrapper.next_kernel_suffix()}'
             wrapper.src_to_kernel[source] = name
             wrapper.header.writeline(f'{name} = mesh_native.shader({source_text!r}, "generated_kernel", {access})')

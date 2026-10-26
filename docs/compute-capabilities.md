@@ -19,7 +19,7 @@ Read from the live nodes on 2026-10-26:
 | Laptop 1980260065 | 6 Super, 12 Performance | 40 |
 
 The shared build operands are in `etc/compute/metal.mk`: macOS 26.0 and Metal 4.0. The bridge libraries,
-Torch extension and native Swift build consume that file. Numerical shader frontends use `MetalCompilerOptions`;
+Torch extension and native Swift build consume that file. Numerical shader frontends use `MetalCompilerOptions(device)`;
 transport AIR uses the same language setting. Numerical floating-point options keep the language's existing default;
 the transport build's explicit safe math setting remains separate. `METAL_CONFIGURATION` names a different file when
 a host needs a different build. A missing file fails the build. The extension passes the deployment target explicitly
@@ -61,8 +61,8 @@ claims still require the committed-main hourly's whole-call duration and useful 
 
 The shared `etc/compute/metal.def` manifest supplies binding and indirect-command limits, SIMD width, matrix tiles,
 linear tiles and the initial launch policy. `metal-capabilities.h` exposes the same operands to C, Swift and the
-Python extension; `MetalCompilerOptions` and the transport source builder supply them to Metal. No frontend keeps
-its own copy. The linear compiler derives the grouped-product count from the binding capacity. Each row tile gets
+Python extension; `MetalCompilerOptions(device)` and the transport source builder supply them to Metal. These consumers read one definition of each moved operand.
+The linear compiler derives the grouped-product count from the binding capacity. Each row tile gets
 its own grid work, and FX fusion includes wide products. The row crossover selects a compiled geometry; it does not
 limit the number of rows in a function. Gather grids use the discovered GPU core count and configured work per thread.
 
@@ -79,3 +79,19 @@ The Swift engine consumes `metal-microbench/configs/structure.json`'s engine sec
 Batch, KV capacity, page layout, classes and queue capacity now come from that operand. The eight-row MoE assertion
 and silent KV-pool clamp have been removed. Page addressing in the engine's shaders consumes the same configured
 page extent. Preparation still sizes storage from the requested shape and the device's available resource limits.
+
+`etc/compute/streamed.json` is the shared Python/Swift input for streamed-weight kernel candidates and their cost
+model: row tiles, K splits, tiles in flight, precision eligibility, fit priors and numerical settings. A missing
+cooperative-tensor layout now stops Python preparation instead of substituting an ALU kernel. `MetalMeshFile` reads
+a repository-relative preparation input; both shaders and this manifest use that same source loader.
+
+The compiler now receives its Metal device explicitly. The cooperative kernel's thread and scratch limits are
+compile operands from that device; the source no longer states 1,024 threads and 32 KiB as universal limits.
+Panel tile count sets the shader's matrix shape, SIMD-group count, host grid, cost-model features and descriptor
+span together. A changed capability must reach every one of those consumers; changing a launch count alone does
+not configure the kernel.
+
+Selection kernels share their radix, SIMD reductions and scratch sizing across Torch, Swift and LiteRT. Transport
+launch sizes and command-storage geometry are also declared once. The engine supplies its model's hidden width,
+expert count and active-expert count; shader defaults for one model have been removed. Its control capacities are
+operands of the same engine configuration on the host and in the compiled shaders.

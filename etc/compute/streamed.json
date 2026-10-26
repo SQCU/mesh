@@ -1,0 +1,24 @@
+{
+  "attention": {"splits": 64, "pages": 4, "resident_groups": 8, "threadgroups": 256, "last_arrival_elements": 2048},
+  "alu_rows": [1, 2, 4],
+  "cooperative_rows": [8, 16],
+  "panel_rows": [64, 128],
+  "tiles_per_share": [8, 16, 24, 32, 48],
+  "alu_splits": [2, 4, 8],
+  "head_shape": [2, 4],
+  "cooperative_shapes": [[2, 2], [1, 4], [1, 1]],
+  "tiles_in_flight": [1, 2],
+  "finish_rows": 8,
+  "half_width_bits": 8,
+  "smooth_power": 6.0,
+  "fit_iterations": 900,
+  "fit_holdout_iterations": 600,
+  "fit_ridge": 0.02,
+  "fit_spread": 0.01,
+  "fit_learning_rate": 0.05,
+  "fit_prior": {
+    "c0": 2.0, "tile": 0.02, "row": 0.01, "plane": 0.004,
+    "sg": 0.01, "part": 0.002, "lat": 0.3, "latr": 0.15,
+    "occ": 24.0, "press": 0.001
+  }
+}

@@ -1005,7 +1005,7 @@ static void port_opened(struct port *port){
   if(result){
     if(port->refused){
       port->refusals++;
-      const uint64_t hold=MIN(UINT64_C(60)<<MIN(port->refusals-1,6u),UINT64_C(3600));
+      const uint64_t hold=MIN((uint64_t)MESH_RETRY_FIRST_SECONDS<<MIN(port->refusals-1,MESH_RETRY_MAX_SHIFT),MESH_RETRY_MAX_SECONDS);
       port->retry_at=now+hold*UINT64_C(1000000000);
     }
     port->open=0;if(port->control<0)link_set(port,0,MESH_STOPPED,result);
@@ -1055,7 +1055,7 @@ static void control_heard(struct port *port){
     size_t need=sizeof(struct message);
     if(port->held>=need){
       const struct message *header=(const void *)port->in;
-      if(header->magic!=XMAGIC || header->bytes>(UINT32_C(64)<<20)){port_lost(port,EPROTO);return;}
+      if(header->magic!=XMAGIC || header->bytes>MESH_TOPOLOGY_MESSAGE_BYTES){port_lost(port,EPROTO);return;}
       need+=header->bytes;
     }
     if(need>port->in_room){
@@ -1172,7 +1172,7 @@ static void network_heard(int stopping){
    Another Ethernet-family interface of the same unit (bridge0, awdl0, anpi<N>) is taken as the port's, and its event
    says the port's hello early, as the pace would: a hello on an open port with no peer is never wrong */
 static void addresses_heard(void){
-  union { struct kern_event_msg header; unsigned char bytes[512]; } event;
+  union { struct kern_event_msg header; unsigned char bytes[MESH_KERNEL_EVENT_BYTES]; } event;
   while(recv(addresses,event.bytes,sizeof event,0)>=(ssize_t)(KEV_MSG_HEADER_SIZE+sizeof(struct net_event_data))){
     const struct net_event_data *interface=(const void *)(event.bytes+KEV_MSG_HEADER_SIZE);
     for(uint32_t p=0;p<port_count;p++)if(interface->if_family==ports[p].family && interface->if_unit==ports[p].unit){
@@ -1381,7 +1381,7 @@ static void child_reaped(struct port *port);
    child's at a time: a link takes as many as its device holds for it, up to MESH_LINK_LANES (ten of a macOS 26
    device's ten, design/HETEROGENEOUS-LINKS.md) */
 static pid_t child_elsewhere(const struct port *port){
-  static pid_t pids[16384];
+  static pid_t pids[MESH_PROCESS_SNAPSHOT_ENTRIES];
   static char *arguments;
   static size_t room;
   int most=0,argmax[2]={CTL_KERN,KERN_ARGMAX};
@@ -1579,7 +1579,7 @@ static void *control_watch(void *unused){
 static const char *configuration_read(const char *path,char *name,size_t room,uint64_t *region_bytes){
   FILE *file=fopen(path,"rb");
   if(!file)return strerror(errno);
-  unsigned char bytes[65536];
+  unsigned char bytes[MESH_CONFIGURATION_BYTES];
   const size_t length=fread(bytes,1,sizeof bytes,file);
   const int whole=feof(file);
   fclose(file);
@@ -1861,7 +1861,7 @@ static uint64_t turn_due(uint64_t liveness){
 int main(int argc,char **argv){
   if(argc>=3 && !strcmp(argv[1],"--child"))return child_main(argc,argv);
   if(argc!=2)die("usage: mesh-flow CONFIGURATION: the canonical property list bin/mesh-user.sh writes from the node's bridge configuration document (etc/bridge/README.md); the bridge has no default and does not start without one");
-  char name[256];uint64_t region_bytes;
+  char name[MESH_REGION_NAME_BYTES];uint64_t region_bytes;
   const char *refused=configuration_read(argv[1],name,sizeof name,&region_bytes);
   if(refused)die(refused);
   uint32_t room=sizeof self_path;

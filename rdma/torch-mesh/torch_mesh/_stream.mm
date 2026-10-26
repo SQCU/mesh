@@ -598,7 +598,7 @@ static std::vector<id<MTLComputePipelineState>> pipelines_;
 
 static int64_t pipeline(const std::string &source, const std::string &name) {
   id<MTLDevice> device = at::mps::MPSDevice::getInstance()->device();
-  MTLCompileOptions *options = MetalCompilerOptions();
+  MTLCompileOptions *options = MetalCompilerOptions(device);
   NSError *error = nil;
   id<MTLLibrary> library = [device newLibraryWithSource:@(source.c_str()) options:options error:&error];
   if (!library) throw std::runtime_error(std::string("kernel source: ") + error.localizedDescription.UTF8String);
@@ -686,7 +686,7 @@ struct Commands {
         for(int d=0;d<t.dim()&&t.numel();d++)extent+=(t.size(d)-1)*t.stride(d);
         bound.push_back({at::native::mps::getMTLBufferStorage(t),
           (NSUInteger)(t.storage_offset()*t.element_size()),extent*t.element_size(),(uint32_t)j,
-          (uint32_t)(((access>>j)&1?MetalReachRead:0)|((access>>(32+j))&1?MetalReachWritten:0))});
+          (uint32_t)(((access>>j)&1?MetalReachRead:0)|((access>>(MESH_ACCESS_WRITE_SHIFT+j))&1?MetalReachWritten:0))});
         operands.push_back(t);
       }
       for(const auto &[index,scalar]:scalars) {
@@ -722,7 +722,7 @@ static void prepare_dispatch(MetalSchedule *schedule,const Dispatch &d,uint64_t 
   std::vector<MetalCommandBinding> bindings;
   for(size_t j=0;j<d.bound.size();j++)if(d.bound[j])
     bindings.push_back({d.bound[j],d.offsets[j],d.lengths[j],(uint32_t)j,
-      (uint32_t)(((access>>j)&1?MetalReachRead:0)|((access>>(32+j))&1?MetalReachWritten:0))});
+      (uint32_t)(((access>>j)&1?MetalReachRead:0)|((access>>(MESH_ACCESS_WRITE_SHIFT+j))&1?MetalReachWritten:0))});
   bindings.push_back(MetalScheduleData(schedule,d.words.data(),d.words.size()*sizeof(uint32_t),(uint32_t)d.at));
   MetalScheduleCompute(schedule,d.state,bindings.data(),bindings.size(),d.grid,d.group);
 
@@ -741,7 +741,7 @@ static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> 
 // Linear command geometry is compiled from the shared manifest and discovered GPU cores.
 static std::string linear_source_;
 static int64_t linear_cores_ = 0;
-static std::map<std::tuple<int, int, int, int>, int64_t> linear_pipelines_;
+static std::map<std::tuple<int, int, int, int, int>, int64_t> linear_pipelines_;
 static constexpr const char *LINEAR_PARAMETERS[]={"device const half* x", "device const half* w", "device half* y", "device const half* b", "device const half* s"};
 constexpr size_t LINEAR_BINDINGS = sizeof(LINEAR_PARAMETERS) / sizeof(*LINEAR_PARAMETERS);
 constexpr size_t LINEAR_PRODUCTS = (MESH_BUFFER_BINDINGS - 1) / LINEAR_BINDINGS;
@@ -767,20 +767,20 @@ static int64_t linear_groups(int64_t rows, int64_t columns) {
 }
 static int64_t linear_split(int64_t K, int64_t N, int64_t rows) { return linear_fit(K, linear_groups(rows, N)); }
 
-static std::string linear_group_source() {
-  const std::string count=std::to_string(LINEAR_PRODUCTS);
+static std::string linear_group_source(size_t products) {
+  const std::string count=std::to_string(products);
   std::string source="\nstruct linear_group_words { linear_dims d["+count+"]; uint first["+count+"], act["+count+"]; };\n"
     "template <uint VW, uint VX, uint COLS, uint NSG, uint U>\n"
     "[[max_total_threads_per_threadgroup(NSG * MESH_SIMD_WIDTH)]] kernel void linear_group(";
-  for(size_t p=0;p<LINEAR_PRODUCTS;p++) {
+  for(size_t p=0;p<products;p++) {
     const std::string n=std::to_string(p);
     for(size_t k=0;k<LINEAR_BINDINGS;k++)source+=std::string(LINEAR_PARAMETERS[k])+n+" [[buffer("+std::to_string(LINEAR_BINDINGS*p+k)+")]],";
   }
-  source+="constant linear_group_words& g [[buffer("+std::to_string(LINEAR_PRODUCTS*LINEAR_BINDINGS)+")]],"
+  source+="constant linear_group_words& g [[buffer("+std::to_string(products*LINEAR_BINDINGS)+")]],"
     "uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],"
     "uint tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {"
     "threadgroup float part[NSG*MESH_LINEAR_ROWS*COLS];";
-  for(size_t p=LINEAR_PRODUCTS;p-- > 0;) {
+  for(size_t p=products;p-- > 0;) {
     const std::string n=std::to_string(p);
     source+="if(tg>=g.first["+n+"]) { const linear_act_store store{y"+n+",b"+n+",g.d["+n+"].N,g.d["+n+"].B,g.act["+n+"]};"
       "linear_body<VW,VX,COLS,NSG,U>(x"+n+",s"+n+",w"+n+",g.d["+n+"],store,part,sg,lane,tg-g.first["+n+"],tid);return;}";
@@ -788,7 +788,7 @@ static std::string linear_group_source() {
   return source+"}\n";
 }
 
-static int64_t linear_pipeline(const std::tuple<int, int, int, int> &key) {
+static int64_t linear_pipeline(const std::tuple<int, int, int, int, int> &key) {
   const auto found = linear_pipelines_.find(key);
   if (found != linear_pipelines_.end()) return found->second;
   const int64_t split = std::get<2>(key), act = std::get<3>(key);
@@ -796,9 +796,9 @@ static int64_t linear_pipeline(const std::tuple<int, int, int, int> &key) {
                      std::to_string(MESH_LINEAR_COLUMNS) + ", " + std::to_string(split) + ", " + std::to_string(MESH_LINEAR_LOADS);
   const std::string kernel = act < 0 ? "linear_group" : "linear_rows";
   if (act >= 0) args += ", " + std::to_string(act);
-  std::string name = kernel + "_" + args;
+  std::string name = kernel + "_" + args + "_p" + std::to_string(std::get<4>(key));
   for (auto &ch : name) ch = ch == ',' || ch == ' ' ? '_' : ch;
-  return linear_pipelines_.emplace(key, pipeline(linear_source_ + (act < 0 ? linear_group_source() : "") + "\ntemplate [[host_name(\"" + name + "\")]] [[kernel]] decltype(" +
+  return linear_pipelines_.emplace(key, pipeline(linear_source_ + (act < 0 ? linear_group_source(std::get<4>(key)) : "") + "\ntemplate [[host_name(\"" + name + "\")]] [[kernel]] decltype(" +
                                          kernel + "<" + args + ">) " + kernel + "<" + args + ">;\n", name)).first->second;
 }
 
@@ -810,7 +810,7 @@ static std::vector<CommandRecord> linear_commands(const std::vector<at::Tensor> 
   const size_t P = xs.size();
   TORCH_CHECK(P >= 1 && P <= LINEAR_PRODUCTS && ws.size() == P && biases.size() == P && acts.size() == P && x1s.size() == P && ys.size() == P,
               "torch_mesh::linears exceeds the manifest binding capacity or lacks product operands");
-  std::vector<std::optional<at::Tensor>> buffers(LINEAR_BINDINGS * LINEAR_PRODUCTS);
+  std::vector<std::optional<at::Tensor>> buffers(LINEAR_BINDINGS * P);
   LinearGroupWords words{};
   int64_t first = 0, least = INT64_MAX;
   bool wide_w = true, wide_x = true;
@@ -834,21 +834,20 @@ static std::vector<CommandRecord> linear_commands(const std::vector<at::Tensor> 
     wide_w &= ldw % MESH_LINEAR_VECTOR == 0 && K0 % MESH_LINEAR_VECTOR == 0;
     wide_x &= K0 % MESH_LINEAR_VECTOR == 0 && ld0 % MESH_LINEAR_VECTOR == 0 && ld1 % MESH_LINEAR_VECTOR == 0;
   }
-  for (size_t p = P; p < LINEAR_PRODUCTS; p++) {
-    for (size_t k = 0; k < LINEAR_BINDINGS; k++) buffers[LINEAR_BINDINGS * p + k] = buffers[k];
-    words.first[p] = first;
-  }
   const int64_t split = linear_fit(least, first);
   if(P==1) {
     buffers.resize(6);buffers[5]=buffers[4];buffers[4]=std::nullopt;
-    return {{linear_pipeline(std::make_tuple(wide_w?MESH_LINEAR_VECTOR:1,wide_x?MESH_LINEAR_VECTOR:1,(int)split,(int)acts[0])),buffers,
+    return {{linear_pipeline(std::make_tuple(wide_w?MESH_LINEAR_VECTOR:1,wide_x?MESH_LINEAR_VECTOR:1,(int)split,(int)acts[0],1)),buffers,
         {{4,pybind11::bytes((char *)&words.dimensions[0],sizeof(LinearDimensions))}},
         {(NSUInteger)first,1,1},{(NSUInteger)(split*MESH_SIMD_WIDTH),1,1},false,UINT64_C(43)|(UINT64_C(4)<<MESH_ACCESS_WRITE_SHIFT)}};
   }
-  const auto key = std::make_tuple(wide_w ? MESH_LINEAR_VECTOR : 1, wide_x ? MESH_LINEAR_VECTOR : 1, (int)split, -1);
+  const auto key = std::make_tuple(wide_w ? MESH_LINEAR_VECTOR : 1, wide_x ? MESH_LINEAR_VECTOR : 1, (int)split, -1, (int)P);
+  std::string packed((char *)words.dimensions,P*sizeof(LinearDimensions));
+  packed.append((char *)words.first,P*sizeof(*words.first));
+  packed.append((char *)words.activation,P*sizeof(*words.activation));
   uint64_t access=0;
   for(size_t p=0;p<P;p++)access|=(UINT64_C(27)<<(LINEAR_BINDINGS*p))|(UINT64_C(4)<<(MESH_ACCESS_WRITE_SHIFT+LINEAR_BINDINGS*p));
-  return {{linear_pipeline(key),buffers,{{LINEAR_BINDINGS*LINEAR_PRODUCTS,pybind11::bytes((char *)&words,sizeof words)}},
+  return {{linear_pipeline(key),buffers,{{LINEAR_BINDINGS*P,pybind11::bytes(packed)}},
       {(NSUInteger)first,1,1},{(NSUInteger)(split*MESH_SIMD_WIDTH),1,1},false,access}};
 }
 
@@ -1369,12 +1368,12 @@ static void compile_chain(PreparedChain &chain) {
     // a phase need no residency assumption or cross-group spin barrier.
     for(const Dispatch *item:*step.dispatches) {
       uint64_t access=0;
-      if(item==&d)access=UINT64_C(260)|(UINT64_C(24)<<32);
+      if(item==&d)access=UINT64_C(260)|(UINT64_C(24)<<MESH_ACCESS_WRITE_SHIFT);
       else if(chain.publication_words==12)access=item==chain.publication ?
-        UINT64_C(162)|(UINT64_C(192)<<32) : UINT64_C(17)|(UINT64_C(32)<<32);
+        UINT64_C(162)|(UINT64_C(192)<<MESH_ACCESS_WRITE_SHIFT) : UINT64_C(17)|(UINT64_C(32)<<MESH_ACCESS_WRITE_SHIFT);
       else {
         for(size_t k=0;k<item->bound.size();k++)if(item->bound[k])access|=UINT64_C(1)<<k;
-        access|=(item==chain.publication?UINT64_C(12):UINT64_C(4))<<32;
+        access|=(item==chain.publication?UINT64_C(12):UINT64_C(4))<<MESH_ACCESS_WRITE_SHIFT;
       }
       prepare_dispatch(schedule,*item,access);
     }
@@ -1621,7 +1620,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("pipeline", &pipeline);
   pybind11::dict compilation;
 #define MESH_METAL_VALUE(name, value) compilation[#name] = value;
-#include "../../../etc/compute/metal.def"
+#include "metal.def"
 #undef MESH_METAL_VALUE
   compilation["LINEAR_PRODUCTS"] = LINEAR_PRODUCTS;
   module.attr("compilation") = compilation;

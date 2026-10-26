@@ -254,7 +254,8 @@ struct mesh_trees;
    rises, rdma/NCCL.md "Bounded waits"); each wait's own, and once one wait has recorded a failure every other wait on
    the same failure words ends at once or within 2^10 loads (nccl-mesh-kernels.h mesh_step_failed), so waits that never
    land hold the GPU about one bound in all */
-#define NCCL_MESH_POLLS 4500000u
+#include "metal-capabilities.h"
+#define NCCL_MESH_POLLS MESH_POLL_LIMIT
 /* The stream: NULL (the host path) or an ncclMeshStream (the Metal path, above). */
 typedef void *cudaStream_t;
 typedef struct { void *buffer; size_t offset; } ncclMeshBuffer;

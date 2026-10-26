@@ -110,6 +110,9 @@ from pathlib import Path
 
 import torch
 
+import mesh_compute
+COMPUTE = mesh_compute.compilation()
+POLICY = json.loads((Path(mesh_compute.__file__).resolve().parents[1] / 'etc/compute/streamed.json').read_text())
 SOURCE = Path(__file__).with_name('streamed.metal').read_text()
 _PIPELINES = {}
 aten = torch.ops.aten
@@ -146,7 +149,7 @@ def node():
 
 FIT_FEATURES = ('tiles', 'rowwork', 'planes', 'sg', 'partials', 'bytes', 'steps', 'chain_rows', 'passes', 'pressure')
 FIT_TERMS = ('c0', 'tile', 'row', 'plane', 'sg', 'part', 'lat', 'latr', 'occ', 'press')
-FIT_PRIOR = dict(c0=2.0, tile=0.02, row=0.01, plane=0.004, sg=0.01, part=0.002, lat=0.3, latr=0.15, occ=24.0, press=0.001)
+FIT_PRIOR = POLICY['fit_prior']
 FAMILIES = ('alu', 'coop', 'panel')
 # An instance's forms, each read in pairs against its form 0 on the same shape, rows and configuration (a factor a
 # configuration and rows class, never the coefficients'): LOADS a tile's loads (streamed.metal fragment_load), H the sums
@@ -154,7 +157,7 @@ FAMILIES = ('alu', 'coop', 'panel')
 # admitted it at a KL bar, or a resolve names it), RING the cooperative tensor's producer-consumer ring
 # (streamed_coop).
 FORMS = ('LOADS', 'H', 'RING')
-PERS = (8, 16, 24, 32, 48)
+PERS = POLICY['tiles_per_share']
 WIDTH_CLASSES = (4, 8, 12, 15)
 WIDTH_CLASS = [0] + [next(c for c in WIDTH_CLASSES if c >= w) for w in range(1, 16)]
 
@@ -184,8 +187,8 @@ def instance_units(spec, s, rows):
     if kernel == 'panel':
         M = spec['M']
         panels = -(-rows // M)
-        return dict(tiles=nz * panels, rowwork=nz * panels * M / 8, planes=P * panels, sg=(N // 32) * panels * 8,
-                    partials=0, bytes=s['bytes'] * panels, steps=-(-T // 8), chain_rows=M / 8, passes=1,
+        return dict(tiles=nz * panels, rowwork=nz * panels * M / 8, planes=P * panels, sg=(N // 32) * panels * COMPUTE['STREAMED_PANEL_TILES'],
+                    partials=0, bytes=s['bytes'] * panels, steps=-(-T // COMPUTE['STREAMED_PANEL_TILES']), chain_rows=M / 8, passes=1,
                     pressure=nz * panels * (M / 64) ** 2)
     J, SK = spec['J'], spec['SK']
     pair = 2 if kernel == 'couple' else 1
@@ -253,7 +256,7 @@ class Fit:
     admitted = frozenset()
     read = attention_read = attention = fused = {}
 
-    def _predict(self, family, X, theta=None, p=6.0):
+    def _predict(self, family, X, theta=None, p=POLICY['smooth_power']):
         c0, tile, row, plane, sg, part, lat, latr, occ, press = torch.exp(self.theta[family] if theta is None else theta)
         f = dict(zip(FIT_FEATURES, X.T))
         thru = (tile * f['tiles'] + row * f['rowwork'] + plane * f['planes'] + sg * f['sg'] + part * f['partials']
@@ -269,7 +272,7 @@ class Fit:
         forms = sum(self.factors.get(form_key(spec, form), 0.0) for form in FORMS if spec.get(form))
         return float(self._predict(_family(spec), X)[0]) * math.exp(self.factors.get(factor_key(spec), 0.0) + forms)
 
-    def fit(self, observations, iters=900, ridge=0.02, spread=0.01):
+    def fit(self, observations, iters=POLICY['fit_iterations'], ridge=POLICY['fit_ridge'], spread=POLICY['fit_spread']):
         """Least squares in log space over observations (spec, slice units, rows, us, shape): the families' coefficients
         with a ridge toward the prior, and a factor a configuration and rows class (factor_key) with a ridge toward 1 (the
         shape of a kernel's own efficiency, pooled over every slice it ran on) where two shapes at least observed it; a
@@ -306,7 +309,7 @@ class Fit:
             g[2].append(index.get(factor_key(spec), len(keys)))
         theta = {f: v.clone().requires_grad_() for f, v in self.theta.items()}
         factors = torch.zeros(len(keys), dtype=torch.float64, requires_grad=True)
-        opt = torch.optim.Adam(list(theta.values()) + [factors], lr=0.05)
+        opt = torch.optim.Adam(list(theta.values()) + [factors], lr=POLICY['fit_learning_rate'])
         data = {f: (torch.tensor(X, dtype=torch.float64), torch.tensor(y, dtype=torch.float64), torch.tensor(k))
                 for f, (X, y, k) in groups.items()}
         count = sum(len(y) for _, y, _ in data.values())
@@ -328,7 +331,7 @@ class Fit:
 
 def rows_class(rows):
     """The ALUs' rows class R of `rows` input rows (to 4): 1, 2 or 4."""
-    return 1 if rows <= 1 else 2 if rows <= 2 else 4
+    return next(r for r in POLICY['alu_rows'] if r >= min(rows, max(POLICY['alu_rows'])))
 
 
 def candidates(s, rows, op='product', tables=False, widths=15, admitted=frozenset()):
@@ -346,26 +349,26 @@ def candidates(s, rows, op='product', tables=False, widths=15, admitted=frozense
     T, out = s['columns'] // 32, []
     halves = sorted({int(f[1:]) for f in admitted if f[:1] == 'H' and f[1:].isdigit()})
     js = sorted({-(-T // -(-T // max(1, -(-T // per)))) for per in PERS})
-    if op == 'couple' and rows > 4:
+    if op == 'couple' and rows > max(POLICY['alu_rows']):
         return []
-    if rows > 16:
-        return [dict(kernel='panel', M=M, LOADS=loads) for M in (64, 128) for loads in (0, 1)]
+    if rows > max(POLICY['cooperative_rows']):
+        return [dict(kernel='panel', M=M, LOADS=loads) for M in POLICY['panel_rows'] for loads in (0, 1)]
     if op == 'couple':
-        out = [dict(kernel='couple', R=rows_class(rows), SK=sk, BANDS=1, J=1, F=F, LUT=0, APART=apart, LOADS=loads) for sk in (2, 4, 8)
-               for F in (1, 2) for apart in (0, 1) for loads in (0, 1)]
-    elif rows <= 4:
+        out = [dict(kernel='couple', R=rows_class(rows), SK=sk, BANDS=1, J=1, F=F, LUT=0, APART=apart, LOADS=loads) for sk in POLICY['alu_splits']
+               for F in POLICY['tiles_in_flight'] for apart in (0, 1) for loads in (0, 1)]
+    elif rows <= max(POLICY['alu_rows']):
         R = rows_class(rows)
-        shapes = [(sk, 1) for sk in (2, 4, 8)] + ([(2, 4)] if op == 'head' else [])
+        shapes = [(sk, 1) for sk in POLICY['alu_splits']] + ([POLICY['head_shape']] if op == 'head' else [])
         for sk, bands in shapes:
             if (s['outputs'] // 32) % bands:
                 continue
             for J in js:
-                for F in (1, 2):
+                for F in POLICY['tiles_in_flight']:
                     for lut in ((0, 1) if tables else (0,)):
                         out += [dict(kernel='alu', R=R, SK=sk, BANDS=bands, J=J, F=F, LUT=lut, LOADS=loads) for loads in (0, 1)]
     else:
-        M = 8 if rows <= 8 else 16
-        for sk, bands in ((2, 2), (1, 4), (1, 1)):
+        M = next(r for r in POLICY['cooperative_rows'] if r >= rows)
+        for sk, bands in POLICY['cooperative_shapes']:
             if (s['outputs'] // 32) % bands == 0:
                 out += [dict(kernel='coop', M=M, SK=sk, BANDS=bands, J=J, LOADS=loads, RING=ring) for J in js for loads in (0, 1) for ring in (0, 1)]
     return [dict(c, **f) for c in out for f in [{}] + [{'H': h} for h in halves if admits(c, 'H', h, widths)]]
@@ -376,7 +379,7 @@ def admits(spec, form, value, widths):
     couple) at widths exact in half2 (width class 8 at most) in whole steps of its F (fragment_walk's static assertion),
     RING on the cooperative tensor, LOADS on every kernel."""
     if form == 'H':
-        return spec['kernel'] in ('alu', 'couple') and widths <= 8 and value % spec['F'] == 0
+        return spec['kernel'] in ('alu', 'couple') and widths <= POLICY['half_width_bits'] and value % spec['F'] == 0
     return form == 'LOADS' or form == 'RING' and spec['kernel'] == 'coop'
 
 
@@ -450,7 +453,7 @@ def spec_arguments(spec, T, widths, finish=False):
     values = dict({form: 0 for form in FORMS}, **spec, TILES=T, WIDTHS=width_mask(widths), OUT=int(finish))
     if kernel == 'coop':
         slots = coop_slots()
-        values['COOP'] = slots if slots is not None or spec.get('RING', 0) < 8 else 0
+        values['COOP'] = slots
     return kernel, tuple(values[name] for name in ARGUMENTS['panel' if kernel == 'panel_t' else kernel])
 
 
@@ -474,12 +477,12 @@ def launch(spec, outputs, rows):
     ring's band its producers and its consumers: RING 1 SK of each, the role split's (RING r >= 8) SK producers and M / r
     consumers)."""
     if spec['kernel'] == 'panel':
-        return (outputs // 32, -(-rows // spec['M'])), 256, 1
+        return (outputs // 32, -(-rows // spec['M'])), COMPUTE['STREAMED_PANEL_TILES'] * COMPUTE['SIMD_WIDTH'], 1
     if spec['kernel'] == 'couple':
-        return (outputs // 32, 1), (64 if spec['APART'] else 32) * spec['SK'], 1
+        return (outputs // 32, 1), COMPUTE['SIMD_WIDTH'] * (2 if spec['APART'] else 1) * spec['SK'], 1
     ring = spec.get('RING', 0)
-    group = spec['SK'] + spec['M'] // ring if ring >= 8 else spec['SK'] * (2 if ring else 1)
-    return (outputs // 32 // spec['BANDS'], spec['J']), 32 * group * spec['BANDS'], spec['J']
+    group = spec['SK'] + spec['M'] // ring if ring >= COMPUTE['COOPERATIVE_MIN_ROWS'] else spec['SK'] * (2 if ring else 1)
+    return (outputs // 32 // spec['BANDS'], spec['J']), COMPUTE['SIMD_WIDTH'] * group * spec['BANDS'], spec['J']
 
 
 def spec_of(text):
@@ -519,13 +522,20 @@ def decomposition_of(spec, outputs, columns, widths, rows):
 
 
 def coop_slots():
+    """The declared layout; absence never launches a probe or changes kernels."""
+    if _EVIDENCE is None or type(_EVIDENCE.get('coop')) is not int:
+        raise RuntimeError(f'{_EVIDENCE_PATH}: missing cooperative tensor layout (coop); realize the backend capabilities before compilation')
+    return _EVIDENCE['coop']
+
+
+def read_cooperative_layout():
     """The node's cooperative-tensor slots as streamed_coop's COOP (docs/kernels.md#fragment-tiles), or None where
     matmul2d<M, 32, 32>'s right-input map is not the canonical lanes' up to bit permutations (M 8 and 16 read)."""
     if 'coop' in _PIPELINES:
         return _PIPELINES['coop']
     from . import _stream
     found = None
-    for m in (8, 16):
+    for m in POLICY['cooperative_rows']:
         out = torch.zeros(32 * 130, dtype=torch.int32, device='mps')
         xs = torch.zeros(32 * 32, dtype=torch.float16, device='mps')
         _stream.encode(_pipeline(f'streamed_coopmap_{m}'), [None, out, None, None, xs] + [None] * 10, _dims(), 15, 1, 1, 32)
@@ -534,6 +544,8 @@ def coop_slots():
             found = None
             break
         found = slots
+    if found is None:
+        raise RuntimeError('the measured cooperative tensor layout is not represented by this backend; supply its layout before compilation')
     _PIPELINES['coop'] = found
     return found
 
@@ -722,8 +734,6 @@ class Matrix(torch.Tensor):
             spec = dict(admitted(decomposition, self.rows, rows))
         else:
             spec, _ = choose(Fit.node(), slice_units(self), rows, op, tables=self.tabled(op), widths=self.widths)
-        if spec['kernel'] == 'coop' and spec.get('RING', 0) < 8 and coop_slots() is None:
-            spec = dict(kernel='alu', R=rows_class(rows), SK=8, BANDS=1, J=spec['J'], F=1, LUT=0)
         (gx, gy), threads, shares = launch(spec, self.rows, rows)
         return (spec, *spec_instance(spec, self.tiles_, self.widths), gx, gy, threads, shares)
 
@@ -779,8 +789,8 @@ class Matrix(torch.Tensor):
         spec, name, line, gx, gy, threads, shares = self.dispatch(n, op, decomposition)
         assert (tables is not None) == bool(spec.get('LUT')), f'{name}: tables where it reads them'
         partials = torch.empty(shares, n, self.rows, dtype=torch.float32, device='mps')
-        buffers = self._code() + [tables, xt, partials] + ([None] * 5 + [xt, self.row_order, self.row_scale] if n > 16 else [])
-        _encode(name, buffers, _dims(tiles=self.tiles_, outputs=self.rows, rows=n, per=-(-self.tiles_ // 8), split=n * self.rows,
+        buffers = self._code() + [tables, xt, partials] + ([None] * 5 + [xt, self.row_order, self.row_scale] if spec['kernel'] == 'panel' else [])
+        _encode(name, buffers, _dims(tiles=self.tiles_, outputs=self.rows, rows=n, per=-(-self.tiles_ // COMPUTE['STREAMED_PANEL_TILES']), split=n * self.rows,
                                      pitch=self.pitch), gx, gy, threads, line)
         return partials
 
@@ -795,7 +805,7 @@ class Matrix(torch.Tensor):
         name, line = spec_instance(dict(kernel='panel_t', M=m), self.tiles_, self.widths)
         _encode(name, self._code() + [None, xt, partials],
                 _dims(tiles=self.tiles_, outputs=self.rows, rows=n, per=per, split=n * self.columns, pitch=self.pitch),
-                -(-self.tiles_ // 8), -(-n // m) * shares, 256, line)
+                -(-self.tiles_ // COMPUTE['STREAMED_PANEL_TILES']), -(-n // m) * shares, COMPUTE['STREAMED_PANEL_TILES'] * COMPUTE['SIMD_WIDTH'], line)
         return partials
 
     def finish(self, partials, order=None, scale=None, factor=None, dtype=torch.float16):
@@ -813,12 +823,12 @@ class Matrix(torch.Tensor):
         """The product of coded inputs xt [n, columns] finished: y [n, rows] fp16 at its logical rows (the
         `decomposition`'s instance where given: dispatch; its partials finished by streamed_finish unless it is a panel)."""
         n = xt.shape[0]
-        if (n <= 16 if decomposition is None else decomposition['kernel'] != 'panel'):
+        if (n <= max(POLICY['cooperative_rows']) if decomposition is None else decomposition['kernel'] != 'panel'):
             return self.finish(self.product(xt, decomposition=decomposition))
         _, name, line, gx, gy, threads, _ = self.dispatch(n, decomposition=decomposition)
         y = _half(n, self.rows)
         _encode(name, self._code() + [None, xt, None, None, None, None, None, None, y, self.row_order, self.row_scale],
-                _dims(tiles=self.tiles_, outputs=self.rows, rows=n, per=-(-self.tiles_ // 8), stride=self.rows, finish=1,
+                _dims(tiles=self.tiles_, outputs=self.rows, rows=n, per=-(-self.tiles_ // COMPUTE['STREAMED_PANEL_TILES']), stride=self.rows, finish=1,
                       pitch=self.pitch), gx, gy, threads, line)
         return y
 
@@ -831,7 +841,7 @@ class Matrix(torch.Tensor):
         x16 = x.contiguous()
         if dtype != torch.float16:
             x16, factor = _half(n, x.shape[1]), torch.empty(n, dtype=torch.float32, device='mps')
-            _encode('streamed_scale_rows' + _TYPES[dtype], [x.contiguous(), x16, factor], _dims(columns=x.shape[1]), n, 1, 256)
+            _encode('streamed_scale_rows' + _TYPES[dtype], [x.contiguous(), x16, factor], _dims(columns=x.shape[1]), n, 1, COMPUTE['STREAMED_SCALE_THREADS'])
         if self.transposed:
             xt = self.coded_input(x16)[0]
             return self.apply(xt) if factor is None else self.finish(self.product(xt), factor=factor, dtype=dtype)
@@ -1241,7 +1251,7 @@ def _fit(args):
     held, regrets = [], []
     for shape in sorted({o[4] for o in obs}):
         other = Fit(here[1], gbps)
-        other.fit([o for o in obs if o[4] != shape], iters=600)
+        other.fit([o for o in obs if o[4] != shape], iters=POLICY['fit_holdout_iterations'])
         for n in sorted({o[2] for o in obs if o[4] == shape}):
             seen = [(other.time(spec, s, n), t) for spec, s, nn, t, sh in obs if sh == shape and nn == n]
             held += [abs(math.log(p / t)) for p, t in seen]
@@ -1252,7 +1262,7 @@ def _fit(args):
               'count': len(obs), 'loss': loss, 'median_log_error': errors[len(errors) // 2],
               'held_out': {'median_log_error': held[len(held) // 2], 'median_regret': regrets[len(regrets) // 2],
                            'worst_regret': regrets[-1]}, 'coefficients': fit.coefficients(), 'factors': fit.factors,
-              'attention': attention_fit(attention),
+              'attention': attention_fit(attention), 'coop': read_cooperative_layout(),
               'readings': [{'slice': list(k), 'instance': list(c), 'us': us} for k, read in sorted(readings(obs).items()) for c, us in sorted(read.items())],
               'attention_readings': [dict(zip(ATTENTION_READ, k), us=us) for k, us in sorted(attention_readings(attention).items())],
               'fused': kept.get('fused', {}), 'forms_at_bar': kept.get('forms_at_bar', {})}
@@ -1439,7 +1449,7 @@ def prepare_read(data, output, count, repetitions):
     kernel = _pipeline('streamed_read')
     schedule = _stream.Schedule()
     for _ in range(repetitions):
-        schedule.compute(kernel, [data, output], _dims(count=count), 15, 1024, 1, 256, 1 | (2 << 32))
+        schedule.compute(kernel, [data, output], _dims(count=count), 15, 1024, 1, 256, 1 | (2 << COMPUTE['ACCESS_WRITE_SHIFT']))
     schedule.finish()
     return schedule
 
@@ -1700,7 +1710,7 @@ def _resolve(args):
             entries.append({'op': op, 'outputs': outputs, 'columns': columns, 'widths': widths, 'rows': rows, 'kernel': kernel,
                             'args': list(arguments), 'names': list(ARGUMENTS[kernel]), 'grid': list(grid), 'threads': threads,
                             'shares': shares, 'lut': int(spec.get('LUT', 0)), 'us': round(t, 2),
-                            'finish': kernel == 'alu' and shares == 1 and rows <= 8 and rows not in args.apart and rows in fused.get('finish', {}).get(shape, [rows]),
+                            'finish': kernel == 'alu' and shares == 1 and rows <= POLICY['finish_rows'] and rows not in args.apart and rows in fused.get('finish', {}).get(shape, [rows]),
                             'epilogues': sorted(k for k, held_ in stacks.items() if all(rows in fused.get(k, {}).get(f'{shape} {s}', []) for s in held_))})
     ctx = args.ctx or record.get('ctx_mean') or 1024
     part = record['ranks'][args.rank] if args.program else None

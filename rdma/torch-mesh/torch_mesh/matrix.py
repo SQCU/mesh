@@ -60,4 +60,4 @@ def product(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, public
     return (pipeline(tuple(definitions.items())), [x, w, out, arrivals, None, bias, x1],
             {4: struct.pack(f'{len(words)}I', *words)}, (-(-rows // row_tile), -(-columns // column_tile), batches),
             (threads, 1, 1), False, 3 | (32 if bias is not None else 0) | (64 if x1 is not None else 0)
-            | ((12 if publication is not None else 4) << 32))
+            | ((12 if publication is not None else 4) << _stream.compilation['ACCESS_WRITE_SHIFT']))
