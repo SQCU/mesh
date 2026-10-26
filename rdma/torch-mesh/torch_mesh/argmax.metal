@@ -149,6 +149,33 @@ __attribute__((always_inline)) static inline uint mesh_order(float x) {
     return o - 0x00800000u < 0xff000000u ? o : 0u;
 }
 
+// A threadgroup prefix and total, shared by selection and tensor scans.
+// Metal shuffles words; a wide integer carries both words through the same lanes.
+template <typename V> inline V mesh_scan_prefix(V x, uint lid) { return simd_prefix_inclusive_sum(x); }
+inline ulong mesh_scan_prefix(ulong x, uint lid) {
+    for (ushort d = 1; d < MESH_SIMD_WIDTH; d *= 2) {
+        const uint2 words = as_type<uint2>(x);
+        const ulong other = as_type<ulong>(uint2(simd_shuffle_up(words.x, d), simd_shuffle_up(words.y, d)));
+        if (lid % MESH_SIMD_WIDTH >= d) x += other;
+    }
+    return x;
+}
+
+template <uint T, typename V>
+inline V mesh_prefix_sum(V x, uint lid, threadgroup V *sums, thread V &total) {
+    x = mesh_scan_prefix(x, lid);
+    if (lid % MESH_SIMD_WIDTH == MESH_SIMD_WIDTH - 1) sums[lid / MESH_SIMD_WIDTH] = x;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    V before = 0;
+    total = 0;
+    for (uint q = 0; q < T / MESH_SIMD_WIDTH; q++) {
+        before += q < lid / MESH_SIMD_WIDTH ? sums[q] : V(0);
+        total += sums[q];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return before + x;
+}
+
 // The n greatest of candidates [lo, hi) by integer key(c), with zero excluded, in one threadgroup:
 // radix selection of the n-th key's order word, a byte a pass over a 256-bin histogram, then the candidates in ascending
 // order, each thread a contiguous span, put(i, c) at their places (put(i, 0xffffffff) past the last when fewer than n are
@@ -183,14 +210,7 @@ __attribute__((always_inline)) static inline uint2 mesh_top_ordered(K key, uint 
         prefix = said[0]; need = said[1]; mask |= (MESH_SELECTION_BINS - 1) << shift;
     }
     auto scan = [&](uint x, thread uint &total) {
-        const uint inner = simd_prefix_exclusive_sum(x);
-        if (lid % MESH_SIMD_WIDTH == MESH_SIMD_WIDTH - 1) sums[lid / MESH_SIMD_WIDTH] = inner + x;
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        uint before = 0;
-        total = 0;
-        for (uint q = 0; q < T / MESH_SIMD_WIDTH; q++) { before += q < lid / MESH_SIMD_WIDTH ? sums[q] : 0u; total += sums[q]; }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        return before + inner;
+        return mesh_prefix_sum<T>(x, lid, sums, total) - x;
     };
     const uint span = (hi - lo + T - 1) / T, a = min(lo + lid * span, hi), b = min(a + span, hi);
     uint above = 0, ties = 0, greater, tied;

@@ -60,6 +60,14 @@ outputs use the same bitonic pair steps in threadgroup storage when the device
 has room, or in prepared device storage otherwise. Those steps enter ordinary
 command records; no framework selection call runs with the payload.
 
+`cumsum` binds the same threadgroup prefix sum used by that selector. Preparation
+divides the scan axis into blocks, recursively scans their totals, and binds the
+addition of those prefixes to the output. Views supply their original strides.
+The block geometry comes from the Metal compilation operands and device limits.
+Intermediate floating sums retain accumulation precision; equal-width output
+storage holds its own partial sums. All levels enter the native command records
+before execution, including the expert-dispatch graph's integer slot counts.
+
 ## Shared ordered graph passes
 
 [mesh_graph.py](../rdma/mesh_graph.py) receives operation reads and writes as value identities,

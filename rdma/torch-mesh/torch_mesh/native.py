@@ -87,6 +87,13 @@ def topk(x, k, dim=-1, largest=True, sorted=True):
     return output
 
 
+def cumsum(x, dim, *, dtype=None):
+    from .scan import cumsum as prepare
+    output, commands = prepare(x, dim, dtype=dtype)
+    _records.get().extend(commands)
+    return output
+
+
 class Program:
     """Bound numerical command records; composition happens during preparation."""
     def __init__(self, commands, output):
@@ -123,7 +130,8 @@ def compile_graph(module, metadata, operands):
         def _generate_extern_kernel_alloc_helper(self, node, args):
             names = {'torch.ops.torch_mesh.linear.default': 'linear',
                      'torch.ops.torch_mesh.linears.default': 'linears',
-                     'torch.ops.aten.topk.default': 'topk'}
+                     'torch.ops.aten.topk.default': 'topk',
+                     'torch.ops.aten.cumsum.default': 'cumsum'}
             name = node.get_kernel_name()
             if name not in names:
                 raise NotImplementedError(f'no native preparation for {name}; a framework fallback is not an executor')
