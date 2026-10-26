@@ -635,25 +635,19 @@ class Program:
         # FX generates a fixed sequence. Numerical spans use Function's mesh
         # compiler; native crossings use their existing prepared bindings.
         # No runtime task walk, dependency queries, result guards or workers.
-        graph, bindings, numerical = torch.fx.Graph(), {}, []
-
-        def append(value, method):
-            name = f'step_{len(bindings)}'
-            bindings[name] = value
-            graph.call_method(method, (graph.get_attr(name),))
-
+        from torch_mesh.declarations import execution_sequence
+        steps, numerical = [], []
         for task in local:
             if task.crossing:
                 if numerical:
-                    append(self._numerical(tuple(numerical)), 'run')
+                    steps.append((self._numerical(tuple(numerical)), 'run'))
                     numerical.clear()
-                append(task.prepared[0], 'enqueue')
+                steps.append((task.prepared[0], 'enqueue'))
             else:
                 numerical.append(task)
         if numerical:
-            append(self._numerical(tuple(numerical)), 'run')
-        graph.output(None)
-        self.graph = torch.fx.GraphModule(bindings, graph, 'PartialFunction')
+            steps.append((self._numerical(tuple(numerical)), 'run'))
+        self.graph = execution_sequence(steps)
         self.run = self.graph.forward
         self._realized = True
         return self

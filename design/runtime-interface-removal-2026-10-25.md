@@ -59,7 +59,12 @@ substitute.
 
 Open boundaries remain explicit: general PyTorch-generated numerical spans
 still encode through its framework queue and can use compiler-managed temporary
-storage. Generic eager collective APIs still realize their calls on invocation.
+storage. Ordinary all-to-all, partial-row reductions and the supported functional
+collectives now split into bound native crossings during `Function.declare`.
+Their producer/consumer spans use the same fixed FX sequence builder and
+fragment bindings as the partial tensor API. Raw eager compatibility calls
+still realize their operands on invocation; nonleading reduction axes require
+explicit partial tensor views at preparation.
 Native model crossings do not yet all publish partial results from inside the
 producer kernel. Whole-input joins in the recurrent kernel also remain.
 The constrained data-model document is unchanged. Compilation and source

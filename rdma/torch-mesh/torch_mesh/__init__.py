@@ -343,5 +343,5 @@ def merge_partials(out, lse, group=None, root=-1):
 
     from . import backend
     group = group or dist.distributed_c10d._get_default_group()
-    attended, lse = backend.attention(torch.ops.torch_mesh.merge_partials(backend.partial(out, lse), root, group.group_name))
+    attended, lse = backend.attention(torch.ops.torch_mesh.merge_partials(backend.partial(out, lse), root, group.group_name, []))
     return attended.to(out.dtype), lse

@@ -120,12 +120,5 @@ def allocate(numel, scalar, device, in_region):
 
 
 def prepare_fragments(bindings, group):
-    """One group of canonical native collectives over retained alias slices."""
-    from torch_mesh import backend
-    calls, operands = [], []
-    for declaration, source, destination in bindings:
-        code = declaration.op if isinstance(declaration.op, int) else backend.op(declaration.op)
-        calls.append((declaration.kind, [source], [destination], declaration.counts or [], code, declaration.root))
-        operands.extend(t for t in (source, destination) if t is not None)
-    from torch_mesh import _stream
-    return _stream.Collectives(calls, group.handle, operands), [call for call, _, _ in bindings]
+    from torch_mesh.backend import prepare_fragments
+    return prepare_fragments(bindings, group)

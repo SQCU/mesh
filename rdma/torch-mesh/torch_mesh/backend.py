@@ -386,6 +386,16 @@ class ProcessGroupMesh(dist.ProcessGroup):
         return self._issue([call], [out], async_op)
 
 
+def prepare_fragments(bindings, group):
+    """The common AOT binding for partial blocks and frontend graph crossings."""
+    calls, operands = [], []
+    for declaration, source, destination in bindings:
+        code = declaration.op if isinstance(declaration.op, int) else op(declaration.op)
+        calls.append((declaration.kind, [source], [destination], declaration.counts or [], code, declaration.root))
+        operands.extend(t for t in (source, destination) if t is not None)
+    return _stream.Collectives(calls, group.handle, operands), [call for call, _, _ in bindings]
+
+
 def partial(out, lse):
     """An attention's output over some keys (shape x dim) and each row's logsumexp (shape) as the library's partials,
     float32 rows (shape x (2 + dim)) of [m, l, O]: m the logsumexp, l 1, O the output; a row that saw no key (its
@@ -411,7 +421,7 @@ def _mesh(group_name, what):
 
 
 @torch.library.custom_op('torch_mesh::merge_partials', mutates_args=())
-def merge_partials(partials: torch.Tensor, root: int, group_name: str, rows: list[int] = []) -> torch.Tensor:
+def merge_partials(partials: torch.Tensor, root: int, group_name: str, rows: list[int]) -> torch.Tensor:
     """The partials merge on the mesh group named `group_name` as a torch operator (torch_mesh.merge_partials):
     float32 rows of [m, l, O] (partial) merged by their log-sum-exp, on every member (`root` -1) or at `root`."""
     group = _mesh(group_name, 'merge_partials')
@@ -422,7 +432,7 @@ def merge_partials(partials: torch.Tensor, root: int, group_name: str, rows: lis
 
 
 @merge_partials.register_fake
-def _(partials, root, group_name, rows=()):
+def _(partials, root, group_name, rows):
     shape = (rows[_mesh(group_name, 'merge_partials').rank()], partials.shape[-1]) if rows else partials.shape
     return partials.new_empty(shape)
 
