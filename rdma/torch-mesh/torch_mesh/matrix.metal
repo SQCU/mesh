@@ -10,24 +10,31 @@ struct ProductArgs {
 };
 kernel void product(device INPUT *X [[buffer(0)]], device INPUT *W [[buffer(1)]], device uchar *Y [[buffer(2)]],
                     device atomic_uint *arrivals [[buffer(3)]], constant ProductArgs &s [[buffer(4)]], device OUTPUT *bias [[buffer(5)]],
+                    device INPUT *X1 [[buffer(6)]],
                     uint3 tg [[threadgroup_position_in_grid]], uint3 lane [[thread_position_in_threadgroup]],
                     ushort sg [[simdgroup_index_in_threadgroup]]) {
     const uint local = lane.x;
-    const int M=s.shape.x, K=s.shape.y, N=s.shape.z;
+    const int M=s.shape.x, N=s.shape.z;
 #if FUSED
     for (uint k = 0; k < CHANNELS; k++) if (s.publish[k].p) {
         auto b = s.publish[k];
-        mesh_step_enter(*b.p, b.v, b.progress, tg.x == 0 && tg.y == 0 && local == 0);
+        mesh_step_enter(*b.p, b.v, b.progress, tg.x == 0 && tg.y == 0 && tg.z == 0 && local == 0);
     }
 #endif
     const int row=int(tg.x)*64+(sg/2)*32, col=int(tg.y)*64+(sg%2)*32;
-    auto A=tensor(X + tg.z * ABATCH, dextents<int,2>{K,M}, array<int,2>{AK,AM});
-    auto B=tensor(W + tg.z * BBATCH, dextents<int,2>{N,K}, array<int,2>{BN,BK});
+    auto A=tensor(X + tg.z * ABATCH, dextents<int,2>{K0,M}, array<int,2>{AK,AM});
+    auto B=tensor(W + tg.z * BBATCH, dextents<int,2>{N,K0}, array<int,2>{BN,BK});
     constexpr auto desc=matmul2d_descriptor(32,32,32,false,false,false,matmul2d_descriptor::mode::multiply_accumulate);
     matmul2d<desc, execution_simdgroup> op;
     auto acc=op.get_destination_cooperative_tensor<decltype(A),decltype(B),float>();
     for(uint i=0;i<acc.get_capacity();i++)acc[i]=0;
-    for(int at=0;at<K;at+=32){auto a=A.slice<32,32>(at,row);auto b=B.slice<32,32>(col,at);op.run(a,b,acc);}
+    for(int at=0;at<K0;at+=32){auto a=A.slice<32,32>(at,row);auto b=B.slice<32,32>(col,at);op.run(a,b,acc);}
+#if SEGMENTED
+    const int K=s.shape.y;
+    auto A1=tensor(X1 + tg.z * A1BATCH, dextents<int,2>{K-K0,M}, array<int,2>{A1K,A1M});
+    auto B1=tensor(W + tg.z * BBATCH + K0 * BK, dextents<int,2>{N,K-K0}, array<int,2>{BN,BK});
+    for(int at=0;at<K-K0;at+=32){auto a=A1.slice<32,32>(at,row);auto b=B1.slice<32,32>(col,at);op.run(a,b,acc);}
+#endif
     for(uint i=0;i<acc.get_capacity();i++)if(acc.is_valid_element(i)){
         auto e=acc.get_multidimensional_index(i);
         if(row+e[1]<M && col+e[0]<N) {
@@ -43,7 +50,7 @@ kernel void product(device INPUT *X [[buffer(0)]], device INPUT *W [[buffer(1)]]
     atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));
     threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
     threadgroup uint last[1];
-    if (local == 0) last[0] = atomic_fetch_add_explicit(arrivals, 1u, memory_order_relaxed) == uint(((M+63)/64)*((N+63)/64)-1);
+    if (local == 0) last[0] = atomic_fetch_add_explicit(arrivals, 1u, memory_order_relaxed) == uint(((M+63)/64)*((N+63)/64)*s.shape.w-1);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (last[0]) {
         atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));

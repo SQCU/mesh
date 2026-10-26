@@ -235,7 +235,10 @@ appends its input broadcast, starting ticks and all chunks into one complete nat
 `compiled_graph`, `Preparations`, `_CAPTURE`, crossing-key lookup and indexed crossing runtime operators
 are removed. Mathematical kernel choice remains preparation work. `linear.metal` serves the existing
 small-row products. `matrix.metal` contains the matrix body extracted from the DNN program; the DNN
-and larger FX matrix products now import that same implementation. This removes a runtime distinction;
+and larger FX matrix products now import that same implementation. Segmented inputs remain separate views:
+each segment contributes to the same accumulator, including ragged boundaries and batched views. Wider LSTM
+batches therefore need no concatenation copy or separate executor. Publication counts include every batch.
+This removes a runtime distinction;
 whole-function hourlies must establish the resulting latency and useful bandwidth.
 
 ### Operators at the Python/native boundary

@@ -55,10 +55,8 @@ def linears(xs, ws, biases, acts, x1s, *, outputs=None):
     else:
         from .matrix import product
         for x, w, part, bias, act, out in zip(xs, ws, x1s, biases, acts, outputs):
-            if part is not None:
-                raise NotImplementedError('segmented matrix operands must be lowered before matrix command binding')
             if out.numel():
-                _records.get().append(product(x, w.t(), out, bias=bias, act=bool(act)))
+                _records.get().append(product(x, w.t(), out, x1=part, bias=bias, act=bool(act)))
     return outputs
 
 
