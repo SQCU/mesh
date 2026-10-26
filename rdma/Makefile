@@ -154,6 +154,6 @@ clean:
 # installed libraries it loads (make install puts them in rdma/; this target installs nothing, so it never stops the
 # bridge: design/transport.md)
 PYTHON ?= $(HOME)/.venv-mesh-uv/bin/python
-mesh-c: mesh_c_build.py mesh-plan.h nccl.h
+mesh-c: mesh_c_build.py ../etc/bridge/layout.h mesh-plan.h nccl.h mesh-statistics.h
 	$(PYTHON) mesh_c_build.py
 .PHONY: mesh-c
