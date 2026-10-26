@@ -13,9 +13,9 @@ kernel void product(device INPUT *X [[buffer(0)]], device INPUT *W [[buffer(1)]]
                     device INPUT *X1 [[buffer(6)]],
                     uint3 tg [[threadgroup_position_in_grid]], uint3 lane [[thread_position_in_threadgroup]],
                     ushort sg [[simdgroup_index_in_threadgroup]]) {
-    const uint local = lane.x;
     const int M=s.shape.x, N=s.shape.z;
 #if FUSED
+    const uint local = lane.x;
     for (uint k = 0; k < CHANNELS; k++) if (s.publish[k].p) {
         auto b = s.publish[k];
         mesh_step_enter(*b.p, b.v, b.progress, tg.x == 0 && tg.y == 0 && tg.z == 0 && local == 0);
