@@ -346,3 +346,19 @@ Closure of these entries requires the affected callers to use the shared prepare
 numerical features intact. Performance evidence belongs to committed-main hourlies: whole-call time paired
 with useful bandwidth across the configured shapes. This manifest reports source findings, not an unmeasured
 claim that every proposed substitution already improves that curve.
+
+
+## FX integration update — 2026-10-26T17:35:00Z
+
+`TorchSchedule`, its framework/native start/join handoff, indexed crossing execution, `Preparations`, and
+`_CAPTURE` are removed. `native.compile_graph` uses numerical IR and Metal source generation during
+preparation; its wrapper binds `_stream.Commands` once. Those commands and collective bindings append to
+`MetalSchedule` before execution. LSTM, TP/EP/CP, partial tensor programs and engine-share composition
+use that same native submission. The Dynamo backend entry point and eager allocating linear executors
+are removed. `matrix.metal` is the DNN matrix body, now shared with larger FX products. The existing
+small-row linear body remains in use.
+
+CPU/ANE engine shares use the native recorder's producer/consumer records. Generic CPU FX emission remains
+unsupported; missing lowering errors do not select a framework executor. This update does not close every
+entry in this manifest. Native and extension builds passed; whole-call latency and useful bandwidth still
+require the canonical committed-main run. No new test suite or alternate measurement path was added.

@@ -390,17 +390,6 @@ from . import _stream as _native  # noqa: E402  (torch_mesh::fused_step's librar
 _native.fused_maker(_fused_form)
 
 
-@torch.library.register_fake('torch_mesh::indexed_step')
-def _(x, w, index):
-    from .declarations import _INDEXED_SHAPES
-    return x.new_empty(_INDEXED_SHAPES[index])
-
-
-@torch.library.register_fake('torch_mesh::indexed_step_out')
-def _(x, w, out, index):
-    return None
-
-
 @torch.library.register_fake('torch_mesh::fused_step')
 def _(x, w, dim, sizes, group_name, adds, repeats):
     operand = tuple(x.shape) if w is None else (x.shape[0], w.shape[0])
@@ -787,7 +776,7 @@ def _follow_bytes(placement, local, logical_shape, logical_stride, key, rank, gr
             relay = _empty((run.bytes,), local, group, torch.uint8)
             first, stride, kernel = relay.narrow(0, 0, run.row_bytes), run.row_bytes, None
         jobs.append((run, kernel, _migration_words(run, run.row_bytes, 1), 1, first, stride))
-    schedule = _stream.Schedule(mps=True)
+    schedule = _stream.Schedule()
     consumers = []
     for run, kernel, words, groups, first, stride in jobs:
         if run.source == run.destination:

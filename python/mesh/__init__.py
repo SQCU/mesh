@@ -582,7 +582,6 @@ class Program:
         function.declare(self.group)
         if any(function.groups.values()):
             raise ValueError('partial kernels declare communication through block collective operands')
-        function.prepare()
         return function
 
     def realize(self, repetitions=1):
@@ -627,27 +626,21 @@ class Program:
             if task.crossing:
                 task.prepared = task.run[0](self, task)
         self._world.declare(order)
-        for _ in range(repetitions):
-            for task in local:
-                if task.crossing:
-                    task.prepared[0].realize()
-
-        # FX generates a fixed sequence. Numerical spans use Function's mesh
-        # compiler; native crossings use their existing prepared bindings.
-        # No runtime task walk, dependency queries, result guards or workers.
         from torch_mesh.declarations import execution_sequence
         steps, numerical = [], []
         for task in local:
             if task.crossing:
                 if numerical:
-                    steps.append((self._numerical(tuple(numerical)), 'run'))
+                    steps.append(self._numerical(tuple(numerical)))
                     numerical.clear()
-                steps.append((task.prepared[0], 'enqueue'))
+                steps.append(task.prepared[0])
             else:
                 numerical.append(task)
         if numerical:
-            steps.append((self._numerical(tuple(numerical)), 'run'))
+            steps.append(self._numerical(tuple(numerical)))
         self.graph = execution_sequence(steps)
+        self.graph.realize(repetitions)
+        self.completion = self.graph.completion
         self.run = self.graph.forward
         self._realized = True
         return self

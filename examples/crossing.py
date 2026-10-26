@@ -5,7 +5,6 @@ import torch
 import torch.distributed as dist
 import torch.distributed._functional_collectives as collective
 import torch_mesh
-from torch_mesh import _stream
 from torch_mesh.declarations import Function
 from mesh_statistics import now
 import rollout
@@ -39,9 +38,8 @@ def main():
     observer = rollout.start(dist.distributed_c10d._get_default_store(), 'crossing', rank, size, [])
     group._observers = [observer]
     started = now()
-    function()
-    completion = _stream.completion()
-    _stream.publish_boundary()
+    function.run()
+    completion = function.completion()
     observer[0].put((completion, {'episode': '0', 'parts': {}, 'costs': {}, 'graphs': {},
         'workload': {'hidden': HIDDEN, 'crossings': CROSSINGS, 'steps': STEPS, 'overlap': OVERLAP},
         'implementation': 'loaded-program', 'started': started, 'rank': rank, 'size': size,

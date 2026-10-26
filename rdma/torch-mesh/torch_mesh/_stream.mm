@@ -443,40 +443,6 @@ static pybind11::capsule schedule_completion(const Schedule &schedule) {
   });
 }
 
-// Static input/output dependencies between a prepared native segment and its
-// PyTorch neighbours. The native schedule owns execution; this binding only
-// puts the two data events into the framework's existing stream.
-struct TorchSchedule {
-  Schedule schedule;
-  MeshStream *source;
-  id<MTLSharedEvent> ready, done;
-  TorchSchedule():source(&stream_of(at::mps::getCurrentMPSStream())) {
-    auto device=source->mps->device();
-    ready=[device newSharedEvent];done=[device newSharedEvent];
-    schedule=Schedule(MetalScheduleCreateOn(source->prepared,MetalFormEncoded),MetalScheduleFree);
-    TORCH_CHECK(schedule,"creating the prepared crossing command stream");
-    MetalScheduleAfter(schedule.get(),ready,1);MetalScheduleSignal(schedule.get(),done,1);
-  }
-  ~TorchSchedule(){[ready release];[done release];}
-  void start() {
-    MeshStream *s=source;id<MTLSharedEvent> input=ready;
-    at::mps::dispatch_sync_with_rethrow(s->mps->queue(), ^{
-      s->mps->endKernelCoalescing();
-      [s->mps->commandBuffer() encodeSignalEvent:input value:1];
-      s->signalled(false);
-    });
-    MetalScheduleEnqueue(schedule.get());
-  }
-  void join() {
-    MeshStream *s=source;id<MTLSharedEvent> output=done;
-    at::mps::dispatch_sync_with_rethrow(s->mps->queue(), ^{
-      s->mps->endKernelCoalescing();
-      [s->mps->commandBuffer() encodeWaitForEvent:output value:1];
-    });
-  }
-  void enqueue() { start();join(); }
-};
-
 // Fixed operands for a declared block graph. Preparation uses the same operand
 // conversion as issue(); submission uses the same encoder, without a Work or a
 // second task scheduler. The enclosing function retains these tensor bindings.
@@ -489,12 +455,11 @@ struct Collectives {
       : comm(comm), operands(std::move(operands)) {
     for (const Call &call : calls) issues.push_back(prepare(call, group));
   }
-  std::vector<std::unique_ptr<TorchSchedule>> executions;
+  std::vector<Schedule> executions;
   size_t next=0;
-  void realize(size_t repetitions=1) {
-    auto made=std::make_unique<TorchSchedule>();
+  void append(MetalSchedule *schedule,size_t repetitions=1) {
     const auto *list=&issues;const ncclComm_t handle=communicator(comm);
-    checked(MetalScheduleCross(made->schedule.get(),^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
+    checked(MetalScheduleCross(schedule,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
         id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
       ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
         .residencySet=(__bridge void *)residency};
@@ -504,10 +469,14 @@ struct Collectives {
       }
       return 0;
     }));
-    const auto held=operands;
-    MetalScheduleFinish(made->schedule.get(),^(NSError *){(void)held;});executions.push_back(std::move(made));
   }
-  void enqueue() { executions[next++]->enqueue(); }
+  void realize(size_t repetitions=1) {
+    auto made=schedule_after_inputs();append(made.get(),repetitions);
+    const auto held=operands;
+    MetalScheduleFinish(made.get(),^(NSError *){(void)held;});executions.push_back(std::move(made));
+  }
+  void enqueue() { MetalScheduleEnqueue(executions[next++].get()); }
+  pybind11::capsule completion() { return schedule_completion(executions[next-1]); }
 
 };
 
@@ -633,6 +602,7 @@ static int64_t pipeline(const std::string &source, const std::string &name) {
   if (!function) throw std::runtime_error("kernel source: no function " + name);
   id<MTLComputePipelineState> state = [device newComputePipelineStateWithFunction:function error:&error];
   if (!state) throw std::runtime_error(std::string("kernel pipeline: ") + error.localizedDescription.UTF8String);
+  [function release]; [library release]; [options release];
   pipelines_.push_back(state);
   return (int64_t)pipelines_.size() - 1;
 }
@@ -687,6 +657,53 @@ static Dispatch encoded(int64_t handle, const std::vector<std::optional<at::Tens
     }
   return d;
 }
+
+// FX's output is the native recorder's input. This constructor only binds
+// storage and constant operands; it neither runs nor records a framework call.
+using CommandRecord = std::tuple<int64_t, std::vector<std::optional<at::Tensor>>,
+    std::map<uint32_t,std::string>, std::array<NSUInteger,3>, std::array<NSUInteger,3>, bool, uint64_t>;
+struct Commands {
+  MetalReplay *replay=nullptr;
+  std::vector<at::Tensor> operands;
+  explicit Commands(const std::vector<CommandRecord> &records) {
+    if(records.empty())return;
+    auto device=at::mps::MPSDevice::getInstance()->device();
+    std::vector<std::vector<MetalCommandBinding>> bindings(records.size());
+    std::vector<MetalCommandDescription> descriptions;
+    std::vector<id<MTLBuffer>> constants;
+    for(size_t k=0;k<records.size();k++) {
+      const auto &[handle,buffers,scalars,grid,group,threadGrid,access]=records[k];
+      TORCH_CHECK(handle>=0&&handle<(int64_t)pipelines_.size(),"unprepared Metal kernel");
+      auto &bound=bindings[k];
+      for(size_t j=0;j<buffers.size();j++)if(buffers[j]) {
+        const auto &t=*buffers[j];
+        TORCH_CHECK(t.is_mps(),"native command operands must name Metal storage");
+        NSUInteger extent=t.numel()?1:0;
+        for(int d=0;d<t.dim()&&t.numel();d++)extent+=(t.size(d)-1)*t.stride(d);
+        bound.push_back({at::native::mps::getMTLBufferStorage(t),
+          (NSUInteger)(t.storage_offset()*t.element_size()),extent*t.element_size(),(uint32_t)j,
+          (uint32_t)(((access>>j)&1?MetalReachRead:0)|((access>>(32+j))&1?MetalReachWritten:0))});
+        operands.push_back(t);
+      }
+      for(const auto &[index,bytes]:scalars) {
+        id<MTLBuffer> buffer=[device newBufferWithBytes:bytes.data() length:bytes.size() options:MTLResourceStorageModeShared];
+        constants.push_back(buffer);
+        bound.push_back({buffer,0,bytes.size(),index,MetalReachRead});
+      }
+      descriptions.push_back({pipelines_[handle],bound.data(),bound.size(),nullptr,0,nullptr,0,
+        MTLSizeMake(grid[0],grid[1],grid[2]),MTLSizeMake(group[0],group[1],group[2]),(BOOL)threadGrid});
+    }
+    replay=MetalReplayCommands(device,descriptions.data(),descriptions.size(),MetalFormEncoded);
+    for(id buffer:constants)[buffer release];
+    TORCH_CHECK(replay,"native command preparation failed");
+  }
+  ~Commands(){MetalReplayFree(replay);}
+  void append(MetalSchedule *schedule) {
+    if(!replay)return;
+    NSError *error=MetalScheduleAppend(schedule,replay,NSMakeRange(0,1),@[],nil);
+    TORCH_CHECK(!error,error?error.localizedDescription.UTF8String:"");
+  }
+};
 static void encode_in(id<MTLComputeCommandEncoder> encoder, const Dispatch &d) {
   [encoder setComputePipelineState:d.state];
   for (size_t i = 0; i < d.bound.size(); i++)
@@ -719,10 +736,9 @@ static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> 
 // torch_mesh::linear (linear.metal): y[R, N] = act(x[R, K] w[N, K]^T (+ bias[N])) of fp16 MPS tensors (act 0 none, 1
 // tanh), x the cat along K of x [R, K0] and x1 [R, K - K0] where x1 is given (never made), rows of each any whole stride
 // apart, w's rows any whole
-// stride apart (w.stride(0)), one dispatch of linear_rows encoded in torch's open compute encoder (encode), its output a
-// new tensor of torch's.  Its K split, the simdgroups a threadgroup, is fitted to K, N and the GPU's cores: about 256
+// stride apart (w.stride(0)), one recorded dispatch into a bound output. Its K split, the simdgroups a threadgroup, is fitted to K, N and the GPU's cores: about 256
 // simdgroups a core over the N / 2 threadgroups, a power of two from 1 to 8 (rounded up), each simdgroup at least 1,024
-// elements of K. Its pipelines compile from the final FX metadata before execution (prepare_linear).
+// elements of K. Its pipelines compile from the final FX metadata before execution.
 static std::string linear_source_;
 static int64_t linear_cores_ = 0;
 static std::map<std::tuple<int, int, int, int>, int64_t> linear_pipelines_;
@@ -754,59 +770,17 @@ static int64_t linear_pipeline(const std::tuple<int, int, int, int> &key) {
                                          kernel + "<" + args + ">) " + kernel + "<" + args + ">;\n", name)).first->second;
 }
 
-// Metadata only: the compiler prepares the exact row/group specialization.
-static void prepare_linear(const std::vector<at::Tensor> &xs, const std::vector<at::Tensor> &ws,
-                           const std::vector<std::optional<at::Tensor>> &x1s, int64_t act) {
-  int64_t groups = 0, least = INT64_MAX;
-  bool wide_w = true, wide_x = true;
-  for (size_t p = 0; p < xs.size(); p++) {
-    const auto &x = xs[p], &w = ws[p];
-    const int64_t K0 = x.size(1), K = K0 + (x1s[p] ? x1s[p]->size(1) : 0);
-    const int64_t ldw = w.stride(1) == 1 ? w.stride(0) : w.size(1);
-    const int64_t ld0 = x.stride(1) == 1 ? x.stride(0) : K0;
-    const int64_t ld1 = !x1s[p] ? ld0 : x1s[p]->stride(1) == 1 ? x1s[p]->stride(0) : x1s[p]->size(1);
-    groups += (w.size(0) + LINEAR_COLUMNS - 1) / LINEAR_COLUMNS;
-    least = std::min(least, K);
-    wide_w &= ldw % 4 == 0 && K0 % 4 == 0;
-    wide_x &= K0 % 4 == 0 && ld0 % 4 == 0 && ld1 % 4 == 0;
-  }
-  const int64_t split = linear_fit(least, groups);
-  const auto key = std::make_tuple(wide_w ? 4 : 1, wide_x ? 4 : 1, (int)split, (int)act);
-  linear_pipeline(key);
-}
-
-static at::Tensor linear(const at::Tensor &x, const at::Tensor &w, const std::optional<at::Tensor> &bias, int64_t act,
-                         const std::optional<at::Tensor> &x1) {
-  const int64_t K0 = x.size(1), K = K0 + (x1 ? x1->size(1) : 0);
-  TORCH_CHECK(x.scalar_type() == at::kHalf && w.scalar_type() == at::kHalf && x.dim() == 2 && w.dim() == 2 && w.size(1) == K &&
-                  (!x1 || (x1->scalar_type() == at::kHalf && x1->dim() == 2 && x1->size(0) == x.size(0))),
-              "torch_mesh::linear takes fp16 x [R, K0], x1 [R, K - K0] (or none) and w [N, K], not ", x.sizes(), " ", x.scalar_type(),
-              ", ", x1 ? x1->sizes() : at::IntArrayRef{}, " and ", w.sizes(), " ", w.scalar_type());
-  const at::Tensor xc = x.stride(1) == 1 ? x : x.contiguous(), wc = w.stride(1) == 1 ? w : w.contiguous();
-  const at::Tensor x1c = !x1 ? xc : x1->stride(1) == 1 ? *x1 : x1->contiguous();
-  const int64_t R = x.size(0), N = w.size(0), ldw = wc.stride(0), ld0 = xc.stride(0), ld1 = x1c.stride(0);
-  const int64_t groups = (N + LINEAR_COLUMNS - 1) / LINEAR_COLUMNS;
-  const int split = (int)linear_split(K, N);
-  const auto key = std::make_tuple(ldw % 4 || K0 % 4 ? 1 : 4, K0 % 4 || ld0 % 4 || ld1 % 4 ? 1 : 4, split, (int)act);
-  const auto handle = linear_pipeline(key);
-  at::Tensor y = at::empty({R, N}, x.options());
-  encode(handle, {xc, wc, y, bias ? std::optional<at::Tensor>(bias->contiguous()) : y, std::nullopt, x1c},
-         {R, K, N, bias ? 1 : 0, ldw, K0, ld0, ld1}, 4, groups, 1, split * 32);
-  return y;
-}
-
 // torch_mesh::linears (linear.metal linear_group): up to four of linear's products, one dispatch: each problem's
 // threadgroups after the ones before it, its split fitted as linear's to the threadgroups of them all and the least K
 // of any, and the narrowest loads any allows.
-static std::vector<at::Tensor> linears(const std::vector<at::Tensor> &xs, const std::vector<at::Tensor> &ws,
+static std::vector<CommandRecord> linear_commands(const std::vector<at::Tensor> &xs, const std::vector<at::Tensor> &ws,
                                        const std::vector<std::optional<at::Tensor>> &biases, const std::vector<int64_t> &acts,
-                                       const std::vector<std::optional<at::Tensor>> &x1s) {
+                                       const std::vector<std::optional<at::Tensor>> &x1s, const std::vector<at::Tensor> &ys) {
   const size_t P = xs.size();
-  TORCH_CHECK(P >= 1 && P <= 4 && ws.size() == P && biases.size() == P && acts.size() == P && x1s.size() == P,
+  TORCH_CHECK(P >= 1 && P <= 4 && ws.size() == P && biases.size() == P && acts.size() == P && x1s.size() == P && ys.size() == P,
               "torch_mesh::linears takes one to four products, each its x, w, bias, act and x1");
   std::vector<std::optional<at::Tensor>> buffers(20);
   std::vector<int64_t> words(40, 0);
-  std::vector<at::Tensor> ys;
   int64_t first = 0, least = INT64_MAX;
   bool wide_w = true, wide_x = true;
   for (size_t p = 0; p < P; p++) {
@@ -814,12 +788,13 @@ static std::vector<at::Tensor> linears(const std::vector<at::Tensor> &xs, const 
     const int64_t K0 = x.size(1), K = K0 + (x1s[p] ? x1s[p]->size(1) : 0);
     TORCH_CHECK(x.scalar_type() == at::kHalf && w.scalar_type() == at::kHalf && x.dim() == 2 && w.dim() == 2 && w.size(1) == K,
                 "torch_mesh::linears: product ", p, " takes fp16 x [R, K0], x1 [R, K - K0] and w [N, K]");
-    const at::Tensor xc = x.stride(1) == 1 ? x : x.contiguous(), wc = w.stride(1) == 1 ? w : w.contiguous();
-    const at::Tensor x1c = !x1s[p] ? xc : x1s[p]->stride(1) == 1 ? *x1s[p] : x1s[p]->contiguous();
+    TORCH_CHECK(x.stride(1)==1 && w.stride(1)==1 && (!x1s[p] || x1s[p]->stride(1)==1) &&
+        (!biases[p] || biases[p]->is_contiguous()) && ys[p].is_contiguous(),
+        "linear commands require declared row views; implicit contiguous copies are not supported");
+    const at::Tensor &xc=x, &wc=w, &x1c=x1s[p]?*x1s[p]:x;
     const int64_t R = x.size(0), N = w.size(0), ldw = wc.stride(0), ld0 = xc.stride(0), ld1 = x1c.stride(0);
-    ys.push_back(at::empty({R, N}, x.options()));
-    buffers[5 * p] = xc, buffers[5 * p + 1] = wc, buffers[5 * p + 2] = ys.back();
-    buffers[5 * p + 3] = biases[p] ? std::optional<at::Tensor>(biases[p]->contiguous()) : ys.back(), buffers[5 * p + 4] = x1c;
+    buffers[5 * p] = xc, buffers[5 * p + 1] = wc, buffers[5 * p + 2] = ys[p];
+    buffers[5 * p + 3] = biases[p] ? biases[p] : std::make_optional(ys[p]), buffers[5 * p + 4] = x1c;
     const int64_t d[8] = {R, K, N, biases[p] ? 1 : 0, ldw, K0, ld0, ld1};
     for (int k = 0; k < 8; k++) words[8 * p + k] = d[k];
     words[32 + p] = first, words[36 + p] = acts[p];
@@ -832,26 +807,26 @@ static std::vector<at::Tensor> linears(const std::vector<at::Tensor> &xs, const 
     words[32 + p] = first;
   }
   const int64_t split = linear_fit(least, first);
+  if(P==1) {
+    buffers.resize(6);buffers[5]=buffers[4];buffers[4]=std::nullopt;
+    std::vector<uint32_t> packed(words.begin(),words.begin()+8);
+    return {{linear_pipeline(std::make_tuple(wide_w?4:1,wide_x?4:1,(int)split,(int)acts[0])),buffers,
+        {{4,std::string((char *)packed.data(),packed.size()*sizeof(uint32_t))}},
+        {(NSUInteger)first,1,1},{(NSUInteger)(split*32),1,1},false,UINT64_C(43)|(UINT64_C(4)<<32)}};
+  }
   const auto key = std::make_tuple(wide_w ? 4 : 1, wide_x ? 4 : 1, (int)split, -1);
-  encode(linear_pipeline(key), buffers, words, 20, first, 1, split * 32);
-  return ys;
+  std::vector<uint32_t> packed(words.begin(),words.end());
+  uint64_t access=0;
+  for(size_t p=0;p<P;p++)access|=(UINT64_C(27)<<(5*p))|(UINT64_C(4)<<(32+5*p));
+  return {{linear_pipeline(key),buffers,{{20,std::string((char *)packed.data(),packed.size()*sizeof(uint32_t))}},
+      {(NSUInteger)first,1,1},{(NSUInteger)(split*32),1,1},false,access}};
 }
 
-static at::Tensor indexed_step(const at::Tensor &x, const std::optional<at::Tensor> &w, int64_t index);
-static void indexed_step_out(const at::Tensor &x, const std::optional<at::Tensor> &w, at::Tensor out, int64_t index);
 TORCH_LIBRARY_FRAGMENT(torch_mesh, m) {
   m.def("linear(Tensor x, Tensor w, Tensor? bias=None, int act=0, Tensor? x1=None) -> Tensor");
   m.def("linears(Tensor[] x, Tensor[] w, Tensor?[] bias, int[] act, Tensor?[] x1) -> Tensor[]");
   m.def("fused_step(Tensor x, Tensor? w, int dim, int[] sizes, str group_name, bool adds, int repeats) -> Tensor");
   m.def("fused_step_out(Tensor x, Tensor? w, Tensor(a!) out, int dim, int[] sizes, str group_name, bool adds, int repeats) -> ()");
-  m.def("indexed_step(Tensor x, Tensor? w, int index) -> Tensor");
-  m.def("indexed_step_out(Tensor x, Tensor? w, Tensor(a!) out, int index) -> ()");
-}
-TORCH_LIBRARY_IMPL(torch_mesh, MPS, m) {
-  m.impl("linear", &linear);
-  m.impl("linears", &linears);
-  m.impl("indexed_step", &indexed_step);
-  m.impl("indexed_step_out", &indexed_step_out);
 }
 
 // Region tensors (torch_mesh.empty, records, address): a tensor whose bytes are a lease of this node's bridge's region
@@ -1079,14 +1054,12 @@ static FusedForm &fused_form_of(const at::Tensor &x, const std::optional<at::Ten
   return fused_forms_->try_emplace(key, std::move(f)).first->second;
 }
 
-static void release_crossings(int64_t comm);
 static void release_chains(int64_t comm);
 
 // every form on communicator `comm` released, its leases back to the region once the stream has passed them (the
 // group's shutdown: ProcessGroupMesh.shutdown, as destroy_process_group ends it)
 static void fused_release(int64_t comm) {
   std::lock_guard<std::mutex> guard(*fused_lock_);
-  release_crossings(comm);
   release_chains(comm);
   for (auto f = fused_forms_->begin(); f != fused_forms_->end();) f = f->second.comm == comm ? fused_forms_->erase(f) : std::next(f);
 }
@@ -1095,7 +1068,6 @@ static void fused_release(int64_t comm) {
 // train still owns its schedule; discarding its bindings would strand data.
 static void fused_reconfigure(int64_t comm) {
   std::lock_guard<std::mutex> guard(*fused_lock_);
-  release_crossings(comm);
   release_chains(comm);
   for (const auto &entry : *fused_forms_)
     TORCH_CHECK(entry.second.comm != comm || entry.second.j == 0,
@@ -1174,149 +1146,6 @@ static void fused_prepare(const at::Tensor &x, const std::optional<at::Tensor> &
     sequence.rings.push_back(&f.rings[repeats]);
   }
   f.pbind.resize(f.channels * 24), f.lbind.resize(f.channels * 24);
-}
-
-static void put_binding(int64_t *words, const std::array<uint64_t, 6> *record) {
-  for (int k = 0; k < 6; k++) {
-    const uint64_t value = record ? (*record)[k] : 0;
-    words[2 * k] = value & 0xFFFFFFFFu;
-    words[2 * k + 1] = value >> 32;
-  }
-}
-
-struct CrossingFrame {
-  Schedule transport;
-  bool starts;
-  Dispatch publish, land;
-  std::optional<Dispatch> ready;
-  std::vector<id<MTLResource>> resources;
-};
-struct IndexedCrossing {
-  FusedForm *form;
-  FusedForm::Sequence *sequence;
-  int64_t repeats;
-  size_t publish_words, land_words, output_binding;
-  at::Tensor output;
-  Dispatch publish, land;
-  std::optional<Dispatch> ready;
-  MeshStream *stream;
-  std::vector<CrossingFrame> frames;
-  size_t next=0;
-};
-static auto *metadata_queues_=new std::map<int64_t,id<MTL4CommandQueue>>;
-static auto *indexed_crossings_ = new std::vector<std::unique_ptr<IndexedCrossing>>;
-
-static void release_crossings(int64_t comm) {
-  auto queue=metadata_queues_->find(comm);
-  if(queue!=metadata_queues_->end()){[queue->second release];metadata_queues_->erase(queue);}
-  for (auto &call : *indexed_crossings_)
-    if (call && call->form->comm == comm) call.reset();
-}
-
-static int64_t crossing_slot() {
-  const int64_t index = indexed_crossings_->size();
-  indexed_crossings_->push_back(nullptr);
-  return index;
-}
-
-static void prepare_crossing(int64_t index, const at::Tensor &x, const std::optional<at::Tensor> &w, int64_t dim,
-                             const std::vector<int64_t> &sizes, const std::string &group, bool adds,
-                             int64_t repeats, bool destination) {
-  std::unique_lock<std::mutex> held(*fused_lock_);
-  FusedForm &f = fused_form_of(x, w, dim, sizes, group, adds, held);
-  std::vector<int64_t> pwords = f.pwords, lwords = f.lwords;
-  if (pwords.size() % 2) pwords.push_back(0);
-  if (lwords.size() % 2) lwords.push_back(0);
-  const size_t np = pwords.size(), nl = lwords.size();
-  pwords.resize(np + 24 * f.channels), lwords.resize(nl + 24 * f.channels);
-  const at::Tensor out = destination ? at::Tensor{} : region_empty(f.shape, x, true);
-  std::vector<std::optional<at::Tensor>> buffers(w ? 5 : 3);
-  buffers[w ? 3 : 2] = f.arrivals;
-  auto call = std::make_unique<IndexedCrossing>(IndexedCrossing{
-    &f, &f.sequences.at(repeats), repeats, np, nl, w ? 2u : 1u, out,
-    encoded(f.publish, buffers, pwords, 15, f.pgx, 1, f.pthreads),
-    encoded(f.land, {std::nullopt, destination ? std::nullopt : std::make_optional(out)}, lwords, 15, f.lgx, 1, f.lthreads),
-    f.ready < 0 ? std::nullopt : std::make_optional(encoded(f.ready, {}, lwords, 15, 1, 1, f.lthreads)),
-    &stream_of(at::mps::getCurrentMPSStream())});
-  (*indexed_crossings_)[index] = std::move(call);
-}
-
-static void tensor_binding(Dispatch &dispatch, size_t index, const at::Tensor &tensor) {
-  dispatch.bound[index] = at::native::mps::getMTLBufferStorage(tensor);
-  dispatch.offsets[index] = tensor.storage_offset() * tensor.element_size();
-  dispatch.lengths[index] = tensor.nbytes();
-}
-
-static void compile_crossing(int64_t index) { @try {
-  IndexedCrossing &call=*(*indexed_crossings_)[index];FusedForm &f=*call.form;
-  const int64_t j=f.j;
-  Schedule transport;
-  if(j==0) {
-    auto &sequence=*call.sequence;
-    FusedForm::Ring &ring=*sequence.rings[sequence.cursor];sequence.cursor+=sequence.stride;
-    const int64_t half=f.turn%2;
-    PreparedWrites &plans=*ring.plans[half];
-    auto device=call.stream->mps->device();
-    id<MTL4CommandQueue> &queue=(*metadata_queues_)[f.comm];
-    if(!queue)queue=[device newMTL4CommandQueue];
-    transport=Schedule(MetalScheduleCreateOn(queue,MetalFormEncoded),MetalScheduleFree);
-    TORCH_CHECK(transport,"creating the prepared metadata command stream");
-    prepare_fused_writes(transport.get(),plans);
-    MetalScheduleFinish(transport.get(),nil);
-    for(int64_t k=0;k<f.channels;k++) {
-      put_binding(f.pbind.data()+12*k,nullptr);
-      put_binding(f.pbind.data()+12*(f.channels+k),k<plans.records.publishes?&plans.publish[k]:nullptr);
-      put_binding(f.lbind.data()+12*k,k<plans.records.lands?&plans.land[k]:nullptr);
-      put_binding(f.lbind.data()+12*(f.channels+k),nullptr);
-    }
-    f.ring=&ring;f.half=half;f.turn++;f.transport=transport;
-  }
-  f.j=(j+1)%call.repeats;
-  CrossingFrame frame{f.transport,j==0,call.publish,call.land,call.ready};
-  frame.publish.words[f.pj]=j;frame.land.words[f.lj]=j;
-  std::copy(f.pbind.begin(),f.pbind.end(),frame.publish.words.begin()+call.publish_words);
-  std::copy(f.lbind.begin(),f.lbind.end(),frame.land.words.begin()+call.land_words);
-  tensor_binding(frame.publish,call.output_binding,f.ring->segments[f.half][j][f.rank]);
-  tensor_binding(frame.land,0,f.ring->slots[f.half][j]);
-  if(frame.ready)std::copy(frame.land.words.begin(),frame.land.words.end(),frame.ready->words.begin());
-  for(id allocation in MetalScheduleResources(frame.transport.get()).allAllocations)
-    frame.resources.push_back((id<MTLResource>)allocation);
-  call.frames.push_back(std::move(frame));
-} @catch(NSException *error) {
-  throw std::runtime_error(error.reason.UTF8String);
-}
-}
-
-static void run_crossing(IndexedCrossing &call, const at::Tensor &x, const std::optional<at::Tensor> &w, const at::Tensor &out) {
-  CrossingFrame &frame=call.frames[call.next++];
-  if(frame.starts)MetalScheduleEnqueue(frame.transport.get());
-  tensor_binding(frame.publish,0,x);
-  if(w){tensor_binding(frame.publish,1,*w);tensor_binding(frame.publish,4,x);}
-  tensor_binding(frame.land,1,out);
-  const Dispatch *publication = &frame.publish, *landing = &frame.land;
-  const Dispatch *ready = frame.ready ? &*frame.ready : nullptr;
-  at::mps::MPSStream *stream = call.stream->mps;
-  const auto *resources=frame.resources.data();const size_t resource_count=frame.resources.size();
-  dispatch_sync(stream->queue(), ^{
-    @autoreleasepool {
-      id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
-      [encoder useResources:resources count:resource_count usage:MTLResourceUsageRead|MTLResourceUsageWrite];
-      encode_in(encoder, *publication);
-      if (ready) encode_in(encoder, *ready);
-      encode_in(encoder, *landing);
-    }
-  });
-}
-
-static at::Tensor indexed_step(const at::Tensor &x, const std::optional<at::Tensor> &w, int64_t index) {
-  IndexedCrossing &call = *(*indexed_crossings_)[index];
-  run_crossing(call, x, w, call.output);
-  return call.output;
-}
-
-static void indexed_step_out(const at::Tensor &x, const std::optional<at::Tensor> &w, at::Tensor out, int64_t index) {
-  IndexedCrossing &call = *(*indexed_crossings_)[index];
-  run_crossing(call, x, w, out);
 }
 
 // A complete recurrent chain uses the same prepared physical writes as a
@@ -1594,17 +1423,12 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
 // receive configuration; enqueue is the native header's submission operation.
 struct ScheduleBinding {
   Schedule schedule;
-  std::unique_ptr<TorchSchedule> bridge;
-  explicit ScheduleBinding(bool mps=false) {
-    if(mps){bridge=std::make_unique<TorchSchedule>();schedule=bridge->schedule;}
-    else schedule=schedule_after_inputs();
-  }
+  ScheduleBinding():schedule(schedule_after_inputs()){}
   std::vector<at::Tensor> operands;
-  void host(pybind11::function function) {
-    TORCH_CHECK(bridge,"host work requires its framework input/output events");
+  pybind11::capsule host(pybind11::function function) {
     auto held=std::shared_ptr<pybind11::function>(new pybind11::function(std::move(function)),
         [](pybind11::function *f){pybind11::gil_scoped_acquire gil;delete f;});
-    MetalScheduleHost(schedule.get(),^NSError * {
+    id<MTLSharedEvent> event=MetalScheduleHostProducer(schedule.get(),^NSError * {
       pybind11::gil_scoped_acquire gil;
       try { (*held)(); return nil; }
       catch(pybind11::error_already_set &error) {
@@ -1612,7 +1436,11 @@ struct ScheduleBinding {
         return [NSError errorWithDomain:@"mesh.host-operation" code:1 userInfo:@{NSLocalizedDescriptionKey:message}];
       }
     });
+    return pybind11::capsule((void *)event,"mesh.host-result",[](PyObject *token){
+      [(id)PyCapsule_GetPointer(token,"mesh.host-result") release];
+    });
   }
+  void consume(pybind11::capsule event){MetalScheduleHostConsumer(schedule.get(),(id<MTLSharedEvent>)event.get_pointer());}
   void compute(int64_t kernel,const Tensors &buffers,const std::vector<int64_t> &words,
       int64_t at,int64_t gx,int64_t gy,int64_t threads,uint64_t access) {
     for(const auto &buffer:buffers)if(buffer)operands.push_back(*buffer);
@@ -1640,10 +1468,20 @@ struct ScheduleBinding {
     }));
   }
   void finish() { const auto held=operands; MetalScheduleFinish(schedule.get(),^(NSError *){(void)held;}); }
-  void enqueue() { if(bridge)bridge->enqueue();else MetalScheduleEnqueue(schedule.get()); }
-  void start() { bridge->start(); }
-  void join() { bridge->join(); }
+  void enqueue() { MetalScheduleEnqueue(schedule.get()); }
   pybind11::capsule completion() { return schedule_completion(schedule); }
+};
+
+// Invocation slots and results are operands. Runtime selects the next prepared
+// native function; it does not enter the framework's encoding queue.
+struct Executions {
+  std::vector<Schedule> schedules;
+  pybind11::object output;
+  size_t next=0;
+  explicit Executions(pybind11::object value):output(std::move(value)){}
+  void add(ScheduleBinding &binding){schedules.push_back(binding.schedule);}
+  pybind11::object run(){MetalScheduleEnqueue(schedules[next++].get());return output;}
+  pybind11::capsule completion(){return schedule_completion(schedules[next-1]);}
 };
 
 // Immutable exact-span bindings use the same preparation/execution contract
@@ -1686,22 +1524,26 @@ struct SpanWrites {
     const ncclResult_t ended = ncclGroupEnd();
     return result ? result : ended;
   }
-  std::vector<std::unique_ptr<TorchSchedule>> executions;
+  std::vector<Schedule> executions;
   size_t next=0;
-  void realize() {
+  void append(MetalSchedule *schedule) {
     TORCH_CHECK(metal,"prepared distributed writes require the Metal backend");
     prepare();
-    auto made=std::make_unique<TorchSchedule>();SpanWrites *self=this;
-    checked(MetalScheduleCross(made->schedule.get(),^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
+    SpanWrites *self=this;
+    checked(MetalScheduleCross(schedule,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
         id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
       ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
         .residencySet=(__bridge void *)residency};
       return (int)self->encode(&on);
     }));
-    const auto held=leases;
-    MetalScheduleFinish(made->schedule.get(),^(NSError *){(void)held;});executions.push_back(std::move(made));
   }
-  void enqueue() { executions[next++]->enqueue(); }
+  void realize() {
+    auto made=schedule_after_inputs();append(made.get());
+    const auto held=leases;
+    MetalScheduleFinish(made.get(),^(NSError *){(void)held;});executions.push_back(std::move(made));
+  }
+  void enqueue() { MetalScheduleEnqueue(executions[next++].get()); }
+  pybind11::capsule completion(){return schedule_completion(executions[next-1]);}
 
 };
 
@@ -1741,7 +1583,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("completed", &completed);
   module.def("pipeline", &pipeline);
   module.def("linear_source", &linear_source);
-  module.def("prepare_linear", &prepare_linear);
+  module.def("linear_commands", &linear_commands);
+  pybind11::class_<Commands>(module,"Commands").def(pybind11::init<const std::vector<CommandRecord> &>());
   module.def("linear_split", &linear_split);
   module.def("device_facts", &device_facts);
   module.def("pipeline_facts", &pipeline_facts);
@@ -1762,28 +1605,37 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("fused_maker", &fused_maker);
   module.def("fused_release", &fused_release);
   pybind11::class_<ScheduleBinding>(module,"Schedule")
-    .def(pybind11::init<bool>(),pybind11::arg("mps")=false)
+    .def(pybind11::init<>())
+    .def("append",[](ScheduleBinding &s,Commands &commands){commands.append(s.schedule.get());
+        s.operands.insert(s.operands.end(),commands.operands.begin(),commands.operands.end());})
     .def("compute",&ScheduleBinding::compute)
     .def("writes",&ScheduleBinding::writes)
     .def("collectives",&ScheduleBinding::collectives)
     .def("host",&ScheduleBinding::host)
+    .def("consume",&ScheduleBinding::consume)
     .def("finish",&ScheduleBinding::finish)
     .def("enqueue",&ScheduleBinding::enqueue)
-    .def("start",&ScheduleBinding::start)
-    .def("join",&ScheduleBinding::join)
     .def("completion",&ScheduleBinding::completion);
   pybind11::class_<SpanWrites, std::shared_ptr<SpanWrites>>(module, "SpanWrites")
     .def(pybind11::init<const std::vector<SpanBinding> &, int64_t>())
     .def("realize", &SpanWrites::realize)
+    .def("append",[](SpanWrites &w,ScheduleBinding &s){w.append(s.schedule.get());
+        s.operands.insert(s.operands.end(),w.leases.begin(),w.leases.end());})
+    .def("completion", &SpanWrites::completion)
     .def("enqueue", &SpanWrites::enqueue);
   pybind11::class_<Collectives, std::shared_ptr<Collectives>>(module, "Collectives")
     .def(pybind11::init<const std::vector<Call> &, int64_t, std::vector<at::Tensor>>())
     .def("realize", &Collectives::realize, pybind11::arg("repetitions")=1)
+    .def("append",[](Collectives &c,ScheduleBinding &s){c.append(s.schedule.get());
+        s.operands.insert(s.operands.end(),c.operands.begin(),c.operands.end());})
+    .def("completion", &Collectives::completion)
     .def("enqueue", &Collectives::enqueue);
+  pybind11::class_<Executions>(module,"Executions")
+    .def(pybind11::init<pybind11::object>())
+    .def("add",&Executions::add)
+    .def("run",&Executions::run)
+    .def("completion",&Executions::completion);
   module.def("fused_reconfigure", &fused_reconfigure);
-  module.def("crossing_slot", &crossing_slot);
-  module.def("prepare_crossing", &prepare_crossing);
-  module.def("compile_crossing", &compile_crossing);
   module.def("chain_slot", &chain_slot);
   module.def("prepare_chain", &prepare_chain);
   module.def("chain_run", &chain_run);

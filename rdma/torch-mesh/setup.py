@@ -1,12 +1,12 @@
 """torch.distributed's "mesh" backend (torch_mesh/backend.py) over ../libnccl-mesh.dylib; torch_mesh/_stream.mm
-hands libnccl-mesh's Metal path torch's MPS command buffer.
+binds FX numerical and transport commands into the common native recorder.
 
   make -C .. all install
   uv pip install --python <venv>/bin/python --no-build-isolation -e .
 
 The torch.backends entry point registers the backend when torch is imported, so a script only names
-it: torch.distributed.init_process_group(backend="mesh"); the torch_dynamo_backends entry point names the compile
-backend: torch.compile(f, backend="mesh")."""
+it: torch.distributed.init_process_group(backend="mesh"). Numerical functions use
+torch_mesh.declarations.Function to declare and prepare their complete graph."""
 import os
 
 os.environ['TORCH_DEVICE_BACKEND_AUTOLOAD'] = '0'
@@ -19,5 +19,4 @@ setup(name='torch-mesh', version='0.4', packages=['torch_mesh'], package_data={'
                                 libraries=['nccl-mesh'],
                                 extra_link_args=[f'-Wl,-rpath,{RDMA}', '-framework', 'Metal', '-framework', 'Foundation'])],
       cmdclass={'build_ext': BuildExtension},
-      entry_points={'torch.backends': ['mesh = torch_mesh:_autoload'],
-                    'torch_dynamo_backends': ['mesh = torch_mesh:compiler']})
+      entry_points={'torch.backends': ['mesh = torch_mesh:_autoload']})

@@ -11,7 +11,6 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Shard
 from torch_mesh import partition
 from torch_mesh.configuration import placement, bind, record
-from torch_mesh import _stream
 from mesh_statistics import now
 
 from tp import DIM, STEPS, drawn
@@ -63,15 +62,14 @@ def main():
          'experts': EXPERTS, 'ffn': FFN, 'top_k': TOP_K, 'slots': SLOTS},
         os.environ.get('MESH_OBSERVATIONS', '~/.cache/mesh/observations/ep.jsonl'))
     with torch.no_grad():
-        from torch_mesh.declarations import Function
+        from torch_mesh.declarations import Function, execution_sequence
         model = MoE(mesh)
         function = Function(model)
-        bind(configuration, lambda: function.declare(mesh.get_group("ep")), lambda: function.prepare(STEPS))
+        program = execution_sequence([function] * STEPS)
+        bind(configuration, lambda: function.declare(mesh.get_group("ep")), program.realize)
         started = now()
-        for _ in range(STEPS):
-            function()
-        completion = _stream.completion()
-        _stream.publish_boundary()
+        program.forward()
+        completion = program.completion()
         record(configuration, completion, started, STEPS * TOKENS * DIM * model.x.element_size(),
                {'program': 'ep', 'steps': STEPS, 'parts': configuration['assignment']['parts']['ep']})
     dist.destroy_process_group()

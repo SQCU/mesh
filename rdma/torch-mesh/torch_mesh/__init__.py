@@ -1,10 +1,8 @@
 """torch.distributed's "mesh" backend over ../libnccl-mesh.dylib (torch_mesh/backend.py).  The torch.backends
 entry point loads it when torch is imported, so a program only names it: init_process_group(backend="mesh").
 
-compiler is the torch.compile backend "mesh" (setup.py's torch_dynamo_backends entry point, a backend torch documents
-for a package to register): torch.compile(f, backend="mesh") compiles f with Inductor, its collectives the library's,
-with nothing wrapped around a compiled graph's run.  Every collective, compiled or eager, is committed by _stream.mm's
-one commit rule (README, Performance).
+declarations.Function compiles a complete PyTorch graph into the common native
+command records, with buffers and dispatches bound before execution.
 
 empty() makes a region tensor, whose bytes are a lease of this node's bridge's region (an MPS one through torch's
 DLPack interop over the lease's Metal buffer: _stream.mm region_empty), which a collective reads and writes where it
@@ -27,39 +25,19 @@ def _autoload():
     from . import backend  # noqa: F401
 
 
-def compiler(gm, example_inputs, *, whole_graph=False):
-    """Inductor's compilation of a graph (torch._dynamo.lookup_backend("inductor"), as torch's composable backends
-    compose it), its collectives the library's (_stream.mm's kernels for torch's functional collectives on MPS), with
-    nothing wrapped around its run.  A compiled collective's publication is committed by the same rule as an eager
-    one's (_stream.mm, the commit rule; README, Performance), so how a program is written does not decide how fast its
-    collectives are.  The graph the backend is handed is a forward (a training graph's backward runs from autograd,
-    under the same rule).  Its all-reduces are torch_mesh::all_reduce (backend.all_reduce), which Inductor calls rather
-    than lowers: it would lower one to a copy into a buffer of its own and an all_reduce_ in place there
-    (torch/_inductor/comm_lowering.py), memory the library does not send from (rdma/nccl.h Memory).  Its products of a
-    few fp16 rows by a weight laid out as nn.Linear's (aten.mm(x, w^T), aten.addmm(b, x, w^T): w^T the transposed view of
-    a [N, K] whose rows lie apart by K or more, x at most 8 rows) are torch_mesh::linear, one plain dispatch of
-    torch-mesh's own (linear.metal) where MPS's matmul costs its host about 12 us a call, with a tanh that is a
-    product's one use folded into it, a cat of two row segments that is its x read in place, and up to four consecutive
-    independent products one dispatch (torch_mesh::linears).  A graph's sums on a group, where every collective it
-    names that group in is one of them and all of one form, are one issue's repeats (each node told their count:
-    rdma/nccl.h ncclMeshFused repeats), so the host issues their crossing once a graph.  Inductor's run-time size,
-    alignment and scalar asserts are off: each is a check at every call of what the compile fixed (design/data-model.md
-    section 6)."""
+def compiler(gm, example_inputs):
+    """Lower a declared whole function to the shared native command records.
+
+    Torch supplies the graph and tensor metadata. Mathematical fusion and Metal
+    source generation happen here; framework launchers are not an executor.
+    """
     from pathlib import Path
-
     import torch
-    from torch._inductor import config
-    from torch._inductor.compile_fx import compile_fx, compile_fx_inner
-    from torch._functorch import config as autograd_config
-    from .declarations import operation, compiled_graph, Preparations, _CAPTURE
-
-    from . import _stream, backend, partition  # noqa: F401  (torch_mesh::all_reduce, torch_mesh::allgatherv)
+    from . import _stream, backend, partition
     from .streamed import node
+    from .native import compile_graph
     _stream.linear_source((Path(__file__).parent / 'linear.metal').read_text(), node()[1])
-
     aten = torch.ops.aten
-    # each fused crossing's op and where its group's name lies among its arguments, its repeats the next
-    CROSSINGS = {torch.ops.torch_mesh.all_reduce.default: 2, torch.ops.torch_mesh.linear_sum.default: 2}
 
     def rows(x, w):
         """Whether x @ w is linear's: on MPS (its one implementation), fp16, x [R <= 8, K] contiguous, w the transposed
@@ -67,19 +45,6 @@ def compiler(gm, example_inputs, *, whole_graph=False):
         x, w = x.meta.get('val'), w.meta.get('val')
         return (x is not None and w is not None and x.device.type == 'mps' and x.dtype == w.dtype == torch.half and x.dim() == w.dim() == 2
                 and x.shape[0] <= 8 and x.is_contiguous() and w.stride(0) == 1 and w.stride(1) >= w.shape[0])
-
-    def told(node, repeats):
-        """A crossing's node told its repeats (the argument after its group's name), the fake values Inductor records
-        for its call alike."""
-        if node.target not in CROSSINGS:
-            node.kwargs = dict(node.kwargs, repeats=repeats)
-            node.meta.pop('eager_input_vals', None)
-            return
-        i = CROSSINGS[node.target] + 1
-        node.args = (*node.args[:i], repeats)
-        if 'eager_input_vals' in node.meta:
-            values, named = node.meta['eager_input_vals']
-            node.meta['eager_input_vals'] = ((*values[:i], repeats), named)
 
     def joined(x):
         """The two fp16 rows-segments x is the cat of along its last dimension, where that cat has no other use."""
@@ -128,52 +93,8 @@ def compiler(gm, example_inputs, *, whole_graph=False):
                     graph.erase_node(m)
             i += len(group)
 
-    def native(node):
-        """Lower both a product's sum and a plain sum to the same crossing."""
-        import torch.distributed as dist
-        group = dist.distributed_c10d._resolve_process_group(node.args[2])
-        if not (isinstance(group, backend.ProcessGroupMesh) and group.size() > 1):
-            return
-        x, w = node.args[:2]
-        plain = node.target is torch.ops.torch_mesh.all_reduce.default
-        if plain:
-            if w != 'sum' or x.meta['val'].device.type != 'mps' or x.meta['val'].dtype not in (torch.float16, torch.float32):
-                return
-            w = None
-        scalar = x.meta['val'].ndim == 0
-        output = node.meta['val']
-        if scalar:
-            with node.graph.inserting_before(node):
-                source = node.graph.call_function(aten.view.default, (x, [1]))
-                source.meta['val'] = x.meta['val'].view(1)
-            x = source
-            node.meta['val'] = output.view(1)
-        repeats = node.args[3] if len(node.args) > 3 else 1
-        node.target = torch.ops.torch_mesh.fused_step.default
-        node.args = (x, w, 0, [x.meta['val'].shape[0]] * group.size(), node.args[2], True, repeats)
-        node.meta.pop('eager_input_vals', None)
-        if scalar:
-            with node.graph.inserting_after(node):
-                restored = node.graph.call_function(aten.view.default, (node, []))
-                restored.meta['val'] = output
-            node.replace_all_uses_with(restored)
-            restored.args = (node, [])
-
     def rewrite(graph):
         for node in list(graph.nodes):
-            if node.target is torch.ops._c10d_functional.all_reduce.default:
-                node.target = torch.ops.torch_mesh.all_reduce.default
-                told(node, 1)
-                made = node.args[0]
-                if (node.args[1] == 'sum' and made.target is torch.ops.torch_mesh.linear.default and len(made.users) == 1
-                        and made.args[2:] in ((), (None,), (None, 0))):
-                    with graph.inserting_before(node):
-                        summed = graph.call_function(torch.ops.torch_mesh.linear_sum.default, (*made.args[:2], node.args[2], 1))
-                    summed.meta['val'] = node.meta['val']
-                    node.replace_all_uses_with(summed)
-                    graph.erase_node(node)
-                    graph.erase_node(made)
-                continue
             mm = node.target is aten.mm.default and rows(*node.args)
             addmm = (node.target is aten.addmm.default and not node.kwargs and len(node.args) == 3 and rows(*node.args[1:])
                      and node.args[0].meta['val'].dim() == 1)
@@ -198,102 +119,49 @@ def compiler(gm, example_inputs, *, whole_graph=False):
                     graph.erase_node(users[0])
         grouped(graph)
 
-        def form(value):
-            if isinstance(value, torch.Tensor):
-                return (tuple(value.shape), tuple(value.stride()), value.dtype, value.device.type)
-            if isinstance(value, (list, tuple)):
-                return tuple(map(form, value))
-            return value
-
-        crossings = {}
-        for item in graph.nodes:
-            target, args = operation(item)
-            name = args.get('group_name')
-            if name is not None:
-                crossings.setdefault(name, []).append((item, target, args))
-        for entries in crossings.values():
-            forms = {(target, tuple((key, form(value)) for key, value in args.items() if key != 'repeats'))
-                     for _, target, args in entries}
-            if len(entries) > 1 and len(forms) == 1 and entries[0][1] in CROSSINGS:
-                for item, _, _ in entries:
-                    told(item, len(entries))
-        for item in [n for n in graph.nodes if n.target in (torch.ops.torch_mesh.linear_sum.default,
-                                                           torch.ops.torch_mesh.all_reduce.default)]:
-            native(item)
-
-    def realize(graph, inputs, **options):
-        # Declaration is configuration output, needed even on a numerical code
-        # cache hit. Rewrite and capture before Inductor's FX cache lookup; the
-        # cache then keys the actual rewritten operators and repeat operands.
-        rewrite(graph.graph)
-        for node in graph.graph.nodes:
-            target, args = operation(node)
-            if target is torch.ops.torch_mesh.linear.default:
-                _stream.prepare_linear([args['x']], [args['w']], [args['x1']], args['act'])
-            elif target is torch.ops.torch_mesh.linears.default:
-                _stream.prepare_linear(args['x'], args['w'], args['x1'], -1)
-            elif target is torch.ops.torch_mesh.linear_sum.default:
-                _stream.prepare_linear([args['x']], [args['w']], [None], 0)
-        forms = compiled_graph(graph)
-        graph.recompile()
-        made = compile_fx_inner(graph, inputs, **options)
-        if _CAPTURE.get() is None:
-            Preparations(forms)()
-        return made
-
-    # AOTAutograd's cache stores executable code without this communicator's
-    # declarations. Always realize that configuration; Inductor still caches
-    # the resulting numerical executable and kernels in compile_fx_inner.
-    with autograd_config.patch(enable_autograd_cache=False), config.patch(
-            size_asserts=False, alignment_asserts=False, scalar_asserts=False,
-            max_fusion_unique_io_buffers=31):  # Metal's buffer-argument capacity
-        if whole_graph:
-            # Function has already declared forward and backward together.
-            # Preserve that graph's shape environment and lower it directly;
-            # a second AOTAutograd pass would derive its gradients again.
-            from torch._guards import detect_fake_mode
-            from torch._subclasses.fake_tensor import FakeTensorMode
-            from torch.fx.experimental.proxy_tensor import make_fx
-            from torch._inductor.decomposition import select_decomp_table
-            from torch._subclasses.functional_tensor import dispatch_functionalize
-            # Functionalization receives every tensor as an operand, including
-            # weights and prebound outputs. It can then lower out= operations
-            # while retaining their writes to those exact destinations.
-            copied = torch.fx.Graph()
-            copied.output(copied.graph_copy(gm.graph, {}))
-            lifted = torch.fx.GraphModule(gm, copied)
-            constants = []
-            first = next(node for node in copied.nodes if node.op != 'placeholder')
-            for node in list(copied.nodes):
-                if node.op != 'get_attr':
-                    continue
-                value = lifted
-                for name in node.target.split('.'):
-                    value = getattr(value, name)
-                if isinstance(value, torch.Tensor):
-                    with copied.inserting_before(first):
-                        operand = copied.placeholder(f'_mesh_constant_{len(constants)}')
-                    operand.meta = node.meta.copy()
-                    constants.append(value)
-                    node.replace_all_uses_with(operand)
-                    if node is first:
-                        first = node.next
-                    copied.erase_node(node)
-            lifted.recompile()
-            described = [node.meta['val'] for node in gm.graph.nodes if 'val' in node.meta]
-            mode = detect_fake_mode(described) or FakeTensorMode(allow_non_fake_inputs=True)
-            inputs = [mode.from_tensor(value) if isinstance(value, torch.Tensor) else value
-                      for value in [*example_inputs, *constants]]
-            with mode:
-                lowered = make_fx(dispatch_functionalize(lifted, propagate_input_mutations=True), decomposition_table=select_decomp_table(),
-                                  tracing_mode='fake', _allow_non_fake_inputs=True)(*inputs)
-            output = next(node for node in lowered.graph.nodes if node.op == 'output')
-            if not isinstance(output.args[0], (tuple, list)):
-                output.args = ((output.args[0],),)
-                lowered.recompile()
-            made = realize(lowered, inputs, is_inference=True)
-            return lambda *values: made([*values, *constants])
-        return compile_fx(gm, example_inputs, inner_compile=realize)
+    from torch._guards import detect_fake_mode
+    from torch._subclasses.fake_tensor import FakeTensorMode
+    from torch.fx.experimental.proxy_tensor import make_fx
+    from torch._inductor.decomposition import select_decomp_table
+    from torch._subclasses.functional_tensor import dispatch_functionalize
+    # Functionalization receives every tensor as an operand, including
+    # weights and prebound outputs. It can then lower out= operations
+    # while retaining their writes to those exact destinations.
+    copied = torch.fx.Graph()
+    copied.output(copied.graph_copy(gm.graph, {}))
+    lifted = torch.fx.GraphModule(gm, copied)
+    constants = []
+    first = next(node for node in copied.nodes if node.op != 'placeholder')
+    for node in list(copied.nodes):
+        if node.op != 'get_attr':
+            continue
+        value = lifted
+        for name in node.target.split('.'):
+            value = getattr(value, name)
+        if isinstance(value, torch.Tensor):
+            with copied.inserting_before(first):
+                operand = copied.placeholder(f'_mesh_constant_{len(constants)}')
+            operand.meta = node.meta.copy()
+            constants.append(value)
+            node.replace_all_uses_with(operand)
+            if node is first:
+                first = node.next
+            copied.erase_node(node)
+    lifted.recompile()
+    described = [node.meta['val'] for node in gm.graph.nodes if 'val' in node.meta]
+    mode = detect_fake_mode(described) or FakeTensorMode(allow_non_fake_inputs=True)
+    inputs = [mode.from_tensor(value) if isinstance(value, torch.Tensor) else value
+              for value in [*example_inputs, *constants]]
+    with mode:
+        lowered = make_fx(dispatch_functionalize(lifted, propagate_input_mutations=True), decomposition_table=select_decomp_table(),
+                          tracing_mode='fake', _allow_non_fake_inputs=True)(*inputs)
+    output = next(node for node in lowered.graph.nodes if node.op == 'output')
+    if not isinstance(output.args[0], (tuple, list)):
+        output.args = ((output.args[0],),)
+        lowered.recompile()
+    rewrite(lowered.graph)
+    lowered.recompile()
+    return compile_graph(lowered, inputs, [*example_inputs, *constants])
 
 
 def empty(*size, dtype=None, device='mps'):

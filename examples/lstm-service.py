@@ -10,7 +10,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Shard
 from torch_mesh import partition
 from torch_mesh.backend import BROADCAST, Call
-from torch_mesh.declarations import Function, Preparations
+from torch_mesh.declarations import Function, execution_sequence
 from torch_mesh.configuration import placement, bind, record
 from torch_mesh import _stream
 from mesh_statistics import now
@@ -72,10 +72,7 @@ def main():
     for function in initial:
         function.declare(group)
     ordered = [*initial, *(functions[count] for count in chunks)]
-    runs = tuple(function.run for function in ordered)
     groups = [calls for function in ordered for calls in function.groups.get(group.group_name, [])]
-    forms = [form for function in ordered for form in function.forms]
-    preparations = Preparations(forms, [step for function in ordered for step in function.preparations.order])
     if rank == 0:
         X.copy_(torch.from_numpy(inputs[:]))
     torch_mesh.check_memory()
@@ -83,16 +80,11 @@ def main():
     from torch_mesh.backend import prepare_fragments
     broadcast = Call(BROADCAST, X.numel(), X.dtype, root=0)
     inputs, _ = prepare_fragments([(broadcast, X, X)], group)
-    def prepare():
-        inputs.realize()
-        preparations()
-    bind(configuration, [[broadcast], *groups], prepare)
+    program = execution_sequence([inputs, *ordered], O)
+    bind(configuration, [[broadcast], *groups], program.realize)
     started = now()
-    inputs.enqueue()
-    for run in runs:
-        run()
-    completion = _stream.completion()
-    _stream.publish_boundary()
+    program.forward()
+    completion = program.completion()
     blocks = partition.split(mesh, 'tp', H)
     summary = dict(blocks=blocks, steps_per_replay=k, layers=L, rows=rows,
                    input_width=KIN, width=H, steps=steps, ticks=ticks, latency_ticks=L)

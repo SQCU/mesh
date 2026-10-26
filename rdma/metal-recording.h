@@ -73,6 +73,11 @@ void MetalScheduleSignal(struct MetalSchedule *, id<MTLEvent>, uint64_t value);
 // A prepared CPU/ANE operation follows this schedule's input commands. Its
 // output event is published after the operation; unrelated GPU work proceeds.
 void MetalScheduleHost(struct MetalSchedule *, NSError *(^operation)(void));
+// Bind a host producer now and its data consumers later. The returned event is
+// owned by the caller. Unrelated commands between these declarations can run
+// while the CPU/ANE produces the result.
+id<MTLSharedEvent> MetalScheduleHostProducer(struct MetalSchedule *, NSError *(^operation)(void));
+void MetalScheduleHostConsumer(struct MetalSchedule *, id<MTLSharedEvent>);
 id<MTLResidencySet> MetalScheduleResources(struct MetalSchedule *);
 // Explicit bindings from a compiler which already has its pipelines. These
 // enter the same access ordering and encoding used by captured commands.
@@ -92,6 +97,7 @@ struct MetalCommandDescription {
     const struct MetalReach *reaches;
     size_t reachCount;
     MTLSize groups, threads;
+    BOOL threadGrid;
 };
 struct MetalReplay *MetalReplayCommands(id<MTLDevice>, const struct MetalCommandDescription *, size_t count, enum MetalForm);
 void MetalReplayEncode(struct MetalReplay *, id<MTLCommandBuffer>, NSRange commands);

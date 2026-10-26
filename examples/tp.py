@@ -14,7 +14,6 @@ from torch_mesh import partition
 from torch_mesh.attention import attention
 from torch_mesh.partition import ColwiseParallel, RowwiseParallel, SequenceParallel
 from torch_mesh.configuration import placement, bind, record
-from torch_mesh import _stream
 from mesh_statistics import now
 
 DIM, HEADS, FFN, LAYERS, BATCH, SEQ = 2048, 16, 5632, 4, 2, 1024
@@ -111,14 +110,13 @@ def main():
         parallelize_module(block, mesh, plan(), src_data_rank=None)
     held(model)
     x = drawn(partition.distribute_tensor(whole, mesh, [Shard(1) if SP else Replicate()], src_data_rank=None))
-    from torch_mesh.declarations import Function
+    from torch_mesh.declarations import Function, execution_sequence
     function = Function(lambda: step(model, x.to_local()), parameters=model.parameters())
-    bind(configuration, lambda: function.declare(mesh.get_group('tp')), lambda: function.prepare(STEPS))
+    program = execution_sequence([function] * STEPS)
+    bind(configuration, lambda: function.declare(mesh.get_group('tp')), program.realize)
     started = now()
-    for _ in range(STEPS):
-        function()
-    completion = _stream.completion()
-    _stream.publish_boundary()
+    program.forward()
+    completion = program.completion()
     record(configuration, completion, started, STEPS * BATCH * SEQ * DIM * x.element_size(),
            {'program': 'tp', 'steps': STEPS, 'parts': configuration['assignment']['parts']['tp']})
     dist.destroy_process_group()

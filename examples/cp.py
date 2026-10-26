@@ -7,7 +7,6 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch_mesh import partition
 from torch_mesh.configuration import placement, bind, record
-from torch_mesh import _stream
 from mesh_statistics import now
 
 from tp import DIM, HEADS, STEPS, Attention, held
@@ -43,16 +42,15 @@ def main():
     def ring(q, k, v, is_causal):
         return partition.ring_attention(mesh, "cp", q, k, v, is_causal=is_causal, load_balance=False, sequence_length=SEQ)[0]
 
-    from torch_mesh.declarations import Function
+    from torch_mesh.declarations import Function, execution_sequence
     function = Function(lambda: partition.context_parallel_unshard(
         mesh, "cp", [run(x.to_local(), ring)], [1], load_balance=False, sequence_length=SEQ))
     with torch.no_grad():
-        bind(configuration, lambda: function.declare(mesh.get_group('cp')), lambda: function.prepare(STEPS))
+        program = execution_sequence([function] * STEPS)
+        bind(configuration, lambda: function.declare(mesh.get_group('cp')), program.realize)
         started = now()
-        for _ in range(STEPS):
-            function()
-        completion = _stream.completion()
-        _stream.publish_boundary()
+        program.forward()
+        completion = program.completion()
         record(configuration, completion, started, STEPS * SEQ * DIM * x.element_size(),
                {'program': 'cp', 'steps': STEPS, 'parts': configuration['assignment']['parts']['cp']})
     dist.destroy_process_group()

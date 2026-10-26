@@ -670,7 +670,7 @@ struct MetalReplay *MetalReplayCommands(id<MTLDevice> device,const struct MetalC
     @try {
         for(size_t i=0;i<count;i++) {
             const struct MetalCommandDescription *description=commands+i;
-            struct MetalRecordedDispatch command={.pipeline=description->pipeline,.grid=description->groups,.group=description->threads,
+            struct MetalRecordedDispatch command={.pipeline=description->pipeline,.grid=description->groups,.group=description->threads,.threads=description->threadGrid,
                 .reach=(uint32_t)(capture->reaches.length/sizeof(struct MetalReach)),.reaches=(uint32_t)description->reachCount};
             [capture->owners addObject:command.pipeline];
             for(size_t k=0;k<description->bindingCount;k++) {
@@ -873,6 +873,16 @@ static struct MetalSchedule *MetalScheduleAdvance(struct MetalSchedule *root,
     return next;
 }
 
+id<MTLSharedEvent> MetalScheduleHostProducer(struct MetalSchedule *root,NSError *(^operation)(void)) {
+    id<MTLSharedEvent> event=[root->device newSharedEvent];
+    MetalScheduleAdvance(root,operation,event);
+    return event;
+}
+
+void MetalScheduleHostConsumer(struct MetalSchedule *root,id<MTLSharedEvent> event) {
+    MetalScheduleAfter(MetalScheduleAdvance(root,nil,nil),event,1);
+}
+
 static void MetalScheduleRange(struct MetalSchedule *root,struct MetalReplay *replay,NSUInteger t,NSUInteger from,NSUInteger to) {
     struct MetalSchedule *s=MetalScheduleTail(root);
     if(!replay||from==to)return;
@@ -929,12 +939,12 @@ NSError *MetalScheduleAppend(struct MetalSchedule *root,struct MetalReplay *repl
                 if([host[@"consume"] boolValue]) {
                     id<MTLSharedEvent> event=events[key];
                     if(!event)return MetalReplayFailure(EINVAL,@"host consumer has no producer in its declared invocation");
-                    MetalScheduleAfter(MetalScheduleAdvance(root,nil,nil),event,1);
+                    MetalScheduleHostConsumer(root,event);
                     [events removeObjectForKey:key];
                 } else {
                     if(events[key])return MetalReplayFailure(EINVAL,@"host output is overwritten before its declared consumer");
-                    id<MTLSharedEvent> event=[s->device newSharedEvent];events[key]=event;
-                    MetalScheduleAdvance(root,host[@"operation"],event);[event release];
+                    id<MTLSharedEvent> event=MetalScheduleHostProducer(root,host[@"operation"]);events[key]=event;
+                    [event release];
                 }
             }
             while(k<marks.count&&marks[k].unsignedIntegerValue==at) {

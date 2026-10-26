@@ -9,7 +9,6 @@ import json
 
 import torch
 from torch_mesh import engines
-from torch_mesh import _stream
 import rollout
 from mesh_statistics import now
 
@@ -47,28 +46,25 @@ for operation in shared[1:]:
     operation.declare(rows, x.dtype, capacities=capacities)
 observations = []
 observer = rollout.start(None, 'engines', 0, 1, observations)
-from torch_mesh.declarations import Function
+from torch_mesh.declarations import Function, execution_sequence
 for start in range(0, steps, every):
     assigned = engines.placement(pool, observations)
     calls = min(every, steps - start)
-    spans, hosted, source = [], [], x
+    spans, source = [], x
     for projection, operation in zip(projections, shared):
         normalized = torch.empty_like(x)
         def project(source=source, projection=projection, normalized=normalized):
             return normalized.copy_(torch.nn.functional.rms_norm(torch.nn.functional.linear(source, projection), (k,), eps=1e-6))
         project = Function(project)
         project.declare(None)
-        project.prepare(calls)
-        work = operation.prepare(normalized, parts=assigned['parts'][key], repetitions=calls)
+        work = operation.prepare(normalized, parts=assigned['parts'][key])
         spans.extend((project, work))
-        hosted.extend(work.completions)
         source = work.output
+    program = execution_sequence(spans * calls, source)
+    program.realize()
     began = now()
-    for _ in range(calls):
-        for span in spans:
-            span()
-    completion = (_stream.completion(), *hosted)
-    _stream.publish_boundary()
+    program.forward()
+    completion = program.completion()
     observer[0].put((completion, {'episode': str(start), 'parts': assigned['parts'], 'costs': {}, 'graphs': {},
         'workload': {'layers': layers, 'kind': kind, 'rows': rows, 'k': k, 'n': n},
         'implementation': 'loaded-program', 'started': began, 'rank': 0, 'size': 1,

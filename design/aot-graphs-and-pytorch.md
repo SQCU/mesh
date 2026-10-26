@@ -31,48 +31,32 @@ rediscovers a tensor's placement or joins a whole operand can waste the advantag
 The hardware comparisons are in data-model sections 1–4; they are not a license to assume every operation is
 limited by only one resource.
 
-## What the existing pieces do
+## Current connection, 2026-10-26
 
-| Layer | Existing code | Role before execution | Remaining gap |
-|---|---|---|---|
-| Partial tensor declarations | [python/mesh](../python/mesh/__init__.py): `Partial`, `Tensor`, `Ref`, `BlockSpec`, `Program.kernel_call`, `realize` | Name tile regions, contributions, kernel calls and their dependencies | Realization now generates a fixed FX sequence of compiled numerical spans and bound native crossings. The worker executor is removed. |
-| PyTorch graph declarations | [declarations.py](../rdma/torch-mesh/torch_mesh/declarations.py): `trace`, `lower`, `compiled_graph`, `Function`, `Preparations` | Trace a complete function with fake tensors; describe collective calls; bind indexed crossings | Function compilation is mandatory and crossings have prepared indices. FX still does not lower to the native Metal recorder. |
-| Ragged placement | [partition.py](../rdma/torch-mesh/torch_mesh/partition.py), `RaggedShard`, `Preparations`; [configuration.py](../rdma/torch-mesh/torch_mesh/configuration.py) | Map uneven tensor shares to a device mesh and declare their communication | Generic collective launch still reconstructs metadata; some examples impose whole-operand joins. |
-| Physical write compiler | [mesh-plan.h](../rdma/mesh-plan.h), `mesh_routed_compile`, span/row planners, [routing.py](../rdma/routing.py) | Turn logical data needs into many-cable routes, relay slots, packet cuts and ordering | Raw pointer/extent write contracts and generic registration cuts are not fully reconciled with the page/mask model. |
-| Native numerical composition | [matrix_operations.swift](../../../metal-microbench/matrix_operations.swift): `MetalProgram`, `MetalDispatch`, `MatrixView`, `Reach` | Compose kernels, bind constants and describe accessed ranges | Some callers and profiling modes still change work during execution. |
-| Native graph record/replay | [metal_recording.h](../../../metal-microbench/metal_recording.h): `MetalRecord`, `MetalReplay`, `MetalOperand`, `MetalReach` | Capture command bindings, prepare repeated slots, derive access order, retain residency | Shared prepared submission and byte-range access ordering replace the former host batch loop. |
-| Native model adapters | [engine_recording.swift](../../../metal-microbench/engine_recording.swift), [litert_program.h](../../../metal-microbench/litert_program.h), [mesh_rank.h](../../../metal-microbench/mesh_rank.h) | Declare prefill/decode phases and their collective crossings using shared records | LiteRT now consumes phase parts and explicit handoff formats, then declares native replay. `MeshRankRun` still waits and allocates. |
-| Feedback as data | [assignment.py](../rdma/assignment.py), [rollout.py](../rdma/rollout.py), [lifetimes.py](../rdma/lifetimes.py) | Use whole-call observations to emit the next shares, routes and storage relations | Existing capability is not proof of convergence or optimality. Some relevant metadata is not yet connected to the active solver. |
+Partial declarations and `declarations.Function` now append numerical spans and collective bindings into
+one `MetalSchedule`. FX supplies tensor metadata; Inductor supplies numerical IR, fusion and Metal source
+at preparation. The generated wrapper binds storage and native command records once. It does not execute
+payload data. `_stream.Commands` feeds `MetalReplayCommands`, then `MetalScheduleAppend`, so the FX frontend
+uses the recorder that native Metal and LiteRT already use. Unsupported external operators fail preparation.
 
-These layers are not interchangeable. FX describes operators and tensor metadata. The Metal recorder sees
-commands and bound storage. The physical write compiler sees cables and page movements. The integration task
-is to carry the useful information between them without creating a new runtime decision loop at each boundary.
+The old indexed crossing launcher, `Preparations`, `_CAPTURE`, and `TorchSchedule` framework/native
+start/join handoff are removed. The small-row linear kernels remain mathematical implementations, now bound
+to supplied outputs before execution. The larger matrix body was extracted from the DNN implementation;
+both DNN and FX import it. Engine-share CPU/ANE producers and their consumers use the same native host
+records as the native frontend. The FX numerical emitter currently supports Metal; generic CPU graph
+emission remains unimplemented and fails explicitly.
 
-## PyTorch can be the language without owning the schedule
+`Function` fake-traces the complete supplied forward/backward graph and retains gradient outputs. PyTorch
+notation, autograd and ragged DTensor metadata remain authoring tools. They do not own the numerical runtime.
+The physical compiler still assigns cable paths, relay storage and collective forms. The ordinary Dynamo
+backend registration is removed because it permitted a framework runtime wrapper in place of this declaration.
 
-The current `trace` uses `make_fx` with fake tensors. It records the supplied function and the backward work
-that function includes. `Function.declare` retains parameter gradients as graph outputs, so an explicit backward
-cannot be discarded merely because the normal forward result does not use it. It does not invent training for
-a forward-only function.
-
-`lower` reads operator, shape and group metadata. `compiled_graph` rewrites supported collective occurrences
-to `indexed_step` or `indexed_step_out`. `Preparations` allocates occurrence slots and binds their operands
-before execution. Thus the useful extension is already more than a Python call to an ordinary eager collective:
-the frontend can supply enough information to remove repeated crossing discovery.
-
-`Function.declare` invokes the shared compiler during configuration with the explicit FX graph. The compiler
-publishes its final collective graph there, so later transformations cannot hide or reorder communication after
-the transport plan has been made. The interface has no eager execution option.
-
-PyTorch tensor notation, autograd and DTensor placement can therefore serve as an authoring interface for an
-alternative compiler. They do not require a CUDA execution stack or a particular default `torch.compile`
-backend. This repository already extends that interface with ragged shares, coded matrices, partial operations,
-fused publication and indexed crossings. The compiler should lower those declarations to the same page and
-command machinery used by native programs.
-
-This describes an existing frontend and a required integration, not a claim that the whole FX graph already
-lowers into `MetalReplay`. That complete connection was not found. Replacing a fused kernel with many eager
-tensor operations is not that connection either: it can discard useful algorithm and publication structure.
+The LSTM service composes its starting ticks and all recurrent chunks into one prepared native function.
+TP, EP, CP and the engine-share example compose their configured full workload through the same interface.
+The [interface reference](../docs/partial-tensors-and-fx.md) describes the current operands. Whole-function
+latency and useful bandwidth must be assessed from the committed-main hourly; successful compilation is not
+performance evidence. The physical page/mask contract and generic CPU transport gaps in the removal manifest
+are separate remaining work.
 
 ## What the native recorder actually reuses
 
@@ -94,11 +78,11 @@ pipeline reflection and supplies external tensor byte views during capture. Repe
 actual byte overlap. These changes remove manifest R12–R14; performance remains an empirical property of
 the completed function, paired with its useful-output rate.
 
-The PyTorch extension is a separate adapter. Its `dispatch_sync` hands a host encoding closure to the MPS
-stream queue and waits for that closure. Encoding sets pipeline/buffer bindings and dispatch geometry; it does
-not mean that tensor values are shuttled back and forth, nor necessarily that GPU work has completed. The
-historical fast chain also used this queue call. Repeating known bindings remains removable overhead, but
-that fact alone does not identify the later regression's cause.
+The previous PyTorch adapter used `dispatch_sync` to enter the framework's encoding queue at runtime,
+then joined the native and framework queues around crossings. The current FX emitter binds commands before
+execution and submits through the native header. Eager compatibility operations elsewhere in the extension
+still have framework encoding calls; they are not permitted substitutes for a prepared function. The
+[submission history](submission-boundary-history.md) records these additions and their removal boundaries.
 
 ## Roles in project history
 

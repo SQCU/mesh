@@ -90,7 +90,7 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 | all_to_all, all_to_all_single | uneven splits, empty inputs (`ncclMeshAlltoAllV`) |
 | send, recv, isend, irecv, batch_isend_irecv | |
 | barrier, async_op works, coalescing | |
-| functional collectives under torch.compile | one graph; `backend="mesh"` is Inductor with the library's collectives, with explicit function submission (Performance) |
+| functional collectives in `declarations.Function` | AOT numerical and transport commands share the native recorder (Performance). |
 | DDP | |
 | ring attention | `partition.ring_attention` on capacity blocks (equal parts: torch's equal shards), and SDPA on a `RaggedShard` of the sequence, forward only, in place of `context_parallel`: split-KV partials merged by the library (below) |
 | partials merge | `torch_mesh.merge_partials(out, lse, group)`: each member's attention over its own keys merged into the attention over all of them (the operator `torch_mesh::merge_partials`, below) |
@@ -133,29 +133,28 @@ rows' attention. Its reproduction target is `cp.py`'s (Uneven nodes, below).
 
 ### Prepare and call a whole function
 
-`declarations.Function(function, compiler="mesh")` traces the supplied numerical function with fake tensors.
-`declare(group)` compiles its complete graph and collects its communication declarations before execution.
-The caller plans those declarations and binds storage with `Preparations` (or `Function.prepare`), then calls the
-prepared `.run` function directly. `Function.__call__` also restores structured outputs and parameter gradients
-for callers that need them. Tracing includes backward operations when the supplied function contains them.
+`declarations.Function(function, *arguments, parameters=())` fake-traces the complete numerical function.
+`declare(group)` binds its numerical commands and communication declarations before execution. Install the
+communicator plan, then call `prepare()` to finish the native schedule. `run()` submits it and returns
+prebound output views. `completion()` exposes ordinary native completion. `Function.__call__` additionally
+restores structured outputs and parameter gradients. Tracing includes backward work when the supplied
+function contains it.
 
-The LSTM service prepares its fixed-size chunks and any remainder through this interface. It does not execute
-a chunk to compile it, wait for peer compilation at first issue, or retain a second recording executor.
-A statistics thread observes ordinary completion state with a host clock; it cannot submit numerical work,
-add GPU timing events, or drain the stream for a measurement. See the
-[partial tensor and FX reference](../../docs/partial-tensors-and-fx.md) for interfaces and preparation order.
+`execution_sequence(steps, output)` appends declared functions and transport into one native function.
+The LSTM service composes the input broadcast, starting ticks and every recurrent chunk this way.
+TP, EP and CP likewise compose their complete configured workload before submission.
 
-The 10-01 form (mesh 4cbe704 `record`/`replay`, metal-microbench 35c30a9 `metal_recording.m`) also recorded every Metal
-command the step encoded, from any thread, and replayed them as one program; had torch's own copy kernels that store a
-send buffer publish it by range (`MetalRecordPublish`), so its sends started as the ranges were stored; gated the
-replay's command buffers on the calls' landings (`MetalRecordGate`); and made each call persistent, its receives posted
-ahead from the replay's leading cut (`ncclMeshPersistentStart`). Those need the recorder interposed on Metal
-(`DYLD_INSERT_LIBRARIES`), which acceptance A53 forbids, and torch documents no MPS command capture to take its place
-(no MPS analogue of `torch.cuda.graph`; its MPS kernels encode into its own stream's encoder). The FX callable here runs
-Inductor's wrapper and torch's MPS kernels each time; the posting ahead is the bridges' (a bridge posts a holding's
-receives into the holder's own landing pages, a window ahead of the data: [design/transport.md](../../design/transport.md)
-section 14), and the planning once is the communicator's compiled programs'. A training step's backward, run by
-autograd, is compiled and committed by the same rule.
+Inductor supplies tensor IR, fusion and Metal source during preparation. Its generated wrapper only binds
+buffers and command records once. It is not a runtime executor. `_stream.Commands` passes the result to
+`MetalReplayCommands` and `MetalScheduleAppend`, the same interfaces used by native Metal and LiteRT.
+The old `TorchSchedule` start/join handoff and indexed crossing launcher are removed. Unknown numerical
+lowerings fail preparation; there is no eager or ATen execution substitute. The current native emitter
+supports Metal; the separate CPU/ANE share declarations use the common recorder's host records.
+
+The existing small-row linear kernel is preserved. Larger matrix products and the streamed DNN import
+one shared matrix body. Historical interposition-based record/replay is not restored. A statistics thread
+observes ordinary completion with a host clock; it does not submit work or drain a framework stream.
+See the [partial tensor and FX reference](../../docs/partial-tensors-and-fx.md).
 
 ## What does not
 
@@ -386,26 +385,24 @@ w = s["lm_head"].to("cpu")                        # decoded
   command representation and submission path as native Metal and LiteRT. A
   prepared invocation owns its immutable bindings through completion. It
   submits the finished command stream without reconstructing its routes.
-- A function still containing PyTorch-generated numerical commands commits
-  its framework stream at the function boundary. Per-publication double
-  buffering has been removed. Native segments between framework operations
-  carry explicit input and output data events; these do not wait on the host.
+- FX numerical kernels are recorded before execution. The runtime does not commit a framework
+  stream between numerical spans and collective crossings. Initial framework input creation is ordered
+  at preparation; it does not create a per-operation handoff.
 - `mesh-statistics.h` and `mesh_statistics.py` calculate elapsed time and useful
   rate from ordinary completion observations. Statistics do not drain queues
   or choose when work runs.
 
-- `torch.compile(f, backend="mesh")` (`torch_mesh.compiler`, registered through torch's `torch_dynamo_backends` entry
-  point) is Inductor's compilation with the library's collectives, with nothing wrapped around its run. Reproduction
-  targets: metal-microbench `crossing.py`, 17.4 us a crossing eager and 12.7 compiled with `COMPILE=1 COMPILER=mesh`
-  (mesh 3c00d37). No reading of this rule has been taken yet.
+- `Function` is the whole-function compiler interface. The ordinary Dynamo backend registration is
+  removed: a runtime framework wrapper cannot substitute for a complete declaration.
 - Readings and their records: metal-microbench `docs/measurement.md`.
 
 ## Prepared engine shares
 
 `engines.Linear` and `engines.FFN` are declarations. Call `declare(rows, dtype, capacities=work_rates)`
-before choosing the allocation, then `prepare(input, parts=..., repetitions=...)`.
-The prepared call owns its fixed outputs and host views. CPU/ANE work runs through
-`MetalScheduleHost`, and GPU consumers name its result dependency. The old
+before choosing the allocation, then `prepare(input, parts=...)`.
+The prepared share owns its fixed outputs and host views. Append it to `execution_sequence` with the
+other function parts. CPU/ANE work uses `MetalScheduleHostProducer`; its consumers use
+`MetalScheduleHostConsumer`. These are the same records used by native engine capture. The old
 operation-call allocator, shard loader, thread pool and future joins are removed.
 `examples/engines.py` uses the same interface as an application.
 Its required `ENGINE_CAPACITIES` JSON object supplies one work rate per named engine for the configured shape.

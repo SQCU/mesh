@@ -2,7 +2,7 @@
 
 Declare shapes and choose shares before execution. ``Operation.prepare`` binds
 weights, outputs and host views. GPU spans use ``declarations.Function``; host
-shares use ``MetalScheduleHost`` through the same native scheduler. Only result
+shares use the native recorder's host producer/consumer records. Only result
 consumers depend on host completion. No operation times itself, chooses shares,
 loads a model, or joins a future while it runs.
 """
@@ -153,7 +153,7 @@ class Cpu(Engine):
         cpu = lambda t: t.detach().float().cpu().contiguous()
         return cpu(op.gate[start:end]), cpu(op.up[start:end]), cpu(op.down[:, start:end])
 
-    def bind(self, op, shard, x, prologue, out, repetitions):
+    def bind(self, op, shard, x, prologue, out):
         source, target = host(prologue['fp32']), host(out)
         if op.kind == 'linear':
             weight = shard.T
@@ -204,7 +204,7 @@ class Ane(Engine):
         numpy = lambda t: t.detach().to('cpu', torch.float16).contiguous().numpy()
         return _Compiled('ffn', (numpy(op.gate[start:end]), numpy(op.up[start:end]), numpy(op.down[:, start:end])))
 
-    def bind(self, op, shard, x, prologue, out, repetitions):
+    def bind(self, op, shard, x, prologue, out):
         native = _coreml()
         if native is None:
             raise RuntimeError('Neural Engine requires the native shared-memory binding')
@@ -345,11 +345,10 @@ class Engines:
         self.operations, self.decisions = [], {}
 
 
-def _gpu(function, repetitions):
+def _gpu(function):
     from .declarations import Function
     made = Function(function)
     made.declare(None)
-    made.prepare(repetitions)
     return made
 
 
@@ -392,8 +391,8 @@ class Operation:
                                       'capacity': list(capacities)}
         return key
 
-    def prepare(self, x, *, parts, repetitions=1):
-        return Prepared(self, x, parts, repetitions)
+    def prepare(self, x, *, parts):
+        return Prepared(self, x, parts)
 
     def finish(self, y):
         return y
@@ -401,8 +400,7 @@ class Operation:
 
 class Prepared:
     """Fixed engine operands and data events for the declared invocations."""
-    def __init__(self, op, x, parts, repetitions):
-        from . import _stream
+    def __init__(self, op, x, parts):
         self.op, self.x = op, x
         rows, dtype = x.shape[0], x.dtype
         if len(parts) != len(op.engines.engines) or sum(parts) != op.units or min(parts) < 0:
@@ -412,7 +410,7 @@ class Prepared:
         self.prologue = None
         if any(count and engine.name == 'cpu' for engine, count in zip(op.engines.engines, parts)):
             prologue['fp32'] = torch.empty_like(x, dtype=torch.float32)
-            self.prologue = _gpu(lambda: prologue['fp32'].copy_(x), repetitions)
+            self.prologue = _gpu(lambda: prologue['fp32'].copy_(x))
         self.gpu, self.host = [], []
         pieces, start = [], 0
         for engine, count in zip(op.engines.engines, parts):
@@ -425,16 +423,10 @@ class Prepared:
                 out = torch.empty(shape, device=x.device, dtype=engine.out_dtype(dtype))
                 pieces.append(out)
                 if engine.host_side:
-                    bound = engine.bind(op, shard, x, prologue, out, repetitions)
-                    invocations = []
-                    for _ in range(repetitions):
-                        schedule = _stream.Schedule(mps=True)
-                        schedule.host(bound)
-                        schedule.finish()
-                        invocations.append(schedule)
-                    self.host.append(invocations)
+                    bound = engine.bind(op, shard, x, prologue, out)
+                    self.host.append(bound)
                 else:
-                    self.gpu.append(_gpu(lambda e=engine, w=shard, y=out: e.run(op, w, x, prologue, y), repetitions))
+                    self.gpu.append(_gpu(lambda e=engine, w=shard, y=out: e.run(op, w, x, prologue, y)))
             start = end
         def combine():
             if op.combine == 'concat':
@@ -445,24 +437,17 @@ class Prepared:
                     y = y + p.float()
                 y = y.to(dtype)
             return self.output.copy_(op.finish(y))
-        self.combine = _gpu(combine, repetitions)
-        self.invocations = tuple(zip(*self.host)) if self.host else ((),) * repetitions
-        self.next = 0
-        self.completions = tuple(s.completion() for items in self.host for s in items)
+        self.combine = _gpu(combine)
 
-    def __call__(self):
-        tasks = self.invocations[self.next]
-        self.next += 1
+    def append(self, schedule):
         if self.prologue is not None:
-            self.prologue()
-        for task in tasks:
-            task.start()
+            self.prologue.append(schedule)
+        results = [schedule.host(function) for function in self.host]
         for function in self.gpu:
-            function()
-        for task in tasks:
-            task.join()
-        self.combine()
-        return self.output
+            function.append(schedule)
+        for result in results:
+            schedule.consume(result)
+        self.combine.append(schedule)
 
 
 class Linear(Operation):
