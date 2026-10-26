@@ -429,7 +429,8 @@ class BoundGraph:
                     if crossing.target is not target:
                         raise NotImplementedError('bound collectives require functional graph operands')
                     actual = map_arg(crossing.args, live.__getitem__)
-                    named = {a.name: actual[i] if i < len(actual) else crossing.kwargs.get(a.name, a.default_value)
+                    keywords = map_arg(crossing.kwargs, live.__getitem__)
+                    named = {a.name: actual[i] if i < len(actual) else keywords.get(a.name, a.default_value)
                              for i, a in enumerate(target._schema.arguments)}
                     source = named.get('input', named.get('x', named.get('self', named.get('partials'))))
                     if metadata.get('dim', 0) != 0:
@@ -515,7 +516,7 @@ class Function:
             # Backward is explicit in this graph. No numerical execution or
             # alternative eager function is used to discover its declarations.
             with torch.no_grad():
-                run = partial(compiler(graph, list(self.arguments)), *self.arguments)
+                run = partial(compiler(graph, list(self.arguments), whole_graph=True), *self.arguments)
         finally:
             _CAPTURE.reset(token)
         if declarations and not captured:

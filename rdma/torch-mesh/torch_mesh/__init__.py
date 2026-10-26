@@ -27,7 +27,7 @@ def _autoload():
     from . import backend  # noqa: F401
 
 
-def compiler(gm, example_inputs):
+def compiler(gm, example_inputs, *, whole_graph=False):
     """Inductor's compilation of a graph (torch._dynamo.lookup_backend("inductor"), as torch's composable backends
     compose it), its collectives the library's (_stream.mm's kernels for torch's functional collectives on MPS), with
     nothing wrapped around its run.  A compiled collective's publication is committed by the same rule as an eager
@@ -271,6 +271,17 @@ def compiler(gm, example_inputs):
     with autograd_config.patch(enable_autograd_cache=False), config.patch(
             size_asserts=False, alignment_asserts=False, scalar_asserts=False,
             max_fusion_unique_io_buffers=31):  # Metal's buffer-argument capacity
+        if whole_graph:
+            # Function has already declared forward and backward together.
+            # Preserve that graph's shape environment and lower it directly;
+            # a second AOTAutograd pass would derive its gradients again.
+            from torch._guards import detect_fake_mode
+            from torch._subclasses.fake_tensor import FakeTensorMode
+            described = [node.meta['val'] for node in gm.graph.nodes if 'val' in node.meta]
+            mode = detect_fake_mode(described) or FakeTensorMode(allow_non_fake_inputs=True)
+            inputs = [mode.from_tensor(value) if isinstance(value, torch.Tensor) else value for value in example_inputs]
+            made = realize(gm, inputs, is_inference=True)
+            return lambda *values: made(list(values))
         return compile_fx(gm, example_inputs, inner_compile=realize)
 
 

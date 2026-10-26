@@ -131,7 +131,12 @@ class _Operand:
 
     def cached(self, what, build):
         if what not in self.cache:
-            self.cache[what] = build(self.parts.tolist())
+            # These are placement operands, not work in the declared tensor
+            # graph. A trace must not leave FakeTensors in the live page map.
+            from torch._subclasses.fake_tensor import unset_fake_temporarily
+            from torch.fx.experimental.proxy_tensor import disable_proxy_modes_tracing
+            with disable_proxy_modes_tracing(), unset_fake_temporarily():
+                self.cache[what] = build(self.parts.tolist())
         return self.cache[what]
 
 
