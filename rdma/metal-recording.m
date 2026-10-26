@@ -40,7 +40,7 @@ void MetalRecordViews(const struct MetalBindingView *views,size_t count,void (^e
     @try { encode(); } @finally { bindingViews=previous;bindingViewCount=before; }
 }
 
-static char replaySegmentsKey,replayRecordsKey,pipelineAccessKey,pipelineDescriptorKey,pipelineBindingsKey,
+static char replaySegmentsKey,replayRecordsKey,replayResourcesKey,pipelineAccessKey,pipelineDescriptorKey,pipelineBindingsKey,
     pipelineAddressesKey,operandStrideKey,operandInstancesKey,operandOutputOffsetKey;
 
 static void MetalReplayDestroy(struct MetalReplay *replay) {
@@ -482,6 +482,10 @@ static void MetalReplayBuild(MetalCapture *capture,id<MTLDevice> device,NSUInteg
         for(NSUInteger i=0;i<result->count;i++)ordered[t*result->count+i]=MetalOrder(read,written,&phase,commands+i,capture->reaches.bytes,t);
     }
     result->owner = [capture->owners retain];
+    NSMutableData *resources=[NSMutableData dataWithLength:capture->resources.count*sizeof(id)];
+    id __unsafe_unretained *resourceList=resources.mutableBytes;NSUInteger resourceIndex=0;
+    for(id resource in capture->resources)resourceList[resourceIndex++]=resource;
+    objc_setAssociatedObject(result->owner,&replayResourcesKey,resources,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     // docs/kernels.md E2: the records a direct replay encodes (MetalReplayDispatch4)
     objc_setAssociatedObject(result->owner, &replayRecordsKey, @[[NSData dataWithBytes:commands length:capture->dispatches.length],barriers,@(form),[NSData dataWithData:capture->reaches],@(repetitions)],
         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -648,7 +652,7 @@ static void MetalReplayDispatch4(id<MTL4ComputeCommandEncoder> encoder,id<MTL4Ar
 
 // ../dox/mesh/design/prepared-machine.md#M13
 static void MetalReplayDispatch(id<MTLComputeCommandEncoder> encoder, struct MetalReplay *replay,
-    const struct MetalRecordedDispatch *source, NSUInteger t) {
+    const struct MetalRecordedDispatch *source, NSUInteger t, const struct MetalReach *reaches) {
     [encoder setComputePipelineState:source->pipeline];
     for (NSUInteger j = 0; j < replay->buffers; j++)
         if (((source->access | (source->access >> 32)) >> j) & 1) {
@@ -658,7 +662,68 @@ static void MetalReplayDispatch(id<MTLComputeCommandEncoder> encoder, struct Met
     for (NSUInteger j = 0; j < replay->memory; j++)
         if (source->memory[j]) [encoder setThreadgroupMemoryLength:source->memory[j] atIndex:j];
     if (source->threads) [encoder dispatchThreads:source->grid threadsPerThreadgroup:source->group];
+    else if(reaches)MetalDispatchReaching(encoder,source->grid,source->group,reaches+source->reach,source->reaches);
     else [encoder dispatchThreadgroups:source->grid threadsPerThreadgroup:source->group];
+}
+
+struct MetalReplay *MetalReplayCommands(id<MTLDevice> device,const struct MetalCommandDescription *commands,size_t count,enum MetalForm form) {
+    if(object_getClass(device)==[MetalDeviceRecorder class])device=((MetalForwarder *)device)->target;
+    MetalCapture *capture=[MetalCapture new];struct MetalReplay *replay=NULL;
+    @try {
+        for(size_t i=0;i<count;i++) {
+            const struct MetalCommandDescription *description=commands+i;
+            struct MetalRecordedDispatch command={.pipeline=description->pipeline,.grid=description->groups,.group=description->threads,
+                .reach=(uint32_t)(capture->reaches.length/sizeof(struct MetalReach)),.reaches=(uint32_t)description->reachCount};
+            [capture->owners addObject:command.pipeline];
+            for(size_t k=0;k<description->bindingCount;k++) {
+                const struct MetalCommandBinding binding=description->bindings[k];
+                if(binding.index>=METAL_RECORDING_BUFFERS)[NSException raise:NSInvalidArgumentException format:@"binding index exceeds Metal capacity"];
+                const uint32_t at=binding.index;
+                command.buffers[at]=binding.buffer;command.offsets[at]=binding.offset;command.lengths[at]=binding.length;
+                command.access|=(uint64_t)(binding.access&MetalReachRead?1:0)<<at;
+                command.access|=(uint64_t)(binding.access&MetalReachWritten?1:0)<<(32+at);
+                capture->buffers=MAX(capture->buffers,at+1);
+                [capture->resources addObject:binding.buffer];
+            }
+            if(description->memoryCount>METAL_RECORDING_BUFFERS)[NSException raise:NSInvalidArgumentException format:@"threadgroup-memory index exceeds Metal capacity"];
+            for(size_t k=0;k<description->memoryCount;k++)command.memory[k]=description->memory[k];
+            capture->memory=MAX(capture->memory,description->memoryCount);
+            [capture->reaches appendBytes:description->reaches length:description->reachCount*sizeof(struct MetalReach)];
+            for(size_t k=0;k<description->reachCount;k++) {
+                const struct MetalReach reach=description->reaches[k];
+                [capture->resources addObject:reach.buffer];
+                if(reach.access&MetalReachBinding)for(size_t j=0;j<METAL_RECORDING_BUFFERS;j++)
+                    if(command.buffers[j]==reach.buffer&&command.offsets[j]==reach.offset)command.extents|=UINT32_C(1)<<j;
+            }
+            [capture->dispatches appendBytes:&command length:sizeof command];
+        }
+        MetalDataflow(capture);
+        if(posix_memalign((void **)&replay,_Alignof(struct MetalReplay),sizeof *replay))
+            [NSException raise:NSMallocException format:@"allocating replay"];
+        memset(replay,0,sizeof *replay);
+        MetalReplayBuild(capture,device,1,form,replay);
+    } @catch(NSException *error) {
+        if(replay){MetalReplayDestroy(replay);free(replay);replay=NULL;}
+        fprintf(stderr,"record: %s\n",error.reason.UTF8String);
+    } @finally { [capture release]; }
+    return replay;
+}
+
+void MetalReplayEncode(struct MetalReplay *replay,id<MTLCommandBuffer> command,NSRange range) {
+    NSArray *held=objc_getAssociatedObject(replay->owner,&replayRecordsKey);
+    id<MTLComputeCommandEncoder> encoder=[command computeCommandEncoder];
+    if(activeCapture || [held[2] unsignedIntegerValue]!=MetalFormIndirect) {
+        const struct MetalRecordedDispatch *records=[held[0] bytes];
+        const struct MetalReach *reaches=[held[3] bytes];
+        for(NSUInteger i=range.location;i<NSMaxRange(range);i++)MetalReplayDispatch(encoder,replay,records+i,0,reaches);
+    } else {
+        NSData *resources=objc_getAssociatedObject(replay->owner,&replayResourcesKey);
+        [encoder useResources:resources.bytes count:resources.length/sizeof(id) usage:MTLResourceUsageRead|MTLResourceUsageWrite];
+        MetalReplaySegments(replay,range,^(id<MTLIndirectCommandBuffer> segment,NSRange local){
+            [encoder executeCommandsInBuffer:segment withRange:local];
+        });
+    }
+    [encoder endEncoding];
 }
 
 // docs/kernels.md#collectives
@@ -776,7 +841,7 @@ void MetalScheduleCompute(struct MetalSchedule *s,id<MTLComputePipelineState> pi
     BOOL barrier=MetalOrder(s->read,s->written,&s->phase,&command,NULL,0);
     if(s->form==MetalFormSerial) {
         if(!s->encoder)s->encoder=[[(id<MTLCommandBuffer>)s->command computeCommandEncoderWithDispatchType:MTLDispatchTypeSerial] retain];
-        MetalReplayDispatch(s->encoder,&view,&command,0);
+        MetalReplayDispatch(s->encoder,&view,&command,0,NULL);
     } else {
         if(barrier)[(id<MTL4ComputeCommandEncoder>)s->encoder barrierAfterEncoderStages:MTLStageDispatch
             beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
@@ -819,7 +884,7 @@ NSError *MetalScheduleAppend(struct MetalSchedule *s,struct MetalReplay *replay,
             for(NSUInteger c=t*n+from;c<t*n+to;c++) @autoreleasepool {
                 const struct MetalRecordedDispatch *source=records+c%n;
                 BOOL barrier=MetalOrder(s->read,s->written,&s->phase,source,reaches,t);
-                if(s->form==MetalFormSerial)MetalReplayDispatch(s->encoder,replay,source,t);
+                if(s->form==MetalFormSerial)MetalReplayDispatch(s->encoder,replay,source,t,NULL);
                 else if(s->form==MetalFormEncoded) {
                     if(barrier)[encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
                     MetalReplayDispatch4(encoder,s->table,replay,source,t);

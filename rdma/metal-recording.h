@@ -74,6 +74,20 @@ struct MetalCommandBinding {
     NSUInteger offset, length;
     uint32_t index, access;
 };
+// Native frontends can supply the same records directly instead of capturing
+// encoder calls. Both routes use the common access-order and replay compiler.
+struct MetalCommandDescription {
+    __unsafe_unretained id<MTLComputePipelineState> pipeline;
+    const struct MetalCommandBinding *bindings;
+    size_t bindingCount;
+    const NSUInteger *memory;
+    size_t memoryCount;
+    const struct MetalReach *reaches;
+    size_t reachCount;
+    MTLSize groups, threads;
+};
+struct MetalReplay *MetalReplayCommands(id<MTLDevice>, const struct MetalCommandDescription *, size_t count, enum MetalForm);
+void MetalReplayEncode(struct MetalReplay *, id<MTLCommandBuffer>, NSRange commands);
 struct MetalCommandBinding MetalScheduleData(struct MetalSchedule *, const void *, size_t bytes, uint32_t index);
 void MetalScheduleCompute(struct MetalSchedule *, id<MTLComputePipelineState>,
     const struct MetalCommandBinding *, size_t count, MTLSize groups, MTLSize threads);
