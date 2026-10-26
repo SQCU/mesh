@@ -124,6 +124,7 @@ def compiler(gm, example_inputs):
     from torch.fx.experimental.proxy_tensor import make_fx
     from torch._inductor.decomposition import select_decomp_table
     from torch._subclasses.functional_tensor import dispatch_functionalize
+    from torch.utils._pytree import tree_map, tree_flatten
     # Functionalization receives every tensor as an operand, including
     # weights and prebound outputs. It can then lower out= operations
     # while retaining their writes to those exact destinations.
@@ -150,8 +151,8 @@ def compiler(gm, example_inputs):
     lifted.recompile()
     described = [node.meta['val'] for node in gm.graph.nodes if 'val' in node.meta]
     mode = detect_fake_mode(described) or FakeTensorMode(allow_non_fake_inputs=True)
-    inputs = [mode.from_tensor(value) if isinstance(value, torch.Tensor) else value
-              for value in [*example_inputs, *constants]]
+    operands = [*example_inputs, *constants]
+    inputs = tree_map(lambda value: mode.from_tensor(value) if isinstance(value, torch.Tensor) else value, operands)
     with mode:
         lowered = make_fx(dispatch_functionalize(lifted, propagate_input_mutations=True), decomposition_table=select_decomp_table(),
                           tracing_mode='fake', _allow_non_fake_inputs=True)(*inputs)
@@ -161,7 +162,7 @@ def compiler(gm, example_inputs):
         lowered.recompile()
     rewrite(lowered.graph)
     lowered.recompile()
-    return compile_graph(lowered, inputs, [*example_inputs, *constants])
+    return compile_graph(lowered, tree_flatten(inputs)[0], tree_flatten(operands)[0])
 
 
 def empty(*size, dtype=None, device='mps'):

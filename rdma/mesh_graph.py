@@ -18,6 +18,7 @@ def needed(reads, writes, roots, cuts=(), effects=()):
     spans = [[] for _ in range(len(cuts) + 1)]
     for i in range(len(writes) - 1, -1, -1):
         if i in effects or wanted.intersection(writes[i]):
+            wanted.difference_update(writes[i])
             wanted.update(reads[i])
             spans[bisect_right(cuts, i)].append(i)
     return [span[::-1] for span in spans]
@@ -30,13 +31,31 @@ def frontiers(reads, writes, spans, roots, constants=()):
     only when a later span or a result root needs it. Values retain their
     identities across boundaries; the frontend binds their original storage.
     """
-    owner = {value: stage for stage, span in enumerate(spans) for i in span for value in writes[i]}
-    required = [{value for i in span for value in reads[i]} for span in spans]
-    later, constants = set(roots), set(constants)
-    result = []
-    for stage in range(len(spans) - 1, -1, -1):
-        inputs = {value for value in required[stage] if owner.get(value) != stage and value not in constants}
-        outputs = {value for value in later if owner.get(value) == stage}
-        result.append((inputs, outputs))
-        later.update(required[stage])
-    return result[::-1]
+    owner, constants = {}, set(constants)
+    result = [(set(), set()) for _ in spans]
+    for stage, span in enumerate(spans):
+        for i in span:
+            for value in reads[i]:
+                previous = owner.get(value)
+                if previous != stage and value not in constants:
+                    result[stage][0].add(value)
+                    if previous is not None:
+                        result[previous][1].add(value)
+            owner.update((value, stage) for value in writes[i])
+    for value in roots:
+        if value in owner:
+            result[owner[value]][1].add(value)
+    return result
+
+
+def partition(reads, writes, roots, cuts=(), effects=(), constants=(), external=()):
+    """Selected operations and their boundary operands, in declaration order.
+
+    External operations declare inputs/constants/results in frontends such as
+    FX. They participate in dependency selection but emit no numerical command.
+    Rewritten value identities refer to their most recent preceding definition.
+    """
+    external, roots = set(external), tuple(roots)
+    spans = [[i for i in span if i not in external] for span in needed(reads, writes, roots, cuts, effects)]
+    return [(span, inputs, outputs) for span, (inputs, outputs) in
+            zip(spans, frontiers(reads, writes, spans, roots, constants))]

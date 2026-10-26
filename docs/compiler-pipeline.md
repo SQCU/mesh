@@ -71,16 +71,21 @@ before execution, including the expert-dispatch graph's integer slot counts.
 ## Shared ordered graph passes
 
 [mesh_graph.py](../rdma/mesh_graph.py) receives operation reads and writes as value identities,
-result roots, required effects and existing cut positions. `needed` performs backward dependency
-selection and returns operation indices in their original order, grouped by those cuts. Duplicate
-cuts retain empty spans. `frontiers` identifies each selected span's external inputs and outputs;
-constants remain in the frontend's constant table.
+result roots, required effects and existing cut positions. `partition` returns the needed operations
+and boundary operands for each span. `needed` resolves backward dependencies at each definition;
+`frontiers` follows reads to their preceding producer. Reusing a value name does not make an earlier
+reader depend on a later write. Duplicate cuts retain empty spans. Constants remain in the frontend's
+constant table, and frontend input/result declarations emit no numerical command.
 
-FX supplies node identities and its mutation/random-effect classification. It uses the same selection
-for dead-operation removal and numerical/collective boundaries. LiteRT supplies tensor indices, graph
-outputs and configured crossing cuts; subgraph serialization and typed constant slicing remain its
-frontend's work. Neither pass emits a numerical operation, copy, wait, route or new execution interface.
-The frontend adapters retain the existing node objects and metadata.
+FX supplies node identities and its mutation/random-effect classification. Its former `split_module`
+path is removed. `declarations.sections` materializes the common partitions as FX fragments, retaining
+their tensor metadata and the original fake-tensor shape environment. Native outputs bind directly to
+the next fragment's input operands. Tuple/list results and their aliases retain their declared structure;
+flattening for numerical lowering happens only during preparation.
+
+LiteRT supplies tensor indices, graph outputs and configured crossing cuts to the same `partition`
+function. Its adapter serializes the resulting subgraphs and typed constants. Neither frontend's
+partition adapter emits a numerical operation, copy, wait, route or new execution interface.
 
 ## Native and LiteRT preparation
 

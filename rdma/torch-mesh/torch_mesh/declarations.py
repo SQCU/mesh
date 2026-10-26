@@ -10,17 +10,22 @@ import torch
 import torch.distributed as dist
 
 
+def effects(nodes):
+    """FX's declared mutation/random effects, shared by selection and partition."""
+    random_effects = True
+    if torch._guards.TracingContext.try_get():
+        from torch._inductor import config
+        random_effects = config.fallback_random
+    return [i for i, node in enumerate(nodes) if node.is_impure(random_effects)]
+
+
 def spans(graph, cuts=()):
     """Adapt FX values and effects to the common ordered dependency slicer."""
     from mesh_graph import needed
     graph.lint()
     nodes = list(graph.nodes)
-    random_effects = True
-    if torch._guards.TracingContext.try_get():
-        from torch._inductor import config
-        random_effects = config.fallback_random
     selected = needed([node.all_input_nodes for node in nodes], [(node,) for node in nodes], (), cuts,
-                      [i for i, node in enumerate(nodes) if node.is_impure(random_effects)])
+                      effects(nodes))
     live = {i for span in selected for i in span}
     for i in range(len(nodes) - 1, -1, -1):
         if i not in live:
@@ -255,6 +260,40 @@ def _bound(node):
     return name in _BOUND
 
 
+def sections(module, cuts):
+    """Materialize the common graph partition as FX fragments, retaining metadata."""
+    from mesh_graph import partition
+    nodes = list(module.graph.nodes)
+    order = {node: i for i, node in enumerate(nodes)}
+    output = next(node for node in nodes if node.op == 'output')
+    constants = [node for node in nodes if node.op == 'get_attr']
+    pieces = partition([node.all_input_nodes for node in nodes], [(node,) for node in nodes],
+                       output.all_input_nodes, cuts,
+                       effects=effects(nodes),
+                       constants=constants,
+                       external=[i for i, node in enumerate(nodes) if node.op in ('placeholder', 'get_attr', 'output')])
+    for indices, inputs, outputs in pieces:
+        if not indices:
+            continue
+        inputs, outputs = sorted(inputs, key=order.__getitem__), sorted(outputs, key=order.__getitem__)
+        graph, bound = torch.fx.Graph(), {}
+        for node in inputs:
+            bound[node] = graph.placeholder(node.name, type_expr=node.type)
+            bound[node].meta = node.meta.copy()
+        def operand(node):
+            if node not in bound:
+                if node.op != 'get_attr':
+                    raise ValueError(f'undeclared fragment input: {node.name}')
+                bound[node] = graph.node_copy(node, operand)
+            return bound[node]
+        for index in indices:
+            node = nodes[index]
+            bound[node] = graph.node_copy(node, operand)
+        graph.output(tuple(operand(node) for node in outputs))
+        graph.lint()
+        yield torch.fx.GraphModule(module, graph), tuple(inputs), tuple(outputs)
+
+
 class BoundGraph:
     """Configuration-time binding of ordinary collective graph boundaries.
 
@@ -263,8 +302,6 @@ class BoundGraph:
     generated execution sequence. Numerical spans use the existing compiler.
     """
     def __init__(self, graph, arguments, group):
-        import operator
-        from torch.fx.passes.split_module import split_module
         from torch.fx.node import map_arg
         from torch.utils._pytree import tree_map, tree_flatten
         from . import backend, empty
@@ -281,108 +318,103 @@ class BoundGraph:
             if getattr(getattr(target, '_schema', None), 'name', '') == '_c10d_functional::wait_tensor':
                 node.replace_all_uses_with(node.args[0]);graph.graph.erase_node(node)
         cuts = [at for i, node in enumerate(graph.graph.nodes) if _bound(node) for at in (i, i + 1)]
-        parts = {node: phase for phase, span in enumerate(spans(graph.graph, cuts)) for node in span}
-        divided = split_module(graph, graph, lambda node: parts[node], keep_original_order=True)
         values, arguments = {}, iter(arguments)
         self.groups, self.steps = {}, []
-        for node in divided.graph.nodes:
+        for node in graph.graph.nodes:
             if node.op == 'placeholder':
                 values[node] = next(arguments)
             elif node.op == 'get_attr':
-                value = divided
+                value = graph
                 for name in node.target.split('.'):
                     value = getattr(value, name)
                 values[node] = value
-            elif node.op == 'call_function' and node.target is operator.getitem:
-                args = map_arg(node.args, values.__getitem__)
-                values[node] = operator.getitem(*args)
-            elif node.op == 'call_module':
-                module = divided.get_submodule(node.target)
-                args = map_arg(node.args, values.__getitem__)
-                live = {n: v for n, v in zip((n for n in module.graph.nodes if n.op == 'placeholder'), args)}
-                for n in module.graph.nodes:
-                    if n.op == 'get_attr':
-                        value = module
-                        for name in n.target.split('.'):
-                            value = getattr(value, name)
-                        live[n] = value
-                outputs = next(n.args[0] for n in module.graph.nodes if n.op == 'output')
-                def storage(n):
-                    metadata = _value(n)
+        for module, inputs, exported in sections(graph, cuts):
+            args = tuple(values[node] for node in inputs)
+            live = {n: v for n, v in zip((n for n in module.graph.nodes if n.op == 'placeholder'), args)}
+            for n in module.graph.nodes:
+                if n.op == 'get_attr':
+                    value = module
+                    for name in n.target.split('.'):
+                        value = getattr(value, name)
+                    live[n] = value
+            outputs = next(n.args[0] for n in module.graph.nodes if n.op == 'output')
+            aliases = [(described, value) for dependency, operand in live.items()
+                       for described, value in zip(tree_flatten(_value(dependency))[0], tree_flatten(operand)[0])
+                       if isinstance(described, torch.Tensor)]
+            def storage(n):
+                def bind(metadata):
                     if not isinstance(metadata, torch.Tensor):
                         return metadata
-                    for dependency, value in live.items():
-                        described = _value(dependency)
-                        if isinstance(described, torch.Tensor) and torch._C._is_alias_of(metadata, described):
+                    for described, value in aliases:
+                        if torch._C._is_alias_of(metadata, described):
                             return value.as_strided(tuple(metadata.shape), tuple(metadata.stride()),
                                 value.storage_offset() + metadata.storage_offset() - described.storage_offset())
                     return empty(tuple(metadata.shape), dtype=metadata.dtype, device=metadata.device.type)
-                crossing = next((n for n in module.graph.nodes if _bound(n)), None)
-                if crossing is None:
-                    # Keep the graph and its one FakeTensor shape environment.
-                    # Retracing a split graph creates a second set of symbols
-                    # for the same internal values and loses their bindings.
-                    # Native preparation already assigns region storage. Bind
-                    # the next consumer to those outputs, including aliases;
-                    # no separate destination or publication copy is needed.
-                    from torch.utils._pytree import tree_unflatten
-                    made = Function(module, *args)
-                    made.output_spec = tree_flatten(outputs)[1]
-                    made.declare_graph(module, group)
-                    targets = tree_unflatten(tree_flatten(made.execution.output)[0], made.output_spec)
-                    self.steps.append(made)
-                    declarations = made.groups
-                else:
-                    targets = map_arg(outputs, storage)
-                    target, metadata = operation(crossing)
-                    if crossing.target is not target:
-                        raise NotImplementedError('bound collectives require functional graph operands')
-                    actual = map_arg(crossing.args, live.__getitem__)
-                    keywords = map_arg(crossing.kwargs, live.__getitem__)
-                    named = {a.name: actual[i] if i < len(actual) else keywords.get(a.name, a.default_value)
-                             for i, a in enumerate(target._schema.arguments)}
-                    source = named.get('input', named.get('x', named.get('self', named.get('partials'))))
-                    gather = target in (torch.ops.torch_mesh.allgatherv.default, torch.ops.torch_mesh.allgatherv_out.default)
-                    native = dist.distributed_c10d._resolve_process_group(metadata['group_name'])
-                    declarations = lower(module)
-                    if gather:
-                        destination = named.get('out')
-                        if destination is None:
-                            destination = tree_flatten(targets)[0][0]
-                        prepared, local = backend.bind_gather_views(source, destination, named['dim'], named['sizes'], native)
-                        if local is not None:
-                            local.declare(None)
-                            self.steps.append(local)
-                        if prepared is not None:
-                            self.steps.append(prepared)
-                        for name, calls in declarations.items():
-                            self.groups.setdefault(name, []).extend(calls)
-                        values[node] = targets
-                        continue
-                    if target is torch.ops.torch_mesh.reduce_scatterv.default:
-                        destination = tree_flatten(targets)[0][0]
-                        made, calls = backend.bind_scatter_views(source, destination, named['dim'], named['sizes'],
-                                                                 _operation(named['op']), native)
-                        self.steps.append(made)
-                        self.groups.setdefault(metadata['group_name'], []).append(calls)
-                        values[node] = targets
-                        continue
-                    calls = declarations[metadata['group_name']]
-                    if len(calls) != 1:
-                        raise ValueError('a bound crossing declares one collective group')
-                    outputs_flat = tree_flatten(targets)[0]
-                    sources = named.get('inputs', [source])
-                    if len(outputs_flat) != len(calls[0]) or len(sources) != len(calls[0]):
-                        raise ValueError('each declared collective needs its source and final output')
-                    made, _ = backend.prepare_fragments(list(zip(calls[0], sources, outputs_flat)), native)
-                    self.steps.append(made)
-                for name, calls in declarations.items():
-                    self.groups.setdefault(name, []).extend(calls)
-                values[node] = targets
-            elif node.op == 'output':
-                self.output = map_arg(node.args[0], values.__getitem__)
+                return tree_map(bind, _value(n))
+            crossing = next((n for n in module.graph.nodes if _bound(n)), None)
+            if crossing is None:
+                # Keep the graph and its one FakeTensor shape environment.
+                # Retracing a split graph creates a second set of symbols
+                # for the same internal values and loses their bindings.
+                # Native preparation already assigns region storage. Bind
+                # the next consumer to those outputs, including aliases;
+                # no separate destination or publication copy is needed.
+                from torch.utils._pytree import tree_unflatten
+                made = Function(module, *args)
+                made.output_spec = tree_flatten(tree_map(_value, outputs))[1]
+                made.declare_graph(module, group)
+                targets = tree_unflatten(tree_flatten(made.execution.output)[0], made.output_spec)
+                self.steps.append(made)
+                declarations = made.groups
             else:
-                raise NotImplementedError(f'bound graph configuration node {node.op}: {node.target}')
+                targets = map_arg(outputs, storage)
+                target, metadata = operation(crossing)
+                if crossing.target is not target:
+                    raise NotImplementedError('bound collectives require functional graph operands')
+                actual = map_arg(crossing.args, live.__getitem__)
+                keywords = map_arg(crossing.kwargs, live.__getitem__)
+                named = {a.name: actual[i] if i < len(actual) else keywords.get(a.name, a.default_value)
+                         for i, a in enumerate(target._schema.arguments)}
+                source = named.get('input', named.get('x', named.get('self', named.get('partials'))))
+                gather = target in (torch.ops.torch_mesh.allgatherv.default, torch.ops.torch_mesh.allgatherv_out.default)
+                native = dist.distributed_c10d._resolve_process_group(metadata['group_name'])
+                declarations = lower(module)
+                if gather:
+                    destination = named.get('out')
+                    if destination is None:
+                        destination = tree_flatten(targets)[0][0]
+                    prepared, local = backend.bind_gather_views(source, destination, named['dim'], named['sizes'], native)
+                    if local is not None:
+                        local.declare(None)
+                        self.steps.append(local)
+                    if prepared is not None:
+                        self.steps.append(prepared)
+                    for name, calls in declarations.items():
+                        self.groups.setdefault(name, []).extend(calls)
+                    values.update(zip(exported, targets))
+                    continue
+                if target is torch.ops.torch_mesh.reduce_scatterv.default:
+                    destination = tree_flatten(targets)[0][0]
+                    made, calls = backend.bind_scatter_views(source, destination, named['dim'], named['sizes'],
+                                                             _operation(named['op']), native)
+                    self.steps.append(made)
+                    self.groups.setdefault(metadata['group_name'], []).append(calls)
+                    values.update(zip(exported, targets))
+                    continue
+                calls = declarations[metadata['group_name']]
+                if len(calls) != 1:
+                    raise ValueError('a bound crossing declares one collective group')
+                outputs_flat = tree_flatten(targets)[0]
+                sources = named.get('inputs', [source])
+                if len(outputs_flat) != len(calls[0]) or len(sources) != len(calls[0]):
+                    raise ValueError('each declared collective needs its source and final output')
+                made, _ = backend.prepare_fragments(list(zip(calls[0], sources, outputs_flat)), native)
+                self.steps.append(made)
+            for name, calls in declarations.items():
+                self.groups.setdefault(name, []).extend(calls)
+            values.update(zip(exported, targets))
+        output = next(node for node in graph.graph.nodes if node.op == 'output')
+        self.output = map_arg(output.args[0], values.__getitem__)
         self.execution = execution_sequence(self.steps, self.output)
 
 class Function:
