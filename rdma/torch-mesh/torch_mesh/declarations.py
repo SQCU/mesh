@@ -301,7 +301,8 @@ class Preparations:
 class Function:
     """One numerical callable and its framework-derived AOT declaration.
 
-    ``declare`` retraces after placement changes. Compilation operates on the
+    Tensor arguments are fake inputs during tracing and are bound once to the
+    realized callable. ``declare`` retraces after placement changes. Compilation operates on the
     complete explicit forward/backward graph, with parameter gradients retained
     as outputs; a compiler cannot discard the backward as unused work. No payload
     function is executed to discover communication. Eager execution keeps its

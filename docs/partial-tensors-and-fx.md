@@ -182,7 +182,7 @@ backward operations; supplying parameters alone does not invent a backward graph
 | `declare(group)` | Fake-traces the whole callable, retains parameter gradients as graph outputs, lowers communication, and invokes the chosen compiler now. Returns this group's ordered `Call` groups. |
 | `graph`, `groups` | The FX graph and declarations keyed by process-group name. |
 | `forms`, `preparations` | Crossing metadata and the storage-binding preparation built from it. |
-| `run` | The prepared numerical callable. With no compiler it is the original Python function. With a compiler it is the compiled FX callable returning flattened outputs and gradients. |
+| `run` | The prepared numerical callable. With no compiler it is the original Python function with its arguments bound. With a compiler it is the compiled FX callable returning flattened outputs and gradients. |
 | `output_spec` | The output tree description needed to reconstruct the user's structured result. |
 | `prepare(repetitions=1)` | Bind the crossing storage and repeated forms before numerical execution, after the communicator's plan is installed. |
 | `__call__()` | Call `run`, restore parameter gradients and reconstruct structured outputs. Call `run` directly when those adaptations are unnecessary. |
