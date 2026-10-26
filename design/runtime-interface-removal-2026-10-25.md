@@ -21,7 +21,7 @@ It is not a claim that every line in both repositories has been reviewed. An exi
 each removal. Where it lacks a complete replacement, that gap is explicit. A matching name or an older date
 does not establish that an implementation is faster or meets the model.
 
-## Integration status — 2026-10-26T01:00:00-07:00
+## Integration status — 2026-10-26T07:38:01-07:00
 
 The native recorder, access ordering, replay compiler and submission scheduler live in
 `rdma/metal-recording.h` and `.m`. Native command descriptions, captured LiteRT commands,
@@ -34,8 +34,12 @@ Ragged reduce-scatter is a configured operation of the same rank crossing interf
 Python list gathers bind final output buffers. Native column gathers bind final row views.
 KV handoff now declares each sender's and receiver's own row pitch and head offset to the same
 write planner; its staging buffer, `placeColumnsCommand` and `place_columns` kernel are removed.
-The coded drafter's gather permutation and compiled FX gather publication/landing copies still
-need consolidation; these changes do not establish that every gather copy has been removed.
+The coded drafter now produces natural columns and binds their indexed final views to that same
+planner. Its staging tensor and `mesh_draft_place` permutation kernel are deleted. FX ragged
+gathers also bind source and final recipient views; their `gather_land` kernel and fused-copy
+rewrite are deleted. The LSTM produces its local columns in the final state tensor. A separately
+supplied source still requires its ordinary local placement into a distinct local result; there
+is no remote receive-and-copy-back substitute. Fused reductions retain their numerical fold.
 
 TP, EP and CP declare whole functions. The CP example supplies compiler crossing indices.
 Hourly workload bodies live in `mesh/examples`; the hourly supplies configurations. The former
@@ -44,6 +48,8 @@ private timer or numerical loop. `mesh-statistics.h` supplies ordinary host time
 latency/useful-rate arithmetic; Python and native callers import it.
 
 Collective repetitions, recurrent chain commands and DNN row blocks are prepared before enqueue.
+FX native bindings and fused crossings share `Preparations` and its ordered operands; the LSTM
+service supplies its complete call order to it. Span plans are bound after routing is assigned.
 Recurrent inputs name the frame each step consumes. Invocation storage uses assigned ranges in
 region pages; the free-buffer scan and `ncclMeshMemReusable` API are removed. Payload ranges keep
 page alignment. The preceding 64-byte payload alignment caused a registration-boundary failure
@@ -54,7 +60,7 @@ kernel lowering. Dead framework coordinate queries are removed from the graph; t
 introduced a dynamic `nonzero` into TP lowering. These are preparation changes, not measured
 performance claims.
 
-Open work includes native producer-kernel publication, the remaining gather copies, generic
+Open work includes native producer-kernel publication, generic
 Torch numerical spans' framework encoding and temporary storage, and the eager CPU compatibility
 executor. Shared code and successful builds do not establish maximum performance. Canonical
 hourlies have recorded failures; completion of all seven assigned items is not claimed here.

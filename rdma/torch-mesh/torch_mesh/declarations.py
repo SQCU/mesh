@@ -206,7 +206,8 @@ def lower(graph, *, forms=None):
         else:
             raise NotImplementedError(f'AOT collective declaration for {schema.name}')
         if calls:
-            repeats = int(args.get('repeats', 1)) if all(call.kind == backend.WRITE for call in calls) else 1
+            fused_calls = all(call.kind == backend.WRITE and call.fused for call in calls)
+            repeats = int(args.get('repeats', 1)) if fused_calls else 1
             if repeats < 1:
                 raise ValueError('compiled collective repeat count must be positive')
             if group_name in trains:
@@ -219,7 +220,7 @@ def lower(graph, *, forms=None):
                     trains[group_name] = expected, remaining - 1
                 continue
             groups.setdefault(group_name, []).append((calls, repeats) if repeats > 1 else calls)
-            if forms is not None and all(call.kind == backend.WRITE for call in calls):
+            if forms is not None and fused_calls:
                 weight, adds = args.get('w'), name in ('all_reduce', 'linear_sum') or args.get('adds', False)
                 source = x.view(1) if x.ndim == 0 else x
                 dim = args.get('dim', 0)
@@ -260,7 +261,7 @@ def trace(function, *arguments, parameters=()):
 
 class Preparations:
     """Page bindings and dispatch operands realized before a complete function."""
-    def __init__(self, forms):
+    def __init__(self, forms, order=None):
         from collections import Counter
         batches = Counter(crossing_key(form) for form in forms)
         prototype = lambda m: None if m is None else torch.empty_strided(m[0], m[1], dtype=m[2], device='meta')
@@ -279,6 +280,8 @@ class Preparations:
             for index, destination in source[7] if len(source) == 8 else ():
                 self.bindings[index] = (prototype(x), prototype(w), dim, list(sizes), name, adds, repeats, destination)
                 self.order.append(index)
+        if order is not None:
+            self.order = list(order)
 
     def bind(self, repetitions=1):
         from . import _stream
@@ -293,8 +296,11 @@ class Preparations:
         from . import _stream
         self.bind(repetitions)
         for _ in range(repetitions):
-            for index in self.order:
-                _stream.compile_crossing(index)
+            for step in self.order:
+                if isinstance(step, int):
+                    _stream.compile_crossing(step)
+                else:
+                    step.realize()
 
 
 def execution_sequence(steps, output=None):
@@ -315,7 +321,7 @@ def execution_sequence(steps, output=None):
     return torch.fx.GraphModule(bindings, graph, 'PreparedFunction')
 
 
-_BOUND = {'all_to_all_single', 'merge_partials', 'reduce_scatterv',
+_BOUND = {'all_to_all_single', 'merge_partials', 'reduce_scatterv', 'allgatherv', 'allgatherv_out',
           'reduce_scatter_tensor', 'all_gather_into_tensor', 'all_gather_into_tensor_out',
           'broadcast', 'broadcast_', 'all_reduce_coalesced', 'all_gather_into_tensor_coalesced',
           'reduce_scatter_tensor_coalesced'}
@@ -426,7 +432,7 @@ class BoundGraph:
                     made = Function(module, *args)
                     made.output_spec = tree_flatten(targets)[1]
                     made.declare_graph(module, group)
-                    self.steps.append((made, 'run'));self.order.append(made.preparations.order)
+                    self.steps.append((made, 'run'));self.order.extend(made.preparations.order)
                     self.forms.extend(made.forms)
                     declarations = made.groups
                 else:
@@ -438,10 +444,25 @@ class BoundGraph:
                     named = {a.name: actual[i] if i < len(actual) else keywords.get(a.name, a.default_value)
                              for i, a in enumerate(target._schema.arguments)}
                     source = named.get('input', named.get('x', named.get('self', named.get('partials'))))
-                    if metadata.get('dim', 0) != 0:
+                    gather = target in (torch.ops.torch_mesh.allgatherv.default, torch.ops.torch_mesh.allgatherv_out.default)
+                    if not gather and metadata.get('dim', 0) != 0:
                         raise NotImplementedError('nonleading reduction axes require partial tensor views')
                     native = dist.distributed_c10d._resolve_process_group(metadata['group_name'])
                     declarations = lower(module)
+                    if gather:
+                        destination = named.get('out')
+                        if destination is None:
+                            destination = tree_flatten(targets)[0][0]
+                        prepared, local = backend.bind_gather_views(source, destination, named['dim'], named['sizes'], native)
+                        if local is not None:
+                            local.declare(None)
+                            self.steps.append((local, 'run')); self.order.extend(local.preparations.order)
+                        if prepared is not None:
+                            self.steps.append((prepared, 'enqueue')); self.order.append(prepared)
+                        for name, calls in declarations.items():
+                            self.groups.setdefault(name, []).extend(calls)
+                        values[node] = targets
+                        continue
                     calls = declarations[metadata['group_name']]
                     if len(calls) != 1:
                         raise ValueError('a bound crossing declares one collective group')
@@ -458,21 +479,9 @@ class BoundGraph:
                 self.output = map_arg(node.args[0], values.__getitem__)
             else:
                 raise NotImplementedError(f'bound graph configuration node {node.op}: {node.target}')
-        self.preparations = Preparations(self.forms)
+        self.preparations = Preparations(self.forms, self.order)
         self.graph = execution_sequence(self.steps, self.output)
         self.run = self.graph.forward
-
-    def __call__(self, repetitions=1):
-        from . import _stream
-        self.preparations.bind(repetitions)
-        for _ in range(repetitions):
-            for step in self.order:
-                if isinstance(step, list):
-                    for index in step:
-                        _stream.compile_crossing(index)
-                else:
-                    step.realize()
-
 
 class Function:
     """One numerical callable and its framework-derived AOT declaration.
@@ -512,7 +521,7 @@ class Function:
         if any(_bound(node) for node in graph.graph.nodes):
             prepared = BoundGraph(graph, self.arguments, group)
             self.graph, self.groups, self.run, self.forms = prepared.graph, prepared.groups, prepared.run, prepared.forms
-            self.preparations = prepared
+            self.preparations = prepared.preparations
             return self.groups.get(group.group_name, []) if group is not None else []
         from . import compiler
         captured = []

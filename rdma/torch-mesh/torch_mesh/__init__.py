@@ -59,8 +59,7 @@ def compiler(gm, example_inputs, *, whole_graph=False):
 
     aten = torch.ops.aten
     # each fused crossing's op and where its group's name lies among its arguments, its repeats the next
-    CROSSINGS = {torch.ops.torch_mesh.all_reduce.default: 2, torch.ops.torch_mesh.linear_sum.default: 2,
-                 torch.ops.torch_mesh.allgatherv.default: 3, torch.ops.torch_mesh.allgatherv_out.default: 4}
+    CROSSINGS = {torch.ops.torch_mesh.all_reduce.default: 2, torch.ops.torch_mesh.linear_sum.default: 2}
 
     def rows(x, w):
         """Whether x @ w is linear's: on MPS (its one implementation), fp16, x [R <= 8, K] contiguous, w the transposed
@@ -221,29 +220,6 @@ def compiler(gm, example_inputs, *, whole_graph=False):
         for item in [n for n in graph.nodes if n.target in (torch.ops.torch_mesh.linear_sum.default,
                                                            torch.ops.torch_mesh.all_reduce.default)]:
             native(item)
-        for item in graph.nodes:
-            target, values = operation(item)
-            if target not in (torch.ops.torch_mesh.allgatherv.default, torch.ops.torch_mesh.allgatherv_out.default):
-                continue
-            import torch.distributed as dist
-            group = dist.distributed_c10d._resolve_process_group(values['group_name'])
-            if not (partition._region_backed(values['x'], group) and group.size() > 1):
-                continue
-            into = target is torch.ops.torch_mesh.allgatherv_out.default
-            native_target = torch.ops.torch_mesh.fused_step_out.default if into else torch.ops.torch_mesh.fused_step.default
-            if item.target is target:
-                args = {a.name: item.args[i] if i < len(item.args) else item.kwargs.get(a.name, a.default_value)
-                        for i, a in enumerate(target._schema.arguments)}
-                item.target = native_target
-                item.args = (args['x'], None, *((args['out'],) if into else ()), args['dim'], args['sizes'],
-                             args['group_name'], False, args['repeats'])
-                item.kwargs = {}
-            else:
-                # Keep PyTorch's alias/view metadata and its reinplacing pass.
-                # Only the underlying call changes to the existing native op.
-                item.args = (native_target, *item.args[1:])
-                item.kwargs = dict(item.kwargs, w=None, adds=False)
-            item.meta.pop('eager_input_vals', None)
 
     def realize(graph, inputs, **options):
         # Declaration is configuration output, needed even on a numerical code

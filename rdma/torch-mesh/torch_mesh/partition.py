@@ -217,30 +217,22 @@ def _(x, out, dim, sizes, group_name, repeats=1):
 
 
 # The generic gather and sum are data functions over the compiler's physical
-# one-sided all-gather writes. Rank-sized arrays describe tensor layout; channel-
-# sized arrays describe the transport, including parallel cables and relays.
-# The producer writes one region segment and publishes its physical bindings.
-# A single ready dispatch observes those landings, then parallel gather/fold
-# readers load coherent payloads without repeating waits. The out variant binds
-# a declared destination directly, avoiding a second output copy.
-# Two slots may be reused only for the recurrent all-gather: consuming every
-# peer's preceding contribution before publishing the next supplies a natural
-# descendant observation of each old reader. It is not a general lifetime rule
-# for asymmetric writes (follow uses transfer-owned deferred retirement).
+# A reduction's rank-local partials, fused producer publication and numerical
+# fold. Gathers use the common indexed WRITE planner and final tensor views.
 _GATHER_SOURCE = r"""
 template <uint N, uint CHANNELS>
 struct gather_words { uint count, pre, post, rank, j; uint sizes[N], starts[N]; mesh_step_binding land[CHANNELS], publish[CHANNELS]; };
 
 template <uint AXES, uint CHANNELS>
-struct gather_publish_words {
+struct partial_publish_words {
     uint count, j, shape[AXES], strides[AXES];
     mesh_step_binding land[CHANNELS], publish[CHANNELS];
 };
 
 template <uint AXES, uint UNITS, uint COPY_BYTES, uint CHANNELS, bool CONTIGUOUS, uint THREADS>
 [[max_total_threads_per_threadgroup(THREADS)]]
-kernel void gather_publish(device const metal::conditional_t<COPY_BYTES == 1, uchar, ushort>* x [[buffer(0)]], device uchar* send [[buffer(1)]],
-                           device atomic_uint* arrivals [[buffer(2)]], constant gather_publish_words<AXES, CHANNELS>& w [[buffer(15)]],
+kernel void partial_publish(device const metal::conditional_t<COPY_BYTES == 1, uchar, ushort>* x [[buffer(0)]], device uchar* send [[buffer(1)]],
+                           device atomic_uint* arrivals [[buffer(2)]], constant partial_publish_words<AXES, CHANNELS>& w [[buffer(15)]],
                            uint tid [[thread_index_in_threadgroup]], uint g [[threadgroup_position_in_grid]],
                            uint groups [[threadgroups_per_grid]]) {
     using T = metal::conditional_t<COPY_BYTES == 1, uchar, ushort>;
@@ -286,25 +278,6 @@ template <uint N, uint CHANNELS, uint THREADS>
 kernel void gather_ready(constant gather_words<N, CHANNELS>& w [[buffer(15)]],
                          uint tid [[thread_index_in_threadgroup]]) {
     gather_observe(w, tid);
-}
-
-template <uint COPY_BYTES, uint N, uint CHANNELS, bool WAIT, uint THREADS>
-[[max_total_threads_per_threadgroup(THREADS)]]
-kernel void gather_land(device const uchar* lease [[buffer(0)]], device metal::conditional_t<COPY_BYTES == 1, uchar, ushort>* out [[buffer(1)]],
-                        constant gather_words<N, CHANNELS>& w [[buffer(15)]], uint tid [[thread_index_in_threadgroup]],
-                        uint g [[threadgroup_position_in_grid]], uint groups [[threadgroups_per_grid]]) {
-    using T = metal::conditional_t<COPY_BYTES == 1, uchar, ushort>;
-    if (WAIT) gather_observe(w, tid);
-    uint total = 0;
-    for (uint r = 0; r < N; r++) total += w.sizes[r];
-    const uint row = total * w.post;
-    for (uint e = g * THREADS + tid; e < w.pre * row; e += groups * THREADS) {
-        const uint i = e / row, k = e % w.post;
-        uint r = 0, at = e / w.post % total;
-        while (at >= w.sizes[r]) at -= w.sizes[r++];
-        const ulong from = w.starts[r] + (ulong(i) * w.sizes[r] + at) * w.post + k;
-        out[e] = r == w.rank ? ((device const T*)lease)[from] : mesh_step_read<T>(lease, from);
-    }
 }
 
 template <uint BYTES, uint N, uint CHANNELS, bool WAIT, uint THREADS>
@@ -367,13 +340,15 @@ def _gather_paths(fabric):
 
 def _fused_form(x, w, dim, sizes, group_name, adds, channels):
     """A fused crossing's form for torch_mesh::fused_step, made during preparation (_stream.mm fused_maker): the
-    communicator and the waits' bound; this rank and the ranks; the publication's kernel (gather_publish, or
-    linear_publish where `w`), constant words, its repeat's word and grid; the landing's (sum_land or gather_land, and
+    communicator and the waits' bound; this rank and the ranks; the publication's kernel (partial_publish, or
+    linear_publish where `w`), constant words, its repeat's word and grid; the reduction's (sum_land, and
     this rank's segment's start and each rank's sizes in its words); every rank's exact segment start and count
     and the output's shape; the publication's arrival count; the separate landing-prefix
     observer and physical channel extent."""
     from . import _stream
     from lifetimes import prove_recurrent_gather
+    if not adds:
+        raise ValueError('gathers use prepared final views, not fused reduction storage')
     group = dist.distributed_c10d._resolve_process_group(group_name)
     n, rank = len(sizes), group.rank()
     operand = tuple(x.shape) if w is None else (x.shape[0], w.shape[0])
@@ -388,16 +363,15 @@ def _fused_form(x, w, dim, sizes, group_name, adds, channels):
     if all(counts):
         prove_recurrent_gather(n, _gather_paths(group.fabric))
     words = ([math.prod(operand) * half, math.prod(operand[:dim]), math.prod(operand[dim + 1:]) * half, rank, 0] + list(sizes) +
-             [a * (1 if adds else half) for a in starts[:-1]])
-    shape = operand if adds else operand[:dim] + (sum(sizes),) + operand[dim + 1:]
+             starts[:-1])
+    shape = operand
     spread = lambda count: max(1, min(16, -(-count // (_GATHER_THREADS * 8))))
     groups = spread(math.prod(shape) * half)
     inline_wait = groups == 1
-    land = (_gather_kernel('sum_land', x.element_size(), n, channels, inline_wait) if adds else
-            _gather_kernel('gather_land', copy_bytes, n, channels, inline_wait))
+    land = _gather_kernel('sum_land', x.element_size(), n, channels, inline_wait)
     if w is None:
         publish_words = [math.prod(operand) * half, 0, *x.shape, *x.stride()]
-        publish = (_gather_kernel('gather_publish', x.ndim, half, copy_bytes, channels, x.is_contiguous()), publish_words, 1,
+        publish = (_gather_kernel('partial_publish', x.ndim, half, copy_bytes, channels, x.is_contiguous()), publish_words, 1,
                    spread(words[0]), _GATHER_THREADS)
     else:
         K, N, ldw = x.shape[1], w.shape[0], w.stride(0)
@@ -498,11 +472,13 @@ def gathered(x, dim, sizes, group):
     No rank segment is padded to a transport page. Non-mesh backends retain
     their own collective declaration.
     """
-    from .backend import ALLGATHER, Call
+    from .backend import ALLGATHER, WRITE, Call
     counts = [s * _row(x, dim) for s in sizes]
     if not _region_backed(x, group):
         return [Call(ALLGATHER, x.numel(), x.dtype, counts=counts)]
-    return _gather_writes(counts, x.dtype)
+    return [Call(WRITE, count * x.element_size(), torch.uint8, root=source, destination=destination)
+            for source, count in enumerate(counts) if count
+            for destination in range(len(counts)) if source != destination]
 
 
 def summed(x, group):
@@ -1779,7 +1755,7 @@ def context_parallel_unshard(mesh, name, buffers, seq_dims, load_balance=True, *
     The ordinary contiguous sequence layout is the declared final destination.
     A head/tail partition gathers the same exact contributions, then permutes
     its two logical halves locally; no page-padded transport buffer is used.
-    Original input strides are read by the shared gather publisher. Supply the
+    Original input strides bind the common indexed WRITE plan. Supply the
     declared sequence_length on zero-share ranks, whose local extent is empty.
     """
     o, rank, group = operand(mesh, name), mesh.get_local_rank(name), mesh.get_group(name)
@@ -1810,18 +1786,6 @@ def ring_attention(mesh, name, query, key, value, is_causal=False, scale=None, l
     S = _sequence_extent(o, mesh.get_local_rank(name), query.size(2), sequence_length)
     return _ring_attention(mesh.get_group(name), o.key, query, key, value, is_causal, scale, _halves(o, S, load_balance), S)
 
-
-def unshard_calls(mesh, name, shapes, dims, dtype, *, sequence_length=None):
-    """The static gathered blocks used by context_parallel_unshard."""
-    group, o, rank = mesh.get_group(name), operand(mesh, name), mesh.get_local_rank(name)
-    groups = []
-    for shape, dim in zip(shapes, dims):
-        dim %= len(shape)
-        total = _sequence_extent(o, rank, shape[dim], sequence_length)
-        row = math.prod(shape[:dim] + shape[dim + 1:])
-        counts = [length * row for length in _blocks(o, total)[0]]
-        groups.append(_gather_writes(counts, dtype))
-    return groups
 
 
 SCORES = 1 << 26

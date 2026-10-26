@@ -166,22 +166,6 @@ kernel void mesh_saguaro_keys(device const uint *state [[buffer(0)]], device con
     own[8] = key == 0xffffffffu ? state[8] : key;
 }
 
-// A coded product's rows gathered from its drafting members (metal-microbench docs/kernels.md#the-drafter-as-a-share) placed
-// at their natural rows: the export orders a product's rows by their energy, so each member writes its run of coded rows
-// in code order, [rows][its run], the runs end to end in member order (`starts`: each run's first coded row, then the
-// product's rows, `members` + 1 words), all-gathered into `runs`; coded row j of row r goes to y's row r at its natural
-// row `order[j]`.  Thread (j, r).
-kernel void mesh_draft_place(device half *y [[buffer(0)]], device const half *runs [[buffer(1)]], device const int *order [[buffer(2)]],
-                             device const uint *starts [[buffer(3)]], constant uint &members [[buffer(4)]], uint2 at [[thread_position_in_grid]],
-                             uint2 grid [[threads_per_grid]]) {
-    const uint n = starts[members], j = at.x, r = at.y;
-    if (j >= n) return;
-    uint k = 0;
-    while (k + 1 < members && j >= starts[k + 1]) k++;
-    const uint a = starts[k], b = starts[k + 1];
-    y[ulong(r) * n + uint(order[j])] = runs[ulong(grid.y) * a + ulong(r) * (b - a) + (j - a)];
-}
-
 // E2B's own trained MTP drafter (metal-microbench docs/kernels.md#the-drafter, E2B's MTP drafter: the LiteRT-LM export's
 // tf_lite_mtp_drafter, signature mtp_drafter, its weights as stored by metal-microbench tools/draft/mtp_export.py;
 // restored from metal-microbench e57247d and 65b05c6^ tools/prepare_e2b.py compose onto the engine's step): a chain of

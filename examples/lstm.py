@@ -26,14 +26,15 @@ class Tick:
         self.W, self.b = [held(w) for w in weights], [held(b) for b in biases]
         self.group, self.sizes = mesh.get_group('tp').group_name, partition.split(mesh, 'tp', H)
         self.c = torch_mesh.empty(self.L, rows, HR, dtype=torch.float32)
-        self.mine = torch_mesh.empty(self.L, rows, HR, dtype=torch.half)
         self.h = torch_mesh.empty(self.L, rows, H, dtype=torch.half)
+        first = sum(self.sizes[:mesh.get_group('tp').rank()])
+        self.mine = self.h.narrow(2, first, HR)
         self.reset()
 
     # docs/writing-a-service.md#the-lstm
     def reset(self):
         """Every layer's state h(-1) and c(-1): zeros."""
-        for state in (self.c, self.mine, self.h):
+        for state in (self.c, self.h):
             state.zero_()
 
     # docs/writing-a-service.md#the-lstm

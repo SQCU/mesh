@@ -1654,11 +1654,16 @@ using SpanBinding = std::tuple<at::Tensor, std::vector<std::array<uint64_t, 2>>,
 struct SpanWrites {
   int64_t comm;
   bool metal;
+  std::vector<SpanBinding> bindings;
   PreparedWrites plans;
   std::vector<at::Tensor> leases;
-  SpanWrites(const std::vector<SpanBinding> &bindings, int64_t handle) : comm(handle), metal(false) {
+  SpanWrites(const std::vector<SpanBinding> &given, int64_t handle) : comm(handle), metal(false), bindings(given) {
     TORCH_CHECK(!bindings.empty(), "span writes require at least one declared delivery");
     metal = std::get<0>(bindings.front()).is_mps();
+    for(const auto &binding:bindings)leases.push_back(std::get<0>(binding));
+  }
+  void prepare() {
+    if(!plans.handles.empty())return;
     Group g{metal};
     for (const auto &[base, rows, source, destination] : bindings) {
       TORCH_CHECK(base.is_mps() == metal, "span writes require one local device");
@@ -1674,7 +1679,6 @@ struct SpanWrites {
       plans.handles.push_back(nullptr);
       checked(ncclMeshWriteSpansPrepare(at, (void *)at, spans.data(), spans.size(), source, destination,
                                        communicator(comm), metal, 0, &plans.handles.back()));
-      leases.push_back(base);
     }
   }
   ncclResult_t encode(ncclMeshStream *stream) {
@@ -1687,6 +1691,7 @@ struct SpanWrites {
   size_t next=0;
   void realize() {
     TORCH_CHECK(metal,"prepared distributed writes require the Metal backend");
+    prepare();
     auto made=std::make_unique<TorchSchedule>();SpanWrites *self=this;
     checked(MetalScheduleCross(made->schedule.get(),^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
         id<MTLResidencySet> residency,NSUInteger,NSUInteger) {

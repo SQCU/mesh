@@ -396,6 +396,33 @@ def prepare_fragments(bindings, group):
     return _stream.Collectives(calls, group.handle, operands), [call for call, _, _ in bindings]
 
 
+def bind_gather_views(source, output, dim, sizes, group):
+    """Original producer views to final recipient views through indexed WRITEs.
+
+    A caller can produce in its final local slice. Otherwise its mathematical
+    local placement is a declared numerical copy, compiled with the ordinary
+    graph compiler. There is no packed send tensor or received-data copy-back.
+    """
+    from .declarations import Function
+    dim %= output.ndim
+    slices = list(output.split(sizes, dim))
+    own = slices[group.rank()]
+    placed = (torch._C._is_alias_of(source, own) and source.storage_offset() == own.storage_offset()
+              and tuple(source.stride()) == tuple(own.stride()))
+    local = None if placed else Function(lambda x, out: out.copy_(x), source, own)
+    deliveries = []
+    for a, segment in enumerate(slices):
+        if segment.numel() == 0:
+            continue
+        for b in range(group.size()):
+            if a == b:
+                continue
+            view = (source if group.rank() == a else segment if group.rank() == b else
+                    empty(segment.numel() * segment.element_size(), dtype=torch.uint8, device=source.device.type))
+            deliveries.append((view, a, b))
+    return (group.prepare_writes(deliveries) if deliveries else None), local
+
+
 def partial(out, lse):
     """An attention's output over some keys (shape x dim) and each row's logsumexp (shape) as the library's partials,
     float32 rows (shape x (2 + dim)) of [m, l, O]: m the logsumexp, l 1, O the output; a row that saw no key (its

@@ -75,6 +75,7 @@ def main():
     runs = tuple(function.run for function in ordered)
     groups = [calls for function in ordered for calls in function.groups.get(group.group_name, [])]
     forms = [form for function in ordered for form in function.forms]
+    preparations = Preparations(forms, [step for function in ordered for step in function.preparations.order])
     if rank == 0:
         X.copy_(torch.from_numpy(inputs[:]))
     torch_mesh.check_memory()
@@ -84,7 +85,7 @@ def main():
     inputs, _ = prepare_fragments([(broadcast, X, X)], group)
     def prepare():
         inputs.realize()
-        Preparations(forms)()
+        preparations()
     bind(configuration, [[broadcast], *groups], prepare)
     started = now()
     inputs.enqueue()
