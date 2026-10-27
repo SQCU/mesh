@@ -156,10 +156,10 @@ class WritePlan:
             comm._writes = weakref.WeakSet()
         comm._writes.add(self)
 
-    def Execute(self):
+    def Execute(self, invocation=0):
         if self.handle == ffi.NULL:
             raise ValueError('WRITE plan is already freed')
-        check(lib.ncclMeshWriteExecute(self.handle, ffi.NULL))
+        check(lib.ncclMeshWriteExecute(self.handle, invocation, ffi.NULL))
 
     __call__ = Execute
 
@@ -252,15 +252,15 @@ class Comm:
     def Get_size(self):
         return self.size
 
-    def Plan(self, calls):
-        """Declare the complete function's native calls through the shared controller.
+    def Plan(self, calls, *, order=None):
+        """Declare the complete function's native calls through the shared compiler.
 
         Calls are dictionaries of ncclMeshCall fields, with ordinary count lists
         where required. This is configuration metadata, not a Python schedule or
         a collective decomposition. Every rank declares the same function.
         """
         from assignment import declare
-        return declare(self.comm, calls)
+        return declare(self.comm, calls, order=order)
 
     def PlanDemands(self):
         """Exact compiler-reported directed bytes for the declared complete function."""
@@ -273,14 +273,15 @@ class Comm:
         check(lib.ncclMeshPageTableCreate(at(array), self.comm, 0, made))
         return PageTable(self, made[0], array)
 
-    def Write_pages_prepare(self, table, masks, source, destination, *, max_packet=0):
+    def Write_pages_prepare(self, table, masks, source, destination, *, max_packet=0, tile_bytes=0, instances=1, instance_pages=0, invocations=1):
         """Declare an ordered list of (page, first byte, byte count) page masks."""
         if table.comm is not self:
             raise ValueError('the page table must belong to this communicator')
         masks = list(masks)
         made = ffi.new('ncclMeshWritePlan_t *')
         check(lib.ncclMeshWritePagesPrepare(table.handle, ffi.new('ncclMeshPageMask[]', masks) if masks else ffi.NULL,
-                                           len(masks), source, destination, max_packet, made))
+                                           len(masks), source, destination, max_packet,
+                                           {'tile_bytes': tile_bytes, 'instances': instances, 'instance_pages': instance_pages, 'invocations': invocations}, made))
         return WritePlan(self, made[0], (table,))
 
     def Write_prepare(self, sendbuf, landingbuf, source, destination, *, max_packet=0):
@@ -316,7 +317,7 @@ class Comm:
         pointer, made = ffi.cast('void *', own.ctypes.data), ffi.new('ncclMeshWritePlan_t *')
         check(lib.mesh_compile_rows(pointer if self.rank == source else ffi.NULL,
             ffi.NULL if self.rank == source else pointer, row_bytes, rows, pitch,
-            source, destination, self.comm, 0, max_packet, made))
+            source, destination, self.comm, 0, max_packet, {'instances': 1, 'invocations': 1}, made))
         return WritePlan(self, made[0], (own,))
 
     def _write_spans_prepare(self, own, spans, source, destination, max_packet, base_shift=0):
@@ -328,7 +329,7 @@ class Comm:
         made = ffi.new('ncclMeshWritePlan_t *')
         check(lib.mesh_compile_spans(pointer if self.rank == source else ffi.NULL,
             ffi.NULL if self.rank == source else pointer, metadata, len(spans), source, destination,
-            self.comm, 0, max_packet, made))
+            self.comm, 0, max_packet, {'instances': 1, 'invocations': 1}, made))
         return WritePlan(self, made[0], (own,))
 
     def Write_view_prepare(self, sendbuf, landingbuf, source, destination, *, max_packet=0):

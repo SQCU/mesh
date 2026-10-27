@@ -1002,25 +1002,31 @@ typedef struct { uint64_t page, first, count; } ncclMeshPageMask;
 ncclResult_t ncclMeshPageTableCreate(const void* local, ncclComm_t comm, int metal, ncclMeshPageTable_t* out);
 ncclResult_t ncclMeshPageTableShape(ncclMeshPageTable_t table, size_t* pages, size_t* page_bytes);
 ncclResult_t ncclMeshPageTableDestroy(ncclMeshPageTable_t table);
+/* A repeated local binding. Instance selection happens while compiling commands;
+   execution reads the resulting page lists. Each rank supplies its own period
+   and page stride in its local table. tile_bytes is common logical publication geometry, 0 for a
+   single publication. invocations is the common function extent; each local
+   binding period can differ. A relay can retain a distinct slot per invocation. */
+typedef struct { size_t tile_bytes, instances, instance_pages, invocations; } ncclMeshWriteLayout;
+/* Affine metadata table: tile t, invocation i names
+   (i % instances)*instance_stride + (t/columns)*row_stride + (t%columns)*tile_stride.
+   All strides are bytes. These indices are resolved during preparation. */
+typedef struct { size_t columns, tile_stride, row_stride, instances, instance_stride; } ncclMeshTileLayout;
 ncclResult_t ncclMeshWritePagesPrepare(ncclMeshPageTable_t table, const ncclMeshPageMask* masks, size_t count,
-    int source, int destination, size_t max_packet, ncclMeshWritePlan_t* out);
-/* Preparation operand for independently produced source tiles. All ranks bind
-   it before Execute; only the source's word is used (ncclMeshBuffer on Metal,
-   region address on host). The producer stores value after its payload stores.
-   value must be at least the plan's logical byte count; the initial word must
-   be below value - byte_count + 1. One word may release several WRITE plans.
-   Each compiled occurrence owns a distinct word or a disjoint increasing value
-   interval. No reset is allowed while an earlier occurrence can still read it.
-   Relays still depend on their incoming data. Fused execution returns landing
-   bindings only for these plans, with no channel-prefix publication. */
-ncclResult_t ncclMeshWriteSourceReady(ncclMeshWritePlan_t plan, const void* word, uint64_t value);
-/* Preparation output for this WRITE's consumer, independent of other writes in
-   the same fused group. The destination supplies capacity physical-channel
-   records; Execute fills them and count while compiling the group. Other ranks
-   supply no output. Storage remains valid through group compilation. Kernels
-   consume the records with mesh_landing_await; no completion command is added. */
-ncclResult_t ncclMeshWriteLandings(ncclMeshWritePlan_t plan, ncclMeshBinding* bindings, uint32_t capacity, uint32_t* count);
-ncclResult_t ncclMeshWriteExecute(ncclMeshWritePlan_t plan, cudaStream_t stream);
+    int source, int destination, size_t max_packet, ncclMeshWriteLayout layout, ncclMeshWritePlan_t* out);
+/* Bind source words once (ncclMeshBuffer on Metal, region address on host).
+   Only the source supplies the words and their local layout. All ranks supply
+   the same value. value covers one logical tile (the entire write when
+   tile_bytes is 0). Each tile/occurrence has its own word or nonoverlapping value
+   interval. Initial words are below value - largest_tile_bytes + 1 (using
+   the whole byte count for an untiled write); no reset may race an earlier reader.
+   A relay still reads its incoming landed word. */
+ncclResult_t ncclMeshWriteSourceReady(ncclMeshWritePlan_t plan, const void* words, uint64_t value, ncclMeshTileLayout layout);
+/* Destination records are { uint64_t count; ncclMeshBinding bindings[capacity]; }
+   in the supplied affine table. Compilation fills each tile's last incoming
+   prefix per physical channel, without a whole-write completion command. */
+ncclResult_t ncclMeshWriteLandings(ncclMeshWritePlan_t plan, void* records, uint32_t capacity, ncclMeshTileLayout layout);
+ncclResult_t ncclMeshWriteExecute(ncclMeshWritePlan_t plan, size_t invocation, cudaStream_t stream);
 ncclResult_t ncclMeshWritePlanDestroy(ncclMeshWritePlan_t plan);
 /* A call a program declares ahead (ncclMeshCommPlan): `what` (mesh-plan.h MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE,
    MESH_REDUCE_SCATTER, MESH_ALLGATHER, or ncclMeshCallAlltoAllV), its `peer` (a
@@ -1028,7 +1034,7 @@ ncclResult_t ncclMeshWritePlanDestroy(ncclMeshWritePlan_t plan);
    recvcount, an all-gather's sendcount), `counts` (NULL: none; read for these alone) a V form's (ncclMeshAllGatherV's
    and ncclMeshReduceScatterV's, a rank's count each; ncclMeshAlltoAllV's sendcounts then recvcounts), `type`, `op` (a
    reduction's), and `group`: consecutive calls of one number are one group (ncclGroupStart to ncclGroupEnd; a call
-   outside one its own group), issued `repeat` times in a row (its first call's; 0 as 1).  `fused` (not 0): the call is
+   outside one its own group). ncclMeshPlanRun supplies their invocation order. `fused` (not 0): the call is
    issued on a fused stream (ncclMeshStream fused). It uses the same physical striping and routed-write
    representation as other calls; fusion changes publication/consumption encoding, not available cables. */
 enum { ncclMeshCallAlltoAllV = 18, ncclMeshCallWrite = 19 };
@@ -1039,9 +1045,9 @@ typedef struct {
   ncclDataType_t type;
   ncclRedOp_t op;
   int group;
-  uint32_t repeat;
   int destination;
   int fused;
+  size_t tile_bytes; /* WRITE publication geometry, 0: whole operand */
   /* Optional complete source-major count matrix for AlltoAllV. Otherwise
      CommPlan exchanges local count metadata once during configuration. */
   const size_t* matrix;
@@ -1052,7 +1058,7 @@ typedef struct {
   const uint64_t* recipients;
 } ncclMeshCall;
 /* A communicator's plan (ncclMeshCommPlan): its `groups` declared groups, the groups one pass of its order issues
-   (`issues`, the repeats' sum), the number of the communicator's group the order starts at (`first`: its groups
+   (`issues`, the sum of each block's count times repeat), the number of the communicator's group the order starts at (`first`: its groups
    numbered from 1 in issue order, the first after the call), and of declared group g this rank's entries on its send
    lists and on its landing lists (entries[g][0] and [1]: a fused crossing's publications and landings, ncclMeshFused). */
 typedef struct {
@@ -1060,19 +1066,15 @@ typedef struct {
   uint64_t issues, first;
   const uint64_t (*entries)[2];
 } ncclMeshPlan;
-/* The program's whole workload declared once, after comm forms (design/rubrics.md D2: the shapes and the callgraph
-   are fixed when the program is compiled): every call it will make on comm, in its order, each declared group compiled
-   here once as a group issued with no plan is compiled at its call (typed logical
-   steps lowered through the common physical WRITE graph, and each channel's
-   dependency-ordered entries), so a group issued after
-   it plans nothing.  From comm's next group on, its groups are the plan's in order, each `repeat` times, the order
-   repeated: the k-th group after the call runs declared group (k mod issues)'s compiled form with the issued calls'
-   buffers, and nothing compares the two (a group that is not its declaration is the program's error, undefined).
-   Every rank passes its own calls (its own peers), the same groups in the same order, at the same point between its
-   groups.  The plan is comm's until the next call or its destroy, *plan (may be NULL) its view; count 0 drops it, each
-   group then compiled at its call.  A form set after it (ncclMeshCommForms) changes no planned group.  A declared call
-   that would fail at its call fails the plan as a value (ncclInvalidArgument, ncclInvalidUsage), comm's plan kept. */
-ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall* calls, int count, const ncclMeshPlan** plan);
+/* A compact sequence of contiguous declared groups, repeated as a block.
+   first is a group index, not the caller's arbitrary group label. */
+typedef struct { uint32_t first, count; uint64_t repeat; } ncclMeshPlanRun;
+/* Compile each declared group once. order describes the complete function's
+   sequence without duplicating calls for each invocation. Issued groups bind
+   their prepared operands to these definitions; execution does not replan.
+   count=0 and runs=0 drop the declaration. Every rank supplies the same order. */
+ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall* calls, int count,
+    const ncclMeshPlanRun* order, size_t runs, const ncclMeshPlan** plan);
 /* Compiler-derived useful directed bytes for one entire declared function.
    demand has nranks*nranks entries (source-major); group repeats are included.
    Relay amplification is excluded. Query after configuration, before execution;

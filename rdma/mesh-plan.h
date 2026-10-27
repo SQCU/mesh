@@ -186,8 +186,11 @@ int mesh_fabric_refine(const struct mesh_transfer *,uint32_t count,uint64_t page
    fits uint64_t. Allocation uses uint128_t products and integer remainders. */
 struct mesh_paths { uint32_t count; const uint32_t *first,*cable; const uint64_t *weight; };
 int mesh_paths_check(const struct mesh_fabric *,uint32_t source,uint32_t destination,const struct mesh_paths *);
+/* tile is the publication width in elements (0: one publication). Route the
+   complete operand once, then cut every path at these logical boundaries.
+   Source, relay and destination retain matching independent tile fragments. */
 int mesh_write_compile(const struct mesh_fabric *,uint32_t rank,uint32_t source,uint32_t destination,
-                        const struct mesh_paths *,struct mesh_operand,uint64_t page,
+                        const struct mesh_paths *,struct mesh_operand,uint64_t page,uint64_t tile,
                         struct mesh_transfer *,uint32_t room);
 
 /* Physical lowering of a complete typed dataflow. first/steps contain every

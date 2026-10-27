@@ -41,8 +41,8 @@ ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL = range(6)
 WRITE = 8
 # a declared call (ProcessGroupMesh.plan): its kind, its elements, its dtype, its root or peer, its operator and, for an
 # all-gather or a reduce-scatter, each rank's elements (an all-to-all's to each rank, then from each)
-Call = collections.namedtuple('Call', 'kind count dtype root op counts destination fused contributors matrix recipients',
-                              defaults=(0, ReduceOp.SUM, None, 0, False, None, None, None))
+Call = collections.namedtuple('Call', 'kind count dtype root op counts destination fused contributors matrix recipients tile_bytes',
+                              defaults=(0, ReduceOp.SUM, None, 0, False, None, None, None, 0))
 WHAT = {ALLREDUCE: LIB.MESH_ALLREDUCE, REDUCE: LIB.MESH_REDUCE, BROADCAST: LIB.MESH_BROADCAST, ALLGATHER: LIB.MESH_ALLGATHER,
         REDUCE_SCATTER: LIB.MESH_REDUCE_SCATTER, ALLTOALL: LIB.ncclMeshCallAlltoAllV, WRITE: LIB.ncclMeshCallWrite}
 TYPES = {torch.int8: LIB.ncclInt8, torch.uint8: LIB.ncclUint8, torch.bool: LIB.ncclUint8, torch.int32: LIB.ncclInt32,
@@ -103,7 +103,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     def _held(self, rank, size, comm):
         self._rank, self._size, self._pending, self._operators = rank, size, None, {}
-        self._declaration, self._plan_enabled = [], False
+        self._declaration, self._plan_enabled = ([], []), False
         self.comm = comm
         self.handle = int(ffi.cast('uintptr_t', self.comm))
         # Native realization installs default routes over every physical path.
@@ -189,14 +189,20 @@ class ProcessGroupMesh(dist.ProcessGroup):
         work = _stream.issue(calls, self.handle, bool(split), _flat(result))
         return done(result) if work is None else work
 
-    def plan(self, groups):
+    def plan(self, groups, *, order=None):
         """This group's collectives declared once, in their order (nccl.h ncclMeshCommPlan): `groups` the groups its
         calls issue, each a list of Calls (one torch collective is one group), or (that list, repeat) issued repeat
         times in a row, the order repeated from this group's next collective on.  Each is compiled now, so none is
         planned where it is issued, and none is compared with its declaration.  [] drops the plan.  Returns each
-        declared group's (send entries, landing entries) on this rank's lists."""
+        declared group's (send entries, landing entries) on this rank's lists.
+        An explicit order supplies ncclMeshPlanRun dictionaries to repeat whole
+        blocks of group definitions without expanding their calls."""
         groups = list(groups)
         rows = [(g, *(group if isinstance(group, tuple) else (group, 1))) for g, group in enumerate(groups)]
+        if any(not calls for _, calls, _ in rows):
+            raise ValueError('a declared collective group must contain calls')
+        order = ([{'first': g, 'count': 1, 'repeat': repeat} for g, calls, repeat in rows]
+                 if order is None else list(order))
         rows = [(g, repeat, call) for g, calls, repeat in rows for call in calls]
         made, kept = [], []
         for g, repeat, c in rows:
@@ -222,11 +228,12 @@ class ProcessGroupMesh(dist.ProcessGroup):
                 kept.append(ffi.new('uint64_t[]', bits) if participants is not None else ffi.NULL)
                 masks.append(kept[-1])
             made.append({'what': WHAT[c.kind], 'peer': c.root, 'count': c.count * per, 'type': nccl, 'op': code,
-                         'group': g, 'repeat': repeat, 'destination': c.destination, 'fused': int(c.fused),
+                         'group': g, 'destination': c.destination, 'fused': int(c.fused), 'tile_bytes': c.tile_bytes,
                          'counts': counts, 'matrix': matrix, 'contributors': masks[0], 'recipients': masks[1]})
         view = ffi.new('ncclMeshPlan **')
-        check(LIB.ncclMeshCommPlan(self.comm, ffi.new('ncclMeshCall[]', made or 1), len(made), view))
-        self._declaration, self._plan_enabled = groups, bool(groups)
+        check(LIB.ncclMeshCommPlan(self.comm, ffi.new('ncclMeshCall[]', made or 1), len(made),
+                                   ffi.new('ncclMeshPlanRun[]', order or 1), len(order), view))
+        self._declaration, self._plan_enabled = (groups, order), bool(groups)
         return [] if view[0] == ffi.NULL else [tuple(view[0].entries[g]) for g in range(view[0].groups)]
 
     @contextlib.contextmanager
@@ -242,7 +249,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
         try:
             yield
         finally:
-            self.plan(previous)
+            self.plan(previous[0], order=previous[1])
             self.plan_active(enabled)
 
     def plan_demands(self):

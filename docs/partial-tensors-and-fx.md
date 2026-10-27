@@ -329,17 +329,20 @@ current eager wrappers are not all free of such work.
 
 ```python
 Call(kind, count, dtype, root=0, op=ReduceOp.SUM, counts=None,
-     destination=0, fused=False, contributors=None, matrix=None, recipients=None)
+     destination=0, fused=False, contributors=None, matrix=None, recipients=None, tile_bytes=0)
 ```
 
 The operation constants are `ALLREDUCE`, `REDUCE`, `BROADCAST`, `ALLGATHER`, `REDUCE_SCATTER`, `ALLTOALL`, and
 `WRITE`. `counts` carries variable rank counts; all-to-all can carry send and receive counts and a source-major
 rank matrix. `contributors` and `recipients` independently select logical sources and results. For `WRITE`,
-`root` is the source and `destination` the receiver. A declared group is a list of calls, optionally paired with
+`root` is the source and `destination` the receiver. `tile_bytes` gives the logical publication
+width; zero means one publication for the whole operand. A declared group is a list of calls, optionally paired with
 its repetition count. This is different from the six-field execution tuple
 `(kind, send_tensors, receive_tensors, counts, operation, root)` used by `_issue`.
 
-`ProcessGroupMesh.plan` translates declarations to `ncclMeshCall`. `configuration` temporarily installs a
+`ProcessGroupMesh.plan` translates declarations to `ncclMeshCall`. Its explicit `order` operand
+accepts `ncclMeshPlanRun` dictionaries (`first`, `count`, `repeat`) to repeat contiguous blocks
+of group definitions without duplicating calls. `configuration` temporarily installs a
 configuration plan; `plan_demands`, `reset_fused_configuration` and `plan_active` support preparation. The
 process group implements PyTorch collectives, coalesced operations, variable-count gathering/scattering,
 attention partial merging, and group lifecycle (`shrink`, `grow`, `revoke`, `shutdown`). `partials_operator(width)`
@@ -350,7 +353,7 @@ infer zero-copy behavior merely from their sharing the communicator.
 
 | Source | Types and entry points | Role |
 |---|---|---|
-| [nccl.h](../rdma/nccl.h) | `ncclMeshCall`, `ncclMeshPlan`; `ncclMeshCommPlan`, `PlanDemands`, `PlanRouteUnits`, `PlanActive` | Common ordered declaration, compiled publication/landing entries and routing demand. |
+| [nccl.h](../rdma/nccl.h) | `ncclMeshCall`, `ncclMeshPlanRun`, `ncclMeshPlan`; `ncclMeshCommPlan`, `PlanDemands`, `PlanRouteUnits`, `PlanActive` | Common ordered declaration, compiled publication/landing entries and routing demand. |
 | [nccl.h](../rdma/nccl.h) | `ncclMeshBuffer`, `ncclMeshIssue`, `ncclMeshFused`, `ncclMeshStream` | Local Metal buffer/offset, ticket/publication state, physical crossing bindings, and caller-owned encoding context. |
 | [nccl.h](../rdma/nccl.h) | `ncclMeshWritePlan_t`, `ncclMeshSpan`; `ncclMeshWritePrepare`, `WriteRowsPrepare`, `WriteSpansPrepare`, `WriteExecute`, `WritePlanDestroy` | Prepare native one-sided writes from contiguous, affine-row or span views; execute the prepared plan. |
 | [mesh-plan.h](../rdma/mesh-plan.h) | `mesh_operand`, `mesh_step`, `mesh_program`, `mesh_move` | Element metadata, selected numerical/transport steps and collective programs. |

@@ -39,7 +39,7 @@ dependencies. The cache declaration covers its prepared eligible pages, not a gu
 
 ## Tile publication
 
-The WRITE compiler accepts `ncclMeshWriteSourceReady(plan, word, value)` during preparation.
+The WRITE compiler accepts `ncclMeshWriteSourceReady(plan, words, value, layout)` during preparation.
 The source's SEND descriptors use that word instead of the channel's cumulative ready prefix.
 A tile's producer calls the shared `mesh_source_release` after its stores. Each tile has its own
 word, so a later tile finishing first cannot release an unfinished earlier tile. Wire order is
@@ -60,8 +60,8 @@ preparation and retirement, outside the numerical function.
 | Native `MeshConsumption` | Binds each WRITE's incoming channel records to its consumer's tile, in that invocation's operand slot. There is no whole-crossing completion command. |
 
 Native query gathers and key/value row handoffs use head tiles. Each source and recipient retains
-its own row pitch; relays retain their own pages. All head plans of a crossing are issued as one
-group. The declaration and physical plan enumerate the same pieces. Per-invocation readiness
+its own row pitch; relays retain their own pages. One WRITE plan describes each sender/recipient pair. The crossing issues those plans as one
+group. The declaration and physical plan carry the same tile boundaries. Per-invocation readiness
 words are ordinary recorded operand slots, including when an epilogue is fused into a product;
 no captured address is expected to follow a changing slot.
 
@@ -72,7 +72,7 @@ The native epilogue's contributor count clips its final span to the actual outpu
 
 ## Tile consumers
 
-`ncclMeshWriteLandings` returns each WRITE's final incoming prefix on each used physical
+`ncclMeshWriteLandings` fills each tile's final incoming prefix on each used physical
 channel. Multiple tiles remain in one group; recording a tile adds no host submission.
 Relay-only entries are not consumer inputs. Native `TileLanding` stores these lists in the
 same invocation slots as other recorded operands. The shared `mesh_landing_counts` and
@@ -117,7 +117,7 @@ latency/useful-throughput improvement.
 ## Integration on 2026-10-26
 
 `MeshProduction.rowStride` and `MeshConsumption.rowStride` give each row/head its own
-prepared WRITE and landing record. The common group contains all of them. Query
+prepared readiness word and landing record. The common group contains all of them. Query
 consumers name their own row/head; a fresh KV page names only the rows it contains.
 Head publication no longer allocates or increments a cross-row arrival counter.
 Attention’s reduction still combines the numerical partials required for that row.
@@ -126,3 +126,48 @@ Page masks are now the public WRITE declaration in `nccl.h`. Tensor-view adapter
 live in `mesh-write-compiler.h` and resolve local views into that page domain during
 preparation. They preserve the element cuts of an already declared typed call.
 Adjacent page selections coalesce before physical descriptor generation.
+
+
+## Compact publication plans — 2026-10-27
+
+For a crossing with `I` invocations, `R` rows, `H` heads per source and `P` active
+sender/recipient pairs, the former native builder made up to `I × R × H × P`
+WRITE plans and repeated the same number of call declarations. Each tile plan
+exchanged placement metadata and compiled routes separately.
+
+`columns_prepare` now makes `P` plans. The tensor compiler's `mesh_write_layout`
+supplies the logical tile width and each rank's payload-slot count and byte stride.
+The public page API's `ncclMeshWriteLayout` uses strides in local pages instead;
+its masks stay within one page. Both lower through the same preparation function. The source and
+recipient keep their recorded binding periods. A relay gets distinct payload
+slots for the function's invocations; sharing a plan does not reuse its data
+early. The packet compiler derives common cuts from the peers' slots for that invocation
+only. Packet sizing restarts at each publication tile. An occurrence never inherits
+another occurrence's registration cuts. An invocation indexes its prepared descriptor train when commands are
+recorded, before numerical execution.
+
+`mesh_write_compile` allocates the complete pair's flow across its configured
+paths, then cuts every path at publication boundaries. Each resulting fragment
+names its tile's source word; relay fragments still name incoming landed words.
+`ncclMeshTileLayout` maps logical tiles into readiness and landing tables. Row
+pitches, table strides and invocation periods are explicit local operands.
+A tile split across several cables retains all of its required landing records.
+
+`ncclMeshCommPlan` compiles each group definition once. `ncclMeshPlanRun` describes
+contiguous group blocks and their repeat counts. Native classes supply definitions;
+the function's run order references them. Useful-byte demand includes every block
+occurrence. The former expanded array of issue pointers is also removed. Python
+and Torch declaration callers use the same interface.
+
+Dependency words, landing records, and actual DMA descriptors still scale with
+the independently live tiles and payload bindings. Those are data relationships,
+not duplicate routing problems. Numerical submission remains `MetalScheduleEnqueue`;
+there is no new tile loop, route lookup, allocation, or host wait in that submission.
+FIFO ordering remains item 5. The shared stream still limits a group to its configured
+`MESH_STREAM_ENTRIES`; this change removes duplicate plans, not that physical-list limit.
+Compact affine/page lowering remains item 8.
+
+The shared libraries, CFFI module, Torch extension and macOS 26 Swift/native/LiteRT
+rank compile. No numerical execution or performance measurement was made for this
+change. These builds establish integration of the changed interfaces, not a
+latency or useful-throughput result.

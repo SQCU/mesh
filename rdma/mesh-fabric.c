@@ -49,7 +49,7 @@ int mesh_fabric_stripe(const struct mesh_fabric *f,uint32_t rank,const struct me
   const struct mesh_paths paths={n,first,cable,logs};
   const uint32_t source=step->op==MESH_STEP_SEND?rank:step->peer;
   const uint32_t destination=step->op==MESH_STEP_SEND?step->peer:rank;
-  const int written=mesh_write_compile(f,rank,source,destination,&paths,step->piece,page?page:1,out,room);
+  const int written=mesh_write_compile(f,rank,source,destination,&paths,step->piece,page?page:1,0,out,room);
   for(int k=0;out && k<written;k++){
     const uint64_t offset=out[k].step.first,elements=out[k].step.piece.elements;
     out[k].step=*step;out[k].step.first+=offset;out[k].step.piece.elements=elements;
@@ -170,7 +170,7 @@ int mesh_paths_check(const struct mesh_fabric *f,uint32_t source,uint32_t destin
 }
 
 int mesh_write_compile(const struct mesh_fabric *f,uint32_t rank,uint32_t source,uint32_t destination,
-                        const struct mesh_paths *paths,struct mesh_operand operand,uint64_t page,
+                        const struct mesh_paths *paths,struct mesh_operand operand,uint64_t page,uint64_t tile,
                         struct mesh_transfer *out,uint32_t room){
   const int check=mesh_paths_check(f,source,destination,paths);
   if(check || rank>=f->nodes || !operand.element_bytes || !page)return -(check?check:EINVAL);
@@ -207,10 +207,17 @@ int mesh_write_compile(const struct mesh_fabric *f,uint32_t rank,uint32_t source
     for(uint32_t k=paths->first[p];k<paths->first[p+1];k++){
       const uint32_t e=paths->cable[k],next=f->cable[e].node[f->cable[e].node[0]==at];
       if(rank==at || rank==next){
-        if(out && written<room)out[written]=(struct mesh_transfer){
-          .step={rank==at?MESH_STEP_SEND:MESH_STEP_COPY,rank==at?next:at,
-                 k-paths->first[p],0,lo,{operand.type,operand.element_bytes,amount}},.cable=e};
-        written++;
+        const uint64_t fragments=tile?(lo+amount-1)/tile-lo/tile+1:1;
+        if(fragments>INT_MAX-written){free(count);free(base);free(remainder);return -EOVERFLOW;}
+        if(!out)written+=(uint32_t)fragments;
+        else for(uint64_t first=lo,left=amount;left;){
+          uint64_t n=tile?tile-first%tile:left;
+          if(n>left)n=left;
+          if(out && written<room)out[written]=(struct mesh_transfer){
+            .step={rank==at?MESH_STEP_SEND:MESH_STEP_COPY,rank==at?next:at,
+                   k-paths->first[p],0,first,{operand.type,operand.element_bytes,n}},.cable=e};
+          written++;first+=n;left-=n;
+        }
       }
       at=next;
     }

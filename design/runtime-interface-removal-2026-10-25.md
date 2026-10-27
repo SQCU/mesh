@@ -411,3 +411,18 @@ CPU/ANE engine shares use the native recorder's access declarations and bound na
 unsupported; missing lowering errors do not select a framework executor. This update does not close every
 entry in this manifest. Native and extension builds passed; whole-call latency and useful bandwidth still
 require the canonical committed-main run. No new test suite or alternate measurement path was added.
+
+
+## Tile-plan compaction — 2026-10-27
+
+Item 4 removes native `ColumnWrites.slots`, the row/head plan loop, the per-slot
+configuration exchange, and declarations expanded over every invocation. A pair's
+page/mask WRITE plan now carries tile and local binding geometry. Source words
+and destination landing lists use affine tile tables; relay payload slots stay
+separate for each invocation. The common route compiler cuts at tile boundaries.
+
+The per-call `ncclMeshCall.repeat` field and expanded issue-pointer array are
+replaced by `ncclMeshPlanRun` blocks. Native, Python and Torch callers use that one
+interface. [The publication document](../docs/native-access-publication.md#compact-publication-plans--2026-10-27)
+records the representation and its remaining physical descriptor costs. Builds
+passed; numerical execution remains deferred until the structural sequence is done.

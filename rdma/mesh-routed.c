@@ -442,7 +442,7 @@ int mesh_routed_compile(const struct mesh_fabric *f,const struct mesh_paths *pat
     for(uint32_t r=0;r<N;r++)relay[r]=UINT32_MAX;
     for(uint32_t r=0;r<N && !status;r++){
       const struct mesh_paths *along=paths+(size_t)source*N+destination;
-      const int needed=mesh_write_compile(f,r,source,destination,along,send->piece,page,NULL,0);
+      const int needed=mesh_write_compile(f,r,source,destination,along,send->piece,page,0,NULL,0);
       if(needed<0){status=-needed;break;}
       if(!needed)continue;
       if((size_t)needed>UINT32_MAX-count || count+(size_t)needed>SIZE_MAX/sizeof *pieces){status=EOVERFLOW;break;}
@@ -450,7 +450,7 @@ int mesh_routed_compile(const struct mesh_fabric *f,const struct mesh_paths *pat
       struct routed_piece *grown=realloc(pieces,(count+(size_t)needed)*sizeof *pieces);
       if(grown)pieces=grown;
       if(!physical || !grown){free(physical);status=ENOMEM;break;}
-      const int written=mesh_write_compile(f,r,source,destination,along,send->piece,page,physical,(uint32_t)needed);
+      const int written=mesh_write_compile(f,r,source,destination,along,send->piece,page,0,physical,(uint32_t)needed);
       if(written!=needed){free(physical);status=written<0?-written:EPROTO;break;}
       if(r!=source && r!=destination){
         struct mesh_routed_rank *rank=made.rank+r;

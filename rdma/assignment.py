@@ -5,7 +5,7 @@ from allocate import equal_finish, project, simplex
 from routing import NUMERICS
 
 
-def declare(comm, calls):
+def declare(comm, calls, *, order=None):
     """Realize explicit native call descriptors once at a function boundary."""
     import mesh
     made, arrays = [], []
@@ -18,8 +18,16 @@ def declare(comm, calls):
                 row[field] = arrays[-1]
         row.setdefault('counts', mesh.ffi.NULL)
         made.append(row)
+    sequence, previous = [], None
+    for row in made:
+        repeat = row.pop('repeat')
+        if not sequence or row['group'] != previous:
+            sequence.append({'first': len(sequence), 'count': 1, 'repeat': repeat})
+        previous = row['group']
+    order = sequence if order is None else list(order)
     result = mesh.ffi.new('ncclMeshPlan **')
-    mesh.check(mesh.lib.ncclMeshCommPlan(comm, mesh.ffi.new('ncclMeshCall[]', made or 1), len(made), result))
+    mesh.check(mesh.lib.ncclMeshCommPlan(comm, mesh.ffi.new('ncclMeshCall[]', made or 1), len(made),
+                                      mesh.ffi.new('ncclMeshPlanRun[]', order or 1), len(order), result))
     return [] if result[0] == mesh.ffi.NULL else [tuple(result[0].entries[g]) for g in range(result[0].groups)]
 
 

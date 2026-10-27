@@ -1020,7 +1020,7 @@ static void prepare_fused_writes(MetalSchedule *schedule,PreparedWrites &plans) 
     ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
       .residencySet=(__bridge void *)residency,.polls=p->polls,.fused=&p->records};
     ncclResult_t result=ncclGroupStart();
-    for(auto handle:p->handles)if(!result)result=ncclMeshWriteExecute(handle,&on);
+    for(auto handle:p->handles)if(!result)result=ncclMeshWriteExecute(handle,0,&on);
     ncclResult_t ended=ncclGroupEnd();return (int)(result?result:ended);
   }));
 }
@@ -1465,10 +1465,11 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
       TORCH_CHECK(out.type == ncclUint8 && out.count == (size_t)row_bytes,
                   "affine write bindings name the first row as a contiguous byte view");
       checked(mesh_compile_rows(out.at, (void *)in[i].at, (size_t)row_bytes, (size_t)rows, (size_t)stride,
-                                      pairs[i][0], pairs[i][1], c, 1, 0, &plans.handles[i]));
+                                      pairs[i][0], pairs[i][1], c, 1, 0, mesh_write_layout{.instances=1,.invocations=1}, &plans.handles[i]));
     } else checked(mesh_compile_write(out.at, (void *)in[i].at, out.count, out.type, pairs[i][0], pairs[i][1], c, 1,
                                       (uint32_t)repeats, (size_t)stride, 0, &plans.handles[i]));
-    if (produced) checked(ncclMeshWriteSourceReady(plans.handles[i], produced->at, (uint64_t)ready_value));
+    if (produced) checked(ncclMeshWriteSourceReady(plans.handles[i], produced->at, (uint64_t)ready_value,
+        ncclMeshTileLayout{.columns=1,.instances=1}));
   }
   plans.prepare(comm, polls, repeats, rows ? 0 : stride);
   prepare_fused_writes(schedule,plans);
@@ -1596,12 +1597,12 @@ struct SpanWrites {
       const void *at = g.where(base);
       plans.handles.push_back(nullptr);
       checked(mesh_compile_spans(at, (void *)at, spans.data(), spans.size(), source, destination,
-                                       communicator(comm), metal, 0, &plans.handles.back()));
+                                       communicator(comm), metal, 0, mesh_write_layout{.instances=1,.invocations=1}, &plans.handles.back()));
     }
   }
   ncclResult_t encode(ncclMeshStream *stream) {
     ncclResult_t result = ncclGroupStart();
-    for (auto plan : plans.handles) if (!result) result = ncclMeshWriteExecute(plan, stream);
+    for (auto plan : plans.handles) if (!result) result = ncclMeshWriteExecute(plan, 0, stream);
     const ncclResult_t ended = ncclGroupEnd();
     return result ? result : ended;
   }
