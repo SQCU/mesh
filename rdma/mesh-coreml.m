@@ -17,6 +17,7 @@
 #import <Accelerate/Accelerate.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static NSMutableArray *models_;
@@ -32,17 +33,69 @@ typedef struct MeshCpuCommand {
   int rows, columns, inner, input_stride, weight_stride, output_stride;
   int input_column, weight_column, output_column;
   float *input, *weight, *output, *scratch;
+  int input_transpose, weight_transpose;
 } MeshCpuCommand;
 
 void mesh_cpu_product(const MeshCpuCommand *c) {
-      cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasTrans,c->rows,c->columns,c->inner,
+      cblas_sgemm(CblasRowMajor,c->input_transpose,c->weight_transpose,c->rows,c->columns,c->inner,
                   1,c->input,c->input_stride,c->weight,c->weight_stride,0,c->output,c->output_stride);
 }
-void mesh_cpu_product_view(const MeshCpuCommand *c) {
-  for(int row=0;row<c->rows;row++)for(int col=0;col<c->columns;col++)
-    c->output[(size_t)row*c->output_stride+(size_t)col*c->output_column]=
-      cblas_sdot(c->inner,c->input+(size_t)row*c->input_stride,c->input_column,
-                         c->weight+(size_t)col*c->weight_stride,c->weight_column);
+typedef struct {
+  BNNSNDArrayDescriptor input, weight, output;
+  void *workspace;
+} MeshCpuProduct;
+
+static void mesh_cpu_product_strided(const MeshCpuCommand *c) {
+  MeshCpuProduct *p=(MeshCpuProduct *)c->scratch;
+  if(BNNSMatMul(false,true,1,&p->input,&p->weight,&p->output,p->workspace,NULL)) {
+    fputs("mesh: prepared CPU contraction failed\n",stderr);abort();
+  }
+}
+
+/* Preparation chooses a whole-matrix instruction and binds its storage.
+   Transposing the result swaps the operands: (X W^T)^T = W X^T. */
+int mesh_cpu_product_bind(MeshCpuCommand *c) {
+  if(c->input_column<=0||c->input_stride<=0||c->weight_column<=0||c->weight_stride<=0||
+     c->output_column<=0||c->output_stride<=0)return -1;
+  if((c->input_column==1||c->input_stride==1) &&
+     (c->weight_column==1||c->weight_stride==1) &&
+     (c->output_column==1||c->output_stride==1)) {
+    if(c->output_column!=1) {
+      int n=c->rows;c->rows=c->columns;c->columns=n;
+      float *p=c->input;c->input=c->weight;c->weight=p;
+      n=c->input_stride;c->input_stride=c->weight_stride;c->weight_stride=n;
+      n=c->input_column;c->input_column=c->weight_column;c->weight_column=n;
+      c->output_stride=c->output_column;c->output_column=1;
+    }
+    c->input_transpose=c->input_column==1?CblasNoTrans:CblasTrans;
+    c->weight_transpose=c->weight_column==1?CblasTrans:CblasNoTrans;
+    if(c->input_column!=1)c->input_stride=c->input_column;
+    if(c->weight_column!=1)c->weight_stride=c->weight_column;
+    c->run=mesh_cpu_product;
+    return 0;
+  }
+  MeshCpuProduct *p=calloc(1,sizeof *p);if(!p)return -1;
+  p->input=(BNNSNDArrayDescriptor){.layout=BNNSDataLayoutRowMajorMatrix,
+    .size={c->inner,c->rows},.stride={c->input_column,c->input_stride},
+    .data=c->input,.data_type=BNNSDataTypeFloat32,.data_scale=1};
+  p->weight=(BNNSNDArrayDescriptor){.layout=BNNSDataLayoutRowMajorMatrix,
+    .size={c->inner,c->columns},.stride={c->weight_column,c->weight_stride},
+    .data=c->weight,.data_type=BNNSDataTypeFloat32,.data_scale=1};
+  p->output=(BNNSNDArrayDescriptor){.layout=BNNSDataLayoutRowMajorMatrix,
+    .size={c->columns,c->rows},.stride={c->output_column,c->output_stride},
+    .data=c->output,.data_type=BNNSDataTypeFloat32,.data_scale=1};
+  ssize_t bytes=BNNSMatMulWorkspaceSize(false,true,1,&p->input,&p->weight,&p->output,NULL);
+  if(bytes<0){free(p);return -1;}
+  p->workspace=malloc(bytes?bytes:1);
+  if(!p->workspace){free(p);return -1;}
+  c->scratch=(float *)p;c->run=mesh_cpu_product_strided;
+  return 0;
+}
+
+void mesh_cpu_command_release(MeshCpuCommand *c) {
+  if(c->run==mesh_cpu_product_strided) {
+    MeshCpuProduct *p=(MeshCpuProduct *)c->scratch;free(p->workspace);free(p);
+  }
 }
 void mesh_cpu_gelu(const MeshCpuCommand *c) {
       const int n=c->rows*c->columns;

@@ -71,6 +71,9 @@ def _coreml():
             lib.mesh_coreml_compile.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
             lib.mesh_cpu_run.argtypes = [ctypes.POINTER(CpuCommand), ctypes.c_size_t]
             lib.mesh_cpu_run.restype = None
+            lib.mesh_cpu_product_bind.argtypes = [ctypes.POINTER(CpuCommand)]
+            lib.mesh_cpu_product_bind.restype = ctypes.c_int
+            lib.mesh_cpu_command_release.argtypes = [ctypes.POINTER(CpuCommand)]
             _CORE_ML = lib
         except OSError:
             _CORE_ML = False
@@ -166,11 +169,13 @@ class Cpu(Engine):
         if native is None:
             raise RuntimeError('CPU commands require the native engine library')
         def product(x, w, y):
-            body = native.mesh_cpu_product if x.stride(1) == w.stride(1) == y.stride(1) == 1 else native.mesh_cpu_product_view
-            return CpuCommand(ctypes.cast(body, ctypes.c_void_p),
+            command = CpuCommand(None,
                               x.shape[0], w.shape[0], x.shape[1], x.stride(0), w.stride(0), y.stride(0),
                               x.stride(1), w.stride(1), y.stride(1),
                               x.data_ptr(), w.data_ptr(), y.data_ptr(), None)
+            if native.mesh_cpu_product_bind(ctypes.byref(command)):
+                raise ValueError('CPU matrix views could not be bound to a bulk contraction')
+            return command
         if op.kind == 'linear':
             return CpuProgram([product(source, shard, target)], (source, shard, target))
         gate, up, down = shard
@@ -186,6 +191,7 @@ class CpuCommand(ctypes.Structure):
     _fields_ = [('run', ctypes.c_void_p)] + [(name, ctypes.c_int) for name in ('rows', 'columns', 'inner', 'input_stride', 'weight_stride', 'output_stride',
                                                                           'input_column', 'weight_column', 'output_column')] \
              + [(name, ctypes.c_void_p) for name in ('input', 'weight', 'output', 'scratch')]
+    _fields_ += [(name, ctypes.c_int) for name in ('input_transpose', 'weight_transpose')]
 
 
 class CpuProgram:
@@ -197,6 +203,10 @@ class CpuProgram:
 
     def __call__(self):
         self.native.mesh_cpu_run(self.commands, len(self.commands))
+
+    def __del__(self):
+        for command in getattr(self, 'commands', ()):
+            self.native.mesh_cpu_command_release(ctypes.byref(command))
 
 
 class _Compiled:

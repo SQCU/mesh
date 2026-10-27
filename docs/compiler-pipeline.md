@@ -11,6 +11,23 @@ passes can be extended or reused without adopting PyTorch's executor or its devi
 Metal source generation is replaceable. The target is a general tensor library across CPU, GPU, ANE
 and peer computers; a model name must not select another runtime.
 
+## Structural corrections, 2026-10-27
+
+The current correction sequence starts with CPU contraction. `Cpu.bind` binds a
+whole-matrix operation. Row-major, column-major, padded and transposed views use
+SGEMM with explicit transpose and leading-dimension operands. A transposed output
+swaps the two inputs and output dimensions during preparation. Other positive
+strides bind BNNS matrix descriptors and caller-owned workspace during preparation.
+Execution calls that prepared bulk operation; it has no per-output BLAS loop,
+application packing buffer, output scatter, or workspace allocation. BNNS owns its
+internal numerical implementation; binding the original pointers does not establish
+that its internal algorithm performs no packing.
+
+This removes the `mesh_cpu_product_view` dot-product loop introduced in `ac1ea093`.
+Source and compiler checks cover this edit; no numerical or performance run was
+made. The host dependency, graph placement, publication, access, feedback and
+backend integration items remain separate work in the correction sequence.
+
 ## Transformations applied to PyTorch descriptions
 
 1. `declarations.trace` uses `make_fx` and fake tensors to capture the supplied function without executing
