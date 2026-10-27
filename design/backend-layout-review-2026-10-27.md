@@ -386,18 +386,35 @@ Nonseparable page maps, producer splitting and the other open items remain.
 
 ## Shared addressing and consumer dependencies
 
-Recorded: 2026-10-27T22:36:42Z. A head's reduction now declares its logical
+Updated: 2026-10-27T23:01:31Z. A head's reduction now declares its logical
 input range. Its values can occupy different encoded row groups. Preparation
 composes the inverse row order with `TensorView.gathered` for both partial
 values and scales; the consumer retains its numerical body and reads the same
 allocation. No value copy or separate numerical dispatch is added.
 
-`MetalViewDependencies` is the recorder's existing range-dependency algorithm,
-extracted for reuse. Recorded commands and fused tiles both supply the exact
-`MetalReach` intervals produced by the shared view lowerer. The shader emitter
-turns a producer/consumer relation into immutable adjacency and arrival counts.
-The contiguous case keeps arithmetic indexing and arrival counts. Both cases
-use the same arrival handling and consumer body.
+Every layout carries the same `TensorView` and `ViewRelation` types. The latter
+retains declared accesses and predecessor sets for every consumer. Recorded
+commands, fused tiles and cross-encoder ordering now use one dependency compiler
+over `MetalReach` intervals. Shared Metal aliases and CPU views use their common
+addresses. A partial overwrite replaces only its covered bytes. A command's
+accesses are read together before its writes update the dependency state.
+
+The shader emitter consumes this relation for every fused consumer. It passes
+adjacency and arrival counts through the same index lowerer used for tensor
+views. Regular relations can become arithmetic; irregular relations can use
+immutable tables. This simplification happens at emission and never selects a
+different dependency type or consumer body.
+
+`ConsumerArguments` declares views and scalar fields once for standalone and
+fused emission. It replaces reconstruction from buffer positions, sorted
+constants and packed command words. Producer row geometry travels with the
+selected launch; explicit decompositions supply it as configuration. View
+specialization registers only the requested kernel instance. An explicit
+whole-library preparation still compiles all registered instances together.
+
+`MatrixView` derives accesses from its `TensorView`. FX and Core ML also share
+`MetalViewLayoutMatches`: different strides on singleton axes need no copy.
+Core ML receives the required equivalent view over the same shared buffer.
 
 The native caller carries the ranges each consumer actually reads. This also
 fixes the key/value-only consumer of a larger QKV product: it no longer derives
@@ -406,8 +423,10 @@ rejects row permutations that cross head boundaries. Native compressed cuts
 still need their logical domains and masks carried through slicing; this is
 not a claim that those restrictions or general FX page placement are finished.
 
-The shared library and native rank/goal-a build. Preparation compiled plain,
-contiguous and mapped fused ALU/cooperative shaders. Inspecting interleaved
+The shared library, Python extension and native rank/goal-a build. Preparation
+compiled plain and unified fused ALU/cooperative shaders. Inspecting interleaved
 row declarations showed both consumers depending on both producer tiles;
-selecting one consumer retained only its dependency set. No numerical commands,
-benchmarks or unit suites ran, and no throughput/latency improvement is claimed.
+selecting one consumer retained only its dependency set. Metadata inspection
+also covered partial overwrites, a command with overlapping read/write accesses,
+and shared-buffer aliases of CPU addresses. No numerical commands, benchmarks
+or unit suites ran, and no throughput/latency improvement is claimed.

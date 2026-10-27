@@ -24,7 +24,7 @@ def matches(value, required):
 
 
 def _matches(shape, steps, required):
-    return all(n <= 1 or a == b for n, a, b in zip(shape, steps, required, strict=True))
+    return _stream.view_matches(shape, steps, required)
 
 
 def index_source(bindings, maps=None):

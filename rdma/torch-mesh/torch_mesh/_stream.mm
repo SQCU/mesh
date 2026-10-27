@@ -1709,6 +1709,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("completion", &completion);
   module.def("completed", &completed);
   module.def("pipeline", &pipeline);
+  module.def("view_matches", [](const std::vector<NSUInteger> &shape,const std::vector<NSInteger> &strides,const std::vector<NSInteger> &required) {
+    TORCH_CHECK(shape.size()==strides.size()&&shape.size()==required.size(),"a layout needs one stride per axis");
+    return bool(MetalViewLayoutMatches(shape.data(),strides.data(),required.data(),shape.size()));
+  });
   module.def("view_block_slice", [](const std::vector<int32_t> &order,NSInteger first,NSInteger end,NSInteger step,NSUInteger block) {
     auto result=MetalViewBlockSlice(order.data(),order.size(),first,end,step,block);
     auto values=[](NSData *data) {

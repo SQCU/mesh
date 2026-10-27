@@ -3,6 +3,12 @@
 #import <objc/runtime.h>
 #include <stdatomic.h>
 
+BOOL MetalViewLayoutMatches(const NSUInteger *shape,const NSInteger *strides,const NSInteger *required,size_t rank) {
+    for(size_t d=0;d<rank;d++)if(!shape[d])return YES;
+    for(size_t d=0;d<rank;d++)if(shape[d]>1&&strides[d]!=required[d])return NO;
+    return YES;
+}
+
 NSString *MetalViewIndexExpression(const NSUInteger *shape,const NSInteger *strides,size_t rank,NSString *index) {
     // Collapse adjacent axes before emitting arithmetic. Contiguous views
     // become the original index, with no table, descriptor load or branch.
@@ -28,10 +34,14 @@ NSString *MetalViewIndexExpression(const NSUInteger *shape,const NSInteger *stri
     return terms.count?[terms componentsJoinedByString:@" + "]:@"0";
 }
 
+static NSString *MetalViewIndexTemplates(void) {
+    return @"template<uint B> inline long mesh_index(ulong i) { return long(i); }\n"
+        "template<uint B> constexpr bool mesh_vector4() { return true; }\n";
+}
+
 NSString *MetalViewIndexPrelude(void) {
-    return @"#ifndef MESH_INDEX_DECLARED\n#include <metal_stdlib>\nusing namespace metal;\n#define MESH_INDEX_DECLARED 1\n"
-        "template<uint B> inline long mesh_index(ulong i) { return long(i); }\n"
-        "template<uint B> constexpr bool mesh_vector4() { return true; }\n#endif\n";
+    return [@"#ifndef MESH_INDEX_DECLARED\n#include <metal_stdlib>\nusing namespace metal;\n#define MESH_INDEX_DECLARED 1\n"
+        stringByAppendingFormat:@"%@#endif\n",MetalViewIndexTemplates()];
 }
 
 NSDictionary<NSString *,NSData *> *MetalViewBlockSlice(const int32_t *order,size_t count,
@@ -339,12 +349,14 @@ static id<MTLComputePipelineState> MetalCreatePipeline(id<MTLDevice> device,
 // docs/kernels.md Any program: the dataflow's identity of a buffer, its allocation.  A heap's
 // buffers may alias one another (makeAliasable), so each is its heap.
 static NSValue *MetalAllocationKey(id buffer) {
+    if(!buffer||[buffer storageMode]==MTLStorageModeShared)return [NSValue valueWithPointer:NULL];
     id heap=[buffer respondsToSelector:@selector(heap)]?[buffer heap]:nil;
     return [NSValue valueWithPointer:heap?:buffer];
 }
 
 // docs/kernels.md Any program: where a buffer starts in its allocation
 static NSUInteger MetalAllocationBase(id<MTLBuffer> buffer) {
+    if(!buffer||buffer.storageMode==MTLStorageModeShared)return (NSUInteger)buffer.contents;
     return [buffer respondsToSelector:@selector(heap)]&&[buffer heap]?buffer.heapOffset:0;
 }
 
@@ -370,8 +382,75 @@ static void MetalAccesses(const struct MetalRecordedDispatch *command, const str
     }
 }
 
-// docs/kernels.md Any program: bytes [lo, hi) of an allocation, accessed by commands of levels below `done`
-struct MetalSpan { NSUInteger lo, hi, done; };
+// Canonical storage identity and ranges for every dependency lowering.
+static void MetalViewAccesses(NSData *accesses,void (^each)(id,NSUInteger,NSUInteger,uint32_t)) {
+    const struct MetalReach *views=accesses.bytes;
+    for(NSUInteger i=0;i<accesses.length/sizeof *views;i++) {
+        const struct MetalReach v=views[i];if(!v.length||!(v.access&3))continue;
+        const NSUInteger base=MetalAllocationBase(v.buffer);
+        each(MetalAllocationKey(v.buffer),base+v.offset,base+v.offset+v.length,v.access);
+    }
+}
+
+struct MetalSpan { NSUInteger lo, hi, node; };
+static void MetalSpanAdd(NSMutableDictionary *spans,id key,NSUInteger lo,NSUInteger hi,NSUInteger node) {
+    NSMutableData *held=spans[key]?:(spans[key]=[NSMutableData data]);
+    const struct MetalSpan span={lo,hi,node};[held appendBytes:&span length:sizeof span];
+}
+
+// A new writer replaces only the covered portion of the previous frontier.
+static void MetalSpanErase(NSMutableData *data,NSUInteger lo,NSUInteger hi) {
+    const NSUInteger count=data.length/sizeof(struct MetalSpan);if(!count)return;NSUInteger kept=0;
+    NSMutableData *tails=[NSMutableData data];struct MetalSpan *spans=data.mutableBytes;
+    for(NSUInteger i=0;i<count;i++) {
+        struct MetalSpan span=spans[i];
+        if(span.lo>=hi||span.hi<=lo){spans[kept++]=span;continue;}
+        if(span.hi>hi){const struct MetalSpan tail={hi,span.hi,span.node};[tails appendBytes:&tail length:sizeof tail];}
+        if(span.lo<lo){span.hi=lo;spans[kept++]=span;}
+    }
+    data.length=kept*sizeof *spans;[data appendData:tails];
+}
+
+static NSIndexSet *MetalViewPrior(NSMutableDictionary *read,NSMutableDictionary *written,NSData *views) {
+    NSMutableIndexSet *prior=[NSMutableIndexSet indexSet];
+    MetalViewAccesses(views,^(id key,NSUInteger lo,NSUInteger hi,uint32_t access){
+        for(NSMutableDictionary *set in (access&MetalReachWritten?@[written,read]:@[written])) {
+            NSData *data=set[key];const struct MetalSpan *spans=data.bytes;
+            for(NSUInteger i=0;i<data.length/sizeof *spans;i++)
+                if(spans[i].lo<hi&&lo<spans[i].hi)[prior addIndex:spans[i].node];
+        }
+    });
+    return prior;
+}
+
+static void MetalViewDefine(NSMutableDictionary *read,NSMutableDictionary *written,NSData *views,NSUInteger node) {
+    MetalViewAccesses(views,^(id key,NSUInteger lo,NSUInteger hi,uint32_t access){
+        if(access&MetalReachWritten){MetalSpanErase(read[key],lo,hi);MetalSpanErase(written[key],lo,hi);}
+    });
+    MetalViewAccesses(views,^(id key,NSUInteger lo,NSUInteger hi,uint32_t access){
+        if(access&MetalReachWritten)MetalSpanAdd(written,key,lo,hi,node);
+        else if(access&MetalReachRead)MetalSpanAdd(read,key,lo,hi,node);
+    });
+}
+
+NSArray<NSIndexSet *> *MetalViewDependencies(NSArray<NSData *> *accesses) {
+    NSMutableDictionary *read=[NSMutableDictionary dictionary],*written=[NSMutableDictionary dictionary];
+    NSMutableArray *dependencies=[NSMutableArray arrayWithCapacity:accesses.count];
+    for(NSUInteger i=0;i<accesses.count;i++) {
+        [dependencies addObject:MetalViewPrior(read,written,accesses[i])];
+        MetalViewDefine(read,written,accesses[i],i);
+    }
+    return dependencies;
+}
+
+static NSData *MetalCommandReaches(const struct MetalRecordedDispatch *command,const struct MetalReach *reaches,NSUInteger invocation) {
+    NSMutableData *views=[NSMutableData data];
+    MetalAccesses(command,reaches,invocation,^(id<MTLBuffer> buffer,NSUInteger offset,NSUInteger bytes,BOOL load,BOOL store){
+        const struct MetalReach view={buffer,offset,bytes,(load?MetalReachRead:0)|(store?MetalReachWritten:0),-1};
+        [views appendBytes:&view length:sizeof view];
+    });
+    return views;
+}
 
 // Accesses still relevant to later encoders. Weak allocation keys avoid keeping
 // a finished function's pages alive through its queue. The function itself owns
@@ -389,13 +468,6 @@ struct MetalSpan { NSUInteger lo, hi, done; };
 - (void)dealloc { [read release];[written release];[super dealloc]; }
 @end
 static char queueAccessKey,encoderAccessKey;
-
-static BOOL MetalRangeOverlaps(NSMapTable *map,id allocation,NSUInteger lo,NSUInteger hi) {
-    NSData *data=[map objectForKey:allocation];const struct MetalSpan *spans=data.bytes;
-    for(NSUInteger i=0;i<data.length/sizeof(*spans);i++)
-        if(spans[i].lo<hi&&lo<spans[i].hi)return YES;
-    return NO;
-}
 
 static void MetalRangeAdd(NSMapTable *map,id allocation,NSUInteger lo,NSUInteger hi) {
     if(lo==hi)return;
@@ -419,72 +491,54 @@ static void MetalRangesMerge(NSMapTable *into,NSMapTable *from) {
     }
 }
 
+static NSData *MetalQueueViews(MetalQueueAccess *scope) {
+    NSMutableData *views=[NSMutableData data];
+    for(NSUInteger mode=MetalReachRead;mode<=MetalReachWritten;mode++) {
+        NSMapTable *set=mode==MetalReachRead?scope->read:scope->written;
+        for(id buffer in set.keyEnumerator) {
+            NSData *data=[set objectForKey:buffer];const struct MetalSpan *spans=data.bytes;
+            for(NSUInteger i=0;i<data.length/sizeof *spans;i++) {
+                const struct MetalReach view={buffer,spans[i].lo,spans[i].hi-spans[i].lo,(uint32_t)mode,-1};
+                [views appendBytes:&view length:sizeof view];
+            }
+        }
+    }
+    return views;
+}
+
 void MetalEncoderReaches(id<MTL4ComputeCommandEncoder> encoder,const struct MetalReach *reaches,size_t count) {
     NSArray *scope=objc_getAssociatedObject(encoder,&encoderAccessKey);
     if(!scope)[NSException raise:NSInvalidArgumentException format:@"Metal accesses require a prepared schedule encoder"];
     MetalQueueAccess *previous=scope[0],*current=scope[1];
-    BOOL dependency=NO;
-    for(size_t i=0;i<count;i++) {
-        const struct MetalReach r=reaches[i];if(!r.length||!(r.access&3))continue;
-        id allocation=(id)r.buffer.heap?:r.buffer;NSUInteger lo=MetalAllocationBase(r.buffer)+r.offset;
-        dependency|=MetalRangeOverlaps(previous->written,allocation,lo,lo+r.length)||
-            ((r.access&MetalReachWritten)&&MetalRangeOverlaps(previous->read,allocation,lo,lo+r.length));
-    }
-    if(dependency) {
+    NSData *views=[NSData dataWithBytes:reaches length:count*sizeof *reaches];
+    NSArray *dependencies=MetalViewDependencies(@[MetalQueueViews(previous),views]);
+    if([dependencies[1] count]) {
         [encoder barrierAfterQueueStages:MTLStageDispatch beforeStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
         [previous->read removeAllObjects];[previous->written removeAllObjects];
     }
     for(size_t i=0;i<count;i++) {
-        const struct MetalReach r=reaches[i];if(!r.length||!(r.access&3))continue;
-        id allocation=(id)r.buffer.heap?:r.buffer;NSUInteger lo=MetalAllocationBase(r.buffer)+r.offset;
-        if(r.access&MetalReachRead)MetalRangeAdd(current->read,allocation,lo,lo+r.length);
-        if(r.access&MetalReachWritten)MetalRangeAdd(current->written,allocation,lo,lo+r.length);
+        const struct MetalReach r=reaches[i];if(!r.length)continue;
+        if(r.access&MetalReachRead)MetalRangeAdd(current->read,r.buffer,r.offset,r.offset+r.length);
+        if(r.access&MetalReachWritten)MetalRangeAdd(current->written,r.buffer,r.offset,r.offset+r.length);
     }
 }
 
 static void MetalEncoderAccesses(id<MTL4ComputeCommandEncoder> encoder,const struct MetalRecordedDispatch *command,
     const struct MetalReach *reaches,NSUInteger invocation) {
-    MetalAccesses(command,reaches,invocation,^(id<MTLBuffer> buffer,NSUInteger offset,NSUInteger bytes,BOOL load,BOOL store){
-        const struct MetalReach r={buffer,offset,bytes,(load?MetalReachRead:0)|(store?MetalReachWritten:0),-1};
-        MetalEncoderReaches(encoder,&r,1);
-    });
+    NSData *views=MetalCommandReaches(command,reaches,invocation);
+    MetalEncoderReaches(encoder,views.bytes,views.length/sizeof(struct MetalReach));
 }
 
-// docs/kernels.md Any program: the greatest `done` of the spans overlapping [lo, hi), each span no later command can
-// wait on (its `done` at most `phase`, every later level's floor) dropped
-static NSUInteger MetalSpansAfter(NSMutableData *spans, NSUInteger lo, NSUInteger hi, NSUInteger phase) {
-    struct MetalSpan *at=spans.mutableBytes;
-    NSUInteger count=spans.length/sizeof(*at),kept=0,after=0;
-    for(NSUInteger s=0;s<count;s++) {
-        if(at[s].done<=phase)continue;
-        if(at[s].lo<hi&&lo<at[s].hi)after=MAX(after,at[s].done);
-        at[kept++]=at[s];
-    }
-    spans.length=kept*sizeof(*at);
-    return after;
-}
-
-static void MetalSpanAdd(NSMutableDictionary<NSValue *,NSMutableData *> *spans, NSValue *key, NSUInteger lo, NSUInteger hi, NSUInteger done) {
-    NSMutableData *held=spans[key]?:(spans[key]=[NSMutableData data]);
-    const struct MetalSpan span={lo,hi,done};
-    [held appendBytes:&span length:sizeof span];
-}
-
-// One preparation-time access-order calculation for records, repeated slots and whole functions.
+// Lower the same relation to a serial sequence of GPU phases. An emitted
+// barrier already covers all earlier phases, so their frontier can be dropped.
 static BOOL MetalOrder(NSMutableDictionary *read,NSMutableDictionary *written,NSUInteger *phase,
     const struct MetalRecordedDispatch *command,const struct MetalReach *reaches,NSUInteger invocation) {
-    __block NSUInteger level=*phase;const NSUInteger before=*phase;
-    MetalAccesses(command,reaches,invocation,^(id<MTLBuffer> buffer,NSUInteger offset,NSUInteger bytes,BOOL load,BOOL store){
-        (void)load;NSValue *key=MetalAllocationKey(buffer);NSUInteger lo=MetalAllocationBase(buffer)+offset;
-        level=MAX(level,MetalSpansAfter(written[key],lo,lo+bytes,before));
-        if(store)level=MAX(level,MetalSpansAfter(read[key],lo,lo+bytes,before));
-    });
-    MetalAccesses(command,reaches,invocation,^(id<MTLBuffer> buffer,NSUInteger offset,NSUInteger bytes,BOOL load,BOOL store){
-        NSValue *key=MetalAllocationKey(buffer);NSUInteger lo=MetalAllocationBase(buffer)+offset;
-        if(load)MetalSpanAdd(read,key,lo,lo+bytes,level+1);
-        if(store)MetalSpanAdd(written,key,lo,lo+bytes,level+1);
-    });
-    BOOL barrier=level!=*phase;*phase=level;return barrier;
+    NSData *views=MetalCommandReaches(command,reaches,invocation);
+    NSIndexSet *prior=MetalViewPrior(read,written,views);
+    const NSUInteger level=prior.count?MAX(*phase,prior.lastIndex+1):*phase;
+    BOOL barrier=level!=*phase;
+    if(barrier){[read removeAllObjects];[written removeAllObjects];}
+    MetalViewDefine(read,written,views,level);*phase=level;return barrier;
 }
 
 static void MetalDataflow(MetalCapture *capture) {
@@ -1352,11 +1406,7 @@ static NSArray *MetalScheduleExpand(struct MetalSchedule *root,NSArray *ranges) 
         const struct MetalRecordedDispatch *records=[held[0] bytes];
         const struct MetalReach *reaches=[held[3] bytes];
         for(NSUInteger c=range->first;c<range->end;c++) {
-            NSMutableData *accesses=[NSMutableData data];
-            MetalAccesses(records+c,reaches,range->invocation,^(id<MTLBuffer> buffer,NSUInteger offset,NSUInteger bytes,BOOL read,BOOL write){
-                const struct MetalReach reach={buffer,offset,bytes,(read?MetalReachRead:0)|(write?MetalReachWritten:0),-1};
-                [accesses appendBytes:&reach length:sizeof reach];
-            });
+            NSData *accesses=MetalCommandReaches(records+c,reaches,range->invocation);
             MetalWork *work=MetalScheduleWork(root,accesses,nil,nil);
             memcpy(work->replay,&replay,sizeof replay);work->invocation=range->invocation;work->first=c;work->end=c+1;
         }
@@ -1371,58 +1421,6 @@ static struct MetalSchedule *MetalScheduleWritable(struct MetalSchedule *root) {
     if(!next)[NSException raise:NSMallocException format:@"preparing data-dependent command part"];
     next->root=root;next->ordinal=tail->ordinal+1;tail->next=next;root->tail=next;
     return next;
-}
-
-// These intervals exist only while compiling. Shared CPU and Metal views use
-// their common addresses; private/heap views use the recorder's allocation key.
-static void MetalViewAccesses(NSData *accesses,void (^each)(id,NSUInteger,NSUInteger,uint32_t)) {
-    const struct MetalReach *views=accesses.bytes;
-    for(NSUInteger i=0;i<accesses.length/sizeof *views;i++) {
-        const struct MetalReach v=views[i];if(!v.length)continue;
-        BOOL shared=!v.buffer||v.buffer.storageMode==MTLStorageModeShared;
-        id key=shared?[NSValue valueWithPointer:NULL]:MetalAllocationKey(v.buffer);
-        NSUInteger base=shared?(NSUInteger)v.buffer.contents:MetalAllocationBase(v.buffer);
-        each(key,base+v.offset,base+v.offset+v.length,v.access);
-    }
-}
-
-static NSUInteger MetalViewBound(NSArray *bounds,NSUInteger value) {
-    NSUInteger lo=0,hi=bounds.count;
-    while(lo<hi){NSUInteger m=lo+(hi-lo)/2;if([bounds[m] unsignedIntegerValue]<value)lo=m+1;else hi=m;}
-    return lo;
-}
-
-NSArray<NSIndexSet *> *MetalViewDependencies(NSArray<NSData *> *accesses) {
-    NSMutableDictionary *ends=[NSMutableDictionary dictionary],*states=[NSMutableDictionary dictionary];
-    NSMutableSet *written=[NSMutableSet set];
-    for(NSData *views in accesses)MetalViewAccesses(views,^(id key,NSUInteger lo,NSUInteger hi,uint32_t access){
-        if(!ends[key])ends[key]=[NSMutableSet set];[ends[key] addObject:@(lo)];[ends[key] addObject:@(hi)];
-        if(access&MetalReachWritten)[written addObject:key];
-    });
-    for(id key in written) {
-        NSArray *bounds=[[ends[key] allObjects] sortedArrayUsingSelector:@selector(compare:)];
-        NSMutableArray *readers=[NSMutableArray array];
-        NSMutableData *writers=[NSMutableData dataWithLength:(bounds.count-1)*sizeof(NSUInteger)];
-        NSUInteger *last=writers.mutableBytes;
-        for(NSUInteger j=0;j+1<bounds.count;j++){last[j]=NSNotFound;[readers addObject:[NSMutableIndexSet indexSet]];}
-        states[key]=@[bounds,writers,readers];
-    }
-    NSMutableArray *dependencies=[NSMutableArray arrayWithCapacity:accesses.count];
-    for(NSUInteger i=0;i<accesses.count;i++) {
-        NSMutableIndexSet *prior=[NSMutableIndexSet indexSet];
-        MetalViewAccesses(accesses[i],^(id key,NSUInteger lo,NSUInteger hi,uint32_t access){
-            NSArray *state=states[key];if(!state)return;
-            NSArray *bounds=state[0],*readers=state[2];NSUInteger *last=[state[1] mutableBytes];
-            NSUInteger end=MetalViewBound(bounds,hi);
-            for(NSUInteger j=MetalViewBound(bounds,lo);j<end;j++) {
-                if(last[j]!=NSNotFound)[prior addIndex:last[j]];
-                if(access&MetalReachWritten){[prior addIndexes:readers[j]];[readers[j] removeAllIndexes];last[j]=i;}
-                else if(access&MetalReachRead)[readers[j] addIndex:i];
-            }
-        });
-        [prior removeIndex:i];[dependencies addObject:prior];
-    }
-    return dependencies;
 }
 
 NSString *MetalViewDependencyDeclaration(NSString *name,NSArray<NSIndexSet *> *dependencies,NSUInteger producers) {
@@ -1441,20 +1439,20 @@ NSString *MetalViewDependencyDeclaration(NSString *name,NSArray<NSIndexSet *> *d
         }
         [offsets appendBytes:&offset length:sizeof offset];
     }
-    NSDictionary *arrays=@{@"offsets":offsets,@"targets":targets,@"holders":holders};
-    NSMutableString *source=[NSMutableString string];
-    for(NSString *key in @[@"offsets",@"targets",@"holders"]) {
-        NSData *data=arrays[key];const uint32_t *values=data.bytes;const NSUInteger count=data.length/sizeof *values;
-        [source appendFormat:@"constant uint %@_%@[%lu] = {",name,key,(unsigned long)MAX(count,1)];
-        for(NSUInteger i=0;i<count;i++)[source appendFormat:@"%s%uu",i?",":"",values[i]];
-        if(!count)[source appendString:@"0u"];
-        [source appendString:@"};\n"];
+    NSArray *arrays=@[offsets,targets,holders];
+    NSMutableString *source=[NSMutableString stringWithFormat:@"namespace %@_indices {\n%@",name,MetalViewIndexTemplates()];
+    for(NSUInteger binding=0;binding<arrays.count;binding++) {
+        NSData *data=arrays[binding];const uint32_t *values=data.bytes;
+        const NSUInteger count=data.length/sizeof *values;const NSInteger stride=0;
+        NSMutableData *map=[NSMutableData dataWithLength:count*sizeof(NSInteger)];NSInteger *indices=map.mutableBytes;
+        for(NSUInteger i=0;i<count;i++)indices[i]=values[i];
+        [source appendString:MetalViewMappedIndexDeclaration(binding,&count,&stride,1,0,@{@0:map})];
     }
-    [source appendFormat:@"struct %@ { uint producer;\n"
-        "uint begin() const { return %@_offsets[producer]; }\n"
-        "uint end() const { return %@_offsets[producer+1]; }\n"
-        "static uint target(uint i) { return %@_targets[i]; }\n"
-        "static uint holders(uint g) { return %@_holders[g]; }\n};\n",name,name,name,name,name];
+    [source appendFormat:@"}\nstruct %@ { uint producer;\n"
+        "uint begin() const { return uint(%@_indices::mesh_index<0>(producer)); }\n"
+        "uint end() const { return uint(%@_indices::mesh_index<0>(producer+1)); }\n"
+        "static uint target(uint i) { return uint(%@_indices::mesh_index<1>(i)); }\n"
+        "static uint holders(uint g) { return uint(%@_indices::mesh_index<2>(g)); }\n};\n",name,name,name,name,name];
     return source;
 }
 

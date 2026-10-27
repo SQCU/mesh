@@ -66,6 +66,10 @@ NSData *MetalViewReaches(id<MTLBuffer>, NSUInteger offset, const NSUInteger *sha
 NSString *MetalViewIndexExpression(const NSUInteger *shape, const NSInteger *strides,
     size_t rank, NSString *index);
 NSString *MetalViewIndexPrelude(void);
+// Required API strides are equivalent when they address the same elements.
+// Empty and singleton axes do not impose a different physical layout.
+BOOL MetalViewLayoutMatches(const NSUInteger *shape, const NSInteger *strides,
+    const NSInteger *required, size_t rank);
 // AOT copy tiles, packed as (origin[rank], shape[rank]) words per tile.
 NSData *MetalViewTiles(const NSUInteger *shape, size_t rank, NSUInteger elements);
 // A logical slice of an encoded axis. `order` maps stored entries to logical
