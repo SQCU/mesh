@@ -430,3 +430,44 @@ selecting one consumer retained only its dependency set. Metadata inspection
 also covered partial overwrites, a command with overlapping read/write accesses,
 and shared-buffer aliases of CPU addresses. No numerical commands, benchmarks
 or unit suites ran, and no throughput/latency improvement is claimed.
+
+## Native basis domains and exact input tails
+
+Recorded: 2026-10-27T23:30:03Z. The native coded matrix now carries its logical
+input domain separately from its encoded columns. Int8 rotations are
+`TensorView` operands and folded half-precision rotations are `MatrixView`
+operands. Their declared shapes can be rectangular. A natural-coordinate
+column cut slices those views while retaining the encoded columns needed by
+the basis; it does not copy the codes or the basis. Input, basis and norm
+accesses use the selected logical extent and the original physical pitch.
+
+Hadamard cuts compose their source map with `MetalViewBlockSlice`, retaining
+the transform domain and masking its missing inputs. Every native matrix has
+the same input-domain declaration. Identity domains share the existing index
+storage. The direct and folded transforms consume that declaration. A
+requested normalization is retained before the larger-row folded product.
+Attention's elementwise gather no longer substitutes for a rotation.
+
+The ordinary native product bodies now handle partial input vectors and
+unaligned half-weight rows. Width and alignment are prepared operands; the
+existing literal specialization binds them before execution. Aligned whole
+tiles retain their vector loads. The shared four-element load also accepts
+the logical row-alignment fact, so a 37-column row cannot cause an unaligned
+vector read merely because its overall allocation is contiguous.
+
+Compiling the whole native source exposed references to the removed
+`FC_RMS_STRIDES` declaration in add and scale. Both now consume ordinary
+`TensorView` indices and accesses. `mesh_view` supplies the same indexed
+operand type for reads and writes; add retains the shared numerical body.
+
+The shared library, Python extension and native rank/goal-a build. Compiler
+inspection created rectangular rotation, masked Hadamard, gather and native
+product pipelines, including literal specializations for 37- and 64-column
+inputs. The shared metadata helper composed repeated cuts to the expected
+source positions. These checks submitted no numerical commands.
+
+This closes natural-coordinate basis slicing in the native preparation
+interface. It does not close compressed row cuts, nonrotated partial blocks,
+encoded-coordinate basis cuts, or the ragged FFN/head planner's old view
+restrictions. Those consumers still need the logical domain and encoded block
+selection carried together. General FX page placement also remains open.

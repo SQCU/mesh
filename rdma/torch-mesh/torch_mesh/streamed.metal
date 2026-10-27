@@ -53,9 +53,9 @@ using namespace metal;
 template<uint B> inline long mesh_index(ulong i) { return long(i); }
 template<uint B> constexpr bool mesh_vector4() { return true; }
 #endif
-template<uint B, typename V, typename T>
+template<uint B, typename V, bool Aligned = true, typename T>
 inline V mesh_load4(device const T *p, ulong i) {
-    if constexpr (mesh_vector4<B>()) return *(device const V *)(p + mesh_index<B>(i));
+    if constexpr (Aligned && mesh_vector4<B>()) return *(device const V *)(p + mesh_index<B>(i));
     else return V(p[mesh_index<B>(i)], p[mesh_index<B>(i+1)], p[mesh_index<B>(i+2)], p[mesh_index<B>(i+3)]);
 }
 template<uint B, typename T, typename V>
@@ -66,12 +66,12 @@ inline void mesh_store4(device T *p, ulong i, V value) {
         p[mesh_index<B>(i+2)] = value.z; p[mesh_index<B>(i+3)] = value.w;
     }
 }
-template<uint B, typename P> struct mesh_input {
+template<uint B, typename P> struct mesh_operand {
     P p; long first;
-    auto operator[](ulong i) const { return p[mesh_index<B>(first+long(i))]; }
-    mesh_input operator-(long offset) const { return {p, first-offset}; }
+    auto operator[](ulong i) const -> decltype(p[0]) { return p[mesh_index<B>(first+long(i))]; }
+    mesh_operand operator-(long offset) const { return {p, first-offset}; }
 };
-template<uint B, typename P> inline mesh_input<B,P> mesh_read(P p, long first=0) { return {p,first}; }
+template<uint B, typename P> inline mesh_operand<B,P> mesh_view(P p, long first=0) { return {p,first}; }
 
 // Every kernel's constants, one block at buffer 15 (a caller sets the fields its kernel reads): tiles a 32-row block
 // (columns / 32), a matrix's outputs (rows), input rows, a count per unit (a panel's panels a threadgroup, a Hadamard
@@ -239,7 +239,7 @@ template <typename V> struct streamed_vector_pointer<V, coherent(device) device 
 template <typename V, typename P> inline V streamed_four(P p, ulong i) {
     return *(typename streamed_vector_pointer<V, P>::type)(p + i);
 }
-template <typename V, uint B, typename P> inline V streamed_four(mesh_input<B, P> p, ulong i) {
+template <typename V, uint B, typename P> inline V streamed_four(mesh_operand<B, P> p, ulong i) {
     if constexpr (mesh_vector4<B>()) return streamed_four<V>(p.p, mesh_index<B>(p.first + long(i)));
     else return V(p[i], p[i+1], p[i+2], p[i+3]);
 }
@@ -546,7 +546,7 @@ kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const ui
         const float value = rowScale[mesh_index<13>(output)] * total;
         ys[mesh_index<11>(ulong(n) * d.stride + uint(order[mesh_index<12>(output)]))] = Output(streamed_capped(value, d.cap));
     }
-    if (OUT == 0) epilogue.after(mesh_read<E::input_binding>(E::input_binding == 5 ? stores : (typename E::partials)consumer), mesh_read<12>(order), mesh_read<13>(rowScale), arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * SK * 32, produced, producing);
+    if (OUT == 0) epilogue.after(mesh_view<E::input_binding>(E::input_binding == 5 ? stores : (typename E::partials)consumer), mesh_view<12>(order), mesh_view<13>(rowScale), arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * SK * 32, produced, producing);
 }
 
 // The gate and up products of up to R input rows together, GELU(gate) * up between them (the study's gate_up_mm): a
@@ -681,7 +681,7 @@ kernel void streamed_finish(device const float *partials [[buffer(0)]], device T
     const uint n = i / d.outputs, r = i % d.outputs;
     const int target = order[mesh_index<2>(r)];
     if (Masked && target < 0) return;
-    float value = streamed_value(mesh_read<0>(partials), i, d.shares, d.split, scale[mesh_index<3>(r)]);
+    float value = streamed_value(mesh_view<0>(partials), i, d.shares, d.split, scale[mesh_index<3>(r)]);
     if (d.inputs) value /= factor[mesh_index<4>(n)];
     y[mesh_index<1>(n * d.stride + uint(target))] = T(streamed_capped(value, d.cap));
 }
@@ -760,12 +760,12 @@ kernel void streamed_row_gather(device const half *x [[buffer(0)]], device half 
     threadgroup float partial[32];
     const uint columns = d.columns, inputColumns = InputColumns ? InputColumns : columns;
     if (WIDTH == 0) {
-        streamed_gather<STRIDE, Masked>(mesh_read<0>(x, ulong(n) * inputColumns), 1.0f, order, first, scale, second, secondScale, third, thirdScale, d.inputs, columns, d.rows, n, t, threads);
+        streamed_gather<STRIDE, Masked>(mesh_view<0>(x, ulong(n) * inputColumns), 1.0f, order, first, scale, second, secondScale, third, thirdScale, d.inputs, columns, d.rows, n, t, threads);
         return;
     }
     float s = 0.0f;
     for (uint q = t; q < inputColumns / 4; q += threads) {
-        const float4 v = float4(mesh_load4<0,half4>(x, ulong(n) * inputColumns + 4*q));
+        const float4 v = float4(mesh_load4<0,half4,(InputColumns ? InputColumns : WIDTH) % 4 == 0>(x, ulong(n) * inputColumns + 4*q));
         ((threadgroup float4 *)values)[q] = v;
         s += dot(v, v);
     }
@@ -815,7 +815,7 @@ kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *fir
         for (uint w = lane; w < words; w += 32) {
             float4 xv[4];
             for (uint k = 0; k < 4; k++) {
-                xv[k] = float4(mesh_load4<0,half4>(x, ulong(n) * inputColumns + 4*(4*w+k)));
+                xv[k] = float4(mesh_load4<0,half4,InputColumns % 4 == 0>(x, ulong(n) * inputColumns + 4*(4*w+k)));
                 if (eps > 0.0f) { squares += dot(xv[k], xv[k]); xv[k] *= float4(mesh_load4<11,half4>(gamma, 4 * (4 * w + k))); }
             }
             for (uint c = 0; c < C; c++) {
@@ -825,8 +825,8 @@ kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *fir
                             + dot(float4(as_type<char4>(bits.z)), xv[2]) + dot(float4(as_type<char4>(bits.w)), xv[3]);
                 } else {
                     const ulong base = ulong(min(j0 + c, columns - 1)) * inputColumns + 16 * w;
-                    acc[c] += dot(float4(mesh_load4<6,char4>(rotation, base)), xv[0]) + dot(float4(mesh_load4<6,char4>(rotation, base + 4)), xv[1])
-                            + dot(float4(mesh_load4<6,char4>(rotation, base + 8)), xv[2]) + dot(float4(mesh_load4<6,char4>(rotation, base + 12)), xv[3]);
+                    acc[c] += dot(float4(mesh_load4<6,char4,InputColumns % 4 == 0>(rotation, base)), xv[0]) + dot(float4(mesh_load4<6,char4,InputColumns % 4 == 0>(rotation, base + 4)), xv[1])
+                            + dot(float4(mesh_load4<6,char4,InputColumns % 4 == 0>(rotation, base + 8)), xv[2]) + dot(float4(mesh_load4<6,char4,InputColumns % 4 == 0>(rotation, base + 12)), xv[3]);
                 }
             }
         }
@@ -888,7 +888,7 @@ kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *f
     const uint columns = d.columns, N = d.per, shift = ctz(N), K = columns >> shift, W = N / 32;
     const float eps = d.eps;
     const uint inputColumns = InputColumns ? InputColumns : columns;
-    const auto row = mesh_read<0>(x, ulong(n) * inputColumns);
+    const auto row = mesh_view<0>(x, ulong(n) * inputColumns);
     uint place[P];
     float firstScale[P], otherScale[P];
     for (uint p = 0; p < P; p++) {
@@ -958,8 +958,8 @@ kernel void streamed_gelu(device const T *gate [[buffer(0)]], device const T *up
     const ulong row = ulong(n) * d.outputs;
     for (uint r = first; r < min(first + 4, d.outputs); ++r)
         hidden[mesh_index<4>(ulong(n) * d.outputs + r)] = Masked && selected[mesh_index<5>(r)] < 0 ? half(0) : half(streamed_gelu_of(
-            d.shares ? streamed_value(mesh_read<0>(gate), row + r, d.shares, d.split, gateScale[mesh_index<2>(r)]) : float(gate[mesh_index<0>(row + r)]),
-            d.inputs ? streamed_value(mesh_read<1>(up), row + r, d.inputs, d.per, upScale[mesh_index<3>(r)]) : float(up[mesh_index<1>(row + r)])));
+            d.shares ? streamed_value(mesh_view<0>(gate), row + r, d.shares, d.split, gateScale[mesh_index<2>(r)]) : float(gate[mesh_index<0>(row + r)]),
+            d.inputs ? streamed_value(mesh_view<1>(up), row + r, d.inputs, d.per, upScale[mesh_index<3>(r)]) : float(up[mesh_index<1>(row + r)])));
 }
 
 template [[host_name("streamed_gelu")]] [[kernel]] decltype(streamed_gelu<float>) streamed_gelu<float>;
@@ -1166,7 +1166,7 @@ kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const u
             stores[mesh_index<5>(ulong(group.y) * d.split + n * d.outputs + (group.x * BANDS + which) * 32 + r)] = total;
         }
     }
-    epilogue.after(mesh_read<E::input_binding>(E::input_binding == 5 ? stores : (typename E::partials)consumer), mesh_read<12>(order), mesh_read<13>(rowScale), arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * GROUP * 32, produced, producing);
+    epilogue.after(mesh_view<E::input_binding>(E::input_binding == 5 ? stores : (typename E::partials)consumer), mesh_view<12>(order), mesh_view<13>(rowScale), arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * GROUP * 32, produced, producing);
 }
 
 // The right-input and destination element maps of matmul2d<M, 32, 32> at one simdgroup (fp16 operands, fp32
