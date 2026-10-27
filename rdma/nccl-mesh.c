@@ -1784,7 +1784,7 @@ struct ncclMeshWritePlan {
   struct where source_ready;
   uint64_t ready_value;
   void *ready_owner;
-  uint64_t (*land_bindings)[6];
+  ncclMeshBinding *land_bindings;
   uint32_t land_capacity, land_channel, *land_count;
   ncclMeshBuffer source_buffer, landing_buffer;
   ncclComm_t comm;
@@ -5011,7 +5011,7 @@ ncclResult_t ncclMeshWriteExecute(ncclMeshWritePlan_t plan, cudaStream_t stream)
     .recv = plan->metal ? &plan->landing_buffer : (void *)plan->landing.offset,
     .count = plan->count, .type = plan->type, .op = ncclSum, .comm = plan->comm, .stream = stream, .write_plan = plan});
 }
-ncclResult_t ncclMeshWriteLandings(ncclMeshWritePlan_t plan, uint64_t (*bindings)[6], uint32_t capacity, uint32_t *count) {
+ncclResult_t ncclMeshWriteLandings(ncclMeshWritePlan_t plan, ncclMeshBinding *bindings, uint32_t capacity, uint32_t *count) {
   if (!plan || !plan->metal || plan->repeats != 1 || plan->comm->rank != plan->to || !count || (capacity && !bindings) || plan->land_count)
     return fail(ncclInvalidArgument, "WRITE landing output needs a fresh single-occurrence Metal plan and physical-channel storage");
   *count = 0;

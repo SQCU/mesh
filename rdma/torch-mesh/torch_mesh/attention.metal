@@ -212,6 +212,7 @@ __attribute__((always_inline)) static inline void mesh_merge_row(P parts, uint i
 //   the page's first position;
 //   live(r, position): whether row r attends the position; finish(o, m, l): the parts' merge and the store, o the
 //   simdgroup's column blocks, m and l its rows'.
+//   load_k/load_v(matrix, page_address, chunk, page, row, column): the task's compiled storage layout.
 template <typename A>
 __attribute__((always_inline)) static inline void mesh_attention_tile(thread A &a) {
     constexpr uint D = A::dims, NSG = A::simdgroups, PAGE = A::page_extent, C = NSG * PAGE, DB = D / 8, OB = DB / NSG, RS = 8 / NSG > 0 ? 8 / NSG : 1;
@@ -315,7 +316,8 @@ struct mesh_unmasked {
 // keys its mask mod M keeps (M::exact: all of them; else mod.keep(query[r].x, query[r].y, key) of its batch row and query
 // head); part j of J over the pages [base, base + pages) of the rows' union, each part's (m, l, O) at Q's row times `parts`
 // plus j, through F and F4 (coherent(device) pointers where the last of a row's parts to arrive merges them in the same
-// dispatch). layout() places the threadgroup memory a wrapper declares (region floats, 64 diag floats, simdgroups places)
+// dispatch). Access supplies query and KV matrix loads; its default is the cached row layout.
+// layout() places the threadgroup memory a wrapper declares (region floats, 64 diag floats, simdgroups places)
 // and span() the pages of the rows' union and J, the configuration's part count (each part written: an empty one's l = 0,
 // which the merge passes over).
 struct mesh_attention_access {

@@ -64,10 +64,10 @@ __attribute__((always_inline)) static inline void mesh_arrival_fence() {
 
 template <bool System = false>
 __attribute__((always_inline)) static inline bool mesh_last_arrival(device atomic_uint *arrivals, uint slot, uint J, uint t,
-                                                                   threadgroup uint *last) {
+                                                                   threadgroup uint *last, uint contribution = 1u) {
     mesh_arrival_fence<System>();
     threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
-    bool mine = t == 0 && atomic_fetch_add_explicit(&arrivals[slot], 1u, memory_order_relaxed) == J - 1;
+    bool mine = t == 0 && atomic_fetch_add_explicit(&arrivals[slot], contribution, memory_order_relaxed) == J - contribution;
     if (last) {
         if (t == 0) *last = mine ? 1u : 0u;
         threadgroup_barrier(mem_flags::mem_threadgroup);

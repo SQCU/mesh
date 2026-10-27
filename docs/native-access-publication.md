@@ -86,14 +86,15 @@ receivers use that same cache writer. No consumer waits for another GPU threadgr
 
 The native softmax configuration now uses the existing gather-and-merge algorithm. Its
 partials occupy `[row, contributor, head, m/l/O]`, so head columns land directly at their
-final positions. The producer publishes each head after its row contributors finish, and
-each merge reads only that head's contributors. The old native `partials` all-reduce branch
+final positions. Attention's last contributing part writes that result and publishes each
+head after its rows finish. The separate partial-packing dispatch is removed. Each receiving
+merge reads only that head's contributors. The old native `partials` all-reduce branch
 is removed; old records must be derived again. This changes collective decomposition as
 well as scheduling; end-to-end latency and useful throughput still need measurement.
 
 The DNN fold retains its row-tile dependencies. Native source publication is still one
-head across its rows. Local attention kernels still finish their own dispatch before the
-separate partial-result producer executes. The PLE epilogue has no declared remote output.
+head across its rows. Masked rows contribute empty partials within the same producer.
+The PLE epilogue has no declared remote output.
 
 A channel still has FIFO ordering. Independent readiness words remove the false dependency
 on every producer tile finishing; they do not make a later descriptor overtake an earlier one.
@@ -106,6 +107,7 @@ The shared library and Torch extension built. The matrix producer prepared a 131
 rank built; Metal compiled the standalone and fused native head producers. The existing FX
 transformer forward/backward graph also prepared at batch 2, sequence 1,024 and width 2,048.
 The consumer refactor additionally compiled the native vector, tile and shared-prefix
-attention instances, partial-result producer/merge and cache writer for macOS 26. No
+attention instances with fused partial publication, the receiving merge and cache writer
+for macOS 26. The complete Swift/native/LiteRT rank build succeeded. No
 distributed numerical run was launched. These results do not establish an end-to-end
 latency/useful-throughput improvement.

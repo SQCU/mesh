@@ -279,7 +279,8 @@ typedef struct { uint64_t ticket; int published; } ncclMeshIssue;
    binding records are returned; their prefix increments describe subsequent
    frames, and kernels use mesh_step_release/mesh_step_await with that frame's
    index. A zero stride does not establish permission to overwrite live pages. */
-typedef struct { uint64_t (*publish)[6], (*land)[6]; uint32_t publishes, lands, repeats; size_t stride; } ncclMeshFused;
+typedef uint64_t ncclMeshBinding[6];
+typedef struct { ncclMeshBinding *publish, *land; uint32_t publishes, lands, repeats; size_t stride; } ncclMeshFused;
 typedef struct {
   void *commandBuffer;
   void *commandEncoder;
@@ -1036,7 +1037,7 @@ ncclResult_t ncclMeshWriteSourceReady(ncclMeshWritePlan_t plan, const void* word
    records; Execute fills them and count while compiling the group. Other ranks
    supply no output. Storage remains valid through group compilation. Kernels
    consume the records with mesh_landing_await; no completion command is added. */
-ncclResult_t ncclMeshWriteLandings(ncclMeshWritePlan_t plan, uint64_t (*bindings)[6], uint32_t capacity, uint32_t* count);
+ncclResult_t ncclMeshWriteLandings(ncclMeshWritePlan_t plan, ncclMeshBinding* bindings, uint32_t capacity, uint32_t* count);
 ncclResult_t ncclMeshWriteExecute(ncclMeshWritePlan_t plan, cudaStream_t stream);
 ncclResult_t ncclMeshWritePlanDestroy(ncclMeshWritePlan_t plan);
 /* A call a program declares ahead (ncclMeshCommPlan): `what` (mesh-plan.h MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE,
