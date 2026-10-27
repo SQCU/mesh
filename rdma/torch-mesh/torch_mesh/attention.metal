@@ -166,14 +166,14 @@ __attribute__((always_inline)) static inline void mesh_merge(P parts, uint J, ui
 // else in place. The places are 32-bit element indices (an operand of fewer than 2^32 elements; out and columns multiples
 // of 4, so one column c for the four), held from the task's start to its store.
 __attribute__((always_inline)) static inline void mesh_gathered_places(uint out, device const int *inverse, device const float *scale, uint columns,
-                                                                      thread uint4 &dst, thread float4 &cs) {
+                                                                      thread uint4 &dst, thread float4 &cs, uint stride) {
     dst = uint4(out) + uint4(0, 1, 2, 3);
     cs = float4(1.0f);
     if (columns != 0) {
         const uint c = out % columns;
         for (uint i = 0; i < 4; ++i) {
             const uint to = uint(inverse[c + i]);
-            dst[i] = out - c + to;
+            dst[i] = (out / columns) * stride + to;
             cs[i] = scale[to];
         }
     }
@@ -189,10 +189,10 @@ __attribute__((always_inline)) static inline void mesh_gathered_store(device hal
 // (no kernel is defined here: a source including this file stays one kernel's).
 template <uint D, typename P>
 __attribute__((always_inline)) static inline void mesh_merge_row(P parts, uint i, uint J, uint d, uint lane, device half *O, device const int *inverse,
-                                                                device const float *scale, uint columns) {
+                                                                device const float *scale, uint columns, uint stride) {
     uint4 dst;
     float4 cs;
-    mesh_gathered_places(i * D + 4 * d, inverse, scale, columns, dst, cs);
+    mesh_gathered_places(i * D + 4 * d, inverse, scale, columns, dst, cs, stride);
     mesh_merge<D / 4, 1>(parts, J, d, 0u, lane, nullptr, [&](float, float total, float4 sum) { mesh_gathered_store(O, dst, cs, columns, mesh_merged(total, sum)); });
 }
 

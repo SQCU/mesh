@@ -44,24 +44,63 @@ NSString *MetalViewIndexPrelude(void) {
         stringByAppendingFormat:@"%@#endif\n",MetalViewIndexTemplates()];
 }
 
-NSDictionary<NSString *,NSData *> *MetalViewBlockSlice(const int32_t *order,size_t count,
-    NSInteger first,NSInteger end,NSInteger step,NSUInteger block) {
+static NSDictionary<NSString *,NSData *> *MetalViewBlockSelection(const int32_t *order,size_t count,
+    NSUInteger block,NSUInteger copies,int32_t (^select)(int32_t,NSUInteger)) {
     NSMutableData *blocks=[NSMutableData data],*mapped=[NSMutableData data];
     int32_t *lanes=malloc(block*sizeof *lanes);
-    for(size_t start=0;start<count;start+=block) {
+    for(size_t start=0;start<count;start+=block)for(NSUInteger copy=0;copy<copies;copy++) {
         BOOL used=NO;
         for(NSUInteger i=0;i<block;i++) {
-            const NSInteger value=start+i<count?order[start+i]:-1,delta=value-first;
-            const BOOL selected=value>=0&&(step>0?(value>=first&&value<end):(value<=first&&value>end))&&delta%step==0;
-            lanes[i]=selected?(int32_t)(delta/step):-1;used|=selected;
+            const int32_t value=start+i<count?order[start+i]:-1;
+            lanes[i]=value>=0?select(value,copy):-1;used|=lanes[i]>=0;
         }
         if(used) {
             const int32_t index=(int32_t)(start/block);
             [blocks appendBytes:&index length:sizeof index];
             [mapped appendBytes:lanes length:block*sizeof *lanes];
-        }
+        } else break;
     }
     free(lanes);return @{@"blocks":blocks,@"order":mapped};
+}
+
+NSDictionary<NSString *,NSData *> *MetalViewBlockSlice(const int32_t *order,size_t count,
+    NSInteger first,NSInteger end,NSInteger step,NSUInteger block) {
+    return MetalViewBlockSelection(order,count,block,1,^int32_t(int32_t value,NSUInteger copy) {
+        (void)copy;
+        const NSInteger delta=value-first;
+        return (step>0?(value>=first&&value<end):(value<=first&&value>end))&&delta%step==0?(int32_t)(delta/step):-1;
+    });
+}
+
+typedef struct { int32_t value, output; } MetalViewSelection;
+static int MetalViewSelectionCompare(const void *a,const void *b) {
+    const MetalViewSelection *x=a,*y=b;
+    if(x->value!=y->value)return x->value<y->value?-1:1;
+    return x->output<y->output?-1:x->output>y->output;
+}
+NSDictionary<NSString *,NSData *> *MetalViewBlockGather(const int32_t *order,size_t count,
+    const int32_t *selected,size_t selectedCount,NSUInteger block) {
+    if(selectedCount) {
+        const NSInteger step=selectedCount>1?(NSInteger)selected[1]-selected[0]:1;
+        BOOL affine=step!=0;
+        for(size_t i=1;affine&&i<selectedCount;i++)affine=selected[i]==(NSInteger)selected[0]+(NSInteger)i*step;
+        if(affine)return MetalViewBlockSlice(order,count,selected[0],(NSInteger)selected[selectedCount-1]+step,step,block);
+    }
+    MetalViewSelection *entries=malloc(selectedCount*sizeof *entries);
+    for(size_t i=0;i<selectedCount;i++)entries[i]=(MetalViewSelection){selected[i],(int32_t)i};
+    qsort(entries,selectedCount,sizeof *entries,MetalViewSelectionCompare);
+    NSUInteger copies=0;
+    for(size_t first=0;first<selectedCount;) {
+        size_t end=first+1;while(end<selectedCount&&entries[end].value==entries[first].value)end++;
+        copies=MAX(copies,end-first);first=end;
+    }
+    NSDictionary *result=MetalViewBlockSelection(order,count,block,copies,^int32_t(int32_t value,NSUInteger copy) {
+        size_t lo=0,hi=selectedCount;
+        while(lo<hi){size_t mid=lo+(hi-lo)/2;if(entries[mid].value<value)lo=mid+1;else hi=mid;}
+        const size_t at=lo+copy;
+        return at<selectedCount&&entries[at].value==value?entries[at].output:-1;
+    });
+    free(entries);return result;
 }
 
 NSData *MetalViewTiles(const NSUInteger *shape,size_t rank,NSUInteger elements) {

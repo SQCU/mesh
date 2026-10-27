@@ -473,7 +473,8 @@ def spec_instance(spec, T, widths, finish=False, masked=False):
     """An instance's host name and instantiation (spec_arguments)."""
     kernel, arguments = spec_arguments(spec, T, widths, finish)
     if masked:
-        arguments += ('half', 1) if kernel == 'panel' else (1,)
+        arguments += (('streamed_plain', 'half', 1) if kernel == 'alu'
+                      else ('half', 1) if kernel == 'panel' else (1,))
     return instance('streamed_' + kernel, *arguments)
 
 

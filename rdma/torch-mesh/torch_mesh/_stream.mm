@@ -1713,14 +1713,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     TORCH_CHECK(shape.size()==strides.size()&&shape.size()==required.size(),"a layout needs one stride per axis");
     return bool(MetalViewLayoutMatches(shape.data(),strides.data(),required.data(),shape.size()));
   });
-  module.def("view_block_slice", [](const std::vector<int32_t> &order,NSInteger first,NSInteger end,NSInteger step,NSUInteger block) {
-    auto result=MetalViewBlockSlice(order.data(),order.size(),first,end,step,block);
+  auto viewSelection=[](NSDictionary *result) {
     auto values=[](NSData *data) {
       std::vector<int32_t> words(data.length/sizeof(int32_t));
       if(data.length)memcpy(words.data(),data.bytes,data.length);
       return words;
     };
     return std::make_pair(values(result[@"blocks"]),values(result[@"order"]));
+  };
+  module.def("view_block_slice", [viewSelection](const std::vector<int32_t> &order,NSInteger first,NSInteger end,NSInteger step,NSUInteger block) {
+    return viewSelection(MetalViewBlockSlice(order.data(),order.size(),first,end,step,block));
+  });
+  module.def("view_block_gather", [viewSelection](const std::vector<int32_t> &order,const std::vector<int32_t> &selected,NSUInteger block) {
+    return viewSelection(MetalViewBlockGather(order.data(),order.size(),selected.data(),selected.size(),block));
   });
   module.def("view_tiles", [](const std::vector<NSUInteger> &shape,NSUInteger elements) {
     using Tile=std::pair<std::vector<NSUInteger>,std::vector<NSUInteger>>;

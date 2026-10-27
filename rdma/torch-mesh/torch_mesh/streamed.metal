@@ -511,7 +511,7 @@ static inline __attribute__((always_inline)) void fragment_walk(device const uin
 // the epilogue E) or finished (OUT 1, one share covering K: each with its row's scale, capped where cap > 0, at row
 // order[r] of ys, row stride d.stride). Rows past d.rows repeat the last row's loads and are not written. LOADS:
 // fragment_load's; H: fragment_walk's (0 the fp32 sums, else the fp16 pair sums added into them every H tiles).
-template <uint R, uint SK, uint BANDS, uint J, uint TILES, uint WIDTHS, uint OUT, uint LUT, uint F, uint LOADS, uint H, typename E = streamed_plain, typename Output = half>
+template <uint R, uint SK, uint BANDS, uint J, uint TILES, uint WIDTHS, uint OUT, uint LUT, uint F, uint LOADS, uint H, typename E = streamed_plain, typename Output = half, bool Masked = false>
 kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
                          device const uint *bands [[buffer(2)]], device const float *tables [[buffer(3)]],
                          device const half *xs [[buffer(4)]], device float *partials [[buffer(5)]],
@@ -543,8 +543,10 @@ kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const ui
         for (uint s = 0; s < SK; s++) total += sums[at][s][n][r];
         const uint output = (group.x * BANDS + at) * 32 + r;
         if (OUT == 0) { stores[mesh_index<5>(ulong(group.y) * d.split + n * d.outputs + output)] = total; continue; }
+        const int target = order[mesh_index<12>(output)];
+        if (Masked && target < 0) continue;
         const float value = rowScale[mesh_index<13>(output)] * total;
-        ys[mesh_index<11>(ulong(n) * d.stride + uint(order[mesh_index<12>(output)]))] = Output(streamed_capped(value, d.cap));
+        ys[mesh_index<11>(ulong(n) * d.stride + uint(target))] = Output(streamed_capped(value, d.cap));
     }
     if (OUT == 0) epilogue.after(mesh_view<E::input_binding>(E::input_binding == 5 ? stores : (typename E::partials)consumer), mesh_view<12>(order), mesh_view<13>(rowScale), arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * SK * 32, produced, producing);
 }

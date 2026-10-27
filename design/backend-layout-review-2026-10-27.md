@@ -471,3 +471,45 @@ interface. It does not close compressed row cuts, nonrotated partial blocks,
 encoded-coordinate basis cuts, or the ragged FFN/head planner's old view
 restrictions. Those consumers still need the logical domain and encoded block
 selection carried together. General FX page placement also remains open.
+
+## Native logical cuts and consumer dimensions
+
+Recorded: 2026-10-27T23:52:15Z. Native matrices now carry logical output rows
+separately from retained encoded lanes. The shared block selector serves both
+normalized slices and explicit gathers. It composes reordered and repeated
+selections through masked metadata; ordinary arithmetic selections retain the
+linear slice algorithm. Native cuts keep contiguous metadata as views and
+gather other metadata without copying code planes.
+
+The ordinary loader consumes lists of output ranges. The single-range filter,
+whole-band gather implementation and permutation-confinement checks are gone
+from this path. Attention head shares and vocabulary shares use the same
+logical cuts, including partial blocks and rotated attention-output inputs.
+Row-only cuts share their prepared input storage.
+
+`StreamedProduct` always exposes the declared logical row view through prepared
+inverse indices. Fused and standalone consumers receive those same indices
+and dependencies. The producer's encoded store dimensions and the consumer's
+logical reduction dimensions are now distinct operands. Direct ALU and panel
+stores specialize the excluded-lane mask. The coupled FFN names its encoded
+coordinate order explicitly instead of inheriting it from the absence of a
+consumer declaration.
+
+Attention and per-layer placement now carry destination pitch separately from
+logical width. Attention's write accesses follow its actual destination map.
+Missing encoded input lanes are constant zeros prepared with their storage;
+masked gathers also write zero into those lanes. There is no runtime clearing
+pass, new submission boundary, or data-layout planner.
+
+The shared library, extension and native rank/goal-a builds completed. Compiler
+preparation covered masked ALU/panel stores, normalized gathers, fused head and
+per-layer consumers with smaller logical domains, and standalone consumers.
+Metadata inspection covered disjoint, repeated and composed reverse row
+selections. No numerical commands, benchmarks or unit suites ran.
+
+The coupled FFN's whole-block and encoded-basis restrictions remain. Stored
+GGUF partial blocks, signed/arbitrary basis selection, general FX page
+placement and the later 2/3/6 integration work remain open. Repeated selections
+currently repeat block references; sharing their numerical producers also
+remains work. These changes do not establish runtime performance or complete
+item 9.
