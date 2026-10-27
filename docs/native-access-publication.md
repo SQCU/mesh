@@ -81,6 +81,8 @@ The routing compiler can choose a different order using the same interface.
 ## Validation
 
 The shared library and Torch extension built. The matrix producer prepared a 131 by 257 by
-259 product with row tiles of 64, 64 and 3, without numerical submission. Native integration
-build and complete graph preparation are recorded with the implementation commit. Build and
-preparation results do not establish an end-to-end latency/useful-throughput improvement.
+259 product with row tiles of 64, 64 and 3, without numerical submission. The native/LiteRT
+rank built; Metal compiled the standalone and fused native head producers. The existing FX
+transformer forward/backward graph also prepared at batch 2, sequence 1,024 and width 2,048.
+No distributed numerical run was launched. These build and preparation results do not establish
+an end-to-end latency/useful-throughput improvement.

@@ -28,7 +28,7 @@ class DNN:
         self.pairs = [(a, b) for a in range(group.size()) for b in range(group.size()) if a != b]
         self.landing = [[torch_mesh.empty(B, H) for _ in self.pairs] for _ in range(L)]
         peers = group.size() - 1
-        inputs = ', '.join(f'volatile coherent(system) device const float *p{k} [[buffer({k + 1})]]' for k in range(peers))
+        inputs = ''.join(f'volatile coherent(system) device const float *p{k} [[buffer({k + 1})]], ' for k in range(peers))
         addition = ' + '.join(['own[i]'] + [f'mesh_payload(p{k} + i)' for k in range(peers)])
         vectors = ' + '.join(['((device const float4 *)own)[i / 4]'] +
                              [f'mesh_payload((volatile coherent(system) device const float4 *)p{k} + i / 4)' for k in range(peers)])
@@ -43,7 +43,7 @@ class DNN:
     atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
 '''
         source = fused.steps() + f'#define CHANNELS {self.channels}\n' + f'''
-kernel void fold(device const float *own [[buffer(0)]], {inputs}, device float *out [[buffer({peers + 1})]],
+kernel void fold(device const float *own [[buffer(0)]], {inputs}device float *out [[buffer({peers + 1})]],
                  constant uint *s [[buffer({peers + 2})]], uint2 pos [[thread_position_in_grid]],
                  uint local [[thread_index_in_threadgroup]], uint2 grid [[threads_per_grid]],
                  uint2 group [[threadgroup_position_in_grid]]) {{
@@ -84,11 +84,12 @@ kernel void fold(device const float *own [[buffer(0)]], {inputs}, device float *
                 partial = self.partial[layer].narrow(0, first, rows)
                 landings = [t.narrow(0, first, rows) for t in self.landing[layer]]
                 tiles = row_tiles(rows)
-                ready = torch_mesh.empty(len(tiles), dtype=torch.int64)
-                arrivals = torch_mesh.empty(len(tiles), dtype=torch.int32)
-                host(ready).zero_(); host(arrivals).zero_()
+                ready = torch_mesh.empty(len(tiles), dtype=torch.int64) if self.pairs else None
+                arrivals = torch_mesh.empty(len(tiles), dtype=torch.int32) if self.pairs else None
+                if ready is not None:
+                    host(ready).zero_(); host(arrivals).zero_()
                 words = [partial.numel(), H, tiles[0][1], 0]
-                for index, (at, count) in enumerate(tiles):
+                for index, (at, count) in enumerate(tiles if self.pairs else ()):
                     crossing = fused.writes(schedule, partial.narrow(0, at, count),
                         [t.narrow(0, at, count) for t in landings], self.pairs, self.group,
                         ready=ready.narrow(0, index, 1), ready_value=count * H * partial.element_size())
