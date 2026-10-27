@@ -490,11 +490,11 @@ static inline __attribute__((always_inline)) void fragment_walk(device const uin
             fragment_x<H> x1[R][4];
             if ((wa >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK) fragment_fetch<R, WIDTHS, LUT, LOADS>(wa, planes, xs, columns, rows, ta * 32 + kb, w, x);
             if ((wc >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK) fragment_fetch<R, WIDTHS, LUT, LOADS>(wc, planes, xs, columns, rows, tc * 32 + kb, w1, x1);
-            if ((wa >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK) fragment_use<R, WIDTHS, LUT, H>(wa, w, x, tables + (ta * 8 + kb) * 16, columns * 4, acc, t, corr);
-            if ((wc >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK) fragment_use<R, WIDTHS, LUT, H>(wc, w1, x1, tables + (tc * 8 + kb) * 16, columns * 4, acc, t, corr);
+            if ((wa >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK) fragment_use<R, WIDTHS, LUT, H>(wa, w, x, tables + ta * MESH_STREAMED_LUT_ENTRIES + kb * 16, columns / MESH_WEIGHT_ROW_GROUP * MESH_STREAMED_LUT_ENTRIES, acc, t, corr);
+            if ((wc >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK) fragment_use<R, WIDTHS, LUT, H>(wc, w1, x1, tables + tc * MESH_STREAMED_LUT_ENTRIES + kb * 16, columns / MESH_WEIGHT_ROW_GROUP * MESH_STREAMED_LUT_ENTRIES, acc, t, corr);
         } else if ((wa >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK) {
             fragment_fetch<R, WIDTHS, LUT, LOADS>(wa, planes, xs, columns, rows, ta * 32 + kb, w, x);
-            fragment_use<R, WIDTHS, LUT, H>(wa, w, x, tables + (ta * 8 + kb) * 16, columns * 4, acc, t, corr);
+            fragment_use<R, WIDTHS, LUT, H>(wa, w, x, tables + ta * MESH_STREAMED_LUT_ENTRIES + kb * 16, columns / MESH_WEIGHT_ROW_GROUP * MESH_STREAMED_LUT_ENTRIES, acc, t, corr);
         }
         if constexpr (H > 0)
             if ((i + F) % H == 0 || i + F >= STEPS) fragment_flush<R>(acc, t);
@@ -511,11 +511,11 @@ static inline __attribute__((always_inline)) void fragment_walk(device const uin
 // the epilogue E) or finished (OUT 1, one share covering K: each with its row's scale, capped where cap > 0, at row
 // order[r] of ys, row stride d.stride). Rows past d.rows repeat the last row's loads and are not written. LOADS:
 // fragment_load's; H: fragment_walk's (0 the fp32 sums, else the fp16 pair sums added into them every H tiles).
-template <uint R, uint SK, uint BANDS, uint J, uint TILES, uint WIDTHS, uint OUT, uint LUT, uint F, uint LOADS, uint H, typename E = streamed_plain>
+template <uint R, uint SK, uint BANDS, uint J, uint TILES, uint WIDTHS, uint OUT, uint LUT, uint F, uint LOADS, uint H, typename E = streamed_plain, typename Output = half>
 kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
                          device const uint *bands [[buffer(2)]], device const float *tables [[buffer(3)]],
                          device const half *xs [[buffer(4)]], device float *partials [[buffer(5)]],
-                         device half *ys [[buffer(11)]], device const int *order [[buffer(12)]],
+                         device Output *ys [[buffer(11)]], device const int *order [[buffer(12)]],
                          device const float *rowScale [[buffer(13)]], device atomic_uint *arrivals [[buffer(14)]],
                          constant streamed_dims &dims [[buffer(15)]], constant E &epilogue [[buffer(16)]],
                          device ulong *produced [[buffer(17)]], device atomic_uint *producing [[buffer(18)]],
@@ -542,8 +542,8 @@ kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const ui
         for (uint s = 0; s < SK; s++) total += sums[at][s][n][r];
         const uint output = (group.x * BANDS + at) * 32 + r;
         if (OUT == 0) { stores[mesh_index<5>(ulong(group.y) * d.split + n * d.outputs + output)] = total; continue; }
-        const float value = rowScale[output] * total;
-        ys[mesh_index<11>(ulong(n) * d.stride + uint(order[output]))] = half(streamed_capped(value, d.cap));
+        const float value = rowScale[mesh_index<13>(output)] * total;
+        ys[mesh_index<11>(ulong(n) * d.stride + uint(order[mesh_index<12>(output)]))] = Output(streamed_capped(value, d.cap));
     }
     if (OUT == 0) epilogue.after(mesh_read<5>(stores), mesh_read<12>(order), mesh_read<13>(rowScale), arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * SK * 32, produced, producing);
 }
@@ -823,11 +823,11 @@ kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *fir
         }
         if (tabled) {
             threadgroup_barrier(mem_flags::mem_threadgroup);
-            if (thread_id < 128) {
+            if (thread_id < MESH_STREAMED_LUT_ENTRIES) {
                 const uint kb = thread_id >> 4, m = thread_id & 15u;
                 float sum = 0.0f;
                 for (uint j = 0; j < 4; j++) if ((m >> j) & 1u) sum += values[kb + 8 * j];
-                tables[mesh_index<8>((ulong(n) * (columns / 32) + group) * 128 + thread_id)] = sum;
+                tables[mesh_index<8>((ulong(n) * (columns / MESH_WEIGHT_ROW_GROUP) + group) * MESH_STREAMED_LUT_ENTRIES + thread_id)] = sum;
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
         }
@@ -1197,10 +1197,10 @@ static inline __attribute__((always_inline)) void fragment_panel(device const ui
 // panels cover K): each value with its row's scale, capped (cap > 0), at row order[r] of ys (row stride d.stride). A
 // last panel past the matrix's width adds its tail element by element (a tensor operation's slice past its operand is
 // not clipped).
-template <uint M, uint TILES, uint WIDTHS, uint LOADS>
+template <uint M, uint TILES, uint WIDTHS, uint LOADS, typename Output = half>
 kernel void streamed_panel(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
                            device const uint *bands [[buffer(2)]], device const half *xs [[buffer(4)]],
-                           device float *partials [[buffer(5)]], device half *ys [[buffer(11)]],
+                           device float *partials [[buffer(5)]], device Output *ys [[buffer(11)]],
                            device const int *order [[buffer(12)]], device const float *rowScale [[buffer(13)]],
                            constant streamed_dims &dims [[buffer(15)]], uint2 group [[threadgroup_position_in_grid]],
                            uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
@@ -1255,8 +1255,8 @@ kernel void streamed_panel(device const uint *codes [[buffer(0)]], device const 
         const uint n = row0 + uint(e[1]), r = group.x * 32 + uint(e[0]);
         if (n >= rows) continue;
         if (finish == 0) { partials[mesh_index<5>(ulong(share) * stride + ulong(n) * outputs + r)] = acc[i]; continue; }
-        const float value = rowScale[r] * acc[i];
-        ys[mesh_index<11>(ulong(n) * stride + uint(order[r]))] = half(streamed_capped(value, cap));
+        const float value = rowScale[mesh_index<13>(r)] * acc[i];
+        ys[mesh_index<11>(ulong(n) * stride + uint(order[mesh_index<12>(r)]))] = Output(streamed_capped(value, cap));
     }
 }
 

@@ -286,3 +286,32 @@ splitting, opaque collective marks that join prior host records, and packaged
 LiteRT arena views remain open. Core ML only proposes output backings; the
 runtime still reports a provider that declines them. These limits must remain
 visible rather than being described as complete general lowering.
+
+## The same loss of dataflow in other scopes
+
+Recorded: 2026-10-27T21:29:36Z. Carrying a shape, type or mapping once lets us
+remove later code that guesses it again. Storage, shader indices and access
+records then consume the same facts. Compiler performance work should expose
+and remove these duplicate algorithms, along with the copies and ordering they
+can add.
+
+| Scope | Removed reconstruction or disagreement | Carried relation |
+|---|---|---|
+| Native coded outputs | `placedView` scanned a row permutation to invent the destination width. Fused products did not specialize their stores for that destination's strides or type. | `streamedProgram` requires `MatrixView`. Fused and separate finish commands consume its shape, indexing and type. ALU and panel finishes support the declared fp16/fp32 output without a conversion command. All native callers supply the view. |
+| Column views and direct landing | `colInverse` and `heldColScale` subtracted offsets to recover a parent that was no longer an operand. A selected column count and a separately carried origin could disagree. Attention wrote using parent indices while publishing a local interval. | `StreamedColumns` retains its stored domain and selected interval. Matrix column count comes from that interval. Its prepared inverse and scale address the local landing; the consumer reads that same local value. |
+| Coded byte dependencies | `weightReaches` used the first and last tile to guess one code span. Reordered tiles or holes invalidate that bound. | Preparation takes each selected tile's declared code range and merges their exact union. It does not read or repack weight values. |
+| Immutable inverse reuse | The cache key named only a buffer address and offset. It omitted permutation extent and coordinate origin and did not retain the source allocation. | The key retains the typed source view and origin. Different declared domains cannot silently reuse one inverse. |
+| Writable product results | `Generation.derived` cached accumulators and transform tables by matrix/shape keys. It allocated them for registered matrices before a product needed them, and could give unrelated producers one writable buffer. | Each `StreamedProduct` owns its declared partial-sum value at the actual row/share shape. Transform tables are shaped operands; sharing between consumers is explicit. The writable cache, its registration allocations and its row-class bookkeeping are removed. Immutable code and pipeline sharing remain. |
+| FX collective result binding | A new crossing result discarded its known strides and allocated packed storage. | Binding allocates the declared shape and strides when no earlier placement or alias supplies storage. |
+
+The library, Python extension, native rank and goal-a build. Preparation compiled
+fused ALU/panel finishes with mapped destinations and both output types, plus
+the rotation table producer and consumer. No numerical dispatch, performance
+run or unit suite was launched.
+
+This sweep does not yet give compressed logical cuts their general lowering.
+The existing alignment, permutation and rotation restrictions remain visible.
+The weight-owned transformed-input buffers also remain distinct work from the
+removed partial-sum cache. Arbitrary page maps, exact grouped-tail tensor views,
+global lifetime-based storage assignment and the previously listed provider
+and dependency gaps still require integration.

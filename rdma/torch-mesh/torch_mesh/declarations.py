@@ -318,7 +318,7 @@ class BoundGraph:
     def __init__(self, graph, arguments, group, configuration, destinations=None):
         from torch.fx.node import map_arg
         from torch.utils._pytree import tree_map, tree_flatten
-        from . import backend, empty
+        from . import backend
         from .native import empty_strided
         from .placement import Placements, alias, same_view
         # Waiting on a functional collective describes its result edge. The
@@ -399,7 +399,7 @@ class BoundGraph:
                     for described, value in aliases:
                         if torch._C._is_alias_of(metadata, described):
                             return alias(described, value, metadata)
-                    return empty(tuple(metadata.shape), dtype=metadata.dtype, device=metadata.device.type)
+                    return empty_strided(tuple(metadata.shape), tuple(metadata.stride()), metadata.dtype, metadata.device.type)
                 return tree_map(bind, _value(n))
             crossing = next((n for n in module.graph.nodes if _bound(n)), None)
             if crossing is None:

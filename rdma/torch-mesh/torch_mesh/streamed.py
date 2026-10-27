@@ -834,7 +834,7 @@ class Matrix(torch.Tensor):
         y = _half(n, self.rows)
         y, = _encode(name, self._code() + [None, xt, None, None, None, None, None, None, y, self.row_order, self.row_scale],
                 _dims(tiles=self.tiles_, outputs=self.rows, rows=n, per=-(-self.tiles_ // COMPUTE['STREAMED_PANEL_TILES']), stride=self.rows, finish=1,
-                      pitch=self.pitch), gx, gy, threads, line, outputs=(11,), pitched=(1,))
+                      pitch=self.pitch), gx, gy, threads, line, outputs=(11,), indexed=(12, 13), pitched=(1,))
         return y
 
     def times(self, x):
