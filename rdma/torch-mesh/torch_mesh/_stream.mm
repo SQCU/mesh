@@ -1728,14 +1728,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
       tiles.push_back({{words+i,words+i+shape.size()},{words+i+shape.size(),words+i+2*shape.size()}});
     return tiles;
   });
-  module.def("view_indices", [](const std::vector<std::tuple<NSUInteger,std::vector<NSUInteger>,std::vector<NSInteger>,NSUInteger>> &bindings) {
+  using ViewAxisMaps=std::map<NSUInteger,std::map<NSUInteger,std::vector<NSInteger>>>;
+  module.def("view_indices", [](const std::vector<std::tuple<NSUInteger,std::vector<NSUInteger>,std::vector<NSInteger>,NSUInteger>> &bindings,
+                              const ViewAxisMaps &mapped) {
     NSMutableString *source=[NSMutableString stringWithString:MetalViewIndexPrelude()];
     for(const auto &[binding,shape,strides,offset]:bindings) {
       TORCH_CHECK(shape.size()==strides.size(),"an index view needs one stride per axis");
-      [source appendString:MetalViewIndexDeclaration(binding,shape.data(),strides.data(),shape.size(),offset)];
+      NSMutableDictionary *maps=[NSMutableDictionary dictionary];
+      auto found=mapped.find(binding);
+      if(found!=mapped.end())for(const auto &[axis,values]:found->second)
+        maps[@(axis)]=[NSData dataWithBytes:values.data() length:values.size()*sizeof(NSInteger)];
+      [source appendString:MetalViewMappedIndexDeclaration(binding,shape.data(),strides.data(),shape.size(),offset,maps)];
     }
     return std::string(source.UTF8String);
-  });
+  },pybind11::arg("bindings"),pybind11::arg("maps")=ViewAxisMaps{});
   module.def("view_index", [](const std::vector<NSUInteger> &shape,const std::vector<NSInteger> &strides,const std::string &index) {
     TORCH_CHECK(shape.size()==strides.size(),"an index view needs one stride per axis");
     return std::string([MetalViewIndexExpression(shape.data(),strides.data(),shape.size(),@(index.c_str())) UTF8String]);

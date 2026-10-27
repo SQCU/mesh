@@ -77,6 +77,17 @@ NSDictionary<NSString *, NSData *> *MetalViewBlockSlice(const int32_t *order, si
     NSInteger first, NSInteger end, NSInteger step, NSUInteger block);
 NSString *MetalViewIndexDeclaration(NSUInteger binding, const NSUInteger *shape, const NSInteger *strides,
     size_t rank, NSUInteger elementOffset);
+// Axis maps contain signed offsets, in the same units as strides. A mapped
+// axis replaces that axis's multiplication by stride. Maps are consumed at
+// preparation: generated shaders contain arithmetic or one immutable lookup.
+// Normalize affine maps into strides and a base offset before API binding.
+NSDictionary<NSString *, id> *MetalViewNormalizeAxes(const NSInteger *strides, size_t rank,
+    NSDictionary<NSNumber *, NSData *> *maps);
+NSString *MetalViewMappedIndexDeclaration(NSUInteger binding, const NSUInteger *shape, const NSInteger *strides,
+    size_t rank, NSUInteger elementOffset, NSDictionary<NSNumber *, NSData *> *maps);
+NSData *MetalViewMappedReaches(id<MTLBuffer> buffer, NSUInteger offset, const NSUInteger *shape,
+    const NSInteger *strides, size_t rank, NSUInteger elementBytes, uint32_t access, int32_t binding,
+    NSDictionary<NSNumber *, NSData *> *maps);
 // Preparation only: carry declared page accesses across encoders on the supplied
 // queue. Prepare and enqueue its functions in the same order. Disjoint ranges
 // add no dependency. Transport uses this declaration for its shared counters.

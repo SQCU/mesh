@@ -349,3 +349,36 @@ restrictions. Its consumers must carry these same logical domains before
 those restrictions can be removed. Signed/reversed basis views also need the
 common arbitrary-index lowering; this change does not provide that lowering.
 The other open items above remain open.
+
+## Native mapped operands and exact grouped tails
+
+Recorded: 2026-10-27T22:13:58Z. Native compressed consumers need gathered views
+of their producer's encoded rows. `TensorView` now carries signed offsets for
+declared axes as well as strides. Gather, slice, element and permutation
+operations compose that metadata during preparation and preserve storage.
+
+`MetalViewNormalizeAxes` removes maps that are affine, so they do not cause
+extra copies at a strided API boundary. `MetalViewMappedIndexDeclaration`
+reduces grouped maps to arithmetic and emits immutable tables for irregular
+maps. `MetalViewMappedReaches` computes the exact union of the same addresses.
+The Swift bindings and Python index-source generator use these shared helpers.
+Copy and reduction commands retain their numerical bodies.
+
+`MatrixView.tensor` now reports the actual row count of a grouped view. Its
+final short group no longer becomes extra logical rows. Core ML preparation
+accepts normalized affine views directly and prepares tiled materialization
+for a genuinely non-affine operand. The coded finish's publication builder
+also consumes its declared order view, including its map; it previously kept
+only that view's stride.
+
+The library, extension and native rank/goal-a build. Preparation compiled page
+gather/scatter and grouped-tail reduction shaders. It confirmed that grouped
+row indexing becomes arithmetic, irregular byte spans remain disjoint, and a
+reversed affine map becomes a signed stride. No numerical dispatch or metric
+run took place.
+
+This supplies native consumers with the missing representation. It does not
+yet remove the compressed-slice restrictions. The FX placement binder also
+still needs to carry non-affine layouts through aliases and command accesses;
+exposing them in index-source generation alone does not complete that path.
+Nonseparable page maps, producer splitting and the other open items remain.

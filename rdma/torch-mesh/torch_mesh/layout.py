@@ -27,9 +27,9 @@ def _matches(shape, steps, required):
     return all(n <= 1 or a == b for n, a, b in zip(shape, steps, required, strict=True))
 
 
-def index_source(bindings):
+def index_source(bindings, maps=None):
     """Specialize numerical indexing; no layout descriptor survives this pass."""
-    return _stream.view_indices(bindings)
+    return _stream.view_indices(bindings, maps or {})
 
 
 def place(graph, placements, fixed):
