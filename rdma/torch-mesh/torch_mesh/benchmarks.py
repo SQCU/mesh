@@ -84,7 +84,7 @@ def bandwidth(config):
         started = now()
         binding.enqueue()
         completion = binding.completion()
-        observer[0].put((completion, {'episode': str(index), 'parts': {}, 'graphs': {}, 'costs': {},
+        observer[0].put((completion, {'episode': str(index), 'parts': {}, 'graphs': {}, 'proposal': 0,
             'workload': {'collective': what, 'bytes': requested, 'calls': calls}, 'implementation': 'loaded-program',
             'started': started, 'rank': rank, 'size': size, 'useful_work_bytes': useful * calls,
             'report': {'what': what, 'requested_bytes': requested, 'calls': calls,

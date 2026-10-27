@@ -13,6 +13,7 @@ from torch_mesh.backend import BROADCAST, Call
 from torch_mesh.declarations import Function, execution_sequence
 from torch_mesh.configuration import placement, bind, record
 from torch_mesh import _stream
+from torch_mesh.compilation import parameters
 from mesh_statistics import now
 
 import chain
@@ -50,7 +51,9 @@ def main():
     partition.attach(mesh, tp=H)
     configuration = placement(mesh, 'tp', {'function': 'lstm_sequence', 'layers': L, 'input_width': KIN,
                                         'width': H, 'steps': steps, 'rows': rows},
-                            config['observations'])
+                            config['observations'], parameters={**parameters(), **config['parameters']})
+    chosen = configuration['assignment']['operands']
+    compiler = {'LINEAR_ROW_CROSSOVER': chosen['LINEAR_ROW_CROSSOVER']}
     shape = lambda l: (4, H, (KIN if l == 0 else H) + H)
     split = lambda t: partition.distribute_tensor(t, mesh, [Shard(1)], src_data_rank=0)
     held = held or [(torch_mesh.empty(1, 1, shape(l)[2], dtype=torch.half).expand(shape(l)),
@@ -59,16 +62,16 @@ def main():
     del held
     X = torch_mesh.empty(steps, rows, KIN, dtype=torch.half)
     O = torch_mesh.empty(steps, rows, H, dtype=torch.half) if rank == 0 else None
-    t, k = torch.empty(1, dtype=torch.int64, device='mps').fill_(L - 1), config['steps_per_replay']
+    t, k = torch.empty(1, dtype=torch.int64, device='mps').fill_(L - 1), chosen['steps_per_replay']
     group = mesh.get_group('tp')
     full, rest = divmod(steps, k)
     chunks = [k] * full + [rest] * bool(rest)
     functions = {}
     for count in dict.fromkeys(chunks):
-        function = Function(tick.stepper(X, O, count), t)
+        function = Function(tick.stepper(X, O, count), t, configuration=compiler)
         function.declare(group)
         functions[count] = function
-    initial = [Function(tick.starting, s, X[s]) for s in range(L - 1)]
+    initial = [Function(tick.starting, s, X[s], configuration=compiler) for s in range(L - 1)]
     for function in initial:
         function.declare(group)
     ordered = [*initial, *(functions[count] for count in chunks)]

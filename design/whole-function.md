@@ -318,23 +318,44 @@ another, despite those cables having the same release dependencies.
 
 ## Numerical operands
 
-`assignment.assign(decisions, observations)` uses bounded linear shares. The compiler rounds compute shares to
+`assignment.assign(decisions, observations, step=proposal)` uses bounded linear shares. The compiler rounds compute shares to
 whole tiles and path shares to Q40 units. Projection preserves each declared total. The numerical fits have positive
 regularization; they use neither logarithms of shares nor division by a share that can vanish.
 
 A compute share starts from declared capacity, with equal capacity where none is known. Torch configuration reads
 each node's GPU core count as a prior, not as a performance measurement. Every solve fits fixed and work-dependent
 costs from complete-call observations. A fixed cost per code version separates changes in the implementation from
-changes in its operands. Resource samples, when already present in the input records, constrain the same fit.
-The affine envelope is an estimate of whole-call cost by work share. It is not an isolated measurement of arithmetic.
+changes in its operands. The duration of each complete call fits the stage envelope directly; the model does not
+require an optional list of per-operation costs. The affine envelope estimates whole-call cost by work share. Its
+coefficient variances retain uncertainty where the completed calls cannot distinguish two resource costs.
 
 The historical equal-finish solver rounds the fitted allocation. Whole-call finite differences move all compute
-and route coordinates together. A diminishing perturbation supplies new observations. No result is accepted or
+and route coordinates together. Compiler parameters use the same vector. An explicit proposal ordinal advances
+the paired perturbations; retaining only a bounded history cannot freeze their direction or radius. Each compute
+or route axis carries its realization grain, so a perturbation can still cross a compiler rounding boundary. No result is accepted or
 rejected as a candidate. There is no saved controller or hidden solver lifecycle to restore. The saved data is what
 ran, its actual operands, and its measured completion interval.
 
 This is an empirical local solver. A small residual, a compiled plan, or a capacity prior does not establish a global
 optimum. The required evidence remains lower whole-function elapsed time and higher useful output per second.
+
+The compiler retains the newest configured number of observations by proposal ordinal. Arrival order cannot
+rename an old proposal or turn it into the next finite difference. Regression weights combine the observation's
+explicit importance, its distance from the current operand vector, and the width of its completion interval.
+The coefficient fit and residual fit are regularized. Analytic derivatives avoid a new objective evaluation for
+every routing coordinate. The only outcome sent to preparation is the next bounded vector and its cost estimates.
+
+`etc/compute/parameters.json` declares the FX linear/matrix crossover domain. The chain, LSTM and DNN
+configuration operands declare replay grouping, input publication grouping, resident tile threshold and DNN
+row grouping where those apply. The demos consume the returned values before building their commands. The
+hourly supplies those same configuration documents and calls the demos.
+
+The fitted per-source envelope also informs producer scheduling. `producer_seconds` maps declared holder groups
+to physical ranks. Preparation divides that envelope across the actual repeated producer groups, and the shared
+`ncclMeshProductionTimes` function maps each group's existing traversal onto that interval. Both Torch and native
+call it before `ncclMeshCommPlan`. These are inferred release times used to order descriptors, not measured tile
+completion times. Actual publications remain the data dependencies. No timer, wait or polling operation is added.
+The initial graph has its declared traversal and no measured time distinction.
 
 ## Compilation
 

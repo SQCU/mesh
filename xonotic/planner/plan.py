@@ -82,7 +82,9 @@ def main():
                       'experts': EXPERTS, 'columns': columns[rank]}), flush=True)
     start = ready = time.monotonic()
     for tick in range(args.ticks):
-        proposal = assignment.assign(decisions, observations)
+        proposal = assignment.assign(decisions, observations, step=tick)
+        for key, values in proposal['parts'].items():
+            decisions[key]['parts'] = values
         shares = proposal['parts']['columns']
         assignment.install(comm.comm, proposal['parts'], 'world')
         declare(comm.comm, calls)
@@ -109,7 +111,8 @@ def main():
         previous = {'proposal': proposal, 'seconds': time.monotonic() - function_started}
         if feedback is not None:
             observations.append({'parts': feedback[0]['parts'], 'seconds': feedback[1],
-                                 'implementation': 'loaded-program', 'costs': {}})
+                                 'implementation': 'loaded-program', 'proposal': feedback[0]['proposal']})
+            observations[:] = assignment.window(observations)
     elapsed = time.monotonic() - start
     comm.Free()
     print(json.dumps({'event': 'planner_finished', 'rank': rank, 'ticks': args.ticks,

@@ -14,6 +14,7 @@ from torch_mesh import partition
 from torch_mesh.attention import attention
 from torch_mesh.partition import ColwiseParallel, RowwiseParallel, SequenceParallel
 from torch_mesh.configuration import placement, bind, record
+from torch_mesh.compilation import parameters
 from mesh_statistics import now
 
 DIM, HEADS, FFN, LAYERS, BATCH, SEQ = 2048, 16, 5632, 4, 2, 1024
@@ -102,7 +103,7 @@ def main():
     configuration = placement(mesh, 'tp',
         {'function': 'transformer_forward_backward', 'steps': STEPS, 'layers': LAYERS, 'batch': BATCH,
          'sequence': SEQ, 'width': DIM, 'heads': HEADS, 'ffn': FFN, 'sequence_parallel': SP},
-        os.environ.get('MESH_OBSERVATIONS', '~/.cache/mesh/observations/tp.jsonl'))
+        os.environ.get('MESH_OBSERVATIONS', '~/.cache/mesh/observations/tp.jsonl'), parameters=parameters())
     with torch.device("meta"):
         model = nn.Sequential(*(Block() for _ in range(LAYERS)))
         whole = torch.empty(BATCH, SEQ, DIM)

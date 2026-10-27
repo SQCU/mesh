@@ -58,13 +58,14 @@ def main():
     mesh = DeviceMesh.from_group(dist.group.WORLD, 'mps', mesh_dim_names=('tp',))
     partition.attach(mesh, tp=width)
     configuration = placement(mesh, 'tp', {'function': 'chain_sequence', 'width': width, 'steps': steps, 'rows': rows},
-                            config['observations'])
-    k = config['steps_per_replay']
+                            config['observations'], parameters=config['parameters'])
+    chosen = configuration['assignment']['operands']
+    k = chosen['steps_per_replay']
     a, b = chain.weights(mesh, folds, width)
     del folds
     E, O = (torch_mesh.empty(steps, rows, width, dtype=torch.half) for _ in range(2))
     group = mesh.get_group('tp')
-    groups, operands = sequence.operands(a, b, E, O, group, k, config['resident_tiles'], config['input_frames'], capabilities)
+    groups, operands = sequence.operands(a, b, E, O, group, k, chosen['resident_tiles'], chosen['input_frames'], capabilities)
     if rank == 0:
         E.copy_(torch.from_numpy(inputs[:]))
     torch_mesh.check_memory()

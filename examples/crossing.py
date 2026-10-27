@@ -40,7 +40,7 @@ def main():
     started = now()
     function.run()
     completion = function.completion()
-    observer[0].put((completion, {'episode': '0', 'parts': {}, 'costs': {}, 'graphs': {},
+    observer[0].put((completion, {'episode': '0', 'parts': {}, 'proposal': 0, 'graphs': {},
         'workload': {'hidden': HIDDEN, 'crossings': CROSSINGS, 'steps': STEPS, 'overlap': OVERLAP},
         'implementation': 'loaded-program', 'started': started, 'rank': rank, 'size': size,
         'useful_work_bytes': STEPS * CROSSINGS * HIDDEN * x.element_size(),

@@ -19,7 +19,7 @@ def main():
     completion = function.completion()
     started = now()
     function.enqueue()
-    observer[0].put((completion, {'episode': '0', 'parts': {}, 'costs': {}, 'graphs': {},
+    observer[0].put((completion, {'episode': '0', 'parts': {}, 'proposal': 0, 'graphs': {},
         'workload': {'mib': config.mib, 'rounds': config.rounds}, 'implementation': 'loaded-program',
         'started': started, 'rank': 0, 'size': 1, 'useful_work_bytes': count * 16 * config.rounds,
         'report': {'program': 'memory-read', 'kind': 'bandwidth', 'node': list(streamed.node()), 'steps': config.rounds}}))

@@ -4760,6 +4760,17 @@ static ncclResult_t plan_routes(ncclComm_t comm, uint64_t *demand, size_t entrie
   return result;
 }
 
+ncclResult_t ncclMeshProductionTimes(ncclMeshProduction* records, size_t count, double seconds) {
+  if (!isfinite(seconds) || seconds < 0 || (count && !records)) return ncclInvalidArgument;
+  uint64_t extent = 0;
+  for (size_t i = 0; i < count; i++) {
+    if (records[i].order == UINT64_MAX) return ncclInvalidArgument;
+    if (records[i].order + 1 > extent) extent = records[i].order + 1;
+  }
+  for (size_t i = 0; i < count; i++) records[i].seconds = seconds * ((double)(records[i].order + 1) / extent);
+  return ncclSuccess;
+}
+
 ncclResult_t ncclMeshCommPlanDemands(ncclComm_t comm, uint64_t *demand, size_t entries) {
   return plan_routes(comm, demand, entries, 0);
 }

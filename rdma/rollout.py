@@ -77,9 +77,14 @@ def _collect(store, key, rank, ranks, history, outgoing, stopping):
             for episode, peers in list(pending.items()):
                 if len(peers) == ranks:
                     row = {**peers[0], 'seconds': max(p['seconds'] for p in peers.values()),
-                           'rank_seconds': [peers[p]['seconds'] for p in range(ranks)]}
+                           'rank_seconds': [peers[p]['seconds'] for p in range(ranks)],
+                           'completion_seconds_bounds': [max(p['completion_seconds_bounds'][0] for p in peers.values()),
+                                                         max(p['completion_seconds_bounds'][1] for p in peers.values())]}
                     records.append(row)
-                    (history if isinstance(history, list) else observations(history)).append(row)
+                    held = history if isinstance(history, list) else observations(history)
+                    held.append(row)
+                    from assignment import window
+                    held[:] = window(held)
                     del pending[episode]
             finished = [f'{key}/finished/{peer}' for peer in range(1, ranks)]
             if announced and (not finished or store.check(finished)) and all(received[p] == int(store.get(k)) for p, k in enumerate(finished, 1)):

@@ -18,7 +18,8 @@ def main():
     mesh = DeviceMesh.from_group(dist.group.WORLD, 'mps', mesh_dim_names=('ffn',))
     partition.attach(mesh, ffn=args.expansion // 64)
     workload = {k: getattr(args, k) for k in ('rows', 'width', 'expansion', 'layers')}
-    configuration = placement(mesh, 'ffn', workload, args.observations)
+    configuration = placement(mesh, 'ffn', workload, args.observations, parameters=args.parameters)
+    args.tile_rows = configuration['assignment']['operands']['tile_rows']
     group = mesh.get_group('ffn')
     dnn = DNN(args, group, group.fabric)
     bind(configuration, dnn.declare(), lambda: dnn.prepare({'compute': partition.split(mesh, 'ffn', args.expansion)}))

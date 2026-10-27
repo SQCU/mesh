@@ -1,9 +1,9 @@
 {
   "route_weight_bits": 40,
   "route_units": 4096,
-  "route_relative_tolerance": 1e-8,
+  "route_relative_tolerance": 1e-08,
   "route_absolute_tolerance": 1e-10,
-  "route_regularization": 1e-8,
+  "route_regularization": 1e-08,
   "route_function_tolerance": 1e-12,
   "route_iterations": 1000,
   "fit_prior_scale": 0.03125,
@@ -14,5 +14,7 @@
   "exponent_limit": 500,
   "joint_curvature": 0.125,
   "probe_radius": 0.125,
-  "observation_window": 64
+  "observation_window": 64,
+  "unknown_capacity": 1.0,
+  "observation_relative_noise": 0.03125
 }

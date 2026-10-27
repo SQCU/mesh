@@ -451,3 +451,16 @@ The [publication document](../docs/native-access-publication.md#producer-order-i
 distinguishes that scheduling prior from measured completion order. Empirical
 optimizer integration remains item 7. The builds passed; no numerical run was
 started. The constrained data-model document is unchanged.
+
+
+## Whole-function feedback — 2026-10-27
+
+Item 7 removes the history-length proposal clock and optional per-operation cost fit. The pure assignment function
+now consumes an explicit proposal ordinal and complete-call durations. Its vector includes the demo's actual
+compiler/grouping operands. Native engine shares no longer disappear when diagnostic times are absent. Both
+frontends map fitted source envelopes into producer ordering through `ncclMeshProductionTimes`, during preparation.
+Native route output is quantized through the common Q40 path-weight function.
+
+[The publication document](../docs/native-access-publication.md#assignment-feedback--2026-10-27) records the source
+scope and inference limits. Compilation and parse checks passed. No numerical execution was started; the data-model
+document is unchanged. Structural items 8 and 9 remain.

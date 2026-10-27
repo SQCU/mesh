@@ -26,3 +26,12 @@ def bind(configuration):
         yield values
     finally:
         _bound.reset(token)
+
+
+def parameters():
+    """The declared empirical compiler domains, read at preparation."""
+    import json
+    from pathlib import Path
+    import mesh_compute
+    path = Path(mesh_compute.__file__).resolve().parents[1] / 'etc/compute/parameters.json'
+    return json.loads(path.read_text())

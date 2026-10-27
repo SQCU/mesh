@@ -288,3 +288,30 @@ build. The streamed Metal source also compiles for macOS 26 with the queried
 device capability operands.
 No dispatch was submitted. Numerical runs and measurements remain deferred until
 the structural sequence is complete.
+
+
+## Assignment feedback — 2026-10-27
+
+Structural item 7 connects the shared numerical assignment to complete-call evidence and producer ordering.
+
+- `assignment.assign` requires a proposal ordinal independently of the retained observation count. The old
+  `len(rows)` schedule stopped moving after the history window filled. Paired directions now keep advancing;
+  declared tile and route quanta determine the smallest observable operand change.
+- Fixed and work-dependent coefficients are fitted from complete-call durations. The old fit used only optional
+  `costs` arrays, which most callers supplied empty. The fit now receives every compatible completed call and
+  keeps a regularized uncertainty estimate. A residual fit updates compute, engine, route and compiler shares.
+- Late records retain their executed proposal, operands and implementation. Completion bounds come from the
+  maximum of peer intervals. The observation worker still collects them without holding up numerical execution.
+- Chain/LSTM/DNN grouping operands and the FX product crossover are declared configuration domains and consumed
+  during preparation. Native GPU/ANE shares remain domains even when diagnostic timing arrays are empty.
+- Torch and native producer records use `ncclMeshProductionTimes`. It consumes the inferred source duration and
+  existing traversal; the runtime still sees the same page descriptors and publication words. No timing event or
+  per-tile measurement was introduced. Native routes receive the same integer path weights as Python transport.
+
+The model cannot identify every node's isolated compute or hop latency from one complete-call scalar. Its
+producer times remain estimates. This source change establishes the feedback and realization path; it does not
+establish a throughput/latency gain. Shared libraries, CFFI, the Torch extension and the native/LiteRT rank compile.
+Python and configuration documents parse. No numerical workload, test suite or hourly was run.
+
+Items 8 and 9 remain: compact page/mask compilation and general backend/coded-weight layouts. The LiteRT internal
+view metadata gap recorded in item 6 remains a provider requirement; this change adds no substitute executor.

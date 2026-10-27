@@ -189,7 +189,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
         work = _stream.issue(calls, self.handle, bool(split), _flat(result))
         return done(result) if work is None else work
 
-    def plan(self, groups, *, order=None):
+    def plan(self, groups, *, order=None, production_seconds=None):
         """This group's collectives declared once, in their order (nccl.h ncclMeshCommPlan): `groups` the groups its
         calls issue, each a list of Calls (one torch collective is one group), or (that list, repeat) issued repeat
         times in a row, the order repeated from this group's next collective on.  Each is compiled now, so none is
@@ -203,6 +203,13 @@ class ProcessGroupMesh(dist.ProcessGroup):
             raise ValueError('a declared collective group must contain calls')
         order = ([{'first': g, 'count': 1, 'repeat': repeat} for g, calls, repeat in rows]
                  if order is None else list(order))
+        if production_seconds is not None and len(production_seconds) != self._size:
+            raise ValueError('producer durations require one operand per physical rank')
+        producer_groups = [0] * self._size
+        for block in order:
+            for _, calls, _ in rows[block['first']:block['first'] + block['count']]:
+                for source in {c.root for c in calls if c.production is not None}:
+                    producer_groups[source] += block['repeat']
         rows = [(g, repeat, call) for g, calls, repeat in rows for call in calls]
         made, kept = [], []
         for g, repeat, c in rows:
@@ -232,6 +239,9 @@ class ProcessGroupMesh(dist.ProcessGroup):
                 if len(c.production) != tiles:
                     raise ValueError('producer records must cover every logical publication tile')
             kept.append(ffi.new('ncclMeshProduction[]', c.production) if c.production is not None else ffi.NULL)
+            if c.production is not None and production_seconds is not None:
+                check(LIB.ncclMeshProductionTimes(kept[-1], len(c.production),
+                      production_seconds[c.root] / producer_groups[c.root]))
             made.append({'what': WHAT[c.kind], 'peer': c.root, 'count': c.count * per, 'type': nccl, 'op': code,
                          'group': g, 'destination': c.destination, 'fused': int(c.fused), 'tile_bytes': c.tile_bytes,
                          'production': kept[-1],

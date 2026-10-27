@@ -9,6 +9,7 @@ import json
 
 import torch
 from torch_mesh import engines
+from torch_mesh.compilation import parameters
 import rollout
 from mesh_statistics import now
 
@@ -27,7 +28,7 @@ if codes:
     assert kind == 'ffn' and all(g.shape == (n, k) for g, _, _ in coded), 'CODES: FFN layers of one shape'
 torch.manual_seed(0)
 x = torch.randn(rows, k).half().to('mps') / 4
-pool = engines.Engines(names.split(','), ane={'tile': env('ANE_TILE', 128), 'block': env('ANE_BLOCK', 4096)})
+pool = engines.Engines(names.split(','), compilation=parameters(), ane={'tile': env('ANE_TILE', 128), 'block': env('ANE_BLOCK', 4096)})
 projections, shared = [], []
 for layer in range(layers):
     projections.append((torch.randn(k, k) / k ** 0.5).half().to('mps'))
@@ -48,7 +49,7 @@ observations = []
 observer = rollout.start(None, 'engines', 0, 1, observations)
 from torch_mesh.declarations import Function, execution_sequence
 for start in range(0, steps, every):
-    assigned = engines.placement(pool, observations)
+    assigned = engines.placement(pool, observations, step=start // every)
     calls = min(every, steps - start)
     spans, source = [], x
     for projection, operation in zip(projections, shared):
@@ -65,7 +66,7 @@ for start in range(0, steps, every):
     began = now()
     program.forward()
     completion = program.completion()
-    observer[0].put((completion, {'episode': str(start), 'parts': assigned['parts'], 'costs': {}, 'graphs': {},
+    observer[0].put((completion, {'episode': str(start), 'parts': assigned['parts'], 'proposal': assigned['proposal'], 'graphs': {},
         'workload': {'layers': layers, 'kind': kind, 'rows': rows, 'k': k, 'n': n},
         'implementation': 'loaded-program', 'started': began, 'rank': 0, 'size': 1,
         'useful_work_bytes': rows * k * calls * 2,

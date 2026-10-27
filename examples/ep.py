@@ -11,6 +11,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Shard
 from torch_mesh import partition
 from torch_mesh.configuration import placement, bind, record
+from torch_mesh.compilation import parameters
 from mesh_statistics import now
 
 from tp import DIM, STEPS, drawn
@@ -60,7 +61,7 @@ def main():
     configuration = placement(mesh, 'ep',
         {'function': 'moe_dispatch_experts_combine', 'steps': STEPS, 'tokens': TOKENS, 'width': DIM,
          'experts': EXPERTS, 'ffn': FFN, 'top_k': TOP_K, 'slots': SLOTS},
-        os.environ.get('MESH_OBSERVATIONS', '~/.cache/mesh/observations/ep.jsonl'))
+        os.environ.get('MESH_OBSERVATIONS', '~/.cache/mesh/observations/ep.jsonl'), parameters=parameters())
     with torch.no_grad():
         from torch_mesh.declarations import Function, execution_sequence
         model = MoE(mesh)

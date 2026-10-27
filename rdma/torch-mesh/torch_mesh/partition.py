@@ -1032,14 +1032,14 @@ def calls(tensor):
             for i, p in enumerate(tensor.placements) if isinstance(p, RaggedShard) and mesh.size(i) > 1]
 
 
-def plan(mesh, name, groups):
+def plan(mesh, name, groups, *, production_seconds=None):
     """The program's collectives on mesh dimension `name`'s group declared once, in their order (torch_mesh.plan):
     `groups` from the ops' own (calls, gathered, scattered), as a step issues them, or a function of no arguments
     giving them from the parts attached now, called again when the controller moves the parts. A list declares
     invariant counts; use a callable for every declaration whose counts depend on the current partition."""
     from . import plan as declare
-    _PLANS[mesh, name] = groups
-    return declare(mesh.get_group(name), groups() if callable(groups) else groups)
+    _PLANS[mesh, name] = (groups, production_seconds)
+    return declare(mesh.get_group(name), groups() if callable(groups) else groups, production_seconds=production_seconds)
 
 
 _PLANS = {}
@@ -1047,10 +1047,11 @@ _PLANS = {}
 
 def _replan(mesh, name):
     """Re-realize the declared graph, including unchanged-count graphs after route updates."""
-    groups = _PLANS.get((mesh, name))
-    if groups is not None:
+    held = _PLANS.get((mesh, name))
+    if held is not None:
+        groups, production_seconds = held
         from . import plan as declare
-        declare(mesh.get_group(name), groups() if callable(groups) else groups)
+        declare(mesh.get_group(name), groups() if callable(groups) else groups, production_seconds=production_seconds)
 
 
 def split(mesh, name, N):

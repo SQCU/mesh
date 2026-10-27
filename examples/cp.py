@@ -7,6 +7,7 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch_mesh import partition
 from torch_mesh.configuration import placement, bind, record
+from torch_mesh.compilation import parameters
 from mesh_statistics import now
 
 from tp import DIM, HEADS, STEPS, Attention, held
@@ -30,7 +31,7 @@ def main():
     partition.attach(mesh, cp=SEQ // POSITIONS)
     configuration = placement(mesh, 'cp',
         {'function': 'attention_and_unshard', 'steps': STEPS, 'sequence': SEQ, 'width': DIM, 'heads': HEADS},
-        os.environ.get('MESH_OBSERVATIONS', '~/.cache/mesh/observations/cp.jsonl'))
+        os.environ.get('MESH_OBSERVATIONS', '~/.cache/mesh/observations/cp.jsonl'), parameters=parameters())
     with torch.device("meta"):
         layer = Attention()
     run = held(layer)

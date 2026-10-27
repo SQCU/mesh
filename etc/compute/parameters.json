@@ -1,0 +1,3 @@
+{
+  "LINEAR_ROW_CROSSOVER": {"value": 8, "minimum": 1, "maximum": 128, "grain": 1}
+}

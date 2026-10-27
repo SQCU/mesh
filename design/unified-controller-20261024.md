@@ -6,18 +6,21 @@ run work, wait for peers, allocate a runtime buffer, or install a plan.
 
 ## Numerical operands
 
-`assignment.assign(decisions, observations)` uses bounded linear shares. The compiler rounds compute shares to
+`assignment.assign(decisions, observations, step=proposal)` uses bounded linear shares. The compiler rounds compute shares to
 whole tiles and path shares to Q40 units. Projection preserves each declared total. The numerical fits have positive
 regularization; they use neither logarithms of shares nor division by a share that can vanish.
 
 A compute share starts from declared capacity, with equal capacity where none is known. Torch configuration reads
 each node's GPU core count as a prior, not as a performance measurement. Every solve fits fixed and work-dependent
 costs from complete-call observations. A fixed cost per code version separates changes in the implementation from
-changes in its operands. Resource samples, when already present in the input records, constrain the same fit.
-The affine envelope is an estimate of whole-call cost by work share. It is not an isolated measurement of arithmetic.
+changes in its operands. The duration of each complete call fits the stage envelope directly; the model does not
+require an optional list of per-operation costs. The affine envelope estimates whole-call cost by work share. Its
+coefficient variances retain uncertainty where the completed calls cannot distinguish two resource costs.
 
 The historical equal-finish solver rounds the fitted allocation. Whole-call finite differences move all compute
-and route coordinates together. A diminishing perturbation supplies new observations. No result is accepted or
+and route coordinates together. Compiler parameters use the same vector. An explicit proposal ordinal advances
+the paired perturbations; retaining only a bounded history cannot freeze their direction or radius. Each compute
+or route axis carries its realization grain, so a perturbation can still cross a compiler rounding boundary. No result is accepted or
 rejected as a candidate. There is no saved controller or hidden solver lifecycle to restore. In-memory observations name what
 ran, its actual operands, and its measured completion interval.
 

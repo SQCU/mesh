@@ -1046,6 +1046,9 @@ enum { ncclMeshCallAlltoAllV = 18, ncclMeshCallWrite = 19 };
    Every rank supplies the same source records. A tiled WRITE requires them;
    an untiled WRITE may supply one record or declare an already available input. */
 typedef struct { double seconds; uint64_t order; } ncclMeshProduction;
+/* Preparation only. Map an explicit producer traversal onto the fitted duration
+   of this group. Predictions order physical descriptors; they add no wait. */
+ncclResult_t ncclMeshProductionTimes(ncclMeshProduction* records, size_t count, double seconds);
 typedef struct {
   int what, peer;
   size_t count;

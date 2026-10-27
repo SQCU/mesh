@@ -431,11 +431,13 @@ class CtxSolver:
         assignment.declare(self.world.native, calls)
         decisions = assignment.domains(data['decisions'], {'world': assignment.graph(self.world.native)})
         observations = [row for row in data['observations'] if row['workload'] == {'rows': rows}]
-        proposal = assignment.assign(decisions, observations)
+        proposal = assignment.assign(decisions, observations, step=self.solves)
         proposal['workload'] = {'rows': rows}
         self.columns = list(proposal['parts']['columns'])
         widths = [hi - lo for lo, hi in (self.span(RES, rank) for rank in range(self.world.size))]
         calls[2].update(count=rows * widths[self.rank()], counts=[rows * width for width in widths])
+        for key, values in proposal['parts'].items():
+            decisions[key]['parts'] = values
         data['decisions'] = decisions
         assignment.install(self.world.native, proposal['parts'], 'world')
         assignment.declare(self.world.native, calls)
@@ -461,7 +463,9 @@ class CtxSolver:
             previous, seconds = self.pending_feedback
             self.pending_feedback = None
             self.assignment_data['observations'].append({'parts': previous['parts'], 'workload': previous['workload'], 'seconds': seconds,
-                                                        'implementation': 'loaded-program', 'costs': {}})
+                                                        'implementation': 'loaded-program', 'proposal': previous['proposal']})
+            import assignment
+            self.assignment_data['observations'][:] = assignment.window(self.assignment_data['observations'])
         return result
 
     def _solve(self, idx):
