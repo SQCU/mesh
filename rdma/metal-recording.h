@@ -66,6 +66,8 @@ NSData *MetalViewReaches(id<MTLBuffer>, NSUInteger offset, const NSUInteger *sha
 NSString *MetalViewIndexExpression(const NSUInteger *shape, const NSInteger *strides,
     size_t rank, NSString *index);
 NSString *MetalViewIndexPrelude(void);
+// AOT copy tiles, packed as (origin[rank], shape[rank]) words per tile.
+NSData *MetalViewTiles(const NSUInteger *shape, size_t rank, NSUInteger elements);
 NSString *MetalViewIndexDeclaration(NSUInteger binding, const NSUInteger *shape, const NSInteger *strides,
     size_t rank, NSUInteger elementOffset);
 // Preparation only: carry declared page accesses across encoders on the supplied

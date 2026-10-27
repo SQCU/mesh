@@ -4,7 +4,6 @@ This module runs only during preparation. A required materialization is an
 ordinary tiled data dependency, using preassigned region storage.
 """
 from functools import lru_cache
-import itertools
 import math
 from pathlib import Path
 
@@ -97,7 +96,7 @@ def torch_alias(left, right):
 @lru_cache(None)
 def _copy_pipeline(shape, source, destination, width):
     kind = {1: 'uchar', 2: 'ushort', 4: 'uint', 8: 'ulong'}[width]
-    prefix = (f'#define MESH_COPY_TYPE {kind}\n#define MESH_COPY_COUNT {math.prod(shape)}ul\n'
+    prefix = (f'#define MESH_COPY_INPUT_TYPE {kind}\n#define MESH_COPY_OUTPUT_TYPE {kind}\n#define MESH_COPY_COUNT {math.prod(shape)}ul\n'
               f'#define MESH_COPY_SOURCE ({_stream.view_index(shape, source, "i")})\n'
               f'#define MESH_COPY_DESTINATION ({_stream.view_index(shape, destination, "i")})\n')
     return _stream.pipeline(prefix + Path(__file__).with_suffix('.metal').read_text(), 'mesh_layout_copy')
@@ -113,22 +112,11 @@ def copies(source, destination):
     configuration = operands()
     limit = max(1, configuration['LAYOUT_COPY_TILE_BYTES'] // source.element_size())
     shape = tuple(source.shape)
-    axis, tail = len(shape), 1
-    while axis and tail * shape[axis - 1] <= limit:
-        axis -= 1
-        tail *= shape[axis]
-    if axis:
-        axis -= 1
-        chunk = max(1, limit // tail)
-        regions = (prefix + (slice(first, min(first + chunk, shape[axis])),)
-                   for prefix in itertools.product(*(range(n) for n in shape[:axis]))
-                   for first in range(0, shape[axis], chunk))
-    else:
-        regions = [()]
     commands = []
     width = math.gcd(source.element_size(), 8)
     units = source.element_size() // width
-    for region in regions:
+    for origin, size in _stream.view_tiles(shape, limit):
+        region = tuple(slice(first, first + count) for first, count in zip(origin, size))
         left, right = source[region], destination[region]
         sizes = (*left.shape, units)
         a, b = (*[s * units for s in left.stride()], 1), (*[s * units for s in right.stride()], 1)
@@ -140,18 +128,18 @@ def copies(source, destination):
     return commands
 
 
-def resolve(value, requirement, *, writing=False):
+def resolve(value, requirement, *, writing=False, device=None):
     """Resolve one declared API binding before recording the function.
 
     ``strided`` accepts the supplied view, ``contiguous`` requires row-major
     storage, and an element-stride tuple describes an API-specific layout.
     A materialization's direction follows its declared input/output role.
     """
-    if requirement == 'strided':
-        return value, []
-    required = strides(value.shape) if requirement == 'contiguous' else tuple(requirement)
-    if matches(value, required):
+    required = (value.stride() if requirement == 'strided' else
+                strides(value.shape) if requirement == 'contiguous' else tuple(requirement))
+    device = value.device.type if device is None else device
+    if matches(value, required) and value.device.type == device:
         return value, []
     from .native import empty_strided
-    placed = empty_strided(tuple(value.shape), required, value.dtype, value.device.type)
+    placed = empty_strided(tuple(value.shape), required, value.dtype, device)
     return placed, copies(placed, value) if writing else copies(value, placed)

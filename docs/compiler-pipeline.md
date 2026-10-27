@@ -339,6 +339,24 @@ no longer ask the weight matrix to select the producer or infer its split layout
 The view lowers through the common index generator; these Swift values are
 preparation records and add no runtime interpreter.
 
+The Core ML integration now carries a complete model declaration through both
+frontends. Feature names, types and layouts, constant type, precision, deployment
+and compute units are explicit configuration. Reduction precision is declared too. The specialized builder consumes
+the actual row and channel extents, including tails. Native manifests retain
+each fixed row shape; the caller cannot reinterpret a shape as a maximum or
+silently omit a backend share. A shared typed manifest serves preload, rank and
+demo preparation. Native calls carry the actual input/output views and types.
+
+`mesh-coreml.h` defines the common prepared binding. Native Swift no longer
+implements its own model loader, feature wrappers or predictor. Layout/type
+materialization uses the shared tile partitioner and copy body; strided partials
+feed a mapped reduction. The schedule receives their exact accesses. The
+Python engine's input conversions follow backend type declarations, replacing
+the CPU-only prologue convention. All storage and bindings are fixed before
+replay. Repeated calls with identical bound views and types reuse prepared
+commands and intermediate storage; there is no runtime lookup. Core ML's willingness to use proposed output storage remains a provider
+contract limitation; the binding reports that failure instead of copying.
+
 ## Joint configuration operands
 
 `assignment.assign` uses one complete-call objective for all configured coordinates.

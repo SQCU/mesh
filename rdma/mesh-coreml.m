@@ -1,17 +1,7 @@
-/* mesh-coreml.m: a Core ML model's predictions on caller memory, for torch-mesh's Neural Engine engine
-   (torch-mesh/torch_mesh/engines.py Ane).  A prediction's input is the caller's memory as a float16 MLMultiArray (no
-   copy: on unified memory, torch's MPS tensors' shared storage), and its output is written into the caller's memory
-   (Core ML's output backing), so the CPU does no copying on the prediction's critical path: through coremltools each
-   prediction copied its input and output on the CPU, and once the CPU's performance cores clocked down beside a busy
-   GPU (1.3-2.8 GHz from 4.3 on an M4 Pro), a 3 ms prediction took 9. Preparation binds native entry points and
-   their operands into the shared schedule; execution does not enter the interpreter.
-
-   mesh_coreml_load(package, input, output, units): compiles a model package (MLModel compileModelAtURL; a compiled
-   .mlmodelc loads as it is) and loads it on `units` (0 CPU and Neural Engine, 1 all, 2 CPU only), its input and output
-   named (empty: the model's own first); its handle, or -1 (mesh_coreml_error).
-   mesh_coreml_bind fixes the input and output views before execution.
-   mesh_coreml_run executes that binding; an incompatible output backing fails the call.
-   There is no copied-output execution substitute. */
+/* Prepared Core ML bindings shared by the FX and native frontends.
+   Compilation, model loading and named view binding are preparation operations.
+   Run invokes the already-bound model; no copied-output substitute exists. */
+#include "mesh-coreml.h"
 #import <CoreML/CoreML.h>
 #import <Foundation/Foundation.h>
 #import <Accelerate/Accelerate.h>
@@ -22,9 +12,10 @@
 #include <stdatomic.h>
 
 static NSMutableArray *models_;
-static NSMutableArray *names_;
+static NSMutableDictionary *loaded_;
 static NSMutableArray *compiled_;
 static NSMutableArray *units_;
+static NSMutableArray *references_, *keys_;
 static _Thread_local char error_[2048];
 
 /* Prepared CPU numerical commands, on the same shared views as graph shares.
@@ -138,34 +129,34 @@ const char *mesh_cpu_program_run(void *program) {
 
 const char *mesh_coreml_error(void) { return error_; }
 
-long mesh_coreml_load(const char *package, const char *input, const char *output, int units) {
+long mesh_coreml_load(const char *package, int units) {
   @autoreleasepool {
-    if (!models_) { models_ = [NSMutableArray new]; names_ = [NSMutableArray new]; compiled_ = [NSMutableArray new]; units_ = [NSMutableArray new]; }
+   @synchronized([MLModel class]) {
+    if (!models_) { models_ = [NSMutableArray new]; loaded_ = [NSMutableDictionary new]; compiled_ = [NSMutableArray new]; units_ = [NSMutableArray new]; references_=[NSMutableArray new];keys_=[NSMutableArray new]; }
+    const MLComputeUnits choices[]={MLComputeUnitsCPUAndNeuralEngine,MLComputeUnitsAll,MLComputeUnitsCPUOnly,MLComputeUnitsCPUAndGPU};
+    if((unsigned)units>=sizeof choices/sizeof *choices){snprintf(error_,sizeof error_,"missing or invalid compute units");return -1;}
+    NSString *key=[NSString stringWithFormat:@"%d:%s",units,package];
+    NSNumber *held=loaded_[key];if(held){long h=held.longValue;references_[h]=@([references_[h] unsignedLongValue]+1);return h;}
     NSError *error = nil;
-    NSURL *given = [NSURL fileURLWithPath:@(package)];
-    NSURL *compiled = [given.pathExtension isEqualToString:@"mlmodelc"] ? given : [MLModel compileModelAtURL:given error:&error];
-    if (!compiled) { snprintf(error_, sizeof error_, "compile: %s", error.localizedDescription.UTF8String); return -1; }
+    NSURL *compiled = [NSURL fileURLWithPath:@(package)];
     MLModelConfiguration *configuration = [MLModelConfiguration new];
-    configuration.computeUnits = units == 1 ? MLComputeUnitsAll : units == 2 ? MLComputeUnitsCPUOnly : MLComputeUnitsCPUAndNeuralEngine;
+    configuration.computeUnits = choices[units];
     MLModel *model = [MLModel modelWithContentsOfURL:compiled configuration:configuration error:&error];
     if (!model) { snprintf(error_, sizeof error_, "load: %s", error.localizedDescription.UTF8String); return -1; }
-    NSString *in = strlen(input) ? @(input) : model.modelDescription.inputDescriptionsByName.allKeys.firstObject;
-    NSString *out = strlen(output) ? @(output) : model.modelDescription.outputDescriptionsByName.allKeys.firstObject;
-    if (!in || !out) { snprintf(error_, sizeof error_, "load: the model names no input or output"); return -1; }
-    [models_ addObject:model];
-    [names_ addObject:@[in, out]];
-    [compiled_ addObject:compiled];
-    [units_ addObject:@(configuration.computeUnits)];
-    return (long)models_.count - 1;
+    NSUInteger handle=[models_ indexOfObject:[NSNull null]];
+    if(handle==NSNotFound){handle=models_.count;[models_ addObject:model];[compiled_ addObject:compiled];[units_ addObject:@(configuration.computeUnits)];[references_ addObject:@1];[keys_ addObject:key];}
+    else{models_[handle]=model;compiled_[handle]=compiled;units_[handle]=@(configuration.computeUnits);references_[handle]=@1;keys_[handle]=key;}
+    loaded_[key]=@(handle);return (long)handle;
+   }
   }
 }
 
-typedef struct {
-  const char *name;
-  void *data;
-  const int64_t *shape, *strides;
-  int rank, dtype;
-} MeshModelView;
+void mesh_coreml_release(long handle) {
+  @synchronized([MLModel class]) {
+    NSUInteger left=[references_[handle] unsignedLongValue]-1;references_[handle]=@(left);
+    if(!left){[loaded_ removeObjectForKey:keys_[handle]];models_[handle]=[NSNull null];compiled_[handle]=[NSNull null];units_[handle]=[NSNull null];keys_[handle]=[NSNull null];}
+  }
+}
 
 static MLMultiArray *wrap(const MeshModelView *view, NSError **error) {
   const MLMultiArrayDataType types[]={MLMultiArrayDataTypeFloat16,MLMultiArrayDataTypeFloat32,
@@ -178,28 +169,44 @@ static MLMultiArray *wrap(const MeshModelView *view, NSError **error) {
 }
 
 @interface MeshPrediction : NSObject
+@property long handle;
 @property(retain) MLModel *model;
 @property(retain) MLDictionaryFeatureProvider *features;
 @property(retain) MLPredictionOptions *options;
 @property(retain) NSDictionary<NSString *, MLMultiArray *> *outputs;
 @end
 @implementation MeshPrediction
+- (void)dealloc { mesh_coreml_release(_handle); }
 @end
 
 void *mesh_coreml_bind(long handle, const MeshModelView *inputs, size_t ni, const MeshModelView *outputs, size_t no) {
   @autoreleasepool {
-    if (handle < 0 || handle >= (long)models_.count) { snprintf(error_, sizeof error_, "no model %ld", handle); return NULL; }
-    NSArray *names=names_[handle];NSError *error=nil;
+    MLModel *model;
+    @synchronized([MLModel class]) {
+      if (handle < 0 || handle >= (long)models_.count || models_[handle]==[NSNull null]) {
+        snprintf(error_,sizeof error_,"no model %ld",handle);return NULL;
+      }
+      model=models_[handle];
+    }
+    NSError *error=nil;
     NSMutableDictionary *features=[NSMutableDictionary new], *backings=[NSMutableDictionary new];
     for (size_t i=0;i<ni+no;i++) {
       const MeshModelView *view=i<ni ? inputs+i : outputs+i-ni;
       if ((unsigned)view->dtype >= 4) { snprintf(error_,sizeof error_,"unsupported view dtype");return NULL; }
-      NSString *name=strlen(view->name) ? @(view->name) : names[i<ni ? 0 : 1];
+      if(!view->name||!view->name[0]){snprintf(error_,sizeof error_,"each model view requires its declared feature name");return NULL;}
+      NSString *name=@(view->name);
+      NSDictionary *descriptions=i<ni ? model.modelDescription.inputDescriptionsByName : model.modelDescription.outputDescriptionsByName;
+      if(!descriptions[name]){snprintf(error_,sizeof error_,"model has no declared %s feature %s",i<ni?"input":"output",view->name);return NULL;}
       MLMultiArray *array=wrap(view,&error);
       if(!array){snprintf(error_,sizeof error_,"arrays: %s",error.localizedDescription.UTF8String);return NULL;}
+      if(![descriptions[name] isAllowedValue:[MLFeatureValue featureValueWithMultiArray:array]]){
+        snprintf(error_,sizeof error_,"view %s does not match its model feature declaration",view->name);return NULL;
+      }
       if(i<ni)features[name]=[MLFeatureValue featureValueWithMultiArray:array];else backings[name]=array;
     }
-    MeshPrediction *p=[MeshPrediction new];p.model=models_[handle];p.outputs=backings;
+    MeshPrediction *p=[MeshPrediction new];p.handle=handle;
+    @synchronized([MLModel class]) { references_[handle]=@([references_[handle] unsignedLongValue]+1); }
+    p.model=model;p.outputs=backings;
     p.features=[[MLDictionaryFeatureProvider alloc] initWithDictionary:features error:&error];
     p.options=[MLPredictionOptions new];p.options.outputBackings=backings;
     if(!p.features){snprintf(error_,sizeof error_,"features: %s",error.localizedDescription.UTF8String);return NULL;}
@@ -230,14 +237,20 @@ void mesh_coreml_unbind(void *binding) { CFRelease(binding); }
    anything else running there. */
 long mesh_coreml_placement(long handle, char *out, size_t size) {
   @autoreleasepool {
-    if (handle < 0 || handle >= (long)models_.count) { snprintf(error_, sizeof error_, "no model %ld", handle); return -1; }
+    NSURL *compiled; MLComputeUnits units;
+    @synchronized([MLModel class]) {
+      if (handle < 0 || handle >= (long)models_.count || models_[handle]==[NSNull null]) {
+        snprintf(error_,sizeof error_,"no model %ld",handle);return -1;
+      }
+      compiled=compiled_[handle];units=(MLComputeUnits)[units_[handle] integerValue];
+    }
     if (@available(macOS 14.4, *)) {
       MLModelConfiguration *configuration = [MLModelConfiguration new];
-      configuration.computeUnits = (MLComputeUnits)[units_[handle] integerValue];
+      configuration.computeUnits = units;
       dispatch_semaphore_t done = dispatch_semaphore_create(0);
       __block MLComputePlan *plan = nil;
       __block NSError *failure = nil;
-      [MLComputePlan loadContentsOfURL:compiled_[handle] configuration:configuration
+      [MLComputePlan loadContentsOfURL:compiled configuration:configuration
                      completionHandler:^(MLComputePlan *loaded, NSError *error) { plan = loaded; failure = error; dispatch_semaphore_signal(done); }];
       dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
       if (!plan) { snprintf(error_, sizeof error_, "compute plan: %s", failure.localizedDescription.UTF8String); return -1; }

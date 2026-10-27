@@ -135,7 +135,7 @@ $(IMAGES:%=.build/%) .build/nccl-mesh-kernels .build/libnccl-mesh.binarchive: .b
 	  -Wl,-install_name,@rpath/libnccl-mesh.dylib -Wl,-rpath,@loader_path \
 	  $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ nccl-mesh.c mesh-statistics.c nccl-mesh-metal.m metal-recording.m -L.build -lmesh \
 	  -framework Metal -framework Foundation
-.build/libmesh-coreml.dylib: mesh-coreml.m Makefile
+.build/libmesh-coreml.dylib: mesh-coreml.m mesh-coreml.h Makefile
 	mkdir -p .build
 	cc -fobjc-arc -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh-coreml.dylib -o $@ mesh-coreml.m \
 	  -framework CoreML -framework Foundation -framework Accelerate

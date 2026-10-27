@@ -34,6 +34,29 @@ NSString *MetalViewIndexPrelude(void) {
         "template<uint B> constexpr bool mesh_vector4() { return true; }\n";
 }
 
+NSData *MetalViewTiles(const NSUInteger *shape,size_t rank,NSUInteger elements) {
+    for(size_t d=0;d<rank;d++)if(!shape[d])return [NSData data];
+    size_t axis=rank;NSUInteger tail=1;
+    while(axis&&tail*shape[axis-1]<=elements){axis--;tail*=shape[axis];}
+    NSMutableData *result=[NSMutableData data];
+    NSUInteger *tile=calloc(2*rank+1,sizeof *tile);
+    memcpy(tile+rank,shape,rank*sizeof *shape);
+    if(!axis){[result appendBytes:tile length:2*rank*sizeof *tile];free(tile);return result;}
+    axis--;NSUInteger chunk=MAX(1,elements/tail);
+    for(size_t d=0;d<axis;d++)tile[rank+d]=1;
+    BOOL done=NO;
+    while(!done){
+        tile[rank+axis]=MIN(chunk,shape[axis]-tile[axis]);
+        [result appendBytes:tile length:2*rank*sizeof *tile];
+        tile[axis]+=chunk;
+        if(tile[axis]>=shape[axis]){
+            tile[axis]=0;done=YES;
+            for(size_t d=axis;d--;){if(++tile[d]<shape[d]){done=NO;break;}tile[d]=0;}
+        }
+    }
+    free(tile);return result;
+}
+
 NSString *MetalViewIndexDeclaration(NSUInteger binding,const NSUInteger *shape,const NSInteger *strides,
     size_t rank,NSUInteger elementOffset) {
     NSString *expression=MetalViewIndexExpression(shape,strides,rank,@"i");

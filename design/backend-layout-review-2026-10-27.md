@@ -246,3 +246,43 @@ loss described above. It does not close coded sub-block cuts, rotated subdomains
 arbitrary numerical page mappings, producer-domain splitting, specialized ANE
 provider constraints, or all model-specific graph-builder restrictions. The
 remaining items in the preceding review still require their own lowering work.
+
+
+## Carry declarations instead of rebuilding them
+
+Recorded: 2026-10-27T21:01:11Z. This follow-up concerns information lost inside
+preparation. The compiler already has the producer and consumer declarations;
+a downstream local convention must not replace them.
+
+| Lost relation | Source change |
+|---|---|
+| A fixed model shape was treated as a maximum; larger calls lost their ANE share. | `programs.model_rows` reads exact prefill shapes. Blocks and the member preparation identity carry them. `PrefillPartner` no longer has a maximum-row fallback. |
+| Native preparation accepted bare buffers and rebuilt their views from global width and row counts. | The caller passes `TensorView` and numerical type to one preparation function. Required storage, model bindings and access publication consume those views. |
+| ANE read the earlier normalized tensor when the GPU consumed a preceding convolution's result. | Both receive the declared FFN input. The all-ANE branch no longer normalizes the earlier tensor again. |
+| Native and Python independently loaded models and wrapped their inputs and outputs. | Both use `mesh-coreml.h`. Feature names, types, layouts, precision, deployment, compute units and placement devices come from configuration. Native preloading, rank and goal-a share a typed manifest. |
+| Two preparation calls communicated through a hidden pending invocation. | One call returns producer and consumer commands together. No pending bind state remains. |
+| Native output partials used one global fp16 workspace and a private combine shader. | The declared output type and strides size local prepared partials. The generic indexed sum consumes them at the declared accumulation type. Required copies use the shared tile partitioner and copy kernel. |
+| The Python CPU branch alone decided to convert its input. | Every backend declares its input type; preparation shares required conversions. Core ML's host visibility requirement is also resolved before binding. |
+| Row rounding and whole-block enumeration erased tails; a later build sweep prepared unrelated layers. | The builder keeps exact row/channel tails and no longer performs the unrelated-layer sweep. Allowed provider devices are configuration, not an ANE literal in the native tool. |
+
+Repeated native calls reuse prepared commands and intermediate storage for the
+same bound input/output views and types. Different views remain distinct
+operands; this is not shape-based scratch pooling or runtime allocation.
+
+The older streamed-ANE demo also called an obsolete raw binding ABI. It now
+uses `coreml_graph`, `execution_sequence` and the common asynchronous statistics
+module. It does not invoke the predictor directly for a private timing loop.
+
+Native rank and goal-a, the shared Core ML library and the Python extension
+build. Preparation compiled mapped copy and reduction shaders, and compiled
+and bound a named fp32-input/output model with fp16 weights and ragged row and
+channel tiles. No prediction, numerical workload, unit suite or hourly was run.
+
+This does not close the whole backend/layout item. The allocator still describes
+one GPU range and one ANE range, with its earlier block-end policy. Ragged model
+manifests still list all blocks of the layers they hold. Arbitrary compressed
+cuts and rotated subdomains, arbitrary numerical page maps, global producer
+splitting, opaque collective marks that join prior host records, and packaged
+LiteRT arena views remain open. Core ML only proposes output backings; the
+runtime still reports a provider that declines them. These limits must remain
+visible rather than being described as complete general lowering.

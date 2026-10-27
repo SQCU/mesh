@@ -9,6 +9,7 @@ loads a model, or joins a future while it runs.
 import ctypes
 import hashlib
 import math
+import json
 import os
 import shutil
 from pathlib import Path
@@ -58,7 +59,8 @@ def _coreml():
         try:
             lib = ctypes.CDLL(os.path.join(RDMA, 'libmesh-coreml.dylib'))
             lib.mesh_coreml_load.restype = ctypes.c_long
-            lib.mesh_coreml_load.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
+            lib.mesh_coreml_load.argtypes = [ctypes.c_char_p, ctypes.c_int]
+            lib.mesh_coreml_release.argtypes = [ctypes.c_long]
             lib.mesh_coreml_bind.restype = ctypes.c_void_p
             lib.mesh_coreml_bind.argtypes = [ctypes.c_long, ctypes.POINTER(ModelView), ctypes.c_size_t,
                                              ctypes.POINTER(ModelView), ctypes.c_size_t]
@@ -122,14 +124,20 @@ class Engine:
     def takes(self, op, dtype):
         return hasattr(self, 'prepare_' + op.kind) and dtype in self.limits['dtypes']
 
+    def input_dtype(self, dtype):
+        return dtype
+
     def out_dtype(self, dtype):
         return dtype
+
+    def sum_dtype(self):
+        return torch.float32
 
     def prepare(self, op, start, end):
         return getattr(self, 'prepare_' + op.kind)(op, start, end)
 
-    def run(self, op, shard, x, prologue, out):
-        return getattr(self, 'run_' + op.kind)(op, shard, x, prologue, out)
+    def run(self, op, shard, x, out):
+        return getattr(self, 'run_' + op.kind)(op, shard, x, out)
 
 
 class Mps(Engine):
@@ -143,13 +151,13 @@ class Mps(Engine):
     def prepare_linear(self, op, start, end):
         return op.weight[start:end]
 
-    def run_linear(self, op, shard, x, prologue, out):
+    def run_linear(self, op, shard, x, out):
         torch.mm(x, shard.T, out=out)
 
     def prepare_ffn(self, op, start, end):
         return op.gate[start:end], op.up[start:end], op.down[:, start:end]
 
-    def run_ffn(self, op, shard, x, prologue, out):
+    def run_ffn(self, op, shard, x, out):
         ffn(x, *shard, out=out)
 
 
@@ -157,6 +165,9 @@ class Cpu(Engine):
     """The CPU's matrix units through prepared Accelerate commands: the input read in place as fp32 (the
     GPU's prologue converts it), the fp32 shard resident in host memory, the output written in place in fp32."""
     name, occupies = 'cpu', frozenset({'cpu'})
+
+    def input_dtype(self, dtype):
+        return torch.float32
 
     def out_dtype(self, dtype):
         return torch.float32
@@ -168,8 +179,8 @@ class Cpu(Engine):
         cpu = lambda t: t.detach().float().cpu()
         return cpu(op.gate[start:end]), cpu(op.up[start:end]), cpu(op.down[:, start:end])
 
-    def bind(self, op, shard, x, prologue, out):
-        source, target = host(prologue['fp32']), host(out)
+    def bind(self, op, shard, x, out):
+        source, target = host(x), host(out)
         native = _coreml()
         if native is None:
             raise RuntimeError('CPU commands require the native engine library')
@@ -182,14 +193,14 @@ class Cpu(Engine):
                 raise ValueError('CPU matrix views could not be bound to a bulk contraction')
             return command
         if op.kind == 'linear':
-            return CpuProgram([product(source, shard, target)], (prologue['fp32'], shard), (out,))
+            return CpuProgram([product(source, shard, target)], (x, shard), (out,))
         gate, up, down = shard
         g = torch.empty(source.shape[0], gate.shape[0], dtype=torch.float32)
         u, scratch = torch.empty_like(g), torch.empty_like(g)
         activation = CpuCommand(ctypes.cast(native.mesh_cpu_gelu, ctypes.c_void_p), g.shape[0], g.shape[1], 0, 0, 0, 0, 0, 0, 0,
                                  g.data_ptr(), u.data_ptr(), g.data_ptr(), scratch.data_ptr())
         return CpuProgram([product(source, gate, g), product(source, up, u), activation, product(g, down, target)],
-                          (prologue['fp32'], *shard), (out, g, u, scratch))
+                          (x, *shard), (out, g, u, scratch))
 
 
 class CpuCommand(ctypes.Structure):
@@ -228,7 +239,7 @@ class CpuProgram:
 
 
 class _Compiled:
-    """A Neural Engine share: its operation kind, its fp16 weights and their compiled models by row count."""
+    """A model share: its declared operation kind and typed constant arrays."""
 
     def __init__(self, kind, arrays):
         self.kind, self.arrays = kind, arrays
@@ -240,12 +251,21 @@ class Ane(Engine):
     Compilation and model loading happen during preparation. Predictions bind
     shared input/output views and fail if Core ML does not honor output backing.
     """
-    name, limits, occupies = 'ane', {'dtypes': (torch.float16,), 'constants': True}, frozenset({'ane'})
+    name, limits, occupies = 'ane', {'dtypes': (torch.float16, torch.bfloat16, torch.float32), 'constants': True}, frozenset({'ane'})
 
     def __init__(self, **options):
         super().__init__(**options)
         self.tile, self.block = int(options['tile']), int(options['block'])
-        self.input_layout, self.output_layout = options['input_layout'], options['output_layout']
+        self.model = options['model']
+
+    def input_dtype(self, dtype):
+        return getattr(torch, self.model['input']['dtype'])
+
+    def out_dtype(self, dtype):
+        return getattr(torch, self.model['output']['dtype'])
+
+    def sum_dtype(self):
+        return getattr(torch, self.model['sum_dtype'])
 
     @classmethod
     def missing(cls):
@@ -256,23 +276,27 @@ class Ane(Engine):
         return None
 
     def prepare_linear(self, op, start, end):
-        return _Compiled('linear', (op.weight[start:end].detach().to('cpu', torch.float16).numpy(),))
+        return _Compiled('linear', (op.weight[start:end].detach().to('cpu', getattr(torch, self.model['weight_dtype'])).numpy(),))
 
     def prepare_ffn(self, op, start, end):
-        numpy = lambda t: t.detach().to('cpu', torch.float16).contiguous().numpy()
+        numpy = lambda t: t.detach().to('cpu', getattr(torch, self.model['weight_dtype'])).numpy()
         return _Compiled('ffn', (numpy(op.gate[start:end]), numpy(op.up[start:end]), numpy(op.down[:, start:end])))
 
-    def bind(self, op, shard, x, prologue, out):
+    def bind(self, op, shard, x, out):
         native = _coreml()
         if native is None:
             raise RuntimeError('Neural Engine requires the native shared-memory binding')
         rows = x.shape[0]
-        compiled, shard.block, _ = neural_engine_share(shard.kind, shard.arrays, rows, self.tile, self.block)
-        handle = native.mesh_coreml_load(str(compiled).encode(), b'', b'', 0)
+        compiled, shard.block, _ = neural_engine_share(shard.kind, shard.arrays, rows, self.tile, self.block, self.model)
+        handle = native.mesh_coreml_load(str(compiled).encode(), self.model['units'])
         if handle < 0:
             raise RuntimeError(native.mesh_coreml_error().decode())
-        return Prediction(native, handle, {'': x}, {'': out},
-                          input_layouts={'': self.input_layout}, output_layouts={'': self.output_layout})
+        source, target = self.model['input'], self.model['output']
+        try:
+            return Prediction(native, handle, {source['name']: x}, {target['name']: out},
+                              input_layouts={source['name']: source['layout']}, output_layouts={target['name']: target['layout']})
+        finally:
+            native.mesh_coreml_release(handle)
 
 
 class ModelView(ctypes.Structure):
@@ -291,15 +315,14 @@ class Prediction:
                 raise ValueError('each Core ML binding requires an explicit layout operand')
             placed = {}
             for name, value in values.items():
-                placed[name], commands = layout.resolve(value, requirements[name], writing=writing)
+                placed[name], commands = layout.resolve(value, requirements[name], writing=writing,
+                                                          device='cpu' if host(value) is None else None)
                 (after if writing else before).extend(commands)
             return placed
         source = resolve(source, input_layouts, False)
         target = resolve(target, output_layouts, True)
         self.before, self.after = _stream.Commands(before), _stream.Commands(after)
         self.inputs, self.outputs = tuple(source.values()), tuple(target.values())
-        # Empty names select the load declaration's names; general graphs pass
-        # an explicit mapping for every input and output.
         def views(values):
             types = (torch.float16, torch.float32, torch.int32, torch.float64)
             records = []
@@ -332,7 +355,7 @@ class Prediction:
 def coreml_graph(compiled, inputs, outputs, *, units, input_layouts, output_layouts):
     """Bind any compiled Core ML graph to named shared views at preparation.
 
-    ``units`` is the caller's backend operand (0 CPU/ANE, 1 all, 2 CPU).
+    ``units`` is the caller's backend operand (0 CPU/ANE, 1 all, 2 CPU, 3 CPU/GPU).
     Graph conversion belongs to preparation; no operation-kind dispatch or
     model loading occurs in the returned host record. The common schedule
     derives dependencies from the declared input and output views. Per-name
@@ -342,10 +365,13 @@ def coreml_graph(compiled, inputs, outputs, *, units, input_layouts, output_layo
     native = _coreml()
     if native is None:
         raise RuntimeError('Core ML graph requires the native shared-memory binding')
-    handle = native.mesh_coreml_load(os.fsencode(compiled), b'', b'', units)
+    handle = native.mesh_coreml_load(os.fsencode(compiled), units)
     if handle < 0:
         raise RuntimeError(native.mesh_coreml_error().decode())
-    return Prediction(native, handle, inputs, outputs, input_layouts=input_layouts, output_layouts=output_layouts)
+    try:
+        return Prediction(native, handle, inputs, outputs, input_layouts=input_layouts, output_layouts=output_layouts)
+    finally:
+        native.mesh_coreml_release(handle)
 
 
 def export_coreml_graph(program, inputs, outputs, *, directory, units, deployment, precision, input_layouts, output_layouts):
@@ -360,10 +386,10 @@ def export_coreml_graph(program, inputs, outputs, *, directory, units, deploymen
     native = _coreml()
     if native is None:
         raise RuntimeError('Core ML graph requires the native shared-memory binding')
-    compute = {0: ct.ComputeUnit.CPU_AND_NE, 1: ct.ComputeUnit.ALL, 2: ct.ComputeUnit.CPU_ONLY}[units]
+    compute = coreml_units(units)
     model = ct.convert(program, convert_to='mlprogram', compute_units=compute,
                        minimum_deployment_target=getattr(ct.target, deployment),
-                       compute_precision=getattr(ct.precision, precision))
+                       compute_precision=getattr(ct.precision, precision), skip_model_load=True)
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     package, compiled = directory / 'graph.mlpackage', directory / 'graph.mlmodelc'
@@ -376,28 +402,37 @@ def export_coreml_graph(program, inputs, outputs, *, directory, units, deploymen
     return coreml_graph(compiled, inputs, outputs, units=units, input_layouts=input_layouts, output_layouts=output_layouts)
 
 
-def neural_engine_model(kind, arrays, rows, tile=128, block=None):
-    """A Neural Engine share as a Core ML program (coremltools; fp16): `kind` 'linear' (arrays: W [N, K]) or 'ffn'
-    (arrays: Wg, Wu [I, K], Wd [K, I]: down(gelu_tanh(x Wg^T) * (x Wu^T))), its input x [rows, K] and output [rows, N or
-    K] row-major, the transposes to and from channels-first inside the graph, rows in tiles of `tile` (the last the
-    rows' remainder), each tile one 1x1 convolution a matrix with its weights constant, the units (N outputs, I
-    neurons) in blocks of at most `block` (each block its own convolutions; a linear's blocks concatenated, an FFN's
-    down partials summed), so no convolution's weights pass what the Neural Engine's compiler takes
-    (neural_engine_block).  The one statement of the graph: this
-    module's Ane engine and the metal-microbench engine's prepared shares (tools/mesh/neural_engine.py) both build it
-    here."""
+def coreml_units(units):
+    import coremltools as ct
+    return {0: ct.ComputeUnit.CPU_AND_NE, 1: ct.ComputeUnit.ALL, 2: ct.ComputeUnit.CPU_ONLY, 3: ct.ComputeUnit.CPU_AND_GPU}[units]
+
+
+def neural_engine_model(kind, arrays, rows, tile, block, configuration):
+    """Prepare a declared linear/FFN share using configured Core ML operands.
+
+    Tile and channel blocks choose convolution domains, including their tails.
+    Input/output names and types, weight type, precision, deployment and compute
+    units come from the same configuration consumed by the binding frontend.
+    """
     import coremltools as ct
     import numpy as np
     from coremltools.converters.mil import Builder as mb
-    from coremltools.converters.mil.mil import types
+    from coremltools.converters.mil.mil import types, Program, Function
     width = arrays[0].shape[1]
     units = arrays[0].shape[0]
-    block = units if not block or block >= units else int(block)
+    block = int(block)
     spans = [(b, min(b + block, units)) for b in range(0, units, block)]
-    conv = lambda array: mb.const(val=np.ascontiguousarray(array).reshape(array.shape[0], array.shape[1], 1, 1))
+    conv = lambda array: mb.const(val=np.ascontiguousarray(array, dtype=configuration['weight_dtype']).reshape(array.shape[0], array.shape[1], 1, 1))
 
-    @mb.program(input_specs=[mb.TensorSpec(shape=(rows, width), dtype=types.fp16)], opset_version=ct.target.macOS15)
-    def program(x):
+    source, target = configuration['input'], configuration['output']
+    kinds = {'float16': types.fp16, 'float32': types.fp32, 'int32': types.int32, 'float64': types.fp64}
+    casts = {'float16': 'fp16', 'float32': 'fp32', 'int32': 'int32', 'float64': 'fp64'}
+    program = Program()
+    with Function({source['name']: mb.TensorSpec(shape=(rows, width), dtype=kinds[source['dtype']])},
+                  opset_version=getattr(ct.target, configuration['deployment'])) as function:
+        x = function.inputs[source['name']]
+        if source['dtype'] != configuration['weight_dtype']:
+            x = mb.cast(x=x, dtype=casts[configuration['weight_dtype']])
         if kind == 'linear':
             weights = [(conv(arrays[0][a:b]),) for a, b in spans]
         else:
@@ -423,45 +458,50 @@ def neural_engine_model(kind, arrays, rows, tile=128, block=None):
                 outputs.append(total)
         y = mb.concat(values=outputs, axis=3) if len(outputs) > 1 else outputs[0]
         n = arrays[0].shape[0] if kind == 'linear' else arrays[2].shape[0]
-        return mb.transpose(x=mb.reshape(x=y, shape=[n, rows]), perm=[1, 0])
-    return ct.convert(program, convert_to='mlprogram', compute_units=ct.ComputeUnit.CPU_AND_NE,
-                      compute_precision=ct.precision.FLOAT16, minimum_deployment_target=ct.target.macOS15)
+        y = mb.transpose(x=mb.reshape(x=y, shape=[n, rows]), perm=[1, 0])
+        y = mb.cast(x=y, dtype=casts[target['dtype']], name=target['name']) if configuration['weight_dtype'] != target['dtype'] else mb.identity(x=y, name=target['name'])
+        function.set_outputs([y])
+    program.add_function('main', function)
+    return ct.convert(program, convert_to='mlprogram', compute_units=coreml_units(configuration['units']),
+                      compute_precision=getattr(ct.precision, configuration['precision']),
+                      minimum_deployment_target=getattr(ct.target, configuration['deployment']), skip_model_load=True)
 
 
-def neural_engine_share(kind, arrays, rows, tile, block):
-    """A Neural Engine share in convolutions of `block` units (the caller's configuration): built (neural_engine_model),
-    compiled once into ~/.cache/mesh-engines by content (the arrays, kind, rows, tile and block), and its compute plan
-    read (coremltools MLComputePlan).  The Neural Engine's compiler refuses a convolution past a weight size (on an M4 Pro
-    between 7680 and 8192 units of a 1536-wide input in fp16: 22.5 to 24 MiB), and Core ML then runs the whole program
-    on the CPU, 20 to 60 times slower: the devices returned say where its operations run, and a caller whose share
-    places elsewhere fails it.  The search that halved the block and built again until it placed, and its store of the
-    largest block a node placed (~/.cache/mesh-engines/blocks.json), were deleted 2026-10-22 (no retry: the block is a
-    stated fact of the configuration).  (compiled .mlmodelc path, block, its operations' devices)."""
+def neural_engine_share(kind, arrays, rows, tile, block, configuration):
+    """Compile a configured model share and retain its provider placement.
+
+    Names, types, row/channel tiles, precision, target, compute units and allowed
+    devices are compiler operands. Artifacts are reused by those operands and
+    constants. Provider placement is checked during preparation, before binding.
+    """
     import collections
     import coremltools as ct
     import numpy as np
     from coremltools.models.compute_plan import MLComputePlan
     cache = Path(os.path.expanduser('~/.cache/mesh-engines'))
     cache.mkdir(parents=True, exist_ok=True)
-    digest = hashlib.sha1(b''.join(np.ascontiguousarray(a).tobytes() for a in arrays) + f'{kind} {rows} {tile}'.encode()).hexdigest()
+    digest = hashlib.sha1(b''.join(np.ascontiguousarray(a).tobytes() for a in arrays) + json.dumps([kind, rows, tile, block, configuration], sort_keys=True).encode()).hexdigest()
     native = _coreml()
     if native is None:
         raise RuntimeError('Neural Engine share: rdma/libmesh-coreml.dylib does not load')
     compiled = cache / f'{digest}-b{block}.mlmodelc'
     if not compiled.exists():
         package = cache / f'{digest}-b{block}.mlpackage'
-        neural_engine_model(kind, arrays, rows, tile, block).save(str(package))
+        neural_engine_model(kind, arrays, rows, tile, block, configuration).save(str(package))
         failed = native.mesh_coreml_compile(str(package).encode(), str(compiled).encode())
         shutil.rmtree(package, ignore_errors=True)
         if failed:
             raise RuntimeError(f'Neural Engine share: {native.mesh_coreml_error().decode()}')
-    plan = MLComputePlan.load_from_path(path=str(compiled), compute_units=ct.ComputeUnit.CPU_AND_NE)
+    plan = MLComputePlan.load_from_path(path=str(compiled), compute_units=coreml_units(configuration['units']))
     devices = collections.Counter()
     for op in plan.model_structure.program.functions['main'].block.operations:
         usage = plan.get_compute_device_usage_for_mlprogram_operation(op)
         if usage is not None:
             name = type(usage.preferred_compute_device).__name__
             devices['ane' if 'NeuralEngine' in name else 'gpu' if 'GPU' in name else 'cpu' if 'CPU' in name else 'unknown'] += 1
+    outside = set(devices) - set(configuration['devices'])
+    if outside:
+        raise ValueError(f"model placement {dict(devices)} exceeds declared devices {configuration['devices']}")
     return compiled, block, dict(devices)
 
 
@@ -552,15 +592,22 @@ class Prepared:
         self.output = empty((rows, op.width), dtype=dtype) if output is None else output
         if self.output.shape != (rows, op.width) or self.output.dtype != dtype:
             raise ValueError('output must match the declared shape and dtype')
-        prologue = {}
         configuration = {k: p['value'] for k, p in op.engines.parameters.items()}
-        self.prologue = None
-        if any(count and engine.name == 'cpu' for engine, count in zip(op.engines.engines, parts)):
-            prologue['fp32'] = x if dtype == torch.float32 else empty(tuple(x.shape), dtype=torch.float32)
-            if dtype != torch.float32:
-                self.prologue = _gpu(lambda: prologue['fp32'].copy_(x), configuration)
+        sources, casts = {dtype: x}, []
+        for engine, count in zip(op.engines.engines, parts):
+            needed = engine.input_dtype(dtype)
+            if count and needed not in sources:
+                sources[needed] = empty(tuple(x.shape), dtype=needed)
+                casts.append((sources[needed], x))
+        def convert_inputs():
+            for destination, source in casts:
+                destination.copy_(source)
+        self.prologue = _gpu(convert_inputs, configuration) if casts else None
         self.gpu, self.host = [], []
         pieces, conversions, start = [], [], 0
+        sum_types = [engine.sum_dtype() for engine, count in zip(op.engines.engines, parts) if count]
+        from functools import reduce
+        accumulator = reduce(torch.promote_types, sum_types)
         for engine, count in zip(op.engines.engines, parts):
             end = start + count
             if count:
@@ -575,10 +622,10 @@ class Prepared:
                 if op.combine == 'concat' and not direct:
                     conversions.append((destination, out))
                 if engine.host_side:
-                    bound = engine.bind(op, shard, x, prologue, out)
+                    bound = engine.bind(op, shard, sources[engine.input_dtype(dtype)], out)
                     self.host.append(bound)
                 else:
-                    self.gpu.append(_gpu(lambda e=engine, w=shard, y=out: e.run(op, w, x, prologue, y), configuration))
+                    self.gpu.append(_gpu(lambda e=engine, w=shard, y=out, source=sources[engine.input_dtype(dtype)]: e.run(op, w, source, y), configuration))
             start = end
         def combine():
             if op.combine == 'concat':
@@ -586,9 +633,9 @@ class Prepared:
                     destination.copy_(source)
                 y = self.output
             else:
-                y = pieces[0].float()
+                y = pieces[0].to(accumulator)
                 for p in pieces[1:]:
-                    y = y + p.float()
+                    y = y + p.to(accumulator)
                 y = y.to(dtype)
             return self.output.copy_(op.finish(y))
         needs_combine = (op.combine == 'sum' and (len(pieces) > 1 or pieces[0] is not self.output)

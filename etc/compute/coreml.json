@@ -1,4 +1,22 @@
 {
-  "input_layout": "strided",
-  "output_layout": "strided"
+  "model": {
+    "input": {
+      "name": "input",
+      "dtype": "float16",
+      "layout": "contiguous"
+    },
+    "output": {
+      "name": "output",
+      "dtype": "float16",
+      "layout": "contiguous"
+    },
+    "weight_dtype": "float16",
+    "sum_dtype": "float32",
+    "precision": "FLOAT16",
+    "deployment": "macOS15",
+    "units": 0,
+    "devices": [
+      "ane"
+    ]
+  }
 }

@@ -29,9 +29,9 @@ if codes:
     assert kind == 'ffn' and all(g.shape == (n, k) for g, _, _ in coded), 'CODES: FFN layers of one shape'
 torch.manual_seed(0)
 x = torch.randn(rows, k).half().to('mps') / 4
-layouts = json.loads(Path(os.environ.get('COREML_LAYOUTS', Path(__file__).resolve().parents[1] / 'etc/compute/coreml.json')).read_text())
+coreml = json.loads(Path(os.environ.get('COREML_CONFIGURATION', Path(__file__).resolve().parents[1] / 'etc/compute/coreml.json')).read_text())
 pool = engines.Engines(names.split(','), compilation=parameters(),
-                       ane={**layouts, 'tile': env('ANE_TILE', 128), 'block': env('ANE_BLOCK', 4096)})
+                       ane={**coreml, 'tile': env('ANE_TILE', 128), 'block': env('ANE_BLOCK', 4096)})
 projections, shared = [], []
 for layer in range(layers):
     projections.append((torch.randn(k, k) / k ** 0.5).half().to('mps'))

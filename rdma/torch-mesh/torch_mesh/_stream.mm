@@ -1709,6 +1709,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("completion", &completion);
   module.def("completed", &completed);
   module.def("pipeline", &pipeline);
+  module.def("view_tiles", [](const std::vector<NSUInteger> &shape,NSUInteger elements) {
+    using Tile=std::pair<std::vector<NSUInteger>,std::vector<NSUInteger>>;
+    if(shape.empty())return std::vector<Tile>{{{}, {}}};
+    NSData *data=MetalViewTiles(shape.data(),shape.size(),elements);
+    const NSUInteger *words=(const NSUInteger *)data.bytes;
+    std::vector<Tile> tiles;
+    for(size_t i=0;i<data.length/sizeof *words;i+=2*shape.size())
+      tiles.push_back({{words+i,words+i+shape.size()},{words+i+shape.size(),words+i+2*shape.size()}});
+    return tiles;
+  });
   module.def("view_indices", [](const std::vector<std::tuple<NSUInteger,std::vector<NSUInteger>,std::vector<NSInteger>,NSUInteger>> &bindings) {
     NSMutableString *source=[NSMutableString stringWithString:MetalViewIndexPrelude()];
     for(const auto &[binding,shape,strides,offset]:bindings) {
