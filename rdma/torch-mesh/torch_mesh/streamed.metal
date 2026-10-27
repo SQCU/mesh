@@ -60,8 +60,8 @@ struct streamed_dims { uint tiles, outputs, rows, per, stride, shares, split, fi
 // sharing a column order stack into one matrix (metal-microbench docs/kernels.md#stacked-products: q|k|v, gate|up), one
 // dispatch over all their bands; each band reads its own product's coded input, slab s at s * d.inputs rows of the
 // input (an export's band words, one matrix's, are slab 0).
-static inline uint streamed_base(uint word) { return word & 0x0FFFFFFFu; }
-static inline ulong streamed_slab(uint word, uint rows, uint columns) { return ulong(word >> 28) * rows * columns; }
+static inline uint streamed_base(uint word) { return word & MESH_STREAMED_BAND_BASE_MASK; }
+static inline ulong streamed_slab(uint word, uint rows, uint columns) { return ulong(word >> MESH_STREAMED_SLAB_SHIFT) * rows * columns; }
 
 // Literal parts in a library compiled with MESH_LITERAL (metal-microbench docs/kernels.md#one-kernel-interface: the served
 // engine's classes): a pipeline specialized at its command's block (function constants 200-203, sixteen words) and lane
@@ -396,8 +396,8 @@ static inline uint fragment_word(uint held, device const uint *words, uint span,
 template <uint R, uint WIDTHS, uint LUT, uint LOADS, uint N, typename S>
 static inline __attribute__((always_inline)) void fragment_fetch(uint word, device const uint *planes, device const half *xs, uint columns,
         uint rows, uint k, thread uint (&w)[N], thread S (&x)[R][4]) {
-    const uint b = (word >> 12) & 15u;
-    device const uint *at = planes + ((word & 0xFFFu) << 5);
+    const uint b = (word >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK;
+    device const uint *at = planes + ((word & MESH_STREAMED_TILE_OFFSET_MASK) * MESH_STREAMED_PLANE_WORDS);
     if (LUT && b == 1) { w[0] = at[0]; return; }
     fragment_load<WIDTHS, LOADS>(at, b, w);
     const S h = S(0.5f * fragment_step(word));
@@ -412,7 +412,7 @@ static inline __attribute__((always_inline)) void fragment_fetch(uint word, devi
 template <uint R, uint WIDTHS, uint LUT, uint H, uint N, typename S>
 static inline __attribute__((always_inline)) void fragment_use(uint word, thread const uint (&w)[N], thread const S (&x)[R][4], device const float *T,
         uint stride, thread float2 (&acc)[R][4], thread half2 (&t)[R][4], thread float (&corr)[R]) {
-    const uint b = (word >> 12) & 15u;
+    const uint b = (word >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK;
     if (LUT && b == 1) { fragment_lut<R>(w[0], T, stride, fragment_step(word), acc, corr); return; }
     if constexpr (H > 0) {
 #define FRAGMENT_FMA(B) fragment_fma<B, R>(w, x, t)
@@ -443,7 +443,7 @@ static inline __attribute__((always_inline)) void fragment_walk(device const uin
         corr[n] = 0.0f;
         for (uint p = 0; p < 4; p++) { acc[n][p] = float2(0.0f); t[n][p] = half2(0.0h); }
     }
-    device const uint *planes = codes + (base << 5) + lane;
+    device const uint *planes = codes + (base * MESH_STREAMED_PLANE_WORDS) + lane;
     for (uint i = 0; i < STEPS; i += F) {
         const uint ta = first + part + i * SK, wa = fragment_word<SK, STEPS>(held, words, span, part, i);
         uint w[N];
@@ -452,11 +452,11 @@ static inline __attribute__((always_inline)) void fragment_walk(device const uin
             const uint tc = ta + SK, wc = fragment_word<SK, STEPS>(held, words, span, part, i + 1);
             uint w1[N];
             fragment_x<H> x1[R][4];
-            if ((wa >> 12) & 15u) fragment_fetch<R, WIDTHS, LUT, LOADS>(wa, planes, xs, columns, rows, ta * 32 + kb, w, x);
-            if ((wc >> 12) & 15u) fragment_fetch<R, WIDTHS, LUT, LOADS>(wc, planes, xs, columns, rows, tc * 32 + kb, w1, x1);
-            if ((wa >> 12) & 15u) fragment_use<R, WIDTHS, LUT, H>(wa, w, x, tables + (ta * 8 + kb) * 16, columns * 4, acc, t, corr);
-            if ((wc >> 12) & 15u) fragment_use<R, WIDTHS, LUT, H>(wc, w1, x1, tables + (tc * 8 + kb) * 16, columns * 4, acc, t, corr);
-        } else if ((wa >> 12) & 15u) {
+            if ((wa >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK) fragment_fetch<R, WIDTHS, LUT, LOADS>(wa, planes, xs, columns, rows, ta * 32 + kb, w, x);
+            if ((wc >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK) fragment_fetch<R, WIDTHS, LUT, LOADS>(wc, planes, xs, columns, rows, tc * 32 + kb, w1, x1);
+            if ((wa >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK) fragment_use<R, WIDTHS, LUT, H>(wa, w, x, tables + (ta * 8 + kb) * 16, columns * 4, acc, t, corr);
+            if ((wc >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK) fragment_use<R, WIDTHS, LUT, H>(wc, w1, x1, tables + (tc * 8 + kb) * 16, columns * 4, acc, t, corr);
+        } else if ((wa >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK) {
             fragment_fetch<R, WIDTHS, LUT, LOADS>(wa, planes, xs, columns, rows, ta * 32 + kb, w, x);
             fragment_use<R, WIDTHS, LUT, H>(wa, w, x, tables + (ta * 8 + kb) * 16, columns * 4, acc, t, corr);
         }
@@ -545,7 +545,7 @@ kernel void streamed_couple(device const uint *gateCodes [[buffer(0)]], device c
         const uint kb = fragment_kb(lane);
         device const uint *gw = gateTiles + band * pitch, *uw = upTiles + band * pitch;
         const uint gheld = fragment_words<SK, STEPS>(gw, TILES, simd, lane), uheld = fragment_words<SK, STEPS>(uw, TILES, simd, lane);
-        device const uint *gp = gateCodes + (streamed_base(gateBands[band]) << 5) + lane, *up = upCodes + (streamed_base(upBands[band]) << 5) + lane;
+        device const uint *gp = gateCodes + (streamed_base(gateBands[band]) * MESH_STREAMED_PLANE_WORDS) + lane, *up = upCodes + (streamed_base(upBands[band]) * MESH_STREAMED_PLANE_WORDS) + lane;
         float2 gacc[R][4], uacc[R][4];
         float gcorr[R], ucorr[R], gout[R], uout[R];
         half2 gt[R][4], ut[R][4];
@@ -556,21 +556,21 @@ kernel void streamed_couple(device const uint *gateCodes [[buffer(0)]], device c
             const uint gw0 = fragment_word<SK, STEPS>(gheld, gw, TILES, simd, i), uw0 = fragment_word<SK, STEPS>(uheld, uw, TILES, simd, i);
             uint g[FRAGMENT_MAX(WIDTHS)], u[FRAGMENT_MAX(WIDTHS)];
             fragment_x<H> gxs[R][4], uxs[R][4];
-            if ((gw0 >> 12) & 15u) fragment_fetch<R, WIDTHS, 0, LOADS>(gw0, gp, gx, COLUMNS, rows, k, g, gxs);
-            if ((uw0 >> 12) & 15u) fragment_fetch<R, WIDTHS, 0, LOADS>(uw0, up, ux, COLUMNS, rows, k, u, uxs);
+            if ((gw0 >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK) fragment_fetch<R, WIDTHS, 0, LOADS>(gw0, gp, gx, COLUMNS, rows, k, g, gxs);
+            if ((uw0 >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK) fragment_fetch<R, WIDTHS, 0, LOADS>(uw0, up, ux, COLUMNS, rows, k, u, uxs);
             if constexpr (F > 1) {
                 const uint gw1 = fragment_word<SK, STEPS>(gheld, gw, TILES, simd, i + 1), uw1 = fragment_word<SK, STEPS>(uheld, uw, TILES, simd, i + 1);
                 uint g1[FRAGMENT_MAX(WIDTHS)], u1[FRAGMENT_MAX(WIDTHS)];
                 fragment_x<H> gxs1[R][4], uxs1[R][4];
-                if ((gw1 >> 12) & 15u) fragment_fetch<R, WIDTHS, 0, LOADS>(gw1, gp, gx, COLUMNS, rows, k + 32 * SK, g1, gxs1);
-                if ((uw1 >> 12) & 15u) fragment_fetch<R, WIDTHS, 0, LOADS>(uw1, up, ux, COLUMNS, rows, k + 32 * SK, u1, uxs1);
-                if ((gw0 >> 12) & 15u) fragment_use<R, WIDTHS, 0, H>(gw0, g, gxs, nullptr, 0, gacc, gt, gcorr);
-                if ((uw0 >> 12) & 15u) fragment_use<R, WIDTHS, 0, H>(uw0, u, uxs, nullptr, 0, uacc, ut, ucorr);
-                if ((gw1 >> 12) & 15u) fragment_use<R, WIDTHS, 0, H>(gw1, g1, gxs1, nullptr, 0, gacc, gt, gcorr);
-                if ((uw1 >> 12) & 15u) fragment_use<R, WIDTHS, 0, H>(uw1, u1, uxs1, nullptr, 0, uacc, ut, ucorr);
+                if ((gw1 >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK) fragment_fetch<R, WIDTHS, 0, LOADS>(gw1, gp, gx, COLUMNS, rows, k + 32 * SK, g1, gxs1);
+                if ((uw1 >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK) fragment_fetch<R, WIDTHS, 0, LOADS>(uw1, up, ux, COLUMNS, rows, k + 32 * SK, u1, uxs1);
+                if ((gw0 >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK) fragment_use<R, WIDTHS, 0, H>(gw0, g, gxs, nullptr, 0, gacc, gt, gcorr);
+                if ((uw0 >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK) fragment_use<R, WIDTHS, 0, H>(uw0, u, uxs, nullptr, 0, uacc, ut, ucorr);
+                if ((gw1 >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK) fragment_use<R, WIDTHS, 0, H>(gw1, g1, gxs1, nullptr, 0, gacc, gt, gcorr);
+                if ((uw1 >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK) fragment_use<R, WIDTHS, 0, H>(uw1, u1, uxs1, nullptr, 0, uacc, ut, ucorr);
             } else {
-                if ((gw0 >> 12) & 15u) fragment_use<R, WIDTHS, 0, H>(gw0, g, gxs, nullptr, 0, gacc, gt, gcorr);
-                if ((uw0 >> 12) & 15u) fragment_use<R, WIDTHS, 0, H>(uw0, u, uxs, nullptr, 0, uacc, ut, ucorr);
+                if ((gw0 >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK) fragment_use<R, WIDTHS, 0, H>(gw0, g, gxs, nullptr, 0, gacc, gt, gcorr);
+                if ((uw0 >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK) fragment_use<R, WIDTHS, 0, H>(uw0, u, uxs, nullptr, 0, uacc, ut, ucorr);
             }
             if constexpr (H > 0)
                 if ((i + F) % H == 0 || i + F >= STEPS) { fragment_flush<R>(gacc, gt); fragment_flush<R>(uacc, ut); }
@@ -610,10 +610,10 @@ kernel void streamed_dense(device const uint *codes [[buffer(0)]], device const 
                            constant streamed_dims &dims [[buffer(15)]], uint2 group [[threadgroup_position_in_grid]],
                            uint lane [[thread_index_in_simdgroup]]) {
     const streamed_dims d = dims_of(dims);
-    const uint T = d.tiles, pitch = d.pitch ? d.pitch : T, word = tiles[group.x * pitch + group.y], b = (word >> 12) & 15u;
+    const uint T = d.tiles, pitch = d.pitch ? d.pitch : T, word = tiles[group.x * pitch + group.y], b = (word >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK;
     const uint row0 = group.x * 32 + 8 * fragment_c(lane), k0 = group.y * 32 + fragment_kb(lane), width = T * 32;
     const float h = 0.5f * fragment_step(word);
-    device const uint *at = codes + ((streamed_base(bands[group.x]) + (word & 0xFFFu)) << 5) + lane;
+    device const uint *at = codes + ((streamed_base(bands[group.x]) + (word & MESH_STREAMED_TILE_OFFSET_MASK)) * MESH_STREAMED_PLANE_WORDS) + lane;
     auto put = [&](uint P, float2 v) {
         const uint r = row0 + 2 * (P >> 2), k = k0 + 8 * (P & 3u);
         dense[ulong(order[r]) * width + uint(columns[k])] = half(v.x * h * rowScale[r] * colScale[k]);
@@ -940,8 +940,8 @@ static inline __attribute__((always_inline)) void fragment_ring(W w, half h, thr
 // A ring producer's step: the tile of word `word` (width b > 0) of the planes at `planes` decoded into its slot.
 template <uint WIDTHS, uint LOADS>
 static inline __attribute__((always_inline)) void fragment_ring_tile(uint word, device const uint *planes, threadgroup half *slot, uint lane) {
-    const uint b = (word >> 12) & 15u;
-    device const uint *from = planes + ((word & 0xFFFu) << 5);
+    const uint b = (word >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK;
+    device const uint *from = planes + ((word & MESH_STREAMED_TILE_OFFSET_MASK) * MESH_STREAMED_PLANE_WORDS);
     const half h = half(0.5f * fragment_step(word));
     uint w[FRAGMENT_MAX(WIDTHS)];
     if (LOADS) fragment_load<WIDTHS, 1>(from, b, w);
@@ -1009,7 +1009,7 @@ kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const u
     auto X = tensor(const_cast<device half *>(xs) + streamed_slab(bw, d.inputs, TILES * 32), dextents<int, 2>{int(TILES * 32), int(rows)}, array<int, 2>{1, int(TILES * 32)});
     constexpr auto descriptor = matmul2d_descriptor(OM, 32, 32, false, false, false, matmul2d_descriptor::mode::multiply_accumulate);
     matmul2d<descriptor, execution_simdgroup> op;
-    device const uint *words = tiles + band * pitch + first, *planes = codes + (streamed_base(bw) << 5) + lane;
+    device const uint *words = tiles + band * pitch + first, *planes = codes + (streamed_base(bw) * MESH_STREAMED_PLANE_WORDS) + lane;
     const uint held = !SPLIT || role < SK ? fragment_words<SK, STEPS>(words, span, part, lane) : 0u;
     if constexpr (SPLIT) {
         threadgroup uint live[2][BANDS][SK];
@@ -1019,7 +1019,7 @@ kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const u
         const uint row0 = role >= SK ? (role - SK) * RING : 0u;
         for (uint s = 0; s <= STEPS; s++) {
             if (role < SK && s < STEPS) {
-                const uint word = fragment_word<SK, STEPS>(held, words, span, part, s), b = (word >> 12) & 15u;
+                const uint word = fragment_word<SK, STEPS>(held, words, span, part, s), b = (word >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK;
                 if (lane == 0) live[s & 1u][local][part] = b;
                 if (b != 0) fragment_ring_tile<WIDTHS, LOADS>(word, planes, ring[s & 1u][local][part], lane);
             }
@@ -1046,9 +1046,9 @@ kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const u
         for (uint s = 0; s <= STEPS; s++) {
             if (role < SK && s < STEPS) {
                 const uint word = fragment_word<SK, STEPS>(held, words, span, part, s);
-                if ((word >> 12) & 15u) fragment_ring_tile<WIDTHS, LOADS>(word, planes, ring[s & 1u][local][part], lane);
+                if ((word >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK) fragment_ring_tile<WIDTHS, LOADS>(word, planes, ring[s & 1u][local][part], lane);
             }
-            if (role >= SK && s > 0 && (fragment_word<SK, STEPS>(held, words, span, part, s - 1) >> 12) & 15u) {
+            if (role >= SK && s > 0 && (fragment_word<SK, STEPS>(held, words, span, part, s - 1) >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK) {
                 auto right = tensor(&ring[(s - 1) & 1u][local][part][0], dextents<int, 2>{32, 32}, array<int, 2>{1, int(FRAGMENT_RING)});
                 const int k = int((first + part + (s - 1) * SK) * 32);
                 if (rows >= M) {
@@ -1067,9 +1067,9 @@ kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const u
         auto acc = op.template get_destination_cooperative_tensor<decltype(X), decltype(shape), float>();
         for (uint i = 0; i < acc.get_capacity(); ++i) acc[i] = 0;
         for (uint i = 0; i < STEPS; i++) {
-            const uint t = part + i * SK, word = fragment_word<SK, STEPS>(held, words, span, part, i), b = (word >> 12) & 15u;
+            const uint t = part + i * SK, word = fragment_word<SK, STEPS>(held, words, span, part, i), b = (word >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK;
             if (b == 0) continue;
-            device const uint *from = planes + ((word & 0xFFFu) << 5);
+            device const uint *from = planes + ((word & MESH_STREAMED_TILE_OFFSET_MASK) * MESH_STREAMED_PLANE_WORDS);
             const half h = half(0.5f * fragment_step(word));
             auto rb = op.template get_right_input_cooperative_tensor<half, half, float>();
             uint w[FRAGMENT_MAX(WIDTHS)];
@@ -1137,7 +1137,7 @@ template <uint TILES, uint WIDTHS, bool ROWS, uint LOADS>
 static inline __attribute__((always_inline)) void fragment_panel(device const uint *codes, device const uint *tiles, uint base,
         uint t0, uint simd, uint lane, threadgroup half *panel, uint stride) {
     const uint t = t0 + simd, c = fragment_c(lane), kb = fragment_kb(lane);
-    const uint word = t < TILES ? tiles[t] : 0u, b = (word >> 12) & 15u;
+    const uint word = t < TILES ? tiles[t] : 0u, b = (word >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK;
     const float h = 0.5f * fragment_step(word);
     auto put = [&](uint P, float2 v) {
         const uint n = 8 * c + 2 * (P >> 2), k = 32 * simd + kb + 8 * (P & 3u);
@@ -1146,7 +1146,7 @@ static inline __attribute__((always_inline)) void fragment_panel(device const ui
         else { panel[n * stride + k] = value.x; panel[(n + 1) * stride + k] = value.y; }
     };
     if (b == 0) { for (uint P = 0; P < 16; P++) put(P, float2(0.0f)); return; }
-    device const uint *at = codes + ((base + (word & 0xFFFu)) << 5) + lane;
+    device const uint *at = codes + ((base + (word & MESH_STREAMED_TILE_OFFSET_MASK)) * MESH_STREAMED_PLANE_WORDS) + lane;
     uint w[FRAGMENT_MAX(WIDTHS)];
     if (LOADS) fragment_load<WIDTHS, 1>(at, b, w);
 #define FRAGMENT_PANEL(B) { if (!LOADS) fragment_run<B>(at, w); fragment_values<B>(w, put); }

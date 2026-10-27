@@ -39,7 +39,10 @@ id<MTLDevice> MetalRecordingDevice(id<MTLDevice> device, BOOL indirectPipelines)
 // tools/mesh/schedule.py
 void MetalRecordingList(int on);
 // A prepared foreign stage supplies the byte views of its external tensors. Its pipelines
-// still supply read/write modes; these views narrow their bindings during command capture.
+// still supply read/write modes; these views define their bindings during command capture.
+// Every accessed binding needs a view or dispatch reach (setBytes declares its
+// own length). A missing view fails preparation; allocation/slot sizes are not
+// substitutes. Providers must expose internal tensor views as well as I/O.
 struct MetalBindingView { __unsafe_unretained id<MTLBuffer> buffer; NSUInteger offset, length; };
 void MetalRecordViews(const struct MetalBindingView *, size_t count, void (^encode)(void));
 // docs/kernels.md Any program
@@ -104,6 +107,9 @@ struct MetalCommandBinding {
     NSUInteger offset, length;
     uint32_t index, access;
 };
+// length is the exact dense extent, including zero for an empty view. Binding
+// reaches replace it with a union of strided/masked regions. Neither form is an
+// instruction to access the remainder of a buffer.
 // Native frontends can supply the same records directly instead of capturing
 // encoder calls. Both routes use the common access-order and replay compiler.
 struct MetalCommandDescription {

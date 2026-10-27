@@ -72,7 +72,7 @@ struct MetalRecordedDispatch {
     uint64_t access;
     // docs/kernels.md Any program: the reaches the dispatch declared (MetalDispatchReaching), `reaches` of the
     // capture's from `reach`, and the bindings whose extent one of them declares (bit j: binding j)
-    uint32_t reach, reaches, extents;
+    uint32_t reach, reaches, extents, bounded;
 };
 
 @interface MetalCapture : NSObject {
@@ -164,15 +164,15 @@ static NSUInteger MetalAllocationBase(id<MTLBuffer> buffer) {
 
 typedef void (^MetalAccess)(id<MTLBuffer> buffer, NSUInteger offset, NSUInteger bytes, BOOL load, BOOL store);
 // docs/kernels.md Any program: a command's accesses, each a buffer's bytes [offset, offset + bytes) read or written:
-// each binding its pipeline reads or writes, from its offset to its buffer's end (a slot's stride where it rings), but
-// where a reach declares its extent (MetalReachBinding); then each reach the dispatch declared.
+// Each binding has an explicit extent or a union of binding reaches. Slot strides
+// relocate those views; neither slot strides nor allocation sizes are accesses.
 static void MetalAccesses(const struct MetalRecordedDispatch *command, const struct MetalReach *reaches, NSUInteger invocation, MetalAccess each) {
     for(NSUInteger j=0;j<MESH_BUFFER_BINDINGS;j++) {
         id<MTLBuffer> buffer=command->buffers[j];
         const BOOL load=(command->access>>j)&1,store=(command->access>>(MESH_ACCESS_WRITE_SHIFT+j))&1;
         if(!buffer||(!load&&!store)||((command->extents>>j)&1))continue;
         const NSUInteger offset=MetalInvocationOffset(command->offsets[j],command->strides[j],command->instances[j],invocation);
-        each(buffer,offset,command->lengths[j]?command->lengths[j]:command->strides[j]?command->strides[j]:buffer.length>offset?buffer.length-offset:0,load,store);
+        if(command->lengths[j])each(buffer,offset,command->lengths[j],load,store);
     }
     for(uint32_t k=0;k<command->reaches;k++) {
         const struct MetalReach *reach=reaches+command->reach+k;
@@ -403,6 +403,7 @@ static void MetalDataflow(MetalCapture *capture) {
         [NSException raise:NSInvalidArgumentException
             format:@"Buffer binding %lu exceeds Metal capacity %d", index, MESH_BUFFER_BINDINGS];
     state.buffers[index] = buffer; state.offsets[index] = offset;
+    state.lengths[index]=0;state.bounded&=~(UINT32_C(1)<<index);
     state.strides[index] = [objc_getAssociatedObject(buffer,&operandStrideKey) unsignedIntegerValue];
     capture->buffers = MAX(capture->buffers, index + 1);
     if (buffer) { [capture->resources addObject:buffer]; [capture->owners addObject:buffer]; }
@@ -412,13 +413,15 @@ static void MetalDataflow(MetalCapture *capture) {
         [NSException raise:NSInvalidArgumentException
             format:@"Buffer binding %lu exceeds Metal capacity %d", index, MESH_BUFFER_BINDINGS];
     state.offsets[index] = offset;
+    state.lengths[index]=0;state.bounded&=~(UINT32_C(1)<<index);
 }
 - (void)setBuffers:(const id<MTLBuffer> *)buffers offsets:(const NSUInteger *)offsets withRange:(NSRange)range {
     for (NSUInteger i = 0; i < range.length; ++i) [self setBuffer:buffers[i] offset:offsets[i] atIndex:range.location + i];
 }
 - (void)setBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index {
     id<MTLBuffer> buffer = [[target device] newBufferWithBytes:bytes length:length options:MTLResourceStorageModeShared];
-    [self setBuffer:buffer offset:0 atIndex:index]; [buffer release];
+    [self setBuffer:buffer offset:0 atIndex:index];
+    state.lengths[index]=length;state.bounded|=UINT32_C(1)<<index;[buffer release];
 }
 - (void)setThreadgroupMemoryLength:(NSUInteger)length atIndex:(NSUInteger)index {
     if (index >= MESH_MEMORY_BINDINGS)
@@ -470,6 +473,7 @@ static void MetalDataflow(MetalCapture *capture) {
         [NSException raise:NSInvalidArgumentException format:@"command %lu (%@): its arguments hold addresses and it declares no reach "
             "(MetalDispatchReaching, docs/kernels.md Any program)", index, name];
     state.extents = 0;
+    uint64_t access=state.access;
     const struct MetalReach *reaches = (const struct MetalReach *)capture->reaches.bytes + state.reach;
     for (uint32_t k = 0; k < state.reaches; k++) {
         const struct MetalReach *reach = reaches + k;
@@ -483,16 +487,29 @@ static void MetalDataflow(MetalCapture *capture) {
         if (!(reach->access & MetalReachBinding)) continue;
         if (reach->binding < 0 || reach->binding >= MESH_BUFFER_BINDINGS || state.buffers[reach->binding] != reach->buffer)
             [NSException raise:NSInvalidArgumentException format:@"command %lu (%@): reach %u names no matching buffer binding", index, name, k];
+        if(!(state.extents&(UINT32_C(1)<<reach->binding)))
+            access&=~((UINT64_C(1)<<reach->binding)|(UINT64_C(1)<<(MESH_ACCESS_WRITE_SHIFT+reach->binding)));
+        if(reach->access&MetalReachRead)access|=UINT64_C(1)<<reach->binding;
+        if(reach->access&MetalReachWritten)access|=UINT64_C(1)<<(MESH_ACCESS_WRITE_SHIFT+reach->binding);
         state.extents |= UINT32_C(1) << reach->binding;
     }
     struct MetalRecordedDispatch recorded = state;
+    recorded.access=access;
     for(NSUInteger j=0;j<MESH_BUFFER_BINDINGS;j++) {
-        recorded.lengths[j]=0;
+        const uint32_t bit=UINT32_C(1)<<j;
+        const uint32_t mode=((state.access>>j)&1?MetalReachRead:0)|
+            ((state.access>>(MESH_ACCESS_WRITE_SHIFT+j))&1?MetalReachWritten:0);
+        if(!state.buffers[j]||!mode||(recorded.extents&bit)||(recorded.bounded&bit))continue;
         for(size_t v=0;v<bindingViewCount;v++) {
             const struct MetalBindingView *view=bindingViews+v;
-            if(view->buffer!=state.buffers[j]||state.offsets[j]<view->offset||state.offsets[j]>=view->offset+view->length)continue;
-            recorded.lengths[j]=MAX(recorded.lengths[j],view->offset+view->length-state.offsets[j]);
+            if(view->buffer!=state.buffers[j]||state.offsets[j]<view->offset||
+                (view->length?state.offsets[j]>=view->offset+view->length:state.offsets[j]!=view->offset))continue;
+            const struct MetalReach range={view->buffer,state.offsets[j],view->offset+view->length-state.offsets[j],mode|MetalReachBinding,(int32_t)j};
+            if(!recorded.reaches)recorded.reach=(uint32_t)(capture->reaches.length/sizeof range);
+            [capture->reaches appendBytes:&range length:sizeof range];recorded.reaches++;recorded.extents|=bit;
         }
+        if(!(recorded.extents&bit))
+            [NSException raise:NSInvalidArgumentException format:@"command %lu (%@): binding %lu has no prepared byte view",index,name,(unsigned long)j];
     }
     for (NSUInteger i = 0; i < MESH_MEMORY_BINDINGS; i++)
         if (!(declared.unsignedLongLongValue & (UINT64_C(1) << (MESH_ACCESS_WRITE_SHIFT + i)))) recorded.memory[i] = 0;
@@ -779,7 +796,23 @@ static void MetalReplayDispatch(id<MTLComputeCommandEncoder> encoder, struct Met
         }
     for (NSUInteger j = 0; j < replay->memory; j++)
         if (source->memory[j]) [encoder setThreadgroupMemoryLength:source->memory[j] atIndex:j];
-    MetalDispatchAccesses(encoder,source->grid,source->group,source->threads,
+    if(activeCapture) {
+        // Recapture preserves scalar/dense binding extents too. This is graph
+        // construction, never a numerical submission operation.
+        NSMutableData *views=[NSMutableData data];
+        if(reaches)[views appendBytes:reaches+source->reach length:source->reaches*sizeof *reaches];
+        for(NSUInteger j=0;j<replay->buffers;j++) {
+            const uint32_t mode=((source->access>>j)&1?MetalReachRead:0)|
+                ((source->access>>(MESH_ACCESS_WRITE_SHIFT+j))&1?MetalReachWritten:0);
+            if(!source->buffers[j]||!mode||((source->extents>>j)&1))continue;
+            const struct MetalReach view={source->buffers[j],source->offsets[j],source->lengths[j],mode|MetalReachBinding,(int32_t)j};
+            [views appendBytes:&view length:sizeof view];
+        }
+        struct MetalReach *bound=views.mutableBytes;
+        for(NSUInteger j=0;j<views.length/sizeof *bound;j++)if(bound[j].access&MetalReachBinding)
+            bound[j].offset=MetalInvocationOffset(bound[j].offset,source->strides[bound[j].binding],source->instances[bound[j].binding],t);
+        MetalDispatchAccesses(encoder,source->grid,source->group,source->threads,views.bytes,views.length/sizeof *bound);
+    } else MetalDispatchAccesses(encoder,source->grid,source->group,source->threads,
         reaches?reaches+source->reach:NULL,reaches?source->reaches:0);
 }
 

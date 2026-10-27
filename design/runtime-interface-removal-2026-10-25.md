@@ -89,6 +89,16 @@ row operations and head outputs supply their layouts. Fused epilogues preserve t
 capturing addresses. [The publication review](../docs/native-access-publication.md) distinguishes these
 completed changes from the still-open binding of native tile completion to physical WRITE prefixes.
 
+Updated 2026-10-27: structural item 6 removes implicit buffer-to-end and slot-stride
+access extents from the shared recorder, native command binding and fused epilogue
+capture. Native command builders supply dense or strided operand views; the raw
+Swift single-command encoder is removed. Prepared replay retains those views when
+captured into a larger function. Missing views fail preparation. LiteRT's native
+stages and external tensors supply views, but its packaged delegate still needs
+to export its internal tensor views from shared arenas. That provider requirement
+is explicit; there is no whole-arena substitute. See
+[the source record](../docs/native-access-publication.md#explicit-native-binding-views--2026-10-27).
+
 ## Integration — 2026-10-26T21:13:39-07:00
 
 The seven current interventions are recorded in

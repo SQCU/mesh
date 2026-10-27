@@ -232,3 +232,59 @@ or additional submission boundary is introduced.
 The C libraries, CFFI module, Torch extension and macOS 26 native/LiteRT rank
 build. Python source parses. Numerical execution and performance measurements
 remain deferred until the structural sequence is complete.
+
+## Explicit native binding views — 2026-10-27
+
+Source changes recorded 2026-10-27 16:31 UTC, structural item 6.
+
+`MetalAccesses` no longer chooses the remaining allocation or an invocation
+stride when a binding has no extent. Dense extents include zero; strided binding
+reaches supply their union of ranges. Strides only relocate those ranges across
+prepared invocation slots.
+
+Native `MetalDispatch` builders supply dense `reads`/`writes` lengths or existing
+`Reach` views. Both become the same records before execution. Construction checks
+that each used, non-null buffer argument has a declaration. `MetalProgram.bind`
+uses the declared access modes rather than assuming every operand is read and
+every unreflected operand is also written. The separate raw Swift `encode`
+helper is removed. Its serving copy and weight-conversion callers use the common
+prepared command interface.
+
+Declarations now include routed expert storage, control operands, sampling,
+descriptor copies, drafting, vision and DSV41 commands. Shape operands determine
+payload extents. Runtime-indexed tables declare their eligible domains; an input
+value cannot be guessed during preparation. Immutable address and control tables
+may be read in full as named operands. That does not make the containing payload
+arena an access.
+
+Coded products use the immutable tile and band words to find the selected code
+planes and input slabs. Their field masks and plane width come from
+`etc/compute/metal.def`, also consumed by the Metal decoder. Column pitches exclude other column slices. Finished products use
+the supplied row order to name their output columns, including permutations with
+gaps. Head consumers declare their selected Q/K/V source columns and partial-sum
+planes. Fused epilogues retain their standalone declarations; the former
+buffer-to-end substitution is deleted. Publication words keep their binding
+indices when passed to the fused producer.
+
+Recapturing a prepared command preserves its dense constants, empty views,
+strided ranges and explicit read/write modes. Previously constants lost their
+lengths at this boundary, and reflection could restore a broader access mode.
+All view construction and missing-input errors occur during preparation. No view
+lookup, allocation, new wait or validation is added to numerical submission.
+
+The raw recorder requires views too. LiteRT native stages now supply the logical
+`MeshOperand.bytes` for each bound invocation. External delegate tensors already
+supply their typed storage views. The packaged LiteRT delegate does **not** yet
+export its internal views: `InferenceContext` places tensors at offsets in shared
+buffers, and `MetalArguments::Encode` passes only buffer and offset. Those
+internal bindings now fail preparation. The provider must carry its tensor
+extent/access metadata to `MetalDispatchReaching` or scoped `MetalRecordViews`;
+restoring a buffer-tail extent would recreate the defect. This is an outstanding
+backend integration requirement before numerical execution, not a completed
+LiteRT capability or a performance result.
+
+The shared C libraries, Torch extension and macOS 26 Swift/native/LiteRT rank
+build. The streamed Metal source also compiles for macOS 26 with the queried
+device capability operands.
+No dispatch was submitted. Numerical runs and measurements remain deferred until
+the structural sequence is complete.
