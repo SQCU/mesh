@@ -3,8 +3,8 @@
    copy: on unified memory, torch's MPS tensors' shared storage), and its output is written into the caller's memory
    (Core ML's output backing), so the CPU does no copying on the prediction's critical path: through coremltools each
    prediction copied its input and output on the CPU, and once the CPU's performance cores clocked down beside a busy
-   GPU (1.3-2.8 GHz from 4.3 on an M4 Pro), a 3 ms prediction took 9.  Called through ctypes, which releases the
-   interpreter while it runs.
+   GPU (1.3-2.8 GHz from 4.3 on an M4 Pro), a 3 ms prediction took 9. Preparation binds native entry points and
+   their operands into the shared schedule; execution does not enter the interpreter.
 
    mesh_coreml_load(package, input, output, units): compiles a model package (MLModel compileModelAtURL; a compiled
    .mlmodelc loads as it is) and loads it on `units` (0 CPU and Neural Engine, 1 all, 2 CPU only), its input and output
@@ -19,12 +19,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 
 static NSMutableArray *models_;
 static NSMutableArray *names_;
 static NSMutableArray *compiled_;
 static NSMutableArray *units_;
-static char error_[2048];
+static _Thread_local char error_[2048];
 
 /* Prepared CPU numerical commands, on the same shared views as graph shares.
    Weights and scratch are bound by the compiler; execution allocates nothing. */
@@ -105,8 +106,34 @@ void mesh_cpu_gelu(const MeshCpuCommand *c) {
       vvtanhf(c->scratch,c->scratch,&n);
       for(int i=0;i<n;i++)c->output[i]=0.5f*c->input[i]*(1+c->scratch[i])*c->weight[i];
 }
-void mesh_cpu_run(const MeshCpuCommand *commands, size_t count) {
-  for(size_t j=0;j<count;j++)commands[j].run(commands+j);
+typedef struct {
+  _Atomic unsigned references;
+  size_t count;
+  MeshCpuCommand commands[];
+} MeshCpuProgram;
+
+/* Preparation transfers command-owned workspace into this native lifetime.
+   The schedule retains it independently of the frontend that constructed it. */
+void *mesh_cpu_program_create(const MeshCpuCommand *commands, size_t count) {
+  MeshCpuProgram *p=malloc(sizeof *p+count*sizeof *commands);
+  if(!p)return NULL;
+  atomic_init(&p->references,1);p->count=count;
+  memcpy(p->commands,commands,count*sizeof *commands);
+  return p;
+}
+void mesh_cpu_program_retain(void *program) {
+  MeshCpuProgram *p=program;atomic_fetch_add_explicit(&p->references,1,memory_order_relaxed);
+}
+void mesh_cpu_program_release(void *program) {
+  MeshCpuProgram *p=program;
+  if(atomic_fetch_sub_explicit(&p->references,1,memory_order_acq_rel)!=1)return;
+  for(size_t j=0;j<p->count;j++)mesh_cpu_command_release(p->commands+j);
+  free(p);
+}
+const char *mesh_cpu_program_run(void *program) {
+  MeshCpuProgram *p=program;
+  for(size_t j=0;j<p->count;j++)p->commands[j].run(p->commands+j);
+  return NULL;
 }
 
 const char *mesh_coreml_error(void) { return error_; }
@@ -180,20 +207,21 @@ void *mesh_coreml_bind(long handle, const MeshModelView *inputs, size_t ni, cons
   }
 }
 
-int mesh_coreml_run(void *binding) {
+const char *mesh_coreml_run(void *binding) {
   @autoreleasepool {
     MeshPrediction *p=(__bridge MeshPrediction *)binding;NSError *error=nil;
     id<MLFeatureProvider> result=[p.model predictionFromFeatures:p.features options:p.options error:&error];
-    if(!result){snprintf(error_,sizeof error_,"predict: %s",error.localizedDescription.UTF8String);return -1;}
+    if(!result){snprintf(error_,sizeof error_,"predict: %s",error.localizedDescription.UTF8String);return error_;}
     for (NSString *name in p.outputs) {
       if([result featureValueForName:name].multiArrayValue.dataPointer!=p.outputs[name].dataPointer){
-        snprintf(error_,sizeof error_,"Core ML did not use the configured output backing");return -1;
+        snprintf(error_,sizeof error_,"Core ML did not use the configured output backing");return error_;
       }
     }
-    return 0;
+    return NULL;
   }
 }
 
+void mesh_coreml_retain(void *binding) { CFRetain(binding); }
 void mesh_coreml_unbind(void *binding) { CFRelease(binding); }
 
 /* Where Core ML places each operation of a loaded model (MLComputePlan): "operator=device" a line, the device cpu, gpu,

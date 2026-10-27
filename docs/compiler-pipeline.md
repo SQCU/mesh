@@ -25,8 +25,30 @@ that its internal algorithm performs no packing.
 
 This removes the `mesh_cpu_product_view` dot-product loop introduced in `ac1ea093`.
 Source and compiler checks cover this edit; no numerical or performance run was
-made. The host dependency, graph placement, publication, access, feedback and
-backend integration items remain separate work in the correction sequence.
+made.
+
+The next correction replaces the host start/consume tokens with input and output
+views in `MetalScheduleHost` and `MetalRecordHost`. FX binds native CPU/Core ML
+entry points and retains their operands in native storage. Swift declares its ANE
+input and output ranges through the same recorder. Neither caller supplies a
+Python runtime callback or a separate consumer marker.
+
+During preparation, overlapping reads and writes form dependencies. The compiler
+orders independent GPU work ahead of consumers that need unfinished host work.
+A GPU part publishes an event only when a host operation needs it; GPU consumers
+wait on their actual host predecessors. Host operations use prepared event
+notifications. They do not acquire the Python GIL, inspect layouts, or allocate
+commands. Empty GPU parts are omitted from submission. Adjacent replay commands
+remain batched; GPU-only spans keep compact ranges without constructing the host
+dependency graph. This changes our scheduling machinery, not the internals of
+Accelerate or Core ML.
+
+Collective marks still have an opaque access interface here. They preserve their
+declared order and join preceding host work. Removing that conservative boundary
+belongs to the outstanding collective placement/access integration. Graph
+placement, publication, access, feedback and backend integration remain in the
+correction sequence. These are structural changes, not measured performance
+claims; numerical execution remains deferred until that sequence is complete.
 
 ## Transformations applied to PyTorch descriptions
 
@@ -183,8 +205,8 @@ shared strided views. `export_coreml_graph` converts an exported tensor graph be
 execution, with explicit deployment, precision, compute units and artifact directory.
 Both use the same native Core ML binding as the existing linear/FFN graph builder.
 The binding is no longer limited to one dense two-dimensional input and output.
-A host record returns its dependency token; the consumer names that token in the
-common schedule. Native ANE commands bind their actual normalized input directly;
+A host record declares its input and output views; the common schedule derives
+the data dependencies before execution. Native ANE commands bind their actual normalized input directly;
 a sole ANE result binds its final output directly. Multiple numerical partials still
 use the ordinary sum command.
 

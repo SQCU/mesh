@@ -72,10 +72,13 @@ struct MetalReplay *MetalRecord(id<MTLDevice> device, void (^encode)(void), cons
     size_t count, NSUInteger invocations, enum MetalForm form);
 // docs/kernels.md#collectives
 NSUInteger MetalRecordMark(void);
-// A configured host share starts after its input commands. Only its declared
-// consumers depend on completion. These declarations are captured with the
-// numerical graph and use the same prepared schedule at execution.
-void MetalRecordHost(id identity, BOOL consume, NSError *(^operation)(void));
+// Host operations declare the same read/write views as GPU commands. The
+// compiler orders their producers and consumers; there are no consume markers.
+// These are prepared native operations, not callbacks into a frontend. CPU-only
+// views use a nil buffer and their address as offset; Metal views use buffer-relative
+// offsets. The bound operation retains any CPU storage it uses. Capture holds Metal
+// buffers. Host views/operations stay bound to these operands across replay slots.
+void MetalRecordHost(const struct MetalReach *, size_t count, NSError *(^operation)(void));
 // docs/kernels.md#collectives
 typedef int (^MetalCrossing)(id<MTL4ComputeCommandEncoder> encoder, id<MTL4ArgumentTable> table, id<MTLResidencySet> residency,
     NSUInteger invocation, NSUInteger mark);
@@ -92,11 +95,7 @@ void MetalScheduleAfter(struct MetalSchedule *, id<MTLEvent>, uint64_t value);
 // Preparation records the function's collective result sources. Observers read
 // their existing failure state; this adds no command or transfer-time check.
 void MetalScheduleCommunicator(struct MetalSchedule *, struct ncclComm *);
-// Bind a host producer now and its data consumers later. The returned event is
-// owned by the caller. Unrelated commands between these declarations can run
-// while the CPU/ANE produces the result.
-id<MTLSharedEvent> MetalScheduleHostProducer(struct MetalSchedule *, NSError *(^operation)(void));
-void MetalScheduleHostConsumer(struct MetalSchedule *, id<MTLSharedEvent>);
+void MetalScheduleHost(struct MetalSchedule *, const struct MetalReach *, size_t count, NSError *(^operation)(void));
 id<MTLResidencySet> MetalScheduleResources(struct MetalSchedule *);
 // Explicit bindings from a compiler which already has its pipelines. These
 // enter the same access ordering and encoding used by captured commands.

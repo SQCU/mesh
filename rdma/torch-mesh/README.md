@@ -401,9 +401,11 @@ w = s["lm_head"].to("cpu")                        # decoded
 `engines.Linear` and `engines.FFN` are declarations. Call `declare(rows, dtype, capacities=work_rates)`
 before choosing the allocation, then `prepare(input, parts=...)`.
 The prepared share owns its fixed outputs and host views. Append it to `execution_sequence` with the
-other function parts. CPU/ANE work uses `MetalScheduleHostProducer`; its consumers use
-`MetalScheduleHostConsumer`. These are the same records used by native engine capture. The old
-operation-call allocator, shard loader, thread pool and future joins are removed.
+other function parts. CPU/ANE work uses `MetalScheduleHost` with a native entry point
+and declared input/output views. The compiler derives dependencies from overlapping
+accesses, using the same records as native engine capture. Consumers need no token
+or explicit join. The operation-call allocator, shard loader, Python callback,
+thread pool and future joins are removed.
 `examples/engines.py` uses the same interface as an application.
 Its required `ENGINE_CAPACITIES` JSON object supplies one work rate per named engine for the configured shape.
 Missing rates fail before tensors or models are prepared; no equal-rate fallback is used. Zero explicitly excludes

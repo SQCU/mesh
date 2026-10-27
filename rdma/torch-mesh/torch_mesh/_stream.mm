@@ -1482,22 +1482,42 @@ struct ScheduleBinding {
   Schedule schedule;
   ScheduleBinding():schedule(schedule_after_inputs()){}
   std::vector<at::Tensor> operands;
-  pybind11::capsule host(pybind11::function function) {
-    auto held=std::shared_ptr<pybind11::function>(new pybind11::function(std::move(function)),
-        [](pybind11::function *f){pybind11::gil_scoped_acquire gil;delete f;});
-    id<MTLSharedEvent> event=MetalScheduleHostProducer(schedule.get(),^NSError * {
-      pybind11::gil_scoped_acquire gil;
-      try { (*held)(); return nil; }
-      catch(pybind11::error_already_set &error) {
-        NSString *message=@(error.what());error.restore();PyErr_Clear();
-        return [NSError errorWithDomain:@"mesh.host-operation" code:1 userInfo:@{NSLocalizedDescriptionKey:message}];
+  // Preparation supplies native run/context/retain/release operands. The
+  // completion worker neither owns a Python callback nor acquires the GIL.
+  void host(const std::array<uintptr_t,4> &entry,const std::vector<at::Tensor> &inputs,
+      const std::vector<at::Tensor> &outputs) { @autoreleasepool {
+    for(auto pointer:entry)TORCH_CHECK(pointer,"host operation requires a complete native binding");
+    using Run=const char *(*)(void *);
+    using Lifetime=void (*)(void *);
+    auto run=reinterpret_cast<Run>(entry[0]);
+    auto context=reinterpret_cast<void *>(entry[1]);
+    reinterpret_cast<Lifetime>(entry[2])(context);
+    auto bound=std::shared_ptr<void>(context,reinterpret_cast<Lifetime>(entry[3]));
+    std::vector<MetalReach> views;
+    auto declare=[&](const std::vector<at::Tensor> &tensors,uint32_t access) {
+      for(const auto &t:tensors) {
+        TORCH_CHECK(t.is_mps()||t.device().is_cpu(),"host views require shared CPU/Metal storage");
+        id<MTLBuffer> buffer=t.is_mps()?at::native::mps::getMTLBufferStorage(t):nil;
+        TORCH_CHECK(!buffer||buffer.storageMode==MTLStorageModeShared,"host views require shared Metal storage");
+        const NSUInteger offset=buffer?t.storage_offset()*t.element_size():(NSUInteger)t.data_ptr();
+        std::vector<NSUInteger> shape(t.sizes().begin(),t.sizes().end());
+        std::vector<NSInteger> strides(t.strides().begin(),t.strides().end());
+        for(auto &stride:strides)stride*=t.element_size();
+        NSData *data=MetalViewReaches(buffer,offset,shape.data(),strides.data(),shape.size(),t.element_size(),access,-1);
+        const auto *spans=(const MetalReach *)data.bytes;
+        views.insert(views.end(),spans,spans+data.length/sizeof *spans);
       }
+    };
+    declare(inputs,MetalReachRead);declare(outputs,MetalReachWritten);
+    auto held=inputs;held.insert(held.end(),outputs.begin(),outputs.end());
+    MetalScheduleHost(schedule.get(),views.data(),views.size(),^NSError * {
+      // Tensor handles retain the actual storage, including CPU-only weights.
+      (void)held;
+      const char *error=run(bound.get());
+      return error?[NSError errorWithDomain:@"mesh.host-operation" code:1
+        userInfo:@{NSLocalizedDescriptionKey:@(error)}]:nil;
     });
-    return pybind11::capsule((void *)event,"mesh.host-result",[](PyObject *token){
-      [(id)PyCapsule_GetPointer(token,"mesh.host-result") release];
-    });
-  }
-  void consume(pybind11::capsule event){MetalScheduleHostConsumer(schedule.get(),(id<MTLSharedEvent>)event.get_pointer());}
+  }}
   void compute(int64_t kernel,const Tensors &buffers,const std::vector<int64_t> &words,
       int64_t at,int64_t gx,int64_t gy,int64_t threads,uint64_t access) {
     for(const auto &buffer:buffers)if(buffer)operands.push_back(*buffer);
@@ -1680,7 +1700,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def("writes",&ScheduleBinding::writes)
     .def("collectives",&ScheduleBinding::collectives)
     .def("host",&ScheduleBinding::host)
-    .def("consume",&ScheduleBinding::consume)
     .def("finish",&ScheduleBinding::finish)
     .def("enqueue",&ScheduleBinding::enqueue)
     .def("completion",&ScheduleBinding::completion);

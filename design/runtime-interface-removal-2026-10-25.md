@@ -119,7 +119,8 @@ records the current status; unmarked entries remain outstanding.
   Native [NeuralEngineShares](../../../metal-microbench/neural_engine.swift) also already binds shared input,
   result and progress storage before execution.
 - **Integration still required:** declare all operation shapes, allocate their results, load their models and
-  bind CPU/GPU/ANE work before the call. Native ANE coordination now uses recorded host-producer and consumer edges in the shared schedule. Preserve `Linear`/`FFN`
+  bind CPU/GPU/ANE work before the call. CPU/ANE records now declare input/output ranges in the shared schedule;
+  the start/consume token interface and Python runtime callback have been removed. Preserve `Linear`/`FFN`
   mathematics and the engine capabilities while deleting the hidden execution policy.
 
 ### R02. SparseLinear's private optimizer and timer — removed
@@ -395,7 +396,7 @@ use that same native submission. The Dynamo backend entry point and eager alloca
 are removed. `matrix.metal` is the DNN matrix body, now shared with larger FX products. The existing
 small-row linear body remains in use.
 
-CPU/ANE engine shares use the native recorder's producer/consumer records. Generic CPU FX emission remains
+CPU/ANE engine shares use the native recorder's access declarations and bound native operations. Generic CPU FX emission remains
 unsupported; missing lowering errors do not select a framework executor. This update does not close every
 entry in this manifest. Native and extension builds passed; whole-call latency and useful bandwidth still
 require the canonical committed-main run. No new test suite or alternate measurement path was added.

@@ -62,15 +62,20 @@ def _coreml():
             lib.mesh_coreml_bind.restype = ctypes.c_void_p
             lib.mesh_coreml_bind.argtypes = [ctypes.c_long, ctypes.POINTER(ModelView), ctypes.c_size_t,
                                              ctypes.POINTER(ModelView), ctypes.c_size_t]
-            lib.mesh_coreml_run.restype, lib.mesh_coreml_run.argtypes = ctypes.c_int, [ctypes.c_void_p]
+            lib.mesh_coreml_run.restype, lib.mesh_coreml_run.argtypes = ctypes.c_char_p, [ctypes.c_void_p]
+            lib.mesh_coreml_retain.argtypes = [ctypes.c_void_p]
             lib.mesh_coreml_unbind.argtypes = [ctypes.c_void_p]
             lib.mesh_coreml_error.restype = ctypes.c_char_p
             lib.mesh_coreml_placement.restype = ctypes.c_long
             lib.mesh_coreml_placement.argtypes = [ctypes.c_long, ctypes.c_char_p, ctypes.c_size_t]
             lib.mesh_coreml_compile.restype = ctypes.c_int
             lib.mesh_coreml_compile.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
-            lib.mesh_cpu_run.argtypes = [ctypes.POINTER(CpuCommand), ctypes.c_size_t]
-            lib.mesh_cpu_run.restype = None
+            lib.mesh_cpu_program_create.argtypes = [ctypes.POINTER(CpuCommand), ctypes.c_size_t]
+            lib.mesh_cpu_program_create.restype = ctypes.c_void_p
+            lib.mesh_cpu_program_run.argtypes = [ctypes.c_void_p]
+            lib.mesh_cpu_program_run.restype = ctypes.c_char_p
+            lib.mesh_cpu_program_retain.argtypes = [ctypes.c_void_p]
+            lib.mesh_cpu_program_release.argtypes = [ctypes.c_void_p]
             lib.mesh_cpu_product_bind.argtypes = [ctypes.POINTER(CpuCommand)]
             lib.mesh_cpu_product_bind.restype = ctypes.c_int
             lib.mesh_cpu_command_release.argtypes = [ctypes.POINTER(CpuCommand)]
@@ -177,14 +182,14 @@ class Cpu(Engine):
                 raise ValueError('CPU matrix views could not be bound to a bulk contraction')
             return command
         if op.kind == 'linear':
-            return CpuProgram([product(source, shard, target)], (source, shard, target))
+            return CpuProgram([product(source, shard, target)], (prologue['fp32'], shard), (out,))
         gate, up, down = shard
         g = torch.empty(source.shape[0], gate.shape[0], dtype=torch.float32)
         u, scratch = torch.empty_like(g), torch.empty_like(g)
         activation = CpuCommand(ctypes.cast(native.mesh_cpu_gelu, ctypes.c_void_p), g.shape[0], g.shape[1], 0, 0, 0, 0, 0, 0, 0,
                                  g.data_ptr(), u.data_ptr(), g.data_ptr(), scratch.data_ptr())
         return CpuProgram([product(source, gate, g), product(source, up, u), activation, product(g, down, target)],
-                          (source, target, *shard, g, u, scratch))
+                          (prologue['fp32'], *shard), (out, g, u, scratch))
 
 
 class CpuCommand(ctypes.Structure):
@@ -194,19 +199,32 @@ class CpuCommand(ctypes.Structure):
     _fields_ += [(name, ctypes.c_int) for name in ('input_transpose', 'weight_transpose')]
 
 
+def _native_entry(run, binding, retain, release):
+    return (ctypes.cast(run, ctypes.c_void_p).value, binding,
+            ctypes.cast(retain, ctypes.c_void_p).value, ctypes.cast(release, ctypes.c_void_p).value)
+
+
 class CpuProgram:
-    def __init__(self, commands, operands):
+    def __init__(self, commands, inputs, outputs):
         self.native = _coreml()
         if self.native is None:
             raise RuntimeError('CPU commands require the native engine library')
-        self.commands, self.operands = (CpuCommand * len(commands))(*commands), operands
+        records = (CpuCommand * len(commands))(*commands)
+        self.binding = self.native.mesh_cpu_program_create(records, len(records))
+        if not self.binding:
+            for command in records:
+                self.native.mesh_cpu_command_release(ctypes.byref(command))
+            raise MemoryError('preparing CPU commands')
+        self.inputs, self.outputs = inputs, outputs
+        self.entry = _native_entry(self.native.mesh_cpu_program_run, self.binding,
+                                   self.native.mesh_cpu_program_retain, self.native.mesh_cpu_program_release)
 
-    def __call__(self):
-        self.native.mesh_cpu_run(self.commands, len(self.commands))
+    def append(self, schedule):
+        schedule.host(self.entry, self.inputs, self.outputs)
 
     def __del__(self):
-        for command in getattr(self, 'commands', ()):
-            self.native.mesh_cpu_command_release(ctypes.byref(command))
+        if getattr(self, 'binding', None):
+            self.native.mesh_cpu_program_release(self.binding)
 
 
 class _Compiled:
@@ -252,7 +270,7 @@ class Ane(Engine):
         handle = native.mesh_coreml_load(str(compiled).encode(), b'', b'', 0)
         if handle < 0:
             raise RuntimeError(native.mesh_coreml_error().decode())
-        return Prediction(native, handle, host(x), host(out))
+        return Prediction(native, handle, x, out)
 
 
 class ModelView(ctypes.Structure):
@@ -263,14 +281,17 @@ class ModelView(ctypes.Structure):
 class Prediction:
     """One Core ML invocation's views, bound before the numerical function."""
     def __init__(self, native, model, source, target):
-        self.native, self.source, self.target = native, source, target
+        self.native = native
+        source = source if isinstance(source, dict) else {'': source}
+        target = target if isinstance(target, dict) else {'': target}
+        self.inputs, self.outputs = tuple(source.values()), tuple(target.values())
         # Empty names select the load declaration's names; general graphs pass
         # an explicit mapping for every input and output.
         def views(values):
-            values = values if isinstance(values, dict) else {'': values}
             types = (torch.float16, torch.float32, torch.int32, torch.float64)
             records = []
-            for name, tensor in values.items():
+            for name, original in values.items():
+                tensor = host(original)
                 if tensor is None or tensor.dtype not in types:
                     raise ValueError('Core ML views require shared fp16, fp32, int32 or fp64 storage')
                 rank = tensor.ndim
@@ -282,16 +303,15 @@ class Prediction:
         if not self.binding:
             raise RuntimeError(native.mesh_coreml_error().decode())
 
-    def __call__(self):
-        if self.native.mesh_coreml_run(self.binding):
-            raise RuntimeError(self.native.mesh_coreml_error().decode())
+        self.entry = _native_entry(native.mesh_coreml_run, self.binding,
+                                   native.mesh_coreml_retain, native.mesh_coreml_unbind)
 
     def __del__(self):
         if getattr(self, 'binding', None):
             self.native.mesh_coreml_unbind(self.binding)
 
     def append(self, schedule):
-        return schedule.host(self)
+        schedule.host(self.entry, self.inputs, self.outputs)
 
 
 def coreml_graph(compiled, inputs, outputs, *, units):
@@ -299,8 +319,8 @@ def coreml_graph(compiled, inputs, outputs, *, units):
 
     ``units`` is the caller's backend operand (0 CPU/ANE, 1 all, 2 CPU).
     Graph conversion belongs to preparation; no operation-kind dispatch or
-    model loading occurs in the returned host record. Consumers attach to the
-    record returned by ``append`` through the common schedule.
+    model loading occurs in the returned host record. The common schedule
+    derives dependencies from the declared input and output views.
     """
     native = _coreml()
     if native is None:
@@ -308,7 +328,7 @@ def coreml_graph(compiled, inputs, outputs, *, units):
     handle = native.mesh_coreml_load(os.fsencode(compiled), b'', b'', units)
     if handle < 0:
         raise RuntimeError(native.mesh_coreml_error().decode())
-    return Prediction(native, handle, {k: host(v) for k, v in inputs.items()}, {k: host(v) for k, v in outputs.items()})
+    return Prediction(native, handle, inputs, outputs)
 
 
 def export_coreml_graph(program, inputs, outputs, *, directory, units, deployment, precision):
@@ -561,11 +581,10 @@ class Prepared:
     def append(self, schedule):
         if self.prologue is not None:
             self.prologue.append(schedule)
-        results = [schedule.host(function) for function in self.host]
+        for function in self.host:
+            function.append(schedule)
         for function in self.gpu:
             function.append(schedule)
-        for result in results:
-            schedule.consume(result)
         if self.combine is not None:
             self.combine.append(schedule)
 
