@@ -147,7 +147,7 @@ class Mps(Engine):
         torch.mm(x, shard.T, out=out)
 
     def prepare_ffn(self, op, start, end):
-        return op.gate[start:end], op.up[start:end], op.down[:, start:end].contiguous()
+        return op.gate[start:end], op.up[start:end], op.down[:, start:end]
 
     def run_ffn(self, op, shard, x, prologue, out):
         ffn(x, *shard, out=out)
@@ -162,10 +162,10 @@ class Cpu(Engine):
         return torch.float32
 
     def prepare_linear(self, op, start, end):
-        return op.weight[start:end].detach().float().cpu().contiguous()
+        return op.weight[start:end].detach().float().cpu()
 
     def prepare_ffn(self, op, start, end):
-        cpu = lambda t: t.detach().float().cpu().contiguous()
+        cpu = lambda t: t.detach().float().cpu()
         return cpu(op.gate[start:end]), cpu(op.up[start:end]), cpu(op.down[:, start:end])
 
     def bind(self, op, shard, x, prologue, out):

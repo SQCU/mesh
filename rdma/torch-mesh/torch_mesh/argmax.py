@@ -39,8 +39,8 @@ def _kernel(kernel, *arguments):
 
 
 def _rows(z, keys):
-    z2 = z.to('mps', torch.float32).reshape(-1, z.shape[-1]).contiguous()
-    return z2, torch.as_tensor(keys, dtype=torch.int32, device=z2.device).reshape(-1).expand(z2.shape[0]).contiguous()
+    z2 = z.to('mps', torch.float32).reshape(-1, z.shape[-1])
+    return z2, torch.as_tensor(keys, dtype=torch.int32, device=z2.device).reshape(-1).expand(z2.shape[0])
 
 
 @torch.library.custom_op('torch_mesh::draw', mutates_args=())

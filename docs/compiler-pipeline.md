@@ -218,6 +218,13 @@ Fused epilogues keep the standalone command's declared ranges when capturing its
 the original argument indices because those indices name different bindings in the fused command.
 See [native accesses and tile publication](native-access-publication.md) for the boundaries still open.
 
+`MatrixView` also accepts empty, repeated-read and reversed affine views. Native RMS
+normalization and coded finish compile their addresses with the same index generator
+used by FX. Their access records consume those same view operands. RMS reduction
+storage follows the selected threadgroup size instead of a separate fixed array.
+Structured-transform block width is an explicit graph-construction operand; the
+chosen factor fits the device's memory and sizes the specialized shader workspace.
+
 Validation on 2026-10-26: the native library, Torch extension and Swift/LiteRT rank built. The existing
 transformer example's block prepared its complete forward/backward graph at batch 2, sequence 1,024,
 width 2,048 and float16, including native schedule realization. No numerical submission was made.
@@ -254,6 +261,12 @@ Section discovery consumes the model configuration's explicit `--semantics` oper
 patterns; the importer contains no model-name switch. LiteRT records each stage once.
 The former payload warm invocation before capture is removed. The recording device
 handles preparation fills and captures numerical commands without dispatching them.
+
+Head handoffs carry configured axis order and element type into explicit row count,
+width, local pitch and offset operands. The native adapter binds them through
+`MeshRankRows` and the shared page WRITE compiler. A head slice can span many rows;
+source and destination may have different local pitches. Plain Metal external
+storage is still required until other provider layouts have declared mappings.
 
 `engines.Cpu` binds Accelerate products and the GELU/multiply epilogue into native
 commands, with all weights and scratch supplied at preparation. Its former eager

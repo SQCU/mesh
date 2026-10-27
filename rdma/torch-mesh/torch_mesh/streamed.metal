@@ -215,12 +215,12 @@ static inline float streamed_capped(float x, float cap) { return cap > 0.0f ? ta
 template <bool Fresh = false>
 static inline float streamed_sum(float s, threadgroup float *partial, uint t, uint threads) {
     s = simd_sum(s);
-    if (threads <= 32) return s;
+    if (threads <= MESH_SIMD_WIDTH) return s;
     if (!Fresh) threadgroup_barrier(mem_flags::mem_threadgroup);
-    if ((t & 31u) == 0) partial[t >> 5] = s;
+    if (t % MESH_SIMD_WIDTH == 0) partial[t / MESH_SIMD_WIDTH] = s;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float total = 0.0f;
-    for (uint i = 0; i < threads / 32; i++) total += partial[i];
+    for (uint i = 0; i < threads / MESH_SIMD_WIDTH; i++) total += partial[i];
     return total;
 }
 

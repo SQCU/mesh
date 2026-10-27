@@ -34,6 +34,9 @@ MESH_METAL_VALUE(GATHER_GROUPS_PER_CORE, 1)
 // Maximum logical bytes of one prepared layout-copy dependency tile.
 // This is scheduling policy, not a limit on operand or function size.
 MESH_METAL_VALUE(LAYOUT_COPY_TILE_BYTES, 262144)
+// Preferred Hadamard block; graph construction factors larger rows into blocks.
+// Workspace is specialized to the chosen width within the live memory limit.
+MESH_METAL_VALUE(FWHT_BLOCK_WIDTH, 4096)
 
 // Existing two-matrix attention page format. A different layout needs its compiled kernel.
 MESH_METAL_VALUE(ATTENTION_TILE_PAGE, 16)

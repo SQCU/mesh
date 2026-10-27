@@ -161,3 +161,45 @@ The table above remains the historical review baseline. Arbitrary numerical page
 maps, global producer-domain splitting, provider output-backing guarantees, and
 the other listed algorithm/shape restrictions remain work. This change does not
 establish global optimal layout placement or a measured performance improvement.
+
+## Constraint propagation follow-up
+
+Recorded: 2026-10-27T19:29:47Z. A constraint is complete only when its
+declaration reaches storage placement, numerical specialization, transfer
+layout and dependency records wherever those stages use it. A manifest field
+with a separate literal in a lowering does not complete that work. This applies
+to shapes, types, alignment, contiguous ranges, masks, resource limits, tile
+geometry, ownership and value lifetimes, across every backend.
+
+| Relation | Declaration and lowering | Result |
+|---|---|---|
+| Coded input storage | Matrix columns/slabs and operation rows determine prepared storage, slab offsets, shader `inputs` and `inputReaches`. Callers explicitly share one prepared input among its readers. | Removed the 12,288-column workspace and `ROWS` rejection. Unrelated large inputs no longer share a global scratch buffer. Rotation results and head partials have distinct prepared storage. |
+| Coded identity order | The matrix's row or column count sizes its immutable index table. | Removed the 65,536-entry table ceiling. |
+| Native affine views | `MatrixView` supplies signed strides, grouped rows, type and offset to both `MetalViewIndexDeclaration` and `MetalViewReaches`. | Zero-stride reads, reversed views and empty views are representable. RMS normalization uses this mapping; its separate unsigned stride constants are removed. Reduction workspace follows the selected threadgroup size. |
+| Structured transforms | `FWHT_BLOCK_WIDTH` is a graph-construction preference. The requested row factors into blocks within live threadgroup memory. Each chosen width specializes the shader's actual array. | Removed the fixed 4,096-value shader array. An 8,192-value specialization prepared on the local device. |
+| Accepted strided operands | Structured transforms and their backward declaration, sampling, and CPU/MPS shard preparation preserve views. Existing shader words and Accelerate descriptors consume their actual strides. | Removed extra `.contiguous()` calls. Required dtype/device conversion remains explicit. A non-affine sampling reshape can still require a compiler copy. |
+| LiteRT head handoffs | Configuration supplies axis order and element type. The importer emits selected row count, width, pitch and offset. The native adapter passes these to `MeshRankRows`, then `mesh_compile_rows`. | Removed the leading-dimension-product-of-one restriction. Each peer's local pitch reaches the shared page WRITE compiler; gaps are not transferred. Missing element geometry fails preparation. |
+
+Prepared storage is retained by the recorded commands. None of these builders
+runs during payload execution. A value shared by several readers is an explicit
+operand; equal buffer sizes do not establish that two live values may alias.
+General native storage coalescing still needs the compiler's value-lifetime
+relations. There is no new runtime scratch cache or allocation path.
+An explicit transformed-input destination also no longer suppresses rotation
+lookup-table production when the selected product consumes that table.
+The shared reduction now consumes `MESH_SIMD_WIDTH` for its lane grouping,
+replacing its separate shift/mask literals.
+
+The review remains open for arbitrary numerical page maps, producer splitting,
+ordinary contiguous-only collective bindings, coded block cuts and rotated
+subdomains, partial-share reductions, native format-product geometry, specialized
+CPU/ANE type and deployment declarations, native ANE partition assumptions,
+non-plain LiteRT storage mappings, sparse tails, LiteRT partial-row transforms,
+cost-evidence feasibility filters, and placement across all local backends.
+The table above the follow-up retains the concrete source locations. These are
+unfinished lowerings, not exceptions to the declaration requirement.
+
+Native and extension builds, Python syntax, and Metal shader preparation passed.
+RMS specializations included repeated/reversed reads and grouped output layouts;
+FWHT prepared both a small block and the device's 8,192-value block. These were
+compilation steps only. No numerical workload, unit suite or hourly was run.
