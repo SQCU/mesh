@@ -165,7 +165,7 @@ not duplicate routing problems. Numerical submission remains `MetalScheduleEnque
 there is no new tile loop, route lookup, allocation, or host wait in that submission.
 Item 5's ordering change follows below. The shared stream still limits a group to its
 configured `MESH_STREAM_ENTRIES`; plan compaction does not remove that physical-list limit.
-Compact affine/page lowering remains item 8.
+Compact affine/page lowering is recorded under item 8 below.
 
 The shared libraries, CFFI module, Torch extension and macOS 26 Swift/native/LiteRT
 rank compile. No numerical execution or performance measurement was made for this
@@ -313,5 +313,42 @@ producer times remain estimates. This source change establishes the feedback and
 establish a throughput/latency gain. Shared libraries, CFFI, the Torch extension and the native/LiteRT rank compile.
 Python and configuration documents parse. No numerical workload, test suite or hourly was run.
 
-Items 8 and 9 remain: compact page/mask compilation and general backend/coded-weight layouts. The LiteRT internal
+At this point items 8 and 9 remained: compact page/mask compilation and general backend/coded-weight layouts. The LiteRT internal
 view metadata gap recorded in item 6 remains a provider requirement; this change adds no substitute executor.
+
+## Compact page-bound views — 2026-10-27
+
+Structural item 8 removes the row → span → page-mask → span round trip. `mesh_compile_rows` now keeps
+row width, row count and local pitch as scalar operands. Typed repeated WRITEs no longer allocate a page-mask
+array only to discard it. `mesh_compile_spans` retains the caller's declared selections without splitting each
+one into pages. The public `ncclMeshWritePagesPrepare` still accepts only page identities and masks confined
+to one page; its adjacent selections coalesce during preparation.
+
+All adapters resolve local storage to a page table and page-local start. The common preparer consumes that
+domain, bounds the whole selection and its declared slots there, then emits the final physical descriptors.
+The mask of a compact row within any page follows from its start, width and pitch. These expressions need no
+stored entry per intersected page. No process pointer is exchanged, and no raw pointer WRITE API was restored.
+
+The common cut builder handles different row shapes, pitches and indexed layouts on different peers for the
+same logical bytes. An indexed source can therefore land in affine destination or relay storage. The old report
+comparison rejected that combination. Each invocation uses its own slot's registration phase; the removed row
+planner used the first slot's phase. Cuts also retain logical publication boundaries and their packet grid.
+Contiguous row/page/span edges impose no extra cut. Contiguous payloads and typed repetitions keep the existing
+modular residue solver, without a per-packet walk across peers.
+
+`views.byte_layout` keeps affine NumPy and Torch views compact before crossing the native binding. The old
+`SpanWrites` binding is replaced by `ViewWrites`, which supplies row operands or irregular selections to the
+same native preparer. `byte_rows` also replaces the NumPy adapter's separate affine-layout calculation.
+Explicit indexed selections that describe affine rows collapse to a fixed report. Reversed and aliased source
+views retain their mapping; overlapping destination selections fail preparation.
+
+Affine layout metadata now has constant size per peer, independent of row and page counts. Common cuts and
+final descriptors still scale with physical fragments and independently placed invocation slots. Irregular
+lists still scale with their declared selections. No mask walk, shape check or allocation was added to numerical
+execution. The separate `mesh-row-span-plan.h` compiler is removed.
+
+Item 9 remains: general backend/coded-weight layout integration. Numerical execution and hourly measurements
+remain deferred until the structural sequence is complete.
+
+The shared libraries, CFFI module, Torch extension and native/LiteRT rank compile. Changed Python sources parse,
+and the diff has no whitespace errors. No numerical workload, test suite or hourly was run.

@@ -298,14 +298,14 @@ class ProcessGroupMesh(dist.ProcessGroup):
         forwarding rank a distinct relay lease. Local strides and span counts
         may differ; native preparation agrees their common logical byte units.
         """
-        from views import byte_spans
+        from views import byte_layout
         bindings = []
         for view, source, destination in deliveries:
             size = view.element_size()
-            shift, spans = byte_spans(tuple(view.shape), [s * size for s in view.stride()], size)
+            shift, rows, spans = byte_layout(tuple(view.shape), [s * size for s in view.stride()], size)
             base = (view.as_strided((1,), (1,), view.storage_offset() + shift // size) if shift else view)
-            bindings.append((base, spans, int(source), int(destination)))
-        return _stream.SpanWrites(bindings, self.handle)
+            bindings.append((base, rows, spans, int(source), int(destination)))
+        return _stream.ViewWrites(bindings, self.handle)
 
     def union_cuts(self, cuts):
         """Agree view boundaries during configuration, before the function runs."""

@@ -1583,38 +1583,47 @@ struct Executions {
   pybind11::capsule completion(){return schedule_completion(schedules[next-1]);}
 };
 
-// Immutable exact-span bindings use the same preparation/execution contract
-// as affine and contiguous WRITEs. All source/destination address selection is
-// configuration metadata. Execution contains no packing or count exchange.
-using SpanBinding = std::tuple<at::Tensor, std::vector<std::array<uint64_t, 2>>, int, int>;
-struct SpanWrites {
+// Compact row geometry and explicit indexed selections lower to one prepared
+// page WRITE. Layout resolution ends before native commands are recorded.
+using ViewBinding = std::tuple<at::Tensor, std::array<uint64_t, 3>, std::vector<std::array<uint64_t, 2>>, int, int>;
+struct ViewWrites {
   int64_t comm;
   bool metal;
-  std::vector<SpanBinding> bindings;
+  std::vector<ViewBinding> bindings;
   PreparedWrites plans;
   std::vector<at::Tensor> leases;
-  SpanWrites(const std::vector<SpanBinding> &given, int64_t handle) : comm(handle), metal(false), bindings(given) {
-    TORCH_CHECK(!bindings.empty(), "span writes require at least one declared delivery");
+  ViewWrites(const std::vector<ViewBinding> &given, int64_t handle) : comm(handle), metal(false), bindings(given) {
+    TORCH_CHECK(!bindings.empty(), "view writes require at least one declared delivery");
     metal = std::get<0>(bindings.front()).is_mps();
     for(const auto &binding:bindings)leases.push_back(std::get<0>(binding));
   }
   void prepare() {
     if(!plans.handles.empty())return;
     Group g{metal};
-    for (const auto &[base, rows, source, destination] : bindings) {
-      TORCH_CHECK(base.is_mps() == metal, "span writes require one local device");
+    for (const auto &[base, geometry, indexed, source, destination] : bindings) {
+      TORCH_CHECK(base.is_mps() == metal, "view writes require one local device");
       const size_t offset = base.storage_offset() * base.element_size();
       const size_t storage = base.storage().nbytes();
-      std::vector<ncclMeshSpan> spans;
-      for (const auto &row : rows) {
-        TORCH_CHECK(offset <= storage && row[0] <= storage - offset && row[1] <= storage - offset - row[0],
-                    "span write lies outside its original tensor storage");
-        spans.push_back({row[0], row[1]});
-      }
       const void *at = g.where(base);
       plans.handles.push_back(nullptr);
-      checked(mesh_compile_spans(at, (void *)at, spans.data(), spans.size(), source, destination,
-                                       communicator(comm), metal, 0, mesh_write_layout{.instances=1,.invocations=1}, &plans.handles.back()));
+      const mesh_write_layout layout{.instances=1,.invocations=1};
+      const auto [width, rows, pitch] = geometry;
+      if (rows) {
+        TORCH_CHECK(indexed.empty() && width && pitch >= width && offset <= storage && width <= storage - offset &&
+                    rows - 1 <= (storage - offset - width) / pitch, "affine write lies outside its tensor storage");
+        checked(mesh_compile_rows(at, (void *)at, width, rows, pitch, source, destination,
+                                  communicator(comm), metal, 0, layout, &plans.handles.back()));
+      } else {
+        std::vector<ncclMeshSpan> spans;
+        spans.reserve(indexed.size());
+        for (const auto &row : indexed) {
+          TORCH_CHECK(offset <= storage && row[0] <= storage - offset && row[1] <= storage - offset - row[0],
+                      "indexed write lies outside its tensor storage");
+          spans.push_back({row[0], row[1]});
+        }
+        checked(mesh_compile_spans(at, (void *)at, spans.data(), spans.size(), source, destination,
+                                   communicator(comm), metal, 0, layout, &plans.handles.back()));
+      }
     }
   }
   ncclResult_t encode(ncclMeshStream *stream) {
@@ -1629,7 +1638,7 @@ struct SpanWrites {
     TORCH_CHECK(metal,"prepared distributed writes require the Metal backend");
     MetalScheduleCommunicator(schedule,communicator(comm));
     prepare();
-    SpanWrites *self=this;
+    ViewWrites *self=this;
     checked(MetalScheduleCross(schedule,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
         id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
       ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
@@ -1723,13 +1732,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def("finish",&ScheduleBinding::finish)
     .def("enqueue",&ScheduleBinding::enqueue)
     .def("completion",&ScheduleBinding::completion);
-  pybind11::class_<SpanWrites, std::shared_ptr<SpanWrites>>(module, "SpanWrites")
-    .def(pybind11::init<const std::vector<SpanBinding> &, int64_t>())
-    .def("realize", &SpanWrites::realize)
-    .def("append",[](SpanWrites &w,ScheduleBinding &s){w.append(s.schedule.get());
+  pybind11::class_<ViewWrites, std::shared_ptr<ViewWrites>>(module, "ViewWrites")
+    .def(pybind11::init<const std::vector<ViewBinding> &, int64_t>())
+    .def("realize", &ViewWrites::realize)
+    .def("append",[](ViewWrites &w,ScheduleBinding &s){w.append(s.schedule.get());
         s.operands.insert(s.operands.end(),w.leases.begin(),w.leases.end());})
-    .def("completion", &SpanWrites::completion)
-    .def("enqueue", &SpanWrites::enqueue);
+    .def("completion", &ViewWrites::completion)
+    .def("enqueue", &ViewWrites::enqueue);
   pybind11::class_<Collectives, std::shared_ptr<Collectives>>(module, "Collectives")
     .def(pybind11::init<const std::vector<Call> &, int64_t, std::vector<at::Tensor>>())
     .def("realize", &Collectives::realize, pybind11::arg("repetitions")=1)

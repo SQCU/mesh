@@ -5,7 +5,6 @@
 #include "mesh-plan.h"
 #include "mesh.h"
 #include "mesh-span-plan.h"
-#include "mesh-row-span-plan.h"
 #include "mesh-write-routes.h"
 #include "nccl-mesh-metal.h"
 #include <errno.h>
@@ -4817,6 +4816,19 @@ ncclResult_t ncclBcast(void *buff, size_t count, ncclDataType_t datatype, int ro
   return ncclBroadcast(buff, buff, count, datatype, root, comm, stream);
 }
 
+struct ncclMeshPageTable {
+  ncclComm_t comm;
+  struct where base;
+  size_t pages, page_bytes;
+  int metal;
+};
+
+/* A tensor adapter resolves its local address once. Everything below that
+   boundary names this table and a page-local start, plus a compact selection.
+   A row's page/mask at byte k is divmod(start + row*pitch + k, page_bytes);
+   no array of those identical affine expressions needs to be materialized. */
+struct write_page_index { size_t page, first; };
+
 /* Fixed-size configuration reports. Addresses are local arena phases; no
    process pointer crosses a socket. Metadata on the retained bootstrap is
    serialized separately from GPU execution and remains revocable/deadlined. */
@@ -4837,15 +4849,17 @@ static int write_view_validate(const ncclMeshSpan *view, size_t count, int landi
   if ((count && !view) || !bytes || !extent) return EINVAL;
   if (count > SIZE_MAX / sizeof *view || count == SIZE_MAX) return EOVERFLOW;
   uint64_t total = 0, last = 0;
+  int ordered = 1;
   for (size_t k = 0; k < count; k++) {
     if (!view[k].bytes) return EINVAL;
     if (view[k].offset > SIZE_MAX || view[k].bytes > SIZE_MAX - view[k].offset ||
         view[k].bytes > SIZE_MAX - total) return EOVERFLOW;
     total += view[k].bytes;
+    if (k && view[k].offset < view[k - 1].offset + view[k - 1].bytes) ordered = 0;
     const uint64_t end = view[k].offset + view[k].bytes;
     if (end > last) last = end;
   }
-  if (landing && count > 1) {
+  if (landing && !ordered) {
     ncclMeshSpan *ordered = malloc(count * sizeof *ordered);
     if (!ordered) return ENOMEM;
     memcpy(ordered, view, count * sizeof *ordered);
@@ -4860,25 +4874,34 @@ static int write_view_validate(const ncclMeshSpan *view, size_t count, int landi
   return 0;
 }
 
-/* Common logical packet boundaries for rank-local indexed views. Walk actual
-   spans at their actual phase; do not union unrelated offsets across every
-   row or duplicate the packet grid per participant. Output size, rather than
-   byte payload, bounds the loop. Padding of configuration reports is ignored. */
-static int write_view_packets(const struct write_binding_report *reports, const ncclMeshSpan *views,
-    size_t stride, uint32_t participants, uint32_t packet, struct mesh_span_plan *out) {
-  if (!reports || !participants || !packet || !out || out->cuts || out->count ||
-      (stride && !views)) return EINVAL;
-  if (stride > SIZE_MAX / participants / sizeof *views ||
-      (size_t)participants > SIZE_MAX / sizeof(uint64_t)) return EOVERFLOW;
-  const uint64_t bytes = reports[0].bytes;
-  for (uint32_t r = 0; r < participants; r++) {
-    uint64_t actual = 0, extent = 0;
-    if (reports[r].views > stride || reports[r].bytes != bytes || reports[r].phase >= MESH_DMA_EXTENT) return EINVAL;
-    const int error = write_view_validate(stride ? views + r * stride : NULL, (size_t)reports[r].views,
-                                          r != reports[r].source, &actual, &extent);
-    if (error) return error;
-    if (actual != bytes) return EINVAL;
+/* Already-declared masks/spans can also describe affine rows. Recognize that
+   algebra once; peers need only the fixed geometry report for such a view.
+   Irregular, reversed and aliased sources retain their declared index list. */
+static int write_view_rows(const ncclMeshSpan *view, size_t count, uint64_t bytes,
+    size_t *row_bytes, size_t *rows, size_t *pitch) {
+  if (!count) return 0;
+  int contiguous = 1, affine = 1;
+  const uint64_t width = view[0].bytes;
+  const uint64_t stride = count > 1 && view[1].offset >= view[0].offset ? view[1].offset - view[0].offset : width;
+  for (size_t k = 1; k < count; k++) {
+    if (view[k].offset != view[k - 1].offset + view[k - 1].bytes) contiguous = 0;
+    if (view[k].bytes != width || view[k].offset < view[k - 1].offset ||
+        view[k].offset - view[k - 1].offset != stride) affine = 0;
   }
+  if (contiguous) { *row_bytes = bytes; *rows = 1; *pitch = bytes; return 1; }
+  if (affine && stride >= width) { *row_bytes = width; *rows = count; *pitch = stride; return 1; }
+  return 0;
+}
+
+/* Common cuts for compact local selections. Each peer can use rows, indexed
+   masks or a contiguous selection for the same logical bytes. Visit actual
+   discontinuities and registration boundaries without expanding affine rows
+   or pages. Contiguous selections across page/row/span edges stay contiguous.
+   Publication tiles restart the packet grid. All operands were checked once
+   before this occurrence's cuts are compiled. */
+static int write_view_packets(const struct write_binding_report *reports, const ncclMeshSpan *views,
+    size_t stride, const uint64_t *phases, uint32_t participants, uint32_t packet, struct mesh_span_plan *out) {
+  const uint64_t bytes = reports[0].bytes;
   size_t *index = calloc(participants, sizeof *index);
   uint64_t *begin = calloc(participants, sizeof *begin);
   struct mesh_span_residues cuts = {0};
@@ -4889,11 +4912,23 @@ static int write_view_packets(const struct write_binding_report *reports, const 
     if(tile && length>tile-within)length=tile-within;
     if (length > bytes - at) length = bytes - at;
     for (uint32_t r = 0; r < participants; r++) {
-      const ncclMeshSpan *view = views + r * stride;
-      while (at - begin[r] >= view[index[r]].bytes) begin[r] += view[index[r]++].bytes;
-      const uint64_t into = at - begin[r], left = view[index[r]].bytes - into;
+      const struct write_binding_report *p = reports + r;
+      uint64_t offset = at, left = bytes - at;
+      if (p->indexed) {
+        const ncclMeshSpan *view = views + r * stride;
+        while (at - begin[r] >= view[index[r]].bytes) begin[r] += view[index[r]++].bytes;
+        const uint64_t into = at - begin[r];
+        offset = view[index[r]].offset + into;
+        left = view[index[r]].bytes - into;
+        for (size_t k = index[r] + 1; length > left && k < p->views &&
+            view[k - 1].offset + view[k - 1].bytes == view[k].offset; k++) left += view[k].bytes;
+      } else if (p->rows && p->stride != p->row_bytes) {
+        const uint64_t into = at % p->row_bytes;
+        offset = (at / p->row_bytes) * p->stride + into;
+        left = p->row_bytes - into;
+      }
       if (length > left) length = left;
-      const uint64_t phase=(reports[r].phase + view[index[r]].offset % MESH_DMA_EXTENT + into % MESH_DMA_EXTENT) % MESH_DMA_EXTENT;
+      const uint64_t phase=(phases[r] + offset % MESH_DMA_EXTENT) % MESH_DMA_EXTENT;
       if(length>MESH_DMA_EXTENT-phase)length=MESH_DMA_EXTENT-phase;
     }
     at += length;
@@ -4991,11 +5026,13 @@ static ncclResult_t write_prepare_spans(struct ncclMeshWritePlan *plan) {
   return result;
 }
 
-static ncclResult_t write_prepare(const void *source_buffer, void *landing_buffer, size_t count, ncclDataType_t datatype,
-    int source, int destination, ncclComm_t comm, int metal, uint32_t repeats, size_t stride, size_t max_packet,
+static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_index start, size_t count, ncclDataType_t datatype,
+    int source, int destination, uint32_t repeats, size_t stride, size_t max_packet,
     size_t row_bytes, size_t rows, const ncclMeshSpan *view, size_t views, int indexed, struct mesh_write_layout layout, ncclMeshWritePlan_t *out) {
-  if (!comm || !out || *out || !comm->attach)
-    return fail(ncclInvalidArgument, "write preparation requires a ready communicator and an empty output handle");
+  if (!table || !out || *out || !table->comm->attach)
+    return fail(ncclInvalidArgument, "write preparation requires a page table and an empty output handle");
+  const ncclComm_t comm = table->comm;
+  const int metal = table->metal;
   const size_t packet = max_packet ? max_packet : comm->page;
   struct write_binding_report local = {.stride = stride, .count = count, .packet = packet, .repeats = repeats,
     .type = (uint32_t)datatype, .source = (uint32_t)source, .destination = (uint32_t)destination,
@@ -5005,11 +5042,17 @@ static ncclResult_t write_prepare(const void *source_buffer, void *landing_buffe
       (metal != 0 && metal != 1) || !layout.instances || !layout.invocations) local.status = EINVAL;
   if (!local.status && count > SIZE_MAX / SIZE[datatype]) local.status = EOVERFLOW;
   if (!local.status) local.bytes = count * SIZE[datatype];
-  uint64_t view_extent = 0;
+  uint64_t view_extent = 0, view_origin = 0;
   if (!local.status && indexed) {
     if (datatype != ncclUint8 || rows || repeats != 1 || stride) local.status = EINVAL;
     else local.status = write_view_validate(view, views, comm->rank != source, &local.bytes, &view_extent);
     local.count = count = local.bytes;
+    if (!local.status && write_view_rows(view, views, local.bytes, &row_bytes, &rows, &stride)) {
+      view_origin = view[0].offset;
+      indexed = 0; views = 0;
+      local.indexed = 0; local.views = 0;
+      local.row_bytes = row_bytes; local.rows = rows; local.stride = stride;
+    }
   }
   if (!local.status && (layout.tile_bytes % SIZE[datatype] ||
       (layout.tile_bytes && repeats != 1))) local.status = EINVAL;
@@ -5017,14 +5060,20 @@ static ncclResult_t write_prepare(const void *source_buffer, void *landing_buffe
   if (!local.status && rows && (!row_bytes || repeats != 1 || stride < row_bytes ||
       rows > SIZE_MAX / row_bytes || local.bytes != rows * row_bytes ||
       (stride && rows - 1 > (SIZE_MAX - row_bytes) / stride))) local.status = EOVERFLOW;
-  const struct where send_at = metal ? where_of(source_buffer) : (struct where){NULL, (size_t)source_buffer};
-  const struct where recv_at = metal ? where_of(landing_buffer) : (struct where){NULL, (size_t)landing_buffer};
-  const struct where binding = comm->rank == source ? send_at : recv_at;
+  const size_t table_bytes = table->pages * table->page_bytes;
+  size_t origin = 0;
+  if (start.page > table->pages || start.first >= table->page_bytes ||
+      (start.page == table->pages && start.first)) local.status = EINVAL;
+  else origin = start.page * table->page_bytes + start.first;
+  if (view_origin > table_bytes - origin) local.status = EINVAL;
+  else origin += view_origin;
+  const struct where binding = shifted(table->base, origin);
   const unsigned char *address = address_of(binding);
   if (!local.status && local.bytes) {
     size_t extent = indexed ? (size_t)view_extent : rows ? row_bytes + (rows - 1) * stride : local.bytes + (repeats - 1) * stride;
     if (layout.instance_stride && layout.instances - 1 > (SIZE_MAX - extent) / layout.instance_stride) local.status = EOVERFLOW;
     else extent += (layout.instances - 1) * layout.instance_stride;
+    if (extent > table_bytes - origin) local.status = EINVAL;
     pthread_mutex_lock(&attach_lock);
     const struct lease *lease = !local.status && in_region(comm, binding, extent) ? lease_at(address, NULL) : NULL;
     if (!lease || lease->returned || extent > lease->bytes - (size_t)(address - (const unsigned char *)lease->address))
@@ -5042,18 +5091,19 @@ static ncclResult_t write_prepare(const void *source_buffer, void *landing_buffe
   atomic_fetch_add(&comm->runs, 1);
   comm->until = mesh_deadline("libnccl-mesh: configuration-time write binding metadata", 0);
   int error = prepare_exchange_locked(comm, &local, sizeof local, reports);
+  int contiguous = !layout.tile_bytes;
   for (int r = 0; r < comm->nranks && !error; r++) {
     const struct write_binding_report *p = reports + r;
     error = p->status;
     if (!error && (p->bytes != local.bytes || p->count != local.count || p->packet != local.packet ||
         p->repeats != local.repeats || p->type != local.type || p->source != local.source || p->destination != local.destination ||
-        p->row_bytes != local.row_bytes || p->rows != local.rows || p->indexed != local.indexed ||
         p->layout.tile_bytes != local.layout.tile_bytes || p->layout.invocations != local.layout.invocations)) error = EPROTO;
-    phases[r] = p->phase; strides[r] = p->stride;
+    strides[r] = p->stride;
+    if (p->indexed || (p->rows > 1 && p->stride != p->row_bytes)) contiguous = 0;
   }
   size_t most = 0;
   ncclMeshSpan *all_views = NULL, *local_views = NULL;
-  if (!error && indexed) {
+  if (!error) {
     for (int r = 0; r < comm->nranks; r++) if (reports[r].views > most) most = (size_t)reports[r].views;
     if (most > SIZE_MAX / (size_t)comm->nranks / sizeof *all_views || views > (SIZE_MAX / sizeof *plan->view_first) - 1)
       error = EOVERFLOW;
@@ -5082,11 +5132,12 @@ static ncclResult_t write_prepare(const void *source_buffer, void *landing_buffe
       !(plan->packets=calloc(plan->occurrences,sizeof *plan->packets))))error=ENOMEM;
   for(size_t occurrence=0;!error&&occurrence<plan->occurrences;occurrence++) {
     for(int r=0;r<comm->nranks;r++)
-      reports[r].phase=(phases[r]+(uint64_t)((__uint128_t)(occurrence%reports[r].layout.instances)*
+      phases[r]=(reports[r].phase+(uint64_t)((__uint128_t)(occurrence%reports[r].layout.instances)*
         reports[r].layout.instance_stride%MESH_DMA_EXTENT))%MESH_DMA_EXTENT;
-    if(indexed)error=write_view_packets(reports,all_views,most,(uint32_t)comm->nranks,(uint32_t)packet,plan->packets+occurrence);
-    else error=rows?mesh_row_span_plan_create(phases,strides,(uint32_t)comm->nranks,row_bytes,rows,(uint32_t)packet,plan->packets+occurrence)
-      :mesh_span_plan_create(phases,strides,(uint32_t)comm->nranks,local.bytes,repeats,(uint32_t)packet,plan->packets+occurrence);
+    // Keep the existing arithmetic union for contiguous payloads and repeats;
+    // only actual local discontinuities/publication tiles need a view cursor.
+    if(contiguous)error=mesh_span_plan_create(phases,strides,(uint32_t)comm->nranks,local.bytes,repeats,(uint32_t)packet,plan->packets+occurrence);
+    else error=write_view_packets(reports,all_views,most,phases,(uint32_t)comm->nranks,(uint32_t)packet,plan->packets+occurrence);
   }
   if(!error && indexed && views) {
     plan->view=malloc(views*sizeof *plan->view);
@@ -5103,9 +5154,9 @@ static ncclResult_t write_prepare(const void *source_buffer, void *landing_buffe
     return fail(ncclInvalidUsage, "preparing exact-byte write bindings: %s", strerror(error)); }
   atomic_init(&plan->refs, 1);
   plan->layout = layout;
-  plan->source = send_at; plan->landing = recv_at; plan->comm = comm;
-  plan->source_buffer = (ncclMeshBuffer){send_at.buffer, send_at.offset};
-  plan->landing_buffer = (ncclMeshBuffer){recv_at.buffer, recv_at.offset};
+  plan->source = binding; plan->landing = binding; plan->comm = comm;
+  plan->source_buffer = (ncclMeshBuffer){binding.buffer, binding.offset};
+  plan->landing_buffer = plan->source_buffer;
   plan->count = count; plan->stride = rows ? 0 : stride; plan->bytes = local.bytes; plan->repeats = repeats;
   plan->row_bytes = row_bytes; plan->rows = rows; plan->pitch = stride;
   plan->type = datatype; plan->from = source; plan->to = destination; plan->metal = metal;
@@ -5114,14 +5165,6 @@ static ncclResult_t write_prepare(const void *source_buffer, void *landing_buffe
   *out = plan;
   return ncclSuccess;
 }
-struct ncclMeshPageTable {
-  ncclComm_t comm;
-  struct where base;
-  ncclMeshBuffer metal_base;
-  size_t pages, page_bytes;
-  int metal;
-};
-
 ncclResult_t ncclMeshPageTableCreate(const void *local, ncclComm_t comm, int metal, ncclMeshPageTable_t *out) {
   if (!comm || !local || !out || *out || (metal != 0 && metal != 1))
     return fail(ncclInvalidArgument, "page table needs local storage and an empty result");
@@ -5136,7 +5179,6 @@ ncclResult_t ncclMeshPageTableCreate(const void *local, ncclComm_t comm, int met
     if(table) {
       const size_t offset=(uintptr_t)address-(uintptr_t)lease->address;
       table->base=metal ? (struct where){binding.buffer,binding.offset-offset} : (struct where){NULL,(size_t)lease->address};
-      table->metal_base=(ncclMeshBuffer){table->base.buffer,table->base.offset};
       table->comm=comm;table->metal=metal;
       table->page_bytes=owner->context.M->pgsz;
       table->pages=lease->bytes/table->page_bytes;
@@ -5178,11 +5220,8 @@ static ncclResult_t write_pages_prepare(ncclMeshPageTable_t table,const ncclMesh
     int source,int destination,size_t max_packet,struct mesh_write_layout layout,ncclMeshWritePlan_t *out) {
   ncclMeshSpan *spans=NULL;size_t used=0;
   ncclResult_t result=page_spans(table,masks,count,&spans,&used);
-  if(!result) {
-    void *base=table->metal ? (void *)&table->metal_base : (void *)table->base.offset;
-    result=write_prepare(base,base,0,ncclUint8,source,destination,table->comm,table->metal,1,0,
-                         max_packet,0,0,spans,used,1,layout,out);
-  }
+  if(!result)result=write_prepare(table,(struct write_page_index){0},0,ncclUint8,source,destination,1,0,
+                                 max_packet,0,0,spans,used,1,layout,out);
   free(spans);return result;
 }
 
@@ -5194,71 +5233,46 @@ ncclResult_t ncclMeshWritePagesPrepare(ncclMeshPageTable_t table,const ncclMeshP
     (struct mesh_write_layout){layout.tile_bytes,layout.instances,layout.instance_pages*table->page_bytes,layout.invocations},out);
 }
 
-/* Tensor descriptors are compiled into page-local masks. The local pointer
-   is used here only to find its already allocated page table. */
-static ncclResult_t tensor_masks(const void *local,ncclComm_t comm,int metal,const ncclMeshSpan *spans,size_t count,
-                                  ncclMeshPageTable_t *table,ncclMeshPageMask **out,size_t *used) {
+/* Resolve the local tensor binding to a page index. The common compiler
+   bounds the entire selection and all its instances in that page table.
+   Affine expressions stay affine until final DMA descriptors are emitted. */
+static ncclResult_t tensor_pages(const void *local,ncclComm_t comm,int metal,
+                                  ncclMeshPageTable_t *table,struct write_page_index *start) {
   ncclResult_t result=ncclMeshPageTableCreate(local,comm,metal,table);
   if(result)return result;
   const struct where binding=metal ? where_of(local) : (struct where){NULL,(size_t)local};
   const size_t origin=(uintptr_t)address_of(binding)-(uintptr_t)address_of((*table)->base);
-  const size_t page=(*table)->page_bytes,extent=(*table)->pages*page;
-  size_t n=0;
-  for(size_t i=0;i<count;i++) {
-    if(origin>extent||spans[i].offset>extent-origin||spans[i].bytes>extent-origin-spans[i].offset)
-      return fail(ncclInvalidArgument,"tensor view leaves its page table");
-    if(spans[i].bytes) {
-      const size_t first=origin+spans[i].offset;
-      const size_t pieces=(first+spans[i].bytes-1)/page-first/page+1;
-      if(pieces>SIZE_MAX/sizeof **out-n)return fail(ncclInvalidArgument,"tensor mask metadata overflow");
-      n+=pieces;
-    }
-  }
-  ncclMeshPageMask *masks=n?malloc(n*sizeof *masks):NULL;
-  if(n&&!masks)return fail(ncclSystemError,"tensor mask metadata allocation");
-  n=0;
-  for(size_t i=0;i<count;i++) {
-    size_t at=origin+spans[i].offset,left=spans[i].bytes;
-    while(left) {
-      const size_t bytes=left<page-at%page?left:page-at%page;
-      masks[n++]=(ncclMeshPageMask){at/page,at%page,bytes};at+=bytes;left-=bytes;
-    }
-  }
-  *out=masks;*used=n;return ncclSuccess;
+  *start=(struct write_page_index){origin/(*table)->page_bytes,origin%(*table)->page_bytes};
+  return ncclSuccess;
 }
 
 ncclResult_t mesh_compile_spans(const void *source_buffer,void *landing_buffer,const ncclMeshSpan *spans,size_t nspans,
     int source,int destination,ncclComm_t comm,int metal,size_t max_packet,struct mesh_write_layout layout,ncclMeshWritePlan_t *out) {
-  ncclMeshPageTable_t table=NULL;ncclMeshPageMask *masks=NULL;size_t count=0;
-  ncclResult_t result=tensor_masks(comm->rank==source?source_buffer:landing_buffer,comm,metal,spans,nspans,&table,&masks,&count);
-  if(!result)result=write_pages_prepare(table,masks,count,source,destination,max_packet,layout,out);
-  free(masks);ncclMeshPageTableDestroy(table);return result;
+  if(!comm)return fail(ncclInvalidArgument,"tensor view requires a communicator");
+  ncclMeshPageTable_t table=NULL;struct write_page_index start={0};
+  ncclResult_t result=tensor_pages(comm->rank==source?source_buffer:landing_buffer,comm,metal,&table,&start);
+  if(!result)result=write_prepare(table,start,0,ncclUint8,source,destination,1,0,max_packet,
+                                 0,0,spans,nspans,1,layout,out);
+  ncclMeshPageTableDestroy(table);return result;
 }
 ncclResult_t mesh_compile_rows(const void *source_buffer,void *landing_buffer,size_t row_bytes,size_t rows,
     size_t pitch,int source,int destination,ncclComm_t comm,int metal,size_t max_packet,struct mesh_write_layout layout,ncclMeshWritePlan_t *out) {
-  if(rows>SIZE_MAX/sizeof(ncclMeshSpan)||!rows||!row_bytes||pitch<row_bytes||
-     (rows-1)>(SIZE_MAX-row_bytes)/pitch)return fail(ncclInvalidArgument,"invalid tensor row view");
-  ncclMeshSpan *spans=malloc(rows*sizeof *spans);
-  if(!spans)return fail(ncclSystemError,"tensor row metadata allocation");
-  for(size_t row=0;row<rows;row++)spans[row]=(ncclMeshSpan){row*pitch,row_bytes};
-  ncclResult_t result=mesh_compile_spans(source_buffer,landing_buffer,spans,rows,source,destination,comm,metal,max_packet,layout,out);
-  free(spans);return result;
+  if(!comm||!rows||!row_bytes||rows>SIZE_MAX/row_bytes)
+    return fail(ncclInvalidArgument,"invalid tensor row view");
+  ncclMeshPageTable_t table=NULL;struct write_page_index start={0};
+  ncclResult_t result=tensor_pages(comm->rank==source?source_buffer:landing_buffer,comm,metal,&table,&start);
+  if(!result)result=write_prepare(table,start,rows*row_bytes,ncclUint8,source,destination,1,pitch,max_packet,
+                                 row_bytes,rows,NULL,0,0,layout,out);
+  ncclMeshPageTableDestroy(table);return result;
 }
 ncclResult_t mesh_compile_write(const void *source_buffer,void *landing_buffer,size_t count,ncclDataType_t datatype,
     int source,int destination,ncclComm_t comm,int metal,uint32_t repeats,size_t stride,size_t max_packet,ncclMeshWritePlan_t *out) {
-  if((unsigned)datatype>=ncclNumTypes||count>SIZE_MAX/SIZE[datatype]||!repeats)
-    return fail(ncclInvalidArgument,"invalid tensor write declaration");
-  const size_t bytes=count*SIZE[datatype];
-  /* An affine tensor view has a compact descriptor train. Resolve its domain
-     to pages once, retaining its declared element quantum and repeat compiler.
-     Element cuts must match those already declared in the function's graph. */
-  if(stride&&(repeats-1)>(SIZE_MAX-bytes)/stride)return fail(ncclInvalidArgument,"repeat view overflow");
-  const ncclMeshSpan span={0,bytes+(repeats-1)*stride};
-  ncclMeshPageTable_t table=NULL;ncclMeshPageMask *masks=NULL;size_t used=0;
-  ncclResult_t result=tensor_masks(comm->rank==source?source_buffer:landing_buffer,comm,metal,&span,1,&table,&masks,&used);
-  if(!result)result=write_prepare(source_buffer,landing_buffer,count,datatype,source,destination,comm,metal,repeats,stride,max_packet,
+  if(!comm)return fail(ncclInvalidArgument,"tensor write requires a communicator");
+  ncclMeshPageTable_t table=NULL;struct write_page_index start={0};
+  ncclResult_t result=tensor_pages(comm->rank==source?source_buffer:landing_buffer,comm,metal,&table,&start);
+  if(!result)result=write_prepare(table,start,count,datatype,source,destination,repeats,stride,max_packet,
                                  0,0,NULL,0,0,(struct mesh_write_layout){.instances=1,.invocations=1},out);
-  free(masks);ncclMeshPageTableDestroy(table);return result;
+  ncclMeshPageTableDestroy(table);return result;
 }
 ncclResult_t ncclMeshWriteSourceReady(ncclMeshWritePlan_t plan, const void *words, uint64_t value, ncclMeshTileLayout layout) {
   if (!plan || !value || value < (plan->layout.tile_bytes && plan->layout.tile_bytes < plan->bytes ? plan->layout.tile_bytes : plan->bytes) || plan->ready_value)

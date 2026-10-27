@@ -1,7 +1,7 @@
 # Partial tensors and the FX declaration path
 
 This is the interface reference for `python/mesh`, the ragged PyTorch frontend, and the native headers they
-use. It describes the source on `main` on 2026-10-26. The [data model](../design/data-model.md)
+use. It describes the source on `main` through 2026-10-27. The [data model](../design/data-model.md)
 explains why the project uses pages, compilation and one-sided writes. This document names the existing types,
 their operands, and the work each interface performs. The [graph history](../design/aot-graphs-and-pytorch.md)
 records how the native and PyTorch paths acquired their roles.
@@ -24,9 +24,10 @@ Three meanings of “partial” must stay distinct:
 - PyTorch's `Partial` placement describes an unreduced distributed value. `RaggedShard` describes unequal shards.
 - The `PARTIALS` collective combines attention records `[m, l, O...]` with the native log-sum-exp operator.
 
-A tensor block is a numerical view. It is not necessarily one bridge page. A transport unit can cover less than
-one allocation page. The current byte-span interfaces also remain broader than the page-plus-within-page-mask
-contract required by the data model; the existence of those interfaces does not resolve that gap.
+A tensor block is a numerical view. It is not necessarily one bridge page. Program-facing WRITEs select local
+pages with masks confined to each page. Tensor adapters resolve local storage into that page domain during
+preparation. Affine rows stay compact until the common compiler emits physical DMA descriptors. A descriptor
+can cover a sub-page selection or merge adjacent selections across page boundaries.
 
 ## Python partial tensor API
 
@@ -58,8 +59,9 @@ same substrate. Put the checkout's `python/` before `rdma/` on the import path w
 | `Partial(required, terms)` | Frozen sets of required and present term labels. `merge(refs)` unions terms, rejects duplicate terms, and returns `None` when the result is complete. |
 
 Offsets and strides in `Ref` are in elements. Native byte views multiply them by element width during
-preparation. A `Ref` does not expose a remote process pointer. The lower native APIs nevertheless accept local
-buffer/extent descriptions, so this alone does not establish the final constrained page interface.
+preparation. A `Ref` does not expose a remote process pointer. The compiler-local tensor adapters bind a local
+address to a page table; the common WRITE preparer consumes that table and a page-local start. The public
+communication interface takes page identities and within-page masks.
 
 ### Block selection and numerical kernels
 
@@ -171,7 +173,7 @@ each row, with at least `[m, l, O]`; gaps between rows are allowed. An associati
 an owner and combines them with a tree of kernel calls. It must declare `combine`, and custom `all_reduce`
 requires an owner map.
 
-The movement preparation hooks build `SpanWrites` from original/final views and compact relay storage.
+The movement preparation hooks build `ViewWrites` from original/final views and compact relay storage.
 Reduction preparation computes common logical cuts, then binds contiguous aliases of the original operands.
 Each preparation returns its native bindings and common `Call` group. The full physical communicator remains present
 when some ranks only relay. [The `_native` adapter](../python/mesh/_native.py) supplies:
@@ -276,12 +278,15 @@ kernel into command records with supplied output storage. No eager linear implem
 output or enters a framework queue during a compiled call. `FusedForm` remains preparation metadata for
 the native chain; it is not a separate FX executor.
 
-`SpanWrites` takes bindings `(tensor, [(offset, bytes), ...], source, destination)` and provides
+`ViewWrites` takes bindings `(tensor, (row_bytes, rows, pitch), spans, source, destination)` and provides
 `append(schedule)` for composition and `realize()` / `enqueue()` for a complete declared transfer. `ProcessGroupMesh.prepare_writes` constructs these from local tensor views.
+Affine views have an empty span list; irregular views have zero row operands. There is one prepared executor.
 `Collectives` binds reduction `Call` operands through the same native preparation and encoder as generic
 collectives. Its `enqueue()` includes the GPU consumer dependencies without creating a host Work handle.
-`views.byte_spans(shape, byte_strides, itemsize)` returns a base displacement and logical-order byte spans;
-it reads metadata, not tensor values. Reversed and broadcast dimensions retain their mappings.
+`views.byte_layout(shape, byte_strides, itemsize)` returns a base displacement, compact row operands and any
+irregular spans. It reads metadata, not tensor values. Reversed and broadcast dimensions retain their mappings.
+`byte_rows` resolves affine geometry in time bounded by dimensions. `byte_spans` expands intervals for alias
+analysis callers; transport frontends use `byte_layout` directly.
 
 `MeshWork.wait`, `isCompleted` and `getFuture` concern host encoding completion in this adapter. They are not
 a passive GPU completion clock. `_stream.completion()` and `_stream.completed(token)` expose ordinary command
@@ -355,11 +360,12 @@ infer zero-copy behavior merely from their sharing the communicator.
 |---|---|---|
 | [nccl.h](../rdma/nccl.h) | `ncclMeshCall`, `ncclMeshPlanRun`, `ncclMeshPlan`; `ncclMeshCommPlan`, `PlanDemands`, `PlanRouteUnits`, `PlanActive` | Common ordered declaration, compiled publication/landing entries and routing demand. |
 | [nccl.h](../rdma/nccl.h) | `ncclMeshBuffer`, `ncclMeshIssue`, `ncclMeshFused`, `ncclMeshStream` | Local Metal buffer/offset, ticket/publication state, physical crossing bindings, and caller-owned encoding context. |
-| [nccl.h](../rdma/nccl.h) | `ncclMeshWritePlan_t`, `ncclMeshSpan`; `ncclMeshWritePrepare`, `WriteRowsPrepare`, `WriteSpansPrepare`, `WriteExecute`, `WritePlanDestroy` | Prepare native one-sided writes from contiguous, affine-row or span views; execute the prepared plan. |
+| [nccl.h](../rdma/nccl.h) | `ncclMeshPageTable_t`, `ncclMeshPageMask`, `ncclMeshWriteLayout`, `ncclMeshWritePlan_t`; `ncclMeshWritePagesPrepare`, `WriteExecute`, `WritePlanDestroy` | Select bytes within local pages and execute the prepared one-sided WRITE. |
+| [mesh-write-compiler.h](../rdma/mesh-write-compiler.h) | `ncclMeshSpan`, `mesh_write_layout`; `mesh_compile_write`, `mesh_compile_rows`, `mesh_compile_spans` | Compiler-local tensor bindings into the same page domain; compact affine rows and typed repeats. |
 | [mesh-plan.h](../rdma/mesh-plan.h) | `mesh_operand`, `mesh_step`, `mesh_program`, `mesh_move` | Element metadata, selected numerical/transport steps and collective programs. |
 | [mesh-plan.h](../rdma/mesh-plan.h) | `mesh_cable`, `mesh_fabric`, `mesh_paths`, `mesh_transfer`, `mesh_routed_rank`, `mesh_routed_program`; `mesh_write_compile`, `mesh_routed_compile` | All physical cables, path weights and routing output, including relays. Path weights use fixed-point units. |
 | [mesh-plan.h](../rdma/mesh-plan.h) | `mesh_link_map`, `mesh_trees`, `mesh_group`, `mesh_group_call`, `mesh_place`, `mesh_group_place` | Logical connectivity, collective trees and placement of ordered calls on transport streams. |
-| [mesh-span-plan.h](../rdma/mesh-span-plan.h), [mesh-row-span-plan.h](../rdma/mesh-row-span-plan.h) | Span and row-span compilation helpers | Reconcile logical cuts with physical registration boundaries during preparation. |
+| [mesh-span-plan.h](../rdma/mesh-span-plan.h), [nccl-mesh.c](../rdma/nccl-mesh.c) | Modular repeat and common view cut compilers | Reconcile logical cuts, publication tiles and each occurrence's physical registration boundaries during preparation. |
 | [mesh-write-routes.h](../rdma/mesh-write-routes.h), [mesh-write-order.h](../rdma/mesh-write-order.h) | Routed write and ordered publication helpers | Common path and dependency descriptions used by prepared writes. |
 | [mesh.h](../rdma/mesh.h) | `mesh_page_entry`, `mesh_dma_span`, `mesh_entry`, `mesh_units`, `mesh_pages`, `mesh_row` | Bridge page mappings, DMA spans, indexed stream entries, transport-unit counts, allocation-page counts and row identities. These counts are distinct. |
 | [mesh-call.h](../rdma/mesh-call.h) | `mesh_section`, `mesh_endpoint`, `mesh_stream_view`; section and stream binding functions | Preallocated sections, physical endpoint discovery and selected stream bindings. |

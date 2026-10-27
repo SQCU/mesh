@@ -1,6 +1,9 @@
 /* Tensor frontend lowering, used only during preparation. Program-facing
    communication operands are ncclMeshPageMask in nccl.h. These adapters resolve
-   local tensor views to that page domain before the common WRITE compiler. */
+   local tensor views to that page domain before the common WRITE compiler.
+   Affine rows and repeated typed values remain compact operands. Indexed
+   views retain only their declared selections; none expand to per-page masks.
+   Peers may use different row/indexed forms of the same logical bytes. */
 #ifndef MESH_WRITE_COMPILER_H
 #define MESH_WRITE_COMPILER_H
 #include "nccl.h"

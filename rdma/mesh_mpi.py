@@ -108,22 +108,12 @@ def _row_pitch(array, row_bytes, rows):
         raise ValueError('a WRITE binding is a numpy array without Python objects')
     if row_bytes <= 0 or rows <= 0 or row_bytes * rows != array.nbytes or row_bytes % array.itemsize:
         raise ValueError('row_bytes * rows must cover exactly the array, in whole dtype elements')
-    axes = [(int(n), int(stride)) for n, stride in zip(array.shape, array.strides) if n > 1]
-    contiguous = array.itemsize
-    while axes and axes[-1][1] == contiguous:
-        n, _ = axes.pop()
-        contiguous *= n
-    if not axes:
+    from views import byte_rows
+    width, count, pitch = byte_rows(array.shape, array.strides, array.itemsize)
+    if count and pitch == width:
         return row_bytes
-    if contiguous != row_bytes:
-        raise ValueError('the requested rows are not contiguous intervals of this view')
-    pitch, extent = axes[-1][1], 1
-    if pitch < row_bytes:
-        raise ValueError('affine WRITE rows must have positive, nonoverlapping pitch')
-    for n, stride in reversed(axes):
-        if stride != pitch * extent:
-            raise ValueError('this view needs the shared indexed descriptor API; it is not one affine row map')
-        extent *= n
+    if (width, count) != (row_bytes, rows):
+        raise ValueError('the requested rows are not the affine intervals of this view')
     return pitch
 
 
@@ -305,8 +295,8 @@ class Comm:
     def Write_rows_prepare(self, sendbuf, landingbuf, source, destination, *, row_bytes, rows, max_packet=0):
         """Bind the same native WRITE as exact rows with local pitches.
 
-        row_bytes and rows agree across ranks; source, destination and relay
-        pitches may differ. The original NumPy view must describe exactly this
+        Total logical bytes agree across ranks; row shapes and local pitches
+        may differ. The original NumPy view must describe exactly this
         positive affine row map. No padding, staging allocation or per-row
         execution call is introduced. General non-affine views need the shared
         indexed native descriptor, not a private packing implementation here.
@@ -340,11 +330,14 @@ class Comm:
         views and spans outside one live lease. The original view retains its
         storage; no contiguous temporary or numerical copy is constructed.
         """
-        from views import byte_spans
+        from views import byte_layout
         own = sendbuf if self.rank == source else landingbuf
         if not isinstance(own, np.ndarray) or own.dtype.hasobject:
             raise ValueError('a WRITE binding is a numpy array without Python objects')
-        shift, spans = byte_spans(own.shape, own.strides, own.dtype.itemsize)
+        shift, (width, rows, _), spans = byte_layout(own.shape, own.strides, own.dtype.itemsize)
+        if rows:
+            return self.Write_rows_prepare(sendbuf, landingbuf, source, destination,
+                                           row_bytes=width, rows=rows, max_packet=max_packet)
         return self._write_spans_prepare(own, spans, source, destination, max_packet, shift)
 
     def Allreduce(self, sendbuf, recvbuf, op=SUM):

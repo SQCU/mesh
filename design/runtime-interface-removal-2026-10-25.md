@@ -235,8 +235,9 @@ for those limits and the compilation-only validation.
   `place_group` descriptor construction, `enqueue_counts` segment allocation, and corresponding per-launch
   metadata allocation in [nccl-mesh.c](../rdma/nccl-mesh.c).
 - **Use:** `ncclMeshCommPlan`, `mesh_routed_compile`, and the existing prepared write machinery. The common
-  [mesh-span-plan.h](../rdma/mesh-span-plan.h) and [mesh-row-span-plan.h](../rdma/mesh-row-span-plan.h) already
-  compute matching cuts across registration boundaries before execution.
+  [repeat compiler](../rdma/mesh-span-plan.h) and common view compiler in [nccl-mesh.c](../rdma/nccl-mesh.c)
+  compute matching cuts across registration boundaries before execution. The separate row planner was folded
+  into that common view compiler on 2026-10-27.
 - **Integration still required:** all collective forms must consume those cuts and immutable schedules.
   `ncclMeshWriteExecute` still enters the generic enqueue/launch machinery. Naming a path “prepared” has not
   removed that machinery. `place_group` can still reject its own generated span at a registration boundary.
@@ -260,9 +261,10 @@ for those limits and the compilation-only validation.
 - **Use:** page identity plus a mask limited to that page, lowered through the existing affine and common-cut
   planners into local bridge descriptors. `migration.compile_rows` and `views.byte_spans` contain useful
   layout mathematics for that lowering.
-- **Integration still required:** a constrained public page/mask type is not supplied merely by those byte-span
-  helpers. Local device bindings may contain addresses and lengths; application write operands must not.
-  NCCL/PyTorch compatibility is a frontend lowering responsibility, not permission for a competing transport.
+- **Implemented:** the public WRITE contract is `ncclMeshPageTable_t` plus `ncclMeshPageMask` in `nccl.h`.
+  The old pointer/extent WRITE entry points are removed. On 2026-10-27 the common preparer also takes a local
+  page table and page-local start, preserving affine tensor geometry without an expanded mask array. Local
+  tensor addresses are resolved at the frontend boundary. NCCL/PyTorch lowering uses the same compiler.
 
 ### R12. Native submission throttling and allocation — removed
 

@@ -154,13 +154,14 @@ queue-pair numbers, packet sequence numbers and GIDs the hardware assigns at eac
 endpoint exchange): HELLO and LINK on the control socket, once a pairing. RECORD carries each node's links and memory
 (the map), which is data, not a dialogue.
 
-Before execution, both ends have equal payload lengths and unit order. `ncclMeshWritePrepare` and
-`ncclMeshWriteRowsPrepare` exchange placement/shape metadata through the existing bootstrap while realizing the
-plan, then retain fixed bindings. `ncclMeshWriteExecute` exchanges neither that metadata nor acknowledgments.
-The row API describes an entire affine run in one call and one span table. Its participants may have different
-pitches; common cuts include each row's actual registration boundaries and the packet-size limit. A full-page
-operand uses the same span descriptor. See the [API](../rdma/nccl.h), [span compiler](../rdma/mesh-span-plan.h), and
-[row compiler](../rdma/mesh-row-span-plan.h).
+Before execution, both ends have equal payload lengths and unit order. `ncclMeshWritePagesPrepare` and the
+[tensor adapters](../rdma/mesh-write-compiler.h) resolve local page selections and exchange shape metadata
+through the existing bootstrap while realizing the plan. `ncclMeshWriteExecute` exchanges neither that metadata
+nor acknowledgments. Affine rows stay in a fixed-size report. Peers may use different row pitches, row shapes or
+indexed selections for the same message. The [common cut builder](../rdma/nccl-mesh.c) includes actual layout
+discontinuities, each binding occurrence's registration boundaries, publication tiles and the packet limit.
+Typed repeats retain the [modular repeat compiler](../rdma/mesh-span-plan.h). Only final DMA descriptors are
+materialized. Full pages and masked pages use this same compiler and executor.
 
 Data executes as SEND into an AOT-bound, preposted receive. There is no payload header, receive-address request,
 receipt all-gather or remote ACK. A lost link remains a driver/control-socket event. Prepared bindings carry a
