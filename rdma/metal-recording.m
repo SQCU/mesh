@@ -34,6 +34,26 @@ NSString *MetalViewIndexPrelude(void) {
         "template<uint B> constexpr bool mesh_vector4() { return true; }\n";
 }
 
+NSDictionary<NSString *,NSData *> *MetalViewBlockSlice(const int32_t *order,size_t count,
+    NSInteger first,NSInteger end,NSInteger step,NSUInteger block) {
+    NSMutableData *blocks=[NSMutableData data],*mapped=[NSMutableData data];
+    int32_t *lanes=malloc(block*sizeof *lanes);
+    for(size_t start=0;start<count;start+=block) {
+        BOOL used=NO;
+        for(NSUInteger i=0;i<block;i++) {
+            const NSInteger value=start+i<count?order[start+i]:-1,delta=value-first;
+            const BOOL selected=value>=0&&(step>0?(value>=first&&value<end):(value<=first&&value>end))&&delta%step==0;
+            lanes[i]=selected?(int32_t)(delta/step):-1;used|=selected;
+        }
+        if(used) {
+            const int32_t index=(int32_t)(start/block);
+            [blocks appendBytes:&index length:sizeof index];
+            [mapped appendBytes:lanes length:block*sizeof *lanes];
+        }
+    }
+    free(lanes);return @{@"blocks":blocks,@"order":mapped};
+}
+
 NSData *MetalViewTiles(const NSUInteger *shape,size_t rank,NSUInteger elements) {
     for(size_t d=0;d<rank;d++)if(!shape[d])return [NSData data];
     size_t axis=rank;NSUInteger tail=1;

@@ -68,6 +68,13 @@ NSString *MetalViewIndexExpression(const NSUInteger *shape, const NSInteger *str
 NSString *MetalViewIndexPrelude(void);
 // AOT copy tiles, packed as (origin[rank], shape[rank]) words per tile.
 NSData *MetalViewTiles(const NSUInteger *shape, size_t rank, NSUInteger elements);
+// A logical slice of an encoded axis. `order` maps stored entries to logical
+// indices (-1 for unused entries). Bounds/step are the normalized slice;
+// block is the format's indivisible stored group. Returns int32 block indices
+// and a compacted int32 order, with -1 for unused lanes of retained blocks.
+// Only immutable index metadata is read. Encoded numerical values stay in place.
+NSDictionary<NSString *, NSData *> *MetalViewBlockSlice(const int32_t *order, size_t count,
+    NSInteger first, NSInteger end, NSInteger step, NSUInteger block);
 NSString *MetalViewIndexDeclaration(NSUInteger binding, const NSUInteger *shape, const NSInteger *strides,
     size_t rank, NSUInteger elementOffset);
 // Preparation only: carry declared page accesses across encoders on the supplied

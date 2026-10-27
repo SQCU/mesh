@@ -554,12 +554,12 @@ kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const ui
 // matrix (the first SK gate's, the rest up's: one walk's code for both, F tiles in flight). hidden[n][r] =
 // GELU(gateScale[r] g) * upScale[r] u, in the hidden's code order (down's coded input). Rows past d.rows repeat the
 // last row's loads and are not written. H: fragment_walk's.
-template <uint R, uint SK, uint TILES, uint WIDTHS, uint F, uint APART, uint LOADS, uint H>
+template <uint R, uint SK, uint TILES, uint WIDTHS, uint F, uint APART, uint LOADS, uint H, bool Masked = false>
 kernel void streamed_couple(device const uint *gateCodes [[buffer(0)]], device const uint *gateTiles [[buffer(1)]],
                             device const uint *gateBands [[buffer(2)]], device const half *gx [[buffer(4)]],
                             device const uint *upCodes [[buffer(6)]], device const uint *upTiles [[buffer(7)]],
                             device const uint *upBands [[buffer(8)]], device const half *ux [[buffer(9)]],
-                            device const float *upScale [[buffer(10)]], device half *hidden [[buffer(11)]],
+                            device const float *upScale [[buffer(10)]], device half *hidden [[buffer(11)]], device const int *selected [[buffer(12)]],
                             device const float *gateScale [[buffer(13)]], constant streamed_dims &dims [[buffer(15)]],
                             uint2 group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
                             uint lane [[thread_index_in_simdgroup]], uint thread_id [[thread_index_in_threadgroup]]) {
@@ -622,7 +622,9 @@ kernel void streamed_couple(device const uint *gateCodes [[buffer(0)]], device c
         float gs = 0.0f, us = 0.0f;
         for (uint s = 0; s < SK; s++) { gs += sums[0][s][n][r]; us += sums[1][s][n][r]; }
         const uint output = band * 32 + r;
-        hidden[mesh_index<11>(ulong(n) * d.outputs + output)] = half(streamed_gelu_of(gateScale[output] * gs, upScale[output] * us));
+        const bool active = !Masked || selected[mesh_index<12>(output)] >= 0;
+        hidden[mesh_index<11>(ulong(n) * d.outputs + output)] = active
+            ? half(streamed_gelu_of(gateScale[mesh_index<13>(output)] * gs, upScale[mesh_index<10>(output)] * us)) : half(0);
     }
 }
 
@@ -639,6 +641,7 @@ kernel void streamed_read(device const uint4 *in [[buffer(0)]], device uint *out
 
 // The matrix decoded to dense values in its row and column orders: dense[order[r]][columns[j]] = rowScale[r] *
 // colScale[j] * value of coded row r, coded column j (a threadgroup a tile).
+template <bool Masked = false>
 kernel void streamed_dense(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
                            device const uint *bands [[buffer(2)]], device half *dense [[buffer(4)]],
                            device const int *order [[buffer(5)]], device const float *rowScale [[buffer(6)]],
@@ -647,13 +650,14 @@ kernel void streamed_dense(device const uint *codes [[buffer(0)]], device const 
                            uint lane [[thread_index_in_simdgroup]]) {
     const streamed_dims d = dims_of(dims);
     const uint T = d.tiles, pitch = d.pitch ? d.pitch : T, word = tiles[group.x * pitch + group.y], b = (word >> MESH_STREAMED_TILE_WIDTH_SHIFT) & MESH_STREAMED_TILE_WIDTH_MASK;
-    const uint row0 = group.x * 32 + 8 * fragment_c(lane), k0 = group.y * 32 + fragment_kb(lane), width = T * 32;
+    const uint row0 = group.x * 32 + 8 * fragment_c(lane), k0 = group.y * 32 + fragment_kb(lane), width = Masked ? d.stride : T * 32;
     const float h = 0.5f * fragment_step(word);
     device const uint *at = codes + ((streamed_base(bands[group.x]) + (word & MESH_STREAMED_TILE_OFFSET_MASK)) * MESH_STREAMED_PLANE_WORDS) + lane;
     auto put = [&](uint P, float2 v) {
         const uint r = row0 + 2 * (P >> 2), k = k0 + 8 * (P & 3u);
-        dense[mesh_index<4>(ulong(order[mesh_index<5>(r)]) * width + uint(columns[mesh_index<8>(k)]))] = half(v.x * h * rowScale[mesh_index<6>(r)] * colScale[mesh_index<9>(k)]);
-        dense[mesh_index<4>(ulong(order[mesh_index<5>(r + 1)]) * width + uint(columns[mesh_index<8>(k)]))] = half(v.y * h * rowScale[mesh_index<6>(r + 1)] * colScale[mesh_index<9>(k)]);
+        const int col = columns[mesh_index<8>(k)], a = order[mesh_index<5>(r)], b = order[mesh_index<5>(r + 1)];
+        if (!Masked || (a >= 0 && col >= 0)) dense[mesh_index<4>(ulong(a) * width + uint(col))] = half(v.x * h * rowScale[mesh_index<6>(r)] * colScale[mesh_index<9>(k)]);
+        if (!Masked || (b >= 0 && col >= 0)) dense[mesh_index<4>(ulong(b) * width + uint(col))] = half(v.y * h * rowScale[mesh_index<6>(r + 1)] * colScale[mesh_index<9>(k)]);
     };
     if (b == 0) { for (uint P = 0; P < 16; P++) put(P, float2(0.0f)); return; }
     uint w[12];
@@ -662,10 +666,11 @@ kernel void streamed_dense(device const uint *codes [[buffer(0)]], device const 
     FRAGMENT_WIDTHS(0x1FFEu, FRAGMENT_DENSE)
 #undef FRAGMENT_DENSE
 }
+template [[host_name("streamed_dense")]] [[kernel]] decltype(streamed_dense<false>) streamed_dense<false>;
 
 // A product's outputs finished into plain values of T: y[n * stride + order[r]], over the row's factor (inputs > 0: its
 // input row scaled by streamed_scale_rows), capped (cap > 0).
-template <typename T>
+template <typename T, bool Masked = false>
 kernel void streamed_finish(device const float *partials [[buffer(0)]], device T *y [[buffer(1)]],
                             device const int *order [[buffer(2)]], device const float *scale [[buffer(3)]],
                             device const float *factor [[buffer(4)]], constant streamed_dims &dims [[buffer(15)]],
@@ -673,9 +678,11 @@ kernel void streamed_finish(device const float *partials [[buffer(0)]], device T
     const streamed_dims d = dims_of(dims);
     if (i >= d.count) return;
     const uint n = i / d.outputs, r = i % d.outputs;
+    const int target = order[mesh_index<2>(r)];
+    if (Masked && target < 0) return;
     float value = streamed_value(mesh_read<0>(partials), i, d.shares, d.split, scale[mesh_index<3>(r)]);
     if (d.inputs) value /= factor[mesh_index<4>(n)];
-    y[mesh_index<1>(n * d.stride + uint(order[mesh_index<2>(r)]))] = T(streamed_capped(value, d.cap));
+    y[mesh_index<1>(n * d.stride + uint(target))] = T(streamed_capped(value, d.cap));
 }
 
 template [[host_name("streamed_finish")]] [[kernel]] decltype(streamed_finish<half>) streamed_finish<half>;
@@ -719,17 +726,19 @@ template [[host_name("streamed_scale_rows_bfloat")]] [[kernel]] decltype(streame
 // time) written in blocks of s columns, block-major ([columns / s][rows][s]: a tensor operation's operand rows s apart
 // whatever the width). A row kernel ending in its consumers' inputs (metal-microbench docs/kernels.md#stacked-products,
 // the rows) calls it with its own staged row.
-template <uint STRIDE, typename V>
+template <uint STRIDE, bool Masked = false, typename V>
 static inline void streamed_gather(V values, float factor, device const int *order, device half *first, device const float *scale,
                                    device half *second, device const float *secondScale, device half *third,
                                    device const float *thirdScale, uint inputs, uint columns, uint rows, uint n, uint t, uint threads) {
     for (uint q = t; q < columns / 4; q += threads) {
         const int4 o = mesh_load4<2,int4>(order, 4*q);
-        const float4 v = factor * float4(float(values[o.x]), float(values[o.y]), float(values[o.z]), float(values[o.w]));
+        const int4 read = Masked ? max(o, int4(0)) : o;
+        const float4 v = factor * float4(float(values[read.x]), float(values[read.y]), float(values[read.z]), float(values[read.w]));
         const ulong at = STRIDE ? (ulong(4 * q / max(STRIDE, 1u)) * rows + n) * STRIDE + 4 * q % max(STRIDE, 1u) : ulong(n) * columns + 4 * q;
-        mesh_store4<1>(first, at, half4(mesh_load4<3,float4>(scale, 4*q) * v));
-        if (inputs > 1) mesh_store4<5>(second, at, half4(mesh_load4<7,float4>(secondScale, 4*q) * v));
-        if (inputs > 2) mesh_store4<6>(third, at, half4(mesh_load4<8,float4>(thirdScale, 4*q) * v));
+        const bool4 active = Masked ? (o >= 0) : bool4(true);
+        mesh_store4<1>(first, at, select(half4(0), half4(mesh_load4<3,float4>(scale, 4*q) * v), active));
+        if (inputs > 1) mesh_store4<5>(second, at, select(half4(0), half4(mesh_load4<7,float4>(secondScale, 4*q) * v), active));
+        if (inputs > 2) mesh_store4<6>(third, at, select(half4(0), half4(mesh_load4<8,float4>(thirdScale, 4*q) * v), active));
     }
 }
 
@@ -737,7 +746,7 @@ static inline void streamed_gather(V values, float factor, device const int *ord
 // row (metal-microbench docs/kernels.md#one-kernel-interface, typed rows): with Normed times the row's RMS norm's factor
 // (eps d.eps; a norm's gamma folded into the products' column scales: docs/kernels.md#stacked-products); the row staged
 // in threadgroup memory where WIDTH > 0 (d.columns at most WIDTH), else read in place (streamed_gather).
-template <bool Normed, uint WIDTH, uint STRIDE>
+template <bool Normed, uint WIDTH, uint STRIDE, bool Masked = false, uint InputColumns = 0>
 kernel void streamed_row_gather(device const half *x [[buffer(0)]], device half *first [[buffer(1)]],
                                 device const int *order [[buffer(2)]], device const float *scale [[buffer(3)]],
                                 device half *second [[buffer(5)]], device half *third [[buffer(6)]],
@@ -748,20 +757,25 @@ kernel void streamed_row_gather(device const half *x [[buffer(0)]], device half 
     const uint threads = lanes_of(lanes);
     threadgroup float values[WIDTH > 0 ? WIDTH : 1];
     threadgroup float partial[32];
-    const uint columns = d.columns;
+    const uint columns = d.columns, inputColumns = InputColumns ? InputColumns : columns;
     if (WIDTH == 0) {
-        streamed_gather<STRIDE>(mesh_read<0>(x, ulong(n) * columns), 1.0f, order, first, scale, second, secondScale, third, thirdScale, d.inputs, columns, d.rows, n, t, threads);
+        streamed_gather<STRIDE, Masked>(mesh_read<0>(x, ulong(n) * inputColumns), 1.0f, order, first, scale, second, secondScale, third, thirdScale, d.inputs, columns, d.rows, n, t, threads);
         return;
     }
     float s = 0.0f;
-    for (uint q = t; q < columns / 4; q += threads) {
-        const float4 v = float4(mesh_load4<0,half4>(x, ulong(n) * columns + 4*q));
+    for (uint q = t; q < inputColumns / 4; q += threads) {
+        const float4 v = float4(mesh_load4<0,half4>(x, ulong(n) * inputColumns + 4*q));
         ((threadgroup float4 *)values)[q] = v;
         s += dot(v, v);
     }
-    const float factor = Normed ? streamed_rms(s, columns, d.eps, partial, t, threads) : 1.0f;
+    for (uint q = inputColumns / 4 * 4 + t; q < inputColumns; q += threads) {
+        const float v = float(x[mesh_index<0>(ulong(n) * inputColumns + q)]);
+        values[q] = v;
+        s += v * v;
+    }
+    const float factor = Normed ? streamed_rms(s, inputColumns, d.eps, partial, t, threads) : 1.0f;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    streamed_gather<STRIDE>((threadgroup const float *)values, factor, order, first, scale, second, secondScale, third, thirdScale, d.inputs, columns, d.rows, n, t, threads);
+    streamed_gather<STRIDE, Masked>((threadgroup const float *)values, factor, order, first, scale, second, secondScale, third, thirdScale, d.inputs, columns, d.rows, n, t, threads);
 }
 
 template [[host_name("streamed_gather")]] [[kernel]] decltype(streamed_row_gather<false, 0, 0>) streamed_row_gather<false, 0, 0>;
@@ -774,6 +788,7 @@ template [[host_name("streamed_gather_32")]] [[kernel]] decltype(streamed_row_ga
 // covers 4s columns. With flags bit 0 (eight simdgroups: a threadgroup a tile column t) it also writes the first
 // product's tables for 1-bit tiles, tables[n][t][kb][m] = the sum over j in m of its coded input kb + 8 j of the tile
 // (fp32, from the fp16 values it stored).
+template <uint InputColumns = 0>
 kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *first [[buffer(1)]],
                             device half *second [[buffer(2)]],
                             device const float *scale [[buffer(4)]], device const float *secondScale [[buffer(5)]],
@@ -791,8 +806,7 @@ kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *fir
     const uint j0 = (group * simds + simd) * C;
     const bool tabled = (d.flags & 1u) != 0;
     if (j0 >= columns) return;
-    device const half4 *gamma4 = (device const half4 *)gamma;
-    const uint words = columns / 16;
+    const uint inputColumns = InputColumns ? InputColumns : columns, words = inputColumns / 16;
     for (uint n = 0; n < rows; n++) {
         float acc[C];
         for (uint c = 0; c < C; c++) acc[c] = 0.0f;
@@ -800,16 +814,27 @@ kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *fir
         for (uint w = lane; w < words; w += 32) {
             float4 xv[4];
             for (uint k = 0; k < 4; k++) {
-                xv[k] = float4(mesh_load4<0,half4>(x, ulong(n) * columns + 4*(4*w+k)));
-                if (eps > 0.0f) { squares += dot(xv[k], xv[k]); xv[k] *= float4(gamma4[4 * w + k]); }
+                xv[k] = float4(mesh_load4<0,half4>(x, ulong(n) * inputColumns + 4*(4*w+k)));
+                if (eps > 0.0f) { squares += dot(xv[k], xv[k]); xv[k] *= float4(mesh_load4<11,half4>(gamma, 4 * (4 * w + k))); }
             }
             for (uint c = 0; c < C; c++) {
-                const uint4 bits = ((device const uint4 *)(rotation + ulong(min(j0 + c, columns - 1)) * columns))[w];
-                acc[c] += dot(float4(as_type<char4>(bits.x)), xv[0]) + dot(float4(as_type<char4>(bits.y)), xv[1])
-                        + dot(float4(as_type<char4>(bits.z)), xv[2]) + dot(float4(as_type<char4>(bits.w)), xv[3]);
+                if constexpr (InputColumns == 0) {
+                    const uint4 bits = ((device const uint4 *)(rotation + ulong(min(j0 + c, columns - 1)) * columns))[w];
+                    acc[c] += dot(float4(as_type<char4>(bits.x)), xv[0]) + dot(float4(as_type<char4>(bits.y)), xv[1])
+                            + dot(float4(as_type<char4>(bits.z)), xv[2]) + dot(float4(as_type<char4>(bits.w)), xv[3]);
+                } else {
+                    const ulong base = ulong(min(j0 + c, columns - 1)) * inputColumns + 16 * w;
+                    acc[c] += dot(float4(mesh_load4<6,char4>(rotation, base)), xv[0]) + dot(float4(mesh_load4<6,char4>(rotation, base + 4)), xv[1])
+                            + dot(float4(mesh_load4<6,char4>(rotation, base + 8)), xv[2]) + dot(float4(mesh_load4<6,char4>(rotation, base + 12)), xv[3]);
+                }
             }
         }
-        const float rms = eps > 0.0f ? streamed_rms(squares, columns, eps, nullptr, lane, 32) : 1.0f;
+        for (uint k = words * 16 + lane; k < inputColumns; k += MESH_SIMD_WIDTH) {
+            float value = float(x[mesh_index<0>(ulong(n) * inputColumns + k)]);
+            if (eps > 0.0f) { squares += value * value; value *= float(gamma[mesh_index<11>(k)]); }
+            for (uint c = 0; c < C; c++) acc[c] += value * float(rotation[mesh_index<6>(ulong(min(j0 + c, columns - 1)) * inputColumns + k)]);
+        }
+        const float rms = eps > 0.0f ? streamed_rms(squares, inputColumns, eps, nullptr, lane, 32) : 1.0f;
         for (uint c = 0; c < C; c++) {
             const float total = simd_sum(acc[c]) * rms;
             const uint j = j0 + c;
@@ -833,6 +858,7 @@ kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *fir
         }
     }
 }
+template [[host_name("streamed_rotate")]] [[kernel]] decltype(streamed_rotate<0>) streamed_rotate<0>;
 
 // The coded inputs of up to two products of a randomized Hadamard basis (QuIP#, QuaRot): rotated coordinate c = a N + j
 // of T x = (H_K (x) H_N) diag(signs) x / sqrt(K N), H_N Sylvester's and H_K (int8, +-1, K x K, row-major: Paley's for
@@ -843,11 +869,12 @@ kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *fir
 // of the K blocks is read into registers by threads (g, j), g < threads / N, each mixing its K / (threads / N) rows
 // into a second region, which the puts read in their column order. Two barriers. N in {32, 64, 128}, K <= 20 and a
 // multiple of threads / N, K <= 3 S, columns <= 16 threads and <= 2560.
+template <uint InputColumns = 0, bool Masked = false>
 kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *first [[buffer(1)]],
                               device half *second [[buffer(2)]], device const int *order [[buffer(3)]],
                               device const float *scale [[buffer(4)]], device const float *secondScale [[buffer(5)]],
                               device const char *signs [[buffer(6)]], device const char *mix [[buffer(7)]],
-                              device const half *gamma [[buffer(11)]], constant streamed_dims &dims [[buffer(15)]],
+                              device const half *gamma [[buffer(11)]], device const int *sourceOrder [[buffer(12)]], constant streamed_dims &dims [[buffer(15)]],
                               uint n [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
                               uint lanes [[threads_per_threadgroup]], uint simd [[simdgroup_index_in_threadgroup]],
                               uint lane [[thread_index_in_simdgroup]], uint simds [[simdgroups_per_threadgroup]]) {
@@ -859,7 +886,8 @@ kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *f
     threadgroup uint masks[20];
     const uint columns = d.columns, N = d.per, shift = ctz(N), K = columns >> shift, W = N / 32;
     const float eps = d.eps;
-    const auto row = mesh_read<0>(x, ulong(n) * columns);
+    const uint inputColumns = InputColumns ? InputColumns : columns;
+    const auto row = mesh_read<0>(x, ulong(n) * inputColumns);
     uint place[P];
     float firstScale[P], otherScale[P];
     for (uint p = 0; p < P; p++) {
@@ -878,9 +906,10 @@ kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *f
         float r[V];
         for (uint u = 0; u < V; u++) if (u < W) {
             const uint i = (b << shift) + lane * W + u;
-            const float value = float(row[i]);
+            const int source = Masked ? sourceOrder[mesh_index<12>(i)] : int(i);
+            const float value = Masked ? (source >= 0 ? float(row[source]) : 0.0f) : float(row[i]);
             squares += value * value;
-            r[u] = (eps > 0.0f ? value * float(gamma[i]) : value) * float(signs[mesh_index<6>(i)]);
+            r[u] = (eps > 0.0f && source >= 0 ? value * float(gamma[mesh_index<11>(source)]) : value) * float(signs[mesh_index<6>(i)]);
         }
         for (uint h = 1; h < V; h <<= 1) if (h < W)
             for (uint u = 0; u < V; u++) if (u < W && !(u & h)) { const float a0 = r[u], a1 = r[u + h]; r[u] = a0 + a1; r[u + h] = a0 - a1; }
@@ -888,7 +917,7 @@ kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *f
             for (uint u = 0; u < V; u++) if (u < W) { const float other = simd_shuffle_xor(r[u], h); r[u] = (lane & h) ? other - r[u] : r[u] + other; }
         for (uint u = 0; u < V; u++) if (u < W) v[(b << shift) + lane * W + u] = r[u];
     }
-    const float rms = streamed_rms<true>(squares, columns, eps, partial, t, threads);
+    const float rms = streamed_rms<true>(squares, inputColumns, eps, partial, t, threads);
     const float factor = rsqrt(float(columns)) * (eps > 0.0f ? rms : 1.0f);
     const uint j = t & (N - 1), g = t >> shift, Q = K / (threads >> shift);
     threadgroup float *mixed = v + columns;
@@ -909,6 +938,7 @@ kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *f
         if (d.inputs > 1) second[mesh_index<2>(ulong(n) * columns + at)] = half(otherScale[p] * value);
     }
 }
+template [[host_name("streamed_hadamard")]] [[kernel]] decltype(streamed_hadamard<0, false>) streamed_hadamard<0, false>;
 
 // The GELU FFN's middle: hidden = GELU(gate) * up in the gate and up products' (shared) coded row order, which the down
 // product's columns follow: from their partials (gate's d.shares shares, up's d.inputs, each product its own
@@ -916,17 +946,17 @@ kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *f
 // (T half). Each binding maps logical [row, output] indices to its declared view.
 // Each input declares its reduction stride: gate's d.split, up's d.per.
 // Four outputs a thread.
-template <typename T>
+template <typename T, bool Masked = false>
 kernel void streamed_gelu(device const T *gate [[buffer(0)]], device const T *up [[buffer(1)]],
                           device const float *gateScale [[buffer(2)]], device const float *upScale [[buffer(3)]],
-                          device half *hidden [[buffer(4)]], constant streamed_dims &dims [[buffer(15)]],
+                          device half *hidden [[buffer(4)]], device const int *selected [[buffer(5)]], constant streamed_dims &dims [[buffer(15)]],
                           uint2 g [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
                           uint2 threads [[threads_per_threadgroup]]) {
     const streamed_dims d = dims_of(dims);
     const uint n = g.y, first = (g.x * lanes_of(threads.x) + t) * 4;
     const ulong row = ulong(n) * d.outputs;
     for (uint r = first; r < min(first + 4, d.outputs); ++r)
-        hidden[mesh_index<4>(ulong(n) * d.outputs + r)] = half(streamed_gelu_of(
+        hidden[mesh_index<4>(ulong(n) * d.outputs + r)] = Masked && selected[mesh_index<5>(r)] < 0 ? half(0) : half(streamed_gelu_of(
             d.shares ? streamed_value(mesh_read<0>(gate), row + r, d.shares, d.split, gateScale[mesh_index<2>(r)]) : float(gate[mesh_index<0>(row + r)]),
             d.inputs ? streamed_value(mesh_read<1>(up), row + r, d.inputs, d.per, upScale[mesh_index<3>(r)]) : float(up[mesh_index<1>(row + r)])));
 }
@@ -1197,7 +1227,7 @@ static inline __attribute__((always_inline)) void fragment_panel(device const ui
 // panels cover K): each value with its row's scale, capped (cap > 0), at row order[r] of ys (row stride d.stride). A
 // last panel past the matrix's width adds its tail element by element (a tensor operation's slice past its operand is
 // not clipped).
-template <uint M, uint TILES, uint WIDTHS, uint LOADS, typename Output = half>
+template <uint M, uint TILES, uint WIDTHS, uint LOADS, typename Output = half, bool Masked = false>
 kernel void streamed_panel(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
                            device const uint *bands [[buffer(2)]], device const half *xs [[buffer(4)]],
                            device float *partials [[buffer(5)]], device Output *ys [[buffer(11)]],
@@ -1255,8 +1285,10 @@ kernel void streamed_panel(device const uint *codes [[buffer(0)]], device const 
         const uint n = row0 + uint(e[1]), r = group.x * 32 + uint(e[0]);
         if (n >= rows) continue;
         if (finish == 0) { partials[mesh_index<5>(ulong(share) * stride + ulong(n) * outputs + r)] = acc[i]; continue; }
+        const int target = order[mesh_index<12>(r)];
+        if (Masked && target < 0) continue;
         const float value = rowScale[mesh_index<13>(r)] * acc[i];
-        ys[mesh_index<11>(ulong(n) * stride + uint(order[mesh_index<12>(r)]))] = Output(streamed_capped(value, cap));
+        ys[mesh_index<11>(ulong(n) * stride + uint(target))] = Output(streamed_capped(value, cap));
     }
 }
 

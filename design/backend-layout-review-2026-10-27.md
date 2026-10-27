@@ -315,3 +315,37 @@ The weight-owned transformed-input buffers also remain distinct work from the
 removed partial-sum cache. Arbitrary page maps, exact grouped-tail tensor views,
 global lifetime-based storage assignment and the previously listed provider
 and dependency gaps still require integration.
+
+## Compressed logical domains reach the shared shaders
+
+Recorded: 2026-10-27T21:56:15Z. The FX coded-matrix declaration now keeps its
+logical shape apart from the stored tile shape. The shared preparation helper
+`MetalViewBlockSlice` selects touched blocks and maps their lanes into the
+selected logical range. Boundary lanes carry a mask. Code planes stay in their
+original storage; preparation only gathers immutable tile and index metadata.
+Repeated cuts compose these maps, including positive-step column slices.
+
+Forward and transposed products, decode, input transforms and fused GELU
+consume those domains. Output allocation uses the logical shape. The
+transposed product receives its row count instead of recovering it by dividing
+buffer size. Slice pricing reads carried metadata during FX tracing instead
+of trying to read fake tensor values. The transpose and decode interfaces no
+longer force contiguous copies of otherwise usable views.
+
+Rotated column slices retain the needed coded columns and use rectangular
+basis views. The int8 transform consumes the view's indices and exact input
+tail; the Hadamard transform inserts masked logical inputs into the retained
+transform domain. Masked shader specializations share the existing bodies.
+Whole-tile declarations retain their original specializations.
+
+The shared library, Python extension and native rank/goal-a build. Preparation
+compiled the masked shaders and traced forward, transpose, rotated and
+Hadamard declarations with exact logical shapes. No numerical workload,
+benchmark or unit suite ran. These are preparation results, not measured
+throughput or latency results.
+
+Native matrix slicing still uses its older whole-tile and permutation
+restrictions. Its consumers must carry these same logical domains before
+those restrictions can be removed. Signed/reversed basis views also need the
+common arbitrary-index lowering; this change does not provide that lowering.
+The other open items above remain open.

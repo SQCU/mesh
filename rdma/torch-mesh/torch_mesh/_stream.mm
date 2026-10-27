@@ -1709,6 +1709,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("completion", &completion);
   module.def("completed", &completed);
   module.def("pipeline", &pipeline);
+  module.def("view_block_slice", [](const std::vector<int32_t> &order,NSInteger first,NSInteger end,NSInteger step,NSUInteger block) {
+    auto result=MetalViewBlockSlice(order.data(),order.size(),first,end,step,block);
+    auto values=[](NSData *data) {
+      std::vector<int32_t> words(data.length/sizeof(int32_t));
+      if(data.length)memcpy(words.data(),data.bytes,data.length);
+      return words;
+    };
+    return std::make_pair(values(result[@"blocks"]),values(result[@"order"]));
+  });
   module.def("view_tiles", [](const std::vector<NSUInteger> &shape,NSUInteger elements) {
     using Tile=std::pair<std::vector<NSUInteger>,std::vector<NSUInteger>>;
     if(shape.empty())return std::vector<Tile>{{{}, {}}};
