@@ -677,7 +677,9 @@ struct Commands {
     std::vector<std::vector<MetalCommandBinding>> bindings(records.size());
     std::vector<std::vector<MetalReach>> reaches(records.size());
     std::vector<MetalCommandDescription> descriptions;
-    std::vector<id<MTLBuffer>> constants;
+    std::vector<id<MTLBuffer>> owned;
+    std::map<uintptr_t,id<MTLBuffer>> hostBuffers;
+    const NSUInteger page=(NSUInteger)sysconf(_SC_PAGESIZE);
     for(size_t k=0;k<records.size();k++) {
       const auto &[handle,buffers,scalars,grid,group,threadGrid,access]=records[k];
       TORCH_CHECK(handle>=0&&handle<(int64_t)pipelines_.size(),"unprepared Metal kernel");
@@ -685,9 +687,24 @@ struct Commands {
       auto &ranges=reaches[k];
       for(size_t j=0;j<buffers.size();j++)if(buffers[j]) {
         const auto &t=*buffers[j];
-        TORCH_CHECK(t.is_mps(),"native command operands must name Metal storage");
-        auto buffer=at::native::mps::getMTLBufferStorage(t);
-        const NSUInteger offset=t.storage_offset()*t.element_size();
+        TORCH_CHECK(t.is_mps()||t.device().is_cpu(),"native command operands require shared CPU or Metal storage");
+        id<MTLBuffer> buffer=nil;
+        NSUInteger offset=t.storage_offset()*t.element_size();
+        if(t.is_mps())buffer=at::native::mps::getMTLBufferStorage(t);
+        else {
+          // Bind the existing host allocation once, without moving its data.
+          // This permits an API's layout copy to use the same command body
+          // whether its prepared operand is named by a CPU or Metal view.
+          const uintptr_t base=(uintptr_t)t.storage().data_ptr().get(),first=base/page*page;
+          auto found=hostBuffers.find(base);
+          if(found==hostBuffers.end()) {
+            const NSUInteger length=((base-first+t.storage().nbytes()+page-1)/page)*page;
+            buffer=[device newBufferWithBytesNoCopy:(void *)first length:length options:MTLResourceStorageModeShared deallocator:nil];
+            TORCH_CHECK(buffer,"native preparation could not map the supplied host storage");
+            hostBuffers.emplace(base,buffer);owned.push_back(buffer);
+          } else buffer=found->second;
+          offset+=base-first;
+        }
         const uint32_t mode=((access>>j)&1?MetalReachRead:0)|((access>>(MESH_ACCESS_WRITE_SHIFT+j))&1?MetalReachWritten:0);
         bound.push_back({buffer,offset,t.nbytes(),(uint32_t)j,mode});
         if(mode) {
@@ -703,14 +720,14 @@ struct Commands {
       for(const auto &[index,scalar]:scalars) {
         const std::string bytes=scalar;
         id<MTLBuffer> buffer=[device newBufferWithBytes:bytes.data() length:bytes.size() options:MTLResourceStorageModeShared];
-        constants.push_back(buffer);
+        owned.push_back(buffer);
         bound.push_back({buffer,0,bytes.size(),index,MetalReachRead});
       }
       descriptions.push_back({pipelines_[handle],bound.data(),bound.size(),nullptr,0,ranges.data(),ranges.size(),
         MTLSizeMake(grid[0],grid[1],grid[2]),MTLSizeMake(group[0],group[1],group[2]),(BOOL)threadGrid});
     }
     replay=MetalReplayCommands(device,descriptions.data(),descriptions.size(),MetalFormEncoded);
-    for(id buffer:constants)[buffer release];
+    for(id buffer:owned)[buffer release];
     TORCH_CHECK(replay,"native command preparation failed");
   }
   ~Commands(){MetalReplayFree(replay);}
@@ -1692,6 +1709,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("completion", &completion);
   module.def("completed", &completed);
   module.def("pipeline", &pipeline);
+  module.def("view_indices", [](const std::vector<std::tuple<NSUInteger,std::vector<NSUInteger>,std::vector<NSInteger>,NSUInteger>> &bindings) {
+    NSMutableString *source=[NSMutableString stringWithString:MetalViewIndexPrelude()];
+    for(const auto &[binding,shape,strides,offset]:bindings) {
+      TORCH_CHECK(shape.size()==strides.size(),"an index view needs one stride per axis");
+      [source appendString:MetalViewIndexDeclaration(binding,shape.data(),strides.data(),shape.size(),offset)];
+    }
+    return std::string(source.UTF8String);
+  });
+  module.def("view_index", [](const std::vector<NSUInteger> &shape,const std::vector<NSInteger> &strides,const std::string &index) {
+    TORCH_CHECK(shape.size()==strides.size(),"an index view needs one stride per axis");
+    return std::string([MetalViewIndexExpression(shape.data(),strides.data(),shape.size(),@(index.c_str())) UTF8String]);
+  });
   pybind11::dict compilation;
 #define MESH_METAL_VALUE(name, value) compilation[#name] = value;
 #include "metal.def"

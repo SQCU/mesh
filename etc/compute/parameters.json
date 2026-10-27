@@ -1,3 +1,4 @@
 {
-  "LINEAR_ROW_CROSSOVER": {"value": 8, "minimum": 1, "maximum": 128, "grain": 1}
+  "LINEAR_ROW_CROSSOVER": {"value": 8, "minimum": 1, "maximum": 128, "grain": 1},
+  "LAYOUT_COPY_TILE_BYTES": {"value": 262144, "minimum": 1, "maximum": 4194304, "grain": 1}
 }

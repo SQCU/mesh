@@ -19,18 +19,25 @@ def same_view(a, b):
             and all(n <= 1 or x == y for n, x, y in zip(a.shape, a.stride(), b.stride())))
 
 
-def alias(described, placed, view):
+def indices(described, placed_strides, placed_offset, view):
+    """Resolve an alias's element indices without allocating its destination."""
     width, target_width = described.element_size(), view.element_size()
     offset, strides = rebase((*described.shape, width), (*[s * width for s in described.stride()], 1),
-                             described.storage_offset() * width, (*[s * width for s in placed.stride()], 1),
-                             placed.storage_offset() * width, (*view.shape, target_width),
+                             described.storage_offset() * width, (*[s * width for s in placed_strides], 1),
+                             placed_offset * width, (*view.shape, target_width),
                              (*[s * target_width for s in view.stride()], 1), view.storage_offset() * target_width)
     if offset % target_width or any(step % target_width for n, step in zip(view.shape, strides[:-1]) if n > 1) or strides[-1] != 1:
         raise ValueError('placed bytes do not form the declared typed elements')
+    return offset // target_width, tuple(max(1, step // target_width) if n <= 1 else step // target_width
+                                        for n, step in zip(view.shape, strides[:-1]))
+
+
+def alias(described, placed, view):
+    offset, strides = indices(described, placed.stride(), placed.storage_offset(), view)
     # A dtype view shares the same allocation; it does not convert values.
+    width = described.element_size()
     storage = placed if placed.dtype == view.dtype else placed.as_strided((placed.untyped_storage().nbytes() // width,), (1,), 0).view(view.dtype)
-    return storage.as_strided(tuple(view.shape), tuple(max(1, step // target_width) if n <= 1 else step // target_width
-                                                      for n, step in zip(view.shape, strides[:-1])), offset // target_width)
+    return storage.as_strided(tuple(view.shape), strides, offset)
 
 
 class Placements:

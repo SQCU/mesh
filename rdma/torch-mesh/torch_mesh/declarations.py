@@ -354,6 +354,8 @@ class BoundGraph:
             for described, destination in zip(tree_flatten(map_arg(result, _value))[0], destinations, strict=True):
                 if destination is not None:
                     placements.bind(described, destination)
+        from .layout import place
+        place(graph.graph, placements, [logical for logical, _ in inputs_placed.bindings])
         # Solve from recipients back to producers before compiling any span.
         # A gather which feeds another gather inherits that gather's local view.
         for node in reversed(list(graph.graph.nodes)):

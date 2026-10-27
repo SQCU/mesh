@@ -245,6 +245,7 @@ class Ane(Engine):
     def __init__(self, **options):
         super().__init__(**options)
         self.tile, self.block = int(options['tile']), int(options['block'])
+        self.input_layout, self.output_layout = options['input_layout'], options['output_layout']
 
     @classmethod
     def missing(cls):
@@ -270,7 +271,8 @@ class Ane(Engine):
         handle = native.mesh_coreml_load(str(compiled).encode(), b'', b'', 0)
         if handle < 0:
             raise RuntimeError(native.mesh_coreml_error().decode())
-        return Prediction(native, handle, x, out)
+        return Prediction(native, handle, {'': x}, {'': out},
+                          input_layouts={'': self.input_layout}, output_layouts={'': self.output_layout})
 
 
 class ModelView(ctypes.Structure):
@@ -280,10 +282,21 @@ class ModelView(ctypes.Structure):
 
 class Prediction:
     """One Core ML invocation's views, bound before the numerical function."""
-    def __init__(self, native, model, source, target):
+    def __init__(self, native, model, source, target, *, input_layouts, output_layouts):
+        from . import _stream, layout
         self.native = native
-        source = source if isinstance(source, dict) else {'': source}
-        target = target if isinstance(target, dict) else {'': target}
+        before, after = [], []
+        def resolve(values, requirements, writing):
+            if values.keys() != requirements.keys():
+                raise ValueError('each Core ML binding requires an explicit layout operand')
+            placed = {}
+            for name, value in values.items():
+                placed[name], commands = layout.resolve(value, requirements[name], writing=writing)
+                (after if writing else before).extend(commands)
+            return placed
+        source = resolve(source, input_layouts, False)
+        target = resolve(target, output_layouts, True)
+        self.before, self.after = _stream.Commands(before), _stream.Commands(after)
         self.inputs, self.outputs = tuple(source.values()), tuple(target.values())
         # Empty names select the load declaration's names; general graphs pass
         # an explicit mapping for every input and output.
@@ -311,16 +324,20 @@ class Prediction:
             self.native.mesh_coreml_unbind(self.binding)
 
     def append(self, schedule):
+        schedule.append(self.before)
         schedule.host(self.entry, self.inputs, self.outputs)
+        schedule.append(self.after)
 
 
-def coreml_graph(compiled, inputs, outputs, *, units):
+def coreml_graph(compiled, inputs, outputs, *, units, input_layouts, output_layouts):
     """Bind any compiled Core ML graph to named shared views at preparation.
 
     ``units`` is the caller's backend operand (0 CPU/ANE, 1 all, 2 CPU).
     Graph conversion belongs to preparation; no operation-kind dispatch or
     model loading occurs in the returned host record. The common schedule
-    derives dependencies from the declared input and output views.
+    derives dependencies from the declared input and output views. Per-name
+    ``input_layouts`` and ``output_layouts`` declare strided, contiguous, or
+    exact element strides. Necessary copies are recorded at preparation.
     """
     native = _coreml()
     if native is None:
@@ -328,10 +345,10 @@ def coreml_graph(compiled, inputs, outputs, *, units):
     handle = native.mesh_coreml_load(os.fsencode(compiled), b'', b'', units)
     if handle < 0:
         raise RuntimeError(native.mesh_coreml_error().decode())
-    return Prediction(native, handle, inputs, outputs)
+    return Prediction(native, handle, inputs, outputs, input_layouts=input_layouts, output_layouts=output_layouts)
 
 
-def export_coreml_graph(program, inputs, outputs, *, directory, units, deployment, precision):
+def export_coreml_graph(program, inputs, outputs, *, directory, units, deployment, precision, input_layouts, output_layouts):
     """Lower an exported tensor graph once, then bind the common host record.
 
     ``program`` is a torch.export.ExportedProgram (its graph and constants).
@@ -356,7 +373,7 @@ def export_coreml_graph(program, inputs, outputs, *, directory, units, deploymen
             raise RuntimeError(native.mesh_coreml_error().decode())
     finally:
         shutil.rmtree(package)
-    return coreml_graph(compiled, inputs, outputs, units=units)
+    return coreml_graph(compiled, inputs, outputs, units=units, input_layouts=input_layouts, output_layouts=output_layouts)
 
 
 def neural_engine_model(kind, arrays, rows, tile=128, block=None):

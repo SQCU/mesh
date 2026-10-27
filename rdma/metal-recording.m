@@ -3,6 +3,56 @@
 #import <objc/runtime.h>
 #include <stdatomic.h>
 
+NSString *MetalViewIndexExpression(const NSUInteger *shape,const NSInteger *strides,size_t rank,NSString *index) {
+    // Collapse adjacent axes before emitting arithmetic. Contiguous views
+    // become the original index, with no table, descriptor load or branch.
+    struct { NSUInteger count, divisor; NSInteger stride; } axes[rank?rank:1];
+    NSUInteger divisor=1,used=0;
+    for(size_t d=rank;d--;) {
+        if(!shape[d])return @"0";
+        if(shape[d]==1)continue;
+        if(used&&strides[d]==axes[used-1].stride*(NSInteger)axes[used-1].count)
+            axes[used-1].count*=shape[d];
+        else {axes[used].count=shape[d];axes[used].divisor=divisor;axes[used++].stride=strides[d];}
+        divisor*=shape[d];
+    }
+    NSMutableArray *terms=[NSMutableArray array];
+    for(NSUInteger a=0;a<used;a++) {
+        if(!axes[a].stride)continue;
+        NSString *term=[NSString stringWithFormat:@"long(%@)",index];
+        if(axes[a].divisor!=1)term=[NSString stringWithFormat:@"(%@ / %lul)",term,(unsigned long)axes[a].divisor];
+        if(a+1<used)term=[NSString stringWithFormat:@"(%@ %% %lul)",term,(unsigned long)axes[a].count];
+        if(axes[a].stride!=1)term=[NSString stringWithFormat:@"(%@ * %ldl)",term,(long)axes[a].stride];
+        [terms addObject:term];
+    }
+    return terms.count?[terms componentsJoinedByString:@" + "]:@"0";
+}
+
+NSString *MetalViewIndexPrelude(void) {
+    return @"#include <metal_stdlib>\nusing namespace metal;\n#define MESH_INDEX_DECLARED 1\n"
+        "template<uint B> inline long mesh_index(ulong i) { return long(i); }\n"
+        "template<uint B> constexpr bool mesh_vector4() { return true; }\n";
+}
+
+NSString *MetalViewIndexDeclaration(NSUInteger binding,const NSUInteger *shape,const NSInteger *strides,
+    size_t rank,NSUInteger elementOffset) {
+    NSString *expression=MetalViewIndexExpression(shape,strides,rank,@"i");
+    NSMutableString *source=[NSMutableString string];
+    if(![expression isEqualToString:@"long(i)"])
+        [source appendFormat:@"template<> inline long mesh_index<%lu>(ulong i) { return %@; }\n",(unsigned long)binding,expression];
+    // A logical group of four can retain its vector instruction only when it
+    // is physically adjacent and aligned. This is a compilation decision.
+    NSUInteger inner=1,prefix=rank;
+    for(size_t d=rank;d--;) {
+        if(shape[d]>1&&strides[d]!=(NSInteger)inner)break;
+        inner*=shape[d];prefix=d;
+    }
+    BOOL vector=elementOffset%4==0&&(!prefix||inner%4==0);
+    for(size_t d=0;d<prefix;d++)if(shape[d]>1&&strides[d]%4)vector=NO;
+    if(!vector)[source appendFormat:@"template<> constexpr bool mesh_vector4<%lu>() { return false; }\n",(unsigned long)binding];
+    return source;
+}
+
 struct MetalViewAxis { NSUInteger count, stride; };
 struct MetalViewSpan { NSUInteger offset, length; };
 static int MetalViewAxisOrder(const void *a,const void *b) {

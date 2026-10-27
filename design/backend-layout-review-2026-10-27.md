@@ -28,10 +28,14 @@ through the same preparation interface.
 The descriptor must distinguish a packed local address range, strided local
 views, and gathered page/range views. A page list does not by itself make
 disjoint local addresses contiguous for an API that takes one address range.
-That requirement has to be satisfied during placement, using the mappings the
-backend actually supports. Fixed inputs with incompatible requirements must
-be reported during preparation. Execution must not discover the conflict and
-insert a copy, choose another executor, or wait for a layout repair.
+Compilation satisfies that requirement using the mappings the backend supports.
+It first uses a suitable existing view or producer destination. Where values
+must occupy another physical layout, it assigns that storage and adds the needed
+copies to the graph before execution. Each copy names its source and destination
+pieces. Those data edges let it overlap other work as pieces arrive, and let later
+work reuse source storage once its readers finish. Callers declare requirements;
+they do not write staging scripts. Execution neither chooses the layout nor
+allocates its storage.
 
 ## What is already represented
 
@@ -126,3 +130,34 @@ recorder. The interface must express contiguous local tiles and gathered ranges
 on both input and output, including ANE/CPU operations, without adding a runtime
 layout dispatcher. No numerical run, unit suite or hourly was launched for this
 review; no rejection branch has yet been removed by it.
+
+## Implementation following the review
+
+The generic numerical declaration now carries fixed strides and indexed binding
+roles for inputs and outputs. Its blanket rejection of strided outputs is removed.
+Coded output stores and the scalar/vector input transforms use compiled affine
+index maps. The shared `MetalViewIndexExpression` and binding declarations also
+serve FX scan/selection row offsets and native `MatrixView` specialization.
+Native `streamedFinish` now consumes a view, including column strides and grouped
+rows, and publishes the exact selected output ranges. Contiguous vector groups
+retain vector instructions; other views use scalar element addresses.
+
+`layout.place` carries compatible whole-value requirements back to producers
+before numerical spans and gather destinations are bound. It resolves aliases
+from metadata before assigning storage. `layout.resolve` binds an accepted view directly or allocates required storage
+during preparation. Required copies become tiled native command records through
+`layout.copies`, with exact read/write ranges. `LAYOUT_COPY_TILE_BYTES` is a compiler
+operand in the existing empirical parameter domain. This is the same recorder
+used by numerical work, not a staging executor. CPU-backed command operands can
+also be mapped into Metal without moving their bytes.
+
+Core ML declarations now require a layout operand for each named input and output.
+The specialized ANE builder consumes the same relation. The example configuration
+in `etc/compute/coreml.json` explicitly retains strided views; a specific provider
+may instead declare contiguous storage or exact strides. A required copy is
+scheduled around the native host record during preparation.
+
+The table above remains the historical review baseline. Arbitrary numerical page
+maps, global producer-domain splitting, provider output-backing guarantees, and
+the other listed algorithm/shape restrictions remain work. This change does not
+establish global optimal layout placement or a measured performance improvement.

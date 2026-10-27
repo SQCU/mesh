@@ -69,16 +69,36 @@ A value supplied by the caller has no producer to relocate. Its gather input mus
 already be the local slice of the supplied final output. Conflicting destinations,
 or aliases that cannot fit in one affine view, fail preparation. Relocating a proper
 subset while retaining the rest of a larger producer requires producer-domain
-splitting; this pass does not invent that split. Opaque coded-kernel declarations
-still have fixed output layouts: they accept matching destinations and reject a
-different stride until their builders supply that layout explicitly. Their general
-layout integration remains in item 9.
+splitting; this pass does not invent that split. Coded-kernel declarations now
+carry their binding layouts explicitly. Their indexed stores can write strided
+destinations directly; bindings tied to a fixed physical layout declare that
+requirement and use the preparation described below.
 
 The [backend layout review](../design/backend-layout-review-2026-10-27.md) records
 the restrictions across coded kernels, CPU/ANE bindings and LiteRT handoffs.
 Contiguity is a requirement of a particular operation's input or output view.
 Preparation must carry it through producer placement and page dependencies,
 alongside the gathered views supported by other operations.
+
+`kernel.declare` carries indexed binding slots and required element strides for
+both inputs and outputs. `layout.place` propagates compatible whole-value
+requirements back to producers before numerical spans and gather destinations
+are bound. It checks the graph's alias relations using metadata before assigning
+storage. Fixed external views and conflicting requirements retain their explicit
+copy edges. `layout.resolve` keeps an accepted view or assigns a
+required layout before recording. An unconstrained result is allocated in its
+declared layout. Where a fixed external destination conflicts with a consumer's
+requirement, `layout.copies` emits bit-preserving tiled copies into the common
+command records. The copies name exact source and destination ranges, so the
+schedule can use their individual data edges. The copy tile size is a compiler
+operand, included in the whole-function solver's parameter domain.
+
+The shared native index generator lowers shape/stride relations to constant
+arithmetic and removes contiguous-axis divisions. Coded scalar accesses, vector
+groups, FX row offsets and native `MatrixView` specialization use that generator.
+No runtime layout descriptor is traversed. Coded entry transforms no longer ask
+their callers to pack `times` or `ffn` inputs. Fixed-layout TensorOps bindings
+still state their physical requirement; they do not make it a tensor-wide rule.
 
 Collective marks still have an opaque access interface in the shared scheduler.
 They preserve their declared order and join preceding host work. Removing that
@@ -243,7 +263,11 @@ remain for a mathematical sum or a dtype conversion; there is no concatenation
 executor. Callers can supply the final output allocation.
 
 `coreml_graph` binds any supported compiled graph's named inputs and outputs to
-shared strided views. `export_coreml_graph` converts an exported tensor graph before
+shared views. Required `input_layouts` and `output_layouts` mappings describe each
+binding as `strided`, `contiguous`, or an explicit element-stride tuple. Preparation
+uses the same layout resolver as numerical kernels; any necessary copies become
+ordinary command records before or after the host record. `export_coreml_graph`
+converts an exported tensor graph before
 execution, with explicit deployment, precision, compute units and artifact directory.
 Both use the same native Core ML binding as the existing linear/FFN graph builder.
 The binding is no longer limited to one dense two-dimensional input and output.

@@ -26,12 +26,9 @@ def empty_strided(shape, stride, dtype, device):
 
 def row_offset(name, shape, strides, axis):
     """Emit the base of a tensor view's rows along one declared axis."""
-    terms, divisor = [], 1
-    for dim in range(len(shape) - 1, -1, -1):
-        if dim != axis:
-            terms.append(f'(ulong(row) / {divisor} % {shape[dim]}) * {strides[dim]}')
-            divisor *= shape[dim]
-    return f'inline ulong {name}(uint row) {{ return ' + (' + '.join(terms) or '0') + '; }\n'
+    expression = _stream.view_index([n for d, n in enumerate(shape) if d != axis],
+                                    [s for d, s in enumerate(strides) if d != axis], 'row')
+    return f'inline ulong {name}(uint row) {{ return {expression}; }}\n'
 
 
 @lru_cache(None)
@@ -168,6 +165,9 @@ def compile_graph(module, metadata, operands, *, destinations=None):
             if destination is not None:
                 placements.bind(described, destination)
     input_storage = dict(zip((n.name for n in module.graph.nodes if n.op == 'placeholder'), operands, strict=True))
+    from .layout import place
+    place(module.graph, placements, [v for n in module.graph.nodes if n.op in ('placeholder', 'get_attr')
+                                    for v in tree_flatten(n.meta.get('val'))[0]])
 
     class Preparation(PythonWrapperCodegen):
         def make_allocation(self, name, device, dtype, shape, stride, allocation_shape=None, is_pinned=False):

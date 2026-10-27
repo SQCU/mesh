@@ -61,6 +61,13 @@ struct MetalReach {
 // to dependencies. Empty views retain a zero-length binding declaration.
 NSData *MetalViewReaches(id<MTLBuffer>, NSUInteger offset, const NSUInteger *shape,
     const NSInteger *strides, size_t rank, NSUInteger elementBytes, uint32_t access, int32_t binding);
+// Preparation-only address lowering. The result maps a logical linear index
+// to an element offset; shape/stride descriptors do not enter the kernel.
+NSString *MetalViewIndexExpression(const NSUInteger *shape, const NSInteger *strides,
+    size_t rank, NSString *index);
+NSString *MetalViewIndexPrelude(void);
+NSString *MetalViewIndexDeclaration(NSUInteger binding, const NSUInteger *shape, const NSInteger *strides,
+    size_t rank, NSUInteger elementOffset);
 // Preparation only: carry declared page accesses across encoders on the supplied
 // queue. Prepare and enqueue its functions in the same order. Disjoint ranges
 // add no dependency. Transport uses this declaration for its shared counters.

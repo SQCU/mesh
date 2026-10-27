@@ -31,6 +31,9 @@ MESH_METAL_VALUE(MATRIX_COLUMN_GROUPS, 2)
 MESH_METAL_VALUE(GATHER_THREADS, 256)
 MESH_METAL_VALUE(GATHER_ELEMENTS_PER_THREAD, 8)
 MESH_METAL_VALUE(GATHER_GROUPS_PER_CORE, 1)
+// Maximum logical bytes of one prepared layout-copy dependency tile.
+// This is scheduling policy, not a limit on operand or function size.
+MESH_METAL_VALUE(LAYOUT_COPY_TILE_BYTES, 262144)
 
 // Existing two-matrix attention page format. A different layout needs its compiled kernel.
 MESH_METAL_VALUE(ATTENTION_TILE_PAGE, 16)
