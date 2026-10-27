@@ -12,6 +12,7 @@ import struct
 import torch
 
 from . import _stream
+from .compilation import operands as compiler_operands
 
 _records = ContextVar('mesh_native_commands')
 
@@ -66,7 +67,7 @@ def linear(x, w, bias=None, act=0, x1=None, *, out=None):
 def linears(xs, ws, biases, acts, x1s, *, outputs=None):
     outputs = outputs if outputs is not None else [empty_strided((x.shape[0], w.shape[0]), (w.shape[0], 1), x.dtype, x.device)
                                                    for x, w in zip(xs, ws)]
-    if all(x.dtype == w.dtype == torch.half and x.shape[0] <= _stream.compilation['LINEAR_ROW_CROSSOVER'] and x.stride(1) == w.stride(1) == 1
+    if all(x.dtype == w.dtype == torch.half and x.shape[0] <= compiler_operands()['LINEAR_ROW_CROSSOVER'] and x.stride(1) == w.stride(1) == 1
            and (part is None or part.stride(1) == 1) and (bias is None or bias.is_contiguous()) and out.is_contiguous()
            for x, w, part, bias, out in zip(xs, ws, x1s, biases, outputs)):
         _records.get().extend(_stream.linear_commands(xs, ws, biases, acts, x1s, outputs))
@@ -100,6 +101,34 @@ def topk(x, k, dim=-1, largest=True, sorted=True):
 def cumsum(x, dim, *, dtype=None):
     from .scan import cumsum as prepare
     output, commands = prepare(x, dim, dtype=dtype)
+    _records.get().extend(commands)
+    return output
+
+
+def draw(*args):
+    from .argmax import prepare_draw
+    output, commands = prepare_draw(*args)
+    _records.get().extend(commands)
+    return output
+
+
+def retain(*args):
+    from .argmax import prepare_retain
+    output, commands = prepare_retain(*args)
+    _records.get().extend(commands)
+    return output
+
+
+def fwht(*args):
+    from .structured import prepare
+    output, commands = prepare(*args)
+    _records.get().extend(commands)
+    return output
+
+
+def kernel(*args):
+    from .kernel import prepare
+    output, commands = prepare(*args)
     _records.get().extend(commands)
     return output
 
@@ -141,7 +170,11 @@ def compile_graph(module, metadata, operands):
             names = {'torch.ops.torch_mesh.linear.default': 'linear',
                      'torch.ops.torch_mesh.linears.default': 'linears',
                      'torch.ops.aten.topk.default': 'topk',
-                     'torch.ops.aten.cumsum.default': 'cumsum'}
+                     'torch.ops.aten.cumsum.default': 'cumsum',
+                     'torch.ops.torch_mesh.draw.default': 'draw',
+                     'torch.ops.torch_mesh.retain.default': 'retain',
+                     'torch.ops.torch_mesh.fwht.default': 'fwht',
+                     'torch.ops.torch_mesh.native_kernel.default': 'kernel'}
             name = node.get_kernel_name()
             if name not in names:
                 raise NotImplementedError(f'no native preparation for {name}; a framework fallback is not an executor')
@@ -190,7 +223,7 @@ def compile_graph(module, metadata, operands):
     if mode is None:
         raise ValueError('native lowering requires the declaration\'s fake tensor metadata')
     with config.patch(size_asserts=False, alignment_asserts=False, scalar_asserts=False,
-                      max_fusion_unique_io_buffers=_stream.compilation['BUFFER_BINDINGS'], max_autotune=False,
+                      max_fusion_unique_io_buffers=compiler_operands()['BUFFER_BINDINGS'], max_autotune=False,
                       max_autotune_gemm=False, assert_indirect_indexing=False), \
             V.set_fake_mode(mode), DebugContext():
         graph = NativeGraph(module, metadata, shape_env=mode.shape_env, is_inference=True)

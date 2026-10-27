@@ -5,6 +5,7 @@ import struct
 
 import torch
 from . import _stream, fused
+from .compilation import operands
 
 
 @lru_cache(None)
@@ -16,7 +17,7 @@ def pipeline(definitions):
 
 def row_tiles(rows):
     """The product's compiled row groups; shared by writes and their producer."""
-    geometry = _stream.compilation
+    geometry = operands()
     width = geometry['MATRIX_ROWS'] * geometry['MATRIX_ROW_GROUPS']
     return tuple((first, min(width, rows - first)) for first in range(0, rows, width))
 
@@ -60,7 +61,7 @@ def product(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, ready=
                        A1M=x1.stride(-2) if x1 is not None else 0,
                        A1K=x1.stride(-1) if x1 is not None else 0,
                        A1BATCH=stride(x1) if x1 is not None else 0)
-    geometry = _stream.compilation
+    geometry = operands()
     definitions.update((key, geometry['MATRIX_' + key])
                        for key in ('ROWS', 'COLUMNS', 'INNER', 'ROW_GROUPS', 'COLUMN_GROUPS'))
     row_tile = definitions['ROWS'] * definitions['ROW_GROUPS']

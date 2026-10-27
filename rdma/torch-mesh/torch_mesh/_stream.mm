@@ -1,3 +1,4 @@
+#include "mesh-write-compiler.h"
 // PyTorch frontend bindings to the common collective compiler and native
 // Metal schedule. Prepared calls resolve routes, pages and dispatch operands
 // before submission. The compatibility MPS stream is flushed at a whole
@@ -1154,7 +1155,7 @@ static void fused_allocate_ring(FusedForm &f, FusedForm::Ring &ring, const at::T
         }
         const Operand out = g.moving(source_view), in = g.moving(landing_view);
         prepared->handles.push_back(nullptr);
-        checked(ncclMeshWritePrepare(out.at, (void *)in.at, out.count, out.type, (int)source, (int)destination,
+        checked(mesh_compile_write(out.at, (void *)in.at, out.count, out.type, (int)source, (int)destination,
                                     communicator(f.comm), 1, (uint32_t)repeats, (size_t)local_stride, 0,
                                     &prepared->handles.back()));
       }
@@ -1286,7 +1287,7 @@ static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, c
       }
       const Operand out = g.moving(source), in = g.moving(landing);
       prepared->handles.push_back(nullptr);
-      checked(ncclMeshWritePrepare(out.at, (void *)in.at, out.count, out.type, 0, (int)destination,
+      checked(mesh_compile_write(out.at, (void *)in.at, out.count, out.type, 0, (int)destination,
                                   communicator(f.comm), 1, (uint32_t)count, stride, 0, &prepared->handles.back()));
     }
     prepared->prepare(f.comm, f.polls, count, input_pitch);
@@ -1461,9 +1462,9 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
     if (rows) {
       TORCH_CHECK(out.type == ncclUint8 && out.count == (size_t)row_bytes,
                   "affine write bindings name the first row as a contiguous byte view");
-      checked(ncclMeshWriteRowsPrepare(out.at, (void *)in[i].at, (size_t)row_bytes, (size_t)rows, (size_t)stride,
+      checked(mesh_compile_rows(out.at, (void *)in[i].at, (size_t)row_bytes, (size_t)rows, (size_t)stride,
                                       pairs[i][0], pairs[i][1], c, 1, 0, &plans.handles[i]));
-    } else checked(ncclMeshWritePrepare(out.at, (void *)in[i].at, out.count, out.type, pairs[i][0], pairs[i][1], c, 1,
+    } else checked(mesh_compile_write(out.at, (void *)in[i].at, out.count, out.type, pairs[i][0], pairs[i][1], c, 1,
                                       (uint32_t)repeats, (size_t)stride, 0, &plans.handles[i]));
     if (produced) checked(ncclMeshWriteSourceReady(plans.handles[i], produced->at, (uint64_t)ready_value));
   }
@@ -1572,7 +1573,7 @@ struct SpanWrites {
       }
       const void *at = g.where(base);
       plans.handles.push_back(nullptr);
-      checked(ncclMeshWriteSpansPrepare(at, (void *)at, spans.data(), spans.size(), source, destination,
+      checked(mesh_compile_spans(at, (void *)at, spans.data(), spans.size(), source, destination,
                                        communicator(comm), metal, 0, &plans.handles.back()));
     }
   }

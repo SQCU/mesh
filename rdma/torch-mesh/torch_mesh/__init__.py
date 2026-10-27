@@ -25,7 +25,13 @@ def _autoload():
     from . import backend  # noqa: F401
 
 
-def compiler(gm, example_inputs):
+def compiler(gm, example_inputs, *, configuration=None):
+    from .compilation import bind
+    with bind(configuration):
+        return _compile(gm, example_inputs)
+
+
+def _compile(gm, example_inputs):
     """Lower a declared whole function to the shared native command records.
 
     Torch supplies the graph and tensor metadata. Mathematical fusion and Metal
@@ -36,6 +42,7 @@ def compiler(gm, example_inputs):
     from . import _stream, backend, partition
     from .streamed import node
     from .native import compile_graph
+    from .compilation import operands as compiler_operands
     _stream.linear_source((Path(__file__).parent / 'linear.metal').read_text(), node()[1])
     aten = torch.ops.aten
 
@@ -76,7 +83,7 @@ def compiler(gm, example_inputs):
         i = 0
         while i < len(products):
             group = [products[i]]
-            for m in products[i + 1:_stream.compilation['LINEAR_PRODUCTS'] + i]:
+            for m in products[i + 1:compiler_operands()['LINEAR_PRODUCTS'] + i]:
                 if any(g in ancestors(m) for g in group) or any(order[u] < order[m] for g in group for u in g.users):
                     break
                 group.append(m)

@@ -15,7 +15,7 @@ from .streamed import node
 _serial = itertools.count()
 
 
-def placement(mesh, name, workload, observations):
+def placement(mesh, name, workload, observations, *, parameters=None):
     group = mesh.get_group(name)
     rank, size = group.rank(), group.size()
     store = dist.distributed_c10d._get_default_store()
@@ -35,7 +35,7 @@ def placement(mesh, name, workload, observations):
     current = {'nodes': group.fabric.nodes, 'cables': group.fabric.cables}
     if any(g['nodes'] != current['nodes'] or g['cables'] != current['cables'] for g in graphs.values()):
         records, graphs = [], {}
-    decisions = assignment.domains(decisions, graphs)
+    decisions = assignment.domains(decisions, graphs, parameters)
     operands = assignment.assign(decisions, records)
     partition._attach(mesh, name, operands['parts'][name])
     return {'mesh': mesh, 'name': name, 'group': group, 'rank': rank, 'size': size,
@@ -49,7 +49,7 @@ def bind(configuration, groups, prepare):
     mesh, name, group = c['mesh'], c['name'], c['group']
     partition.plan(mesh, name, groups)
     graph = assignment.graph(group.comm)
-    decisions = assignment.domains({name: c['decisions'][name]}, {name: graph})
+    decisions = assignment.domains({k: v for k, v in c['decisions'].items() if not k.startswith('flow:')}, {name: graph})
     previous = c['assignment']['parts']
     operands = {k: previous.get(k, value['parts']) for k, value in decisions.items()}
     group.reset_fused_configuration()

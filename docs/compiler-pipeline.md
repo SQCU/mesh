@@ -32,7 +32,7 @@ and peer computers; a model name must not select another runtime.
    configured binding capacity. These rules have explicit dtype, rank and stride conditions.
 7. `native.compile_graph` uses Inductor's numerical IR, fusion scheduler and Metal source generator.
    Matrix and linear external operations instead bind our existing numerical kernels. Unsupported
-   external operations fail preparation. Generic CPU FX emission is not implemented.
+   external operations fail preparation. CPU/ANE exported graphs use Core ML conversion and the shared host-record binding described below.
 8. The generated Python is a preparation program. It assigns region storage, resolves views, binds
    pipelines and constants, and constructs `_stream.Commands`. It is not called during numerical execution.
 9. Numerical commands and prepared collective bindings append to the common native schedule. Execution
@@ -148,14 +148,28 @@ The LiteRT importer, [prepare_e2b.py](../../../metal-microbench/tools/prepare_e2
 - Hoisting expressions determined by prepared inputs (`save`).
 - Expression-tree matching and replacement (`lower_rotations`).
 
-Some section discovery still depends on tensor names such as `/mlp/` and `/q_einsum/`. That must become
-semantic metadata or structural matching for general import. LiteRT also still runs each stage once to
-trigger allocation and upload before recording. It is not yet a wholly declarative preparation interface.
+Section discovery consumes the model configuration's explicit `--semantics` operand.
+`configs/litert-reference-graph.json` supplies the reference export's layer and role
+patterns; the importer contains no model-name switch. LiteRT records each stage once.
+The former payload warm invocation before capture is removed. The recording device
+handles preparation fills and captures numerical commands without dispatching them.
 
-CPU/ANE composition is not general graph placement. `engines.Cpu` currently binds Torch CPU operations;
-the ANE graph builder covers linear and FFN shares. `engines.Prepared` still allocates separate share
-outputs and combines them. The general compiler must expose and connect these capabilities without
-retaining those restrictions as permanent backend boundaries.
+`engines.Cpu` binds Accelerate products and the GELU/multiply epilogue into native
+commands, with all weights and scratch supplied at preparation. Its former eager
+Torch operation loop is removed. `Prepared` writes linear columns into their final
+strided output views where the representation agrees. Separate partial results
+remain for a mathematical sum or a dtype conversion; there is no concatenation
+executor. Callers can supply the final output allocation.
+
+`coreml_graph` binds any supported compiled graph's named inputs and outputs to
+shared strided views. `export_coreml_graph` converts an exported tensor graph before
+execution, with explicit deployment, precision, compute units and artifact directory.
+Both use the same native Core ML binding as the existing linear/FFN graph builder.
+The binding is no longer limited to one dense two-dimensional input and output.
+A host record returns its dependency token; the consumer names that token in the
+common schedule. Native ANE commands bind their actual normalized input directly;
+a sole ANE result binds its final output directly. Multiple numerical partials still
+use the ordinary sum command.
 
 ## Reusable numerical families
 
@@ -175,22 +189,49 @@ numerical bodies to expose through these descriptions. For example, `matrix.prod
 batched strides, segmented inputs, output views, bias, scaling and publication operands. A new emitter
 should instantiate these bodies and their schedules, not transcribe them into separate frontend kernels.
 
-## Remaining compiler work
+## Prepared numerical declarations
 
-1. Extend the shared view-to-access lowering to the remaining native command builders, and connect value
-   versions, accumulation types, quantization metadata and incomplete reduction terms with those ranges.
-   `BlockSpec`, partial tensors, native reaches and routed transfers already provide parts of this description.
-2. Extend functionalization and view simplification so destinations are assigned before emission and
-   views remain index maps wherever consumers can use them directly.
-3. Recognize numerical patterns and apply their algebraic rules. A split product may combine partial sums;
-   `tanh(a + b)` cannot be rewritten as `tanh(a) + tanh(b)`. Such decisions happen during compilation.
-4. Expose existing native kernels and extend generic emission for CPU/GPU and supported ANE subgraphs.
-   The shared ANE linear/FFN builder is already used by both Python and microbench.
-5. Choose tiles, fusion boundaries, compute shares, backend assignments, page layouts, relay paths and
-   publication order together. Capabilities and whole-function observations are compiler operands.
-6. Carry partial production into transport. Recording a whole kernel's completion does not expose an
-   early output tile. Bind each produced range to its writes and consumers, and assign reuse from the
-   existing dependencies. No receipt protocol or runtime allocation search is needed for that assignment.
+`argmax.draw`, `argmax.retain`, structured rotations and coded matrix operations
+now declare graph nodes. Their existing Metal bodies bind into `_stream.Commands`
+at preparation. Their private eager calls to the framework stream are removed.
+The coded kernel declaration carries input/output roles, shapes, types, constants
+and launch geometry. Output aliases within one kernel share one assigned buffer.
+`Matrix.coded_input` returns its generated tables as an output operand, alongside
+its transformed inputs. Coded matrix width/work metadata is retained through FX
+flattening, rather than read back from a device while tracing an operation.
+
+## Joint configuration operands
+
+`assignment.assign` uses one complete-call objective for all configured coordinates.
+Fixed/work-dependent compute fits supply the prior. A joint residual uses weighted
+finite differences within each source revision; observation arrival order does not
+define a difference pair. The positive ridge term bounds the fit, and normalized
+coordinates keep differently sized domains comparable. The solver projects its
+result once onto the supplied allocation grains. It has no measured-candidate
+accept/reject gate and no later independent compute reset.
+
+`compiler_domains` adds bounded compiler parameters to the same vector as backend
+shares and path shares. `assign` returns both allocation parts and compiler operands.
+`Function(configuration=...)` binds those operands during graph compilation; grouped
+linears, matrix tiles and fusion capacity consume them there. Engine preparation
+uses the same parameter operands. The solver does not run during numerical work.
+The supplied parameter domain determines which choices it can change; a tile or
+layout absent from that domain is not magically searched.
+
+## Page-mask communication boundary
+
+`ncclMeshPageTableCreate` resolves local allocated storage before execution.
+`ncclMeshWritePagesPrepare` consumes ordered `(page, first, count)` masks. Each mask
+stays in one local page; each peer uses its own table and page size. Their logical
+byte totals agree. No remote pointer or cross-page extent appears in this public
+declaration. The NumPy frontend exposes `Pages` and `Write_pages_prepare`.
+
+The raw `ncclMeshWritePrepare`, `ncclMeshWriteRowsPrepare` and
+`ncclMeshWriteSpansPrepare` public interfaces are removed. Local tensor adapters
+are compiler-only functions in `mesh-write-compiler.h`; Python, native and Torch
+call that common lowering. NumPy's public arbitrary-span method is removed.
+Compiled plans retain their existing route, relay and tile-readiness machinery.
+Page validation and mask lowering add no numerical-loop lookup or check.
 
 Matching hand-tuned performance requires retaining both the numerical algorithms and their schedules.
 Operator coverage alone does not establish this. Performance evidence is the canonical committed-main

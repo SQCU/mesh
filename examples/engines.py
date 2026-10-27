@@ -55,7 +55,7 @@ for start in range(0, steps, every):
         normalized = torch.empty_like(x)
         def project(source=source, projection=projection, normalized=normalized):
             return normalized.copy_(torch.nn.functional.rms_norm(torch.nn.functional.linear(source, projection), (k,), eps=1e-6))
-        project = Function(project)
+        project = Function(project, configuration=assigned['operands'])
         project.declare(None)
         work = operation.prepare(normalized, parts=assigned['parts'][key])
         spans.extend((project, work))

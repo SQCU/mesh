@@ -21,6 +21,41 @@ SOURCE = Path(__file__).with_name('structured.metal').read_text()
 _KERNEL = None
 
 
+@torch.library.custom_op('torch_mesh::fwht', mutates_args=())
+def fwht(x: torch.Tensor, signs: torch.Tensor, width: int) -> torch.Tensor:
+    raise RuntimeError('structured transforms must be prepared as part of a declarations.Function')
+
+
+@fwht.register_fake
+def _shape(x, signs, width):
+    return torch.empty_like(x)
+
+
+def _context(ctx, inputs, output):
+    x, signs, ctx.width = inputs
+    ctx.save_for_backward(signs)
+
+
+def _backward(ctx, grad):
+    signs, = ctx.saved_tensors
+    return fwht(grad.contiguous(), torch.ones_like(signs), ctx.width) * signs, None, None
+
+
+fwht.register_autograd(_backward, setup_context=_context)
+
+
+def prepare(x, signs, width):
+    from . import empty
+    import struct
+    y = empty(x.shape, dtype=x.dtype)
+    maximum, _, _ = _stream.pipeline_facts(_kernel())
+    threads = min(maximum, max(_stream.compilation['SIMD_WIDTH'], width // 2))
+    blocks = x.shape[-1] // width
+    return y, [(_kernel(), [x, y, signs], {3: struct.pack('4I', width, blocks, 0, 0)},
+                (x.shape[0] * blocks, 1, 1), (threads, 1, 1), False,
+                5 | (2 << _stream.compilation['ACCESS_WRITE_SHIFT']))] if x.numel() else []
+
+
 def _kernel():
     global _KERNEL
     if _KERNEL is None:
@@ -44,16 +79,14 @@ class Rotation:
         self.signs = [(torch.randint(0, 2, (n,), generator=g) * 2 - 1).float().to(device) for _ in range(rounds)]
         self.mixes = [torch.linalg.qr(torch.randn(self.B, self.B, generator=g, dtype=torch.float64))[0].float().to(device)
                       for _ in range(rounds)]
-        self.ones = None
+        self.ones = torch.ones(self.n, device=device)
 
     def rows(self, x):
         """Each row of x [m, n] rotated (x R^T)."""
         x = x.float().contiguous()
         m = x.shape[0]
         for sign, mix in zip(self.signs, self.mixes):
-            y = torch.empty_like(x)
-            threads = min(1024, max(32, self.N // 2))
-            _stream.encode(_kernel(), [x, y, sign], [self.N, self.B, 0, 0], 3, m * self.B, 1, threads)
+            y = fwht(x, sign, self.N)
             x = torch.einsum('bc,mcn->mbn', mix, y.view(m, self.B, self.N)).reshape(m, self.n) if self.B > 1 else y
         return x
 
@@ -66,13 +99,9 @@ class Rotation:
         inverse (H_N / sqrt N is symmetric and orthogonal), then the signs."""
         y = y.float().contiguous()
         m = y.shape[0]
-        if self.ones is None:
-            self.ones = torch.ones(self.n, device=y.device)
         for sign, mix in reversed(list(zip(self.signs, self.mixes))):
             if self.B > 1:
                 y = torch.einsum('bc,mbn->mcn', mix, y.view(m, self.B, self.N)).reshape(m, self.n).contiguous()
-            x = torch.empty_like(y)
-            threads = min(1024, max(32, self.N // 2))
-            _stream.encode(_kernel(), [y, x, self.ones], [self.N, self.B, 0, 0], 3, m * self.B, 1, threads)
+            x = fwht(y, self.ones, self.N)
             y = x * sign
         return y

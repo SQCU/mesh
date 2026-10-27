@@ -13,7 +13,7 @@ import sys
 import cffi
 
 RDMA = os.path.dirname(os.path.abspath(__file__))
-HEADERS = ('../etc/bridge/layout.h', 'mesh-plan.h', 'nccl.h', 'mesh-statistics.h')
+HEADERS = ('../etc/bridge/layout.h', 'mesh-plan.h', 'nccl.h', 'mesh-write-compiler.h', 'mesh-statistics.h')
 LITERAL = r'-?(?:0x[0-9a-fA-F]+|\d+)[uUlL]*'
 FLOATING = r'-?\d+\.\d*(?:[eE][-+]?\d+)?'
 

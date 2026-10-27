@@ -301,7 +301,7 @@ class BoundGraph:
     that region and its final output. There is no eager transport call in the
     generated execution sequence. Numerical spans use the existing compiler.
     """
-    def __init__(self, graph, arguments, group):
+    def __init__(self, graph, arguments, group, configuration):
         from torch.fx.node import map_arg
         from torch.utils._pytree import tree_map, tree_flatten
         from . import backend, empty
@@ -360,7 +360,7 @@ class BoundGraph:
                 # the next consumer to those outputs, including aliases;
                 # no separate destination or publication copy is needed.
                 from torch.utils._pytree import tree_unflatten
-                made = Function(module, *args)
+                made = Function(module, *args, configuration=configuration)
                 made.output_spec = tree_flatten(tree_map(_value, outputs))[1]
                 made.declare_graph(module, group)
                 targets = tree_unflatten(tree_flatten(made.execution.output)[0], made.output_spec)
@@ -427,9 +427,10 @@ class Function:
     function is executed to discover communication. Execution submits the
     bound native commands; compilation failures propagate to the caller.
     """
-    def __init__(self, function, *arguments, parameters=()):
+    def __init__(self, function, *arguments, parameters=(), configuration=None):
         self.function, self.parameters = function, tuple(parameters)
         self.arguments = arguments
+        self.configuration = configuration
         self.graph, self.groups, self.run, self.output_spec = None, {}, None, None
         self.execution = None
 
@@ -453,12 +454,12 @@ class Function:
         from functools import partial
         declarations = lower(graph) if declarations is None else declarations
         if any(_bound(node) for node in graph.graph.nodes):
-            prepared = BoundGraph(graph, self.arguments, group)
+            prepared = BoundGraph(graph, self.arguments, group, self.configuration)
             self.graph, self.groups, self.execution = graph, prepared.groups, prepared.execution
         else:
             from . import compiler
             with torch.no_grad():
-                program = compiler(graph, list(self.arguments))
+                program = compiler(graph, list(self.arguments), configuration=self.configuration)
             self.graph, self.groups = graph, declarations
             self.execution = execution_sequence([program], program.output)
         self.run = self.execution.forward

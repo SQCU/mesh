@@ -87,6 +87,22 @@ row operations and head outputs supply their layouts. Fused epilogues preserve t
 capturing addresses. [The publication review](../docs/native-access-publication.md) distinguishes these
 completed changes from the still-open binding of native tile completion to physical WRITE prefixes.
 
+## Integration — 2026-10-26T21:13:39-07:00
+
+The seven current interventions are recorded in
+[compiler-pipeline.md](../docs/compiler-pipeline.md) and
+[native-access-publication.md](../docs/native-access-publication.md): prepared
+cache/view accesses; row/head publication; graph declarations for the existing
+selection, rotation and coded kernels; configured LiteRT roles and one capture;
+direct CPU/ANE views and general exported graph binding; joint assignment and
+compiler operands; public page-mask WRITE declarations.
+
+Removed execution interfaces: eager coded/sampling/rotation dispatches, the CPU
+Torch operation loop, native ANE input publication copy, share concatenation,
+LiteRT's pre-capture payload warm run, and the public raw-range WRITE preparers.
+The common recorder, scheduler and WRITE executor remain the execution path.
+No hourly, timing, measurement or unit-test implementation was added.
+
 ## Reviewed interfaces
 
 The bullets below preserve the removal rationale. The integration update above

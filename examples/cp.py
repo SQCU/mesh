@@ -44,7 +44,8 @@ def main():
 
     from torch_mesh.declarations import Function, execution_sequence
     function = Function(lambda: partition.context_parallel_unshard(
-        mesh, "cp", [run(x.to_local(), ring)], [1], load_balance=False, sequence_length=SEQ))
+        mesh, "cp", [run(x.to_local(), ring)], [1], load_balance=False, sequence_length=SEQ),
+        configuration=configuration['assignment']['operands'])
     with torch.no_grad():
         program = execution_sequence([function] * STEPS)
         bind(configuration, lambda: function.declare(mesh.get_group('cp')), program.realize)

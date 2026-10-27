@@ -30,15 +30,20 @@ def _send(pointer, selector, restype=ctypes.c_void_p):
 def host(t):
     """An MPS tensor's memory as a CPU tensor of the same shape and dtype, in place (its storage's MTLBuffer is
     shared), or None where its storage is not CPU-visible.  The caller orders the GPU's and the host's accesses."""
-    if t.device.type != 'mps' or not t.is_contiguous():
+    if t.device.type == 'cpu':
+        return t
+    if t.device.type != 'mps':
         return None
     buffer = t.untyped_storage().data_ptr()
     if _send(buffer, b'storageMode', ctypes.c_ulong) != 0:
         return None
     base = _send(buffer, b'contents')
-    nbytes = t.numel() * t.element_size()
+    elements = 1 + sum((n - 1) * s for n, s in zip(t.shape, t.stride())) if t.numel() else 0
+    nbytes = elements * t.element_size()
     raw = (ctypes.c_uint8 * nbytes).from_address(base + t.storage_offset() * t.element_size())
-    return torch.frombuffer(raw, dtype=t.dtype, count=t.numel()).view(t.shape) if nbytes else torch.empty(t.shape, dtype=t.dtype)
+    view = torch.frombuffer(raw, dtype=t.dtype, count=elements).as_strided(t.shape, t.stride()) if nbytes else torch.empty(t.shape, dtype=t.dtype)
+    view._mesh_storage = t
+    return view
 
 
 _CORE_ML = None
@@ -55,8 +60,8 @@ def _coreml():
             lib.mesh_coreml_load.restype = ctypes.c_long
             lib.mesh_coreml_load.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
             lib.mesh_coreml_bind.restype = ctypes.c_void_p
-            lib.mesh_coreml_bind.argtypes = [ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int,
-                                             ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int]
+            lib.mesh_coreml_bind.argtypes = [ctypes.c_long, ctypes.POINTER(ModelView), ctypes.c_size_t,
+                                             ctypes.POINTER(ModelView), ctypes.c_size_t]
             lib.mesh_coreml_run.restype, lib.mesh_coreml_run.argtypes = ctypes.c_int, [ctypes.c_void_p]
             lib.mesh_coreml_unbind.argtypes = [ctypes.c_void_p]
             lib.mesh_coreml_error.restype = ctypes.c_char_p
@@ -64,6 +69,8 @@ def _coreml():
             lib.mesh_coreml_placement.argtypes = [ctypes.c_long, ctypes.c_char_p, ctypes.c_size_t]
             lib.mesh_coreml_compile.restype = ctypes.c_int
             lib.mesh_coreml_compile.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+            lib.mesh_cpu_run.argtypes = [ctypes.POINTER(CpuCommand), ctypes.c_size_t]
+            lib.mesh_cpu_run.restype = None
             _CORE_ML = lib
         except OSError:
             _CORE_ML = False
@@ -139,7 +146,7 @@ class Mps(Engine):
 
 
 class Cpu(Engine):
-    """The CPU's matrix units through torch's fp32 CPU products (Accelerate): the input read in place as fp32 (the
+    """The CPU's matrix units through prepared Accelerate commands: the input read in place as fp32 (the
     GPU's prologue converts it), the fp32 shard resident in host memory, the output written in place in fp32."""
     name, occupies = 'cpu', frozenset({'cpu'})
 
@@ -155,19 +162,41 @@ class Cpu(Engine):
 
     def bind(self, op, shard, x, prologue, out):
         source, target = host(prologue['fp32']), host(out)
+        native = _coreml()
+        if native is None:
+            raise RuntimeError('CPU commands require the native engine library')
+        def product(x, w, y):
+            body = native.mesh_cpu_product if x.stride(1) == w.stride(1) == y.stride(1) == 1 else native.mesh_cpu_product_view
+            return CpuCommand(ctypes.cast(body, ctypes.c_void_p),
+                              x.shape[0], w.shape[0], x.shape[1], x.stride(0), w.stride(0), y.stride(0),
+                              x.stride(1), w.stride(1), y.stride(1),
+                              x.data_ptr(), w.data_ptr(), y.data_ptr(), None)
         if op.kind == 'linear':
-            weight = shard.T
-            return lambda: torch.mm(source, weight, out=target)
-        gate, up, down = (w.T for w in shard)
-        g = torch.empty(source.shape[0], gate.shape[1], dtype=torch.float32)
-        u = torch.empty_like(g)
-        def run():
-            torch.mm(source, gate, out=g)
-            torch.mm(source, up, out=u)
-            torch.ops.aten.gelu.out(g, approximate='tanh', out=g)
-            torch.mul(g, u, out=g)
-            torch.mm(g, down, out=target)
-        return run
+            return CpuProgram([product(source, shard, target)], (source, shard, target))
+        gate, up, down = shard
+        g = torch.empty(source.shape[0], gate.shape[0], dtype=torch.float32)
+        u, scratch = torch.empty_like(g), torch.empty_like(g)
+        activation = CpuCommand(ctypes.cast(native.mesh_cpu_gelu, ctypes.c_void_p), g.shape[0], g.shape[1], 0, 0, 0, 0, 0, 0, 0,
+                                 g.data_ptr(), u.data_ptr(), g.data_ptr(), scratch.data_ptr())
+        return CpuProgram([product(source, gate, g), product(source, up, u), activation, product(g, down, target)],
+                          (source, target, *shard, g, u, scratch))
+
+
+class CpuCommand(ctypes.Structure):
+    _fields_ = [('run', ctypes.c_void_p)] + [(name, ctypes.c_int) for name in ('rows', 'columns', 'inner', 'input_stride', 'weight_stride', 'output_stride',
+                                                                          'input_column', 'weight_column', 'output_column')] \
+             + [(name, ctypes.c_void_p) for name in ('input', 'weight', 'output', 'scratch')]
+
+
+class CpuProgram:
+    def __init__(self, commands, operands):
+        self.native = _coreml()
+        if self.native is None:
+            raise RuntimeError('CPU commands require the native engine library')
+        self.commands, self.operands = (CpuCommand * len(commands))(*commands), operands
+
+    def __call__(self):
+        self.native.mesh_cpu_run(self.commands, len(self.commands))
 
 
 class _Compiled:
@@ -216,12 +245,30 @@ class Ane(Engine):
         return Prediction(native, handle, host(x), host(out))
 
 
+class ModelView(ctypes.Structure):
+    _fields_ = [('name', ctypes.c_char_p), ('data', ctypes.c_void_p), ('shape', ctypes.POINTER(ctypes.c_int64)),
+                ('strides', ctypes.POINTER(ctypes.c_int64)), ('rank', ctypes.c_int), ('dtype', ctypes.c_int)]
+
+
 class Prediction:
     """One Core ML invocation's views, bound before the numerical function."""
     def __init__(self, native, model, source, target):
         self.native, self.source, self.target = native, source, target
-        shape_in, shape_out = (ctypes.c_int64 * 2)(*source.shape), (ctypes.c_int64 * 2)(*target.shape)
-        self.binding = native.mesh_coreml_bind(model, source.data_ptr(), shape_in, 2, target.data_ptr(), shape_out, 2)
+        # Empty names select the load declaration's names; general graphs pass
+        # an explicit mapping for every input and output.
+        def views(values):
+            values = values if isinstance(values, dict) else {'': values}
+            types = (torch.float16, torch.float32, torch.int32, torch.float64)
+            records = []
+            for name, tensor in values.items():
+                if tensor is None or tensor.dtype not in types:
+                    raise ValueError('Core ML views require shared fp16, fp32, int32 or fp64 storage')
+                rank = tensor.ndim
+                records.append(ModelView(name.encode(), tensor.data_ptr(), (ctypes.c_int64 * rank)(*tensor.shape),
+                                         (ctypes.c_int64 * rank)(*tensor.stride()), rank, types.index(tensor.dtype)))
+            return (ModelView * len(records))(*records)
+        inputs, outputs = views(source), views(target)
+        self.binding = native.mesh_coreml_bind(model, inputs, len(inputs), outputs, len(outputs))
         if not self.binding:
             raise RuntimeError(native.mesh_coreml_error().decode())
 
@@ -232,6 +279,54 @@ class Prediction:
     def __del__(self):
         if getattr(self, 'binding', None):
             self.native.mesh_coreml_unbind(self.binding)
+
+    def append(self, schedule):
+        return schedule.host(self)
+
+
+def coreml_graph(compiled, inputs, outputs, *, units):
+    """Bind any compiled Core ML graph to named shared views at preparation.
+
+    ``units`` is the caller's backend operand (0 CPU/ANE, 1 all, 2 CPU).
+    Graph conversion belongs to preparation; no operation-kind dispatch or
+    model loading occurs in the returned host record. Consumers attach to the
+    record returned by ``append`` through the common schedule.
+    """
+    native = _coreml()
+    if native is None:
+        raise RuntimeError('Core ML graph requires the native shared-memory binding')
+    handle = native.mesh_coreml_load(os.fsencode(compiled), b'', b'', units)
+    if handle < 0:
+        raise RuntimeError(native.mesh_coreml_error().decode())
+    return Prediction(native, handle, {k: host(v) for k, v in inputs.items()}, {k: host(v) for k, v in outputs.items()})
+
+
+def export_coreml_graph(program, inputs, outputs, *, directory, units, deployment, precision):
+    """Lower an exported tensor graph once, then bind the common host record.
+
+    ``program`` is a torch.export.ExportedProgram (its graph and constants).
+    The caller supplies names/views, CPU or ANE placement, target and precision.
+    Conversion emits compiler artifacts in the supplied directory. It does not
+    invoke the numerical graph, and the returned record does no file access.
+    """
+    import coremltools as ct
+    native = _coreml()
+    if native is None:
+        raise RuntimeError('Core ML graph requires the native shared-memory binding')
+    compute = {0: ct.ComputeUnit.CPU_AND_NE, 1: ct.ComputeUnit.ALL, 2: ct.ComputeUnit.CPU_ONLY}[units]
+    model = ct.convert(program, convert_to='mlprogram', compute_units=compute,
+                       minimum_deployment_target=getattr(ct.target, deployment),
+                       compute_precision=getattr(ct.precision, precision))
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    package, compiled = directory / 'graph.mlpackage', directory / 'graph.mlmodelc'
+    model.save(str(package))
+    try:
+        if native.mesh_coreml_compile(os.fsencode(package), os.fsencode(compiled)):
+            raise RuntimeError(native.mesh_coreml_error().decode())
+    finally:
+        shutil.rmtree(package)
+    return coreml_graph(compiled, inputs, outputs, units=units)
 
 
 def neural_engine_model(kind, arrays, rows, tile=128, block=None):
@@ -343,11 +438,12 @@ class Engines:
         self.names = names
         self.engines = [ENGINES[n](**options.get(n, {})) for n in names]
         self.operations, self.decisions = [], {}
+        self.parameters = options.get('compilation', {})
 
 
-def _gpu(function):
+def _gpu(function, configuration=None):
     from .declarations import Function
-    made = Function(function)
+    made = Function(function, configuration=configuration)
     made.declare(None)
     return made
 
@@ -391,8 +487,8 @@ class Operation:
                                       'capacity': list(capacities)}
         return key
 
-    def prepare(self, x, *, parts):
-        return Prepared(self, x, parts)
+    def prepare(self, x, *, parts, output=None):
+        return Prepared(self, x, parts, output)
 
     def finish(self, y):
         return y
@@ -400,19 +496,24 @@ class Operation:
 
 class Prepared:
     """Fixed engine operands and data events for the declared invocations."""
-    def __init__(self, op, x, parts):
+    def __init__(self, op, x, parts, output=None):
         self.op, self.x = op, x
         rows, dtype = x.shape[0], x.dtype
         if len(parts) != len(op.engines.engines) or sum(parts) != op.units or min(parts) < 0:
             raise ValueError('engine shares must partition the declared units')
-        self.output = torch.empty(rows, op.width, device=x.device, dtype=dtype)
+        from . import empty
+        self.output = empty((rows, op.width), dtype=dtype) if output is None else output
+        if self.output.shape != (rows, op.width) or self.output.dtype != dtype:
+            raise ValueError('output must match the declared shape and dtype')
         prologue = {}
+        configuration = {k: p['value'] for k, p in op.engines.parameters.items()}
         self.prologue = None
         if any(count and engine.name == 'cpu' for engine, count in zip(op.engines.engines, parts)):
-            prologue['fp32'] = torch.empty_like(x, dtype=torch.float32)
-            self.prologue = _gpu(lambda: prologue['fp32'].copy_(x))
+            prologue['fp32'] = x if dtype == torch.float32 else empty(tuple(x.shape), dtype=torch.float32)
+            if dtype != torch.float32:
+                self.prologue = _gpu(lambda: prologue['fp32'].copy_(x), configuration)
         self.gpu, self.host = [], []
-        pieces, start = [], 0
+        pieces, conversions, start = [], [], 0
         for engine, count in zip(op.engines.engines, parts):
             end = start + count
             if count:
@@ -420,24 +521,32 @@ class Prepared:
                     raise ValueError(f'{engine.name} cannot execute the declared operation')
                 shard = engine.prepare(op, start, end)
                 shape = (rows, count if op.combine == 'concat' else op.width)
-                out = torch.empty(shape, device=x.device, dtype=engine.out_dtype(dtype))
+                destination = self.output[:, start:end] if op.combine == 'concat' else self.output
+                direct = engine.out_dtype(dtype) == dtype and (op.combine == 'concat' or not pieces)
+                out = destination if direct else empty(shape, dtype=engine.out_dtype(dtype))
                 pieces.append(out)
+                if op.combine == 'concat' and not direct:
+                    conversions.append((destination, out))
                 if engine.host_side:
                     bound = engine.bind(op, shard, x, prologue, out)
                     self.host.append(bound)
                 else:
-                    self.gpu.append(_gpu(lambda e=engine, w=shard, y=out: e.run(op, w, x, prologue, y)))
+                    self.gpu.append(_gpu(lambda e=engine, w=shard, y=out: e.run(op, w, x, prologue, y), configuration))
             start = end
         def combine():
             if op.combine == 'concat':
-                y = torch.cat([p.to(dtype) for p in pieces], dim=1)
+                for destination, source in conversions:
+                    destination.copy_(source)
+                y = self.output
             else:
                 y = pieces[0].float()
                 for p in pieces[1:]:
                     y = y + p.float()
                 y = y.to(dtype)
             return self.output.copy_(op.finish(y))
-        self.combine = _gpu(combine)
+        needs_combine = (op.combine == 'sum' and (len(pieces) > 1 or pieces[0] is not self.output)
+                         or bool(conversions) or getattr(op, 'bias', None) is not None)
+        self.combine = _gpu(combine, configuration) if needs_combine else None
 
     def append(self, schedule):
         if self.prologue is not None:
@@ -447,7 +556,8 @@ class Prepared:
             function.append(schedule)
         for result in results:
             schedule.consume(result)
-        self.combine.append(schedule)
+        if self.combine is not None:
+            self.combine.append(schedule)
 
 
 class Linear(Operation):
@@ -482,10 +592,13 @@ class FFN(Operation):
 
 def placement(engines, observations):
     # design/whole-function.md#numerical-operands
-    from assignment import assign
+    from assignment import assign, domains
     decisions = {k: {field: d[field] for field in ('parts', 'grain', 'low', 'high', 'capacity')}
                  for k, d in engines.decisions.items()}
-    assigned = assign(decisions, observations)
+    assigned = assign(domains(decisions, {}, engines.parameters), observations)
     for key, parts in assigned['parts'].items():
-        engines.decisions[key]['parts'] = parts
+        if key in engines.decisions:
+            engines.decisions[key]['parts'] = parts
+    for key, value in assigned['operands'].items():
+        engines.parameters[key]['value'] = value
     return assigned

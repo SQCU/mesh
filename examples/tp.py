@@ -111,7 +111,8 @@ def main():
     held(model)
     x = drawn(partition.distribute_tensor(whole, mesh, [Shard(1) if SP else Replicate()], src_data_rank=None))
     from torch_mesh.declarations import Function, execution_sequence
-    function = Function(lambda: step(model, x.to_local()), parameters=model.parameters())
+    function = Function(lambda: step(model, x.to_local()), parameters=model.parameters(),
+                        configuration=configuration['assignment']['operands'])
     program = execution_sequence([function] * STEPS)
     bind(configuration, lambda: function.declare(mesh.get_group('tp')), program.realize)
     started = now()

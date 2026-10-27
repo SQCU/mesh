@@ -46,14 +46,19 @@ def route_resolution(comm, nodes):
 
 
 
-def domains(decisions, graphs):
+def domains(decisions, graphs, parameters=None):
     from routing import Fabric
     result = {k: dict(v) for k, v in decisions.items()}
+    result.update(compiler_domains(parameters or {}))
     for name, graph in sorted(graphs.items()):
         fabric = Fabric(graph['nodes'], graph['cables'])
         demands = {(a, b): n for a, b, n in graph['demands'] if n > 0}
         routes = fabric.allocate(demands)[0] if demands else {}
         for key, value in routes.items():
+            if key in graph.get('weights', {}):
+                weights = graph['weights'][key]
+                total = sum(value['parts'])
+                value['parts'] = [total * w / sum(weights) for w in weights]
             result[f'flow:{name}/{key}'] = value
     return result
 
@@ -77,7 +82,7 @@ def install(comm, parts, name):
 
 def assign(decisions, observations):
     # design/whole-function.md#numerical-operands
-    from scipy.optimize import nnls, least_squares
+    from scipy.optimize import nnls, minimize
     prior_scale = NUMERICS['fit_prior_scale']
     names = sorted(decisions)
     totals = {k: sum(decisions[k]['parts']) for k in names}
@@ -96,9 +101,15 @@ def assign(decisions, observations):
             result[k] = realize(k, (vector[at:at + count] * totals[k]).tolist())
             at += count
         return result
+    if not names:
+        return {'parts': {}, 'models': {}, 'observations': 0, 'operands': {}}
+    if any(not math.isfinite(total) or total <= 0 for total in totals.values()):
+        raise ValueError('assignment domains require finite positive totals')
     rows = [o for o in observations if set(o['parts']) == set(names)
             and all(len(o['parts'][k]) == len(decisions[k]['parts'])
                     and math.isclose(sum(o['parts'][k]), totals[k]) for k in names)]
+    if any(not math.isfinite(o['seconds']) or o['seconds'] <= 0 for o in rows):
+        raise ValueError('whole-function durations must be finite and positive')
     seed, models = {}, {}
     scale = float(np.median([o['seconds'] for o in rows])) if rows else 1.0
     for k in names:
@@ -109,36 +120,17 @@ def assign(decisions, observations):
         coefficients, uncertainty = [], []
         for i in range(count):
             samples = [(o['parts'][k][i] / total, o['costs'][k][i] / scale)
-                       for o in rows if k in o['costs'] and o['costs'][k][i] is not None]
+                       for o in rows if k in o.get('costs', {}) and o['costs'][k][i] is not None]
             prior = np.array([0.0, 1.0 / max(capacities[i], 2.0 ** -NUMERICS['capacity_floor_bits'])])
             x = np.array([[1.0, u] for u, t in samples] + [[prior_scale, 0], [0, prior_scale]])
             y = np.array([t for u, t in samples] + (prior * prior_scale).tolist())
             fit, _ = nnls(x, y)
             coefficients.append(fit)
             uncertainty.append(np.linalg.inv(x.T @ x).diagonal().tolist())
-        if rows and not k.startswith('flow:'):
-            prior = np.asarray(coefficients)
-            shares = np.asarray([row['parts'][k] for row in rows], dtype=float) / total
-            durations = np.asarray([row['seconds'] for row in rows]) / scale
-            revisions = list(dict.fromkeys(str(row['implementation']) for row in rows))
-            revision_index = [revisions.index(str(row['implementation'])) for row in rows]
-            def residual(values):
-                coefficients = values.reshape(count, 2)
-                predicted = np.max(coefficients[:, 0] + shares * coefficients[:, 1], axis=1)
-                differences = []
-                for i in range(len(revisions)):
-                    indices = [j for j, r in enumerate(revision_index) if r == i]
-                    differences.extend((predicted[indices] - durations[indices]
-                                        - np.mean(predicted[indices] - durations[indices])).tolist())
-                differences.append(float(np.mean(predicted) - np.mean(durations)))
-                return np.r_[differences, ((coefficients - prior) * prior_scale).ravel()]
-            fit = least_squares(residual, prior.ravel(), bounds=(0, np.inf), max_nfev=NUMERICS['fit_evaluations'])
-            coefficients = fit.x.reshape(count, 2)
-            uncertainty = np.linalg.inv(fit.jac.T @ fit.jac + np.eye(2 * count) * prior_scale ** 2).diagonal().reshape(count, 2).tolist()
         models[k] = {'fixed': [v[0] * scale for v in coefficients],
                      'per_unit': [v[1] * scale / total for v in coefficients],
                      'uncertainty': uncertainty}
-        if k.startswith('flow:'):
+        if k.startswith('flow:') or 'operand' in d:
             seed[k] = list(d['parts'])
         else:
             a, b = [v[0] for v in coefficients], [max(v[1], 2.0 ** -NUMERICS['slope_floor_bits']) / total for v in coefficients]
@@ -146,26 +138,80 @@ def assign(decisions, observations):
                 seed[k] = equal_finish(total, d['grain'], *bounds[k], a, b)[0]
             else:
                 seed[k] = realize(k, (total * capacities).tolist())
-    centre = vector(seed)
+    # Every coordinate uses one complete-call objective. The affine fits are
+    # its prior, not a second update which overwrites measured route/compute
+    # changes. Shared stage labels express concurrent work; stages add.
+    offsets, at = {}, 0
+    for k in names:
+        offsets[k] = slice(at, at + len(decisions[k]['parts']))
+        at += len(decisions[k]['parts'])
+    stages = {}
+    for k in names:
+        if not k.startswith('flow:') and 'operand' not in decisions[k]:
+            stages.setdefault(decisions[k].get('stage', k), []).append(k)
+    temperature = NUMERICS['cost_smoothing']
+    def prior(value):
+        cost = 0.0
+        for keys in stages.values():
+            tails = np.concatenate([np.asarray(models[k]['fixed']) / scale
+                + value[offsets[k]] * np.asarray(models[k]['per_unit']) * totals[k] / scale for k in keys])
+            # Stable log-sum-exp, with no subnormal exponential operands.
+            top = float(np.max(tails))
+            cost += top + temperature * math.log(float(np.exp(np.maximum((tails-top)/temperature,
+                                                       -NUMERICS['exponent_limit'])).sum()))
+        return cost
+    latest = vector({k: decisions[k]['parts'] for k in names}) if rows else vector(seed)
+    gradient = np.zeros(len(latest))
     if rows:
-        # Delta y within one implementation removes its fixed effect. All coordinates share one cost.
-        x, y = [], []
-        for previous, current in zip(rows, rows[1:]):
-            if previous['implementation'] == current['implementation']:
-                x.append(vector(current['parts']) - vector(previous['parts']))
-                y.append((current['seconds'] - previous['seconds']) / scale)
-        dimension = len(centre)
-        design = np.array(x + (np.eye(dimension) * prior_scale).tolist())
-        target = np.array(y + [0.0] * dimension)
-        gradient = np.linalg.solve(design.T @ design, design.T @ target)
-        centre = vector(rows[-1]['parts']) - gradient * (NUMERICS['gradient_step'] / max(NUMERICS['gradient_norm_floor'], np.linalg.norm(gradient)))
-        for k in names:
-            if not k.startswith('flow:'):
-                start = sum(len(decisions[n]['parts']) for n in names[:names.index(k)])
-                centre[start:start + len(seed[k])] += vector(seed)[start:start + len(seed[k])] - vector(rows[-1]['parts'])[start:start + len(seed[k])]
+        # Importance weights belong to the observation. Arrival order does not
+        # define a finite difference: centre all episodes of each revision.
+        design, target = [], []
+        for revision in dict.fromkeys(str(row['implementation']) for row in rows):
+            samples = [row for row in rows if str(row['implementation']) == revision]
+            weights = np.array([float(row.get('importance', 1.0)) for row in samples])
+            if not np.all(np.isfinite(weights)) or np.any(weights <= 0):
+                raise ValueError('observation importance must be finite and positive')
+            weights /= weights.sum()
+            values = np.array([vector(row['parts']) for row in samples])
+            residual = np.array([row['seconds'] / scale - prior(value) for row, value in zip(samples, values)])
+            root = np.sqrt(weights * len(samples))
+            design.extend((values - weights @ values) * root[:, None])
+            target.extend((residual - weights @ residual) * root)
+        design, target = np.asarray(design), np.asarray(target)
+        # The dual ridge system scales with observed episodes, not path count.
+        gradient = design.T @ np.linalg.solve(design @ design.T + np.eye(len(rows)) * prior_scale ** 2, target)
+    lower = np.array([v / totals[k] for k in names for v in bounds[k][0]])
+    upper = np.array([v / totals[k] for k in names for v in bounds[k][1]])
+    def objective(value):
+        delta = value - latest
+        return prior(value) + gradient @ delta + NUMERICS['joint_curvature'] * (delta @ delta)
+    constraints = [{'type': 'eq', 'fun': lambda value, span=span: np.sum(value[span]) - 1.0}
+                   for span in offsets.values()]
+    solved = minimize(objective, vector(seed), method='SLSQP', bounds=list(zip(lower, upper)), constraints=constraints,
+                      options={'maxiter': NUMERICS['fit_evaluations'], 'ftol': NUMERICS['route_function_tolerance']})
+    # Numerical projection is the compiler's one realization boundary.
+    centre = vector(parts(solved.x))
     iteration = len(rows)
     radius = NUMERICS['probe_radius'] / math.sqrt(1 + iteration) if iteration else 0.0
     direction = np.array([1 if ((i + 1) & (1 + iteration // 2)).bit_count() % 2 else -1
                           for i in range(len(centre))], dtype=np.float64)
-    return {'parts': parts(centre + (-1 if iteration % 2 else 1) * radius * direction),
-            'models': models, 'observations': iteration}
+    made = parts(centre + (-1 if iteration % 2 else 1) * radius * direction)
+    return {'parts': made, 'models': models, 'observations': iteration,
+            'operands': {d['operand']: made[k][0] for k, d in decisions.items() if 'operand' in d}}
+
+
+def compiler_domains(parameters):
+    """Explicit bounded compiler operands in the same numerical vector.
+
+    Each parameter supplies value/minimum/maximum/grain. Its complement keeps
+    the common simplex representation. No backend resource limit is inferred.
+    Callers bind the resulting operands while compiling the next function.
+    """
+    result = {}
+    for name, p in parameters.items():
+        low, high, value = p['minimum'], p['maximum'], p['value']
+        if not 0 <= low <= value <= high or high <= 0:
+            raise ValueError(f'{name}: invalid compiler operand bounds')
+        result['compile:' + name] = {'parts': [value, high-value], 'grain': p['grain'],
+            'low': [low, 0], 'high': [high, high-low], 'operand': name, 'capacity': [1, 1]}
+    return result

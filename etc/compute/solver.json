@@ -10,8 +10,9 @@
   "fit_evaluations": 64,
   "capacity_floor_bits": 40,
   "slope_floor_bits": 20,
-  "gradient_step": 0.25,
-  "gradient_norm_floor": 1.0,
+  "cost_smoothing": 0.03125,
+  "exponent_limit": 500,
+  "joint_curvature": 0.125,
   "probe_radius": 0.125,
   "observation_window": 64
 }

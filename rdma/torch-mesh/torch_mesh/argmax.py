@@ -1,5 +1,5 @@
-"""The selection and its records for torch programs: the host's one way into argmax.metal, its kernels encoded on torch's
-MPS stream (metal-microbench docs/kernels.md#speculative-decoding, sampling).  The noise is argmax.metal's mesh_gumbel
+"""Selection declarations lowered to the common prepared native commands in argmax.metal
+(metal-microbench docs/kernels.md#speculative-decoding, sampling). The noise is argmax.metal's mesh_gumbel
 alone; nothing here computes it.
 
   draw(z, seed, keys, first=0, min_p=0)        each row's token at temperature 1 (mesh_draw): over its candidates c the
@@ -43,17 +43,33 @@ def _rows(z, keys):
     return z2, torch.as_tensor(keys, dtype=torch.int32, device=z2.device).reshape(-1).expand(z2.shape[0]).contiguous()
 
 
+@torch.library.custom_op('torch_mesh::draw', mutates_args=())
+def _draw(z: torch.Tensor, keys: torch.Tensor, cutoff: torch.Tensor, seed: int, first: int) -> torch.Tensor:
+    raise RuntimeError('sampling must be prepared as part of a declarations.Function')
+
+
+@_draw.register_fake
+def _draw_shape(z, keys, cutoff, seed, first):
+    return z.new_empty((z.shape[0],), dtype=torch.int64)
+
+
+@torch.library.custom_op('torch_mesh::retain', mutates_args=())
+def _retain(z: torch.Tensor, keys: torch.Tensor, seed: int, head: int, tail: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    raise RuntimeError('retained sampling must be prepared as part of a declarations.Function')
+
+
+@_retain.register_fake
+def _retain_shape(z, keys, seed, head, tail):
+    return (z.new_empty((z.shape[0], head + tail), dtype=torch.int64),
+            z.new_empty((z.shape[0], head + tail)), z.new_empty((z.shape[0],)))
+
+
 def draw(z, seed, keys, first=0, min_p=0):
     """Each row's token, int64 [...] (module docstring)."""
     z2, keys = _rows(z, keys)
     rows, v = z2.shape
-    blocks = max(1, min(_stream.compilation['DRAW_MAX_BLOCKS'], v // _stream.compilation['DRAW_COLUMNS_PER_BLOCK']))
     cutoff = z2.amax(1) + math.log(min_p) if min_p > 0 else torch.full((rows,), -math.inf, device=z2.device)
-    ids = torch.empty(rows, dtype=torch.int64, device=z2.device)
-    parts = torch.empty(2 * rows * blocks, device=z2.device)
-    arrivals = torch.zeros(rows, dtype=torch.int32, device=z2.device)
-    _stream.encode(_kernel('mesh_draw_rows'), [z2, keys, cutoff, ids, parts, arrivals], [v, seed, first, blocks], 6, blocks, rows, THREADS)
-    return ids.reshape(z.shape[:-1])
+    return _draw(z2, keys, cutoff, seed, first).reshape(z.shape[:-1])
 
 
 def retain(z, seed, positions, head=_stream.compilation['KEPT_HEAD'], tail=_stream.compilation['KEPT_TAIL']):
@@ -62,9 +78,32 @@ def retain(z, seed, positions, head=_stream.compilation['KEPT_HEAD'], tail=_stre
     if not all(n > 0 and n & (n - 1) == 0 for n in (head, tail)) or head + tail >= z.shape[-1]:
         raise ValueError(f'retain: head {head} and tail {tail} are each a power of two, together fewer than a row\'s {z.shape[-1]}')
     z2, positions = _rows(z, positions)
-    rows, v = z2.shape
-    ids = torch.empty(rows, head + tail, dtype=torch.int64, device=z2.device)
-    kept = torch.empty(rows, head + tail, device=z2.device)
-    log_z = torch.empty(rows, device=z2.device)
-    _stream.encode(_kernel('mesh_retain_rows', head, tail), [z2, positions, ids, kept, log_z], [v, seed], 5, 1, rows, THREADS)
+    ids, kept, log_z = _retain(z2, positions, seed, head, tail)
     return ids.reshape(*z.shape[:-1], -1), kept.reshape(*z.shape[:-1], -1), log_z.reshape(z.shape[:-1])
+
+
+def prepare_draw(z, keys, cutoff, seed, first):
+    from . import empty
+    from .engines import host
+    import struct
+    rows, width = z.shape
+    blocks = max(1, min(_stream.compilation['DRAW_MAX_BLOCKS'], width // _stream.compilation['DRAW_COLUMNS_PER_BLOCK']))
+    ids = empty((rows,), dtype=torch.int64)
+    parts, arrivals = empty((2 * rows * blocks,)), empty((rows,), dtype=torch.int32)
+    host(arrivals).zero_()
+    record = (_kernel('mesh_draw_rows'), [z, keys, cutoff, ids, parts, arrivals],
+              {6: struct.pack('4I', width, seed & 0xffffffff, first & 0xffffffff, blocks)}, (blocks, rows, 1), (THREADS, 1, 1), False,
+              7 | (56 << _stream.compilation['ACCESS_WRITE_SHIFT']))
+    return ids, [record] if rows else []
+
+
+def prepare_retain(z, keys, seed, head, tail):
+    from . import empty
+    import struct
+    rows, width = z.shape
+    ids = empty((rows, head + tail), dtype=torch.int64)
+    kept, log_z = empty((rows, head + tail)), empty((rows,))
+    record = (_kernel('mesh_retain_rows', head, tail), [z, keys, ids, kept, log_z],
+              {5: struct.pack('2I', width, seed & 0xffffffff)}, (1, rows, 1), (THREADS, 1, 1), False,
+              3 | (28 << _stream.compilation['ACCESS_WRITE_SHIFT']))
+    return (ids, kept, log_z), [record] if rows else []

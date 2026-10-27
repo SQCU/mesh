@@ -64,7 +64,7 @@ def main():
     with torch.no_grad():
         from torch_mesh.declarations import Function, execution_sequence
         model = MoE(mesh)
-        function = Function(model)
+        function = Function(model, configuration=configuration['assignment']['operands'])
         program = execution_sequence([function] * STEPS)
         bind(configuration, lambda: function.declare(mesh.get_group("ep")), program.realize)
         started = now()

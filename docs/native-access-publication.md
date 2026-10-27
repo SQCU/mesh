@@ -22,6 +22,9 @@ runs at preparation. Transport's logical byte order remains the separate `views.
 | `formatProduct(.rows)` | Input rows, packed weight blocks and directly placed output rows |
 | `stackCommand` | Each slab's own weights and output; unused argument slots declare no bytes |
 | `headsCommand` | Query columns at their final offset and pitch; KV output rows |
+| `LayerCaches.reaches` | The prepared local cache page sets for the layer, intersected with each backing chunk |
+| `attentionCommands` | Query, fresh KV and partial-result views, row words, tile landings and publication words |
+| `streamedInput`, `streamedFinish` | Input/output row views and the partial-sum planes they actually use |
 | `StreamedEpilogue.operand` | The standalone command's exact ranges, preserved as indirect accesses |
 
 Packed weight declarations use the same format block size and configured row group as the decoder.
@@ -32,8 +35,7 @@ range to an unrelated argument of the fused product. Nonbinding residency declar
 Some accesses still depend on input values. Expert routing reads selected indices; KV writes use the
 supplied page table. Their current declarations still cover the eligible storage where the builder
 does not provide a smaller prepared set. Treating a guessed selection as that set would omit real
-dependencies. Remaining native builders also need their views supplied. This is not a claim that every
-native command now has an exact access declaration.
+dependencies. The cache declaration covers its prepared eligible pages, not a guessed selection of pages from future input values.
 
 ## Tile publication
 
@@ -53,8 +55,8 @@ preparation and retirement, outside the numerical function.
 |---|---|
 | `matrix.product` | A separate arrival count for each batch/row tile joins only that tile's column groups. Its last contributor releases that tile's source word. |
 | DNN `prepare` | Compiles the same `matrix.row_tiles` into WRITE plans and row-tile consumer bindings. The product and fold remain whole dispatches. |
-| Native `mmb_heads` | Finishes a head's values, then joins the rows of that head and publishes its prepared word. Fused and standalone heads use the same routine. |
-| Native `MeshProduction` | Names a tile width, readiness view and producer command position. The recorder issues the prepared writes before the producer. |
+| Native `mmb_heads` | Finishes one row/head and publishes that row/head’s prepared word, without joining other rows. Fused and standalone heads use the same routine. |
+| Native `MeshProduction` | Names a tile width, readiness row stride, view and producer command position. The recorder issues the prepared writes before the producer. |
 | Native `MeshConsumption` | Binds each WRITE's incoming channel records to its consumer's tile, in that invocation's operand slot. There is no whole-crossing completion command. |
 
 Native query gathers and key/value row handoffs use head tiles. Each source and recipient retains
@@ -87,20 +89,20 @@ receivers use that same cache writer. No consumer waits for another GPU threadgr
 The native softmax configuration now uses the existing gather-and-merge algorithm. Its
 partials occupy `[row, contributor, head, m/l/O]`, so head columns land directly at their
 final positions. Attention's last contributing part writes that result and publishes each
-head after its rows finish. The separate partial-packing dispatch is removed. Each receiving
+row/head as it finishes. The separate partial-packing dispatch is removed. Each receiving
 merge reads only that head's contributors. The old native `partials` all-reduce branch
 is removed; old records must be derived again. This changes collective decomposition as
 well as scheduling; end-to-end latency and useful throughput still need measurement.
 
-The DNN fold retains its row-tile dependencies. Native source publication is still one
-head across its rows. Masked rows contribute empty partials within the same producer.
+The DNN fold retains its row-tile dependencies. Native source publication is one row/head.
+Masked rows publish their own empty partials within the same producer.
 The PLE epilogue has no declared remote output.
 
 A channel still has FIFO ordering. Independent readiness words remove the false dependency
 on every producer tile finishing; they do not make a later descriptor overtake an earlier one.
 The routing compiler can choose a different order using the same interface.
 
-## Validation
+## Earlier compile evidence
 
 The shared library and Torch extension built. The matrix producer prepared a 131 by 257 by
 259 product with row tiles of 64, 64 and 3, without numerical submission. The native/LiteRT
@@ -111,3 +113,16 @@ attention instances with fused partial publication, the receiving merge and cach
 for macOS 26. The complete Swift/native/LiteRT rank build succeeded. No
 distributed numerical run was launched. These results do not establish an end-to-end
 latency/useful-throughput improvement.
+
+## Integration on 2026-10-26
+
+`MeshProduction.rowStride` and `MeshConsumption.rowStride` give each row/head its own
+prepared WRITE and landing record. The common group contains all of them. Query
+consumers name their own row/head; a fresh KV page names only the rows it contains.
+Head publication no longer allocates or increments a cross-row arrival counter.
+Attention’s reduction still combines the numerical partials required for that row.
+
+Page masks are now the public WRITE declaration in `nccl.h`. Tensor-view adapters
+live in `mesh-write-compiler.h` and resolve local views into that page domain during
+preparation. They preserve the element cuts of an already declared typed call.
+Adjacent page selections coalesce before physical descriptor generation.

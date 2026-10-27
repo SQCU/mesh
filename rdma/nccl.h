@@ -990,38 +990,20 @@ ncclResult_t ncclMeshCommConfigGather(ncclComm_t comm, const void* local, void* 
 ncclResult_t ncclMeshCommRealized(ncclComm_t comm);
 /* Predicted producer readiness for each rank; used only when compiling immutable writes. */
 ncclResult_t ncclMeshCommWriteRelease(ncclComm_t comm, const double* seconds);
-/* AOT exact-byte bindings. Every rank prepares in the same order. metal=1
-   interprets buffers as ncclMeshBuffer; metal=0 uses host addresses. Only the
-   source rank's source and each other rank's landing are used. stride is LOCAL
-   (source rows, destination rows and relay rows may have different pitches).
-   repeats/count/type/endpoints/max_packet agree across ranks; max_packet=0 uses
-   the common transport default. Preparation exchanges only placement/shape
-   metadata, never tensor values or execution acknowledgments. All bound leases
-   and the communicator stay alive through execution. Execute performs no such
-   exchange, and Destroy may follow enqueue: the queued call retains its plan. */
+/* Page tables bind local storage during preparation. A message names pages
+   and masks confined to those pages. It never supplies a remote address or an
+   extent that crosses a page. Each peer uses its own page size and page list;
+   their selected bytes form the same logical message in list order.
+   Allocation stays alive through execution. Table metadata may be destroyed
+   once the WRITE has been prepared; its immutable descriptors own the binding. */
 typedef struct ncclMeshWritePlan *ncclMeshWritePlan_t;
-ncclResult_t ncclMeshWritePrepare(const void* source_buffer, void* landing_buffer, size_t count, ncclDataType_t datatype,
-    int source, int destination, ncclComm_t comm, int metal, uint32_t repeats, size_t stride, size_t max_packet,
-    ncclMeshWritePlan_t* out);
-/* Affine byte ranges: packed logical row_bytes*rows maps to each rank's
-   LOCAL pitch, with exact row and registration-boundary cuts. This is one
-   logical WRITE, independent of row count; it creates no per-row ring entries. */
-ncclResult_t ncclMeshWriteRowsPrepare(const void* source_buffer, void* landing_buffer, size_t row_bytes, size_t rows,
-    size_t pitch, int source, int destination, ncclComm_t comm, int metal, size_t max_packet, ncclMeshWritePlan_t* out);
-/* Indexed byte view over ONE local lease base. Concatenating spans in their
-   declared order gives the logical message; offsets are relative to the used
-   local source/landing buffer (after ncclMeshBuffer.offset on Metal). Each
-   positive-length span must lie inside that same lease. Span counts, offsets
-   and physical order may differ across ranks, while total logical bytes agree.
-   Source ranges may overlap; landing ranges must not overlap. Zero spans name
-   an empty message. Preparation copies this metadata and jointly cuts every
-   rank's view boundaries, packet grid and registered-memory boundaries. It
-   does not read/copy tensor values. Execute uses the same routes, entries and
-   lifetime rules as other WRITE plans; no per-span call or runtime exchange. */
-typedef struct ncclMeshSpan { uint64_t offset, bytes; } ncclMeshSpan;
-ncclResult_t ncclMeshWriteSpansPrepare(const void* source_buffer, void* landing_buffer,
-    const ncclMeshSpan* spans, size_t nspans, int source, int destination, ncclComm_t comm,
-    int metal, size_t max_packet, ncclMeshWritePlan_t* out);
+typedef struct ncclMeshPageTable *ncclMeshPageTable_t;
+typedef struct { uint64_t page, first, count; } ncclMeshPageMask;
+ncclResult_t ncclMeshPageTableCreate(const void* local, ncclComm_t comm, int metal, ncclMeshPageTable_t* out);
+ncclResult_t ncclMeshPageTableShape(ncclMeshPageTable_t table, size_t* pages, size_t* page_bytes);
+ncclResult_t ncclMeshPageTableDestroy(ncclMeshPageTable_t table);
+ncclResult_t ncclMeshWritePagesPrepare(ncclMeshPageTable_t table, const ncclMeshPageMask* masks, size_t count,
+    int source, int destination, size_t max_packet, ncclMeshWritePlan_t* out);
 /* Preparation operand for independently produced source tiles. All ranks bind
    it before Execute; only the source's word is used (ncclMeshBuffer on Metal,
    region address on host). The producer stores value after its payload stores.

@@ -172,6 +172,8 @@ _EVIDENCE = json.loads(_EVIDENCE_PATH.read_text()) if _EVIDENCE_PATH.exists() el
 
 def slice_units(m):
     """A slice's units: outputs, columns, tiles, nonzero tiles, planes (the sum of the widths), 1-bit tiles, bytes."""
+    if getattr(m, 'units', None) is not None:
+        return dict(m.units)
     words = m.tiles.long() & 0xFFFFFFFF
     widths = (words >> 12) & 15
     return dict(outputs=m.rows, columns=m.columns, tiles=int(widths.numel()), nonzero=int((widths > 0).sum()),
@@ -591,22 +593,17 @@ def coop_of(maps):
     return a | b << 3 | cj << 6 | d << 9 | sum(s << (12 + 3 * i) for i, s in enumerate(source))
 
 
-def _encode(name, buffers, dims, gx, gy, threads, line=''):
-    from . import _stream
-    _stream.encode(_pipeline(name, line), list(buffers) + [None] * (15 - len(buffers)), dims, 15, gx, gy, threads)
+def _encode(name, buffers, dims, gx, gy, threads, line='', *, outputs):
+    from .kernel import declare
+    return declare('streamed.metal', name, buffers, outputs, dims, 15, (gx, gy, 1), (threads, 1, 1), line)
 
 
 def _half(n, width):
     return torch.empty(n, width, dtype=torch.float16, device='mps')
 
 
-_IDENTITIES = {}
-
-
 def _identity(k):
-    if k not in _IDENTITIES:
-        _IDENTITIES[k] = torch.arange(k, dtype=torch.int32, device='mps')
-    return _IDENTITIES[k]
+    return torch.arange(k, dtype=torch.int32, device='mps')
 
 
 _TYPES = {torch.float16: '', torch.float32: '_float', torch.bfloat16: '_bfloat'}
@@ -637,7 +634,7 @@ class Matrix(torch.Tensor):
     __torch_function__ = torch._C._disabled_torch_function_impl
 
     @staticmethod
-    def __new__(cls, fields, name='', transposed=False, dtype=torch.float16, widths=None):
+    def __new__(cls, fields, name='', transposed=False, dtype=torch.float16, widths=None, units=None):
         rows, columns = fields['tiles'].shape[0] * 32, fields['tiles'].shape[1] * 32
         out = torch.Tensor._make_wrapper_subclass(cls, (columns, rows) if transposed else (rows, columns), dtype=dtype,
                                                   device=fields['codes'].device)
@@ -645,6 +642,7 @@ class Matrix(torch.Tensor):
             setattr(out, k, fields.get(k))
         out.label, out.transposed, out.rows, out.columns, out.tiles_ = name, transposed, rows, columns, columns // 32
         out.widths = widths if widths is not None else widths_of(fields['tiles'])
+        out.units = units if units is not None else slice_units(out)
         return out
 
     def __init__(self, *args, **kwargs):
@@ -672,14 +670,15 @@ class Matrix(torch.Tensor):
 
     def like(self, transposed=None, dtype=None, **fields):
         return Matrix({**{k: getattr(self, k) for k in self.FIELDS}, **fields}, self.label,
-                      self.transposed if transposed is None else transposed, dtype or self.dtype, self.widths)
+                      self.transposed if transposed is None else transposed, dtype or self.dtype, self.widths,
+                      self.units if 'tiles' not in fields else None)
 
     def __repr__(self):
         return (f'Matrix({self.label} [{self.rows} x {self.columns}]{" rotated" if self.folded is not None else ""}'
                 f'{" transposed" if self.transposed else ""}, {self.dtype})')
 
     def __tensor_flatten__(self):
-        return [k for k in self.FIELDS if getattr(self, k) is not None], (self.label, self.transposed, self.dtype, self.widths)
+        return [k for k in self.FIELDS if getattr(self, k) is not None], (self.label, self.transposed, self.dtype, self.widths, self.units)
 
     @staticmethod
     def __tensor_unflatten__(inner, context, outer_size, outer_stride):
@@ -742,8 +741,8 @@ class Matrix(torch.Tensor):
         columns, then times `folded`: the rotation V^T in coded column order, its scale applied)."""
         out = _half(self.rows, self.columns)
         columns = _identity(self.columns) if self.folded is not None else self.col_order
-        _encode('streamed_dense', self._code() + [None, out, self.row_order, self.row_scale, None, columns, self.col_scale],
-                _dims(tiles=self.tiles_, pitch=self.pitch), self.rows // 32, self.tiles_, 32)
+        out, = _encode('streamed_dense', self._code() + [None, out, self.row_order, self.row_scale, None, columns, self.col_scale],
+                _dims(tiles=self.tiles_, pitch=self.pitch), self.rows // 32, self.tiles_, 32, outputs=(4,))
         if self.folded is not None:
             out = torch.mm(out, self.folded)
         return (out.T if self.transposed else out).contiguous().to(self.dtype)
@@ -758,28 +757,30 @@ class Matrix(torch.Tensor):
         if self.folded is None:
             pad = outs + [outs[0]] * (3 - len(outs))
             scales = [m.col_scale for m in matrices] + [self.col_scale] * (3 - len(matrices))
-            _encode('streamed_gather', [x, pad[0], self.col_order, scales[0], None, pad[1], pad[2], scales[1], scales[2]],
-                    _dims(columns=self.columns, inputs=len(matrices)), n, 1, 256)
+            outs = _encode('streamed_gather', [x, pad[0], self.col_order, scales[0], None, pad[1], pad[2], scales[1], scales[2]],
+                    _dims(columns=self.columns, inputs=len(matrices)), n, 1, 256, outputs=(1, 5, 6))
         elif self.signs is not None and len(outs) <= 2:
             second = outs[1] if len(outs) > 1 else outs[0]
-            _encode('streamed_hadamard', [x, outs[0], second, self.col_order, self.col_scale,
+            outs = _encode('streamed_hadamard', [x, outs[0], second, self.col_order, self.col_scale,
                                           (others[0] if others else self).col_scale, self.signs, self.hadamard],
                     _dims(rows=n, columns=self.columns, per=self.columns // self.hadamard.shape[0], inputs=len(matrices)),
-                    n, 1, 256)
+                    n, 1, 256, outputs=(1, 2))
         elif n <= 16:
             second = outs[1] if len(outs) > 1 else outs[0]
-            _encode('streamed_rotate', [x, outs[0], second, None, self.col_scale,
+            made = _encode('streamed_rotate', [x, outs[0], second, None, self.col_scale,
                                         (others[0] if others else self).col_scale, self.rotation, self.rotation_scale, tables],
                     _dims(rows=n, columns=self.columns, inputs=len(matrices), flags=int(tables is not None)),
-                    -(-self.columns // 32), 1, 256)
+                    -(-self.columns // 32), 1, 256, outputs=(1, 2) + ((8,) if tables is not None else ()))
+            outs = made[:len(matrices)]
+            if tables is not None: tables = made[-1]
         else:
             rotated = torch.mm(x, self.folded.T)
             pad = outs + [outs[0]] * (3 - len(outs))
             scales = [m.col_scale for m in matrices] + [self.col_scale] * (3 - len(matrices))
-            _encode('streamed_gather', [rotated, pad[0], _identity(self.columns), scales[0], None, pad[1], pad[2],
+            outs = _encode('streamed_gather', [rotated, pad[0], _identity(self.columns), scales[0], None, pad[1], pad[2],
                                         scales[1], scales[2]],
-                    _dims(columns=self.columns, inputs=len(matrices)), n, 1, 256)
-        return outs
+                    _dims(columns=self.columns, inputs=len(matrices)), n, 1, 256, outputs=(1, 5, 6))
+        return outs, tables
 
     def product(self, xt, op='product', tables=None, decomposition=None):
         """The product of coded inputs xt [n, columns]: partials [shares, n, rows] in coded row order, unscaled (past 16
@@ -790,8 +791,8 @@ class Matrix(torch.Tensor):
         assert (tables is not None) == bool(spec.get('LUT')), f'{name}: tables where it reads them'
         partials = torch.empty(shares, n, self.rows, dtype=torch.float32, device='mps')
         buffers = self._code() + [tables, xt, partials] + ([None] * 5 + [xt, self.row_order, self.row_scale] if spec['kernel'] == 'panel' else [])
-        _encode(name, buffers, _dims(tiles=self.tiles_, outputs=self.rows, rows=n, per=-(-self.tiles_ // COMPUTE['STREAMED_PANEL_TILES']), split=n * self.rows,
-                                     pitch=self.pitch), gx, gy, threads, line)
+        partials, = _encode(name, buffers, _dims(tiles=self.tiles_, outputs=self.rows, rows=n, per=-(-self.tiles_ // COMPUTE['STREAMED_PANEL_TILES']), split=n * self.rows,
+                                     pitch=self.pitch), gx, gy, threads, line, outputs=(5,))
         return partials
 
     def product_t(self, xt):
@@ -803,9 +804,9 @@ class Matrix(torch.Tensor):
         shares = -(-bands // per)
         partials = torch.empty(shares, n, self.columns, dtype=torch.float32, device='mps')
         name, line = spec_instance(dict(kernel='panel_t', M=m), self.tiles_, self.widths)
-        _encode(name, self._code() + [None, xt, partials],
+        partials, = _encode(name, self._code() + [None, xt, partials],
                 _dims(tiles=self.tiles_, outputs=self.rows, rows=n, per=per, split=n * self.columns, pitch=self.pitch),
-                -(-self.tiles_ // COMPUTE['STREAMED_PANEL_TILES']), -(-n // m) * shares, COMPUTE['STREAMED_PANEL_TILES'] * COMPUTE['SIMD_WIDTH'], line)
+                -(-self.tiles_ // COMPUTE['STREAMED_PANEL_TILES']), -(-n // m) * shares, COMPUTE['STREAMED_PANEL_TILES'] * COMPUTE['SIMD_WIDTH'], line, outputs=(5,))
         return partials
 
     def finish(self, partials, order=None, scale=None, factor=None, dtype=torch.float16):
@@ -813,10 +814,10 @@ class Matrix(torch.Tensor):
         default the row side's), each row over its `factor` where given (streamed_scale_rows's)."""
         shares, n, k = partials.shape
         y = torch.empty(n, k, dtype=dtype, device='mps')
-        _encode('streamed_finish' + _TYPES[dtype], [partials, y, self.row_order if order is None else order,
+        y, = _encode('streamed_finish' + _TYPES[dtype], [partials, y, self.row_order if order is None else order,
                                                    self.row_scale if scale is None else scale, factor],
                 _dims(outputs=k, stride=k, shares=shares, split=n * k, count=n * k, inputs=int(factor is not None)),
-                -(-(n * k) // 256), 1, 256)
+                -(-(n * k) // 256), 1, 256, outputs=(1,))
         return y
 
     def apply(self, xt, decomposition=None):
@@ -827,9 +828,9 @@ class Matrix(torch.Tensor):
             return self.finish(self.product(xt, decomposition=decomposition))
         _, name, line, gx, gy, threads, _ = self.dispatch(n, decomposition=decomposition)
         y = _half(n, self.rows)
-        _encode(name, self._code() + [None, xt, None, None, None, None, None, None, y, self.row_order, self.row_scale],
+        y, = _encode(name, self._code() + [None, xt, None, None, None, None, None, None, y, self.row_order, self.row_scale],
                 _dims(tiles=self.tiles_, outputs=self.rows, rows=n, per=-(-self.tiles_ // COMPUTE['STREAMED_PANEL_TILES']), stride=self.rows, finish=1,
-                      pitch=self.pitch), gx, gy, threads, line)
+                      pitch=self.pitch), gx, gy, threads, line, outputs=(11,))
         return y
 
     def times(self, x):
@@ -841,13 +842,13 @@ class Matrix(torch.Tensor):
         x16 = x.contiguous()
         if dtype != torch.float16:
             x16, factor = _half(n, x.shape[1]), torch.empty(n, dtype=torch.float32, device='mps')
-            _encode('streamed_scale_rows' + _TYPES[dtype], [x.contiguous(), x16, factor], _dims(columns=x.shape[1]), n, 1, COMPUTE['STREAMED_SCALE_THREADS'])
+            x16, factor = _encode('streamed_scale_rows' + _TYPES[dtype], [x.contiguous(), x16, factor], _dims(columns=x.shape[1]), n, 1, COMPUTE['STREAMED_SCALE_THREADS'], outputs=(1, 2))
         if self.transposed:
-            xt = self.coded_input(x16)[0]
+            xt = self.coded_input(x16)[0][0]
             return self.apply(xt) if factor is None else self.finish(self.product(xt), factor=factor, dtype=dtype)
         xt = _half(n, self.rows)
-        _encode('streamed_gather_32', [x16, xt, self.row_order, self.row_scale],
-                _dims(columns=self.rows, rows=n, inputs=1), n, 1, 256)
+        xt, = _encode('streamed_gather_32', [x16, xt, self.row_order, self.row_scale],
+                _dims(columns=self.rows, rows=n, inputs=1), n, 1, 256, outputs=(1,))
         partials = self.product_t(xt)
         if self.folded is None:
             return self.finish(partials, self.col_order, self.col_scale, factor, dtype)
@@ -864,19 +865,19 @@ class Matrix(torch.Tensor):
         streamed_gelu."""
         x16 = x.half().contiguous()
         n = x16.shape[0]
-        gx, ux = gate.coded_input(x16, (up,))
+        (gx, ux), _ = gate.coded_input(x16, (up,))
         hidden = _half(n, gate.rows)
         spec = None if decomposition is not None else couple(Fit.node(), slice_units(gate), slice_units(up), n, widths=max(gate.widths, up.widths))[0]
         if spec is not None:
             name, line = spec_instance(spec, gate.tiles_, max(gate.widths, up.widths))
             (groups, _), threads, _ = launch(spec, gate.rows, n)
-            _encode(name, gate._code() + [None, gx, None] + up._code() + [ux, up.row_scale, hidden, None, gate.row_scale],
-                    _dims(tiles=gate.tiles_, outputs=gate.rows, rows=n, pitch=gate.pitch), groups, 1, threads, line)
+            hidden, = _encode(name, gate._code() + [None, gx, None] + up._code() + [ux, up.row_scale, hidden, None, gate.row_scale],
+                    _dims(tiles=gate.tiles_, outputs=gate.rows, rows=n, pitch=gate.pitch), groups, 1, threads, line, outputs=(11,))
             return down.apply(hidden).to(x.dtype)
         g, u = gate.product(gx, decomposition=decomposition), up.product(ux, decomposition=decomposition)
-        _encode('streamed_gelu', [g, u, gate.row_scale, up.row_scale, hidden],
+        hidden, = _encode('streamed_gelu', [g, u, gate.row_scale, up.row_scale, hidden],
                 _dims(outputs=gate.rows, shares=g.shape[0], inputs=u.shape[0], split=n * gate.rows),
-                -(-gate.rows // 1024), n, 256)
+                -(-gate.rows // 1024), n, 256, outputs=(4,))
         return down.apply(hidden, decomposition).to(x.dtype)
 
 

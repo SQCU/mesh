@@ -127,6 +127,18 @@ def _row_pitch(array, row_bytes, rows):
     return pitch
 
 
+class PageTable:
+    def __init__(self, comm, handle, array):
+        self.comm, self.handle, self.array = comm, handle, array
+        pages, size = ffi.new('size_t *'), ffi.new('size_t *')
+        check(lib.ncclMeshPageTableShape(handle, pages, size))
+        self.pages, self.page_bytes = int(pages[0]), int(size[0])
+
+    def __del__(self):
+        if getattr(self, 'handle', ffi.NULL) != ffi.NULL:
+            lib.ncclMeshPageTableDestroy(self.handle)
+
+
 class WritePlan:
     """Fixed native WRITE bindings; preparation exchanges layout metadata once.
 
@@ -255,6 +267,22 @@ class Comm:
         from assignment import function_demands
         return function_demands(self.comm)
 
+    def Pages(self, array):
+        """Prepare the local allocation's page table; array retains its storage."""
+        made = ffi.new('ncclMeshPageTable_t *')
+        check(lib.ncclMeshPageTableCreate(at(array), self.comm, 0, made))
+        return PageTable(self, made[0], array)
+
+    def Write_pages_prepare(self, table, masks, source, destination, *, max_packet=0):
+        """Declare an ordered list of (page, first byte, byte count) page masks."""
+        if table.comm is not self:
+            raise ValueError('the page table must belong to this communicator')
+        masks = list(masks)
+        made = ffi.new('ncclMeshWritePlan_t *')
+        check(lib.ncclMeshWritePagesPrepare(table.handle, ffi.new('ncclMeshPageMask[]', masks) if masks else ffi.NULL,
+                                           len(masks), source, destination, max_packet, made))
+        return WritePlan(self, made[0], (table,))
+
     def Write_prepare(self, sendbuf, landingbuf, source, destination, *, max_packet=0):
         """Bind one exact contiguous native WRITE, without copying or routing in Python.
 
@@ -268,7 +296,7 @@ class Comm:
             raise ValueError('a WRITE binding is a numpy array without Python objects')
         pointer, (datatype, multiple) = at(own), kind(own.dtype)
         made = ffi.new('ncclMeshWritePlan_t *')
-        check(lib.ncclMeshWritePrepare(pointer if self.rank == source else ffi.NULL,
+        check(lib.mesh_compile_write(pointer if self.rank == source else ffi.NULL,
             ffi.NULL if self.rank == source else pointer, own.size * multiple, datatype,
             source, destination, self.comm, 0, 1, 0, max_packet, made))
         return WritePlan(self, made[0], (own,))
@@ -286,7 +314,7 @@ class Comm:
         row_bytes, rows = int(row_bytes), int(rows)
         pitch = _row_pitch(own, row_bytes, rows)
         pointer, made = ffi.cast('void *', own.ctypes.data), ffi.new('ncclMeshWritePlan_t *')
-        check(lib.ncclMeshWriteRowsPrepare(pointer if self.rank == source else ffi.NULL,
+        check(lib.mesh_compile_rows(pointer if self.rank == source else ffi.NULL,
             ffi.NULL if self.rank == source else pointer, row_bytes, rows, pitch,
             source, destination, self.comm, 0, max_packet, made))
         return WritePlan(self, made[0], (own,))
@@ -298,21 +326,10 @@ class Comm:
         metadata = ffi.new('ncclMeshSpan[]', spans) if spans else ffi.NULL
         pointer = ffi.cast('void *', own.ctypes.data + base_shift)
         made = ffi.new('ncclMeshWritePlan_t *')
-        check(lib.ncclMeshWriteSpansPrepare(pointer if self.rank == source else ffi.NULL,
+        check(lib.mesh_compile_spans(pointer if self.rank == source else ffi.NULL,
             ffi.NULL if self.rank == source else pointer, metadata, len(spans), source, destination,
             self.comm, 0, max_packet, made))
         return WritePlan(self, made[0], (own,))
-
-    def Write_spans_prepare(self, sendbuf, landingbuf, spans, source, destination, *, max_packet=0):
-        """Bind logical bytes to explicit (offset, length) ranges in one lease.
-
-        Offsets are relative to the used local array's first element address.
-        Every rank may supply a different ordered list, but logical byte totals
-        agree. Native preparation validates lease bounds and landing overlap.
-        Source ranges may repeat. This copies metadata only, never values.
-        """
-        own = sendbuf if self.rank == source else landingbuf
-        return self._write_spans_prepare(own, spans, source, destination, max_packet)
 
     def Write_view_prepare(self, sendbuf, landingbuf, source, destination, *, max_packet=0):
         """Bind an arbitrary ndarray view in logical row-major element order.
