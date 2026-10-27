@@ -260,7 +260,6 @@ struct ncclComm {
   uint32_t *endpoint;
   struct mesh_paths *writes;
   unsigned char *write_overrides;
-  double *write_release;
   uint64_t page;
   struct mesh_trees paths, trees, rooted;
   struct entry *entries, *given;
@@ -384,7 +383,6 @@ static void comm_free(struct ncclComm *comm) {
   free(comm->scratch); free(comm->scratch_bytes); free(comm->spent); free(comm->channels); free(comm->endpoint); free((void *)comm->fabric.cable);
   for (int p = 0; comm->writes && p < comm->nranks * comm->nranks; p++) paths_free(&comm->writes[p]);
   free(comm->writes); free(comm->write_overrides);
-  free(comm->write_release);
   free(comm->ops);
   pthread_mutex_destroy(&comm->guard);
   pthread_mutex_destroy(&comm->prepare);
@@ -624,21 +622,6 @@ ncclResult_t ncclMeshCommFabric(ncclComm_t comm, const struct mesh_fabric **fabr
 
 
 
-
-ncclResult_t ncclMeshCommWriteRelease(ncclComm_t comm, const double *seconds) {
-  if (!comm || !seconds) return fail(ncclInvalidArgument, "write producer times are required");
-  for (int r = 0; r < comm->nranks; r++)
-    if (!isfinite(seconds[r]) || seconds[r] < 0)
-      return fail(ncclInvalidArgument, "write producer times must be finite and nonnegative");
-  double *copy = malloc((size_t)comm->nranks * sizeof *copy);
-  if (!copy) return fail(ncclSystemError, "out of memory");
-  memcpy(copy, seconds, (size_t)comm->nranks * sizeof *copy);
-  pthread_mutex_lock(&group_lock);
-  free(comm->write_release); comm->write_release = copy;
-  plan_free(comm, comm->plan); comm->plan = NULL;
-  pthread_mutex_unlock(&group_lock);
-  return ncclSuccess;
-}
 
 ncclResult_t ncclMeshCommWriteRoutes(ncclComm_t comm, int source, int destination, const struct mesh_paths *paths) {
   if (!comm || source < 0 || destination < 0 || mesh_paths_check(&comm->fabric, (uint32_t)source, (uint32_t)destination, paths))
@@ -1789,7 +1772,7 @@ struct ncclMeshWritePlan {
   void *land_records;
   ncclMeshTileLayout ready_layout, land_layout;
   struct mesh_write_layout layout;
-  uint32_t land_capacity, *land_channel;
+  uint32_t land_capacity;
   ncclMeshBuffer source_buffer, landing_buffer;
   ncclComm_t comm;
   size_t count, stride, bytes, row_bytes, rows, pitch;
@@ -1876,7 +1859,7 @@ static void write_plan_drop(struct ncclMeshWritePlan *p) {
       if (error) fail(ncclInternalError, "releasing prepared write ownership: %s", strerror(error));
     }
     if (p->spans) ncclMemFree(p->spans);
-    write_packets_free(p); free(p->uses); free(p->span_first); free(p->step_units); free(p->view); free(p->view_first); free(p->land_channel); free(p);
+    write_packets_free(p); free(p->uses); free(p->span_first); free(p->step_units); free(p->view); free(p->view_first); free(p);
   }
 }
 /* First cut strictly after a logical byte offset. */
@@ -1932,6 +1915,7 @@ struct call {
   const void *send;
   void *recv;
   size_t count, total, tile_bytes, invocation;
+  ncclMeshProduction *production;
   uint64_t *segments, *matrix;
   uint64_t *contributors, *recipients;
   /* Configuration owns masks. Issued calls retain only their local roles and
@@ -2127,18 +2111,36 @@ static ncclResult_t write_steps(struct call *c) {
   const size_t room = (size_t)count + 1;
   struct steps *s = calloc(1, sizeof *s);
   struct mesh_transfer *transfers = malloc(room * sizeof *transfers);
+  uint32_t *received=malloc(room*sizeof *received);
   if (s) *s = (struct steps){.references = 1, .count = (uint32_t)count, .buffers = 1, .initialized = 1};
-  if (!s || !transfers || !(s->steps = calloc(room, sizeof *s->steps)) || !(s->done = calloc(room, 1)) ||
+  if (!s || !transfers || !received || !(s->steps = calloc(room, sizeof *s->steps)) || !(s->done = calloc(room, 1)) ||
       !(s->channel = calloc(room, sizeof *s->channel)) || !(s->entry = calloc(room, sizeof *s->entry)) ||
       !(s->cable = calloc(room, sizeof *s->cable)) || !(s->consumption = calloc(room, sizeof *s->consumption)) ||
       !(s->prior_first = calloc(room, sizeof *s->prior_first)) ||
+      !(s->prior = malloc(room*sizeof *s->prior)) ||
       !(s->buffer = calloc(1, sizeof *s->buffer))) {
-    steps_free(s); free(transfers); return fail(ncclSystemError, "out of memory");
+    steps_free(s); free(transfers); free(received); return fail(ncclSystemError, "out of memory");
   }
   const int made = mesh_write_compile(&comm->fabric, (uint32_t)comm->rank, (uint32_t)c->root, (uint32_t)c->target - 1,
     paths, operand, comm->page, c->tile_bytes / SIZE[c->type], transfers, (uint32_t)room);
-  if (made < 0) { steps_free(s); free(transfers); return fail(ncclInternalError, "one-way write compile: %s", strerror(-made)); }
+  if (made < 0) { steps_free(s); free(transfers); free(received); return fail(ncclInternalError, "one-way write compile: %s", strerror(-made)); }
   for (int k = 0; k < made; k++) { s->steps[k] = transfers[k].step; s->cable[k] = transfers[k].cable; }
+  /* WRITE paths own disjoint payload intervals, in increasing interval order.
+     A relay's receive and send have identical tile cuts. Join those intervals
+     once; there is no need to compare each tile with every earlier tile. */
+  uint32_t receives=0,at=0;
+  for(uint32_t k=0;k<s->count;k++)if(s->steps[k].op!=MESH_STEP_SEND)received[receives++]=k;
+  for(uint32_t k=0;k<s->count;k++) {
+    s->prior_first[k]=s->priors;
+    if(s->steps[k].op!=MESH_STEP_SEND||comm->rank==c->root)continue;
+    while(at<receives&&s->steps[received[at]].first<s->steps[k].first)at++;
+    if(at==receives||received[at]>=k||s->steps[received[at]].first!=s->steps[k].first||
+       s->steps[received[at]].piece.elements!=s->steps[k].piece.elements) {
+      steps_free(s);free(transfers);free(received);return fail(ncclInternalError,"WRITE relay tile has no matching incoming interval");
+    }
+    s->prior[s->priors++]=received[at];
+  }
+  s->prior_first[s->count]=s->priors;free(received);
   free(transfers); c->bound = s;
   return ncclSuccess;
 }
@@ -2390,7 +2392,7 @@ static ncclResult_t schedule_group(struct ncclComm *comm, struct call *list, siz
   }
   for (size_t i = 0; i < n && !result; i++) {
     struct steps *st = list[i].bound;
-    if (st) {
+    if (st && !list[i].target) {
       for (uint32_t k = 0; k < st->count; k++) {
         st->prior_first[k] = st->priors;
         for (uint32_t j = 0; j < k; j++)
@@ -2438,7 +2440,20 @@ static int all_writes(const struct call *list, size_t n) {
 }
 
 #include "mesh-write-order.h"
-struct write_fragment { const struct call *call; uint32_t source, cable, hop; size_t offset; };
+struct write_fragment { const struct call *call; uint32_t source, cable, hop; size_t offset; uint32_t task; };
+static int write_fragment_order(const void *left,const void *right) {
+  const struct write_fragment *a=left,*b=right;
+  if(a->call!=b->call)return a->call<b->call?-1:1;
+  if(a->offset!=b->offset)return a->offset<b->offset?-1:1;
+  if(a->hop!=b->hop)return a->hop<b->hop?-1:1;
+  if(a->source!=b->source)return a->source<b->source?-1:1;
+  return a->cable<b->cable?-1:a->cable>b->cable;
+}
+static uint32_t write_fragment_find(const struct write_fragment *fragments,uint32_t count,struct write_fragment key) {
+  uint32_t low=0,high=count;
+  while(low<high){uint32_t mid=low+(high-low)/2;if(write_fragment_order(fragments+mid,&key)<0)low=mid+1;else high=mid;}
+  return low;
+}
 
 static ncclResult_t order_writes(const struct ncclComm *comm, const struct call *list, size_t calls, struct schedule *plans) {
   size_t room = 0;
@@ -2457,7 +2472,7 @@ static ncclResult_t order_writes(const struct ncclComm *comm, const struct call 
   ncclResult_t result = ncclSuccess;
   if (!tasks || !fragments || !transfers || !capacity) { result = fail(ncclSystemError, "out of memory"); goto done; }
   for (uint32_t e = 0; e < comm->fabric.cables; e++)
-    capacity[2 * e] = capacity[2 * e + 1] = fmax(comm->fabric.cable[e].bandwidth / 8.0, 1.0);
+    capacity[2 * e] = capacity[2 * e + 1] = comm->fabric.cable[e].bandwidth / 8.0;
   uint32_t count = 0;
   for (size_t i = 0; i < calls; i++) for (int r = 0; r < comm->nranks; r++) {
     const struct call *c = list + i;
@@ -2468,21 +2483,26 @@ static ncclResult_t order_writes(const struct ncclComm *comm, const struct call 
     for (int k = 0; k < n; k++) {
       const struct mesh_transfer *t = transfers + k;
       if (t->step.op != MESH_STEP_SEND) continue;
-      fragments[count] = (struct write_fragment){c, (uint32_t)r, t->cable, t->step.round, t->step.first * SIZE[c->type]};
+      const size_t tile = c->tile_bytes ? t->step.first * SIZE[c->type] / c->tile_bytes : 0;
+      const ncclMeshProduction production = c->production ? c->production[tile] : (ncclMeshProduction){0};
+      fragments[count] = (struct write_fragment){c, (uint32_t)r, t->cable, t->step.round, t->step.first * SIZE[c->type],count};
       tasks[count++] = (struct mesh_write_task){
         .arc = 2 * t->cable + ((uint32_t)r == comm->fabric.cable[t->cable].node[1]), .parent = UINT32_MAX,
         .bytes = (double)piece_bytes(&t->step),
         .first_bytes = c->write_plan ? fmin((double)piece_bytes(&t->step),
           (double)(write_packets(c->write_plan,c->invocation)->cuts[span_after(write_packets(c->write_plan,c->invocation), t->step.first * SIZE[c->type])] -
                    t->step.first * SIZE[c->type])) : fmin((double)piece_bytes(&t->step), (double)comm->page),
-        .release = comm->write_release ? comm->write_release[c->root] : 0};
+        .release = production.seconds, .production = production.order};
     }
   }
+  qsort(fragments,count,sizeof *fragments,write_fragment_order);
   for (uint32_t k = 0; k < count; k++) if (fragments[k].hop) {
-    for (uint32_t j = 0; j < count; j++)
-      if (fragments[j].call == fragments[k].call && fragments[j].offset == fragments[k].offset &&
-          fragments[j].hop + 1 == fragments[k].hop) { tasks[k].parent = j; break; }
-    if (tasks[k].parent == UINT32_MAX) { result = fail(ncclInternalError, "write relay has no upstream fragment"); goto done; }
+    const struct write_fragment *f=fragments+k;
+    const uint32_t j=write_fragment_find(fragments,count,(struct write_fragment){.call=f->call,.offset=f->offset,.hop=f->hop-1});
+    if(j==count||fragments[j].call!=f->call||fragments[j].offset!=f->offset||fragments[j].hop+1!=f->hop) {
+      result=fail(ncclInternalError,"write relay has no upstream fragment");goto done;
+    }
+    tasks[f->task].parent=fragments[j].task;
   }
   const int status = mesh_write_order(tasks, count, capacity, 2 * comm->fabric.cables, (double)comm->page);
   if (status) { result = fail(ncclInternalError, "write schedule: %s", strerror(status)); goto done; }
@@ -2492,12 +2512,10 @@ static ncclResult_t order_writes(const struct ncclComm *comm, const struct call 
     for (size_t k = 0; k < n; k++) {
       const struct mesh_step *step = items[k].c->bound->steps + items[k].step;
       const uint32_t source = send ? (uint32_t)comm->rank : step->peer;
-      uint32_t j = 0;
-      for (; j < count; j++)
-        if (fragments[j].call == items[k].c && fragments[j].offset == items[k].offset &&
-            fragments[j].source == source && fragments[j].cable == comm->channels[h].cable && fragments[j].hop == step->round) break;
-      if (j == count) { result = fail(ncclInternalError, "write entry has no global fragment"); goto done; }
-      items[k].priority = tasks[j].order;
+      const struct write_fragment key={items[k].c,source,comm->channels[h].cable,step->round,items[k].offset,0};
+      const uint32_t j=write_fragment_find(fragments,count,key);
+      if (j == count || write_fragment_order(fragments+j,&key)) { result = fail(ncclInternalError, "write entry has no global fragment"); goto done; }
+      items[k].priority = tasks[fragments[j].task].order;
     }
     qsort(items, n, sizeof *items, write_order);
     mesh_pages end = {0};
@@ -2508,29 +2526,13 @@ done:
   return result;
 }
 
-static ncclResult_t ordered_writes(const struct ncclComm *comm, const struct call *list, size_t calls, const struct schedule *plans, struct schedule **out) {
-  struct schedule *copy = calloc(comm->count + 1, sizeof *copy);
-  if (!copy) return fail(ncclSystemError, "out of memory");
-  for (uint32_t h = 0; h < comm->count; h++) {
-    copy[h] = plans[h];
-    copy[h].consume = NULL; /* compiled plans have no bound consumer permutation */
-    copy[h].out = malloc((plans[h].outs + 1) * sizeof *copy[h].out);
-    copy[h].in = malloc((plans[h].ins + 1) * sizeof *copy[h].in);
-    if (!copy[h].out || !copy[h].in) { schedules_free(comm, copy); return fail(ncclSystemError, "out of memory"); }
-    memcpy(copy[h].out, plans[h].out, plans[h].outs * sizeof *copy[h].out);
-    memcpy(copy[h].in, plans[h].in, plans[h].ins * sizeof *copy[h].in);
-  }
-  const ncclResult_t result = order_writes(comm, list, calls, copy);
-  if (result) { schedules_free(comm, copy); return result; }
-  *out = copy; return ncclSuccess;
-}
-
 /* a group's calls compiled: each crossing call's steps (plan_calls) and the group's entries on each channel, each list
    from its 0 (schedule_group); *plans NULL where it failed */
 static ncclResult_t compile_group(struct ncclComm *comm, struct call *list, size_t n, struct schedule **plans) {
   ncclResult_t result = plan_calls(comm, list, n);
   if (!result && !(*plans = calloc(comm->count + 1, sizeof **plans))) result = fail(ncclSystemError, "out of memory");
   if (!result) result = schedule_group(comm, list, n, *plans);
+  if (!result && all_writes(list, n)) result = order_writes(comm, list, n, *plans);
   for (uint32_t h = 0; h < comm->count && !result; h++) result = schedule_consumption(*plans + h, 1);
   if (result) { schedules_free(comm, *plans); *plans = NULL; }
   return result;
@@ -2538,7 +2540,7 @@ static ncclResult_t compile_group(struct ncclComm *comm, struct call *list, size
 
 /* Group definitions and a compact sequence of repeated blocks. Geometry is
    compiled once per definition; invocation operands are bound separately. */
-struct compiled { struct call *calls; size_t n; uint64_t repeat; struct schedule *plans, *write_plans; };
+struct compiled { struct call *calls; size_t n; uint64_t repeat; struct schedule *plans; };
 struct plan {
   ncclMeshPlan view;
   struct compiled *group;
@@ -2570,18 +2572,19 @@ static struct message repeat_of(const struct message *m, size_t n, size_t k, siz
    ncclMeshCommPlan), else, with no plan, compiled here (compile_group).  Under group_lock */
 static ncclResult_t group_bound(struct ncclComm *comm, struct call *list, size_t n, uint64_t holder, uint32_t repeats, size_t stride,
                                 struct schedule **plans) {
-  struct compiled own = {list, n, 1, NULL, NULL};
+  struct compiled own = {list, n, 1, NULL};
   const struct compiled *x = comm->plan && comm->plan->active ? group_at(comm->plan, holder) : &own;
+  if (x == &own) for (size_t i = 0; i < n; i++) if (list[i].tile_bytes)
+    return fail(ncclInvalidUsage, "tiled WRITEs require a complete declaration with producer records");
   struct schedule *made = calloc(comm->count + 1, sizeof *made);
   ncclResult_t result = made ? ncclSuccess : fail(ncclSystemError, "out of memory");
   if (!result && x == &own) result = compile_group(comm, list, n, &own.plans);
-  if (!result && x == &own && list[0].fused && all_writes(list, n)) result = order_writes(comm, list, n, own.plans);
   for (size_t i = 0; i < x->n && !result && x != &own; i++) {
     call_bind_roles(list + i, x->calls + i);
     if (x->calls[i].bound && !(list[i].bound = steps_copy(x->calls[i].bound))) result = fail(ncclSystemError, "out of memory");
   }
   for (uint32_t h = 0; h < comm->count && !result; h++) {
-    const struct schedule *p = (list[0].fused && x->write_plans ? x->write_plans : x->plans) + h;
+    const struct schedule *p = x->plans + h;
     struct schedule *q = made + h;
     *q = (struct schedule){malloc((p->outs * repeats + 1) * sizeof *p->out), malloc((p->ins * repeats + 1) * sizeof *p->in), p->outs * repeats,
                            p->ins * repeats, {0, 0}, 0, 0, {p->outs ? p->out[p->outs - 1].end : p->each[0],
@@ -3361,6 +3364,7 @@ static void call_parts_free(struct call *c) {
   free(c->matrix);
   free(c->contributors); free(c->recipients);
   free(c->complement);
+  free(c->production);
 }
 static void calls_free(struct call *list, size_t n) {
   for (size_t i = 0; i < n; i++) call_parts_free(list + i);
@@ -3608,6 +3612,14 @@ static uint64_t own_landing(const struct inflight *g, uint32_t h) {
   return g->start[h][1];
 }
 
+/* Configuration-only reduction to the last prefix for each consumer record
+   on a cable. Several contributors can name the same consumer tile. */
+struct tile_landing { uint64_t *record; size_t entry; };
+static int tile_landing_order(const void *left,const void *right) {
+  const struct tile_landing *a=left,*b=right;
+  if(a->record!=b->record)return (uintptr_t)a->record<(uintptr_t)b->record?-1:1;
+  return a->entry>b->entry?-1:a->entry<b->entry;
+}
 static ncclResult_t complete(struct metal_program *program, struct inflight *through, int *published) {
   if (through->fused) {
     /* A group of immutable one-way writes. Relay entries already name their
@@ -3627,23 +3639,33 @@ static ncclResult_t complete(struct metal_program *program, struct inflight *thr
       if (ch->published < first_end) result = publish(program, comm, h, first_end, published);
       if (!result) ch->published = through->end[h][0];
       const struct schedule *schedule = through->plans + h;
+      struct tile_landing *tiles=malloc((schedule->ins/through->repeats+1)*sizeof *tiles);
+      if(!tiles)return fail(ncclSystemError,"allocating consumer prefix compilation indices");
+      size_t count=0;
       for (size_t k = schedule->ins / through->repeats; !result && k; k--) {
         const struct message *m = schedule->in + k - 1;
         struct ncclMeshWritePlan *write = m->c->write_plan;
         if (!write || !write->land_records || write->to != comm->rank) continue;
         const size_t tile=write_tile(write,m->offset);
-        const size_t index=(m->c->invocation % write->land_layout.instances)*write_tiles(write)+tile;
-        if (write->land_channel[index] == h) continue;
-        write->land_channel[index] = h;
         uint64_t *record=(uint64_t *)((char *)write->land_records+tile_offset(write->land_layout,tile,m->c->invocation));
-        if (*record == write->land_capacity)
-          return fail(ncclInvalidUsage, "WRITE consumer bindings exceed their prepared physical-channel capacity");
+        tiles[count++]=(struct tile_landing){record,k-1};
+      }
+      qsort(tiles,count,sizeof *tiles,tile_landing_order);
+      for(size_t t=0;!result&&t<count;t++) {
+        if(t&&tiles[t].record==tiles[t-1].record)continue;
+        const size_t k=tiles[t].entry;
+        const struct message *m=schedule->in+k;
+        uint64_t *record=tiles[t].record;
+        if (*record == m->c->write_plan->land_capacity) {
+          result=fail(ncclInvalidUsage, "WRITE consumer bindings exceed their prepared physical-channel capacity");break;
+        }
         const struct metal_wait wait = {ch->buffer, comm->violation, m->data.buffer, ch->landed, m->data.offset,
-          m->end, through->start[h][1] + k - 1, h, schedule->each[1]};
+          m->end, through->start[h][1] + k, h, schedule->each[1]};
         ncclMeshBinding *bindings=(ncclMeshBinding *)(record+1);
         result = gpu(metal_land_deferred(program, m->data.buffer, m->data.offset, &wait,
           bindings[(*record)++]), "a WRITE consumer's landing record");
       }
+      free(tiles);
       const uint64_t own = own_landing(through, h);
       if (!result && ch->consumed < own) {
         ch->consumed = own - 1;
@@ -4593,6 +4615,21 @@ static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call
   if (d->tile_bytes && (d->what != ncclMeshCallWrite || (unsigned)d->type >= ncclNumTypes ||
       d->tile_bytes % SIZE[d->type]))
     return fail(ncclInvalidArgument,"a declared WRITE tile must contain whole typed elements");
+  if ((d->tile_bytes && !d->production) || (d->production && d->what != ncclMeshCallWrite))
+    return fail(ncclInvalidArgument,"a tiled WRITE requires its producer records");
+  if (d->production) {
+    if ((unsigned)d->type >= ncclNumTypes || d->count > SIZE_MAX / SIZE[d->type])
+      return fail(ncclInvalidArgument,"producer payload extent");
+    const size_t bytes = d->count * SIZE[d->type];
+    const size_t tiles = d->tile_bytes && bytes ? (bytes - 1) / d->tile_bytes + 1 : 1;
+    if (tiles > SIZE_MAX / sizeof *c->production || !(c->production = malloc(tiles * sizeof *c->production)))
+      return fail(ncclSystemError,"allocating producer records");
+    for (size_t k = 0; k < tiles; k++) {
+      if (!isfinite(d->production[k].seconds) || d->production[k].seconds < 0 || d->production[k].order == UINT64_MAX)
+        return fail(ncclInvalidArgument,"producer predictions must be finite and nonnegative");
+      c->production[k] = d->production[k];
+    }
+  }
   if (d->what == WHAT_COUNTED && !d->counts) return fail(ncclInvalidArgument, "a declared all-to-all without its counts");
   if (v && !(c->segments = malloc((size_t)v * sizeof *c->segments))) return fail(ncclSystemError, "out of memory");
   for (int k = 0; k < v; k++) { c->segments[k] = d->counts[k]; c->total += d->counts[k]; }
@@ -4610,7 +4647,7 @@ static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call
 static void plan_free(const struct ncclComm *comm, struct plan *plan) {
   for (uint32_t g = 0; plan && plan->group && g < plan->view.groups; g++) {
     calls_free(plan->group[g].calls, plan->group[g].n);
-    schedules_free(comm, plan->group[g].plans); schedules_free(comm, plan->group[g].write_plans);
+    schedules_free(comm, plan->group[g].plans);
   }
   if (plan) { free(plan->group); free(plan->order); free(plan->ends); free(plan->entries); }
   free(plan);
@@ -4661,7 +4698,6 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
   for (uint32_t g = 0; g < groups && !result; g++) {
     struct compiled *x = made->group + g;
     result = compile_group(comm, x->calls, x->n, &x->plans);
-    if (!result && all_writes(x->calls, x->n)) result = ordered_writes(comm, x->calls, x->n, x->plans, &x->write_plans);
     for (uint32_t h = 0; h < comm->count && !result; h++) { made->entries[g][0] += x->plans[h].outs; made->entries[g][1] += x->plans[h].ins; }
   }
   if (!result) {
@@ -5249,14 +5285,10 @@ ncclResult_t ncclMeshWriteLandings(ncclMeshWritePlan_t plan, void *records, uint
   if (!plan || !plan->metal || plan->repeats != 1 || plan->comm->rank != plan->to || !records || !capacity || plan->land_records)
     return fail(ncclInvalidArgument, "WRITE landing output needs a fresh Metal plan and physical-channel storage");
   size_t extent=0,tiles=write_tiles(plan);
-  if(tile_extent(layout,tiles,sizeof(uint64_t)+(size_t)capacity*sizeof(ncclMeshBinding),&extent) ||
-     layout.instances>SIZE_MAX/sizeof(uint32_t)/tiles)
+  if(tile_extent(layout,tiles,sizeof(uint64_t)+(size_t)capacity*sizeof(ncclMeshBinding),&extent))
     return fail(ncclInvalidArgument,"WRITE landing table geometry");
-  plan->land_channel=malloc(tiles*layout.instances*sizeof *plan->land_channel);
-  if(!plan->land_channel)return fail(ncclSystemError,"allocating WRITE landing compilation indices");
   for(size_t i=0;i<layout.instances;i++)for(size_t t=0;t<tiles;t++) {
     *(uint64_t *)((char *)records+tile_offset(layout,t,i))=0;
-    plan->land_channel[i*tiles+t]=UINT32_MAX;
   }
   plan->land_records=records;plan->land_capacity=capacity;plan->land_layout=layout;
   return ncclSuccess;

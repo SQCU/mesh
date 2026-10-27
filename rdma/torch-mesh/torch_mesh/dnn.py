@@ -89,12 +89,11 @@ kernel void fold(device const float *own [[buffer(0)]], {inputs}device float *ou
                 if ready is not None:
                     host(ready).zero_(); host(arrivals).zero_()
                 words = [partial.numel(), H, tiles[0][1], 0]
-                for index, (at, count) in enumerate(tiles if self.pairs else ()):
-                    crossing = fused.writes(schedule, partial.narrow(0, at, count),
-                        [t.narrow(0, at, count) for t in landings], self.pairs, self.group,
-                        ready=ready.narrow(0, index, 1), ready_value=count * H * partial.element_size())
-                    words += [w for k in range(self.channels) for w in fused._words(
-                        crossing.land[k] if k < len(crossing.land) else fused._NONE)]
+                if self.pairs:
+                    tile_bytes = tiles[0][1] * H * partial.element_size()
+                    crossing = fused.writes(schedule, partial, landings, self.pairs, self.group,
+                        ready=ready, ready_value=tile_bytes, tile_bytes=tile_bytes)
+                    words += [w for binding in crossing.land for w in fused._words(binding)]
                 schedule.append(_stream.Commands([
                     product(x, a, hidden, act=True),
                     product(hidden, b, partial, ready=ready, arrivals=arrivals)]))
@@ -111,6 +110,7 @@ kernel void fold(device const float *own [[buffer(0)]], {inputs}device float *ou
 
     def declare(self):
         from .backend import Call, WRITE
-        return [([Call(WRITE, count * self.args.width, torch.float32, root=a, destination=b)
-                  for a, b in self.pairs], 1) for _, rows in self.tiles for _ in range(self.args.layers)
-                for _, count in row_tiles(rows)]
+        return [([Call(WRITE, rows * self.args.width, torch.float32, root=a, destination=b, fused=True,
+                       tile_bytes=row_tiles(rows)[0][1] * self.args.width * torch.float32.itemsize,
+                       production=[{'seconds': 0, 'order': tile} for tile in range(len(row_tiles(rows)))])
+                  for a, b in self.pairs], 1) for _, rows in self.tiles for _ in range(self.args.layers)]

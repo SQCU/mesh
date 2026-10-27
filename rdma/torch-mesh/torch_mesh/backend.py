@@ -41,8 +41,8 @@ ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL = range(6)
 WRITE = 8
 # a declared call (ProcessGroupMesh.plan): its kind, its elements, its dtype, its root or peer, its operator and, for an
 # all-gather or a reduce-scatter, each rank's elements (an all-to-all's to each rank, then from each)
-Call = collections.namedtuple('Call', 'kind count dtype root op counts destination fused contributors matrix recipients tile_bytes',
-                              defaults=(0, ReduceOp.SUM, None, 0, False, None, None, None, 0))
+Call = collections.namedtuple('Call', 'kind count dtype root op counts destination fused contributors matrix recipients tile_bytes production',
+                              defaults=(0, ReduceOp.SUM, None, 0, False, None, None, None, 0, None))
 WHAT = {ALLREDUCE: LIB.MESH_ALLREDUCE, REDUCE: LIB.MESH_REDUCE, BROADCAST: LIB.MESH_BROADCAST, ALLGATHER: LIB.MESH_ALLGATHER,
         REDUCE_SCATTER: LIB.MESH_REDUCE_SCATTER, ALLTOALL: LIB.ncclMeshCallAlltoAllV, WRITE: LIB.ncclMeshCallWrite}
 TYPES = {torch.int8: LIB.ncclInt8, torch.uint8: LIB.ncclUint8, torch.bool: LIB.ncclUint8, torch.int32: LIB.ncclInt32,
@@ -227,8 +227,14 @@ class ProcessGroupMesh(dist.ProcessGroup):
                         bits[rank // 64] |= 1 << (rank % 64)
                 kept.append(ffi.new('uint64_t[]', bits) if participants is not None else ffi.NULL)
                 masks.append(kept[-1])
+            if c.production is not None:
+                tiles = -(-(c.count * c.dtype.itemsize) // c.tile_bytes) if c.tile_bytes else 1
+                if len(c.production) != tiles:
+                    raise ValueError('producer records must cover every logical publication tile')
+            kept.append(ffi.new('ncclMeshProduction[]', c.production) if c.production is not None else ffi.NULL)
             made.append({'what': WHAT[c.kind], 'peer': c.root, 'count': c.count * per, 'type': nccl, 'op': code,
                          'group': g, 'destination': c.destination, 'fused': int(c.fused), 'tile_bytes': c.tile_bytes,
+                         'production': kept[-1],
                          'counts': counts, 'matrix': matrix, 'contributors': masks[0], 'recipients': masks[1]})
         view = ffi.new('ncclMeshPlan **')
         check(LIB.ncclMeshCommPlan(self.comm, ffi.new('ncclMeshCall[]', made or 1), len(made),

@@ -426,3 +426,18 @@ replaced by `ncclMeshPlanRun` blocks. Native, Python and Torch callers use that 
 interface. [The publication document](../docs/native-access-publication.md#compact-publication-plans--2026-10-27)
 records the representation and its remaining physical descriptor costs. Builds
 passed; numerical execution remains deferred until the structural sequence is done.
+
+## Producer ordering — 2026-10-27 06:47 UTC
+
+Item 5 removes `ncclMeshCommWriteRelease`, its rank-wide state, the duplicate
+`ordered_writes`/`write_plans` schedules and the DNN's per-row-tile transport
+groups. Producer records now enter the common declaration alongside tile
+geometry. Native head/attention producers and DNN row tiles supply their
+traversal order. Source ranks report their records during realization; absent
+tile records fail before execution. Multiple contributors can share a tile's
+landing table; the common compiler retains one dependency per physical cable.
+
+The [publication document](../docs/native-access-publication.md#producer-order-in-the-common-write-compiler--2026-10-27-0647-utc)
+distinguishes that scheduling prior from measured completion order. Empirical
+optimizer integration remains item 7. The builds passed; no numerical run was
+started. The constrained data-model document is unchanged.

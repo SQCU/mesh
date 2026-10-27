@@ -988,8 +988,6 @@ ncclResult_t ncclMeshCommConfigGather(ncclComm_t comm, const void* local, void* 
    compiled send/landing list ends on every cable and match both directions.
    This is a compiler operation, before submission; no runtime invocation calls it. */
 ncclResult_t ncclMeshCommRealized(ncclComm_t comm);
-/* Predicted producer readiness for each rank; used only when compiling immutable writes. */
-ncclResult_t ncclMeshCommWriteRelease(ncclComm_t comm, const double* seconds);
 /* Page tables bind local storage during preparation. A message names pages
    and masks confined to those pages. It never supplies a remote address or an
    extent that crosses a page. Each peer uses its own page size and page list;
@@ -1024,7 +1022,9 @@ ncclResult_t ncclMeshWritePagesPrepare(ncclMeshPageTable_t table, const ncclMesh
 ncclResult_t ncclMeshWriteSourceReady(ncclMeshWritePlan_t plan, const void* words, uint64_t value, ncclMeshTileLayout layout);
 /* Destination records are { uint64_t count; ncclMeshBinding bindings[capacity]; }
    in the supplied affine table. Compilation fills each tile's last incoming
-   prefix per physical channel, without a whole-write completion command. */
+   prefix per physical channel, without a whole-write completion command.
+   Plans in one group may share records for tiles consumed together; compilation
+   then takes the last incoming prefix across those contributors on each cable. */
 ncclResult_t ncclMeshWriteLandings(ncclMeshWritePlan_t plan, void* records, uint32_t capacity, ncclMeshTileLayout layout);
 ncclResult_t ncclMeshWriteExecute(ncclMeshWritePlan_t plan, size_t invocation, cudaStream_t stream);
 ncclResult_t ncclMeshWritePlanDestroy(ncclMeshWritePlan_t plan);
@@ -1038,6 +1038,14 @@ ncclResult_t ncclMeshWritePlanDestroy(ncclMeshWritePlan_t plan);
    issued on a fused stream (ncclMeshStream fused). It uses the same physical striping and routed-write
    representation as other calls; fusion changes publication/consumption encoding, not available cables. */
 enum { ncclMeshCallAlltoAllV = 18, ncclMeshCallWrite = 19 };
+/* One record per logical publication tile, in payload order. seconds is a
+   prediction relative to this group's producers; order is the producer's
+   launch order (UINT64_MAX is reserved), used when predictions tie. Zero seconds explicitly expresses
+   no timing distinction, not a measured completion time. These operands are
+   copied at declaration and never read by the transport at execution.
+   Every rank supplies the same source records. A tiled WRITE requires them;
+   an untiled WRITE may supply one record or declare an already available input. */
+typedef struct { double seconds; uint64_t order; } ncclMeshProduction;
 typedef struct {
   int what, peer;
   size_t count;
@@ -1048,6 +1056,7 @@ typedef struct {
   int destination;
   int fused;
   size_t tile_bytes; /* WRITE publication geometry, 0: whole operand */
+  const ncclMeshProduction* production;
   /* Optional complete source-major count matrix for AlltoAllV. Otherwise
      CommPlan exchanges local count metadata once during configuration. */
   const size_t* matrix;

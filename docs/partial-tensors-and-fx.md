@@ -443,3 +443,13 @@ in the [dated removal manifest](../design/runtime-interface-removal-2026-10-25.m
 Neither an interface name nor compilation alone establishes a faster implementation. Performance records
 come from the canonical committed-main hourlies: complete-function elapsed time and useful output bandwidth,
 with rows/s for chain and LSTM workloads. This reference adds no alternative runner or measurement path.
+
+Tiled writes declare `ncclMeshCall.production`: one predicted readiness time
+and producer-order ordinal per logical tile. `torch_mesh.backend.Call` and the
+MPI dictionary interface carry those same records. Native head and attention
+lowerings report their local producer geometry before the shared graph is
+compiled. The DNN's matrix row tiles now form one WRITE family per pair, and
+`fused.writes(tile_bytes=...)` returns tile-major physical-channel bindings.
+Several contributions to one consumer tile share each cable's last required
+prefix. [Producer ordering](native-access-publication.md#producer-order-in-the-common-write-compiler--2026-10-27-0647-utc)
+records the current scheduling prior and remaining empirical-fitting work.

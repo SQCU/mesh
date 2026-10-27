@@ -1426,12 +1426,15 @@ static pybind11::capsule chain_completion(int64_t index) {
 static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> fused_writes_impl(
     MetalSchedule *schedule, const at::Tensor &send, const std::vector<at::Tensor> &landings,
     const std::vector<std::array<int, 2>> &pairs, int64_t comm, int64_t polls, int64_t repeats, int64_t stride,
-    int64_t row_bytes, int64_t rows, const std::optional<at::Tensor> &ready, int64_t ready_value) {
+    int64_t row_bytes, int64_t rows, const std::optional<at::Tensor> &ready, int64_t ready_value, int64_t tile_bytes) {
   TORCH_CHECK(landings.size() == pairs.size(), "fused writes: one landing lease per declared write");
   TORCH_CHECK(polls >= 0 && polls <= (int64_t)UINT32_MAX, "fused writes: polls is a 32-bit count of loads");
   TORCH_CHECK(repeats > 0 && repeats <= (int64_t)UINT32_MAX && stride >= 0,
               "fused writes: positive 32-bit frame count and nonnegative byte stride required");
   const ncclComm_t c = communicator(comm);
+  TORCH_CHECK(tile_bytes >= 0 && (!tile_bytes || (ready && repeats == 1 && rows == 0)),
+              "tiled writes require a contiguous publication family and its source words");
+  const size_t tiles = tile_bytes && send.nbytes() ? (send.nbytes()-1)/(size_t)tile_bytes+1 : 1;
   TORCH_CHECK(rows >= 0 && row_bytes >= 0 && (!rows || (row_bytes > 0 && stride >= row_bytes)),
               "affine writes need positive row bytes and a local pitch at least that large");
   const auto framed = [repeats, stride](const at::Tensor &tensor) {
@@ -1447,8 +1450,8 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
   const Operand out = g.moving(send);
   std::optional<Operand> produced;
   if (ready) {
-    TORCH_CHECK(ready->scalar_type() == at::kLong && ready->numel() == 1 && ready_value > 0,
-                "source readiness is one int64 region word with an explicit positive target");
+    TORCH_CHECK(ready->scalar_type() == at::kLong && (size_t)ready->numel() == tiles && ready->is_contiguous() && ready_value > 0,
+                "source readiness requires one contiguous int64 region word per tile and a positive target");
     produced = g.moving(*ready);
   }
   std::vector<Operand> in;
@@ -1459,9 +1462,18 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
                 "fused writes: landing extent and dtype must match the source");
   }
   PreparedWrites plans;
+  plans.prepare(comm, polls, repeats, rows ? 0 : stride);
+  const size_t binding_words=sizeof(ncclMeshBinding)/sizeof(uint64_t),record_words=1+plans.land.size()*binding_words;
+  std::vector<uint64_t> tile_landings(tile_bytes ? tiles*record_words : 0);
+  int rank=0;checked(ncclCommUserRank(c,&rank));
   plans.handles.resize(pairs.size(), nullptr);
   for (size_t i = 0; i < pairs.size(); i++) {
-    if (rows) {
+    if (tile_bytes) {
+      checked(mesh_compile_rows(out.at, (void *)in[i].at, send.nbytes(), 1, send.nbytes(),
+          pairs[i][0], pairs[i][1], c, 1, 0, mesh_write_layout{.tile_bytes=(size_t)tile_bytes,.instances=1,.invocations=1}, &plans.handles[i]));
+      if(rank==pairs[i][1])checked(ncclMeshWriteLandings(plans.handles[i],tile_landings.data(),(uint32_t)plans.land.size(),
+          ncclMeshTileLayout{.columns=tiles,.tile_stride=record_words*sizeof(uint64_t),.instances=1}));
+    } else if (rows) {
       TORCH_CHECK(out.type == ncclUint8 && out.count == (size_t)row_bytes,
                   "affine write bindings name the first row as a contiguous byte view");
       checked(mesh_compile_rows(out.at, (void *)in[i].at, (size_t)row_bytes, (size_t)rows, (size_t)stride,
@@ -1469,13 +1481,18 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
     } else checked(mesh_compile_write(out.at, (void *)in[i].at, out.count, out.type, pairs[i][0], pairs[i][1], c, 1,
                                       (uint32_t)repeats, (size_t)stride, 0, &plans.handles[i]));
     if (produced) checked(ncclMeshWriteSourceReady(plans.handles[i], produced->at, (uint64_t)ready_value,
-        ncclMeshTileLayout{.columns=1,.instances=1}));
+        ncclMeshTileLayout{.columns=tiles,.tile_stride=sizeof(uint64_t),.instances=1}));
   }
-  plans.prepare(comm, polls, repeats, rows ? 0 : stride);
   prepare_fused_writes(schedule,plans);
   std::vector<std::vector<uint64_t>> published, landed;
   for (uint32_t k = 0; k < plans.records.publishes; k++) published.emplace_back(plans.publish[k].begin(), plans.publish[k].end());
-  for (uint32_t k = 0; k < plans.records.lands; k++) landed.emplace_back(plans.land[k].begin(), plans.land[k].end());
+  if(tile_bytes) {
+    for(size_t t=0;t<tiles;t++)for(size_t k=0;k<plans.land.size();k++) {
+      const uint64_t *record=tile_landings.data()+t*record_words;
+      if(k<record[0])landed.emplace_back(record+1+k*binding_words,record+1+(k+1)*binding_words);
+      else landed.emplace_back(binding_words,0);
+    }
+  } else for (uint32_t k = 0; k < plans.records.lands; k++) landed.emplace_back(plans.land[k].begin(), plans.land[k].end());
   return {published, landed};
 }
 
@@ -1529,10 +1546,10 @@ struct ScheduleBinding {
   }
   auto writes(const at::Tensor &send,const std::vector<at::Tensor> &landings,
       const std::vector<std::array<int,2>> &pairs,int64_t comm,int64_t polls,int64_t repeats,int64_t stride,
-      int64_t row_bytes,int64_t rows,const std::optional<at::Tensor> &ready,int64_t ready_value) {
+      int64_t row_bytes,int64_t rows,const std::optional<at::Tensor> &ready,int64_t ready_value,int64_t tile_bytes) {
     operands.push_back(send);operands.insert(operands.end(),landings.begin(),landings.end());
     if(ready)operands.push_back(*ready);
-    return fused_writes_impl(schedule.get(),send,landings,pairs,comm,polls,repeats,stride,row_bytes,rows,ready,ready_value);
+    return fused_writes_impl(schedule.get(),send,landings,pairs,comm,polls,repeats,stride,row_bytes,rows,ready,ready_value,tile_bytes);
   }
   void collectives(const std::vector<Call> &calls,int64_t comm) {
     MetalScheduleCommunicator(schedule.get(),communicator(comm));

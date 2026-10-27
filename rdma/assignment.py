@@ -12,7 +12,8 @@ def declare(comm, calls, *, order=None):
     for index, call in enumerate(calls):
         row = {'group': index, 'repeat': 1, **call}
         for field, ctype in (('counts', 'size_t'), ('matrix', 'size_t'),
-                             ('contributors', 'uint64_t'), ('recipients', 'uint64_t')):
+                             ('contributors', 'uint64_t'), ('recipients', 'uint64_t'),
+                             ('production', 'ncclMeshProduction')):
             if row.get(field) is not None:
                 arrays.append(mesh.ffi.new(f'{ctype}[]', row[field]))
                 row[field] = arrays[-1]

@@ -41,7 +41,9 @@ kernel void product(device INPUT *X [[buffer(0)]], device INPUT *W [[buffer(1)]]
         columnGroups = (N+COLUMNS*COLUMN_GROUPS-1)/(COLUMNS*COLUMN_GROUPS), slot = tg.z*rowGroups+tg.x;
     threadgroup uint last[1];
     if (mesh_last_arrival<true>(arrivals, slot, columnGroups, local, last)) {
-        const ulong bytes = ulong(min(uint(ROWS*ROW_GROUPS), uint(M)-tg.x*ROWS*ROW_GROUPS))*N*sizeof(OUTPUT);
+        // The publication value is a marker shared by this family. The final
+        // short tile still transfers only its masked payload bytes.
+        const ulong bytes = ulong(min(uint(ROWS*ROW_GROUPS), uint(M)))*N*sizeof(OUTPUT);
         mesh_source_release(ready, slot, bytes, local);
         mesh_arrival_reset(arrivals, slot, local);
     }

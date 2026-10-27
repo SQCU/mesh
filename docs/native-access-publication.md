@@ -98,9 +98,9 @@ The DNN fold retains its row-tile dependencies. Native source publication is one
 Masked rows publish their own empty partials within the same producer.
 The PLE epilogue has no declared remote output.
 
-A channel still has FIFO ordering. Independent readiness words remove the false dependency
-on every producer tile finishing; they do not make a later descriptor overtake an earlier one.
-The routing compiler can choose a different order using the same interface.
+A channel still has FIFO ordering. Independent readiness words name each tile's data.
+The compiler orders descriptors from the producer records described below; a running
+descriptor list does not choose another tile when its next tile is unfinished.
 
 ## Earlier compile evidence
 
@@ -163,11 +163,72 @@ Dependency words, landing records, and actual DMA descriptors still scale with
 the independently live tiles and payload bindings. Those are data relationships,
 not duplicate routing problems. Numerical submission remains `MetalScheduleEnqueue`;
 there is no new tile loop, route lookup, allocation, or host wait in that submission.
-FIFO ordering remains item 5. The shared stream still limits a group to its configured
-`MESH_STREAM_ENTRIES`; this change removes duplicate plans, not that physical-list limit.
+Item 5's ordering change follows below. The shared stream still limits a group to its
+configured `MESH_STREAM_ENTRIES`; plan compaction does not remove that physical-list limit.
 Compact affine/page lowering remains item 8.
 
 The shared libraries, CFFI module, Torch extension and macOS 26 Swift/native/LiteRT
 rank compile. No numerical execution or performance measurement was made for this
 change. These builds establish integration of the changed interfaces, not a
 latency or useful-throughput result.
+
+## Producer order in the common WRITE compiler — 2026-10-27 06:47 UTC
+
+The former `ncclMeshCommWriteRelease` supplied one predicted time per rank.
+All tiles from that rank therefore looked equally ready. Ties followed the
+transfer array's payload order. A native head grid traverses rows within a
+head, while its output stores heads within a row. For two rows and three heads,
+the grid's order over logical output tiles is `0, 3, 1, 4, 2, 5`, rather than
+the memory order `0, 1, 2, 3, 4, 5`.
+
+That rank-wide interface is removed. `ncclMeshCall.production` supplies one
+`ncclMeshProduction` record per logical tile: predicted seconds relative to
+the group's producers and the producer's ordering ordinal. Native source ranks
+report their own records during graph realization. The merged declaration gives
+every rank the same source records. Python, MPI and Torch declarations consume
+that same C interface. Missing tile records fail preparation.
+
+Native head lowering supplies its row/head traversal, including shared K/V
+production. Attention supplies its vector traversal or its KV-head-group
+traversal. The current native seed declares zero time differences and uses these
+ordinals; it does not invent measured tile times. Masked rows and GPU scheduling
+can finish in a different order. Time predictions are compilation operands, not
+runtime delays or permission to send unfinished data.
+
+`mesh_write_order` combines those records with the selected physical paths,
+link capacities and streamed parent dependencies. It chooses the earliest
+predicted available cable slot, then the producer ordinal. Source and recipient
+use the same global ordering.
+Relay fragments retain their incoming-page dependencies. All WRITE groups now
+use that one schedule. The second `ordered_writes` copy, `write_plans` storage
+and fused/unfused schedule selection are removed.
+
+Fragment lookup uses a sorted index. Each cable's compiler heaps hold pending
+and predicted-ready fragments; each fragment enters and leaves each heap once.
+The order builder scans cable candidates rather than every remaining fragment.
+For `T` fragments and `E` directed cables, this ordering stage takes
+`O(T log T + T E)` work and `O(T + E)` storage, replacing its quadratic scans.
+These temporary compiler structures are absent from execution.
+Relay dependency construction also joins the compiler's disjoint, ordered
+incoming and outgoing tile intervals in one pass. It no longer compares each
+WRITE tile with every earlier tile.
+
+The DNN also declares one tiled WRITE family per peer pair and layer, rather
+than one group per row tile. Its matrix launch supplies row-tile order. The
+existing `fused.writes` adapter binds the family through the same page compiler;
+the fold still consumes individual tiles. Contributors can share a consumer's
+landing table. During preparation, the compiler reduces their records to the
+last required prefix on each physical cable. This removes duplicate dependency
+checks for that tile. The final short tile publishes the family's marker while
+its page masks still transfer only the useful bytes.
+
+These changes expose production order to route compilation and remove the
+per-tile group boundary. They do not solve whole-function empirical fitting or
+make a FIFO overtake unexpectedly late work. Section 7 still has to connect
+optimizer operands and complete-call observations. The physical group-entry
+limit remains explicit. No runtime scanner, host callback, ACK, payload staging
+or additional submission boundary is introduced.
+
+The C libraries, CFFI module, Torch extension and macOS 26 native/LiteRT rank
+build. Python source parses. Numerical execution and performance measurements
+remain deferred until the structural sequence is complete.

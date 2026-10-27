@@ -1,4 +1,4 @@
-"""Physical one-sided write bindings on torch's MPS stream.
+"""Physical one-sided write bindings on the shared native Metal schedule.
 
 All callers use the compiler's indexed source/destination writes. A kernel's
 constant block contains its words padded to an even count, then physical
@@ -42,7 +42,7 @@ def _words(addresses):
     return [w for a in addresses for w in (a & 0xFFFFFFFF, a >> 32)]
 
 
-def writes(schedule, send, landings, pairs, group, polls=0, *, repeats=1, stride=0, ready=None, ready_value=0):
+def writes(schedule, send, landings, pairs, group, polls=0, *, repeats=1, stride=0, ready=None, ready_value=0, tile_bytes=0):
     """Immutable routed writes, one landing lease per (source, destination).
 
     The producer releases every returned publication after making its operand.
@@ -63,9 +63,13 @@ def writes(schedule, send, landings, pairs, group, polls=0, *, repeats=1, stride
     the channel prefix. The producer calls mesh_source_release after this
     tile's stores. Distinct tiles own distinct words; no completion ordering
     between them is assumed. Relay readiness still follows incoming pages.
+    With ``tile_bytes``, one WRITE family covers the operand. ``ready`` has one
+    word per tile; ``land`` contains tile-major physical-channel bindings,
+    padded with null records. Contributions to the same tile share each
+    channel's last required prefix.
     """
     publish, land = schedule.writes(send, list(landings), list(pairs), group.handle,
-                                    int(polls), int(repeats), int(stride), 0, 0, ready, int(ready_value))
+                                    int(polls), int(repeats), int(stride), 0, 0, ready, int(ready_value), int(tile_bytes))
     return Crossing(tuple(map(tuple, publish)), tuple(map(tuple, land)))
 
 
@@ -79,7 +83,7 @@ def write_rows(schedule, send, landings, pairs, group, row_bytes, rows, stride):
     final landing bindings use repeat index zero.
     """
     publish, land = schedule.writes(send, list(landings), list(pairs), group.handle,
-                                    0, 1, int(stride), int(row_bytes), int(rows), None, 0)
+                                    0, 1, int(stride), int(row_bytes), int(rows), None, 0, 0)
     return Crossing(tuple(map(tuple, publish)), tuple(map(tuple, land)))
 
 def _encode_words(constants, channels, land, publish):
