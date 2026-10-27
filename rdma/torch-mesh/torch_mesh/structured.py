@@ -44,14 +44,14 @@ def _backward(ctx, grad):
 fwht.register_autograd(_backward, setup_context=_context)
 
 
-def prepare(x, signs, width):
-    from . import empty
+def prepare(x, signs, width, *, out=None):
+    from .placement import output
     import struct
-    y = empty(x.shape, dtype=x.dtype)
+    y = output(x.shape, x.dtype, x.device, out)
     maximum, _, _ = _stream.pipeline_facts(_kernel())
     threads = min(maximum, max(_stream.compilation['SIMD_WIDTH'], width // 2))
     blocks = x.shape[-1] // width
-    return y, [(_kernel(), [x, y, signs], {3: struct.pack('4I', width, blocks, 0, 0)},
+    return y, [(_kernel(), [x, y, signs], {3: struct.pack('7I', width, blocks, *x.stride(), *y.stride(), signs.stride(0))},
                 (x.shape[0] * blocks, 1, 1), (threads, 1, 1), False,
                 5 | (2 << _stream.compilation['ACCESS_WRITE_SHIFT']))] if x.numel() else []
 

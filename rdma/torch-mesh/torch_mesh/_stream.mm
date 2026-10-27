@@ -756,7 +756,7 @@ static std::map<std::tuple<int, int, int, int, int>, int64_t> linear_pipelines_;
 static constexpr const char *LINEAR_PARAMETERS[]={"device const half* x", "device const half* w", "device half* y", "device const half* b", "device const half* s"};
 constexpr size_t LINEAR_BINDINGS = sizeof(LINEAR_PARAMETERS) / sizeof(*LINEAR_PARAMETERS);
 constexpr size_t LINEAR_PRODUCTS = (MESH_BUFFER_BINDINGS - 1) / LINEAR_BINDINGS;
-struct LinearDimensions { uint32_t rows, inner, columns, bias, weight_stride, first, stride0, stride1; };
+struct LinearDimensions { uint32_t rows, inner, columns, bias, weight_stride, first, stride0, stride1, output_row, output_column; };
 struct LinearGroupWords {
   LinearDimensions dimensions[LINEAR_PRODUCTS];
   uint32_t first[LINEAR_PRODUCTS], activation[LINEAR_PRODUCTS];
@@ -793,7 +793,7 @@ static std::string linear_group_source(size_t products) {
     "threadgroup float part[NSG*MESH_LINEAR_ROWS*COLS];";
   for(size_t p=products;p-- > 0;) {
     const std::string n=std::to_string(p);
-    source+="if(tg>=g.first["+n+"]) { const linear_act_store store{y"+n+",b"+n+",g.d["+n+"].N,g.d["+n+"].B,g.act["+n+"]};"
+    source+="if(tg>=g.first["+n+"]) { const linear_act_store store{y"+n+",b"+n+",g.d["+n+"].LDY,g.d["+n+"].SDY,g.d["+n+"].B,g.act["+n+"]};"
       "linear_body<VW,VX,COLS,NSG,U>(x"+n+",s"+n+",w"+n+",g.d["+n+"],store,part,sg,lane,tg-g.first["+n+"],tid);return;}";
   }
   return source+"}\n";
@@ -831,19 +831,21 @@ static std::vector<CommandRecord> linear_commands(const std::vector<at::Tensor> 
     TORCH_CHECK(x.scalar_type() == at::kHalf && w.scalar_type() == at::kHalf && x.dim() == 2 && w.dim() == 2 && w.size(1) == K,
                 "torch_mesh::linears: product ", p, " takes fp16 x [R, K0], x1 [R, K - K0] and w [N, K]");
     TORCH_CHECK(x.stride(1)==1 && w.stride(1)==1 && (!x1s[p] || x1s[p]->stride(1)==1) &&
-        (!biases[p] || biases[p]->is_contiguous()) && ys[p].is_contiguous(),
+        (!biases[p] || biases[p]->is_contiguous()),
         "linear commands require declared row views; implicit contiguous copies are not supported");
     const at::Tensor &xc=x, &wc=w, &x1c=x1s[p]?*x1s[p]:x;
     const int64_t R = x.size(0), N = w.size(0), ldw = wc.stride(0), ld0 = xc.stride(0), ld1 = x1c.stride(0);
     buffers[LINEAR_BINDINGS * p] = xc, buffers[LINEAR_BINDINGS * p + 1] = wc, buffers[LINEAR_BINDINGS * p + 2] = ys[p];
     buffers[LINEAR_BINDINGS * p + 3] = biases[p] ? biases[p] : std::make_optional(ys[p]), buffers[LINEAR_BINDINGS * p + 4] = x1c;
     words.dimensions[p] = {(uint32_t)R, (uint32_t)K, (uint32_t)N, (uint32_t)bool(biases[p]),
-                           (uint32_t)ldw, (uint32_t)K0, (uint32_t)ld0, (uint32_t)ld1};
+                           (uint32_t)ldw, (uint32_t)K0, (uint32_t)ld0, (uint32_t)ld1,
+                           (uint32_t)ys[p].stride(0), (uint32_t)ys[p].stride(1)};
     words.first[p] = first; words.activation[p] = acts[p];
     first += linear_groups(R, N);
     least = std::min(least, K);
-    wide_w &= ldw % MESH_LINEAR_VECTOR == 0 && K0 % MESH_LINEAR_VECTOR == 0;
-    wide_x &= K0 % MESH_LINEAR_VECTOR == 0 && ld0 % MESH_LINEAR_VECTOR == 0 && ld1 % MESH_LINEAR_VECTOR == 0;
+    wide_w &= ldw % MESH_LINEAR_VECTOR == 0 && K0 % MESH_LINEAR_VECTOR == 0 && wc.storage_offset() % MESH_LINEAR_VECTOR == 0;
+    wide_x &= K0 % MESH_LINEAR_VECTOR == 0 && ld0 % MESH_LINEAR_VECTOR == 0 && ld1 % MESH_LINEAR_VECTOR == 0 &&
+              xc.storage_offset() % MESH_LINEAR_VECTOR == 0 && x1c.storage_offset() % MESH_LINEAR_VECTOR == 0;
   }
   const int64_t split = linear_fit(least, first);
   if(P==1) {

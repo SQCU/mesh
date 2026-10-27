@@ -247,8 +247,9 @@ __attribute__((always_inline)) static inline uint2 mesh_top(K key, uint lo, uint
 template <uint T, typename Z, typename Id, typename I>
 __attribute__((always_inline)) static inline bool mesh_retain(thread float &m, thread float &l, Z z, uint seed, uint key, Id id, uint head,
                                                               uint tail, uint lo, uint hi, uint lid, threadgroup uint *w, device I *ids,
-                                                              device float *zs) {
-    auto put = [&](uint i, uint c) { ids[i] = c == 0xffffffffu ? I(-1) : I(id(c)); zs[i] = c == 0xffffffffu ? -INFINITY : z(c); };
+                                                              device float *zs, ulong id_stride = 1, ulong value_stride = 1) {
+    auto put = [&](uint i, uint c) { ids[ulong(i) * id_stride] = c == 0xffffffffu ? I(-1) : I(id(c));
+                                  zs[ulong(i) * value_stride] = c == 0xffffffffu ? -INFINITY : z(c); };
     const uint2 top = mesh_top<T>(z, lo, hi, head, lid, w, put);
     mesh_top<T>([&](uint c) {
         const float x = z(c);
@@ -272,10 +273,11 @@ kernel void mesh_draw_rows(device const float *z [[buffer(0)]], device const uin
                lo = min(v, group.x * span), hi = min(v, lo + span);
     float best;
     uint c;
-    if (mesh_draw<T>(best, c, [&](uint i) { return z[ulong(r) * v + i]; }, words[1], keys[r], [&](uint i) { return first + i; }, cutoff[r],
+    if (mesh_draw<T>(best, c, [&](uint i) { return z[ulong(r) * words[5] + ulong(i) * words[6]]; }, words[1], keys[ulong(r) * words[7]],
+                     [&](uint i) { return first + i; }, cutoff[ulong(r) * words[8]],
                      lo, hi, lid, tv, tk, parts, (coherent(device) device uint *)(parts + groups.y * blocks), &arrivals[r],
                      r * blocks + group.x, blocks))
-        ids[r] = long(first + c);
+        ids[ulong(r) * words[4]] = long(first + c);
 }
 
 // argmax.py's retain: row group.y of z [rows, v] in one threadgroup, its H + M entries and log Z (words: v, seed).
@@ -286,8 +288,9 @@ kernel void mesh_retain_rows(device const float *z [[buffer(0)]], device const u
     threadgroup uint w[mesh_selection_words<T>];
     const uint v = words[0], r = group.y;
     float m, l;
-    if (mesh_retain<T>(m, l, [&](uint c) { return z[ulong(r) * v + c]; }, words[1], positions[r], [&](uint c) { return c; }, H, M, 0, v, lid,
-                       w, ids + ulong(r) * (H + M), kept + ulong(r) * (H + M)))
-        log_z[r] = m + log(l);
+    if (mesh_retain<T>(m, l, [&](uint c) { return z[ulong(r) * words[7] + ulong(c) * words[8]]; }, words[1], positions[ulong(r) * words[9]],
+                       [&](uint c) { return c; }, H, M, 0, v, lid,
+                       w, ids + ulong(r) * words[2], kept + ulong(r) * words[4], words[3], words[5]))
+        log_z[ulong(r) * words[6]] = m + log(l);
 }
 #endif

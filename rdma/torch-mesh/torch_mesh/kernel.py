@@ -44,9 +44,13 @@ def pipeline(source, name, instance):
     return _stream.pipeline(Path(__file__).with_name(source).read_text() + '\n' + instance, name)
 
 
-def prepare(inputs, input_slots, output_slots, shapes, dtypes, source, name, instance, words, constant_slot, grid, threads):
+def prepare(inputs, input_slots, output_slots, shapes, dtypes, source, name, instance, words, constant_slot, grid, threads, *, outputs=None):
     from . import _stream, empty
-    results = [empty(shape, dtype=getattr(torch, dtype), device=inputs[0].device) for shape, dtype in zip(shapes, dtypes)]
+    from .placement import output
+    results = [output(shape, getattr(torch, dtype), inputs[0].device, out)
+               for shape, dtype, out in zip(shapes, dtypes, outputs if outputs is not None else [None] * len(shapes), strict=True)]
+    if any(not value.is_contiguous() for value in results):
+        raise ValueError('opaque native kernel layout is fixed by its declaration; supply its output strides in the kernel interface')
     if any(v == 0 for v in grid):
         return results, []
     count = max([constant_slot, *input_slots, *(i for slots in output_slots for i in slots)]) + 1

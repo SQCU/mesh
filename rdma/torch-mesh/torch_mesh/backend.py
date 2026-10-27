@@ -410,31 +410,30 @@ def prepare_fragments(bindings, group):
     return _stream.Collectives(calls, group.handle, operands), [call for call, _, _ in bindings]
 
 
-def bind_gather_views(source, output, dim, sizes, group):
+def bind_gather_views(gathers, group):
     """Original producer views to final recipient views through indexed WRITEs.
 
-    A caller can produce in its final local slice. Otherwise its mathematical
-    local placement is a declared numerical copy, compiled with the ordinary
-    graph compiler. There is no packed send tensor or received-data copy-back.
+    Preparation binds the producer to its final local slice. This interface
+    cannot insert a numerical copy or a second executor to repair placement.
     """
-    from .declarations import Function
-    dim %= output.ndim
-    slices = list(output.split(sizes, dim))
-    own = slices[group.rank()]
-    placed = (torch._C._is_alias_of(source, own) and source.storage_offset() == own.storage_offset()
-              and tuple(source.stride()) == tuple(own.stride()))
-    local = None if placed else Function(lambda x, out: out.copy_(x), source, own)
+    from .placement import same_view
     deliveries = []
-    for a, segment in enumerate(slices):
-        if segment.numel() == 0:
-            continue
-        for b in range(group.size()):
-            if a == b:
+    for source, output, dim, sizes in gathers:
+        dim %= output.ndim
+        slices = list(output.split(sizes, dim))
+        own = slices[group.rank()]
+        if not same_view(source, own):
+            raise ValueError('gather producer must be bound to its final local output slice')
+        for a, segment in enumerate(slices):
+            if segment.numel() == 0:
                 continue
-            view = (source if group.rank() == a else segment if group.rank() == b else
-                    empty(segment.numel() * segment.element_size(), dtype=torch.uint8, device=source.device.type))
-            deliveries.append((view, a, b))
-    return (group.prepare_writes(deliveries) if deliveries else None), local
+            for b in range(group.size()):
+                if a == b:
+                    continue
+                view = (source if group.rank() == a else segment if group.rank() == b else
+                        empty(segment.numel() * segment.element_size(), dtype=torch.uint8, device=source.device.type))
+                deliveries.append((view, a, b))
+    return group.prepare_writes(deliveries) if deliveries else None
 
 
 def bind_scatter_views(source, output, dim, sizes, reduction, group):

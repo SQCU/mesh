@@ -82,28 +82,34 @@ def retain(z, seed, positions, head=_stream.compilation['KEPT_HEAD'], tail=_stre
     return ids.reshape(*z.shape[:-1], -1), kept.reshape(*z.shape[:-1], -1), log_z.reshape(z.shape[:-1])
 
 
-def prepare_draw(z, keys, cutoff, seed, first):
+def prepare_draw(z, keys, cutoff, seed, first, *, out=None):
     from . import empty
     from .engines import host
     import struct
     rows, width = z.shape
     blocks = max(1, min(_stream.compilation['DRAW_MAX_BLOCKS'], width // _stream.compilation['DRAW_COLUMNS_PER_BLOCK']))
-    ids = empty((rows,), dtype=torch.int64)
+    from .placement import output
+    ids = output((rows,), torch.int64, z.device, out)
     parts, arrivals = empty((2 * rows * blocks,)), empty((rows,), dtype=torch.int32)
     host(arrivals).zero_()
     record = (_kernel('mesh_draw_rows'), [z, keys, cutoff, ids, parts, arrivals],
-              {6: struct.pack('4I', width, seed & 0xffffffff, first & 0xffffffff, blocks)}, (blocks, rows, 1), (THREADS, 1, 1), False,
+              {6: struct.pack('9I', width, seed & 0xffffffff, first & 0xffffffff, blocks,
+                              ids.stride(0), *z.stride(), keys.stride(0), cutoff.stride(0))}, (blocks, rows, 1), (THREADS, 1, 1), False,
               7 | (56 << _stream.compilation['ACCESS_WRITE_SHIFT']))
     return ids, [record] if rows else []
 
 
-def prepare_retain(z, keys, seed, head, tail):
+def prepare_retain(z, keys, seed, head, tail, *, outputs=None):
     from . import empty
     import struct
     rows, width = z.shape
-    ids = empty((rows, head + tail), dtype=torch.int64)
-    kept, log_z = empty((rows, head + tail)), empty((rows,))
+    from .placement import output
+    ids, kept, log_z = [output(shape, dtype, z.device, out) for shape, dtype, out in
+                       zip(((rows, head + tail), (rows, head + tail), (rows,)),
+                           (torch.int64, torch.float32, torch.float32),
+                           outputs if outputs is not None else (None, None, None), strict=True)]
     record = (_kernel('mesh_retain_rows', head, tail), [z, keys, ids, kept, log_z],
-              {5: struct.pack('2I', width, seed & 0xffffffff)}, (1, rows, 1), (THREADS, 1, 1), False,
+              {5: struct.pack('10I', width, seed & 0xffffffff, *ids.stride(), *kept.stride(), log_z.stride(0),
+                              *z.stride(), keys.stride(0))}, (1, rows, 1), (THREADS, 1, 1), False,
               3 | (28 << _stream.compilation['ACCESS_WRITE_SHIFT']))
     return (ids, kept, log_z), [record] if rows else []

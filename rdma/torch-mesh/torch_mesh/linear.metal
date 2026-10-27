@@ -13,7 +13,7 @@
 #include <metal_stdlib>
 using namespace metal;
 
-struct linear_dims { uint R, K, N, B, LDW, K0, LD0, LD1; };
+struct linear_dims { uint R, K, N, B, LDW, K0, LD0, LD1, LDY, SDY; };
 
 template <uint V> inline vec<float, MESH_LINEAR_VECTOR> linear_load(device const half* p);
 template <> inline vec<float, MESH_LINEAR_VECTOR> linear_load<MESH_LINEAR_VECTOR>(device const half* p) { return vec<float, MESH_LINEAR_VECTOR>(*(device const vec<half, MESH_LINEAR_VECTOR>*)p); }
@@ -89,10 +89,10 @@ template <uint ACT>
 struct linear_store {
     device half* y;
     device const half* bias;
-    uint N, B;
+    uint LDY, SDY, B;
     void operator()(uint r, uint n, float s) const {
         const float v = s + (B ? float(bias[n]) : 0.0f);
-        y[ulong(r) * N + n] = half(ACT == 1 ? tanh(v) : v);
+        y[ulong(r) * LDY + ulong(n) * SDY] = half(ACT == 1 ? tanh(v) : v);
     }
 };
 
@@ -103,17 +103,17 @@ kernel void linear_rows(device const half* x [[buffer(0)]], device const half* w
                         uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
                         uint tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
     threadgroup float part[NSG * MESH_LINEAR_ROWS * COLS];
-    const linear_store<ACT> store{y, bias, d.N, d.B};
+    const linear_store<ACT> store{y, bias, d.LDY, d.SDY, d.B};
     linear_body<VW, VX, COLS, NSG, U>(x, x1, w, d, store, part, sg, lane, tg, tid);
 }
 
 struct linear_act_store {
     device half* y;
     device const half* bias;
-    uint N, B, ACT;
+    uint LDY, SDY, B, ACT;
     void operator()(uint r, uint n, float s) const {
         const float v = s + (B ? float(bias[n]) : 0.0f);
-        y[ulong(r) * N + n] = half(ACT == 1 ? tanh(v) : v);
+        y[ulong(r) * LDY + ulong(n) * SDY] = half(ACT == 1 ? tanh(v) : v);
     }
 };
 
@@ -141,7 +141,7 @@ kernel void linear_publish(device const half* x [[buffer(0)]], device const half
     threadgroup uint last;
     for (uint q = 0; q < CHANNELS; q++) if (p.publish[q].p)
         mesh_step_enter(*p.publish[q].p, p.publish[q].v, p.publish[q].progress, tg == 0 && tid == 0);
-    const linear_dims d = {p.R, p.K, p.N, 0, p.LDW, p.K0, p.LD0, p.LD1};
+    const linear_dims d = {p.R, p.K, p.N, 0, p.LDW, p.K0, p.LD0, p.LD1, p.N, 1};
     const linear_step_store store{send, p.N};
     linear_body<VW, VX, COLS, NSG, U>(x, x1, w, d, store, part, sg, lane, tg, tid);
     threadgroup_barrier(mem_flags::mem_device);

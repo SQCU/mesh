@@ -37,9 +37,11 @@ write planner; its staging buffer, `placeColumnsCommand` and `place_columns` ker
 The coded drafter now produces natural columns and binds their indexed final views to that same
 planner. Its staging tensor and `mesh_draft_place` permutation kernel are deleted. FX ragged
 gathers also bind source and final recipient views; their `gather_land` kernel and fused-copy
-rewrite are deleted. The LSTM produces its local columns in the final state tensor. A separately
-supplied source still requires its ordinary local placement into a distinct local result; there
-is no remote receive-and-copy-back substitute. Fused reductions retain their numerical fold.
+rewrite are deleted. The LSTM produces its local columns in the final state tensor.
+Updated 2026-10-27T05:44:06Z: FX gather destinations now reach producer compilation before any
+numerical span is lowered. The remaining local-copy `Function` in `bind_gather_views` is removed.
+A separately supplied source must already occupy its final local slice; preparation rejects a
+distinct local source instead of constructing a copy. Fused reductions retain their numerical fold.
 
 TP, EP and CP declare whole functions. The CP example supplies compiler crossing indices.
 Hourly workload bodies live in `mesh/examples`; the hourly supplies configurations. The former
@@ -161,6 +163,15 @@ destination allocations and inserted output `copy_` operations are removed; outp
 Preparation compiled a causal training graph at the TP example's `[2, 5, 1024, 128]` shape with a collective
 boundary and an aliased result, as well as rectangular query/key/value shapes. No numerical work was
 submitted, so this records integration and compilation evidence, not attained latency or bandwidth.
+
+Updated 2026-10-27T05:44:06Z: the remaining gather-local copy is removed from
+`backend.bind_gather_views`. `Function.declare(..., destinations=...)` passes fixed output operands
+through functionalization to native IR and numerical builders. Gather binding now handles ragged,
+standard and coalesced declarations with the same WRITE interface. The small-row linear kernel keeps
+its algorithm while writing to strided final slices. No payload wrapper or second scheduler was added.
+Non-affine relocation, a proper subset of a larger producer, and opaque kernels without output-layout
+operands remain explicit preparation limits. See [the compiler reference](../docs/compiler-pipeline.md)
+for those limits and the compilation-only validation.
 
 ### R05. Coded-matrix calls that choose and allocate while executing
 

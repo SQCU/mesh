@@ -10,7 +10,7 @@ kernel void scan_blocks(device const INPUT *source [[buffer(0)]], device OUTPUT 
     ACCUM total;
     const ACCUM prefix = mesh_prefix_sum<THREADS>(value, lid, sums, total);
     if constexpr (BLOCKS > 1) {
-        if (column < EXTENT) partial[at] = prefix;
+        if (column < EXTENT) partial[partial_base(block.y) + column * PARTIAL_STRIDE] = prefix;
         if (lid == 0) totals[ulong(block.y) * BLOCKS + block.x] = total;
     } else if (column < EXTENT) output[at] = OUTPUT(prefix);
 }
@@ -22,6 +22,6 @@ kernel void add_prefix(device OUTPUT *output [[buffer(0)]], device const ACCUM *
     if (column < EXTENT) {
         const ulong at = output_base(block.y) + column * OUTPUT_STRIDE;
         const ACCUM before = block.x ? prefix[ulong(block.y) * BLOCKS + block.x - 1] : ACCUM(0);
-        output[at] = OUTPUT(before + partial[at]);
+        output[at] = OUTPUT(before + partial[partial_base(block.y) + column * PARTIAL_STRIDE]);
     }
 }

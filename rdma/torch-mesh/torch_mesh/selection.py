@@ -18,7 +18,7 @@ def pipelines(definitions, offsets, names):
     return tuple(_stream.pipeline(source, name) for name in names)
 
 
-def topk(x, k, dim=-1, largest=True, sorted=True):
+def topk(x, k, dim=-1, largest=True, sorted=True, *, outputs=None):
     """Values, indices and prepared commands. Views bind without packing."""
     kinds = {torch.float16: 'half', torch.bfloat16: 'bfloat', torch.float32: 'float'}
     if x.dtype not in kinds or not x.ndim:
@@ -26,7 +26,9 @@ def topk(x, k, dim=-1, largest=True, sorted=True):
     dim %= x.ndim
     shape = list(x.shape)
     shape[dim] = k
-    values, indices = empty(shape, dtype=x.dtype), empty(shape, dtype=torch.int64)
+    from .placement import output
+    values, indices = [output(shape, dtype, x.device, out) for dtype, out in
+                       zip((x.dtype, torch.int64), outputs if outputs is not None else (None, None), strict=True)]
     rows = math.prod(x.shape[:dim] + x.shape[dim + 1:])
     if not k or not rows:
         return (values, indices), []
@@ -37,11 +39,12 @@ def topk(x, k, dim=-1, largest=True, sorted=True):
     pad = 1 << (k - 1).bit_length()
     words = (1 << geometry['SELECTION_RADIX_BITS']) + geometry['SELECTION_STATE_WORDS'] + threads // geometry['SIMD_WIDTH']
     local = sorted and (pad + words) * struct.calcsize('I') <= memory
-    definitions = dict(INPUT=kinds[x.dtype], INPUT_STRIDE=x.stride(dim), OUTPUT_STRIDE=values.stride(dim),
+    definitions = dict(INPUT=kinds[x.dtype], INPUT_STRIDE=x.stride(dim), OUTPUT_STRIDE=values.stride(dim), INDEX_STRIDE=indices.stride(dim),
                        EXTENT=x.shape[dim], COUNT=k, PAD=pad, THREADS=threads,
                        LARGEST=int(largest), SORTED=int(sorted), LOCAL=int(local))
 
-    offsets = row_offset('source_base', x.shape, x.stride(), dim) + row_offset('output_base', x.shape, values.stride(), dim)
+    offsets = (row_offset('source_base', x.shape, x.stride(), dim) + row_offset('output_base', shape, values.stride(), dim)
+               + row_offset('index_base', shape, indices.stride(), dim))
     external = sorted and not local
     names = ('select_top', 'order_top', 'write_top') if external else ('select_top',)
     handles = pipelines(tuple(definitions.items()), offsets, names)

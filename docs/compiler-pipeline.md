@@ -43,12 +43,47 @@ remain batched; GPU-only spans keep compact ranges without constructing the host
 dependency graph. This changes our scheduling machinery, not the internals of
 Accelerate or Core ML.
 
-Collective marks still have an opaque access interface here. They preserve their
-declared order and join preceding host work. Removing that conservative boundary
-belongs to the outstanding collective placement/access integration. Graph
-placement, publication, access, feedback and backend integration remain in the
-correction sequence. These are structural changes, not measured performance
-claims; numerical execution remains deferred until that sequence is complete.
+The third correction passes gather destinations backward through graph preparation.
+`BoundGraph` resolves final outputs in reverse collective order before compiling
+numerical spans. Each producer receives its final local slice as an output operand.
+Ragged, standard and coalesced FX gathers bind the same indexed WRITEs. Coalesced
+gathers retain one declared group. `bind_gather_views` no longer constructs a local
+`Function(...copy_...)` or returns a second numerical executor.
+
+`Function.declare`, `declare_graph` and `compiler` accept `destinations`: one tensor
+or `None` per flattened result. These operands reach the existing numerical builders
+and generated kernel allocations. The native IR assigns the output layout before
+lowering consumers. Aliases of a placed producer become views directly, without
+an upstream view-packing or buffer-copy helper. `placement.py` and `views.rebase`
+carry the relation with integer shape, stride and offset arithmetic. This calculation
+depends on dimension count, not element count. All of it runs during preparation.
+
+The small-row and grouped linear kernels now receive output row and column strides;
+placement into a gathered column slice does not discard those kernels. Selection,
+scan, sampling and structured-transform builders accept output operands as well.
+Top-k values and indices have separate layouts. Scan partial sums have their own
+layout when their accumulation width differs from the output width. Linear vector
+loads also account for the original views' storage offsets.
+
+A value supplied by the caller has no producer to relocate. Its gather input must
+already be the local slice of the supplied final output. Conflicting destinations,
+or aliases that cannot fit in one affine view, fail preparation. Relocating a proper
+subset while retaining the rest of a larger producer requires producer-domain
+splitting; this pass does not invent that split. Opaque coded-kernel declarations
+still have fixed output layouts: they accept matching destinations and reject a
+different stride until their builders supply that layout explicitly. Their general
+layout integration remains in item 9.
+
+Collective marks still have an opaque access interface in the shared scheduler.
+They preserve their declared order and join preceding host work. Removing that
+conservative boundary remains part of collective access integration. Publication,
+access, feedback and backend integration follow in the correction sequence.
+
+Validation for the placement edit: Python source parses, the Torch extension and
+Swift/LiteRT rank build, and the changed Metal templates compile through the library's
+pipeline compiler. The ordinary linear declaration compiles into a supplied strided
+output. No numerical commands, correctness suite, hourly or performance measurement
+ran. These are structural changes, not measured performance claims.
 
 ## Transformations applied to PyTorch descriptions
 
@@ -59,7 +94,8 @@ claims; numerical execution remains deferred until that sequence is complete.
    the collective operators into common calls: participants, counts, dimensions and reduction types.
 3. `BoundGraph` separates numerical spans at collective boundaries, coalesces duplicate tensor attributes,
    and removes functional `wait_tensor` nodes. Native preparation retains their data relationships.
-   Numerical outputs bind directly to consumers, including output aliases.
+   Gather destinations are resolved backward before numerical lowering. Producers write into their final
+   local output slices; output aliases preserve the chosen physical layouts.
 4. `torch_mesh.compiler` lifts captured tensor attributes into explicit operands. These include weights,
    constants and prebound destinations, so functionalization can see their storage relationships.
 5. The compiler functionalizes mutations and extends the selected PyTorch decomposition table with the

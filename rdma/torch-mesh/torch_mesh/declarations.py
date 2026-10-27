@@ -139,7 +139,7 @@ def lower(graph, *, forms=None):
         elif name in ('broadcast', 'broadcast_'):
             calls = [backend.Call(backend.BROADCAST, x.numel(), x.dtype, root=args['src'])]
         elif name in ('all_gather_into_tensor', 'all_gather_into_tensor_out'):
-            calls = [backend.Call(backend.ALLGATHER, x.numel() * n, x.dtype, counts=[x.numel()] * n)]
+            calls = partition.gathered(x, 0, [x.shape[0]] * n, group)
         elif name == 'reduce_scatter_tensor':
             if x.numel() % n:
                 raise ValueError('reduce-scatter metadata is not divisible by the group size')
@@ -157,7 +157,7 @@ def lower(graph, *, forms=None):
                 if name == 'all_reduce_coalesced':
                     calls.append(backend.Call(backend.ALLREDUCE, tensor.numel(), tensor.dtype, op=_operation(reduction)))
                 elif name == 'all_gather_into_tensor_coalesced':
-                    calls.append(backend.Call(backend.ALLGATHER, tensor.numel() * n, tensor.dtype, counts=[tensor.numel()] * n))
+                    calls.extend(partition.gathered(tensor, 0, [tensor.shape[0]] * n, group))
                 else:
                     calls.append(backend.Call(backend.REDUCE_SCATTER, tensor.numel(), tensor.dtype,
                                                counts=[tensor.numel() // n] * n, op=_operation(reduction)))
@@ -294,6 +294,20 @@ def sections(module, cuts):
         yield torch.fx.GraphModule(module, graph), tuple(inputs), tuple(outputs)
 
 
+def _gathers(target, named, outputs, group):
+    """Gather sources and final views, independent of the frontend spelling."""
+    name = target._schema.name.split('::', 1)[1]
+    from torch.utils._pytree import tree_flatten
+    destinations = [named['out']] if named.get('out') is not None else tree_flatten(outputs)[0]
+    if name in ('allgatherv', 'allgatherv_out'):
+        return [(named['x'], destinations[0], named['dim'], named['sizes'])]
+    if name in ('all_gather_into_tensor', 'all_gather_into_tensor_out', 'all_gather_into_tensor_coalesced'):
+        sources = named['inputs'] if name.endswith('_coalesced') else [named['input']]
+        return [(source, destination, 0, [source.shape[0]] * group.size())
+                for source, destination in zip(sources, destinations, strict=True)]
+    return None
+
+
 class BoundGraph:
     """Configuration-time binding of ordinary collective graph boundaries.
 
@@ -301,10 +315,12 @@ class BoundGraph:
     that region and its final output. There is no eager transport call in the
     generated execution sequence. Numerical spans use the existing compiler.
     """
-    def __init__(self, graph, arguments, group, configuration):
+    def __init__(self, graph, arguments, group, configuration, destinations=None):
         from torch.fx.node import map_arg
         from torch.utils._pytree import tree_map, tree_flatten
         from . import backend, empty
+        from .native import empty_strided
+        from .placement import Placements, alias, same_view
         # Waiting on a functional collective describes its result edge. The
         # prepared native binding already supplies that stream dependency.
         attributes = {}
@@ -328,6 +344,36 @@ class BoundGraph:
                 for name in node.target.split('.'):
                     value = getattr(value, name)
                 values[node] = value
+        placements, inputs_placed = Placements(), Placements()
+        for node, value in values.items():
+            for described, actual in zip(tree_flatten(_value(node))[0], tree_flatten(value)[0], strict=True):
+                if isinstance(described, torch.Tensor):
+                    inputs_placed.bindings.append((described, actual))
+        result = next(n.args[0] for n in graph.graph.nodes if n.op == 'output')
+        if destinations is not None:
+            for described, destination in zip(tree_flatten(map_arg(result, _value))[0], destinations, strict=True):
+                if destination is not None:
+                    placements.bind(described, destination)
+        # Solve from recipients back to producers before compiling any span.
+        # A gather which feeds another gather inherits that gather's local view.
+        for node in reversed(list(graph.graph.nodes)):
+            if not _bound(node):
+                continue
+            target, named = operation(node)
+            native = dist.distributed_c10d._resolve_process_group(named['group_name'])
+            for source, described, dim, sizes in _gathers(target, named, _value(node), native) or ():
+                destination = placements.get(described)
+                if destination is None:
+                    destination = inputs_placed.get(described)
+                if destination is None:
+                    destination = empty_strided(tuple(described.shape), tuple(described.stride()),
+                                                described.dtype, described.device.type)
+                placements.bind(described, destination)
+                own = destination.narrow(dim, sum(sizes[:native.rank()]), sizes[native.rank()])
+                supplied = inputs_placed.get(source)
+                if supplied is not None and not same_view(supplied, own):
+                    raise ValueError('a gather input supplied by the caller must already occupy its final local slice')
+                placements.bind(source, own)
         for module, inputs, exported in sections(graph, cuts):
             args = tuple(values[node] for node in inputs)
             live = {n: v for n, v in zip((n for n in module.graph.nodes if n.op == 'placeholder'), args)}
@@ -345,10 +391,12 @@ class BoundGraph:
                 def bind(metadata):
                     if not isinstance(metadata, torch.Tensor):
                         return metadata
+                    destination = placements.get(metadata)
+                    if destination is not None:
+                        return destination
                     for described, value in aliases:
                         if torch._C._is_alias_of(metadata, described):
-                            return value.as_strided(tuple(metadata.shape), tuple(metadata.stride()),
-                                value.storage_offset() + metadata.storage_offset() - described.storage_offset())
+                            return alias(described, value, metadata)
                     return empty(tuple(metadata.shape), dtype=metadata.dtype, device=metadata.device.type)
                 return tree_map(bind, _value(n))
             crossing = next((n for n in module.graph.nodes if _bound(n)), None)
@@ -356,13 +404,11 @@ class BoundGraph:
                 # Keep the graph and its one FakeTensor shape environment.
                 # Retracing a split graph creates a second set of symbols
                 # for the same internal values and loses their bindings.
-                # Native preparation already assigns region storage. Bind
-                # the next consumer to those outputs, including aliases;
-                # no separate destination or publication copy is needed.
                 from torch.utils._pytree import tree_unflatten
                 made = Function(module, *args, configuration=configuration)
                 made.output_spec = tree_flatten(tree_map(_value, outputs))[1]
-                made.declare_graph(module, group)
+                destinations = [placements.get(value) for value in tree_flatten(tree_map(_value, outputs))[0]]
+                made.declare_graph(module, group, destinations=destinations)
                 targets = tree_unflatten(tree_flatten(made.execution.output)[0], made.output_spec)
                 self.steps.append(made)
                 declarations = made.groups
@@ -376,17 +422,11 @@ class BoundGraph:
                 named = {a.name: actual[i] if i < len(actual) else keywords.get(a.name, a.default_value)
                          for i, a in enumerate(target._schema.arguments)}
                 source = named.get('input', named.get('x', named.get('self', named.get('partials'))))
-                gather = target in (torch.ops.torch_mesh.allgatherv.default, torch.ops.torch_mesh.allgatherv_out.default)
                 native = dist.distributed_c10d._resolve_process_group(metadata['group_name'])
                 declarations = lower(module)
-                if gather:
-                    destination = named.get('out')
-                    if destination is None:
-                        destination = tree_flatten(targets)[0][0]
-                    prepared, local = backend.bind_gather_views(source, destination, named['dim'], named['sizes'], native)
-                    if local is not None:
-                        local.declare(None)
-                        self.steps.append(local)
+                gathers = _gathers(target, named, targets, native)
+                if gathers is not None:
+                    prepared = backend.bind_gather_views(gathers, native)
                     if prepared is not None:
                         self.steps.append(prepared)
                     for name, calls in declarations.items():
@@ -434,7 +474,7 @@ class Function:
         self.graph, self.groups, self.run, self.output_spec = None, {}, None, None
         self.execution = None
 
-    def declare(self, group):
+    def declare(self, group, *, destinations=None):
         from functools import partial
         from torch.utils._pytree import tree_flatten
         from torch.distributed.tensor import DTensor
@@ -447,19 +487,19 @@ class Function:
             return (*values, *gradients)
 
         graph, declarations = trace(recorded, *self.arguments, parameters=self.parameters)
-        return self.declare_graph(graph, group, declarations)
+        return self.declare_graph(graph, group, declarations, destinations=destinations)
 
-    def declare_graph(self, graph, group, declarations=None):
+    def declare_graph(self, graph, group, declarations=None, *, destinations=None):
         """Compile an existing complete graph without retracing its operators."""
         from functools import partial
         declarations = lower(graph) if declarations is None else declarations
         if any(_bound(node) for node in graph.graph.nodes):
-            prepared = BoundGraph(graph, self.arguments, group, self.configuration)
+            prepared = BoundGraph(graph, self.arguments, group, self.configuration, destinations)
             self.graph, self.groups, self.execution = graph, prepared.groups, prepared.execution
         else:
             from . import compiler
             with torch.no_grad():
-                program = compiler(graph, list(self.arguments), configuration=self.configuration)
+                program = compiler(graph, list(self.arguments), configuration=self.configuration, destinations=destinations)
             self.graph, self.groups = graph, declarations
             self.execution = execution_sequence([program], program.output)
         self.run = self.execution.forward

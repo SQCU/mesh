@@ -4,13 +4,13 @@
 #include <metal_stdlib>
 using namespace metal;
 kernel void fwht(device const float *x [[buffer(0)]], device float *y [[buffer(1)]], device const float *sign [[buffer(2)]],
-                 constant uint4 &dims [[buffer(3)]], uint block [[threadgroup_position_in_grid]],
+                 constant uint *dims [[buffer(3)]], uint block [[threadgroup_position_in_grid]],
                  uint t [[thread_position_in_threadgroup]], uint threads [[threads_per_threadgroup]]) {
   threadgroup float v[4096];
-  const uint N = dims.x, blocks_per_row = dims.y;
-  const ulong base = ulong(block) * N;
+  const uint N = dims[0], blocks_per_row = dims[1], row = block / blocks_per_row;
   const uint offset = (block % blocks_per_row) * N;
-  for (uint i = t; i < N; i += threads) v[i] = x[base + i] * sign[offset + i];
+  for (uint i = t; i < N; i += threads)
+    v[i] = x[ulong(row) * dims[2] + ulong(offset + i) * dims[3]] * sign[ulong(offset + i) * dims[6]];
   threadgroup_barrier(mem_flags::mem_threadgroup);
   for (uint h = 1; h < N; h <<= 1) {
     for (uint i = t; i < N / 2; i += threads) {
@@ -22,5 +22,5 @@ kernel void fwht(device const float *x [[buffer(0)]], device float *y [[buffer(1
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
   const float scale = rsqrt(float(N));
-  for (uint i = t; i < N; i += threads) y[base + i] = v[i] * scale;
+  for (uint i = t; i < N; i += threads) y[ulong(row) * dims[4] + ulong(offset + i) * dims[5]] = v[i] * scale;
 }

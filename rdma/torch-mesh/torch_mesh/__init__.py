@@ -25,13 +25,13 @@ def _autoload():
     from . import backend  # noqa: F401
 
 
-def compiler(gm, example_inputs, *, configuration=None):
+def compiler(gm, example_inputs, *, configuration=None, destinations=None):
     from .compilation import bind
     with bind(configuration):
-        return _compile(gm, example_inputs)
+        return _compile(gm, example_inputs, destinations)
 
 
-def _compile(gm, example_inputs):
+def _compile(gm, example_inputs, destinations):
     """Lower a declared whole function to the shared native command records.
 
     Torch supplies the graph and tensor metadata. Mathematical fusion and Metal
@@ -47,11 +47,11 @@ def _compile(gm, example_inputs):
     aten = torch.ops.aten
 
     def rows(x, w):
-        """Whether x @ w is linear's: on MPS (its one implementation), fp16, x [R, K] contiguous, w the transposed
+        """Whether x @ w is linear's: on MPS (its one implementation), fp16, x [R, K] in row views, w the transposed
         view of a [N, K] whose rows lie apart by K or more."""
         x, w = x.meta.get('val'), w.meta.get('val')
         return (x is not None and w is not None and x.device.type == 'mps' and x.dtype == w.dtype == torch.half and x.dim() == w.dim() == 2
-                and x.is_contiguous() and w.stride(0) == 1 and w.stride(1) >= w.shape[0])
+                and x.stride(1) == 1 and w.stride(0) == 1 and w.stride(1) >= w.shape[0])
 
     def joined(x):
         """The two fp16 rows-segments x is the cat of along its last dimension, where that cat has no other use."""
@@ -170,7 +170,7 @@ def _compile(gm, example_inputs):
         lowered.recompile()
     rewrite(lowered.graph)
     lowered.recompile()
-    return compile_graph(lowered, tree_flatten(inputs)[0], tree_flatten(operands)[0])
+    return compile_graph(lowered, tree_flatten(inputs)[0], tree_flatten(operands)[0], destinations=destinations)
 
 
 def empty(*size, dtype=None, device='mps'):

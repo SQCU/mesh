@@ -65,10 +65,11 @@ def linear(x, w, bias=None, act=0, x1=None, *, out=None):
 
 
 def linears(xs, ws, biases, acts, x1s, *, outputs=None):
-    outputs = outputs if outputs is not None else [empty_strided((x.shape[0], w.shape[0]), (w.shape[0], 1), x.dtype, x.device)
-                                                   for x, w in zip(xs, ws)]
+    from .placement import output
+    outputs = [output((x.shape[0], w.shape[0]), x.dtype, x.device, out)
+               for x, w, out in zip(xs, ws, outputs if outputs is not None else [None] * len(xs), strict=True)]
     if all(x.dtype == w.dtype == torch.half and x.shape[0] <= compiler_operands()['LINEAR_ROW_CROSSOVER'] and x.stride(1) == w.stride(1) == 1
-           and (part is None or part.stride(1) == 1) and (bias is None or bias.is_contiguous()) and out.is_contiguous()
+           and (part is None or part.stride(1) == 1) and (bias is None or bias.is_contiguous())
            for x, w, part, bias, out in zip(xs, ws, x1s, biases, outputs)):
         _records.get().extend(_stream.linear_commands(xs, ws, biases, acts, x1s, outputs))
     else:
@@ -91,44 +92,44 @@ def addmm(bias, x, w, *, out, alpha=1, beta=1):
         _records.get().append(product(x, w, out, bias=bias, alpha=alpha, beta=beta))
 
 
-def topk(x, k, dim=-1, largest=True, sorted=True):
+def topk(x, k, dim=-1, largest=True, sorted=True, *, outputs=None):
     from .selection import topk as prepare
-    output, commands = prepare(x, k, dim, largest, sorted)
+    output, commands = prepare(x, k, dim, largest, sorted, outputs=outputs)
     _records.get().extend(commands)
     return output
 
 
-def cumsum(x, dim, *, dtype=None):
+def cumsum(x, dim, *, dtype=None, out=None):
     from .scan import cumsum as prepare
-    output, commands = prepare(x, dim, dtype=dtype)
+    output, commands = prepare(x, dim, dtype=dtype, out=out)
     _records.get().extend(commands)
     return output
 
 
-def draw(*args):
+def draw(*args, out=None):
     from .argmax import prepare_draw
-    output, commands = prepare_draw(*args)
+    output, commands = prepare_draw(*args, out=out)
     _records.get().extend(commands)
     return output
 
 
-def retain(*args):
+def retain(*args, outputs=None):
     from .argmax import prepare_retain
-    output, commands = prepare_retain(*args)
+    output, commands = prepare_retain(*args, outputs=outputs)
     _records.get().extend(commands)
     return output
 
 
-def fwht(*args):
+def fwht(*args, out=None):
     from .structured import prepare
-    output, commands = prepare(*args)
+    output, commands = prepare(*args, out=out)
     _records.get().extend(commands)
     return output
 
 
-def kernel(*args):
+def kernel(*args, outputs=None):
     from .kernel import prepare
-    output, commands = prepare(*args)
+    output, commands = prepare(*args, outputs=outputs)
     _records.get().extend(commands)
     return output
 
@@ -142,7 +143,7 @@ class Program:
         schedule.append(self.commands)
 
 
-def compile_graph(module, metadata, operands):
+def compile_graph(module, metadata, operands, *, destinations=None):
     from torch._guards import detect_fake_mode
     from torch._subclasses.fake_tensor import unset_fake_temporarily
     from torch._inductor import config
@@ -153,9 +154,25 @@ def compile_graph(module, metadata, operands):
     from torch._inductor.scheduler import Scheduler
     from torch._inductor.virtualized import V
     from torch._inductor.debug import DebugContext
+    from torch._inductor import ir
+    from torch.utils._pytree import tree_flatten, tree_unflatten
+    from torch.fx.node import map_arg
+    from .placement import Placements, same_view
+    from views import rebase
+
+    placements, bound_storage, placed_values = Placements(), {}, []
+    output_nodes = next(n.args[0] for n in module.graph.nodes if n.op == 'output')
+    described_outputs = tree_flatten(map_arg(output_nodes, lambda n: n.meta['val']))[0]
+    if destinations is not None:
+        for described, destination in zip(described_outputs, destinations, strict=True):
+            if destination is not None:
+                placements.bind(described, destination)
+    input_storage = dict(zip((n.name for n in module.graph.nodes if n.op == 'placeholder'), operands, strict=True))
 
     class Preparation(PythonWrapperCodegen):
         def make_allocation(self, name, device, dtype, shape, stride, allocation_shape=None, is_pinned=False):
+            if name in bound_storage:
+                return f'{name} = mesh_destinations[{name!r}]'
             if is_pinned:
                 raise NotImplementedError('native graph storage uses the bridge region, not a separate pinned allocator')
             allocation_shape = shape if allocation_shape is None else allocation_shape
@@ -165,6 +182,12 @@ def compile_graph(module, metadata, operands):
             if tuple(shape) != tuple(allocation_shape):
                 made += f'.as_strided({self.codegen_python_shape_tuple(shape)}, {strides})'
             return made
+
+        def can_reuse(self, input_buffer, output_buffer=None):
+            # Caller-owned landing storage is fixed, not a scratch pool slot.
+            if input_buffer.get_name() in bound_storage or (output_buffer is not None and output_buffer.get_name() in bound_storage):
+                return False
+            return super().can_reuse(input_buffer, output_buffer)
 
         def _generate_extern_kernel_alloc_helper(self, node, args):
             names = {'torch.ops.torch_mesh.linear.default': 'linear',
@@ -178,7 +201,12 @@ def compile_graph(module, metadata, operands):
             name = node.get_kernel_name()
             if name not in names:
                 raise NotImplementedError(f'no native preparation for {name}; a framework fallback is not an executor')
-            self.writeline(f'{node.get_name()} = mesh_native.{names[name]}({", ".join(args)})')
+            outputs = node.codegen_outputs()
+            output_refs = [f'mesh_destinations[{leaf.get_name()!r}]' if isinstance(leaf, ir.IRNode)
+                           and leaf.get_name() in bound_storage else 'None' for leaf in tree_flatten(outputs)[0]]
+            keyword = 'outputs' if names[name] in ('linears', 'topk', 'retain', 'kernel') else 'out'
+            destination = '[' + ', '.join(output_refs) + ']' if keyword == 'outputs' else output_refs[0]
+            self.writeline(f'{node.get_name()} = mesh_native.{names[name]}({", ".join(args)}, {keyword}={destination})')
 
         def _generate_extern_kernel_out_helper(self, kernel, out, out_view, args, device, stack_traces=None):
             names = {'extern_kernels.mm': 'mm', 'extern_kernels.bmm': 'mm', 'extern_kernels.addmm': 'addmm'}
@@ -210,6 +238,70 @@ def compile_graph(module, metadata, operands):
             return MetalSource(self)
 
     class NativeGraph(GraphLowering):
+        def run_node(self, node):
+            logical = node.meta.get('val')
+            schema = getattr(node.target, '_schema', None)
+            # A declared alias of an already placed producer is just a view.
+            # Lower it here, before an upstream reshape helper can pack it.
+            if (node.op == 'call_function' and isinstance(logical, torch.Tensor)
+                    and schema is not None and not schema.is_mutable
+                    and len(schema.returns) == 1 and schema.returns[0].alias_info is not None):
+                for previous, storage, physical in reversed(placed_values):
+                    if previous.dtype == logical.dtype and torch._C._is_alias_of(previous, logical):
+                        with unset_fake_temporarily():
+                            destination = placements.get(logical)
+                        layout = ir.FixedLayout(logical.device, logical.dtype, list(destination.shape),
+                                                list(destination.stride()), destination.storage_offset() - physical.storage_offset())
+                        return ir.TensorBox(ir.ReinterpretView(data=storage, layout=layout))
+            result = super().run_node(node)
+            if not placements.bindings or node.op == 'output' or 'val' not in node.meta:
+                return result
+            leaves, spec = tree_flatten(result)
+            described = tree_flatten(node.meta['val'])[0]
+            for i, (value, logical) in enumerate(zip(leaves, described, strict=True)):
+                with unset_fake_temporarily():
+                    destination = placements.get(logical)
+                if destination is None:
+                    continue
+                # Realize the existing producer. realize_input(Buffer) in the
+                # upstream IR can create a copy, so it is not a placement API.
+                if isinstance(value, (ir.TensorBox, ir.StorageBox, ir.BaseView)):
+                    value.realize()
+                while isinstance(value, (ir.TensorBox, ir.StorageBox)):
+                    value = value.data
+                if isinstance(value, ir.BaseView) and not isinstance(value, ir.ReinterpretView):
+                    value = ir.ExternKernel.convert_to_reinterpret_view(value)
+                storage, layout = ir.as_storage_and_layout(value)
+                buffer = storage.data
+                name = buffer.get_name()
+                if isinstance(buffer, ir.InputBuffer):
+                    actual = input_storage[node.name] if node.op == 'placeholder' else input_storage[buffer.get_name()]
+                    with unset_fake_temporarily():
+                        actual = actual.as_strided(tuple(layout.size), tuple(layout.stride), actual.storage_offset() + int(layout.offset))
+                        if not same_view(actual, destination):
+                            raise ValueError('a supplied graph input cannot be relocated by producer placement')
+                    placed_values.append((logical, storage, input_storage[buffer.get_name()]))
+                    continue
+                if buffer.get_dtype() != destination.dtype:
+                    raise ValueError('native producer placement requires a matching storage element type')
+                if name not in bound_storage:
+                    base = buffer.get_layout()
+                    offset, strides = rebase(layout.size, layout.stride, layout.offset,
+                                              destination.stride(), destination.storage_offset(),
+                                              base.size, base.stride, base.offset)
+                    with unset_fake_temporarily():
+                        bound_storage[name] = destination.as_strided(tuple(base.size), strides, offset)
+                    buffer.layout = ir.FixedLayout(base.device, base.dtype, list(base.size), list(strides))
+                    self.never_reuse_buffers.add(name)
+                placed = bound_storage[name]
+                placed_values.append((logical, storage, placed))
+                relative = destination.storage_offset() - placed.storage_offset()
+                view = ir.FixedLayout(layout.device, layout.dtype, list(layout.size), list(destination.stride()), relative)
+                # Views retain their physical relation after the producer's
+                # layout changes. No tensor copy is introduced to freeze it.
+                leaves[i] = ir.TensorBox(ir.ReinterpretView(data=storage, layout=view))
+            return tree_unflatten(leaves, spec)
+
         def init_wrapper_code(self, *args, **kwargs):
             self.device_type = 'mps'
             self.device_ops = get_device_op_overrides('mps')
@@ -230,7 +322,7 @@ def compile_graph(module, metadata, operands):
         with V.set_graph_handler(graph), V.set_extern_kernel_nodes([]), mode:
             graph.run(*metadata)
             source, _ = graph.codegen()
-        namespace = {'__name__': 'mesh_preparation'}
+        namespace = {'__name__': 'mesh_preparation', 'mesh_destinations': bound_storage}
         records = []
         token = _records.set(records)
         try:
