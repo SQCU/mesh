@@ -203,3 +203,46 @@ Native and extension builds, Python syntax, and Metal shader preparation passed.
 RMS specializations included repeated/reversed reads and grouped output layouts;
 FWHT prepared both a small block and the device's 8,192-value block. These were
 compilation steps only. No numerical workload, unit suite or hourly was run.
+
+## Producer declarations and sparse tails
+
+Recorded: 2026-10-27T20:25:22Z. The native product interface discarded its result
+layout and passed a weight matrix to consumers. Those consumers looked up the
+product again to recover a share count and assumed where its partials lay. The
+large-row head builder also assumed one share. This was missing dataflow in
+preparation, not a limit of attention or of tensor parallelism.
+
+`StreamedProduct` now selects the producer once and declares its reduction
+output. Its buffer, reduction axes, strides, permutation and scale reach stores,
+access publication and consumers. `StreamedMatrix.splits`, `result` and
+`partialReaches` are removed. The head builder no longer calculates allocation
+sizes or reconstructs those outputs. FFN and per-layer builders carry them too,
+including the output returned to the layer finish. Partial and finished products
+share input preparation and command emission; the separate `streamedSplit`
+lowering and bare-buffer `partials` mode are removed. Fused consumers retain
+coherent reads, and aligned groups retain vector loads through the shared index
+generator. Rotation-table operands come from selected products rather than a
+second selection inside the transform emitter.
+The folded-rotation path also no longer constructs a replacement weight matrix
+to request an identity gather. It passes the order to the shared gather emitter.
+
+The sparse frontend now declares forward and backward products through the
+common numerical interface. Preparation converts its callable predicate to fixed
+output tiles and reduction intervals. Adjacent intervals merge before instruction
+tiling. The old GPU predicate evaluator, bitmap scans, per-call padding and eager
+submission are removed. Exact extents support tensor tails and positive sparse
+tile widths that differ from the hardware instruction tile. The hardware geometry
+still comes from compiler operands. This follows the TensorOps extent contract in
+Apple's [Metal Performance Primitives guide](https://developer.apple.com/download/files/Metal-Performance-Primitives-Programming-Guide.pdf),
+sections 1.2 and 2.3.5.
+
+Native compilation and shader preparation passed. Preparation covered strided
+reduction axes and order/scale operands, standalone and fused consumers, and
+sparse forward/backward declarations with ragged dimensions and strided outputs.
+No numerical dispatch or performance measurement was made.
+
+This closes the sparse-tail restriction and the native partial-share metadata
+loss described above. It does not close coded sub-block cuts, rotated subdomains,
+arbitrary numerical page mappings, producer-domain splitting, specialized ANE
+provider constraints, or all model-specific graph-builder restrictions. The
+remaining items in the preceding review still require their own lowering work.

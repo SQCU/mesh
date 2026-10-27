@@ -66,11 +66,12 @@ inline void mesh_store4(device T *p, ulong i, V value) {
         p[mesh_index<B>(i+2)] = value.z; p[mesh_index<B>(i+3)] = value.w;
     }
 }
-template<uint B, typename T> struct mesh_input {
-    device const T *p; ulong first;
-    T operator[](ulong i) const { return p[mesh_index<B>(first+i)]; }
+template<uint B, typename P> struct mesh_input {
+    P p; long first;
+    auto operator[](ulong i) const { return p[mesh_index<B>(first+long(i))]; }
+    mesh_input operator-(long offset) const { return {p, first-offset}; }
 };
-template<uint B, typename T> inline mesh_input<B,T> mesh_read(device const T *p, ulong first=0) { return {p,first}; }
+template<uint B, typename P> inline mesh_input<B,P> mesh_read(P p, long first=0) { return {p,first}; }
 
 // Every kernel's constants, one block at buffer 15 (a caller sets the fields its kernel reads): tiles a 32-row block
 // (columns / 32), a matrix's outputs (rows), input rows, a count per unit (a panel's panels a threadgroup, a Hadamard
@@ -196,8 +197,8 @@ static inline T streamed_value(P partials, ulong at, uint shares, uint stride, T
 struct streamed_plain {
     enum : uint { stage = 1 };
     typedef device float *partials;
-    template <typename P>
-    void after(P, device const int *, device const float *, device atomic_uint *, streamed_dims, uint, uint, uint, threadgroup float *, uint,
+    template <typename P, typename R, typename S>
+    void after(P, R, S, device atomic_uint *, streamed_dims, uint, uint, uint, threadgroup float *, uint,
                uint, device ulong *, device atomic_uint *) constant {}
 };
 
@@ -231,25 +232,35 @@ static inline float streamed_rms(float s, uint count, float eps, threadgroup flo
     return rsqrt(streamed_sum<Fresh>(s, partial, t, threads) / float(count) + eps);
 }
 
-// A partials pointer read four floats at a time, its coherence kept.
-template <typename P> struct streamed_fours { typedef device const float4 *type; };
-template <> struct streamed_fours<coherent(device) device float *> { typedef coherent(device) device const float4 *type; };
+// Keep vector loads for contiguous groups and keep the producer's coherence.
+// Noncontiguous views specialize the same load into four compiled indices.
+template <typename V, typename P> struct streamed_vector_pointer { typedef device const V *type; };
+template <typename V> struct streamed_vector_pointer<V, coherent(device) device float *> { typedef coherent(device) device const V *type; };
+template <typename V, typename P> inline V streamed_four(P p, ulong i) {
+    return *(typename streamed_vector_pointer<V, P>::type)(p + i);
+}
+template <typename V, uint B, typename P> inline V streamed_four(mesh_input<B, P> p, ulong i) {
+    if constexpr (mesh_vector4<B>()) return streamed_four<V>(p.p, mesh_index<B>(p.first + long(i)));
+    else return V(p[i], p[i+1], p[i+2], p[i+3]);
+}
 
 // A product's output row n at logical positions [first, first + count) into vals: from its partials (shares > 0:
 // coded row r of [first, first + count) lands at order[r] - first, its shares summed and scaled) or, where a crossing
 // has summed it into plain values, from `plain` (shares == 0, row stride `rows`). The row order permutes within the
 // range. V elements a thread (1, or 4: float4 partials, int4 orders and float4 scales; first, count, rows and stride
 // multiples of 4). Ends with a threadgroup barrier.
-template <uint V = 1, typename P>
-static inline void streamed_rows(P partials, device const half *plain, device const int *order,
-                                 device const float *scale, uint n, uint first, uint count, uint rows, uint shares,
+template <uint V = 1, typename P, typename O, typename S>
+static inline void streamed_rows(P partials, device const half *plain, O order,
+                                 S scale, uint n, uint first, uint count, uint rows, uint shares,
                                  uint stride, threadgroup float *vals, uint t, uint threads) {
-    if (V == 4) {
+    if constexpr (V == 4) {
         for (uint q = t; q < count / 4; q += threads) {
             const ulong at = (ulong(n) * rows + first) / 4 + q;
             if (shares == 0) { ((threadgroup float4 *)vals)[q] = float4(((device const half4 *)plain)[at]); continue; }
-            const int4 o = ((device const int4 *)order)[first / 4 + q] - int(first);
-            const float4 v = streamed_value((typename streamed_fours<P>::type)partials, at, shares, stride / 4, ((device const float4 *)scale)[first / 4 + q]);
+            const int4 o = streamed_four<int4>(order, first + 4 * q) - int(first);
+            float4 v = 0.0f;
+            for (uint j = 0; j < shares; ++j) v += streamed_four<float4>(partials, 4 * at + ulong(j) * stride);
+            v *= streamed_four<float4>(scale, first + 4 * q);
             vals[o.x] = v.x; vals[o.y] = v.y; vals[o.z] = v.z; vals[o.w] = v.w;
         }
     } else {
@@ -276,8 +287,8 @@ static inline float mesh_rope(float x, float y, bool low, uint pair, uint dims, 
 // from streamed_rows (a product's partials, or plain rows: shares 0, row stride `rows`, from channel `first`), their RMS
 // norm (streamed_rms, eps 1e-6), times gamma where given (staged in `gs` before the reductions), the rotary embedding over
 // its first `pairs` frequency pairs at `position`, stored to `out` and to `line` (a KV line), each where given.
-template <bool Precise, typename P>
-static inline void mesh_head(P partials, device const half *plain, device const int *order, device const float *scale, uint n, uint first,
+template <bool Precise, typename P, typename O, typename S>
+static inline void mesh_head(P partials, device const half *plain, O order, S scale, uint n, uint first,
                              uint D, uint rows, uint shares, uint stride, device const half *gamma, uint pairs, uint position, float theta,
                              device half *out, device half *line, threadgroup float *vals, threadgroup float *gs, threadgroup float *partial,
                              uint t, uint threads) {
@@ -534,7 +545,7 @@ kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const ui
         const float value = rowScale[output] * total;
         ys[mesh_index<11>(ulong(n) * d.stride + uint(order[output]))] = half(streamed_capped(value, d.cap));
     }
-    if (OUT == 0) epilogue.after(stores, order, rowScale, arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * SK * 32, produced, producing);
+    if (OUT == 0) epilogue.after(mesh_read<5>(stores), mesh_read<12>(order), mesh_read<13>(rowScale), arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * SK * 32, produced, producing);
 }
 
 // The gate and up products of up to R input rows together, GELU(gate) * up between them (the study's gate_up_mm): a
@@ -901,21 +912,23 @@ kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *f
 
 // The GELU FFN's middle: hidden = GELU(gate) * up in the gate and up products' (shared) coded row order, which the down
 // product's columns follow: from their partials (gate's d.shares shares, up's d.inputs, each product its own
-// instance's, its row scale applied) or, where they are 0, from their finished rows (T half); a row's values d.stride
-// apart (0: d.outputs; gate|up stacked: twice it, up's from gate's d.outputs on), up's finished rows d.columns apart where
-// nonzero (a per-layer table's); four outputs a thread.
+// instance's, its row scale applied) or, where they are 0, from their finished rows
+// (T half). Each binding maps logical [row, output] indices to its declared view.
+// Each input declares its reduction stride: gate's d.split, up's d.per.
+// Four outputs a thread.
 template <typename T>
 kernel void streamed_gelu(device const T *gate [[buffer(0)]], device const T *up [[buffer(1)]],
                           device const float *gateScale [[buffer(2)]], device const float *upScale [[buffer(3)]],
                           device half *hidden [[buffer(4)]], constant streamed_dims &dims [[buffer(15)]],
-                          uint2 g [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]]) {
+                          uint2 g [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
+                          uint2 threads [[threads_per_threadgroup]]) {
     const streamed_dims d = dims_of(dims);
-    const uint n = g.y, first = (g.x * 256 + t) * 4;
-    const ulong row = ulong(n) * (d.stride ? d.stride : d.outputs);
+    const uint n = g.y, first = (g.x * lanes_of(threads.x) + t) * 4;
+    const ulong row = ulong(n) * d.outputs;
     for (uint r = first; r < min(first + 4, d.outputs); ++r)
         hidden[mesh_index<4>(ulong(n) * d.outputs + r)] = half(streamed_gelu_of(
             d.shares ? streamed_value(mesh_read<0>(gate), row + r, d.shares, d.split, gateScale[mesh_index<2>(r)]) : float(gate[mesh_index<0>(row + r)]),
-            d.inputs ? streamed_value(mesh_read<1>(up), row + r, d.inputs, d.split, upScale[mesh_index<3>(r)]) : float(up[mesh_index<1>((d.columns ? ulong(n) * d.columns : row) + r)])));
+            d.inputs ? streamed_value(mesh_read<1>(up), row + r, d.inputs, d.per, upScale[mesh_index<3>(r)]) : float(up[mesh_index<1>(row + r)])));
 }
 
 template [[host_name("streamed_gelu")]] [[kernel]] decltype(streamed_gelu<float>) streamed_gelu<float>;
@@ -1121,7 +1134,7 @@ kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const u
             stores[mesh_index<5>(ulong(group.y) * d.split + n * d.outputs + (group.x * BANDS + which) * 32 + r)] = total;
         }
     }
-    epilogue.after(stores, order, rowScale, arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * GROUP * 32, produced, producing);
+    epilogue.after(mesh_read<5>(stores), mesh_read<12>(order), mesh_read<13>(rowScale), arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * GROUP * 32, produced, producing);
 }
 
 // The right-input and destination element maps of matmul2d<M, 32, 32> at one simdgroup (fp16 operands, fp32

@@ -1,143 +1,163 @@
-"""Tile-sparse linear products in the mesh library (metal-microbench docs/kernels.md "Tile sparsity"), operand gated: a
-weight carries a closure over its tiles and an explicitly configured lowering.
+"""Tile-sparse products declared to the common whole-function compiler.
 
-The mask is a closure: a predicate KEPT(k, n) over a weight's tiles (k its output tile, n its input tile in torch's
-[out, in] layout), compiled into every kernel (sparse.metal), its environment captured as constants (an arithmetic
-pattern: block-diagonal, banded) or a bitmap (one bit a tile).  The kernels are the dense tensor-operation products
-(MetalPerformancePrimitives matmul2d), each block's loop visiting the tiles its closure keeps, encoded on torch's own
-stream (_stream.encode: torch's open compute encoder, no host wait).  One closure serves the three products of
-y = x . (W (.) M)^T, its arguments' roles exchanged, and the derivative is exact and as sparse as the product.
-
-What a tensor is decides, not what it is said to be: `survey` measures a weight's tile energy and, given the rows it
-multiplies, each tile's contribution to the product and the product's error at each density; `sparsify` induces a
-closure as a quantizer induces a lattice, the fewest tiles whose product on held-out rows stays within a tolerance
-(None where none fewer than all does).  A trained model's dense weights are dense at tile granularity (E2B's FFN:
-docs/kernels.md); a model trained toward a tile support (a projection distance, metal-microbench docs/kernels.md
-"Learning the support") is not.
-
-`SparseLinear` takes its lowering as an explicit configuration operand. The
-whole-function observations can inform the next configuration. Numerical calls
-neither time candidates nor change their lowering.
+A closure runs during preparation over weight-tile coordinates. Its fixed output
+is a schedule of output tiles and reduction intervals. The three products share
+one TensorOps kernel; tensor shapes and sparse tile boundaries supply exact tail
+extents. No numerical call allocates padding, evaluates a predicate or scans a
+bitmap. Layout requirements and output placement use the common kernel interface.
 """
+from functools import lru_cache
 import math
-from pathlib import Path
 
 import torch
 
-from . import _stream
-
-SOURCE = Path(__file__).with_name('sparse.metal').read_text()
-BITMAP = '(bits[((n) * KB + (k)) >> 5] >> (((n) * KB + (k)) & 31)) & 1'
-_EMPTY = None
+from .compilation import operands
 
 
 class Closure:
-    """A kept-tile predicate KEPT(k, n) of tile size `tile` (a multiple of 64): an MSL expression in k, n, KB, NB and,
-    where it captures one, the bitmap `bits` (bit n * KB + k)."""
+    """A preparation function (output tile, input tile, output count, input count).
 
-    def __init__(self, expression, tile, bits=None, name=None):
-        if tile % 64:
-            raise ValueError(f'closure: tile {tile} is no multiple of 64')
-        self.expression, self.tile, self.name = expression, tile, name or expression
-        self.bits = bits if bits is not None else torch.zeros(1, dtype=torch.int32, device='mps')
-        self.kernels, self.evaluated = {}, {}
+    Capture arithmetic parameters or a CPU bitmap in the function. The returned
+    booleans describe immutable support for one compiled function execution.
+    """
+    def __init__(self, predicate, tile, *, name=None):
+        if tile <= 0:
+            raise ValueError('sparse tile extent must be positive')
+        self.predicate, self.tile = predicate, tile
+        self.name = name or getattr(predicate, '__name__', 'tile predicate')
 
-    def kernel(self, name, out):
-        key = (name, out)
-        if key not in self.kernels:
-            text = SOURCE.replace('(TILE_MOD)', f'({self.expression})').replace('(OUT_TYPE)', 'half' if out == torch.float16 else 'float')
-            self.kernels[key] = _stream.pipeline(text, name)
-        return self.kernels[key]
+    @lru_cache(None)
+    def support(self, outputs, inputs):
+        nr, nc = -(-outputs // self.tile), -(-inputs // self.tile)
+        return tuple(tuple(bool(self.predicate(r, c, nr, nc)) for c in range(nc)) for r in range(nr))
 
-    def evaluate(self, k, n):
-        """The closure over the k/tile x n/tile grid (rows: k), evaluated once on the GPU (FlexAttention's
-        create_block_mask): its bitmap words and its kept tiles' count."""
-        if (k, n) not in self.evaluated:
-            kb, nb = k // self.tile, n // self.tile
-            words = torch.zeros((kb * nb + 31) // 32, dtype=torch.int32, device='mps')
-            _encode(self, 'evaluate', [None, None, words], (0, k, n), (words.numel() + 63) // 64, 1, 64, torch.float32)
-            self.evaluated[k, n] = words, int(unpack(words, kb, nb).sum())
-        return self.evaluated[k, n]
-
-    def mask(self, k, n):
-        """The closure's [k/tile, n/tile] booleans."""
-        return unpack(self.evaluate(k, n)[0], k // self.tile, n // self.tile)
-
-
-def unpack(words, kb, nb):
-    bit = torch.arange(kb * nb)
-    on = ((words.cpu().to(torch.int64) & 0xffffffff)[bit // 32] >> (bit % 32)) & 1
-    return on.reshape(nb, kb).T.bool()
+    def mask(self, outputs, inputs):
+        return torch.tensor(self.support(outputs, inputs), dtype=torch.bool).reshape(
+            -(-outputs // self.tile), -(-inputs // self.tile))
 
 
 def bitmap(mask, tile):
-    """The closure of a mask ([K/tile, N/tile] booleans: rows the weight's output tiles): its bitmap captured."""
-    kb, nb = mask.shape
-    flat = mask.to('cpu', torch.bool).T.reshape(-1).to(torch.int64)
-    words = torch.zeros((kb * nb + 31) // 32, dtype=torch.int64)
-    words.index_add_(0, torch.arange(kb * nb) // 32, flat << (torch.arange(kb * nb) % 32))
-    words = torch.where(words >= 2 ** 31, words - 2 ** 32, words).to(torch.int32)
-    return Closure(BITMAP, tile, words.to('mps'), name=f'bitmap {float(mask.float().mean()):.3f}')
+    """Capture a CPU mask at preparation; its partial edge tiles are retained."""
+    nr, nc = mask.shape
+    held = tuple(tuple(row) for row in mask.to('cpu', torch.bool).tolist())
+    def predicate(r, c, rows, columns):
+        if (rows, columns) != (nr, nc):
+            raise ValueError('the sparse bitmap must describe the declared weight tile grid')
+        return held[r][c]
+    return Closure(predicate, tile, name=f'bitmap {nr}x{nc}')
 
 
 def named(spec, tile):
-    """A closure by name: all, blockdiag:G (G diagonal groups of tiles), band:W (|k - n| <= W)."""
+    """Arithmetic support: all, blockdiag:G or band:W, evaluated at preparation."""
     kind, _, value = spec.partition(':')
-    expression = {'all': 'true', 'blockdiag': f'(k) * {value or 1} / KB == (n) * {value or 1} / NB',
-                  'band': f'abs((k) - (n)) <= {value or 0}'}[kind]
-    return Closure(expression, tile, name=spec)
+    if kind == 'all':
+        predicate = lambda r, c, nr, nc: True
+    elif kind == 'blockdiag':
+        groups = int(value or 1)
+        predicate = lambda r, c, nr, nc: r * groups // nr == c * groups // nc
+    elif kind == 'band':
+        width = int(value or 0)
+        predicate = lambda r, c, nr, nc: abs(r - c) <= width
+    else:
+        raise ValueError(f'unknown sparse support {spec}')
+    return Closure(predicate, tile, name=spec)
 
 
-def _encode(closure, name, tensors, shape, gx, gy, threads, out, bits=None):
-    """Kernel `name` of `closure` on `tensors` (buffers 0 to 2, None for none) and its bitmap (or `bits`), `shape`
-    (M, K, N), encoded on torch's stream."""
-    _stream.encode(closure.kernel(name, out), [*tensors, None, closure.bits if bits is None else bits],
-                   [*shape, closure.tile], 3, gx, gy, threads)
+@lru_cache(None)
+def _schedule(m, k, n, support, tile, weight, geometry):
+    """Resolve output domains and reduction intervals; all coordinates are AOT.
+
+    Products mask columns versus inner intervals. Weight gradients mask the
+    output domain instead. Equal reduction lists share the same immutable range.
+    Empty ranges write zeros in the same product, without a separate clearing op.
+    """
+    rm, cn, inner, groups = geometry
+    pieces, records, ranges = [], [], {}
+    def reduction(intervals):
+        merged = []
+        for first, end in intervals:
+            if merged and merged[-1][1] == first:
+                merged[-1] = (merged[-1][0], end)
+            elif first < end:
+                merged.append((first, end))
+        key = tuple(merged)
+        if key not in ranges:
+            first = len(pieces)
+            for start, end in key:
+                pieces.extend((at, min(inner, end - at)) for at in range(start, end, inner))
+            ranges[key] = (first, len(pieces))
+        return ranges[key]
+    def axis(length, block, boundary):
+        for start in range(0, length, boundary):
+            for at in range(start, min(start + boundary, length), block):
+                yield at, min(block, length - at, start + boundary - at)
+    for row, height in axis(m, rm, tile if weight else max(1, m)):
+        for col, width in axis(n, cn, tile):
+            if weight:
+                intervals = ((0, k),) if support[row // tile][col // tile] else ()
+            else:
+                intervals = tuple((i * tile, min((i + 1) * tile, k))
+                                  for i, kept in enumerate(support[col // tile]) if kept)
+            first, end = reduction(intervals)
+            records.extend(((row, col, height, width), (first, end, 0, 0)))
+    count = len(records) // 2
+    for _ in range(-count % groups):
+        records.extend(((0, 0, 0, 0), (0, 0, 0, 0)))
+    return tuple(records), tuple(pieces), -(-count // groups)
+
+
+def _product(a, b, support, tile, out, *, weight=False):
+    from .kernel import declare
+    from .layout import strides
+    m, k = a.shape
+    if b.shape[0] != k or a.dtype != b.dtype:
+        raise ValueError('sparse contraction operands must agree on inner dimension and type')
+    n = b.shape[1]
+    types = {torch.float16: 'half', torch.float32: 'float', torch.bfloat16: 'bfloat'}
+    configuration = operands()
+    geometry = tuple(configuration['MATRIX_' + key] for key in ('ROWS', 'COLUMNS', 'INNER')) + (
+        configuration['MATRIX_ROW_GROUPS'] * configuration['MATRIX_COLUMN_GROUPS'],)
+    records, pieces, groups = _schedule(m, k, n, support, tile, weight, geometry)
+    # These literals are lifted as graph operands. The recorder maps their CPU
+    # storage directly; they are never rebuilt by numerical execution.
+    tiles = torch.tensor(records, dtype=torch.int32).reshape(-1, 4)
+    spans = torch.tensor(pieces, dtype=torch.int32).reshape(-1, 2)
+    result = torch.empty((m, n), dtype=out, device=a.device)
+    rm, cn, inner, _ = geometry
+    full = (int(m % rm == 0 and (not weight or tile % rm == 0)), int(n % cn == 0 and tile % cn == 0),
+            int(all(length == inner for _, length in pieces)))
+    args = ', '.join(map(str, (types[a.dtype], types[out], *geometry, *full, *a.stride(), *b.stride())))
+    instance = f'template [[host_name("sparse_product_bound")]] [[kernel]] decltype(sparse_product<{args}>) sparse_product<{args}>;'
+    buffers = [a, b, result, tiles, spans]
+    requirements = {i: v.stride() for i, v in enumerate(buffers)}
+    requirements[2] = strides(result.shape)
+    result, = declare('sparse.metal', 'sparse_product_bound', buffers, (2,), (m, k, n), 5,
+                      (groups, 1, 1), (geometry[-1] * configuration['SIMD_WIDTH'], 1, 1), instance,
+                      indexed=(2,), requirements=requirements)
+    return result
 
 
 def _rows(x):
-    return x.reshape(-1, x.shape[-1]).contiguous()
-
-
-def _padded(x2):
-    """Rows [M, K] in whole blocks of 64, the padding zeros: the tensor operations read whole blocks (a slice past an
-    operand's extent is not clipped), so a partial block is padded rather than read past its storage."""
-    m = x2.shape[0]
-    if m % 64 == 0:
-        return x2
-    out = torch.zeros(-(-m // 64) * 64, x2.shape[1], dtype=x2.dtype, device=x2.device)
-    out[:m] = x2
-    return out
+    return x.reshape(math.prod(x.shape[:-1]), x.shape[-1])
 
 
 def linear(x, w, closure, out=torch.float16):
-    """x . (w (.) M)^T, w [N, K] (torch's layout), x [..., K] fp16: the closure's kernel (its input_grad form, w as
-    its [K, N] operand)."""
-    x2 = _rows(x)
-    m, (n, k) = x2.shape[0], w.shape
-    y = torch.empty(m, n, dtype=out, device='mps')
-    _encode(closure, 'input_grad', [_padded(x2), w, y], (m, n, k), -(-m // 64), n // 64, 128, out)
-    return y.reshape(*x.shape[:-1], n)
+    """x @ masked(w).T, with output placement supplied by graph preparation."""
+    n, k = w.shape
+    result = _product(_rows(x), w.T, closure.support(n, k), closure.tile, out)
+    return result.reshape(*x.shape[:-1], n)
 
 
 def input_grad(dy, w, closure, out=torch.float16):
-    """dy . (w (.) M): the closure's kernel (its forward form)."""
-    dy2 = _rows(dy)
-    m, (n, k) = dy2.shape[0], w.shape
-    dx = torch.empty(m, k, dtype=out, device='mps')
-    _encode(closure, 'forward', [_padded(dy2), w, dx], (m, n, k), -(-m // 64), k // 64, 128, out)
-    return dx.reshape(*dy.shape[:-1], k)
+    n, k = w.shape
+    support = closure.support(n, k)
+    transposed = tuple(tuple(support[r][c] for r in range(len(support))) for c in range(-(-k // closure.tile)))
+    result = _product(_rows(dy), w, transposed, closure.tile, out)
+    return result.reshape(*dy.shape[:-1], k)
 
 
 def weight_grad(x, dy, closure, n, k, out=torch.float32):
-    """M (.) (dy^T . x), [n, k]: a block of a kept tile over every row, only the kept tiles' blocks dispatched."""
-    words, kept = closure.evaluate(n, k)
-    dw = torch.zeros(n, k, dtype=out, device='mps')
-    if kept:
-        side = closure.tile // 64
-        dy2, x2 = _padded(_rows(dy)), _padded(_rows(x))
-        _encode(closure, 'weight_grad_kept', [dy2, x2, dw], (x2.shape[0], n, k), kept * side * side, 1, 128, out, bits=words)
-    return dw
+    return _product(_rows(dy).T, _rows(x), closure.support(n, k), closure.tile, out, weight=True)
 
 
 class LinearFunction(torch.autograd.Function):
@@ -147,14 +167,14 @@ class LinearFunction(torch.autograd.Function):
     def forward(ctx, x, w, closure):
         ctx.save_for_backward(x, w)
         ctx.closure = closure
-        return linear(x, w, closure)
+        return linear(x, w, closure, out=x.dtype)
 
     @staticmethod
     def backward(ctx, dy):
         x, w = ctx.saved_tensors
-        dy = dy.to(torch.float16)
+        dy = dy.to(x.dtype)
         n, k = w.shape
-        return (input_grad(dy, w, ctx.closure) if ctx.needs_input_grad[0] else None,
+        return (input_grad(dy, w, ctx.closure, out=x.dtype) if ctx.needs_input_grad[0] else None,
                 weight_grad(x, dy, ctx.closure, n, k).to(w.dtype) if ctx.needs_input_grad[1] else None, None)
 
 
@@ -167,11 +187,10 @@ def contributions(w, x, tile):
     """Each tile's contribution to the product x . w^T on the rows x: the squared norm of its own term, [N/tile, K/tile]
     (float32, on w's device)."""
     n, k = w.shape
-    xs = x.float().reshape(x.shape[0], k // tile, tile)
-    out = torch.zeros(n // tile, k // tile, device=w.device)
-    for a in range(n // tile):
-        block = w[a * tile:(a + 1) * tile].float().reshape(tile, k // tile, tile)
-        out[a] = torch.einsum('rkt,ckt->krc', xs, block).pow(2).sum((1, 2))
+    out = torch.empty(-(-n // tile), -(-k // tile), device=w.device)
+    for a in range(0, n, tile):
+        for b in range(0, k, tile):
+            out[a // tile, b // tile] = (x[:, b:b + tile].float() @ w[a:a + tile, b:b + tile].float().T).square().sum()
     return out
 
 
@@ -186,7 +205,8 @@ def survey(w, x=None, tile=64, densities=(0.75, 0.5, 0.25)):
     rows x [M, K] it multiplies, the product's relative error when only each density's most contributing tiles are kept
     (the rows' own contributions: the tensor as it is used)."""
     n, k = w.shape
-    energy = w.float().reshape(n // tile, tile, k // tile, tile).pow(2).sum((1, 3)).flatten().sort(descending=True).values
+    energy = torch.stack([w[a:a + tile, b:b + tile].float().square().sum()
+                          for a in range(0, n, tile) for b in range(0, k, tile)]).sort(descending=True).values
     out = {'tiles': energy.numel(), 'energy': {d: float(energy[:max(1, int(energy.numel() * d))].sum() / energy.sum()) for d in densities}}
     if x is not None:
         scores, y = contributions(w, x, tile), x.float() @ w.float().T
@@ -228,18 +248,15 @@ class SparseLinear(torch.nn.Module):
     def __init__(self, weight, closure, bias=None, tile=64, *, lowering):
         super().__init__()
         n, k = weight.shape
-        if n % tile or k % tile:
-            raise ValueError(f'SparseLinear: [{n}, {k}] is not in whole {tile}-tiles (pad the weight)')
         self.closure = closure if isinstance(closure, Closure) else bitmap(closure, tile)
-        mask = self.closure.mask(n, k)
-        self.weight = torch.nn.Parameter((weight.float() * expand(mask, tile, weight.shape).to(weight.device)).half(), requires_grad=False)
-        self.bias = bias
-
         if lowering not in ('dense', 'tiles'):
             raise ValueError('SparseLinear lowering must be dense or tiles')
+        if lowering == 'dense':
+            weight = weight * expand(self.closure.mask(n, k), self.closure.tile, weight.shape).to(weight.device)
+        self.weight = torch.nn.Parameter(weight, requires_grad=False)
+        self.bias = bias
         self.lowering = lowering
 
     def forward(self, x):
-        x16 = x.to(torch.float16)
-        y = torch.nn.functional.linear(x16, self.weight) if self.lowering == 'dense' else linear(x16, self.weight, self.closure)
+        y = torch.nn.functional.linear(x, self.weight) if self.lowering == 'dense' else linear(x, self.weight, self.closure, out=x.dtype)
         return y if self.bias is None else y + self.bias

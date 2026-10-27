@@ -318,6 +318,27 @@ and launch geometry. Output aliases within one kernel share one assigned buffer.
 its transformed inputs. Coded matrix width/work metadata is retained through FX
 flattening, rather than read back from a device while tracing an operation.
 
+Sparse forward, input-gradient and weight-gradient products now use this same
+declaration. `sparse.Closure` takes a preparation callable over weight-tile
+coordinates; `named` and `bitmap` build that callable. It no longer takes raw MSL
+predicate source. Preparation evaluates support once, merges adjacent kept
+intervals and emits output-tile and reduction-range operands. One TensorOps body
+consumes those operands for all three products. Exact tail extents replace padded
+input copies; weight-gradient zero tiles are stores in that same body. Input
+strides and output placement use `kernel.declare`, with no separate sparse eager
+executor. A change in support is a new compiled operand, not a device-side mask
+discovery step.
+
+The native frontend carries the same kind of producer facts explicitly.
+`StreamedProduct` holds the selected instance and its output `OrderedReduction`.
+`TensorView` describes storage, shape and strides; `ReductionView` names the axes
+to sum. Allocation, numerical stores, access publication, head processing, FFN
+GELU and per-layer consumers use that declaration. The layer builder returns its
+unreduced output alongside commands when the next stage consumes it. Consumers
+no longer ask the weight matrix to select the producer or infer its split layout.
+The view lowers through the common index generator; these Swift values are
+preparation records and add no runtime interpreter.
+
 ## Joint configuration operands
 
 `assignment.assign` uses one complete-call objective for all configured coordinates.
