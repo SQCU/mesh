@@ -74,6 +74,12 @@ still have fixed output layouts: they accept matching destinations and reject a
 different stride until their builders supply that layout explicitly. Their general
 layout integration remains in item 9.
 
+The [backend layout review](../design/backend-layout-review-2026-10-27.md) records
+the restrictions across coded kernels, CPU/ANE bindings and LiteRT handoffs.
+Contiguity is a requirement of a particular operation's input or output view.
+Preparation must carry it through producer placement and page dependencies,
+alongside the gathered views supported by other operations.
+
 Collective marks still have an opaque access interface in the shared scheduler.
 They preserve their declared order and join preceding host work. Removing that
 conservative boundary remains part of collective access integration. Publication,
