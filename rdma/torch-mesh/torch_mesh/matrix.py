@@ -10,10 +10,18 @@ from . import _stream, fused
 @lru_cache(None)
 def pipeline(definitions):
     source = fused.steps() + '\n' + ''.join(f'#define {key} {value}\n' for key, value in definitions)
+    source += Path(__file__).with_name('argmax.metal').read_text() + '\n'
     return _stream.pipeline(source + Path(__file__).with_suffix('.metal').read_text(), 'product')
 
 
-def product(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, publication=None, arrivals=None):
+def row_tiles(rows):
+    """The product's compiled row groups; shared by writes and their producer."""
+    geometry = _stream.compilation
+    width = geometry['MATRIX_ROWS'] * geometry['MATRIX_ROW_GROUPS']
+    return tuple((first, min(width, rows - first)) for first in range(0, rows, width))
+
+
+def product(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, ready=None, arrivals=None):
     """Bind matrix views, including batch strides, without packing or execution."""
     kinds = {torch.float16: 'half', torch.float32: 'float', torch.bfloat16: 'bfloat'}
     if x.dtype != w.dtype or x.dtype not in kinds or out.dtype not in kinds:
@@ -35,7 +43,11 @@ def product(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, public
                             bias.shape[-1] not in (1, columns) or
                             (bias.ndim == 2 and bias.shape[0] not in (1, rows))):
         raise ValueError('matrix bias requires the output dtype and a broadcastable row view')
-    channels = len(publication.publish) if publication is not None else 0
+    if ready is not None:
+        tiles = len(row_tiles(rows)) * batches
+        if (ready.dtype != torch.int64 or ready.numel() != tiles or not ready.is_contiguous() or
+                arrivals is None or arrivals.dtype != torch.int32 or arrivals.numel() != tiles or not arrivals.is_contiguous()):
+            raise ValueError('tile publication needs one ready word and arrival count per batch row tile')
     stride = lambda t: t.stride(0) if t.ndim == 3 and t.shape[0] > 1 else 0
     bias_row = bias.stride(0) if bias is not None and bias.ndim == 2 and bias.shape[0] > 1 else 0
     bias_col = bias.stride(-1) if bias is not None and bias.shape[-1] > 1 else 0
@@ -43,7 +55,7 @@ def product(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, public
                        BK=w.stride(-2), BN=w.stride(-1), YM=out.stride(-2), YN=out.stride(-1),
                        ABATCH=stride(x), BBATCH=stride(w), YBATCH=stride(out), CM=bias_row, CN=bias_col,
                        ACTIVATE=int(act), BIAS=int(bias is not None), ALPHA=repr(float(alpha))+'f',
-                       BETA=repr(float(beta))+'f', CHANNELS=channels, FUSED=int(channels > 0),
+                       BETA=repr(float(beta))+'f', PRODUCED=int(ready is not None),
                        SEGMENTED=int(x1 is not None), K0=first,
                        A1M=x1.stride(-2) if x1 is not None else 0,
                        A1K=x1.stride(-1) if x1 is not None else 0,
@@ -55,9 +67,7 @@ def product(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, public
     column_tile = definitions['COLUMNS'] * definitions['COLUMN_GROUPS']
     threads = definitions['ROW_GROUPS'] * definitions['COLUMN_GROUPS'] * geometry['SIMD_WIDTH']
     words = [rows, inner, columns, batches]
-    if publication is not None:
-        words = fused._encode_words(words, channels, None, publication)
-    return (pipeline(tuple(definitions.items())), [x, w, out, arrivals, None, bias, x1],
+    return (pipeline(tuple(definitions.items())), [x, w, out, arrivals, None, bias, x1, ready],
             {4: struct.pack(f'{len(words)}I', *words)}, (-(-rows // row_tile), -(-columns // column_tile), batches),
             (threads, 1, 1), False, 3 | (32 if bias is not None else 0) | (64 if x1 is not None else 0)
-            | ((12 if publication is not None else 4) << _stream.compilation['ACCESS_WRITE_SHIFT']))
+            | ((140 if ready is not None else 4) << _stream.compilation['ACCESS_WRITE_SHIFT']))

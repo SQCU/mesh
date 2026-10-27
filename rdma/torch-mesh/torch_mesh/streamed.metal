@@ -173,7 +173,7 @@ struct streamed_plain {
     typedef device float *partials;
     template <typename P>
     void after(P, device const int *, device const float *, device atomic_uint *, streamed_dims, uint, uint, uint, threadgroup float *, uint,
-               uint) constant {}
+               uint, device ulong *, device atomic_uint *) constant {}
 };
 
 // The GELU of a gate value times an up value (tanh form, its inner term clamped to [-20, 20]).
@@ -265,8 +265,8 @@ static inline void mesh_head(P partials, device const half *plain, device const 
         const uint p = i < D / 2 ? i : i - D / 2, other = i < D / 2 ? i + D / 2 : i - D / 2;
         const float x = vals[i] * rms * gs[i];
         const half value = half(p < pairs ? mesh_rope<Precise>(x, vals[other] * rms * gs[other], i < D / 2, p, D, position, theta) : x);
-        if (out) out[i] = value;
-        if (line) line[i] = value;
+        if (out) ((volatile coherent(system) device half *)out)[i] = value;
+        if (line) ((volatile coherent(system) device half *)line)[i] = value;
     }
 }
 
@@ -482,6 +482,7 @@ kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const ui
                          device half *ys [[buffer(11)]], device const int *order [[buffer(12)]],
                          device const float *rowScale [[buffer(13)]], device atomic_uint *arrivals [[buffer(14)]],
                          constant streamed_dims &dims [[buffer(15)]], constant E &epilogue [[buffer(16)]],
+                         device ulong *produced [[buffer(17)]], device atomic_uint *producing [[buffer(18)]],
                          uint2 group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
                          uint lane [[thread_index_in_simdgroup]], uint thread_id [[thread_index_in_threadgroup]]) {
     const streamed_dims d = dims_of(dims);
@@ -508,7 +509,7 @@ kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const ui
         const float value = rowScale[output] * total;
         ys[ulong(n) * d.stride + uint(order[output])] = half(streamed_capped(value, d.cap));
     }
-    if (OUT == 0) epilogue.after(stores, order, rowScale, arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * SK * 32);
+    if (OUT == 0) epilogue.after(stores, order, rowScale, arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * SK * 32, produced, producing);
 }
 
 // The gate and up products of up to R input rows together, GELU(gate) * up between them (the study's gate_up_mm): a
@@ -985,6 +986,7 @@ kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const u
                           device float *partials [[buffer(5)]], device const int *order [[buffer(12)]],
                           device const float *rowScale [[buffer(13)]], device atomic_uint *arrivals [[buffer(14)]],
                           constant streamed_dims &dims [[buffer(15)]], constant E &epilogue [[buffer(16)]],
+                          device ulong *produced [[buffer(17)]], device atomic_uint *producing [[buffer(18)]],
                           uint2 group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
                           uint lane [[thread_index_in_simdgroup]], uint thread_id [[thread_index_in_threadgroup]]) {
     const streamed_dims d = dims_of(dims);
@@ -1095,7 +1097,7 @@ kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const u
             stores[ulong(group.y) * d.split + n * d.outputs + (group.x * BANDS + which) * 32 + r] = total;
         }
     }
-    epilogue.after(stores, order, rowScale, arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * GROUP * 32);
+    epilogue.after(stores, order, rowScale, arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * GROUP * 32, produced, producing);
 }
 
 // The right-input and destination element maps of matmul2d<M, 32, 32> at one simdgroup (fp16 operands, fp32

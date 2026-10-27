@@ -4,6 +4,7 @@ import torch
 import torch_mesh
 from . import _stream, fused
 from .engines import host
+from .matrix import product, row_tiles
 
 class DNN:
     """docs/measurement.md#physical-fabric-dnn"""
@@ -31,29 +32,34 @@ class DNN:
         addition = ' + '.join(['own[i]'] + [f'mesh_payload(p{k} + i)' for k in range(peers)])
         vectors = ' + '.join(['((device const float4 *)own)[i / 4]'] +
                              [f'mesh_payload((volatile coherent(system) device const float4 *)p{k} + i / 4)' for k in range(peers)])
-        fold_args = 'struct FoldArgs { uint n, pad; mesh_step_binding land[CHANNELS], publish[CHANNELS]; };'
         fold_wait = r'''
-    for (uint k = 0; k < CHANNELS; k++) if (s.land[k].p) {
-        auto b = s.land[k];
-        mesh_step_enter(*b.p, b.v, b.progress, tid == 0);
+    constant mesh_step_binding *land = (constant mesh_step_binding *)(s + 4) + tile * CHANNELS;
+    for (uint k = 0; k < CHANNELS; k++) if (land[k].p) {
+        auto b = land[k];
+        mesh_step_enter(*b.p, b.v, b.progress, tid == 0 && local == 0);
         if (local == 0) mesh_step_counts(*b.p, b.a, b.v);
     }
     threadgroup_barrier(mem_flags::mem_device);
     atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
 '''
-        source = fused.steps() + f'#define CHANNELS {self.channels}\n' + fold_args + f'''
+        source = fused.steps() + f'#define CHANNELS {self.channels}\n' + f'''
 kernel void fold(device const float *own [[buffer(0)]], {inputs}, device float *out [[buffer({peers + 1})]],
-                 constant FoldArgs &s [[buffer({peers + 2})]], uint tid [[thread_position_in_grid]],
-                 uint local [[thread_position_in_threadgroup]], uint stride [[threads_per_grid]]) {{
+                 constant uint *s [[buffer({peers + 2})]], uint2 pos [[thread_position_in_grid]],
+                 uint local [[thread_index_in_threadgroup]], uint2 grid [[threads_per_grid]],
+                 uint2 group [[threadgroup_position_in_grid]]) {{
+    const uint tid = pos.x, stride = grid.x, tile = group.y;
+    const uint begin = tile * s[1] * s[2], end = min(s[0], begin + s[1] * s[2]);
     {fold_wait}
-    for (uint i = 4 * tid; i < s.n; i += 4 * stride) {{
-        if (i + 3 < s.n) ((device float4 *)out)[i / 4] = tanh({vectors});
-        else for (; i < s.n; i++) out[i] = tanh({addition});
+    for (uint i = begin + 4 * tid; i < end; i += 4 * stride) {{
+        if (i % 4 == 0 && i + 3 < end) ((device float4 *)out)[i / 4] = tanh({vectors});
+        else {{
+            const uint stop = min(i + 4, end);
+            for (uint j = i; j < stop; j++) {{ const uint i = j; out[i] = tanh({addition}); }}
+        }}
     }}
 }}
 '''
         self.fold = _stream.pipeline(source, 'fold')
-        self.arrivals = [torch.zeros(1, dtype=torch.int32, device='mps') for _ in range(L)]
         self.parts = None
         self.tiles = [(first, min(args.tile_rows, B - first)) for first in range(0, B, args.tile_rows)]
 
@@ -77,16 +83,24 @@ kernel void fold(device const float *own [[buffer(0)]], {inputs}, device float *
             for layer, (a, b) in enumerate(self.local):
                 partial = self.partial[layer].narrow(0, first, rows)
                 landings = [t.narrow(0, first, rows) for t in self.landing[layer]]
-                crossing = fused.writes(schedule, partial, landings, self.pairs, self.group)
-                from .matrix import product
+                tiles = row_tiles(rows)
+                ready = torch_mesh.empty(len(tiles), dtype=torch.int64)
+                arrivals = torch_mesh.empty(len(tiles), dtype=torch.int32)
+                host(ready).zero_(); host(arrivals).zero_()
+                words = [partial.numel(), H, tiles[0][1], 0]
+                for index, (at, count) in enumerate(tiles):
+                    crossing = fused.writes(schedule, partial.narrow(0, at, count),
+                        [t.narrow(0, at, count) for t in landings], self.pairs, self.group,
+                        ready=ready.narrow(0, index, 1), ready_value=count * H * partial.element_size())
+                    words += [w for k in range(self.channels) for w in fused._words(
+                        crossing.land[k] if k < len(crossing.land) else fused._NONE)]
                 schedule.append(_stream.Commands([
                     product(x, a, hidden, act=True),
-                    product(hidden, b, partial, publication=crossing, arrivals=self.arrivals[layer])]))
+                    product(hidden, b, partial, ready=ready, arrivals=arrivals)]))
                 inputs = [t for (_, destination), t in zip(self.pairs, landings) if destination == rank]
                 output = len(inputs) + 1
                 schedule.compute(self.fold, [partial, *inputs, result],
-                                 fused._encode_words([result.numel(), 0], self.channels, crossing, None),
-                                 output + 1, (result.numel() + 1023) // 1024, 1, 256,
+                                 words, output + 1, (tiles[0][1] * H + 1023) // 1024, len(tiles), 256,
                                  ((1 << output) - 1) | (1 << (32 + output)))
                 x = result
         schedule.finish()
@@ -96,5 +110,6 @@ kernel void fold(device const float *own [[buffer(0)]], {inputs}, device float *
 
     def declare(self):
         from .backend import Call, WRITE
-        return [([Call(WRITE, rows * self.args.width, torch.float32, root=a, destination=b)
-                  for a, b in self.pairs], self.args.layers) for _, rows in self.tiles]
+        return [([Call(WRITE, count * self.args.width, torch.float32, root=a, destination=b)
+                  for a, b in self.pairs], 1) for _, rows in self.tiles for _ in range(self.args.layers)
+                for _, count in row_tiles(rows)]

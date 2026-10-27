@@ -4,23 +4,13 @@
 using namespace mpp::tensor_ops;
 struct ProductArgs {
     uint4 shape;
-#if FUSED
-    mesh_step_binding land[CHANNELS], publish[CHANNELS];
-#endif
 };
 kernel void product(device INPUT *X [[buffer(0)]], device INPUT *W [[buffer(1)]], device uchar *Y [[buffer(2)]],
                     device atomic_uint *arrivals [[buffer(3)]], constant ProductArgs &s [[buffer(4)]], device OUTPUT *bias [[buffer(5)]],
-                    device INPUT *X1 [[buffer(6)]],
+                    device INPUT *X1 [[buffer(6)]], device ulong *ready [[buffer(7)]],
                     uint3 tg [[threadgroup_position_in_grid]], uint3 lane [[thread_position_in_threadgroup]],
                     ushort sg [[simdgroup_index_in_threadgroup]]) {
     const int M=s.shape.x, N=s.shape.z;
-#if FUSED
-    const uint local = lane.x;
-    for (uint k = 0; k < CHANNELS; k++) if (s.publish[k].p) {
-        auto b = s.publish[k];
-        mesh_step_enter(*b.p, b.v, b.progress, tg.x == 0 && tg.y == 0 && tg.z == 0 && local == 0);
-    }
-#endif
     const int row=int(tg.x)*ROWS*ROW_GROUPS+(sg/COLUMN_GROUPS)*ROWS, col=int(tg.y)*COLUMNS*COLUMN_GROUPS+(sg%COLUMN_GROUPS)*COLUMNS;
     auto A=tensor(X + tg.z * ABATCH, dextents<int,2>{K0,M}, array<int,2>{AK,AM});
     auto B=tensor(W + tg.z * BBATCH, dextents<int,2>{N,K0}, array<int,2>{BN,BK});
@@ -46,17 +36,14 @@ kernel void product(device INPUT *X [[buffer(0)]], device INPUT *W [[buffer(1)]]
                                     OUTPUT(ACTIVATE ? tanh(value) : value));
         }
     }
-#if FUSED
-    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
-    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
+#if PRODUCED
+    const uint local = lane.x, rowGroups = (M+ROWS*ROW_GROUPS-1)/(ROWS*ROW_GROUPS),
+        columnGroups = (N+COLUMNS*COLUMN_GROUPS-1)/(COLUMNS*COLUMN_GROUPS), slot = tg.z*rowGroups+tg.x;
     threadgroup uint last[1];
-    if (local == 0) last[0] = atomic_fetch_add_explicit(arrivals, 1u, memory_order_relaxed) == uint(((M+ROWS*ROW_GROUPS-1)/(ROWS*ROW_GROUPS))*((N+COLUMNS*COLUMN_GROUPS-1)/(COLUMNS*COLUMN_GROUPS))*s.shape.w-1);
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (last[0]) {
-        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
-        for (uint k = 0; k < CHANNELS; k++) if (s.publish[k].p)
-            mesh_step_release(*s.publish[k].p, s.publish[k].a, local);
-        if (local == 0) atomic_store_explicit(arrivals, 0u, memory_order_relaxed);
+    if (mesh_last_arrival<true>(arrivals, slot, columnGroups, local, last)) {
+        const ulong bytes = ulong(min(uint(ROWS*ROW_GROUPS), uint(M)-tg.x*ROWS*ROW_GROUPS))*N*sizeof(OUTPUT);
+        mesh_source_release(ready, slot, bytes, local);
+        mesh_arrival_reset(arrivals, slot, local);
     }
 #endif
 }

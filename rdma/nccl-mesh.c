@@ -1781,6 +1781,9 @@ struct ncclMeshWritePlan {
   uint32_t channels;
   int retained;
   struct where source, landing;
+  struct where source_ready;
+  uint64_t ready_value;
+  void *ready_owner;
   ncclMeshBuffer source_buffer, landing_buffer;
   ncclComm_t comm;
   size_t count, stride, bytes, row_bytes, rows, pitch;
@@ -1808,15 +1811,19 @@ static void write_plan_drop(struct ncclMeshWritePlan *p) {
          allocator. No execution performs an ownership search or reuse query. */
       pthread_mutex_lock(&attach_lock);
       struct lease *payload = lease_at(p->payload, NULL), *metadata = lease_at(p->spans, NULL);
+      struct lease *ready = p->ready_owner ? lease_at(p->ready_owner, NULL) : NULL;
       int error = !payload || !metadata ? EINVAL : 0;
       for (uint32_t k = 0; !error && k < 2 * p->channels; k++) {
         const struct mesh_lease_retire_dep *d = p->uses + k;
         error = mesh_lease_retire_mark_use(&payload->reads, d->stream, d->wire, d->holding, d->end, d->direction, 0);
         if (!error) error = mesh_lease_retire_mark_use(&metadata->reads, d->stream, d->wire, d->holding, d->end, d->direction, 1);
+        if (!error && ready && d->direction == MESH_LEASE_SEND)
+          error = mesh_lease_retire_mark_use(&ready->reads, d->stream, d->wire, d->holding, d->end, d->direction, 1);
       }
       if (!error) {
         mesh_lease_retire_end(&payload->reads);
         mesh_lease_retire_end(&metadata->reads);
+        if (ready) mesh_lease_retire_end(&ready->reads);
       }
       pthread_mutex_unlock(&attach_lock);
       if (error) fail(ncclInternalError, "releasing prepared write ownership: %s", strerror(error));
@@ -2870,6 +2877,11 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
         const mesh_pages units = m->c->write_plan ? (mesh_pages){span_units(&m->c->write_plan->packets,
           before->first * before->piece.element_bytes, delta)} : pages_of(delta, comm->page);
         entry.base = pages_to_word(pages_add(pages_sub(from->end, from->pages), units));
+      } else if (m->c->write_plan && m->c->write_plan->ready_value) {
+        const struct ncclMeshWritePlan *plan = m->c->write_plan;
+        entry.word = (uint64_t)(address_of(plan->source_ready) - (const unsigned char *)context->M);
+        entry.base = plan->ready_value - m->pages.n;
+        if (program) metal_resident(program, plan->source_ready.buffer);
       }
       if (program) records[k]=entry;
       else status = mesh_stream_present(context, ch->stream, 0, entry);
@@ -3361,13 +3373,23 @@ static ncclResult_t outside_groups(struct ncclComm *comm, uint32_t h, int list, 
 static int publishable(struct ncclComm *comm, uint32_t h, uint64_t at) {
   struct inflight *g = inflight_at(comm, h, 0, at);
   const struct message *m = g ? out_at(g, h, at) : NULL;
-  return m && ready(m->c->bound, m->step);
+  return m && ((m->c->write_plan && m->c->write_plan->ready_value) || ready(m->c->bound, m->step));
 }
 
 /* the fused crossing of the group being encoded (nccl.h ncclMeshFused): its records' lists, the room the
    caller gave each (`room`: publications, landings), and the publications and landings written in place of their
    dispatches; under group_lock, for one launch_metal */
 static struct { ncclMeshFused *out; uint32_t room[2], published, landed; } fusing;
+
+/* Explicit producer words and relay landing words already name readiness.
+   Only entries that use the channel's default word need a publication. */
+static int channel_publication(struct inflight *g, uint32_t h, uint64_t first, uint64_t end) {
+  for (uint64_t at = first; at < end; at++) {
+    const struct message *m = out_at(inflight_at(g->comm, h, 0, at), h, at);
+    if (!m->c->write_plan || !m->c->write_plan->ready_value) return 1;
+  }
+  return 0;
+}
 
 /* channel h's send entries [published, upto) published, their steps' bytes written by the stream's work before:
    one release storing the holding's `ready` past the last (one system fence, nccl-mesh-kernels.h mesh_step_release),
@@ -3377,6 +3399,7 @@ static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm
   struct channel *ch = comm->channels + h;
   struct inflight *g = inflight_at(comm, h, 0, upto - 1);
   if (!g) return outside_groups(comm, h, 0, upto - 1);
+  if (!channel_publication(g, h, ch->published, upto)) { ch->published = upto; return ncclSuccess; }
   const struct message *m = out_at(g, h, upto - 1);
   const struct metal_release release = {ch->buffer, ch->ready, m->end, g->plans[h].each[0]};
   ncclResult_t result = ncclSuccess;
@@ -3391,7 +3414,7 @@ static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm
     size_t n = 0;
     for (uint64_t at = ch->published; at < upto; at++) {
       if (n == sizeof operands / sizeof *operands) { metal_uses(program, operands, n, 0); n = 0; }
-      operands[n++] = out_at(g, h, at)->data.buffer;
+      operands[n++] = out_at(inflight_at(comm, h, 0, at), h, at)->data.buffer;
     }
     metal_uses(program, operands, n, 0);
     result = gpu(metal_publish(program, &release), "a publication");
@@ -3596,6 +3619,7 @@ static ncclResult_t complete(struct metal_program *program, struct inflight *thr
         struct inflight *g = inflight_at(c, h, 0, at);
         if (!g || g->fused) { result = g ? fail(ncclInternalError, "a fused crossing's publication on two tracks") : outside_groups(c, h, 0, at); break; }
         const struct message *m = out_at(g, h, at);
+        if (m->c->write_plan && m->c->write_plan->ready_value) { ch->published++; continue; }
         result = gpu(metal_record(program, track, METAL_PUBLISH, at, 0), "a publication's record");
         const struct steps *prior = m->c->bound;
         for (uint32_t d = prior->prior_first[m->step]; !result && d < prior->prior_first[m->step + 1]; d++) {
@@ -4081,7 +4105,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   if (!result && g) {
     uint32_t lands = 0, publishes = 0;
     for (uint32_t h = 0; h < comm->count; h++) {
-      publishes += g->fused ? g->end[h][0] > g->start[h][0] : (uint32_t)((g->end[h][0] - g->start[h][0]) / repeats);
+      publishes += g->fused ? channel_publication(g, h, g->start[h][0], g->end[h][0]) : (uint32_t)((g->end[h][0] - g->start[h][0]) / repeats);
       lands += g->fused ? own_landing(g, h) > g->start[h][1] : (uint32_t)((g->end[h][1] - g->start[h][1]) / repeats);
     }
     /* a fused group is completed at once, issued or not: its steps are records its caller's kernels run, and the
@@ -4941,6 +4965,27 @@ ncclResult_t ncclMeshWriteSpansPrepare(const void *source_buffer, void *landing_
     int source, int destination, ncclComm_t comm, int metal, size_t max_packet, ncclMeshWritePlan_t *out) {
   return write_prepare(source_buffer, landing_buffer, 0, ncclUint8, source, destination, comm, metal, 1, 0,
     max_packet, 0, 0, spans, nspans, 1, out);
+}
+ncclResult_t ncclMeshWriteSourceReady(ncclMeshWritePlan_t plan, const void *word, uint64_t value) {
+  if (!plan || !value || value < plan->bytes || plan->ready_value)
+    return fail(ncclInvalidArgument, "source readiness needs a fresh plan and a value covering its byte count");
+  if (plan->comm->rank == plan->from && plan->retained) {
+    if (!word) return fail(ncclInvalidArgument, "source readiness has no word");
+    const struct where ready = plan->metal ? where_of(word) : (struct where){NULL, (size_t)word};
+    void *address = address_of(ready);
+    pthread_mutex_lock(&attach_lock);
+    struct attach *attachment = NULL;
+    struct lease *owner = lease_at(address, &attachment);
+    const size_t offset = owner ? (uintptr_t)address - (uintptr_t)owner->address : 0;
+    int error = !owner || attachment != plan->comm->attach || owner->returned || offset > owner->bytes || owner->bytes - offset < sizeof(uint64_t) ||
+      (uintptr_t)address % sizeof(uint64_t)
+      ? EINVAL : mesh_lease_retire_begin(&owner->reads);
+    pthread_mutex_unlock(&attach_lock);
+    if (error) return fail(ncclInvalidArgument, "source readiness word is not an aligned live region operand");
+    plan->source_ready = ready; plan->ready_owner = address;
+  }
+  plan->ready_value = value;
+  return ncclSuccess;
 }
 ncclResult_t ncclMeshWriteExecute(ncclMeshWritePlan_t plan, cudaStream_t stream) {
   atomic_fetch_add_explicit(&plan->refs, 1, memory_order_relaxed);

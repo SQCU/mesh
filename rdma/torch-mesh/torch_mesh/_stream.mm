@@ -1423,7 +1423,7 @@ static pybind11::capsule chain_completion(int64_t index) {
 static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> fused_writes_impl(
     MetalSchedule *schedule, const at::Tensor &send, const std::vector<at::Tensor> &landings,
     const std::vector<std::array<int, 2>> &pairs, int64_t comm, int64_t polls, int64_t repeats, int64_t stride,
-    int64_t row_bytes, int64_t rows) {
+    int64_t row_bytes, int64_t rows, const std::optional<at::Tensor> &ready, int64_t ready_value) {
   TORCH_CHECK(landings.size() == pairs.size(), "fused writes: one landing lease per declared write");
   TORCH_CHECK(polls >= 0 && polls <= (int64_t)UINT32_MAX, "fused writes: polls is a 32-bit count of loads");
   TORCH_CHECK(repeats > 0 && repeats <= (int64_t)UINT32_MAX && stride >= 0,
@@ -1442,6 +1442,12 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
   if (!rows) framed(send);
   Group g{true};
   const Operand out = g.moving(send);
+  std::optional<Operand> produced;
+  if (ready) {
+    TORCH_CHECK(ready->scalar_type() == at::kLong && ready->numel() == 1 && ready_value > 0,
+                "source readiness is one int64 region word with an explicit positive target");
+    produced = g.moving(*ready);
+  }
   std::vector<Operand> in;
   for (const at::Tensor &landing : landings) {
     if (!rows) framed(landing);
@@ -1459,6 +1465,7 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
                                       pairs[i][0], pairs[i][1], c, 1, 0, &plans.handles[i]));
     } else checked(ncclMeshWritePrepare(out.at, (void *)in[i].at, out.count, out.type, pairs[i][0], pairs[i][1], c, 1,
                                       (uint32_t)repeats, (size_t)stride, 0, &plans.handles[i]));
+    if (produced) checked(ncclMeshWriteSourceReady(plans.handles[i], produced->at, (uint64_t)ready_value));
   }
   plans.prepare(comm, polls, repeats, rows ? 0 : stride);
   prepare_fused_writes(schedule,plans);
@@ -1498,9 +1505,10 @@ struct ScheduleBinding {
   }
   auto writes(const at::Tensor &send,const std::vector<at::Tensor> &landings,
       const std::vector<std::array<int,2>> &pairs,int64_t comm,int64_t polls,int64_t repeats,int64_t stride,
-      int64_t row_bytes,int64_t rows) {
+      int64_t row_bytes,int64_t rows,const std::optional<at::Tensor> &ready,int64_t ready_value) {
     operands.push_back(send);operands.insert(operands.end(),landings.begin(),landings.end());
-    return fused_writes_impl(schedule.get(),send,landings,pairs,comm,polls,repeats,stride,row_bytes,rows);
+    if(ready)operands.push_back(*ready);
+    return fused_writes_impl(schedule.get(),send,landings,pairs,comm,polls,repeats,stride,row_bytes,rows,ready,ready_value);
   }
   void collectives(const std::vector<Call> &calls,int64_t comm) {
     MetalScheduleCommunicator(schedule.get(),communicator(comm));

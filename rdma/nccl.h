@@ -1021,6 +1021,16 @@ typedef struct ncclMeshSpan { uint64_t offset, bytes; } ncclMeshSpan;
 ncclResult_t ncclMeshWriteSpansPrepare(const void* source_buffer, void* landing_buffer,
     const ncclMeshSpan* spans, size_t nspans, int source, int destination, ncclComm_t comm,
     int metal, size_t max_packet, ncclMeshWritePlan_t* out);
+/* Preparation operand for independently produced source tiles. All ranks bind
+   it before Execute; only the source's word is used (ncclMeshBuffer on Metal,
+   region address on host). The producer stores value after its payload stores.
+   value must be at least the plan's logical byte count; the initial word must
+   be below value - byte_count + 1. One word may release several WRITE plans.
+   Each compiled occurrence owns a distinct word or a disjoint increasing value
+   interval. No reset is allowed while an earlier occurrence can still read it.
+   Relays still depend on their incoming data. Fused execution returns landing
+   bindings only for these plans, with no channel-prefix publication. */
+ncclResult_t ncclMeshWriteSourceReady(ncclMeshWritePlan_t plan, const void* word, uint64_t value);
 ncclResult_t ncclMeshWriteExecute(ncclMeshWritePlan_t plan, cudaStream_t stream);
 ncclResult_t ncclMeshWritePlanDestroy(ncclMeshWritePlan_t plan);
 /* A call a program declares ahead (ncclMeshCommPlan): `what` (mesh-plan.h MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE,

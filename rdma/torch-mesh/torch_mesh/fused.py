@@ -42,7 +42,7 @@ def _words(addresses):
     return [w for a in addresses for w in (a & 0xFFFFFFFF, a >> 32)]
 
 
-def writes(schedule, send, landings, pairs, group, polls=0, *, repeats=1, stride=0):
+def writes(schedule, send, landings, pairs, group, polls=0, *, repeats=1, stride=0, ready=None, ready_value=0):
     """Immutable routed writes, one landing lease per (source, destination).
 
     The producer releases every returned publication after making its operand.
@@ -58,9 +58,14 @@ def writes(schedule, send, landings, pairs, group, polls=0, *, repeats=1, stride
     using the binding's repeat index. Publication must advance in frame order;
     it never certifies an unfinished earlier frame. A zero stride requires a
     separate lifetime proof before overwriting any prior frame's live bytes.
+
+    ``ready`` and ``ready_value`` bind an independent producer word instead of
+    the channel prefix. The producer calls mesh_source_release after this
+    tile's stores. Distinct tiles own distinct words; no completion ordering
+    between them is assumed. Relay readiness still follows incoming pages.
     """
     publish, land = schedule.writes(send, list(landings), list(pairs), group.handle,
-                                    int(polls), int(repeats), int(stride), 0, 0)
+                                    int(polls), int(repeats), int(stride), 0, 0, ready, int(ready_value))
     return Crossing(tuple(map(tuple, publish)), tuple(map(tuple, land)))
 
 
@@ -74,7 +79,7 @@ def write_rows(schedule, send, landings, pairs, group, row_bytes, rows, stride):
     final landing bindings use repeat index zero.
     """
     publish, land = schedule.writes(send, list(landings), list(pairs), group.handle,
-                                    0, 1, int(stride), int(row_bytes), int(rows))
+                                    0, 1, int(stride), int(row_bytes), int(rows), None, 0)
     return Crossing(tuple(map(tuple, publish)), tuple(map(tuple, land)))
 
 def _encode_words(constants, channels, land, publish):

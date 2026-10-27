@@ -35,45 +35,52 @@ does not provide a smaller prepared set. Treating a guessed selection as that se
 dependencies. Remaining native builders also need their views supplied. This is not a claim that every
 native command now has an exact access declaration.
 
-## Where tiles become available
+## Tile publication
 
-The existing numerical completion mechanisms differ from their transport bindings:
+The WRITE compiler accepts `ncclMeshWriteSourceReady(plan, word, value)` during preparation.
+The source's SEND descriptors use that word instead of the channel's cumulative ready prefix.
+A tile's producer calls the shared `mesh_source_release` after its stores. Each tile has its own
+word, so a later tile finishing first cannot release an unfinished earlier tile. Wire order is
+still the compiled order. A relay's descriptors still depend on its incoming landing word.
 
-| Producer | Existing completion point | Current transport boundary |
-|---|---|---|
-| `matrix.metal` `product` | One arrival counter joins every row, column and batch threadgroup | All source publications released by the final threadgroup |
-| DNN `prepare` | Configured outer row tiles, each with its own product and fold | One whole crossing per outer tile; fold observes its full incoming prefixes |
-| Native `mmb_after` | `mesh_last_arrival` joins only the contributors to an epilogue span | Finishing a head or block does not yet release a prepared WRITE |
-| Native `CrossingPoint` | A recorded crossing mark after its producing commands | The ordinary library publication command at that mark |
+The target covers the tile's logical bytes. Each physical fragment derives its unit interval
+below that target at preparation. Publication releases the fragment's existing page/mask list;
+it does not pack, copy or construct descriptors. The readiness operand is retained through the
+bridge's final CPU read by the same lease ledger as the descriptor list. That ledger runs in
+preparation and retirement, outside the numerical function.
 
-`mmb_after` already has the useful numerical structure: a span's last contributor runs its epilogue.
-Other threadgroups do not spin there. `mmb_heads.span()` names a head width; `mmb_ple.span()` names
-its block width. A split product must finish all contributors to that span before nonlinear operations
-or a final-value send. An access range alone does not describe those incomplete sums.
+| Producer | Completion and binding |
+|---|---|
+| `matrix.product` | A separate arrival count for each batch/row tile joins only that tile's column groups. Its last contributor releases that tile's source word. |
+| DNN `prepare` | Compiles the same `matrix.row_tiles` into WRITE plans and row-tile consumer bindings. The product and fold remain whole dispatches. |
+| Native `mmb_heads` | Finishes a head's values, then joins the rows of that head and publishes its prepared word. Fused and standalone heads use the same routine. |
+| Native `MeshProduction` | Names a tile width, readiness view and producer command position. The existing recorder issues the prepared writes before the producer and completes their incoming dependencies at the consumer position. |
 
-## The next compiler boundary
+Native query gathers and key/value row handoffs use head tiles. Each source and recipient retains
+its own row pitch; relays retain their own pages. All head plans of a crossing are issued as one
+group. The declaration and physical plan enumerate the same pieces. Per-invocation readiness
+words are ordinary recorded operand slots, including when an epilogue is fused into a product;
+no captured address is expected to follow a changing slot.
 
-The compiler needs to connect each produced span to its source page/mask list, prepared physical writes
-and consumer views. The producer then releases that span's existing transport bindings after its stores
-are visible. The consumer names the incoming data it needs. Relays retain their own incoming-data
-dependencies. This uses the prepared write compiler and all its physical channels.
+Source publication is part of the producer. It adds no host submission, peer acknowledgment,
+channel-prefix scan, or spin waiting for another producer threadgroup. Arrival counts use the
+existing `mesh_last_arrival` helper. Producer stores exposed during a dispatch are system-coherent.
+The native epilogue's contributor count clips its final span to the actual output width.
 
-The current `ncclMeshFused` interface returns one cumulative publication per active channel for the
-whole crossing. Its repeat index describes an ordered train of frames. It is not an independent tile
-identifier: releasing frame 3 also certifies the earlier entries of that channel. GPU threadgroups can
-finish out of order. Releasing their numbered prefixes independently would advertise unfinished data;
-an unconditional later store of a smaller prefix could also move readiness backwards.
+## Remaining boundaries
 
-The unresolved integration is therefore the compiled relationship between production order and these
-physical prefixes. It must expose tile completion without a new host submission per tile, a peer receipt,
-or a GPU spin waiting for an unscheduled producer. The current whole-dispatch join has not been removed
-by the access-declaration change. The existing span completion, page plans and common schedule are the
-components to connect; another execution interface is not needed.
+The DNN fold observes incoming dependencies per row tile. Native attention still consumes a
+complete query or KV crossing at its recorded consumer mark; this change makes the source
+head tiles available earlier, but does not split every downstream attention command. The PLE
+epilogue has no declared remote output and keeps its existing local span completion.
+
+A channel still has FIFO ordering. Independent readiness words remove the false dependency
+on every producer tile finishing; they do not make a later descriptor overtake an earlier one.
+The routing compiler can choose a different order using the same interface.
 
 ## Validation
 
-This change alters preparation metadata. Numerical bodies, launch grids, write plans and publication
-points are unchanged. The shared library and Torch extension built. The existing transformer block
-prepared its complete forward/backward graph at batch 2, sequence 1,024, width 2,048 and float16 using
-the shared range calculation. No numerical submission was made. This does not establish an end-to-end
-latency or useful-throughput improvement.
+The shared library and Torch extension built. The matrix producer prepared a 131 by 257 by
+259 product with row tiles of 64, 64 and 3, without numerical submission. Native integration
+build and complete graph preparation are recorded with the implementation commit. Build and
+preparation results do not establish an end-to-end latency/useful-throughput improvement.
