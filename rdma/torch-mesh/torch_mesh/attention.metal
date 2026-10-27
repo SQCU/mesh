@@ -216,7 +216,7 @@ template <typename A>
 __attribute__((always_inline)) static inline void mesh_attention_tile(thread A &a) {
     constexpr uint D = A::dims, NSG = A::simdgroups, PAGE = A::page_extent, C = NSG * PAGE, DB = D / 8, OB = DB / NSG, RS = 8 / NSG > 0 ? 8 / NSG : 1;
     static_assert(PAGE == MESH_ATTENTION_TILE_PAGE, "attention kernel and declared KV page layout disagree");
-    const uint s = a.s, lane = a.lane, stride = a.stride;
+    const uint s = a.s, lane = a.lane;
     for (uint e = a.t; e < 64; e += NSG * 32) a.diag[e] = 0.0f;
     a.load_q();
     float m[RS], l[RS];
@@ -232,8 +232,8 @@ __attribute__((always_inline)) static inline void mesh_attention_tile(thread A &
             for (uint d0 = 0; d0 < DB; d0 += 8) {
                 simdgroup_half8x8 k[16];
                 for (uint u = 0; u < 8; u++) {
-                    simdgroup_load(k[2 * u], kp + 8 * (d0 + u), stride);
-                    simdgroup_load(k[2 * u + 1], kp + 8 * stride + 8 * (d0 + u), stride);
+                    a.load_k(k[2 * u], kp, i, s, 0u, 8 * (d0 + u));
+                    a.load_k(k[2 * u + 1], kp, i, s, 8u, 8 * (d0 + u));
                 }
                 for (uint u = 0; u < 8; u += 2) {
                     simdgroup_half8x8 q0, q1;
@@ -285,7 +285,7 @@ __attribute__((always_inline)) static inline void mesh_attention_tile(thread A &
             for (uint h = 0; h < 2; h++) {
                 simdgroup_half8x8 p, vm[OB];
                 simdgroup_load(p, a.ps + w * PAGE + 8 * h, C);
-                for (uint b = 0; b < OB; b++) simdgroup_load(vm[b], v + 8 * h * stride + 8 * (b * NSG + s), stride);
+                for (uint b = 0; b < OB; b++) a.load_v(vm[b], v, i, w, 8 * h, 8 * (b * NSG + s));
                 for (uint b = 0; b < OB; b++) simdgroup_multiply_accumulate(o[b], p, vm[b], o[b]);
             }
         }
@@ -318,7 +318,21 @@ struct mesh_unmasked {
 // dispatch). layout() places the threadgroup memory a wrapper declares (region floats, 64 diag floats, simdgroups places)
 // and span() the pages of the rows' union and J, the configuration's part count (each part written: an empty one's l = 0,
 // which the merge passes over).
-template <uint D, typename KV, typename F = device float *, typename F4 = device float4 *, typename M = mesh_unmasked>
+struct mesh_attention_access {
+    __attribute__((always_inline)) half4 query(device const half *q, ulong at) const { return ((device const half4 *)q)[at]; }
+    __attribute__((always_inline)) void load(thread simdgroup_half8x8 &out, device const half *p, uint, uint row, uint column,
+                                            uint stride, uint, bool) const {
+        simdgroup_load(out, p + ulong(row) * stride + column, stride);
+    }
+};
+
+inline uint mesh_matrix_lane(uint lane) {
+    const uint q = lane / 4;
+    return ((q & 4) + (lane / 2) % 4) * 8 + (q & 2) * 2 + (lane % 2) * 2;
+}
+
+template <uint D, typename KV, typename F = device float *, typename F4 = device float4 *, typename M = mesh_unmasked,
+          typename Access = mesh_attention_access>
 struct mesh_tile {
     enum : uint { dims = D, page_extent = KV::page_extent, simdgroups = 4, region = 8 * D > 4 * D + 12 * 64 ? 8 * D : 4 * D + 12 * 64 };
     KV kv;
@@ -337,6 +351,7 @@ struct mesh_tile {
     uint rows[8], lo[8], hi[8];
     M mod;
     uint2 query[8];
+    Access access;
 
     __attribute__((always_inline)) void layout(threadgroup float *region, threadgroup float *d, threadgroup ulong *p) {
         qs = (threadgroup half *)region; ss = region + 4 * D; ps = (threadgroup half *)(region + 4 * D + 8 * 64);
@@ -356,7 +371,7 @@ struct mesh_tile {
     __attribute__((always_inline)) void load_q() {
         for (uint e = t; e < 2 * D; e += 32 * simdgroups) {
             const uint i = rows[e / (D / 4)];
-            ((threadgroup half4 *)qs)[e] = i != 0xFFFFFFFFu ? ((device const half4 *)Q)[ulong(i) * (D / 4) + e % (D / 4)] : half4(0.0h);
+            ((threadgroup half4 *)qs)[e] = i != 0xFFFFFFFFu ? access.query(Q, ulong(i) * (D / 4) + e % (D / 4)) : half4(0.0h);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
@@ -369,6 +384,13 @@ struct mesh_tile {
     }
 
     __attribute__((always_inline)) uint first(uint i, uint w) { return (base + j + J * (simdgroups * i + w)) * page_extent; }
+
+    __attribute__((always_inline)) void load_k(thread simdgroup_half8x8 &out, device const half *p, uint i, uint w, uint row, uint column) {
+        access.load(out, p, first(i, w), row, column, stride, lane, true);
+    }
+    __attribute__((always_inline)) void load_v(thread simdgroup_half8x8 &out, device const half *p, uint i, uint w, uint row, uint column) {
+        access.load(out, p, first(i, w), row, column, stride, lane, false);
+    }
 
     __attribute__((always_inline)) bool live(uint r, uint position) {
         return position >= lo[r] && position < hi[r] && (M::exact || mod.keep(query[r].x, query[r].y, position));
@@ -425,8 +447,8 @@ struct mesh_shared {
 // in query, each cut to the range; the pages of
 // their union, every one of the range's `splits` parts. The task's other members are the caller's
 // (layout, scale, stride, s, lane, t, j, parts), its KV type mapping the range's pages.
-template <uint D, typename KV, typename F, typename F4, typename M, typename Row>
-__attribute__((always_inline)) static inline void mesh_shared_part(thread mesh_tile<D, KV, F, F4, M> &task, mesh_shared range, uint item, uint count,
+template <uint D, typename KV, typename F, typename F4, typename M, typename Access, typename Row>
+__attribute__((always_inline)) static inline void mesh_shared_part(thread mesh_tile<D, KV, F, F4, M, Access> &task, mesh_shared range, uint item, uint count,
                                                                    Row row) {
     for (uint r = 0; r < 8; ++r) {
         const uint e = 8 * item + r;
@@ -444,8 +466,8 @@ __attribute__((always_inline)) static inline void mesh_shared_part(thread mesh_t
 // A sharing stream's tail on its task (rows and keys as the per-row path fills them): each row's keys cut to past the
 // range, its parts at slots [range.splits, range.splits + J) (the partial pointers offset), J = `splits`; the row's part
 // count range.splits + J, the merge's.
-template <uint D, typename KV, typename F, typename F4, typename M>
-__attribute__((always_inline)) static inline uint mesh_shared_tail(thread mesh_tile<D, KV, F, F4, M> &task, mesh_shared range, uint splits) {
+template <uint D, typename KV, typename F, typename F4, typename M, typename Access>
+__attribute__((always_inline)) static inline uint mesh_shared_tail(thread mesh_tile<D, KV, F, F4, M, Access> &task, mesh_shared range, uint splits) {
     for (uint r = 0; r < 8; ++r) {
         const uint2 keys = range.tail(uint2(task.lo[r], task.hi[r]));
         task.lo[r] = keys.x;

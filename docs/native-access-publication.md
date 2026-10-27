@@ -54,7 +54,8 @@ preparation and retirement, outside the numerical function.
 | `matrix.product` | A separate arrival count for each batch/row tile joins only that tile's column groups. Its last contributor releases that tile's source word. |
 | DNN `prepare` | Compiles the same `matrix.row_tiles` into WRITE plans and row-tile consumer bindings. The product and fold remain whole dispatches. |
 | Native `mmb_heads` | Finishes a head's values, then joins the rows of that head and publishes its prepared word. Fused and standalone heads use the same routine. |
-| Native `MeshProduction` | Names a tile width, readiness view and producer command position. The existing recorder issues the prepared writes before the producer and completes their incoming dependencies at the consumer position. |
+| Native `MeshProduction` | Names a tile width, readiness view and producer command position. The recorder issues the prepared writes before the producer. |
+| Native `MeshConsumption` | Binds each WRITE's incoming channel records to its consumer's tile, in that invocation's operand slot. There is no whole-crossing completion command. |
 
 Native query gathers and key/value row handoffs use head tiles. Each source and recipient retains
 its own row pitch; relays retain their own pages. All head plans of a crossing are issued as one
@@ -67,12 +68,32 @@ channel-prefix scan, or spin waiting for another producer threadgroup. Arrival c
 existing `mesh_last_arrival` helper. Producer stores exposed during a dispatch are system-coherent.
 The native epilogue's contributor count clips its final span to the actual output width.
 
-## Remaining boundaries
+## Tile consumers
 
-The DNN fold observes incoming dependencies per row tile. Native attention still consumes a
-complete query or KV crossing at its recorded consumer mark; this change makes the source
-head tiles available earlier, but does not split every downstream attention command. The PLE
-epilogue has no declared remote output and keeps its existing local span completion.
+`ncclMeshWriteLandings` returns each WRITE's final incoming prefix on each used physical
+channel. Multiple tiles remain in one group; recording a tile adds no host submission.
+Relay-only entries are not consumer inputs. Native `TileLanding` stores these lists in the
+same invocation slots as other recorded operands. The shared `mesh_landing_counts` and
+`mesh_landing_await` helpers observe the lists without another network message.
+
+Vector attention observes its query head. Tile and shared-prefix attention observe only the
+query heads in their active rows. Fresh KV rows are read directly from their received views;
+each page that intersects those rows observes its own KV head's incoming lists. Old KV pages
+continue through the cache page table. The shared attention template accepts this read layout
+as a compilation operand; its ordinary cached layout still uses the existing matrix loads.
+Cache installation follows attention and uses the same per-head dependencies. Handoff-only
+receivers use that same cache writer. No consumer waits for another GPU threadgroup to run.
+
+The native softmax configuration now uses the existing gather-and-merge algorithm. Its
+partials occupy `[row, contributor, head, m/l/O]`, so head columns land directly at their
+final positions. The producer publishes each head after its row contributors finish, and
+each merge reads only that head's contributors. The old native `partials` all-reduce branch
+is removed; old records must be derived again. This changes collective decomposition as
+well as scheduling; end-to-end latency and useful throughput still need measurement.
+
+The DNN fold retains its row-tile dependencies. Native source publication is still one
+head across its rows. Local attention kernels still finish their own dispatch before the
+separate partial-result producer executes. The PLE epilogue has no declared remote output.
 
 A channel still has FIFO ordering. Independent readiness words remove the false dependency
 on every producer tile finishing; they do not make a later descriptor overtake an earlier one.
@@ -84,5 +105,7 @@ The shared library and Torch extension built. The matrix producer prepared a 131
 259 product with row tiles of 64, 64 and 3, without numerical submission. The native/LiteRT
 rank built; Metal compiled the standalone and fused native head producers. The existing FX
 transformer forward/backward graph also prepared at batch 2, sequence 1,024 and width 2,048.
-No distributed numerical run was launched. These build and preparation results do not establish
-an end-to-end latency/useful-throughput improvement.
+The consumer refactor additionally compiled the native vector, tile and shared-prefix
+attention instances, partial-result producer/merge and cache writer for macOS 26. No
+distributed numerical run was launched. These results do not establish an end-to-end
+latency/useful-throughput improvement.

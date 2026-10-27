@@ -1031,6 +1031,12 @@ ncclResult_t ncclMeshWriteSpansPrepare(const void* source_buffer, void* landing_
    Relays still depend on their incoming data. Fused execution returns landing
    bindings only for these plans, with no channel-prefix publication. */
 ncclResult_t ncclMeshWriteSourceReady(ncclMeshWritePlan_t plan, const void* word, uint64_t value);
+/* Preparation output for this WRITE's consumer, independent of other writes in
+   the same fused group. The destination supplies capacity physical-channel
+   records; Execute fills them and count while compiling the group. Other ranks
+   supply no output. Storage remains valid through group compilation. Kernels
+   consume the records with mesh_landing_await; no completion command is added. */
+ncclResult_t ncclMeshWriteLandings(ncclMeshWritePlan_t plan, uint64_t (*bindings)[6], uint32_t capacity, uint32_t* count);
 ncclResult_t ncclMeshWriteExecute(ncclMeshWritePlan_t plan, cudaStream_t stream);
 ncclResult_t ncclMeshWritePlanDestroy(ncclMeshWritePlan_t plan);
 /* A call a program declares ahead (ncclMeshCommPlan): `what` (mesh-plan.h MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE,

@@ -1784,6 +1784,8 @@ struct ncclMeshWritePlan {
   struct where source_ready;
   uint64_t ready_value;
   void *ready_owner;
+  uint64_t (*land_bindings)[6];
+  uint32_t land_capacity, land_channel, *land_count;
   ncclMeshBuffer source_buffer, landing_buffer;
   ncclComm_t comm;
   size_t count, stride, bytes, row_bytes, rows, pitch;
@@ -3549,7 +3551,8 @@ static ncclResult_t complete_track(struct metal_program *program, struct infligh
 static uint64_t own_landing(const struct inflight *g, uint32_t h) {
   const struct schedule *p = g->plans + h;
   for (size_t k = p->ins / g->repeats; k; k--)
-    if (!p->in[k - 1].c->target || p->in[k - 1].c->target == g->comm->rank + 1) return g->start[h][1] + k;
+    if ((!p->in[k - 1].c->target || p->in[k - 1].c->target == g->comm->rank + 1) &&
+        !(p->in[k - 1].c->write_plan && p->in[k - 1].c->write_plan->land_count)) return g->start[h][1] + k;
   return g->start[h][1];
 }
 
@@ -3571,6 +3574,20 @@ static ncclResult_t complete(struct metal_program *program, struct inflight *thr
                                  (through->end[h][0] - through->start[h][0]) / through->repeats;
       if (ch->published < first_end) result = publish(program, comm, h, first_end, published);
       if (!result) ch->published = through->end[h][0];
+      const struct schedule *schedule = through->plans + h;
+      for (size_t k = schedule->ins / through->repeats; !result && k; k--) {
+        const struct message *m = schedule->in + k - 1;
+        struct ncclMeshWritePlan *write = m->c->write_plan;
+        if (!write || !write->land_count || write->to != comm->rank) continue;
+        if (write->land_channel == h) continue;
+        write->land_channel = h;
+        if (*write->land_count == write->land_capacity)
+          return fail(ncclInvalidUsage, "WRITE consumer bindings exceed their prepared physical-channel capacity");
+        const struct metal_wait wait = {ch->buffer, comm->violation, m->data.buffer, ch->landed, m->data.offset,
+          m->end, through->start[h][1] + k - 1, h, schedule->each[1]};
+        result = gpu(metal_land_deferred(program, m->data.buffer, m->data.offset, &wait,
+          write->land_bindings[(*write->land_count)++]), "a WRITE consumer's landing record");
+      }
       const uint64_t own = own_landing(through, h);
       if (!result && ch->consumed < own) {
         ch->consumed = own - 1;
@@ -4993,6 +5010,13 @@ ncclResult_t ncclMeshWriteExecute(ncclMeshWritePlan_t plan, cudaStream_t stream)
     .send = plan->metal ? &plan->source_buffer : (const void *)plan->source.offset,
     .recv = plan->metal ? &plan->landing_buffer : (void *)plan->landing.offset,
     .count = plan->count, .type = plan->type, .op = ncclSum, .comm = plan->comm, .stream = stream, .write_plan = plan});
+}
+ncclResult_t ncclMeshWriteLandings(ncclMeshWritePlan_t plan, uint64_t (*bindings)[6], uint32_t capacity, uint32_t *count) {
+  if (!plan || !plan->metal || plan->repeats != 1 || plan->comm->rank != plan->to || !count || (capacity && !bindings) || plan->land_count)
+    return fail(ncclInvalidArgument, "WRITE landing output needs a fresh single-occurrence Metal plan and physical-channel storage");
+  *count = 0;
+  plan->land_bindings = bindings; plan->land_capacity = capacity; plan->land_count = count; plan->land_channel = UINT32_MAX;
+  return ncclSuccess;
 }
 ncclResult_t ncclMeshWritePlanDestroy(ncclMeshWritePlan_t plan) { write_plan_drop(plan); return ncclSuccess; }
 
