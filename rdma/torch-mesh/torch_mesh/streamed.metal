@@ -195,7 +195,7 @@ static inline T streamed_value(P partials, ulong at, uint shares, uint stride, T
 // threadgroup consumes what (the last to arrive of the threadgroups holding the rows it reads). streamed_plain consumes
 // nothing: the partials are the product's output.
 struct streamed_plain {
-    enum : uint { stage = 1 };
+    enum : uint { stage = 1, input_binding = 5 };
     typedef device float *partials;
     template <typename P, typename R, typename S>
     void after(P, R, S, device atomic_uint *, streamed_dims, uint, uint, uint, threadgroup float *, uint,
@@ -519,6 +519,7 @@ kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const ui
                          device const float *rowScale [[buffer(13)]], device atomic_uint *arrivals [[buffer(14)]],
                          constant streamed_dims &dims [[buffer(15)]], constant E &epilogue [[buffer(16)]],
                          device ulong *produced [[buffer(17)]], device atomic_uint *producing [[buffer(18)]],
+                         device float *consumer [[buffer(19)]],
                          uint2 group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
                          uint lane [[thread_index_in_simdgroup]], uint thread_id [[thread_index_in_threadgroup]]) {
     const streamed_dims d = dims_of(dims);
@@ -545,7 +546,7 @@ kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const ui
         const float value = rowScale[mesh_index<13>(output)] * total;
         ys[mesh_index<11>(ulong(n) * d.stride + uint(order[mesh_index<12>(output)]))] = Output(streamed_capped(value, d.cap));
     }
-    if (OUT == 0) epilogue.after(mesh_read<5>(stores), mesh_read<12>(order), mesh_read<13>(rowScale), arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * SK * 32, produced, producing);
+    if (OUT == 0) epilogue.after(mesh_read<E::input_binding>(E::input_binding == 5 ? stores : (typename E::partials)consumer), mesh_read<12>(order), mesh_read<13>(rowScale), arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * SK * 32, produced, producing);
 }
 
 // The gate and up products of up to R input rows together, GELU(gate) * up between them (the study's gate_up_mm): a
@@ -1054,6 +1055,7 @@ kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const u
                           device const float *rowScale [[buffer(13)]], device atomic_uint *arrivals [[buffer(14)]],
                           constant streamed_dims &dims [[buffer(15)]], constant E &epilogue [[buffer(16)]],
                           device ulong *produced [[buffer(17)]], device atomic_uint *producing [[buffer(18)]],
+                          device float *consumer [[buffer(19)]],
                           uint2 group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
                           uint lane [[thread_index_in_simdgroup]], uint thread_id [[thread_index_in_threadgroup]]) {
     const streamed_dims d = dims_of(dims);
@@ -1164,7 +1166,7 @@ kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const u
             stores[mesh_index<5>(ulong(group.y) * d.split + n * d.outputs + (group.x * BANDS + which) * 32 + r)] = total;
         }
     }
-    epilogue.after(mesh_read<5>(stores), mesh_read<12>(order), mesh_read<13>(rowScale), arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * GROUP * 32, produced, producing);
+    epilogue.after(mesh_read<E::input_binding>(E::input_binding == 5 ? stores : (typename E::partials)consumer), mesh_read<12>(order), mesh_read<13>(rowScale), arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * GROUP * 32, produced, producing);
 }
 
 // The right-input and destination element maps of matmul2d<M, 32, 32> at one simdgroup (fp16 operands, fp32

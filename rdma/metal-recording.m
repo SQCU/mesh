@@ -1375,9 +1375,9 @@ static struct MetalSchedule *MetalScheduleWritable(struct MetalSchedule *root) {
 
 // These intervals exist only while compiling. Shared CPU and Metal views use
 // their common addresses; private/heap views use the recorder's allocation key.
-static void MetalWorkAccesses(MetalWork *work,void (^each)(id,NSUInteger,NSUInteger,uint32_t)) {
-    const struct MetalReach *views=work->accesses.bytes;
-    for(NSUInteger i=0;i<work->accesses.length/sizeof *views;i++) {
+static void MetalViewAccesses(NSData *accesses,void (^each)(id,NSUInteger,NSUInteger,uint32_t)) {
+    const struct MetalReach *views=accesses.bytes;
+    for(NSUInteger i=0;i<accesses.length/sizeof *views;i++) {
         const struct MetalReach v=views[i];if(!v.length)continue;
         BOOL shared=!v.buffer||v.buffer.storageMode==MTLStorageModeShared;
         id key=shared?[NSValue valueWithPointer:NULL]:MetalAllocationKey(v.buffer);
@@ -1386,16 +1386,16 @@ static void MetalWorkAccesses(MetalWork *work,void (^each)(id,NSUInteger,NSUInte
     }
 }
 
-static NSUInteger MetalWorkBound(NSArray *bounds,NSUInteger value) {
+static NSUInteger MetalViewBound(NSArray *bounds,NSUInteger value) {
     NSUInteger lo=0,hi=bounds.count;
     while(lo<hi){NSUInteger m=lo+(hi-lo)/2;if([bounds[m] unsignedIntegerValue]<value)lo=m+1;else hi=m;}
     return lo;
 }
 
-static void MetalWorkDependencies(NSArray *work) {
+NSArray<NSIndexSet *> *MetalViewDependencies(NSArray<NSData *> *accesses) {
     NSMutableDictionary *ends=[NSMutableDictionary dictionary],*states=[NSMutableDictionary dictionary];
     NSMutableSet *written=[NSMutableSet set];
-    for(MetalWork *w in work)MetalWorkAccesses(w,^(id key,NSUInteger lo,NSUInteger hi,uint32_t access){
+    for(NSData *views in accesses)MetalViewAccesses(views,^(id key,NSUInteger lo,NSUInteger hi,uint32_t access){
         if(!ends[key])ends[key]=[NSMutableSet set];[ends[key] addObject:@(lo)];[ends[key] addObject:@(hi)];
         if(access&MetalReachWritten)[written addObject:key];
     });
@@ -1407,19 +1407,63 @@ static void MetalWorkDependencies(NSArray *work) {
         for(NSUInteger j=0;j+1<bounds.count;j++){last[j]=NSNotFound;[readers addObject:[NSMutableIndexSet indexSet]];}
         states[key]=@[bounds,writers,readers];
     }
-    for(NSUInteger i=0;i<work.count;i++) {
-        MetalWork *w=work[i];
-        MetalWorkAccesses(w,^(id key,NSUInteger lo,NSUInteger hi,uint32_t access){
+    NSMutableArray *dependencies=[NSMutableArray arrayWithCapacity:accesses.count];
+    for(NSUInteger i=0;i<accesses.count;i++) {
+        NSMutableIndexSet *prior=[NSMutableIndexSet indexSet];
+        MetalViewAccesses(accesses[i],^(id key,NSUInteger lo,NSUInteger hi,uint32_t access){
             NSArray *state=states[key];if(!state)return;
             NSArray *bounds=state[0],*readers=state[2];NSUInteger *last=[state[1] mutableBytes];
-            NSUInteger end=MetalWorkBound(bounds,hi);
-            for(NSUInteger j=MetalWorkBound(bounds,lo);j<end;j++) {
-                if(last[j]!=NSNotFound)[w->dependencies addIndex:last[j]];
-                if(access&MetalReachWritten){[w->dependencies addIndexes:readers[j]];[readers[j] removeAllIndexes];last[j]=i;}
+            NSUInteger end=MetalViewBound(bounds,hi);
+            for(NSUInteger j=MetalViewBound(bounds,lo);j<end;j++) {
+                if(last[j]!=NSNotFound)[prior addIndex:last[j]];
+                if(access&MetalReachWritten){[prior addIndexes:readers[j]];[readers[j] removeAllIndexes];last[j]=i;}
                 else if(access&MetalReachRead)[readers[j] addIndex:i];
             }
         });
-        [w->dependencies removeIndex:i];
+        [prior removeIndex:i];[dependencies addObject:prior];
+    }
+    return dependencies;
+}
+
+NSString *MetalViewDependencyDeclaration(NSString *name,NSArray<NSIndexSet *> *dependencies,NSUInteger producers) {
+    NSMutableArray *successors=[NSMutableArray arrayWithCapacity:producers];
+    for(NSUInteger i=0;i<producers;i++)[successors addObject:[NSMutableIndexSet indexSet]];
+    NSMutableData *offsets=[NSMutableData data],*targets=[NSMutableData data],*holders=[NSMutableData data];
+    for(NSUInteger i=producers;i<dependencies.count;i++) {
+        NSIndexSet *prior=dependencies[i];const uint32_t count=(uint32_t)prior.count;
+        [holders appendBytes:&count length:sizeof count];
+        [prior enumerateIndexesUsingBlock:^(NSUInteger p,BOOL *stop){(void)stop;[successors[p] addIndex:i-producers];}];
+    }
+    uint32_t offset=0;[offsets appendBytes:&offset length:sizeof offset];
+    for(NSIndexSet *next in successors) {
+        for(NSUInteger i=next.firstIndex;i!=NSNotFound;i=[next indexGreaterThanIndex:i]) {
+            const uint32_t target=(uint32_t)i;[targets appendBytes:&target length:sizeof target];offset++;
+        }
+        [offsets appendBytes:&offset length:sizeof offset];
+    }
+    NSDictionary *arrays=@{@"offsets":offsets,@"targets":targets,@"holders":holders};
+    NSMutableString *source=[NSMutableString string];
+    for(NSString *key in @[@"offsets",@"targets",@"holders"]) {
+        NSData *data=arrays[key];const uint32_t *values=data.bytes;const NSUInteger count=data.length/sizeof *values;
+        [source appendFormat:@"constant uint %@_%@[%lu] = {",name,key,(unsigned long)MAX(count,1)];
+        for(NSUInteger i=0;i<count;i++)[source appendFormat:@"%s%uu",i?",":"",values[i]];
+        if(!count)[source appendString:@"0u"];
+        [source appendString:@"};\n"];
+    }
+    [source appendFormat:@"struct %@ { uint producer;\n"
+        "uint begin() const { return %@_offsets[producer]; }\n"
+        "uint end() const { return %@_offsets[producer+1]; }\n"
+        "static uint target(uint i) { return %@_targets[i]; }\n"
+        "static uint holders(uint g) { return %@_holders[g]; }\n};\n",name,name,name,name,name];
+    return source;
+}
+
+static void MetalWorkDependencies(NSArray *work) {
+    NSMutableArray *accesses=[NSMutableArray arrayWithCapacity:work.count];
+    for(MetalWork *w in work)[accesses addObject:w->accesses];
+    NSArray *dependencies=MetalViewDependencies(accesses);
+    for(NSUInteger i=0;i<work.count;i++) {
+        MetalWork *w=work[i];[w->dependencies addIndexes:dependencies[i]];
         [w->dependencies enumerateIndexesUsingBlock:^(NSUInteger p,BOOL *stop){(void)stop;[((MetalWork *)work[p])->successors addIndex:i];}];
     }
 }

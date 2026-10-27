@@ -75,6 +75,13 @@ NSData *MetalViewTiles(const NSUInteger *shape, size_t rank, NSUInteger elements
 // Only immutable index metadata is read. Encoded numerical values stay in place.
 NSDictionary<NSString *, NSData *> *MetalViewBlockSlice(const int32_t *order, size_t count,
     NSInteger first, NSInteger end, NSInteger step, NSUInteger block);
+// One dependency compiler for recorded commands and fused producer/consumer
+// tiles. Each entry contains MetalReach records in execution order. The result
+// names prior writers/readers of overlapping ranges; shared aliases share keys.
+NSArray<NSIndexSet *> *MetalViewDependencies(NSArray<NSData *> *accesses);
+// A fused bipartite relation: first `producers` entries write, the remaining
+// entries read. Emit fixed adjacency/arrival counts from those dependencies.
+NSString *MetalViewDependencyDeclaration(NSString *name, NSArray<NSIndexSet *> *dependencies, NSUInteger producers);
 NSString *MetalViewIndexDeclaration(NSUInteger binding, const NSUInteger *shape, const NSInteger *strides,
     size_t rank, NSUInteger elementOffset);
 // Axis maps contain signed offsets, in the same units as strides. A mapped

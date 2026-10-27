@@ -382,3 +382,32 @@ yet remove the compressed-slice restrictions. The FX placement binder also
 still needs to carry non-affine layouts through aliases and command accesses;
 exposing them in index-source generation alone does not complete that path.
 Nonseparable page maps, producer splitting and the other open items remain.
+
+
+## Shared addressing and consumer dependencies
+
+Recorded: 2026-10-27T22:36:42Z. A head's reduction now declares its logical
+input range. Its values can occupy different encoded row groups. Preparation
+composes the inverse row order with `TensorView.gathered` for both partial
+values and scales; the consumer retains its numerical body and reads the same
+allocation. No value copy or separate numerical dispatch is added.
+
+`MetalViewDependencies` is the recorder's existing range-dependency algorithm,
+extracted for reuse. Recorded commands and fused tiles both supply the exact
+`MetalReach` intervals produced by the shared view lowerer. The shader emitter
+turns a producer/consumer relation into immutable adjacency and arrival counts.
+The contiguous case keeps arithmetic indexing and arrival counts. Both cases
+use the same arrival handling and consumer body.
+
+The native caller carries the ranges each consumer actually reads. This also
+fixes the key/value-only consumer of a larger QKV product: it no longer derives
+consumer groups from all of the product's rows. Full-matrix loading no longer
+rejects row permutations that cross head boundaries. Native compressed cuts
+still need their logical domains and masks carried through slicing; this is
+not a claim that those restrictions or general FX page placement are finished.
+
+The shared library and native rank/goal-a build. Preparation compiled plain,
+contiguous and mapped fused ALU/cooperative shaders. Inspecting interleaved
+row declarations showed both consumers depending on both producer tiles;
+selecting one consumer retained only its dependency set. No numerical commands,
+benchmarks or unit suites ran, and no throughput/latency improvement is claimed.
