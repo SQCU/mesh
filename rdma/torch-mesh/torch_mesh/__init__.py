@@ -25,6 +25,36 @@ def _autoload():
     from . import backend  # noqa: F401
 
 
+_bounded = {}
+
+
+def bounded(call, what):
+    """call() within the library's preparation bound (MESH_PREPARATION_NS), else the program ends through the library's
+    expiry, its GPU work and posted receives stopped first, naming `what`: a TCPStore call to a peer that stopped
+    answering returns by itself neither at the store's timeout nor at torch's 30-minute default (a stopped store
+    server's check and get, 2026-10-28).  One thread looks at the calls in progress once a second."""
+    import threading
+    import time
+    import mesh
+    from . import _stream
+    ns = mesh.lib.MESH_PREPARATION_NS
+    if not _bounded:
+        def watch():
+            while True:
+                time.sleep(1)
+                for until, named in list(_bounded.values()):
+                    if time.monotonic() > until:
+                        _stream.expired(named, ns)
+        _bounded[None] = (float('inf'), '')
+        threading.Thread(target=watch, name='torch_mesh.bounded', daemon=True).start()
+    key = object()
+    _bounded[key] = (time.monotonic() + ns / 1e9, what)
+    try:
+        return call()
+    finally:
+        del _bounded[key]
+
+
 def compiler(gm, example_inputs, *, configuration=None, destinations=None):
     from .compilation import bind
     with bind(configuration):

@@ -9,7 +9,7 @@ import torch.distributed as dist
 import assignment
 import rollout
 from mesh_source import revision
-from . import partition
+from . import bounded, partition
 from .streamed import node
 
 _serial = itertools.count()
@@ -23,12 +23,12 @@ def placement(mesh, name, workload, observations, *, parameters):
     key = f'mesh/configuration/{group.group_name}/{name}/{next(_serial)}'
     history = (json.load(sys.stdin) if os.environ.get('MESH_OBSERVATIONS_STDIN') else
                observations if isinstance(observations, list) else rollout.observations(observations))
-    store.set(f'{key}/capacity/{rank}', str(node()[1]))
-    capacities = [int(store.get(f'{key}/capacity/{p}')) for p in range(size)]
+    bounded(lambda: store.set(f'{key}/capacity/{rank}', str(node()[1])), f'{key}: store.set capacity')
+    capacities = bounded(lambda: [int(store.get(f'{key}/capacity/{p}')) for p in range(size)], f'{key}: every rank\'s capacity')
     if rank == 0:
         records = assignment.window([row for row in history if row['workload'] == workload])
-        store.set(key + '/observations', json.dumps(records))
-    records = json.loads(store.get(key + '/observations'))
+        bounded(lambda: store.set(key + '/observations', json.dumps(records)), f'{key}: store.set observations')
+    records = json.loads(bounded(lambda: store.get(key + '/observations'), f'{key}: rank 0\'s observations'))
     operand = partition.operand(mesh, name)
     decisions = {name: {'parts': operand.parts.tolist(), 'grain': 1,
                         'low': [1] * size, 'high': [operand.units] * size, 'capacity': capacities}}
