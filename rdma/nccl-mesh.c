@@ -2748,7 +2748,7 @@ static ncclResult_t compile_group(struct ncclComm *comm, struct call *list, size
    compiled once per definition; invocation operands are bound separately.  A definition's invocations take turns
    at GENERATIONS slots of storage (the plan's in-flight depth: bind_slot), `uses` of them bound so far; an undeclared
    group's definition is kept by its calls (signature), `stamp` when it was last bound */
-enum { GENERATIONS = 2, SIGNATURES = 64 };
+enum { GENERATIONS = 2, SIGNATURES = 64, TABLE_PAGES = 64 };
 /* what a group of a definition binds at its issue (group_bound): its schedules laid `repeats` times, its calls' steps
    copies and its record in flight, made at its generation's first issue and bound again by each later one that finds
    it let go (`held` 0: issue_let, as its group is done); a group whose generation's is still held makes one of its own,
@@ -2934,7 +2934,8 @@ static void schedule_laid(struct ncclComm *comm, struct schedule *plans) {
 static size_t page_up(size_t bytes, uint64_t page) { return (size_t)((bytes + page - 1) / page * page); }
 
 /* the span table of `bytes` at region offset `offset`, a span a page, made the first time those bytes are named and
-   never written again (the bridge may yet read it).  Under group_lock */
+   never written again (the bridge may yet read it); TABLE_PAGES pages of them at most before a group is placed
+   (place_group).  Under group_lock */
 static ncclResult_t table_of(struct ncclComm *comm, uint64_t offset, uint64_t bytes, uint64_t units, struct mesh_dma_span **spans) {
   size_t low = 0, high = comm->tables;
   while (low < high) {
@@ -2972,20 +2973,37 @@ static ncclResult_t table_of(struct ncclComm *comm, uint64_t offset, uint64_t by
   return ncclSuccess;
 }
 
-/* a free slot of at least `bytes` (the least such), else a new one (ncclMemAlloc), held; its number + 1, 0 where the
-   region cannot meet it (the failure formatted).  Under group_lock */
+/* a free slot of at least `bytes` (the least such), else a new one (ncclMemAlloc) of `bytes` rounded up to one of eight
+   sizes an octave (at most an eighth more: so a slot made for one definition fits others, and the slots made of each
+   size are never more than are held at once, whatever sizes the definitions name), held; its number + 1, 0 where the
+   region cannot meet it (the failure formatted).  A free slot too small whose last group was the host path's and has
+   every landing awaited (`waited`: no GPU work of the library's can still reach it) is returned to the region
+   (ncclMemFree), its entry vacant for the next; one a Metal-path group used last is returned at ncclCommDestroy (the
+   host cannot tell when a caller's command buffer that touches it has run).  Under group_lock */
 static uint32_t slot_take(struct ncclComm *comm, size_t bytes) {
-  uint32_t best = 0;
-  for (uint32_t k = 0; k < comm->slot_count; k++)
-    if (!comm->slots[k].held && comm->slots[k].bytes >= bytes && (!best || comm->slots[k].bytes < comm->slots[best - 1].bytes)) best = k + 1;
-  if (!best) {
+  size_t step = comm->page ? comm->page : 1;
+  while (bytes > 8 * step) step *= 2;
+  bytes = (bytes + step - 1) / step * step;
+  uint32_t best = 0, vacant = 0;
+  for (uint32_t k = 0; k < comm->slot_count; k++) {
+    struct slot *s = comm->slots + k;
+    int done = !s->held && !s->ticket;
+    for (uint32_t h = 0; done && h < comm->count; h++) done = comm->channels[h].waited >= s->lands[h];
+    if (!s->held && s->bytes >= bytes) { if (!best || s->bytes < comm->slots[best - 1].bytes) best = k + 1; }
+    else if (done) { ncclMemFree(s->address); s->address = NULL; s->bytes = 0; vacant = k + 1; }
+  }
+  if (!best && !vacant) {
     struct slot *grown = realloc(comm->slots, (comm->slot_count + 1) * sizeof *grown);
-    struct slot made = {NULL, bytes ? bytes : 1, 0, calloc(comm->count + 1, sizeof *made.lands), calloc(comm->count + 1, sizeof *made.in), 0};
+    struct slot made = {NULL, 0, 0, calloc(comm->count + 1, sizeof *made.lands), calloc(comm->count + 1, sizeof *made.in), 0};
     if (grown) comm->slots = grown;
     if (!grown || !made.lands || !made.in) { free(made.lands); free(made.in); fail(ncclSystemError, "out of memory"); return 0; }
-    if (ncclMemAlloc(&made.address, made.bytes)) { free(made.lands); free(made.in); return 0; }
-    comm->slots[comm->slot_count++] = made;
-    best = comm->slot_count;
+    comm->slots[comm->slot_count] = made;
+    vacant = ++comm->slot_count;
+  }
+  if (!best) {
+    struct slot *s = comm->slots + (best = vacant) - 1;
+    if (ncclMemAlloc(&s->address, bytes)) return 0;
+    s->bytes = bytes;
   }
   comm->slots[best - 1].held = 1;
   return best;
@@ -3035,6 +3053,10 @@ static ncclResult_t bind_slot(struct metal_program *program, struct ncclComm *co
 static ncclResult_t place_group(struct ncclComm *comm, struct schedule *plans, struct where area) {
   const unsigned char *region = (const unsigned char *)comm->attach->context.M;
   size_t used = 0;
+  /* past TABLE_PAGES pages of span tables, every one let go and made again as its bytes are named: their leases freed
+     (ncclMemFree), whose pages the bridge's reads of the entries already presented keep (present_group's marks) */
+  if (comm->storage_count >= TABLE_PAGES)
+    for (comm->tables = 0; comm->storage_count;) ncclMemFree(comm->storage[--comm->storage_count].address);
   for (uint32_t h = 0; h < comm->count; h++)
     for (int send = 1; send >= 0; send--)
       for (size_t k = 0; k < (send ? plans[h].outs : plans[h].ins); k++) {
