@@ -81,7 +81,11 @@ of different commits attach to the same resident bridge as ordinary clients. The
 bridge runs from its own checkout beside them (`current`), which node prepare moves
 to the run's commit and installs with bin/mesh-user.sh as it is: that restarts the
 bridge (SIGHUP, its region kept) only when its images changed. A node's preparations
-take turns.
+take turns. Such a restart fails the ranks of any other run attached at that
+moment: each link is lost and paired again, and each communicator must be made again
+(design/transport.md section 14). On 2026-10-28 one run's preparation restarted the
+three headless bridges 3 s into another run's chain-n3-long (20261028T221222Z-G),
+whose three ranks failed so.
 
 The application observer emits each completed whole-call record through
 `mesh_statistics.emit`. Late peer observations still enter the existing

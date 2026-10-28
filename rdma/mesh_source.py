@@ -39,7 +39,8 @@ def checkout_command(origin, commit, destination):
         'fi',
         f'[ "$(git --git-dir="$repository" config --get remote.origin.url)" = {shlex.quote(origin)} ]',
         'if ! git --git-dir="$repository" merge-base --is-ancestor ' + shlex.quote(commit) + ' refs/remotes/origin/main 2>/dev/null; then',
-        '  git --git-dir="$repository" fetch --quiet --no-tags origin main:refs/remotes/origin/main',
+        # another run's preparation may be fetching the same ref at once: the ancestry check below decides
+        '  git --git-dir="$repository" fetch --quiet --no-tags origin main:refs/remotes/origin/main || true',
         'fi',
         f'git --git-dir="$repository" merge-base --is-ancestor {shlex.quote(commit)} refs/remotes/origin/main',
         'if [ ! -e "$destination" ]; then',
