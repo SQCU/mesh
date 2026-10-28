@@ -11,11 +11,15 @@ static uint64_t ns(void){ return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 static int order(const void *a,const void *b){ const uint64_t x=*(const uint64_t *)a,y=*(const uint64_t *)b; return (x>y)-(x<y); }
 static double at(uint64_t *v,size_t n,size_t num,size_t den){ qsort(v,n,sizeof *v,order); return n?v[n*num/den]/1e3:0; }
 static int lost(_Atomic uint64_t *word){ return atomic_load_explicit(word,memory_order_acquire)==UINT64_MAX; }
-/* design/transport.md section 5: each wait within MESH_PLATFORM_NS, past which the probe ends, the wait named */
-static int wait_for(_Atomic uint64_t *word,uint64_t value,const char *wait){
+/* design/transport.md section 5: a wait on `landed` alone, within MESH_PLATFORM_NS, past which the probe ends, the wait
+   named; the moment `sent` reaches `through` read as it passes (*at, 0 not yet), so no wait reads `sent` */
+static int wait_for(const struct mesh_stream_view *v,uint64_t value,uint64_t through,uint64_t *at,const char *wait){
   const struct mesh_deadline deadline=mesh_deadline(wait,0);
-  while(atomic_load_explicit(word,memory_order_acquire)<value){if(lost(word))return 1;mesh_deadline_left(&deadline);}
-  return lost(word);
+  for(;;){
+    if(!*at && atomic_load_explicit(v->sent,memory_order_acquire)>=through)*at=ns();
+    if(atomic_load_explicit(v->landed,memory_order_acquire)>=value || lost(v->landed))return lost(v->landed);
+    mesh_deadline_left(&deadline);
+  }
 }
 
 /* No timed request reads or changes a descriptor. One immutable source is read
@@ -94,25 +98,23 @@ int mesh_diagnostic_quiet(int argc,char **argv){
   if(!done || !trip || !gap){
     free(done);free(trip);free(gap);release_probe(&c,stream,0,data,table);return 3;
   }
+  /* a SEND's time: its unit's `sent` seen while the next landing is awaited (the responder's, at its next round, so its
+     last round's is not read), or that landing's time where `sent` had not moved by then */
   int failed=0;
+  uint64_t t0=0;
   for(uint32_t k=0;k<rounds && !failed;k++){
+    uint64_t seen=0;
     gap[k]=k%ngaps;
     if(role){
-      failed=wait_for(v.landed,k+1,"quiet: the peer's unit landed (wait_for landed)");
+      failed=wait_for(&v,k+1,k,&seen,"quiet: the peer's unit landed (wait_for landed)");
+      if(k)done[k-1]=(seen?seen:ns())-t0;
       if(failed)break;
-      const uint64_t t0=ns();
-      atomic_store_explicit(v.ready,k+1,memory_order_release);
-      failed|=wait_for(v.sent,k+1,"quiet: the unit sent (wait_for sent)");
-      done[k]=ns()-t0;
-    }else{
-      const uint64_t from=ns();
-      while(ns()-from<gaps[gap[k]]){}
-      const uint64_t t0=ns();
-      atomic_store_explicit(v.ready,k+1,memory_order_release);
-      failed=wait_for(v.sent,k+1,"quiet: the unit sent (wait_for sent)");
-      done[k]=ns()-t0;
-      failed|=wait_for(v.landed,k+1,"quiet: the peer's unit landed (wait_for landed)");
-      trip[k]=ns()-t0;
+    }else for(const uint64_t from=ns();ns()-from<gaps[gap[k]];){}
+    t0=ns();
+    atomic_store_explicit(v.ready,k+1,memory_order_release);
+    if(!role){
+      failed=wait_for(&v,k+1,k+1,&seen,"quiet: the peer's unit landed (wait_for landed)");
+      done[k]=(seen?seen:ns())-t0;trip[k]=ns()-t0;
     }
   }
   if(failed){
@@ -122,7 +124,7 @@ int mesh_diagnostic_quiet(int argc,char **argv){
   for(uint32_t g=0;g<ngaps;g++){
     uint64_t a[MESH_STREAM_ENTRIES],b[MESH_STREAM_ENTRIES];
     size_t n=0;
-    for(uint32_t k=8;k<rounds;k++)if(gap[k]==g){a[n]=done[k];b[n++]=trip[k];}
+    for(uint32_t k=8;k+(uint32_t)role<rounds;k++)if(gap[k]==g){a[n]=done[k];b[n++]=trip[k];}
     printf("{\"scope\": \"physical_link_quiet_probe\", \"wire\": \"%016llx\", \"payload_bytes\": %llu, \"role\": %d, \"node\": %u, \"quiet_microseconds\": %llu, \"trips\": %zu, \"send_p10\": %.2f, \"send_median\": %.2f, \"send_p90\": %.2f",
            (unsigned long long)wire,(unsigned long long)page,role,c.M->node,(unsigned long long)(role?0:gaps[g]/1000),n,at(a,n,1,10),at(a,n,1,2),at(a,n,9,10));
     if(!role)printf(", \"trip_p10\": %.2f, \"trip_median\": %.2f, \"trip_p90\": %.2f",at(b,n,1,10),at(b,n,1,2),at(b,n,9,10));
