@@ -1,5 +1,13 @@
 {
-  "schema": 2,
+  "schema": 3,
+  "access": {
+    "key": "~/.ssh/primeintellect_ed25519"
+  },
+  "lock": "~/.claude-personal/jobs/15c469fa/tmp/nodes.lock",
+  "run_seconds": 3300,
+  "python": "~/.venv-mesh-uv/bin/python",
+  "checkouts": ".cache/mesh-checkouts",
+  "rank_port": 29600,
   "nodes": {
     "D7377D82-2E96-5084-A5D3-3139FDF3D6CE": {
       "name": "Ms-MacBook-Pro",
@@ -7,7 +15,10 @@
       "serial": "KHQ5KXR9XG",
       "node": 1980260065,
       "management": "100.102.120.16",
-      "fabric": "fd6d:6573:68:b5d5:b9dc:d628:b4e3:3141"
+      "fabric": "fd6d:6573:68:b5d5:b9dc:d628:b4e3:3141",
+      "memory_gib": 128,
+      "roles": ["launcher", "compute"],
+      "guard_free_pages": 4096
     },
     "06594A7A-3279-5A27-9099-11169DE0D270": {
       "name": "Ms-Mac-mini",
@@ -15,7 +26,10 @@
       "serial": "C9XKWJYXWP",
       "node": 1974797816,
       "management": "100.77.188.102",
-      "fabric": "fd6d:6573:68:3af8:1a3c:9700:3034:715d"
+      "fabric": "fd6d:6573:68:3af8:1a3c:9700:3034:715d",
+      "memory_gib": 24,
+      "roles": ["compute", "headless"],
+      "guard_free_pages": 65536
     },
     "E8F9C574-257D-5425-8501-E5BF6981BEA6": {
       "name": "m5ult1",
@@ -23,7 +37,10 @@
       "serial": "WP6Q97X9Y3",
       "node": 521750041,
       "management": "100.103.69.53",
-      "fabric": "fd6d:6573:68:577f:d1f4:93fc:f466:51a6"
+      "fabric": "fd6d:6573:68:577f:d1f4:93fc:f466:51a6",
+      "memory_gib": 96,
+      "roles": ["compute", "headless", "root"],
+      "guard_free_pages": 65536
     },
     "519B8DC8-FF1D-551F-9FC8-0A3168B1ED6A": {
       "name": "m5ult2",
@@ -31,7 +48,10 @@
       "serial": "CJ473V7FJV",
       "node": 455770905,
       "management": "100.86.148.87",
-      "fabric": "fd6d:6573:68:91e1:fbe5:72df:9c0b:bf0b"
+      "fabric": "fd6d:6573:68:91e1:fbe5:72df:9c0b:bf0b",
+      "memory_gib": 96,
+      "roles": ["compute", "headless"],
+      "guard_free_pages": 65536
     }
   }
 }

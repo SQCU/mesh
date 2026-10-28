@@ -39,6 +39,20 @@ and fabric addresses in `etc/mesh-nodes.json`. Each command is visible in
 fetch source to discover a machine. A missing configured node fails preparation.
 The parallel installation commands verify each endpoint's actual bridge identity.
 
+Each workload's ranks are the nodes its `place` selects in `etc/mesh-nodes.json`
+(`Cluster.place`: `compute` nodes with a role and least values, the `root` first).
+Each rank runs under `mesh_nodes.py node guard` in its own session, its operands
+the first line of a stdin its caller holds open. The guard ends it at its deadline,
+below the node's `guard_free_pages` (`vm.page_free_count`, read every 0.1 s), when
+that stdin closes or on SIGTERM or SIGHUP, then SIGKILLs it and each descendant it
+tracked by parent pid until none remains, exiting 125 if one does. The rank's own
+alarm ends it should the guard die. A run ends by `run_seconds`: every command of
+its driver is bounded a minute earlier, so the driver returns its record. A stop
+(SIGTERM, SIGHUP, SIGINT) has the driver close its ranks' stdin and return its
+record before the lease is released. The lease is the shared `mkdir` at `lock`,
+its owner file naming the holder, pid and host; one whose pid on this host is
+gone is stale.
+
 Each node keeps one `current` Git build checkout per repository. It fetches a
 selected commit from origin when needed and retains incremental build products.
 One administration command prepares both repositories and the installation.

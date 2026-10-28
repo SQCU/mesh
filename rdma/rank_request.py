@@ -16,7 +16,7 @@ import threading
 class Connection:
     def __init__(self, node, path):
         import mesh_nodes
-        command = (f'PYTHONPATH={mesh_nodes.home_path(node.source + "/rdma")} {mesh_nodes.PY} '
+        command = (f'PYTHONPATH={mesh_nodes.home_path(node.source + "/rdma")} {node.cluster.python} '
                    f'-m rank_request {shlex.quote(str(path))}')
         self.process = subprocess.Popen(node.argv(command), stdin=subprocess.PIPE,
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
