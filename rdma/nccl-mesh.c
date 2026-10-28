@@ -2200,10 +2200,12 @@ static struct steps *steps_copy(struct steps *from) {
 static size_t piece_bytes(const struct mesh_step *step) { return step->piece.elements * step->piece.element_bytes; }
 static int credit_step(const struct steps *s, uint32_t k) { return s->credit && s->steps[k].buffer == s->credit; }
 
-/* A SEND from reused storage that no later landing at its rank witnesses (mesh-routed.c) is proved read by a credit:
+/* A SEND that no later landing at its rank witnesses (mesh-routed.c), whatever it reads (a slot of the communicator's,
+   the caller's send buffer read in place, a result in recvbuff, an all-to-all's buffers), is proved read by a credit:
    a word its receiver sends back once the call's landings on that cable have landed (present_group), which the
-   sender lands, so a group's landings prove its SENDs read (guard).  Rank me's credit steps, after `round`, in
-   buffer s->credit: word 0 the source of those it sends, then a word for each it lands */
+   sender lands, so a group's landings prove its SENDs read (guard), and the caller's next producer, after the group in
+   the stream, writes no byte the NIC has yet to read.  Rank me's credit steps, after `round`, in buffer s->credit:
+   word 0 the source of those it sends, then a word for each it lands */
 struct credit { uint32_t from, to, cable; };
 static int credit_add(struct credit **list, size_t *n, struct credit x) {
   for (size_t k = 0; k < *n; k++) if (!memcmp(*list + k, &x, sizeof x)) return 0;
@@ -2312,7 +2314,7 @@ static ncclResult_t bind_routed_steps(struct call *c, const uint32_t *first, con
     for (uint32_t k = 0; !status && k < physical.rank[r].count; k++) {
       const struct mesh_transfer *t = physical.rank[r].transfer + k;
       if (t->step.round >= round) round = t->step.round + 1;
-      if (t->step.op == MESH_STEP_SEND && !physical.rank[r].witnessed[k] && generation_buffer(c, r, t->step.buffer))
+      if (t->step.op == MESH_STEP_SEND && !physical.rank[r].witnessed[k])
         status = credit_add(&credit, &credits, (struct credit){r, t->step.peer, t->cable});
     }
   ncclResult_t result = status ? fail(ncclInvalidUsage, "physical collective lowering for %s: %s", comm->name, strerror(status)) : ncclSuccess;
@@ -4137,6 +4139,7 @@ static int plan_direct(struct call *c, struct where own) {
   int direct = w && st->read && st->fresh;
   for (uint32_t k = 0; direct && k < st->count; k++) {
     const struct mesh_step *step = st->steps + k;
+    if (credit_step(st, k)) continue; /* a credit's word is its own buffer's, never the operand's */
     const uint64_t from = step->first, to = step->first + step->piece.elements;
     const struct where source=view_at(c,1,(size_t)(from-lo)*z);
     const struct where map={source.buffer,source.offset-(size_t)from*z};
