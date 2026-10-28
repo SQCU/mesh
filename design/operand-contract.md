@@ -92,7 +92,7 @@ This contract does not declare these existing paths complete:
   resolved earlier. Numerical index tensors must remain data.
 - Producer placement handles native-kernel subdomains, matrix API uses and
   declared CPU/Core ML calls in FX graphs. Native normalization producers now
-  receive ANE input layout requirements before command emission. Other native
+  receive ANE input type and layout requirements before command emission. Other native
   producers still bind already assigned buffers. Conflicting requirements
   also need cost-directed placement and conversion
   choices, beyond the current placement feasibility solver.
@@ -302,11 +302,21 @@ already used logical indices, while the adapter still passed pitch fields that
 the shader ignored. Expert gate/up slices and per-layer inputs now carry those
 pitches in the same view used to emit their accesses.
 
-`PrefillPartner.inputLayouts` exposes the model and provider requirements before
-binding. The FFN normalization producer and Goal A use them to assign their
-destination pages. `TensorView.placed` assigns an unwritten result; it emits no
-copy. The provider's existing resolver still handles necessary type conversions
-and inputs whose producers have already fixed their placement.
+`PrefillPartner.inputRequirement` exposes the model's element type, element
+width and provider layouts before binding. The FFN normalization producer and
+Goal A use this declaration to assign their destination pages. `TensorOperand`
+carries the resulting view and type through producer emission and model binding.
+`TensorView.placed` assigns an unwritten result; it emits no copy. The provider's
+resolver handles inputs whose producers have already fixed their placement.
+
+The ordinary normalizer and fused residual finish can publish several typed
+destinations from one calculation. Compatible GPU and host consumers share the
+same destination. Different element types get direct stores into their declared
+pages; there is no intermediate half result merely to convert it for the host.
+Preparation expands the stores and their accesses. Replay receives no output
+list, type switch or layout interpreter. Only consumers using raw values need
+the separate row-factor output. Stored and large rotated products consume their
+normalized values, so an otherwise unused factor is not allocated or written.
 
 Compressed product kernels retain their declared slab layout, including gaps
 between each slab's active rows. A transformed input carries that layout as a
@@ -365,6 +375,13 @@ The same day's fused handoff changes built rank and Goal A and compiled from the
 native instance prelude at logical widths 64 and 37. Preparation covered masked
 gathers, strided normalization outputs and literal plain/partial reductions.
 This was source and pipeline preparation only; no numerical commands ran.
+
+The typed-output change (`metal-microbench` commit `d2ef9be7`) on 2026-10-28 built rank and Goal A and compiled
+half, float and integer normalization destinations, including mixed destinations,
+strided views and scalar tails. It also compiled the fused finish with and
+without a factor output. These checks submitted no numerical work. Core ML
+float64 declarations still require lowering to a provider that supports that
+arithmetic; this native Metal boundary has no float64 lowering.
 
 ## Compressed projections
 
