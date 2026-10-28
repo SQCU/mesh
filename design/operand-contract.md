@@ -89,8 +89,8 @@ access structure.
 This contract does not declare these existing paths complete:
 
 - Producer placement handles native-kernel subdomains, matrix API uses and
-  declared CPU/Core ML calls in FX graphs. Native normalization producers now
-  receive ANE input type and layout requirements before command emission. Other native
+  declared CPU/Core ML calls in FX graphs. Native normalization and convolution
+  producers receive ANE input type and layout requirements before command emission. Other native
   producers still bind already assigned buffers. Conflicting requirements
   also need cost-directed placement and conversion
   choices, beyond the current placement feasibility solver.
@@ -343,7 +343,26 @@ write the host's normalized values, the row factors and the GPU's gathered
 inputs together. The GPU gather uses the selected share's matrix. Host presence
 does not disable it. Both consumers retain the producer's views; neither
 reconstructs a destination from a readiness flag. An intervening convolution or
-collective puts normalization after that operation instead.
+collective prevents that earlier producer from supplying the FFN input.
+
+An input convolution consumes the normalized residual and writes the FFN's
+declared destinations itself. The partner's type and layout requirements reach
+this producer too. Compatible GPU and host uses share its result; different
+types receive direct stores from the same calculation. The FFN retains those
+views instead of rebuilding a half tensor from the network's buffer name.
+No post-convolution copy is needed merely to satisfy that partner declaration.
+
+Both convolution forms now use the common numerical helper and shared view
+indexing. Inputs, taps, bias, normalization weights, residual and optional scale
+carry the same layout into their shader bindings and dependency records. The
+standalone producer uses the existing typed-output emitter; the normalized
+finish preserves fp32 arithmetic through its final residual store. Launch width
+comes from the configured pointwise width and the compiled pipeline limit.
+
+Preparation on 2026-10-28 built native rank and Goal A and compiled convolution
+producers with half, float and integer destinations, mapped inputs and strided
+outputs. Both scaled and unscaled finishes compiled with mapped views. No
+numerical work or performance measurement ran.
 
 Layer finishes return the gathered operand they actually produce. The next
 attention product consumes that view through the shared input resolver. A finish
