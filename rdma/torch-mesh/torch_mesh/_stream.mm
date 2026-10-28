@@ -1,8 +1,8 @@
 #include "mesh-write-compiler.h"
 // PyTorch frontend bindings to the common collective compiler and native
 // Metal schedule. Prepared calls resolve routes, pages and dispatch operands
-// before submission. The compatibility MPS stream is flushed at a whole
-// function boundary; it has no publication-driven buffering policy.
+// before submission. torch's MPS stream is ended where a prepared function or
+// an eager collective reads what it stored, and committed where one publishes.
 #include <torch/extension.h>
 #include <torch/library.h>
 #include <ATen/DLConvertor.h>
@@ -65,6 +65,14 @@ struct MeshStream {
     mps->endKernelCoalescing();
     [mps->commandBuffer() encodeSignalEvent:progress value:++committed];
     mps->synchronize(wait ? at::mps::SyncType::COMMIT_AND_WAIT : at::mps::SyncType::COMMIT);
+  }
+
+  // On torch's queue, before a collective sends what torch stored: the open buffer ended and committed, and the next
+  // waiting on the GPU for its end (metal-microbench docs/facts.md, 10-24: neither a later kernel of one buffer nor a
+  // commit alone makes a kernel's plain stores visible to the NIC).
+  void released() {
+    signalled(false);
+    [mps->commandBuffer() encodeWaitForEvent:progress value:committed];
   }
 
   // On the host: the workspace `held` of the group issued as `ticket` kept until the library retires it (0: a group
@@ -169,9 +177,10 @@ static void checked(int64_t result) {
   TORCH_CHECK(!result, "libnccl-mesh: ", ncclGetErrorString((ncclResult_t)result), ": ", ncclGetLastError(nullptr));
 }
 
-// A group encoded in one turn of torch's stream queue: its command buffer and open encoder, the group encoded into them,
-// with the enclosing function responsible for submission. Its workspace is held:
-// split, it is issued and not completed, its ticket (0: complete at once) keeping them until the library retires it.
+// A group encoded in one turn of torch's stream queue: torch's stores released to it, its command buffer and open
+// encoder, the group encoded into them, and that buffer committed where it published (a peer waits on it).  Its
+// workspace is held: split, it is issued and not completed, its ticket (0: complete at once) keeping them until the
+// library retires it.
 static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &call, bool split, int64_t comm, std::vector<at::Tensor> held) {
   const auto *encode = &call;
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
@@ -182,8 +191,10 @@ static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &c
   {
     dispatch_sync(stream->queue(), ^{
       @autoreleasepool {
+        s->released();
         ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, split ? &issue : nullptr};
         result = (*encode)(&on);
+        if (!result && (!split || issue.published)) s->mps->synchronize(at::mps::SyncType::COMMIT);
       }
     });
   }
@@ -206,6 +217,7 @@ static void complete(uint64_t ticket, uint64_t ns = 0) {
         ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, nullptr};
         int published = 0;
         result = ncclMeshComplete(ticket, &on, &published);
+        if (!result && published) s->mps->synchronize(at::mps::SyncType::COMMIT);
       }
     });
   }
