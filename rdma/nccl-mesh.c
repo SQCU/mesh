@@ -281,10 +281,10 @@ struct ncclComm {
   uint32_t held;
   struct channel *channels;
   struct storage_page *storage;
-  uint32_t storage_count, slot_count, cached;
+  uint32_t storage_count, storage_room, storage_floor, slot_count, cached;
   struct slot *slots;
   struct table *table;
-  size_t tables;
+  size_t tables, table_room;
   struct compiled *cache;
   uint64_t stamp;
   void *gate, *gate_word;
@@ -449,7 +449,8 @@ static void comm_storage_free(struct ncclComm *comm) {
   for (uint32_t k = 0; k < comm->slot_count; k++) { ncclMemFree(comm->slots[k].address); free(comm->slots[k].lands); free(comm->slots[k].in); }
   if (comm->gate_word) ncclMemFree(comm->gate_word);
   free(comm->storage); free(comm->slots); free(comm->table);
-  comm->storage = NULL; comm->slots = NULL; comm->table = NULL; comm->storage_count = comm->slot_count = 0; comm->tables = 0;
+  comm->storage = NULL; comm->slots = NULL; comm->table = NULL;
+  comm->storage_count = comm->storage_room = comm->storage_floor = comm->slot_count = 0; comm->tables = comm->table_room = 0;
   comm->gate_word = comm->gate = NULL;
 }
 static void comm_free(struct ncclComm *comm) {
@@ -2936,9 +2937,21 @@ static void schedule_laid(struct ncclComm *comm, struct schedule *plans) {
 
 static size_t page_up(size_t bytes, uint64_t page) { return (size_t)((bytes + page - 1) / page * page); }
 
+/* *items (a list of `size`-byte items, *room of them) with room for `count` + 1, its room doubled where it has less:
+   a list kept from call to call grows only to sizes it has not had; 0, or ENOMEM */
+static int grow(void *items, size_t *room, size_t count, size_t size) {
+  void **at = items;
+  if (count < *room) return 0;
+  const size_t more = *room ? 2 * *room : 8;
+  void *made = more > SIZE_MAX / size ? NULL : realloc(*at, more * size);
+  if (!made) return ENOMEM;
+  *at = made; *room = more;
+  return 0;
+}
+
 /* the span table of `bytes` at region offset `offset`, a span a page, made the first time those bytes are named and
-   never written again (the bridge may yet read it); TABLE_PAGES pages of them at most before a group is placed
-   (place_group).  Under group_lock */
+   never written again (the bridge may yet read it), in the communicator's pages of them (place_group lets them all go
+   past TABLE_PAGES, or twice the most one group has made since, if more).  Under group_lock */
 static ncclResult_t table_of(struct ncclComm *comm, uint64_t offset, uint64_t bytes, uint64_t units, struct mesh_dma_span **spans) {
   size_t low = 0, high = comm->tables;
   while (low < high) {
@@ -2949,15 +2962,14 @@ static ncclResult_t table_of(struct ncclComm *comm, uint64_t offset, uint64_t by
   if (low < comm->tables && comm->table[low].offset == offset && comm->table[low].bytes == bytes) { *spans = comm->table[low].spans; return ncclSuccess; }
   const size_t length = (units * sizeof **spans + MESH_RECORD_ALIGNMENT - 1) / MESH_RECORD_ALIGNMENT * MESH_RECORD_ALIGNMENT;
   struct storage_page *page = comm->storage_count ? comm->storage + comm->storage_count - 1 : NULL;
-  struct table *grown = realloc(comm->table, (comm->tables + 1) * sizeof *grown);
-  if (grown) comm->table = grown;
-  if (!grown || units > SIZE_MAX / 2 / sizeof **spans) return fail(ncclSystemError, "out of memory");
+  if (grow(&comm->table, &comm->table_room, comm->tables, sizeof *comm->table) || units > SIZE_MAX / 2 / sizeof **spans)
+    return fail(ncclSystemError, "out of memory");
   if (!page || length > page->bytes - page->used) {
     const size_t extent = length > MESH_COMPILED_STORAGE_BYTES ? length : MESH_COMPILED_STORAGE_BYTES;
-    struct storage_page *pages = realloc(comm->storage, (comm->storage_count + 1) * sizeof *pages);
+    size_t room = comm->storage_room;
     void *address = NULL;
-    if (!pages) return fail(ncclSystemError, "out of memory");
-    comm->storage = pages;
+    if (grow(&comm->storage, &room, comm->storage_count, sizeof *comm->storage)) return fail(ncclSystemError, "out of memory");
+    comm->storage_room = (uint32_t)room;
     const ncclResult_t made = ncclMemAlloc(&address, extent);
     if (made) return made;
     *(page = comm->storage + comm->storage_count++) = (struct storage_page){address, extent, 0};
@@ -2985,7 +2997,9 @@ static ncclResult_t table_of(struct ncclComm *comm, uint64_t offset, uint64_t by
    host cannot tell when a caller's command buffer that touches it has run).  Under group_lock */
 static uint32_t slot_take(struct ncclComm *comm, size_t bytes) {
   size_t step = comm->page ? comm->page : 1;
-  while (bytes > 8 * step) step *= 2;
+  if (bytes > SIZE_MAX / 4) { fail(ncclSystemError, "a slot of %zu bytes", bytes); return 0; }
+  bytes = bytes ? bytes : 1;
+  while (step <= (bytes - 1) / 8) step *= 2;
   bytes = (bytes + step - 1) / step * step;
   uint32_t best = 0, vacant = 0;
   for (uint32_t k = 0; k < comm->slot_count; k++) {
@@ -3062,10 +3076,13 @@ static ncclResult_t bind_slot(struct metal_program *program, struct ncclComm *co
 static ncclResult_t place_group(struct ncclComm *comm, struct schedule *plans, struct where area) {
   const unsigned char *region = (const unsigned char *)comm->attach->context.M;
   size_t used = 0;
-  /* past TABLE_PAGES pages of span tables, every one let go and made again as its bytes are named: their leases freed
-     (ncclMemFree), whose pages the bridge's reads of the entries already presented keep (present_group's marks) */
-  if (comm->storage_count >= TABLE_PAGES)
-    for (comm->tables = 0; comm->storage_count;) ncclMemFree(comm->storage[--comm->storage_count].address);
+  /* past TABLE_PAGES pages of span tables, or twice the most pages one group has made since they were last let go (a
+     group that alone needs more, its operands where they were, makes none again), every one let go and made again as
+     its bytes are named: their leases freed (ncclMemFree), whose pages the bridge's reads of the entries already
+     presented keep (present_group's marks) */
+  if (comm->storage_count >= TABLE_PAGES && comm->storage_count >= 2 * comm->storage_floor)
+    for (comm->tables = comm->storage_floor = 0; comm->storage_count;) ncclMemFree(comm->storage[--comm->storage_count].address);
+  const uint32_t pages = comm->storage_count;
   for (uint32_t h = 0; h < comm->count; h++)
     for (int send = 1; send >= 0; send--)
       for (size_t k = 0; k < (send ? plans[h].outs : plans[h].ins); k++) {
@@ -3099,6 +3116,7 @@ static ncclResult_t place_group(struct ncclComm *comm, struct schedule *plans, s
         if (result) return result;
         x->table = (uint64_t)((unsigned char *)x->spans - region);
       }
+  if (comm->storage_count - pages > comm->storage_floor) comm->storage_floor = comm->storage_count - pages;
   return ncclSuccess;
 }
 
