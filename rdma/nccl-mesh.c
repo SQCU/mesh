@@ -289,6 +289,7 @@ struct ncclComm {
   void *violation;
   uint64_t last, groups, counts, moved;
   void *command, *queue; /* the last GPU program's command buffer; the queue of its host groups' (launch_host) */
+  struct ncclMeshWritePlan *compiled_writes; /* the plans holding definitions of it (write_definitions) */
   struct ncclComm *next_touched, *next_live;
   struct plan *plan;
   _Atomic int runs;
@@ -440,6 +441,8 @@ static void comm_storage_free(struct ncclComm *comm) {
   comm->slots = NULL; comm->slot_count = 0;
   comm->gate_word = comm->gate = NULL;
 }
+struct ncclMeshWritePlan;
+static void write_definitions_drop(struct ncclComm *comm, struct ncclMeshWritePlan *plan);
 static void comm_free(struct ncclComm *comm) {
   pthread_mutex_lock(&live_lock);
   for (struct ncclComm **at = &live; *at; at = &(*at)->next_live) if (*at == comm) { *at = comm->next_live; break; }
@@ -449,6 +452,9 @@ static void comm_free(struct ncclComm *comm) {
   for (uint32_t h = 0; h < comm->count; h++) { metal_release(comm->channels[h].buffer); metal_release(comm->channels[h].lists); }
   ncclMemFree((void *)comm->words);
   metal_release(comm->command); metal_release(comm->queue);
+  pthread_mutex_lock(&group_lock);
+  while (comm->compiled_writes) write_definitions_drop(comm, comm->compiled_writes);
+  pthread_mutex_unlock(&group_lock);
   plan_free(comm, comm->plan);
   free(comm->cache);
   comm_leave(comm);
@@ -1936,6 +1942,8 @@ struct ncclMeshWritePlan {
   uint32_t repeats;
   ncclDataType_t type;
   int from, to, metal;
+  struct compiled *compiled; /* its definitions, an occurrence each, where it runs alone (write_definitions) */
+  struct ncclMeshWritePlan *next_compiled;
 };
 static size_t write_span_index(const struct ncclMeshWritePlan *p, size_t step, size_t invocation) {
   return step*p->occurrences+invocation%p->occurrences;
@@ -3027,11 +3035,13 @@ static ncclResult_t signature(struct ncclComm *comm, const struct call *list, si
   return ncclSuccess;
 }
 
-/* the compiled form of the group numbered `holder` (*group): its plan's group (group_at), else, with no plan, its calls'
-   (signature), each call's roles its declaration's (nothing planned at the call: nccl.h ncclMeshCommPlan); a group of
+/* the compiled form of the group numbered `holder` (*group): its plan's group (group_at), else, with no plan, a WRITE
+   alone's plan's own (write_definitions), else its calls' (signature), each call's roles its declaration's (nothing planned at the call: nccl.h ncclMeshCommPlan); a group of
    other than its declaration's count of calls fails as a value, before any is bound.  Under group_lock */
 static ncclResult_t definition_of(struct ncclComm *comm, struct call *list, size_t n, uint64_t holder, struct compiled **group) {
   struct compiled *x = comm->plan && comm->plan->active ? group_at(comm->plan, holder) : NULL;
+  const struct ncclMeshWritePlan *alone = n == 1 && !list[0].fused ? list[0].write_plan : NULL;
+  if (!x && alone && alone->compiled) x = alone->compiled + list[0].invocation % alone->occurrences;
   ncclResult_t result = x ? ncclSuccess : signature(comm, list, n, &x);
   if (!result && n != x->n) result = fail(ncclInvalidUsage, "a group of %zu calls issued as its declaration of %zu", n, x->n);
   for (size_t i = 0; !result && i < n; i++) call_bind_roles(list + i, x->calls + i);
@@ -5783,6 +5793,40 @@ static ncclResult_t write_prepare_spans(struct ncclMeshWritePlan *plan) {
   return result;
 }
 
+/* a WRITE executed alone in its group (and not on a fused stream) binds a definition its plan holds, compiled as the
+   plan is prepared (compile_group on the call ncclMeshWriteExecute makes, one an occurrence of its packet cuts), not
+   one found or compiled at its execution (signature); its issues are laid and placed at its first executions, a
+   generation each (issue_bind).  A tiled WRITE's comes from its declaration (ncclMeshCommPlan); one that cannot be
+   compiled yet (no paths) at its execution.  The definitions hold no reference to their plan: they are let go before
+   it (ncclMeshWritePlanDestroy), or with their communicator (comm_free), which keeps the plans that hold some
+   (`compiled_writes`).  Under group_lock */
+static void write_definitions(struct ncclMeshWritePlan *plan) {
+  struct ncclComm *comm = plan->comm;
+  if (plan->layout.tile_bytes || comm->nranks == 1) return;
+  struct compiled *made = calloc(plan->occurrences, sizeof *made);
+  int compiled = made != NULL;
+  for (size_t o = 0; compiled && o < plan->occurrences; o++) {
+    struct compiled *x = made + o;
+    compiled = (x->calls = calloc(1, sizeof *x->calls)) != NULL;
+    if (!compiled) break;
+    x->n = 1; x->repeat = 1;
+    x->calls[0] = (struct call){.what = MESH_BROADCAST, .root = plan->from, .target = plan->to + 1, .count = plan->count, .type = plan->type,
+                                .op = ncclSum, .comm = comm, .write_plan = plan, .invocation = o};
+    compiled = !compile_group(comm, x->calls, 1, &x->plans);
+    x->calls[0].write_plan = NULL;
+  }
+  if (compiled) { plan->compiled = made; plan->next_compiled = comm->compiled_writes; comm->compiled_writes = plan; return; }
+  for (size_t o = 0; made && o < plan->occurrences; o++) compiled_drop(comm, made + o);
+  free(made);
+}
+static void write_definitions_drop(struct ncclComm *comm, struct ncclMeshWritePlan *plan) {
+  for (struct ncclMeshWritePlan **at = &comm->compiled_writes; *at; at = &(*at)->next_compiled)
+    if (*at == plan) { *at = plan->next_compiled; break; }
+  for (size_t o = 0; o < plan->occurrences; o++) compiled_drop(comm, plan->compiled + o);
+  free(plan->compiled);
+  plan->compiled = NULL;
+}
+
 static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_index start, size_t count, ncclDataType_t datatype,
     int source, int destination, uint32_t repeats, size_t stride, size_t max_packet,
     size_t row_bytes, size_t rows, const ncclMeshSpan *view, size_t views, int indexed, struct mesh_write_layout layout, ncclMeshWritePlan_t *out) {
@@ -5919,6 +5963,9 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
   plan->type = datatype; plan->from = source; plan->to = destination; plan->metal = metal;
   const ncclResult_t prepared = write_prepare_spans(plan);
   if (prepared) { write_plan_drop(plan); return prepared; }
+  pthread_mutex_lock(&group_lock);
+  write_definitions(plan);
+  pthread_mutex_unlock(&group_lock);
   *out = plan;
   return ncclSuccess;
 }
@@ -6118,7 +6165,15 @@ ncclResult_t ncclMeshWriteLandings(ncclMeshWritePlan_t plan, void *records, uint
   plan->land_records=records;plan->land_capacity=capacity;plan->land_layout=layout;
   return ncclSuccess;
 }
-ncclResult_t ncclMeshWritePlanDestroy(ncclMeshWritePlan_t plan) { write_plan_drop(plan); return ncclSuccess; }
+ncclResult_t ncclMeshWritePlanDestroy(ncclMeshWritePlan_t plan) {
+  if (plan) {
+    pthread_mutex_lock(&group_lock);
+    if (plan->compiled) write_definitions_drop(plan->comm, plan);
+    pthread_mutex_unlock(&group_lock);
+  }
+  write_plan_drop(plan);
+  return ncclSuccess;
+}
 
 ncclResult_t ncclReduceScatterConfig(const void *sendbuff, void *recvbuff, size_t recvcount, ncclDataType_t datatype, ncclRedOp_t op,
                                      ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t *config) {
