@@ -2861,12 +2861,13 @@ static ncclResult_t signature(struct ncclComm *comm, const struct call *list, si
 }
 
 /* the compiled form of the group numbered `holder` (*group): its plan's group (group_at), else, with no plan, its calls'
-   (signature), each call's roles its declaration's (nothing planned at the call: nccl.h ncclMeshCommPlan).  Under
-   group_lock */
+   (signature), each call's roles its declaration's (nothing planned at the call: nccl.h ncclMeshCommPlan); a group of
+   other than its declaration's count of calls fails as a value, before any is bound.  Under group_lock */
 static ncclResult_t definition_of(struct ncclComm *comm, struct call *list, size_t n, uint64_t holder, struct compiled **group) {
   struct compiled *x = comm->plan && comm->plan->active ? group_at(comm->plan, holder) : NULL;
-  const ncclResult_t result = x ? ncclSuccess : signature(comm, list, n, &x);
-  for (size_t i = 0; !result && i < x->n; i++) call_bind_roles(list + i, x->calls + i);
+  ncclResult_t result = x ? ncclSuccess : signature(comm, list, n, &x);
+  if (!result && n != x->n) result = fail(ncclInvalidUsage, "a group of %zu calls issued as its declaration of %zu", n, x->n);
+  for (size_t i = 0; !result && i < n; i++) call_bind_roles(list + i, x->calls + i);
   *group = x;
   return result;
 }
@@ -2877,7 +2878,6 @@ static ncclResult_t definition_of(struct ncclComm *comm, struct call *list, size
 static struct issue *issue_make(struct ncclComm *comm, const struct compiled *x, uint32_t repeats);
 static ncclResult_t group_bound(struct ncclComm *comm, struct call **calls, size_t n, struct compiled *x, uint32_t repeats, size_t stride,
                                 struct schedule **plans, struct issue **issued) {
-  if (n != x->n) return fail(ncclInvalidUsage, "a group of %zu calls issued as its declaration of %zu", n, x->n);
   struct issue **at = x->issue + x->uses % GENERATIONS, *u = *at;
   if (u && !u->held && u->repeats != repeats) { issue_free(comm, u); *at = u = NULL; }
   if (!u || u->held) {
