@@ -26,16 +26,21 @@ def start(store, key, rank, ranks, history):
 
 
 def close(observer):
+    """The collection's records, or its error: it ends within its deadline of the last observation (_collect)."""
     outgoing, stopping, worker, future = observer
     stopping.set()
     emit([{'observations': future.result()}])
 
 
 def _collect(store, key, rank, ranks, history, outgoing, stopping):
+    import mesh
     sent, received, pending = 0, [0] * ranks, {}
     waiting, idle = [], threading.Event()
     announced = False
     records = []
+    # Once stopping, each observation (a completion here, a peer's record) within MESH_PLATFORM_NS of the last or of the
+    # stop, else the collection ends naming what it waited for: a peer that died never reports.
+    deadline, progressed, stopped = mesh.lib.MESH_PLATFORM_NS / 1e9, now(), None
     while True:
         while True:
             try:
@@ -55,6 +60,7 @@ def _collect(store, key, rank, ranks, history, outgoing, stopping):
             record['seconds'] = seconds
             record['completion_seconds_bounds'] = [record.get('last_pending', record['started']) - record['started'], seconds]
             emit([completed(record, seconds)])
+            progressed = observed
             if rank == 0:
                 pending.setdefault(record['episode'], {})[0] = record
                 received[0] += 1
@@ -74,6 +80,7 @@ def _collect(store, key, rank, ranks, history, outgoing, stopping):
                     pending.setdefault(record['episode'], {})[peer] = record
                     received[peer] += 1
                     address = f'{key}/{peer}/{received[peer]}'
+                    progressed = now()
             for episode, peers in list(pending.items()):
                 if len(peers) == ranks:
                     row = {**peers[0], 'seconds': max(p['seconds'] for p in peers.values()),
@@ -91,5 +98,12 @@ def _collect(store, key, rank, ranks, history, outgoing, stopping):
                 break
         elif announced:
             break
+        if stopping.is_set():
+            stopped = stopped or now()
+            if now() - max(progressed, stopped) > deadline:
+                quiet = [p for p in range(1, ranks) if rank == 0 and not (store.check([f'{key}/finished/{p}']) and
+                         received[p] == int(store.get(f'{key}/finished/{p}')))]
+                raise TimeoutError(f'rollout {key}: {len(waiting)} completions here and the records of ranks {quiet}: '
+                                   f'past their deadline of {deadline:.3f} s; the collection ends')
         idle.wait(.005)
     return records

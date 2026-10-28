@@ -1,8 +1,8 @@
 #include "mesh-write-compiler.h"
 // PyTorch frontend bindings to the common collective compiler and native
 // Metal schedule. Prepared calls resolve routes, pages and dispatch operands
-// before submission. The compatibility MPS stream is flushed at a whole
-// function boundary; it has no publication-driven buffering policy.
+// before submission. torch's MPS stream is ended where a prepared function or
+// an eager collective reads what it stored, and committed where one publishes.
 #include <torch/extension.h>
 #include <torch/library.h>
 #include <ATen/DLConvertor.h>
@@ -37,10 +37,14 @@
 // native schedule owns prepared execution; this state names MPS data events.
 struct MeshStream {
   at::mps::MPSStream *const mps;
-  id<MTLSharedEvent> const progress;
+  id<MTLSharedEvent> const progress, passed;
   id<MTL4CommandQueue> const prepared;
   // the buffers this stream committed, the k-th signalling k on progress as the GPU reaches its end
   uint64_t committed = 0;
+  // the prepared functions enqueued from this stream, the k-th signalling k on passed as the prepared queue passes it,
+  // each holding what it runs until then
+  uint64_t enqueued = 0;
+  std::deque<std::pair<uint64_t, std::shared_ptr<void>>> running;
   // whether a group was issued on this stream since the host path last waited for it
   bool streamed = false;
   // the workspace of the group being encoded (the library's workspace allocator's context is the MeshStream, which
@@ -49,26 +53,36 @@ struct MeshStream {
   std::map<uint64_t, std::vector<at::Tensor>> holders;
 
   explicit MeshStream(at::mps::MPSStream *stream) : mps(stream), progress([stream->device() newSharedEvent]),
-      prepared([stream->device() newMTL4CommandQueue]) {
-    if (!progress || !prepared) {
-      [progress release]; [prepared release];
+      passed([stream->device() newSharedEvent]), prepared([stream->device() newMTL4CommandQueue]) {
+    if (!progress || !passed || !prepared) {
+      [progress release]; [passed release]; [prepared release];
       TORCH_CHECK(false,"preparing Metal context: shared event or command queue unavailable");
     }
   }
 
-  // On torch's queue: the open buffer committed (and waited for, where `wait`), its end signalling the next count.
-  void signalled(bool wait) {
+  // On torch's queue: the open buffer committed, its end signalling the next count.
+  void signalled() {
     mps->endKernelCoalescing();
     [mps->commandBuffer() encodeSignalEvent:progress value:++committed];
-    mps->synchronize(wait ? at::mps::SyncType::COMMIT_AND_WAIT : at::mps::SyncType::COMMIT);
+    mps->synchronize(at::mps::SyncType::COMMIT);
+  }
+
+  // On torch's queue, before a collective sends what torch stored: the open buffer ended and committed, and the next
+  // waiting on the GPU for its end (metal-microbench docs/facts.md, 10-24: neither a later kernel of one buffer nor a
+  // commit alone makes a kernel's plain stores visible to the NIC).
+  void released() {
+    signalled();
+    [mps->commandBuffer() encodeWaitForEvent:progress value:committed];
   }
 
   // On the host: the workspace `held` of the group issued as `ticket` kept until the library retires it (0: a group
   // complete in the stream's order once encoded, whose workspace's lease is held again here, where later work reuses
-  // it after the group's), and the workspace of every group retired by now released.
+  // it after the group's), and the workspace of every group retired by now released, with what each prepared function
+  // the prepared queue has passed held.
   void retire(uint64_t ticket, std::vector<at::Tensor> held) {
     if (ticket) holders[ticket] = std::move(held);
     holders.erase(holders.begin(), holders.upper_bound(ncclMeshRetired()));
+    for (const uint64_t at = passed.signaledValue; !running.empty() && running.front().first <= at;) running.pop_front();
   }
 };
 
@@ -95,21 +109,29 @@ static std::vector<MeshStream *> streams_made() {
   return made;
 }
 
-// A host wait of the library's on stream s, on torch's queue: a publication still waiting committed, and with `wait`
-// the stream committed and waited for (torch's COMMIT_AND_WAIT, taken here on its queue), on the stream queue.
-static void host_wait(MeshStream &s, bool wait) {
-  MeshStream *self = &s;
-  at::mps::dispatch_sync_with_rethrow(s.mps->queue(), ^{
-    @autoreleasepool {
-      self->signalled(wait);
-    }
-  });
+// No wait of torch_mesh's outlives its deadline: past it the program ends, naming the wait (the operator, 2026-10-28;
+// the library's mesh_expired).  No turn of torch's queue taken here waits, so its dispatch_sync waits only on torch's
+// own turns, whose GPU waits on a prepared function `watch` bounds.
+[[noreturn]] static void expired(const char *wait, uint64_t ns) {
+  fprintf(stderr, "%s: past its deadline of %.3f s; the program ends\n", wait, (double)ns / 1e9);
+  _exit(1);
 }
 
-// Before a host wait outside torch's streams (a recording's compile meeting): every stream's waiting
-// publication committed.
-static void commit() {
-  for (MeshStream *s : streams_made()) host_wait(*s, false);
+// The host until `event` reaches `value`, within `ns` (0: MESH_PLATFORM_NS) of `from` (a CLOCK_MONOTONIC reading; 0: now).
+static void bounded(id<MTLSharedEvent> event, uint64_t value, const char *wait, uint64_t ns = 0, uint64_t from = 0) {
+  ns = ns ? ns : MESH_PLATFORM_NS;
+  const uint64_t until = (from ? from : clock_gettime_nsec_np(CLOCK_MONOTONIC)) + ns;
+  for (uint64_t now; event.signaledValue < value;) {
+    if ((now = clock_gettime_nsec_np(CLOCK_MONOTONIC)) >= until) expired(wait, ns);
+    [event waitUntilSignaledValue:value timeoutMS:(until - now + 999999) / 1000000];
+  }
+}
+
+// Stream s's work so far complete: its buffer committed, then the host's wait for its end, bounded.
+static void settled(MeshStream &s, const char *wait, uint64_t ns = 0) {
+  MeshStream *self = &s;
+  at::mps::dispatch_sync_with_rethrow(s.mps->queue(), ^{ @autoreleasepool { self->signalled(); } });
+  bounded(s.progress, s.committed, wait, ns);
 }
 
 // Configuration-time migration may read existing tensors produced by ordinary
@@ -118,7 +140,7 @@ static void commit() {
 static void publish_boundary() {
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
   MeshStream *s = &stream_of(stream);
-  at::mps::dispatch_sync_with_rethrow(stream->queue(), ^{ s->signalled(false); });
+  at::mps::dispatch_sync_with_rethrow(stream->queue(), ^{ s->signalled(); });
 }
 
 // The library's workspace allocator: a region lease (region_empty, held: taken again by the next workspace of its size
@@ -163,9 +185,10 @@ static void checked(int64_t result) {
   TORCH_CHECK(!result, "libnccl-mesh: ", ncclGetErrorString((ncclResult_t)result), ": ", ncclGetLastError(nullptr));
 }
 
-// A group encoded in one turn of torch's stream queue: its command buffer and open encoder, the group encoded into them,
-// with the enclosing function responsible for submission. Its workspace is held:
-// split, it is issued and not completed, its ticket (0: complete at once) keeping them until the library retires it.
+// A group encoded in one turn of torch's stream queue: torch's stores released to it, its command buffer and open
+// encoder, the group encoded into them, and that buffer committed where it published (a peer waits on it).  Its
+// workspace is held: split, it is issued and not completed, its ticket (0: complete at once) keeping them until the
+// library retires it.
 static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &call, bool split, int64_t comm, std::vector<at::Tensor> held) {
   const auto *encode = &call;
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
@@ -176,8 +199,10 @@ static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &c
   {
     dispatch_sync(stream->queue(), ^{
       @autoreleasepool {
+        s->released();
         ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, split ? &issue : nullptr};
         result = (*encode)(&on);
+        if (!result && (!split || issue.published)) s->mps->synchronize(at::mps::SyncType::COMMIT);
       }
     });
   }
@@ -187,9 +212,8 @@ static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &c
   return issue.ticket;
 }
 
-// every issued group through `ticket` completed on torch's stream where it is waited, the turn of torch's queue within
-// `ns` is retained for the c10d completion signature.
-static void complete(uint64_t ticket, uint64_t ns = 0) {
+// every issued group through `ticket` completed on torch's stream where it is waited
+static void complete(uint64_t ticket) {
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
   MeshStream *s = &stream_of(stream);
   if (ncclMeshRetired() >= ticket) return s->retire(0, {});
@@ -200,6 +224,7 @@ static void complete(uint64_t ticket, uint64_t ns = 0) {
         ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, nullptr};
         int published = 0;
         result = ncclMeshComplete(ticket, &on, &published);
+        if (!result && published) s->mps->synchronize(at::mps::SyncType::COMMIT);
       }
     });
   }
@@ -209,14 +234,21 @@ static void complete(uint64_t ticket, uint64_t ns = 0) {
 
 // c10d's Work for a group issued and not completed: waiting (or synchronizing, asking whether it completed, or
 // asking for its future) encodes the rest on torch's current stream, where every later kernel reads its results; a
-// c10d completion follows the submitted stream's dependency.
+// c10d completion follows the submitted stream's dependency.  A wait given a timeout (c10d's kNoTimeout is 0) has the
+// host wait for the stream within it too, as NCCL's blocking wait does.
 class MeshWork : public c10d::Work {
  public:
   MeshWork(uint64_t ticket, std::vector<at::Tensor> outputs, int64_t comm)
       : c10d::Work(-1, c10d::OpType::UNKNOWN), ticket_(ticket), outputs_(std::move(outputs)), comm_(comm) {}
   bool isCompleted() override { finish(); return true; }
   bool isSuccess() const override { return finished_; }
-  bool wait(std::chrono::milliseconds timeout) override { finish((uint64_t)std::max<int64_t>(timeout.count(), 0) * 1000000); return true; }
+  bool wait(std::chrono::milliseconds timeout) override {
+    finish();
+    if (timeout.count() > 0)
+      settled(stream_of(at::mps::getCurrentMPSStream()), "MeshWork::wait: its group's completion on torch's MPS stream",
+              (uint64_t)timeout.count() * 1000000);
+    return true;
+  }
   void synchronize() override { finish(); }
   c10::intrusive_ptr<c10::ivalue::Future> getFuture() override {
     finish();
@@ -226,10 +258,10 @@ class MeshWork : public c10d::Work {
   }
 
  private:
-  void finish(uint64_t ns = 0) {
+  void finish() {
     if (finished_) return;
     finished_ = true;
-    complete(ticket_, ns);
+    complete(ticket_);
   }
   uint64_t ticket_;
   std::vector<at::Tensor> outputs_;
@@ -414,7 +446,7 @@ static uint64_t submit(const std::function<ncclResult_t(ncclMeshStream *)> &call
       const MeshStream *current = &stream_of(at::mps::getCurrentMPSStream());
       for (MeshStream *s : streams_made())
         if (s->streamed || s == current) {
-          host_wait(*s, true);
+          settled(*s, "torch_mesh: torch's MPS stream, before a host-path collective (submit)");
           s->retire(0, {});
           s->streamed = false;
         }
@@ -437,16 +469,72 @@ static uint64_t issue(const std::vector<Call> &calls, int64_t comm, bool split, 
                 g.metal, split, comm, {}, unlock);
 }
 
-using Schedule = std::shared_ptr<MetalSchedule>;
+// A prepared function on its stream's prepared queue: its inputs wait for `gate` (its GPU part and the host steps that
+// follow no part), which torch's queue signals 1 where it is enqueued; a function with a host step signals 2 as it ends.
+struct Schedule {
+  std::shared_ptr<MetalSchedule> function;
+  id<MTLSharedEvent> gate = nil;  // the function's (MetalScheduleAfter holds it)
+  bool host = false;
+  MetalSchedule *get() const { return function.get(); }
+};
 
 static Schedule schedule_after_inputs() {
-  at::mps::MPSStream *stream=at::mps::getCurrentMPSStream();
-  MeshStream *source=&stream_of(stream);
-  Schedule schedule(MetalScheduleCreateOn(source->prepared,MetalFormEncoded),MetalScheduleFree);
-  TORCH_CHECK(schedule,"creating the prepared function command stream");
-  at::mps::dispatch_sync_with_rethrow(stream->queue(), ^{ source->signalled(false); });
-  MetalScheduleAfter(schedule.get(),source->progress,source->committed);
+  MeshStream *source=&stream_of(at::mps::getCurrentMPSStream());
+  id<MTLSharedEvent> gate=[source->mps->device() newSharedEvent];
+  Schedule schedule{{MetalScheduleCreateOn(source->prepared,MetalFormEncoded),MetalScheduleFree},gate};
+  if(schedule.function&&gate)MetalScheduleAfter(schedule.get(),gate,1);
+  [gate release];
+  TORCH_CHECK(schedule.function&&gate,"creating the prepared function command stream");
   return schedule;
+}
+
+// Each function `ordered` enqueued watched off the host's path (torch's later work waits for it on the GPU): its gate
+// within MESH_PLATFORM_NS of the later of its enqueue and the previous one's pass, and its pass within MESH_PLATFORM_NS
+// of its gate, or the program ends.
+static void watch(id<MTLSharedEvent> gate, id<MTLSharedEvent> passed, uint64_t at) {
+  static dispatch_queue_t watching = dispatch_queue_create("torch_mesh.passed", DISPATCH_QUEUE_SERIAL);
+  static uint64_t last = 0;  // the previous function's pass, read and written on `watching`
+  const uint64_t enqueued = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+  dispatch_async(watching, ^{
+    bounded(gate, 1, "torch_mesh: torch's MPS work before a prepared function (its gate, ordered)", 0, std::max(last, enqueued));
+    bounded(passed, at, "torch_mesh: a prepared function's run on the prepared queue (ordered)");
+    last = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+  });
+}
+
+// A prepared function enqueued in torch's stream order, with no host wait: its gate signalled at the end of torch's
+// buffer so far (committed, so what torch stored is visible to it and the NIC: metal-microbench docs/facts.md, 10-24),
+// and torch's later work waiting on the GPU for the prepared queue to pass it; it and `keep` held until then.
+static void ordered(const Schedule &schedule, std::shared_ptr<void> keep = {}) {
+  at::mps::MPSStream *stream=at::mps::getCurrentMPSStream();
+  MeshStream *s=&stream_of(stream);
+  s->retire(0,{});
+  MetalSchedule *function=schedule.get();
+  id<MTLSharedEvent> gate=schedule.gate;
+  const bool host=schedule.host;
+  const uint64_t at=++s->enqueued;
+  at::mps::dispatch_sync_with_rethrow(stream->queue(), ^{ @autoreleasepool {
+    s->mps->endKernelCoalescing();
+    [s->mps->commandBuffer() encodeSignalEvent:gate value:1];
+    s->mps->synchronize(at::mps::SyncType::COMMIT);
+    MetalScheduleEnqueue(function);
+    if(host)[s->prepared waitForEvent:gate value:2];
+    [s->prepared signalEvent:s->passed value:at];
+    [s->mps->commandBuffer() encodeWaitForEvent:s->passed value:at];
+  }});
+  watch(gate,s->passed,at);
+  s->running.emplace_back(at,schedule.function);
+  if(keep)s->running.emplace_back(at,std::move(keep));
+}
+
+// The next of a function's invocations prepared ahead, each enqueued once, and the last enqueued.
+static const Schedule &next_of(const std::vector<Schedule> &prepared, size_t &next) {
+  TORCH_CHECK(next < prepared.size(), "enqueue past the ", prepared.size(), " prepared invocations: realize more first");
+  return prepared[next++];
+}
+static const Schedule &last_of(const std::vector<Schedule> &prepared, size_t next) {
+  TORCH_CHECK(next, "no prepared invocation has been enqueued");
+  return prepared[next-1];
 }
 
 static pybind11::capsule schedule_completion(const Schedule &schedule) {
@@ -788,8 +876,8 @@ struct Collectives {
     const auto held=operands;
     checked(MetalScheduleFinish(made.get(),^(NSError *){(void)held;}));executions.push_back(std::move(made));
   }
-  void enqueue() { MetalScheduleEnqueue(executions[next++].get()); }
-  pybind11::capsule completion() { return schedule_completion(executions[next-1]); }
+  void enqueue() { ordered(next_of(executions,next)); }
+  pybind11::capsule completion() { return schedule_completion(last_of(executions,next)); }
 
 };
 
@@ -830,6 +918,7 @@ static constexpr const char *LINEAR_PARAMETERS[]={"device const half* x", "devic
 constexpr size_t LINEAR_BINDINGS = sizeof(LINEAR_PARAMETERS) / sizeof(*LINEAR_PARAMETERS);
 constexpr size_t LINEAR_PRODUCTS = (MESH_BUFFER_BINDINGS - 1) / LINEAR_BINDINGS;
 struct LinearDimensions { uint32_t rows, inner, columns, bias, weight_stride, first, stride0, stride1, output_row, output_column; };
+static_assert(sizeof(LinearDimensions) == 10 * sizeof(uint32_t), "linear.metal's linear_dims, as prepare_chain binds it too");
 struct LinearGroupWords {
   LinearDimensions dimensions[LINEAR_PRODUCTS];
   uint32_t first[LINEAR_PRODUCTS], activation[LINEAR_PRODUCTS];
@@ -966,7 +1055,8 @@ struct RegionShape {
   std::vector<int64_t> sizes, strides;
 };
 
-// Held MPS leases (region_empty's `held`), by their bytes: each released once the stream's work on it had completed.
+// Held MPS leases (region_empty's `held`), by their bytes: each released once the stream's work on it had completed,
+// and taken again once the NIC's reads of it have ended too (ncclMeshMemReusable).
 static std::multimap<size_t, void *> held_;
 
 static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps, bool held) {
@@ -975,10 +1065,14 @@ static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &lik
   void *memory = nullptr;
   {
     std::lock_guard<std::mutex> guard(region_tensors_lock_);
-    const auto found = held ? held_.find(bytes) : held_.end();
-    if (found != held_.end()) {
-      memory = found->second;
-      held_.erase(found);
+    for (auto [at, end] = held ? held_.equal_range(bytes) : std::make_pair(held_.end(), held_.end()); at != end; ++at) {
+      int reusable = 0;
+      checked(ncclMeshMemReusable(at->second, &reusable));
+      if (reusable) {
+        memory = at->second;
+        held_.erase(at);
+        break;
+      }
     }
   }
   if (!memory) {
@@ -1065,7 +1159,7 @@ static std::vector<at::Tensor> import_attributes(const std::vector<at::Tensor> &
   // A foreign MPS attribute may still be produced by its frontend's setup
   // commands. Complete that producer before the host reads its initial bytes.
   // This import is called only by preparation, never by a recorded invocation.
-  if(mps)at::mps::synchronizeAllMPSStreams(at::mps::SyncType::COMMIT_AND_WAIT);
+  if(mps)settled(stream_of(at::mps::getCurrentMPSStream()),"torch_mesh: a foreign attribute's producer on torch's MPS stream (import_attributes)");
   for(auto &[key,group]:groups) {
     const auto &source=values[group.members.front()];
     const size_t low=group.spans.empty()?0:group.low/group.alignment*group.alignment;
@@ -1178,7 +1272,7 @@ struct FusedForm {
   };
   std::map<int64_t, Sequence> sequences;
   Ring *ring = nullptr;
-  int64_t turn = 0, j = 0, half = 0;
+  int64_t turn = 0, half = 0;
   std::vector<int64_t> pbind, lbind;
   Schedule transport;
 };
@@ -1237,14 +1331,10 @@ static void fused_release(int64_t comm) {
   for (auto f = fused_forms_->begin(); f != fused_forms_->end();) f = f->second.comm == comm ? fused_forms_->erase(f) : std::next(f);
 }
 
-// Route changes happen between complete functions. A partially issued repeat
-// train still owns its schedule; discarding its bindings would strand data.
+// Route changes happen between complete functions; a chain still running holds the rings it runs (PreparedChain).
 static void fused_reconfigure(int64_t comm) {
   std::lock_guard<std::mutex> guard(*fused_lock_);
   release_chains(comm);
-  for (const auto &entry : *fused_forms_)
-    TORCH_CHECK(entry.second.comm != comm || entry.second.j == 0,
-                "route reconfiguration requires a complete fused repeat train");
   for (auto f = fused_forms_->begin(); f != fused_forms_->end();)
     f = f->second.comm == comm ? fused_forms_->erase(f) : std::next(f);
 }
@@ -1300,7 +1390,6 @@ static void fused_prepare(const at::Tensor &x, const std::optional<at::Tensor> &
   TORCH_CHECK(batches >= 1, "fused preparation requires a positive batch count");
   std::unique_lock<std::mutex> held(*fused_lock_);
   FusedForm &f = fused_form_of(x, w, dim, sizes, group, adds, held);
-  TORCH_CHECK(f.j == 0, "fused preparation requires a complete preceding repeat train");
   const bool fresh = std::any_of(f.counts.begin(), f.counts.end(), [](int64_t n) { return n == 0; });
   auto &sequence = f.sequences[repeats];
   sequence.rings.clear();
@@ -1350,9 +1439,12 @@ struct PreparedChain {
   MeshStream *stream;
   uint32_t channels;
   Schedule schedule;
+  // the form's rings its steps send from and land in, held with the chain (a reconfiguration lets the form go)
+  std::vector<FusedForm::Ring> rings;
 };
 static void compile_chain(PreparedChain &chain);
-static auto *prepared_chains_ = new std::vector<std::unique_ptr<PreparedChain>>;
+// each prepared chain, held too by its run until the prepared queue has passed it (ordered)
+static auto *prepared_chains_ = new std::vector<std::shared_ptr<PreparedChain>>;
 
 static void release_chains(int64_t comm) {
   for (auto &chain : *prepared_chains_) if (chain && chain->comm == comm) chain.reset();
@@ -1374,7 +1466,7 @@ static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, c
   buffers.push_back(x);  // previous landing; replaced by its compiled page below
   std::vector<int64_t> words = constants;
   words.resize(12 + 36 * f.channels);
-  auto chain = std::make_unique<PreparedChain>(PreparedChain{f.comm, operands, {}, {}, {}, {},
+  auto chain = std::make_shared<PreparedChain>(PreparedChain{f.comm, operands, {}, {}, {}, {},
       encoded(kernel, buffers, words, 15, groups, 1, threads),
       encoded(input_kernel, {}, std::vector<int64_t>(2 + 12 * f.channels), 15, 1, 1, MESH_SIMD_WIDTH),
       {}, {}, {}, nullptr, 6, 9, 12,
@@ -1384,7 +1476,7 @@ static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, c
     const at::Tensor &y = operands[5];
     const int64_t R = x.size(0), K = x.size(1), S = y.size(1);
     chain->products.push_back(encoded(products[0], {x, operands[0], y, y, std::nullopt, x},
-        {R, K, S, 0, K, K, K, K}, 4, linear_groups(R, S), 1, products[2] * MESH_SIMD_WIDTH));
+        {R, K, S, 0, K, K, K, K, y.stride(0), y.stride(1)}, 4, linear_groups(R, S), 1, products[2] * MESH_SIMD_WIDTH));
     std::vector<int64_t> publication{R, S, K, 0, S, S, S, S, 0, 0};
     publication.resize(10 + 24 * f.channels);
     chain->products.push_back(encoded(products[1], {y, operands[1], x, operands[7], y},
@@ -1456,6 +1548,7 @@ static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, c
     }
     append(steps, 0, x, previous, true);
   }
+  for (const auto &[count, ring] : f.rings) chain->rings.push_back(ring);
   compile_chain(*chain);
   (*prepared_chains_)[index] = std::move(chain);
 }
@@ -1542,11 +1635,16 @@ static void compile_chain(PreparedChain &chain) {
   checked(MetalScheduleFinish(schedule,nil));
 }
 
+static const std::shared_ptr<PreparedChain> &chain_at(int64_t index) {
+  TORCH_CHECK(index >= 0 && index < (int64_t)prepared_chains_->size() && (*prepared_chains_)[index], "no prepared chain ", index);
+  return (*prepared_chains_)[index];
+}
 static void chain_run(int64_t index) {
-  MetalScheduleEnqueue((*prepared_chains_)[index]->schedule.get());
+  const auto &chain = chain_at(index);
+  ordered(chain->schedule, chain);
 }
 static pybind11::capsule chain_completion(int64_t index) {
-  return schedule_completion((*prepared_chains_)[index]->schedule);
+  return schedule_completion(chain_at(index)->schedule);
 }
 
 // A declared set of routed writes. Bindings name physical channels, including
@@ -1630,11 +1728,13 @@ struct ScheduleBinding {
   Schedule schedule;
   ScheduleBinding():schedule(schedule_after_inputs()){}
   std::vector<at::Tensor> operands;
+  std::vector<std::shared_ptr<void>> steps;  // the appended steps' replays and plans
   // Preparation supplies native run/context/retain/release operands. The
   // completion worker neither owns a Python callback nor acquires the GIL.
   void host(const std::array<uintptr_t,4> &entry,const std::vector<pybind11::object> &inputs,
       const std::vector<pybind11::object> &outputs) { @autoreleasepool {
     for(auto pointer:entry)TORCH_CHECK(pointer,"host operation requires a complete native binding");
+    schedule.host=true;
     using Run=const char *(*)(void *);
     using Lifetime=void (*)(void *);
     auto run=reinterpret_cast<Run>(entry[0]);
@@ -1674,8 +1774,13 @@ struct ScheduleBinding {
     return fused_writes_impl(schedule.get(),send,landings,pairs,comm,polls,repeats,stride,row_bytes,rows,ready,ready_value,tile_bytes);
   }
 
-  void finish() { const auto held=operands; checked(MetalScheduleFinish(schedule.get(),^(NSError *){(void)held;})); }
-  void enqueue() { MetalScheduleEnqueue(schedule.get()); }
+  // its operands and steps held as long as the schedule; a function with a host step ends where all its parts have
+  // (its gate 2: `ordered` waits for that)
+  void finish() {
+    const auto held=operands;const auto kept=steps;id<MTLSharedEvent> ended=schedule.host?schedule.gate:nil;
+    checked(MetalScheduleFinish(schedule.get(),^(NSError *){(void)held;(void)kept;ended.signaledValue=2;}));
+  }
+  void enqueue() { ordered(schedule); }
   pybind11::capsule completion() { return schedule_completion(schedule); }
 };
 
@@ -1687,8 +1792,8 @@ struct Executions {
   size_t next=0;
   explicit Executions(pybind11::object value):output(std::move(value)){}
   void add(ScheduleBinding &binding){schedules.push_back(binding.schedule);}
-  pybind11::object run(){MetalScheduleEnqueue(schedules[next++].get());return output;}
-  pybind11::capsule completion(){return schedule_completion(schedules[next-1]);}
+  pybind11::object run(){ordered(next_of(schedules,next));return output;}
+  pybind11::capsule completion(){return schedule_completion(last_of(schedules,next));}
 };
 
 // Compact row geometry and explicit indexed selections lower to one prepared
@@ -1759,8 +1864,9 @@ struct ViewWrites {
     const auto held=leases;
     checked(MetalScheduleFinish(made.get(),^(NSError *){(void)held;}));executions.push_back(std::move(made));
   }
-  void enqueue() { MetalScheduleEnqueue(executions[next++].get()); }
-  pybind11::capsule completion(){return schedule_completion(executions[next-1]);}
+  // its plans held while it runs (a configuration's writes are let go once enqueued)
+  void enqueue(std::shared_ptr<ViewWrites> self) { ordered(next_of(executions,next),std::move(self)); }
+  pybind11::capsule completion(){return schedule_completion(last_of(executions,next));}
 
 };
 
@@ -1906,7 +2012,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("linear_source", &linear_source);
   module.def("linear_groups", &linear_groups);
   module.def("linear_commands", &linear_commands);
-  pybind11::class_<Commands>(module,"Commands").def(pybind11::init<const std::vector<CommandRecord> &>());
+  pybind11::class_<Commands,std::shared_ptr<Commands>>(module,"Commands").def(pybind11::init<const std::vector<CommandRecord> &>());
   module.def("linear_split", &linear_split);
   module.def("device_facts", &device_facts);
   module.def("pipeline_facts", &pipeline_facts);
@@ -1917,7 +2023,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     return work_of(issue(calls, comm, split, true), std::move(outputs), comm);
   });
   module.def("attach", &attach);
-  module.def("commit", &commit);
   module.def("publish_boundary", &publish_boundary);
   module.def("region_empty", [](std::vector<int64_t> sizes, const at::Tensor &like, bool mps, bool held) { return region_empty(sizes, like, mps, held); },
              pybind11::arg("sizes"), pybind11::arg("like"), pybind11::arg("mps"), pybind11::arg("held") = false);
@@ -1928,8 +2033,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("fused_release", &fused_release);
   pybind11::class_<ScheduleBinding>(module,"Schedule")
     .def(pybind11::init<>())
-    .def("append",[](ScheduleBinding &s,Commands &commands){commands.append(s.schedule.get());
-        s.operands.insert(s.operands.end(),commands.operands.begin(),commands.operands.end());})
+    .def("append",[](ScheduleBinding &s,const std::shared_ptr<Commands> &commands){commands->append(s.schedule.get());
+        s.operands.insert(s.operands.end(),commands->operands.begin(),commands->operands.end());s.steps.push_back(commands);})
     .def("compute",&ScheduleBinding::compute)
     .def("writes",&ScheduleBinding::writes)
     .def("host",&ScheduleBinding::host)
@@ -1939,18 +2044,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   pybind11::class_<ViewWrites, std::shared_ptr<ViewWrites>>(module, "ViewWrites")
     .def(pybind11::init<const std::vector<ViewBinding> &, int64_t>())
     .def("realize", &ViewWrites::realize)
-    .def("append",[](ViewWrites &w,ScheduleBinding &s){w.append(s.schedule.get());
-        s.operands.insert(s.operands.end(),w.leases.begin(),w.leases.end());})
+    .def("append",[](const std::shared_ptr<ViewWrites> &w,ScheduleBinding &s){w->append(s.schedule.get());
+        s.operands.insert(s.operands.end(),w->leases.begin(),w->leases.end());s.steps.push_back(w);})
     .def("completion", &ViewWrites::completion)
-    .def("enqueue", &ViewWrites::enqueue);
+    .def("enqueue", [](const std::shared_ptr<ViewWrites> &w){w->enqueue(w);});
   pybind11::class_<Collectives, std::shared_ptr<Collectives>>(module, "Collectives")
     .def(pybind11::init<const std::vector<Call> &, int64_t, std::vector<at::Tensor>,
                         const std::vector<CommandRecord> &, const std::vector<CommandRecord> &>(),
          pybind11::arg("calls"),pybind11::arg("comm"),pybind11::arg("operands"),
          pybind11::arg("inputs")=std::vector<CommandRecord>{},pybind11::arg("outputs")=std::vector<CommandRecord>{})
     .def("realize", &Collectives::realize, pybind11::arg("repetitions")=1)
-    .def("append",[](Collectives &c,ScheduleBinding &s){c.append(s.schedule.get());
-        s.operands.insert(s.operands.end(),c.operands.begin(),c.operands.end());})
+    .def("append",[](const std::shared_ptr<Collectives> &c,ScheduleBinding &s){c->append(s.schedule.get());
+        s.operands.insert(s.operands.end(),c->operands.begin(),c->operands.end());s.steps.push_back(c);})
     .def("completion", &Collectives::completion)
     .def("enqueue", &Collectives::enqueue);
   pybind11::class_<Executions>(module,"Executions")

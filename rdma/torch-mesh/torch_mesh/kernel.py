@@ -13,7 +13,17 @@ import torch
 def operation(inputs: list[torch.Tensor], input_slots: list[int], output_slots: list[list[int]], output_strides: list[list[int]],
               shapes: list[list[int]], dtypes: list[str], devices: list[str], operands: str, source: str, name: str, instance: str,
               words: list[int], constant_slot: int, grid: list[int], threads: list[int]) -> list[torch.Tensor]:
-    raise RuntimeError('native kernels require whole-function preparation')
+    """Outside a Function (an encoded matrix's .to('cpu'), a preparation's conversion): the kernel run at once, a
+    prepared function of its commands enqueued in torch's stream order, its inputs imported into the region."""
+    from . import _stream
+    results, records = prepare(_stream.import_attributes(list(inputs)), input_slots, output_slots, output_strides, shapes,
+                               dtypes, devices, operands, source, name, instance, words, constant_slot, grid, threads)
+    if records:
+        schedule = _stream.Schedule()
+        schedule.append(_stream.Commands(records))
+        schedule.finish()
+        schedule.enqueue()
+    return results
 
 
 @operation.register_fake
