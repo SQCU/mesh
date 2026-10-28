@@ -142,9 +142,19 @@ int mesh_diagnostic_quiet(int argc,char **argv){
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <poll.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+/* design/transport.md section 5: the attaching child's report and exit, each within MESH_PLATFORM_NS of the fork (a
+   child's attach or exit can wait on its region or its device), past which it is killed and the run ends, the wait
+   named */
+static void child_left(pid_t pid, const struct mesh_deadline *deadline) {
+  if (mesh_clock_ns() < deadline->at) return;
+  kill(pid, SIGKILL);
+  mesh_expired(deadline->wait, deadline->ns);
+}
 
 int mesh_diagnostic_retire(int n) {
   if (n < 1) return 2;
@@ -163,11 +173,14 @@ int mesh_diagnostic_retire(int n) {
       (void)!write(p[1], &client, sizeof client);
       _exit(0);
     }
+    if (pid < 0) { close(p[0]); close(p[1]); return 1; }
     uint64_t client = 0;
+    const struct mesh_deadline deadline = mesh_deadline("retire: the attaching child's report and exit (mesh_diagnostic_retire)", 0);
+    for (struct pollfd look = {p[0], POLLIN, 0}; poll(&look, 1, 10) <= 0;) child_left(pid, &deadline);
     (void)!read(p[0], &client, sizeof client);
     close(p[0]);
     close(p[1]);
-    waitpid(pid, NULL, 0);
+    while (!waitpid(pid, NULL, WNOHANG)) { child_left(pid, &deadline); usleep(1000); }
     const uint64_t ended = clock_gettime_nsec_np(CLOCK_MONOTONIC);
     const _Atomic uint64_t *owner = &((const struct mesh_client *)((const char *)m + m->client_off) + (client >> 32 & 63))->owner;
     uint64_t at = ended;

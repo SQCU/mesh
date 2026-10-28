@@ -359,6 +359,7 @@ static void watch_turn(void *unused) {
 }
 static void watch_start(void *unused) {
   (void)unused;
+  mesh_expiry_set(mesh_library_expired);
   dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
   dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(MESH_PLATFORM_NS / 5)), MESH_PLATFORM_NS / 5, MESH_PLATFORM_NS / 50);
   dispatch_source_set_event_handler_f(timer, watch_turn);
