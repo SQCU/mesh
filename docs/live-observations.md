@@ -39,7 +39,8 @@ need not be a fabric member. The fabric is the union's largest linked part. A
 configured node that is unreachable, whose bridge is not up, or that is outside the
 fabric is recorded under `absent` with the reason, and the run goes on: every
 reachable node is installed, each workload is placed over the live, installed
-members, and a workload with none is recorded failed while the others run. Pairing
+members, and a workload that none meets, or that fails, is recorded failed while
+the others still run, each gated by its own pairing check. Pairing
 is checked against the union's links. Each command is visible in `discovery` as it
 runs. It does not browse DNS, probe unrelated Tailnet hosts, or fetch source to
 discover a machine. The parallel installation commands verify each endpoint's

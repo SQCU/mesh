@@ -316,9 +316,7 @@ def _execute_locked(record):
             ready = []
         for ordinal, item in enumerate(items):
             record['stage'] = item['tag']
-            result = run_workload(item, ready, paths, record, ordinal, cluster)
-            if result['status'] != 'completed' and result['nodes']:
-                raise RuntimeError(f'{item["tag"]} did not complete; no further workloads submitted')
+            run_workload(item, ready, paths, record, ordinal, cluster)
         record['status'] = 'completed' if (ready and not record['errors'] and
             all(value['status'] == 'completed' for value in record['workloads'])) else 'failed'
     except Exception as error:
