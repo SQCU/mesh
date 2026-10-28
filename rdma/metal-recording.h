@@ -177,7 +177,10 @@ NSError *MetalScheduleAppend(struct MetalSchedule *, struct MetalReplay *, NSRan
 // Finish all local parts and exchange their compiled list ends with peers.
 // Returns the collective preparation error, or zero. Enqueue does no exchange.
 int MetalScheduleFinish(struct MetalSchedule *, void (^completed)(NSError *error));
-void MetalScheduleEnqueue(struct MetalSchedule *);
+// Commits one invocation; `completed` runs once at its end. A later Enqueue, after that end,
+// encodes the same parts again on the same objects (an external command runs once: EALREADY);
+// EBUSY while an invocation is in flight. MetalScheduleAfter between them sets the input value.
+int MetalScheduleEnqueue(struct MetalSchedule *);
 // Ordinary completion observation: 0 pending, 1 complete, -1 failed.
 int MetalScheduleStatus(const struct MetalSchedule *, NSError **error);
 void MetalScheduleFree(struct MetalSchedule *);
