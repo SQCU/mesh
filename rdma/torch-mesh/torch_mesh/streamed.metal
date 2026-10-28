@@ -740,8 +740,10 @@ template [[host_name("streamed_scale_rows_bfloat")]] [[kernel]] decltype(streame
 // scale[j] * factor * values[order[j]]; with STRIDE s > 0 (a literal: a run-time stride's division cost every row its
 // time) written in blocks of s columns, block-major ([columns / s][rows][s]: a tensor operation's operand rows s apart
 // whatever the width). A row kernel ending in its consumers' inputs (metal-microbench docs/kernels.md#stacked-products,
-// the rows) calls it with its own staged row.
-template <uint STRIDE, bool Masked, uint Order, typename V, typename F, typename S, typename G, typename T, typename H, typename U>
+// the rows) calls it with its own staged row. Slabs > 0 declares one logical
+// [slab,row,column] output and [slab,column] scale view; compilation expands the
+// stores while sharing the gathered values. Slabs == 0 uses separate bindings.
+template <uint STRIDE, bool Masked, uint Order, uint Slabs = 0, typename V, typename F, typename S, typename G, typename T, typename H, typename U>
 static inline void streamed_gather(V values, float factor, F first, S scale,
                                    G second, T secondScale, H third, U thirdScale,
                                    uint inputs, uint columns, uint rows, uint n, uint t, uint threads) {
@@ -751,9 +753,16 @@ static inline void streamed_gather(V values, float factor, F first, S scale,
         const float4 v = factor * float4(float(values[read.x]), float(values[read.y]), float(values[read.z]), float(values[read.w]));
         const ulong at = STRIDE ? (ulong(4 * q / max(STRIDE, 1u)) * rows + n) * STRIDE + 4 * q % max(STRIDE, 1u) : ulong(n) * columns + 4 * q;
         const bool4 active = Masked ? (o >= 0) : bool4(true);
-        streamed_store_four(first, at, select(half4(0), half4(streamed_four<float4>(scale, 4*q) * v), active));
-        if (inputs > 1) streamed_store_four(second, at, select(half4(0), half4(streamed_four<float4>(secondScale, 4*q) * v), active));
-        if (inputs > 2) streamed_store_four(third, at, select(half4(0), half4(streamed_four<float4>(thirdScale, 4*q) * v), active));
+        if constexpr (Slabs) {
+            #pragma unroll
+            for (uint slab = 0; slab < Slabs; ++slab)
+                streamed_store_four(first, ulong(slab) * rows * columns + at,
+                    select(half4(0), half4(streamed_four<float4>(scale, ulong(slab) * columns + 4*q) * v), active));
+        } else {
+            streamed_store_four(first, at, select(half4(0), half4(streamed_four<float4>(scale, 4*q) * v), active));
+            if (inputs > 1) streamed_store_four(second, at, select(half4(0), half4(streamed_four<float4>(secondScale, 4*q) * v), active));
+            if (inputs > 2) streamed_store_four(third, at, select(half4(0), half4(streamed_four<float4>(thirdScale, 4*q) * v), active));
+        }
     }
 }
 
@@ -762,7 +771,7 @@ static inline void streamed_gather(V values, float factor, F first, S scale,
 // (eps d.eps; a norm's gamma folded into the products' column scales: docs/kernels.md#stacked-products); the row staged
 // in threadgroup memory where WIDTH > 0 (d.columns at most WIDTH), else read in place (streamed_gather).
 // GivenFactor consumes the normalizer's per-row output; it needs no second reduction or staged row.
-template <bool Normed, uint WIDTH, uint STRIDE, bool Masked = false, uint InputColumns = 0, bool GivenFactor = false, typename Input = half>
+template <bool Normed, uint WIDTH, uint STRIDE, bool Masked = false, uint InputColumns = 0, bool GivenFactor = false, typename Input = half, uint Slabs = 0>
 kernel void streamed_row_gather(device const Input *x [[buffer(0)]], device half *first [[buffer(1)]],
                                 device const float *scale [[buffer(3)]],
                                 device half *second [[buffer(5)]], device half *third [[buffer(6)]],
@@ -777,7 +786,7 @@ kernel void streamed_row_gather(device const Input *x [[buffer(0)]], device half
     const uint columns = d.columns, inputColumns = InputColumns ? InputColumns : columns;
     if (WIDTH == 0) {
         const float factor = GivenFactor ? factors[mesh_index<9>(n)] : 1.0f;
-        streamed_gather<STRIDE, Masked, 2>(mesh_view<0>(x, ulong(n) * inputColumns), factor,
+        streamed_gather<STRIDE, Masked, 2, Slabs>(mesh_view<0>(x, ulong(n) * inputColumns), factor,
             mesh_view<1>(first), mesh_view<3>(scale), mesh_view<5>(second), mesh_view<7>(secondScale),
             mesh_view<6>(third), mesh_view<8>(thirdScale), d.inputs, columns, d.rows, n, t, threads);
         return;
@@ -795,20 +804,20 @@ kernel void streamed_row_gather(device const Input *x [[buffer(0)]], device half
     }
     const float factor = GivenFactor ? factors[mesh_index<9>(n)] : Normed ? streamed_rms(s, inputColumns, d.eps, partial, t, threads) : 1.0f;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    streamed_gather<STRIDE, Masked, 2>((threadgroup const float *)values, factor,
+    streamed_gather<STRIDE, Masked, 2, Slabs>((threadgroup const float *)values, factor,
         mesh_view<1>(first), mesh_view<3>(scale), mesh_view<5>(second), mesh_view<7>(secondScale),
         mesh_view<6>(third), mesh_view<8>(thirdScale), d.inputs, columns, d.rows, n, t, threads);
 }
 
 
-// The coded inputs of up to two products of a rotated basis (int8, stored in coded column order: row j the basis
+// The coded inputs of a declared slab view or two separate products of a rotated basis (int8, stored in coded column order: row j the basis
 // vector of coded column j, scaled by rotationScale[j], as the export writes it); with eps > 0 the RMS norm of x times
 // gamma folds in (the rotation is
 // linear). Four coded columns a simdgroup, each summed within it, 16 bytes a load: a threadgroup of s simdgroups
 // covers 4s columns. With flags bit 0 (eight simdgroups: a threadgroup a tile column t) it also writes the first
 // product's tables for 1-bit tiles, tables[n][t][kb][m] = the sum over j in m of its coded input kb + 8 j of the tile
 // (fp32, from the fp16 values it stored).
-template <uint InputColumns = 0, bool GivenFactor = false, typename Input = half>
+template <uint InputColumns = 0, bool GivenFactor = false, typename Input = half, uint Slabs = 0>
 kernel void streamed_rotate(device const Input *x [[buffer(0)]], device half *first [[buffer(1)]],
                             device half *second [[buffer(2)]],
                             device const float *scale [[buffer(4)]], device const float *secondScale [[buffer(5)]],
@@ -868,9 +877,15 @@ kernel void streamed_rotate(device const Input *x [[buffer(0)]], device half *fi
             if (lane == 0 && j < columns) {
                 const float value = total * rotationScale[mesh_index<7>(j)];
                 const half put = half(scale[mesh_index<4>(j)] * value);
-                first[mesh_index<1>(ulong(n) * columns + j)] = put;
+                if constexpr (Slabs) {
+                    #pragma unroll
+                    for (uint slab = 0; slab < Slabs; ++slab)
+                        first[mesh_index<1>((ulong(slab) * rows + n) * columns + j)] = half(scale[mesh_index<4>(ulong(slab) * columns + j)] * value);
+                } else {
+                    first[mesh_index<1>(ulong(n) * columns + j)] = put;
+                    if (outputs > 1) second[mesh_index<2>(ulong(n) * columns + j)] = half(secondScale[mesh_index<5>(j)] * value);
+                }
                 if (tabled) values[simd * C + c] = float(put);
-                if (outputs > 1) second[mesh_index<2>(ulong(n) * columns + j)] = half(secondScale[mesh_index<5>(j)] * value);
             }
         }
         if (tabled) {
@@ -887,7 +902,7 @@ kernel void streamed_rotate(device const Input *x [[buffer(0)]], device half *fi
 }
 template [[host_name("streamed_rotate")]] [[kernel]] decltype(streamed_rotate<0>) streamed_rotate<0>;
 
-// The coded inputs of up to two products of a randomized Hadamard basis (QuIP#, QuaRot): rotated coordinate c = a N + j
+// The coded inputs of a declared slab view or two separate products of a randomized Hadamard basis (QuIP#, QuaRot): rotated coordinate c = a N + j
 // of T x = (H_K (x) H_N) diag(signs) x / sqrt(K N), H_N Sylvester's and H_K (int8, +-1, K x K, row-major: Paley's for
 // E2B's K = 12) mixing the blocks; with eps > 0 the RMS norm of x times gamma folds in, as in streamed_rotate. A
 // threadgroup a row, latency-bound, so every dependent load is issued first: the puts' order and scales, H_K's rows as
@@ -896,7 +911,7 @@ template [[host_name("streamed_rotate")]] [[kernel]] decltype(streamed_rotate<0>
 // of the K blocks is read into registers by threads (g, j), g < threads / N, each mixing its K / (threads / N) rows
 // into a second region, which the puts read in their column order. Two barriers. N in {32, 64, 128}, K <= 20 and a
 // multiple of threads / N, K <= 3 S, columns <= 16 threads and <= 2560.
-template <uint InputColumns = 0, bool Masked = false, bool GivenFactor = false, typename Input = half>
+template <uint InputColumns = 0, bool Masked = false, bool GivenFactor = false, typename Input = half, uint Slabs = 0>
 kernel void streamed_hadamard(device const Input *x [[buffer(0)]], device half *first [[buffer(1)]],
                               device half *second [[buffer(2)]],
                               device const float *scale [[buffer(4)]], device const float *secondScale [[buffer(5)]],
@@ -971,8 +986,14 @@ kernel void streamed_hadamard(device const Input *x [[buffer(0)]], device half *
         const uint at = t + p * threads;
         if (at >= columns) break;
         const float value = mixed[place[p]];
-        first[mesh_index<1>(ulong(n) * columns + at)] = half(firstScale[p] * value);
-        if (d.inputs > 1) second[mesh_index<2>(ulong(n) * columns + at)] = half(otherScale[p] * value);
+        if constexpr (Slabs) {
+            #pragma unroll
+            for (uint slab = 0; slab < Slabs; ++slab)
+                first[mesh_index<1>((ulong(slab) * d.rows + n) * columns + at)] = half(scale[mesh_index<4>(ulong(slab) * columns + at)] * value);
+        } else {
+            first[mesh_index<1>(ulong(n) * columns + at)] = half(firstScale[p] * value);
+            if (d.inputs > 1) second[mesh_index<2>(ulong(n) * columns + at)] = half(otherScale[p] * value);
+        }
     }
 }
 

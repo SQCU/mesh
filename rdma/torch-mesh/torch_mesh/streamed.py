@@ -800,53 +800,73 @@ class Matrix(torch.Tensor):
         return (out.T if self.transposed else out).to(self.dtype)
 
     def coded_input(self, x, others=(), tables=None):
-        """x [n, columns] read at its declared type into fp16 coded input coordinates (and those of up to two matrices sharing its
-        column order and rotation): gathered and scaled, or rotated (with `tables` [n, tiles, 8, 16] fp32, the first's
-        tables for 1-bit tiles too)."""
-        if any(self.columns != m.columns or self.logical_shape[1] != m.logical_shape[1]
-               or self.metadata['col_order'] != m.metadata['col_order'] or self.input_domain != m.input_domain
-               or any(getattr(self, key) is not getattr(m, key) for key in ('rotation', 'signs', 'hadamard', 'folded')) for m in others):
-            first, tables = self.coded_input(x, tables=tables)
-            return first + [m.coded_input(x)[0][0] for m in others], tables
-        n, input_type = x.shape[0], _TYPES[x.dtype][1]
+        """Declare every product's input transform, preserving basis and order.
+
+        Compatible products share launches within their declared output arity.
+        Folded matrix multiplication is shared across destination batches.
+        Each product retains its actual scale operand, including graph inputs.
+        """
+        def compatible(a, b):
+            return (a.columns == b.columns and a.logical_shape[1] == b.logical_shape[1]
+                    and a.metadata['col_order'] == b.metadata['col_order'] and a.input_domain == b.input_domain
+                    and all(getattr(a, key) is getattr(b, key)
+                            for key in ('rotation', 'rotation_scale', 'signs', 'hadamard', 'folded')))
+
         matrices = [self, *others]
-        outs = [_half(n, self.columns) for _ in matrices]
-        if self.folded is None:
-            pad = outs + [outs[0]] * (3 - len(outs))
-            scales = [m.col_scale for m in matrices] + [self.col_scale] * (3 - len(matrices))
-            name, line = instance('streamed_row_gather', 0, 0, 0, int(self.column_masked), self.logical_shape[1], 0, input_type)
-            outs = _encode(name, [x, pad[0], None, scales[0], None, pad[1], pad[2], scales[1], scales[2]],
-                    _dims(columns=self.columns, inputs=len(matrices)), n, 1, 256, line, outputs=(1, 5, 6), indexed=(0, 3, 7, 8),
-                    indices={2: self.metadata['col_order']})
-        elif self.signs is not None and len(outs) <= 2:
-            second = outs[1] if len(outs) > 1 else outs[0]
-            name, line = instance('streamed_hadamard', self.logical_shape[1], int(-1 in self.input_domain), 0, input_type)
-            outs = _encode(name, [x, outs[0], second, None, self.col_scale,
-                                          (others[0] if others else self).col_scale, self.signs, self.hadamard],
-                    _dims(rows=n, columns=self.columns, per=self.columns // self.hadamard.shape[0], inputs=len(matrices)),
-                    n, 1, 256, line, outputs=(1, 2), indexed=(0, 4, 5, 6, 7),
-                    indices={3: self.metadata['col_order'], 12: self.input_domain})
-        elif n <= 16:
-            second = outs[1] if len(outs) > 1 else outs[0]
-            packed = self.rotation.shape[1] == self.columns and self.rotation.stride() == (self.columns, 1)
-            name, line = (('streamed_rotate', '') if packed and input_type == 'half'
-                          else instance('streamed_rotate', 0 if packed else self.logical_shape[1], 0, input_type))
-            made = _encode(name, [x, outs[0], second, None, self.col_scale,
-                                        (others[0] if others else self).col_scale, self.rotation, self.rotation_scale, tables],
-                    _dims(rows=n, columns=self.columns, inputs=len(matrices), flags=int(tables is not None)),
-                    -(-self.columns // 32), 1, 256, line, outputs=(1, 2) + ((8,) if tables is not None else ()), indexed=(0, 4, 5, 6, 7))
-            outs = made[:len(matrices)]
-            if tables is not None: tables = made[-1]
-        else:
-            rotated = torch.mm(x, self.folded.T)
-            pad = outs + [outs[0]] * (3 - len(outs))
-            scales = [m.col_scale for m in matrices] + [self.col_scale] * (3 - len(matrices))
-            name, line = instance('streamed_row_gather', 0, 0, 0, 0, self.columns, 0, _TYPES[rotated.dtype][1])
-            outs = _encode(name, [rotated, pad[0], None, scales[0], None, pad[1], pad[2],
-                                        scales[1], scales[2]],
-                    _dims(columns=self.columns, inputs=len(matrices)), n, 1, 256, line, outputs=(1, 5, 6), indexed=(0, 3, 7, 8),
-                    indices={2: tuple(range(self.columns))})
-        return outs, tables
+        groups = []
+        for index, matrix in enumerate(matrices):
+            group = next((g for g in groups if compatible(g[0][1], matrix)), None)
+            if group is None:
+                groups.append([(index, matrix)])
+            else:
+                group.append((index, matrix))
+        if len(groups) > 1:
+            outputs = [None] * len(matrices)
+            for group in groups:
+                first = group[0][0] == 0
+                values, made = group[0][1].coded_input(x, [m for _, m in group[1:]], tables=tables if first else None)
+                for (index, _), value in zip(group, values):
+                    outputs[index] = value
+                if first:
+                    tables = made
+            return outputs, tables
+
+        n, input_type = x.shape[0], _TYPES[x.dtype][1]
+        transform = ('gather' if self.folded is None else 'hadamard' if self.signs is not None
+                     else 'rotate' if n <= max(POLICY['cooperative_rows']) else 'gather')
+        bindings = tuple(POLICY['transform_outputs'][transform])
+        # A folded matrix product is shared by every destination batch.
+        source = torch.mm(x, self.folded.T) if transform == 'gather' and self.folded is not None else x
+        positions = tuple(range(self.columns)) if self.folded is not None else self.metadata['col_order']
+        outputs = []
+        for first in range(0, len(matrices), len(bindings)):
+            batch = matrices[first:first + len(bindings)]
+            outs = [_half(n, self.columns) for _ in batch]
+            outs += [outs[0]] * (len(bindings) - len(batch))
+            scales = [m.col_scale for m in batch] + [batch[0].col_scale] * (len(bindings) - len(batch))
+            if transform == 'gather':
+                name, line = instance('streamed_row_gather', 0, 0, 0, int(-1 in positions), source.shape[1], 0, _TYPES[source.dtype][1])
+                made = _encode(name, [source, outs[0], None, scales[0], None, outs[1], outs[2], scales[1], scales[2]],
+                        _dims(rows=n, columns=self.columns, inputs=len(batch)), n, 1, 256, line,
+                        outputs=bindings, indexed=(0, 3, 7, 8), indices={2: positions})
+            elif transform == 'hadamard':
+                name, line = instance('streamed_hadamard', self.logical_shape[1], int(-1 in self.input_domain), 0, input_type)
+                made = _encode(name, [x, outs[0], outs[1], None, scales[0], scales[1], self.signs, self.hadamard],
+                        _dims(rows=n, columns=self.columns, per=self.columns // self.hadamard.shape[0], inputs=len(batch)),
+                        n, 1, 256, line, outputs=bindings, indexed=(0, 4, 5, 6, 7),
+                        indices={3: self.metadata['col_order'], 12: self.input_domain})
+            else:
+                packed = self.rotation.shape[1] == self.columns and self.rotation.stride() == (self.columns, 1)
+                name, line = (('streamed_rotate', '') if packed and input_type == 'half'
+                              else instance('streamed_rotate', 0 if packed else self.logical_shape[1], 0, input_type))
+                tabled = first == 0 and tables is not None
+                made = _encode(name, [x, outs[0], outs[1], None, scales[0], scales[1], self.rotation, self.rotation_scale, tables if tabled else None],
+                        _dims(rows=n, columns=self.columns, inputs=len(batch), flags=int(tabled)),
+                        -(-self.columns // 32), 1, 256, line, outputs=bindings + ((8,) if tabled else ()), indexed=(0, 4, 5, 6, 7))
+                if tabled:
+                    tables = made[-1]
+            outputs.extend(made[:len(batch)])
+        return outputs, tables
 
     def product(self, xt, op='product', tables=None, decomposition=None):
         """The product of coded inputs xt [n, columns]: partials [shares, n, rows] in coded row order, unscaled (past 16

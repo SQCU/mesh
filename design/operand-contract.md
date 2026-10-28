@@ -86,15 +86,44 @@ access structure.
 
 ## Remaining integration
 
-This contract does not declare these existing paths complete:
+The 1–4 integration pass on 2026-10-28 has these boundaries:
 
-- Producer placement handles native-kernel subdomains, matrix API uses and
-  declared CPU/Core ML calls in FX graphs. Native normalization and convolution
-  producers receive ANE input type and layout requirements before command emission. Other native
-  producers still bind already assigned buffers. Conflicting requirements
-  also need cost-directed placement and conversion
-  choices, beyond the current placement feasibility solver.
-- Foreign providers still need all internal views and dependencies exposed.
+1. **Composition.** FX preserves each product's scale operand, input basis and
+   output position. Compatible products share launches, and a folded matrix
+   transform is emitted once across its destination batches. Native transforms
+   can write a declared slab view in one launch, including its capacity gaps;
+   they do not repeat the rotation or normalization for each output batch.
+   Native `StreamedMatrix.stacked` still requires a shared code buffer, column
+   domain and basis. Its packed band word also carries a bounded slab index.
+   That physical encoding is not a complete product-list contract. The remaining
+   change is to retain independent `StreamedProduct`/`ScaledReduction` operands
+   through composition instead of requiring a synthetic common matrix.
+   FX small rotations and Hadamard transforms still repeat across separate
+   scale-binding batches. Their missing piece is a shared binding declaration
+   for disjoint scale storage; replacing the actual scale operands with cached
+   metadata would change the function. These are unfinished lowering work,
+   not restrictions sanctioned for tensor programs.
+2. **Constraints.** `TensorRequirement` now resolves both native streamed and
+   Core ML operands. The feature declaration supplies type and layout, and the
+   same resolver places storage and emits any required tiled conversion. Native
+   normalization and convolution already receive the consumer requirements
+   before emission; other native producers still bind assigned buffers.
+   Conflicting requirements need cost-directed placement beyond feasibility.
+   The fixed Hadamard kernel's shape limits also remain embedded in its loader
+   and numerical implementation; those need a declared decomposition, not just
+   removal of the loader checks.
+3. **Adapters.** Stored Q/K/V and gate/up products now use `storedProducts` for
+   normalization, product selection and destination binding. The gate/up helper
+   adds its declared activation. The old `qkvCommands`, `ModelFeature.resolve`,
+   `TensorView.resolved` and pair-only layout resolver are removed. The native
+   compressed constructors above still need replacement by composition operands.
+4. **Preparation.** Native rank and Goal A build. Complete FX graphs retain five
+   product results through mapped gathers, rotation, Hadamard and product lowering.
+   The folded graph has one matrix transform; the small-transform batching gap
+   above is visible in its emitted graph. Native slab shader specializations
+   compile with capacity gaps. This evidence involves no numerical execution,
+   collective run, throughput result or latency result.
+
 Further integration belongs at these shared lowering boundaries. Numerical
 bodies contribute their work and uses, rather than separate memory systems.
 
@@ -114,7 +143,13 @@ between instructions that can remain in one call.
 Core ML's public `MLPredictionOptions.outputBackings` contract still permits the
 provider to decline caller storage. The binding's current result-identity check
 reports that condition; it does not establish an AOT guarantee. A stronger
-provider output contract remains unresolved.
+provider output contract remains unresolved. The installed Xcode 26.4.1 SDK's
+`CoreML.framework/Headers/MLPredictionOptions.h` describes the backing as a
+proposal and says models may not support caller storage. A manifest can describe
+our requirement; it cannot make that provider promise. Before this path can claim
+a fixed output-page contract, the binding must use an API/model contract which
+actually guarantees the supplied storage. Internal provider work and dependencies
+also remain opaque. No new runtime recovery or copy path has been added.
 
 ## Frontend attributes become page operands
 
@@ -502,10 +537,11 @@ arithmetic; this native Metal boundary has no float64 lowering.
 
 ## Compressed projections
 
-Native and Python FFNs retain each matrix's logical domain and encoded order.
-Shared operand views compose the gate and up outputs with the down input.
-Matching projections can use the coupled numerical kernel. Other projections
-use the same product and reduction bodies with their declared views. A numerical
+Python FFNs retain each matrix's logical domain and encoded order. Native FFNs
+retain logical cuts but still construct a common encoded matrix first, with the
+composition limits listed above. Shared operand views compose gate and up results
+with the down input. Matching projections can use the coupled numerical kernel.
+Separate projections use the same product and reduction bodies with their views. A numerical
 basis transform remains work; a permutation alone adds no copy.
 
 Native `ScaledReduction` carries logical partials, scales and the result's
