@@ -17,10 +17,10 @@ partials merge is a reduction by the library's partials operator.
 
 ## Install
 
-The user's mesh checkout holds the library and its Python bindings (`bin/mesh-user.sh`, rdma/NCCL.md "Build and run"),
-and the user's torch environment, `~/.venv-mesh-uv` (`bin/mesh-user.sh`): `rdma/requirements.txt` (torch 2.14.0 on CPython 3.12.14), this package built against the
-installed library whenever either changes, and the library's directory on the environment's path (`mesh.pth`), so a
-program imports `mesh`, `torch_mesh` and the mesh's modules with nothing of its own.
+A mesh checkout holds the library and this package, built in place (rdma/NCCL.md "Build and run": `make install`,
+`rdma/mesh_c_build.py`, `setup.py build_ext --inplace` here), and a program run with the user's torch environment,
+`~/.venv-mesh-uv` (`bin/mesh-user.sh`: `rdma/requirements.txt`, torch 2.14.0 on CPython 3.12.14), imports `mesh`,
+`torch_mesh` and the mesh's modules from it by path (`PYTHONPATH=<checkout>/rdma:<checkout>/rdma/torch-mesh`).
 
 ## Porting a CUDA/NCCL program
 

@@ -78,8 +78,10 @@ runs make there (which rebuilds only what is stale), _mesh_c and torch_mesh's
 extension in place, and its ranks load them by path (PYTHONPATH and the libraries'
 rpath), never from the shared venv; each reports the commit it loaded. So programs
 of different commits attach to the same resident bridge as ordinary clients. The
-bridge is reinstalled from a run's checkout only when its own images (mesh-heartbeat,
-mesh-flow, libmesh.dylib) differ from the running bridge's.
+bridge runs from its own checkout beside them (`current`), which node prepare moves
+to the run's commit and installs with bin/mesh-user.sh as it is: that restarts the
+bridge (SIGHUP, its region kept) only when its images changed. A node's preparations
+take turns.
 
 The application observer emits each completed whole-call record through
 `mesh_statistics.emit`. Late peer observations still enter the existing

@@ -6,7 +6,6 @@ import collections
 import ctypes
 import dataclasses
 import functools
-import filecmp
 import getpass
 import io
 import json
@@ -383,21 +382,25 @@ def run(*argv, **kw):
 
 def node_prepare():
     """Build this commit's checkout for its ranks, which load it by path, never the shared venv: make (which rebuilds
-    only what is stale), _mesh_c and torch_mesh's extension in place. Reinstall the bridge from it only when its own
-    images differ from the running bridge's."""
-    from mesh_install import install_checkout
-    for where, *argv in (('rdma', 'make', '-s', 'install'), ('rdma', sys.executable, 'mesh_c_build.py'),
-                         ('rdma/torch-mesh', sys.executable, 'setup.py', '-q', 'build_ext', '--inplace',
-                          '--build-temp', '../.build/torch-mesh')):
-        done = run(*argv, cwd=ROOT / where, env={**os.environ, 'MESH_RDMA': str(ROOT / 'rdma')})
-        if done.returncode:
-            raise RuntimeError(f'{where}: {" ".join(argv[1:3])} failed: {(done.stderr or done.stdout)[-600:]}')
-    active = HOME / '.cache/mesh/active-source'
-    active = Path(active.read_text().strip()) / 'rdma' if active.exists() else None
-    if not active or not all((active / f).exists() and filecmp.cmp(ROOT / 'rdma' / f, active / f, shallow=False)
-                             for f in ('mesh-heartbeat', 'mesh-flow', 'libmesh.dylib')):
-        install_checkout(ROOT)
-    print(json.dumps({'bridge': (HOME / '.cache/mesh/active-source').read_text().strip()}))
+    only what is stale), _mesh_c and torch_mesh's extension in place. The bridge runs from its own checkout beside it,
+    `current`, moved to this commit and installed by bin/mesh-user.sh, which restarts the bridge (SIGHUP, its region
+    kept) only when its images changed. A node's preparations take turns."""
+    import fcntl
+    bridge = ROOT.parent / 'current'
+    with open(ROOT.parent / 'prepare.lock', 'a') as turn:
+        fcntl.flock(turn, fcntl.LOCK_EX)
+        for where, *argv in (('rdma', 'make', '-s', 'install'), ('rdma', sys.executable, 'mesh_c_build.py'),
+                             ('rdma/torch-mesh', sys.executable, 'setup.py', '-q', 'build_ext', '--inplace',
+                              '--build-temp', '../.build/torch-mesh'),
+                             ('.', 'git', '--git-dir', ROOT.parent / 'repository.git', 'worktree', 'add', '--detach',
+                              bridge, ROOT.name) if not bridge.exists() else
+                             ('.', 'git', '-C', bridge, 'checkout', '--quiet', '--detach', ROOT.name),
+                             ('.', bridge / 'bin/mesh-user.sh', (HOME / 'Library/Application Support/io.mesh.bridge/'
+                                                                 'document').read_text().strip(), bridge)):
+            done = run(*argv, cwd=ROOT / where, env={**os.environ, 'MESH_RDMA': str(ROOT / 'rdma')})
+            if done.returncode:
+                raise RuntimeError(f'{where}: {" ".join(map(str, argv[:3]))} failed: {(done.stderr or done.stdout)[-600:]}')
+    print(json.dumps({'bridge': 'restarted' if 'restarts the bridge' in done.stdout else 'unchanged'}))
 
 
 def node_resets(since):

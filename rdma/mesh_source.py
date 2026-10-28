@@ -1,6 +1,5 @@
 """Git checkouts used by installation and process launch, before numerical work."""
 import argparse
-import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -58,34 +57,23 @@ def checkout(origin, commit, destination, timeout=None):
         raise RuntimeError(f'Git checkout {commit} from {origin} failed ({result.returncode}): {result.stderr.strip()}')
 
 
-def files(root, relative):
-    return git(Path(root) / relative, 'ls-files', '-z').decode().rstrip('\0').split('\0')
-
-
 def prune(root, kept):
-    """Remove the per-commit checkouts past the `kept` most recently used (`<name>.used`), never the running bridge's."""
-    root, active = Path(root), Path.home() / '.cache/mesh/active-source'
-    active = active.read_text().strip() if active.exists() else ''
-    used = lambda path: (root / f'{path.name}.used').stat().st_mtime if (root / f'{path.name}.used').exists() else 0
-    for path in sorted((p for p in root.iterdir() if (p / '.git').is_file()), key=used, reverse=True)[int(kept):]:
-        if str(path) != active:
-            git(root / 'repository.git', 'worktree', 'remove', '--force', str(path))
-            (root / f'{path.name}.used').unlink(missing_ok=True)
+    """Remove the per-commit checkouts past the `kept` most recently used, each marked by `<name>.used`."""
+    for used in sorted(Path(root).glob('*.used'), key=lambda path: path.stat().st_mtime, reverse=True)[int(kept):]:
+        git(Path(root) / 'repository.git', 'worktree', 'remove', '--force', str(used.with_suffix('')))
+        used.unlink()
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=('files', 'revision', 'verify', 'prune'))
+    parser.add_argument('action', choices=('revision', 'verify', 'prune'))
     parser.add_argument('root', type=Path)
-    parser.add_argument('relative', nargs='*', default=['.'])
+    parser.add_argument('kept', nargs='?', type=int)
     args = parser.parse_args()
-    if args.action == 'files':
-        import sys
-        sys.stdout.buffer.write(b''.join(os.fsencode(p) + b'\0' for p in files(args.root, *args.relative)))
-    elif args.action == 'revision':
+    if args.action == 'revision':
         print(revision(args.root))
     elif args.action == 'prune':
-        prune(args.root, *args.relative)
+        prune(args.root, args.kept)
     else:
         print(verify(args.root))
 

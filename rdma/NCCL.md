@@ -9,9 +9,10 @@ how to run it. PyTorch programs use it through [torch-mesh](torch-mesh/README.md
 
 ## Build and run
 
-The node's user keeps the library in the user's mesh checkout (`~/mesh`): `bin/mesh-user.sh` builds the bridge, the
-libraries and the Python bindings there, keeps the user's torch environment with torch-mesh and the checkout's library on
-its path (`~/.venv-mesh-uv`), and runs the bridge as the user's launchd agent (`io.mesh.bridge`, design/transport.md) with
+The node's user keeps the library in the user's mesh checkout (`~/mesh`): `bin/mesh-user.sh` builds the bridge and the
+libraries there, keeps the user's torch environment's base requirements (`~/.venv-mesh-uv`; a checkout's Python bindings,
+`_mesh_c` and torch-mesh, are built in place by `rdma/mesh_c_build.py` and torch-mesh's `setup.py build_ext --inplace`
+and loaded by path, as the hourly's `node prepare` does), and runs the bridge as the user's launchd agent (`io.mesh.bridge`, design/transport.md) with
 the node's bridge configuration, its one operand (`bin/mesh-user.sh CONFIGURATION`, etc/bridge/README.md; there is no
 default); no part of it needs root. A program links or imports the checkout's library:
 
@@ -626,7 +627,7 @@ communicator a stream (a holding's lists and counts are its holder's alone), of 
 | variable | read by | meaning |
 |---|---|---|
 | `NCCL_COMM_ID` | library (ncclGetUniqueId) | the bootstrap root's `host:port` |
-| `MESH_RDMA` | torch-mesh's build | the rdma directory its extension links against (default its parent; `bin/mesh-user.sh` passes the checkout's) |
+| `MESH_RDMA` | torch-mesh's build | the rdma directory its extension links against (default its parent; `node prepare` passes its checkout's) |
 
 ## NumPy
 

@@ -15,8 +15,7 @@ import zlib
 
 from mesh_source import checkout, prune, revision, upstream, verify
 
-REQUIRED = ('rdma/mesh_hourly.py', 'rdma/mesh_nodes.py', 'rdma/mesh_source.py',
-            'rdma/mesh_install.py', 'rdma/mesh-install-state.c')
+REQUIRED = ('rdma/mesh_hourly.py', 'rdma/mesh_nodes.py', 'rdma/mesh_source.py', 'bin/mesh-user.sh')
 FIGURES = ('steady_step_microseconds', 'step_microseconds', 'crossing_microseconds',
            'steady_tick_microseconds', 'tick_microseconds', 'aggregate_rows_per_second',
            'steady_aggregate_rows_per_second', 'per_stream_steps_per_second')
@@ -208,8 +207,8 @@ def _launch(mesh_root, microbench_root, output_root, cluster):
 
 
 def prepare_node(node, record):
-    """This commit's mesh checkout on the node, built there (node prepare) for ranks that load it by path; the
-    `checkouts_kept` most recently used kept."""
+    """This commit's mesh checkout on the node, built there (node prepare) for ranks that load it by path, the
+    bridge's own checkout moved to it; the `checkouts_kept` most recently used kept."""
     from mesh_nodes import home_path
     from mesh_source import checkout_command
     cluster, commit = node.cluster, record['commits']['mesh']
