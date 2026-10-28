@@ -150,16 +150,17 @@
    communicator leases a page for its gate, pages of span tables (each made the first time its bytes are named and
    never written again), and, for each group definition (a declared group, or an undeclared group's calls, the 64
    most recently used kept), two slots of what its groups send from and land in that are not the caller's (a
-   reduce-scatter's or a non-receiving rank's operand, a tree's scratch, a relay's generations, a combine's landing
-   area, credits): made at its first group, its groups taking turns at them, ncclMemAlloc called again only where one
-   must grow, a dropped definition's slots kept for the next, all returned at ncclCommDestroy.  Nothing is copied into
-   them from a caller's buffer but the operand of a call that cannot read its send buffer in place (a premultiplied,
-   partials-merging or fused call, or one whose pieces partly overlap), and from them only a reduce-scatter's own
-   segment, into recvbuff (its pieces may span segments).  A group writes a slot only once the slot's last group has every landing awaited: the stream's
-   order, and a landed wait for those its stream did not await.  A SEND from a slot, or a write's (its producer's
-   source, a relay's lease), whose arrival no later landing at its rank depends on is answered by a credit, an 8-byte
-   SEND of its receiver's once those landings arrive on that cable, which the sender lands in the same group: so a
-   group whose landings are complete has every such SEND read, and nothing waits on `sent`.  ncclMemAlloc is the lease,
+   reduce-scatter's partials of the others' segments, a non-receiving rank's operand, a tree's scratch, a relay's
+   generations, a combine's landing area, credits): made at its first group, its groups taking turns at them,
+   ncclMemAlloc called again only where one must grow, a dropped definition's slots kept for the next, all returned at
+   ncclCommDestroy.  A result is made in recvbuff (a reduce-scatter's own segment too: no compiled piece spans two
+   segments), and nothing is copied into a slot from a caller's buffer but the operand of a premultiplied,
+   partials-merging or fused call where it is not the result, and an in-place single-phase all-reduce's original.  A
+   group writes a slot only once the slot's last group has every landing awaited: the stream's order, and a landed
+   wait for those its stream did not await.  A SEND from a slot, or a write's (its producer's source, a relay's
+   lease), whose arrival no later landing at its rank depends on is answered by a credit, an 8-byte SEND of its
+   receiver's once those landings arrive on that cable, which the sender lands in the same group: so a group whose
+   landings are complete has every such SEND read, and nothing waits on `sent`.  ncclMemAlloc is the lease,
    the call the operator's division of the work makes of the bridge ("the bridge is there to behave like a system
    call"): whole pages of the region covering size, which the bridge registered on every device when the device came up,
    before any queue pair existed; a lease registers nothing.  The client sizes its leases ("ontologically it must be the

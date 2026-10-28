@@ -1908,8 +1908,8 @@ struct steps {
   uint32_t *cable, *prior_first, *prior;
   uint32_t priors;
   /* the buffer of the call's credits (credits_lay; 0 none): word 0 the source of the credits it sends, each credit
-     it receives a word after */
-  uint32_t credit;
+     it receives a word after; a reduce-scatter's partials of the other ranks' segments (partial_split; 0 none) */
+  uint32_t credit, partial;
 };
 
 /* a call: its collective (or declared WRITE, or WHAT_COUNTED: an all-to-all whose counts the host holds,
@@ -2091,7 +2091,7 @@ static struct steps *steps_copy(struct steps *from) {
   struct steps *s = calloc(1, sizeof *s);
   if (s) {
     *s = (struct steps){.references = 1, .source = from, .count = from->count, .buffers = from->buffers,
-      .initialized = from->initialized, .priors = from->priors, .credit = from->credit, .steps = from->steps, .cable = from->cable,
+      .initialized = from->initialized, .priors = from->priors, .credit = from->credit, .partial = from->partial, .steps = from->steps, .cable = from->cable,
       .prior_first = from->prior_first, .prior = from->prior, .extent = from->extent,
       .consume_order = from->consume_order, .retired_first = from->retired_first, .retired = from->retired};
     atomic_fetch_add_explicit(&from->references, 1, memory_order_relaxed);
@@ -2268,7 +2268,7 @@ static ncclResult_t routed_steps(struct call *c, const struct mesh_program *prog
                                   struct mesh_operand operand, const uint64_t *cut) {
   const uint32_t N = (uint32_t)c->comm->nranks;
   uint32_t *first = calloc((size_t)N + 1, sizeof *first), *initialized = malloc(N * sizeof *initialized);
-  struct mesh_step *logical = calloc((size_t)program->first[N] + 1, sizeof *logical);
+  struct mesh_step *logical = calloc((size_t)program->first[N] * program->parts + 1, sizeof *logical);
   ncclResult_t result = first && initialized && logical ? ncclSuccess : fail(ncclSystemError, "out of memory");
   for (uint32_t r = 0; r < N && !result; r++) {
     initialized[r] = 1 + program->scratch;
@@ -2335,6 +2335,20 @@ static ncclResult_t collective_steps(struct call *c, const struct entry *entry,
   return result;
 }
 
+/* a reduce-scatter's own segment combined in recvbuff itself (buffer 0: result_of), the others' partials in a buffer
+   of the communicator's (`partial`): no step spans two segments (mesh_program_steps_cut), so no result is copied */
+static ncclResult_t partial_split(struct call *c) {
+  struct steps *s = c->bound;
+  size_t length;
+  const uint64_t u = unit_of(c), before = segment_at(c, c->comm->rank, &length) / u, end = before + length / u;
+  uint64_t *extent = realloc(s->extent, ((size_t)s->buffers + 1) * sizeof *extent);
+  if (!extent) return fail(ncclSystemError, "out of memory");
+  (s->extent = extent)[s->partial = s->buffers++] = elements(c) * SIZE[c->type];
+  for (uint32_t k = 0; k < s->count; k++)
+    if (!s->steps[k].buffer && (s->steps[k].first < before || s->steps[k].first >= end)) s->steps[k].buffer = s->partial;
+  return ncclSuccess;
+}
+
 /* every call that crosses a link planned: a collective along the communicator's table (comm_compile), its steps cut on
    the communicator's page (mesh-plan.h mesh_program_steps_cut: the program's own cuts on pages; a reduce-scatter's and
    an all-gather's segments NCCL's, a rank's count each or its counts, so its program's segments must be the ranks), its
@@ -2356,7 +2370,8 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
     const struct mesh_operand operand = {(uint32_t)c->type + 1, (uint32_t)(SIZE[c->type] * u), elements(c) / u};
     uint64_t cut[partitioned ? comm->nranks : 1];
     for (int r = 0; partitioned && r < comm->nranks; r++) cut[r] = (c->segments ? c->segments[r] : c->count) / u;
-    const ncclResult_t result = collective_steps(c, entry, operand, partitioned ? cut : NULL);
+    ncclResult_t result = collective_steps(c, entry, operand, partitioned ? cut : NULL);
+    if (!result && c->what == MESH_REDUCE_SCATTER) result = partial_split(c);
     if (result) return result;
   }
   return ncclSuccess;
@@ -2871,7 +2886,7 @@ static ncclResult_t bind_slot(struct metal_program *program, struct ncclComm *co
     for (size_t i = 0; i < n; i++)
       for (uint32_t b = 0, z = (uint32_t)SIZE[list[i].type]; list[i].bound && b < list[i].bound->buffers; b++) {
         struct steps *st = list[i].bound;
-        if (list[i].target ? !st->credit || b != st->credit : !generation_buffer(list + i, (uint32_t)comm->rank, b)) continue;
+        if (list[i].target ? !st->credit || b != st->credit : !generation_buffer(list + i, (uint32_t)comm->rank, b) || (!b && st->partial)) continue;
         if (pass) st->buffer[b] = shifted(base, used);
         used += page_up(b < st->initialized ? elements(list + i) * z : st->extent[b], comm->page);
       }
@@ -3259,10 +3274,22 @@ static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
   return ncclSuccess;
 }
 
+/* where a call's operand holds byte `at`: its result (c->sum: result_of), a reduce-scatter's partial of another's
+   segment in its own buffer (partial_split) */
+static struct where operand_at(const struct call *c, size_t at) {
+  const struct steps *st = c->bound;
+  size_t length;
+  const size_t before = segment_at(c, c->comm->rank, &length) * SIZE[c->type];
+  return st && st->partial && (at < before || at >= before + length * SIZE[c->type]) ? shifted(st->buffer[st->partial], at) : shifted(c->sum, at);
+}
 /* where a call that is not a write or an all-to-all holds its result: recvbuff where it holds the whole operand or
-   crosses nothing, else the communicator's (bind_slot: a reduce-scatter's, whose compiled pieces may span segments) */
+   crosses nothing, a reduce-scatter's recvbuff as its own segment of the operand (partial_split), else the
+   communicator's (bind_slot) */
 static struct where result_of(const struct call *c) {
-  return !c->bound || (call_receives(c) && c->what != MESH_REDUCE_SCATTER) ? c->recv_at : c->bound->buffer[0];
+  const struct steps *st = c->bound;
+  size_t length;
+  if (!st || (call_receives(c) && c->what != MESH_REDUCE_SCATTER)) return c->recv_at;
+  return st->partial ? shifted(c->recv_at, (size_t)0 - segment_at(c, c->comm->rank, &length) * SIZE[c->type]) : st->buffer[0];
 }
 
 /* each call's buffers bound: a write's the producer's lease itself (not a broadcast's staging copy, which would run
@@ -3280,25 +3307,28 @@ static void bind_calls(struct call *list, size_t n) {
   }
 }
 
-/* the call's contribution made in place in its operand (c->sum), where it reads no send buffer in place */
+/* the call's contribution made in place in its operand (operand_at), where it reads no send buffer in place */
 static void stage(const struct call *c) {
   if (!call_contributes(c)) return;
   const size_t z = SIZE[c->type], n = c->count;
   unsigned char *own = address_of(c->sum);
   if (reducing(c->what)) {
+    const int each = c->send_views || (c->bound && c->bound->partial);
     size_t at = 0;
-    for (int rank = 0; rank < (c->send_views ? c->comm->nranks : 1); rank++) {
-      const size_t count = !c->send_views ? elements(c) : c->segments ? c->segments[rank] : c->count;
-      const unsigned char *from = c->send_views ? address_of(c->send_views[rank]) : (const unsigned char *)c->send;
-      if (c->premultiplied) premultiply(c->type, own + at, from, c->pre, count);
-      else if (own + at != from) memmove(own + at, from, count * z);
+    for (int rank = 0; rank < (each ? c->comm->nranks : 1); rank++) {
+      const size_t count = !each ? elements(c) : c->segments ? c->segments[rank] : c->count;
+      const unsigned char *from = c->send_views ? address_of(c->send_views[rank]) : (const unsigned char *)c->send + at;
+      unsigned char *to = address_of(operand_at(c, at));
+      if (c->premultiplied) premultiply(c->type, to, from, c->pre, count);
+      else if (to != from) memmove(to, from, count * z);
       at += count * z;
     }
   } else if (c->what == MESH_BROADCAST && c->root == c->comm->rank) { if (own != c->send) memmove(own, c->send, n * z); }
   else if (c->what == MESH_ALLGATHER) {
     size_t length;
     const size_t before = segment_at(c, c->comm->rank, &length);
-    if (length) memmove(address_of(view_at(c, 0, before * z)), c->send, length * z);
+    unsigned char *at = address_of(view_at(c, 0, before * z));
+    if (length && at != c->send) memmove(at, c->send, length * z);
   }
 }
 
@@ -3312,11 +3342,10 @@ static void finish(const struct call *c) {
     const uint64_t *x = c->complement + 3 * k;
     memmove(address_of((struct where){c->sum.buffer, (size_t)x[0]}), address_of(view_at(c,1,x[1])), x[2]);
   }
-  /* the result is recvbuff's own (result_of) but a reduce-scatter's, copied from its slot */
+  /* the result is recvbuff's own (result_of): only an integer average's division is left */
   size_t length = n;
   const size_t before = c->what == MESH_REDUCE_SCATTER ? segment_at(c, c->comm->rank, &length) * z : 0;
   if (sum && c->post) truncdiv(c->type, recv, sum + before, length, (uint64_t)nranks);
-  else if (sum && sum + before != recv) memmove(recv, sum + before, length * z);
 }
 
 /* an operator as the host runs it (premultiplier, combine, postoperation; the partials merge's row) */
@@ -3995,16 +4024,20 @@ static int plan_direct(struct call *c, struct where own) {
   if (c->what == MESH_BROADCAST && c->root != c->comm->rank) return 0;
   if (c->what == MESH_ALLGATHER) { size_t length; lo = segment_at(c, c->comm->rank, &length); hi = lo + length; }
   const struct where send = c->send_at;
-  const size_t sent = (size_t)(hi - lo) * z, made = elements(c) * z;
+  size_t length, made = elements(c) * z;
+  const size_t sent = (size_t)(hi - lo) * z, before = segment_at(c, c->comm->rank, &length) * z;
   const unsigned char *a = address_of(send), *b = address_of(own);
   if (!b) return 0;
+  /* a reduce-scatter's result is its own segment alone, which in place (NCCL's) is its own contribution's range */
+  if (st->partial) { b += before; made = length * z; }
+  const int aliased = st->partial && b == a + before;
   if (c->send_views) {
     for (int rank=0;rank<c->comm->nranks;rank++) {
       const size_t bytes=(c->segments?c->segments[rank]:c->count)*z;
       const unsigned char *source=address_of(c->send_views[rank]);
       if (bytes&&(!in_region(c->comm,c->send_views[rank],bytes)||(source<b+made&&b<source+bytes)))return 0;
     }
-  } else if (!in_region(c->comm, send, sent) || (a < b + made && b < a + sent)) return 0;
+  } else if (!in_region(c->comm, send, sent) || (!aliased && a < b + made && b < a + sent)) return 0;
   const uint32_t B = st->buffers;
   struct spans *w = calloc(B, sizeof *w);
   st->read = calloc(st->count, sizeof *st->read); st->fresh = calloc(st->count, 1);
@@ -4068,18 +4101,17 @@ static uint64_t scalar_bits(const struct call *c) {
   return bits;
 }
 
-/* a group's results, once its entries are consumed: each in recvbuff (result_of) but a reduce-scatter's, copied from
-   its slot, loaded system-coherent (METAL_LAND); an integer average's divided */
+/* a group's results, once its entries are consumed: each already in recvbuff (result_of), an integer average's
+   divided there */
 static ncclResult_t epilogue(struct metal_program *program, const struct call *list, size_t n) {
   ncclResult_t result = ncclSuccess;
   for (size_t i = 0; i < n && !result; i++) {
     const struct call *c = list + i;
-    if (c->target || c->receive_views || !call_receives(c) || counted(c) || (!c->post && c->what != MESH_REDUCE_SCATTER)) continue;
+    if (c->target || c->receive_views || !call_receives(c) || counted(c) || !c->post) continue;
     size_t length = c->count;
     const size_t before = c->what == MESH_REDUCE_SCATTER ? segment_at(c, c->comm->rank, &length) * SIZE[c->type] : 0;
-    const struct where recv = c->recv_at, from = shifted(c->sum, before);
-    if (c->post) result = gpu(metal_truncdiv(program, c->type, recv.buffer, recv.offset, from.buffer, from.offset, length, call_participants(c)), "the result");
-    else result = gpu(metal_copy(program, METAL_LAND, recv.buffer, recv.offset, from.buffer, from.offset, length * SIZE[c->type]), "the result");
+    result = gpu(metal_truncdiv(program, c->type, c->recv_at.buffer, c->recv_at.offset, c->sum.buffer, c->sum.offset + before, length,
+                                call_participants(c)), "the result");
   }
   return result;
 }
@@ -4292,10 +4324,11 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     const size_t before = c->what == MESH_ALLGATHER ? segment_at(c, (int)r, &length) : 0;
     const struct where segment = view_at(c, 0, before * z);
     if (!c->direct && reducing(c->what)) {
+      const int each = c->send_views || (st && st->partial);
       size_t at = 0;
-      for (int rank = 0; rank < (c->send_views ? comm->nranks : 1) && !result; rank++) {
-        const size_t count = !c->send_views ? all : c->segments ? c->segments[rank] : c->count;
-        const struct where source = c->send_views ? c->send_views[rank] : send, to = shifted(own, at);
+      for (int rank = 0; rank < (each ? comm->nranks : 1) && !result; rank++) {
+        const size_t count = !each ? all : c->segments ? c->segments[rank] : c->count;
+        const struct where source = c->send_views ? c->send_views[rank] : shifted(send, at), to = operand_at(c, at);
         if (count && c->premultiplied)
           result = gpu(metal_premultiply(program, c->type, to.buffer, to.offset, source.buffer, source.offset, count, scalar_bits(c)), "the operand");
         else if (count && !same(to, source))
