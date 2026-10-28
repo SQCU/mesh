@@ -331,9 +331,10 @@ static uint64_t deadline_left(const struct mesh_deadline *d) {
   return d->at - now;
 }
 /* design/transport.md section 5: once a second, the prepared functions' (MetalSchedulesStalled) and the library's own
-   GPU programs: a communicator's last program committed and not ended while `finished` has not moved for twice
-   MESH_PLATFORM_NS (the platform's watchdog ends a running command buffer within one, so it waits on an event), the
-   program ended there, the wait named; group_lock only where free (a holder's own waits are bounded) */
+   GPU programs: a communicator's last program committed and not ended, seen so at every look since `finished` last
+   moved for twice MESH_PLATFORM_NS (the platform's watchdog ends a running command buffer within one, so it waits on
+   an event), the program ended there, the wait named; a look that finds none committed and not ended starts the count
+   again, so time with no program does not count; group_lock only where free (a holder's own waits are bounded) */
 static void watch_turn(void *unused) {
   (void)unused;
   static uint64_t seen, since;
@@ -341,14 +342,16 @@ static void watch_turn(void *unused) {
   uint64_t idle = MetalSchedulesStalled(wait, sizeof wait);
   if (!idle && !pthread_mutex_trylock(&group_lock)) {
     const uint64_t now = mesh_clock_ns(), signaled = finished ? metal_signaled(finished) : 0;
-    if (signaled != seen || !since) { seen = signaled; since = now; }
+    const struct ncclComm *pending = NULL;
     pthread_mutex_lock(&live_lock);
-    for (struct ncclComm *c = live; c && !idle; c = c->next_live)
-      if (c->last > signaled && c->command && !metal_ended(c->command) && now - since > 2 * MESH_PLATFORM_NS) {
-        idle = now - since;
-        snprintf(wait, sizeof wait, "libnccl-mesh: communicator %s's GPU program %llu, committed and not ended (watch_turn)", c->name,
-                 (unsigned long long)c->last);
-      }
+    for (const struct ncclComm *c = live; c && !pending; c = c->next_live)
+      if (c->last > signaled && c->command && !metal_ended(c->command)) pending = c;
+    if (!pending || signaled != seen || !since) { seen = signaled; since = pending ? now : 0; }
+    else if (now - since > 2 * MESH_PLATFORM_NS) {
+      idle = now - since;
+      snprintf(wait, sizeof wait, "libnccl-mesh: communicator %s's GPU program %llu, committed and not ended (watch_turn)", pending->name,
+               (unsigned long long)pending->last);
+    }
     pthread_mutex_unlock(&live_lock);
     pthread_mutex_unlock(&group_lock);
   }
