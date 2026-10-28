@@ -3,10 +3,11 @@
 #include "nccl-mesh-metal.h"
 #include <os/lock.h>
 
-// design/transport.md section 5: a command buffer's end awaited within twice MESH_PLATFORM_NS (the platform's watchdog
-// ends a running buffer within one: past two it waits on an event); past it the program ends, the wait named.
-static void MetalAwait(id<MTLCommandBuffer> command,const char *wait) {
-    const struct mesh_deadline deadline=mesh_deadline(wait,2*MESH_PLATFORM_NS);
+// metal-recording.h MetalExpired, MetalAwait
+void MetalExpired(const char *wait,uint64_t ns) { mesh_library_expired(wait,ns); }
+uint64_t MetalCompletionNs(void) { return 2*MESH_PLATFORM_NS; }
+void MetalAwait(id<MTLCommandBuffer> command,const char *wait) {
+    const struct mesh_deadline deadline=mesh_deadline(wait,MetalCompletionNs());
     while(command.status<MTLCommandBufferStatusCompleted)
         if(mesh_clock_ns()<deadline.at)usleep(50);else mesh_library_expired(wait,deadline.ns);
 }
