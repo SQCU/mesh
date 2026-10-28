@@ -387,10 +387,29 @@ the destination no longer implicitly supplies that input. All three views feed
 the same indexing and dependency declarations.
 
 Existing native crossings still bind the network's result representation.
-The normalized convolution reads the typed result, but its tap projection
-still consumes half values. Its required conversion uses the ordinary layout
-lowering. These remaining consumer constraints do not apply to every result.
 Provider output-backing guarantees remain unresolved as described above.
+
+Both convolution forms and their tap projections now consume the same typed
+input operand. The compressed gather, rotation and Hadamard bodies read its
+declared scalar type through their prepared indices. Normalization and the
+folded matrix path retain that type too. The tap projection's separate half
+conversion has been removed. Coded product inputs remain the transform's
+declared half outputs; this change does not remove their numerical transform.
+
+Stored matrix products load typed vectors from that operand. Their tiled body
+declares its input, decoded weights and result storage in one threadgroup union,
+sized by the shader compiler. Host code no longer supplies a fixed byte count.
+FX matrix binding likewise carries input and weight types separately, so a
+folded rotation need not convert either whole operand just to match types.
+Normalization weights also carry their type and view into the shared index and
+dependency declarations. They no longer use a separate buffer-offset argument
+or assume linear storage.
+
+Preparation on 2026-10-28 built rank and Goal A and compiled mapped transforms,
+normalization and stored products with half, float, bfloat and integer inputs.
+Complete FX gather, small- and large-row rotation, and cut Hadamard graphs
+prepared with float and bfloat inputs. Mixed matrix operands prepared one
+numerical command. No numerical commands were submitted.
 
 Preparation on 2026-10-28 compiled provider-result finishes at widths 37 and 64
 with mapped half, float and integer inputs, and reductions with independently

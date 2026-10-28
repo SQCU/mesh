@@ -5,7 +5,7 @@ using namespace mpp::tensor_ops;
 struct ProductArgs {
     uint4 shape;
 };
-kernel void product(device INPUT *X [[buffer(0)]], device INPUT *W [[buffer(1)]], device uchar *Y [[buffer(2)]],
+kernel void product(device INPUT *X [[buffer(0)]], device WEIGHT *W [[buffer(1)]], device uchar *Y [[buffer(2)]],
                     device atomic_uint *arrivals [[buffer(3)]], constant ProductArgs &s [[buffer(4)]], device OUTPUT *bias [[buffer(5)]],
                     device INPUT *X1 [[buffer(6)]], device ulong *ready [[buffer(7)]],
                     uint3 tg [[threadgroup_position_in_grid]], uint3 lane [[thread_position_in_threadgroup]],

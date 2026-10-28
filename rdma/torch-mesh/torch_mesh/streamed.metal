@@ -762,8 +762,8 @@ static inline void streamed_gather(V values, float factor, F first, S scale,
 // (eps d.eps; a norm's gamma folded into the products' column scales: docs/kernels.md#stacked-products); the row staged
 // in threadgroup memory where WIDTH > 0 (d.columns at most WIDTH), else read in place (streamed_gather).
 // GivenFactor consumes the normalizer's per-row output; it needs no second reduction or staged row.
-template <bool Normed, uint WIDTH, uint STRIDE, bool Masked = false, uint InputColumns = 0, bool GivenFactor = false>
-kernel void streamed_row_gather(device const half *x [[buffer(0)]], device half *first [[buffer(1)]],
+template <bool Normed, uint WIDTH, uint STRIDE, bool Masked = false, uint InputColumns = 0, bool GivenFactor = false, typename Input = half>
+kernel void streamed_row_gather(device const Input *x [[buffer(0)]], device half *first [[buffer(1)]],
                                 device const float *scale [[buffer(3)]],
                                 device half *second [[buffer(5)]], device half *third [[buffer(6)]],
                                 device const float *secondScale [[buffer(7)]], device const float *thirdScale [[buffer(8)]],
@@ -784,7 +784,7 @@ kernel void streamed_row_gather(device const half *x [[buffer(0)]], device half 
     }
     float s = 0.0f;
     for (uint q = t; q < inputColumns / 4; q += threads) {
-        const float4 v = float4(mesh_load4<0,half4,(InputColumns ? InputColumns : WIDTH) % 4 == 0>(x, ulong(n) * inputColumns + 4*q));
+        const float4 v = float4(mesh_load4<0,vec<Input,4>,(InputColumns ? InputColumns : WIDTH) % 4 == 0>(x, ulong(n) * inputColumns + 4*q));
         ((threadgroup float4 *)values)[q] = v;
         if constexpr (!GivenFactor) s += dot(v, v);
     }
@@ -808,8 +808,8 @@ kernel void streamed_row_gather(device const half *x [[buffer(0)]], device half 
 // covers 4s columns. With flags bit 0 (eight simdgroups: a threadgroup a tile column t) it also writes the first
 // product's tables for 1-bit tiles, tables[n][t][kb][m] = the sum over j in m of its coded input kb + 8 j of the tile
 // (fp32, from the fp16 values it stored).
-template <uint InputColumns = 0, bool GivenFactor = false>
-kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *first [[buffer(1)]],
+template <uint InputColumns = 0, bool GivenFactor = false, typename Input = half>
+kernel void streamed_rotate(device const Input *x [[buffer(0)]], device half *first [[buffer(1)]],
                             device half *second [[buffer(2)]],
                             device const float *scale [[buffer(4)]], device const float *secondScale [[buffer(5)]],
                             device const char *rotation [[buffer(6)]], device const float *rotationScale [[buffer(7)]],
@@ -835,7 +835,7 @@ kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *fir
         for (uint w = lane; w < words; w += 32) {
             float4 xv[4];
             for (uint k = 0; k < 4; k++) {
-                xv[k] = float4(mesh_load4<0,half4,InputColumns % 4 == 0>(x, ulong(n) * inputColumns + 4*(4*w+k)));
+                xv[k] = float4(mesh_load4<0,vec<Input,4>,InputColumns % 4 == 0>(x, ulong(n) * inputColumns + 4*(4*w+k)));
                 if (eps > 0.0f) {
                     if constexpr (!GivenFactor) squares += dot(xv[k], xv[k]);
                     xv[k] *= float4(mesh_load4<11,half4>(gamma, 4 * (4 * w + k)));
@@ -896,8 +896,8 @@ template [[host_name("streamed_rotate")]] [[kernel]] decltype(streamed_rotate<0>
 // of the K blocks is read into registers by threads (g, j), g < threads / N, each mixing its K / (threads / N) rows
 // into a second region, which the puts read in their column order. Two barriers. N in {32, 64, 128}, K <= 20 and a
 // multiple of threads / N, K <= 3 S, columns <= 16 threads and <= 2560.
-template <uint InputColumns = 0, bool Masked = false, bool GivenFactor = false>
-kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *first [[buffer(1)]],
+template <uint InputColumns = 0, bool Masked = false, bool GivenFactor = false, typename Input = half>
+kernel void streamed_hadamard(device const Input *x [[buffer(0)]], device half *first [[buffer(1)]],
                               device half *second [[buffer(2)]],
                               device const float *scale [[buffer(4)]], device const float *secondScale [[buffer(5)]],
                               device const char *signs [[buffer(6)]], device const char *mix [[buffer(7)]],
