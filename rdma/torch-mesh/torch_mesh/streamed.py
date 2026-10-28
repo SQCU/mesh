@@ -1666,28 +1666,13 @@ def draft_kind(name):
     return DRAFT_KINDS.get(name.split('.', 2)[2] if name.startswith('layers.') else name)
 
 
-def _band_view(m, a, b):
-    """Coded rows [a, b) of `m` (whole bands) as the engine's StreamedMatrix.view takes them: their bands, tile words, row
-    scales and row order (the places among the whole's outputs they write: the drafter's export orders a product's rows by
-    energy, so a run of coded rows is natural rows scattered over the product), at the whole's width class.  A slice the
-    resolver keys and prices (products: outputs, columns, width class, units); no product of it runs here."""
-    assert a % 32 == 0 and b % 32 == 0 and 0 <= a < b <= m.rows, f'{m.label}: a view of whole bands, not [{a}:{b}]'
-    out = m.like(tiles=m.tiles[a // 32:b // 32], bands=m.bands[a // 32:b // 32], row_scale=m.row_scale[a:b].contiguous(),
-                 row_order=m.row_order[a:b].contiguous(), metadata={**m.metadata,
-                     'tiles': m.metadata['tiles'][a // 32 * m.tiles_:b // 32 * m.tiles_],
-                     'bands': m.metadata['bands'][a // 32:b // 32],
-                     'row_scale': m.metadata['row_scale'][a:b], 'row_order': m.metadata['row_order'][a:b]})
-    out.label = f'{m.label}[{a}:{b}] view'
-    return out
-
-
 def draft_slices(drafter, record=None, rank=None):
     """The drafter's slices a rank holds (metal-microbench docs/kernels.md#the-drafter-as-a-share), (name, matrix): each
     matrix whole, but a product the record's speculate gives the rank a run of (`draft`, one {kind: [start, end)} a
     drafting member in `drafting` order: programs.py draft_shares; the engine's Drafter.part runs it as a view): where
-    the record's `ragged` names `draft`, every width on that product's `draft <kind>` decision's lattice (spans: whole
-    bands of 32 coded rows, from the member's side), as slices takes the head's rows on the `row` lattice, else its run;
-    each a view of the whole's bands (_band_view) at the whole matrix's code widths.  Without a record, or on a rank
+    the record's `ragged` names `draft`, every width on that product's `draft <kind>` decision's lattice (spans of logical rows at the configured grain), as slices takes the head's rows on the
+    `row` lattice, else its run;
+    each a logical cut lowered by Matrix.cut, with masked boundary blocks.  Without a record, or on a rank
     that drafts no share, every matrix whole (one drafting member: HEAD's form)."""
     speculate = (record or {}).get('speculate') or {}
     drafting = list(speculate.get('drafting') or ([speculate['on']] if 'on' in speculate else []))
@@ -1701,11 +1686,13 @@ def draft_slices(drafter, record=None, rank=None):
         if not held:
             out.append((name, m))
             continue
-        widths = [s for extent, grain in lattice(record, 'draft', f'draft {kind}') for s in spans(m.rows, extent, grain, held)] if ragged else []
+        widths = [s for extent, grain in lattice(record, 'draft', f'draft {kind}') for s in spans(m.logical_shape[0], extent, grain, held)] if ragged else []
         for a, b in widths or [tuple(held)]:
             if (name, a, b) not in seen:
                 seen.add((name, a, b))
-                out.append((name, _band_view(m, a, b)))
+                cut = m.cut(rows=(a, b))
+                cut.widths = m.widths
+                out.append((name, cut))
     return out
 
 
