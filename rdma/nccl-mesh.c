@@ -5159,8 +5159,9 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
     made = was;
     if (plan) *plan = comm->plan ? &comm->plan->view : NULL;
   }
-  pthread_mutex_unlock(&group_lock);
+  /* the plan replaced (or the one not made): its definitions' slots back to comm's, under the groups' lock */
   plan_free(comm, made);
+  pthread_mutex_unlock(&group_lock);
   return result;
 }
 
