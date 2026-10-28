@@ -39,7 +39,7 @@ cat > "$launchd_agents/io.mesh.bridge.plist.new" <<PL
 <key>ProgramArguments</key><array><string>$source/rdma/mesh-heartbeat</string><string>$source/rdma/mesh-flow</string><string>$configuration</string></array>
 <key>LimitLoadToSessionType</key><string>Background</string><key>AbandonProcessGroup</key><true/>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>ThrottleInterval</key><integer>60</integer><key>ExitTimeOut</key><integer>60</integer>
-</dict></plist>
+<key>StandardErrorPath</key><string>$HOME/Library/Logs/io.mesh.bridge.log</string></dict></plist>
 PL
 loaded=
 launchctl print "user/$(id -u)/io.mesh.bridge" >/dev/null 2>&1 && loaded=1
