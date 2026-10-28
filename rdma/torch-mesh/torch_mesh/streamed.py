@@ -611,10 +611,6 @@ def _half(n, width):
     return torch.empty(n, width, dtype=torch.float16, device='mps')
 
 
-def _identity(k):
-    return torch.arange(k, dtype=torch.int32, device='mps')
-
-
 _TYPES = {torch.float16: '', torch.float32: '_float', torch.bfloat16: '_bfloat'}
 
 
@@ -643,7 +639,7 @@ class Matrix(torch.Tensor):
     available to preparation, including while FX carries fake tensor operands.
     """
     FIELDS = ('codes', 'tiles', 'bands', 'row_scale', 'col_scale', 'row_order', 'col_order', 'rotation',
-              'rotation_scale', 'folded', 'signs', 'hadamard', 'input_order')
+              'rotation_scale', 'folded', 'signs', 'hadamard')
     __torch_function__ = torch._C._disabled_torch_function_impl
 
     @staticmethod
@@ -659,7 +655,7 @@ class Matrix(torch.Tensor):
         out.logical_shape = logical_shape
         out.metadata = metadata if metadata is not None else {
             key: tuple(fields[key].detach().cpu().reshape(-1).tolist()) for key in cls.FIELDS[1:7]}
-        out.input_domain = input_domain
+        out.input_domain = tuple(range(columns)) if input_domain is None else input_domain
         out.widths = widths if widths is not None else WIDTH_CLASS[max(((word >> 12) & 15 for word in out.metadata['tiles']), default=0)]
         out.units = units if units is not None else slice_units(out)
         return out
@@ -747,17 +743,16 @@ class Matrix(torch.Tensor):
                         col_scale=tuple(self.metadata['col_scale'][c] for c in ci), col_order=tuple(col_order))
         fields = {key: torch.tensor(values, dtype=getattr(self, key).dtype) for key, values in metadata.items()}
         fields['tiles'] = fields['tiles'].reshape(len(rb), len(cb))
-        input_domain = self.input_domain
+        input_domain = self.input_domain if self.folded is not None else tuple(range(len(ci)))
         if self.folded is not None:
             selection = slice(*col_slice)
             fields['folded'] = self.folded[:, selection]
             if self.rotation is not None:
                 fields['rotation'] = self.rotation[:, selection]
             if self.signs is not None:
-                original = input_domain if input_domain is not None else tuple(range(self.columns))
+                original = input_domain
                 _, input_domain = _stream.view_block_slice(original, *col_slice, len(original))
                 input_domain = tuple(input_domain) or (-1,) * self.columns
-                fields['input_order'] = torch.tensor(input_domain, dtype=torch.int32)
         out = self.like(logical_shape=(len(range(*row_slice)), len(range(*col_slice))), metadata=metadata,
                         input_domain=input_domain, **fields)
         out.label = f'{self.label}[{row_slice}, {col_slice}]'
@@ -795,11 +790,11 @@ class Matrix(torch.Tensor):
         out = _half(self.logical_shape[0], width)
         if not all(self.logical_shape):
             return _half(*self.shape).to(self.dtype)
-        columns = _identity(self.columns) if self.folded is not None else self.col_order
-        name, line = instance('streamed_dense', 1) if self.row_masked or self.column_masked else ('streamed_dense', '')
-        out, = _encode(name, self._code() + [None, out, self.row_order, self.row_scale, None, columns, self.col_scale],
+        columns = tuple(range(self.columns)) if self.folded is not None else self.metadata['col_order']
+        name, line = instance('streamed_dense', int(self.row_masked or self.column_masked))
+        out, = _encode(name, self._code() + [None, out, None, self.row_scale, None, None, self.col_scale],
                 _dims(tiles=self.tiles_, pitch=self.pitch, stride=width), self.rows // 32, self.tiles_, 32, line,
-                outputs=(4,), indexed=(5, 6, 8, 9), pitched=(1,))
+                outputs=(4,), indexed=(6, 9), pitched=(1,), indices={5: self.metadata['row_order'], 8: columns})
         if self.folded is not None:
             out = torch.mm(out, self.folded)
         return (out.T if self.transposed else out).to(self.dtype)
@@ -825,13 +820,12 @@ class Matrix(torch.Tensor):
                     indices={2: self.metadata['col_order']})
         elif self.signs is not None and len(outs) <= 2:
             second = outs[1] if len(outs) > 1 else outs[0]
-            name, line = (instance('streamed_hadamard', self.logical_shape[1], 1)
-                          if self.input_order is not None else ('streamed_hadamard', ''))
-            outs = _encode(name, [x, outs[0], second, self.col_order, self.col_scale,
-                                          (others[0] if others else self).col_scale, self.signs, self.hadamard,
-                                          None, None, None, None, self.input_order],
+            name, line = instance('streamed_hadamard', self.logical_shape[1], int(-1 in self.input_domain))
+            outs = _encode(name, [x, outs[0], second, None, self.col_scale,
+                                          (others[0] if others else self).col_scale, self.signs, self.hadamard],
                     _dims(rows=n, columns=self.columns, per=self.columns // self.hadamard.shape[0], inputs=len(matrices)),
-                    n, 1, 256, line, outputs=(1, 2), indexed=(0, 3, 4, 5, 6, 7, 12))
+                    n, 1, 256, line, outputs=(1, 2), indexed=(0, 4, 5, 6, 7),
+                    indices={3: self.metadata['col_order'], 12: self.input_domain})
         elif n <= 16:
             second = outs[1] if len(outs) > 1 else outs[0]
             name, line = (instance('streamed_rotate', self.logical_shape[1])
@@ -982,9 +976,9 @@ class Matrix(torch.Tensor):
             (groups, _), threads, _ = launch(spec, gate.rows, n)
             scale = TensorView.of(down.col_scale).select(0, stores) if scaled else None
             hidden, = _encode(name, gate._code() + [None, gx, None] + up._code()
-                + [ux, up.row_scale, target.select(1, stores), gate.row_order, gate.row_scale, scale],
+                + [ux, up.row_scale, target.select(1, stores), None, gate.row_scale, scale],
                 _dims(tiles=gate.tiles_, outputs=gate.rows, rows=n, pitch=gate.pitch), groups, 1, threads, line,
-                outputs=(11,), indexed=(10, 12, 13, 14), pitched=(1, 7))
+                outputs=(11,), indexed=(10, 13, 14), pitched=(1, 7))
         else:
             g, u = gate.product(gx, decomposition=decomposition), up.product(ux, decomposition=decomposition)
             def rows(matrix):
@@ -995,9 +989,10 @@ class Matrix(torch.Tensor):
             threads = COMPUTE['STREAMED_SCALE_THREADS']
             hidden, = _encode(name, [TensorView.of(g).select(2, gi), TensorView.of(u).select(2, ui),
                                     TensorView.of(gate.row_scale).select(0, gi), TensorView.of(up.row_scale).select(0, ui),
-                                    target, down.col_order if -1 in order else None, down.col_scale if scaled else None],
+                                    target, None, down.col_scale if scaled else None],
                 _dims(outputs=len(order), shares=g.shape[0], inputs=u.shape[0], split=n * len(order), per=n * len(order)),
-                -(-len(order) // (4 * threads)), n, threads, line, outputs=(4,), indexed=(0, 1, 2, 3, 5, 6))
+                -(-len(order) // (4 * threads)), n, threads, line, outputs=(4,), indexed=(0, 1, 2, 3, 6),
+                indices={5: order})
         coded = down.coded_input(hidden)[0][0] if rotated else hidden
         return down.apply(coded, decomposition).to(x.dtype)
 

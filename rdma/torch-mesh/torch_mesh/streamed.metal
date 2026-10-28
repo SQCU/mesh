@@ -576,7 +576,7 @@ kernel void streamed_couple(device const uint *gateCodes [[buffer(0)]], device c
                             device const uint *gateBands [[buffer(2)]], device const half *gx [[buffer(4)]],
                             device const uint *upCodes [[buffer(6)]], device const uint *upTiles [[buffer(7)]],
                             device const uint *upBands [[buffer(8)]], device const half *ux [[buffer(9)]],
-                            device const float *upScale [[buffer(10)]], device half *hidden [[buffer(11)]], device const int *selected [[buffer(12)]],
+                            device const float *upScale [[buffer(10)]], device half *hidden [[buffer(11)]],
                             device const float *gateScale [[buffer(13)]], device const float *inputScale [[buffer(14)]], constant streamed_dims &dims [[buffer(15)]],
                             uint2 group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
                             uint lane [[thread_index_in_simdgroup]], uint thread_id [[thread_index_in_threadgroup]]) {
@@ -639,7 +639,8 @@ kernel void streamed_couple(device const uint *gateCodes [[buffer(0)]], device c
         float gs = 0.0f, us = 0.0f;
         for (uint s = 0; s < SK; s++) { gs += sums[0][s][n][r]; us += sums[1][s][n][r]; }
         const uint output = band * 32 + r;
-        const bool active = !Masked || selected[mesh_index<12>(output)] >= 0;
+        bool active = true;
+        if constexpr (Masked) active = mesh_position<12>(output) >= 0;
         hidden[mesh_index<11>(ulong(n) * d.outputs + output)] = active ? half(
             streamed_gelu_of(gateScale[mesh_index<13>(output)] * gs, upScale[mesh_index<10>(output)] * us)
             * (Scaled ? inputScale[mesh_index<14>(output)] : 1.0f)) : half(0);
@@ -662,8 +663,7 @@ kernel void streamed_read(device const uint4 *in [[buffer(0)]], device uint *out
 template <bool Masked = false>
 kernel void streamed_dense(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
                            device const uint *bands [[buffer(2)]], device half *dense [[buffer(4)]],
-                           device const int *order [[buffer(5)]], device const float *rowScale [[buffer(6)]],
-                           device const int *columns [[buffer(8)]], device const float *colScale [[buffer(9)]],
+                           device const float *rowScale [[buffer(6)]], device const float *colScale [[buffer(9)]],
                            constant streamed_dims &dims [[buffer(15)]], uint2 group [[threadgroup_position_in_grid]],
                            uint lane [[thread_index_in_simdgroup]]) {
     const streamed_dims d = dims_of(dims);
@@ -673,7 +673,7 @@ kernel void streamed_dense(device const uint *codes [[buffer(0)]], device const 
     device const uint *at = codes + ((streamed_base(bands[group.x]) + (word & MESH_STREAMED_TILE_OFFSET_MASK)) * MESH_STREAMED_PLANE_WORDS) + lane;
     auto put = [&](uint P, float2 v) {
         const uint r = row0 + 2 * (P >> 2), k = k0 + 8 * (P & 3u);
-        const int col = columns[mesh_index<8>(k)], a = order[mesh_index<5>(r)], b = order[mesh_index<5>(r + 1)];
+        const int col = int(mesh_position<8>(k)), a = int(mesh_position<5>(r)), b = int(mesh_position<5>(r + 1));
         if (!Masked || (a >= 0 && col >= 0)) dense[mesh_index<4>(ulong(a) * width + uint(col))] = half(v.x * h * rowScale[mesh_index<6>(r)] * colScale[mesh_index<9>(k)]);
         if (!Masked || (b >= 0 && col >= 0)) dense[mesh_index<4>(ulong(b) * width + uint(col))] = half(v.y * h * rowScale[mesh_index<6>(r + 1)] * colScale[mesh_index<9>(k)]);
     };
@@ -684,7 +684,6 @@ kernel void streamed_dense(device const uint *codes [[buffer(0)]], device const 
     FRAGMENT_WIDTHS(0x1FFEu, FRAGMENT_DENSE)
 #undef FRAGMENT_DENSE
 }
-template [[host_name("streamed_dense")]] [[kernel]] decltype(streamed_dense<false>) streamed_dense<false>;
 
 // Logical reduction values and scales are supplied as prepared page views.
 // Storage permutations and padded lanes have already been composed away.
@@ -899,11 +898,11 @@ template [[host_name("streamed_rotate")]] [[kernel]] decltype(streamed_rotate<0>
 // multiple of threads / N, K <= 3 S, columns <= 16 threads and <= 2560.
 template <uint InputColumns = 0, bool Masked = false, bool GivenFactor = false>
 kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *first [[buffer(1)]],
-                              device half *second [[buffer(2)]], device const int *order [[buffer(3)]],
+                              device half *second [[buffer(2)]],
                               device const float *scale [[buffer(4)]], device const float *secondScale [[buffer(5)]],
                               device const char *signs [[buffer(6)]], device const char *mix [[buffer(7)]],
                               device const float *factors [[buffer(9)]],
-                              device const half *gamma [[buffer(11)]], device const int *sourceOrder [[buffer(12)]], constant streamed_dims &dims [[buffer(15)]],
+                              device const half *gamma [[buffer(11)]], constant streamed_dims &dims [[buffer(15)]],
                               uint n [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
                               uint lanes [[threads_per_threadgroup]], uint simd [[simdgroup_index_in_threadgroup]],
                               uint lane [[thread_index_in_simdgroup]], uint simds [[simdgroups_per_threadgroup]]) {
@@ -921,7 +920,7 @@ kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *f
     float firstScale[P], otherScale[P];
     for (uint p = 0; p < P; p++) {
         const uint j = t + p * threads;
-        if (j < columns) { place[p] = uint(order[mesh_index<3>(j)]); firstScale[p] = scale[mesh_index<4>(j)]; otherScale[p] = secondScale[mesh_index<5>(j)]; }
+        if (j < columns) { place[p] = uint(mesh_position<3>(j)); firstScale[p] = scale[mesh_index<4>(j)]; otherScale[p] = secondScale[mesh_index<5>(j)]; }
     }
     if (t < K) {
         uint m = 0;
@@ -935,8 +934,8 @@ kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *f
         float r[V];
         for (uint u = 0; u < V; u++) if (u < W) {
             const uint i = (b << shift) + lane * W + u;
-            const int source = Masked ? sourceOrder[mesh_index<12>(i)] : int(i);
-            const float value = Masked ? (source >= 0 ? float(row[source]) : 0.0f) : float(row[i]);
+            const int source = int(mesh_position<12>(i));
+            const float value = Masked && source < 0 ? 0.0f : float(row[source]);
             if constexpr (!GivenFactor) { if (eps > 0.0f) squares += value * value; }
             r[u] = (eps > 0.0f && source >= 0 ? value * float(gamma[mesh_index<11>(source)]) : value) * float(signs[mesh_index<6>(i)]);
         }
@@ -976,7 +975,6 @@ kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *f
         if (d.inputs > 1) second[mesh_index<2>(ulong(n) * columns + at)] = half(otherScale[p] * value);
     }
 }
-template [[host_name("streamed_hadamard")]] [[kernel]] decltype(streamed_hadamard<0, false>) streamed_hadamard<0, false>;
 
 // The GELU FFN's middle: hidden = GELU(gate) * up in the gate and up products' (shared) coded row order, which the down
 // product's columns follow: from their partials (gate's d.shares shares, up's d.inputs, each product its own
@@ -987,18 +985,21 @@ template [[host_name("streamed_hadamard")]] [[kernel]] decltype(streamed_hadamar
 template <typename T, bool Masked = false, bool Scaled = false>
 kernel void streamed_gelu(device const T *gate [[buffer(0)]], device const T *up [[buffer(1)]],
                           device const float *gateScale [[buffer(2)]], device const float *upScale [[buffer(3)]],
-                          device half *hidden [[buffer(4)]], device const int *selected [[buffer(5)]], device const float *inputScale [[buffer(6)]],
+                          device half *hidden [[buffer(4)]], device const float *inputScale [[buffer(6)]],
                           constant streamed_dims &dims [[buffer(15)]],
                           uint2 g [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
                           uint2 threads [[threads_per_threadgroup]]) {
     const streamed_dims d = dims_of(dims);
     const uint n = g.y, first = (g.x * lanes_of(threads.x) + t) * 4;
     const ulong row = ulong(n) * d.outputs;
-    for (uint r = first; r < min(first + 4, d.outputs); ++r)
-        hidden[mesh_index<4>(ulong(n) * d.outputs + r)] = Masked && selected[mesh_index<5>(r)] < 0 ? half(0) : half(streamed_gelu_of(
+    for (uint r = first; r < min(first + 4, d.outputs); ++r) {
+        bool active = true;
+        if constexpr (Masked) active = mesh_position<5>(r) >= 0;
+        hidden[mesh_index<4>(ulong(n) * d.outputs + r)] = !active ? half(0) : half(streamed_gelu_of(
             d.shares ? streamed_value(mesh_view<0>(gate), row + r, d.shares, d.split, gateScale[mesh_index<2>(r)]) : float(gate[mesh_index<0>(row + r)]),
             d.inputs ? streamed_value(mesh_view<1>(up), row + r, d.inputs, d.per, upScale[mesh_index<3>(r)]) : float(up[mesh_index<1>(row + r)]))
             * (Scaled ? inputScale[mesh_index<6>(r)] : 1.0f));
+    }
 }
 
 template [[host_name("streamed_gelu")]] [[kernel]] decltype(streamed_gelu<float>) streamed_gelu<float>;
