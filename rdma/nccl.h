@@ -160,7 +160,8 @@
    reduce-scatter's partials of the others' segments, a non-receiving rank's operand, a tree's scratch, a relay's
    generations, a combine's landing area, credits): made at its first group, its groups taking turns at them,
    ncclMemAlloc called again only where one must grow (to one of eight sizes an octave), a dropped definition's slots
-   kept for the next, one too small returned where its last group was the host path's and is done, all returned at
+   kept for the next, one too small returned once its last group is done (the host path's, or a Metal path's that the
+   stream has run past: it stores that group's ticket where its generation let the slot go), all returned at
    ncclCommDestroy.  What the GPU reads of a group once it is encoded (its entries for the bridge's lists, its tracks'
    records, a Metal 4 dispatch's argument record) is cut from the process's pieces of the region, each a lease with its
    Metal buffer made once, taken again once the GPU has done with all cut from it (the entries presented, the tracks
