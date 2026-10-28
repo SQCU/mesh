@@ -13,7 +13,7 @@ import time
 import traceback
 import zlib
 
-from mesh_source import checkout, prune, revision, upstream, verify
+from mesh_source import checkout, git, prune, upstream, verify
 
 REQUIRED = ('rdma/mesh_hourly.py', 'rdma/mesh_nodes.py', 'rdma/mesh_source.py', 'bin/mesh-user.sh')
 FIGURES = ('steady_step_microseconds', 'step_microseconds', 'crossing_microseconds',
@@ -146,10 +146,11 @@ def _launch(mesh_root, microbench_root, output_root, cluster):
                            'role': 'select commits; target helpers execute from upstream Git checkouts'}}
     try:
         roots = {'mesh': Path(mesh_root).resolve(), 'metal-microbench': Path(microbench_root).resolve()}
-        # Resolve both main commits before fetching either. Later commits or
-        # an interactive branch checkout cannot change this invocation's inputs.
-        record['commits'] = {name: revision(root, 'refs/heads/main') for name, root in roots.items()}
+        # Resolve both pushed main commits before fetching either: the nodes fetch from origin, so a local commit
+        # not yet pushed is not committed code they can run.
         record['upstreams'] = {name: upstream(root) for name, root in roots.items()}
+        record['commits'] = {name: git(root, 'ls-remote', record['upstreams'][name], 'refs/heads/main').split()[0].decode()
+                             for name, root in roots.items()}
         for name, root in roots.items():
             target = Path.home() / cluster.checkouts / name / record['commits'][name]
             checkout(record['upstreams'][name], record['commits'][name], target, max(1, record['deadline_unix'] - time.time()))
