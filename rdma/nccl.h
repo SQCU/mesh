@@ -149,12 +149,15 @@
    Memory.  The process is one client of its node's bridge: one attach of the node's region, made at its first
    ncclMemAlloc or communicator, whose slot owns the process's leases and holds the streams its communicators use; a
    communicator leases a page for its gate, pages of span tables (each made the first time its bytes are named and
-   never written again), and, for each group definition (a declared group, or an undeclared group's calls, the 64
-   most recently used kept), two slots of what its groups send from and land in that are not the caller's (a
+   never written again; past 64 pages all are let go and made again as named, the bridge's reads of entries already
+   presented keeping their pages), and, for each group definition (a declared group, or an undeclared group's calls,
+   the 64 most recently used kept), two slots of what its groups send from and land in that are not the caller's (a
    reduce-scatter's partials of the others' segments, a non-receiving rank's operand, a tree's scratch, a relay's
    generations, a combine's landing area, credits): made at its first group, its groups taking turns at them,
-   ncclMemAlloc called again only where one must grow, a dropped definition's slots kept for the next, all returned at
-   ncclCommDestroy.  A result is made in recvbuff (a reduce-scatter's own segment too: no compiled piece spans two
+   ncclMemAlloc called again only where one must grow (to one of eight sizes an octave), a dropped definition's slots
+   kept for the next, one too small returned where its last group was the host path's and is done, all returned at
+   ncclCommDestroy.  A group's host bookkeeping (its schedules, its steps' state, its record in flight) is its
+   definition's too, made at its first groups and bound again at each later one.  A result is made in recvbuff (a reduce-scatter's own segment too: no compiled piece spans two
    segments), and nothing is copied into a slot from a caller's buffer but the operand of a premultiplied,
    partials-merging or fused call where it is not the result, and an in-place single-phase all-reduce's original.  A
    group writes a slot only once the slot's last group has every landing awaited: the stream's order, and a landed
