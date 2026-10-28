@@ -364,6 +364,20 @@ producers with half, float and integer destinations, mapped inputs and strided
 outputs. Both scaled and unscaled finishes compiled with mapped views. No
 numerical work or performance measurement ran.
 
+Residual normalization now consumes typed views for its input, normalization
+weights, residual, destination and optional scale. Its shared numerical template
+uses each view's prepared indices. Goal A uses this builder instead of its own
+dispatch and byte-count declarations. Dense and vision callers use the same
+interface. Destination reads within the calculation do not add an input
+dependency on the old destination contents.
+
+Scaling, residual normalization and fused finishes also share the declarations
+of their control operands. Words, control tables, vectors, gains and statistic
+outputs retain their views in both shader addressing and dependency records.
+Control values remain runtime page data. Preparation on 2026-10-28 built rank
+and Goal A and compiled typed residuals with mapped and strided operands,
+including controls without a scale. No numerical commands were submitted.
+
 Layer finishes return the gathered operand they actually produce. The next
 attention product consumes that view through the shared input resolver. A finish
 that emits no gather returns no such operand. Stored projections also consume
