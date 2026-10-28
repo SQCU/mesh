@@ -116,11 +116,13 @@ def settle(done, progress, wait):
         time.sleep(0.001)
 
 
-def meet(name, value=0):
-    """The sum of every rank's `value` once each has set its own, so every rank is prepared before any enqueues and no
-    crossing waits out a peer's preparation; within the library's preparation bound (torch_mesh.bounded)."""
+def meet(name, value=0, read=True):
+    """This rank's `value` set and, where `read`, the sum of every rank's once each has set its own, so every rank is
+    prepared before any enqueues and no crossing waits out a peer's preparation; within the library's preparation bound
+    (torch_mesh.bounded). A rank that does not read makes no store call after its set, so rank 0 (the store's host) may
+    end once it has read every rank's."""
     store, keys = dist.distributed_c10d._get_default_store(), [f'demo/{name}/{r}' for r in range(dist.get_world_size())]
-    return torch_mesh.bounded(lambda: store.set(keys[dist.get_rank()], str(value)) or sum(int(store.get(k)) for k in keys),
+    return torch_mesh.bounded(lambda: store.set(keys[dist.get_rank()], str(value)) or read and sum(int(store.get(k)) for k in keys),
                               f"demo: every rank's {name} in the store")
 
 
@@ -205,9 +207,9 @@ def main():
         print(f'rank{rank} style {name}: steps={steps} reads={sum(reads.values())} '
               + ' '.join(f'{k}={reads[k]}' for k in ('held', 'torn', 'ahead', 'stale', 'never_landed', 'unproduced', 'wrong_rank'))
               + f" -> {'COUNTEREXAMPLES' if hit else 'clean'}", flush=True)
-    hits = meet('end', hits)
+    hits = meet('end', hits, read=rank == 0) or hits
     if hits:
-        print(f'demo error: the ranks read {hits} counterexamples', file=sys.stderr, flush=True)
+        print(f'demo error: {"the ranks" if rank == 0 else f"rank {rank}"} read {hits} counterexamples', file=sys.stderr, flush=True)
     torch_mesh.bounded(dist.destroy_process_group, 'demo: destroy_process_group')
     return 1 if hits else 0
 
