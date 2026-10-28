@@ -2,6 +2,7 @@
 #define MESH_PLAN_H
 #include <stdint.h>
 #include "../etc/bridge/layout.h"
+#include "mesh-fabric.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -155,8 +156,6 @@ enum { MESH_STEP_SEND, MESH_STEP_REDUCE, MESH_STEP_COPY };
 struct mesh_step { uint32_t op,peer,round,buffer; uint64_t first; struct mesh_operand piece; };
 
 /* design/whole-function.md#fabric */
-struct mesh_cable { uint64_t wire,bandwidth; uint32_t node[2]; };
-struct mesh_fabric { uint32_t nodes,cables; const struct mesh_cable *cable; };
 struct mesh_transfer { struct mesh_step step; uint32_t cable,padding; };
 int mesh_fabric_check(const struct mesh_fabric *);
 /* Logical-edge adapter to mesh_write_compile with all directly joining cables
@@ -181,10 +180,7 @@ int mesh_fabric_stripe(const struct mesh_fabric *,uint32_t rank,const struct mes
    receive gate, payload copy or synchronization is introduced. */
 int mesh_fabric_refine(const struct mesh_transfer *,uint32_t count,uint64_t page,
                        struct mesh_transfer *out,uint32_t room);
-/* Exact linear allocation weights. Zero disables allocation to a path without
-   deleting its capability; at least one weight is positive. The checked sum
-   fits uint64_t. Allocation uses uint128_t products and integer remainders. */
-struct mesh_paths { uint32_t count; const uint32_t *first,*cable; const uint64_t *weight; };
+/* struct mesh_paths (mesh-fabric.h): allocation uses uint128_t products and integer remainders. */
 int mesh_paths_check(const struct mesh_fabric *,uint32_t source,uint32_t destination,const struct mesh_paths *);
 /* tile is the publication width in elements (0: one publication). Route the
    complete operand once, then cut every path at these logical boundaries.

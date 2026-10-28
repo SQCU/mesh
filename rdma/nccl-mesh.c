@@ -29,6 +29,9 @@
 
 
 enum { WHAT_COUNTED = ncclMeshCallAlltoAllV };
+_Static_assert(ncclMeshCallAllReduce == MESH_ALLREDUCE && ncclMeshCallBroadcast == MESH_BROADCAST && ncclMeshCallReduce == MESH_REDUCE &&
+               ncclMeshCallReduceScatter == MESH_REDUCE_SCATTER && ncclMeshCallAllGather == MESH_ALLGATHER,
+               "nccl.h's declared kinds are the planner's collectives");
 enum { COMBINE_SUM, COMBINE_PROD, COMBINE_MAX, COMBINE_MIN, COMBINE_MERGE };
 
 static const size_t SIZE[ncclNumTypes] = {1, 1, 4, 4, 8, 8, 2, 4, 8, 2, 1, 1};

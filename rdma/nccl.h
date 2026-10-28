@@ -290,6 +290,7 @@ struct mesh_trees;
    the same failure words ends at once or within 2^10 loads (nccl-mesh-kernels.h mesh_step_failed), so waits that never
    land hold the GPU about one bound in all */
 #include "metal-capabilities.h"
+#include "mesh-fabric.h"
 #define NCCL_MESH_POLLS MESH_POLL_LIMIT
 /* The stream: NULL (the host path) or an ncclMeshStream (the Metal path, above). */
 typedef void *cudaStream_t;
@@ -1006,10 +1007,8 @@ typedef struct {
    by size class), named by the caller's configuration where a price chose them: the caller's configuration document
    is the one place a form is decided (metal-microbench docs/principles.md section 6). */
 ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm* forms, int count);
-/* design/whole-function.md#interface */
-struct mesh_fabric;
+/* design/whole-function.md#interface: the communicator's fabric and a pair's write paths (mesh-fabric.h) */
 ncclResult_t ncclMeshCommFabric(ncclComm_t comm, const struct mesh_fabric** fabric);
-struct mesh_paths;
 ncclResult_t ncclMeshCommWriteRoutes(ncclComm_t comm, int source, int destination, const struct mesh_paths* paths);
 /* Configuration-time inspection of the installed paths, including exact integer
    weights. The borrowed value remains valid until that pair is reconfigured or
@@ -1069,8 +1068,9 @@ ncclResult_t ncclMeshWriteSourceReady(ncclMeshWritePlan_t plan, const void* word
 ncclResult_t ncclMeshWriteLandings(ncclMeshWritePlan_t plan, void* records, uint32_t capacity, ncclMeshTileLayout layout);
 ncclResult_t ncclMeshWriteExecute(ncclMeshWritePlan_t plan, size_t invocation, cudaStream_t stream);
 ncclResult_t ncclMeshWritePlanDestroy(ncclMeshWritePlan_t plan);
-/* A call a program declares ahead (ncclMeshCommPlan): `what` (mesh-plan.h MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE,
-   MESH_REDUCE_SCATTER, MESH_ALLGATHER, or ncclMeshCallAlltoAllV), its `peer` (a
+/* A call a program declares ahead (ncclMeshCommPlan): `what` (ncclMeshCallAllReduce, ncclMeshCallBroadcast,
+   ncclMeshCallReduce, ncclMeshCallReduceScatter, ncclMeshCallAllGather, ncclMeshCallAlltoAllV or ncclMeshCallWrite:
+   the first five the planner's mesh-plan.h MESH_*), its `peer` (a
    send's or a receive's, a reduce's or a broadcast's root), `count` as its call takes it (a reduce-scatter's
    recvcount, an all-gather's sendcount), `counts` (NULL: none; read for these alone) a V form's (ncclMeshAllGatherV's
    and ncclMeshReduceScatterV's, a rank's count each; ncclMeshAlltoAllV's sendcounts then recvcounts), `type`, `op` (a
@@ -1078,7 +1078,8 @@ ncclResult_t ncclMeshWritePlanDestroy(ncclMeshWritePlan_t plan);
    outside one its own group). ncclMeshPlanRun supplies their invocation order. `fused` (not 0): the call is
    issued on a fused stream (ncclMeshStream fused). It uses the same physical striping and routed-write
    representation as other calls; fusion changes publication/consumption encoding, not available cables. */
-enum { ncclMeshCallAlltoAllV = 18, ncclMeshCallWrite = 19 };
+enum { ncclMeshCallAllReduce = 0, ncclMeshCallBroadcast = 1, ncclMeshCallReduce = 2, ncclMeshCallReduceScatter = 3,
+       ncclMeshCallAllGather = 4, ncclMeshCallAlltoAllV = 18, ncclMeshCallWrite = 19 };
 /* One record per logical publication tile, in payload order. seconds is a
    prediction relative to this group's producers; order is the producer's
    launch order (UINT64_MAX is reserved), used when predictions tie. Zero seconds explicitly expresses

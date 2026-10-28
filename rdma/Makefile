@@ -18,15 +18,15 @@ all: $(IMAGES:%=.build/%)
 # the bridge and mesh-stat read the region through libmesh: beside them once installed, and at ../rdma from $MESH_ROOT/bin
 LIBMESH = -L.build -lmesh -Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../rdma
 # design/transport.md: the bridge, mesh-link.c and mesh-records.c over mesh-bridge.h
-.build/mesh-flow: mesh-link.c mesh-records.c mesh-bridge.h mesh-verbs.h mesh.h mesh-plan.h mesh-dataflow.h mesh-call.h .build/libmesh.dylib Makefile $(RDMA_CONFIGURATION) $(METAL_CONFIGURATION)
+.build/mesh-flow: mesh-link.c mesh-records.c mesh-bridge.h mesh-verbs.h mesh.h mesh-plan.h mesh-fabric.h mesh-dataflow.h mesh-call.h .build/libmesh.dylib Makefile $(RDMA_CONFIGURATION) $(METAL_CONFIGURATION)
 	cc $(CPPFLAGS) -DMESH_PROVIDER_RESERVED_QPS=$(MESH_PROVIDER_RESERVED_QPS) -fblocks -O2 $(WARN) -o $@ mesh-link.c mesh-records.c $(LIBMESH) -lrdma -framework CoreFoundation -framework IOKit
 	codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge $@ || codesign --force --sign - --identifier io.mesh.bridge $@
 # design/transport.md section 2: the heartbeat, the job launchd keeps alive, which opens and closes the bridge
-.build/mesh-heartbeat: mesh-heartbeat.c mesh.h mesh-plan.h mesh-dataflow.h mesh-observe.h Makefile
+.build/mesh-heartbeat: mesh-heartbeat.c mesh.h mesh-plan.h mesh-fabric.h mesh-dataflow.h mesh-observe.h Makefile
 	mkdir -p .build
 	cc -O2 $(WARN) -o $@ mesh-heartbeat.c
 	codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge $@ || codesign --force --sign - --identifier io.mesh.bridge $@
-.build/mesh-stat: mesh-stat.c mesh.h mesh-plan.h .build/libmesh.dylib Makefile
+.build/mesh-stat: mesh-stat.c mesh.h mesh-plan.h mesh-fabric.h .build/libmesh.dylib Makefile
 	cc -O2 $(WARN) -o $@ mesh-stat.c $(LIBMESH)
 # design/transport.md: each built image but libnccl-mesh.dylib whose bytes differ from the installed one's copied beside
 # it and renamed into place, in IMAGES' order, and the bridge's binary anew wherever libmesh changed; a running process
@@ -130,7 +130,7 @@ kernels: .build/libnccl-mesh.metallib
 $(IMAGES:%=.build/%) .build/nccl-mesh-kernels .build/libnccl-mesh.binarchive: .build/metal-environment
 .PHONY: FORCE kernels install-images install-nccl clean-kernels
 .build/libnccl-mesh.dylib: nccl-mesh.c mesh-statistics.c mesh-statistics.h metal-recording.m metal-recording.h mesh-tensor-layout.m mesh-tensor-layout.h mesh-write-order.h mesh-write-routes.h mesh-span-plan.h mesh-lease-retire.h nccl-mesh-metal.m nccl-mesh-metal.h nccl-mesh-kernels.h .build/libnccl-mesh.sha256 .build/mesh_metal.h nccl.h mesh-write-compiler.h \
-  mesh-call.h mesh-dataflow.h mesh.h mesh-plan.h .build/libmesh.dylib Makefile $(METAL_CONFIGURATION)
+  mesh-call.h mesh-dataflow.h mesh.h mesh-plan.h mesh-fabric.h .build/libmesh.dylib Makefile $(METAL_CONFIGURATION)
 	cc -fblocks -O2 $(WARN) $(METAL_DEFINES) -dynamiclib -I .build -DKERNELS_SHA256=\"$$(cat .build/libnccl-mesh.sha256)\" \
 	  -Wl,-install_name,@rpath/libnccl-mesh.dylib -Wl,-rpath,@loader_path \
 	  $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ nccl-mesh.c mesh-statistics.c nccl-mesh-metal.m metal-recording.m mesh-tensor-layout.m -L.build -lmesh \
@@ -146,7 +146,7 @@ $(IMAGES:%=.build/%) .build/nccl-mesh-kernels .build/libnccl-mesh.binarchive: .b
 statistics: .build/libmesh-statistics.dylib
 	cp $< libmesh-statistics.dylib
 .PHONY: statistics
-.build/libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-fabric.c mesh-routed.c mesh-diagnostics.c mesh-diagnostics.h mesh.h mesh-plan.h Makefile
+.build/libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-fabric.c mesh-routed.c mesh-diagnostics.c mesh-diagnostics.h mesh.h mesh-plan.h mesh-fabric.h Makefile
 	mkdir -p .build
 	cc -fblocks -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c mesh-fabric.c mesh-routed.c mesh-diagnostics.c
 # the built images; never an installed image (the launchd job's binary and the libraries clients map)
@@ -159,6 +159,6 @@ clean:
 # installed libraries it loads (make install puts them in rdma/; this target installs nothing, so it never stops the
 # bridge: design/transport.md)
 PYTHON ?= $(HOME)/.venv-mesh-uv/bin/python
-mesh-c: mesh_c_build.py ../etc/bridge/layout.h mesh-plan.h nccl.h mesh-write-compiler.h mesh-statistics.h
+mesh-c: mesh_c_build.py ../etc/bridge/layout.h mesh-plan.h mesh-fabric.h nccl.h mesh-write-compiler.h mesh-statistics.h
 	$(PYTHON) mesh_c_build.py
 .PHONY: mesh-c
