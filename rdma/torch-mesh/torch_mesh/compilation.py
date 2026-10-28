@@ -1,6 +1,7 @@
 """Compiler operands scoped to one graph realization, never runtime policy."""
 from contextlib import contextmanager
 from contextvars import ContextVar
+from functools import lru_cache
 from . import _stream
 
 _bound = ContextVar('mesh_compilation_operands', default=None)
@@ -35,3 +36,13 @@ def parameters():
     import mesh_compute
     path = Path(mesh_compute.__file__).resolve().parents[1] / 'etc/compute/parameters.json'
     return json.loads(path.read_text())
+
+
+@lru_cache(None)
+def api_layouts(name):
+    """Physical operand requirements of a declared native API, at preparation."""
+    import json
+    from pathlib import Path
+    import mesh_compute
+    path = Path(mesh_compute.__file__).resolve().parents[1] / 'etc/compute/metal-apis.json'
+    return json.loads(path.read_text())[name]

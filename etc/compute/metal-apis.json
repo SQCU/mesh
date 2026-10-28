@@ -1,0 +1,8 @@
+{
+  "matrix": {
+    "input": "strided",
+    "weight": "strided",
+    "output": "indexed",
+    "bias": "indexed"
+  }
+}

@@ -95,8 +95,8 @@ kernel void fold(device const float *own [[buffer(0)]], {inputs}device float *ou
                         ready=ready, ready_value=tile_bytes, tile_bytes=tile_bytes)
                     words += [w for binding in crossing.land for w in fused._words(binding)]
                 schedule.append(_stream.Commands([
-                    product(x, a, hidden, act=True),
-                    product(hidden, b, partial, ready=ready, arrivals=arrivals)]))
+                    *product(x, a, hidden, act=True),
+                    *product(hidden, b, partial, ready=ready, arrivals=arrivals)]))
                 inputs = [t for (_, destination), t in zip(self.pairs, landings) if destination == rank]
                 output = len(inputs) + 1
                 schedule.compute(self.fold, [partial, *inputs, result],

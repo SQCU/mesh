@@ -17,6 +17,19 @@ static NSData *TensorWords(NSArray<NSNumber *> *values) {
     return data;
 }
 
+static NSArray *TensorInverseAxes(MetalTensorLayout *declared,NSInteger *origin) {
+    NSMutableArray *axes=[NSMutableArray array];NSInteger low=declared.offset;
+    for(NSUInteger d=0;d<declared.shape.count;d++) {
+        const NSInteger n=[declared.shape[d] integerValue],s=[declared.strides[d] integerValue];
+        if(n>1&&s){[axes addObject:@(d)];low+=MIN(0,(n-1)*s);}
+    }
+    [axes sortUsingComparator:^NSComparisonResult(NSNumber *a,NSNumber *b) {
+        NSInteger x=labs([declared.strides[a.unsignedIntegerValue] integerValue]),y=labs([declared.strides[b.unsignedIntegerValue] integerValue]);
+        return x>y?NSOrderedAscending:x<y?NSOrderedDescending:NSOrderedSame;
+    }];
+    *origin=low;return axes;
+}
+
 @implementation MetalTensorLayout
 + (instancetype)shape:(NSArray<NSNumber *> *)shape strides:(NSArray<NSNumber *> *)strides
     offset:(NSInteger)offset maps:(NSDictionary<NSNumber *,NSData *> *)maps indices:(NSData *)indices {
@@ -213,15 +226,7 @@ static NSData *TensorWords(NSArray<NSNumber *> *values) {
     if([[declared shift:-declared.offset] isEqual:[placed shift:-placed.offset]])
         return [self shift:placed.offset-declared.offset];
     NSArray *logical=TensorStrides(declared.shape);
-    NSMutableArray *axes=[NSMutableArray array];NSInteger low=declared.offset;
-    for(NSUInteger d=0;d<declared.shape.count;d++) {
-        const NSInteger n=[declared.shape[d] integerValue],s=[declared.strides[d] integerValue];
-        if(n>1&&s){[axes addObject:@(d)];low+=MIN(0,(n-1)*s);}
-    }
-    [axes sortUsingComparator:^NSComparisonResult(NSNumber *a,NSNumber *b) {
-        NSInteger x=labs([declared.strides[a.unsignedIntegerValue] integerValue]),y=labs([declared.strides[b.unsignedIntegerValue] integerValue]);
-        return x>y?NSOrderedAscending:x<y?NSOrderedDescending:NSOrderedSame;
-    }];
+    NSInteger low;NSArray *axes=TensorInverseAxes(declared,&low);
     NSMutableDictionary *inverse=nil;
     NSMutableData *data=[NSMutableData dataWithLength:_count*sizeof(NSInteger)];NSInteger *out=data.mutableBytes;
     for(NSUInteger i=0;i<_count;i++) {
@@ -272,6 +277,41 @@ static NSData *TensorWords(NSArray<NSNumber *> *values) {
     if(_indices){const NSInteger step=1;return MetalViewMappedIndexDeclaration(binding,&_count,&step,1,(NSUInteger)_offset,@{@0:_indices});}
     NSData *shape=TensorWords(_shape),*steps=TensorWords(_strides);
     return MetalViewMappedIndexDeclaration(binding,shape.bytes,steps.bytes,_shape.count,(NSUInteger)_offset,_maps);
+}
+- (NSString *)declaration:(NSUInteger)binding fromStorage:(MetalTensorLayout *)source {
+    NSParameterAssert(source.affine&&[source.shape isEqual:_shape]);
+    NSMutableString *result=[NSMutableString stringWithString:[self declaration:binding]];
+    [result appendFormat:@"inline long mesh_storage_%lu(long i) {\n",(unsigned long)binding];
+    if([source matches:TensorStrides(source.shape)]) {
+        [result appendFormat:@"return mesh_index<%lu>(i - %ldl);\n}\n",(unsigned long)binding,(long)source.offset];
+        return result;
+    }
+    NSArray *logical=TensorStrides(source.shape);
+    NSInteger low;NSArray *axes=TensorInverseAxes(source,&low);
+    [result appendFormat:@"long r = i - %ldl, at = 0;\n",(long)low];
+    for(NSNumber *axis in axes) {
+        NSUInteger d=axis.unsignedIntegerValue;NSInteger s=[source.strides[d] integerValue];
+        [result appendFormat:@"{ long q = r / %ldl; r -= q * %ldl; at += ",(long)labs(s),(long)labs(s)];
+        if(s<0)[result appendFormat:@"(%ldl - q)",(long)[source.shape[d] integerValue]-1];else [result appendString:@"q"];
+        [result appendFormat:@" * %lul; }\n",(unsigned long)[logical[d] unsignedIntegerValue]];
+    }
+    [result appendFormat:@"return mesh_index<%lu>(at);\n}\n",(unsigned long)binding];
+    return result;
+}
+- (NSData *)orderedSpans {
+    NSMutableData *data=[NSMutableData data];NSUInteger width=1;
+    if(!_indices)for(NSUInteger d=_shape.count;d--;) {
+        NSUInteger n=[_shape[d] unsignedIntegerValue];
+        if(n>1&&(_maps[@(d)]||[_strides[d] integerValue]!=(NSInteger)width))break;
+        width*=n;
+    }
+    for(NSUInteger i=0;i<_count;i+=width) {
+        const struct MetalTensorSpan span={[self index:i],width};
+        struct MetalTensorSpan *last=data.length?(struct MetalTensorSpan *)data.mutableBytes+data.length/sizeof span-1:NULL;
+        if(last&&last->offset+(NSInteger)last->count==span.offset)last->count+=span.count;
+        else [data appendBytes:&span length:sizeof span];
+    }
+    return data;
 }
 - (NSData *)reaches:(id<MTLBuffer>)buffer base:(NSUInteger)base elementBytes:(NSUInteger)bytes access:(uint32_t)access binding:(int32_t)binding {
     NSArray *shape=_indices?@[@(_count)]:_shape,*strides=_indices?@[@1]:_strides;

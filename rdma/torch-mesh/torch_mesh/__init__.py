@@ -160,7 +160,13 @@ def _compile(gm, example_inputs, destinations):
     described = [node.meta['val'] for node in gm.graph.nodes if 'val' in node.meta]
     mode = detect_fake_mode(described) or FakeTensorMode(allow_non_fake_inputs=True)
     operands = [*example_inputs, *constants]
-    inputs = tree_map(lambda value: mode.from_tensor(value) if isinstance(value, torch.Tensor) else value, operands)
+    from .operand import TensorView
+    def described_input(value, node):
+        if isinstance(value, TensorView):
+            return node.meta['val']
+        return mode.from_tensor(value) if isinstance(value, torch.Tensor) else value
+    inputs = [tree_map(lambda value: described_input(value, node), value)
+              for node, value in zip((n for n in copied.nodes if n.op == 'placeholder'), operands, strict=True)]
     with mode:
         lowered = make_fx(dispatch_functionalize(lifted, propagate_input_mutations=True), decomposition_table=select_decomp_table() | decompositions,
                           tracing_mode='fake', _allow_non_fake_inputs=True)(*inputs)

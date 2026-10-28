@@ -13,6 +13,7 @@
 #define TORCH_MESH_ARGMAX
 #include <metal_stdlib>
 using namespace metal;
+template<uint B> inline long mesh_index(ulong i);
 constant constexpr uint MESH_SELECTION_BINS = 1u << MESH_SELECTION_RADIX_BITS;
 template <uint T> constant constexpr uint mesh_selection_words = MESH_SELECTION_BINS + MESH_SELECTION_STATE_WORDS + T / MESH_SIMD_WIDTH;
 
@@ -244,12 +245,10 @@ __attribute__((always_inline)) static inline uint2 mesh_top(K key, uint lo, uint
 // models' tails at a position coincide where their distributions do), each in ascending candidate order, so no place
 // names the greatest; an absent entry (fewer finite z) is (-1, -inf). True in thread 0, holding the row's (m, l).
 // w: mesh_selection_words<T> words.
-template <uint T, typename Z, typename Id, typename I>
+template <uint T, typename Z, typename Id, typename Put>
 __attribute__((always_inline)) static inline bool mesh_retain(thread float &m, thread float &l, Z z, uint seed, uint key, Id id, uint head,
-                                                              uint tail, uint lo, uint hi, uint lid, threadgroup uint *w, device I *ids,
-                                                              device float *zs, ulong id_stride = 1, ulong value_stride = 1) {
-    auto put = [&](uint i, uint c) { ids[ulong(i) * id_stride] = c == 0xffffffffu ? I(-1) : I(id(c));
-                                  zs[ulong(i) * value_stride] = c == 0xffffffffu ? -INFINITY : z(c); };
+                                                              uint tail, uint lo, uint hi, uint lid, threadgroup uint *w, Put write) {
+    auto put = [&](uint i, uint c) { write(i, c == 0xffffffffu ? -1l : long(id(c)), c == 0xffffffffu ? -INFINITY : z(c)); };
     const uint2 top = mesh_top<T>(z, lo, hi, head, lid, w, put);
     mesh_top<T>([&](uint c) {
         const float x = z(c);
@@ -273,11 +272,11 @@ kernel void mesh_draw_rows(device const float *z [[buffer(0)]], device const uin
                lo = min(v, group.x * span), hi = min(v, lo + span);
     float best;
     uint c;
-    if (mesh_draw<T>(best, c, [&](uint i) { return z[ulong(r) * words[5] + ulong(i) * words[6]]; }, words[1], keys[ulong(r) * words[7]],
-                     [&](uint i) { return first + i; }, cutoff[ulong(r) * words[8]],
+    if (mesh_draw<T>(best, c, [&](uint i) { return z[mesh_index<0>(ulong(r) * v + i)]; }, words[1], keys[mesh_index<1>(r)],
+                     [&](uint i) { return first + i; }, cutoff[mesh_index<2>(r)],
                      lo, hi, lid, tv, tk, parts, (coherent(device) device uint *)(parts + groups.y * blocks), &arrivals[r],
                      r * blocks + group.x, blocks))
-        ids[ulong(r) * words[4]] = long(first + c);
+        ids[mesh_index<3>(r)] = long(first + c);
 }
 
 // argmax.py's retain: row group.y of z [rows, v] in one threadgroup, its H + M entries and log Z (words: v, seed).
@@ -288,9 +287,12 @@ kernel void mesh_retain_rows(device const float *z [[buffer(0)]], device const u
     threadgroup uint w[mesh_selection_words<T>];
     const uint v = words[0], r = group.y;
     float m, l;
-    if (mesh_retain<T>(m, l, [&](uint c) { return z[ulong(r) * words[7] + ulong(c) * words[8]]; }, words[1], positions[ulong(r) * words[9]],
+    if (mesh_retain<T>(m, l, [&](uint c) { return z[mesh_index<0>(ulong(r) * v + c)]; }, words[1], positions[mesh_index<1>(r)],
                        [&](uint c) { return c; }, H, M, 0, v, lid,
-                       w, ids + ulong(r) * words[2], kept + ulong(r) * words[4], words[3], words[5]))
-        log_z[ulong(r) * words[6]] = m + log(l);
+                       w, [&](uint i, long token, float value) {
+                           ids[mesh_index<2>(ulong(r) * (H + M) + i)] = token;
+                           kept[mesh_index<3>(ulong(r) * (H + M) + i)] = value;
+                       }))
+        log_z[mesh_index<4>(r)] = m + log(l);
 }
 #endif

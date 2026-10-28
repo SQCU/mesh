@@ -1,6 +1,6 @@
 """Preparation-only tensor placement relations, shared by graph binding/lowering."""
 import torch
-from views import rebase
+from .operand import TensorView, descriptor
 
 
 def output(shape, dtype, device, out=None):
@@ -18,25 +18,17 @@ def same_view(a, b):
     return _stream.same_operand(a, b)
 
 
-def indices(described, placed_strides, placed_offset, view):
-    """Resolve an alias's element indices without allocating its destination."""
+def relation(described, placed, view):
+    """Compose typed aliases with assigned pages using the shared algebra."""
     width, target_width = described.element_size(), view.element_size()
-    offset, strides = rebase((*described.shape, width), (*[s * width for s in described.stride()], 1),
-                             described.storage_offset() * width, (*[s * width for s in placed_strides], 1),
-                             placed_offset * width, (*view.shape, target_width),
-                             (*[s * target_width for s in view.stride()], 1), view.storage_offset() * target_width)
-    if offset % target_width or any(step % target_width for n, step in zip(view.shape, strides[:-1]) if n > 1) or strides[-1] != 1:
-        raise ValueError('placed bytes do not form the declared typed elements')
-    return offset // target_width, tuple(max(1, step // target_width) if n <= 1 else step // target_width
-                                        for n, step in zip(view.shape, strides[:-1]))
+    return descriptor(view).components(target_width).rebase(
+        descriptor(described).components(width), placed.components(width)).elements(target_width)
 
 
 def alias(described, placed, view):
-    offset, strides = indices(described, placed.stride(), placed.storage_offset(), view)
-    # A dtype view shares the same allocation; it does not convert values.
-    width = described.element_size()
-    storage = placed if placed.dtype == view.dtype else placed.as_strided((placed.untyped_storage().nbytes() // width,), (1,), 0).view(view.dtype)
-    return storage.as_strided(tuple(view.shape), strides, offset)
+    placed = TensorView.of(placed)
+    layout = relation(described, placed.layout, view)
+    return TensorView(placed.storage_as(view.dtype), layout)
 
 
 class Placements:

@@ -42,7 +42,7 @@ def place(graph, placements, fixed):
     a larger value needs producer splitting; incompatible demands need distinct
     layouts. Those cases retain their explicit materialization edges.
     """
-    from .placement import indices
+    from .placement import relation
     from .native import empty_strided
     from torch.utils._pytree import tree_flatten
     described = [v for n in graph.nodes for v in tree_flatten(n.meta.get('val'))[0]]
@@ -82,11 +82,12 @@ def place(graph, placements, fixed):
         if any(torch_alias(value, v) for v in fixed) or any(torch_alias(value, v) for v, _ in placements.bindings):
             continue
         try:
-            compatible = all(_matches(other.shape, indices(value, required, 0, other)[1], steps) for other, steps in group)
+            proposed = _stream.TensorLayout(tuple(value.shape), required)
+            compatible = all(relation(value, proposed, other).matches(steps) for other, steps in group)
             if compatible:
                 for other in described:
                     if torch_alias(value, other):
-                        indices(value, required, 0, other)
+                        relation(value, proposed, other)
         except ValueError:
             compatible = False
         if compatible:

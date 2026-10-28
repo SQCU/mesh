@@ -10,7 +10,7 @@ kernel void fwht(device const float *x [[buffer(0)]], device float *y [[buffer(1
   const uint N = dims[0], blocks_per_row = dims[1], row = block / blocks_per_row;
   const uint offset = (block % blocks_per_row) * N;
   for (uint i = t; i < N; i += threads)
-    v[i] = x[ulong(row) * dims[2] + ulong(offset + i) * dims[3]] * sign[ulong(offset + i) * dims[6]];
+    v[i] = x[mesh_index<0>(ulong(row) * N * blocks_per_row + offset + i)] * sign[mesh_index<2>(offset + i)];
   threadgroup_barrier(mem_flags::mem_threadgroup);
   for (uint h = 1; h < N; h <<= 1) {
     for (uint i = t; i < N / 2; i += threads) {
@@ -22,5 +22,5 @@ kernel void fwht(device const float *x [[buffer(0)]], device float *y [[buffer(1
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
   const float scale = rsqrt(float(N));
-  for (uint i = t; i < N; i += threads) y[ulong(row) * dims[4] + ulong(offset + i) * dims[5]] = v[i] * scale;
+  for (uint i = t; i < N; i += threads) y[mesh_index<1>(ulong(row) * N * blocks_per_row + offset + i)] = v[i] * scale;
 }

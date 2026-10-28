@@ -30,9 +30,9 @@ kernel void product(device INPUT *X [[buffer(0)]], device INPUT *W [[buffer(1)]]
         if(row+e[1]<M && col+e[0]<N) {
             float value=ALPHA*acc[i];
 #if BIAS
-            value+=BETA*float(bias[(row+e[1])*CM+(col+e[0])*CN]);
+            value+=BETA*float(bias[mesh_index<5>((BIAS_ROWS > 1 ? row+e[1] : 0)*BIAS_COLUMNS + (BIAS_COLUMNS > 1 ? col+e[0] : 0))]);
 #endif
-            mesh_step_write<OUTPUT>(Y,tg.z*YBATCH+(row+e[1])*YM+(col+e[0])*YN,
+            mesh_step_write<OUTPUT>(Y,mesh_index<2>((ulong(tg.z)*M+row+e[1])*N+col+e[0]),
                                     OUTPUT(ACTIVATE ? tanh(value) : value));
         }
     }

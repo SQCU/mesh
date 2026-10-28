@@ -53,21 +53,22 @@ def prepare(x, signs, width, *, out=None):
     if width <= 0 or width & (width - 1) or x.shape[-1] % width:
         raise ValueError('fwht blocks must be power-of-two factors of the row width')
     y = output(x.shape, x.dtype, x.device, out)
-    handle = _kernel(width)
+    from .layout import index_source
+    handle = _kernel(width, index_source({0: x, 1: y, 2: signs}))
     maximum, lanes, _ = _stream.pipeline_facts(handle)
     threads = min(maximum, max(lanes, width // 2))
     blocks = x.shape[-1] // width
-    return y, [(handle, [x, y, signs], {3: struct.pack('7I', width, blocks, *x.stride(), *y.stride(), signs.stride(0))},
+    return y, [(handle, [x, y, signs], {3: struct.pack('2I', width, blocks)},
                 (x.shape[0] * blocks, 1, 1), (threads, 1, 1), False,
                 5 | (2 << _stream.compilation['ACCESS_WRITE_SHIFT']))] if x.numel() else []
 
 
 @lru_cache(None)
-def _kernel(width):
+def _kernel(width, indices):
     _, _, memory = _stream.device_facts()
     if width * torch.float32.itemsize > memory:
         raise ValueError('fwht block exceeds the device threadgroup memory; select a smaller block during graph construction')
-    handle = _stream.pipeline(f'#define MESH_FWHT_WIDTH {width}\n' + SOURCE, 'fwht')
+    handle = _stream.pipeline(indices + f'#define MESH_FWHT_WIDTH {width}\n' + SOURCE, 'fwht')
     if _stream.pipeline_facts(handle)[2] > memory:
         raise ValueError('fwht specialized workspace exceeds the device threadgroup memory')
     return handle

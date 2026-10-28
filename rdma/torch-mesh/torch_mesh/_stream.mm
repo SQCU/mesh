@@ -1769,7 +1769,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def("gather",[](const TensorLayout &v,const std::vector<NSInteger> &shape,const std::vector<NSInteger> &indices){return TensorLayout([v.value gather:tensorNumbers(shape) indices:tensorWords(indices)]);})
     .def("rebase",[](const TensorLayout &v,const TensorLayout &declared,const TensorLayout &placed){
       @try{return TensorLayout([v.value rebase:declared.value onto:placed.value]);}
-      @catch(NSException *error){TORCH_CHECK(false,error.reason.UTF8String);}
+      @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
     })
     .def("matches",[](const TensorLayout &v,const std::vector<NSInteger> &steps){return bool([v.value matches:tensorNumbers(steps)]);})
     .def("required",[](const TensorLayout &v,const std::string &kind,const std::vector<NSInteger> &steps){return TensorLayout([v.value required:@(kind.c_str()) strides:tensorNumbers(steps)]);},pybind11::arg("kind"),pybind11::arg("strides")=std::vector<NSInteger>{})
@@ -1780,6 +1780,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
       @catch(NSException *error){TORCH_CHECK(false,error.reason.UTF8String);}
     })
     .def("declaration",[](const TensorLayout &v,NSUInteger binding){return std::string([v.value declaration:binding].UTF8String);})
+    .def("storage_declaration",[](const TensorLayout &v,NSUInteger binding,const TensorLayout &source){
+      return std::string([v.value declaration:binding fromStorage:source.value].UTF8String);})
+    .def("ordered_spans",[](const TensorLayout &v){
+      NSData *data=[v.value orderedSpans];const auto *spans=(const MetalTensorSpan *)data.bytes;
+      std::vector<std::pair<NSInteger,NSUInteger>> result;
+      for(NSUInteger i=0;i<data.length/sizeof *spans;i++)result.emplace_back(spans[i].offset,spans[i].count);
+      return result;
+    })
     .def("spans",[](const TensorLayout &v,NSUInteger bytes){
       NSData *data=[v.value reaches:nil base:0 elementBytes:bytes access:MetalReachRead binding:0];
       const MetalReach *spans=(const MetalReach *)data.bytes;std::vector<std::pair<NSUInteger,NSUInteger>> result;

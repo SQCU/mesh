@@ -88,15 +88,45 @@ access structure.
 
 This contract does not declare these existing paths complete:
 
-- FX `placement.indices` and `FixedLayout` still describe aliases with strides
-  alone. Arbitrary mappings must survive lowering without caller-owned copies.
+- Lifted FX constants still need a common import into bridge pages when their
+  source storage lies outside the region.
 - Some fused consumers load order arrays whose static compositions could be
   resolved earlier. Numerical index tensors must remain data.
 - Producer placement does not yet solve every conflicting API requirement or
   proper subdomain. Local materialization alone does not establish necessity.
 - Foreign providers still need all internal views and dependencies exposed.
+- Generic reduction crossings still accept tensor handles. Gather WRITE plans
+  and reduce-scatter cuts now retain ordered page selections; the remaining
+  crossings need that same binding contract.
 Further integration belongs at these shared lowering boundaries. Numerical
 bodies contribute their work and uses, rather than separate memory systems.
+
+## FX placement and numerical bindings
+
+FX aliases now use the shared layout algebra. The separate affine rebasing
+implementation has been removed. The graph keeps its logical index expressions;
+Metal source emission composes them with the assigned page selections. The
+command recorder receives those same selections for accesses. This works for
+ordinary and gathered operands, including values read as indices. Execution
+does not walk a layout object or choose an indexing implementation.
+
+Top-k, scans, sampling, FWHT and matrix outputs use the same index emitter.
+Matrix inputs carry the current MPP consumer's strided requirement in
+`etc/compute/metal-apis.json`. A supplied gathered input that does not meet that
+requirement gets a prepared conversion edge. Solving producer placement for
+proper subdomains remains the work listed above; that conversion alone does
+not establish an optimal placement.
+
+`orderedSpans` retains logical traversal and repeated reads for transport.
+It is distinct from the union of ranges used for dependencies. WRITE preparation
+uses it for gathered operands and keeps compact row descriptions for affine
+ones. Both descriptions enter the existing physical WRITE compiler.
+
+Preparation on 2026-10-27 compiled gathered loads and stores, a placed producer
+with alias and reduction consumers, and the numerical bindings listed above.
+The public FX frontend also accepted a prepared gathered operand. These were
+command and pipeline construction only; no numerical execution or performance
+measurement was performed.
 
 ## Compressed projections
 

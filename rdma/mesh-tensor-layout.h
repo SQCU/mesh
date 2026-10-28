@@ -3,6 +3,8 @@
 #include "nccl.h"
 NS_ASSUME_NONNULL_BEGIN
 
+struct MetalTensorSpan { NSInteger offset; NSUInteger count; };
+
 // Preparation data, never a runtime tensor or a descriptor followed by a kernel.
 // Every coordinate denotes one logical element. Its storage relation can be
 // affine, separable, or joint across axes; these are normal forms of one type.
@@ -41,6 +43,11 @@ NS_ASSUME_NONNULL_BEGIN
 // later lowering. Conflicts are preparation errors, before any numerical work.
 - (MetalTensorLayout *)requirements:(NSArray<NSDictionary *> *)requirements;
 - (NSString *)declaration:(NSUInteger)binding;
+// Lower the affine storage indices of a frontend IR to this page selection.
+// The source index is compiler structure, not a payload index tensor.
+- (NSString *)declaration:(NSUInteger)binding fromStorage:(MetalTensorLayout *)source;
+// Logical traversal order, including repeated reads; unlike dependency union.
+- (NSData *)orderedSpans;
 - (NSData *)reaches:(nullable id<MTLBuffer>)buffer base:(NSUInteger)base elementBytes:(NSUInteger)bytes
     access:(uint32_t)access binding:(int32_t)binding;
 @end

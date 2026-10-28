@@ -7,61 +7,6 @@ import itertools
 import operator
 
 
-def rebase(shape, strides, offset, placed_strides, placed_offset,
-           view_shape, view_strides, view_offset):
-    """Express a logical alias in a placed view, using bounded integer relations.
-
-    All offsets and strides have the same unit. This is a preparation operation;
-    its cost depends on the number of dimensions, not the number of elements.
-    A non-affine alias needs a different declared placement, not a packing copy.
-    """
-    shape, strides, placed_strides, view_shape, view_strides = (
-        tuple(map(operator.index, values))
-        for values in (shape, strides, placed_strides, view_shape, view_strides))
-    offset, placed_offset, view_offset = map(operator.index, (offset, placed_offset, view_offset))
-    if len(shape) != len(strides) or len(shape) != len(placed_strides) or len(view_shape) != len(view_strides):
-        raise ValueError('placement dimensions must match their strides')
-    if any(n < 0 for n in (*shape, *view_shape)):
-        raise ValueError('placement dimensions must be nonnegative')
-    if shape == view_shape and strides == view_strides and offset == view_offset:
-        return placed_offset, placed_strides
-    if 0 in view_shape:
-        return placed_offset, view_strides
-    axes = sorted(((s, p, n) for n, s, p in zip(shape, strides, placed_strides) if n > 1), reverse=True)
-    merged = []
-    for stride, placed, count in axes:
-        if stride <= 0 or placed < 0:
-            raise ValueError('a placed source needs positive logical strides')
-        if merged and merged[-1][0] == stride * count and merged[-1][1] == placed * count:
-            _, _, previous = merged.pop()
-            count *= previous
-        merged.append((stride, placed, count))
-
-    def bounds(base, steps):
-        spans = [(n - 1) * step for n, step in zip(view_shape, steps)]
-        return base + sum(min(0, span) for span in spans), base + sum(max(0, span) for span in spans)
-
-    remainder, steps = view_offset - offset, list(view_strides)
-    result, result_steps = placed_offset, [0] * len(view_shape)
-    for stride, placed, count in merged:
-        quotient = remainder // stride
-        deltas = [(remainder + step) // stride - quotient if n > 1 else 0
-                  for n, step in zip(view_shape, steps)]
-        remainder -= quotient * stride
-        steps = [step - delta * stride if n > 1 else 0
-                 for n, step, delta in zip(view_shape, steps, deltas)]
-        lo, hi = bounds(remainder, steps)
-        first, last = bounds(quotient, deltas)
-        if lo < 0 or hi >= stride or first < 0 or last >= count:
-            raise ValueError('alias cannot be represented by this affine placement')
-        result += quotient * placed
-        result_steps = [step + delta * placed for step, delta in zip(result_steps, deltas)]
-    if bounds(remainder, steps) != (0, 0):
-        raise ValueError('alias names elements outside its placed source')
-    # Singleton strides have no effect on addresses; retain a nonzero stride.
-    return result, tuple(step if n > 1 else max(1, step) for n, step in zip(view_shape, result_steps))
-
-
 def _byte_geometry(shape, strides, itemsize):
     shape = tuple(map(operator.index, shape))
     strides = tuple(map(operator.index, strides))

@@ -298,13 +298,9 @@ class ProcessGroupMesh(dist.ProcessGroup):
         forwarding rank a distinct relay lease. Local strides and span counts
         may differ; native preparation agrees their common logical byte units.
         """
-        from views import byte_layout
-        bindings = []
-        for view, source, destination in deliveries:
-            size = view.element_size()
-            shift, rows, spans = byte_layout(tuple(view.shape), [s * size for s in view.stride()], size)
-            base = (view.as_strided((1,), (1,), view.storage_offset() + shift // size) if shift else view)
-            bindings.append((base, rows, spans, int(source), int(destination)))
+        from .operand import TensorView
+        bindings = [(*TensorView.of(view).transfer(), int(source), int(destination))
+                    for view, source, destination in deliveries]
         return _stream.ViewWrites(bindings, self.handle)
 
     def union_cuts(self, cuts):
@@ -425,8 +421,11 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
 def prepare_fragments(bindings, group):
     """The common AOT binding for partial blocks and frontend graph crossings."""
+    from .operand import TensorView
     calls, operands = [], []
     for declaration, source, destination in bindings:
+        source = None if source is None else TensorView.of(source).tensor()
+        destination = None if destination is None else TensorView.of(destination).tensor()
         code = declaration.op if isinstance(declaration.op, int) else op(declaration.op)
         calls.append((declaration.kind, [source], [destination], declaration.counts or [], code, declaration.root))
         operands.extend(t for t in (source, destination) if t is not None)
@@ -465,10 +464,11 @@ def bind_scatter_views(source, output, dim, sizes, reduction, group):
     The partial-tensor API uses the same alias/cut calculation and native
     reductions. No transpose, packed operand or received-result copy is made.
     """
-    from views import alias_runs, cut_runs
+    from views import cut_runs
+    from .operand import TensorView, ordered_runs
     views = list(source.split(sizes, dim))
-    runs, total = alias_runs((rank, view.shape, view.stride(), view.storage_offset()) for rank, view in enumerate(views))
-    local, extent = alias_runs([(group.rank(), output.shape, output.stride(), output.storage_offset())])
+    runs, total = ordered_runs(enumerate(views))
+    local, extent = ordered_runs([(group.rank(), output)])
     start = sum(view.numel() for view in views[:group.rank()])
     cuts = group.union_cuts([0, total, *(end for _, end, _, _ in runs), start,
                              *(start + end for _, end, _, _ in local)])
@@ -477,11 +477,11 @@ def bind_scatter_views(source, output, dim, sizes, reduction, group):
     absent = empty(0, dtype=source.dtype, device=source.device.type)
     bindings = []
     for root, offset, count in cut_runs(runs, cuts):
-        send = source.as_strided((count,), (1,), offset)
+        send = TensorView.of(source).storage.as_strided((count,), (1,), offset)
         receive = absent
         if root == group.rank():
             _, at, length = next(own)
-            receive = output.as_strided((length,), (1,), at)
+            receive = TensorView.of(output).storage.as_strided((length,), (1,), at)
         bindings.append((Call(REDUCE, count, source.dtype, root=root, op=reduction), send, receive))
     return prepare_fragments(bindings, group)
 

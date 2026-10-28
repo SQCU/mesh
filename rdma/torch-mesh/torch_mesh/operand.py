@@ -39,6 +39,60 @@ class TensorView:
     def element_size(self):
         return self.storage.element_size()
 
+    @property
+    def ndim(self):
+        return len(self.shape)
+
+    def dim(self):
+        return self.ndim
+
+    def stride(self, axis=None):
+        # Strides are a requirement of a particular foreign API. Indexed
+        # numerical consumers use layout.declaration instead.
+        if not self.layout.affine:
+            raise ValueError('the consumer requested strides for an indexed operand')
+        steps = tuple(self.layout.strides)
+        return steps if axis is None else steps[axis]
+
+    def storage_offset(self):
+        return self.layout.offset
+
+    def is_contiguous(self):
+        from .layout import strides
+        return self.layout.matches(strides(self.shape))
+
+    def is_floating_point(self):
+        return self.dtype.is_floating_point
+
+    def storage_as(self, dtype):
+        """A scalar handle for the same allocation; no values are converted."""
+        if dtype == self.dtype:
+            return self.storage
+        width = self.storage.untyped_storage().nbytes() // self.element_size()
+        return self.storage.as_strided((width,), (1,), 0).view(dtype)
+
+    def typed(self, dtype):
+        """Reinterpret equal-width scalars without changing their page selection."""
+        if dtype.itemsize != self.element_size():
+            raise ValueError('a scalar reinterpretation preserves its declared width')
+        return TensorView(self.storage_as(dtype), self.layout)
+
+    def tensor(self):
+        """Bind an API which explicitly requires a strided tensor handle."""
+        if not self.layout.affine:
+            raise ValueError('this API binding requires a strided layout')
+        return self.storage.as_strided(self.shape, tuple(self.layout.strides), self.layout.offset)
+
+    def narrow(self, axis, first, count):
+        return self.slice(axis % self.ndim, first, count)
+
+    def split(self, sizes, axis=0):
+        first, result = 0, []
+        for size in sizes:
+            result.append(self.narrow(axis, first, size))
+            first += size
+        return tuple(result)
+
     def slice(self, axis, first, count, step=1):
         return TensorView(self.storage, self.layout.slice(axis, first, count, step))
 
@@ -54,9 +108,44 @@ class TensorView:
     def reshape(self, shape):
         return TensorView(self.storage, self.layout.reshape(shape))
 
+    def t(self):
+        return self.permute((1, 0))
+
+    def rows(self, axis):
+        """Put one logical axis last for row-wise numerical kernels."""
+        import math
+        axis %= self.ndim
+        axes = (*[d for d in range(self.ndim) if d != axis], axis)
+        width = self.shape[axis]
+        rows = math.prod(self.shape[d] for d in axes[:-1])
+        return self.permute(axes).reshape((rows, width))
+
+    def transfer(self):
+        """The common WRITE descriptor, retaining order and repeated reads."""
+        from views import byte_layout
+        size = self.element_size()
+        if self.layout.affine:
+            shift, rows, spans = byte_layout(self.shape, [s * size for s in self.layout.strides], size)
+            first = self.layout.offset + shift // size
+        else:
+            runs = self.layout.ordered_spans()
+            first = min((at for at, _ in runs), default=self.layout.offset)
+            rows, spans = (0, 0, 0), [((at - first) * size, count * size) for at, count in runs]
+        base = self.storage.as_strided((int(bool(self.numel())),), (1,), first)
+        return base, rows, spans
+
     def declaration(self, requirement):
         return dict(source=descriptor(self.storage).state, view=self.layout.state, requirement=requirement)
 
+
+def ordered_runs(segments):
+    """Concatenate page selections as logical intervals for collective cuts."""
+    runs, cursor = [], 0
+    for identity, value in segments:
+        for offset, count in descriptor(value).ordered_spans():
+            runs.append((cursor, cursor + count, identity, offset))
+            cursor += count
+    return runs, cursor
 
 def restore(state):
     shape, steps, offset, maps, indices = state

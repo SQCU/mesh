@@ -25,8 +25,8 @@ kernel void select_top(device const INPUT *source [[buffer(0)]], device INPUT *v
                        uint row [[threadgroup_position_in_grid]], uint lid [[thread_index_in_threadgroup]]) {
     threadgroup uint words[mesh_selection_words<THREADS>];
     threadgroup uint chosen[LOCAL ? PAD : 1];
-    const ulong base = source_base(row), out = output_base(row);
-    auto key = [&](uint c) { return top_order(source[base + ulong(c) * INPUT_STRIDE]); };
+    const ulong base = ulong(row) * EXTENT, out = ulong(row) * COUNT;
+    auto key = [&](uint c) { return top_order(source[mesh_index<0>(base + c)]); };
     if constexpr (LOCAL) {
         for (uint i = lid; i < PAD; i += THREADS) chosen[i] = 0xffffffffu;
         threadgroup uint *held = chosen;
@@ -37,8 +37,8 @@ kernel void select_top(device const INPUT *source [[buffer(0)]], device INPUT *v
         }
         for (uint i = lid; i < COUNT; i += THREADS) {
             const uint c = chosen[i];
-            values[out + ulong(i) * OUTPUT_STRIDE] = source[base + ulong(c) * INPUT_STRIDE];
-            indices[index_base(row) + ulong(i) * INDEX_STRIDE] = long(c);
+            values[mesh_index<1>(out + i)] = source[mesh_index<0>(base + c)];
+            indices[mesh_index<2>(ulong(row) * COUNT + i)] = long(c);
         }
     } else if constexpr (SORTED) {
         device uint *held = scratch + ulong(row) * PAD;
@@ -46,8 +46,8 @@ kernel void select_top(device const INPUT *source [[buffer(0)]], device INPUT *v
         mesh_top_ordered<THREADS>(key, 0, EXTENT, COUNT, lid, words, [&](uint i, uint c) { held[i] = c; });
     } else {
         mesh_top_ordered<THREADS>(key, 0, EXTENT, COUNT, lid, words, [&](uint i, uint c) {
-            values[out + ulong(i) * OUTPUT_STRIDE] = source[base + ulong(c) * INPUT_STRIDE];
-            indices[index_base(row) + ulong(i) * INDEX_STRIDE] = long(c);
+            values[mesh_index<1>(out + i)] = source[mesh_index<0>(base + c)];
+            indices[mesh_index<2>(ulong(row) * COUNT + i)] = long(c);
         });
     }
 }
@@ -55,18 +55,18 @@ kernel void select_top(device const INPUT *source [[buffer(0)]], device INPUT *v
 kernel void order_top(device const INPUT *source [[buffer(0)]], device uint *scratch [[buffer(1)]],
                       constant uint *step [[buffer(2)]],
                       uint row [[threadgroup_position_in_grid]], uint lid [[thread_index_in_threadgroup]]) {
-    const ulong base = source_base(row);
+    const ulong base = ulong(row) * EXTENT;
     top_pairs(scratch + ulong(row) * PAD,
-              [&](uint c) { return top_order(source[base + ulong(c) * INPUT_STRIDE]); }, lid, step[0], step[1]);
+              [&](uint c) { return top_order(source[mesh_index<0>(base + c)]); }, lid, step[0], step[1]);
 }
 
 kernel void write_top(device const INPUT *source [[buffer(0)]], device INPUT *values [[buffer(1)]],
                       device long *indices [[buffer(2)]], device const uint *scratch [[buffer(3)]],
                       uint row [[threadgroup_position_in_grid]], uint lid [[thread_index_in_threadgroup]]) {
-    const ulong base = source_base(row), out = output_base(row);
+    const ulong base = ulong(row) * EXTENT, out = ulong(row) * COUNT;
     for (uint i = lid; i < COUNT; i += THREADS) {
         const uint c = scratch[ulong(row) * PAD + i];
-        values[out + ulong(i) * OUTPUT_STRIDE] = source[base + ulong(c) * INPUT_STRIDE];
-        indices[index_base(row) + ulong(i) * INDEX_STRIDE] = long(c);
+        values[mesh_index<1>(out + i)] = source[mesh_index<0>(base + c)];
+        indices[mesh_index<2>(ulong(row) * COUNT + i)] = long(c);
     }
 }

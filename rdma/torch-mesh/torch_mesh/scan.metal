@@ -5,12 +5,12 @@ kernel void scan_blocks(device const INPUT *source [[buffer(0)]], device OUTPUT 
                         uint2 block [[threadgroup_position_in_grid]], uint lid [[thread_index_in_threadgroup]]) {
     threadgroup ACCUM sums[THREADS / MESH_SIMD_WIDTH];
     const ulong column = ulong(block.x) * THREADS + lid;
-    const ulong at = output_base(block.y) + column * OUTPUT_STRIDE;
-    const ACCUM value = column < EXTENT ? ACCUM(OUTPUT(source[source_base(block.y) + column * INPUT_STRIDE])) : ACCUM(0);
+    const ulong at = mesh_index<1>(ulong(block.y) * EXTENT + column);
+    const ACCUM value = column < EXTENT ? ACCUM(OUTPUT(source[mesh_index<0>(ulong(block.y) * EXTENT + column)])) : ACCUM(0);
     ACCUM total;
     const ACCUM prefix = mesh_prefix_sum<THREADS>(value, lid, sums, total);
     if constexpr (BLOCKS > 1) {
-        if (column < EXTENT) partial[partial_base(block.y) + column * PARTIAL_STRIDE] = prefix;
+        if (column < EXTENT) partial[mesh_index<2>(ulong(block.y) * EXTENT + column)] = prefix;
         if (lid == 0) totals[ulong(block.y) * BLOCKS + block.x] = total;
     } else if (column < EXTENT) output[at] = OUTPUT(prefix);
 }
@@ -20,8 +20,8 @@ kernel void add_prefix(device OUTPUT *output [[buffer(0)]], device const ACCUM *
                        uint2 block [[threadgroup_position_in_grid]], uint lid [[thread_index_in_threadgroup]]) {
     const ulong column = ulong(block.x) * THREADS + lid;
     if (column < EXTENT) {
-        const ulong at = output_base(block.y) + column * OUTPUT_STRIDE;
+        const ulong at = mesh_index<1>(ulong(block.y) * EXTENT + column);
         const ACCUM before = block.x ? prefix[ulong(block.y) * BLOCKS + block.x - 1] : ACCUM(0);
-        output[at] = OUTPUT(before + partial[partial_base(block.y) + column * PARTIAL_STRIDE]);
+        output[at] = OUTPUT(before + partial[mesh_index<2>(ulong(block.y) * EXTENT + column)]);
     }
 }

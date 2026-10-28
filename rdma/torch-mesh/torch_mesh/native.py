@@ -13,6 +13,7 @@ import torch
 
 from . import _stream
 from .compilation import operands as compiler_operands
+from .operand import TensorView, descriptor
 
 _records = ContextVar('mesh_native_commands')
 
@@ -22,13 +23,6 @@ def empty_strided(shape, stride, dtype, device):
     from . import empty
     extent = 0 if math.prod(shape) == 0 else 1 + sum((n - 1) * s for n, s in zip(shape, stride))
     return empty((extent,), dtype=dtype, device=device).as_strided(shape, stride)
-
-
-def row_offset(name, shape, strides, axis):
-    """Emit the base of a tensor view's rows along one declared axis."""
-    expression = _stream.view_index([n for d, n in enumerate(shape) if d != axis],
-                                    [s for d, s in enumerate(strides) if d != axis], 'row')
-    return f'inline ulong {name}(uint row) {{ return {expression}; }}\n'
 
 
 @lru_cache(None)
@@ -50,8 +44,8 @@ def shader(source, name, access):
         group = tuple(group_size) + (1,) * (3 - len(group_size))
         tensors, constants = [], {}
         for index, value in enumerate(arguments):
-            tensors.append(value if isinstance(value, torch.Tensor) else None)
-            if not isinstance(value, torch.Tensor):
+            tensors.append(value if isinstance(value, (torch.Tensor, TensorView)) else None)
+            if not isinstance(value, (torch.Tensor, TensorView)):
                 constants[index] = struct.pack('q', int(value))
         _records.get().append((handle, tensors, constants, grid, group, True, access))
     return bind
@@ -65,28 +59,30 @@ def linears(xs, ws, biases, acts, x1s, *, outputs=None):
     from .placement import output
     outputs = [output((x.shape[0], w.shape[0]), x.dtype, x.device, out)
                for x, w, out in zip(xs, ws, outputs if outputs is not None else [None] * len(xs), strict=True)]
-    if all(x.dtype == w.dtype == torch.half and x.shape[0] <= compiler_operands()['LINEAR_ROW_CROSSOVER'] and x.stride(1) == w.stride(1) == 1
+    if (all(descriptor(value).affine for value in (*xs, *ws, *biases, *x1s, *outputs) if value is not None)
+        and all(x.dtype == w.dtype == torch.half and x.shape[0] <= compiler_operands()['LINEAR_ROW_CROSSOVER'] and x.stride(1) == w.stride(1) == 1
            and (part is None or part.stride(1) == 1) and (bias is None or bias.is_contiguous())
-           for x, w, part, bias, out in zip(xs, ws, x1s, biases, outputs)):
-        _records.get().extend(_stream.linear_commands(xs, ws, biases, acts, x1s, outputs))
+           for x, w, part, bias, out in zip(xs, ws, x1s, biases, outputs))):
+        handles = lambda values: [None if v is None else TensorView.of(v).tensor() for v in values]
+        _records.get().extend(_stream.linear_commands(handles(xs), handles(ws), handles(biases), acts, handles(x1s), handles(outputs)))
     else:
         from .matrix import product
         for x, w, part, bias, act, out in zip(xs, ws, x1s, biases, acts, outputs):
             if out.numel():
-                _records.get().append(product(x, w.t(), out, x1=part, bias=bias, act=bool(act)))
+                _records.get().extend(product(x, w.t(), out, x1=part, bias=bias, act=bool(act)))
     return outputs
 
 
 def mm(x, w, *, out):
     from .matrix import product
     if out.numel():
-        _records.get().append(product(x, w, out))
+        _records.get().extend(product(x, w, out))
 
 
 def addmm(bias, x, w, *, out, alpha=1, beta=1):
     from .matrix import product
     if out.numel():
-        _records.get().append(product(x, w, out, bias=bias, alpha=alpha, beta=beta))
+        _records.get().extend(product(x, w, out, bias=bias, alpha=alpha, beta=beta))
 
 
 def topk(x, k, dim=-1, largest=True, sorted=True, *, outputs=None):
@@ -145,7 +141,7 @@ def compile_graph(module, metadata, operands, *, destinations=None):
     from torch._subclasses.fake_tensor import unset_fake_temporarily
     from torch._inductor import config
     from torch._inductor.codegen.common import get_device_op_overrides
-    from torch._inductor.codegen.mps import MetalScheduling
+    from torch._inductor.codegen.mps import MetalScheduling, MetalKernel
     from torch._inductor.codegen.wrapper import PythonWrapperCodegen
     from torch._inductor.graph import GraphLowering
     from torch._inductor.scheduler import Scheduler
@@ -155,9 +151,56 @@ def compile_graph(module, metadata, operands, *, destinations=None):
     from torch.utils._pytree import tree_flatten, tree_unflatten
     from torch.fx.node import map_arg
     from .placement import Placements, same_view
-    from views import rebase
+    from contextlib import contextmanager
 
-    placements, bound_storage, placed_values = Placements(), {}, []
+    placements, bound_storage, views, storage_layouts = Placements(), {}, [], {}
+
+    class PageKernel(MetalKernel):
+        # These objects exist during source emission only. The numerical body
+        # receives page bindings and the resulting ordinary address expression.
+        @contextmanager
+        def access(self, name):
+            previous = getattr(self, 'page_access', None)
+            self.page_access = name
+            try:
+                yield
+            finally:
+                self.page_access = previous
+
+        def index_to_str(self, index):
+            expression = super().index_to_str(index)
+            name = getattr(self, 'page_access', None)
+            if name in storage_layouts:
+                bindings = self.__dict__.setdefault('page_bindings', {})
+                slot = bindings.setdefault(name, len(bindings))
+                return f'mesh_storage_{slot}({expression})'
+            return expression
+
+        def load(self, name, index):
+            with self.access(name):
+                return super().load(name, index)
+
+        def store(self, name, index, value, mode=None):
+            with self.access(name):
+                return super().store(name, index, value, mode)
+
+        def store_reduction(self, name, index, value):
+            with self.access(name):
+                return super().store_reduction(name, index, value)
+
+    class PageView(ir.ReinterpretView):
+        def codegen_reference(self, writer=None):
+            index = len(views)
+            views.append(self.operand)
+            return f'mesh_views[{index}]'
+
+    def page_view(storage, layout, operand):
+        result = PageView(data=storage, layout=layout)
+        result.operand = operand
+        return ir.TensorBox(result)
+
+    def ir_layout(layout):
+        return _stream.TensorLayout(tuple(map(int, layout.size)), tuple(map(int, layout.stride)), int(layout.offset))
     output_nodes = next(n.args[0] for n in module.graph.nodes if n.op == 'output')
     described_outputs = tree_flatten(map_arg(output_nodes, lambda n: n.meta['val']))[0]
     if destinations is not None:
@@ -165,11 +208,25 @@ def compile_graph(module, metadata, operands, *, destinations=None):
             if destination is not None:
                 placements.bind(described, destination)
     input_storage = dict(zip((n.name for n in module.graph.nodes if n.op == 'placeholder'), operands, strict=True))
+    for node in module.graph.nodes:
+        if node.op == 'placeholder' and isinstance(node.meta.get('val'), torch.Tensor):
+            placements.bind(node.meta['val'], input_storage[node.name])
     from .layout import place
     place(module.graph, placements, [v for n in module.graph.nodes if n.op in ('placeholder', 'get_attr')
                                     for v in tree_flatten(n.meta.get('val'))[0]])
 
     class Preparation(PythonWrapperCodegen):
+        def codegen_reinterpret_view(self, data, size, stride, offset, writeline, dtype=None):
+            if data.get_name() not in storage_layouts:
+                return super().codegen_reinterpret_view(data, size, stride, offset, writeline, dtype)
+            original, physical = storage_layouts[data.get_name()]
+            dtype = physical.dtype if dtype is None else dtype
+            described = _stream.TensorLayout(tuple(map(int, size)), tuple(map(int, stride)), int(offset))
+            mapped = described.components(dtype.itemsize).rebase(
+                original.components(physical.element_size()), physical.layout.components(physical.element_size())).elements(dtype.itemsize)
+            views.append(TensorView(physical.storage_as(dtype), mapped))
+            return f'mesh_views[{len(views) - 1}]'
+
         def make_allocation(self, name, device, dtype, shape, stride, allocation_shape=None, is_pinned=False):
             if name in bound_storage:
                 return f'{name} = mesh_destinations[{name!r}]'
@@ -215,19 +272,26 @@ def compile_graph(module, metadata, operands, *, destinations=None):
             self.writeline(f'mesh_native.{names[kernel]}({", ".join(args)}, out={out_view or out})')
 
     class MetalSource(MetalScheduling):
+        kernel_type = PageKernel
+
         def define_kernel(self, source, node_schedule, kernel):
             wrapper = V.graph.wrapper_code
-            if source in wrapper.src_to_kernel:
-                return wrapper.src_to_kernel[source]
             start = source.index("compile_mps_shader('''") + len("compile_mps_shader('''")
             source_text = source[start:source.rindex("''')")]
+            declarations = []
+            for name, slot in getattr(kernel, 'page_bindings', {}).items():
+                original, operand = storage_layouts[name]
+                declarations.append(operand.layout.storage_declaration(slot, original))
+            source_text = _stream.view_prelude() + ''.join(declarations) + source_text
+            if source_text in wrapper.src_to_kernel:
+                return wrapper.src_to_kernel[source_text]
             if 'error' in kernel.headers:
                 raise NotImplementedError('runtime index assertions must be resolved in the declared graph')
             outputs = [name for name in kernel.args.output_buffers if name not in kernel.removed_buffers]
             inputs = list(kernel.args.input_buffers)
             access = (1 << (len(outputs) + len(inputs))) - 1 | ((1 << len(outputs)) - 1) << _stream.compilation['ACCESS_WRITE_SHIFT']
             name = f'mesh_kernel_{wrapper.next_kernel_suffix()}'
-            wrapper.src_to_kernel[source] = name
+            wrapper.src_to_kernel[source_text] = name
             wrapper.header.writeline(f'{name} = mesh_native.shader({source_text!r}, "generated_kernel", {access})')
             return name
 
@@ -239,20 +303,6 @@ def compile_graph(module, metadata, operands, *, destinations=None):
 
     class NativeGraph(GraphLowering):
         def run_node(self, node):
-            logical = node.meta.get('val')
-            schema = getattr(node.target, '_schema', None)
-            # A declared alias of an already placed producer is just a view.
-            # Lower it here, before an upstream reshape helper can pack it.
-            if (node.op == 'call_function' and isinstance(logical, torch.Tensor)
-                    and schema is not None and not schema.is_mutable
-                    and len(schema.returns) == 1 and schema.returns[0].alias_info is not None):
-                for previous, storage, physical in reversed(placed_values):
-                    if previous.dtype == logical.dtype and torch._C._is_alias_of(previous, logical):
-                        with unset_fake_temporarily():
-                            destination = placements.get(logical)
-                        layout = ir.FixedLayout(logical.device, logical.dtype, list(destination.shape),
-                                                list(destination.stride()), destination.storage_offset() - physical.storage_offset())
-                        return ir.TensorBox(ir.ReinterpretView(data=storage, layout=layout))
             result = super().run_node(node)
             if not placements.bindings or node.op == 'output' or 'val' not in node.meta:
                 return result
@@ -277,29 +327,31 @@ def compile_graph(module, metadata, operands, *, destinations=None):
                 if isinstance(buffer, ir.InputBuffer):
                     actual = input_storage[node.name] if node.op == 'placeholder' else input_storage[buffer.get_name()]
                     with unset_fake_temporarily():
-                        actual = actual.as_strided(tuple(layout.size), tuple(layout.stride), actual.storage_offset() + int(layout.offset))
+                        from .placement import alias
+                        # Inputs keep their supplied pages. Their aliases use
+                        # the same declaration-to-placement relation as outputs.
+                        original = next(n.meta['val'] for n in module.graph.nodes
+                                        if n.op == 'placeholder' and n.name == buffer.get_name())
+                        actual = alias(original, actual, logical)
                         if not same_view(actual, destination):
                             raise ValueError('a supplied graph input cannot be relocated by producer placement')
-                    placed_values.append((logical, storage, input_storage[buffer.get_name()]))
+                    physical = TensorView.of(input_storage[buffer.get_name()])
+                    storage_layouts[name] = (ir_layout(buffer.get_layout()), physical)
+                    leaves[i] = page_view(storage, layout, destination)
                     continue
-                if buffer.get_dtype() != destination.dtype:
-                    raise ValueError('native producer placement requires a matching storage element type')
                 if name not in bound_storage:
                     base = buffer.get_layout()
-                    offset, strides = rebase(layout.size, layout.stride, layout.offset,
-                                              destination.stride(), destination.storage_offset(),
-                                              base.size, base.stride, base.offset)
+                    source_layout, base_layout = ir_layout(layout), ir_layout(base)
                     with unset_fake_temporarily():
-                        bound_storage[name] = destination.as_strided(tuple(base.size), strides, offset)
-                    buffer.layout = ir.FixedLayout(base.device, base.dtype, list(base.size), list(strides))
+                        mapped = base_layout.components(base.dtype.itemsize).rebase(
+                            source_layout.components(layout.dtype.itemsize),
+                            destination.layout.components(destination.element_size())).elements(base.dtype.itemsize)
+                        bound_storage[name] = TensorView(destination.storage_as(base.dtype), mapped)
+                    storage_layouts[name] = (base_layout, bound_storage[name])
                     self.never_reuse_buffers.add(name)
-                placed = bound_storage[name]
-                placed_values.append((logical, storage, placed))
-                relative = destination.storage_offset() - placed.storage_offset()
-                view = ir.FixedLayout(layout.device, layout.dtype, list(layout.size), list(destination.stride()), relative)
-                # Views retain their physical relation after the producer's
-                # layout changes. No tensor copy is introduced to freeze it.
-                leaves[i] = ir.TensorBox(ir.ReinterpretView(data=storage, layout=view))
+                # Logical IR remains unchanged. Emission and command binding
+                # use the producer's one physical page relation.
+                leaves[i] = page_view(storage, layout, destination)
             return tree_unflatten(leaves, spec)
 
         def init_wrapper_code(self, *args, **kwargs):
@@ -322,7 +374,7 @@ def compile_graph(module, metadata, operands, *, destinations=None):
         with V.set_graph_handler(graph), V.set_extern_kernel_nodes([]), mode:
             graph.run(*metadata)
             source, _ = graph.codegen()
-        namespace = {'__name__': 'mesh_preparation', 'mesh_destinations': bound_storage}
+        namespace = {'__name__': 'mesh_preparation', 'mesh_destinations': bound_storage, 'mesh_views': views}
         records = []
         token = _records.set(records)
         try:

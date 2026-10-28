@@ -5,14 +5,15 @@ from pathlib import Path
 
 import torch
 from . import _stream, empty
-from .native import row_offset
+from .operand import TensorView
+from .layout import index_source
 
 
 @lru_cache(None)
 def pipelines(definitions, offsets):
     directory = Path(__file__).parent
     source = ''.join(f'#define {k} {v}\n' for k, v in definitions)
-    source += (directory / 'argmax.metal').read_text() + '\n' + offsets
+    source += offsets + (directory / 'argmax.metal').read_text() + '\n'
     source += (directory / 'scan.metal').read_text()
     return tuple(_stream.pipeline(source, name) for name in ('scan_blocks', 'add_prefix'))
 
@@ -28,8 +29,9 @@ def cumsum(x, dim, *, dtype=None, out=None):
     output = bind_output(x.shape, dtype, x.device, out)
     if not x.numel():
         return output, []
-    source = x if x.ndim else x.view(1)
-    target = output if x.ndim else output.view(1)
+    source, target = TensorView.of(x), TensorView.of(output)
+    if not source.ndim:
+        source, target = source.reshape((1,)), target.reshape((1,))
     dim %= source.ndim
     rows = math.prod(source.shape[:dim] + source.shape[dim + 1:])
     accumulator = torch.float32 if output.is_floating_point() else (torch.uint64 if output.element_size() > 4 else torch.uint32)
@@ -43,14 +45,13 @@ def cumsum(x, dim, *, dtype=None, out=None):
     blocks = -(-extent // threads)
     totals = empty((rows, blocks), dtype=accumulator) if blocks > 1 else None
     # Partial sums use their own layout when accumulation changes the width.
-    partial = (target.view(accumulator) if target.element_size() == accumulator.itemsize
+    source, target = source.rows(dim), target.rows(dim)
+    partial = (target.typed(accumulator) if target.element_size() == accumulator.itemsize
                else empty(source.shape, dtype=accumulator)) if blocks > 1 else target
     definitions = dict(INPUT=kinds[source.dtype], OUTPUT=kinds[dtype], ACCUM=kinds[accumulator],
-                       INPUT_STRIDE=source.stride(dim), OUTPUT_STRIDE=target.stride(dim),
-                       PARTIAL_STRIDE=partial.stride(dim), EXTENT=extent, BLOCKS=blocks, THREADS=threads)
+                       EXTENT=extent, BLOCKS=blocks, THREADS=threads)
 
-    offsets = (row_offset('source_base', source.shape, source.stride(), dim) + row_offset('output_base', source.shape, target.stride(), dim)
-               + row_offset('partial_base', source.shape, partial.stride(), dim))
+    offsets = index_source({0: source, 1: target, 2: partial})
     handles = pipelines(tuple(definitions.items()), offsets)
     for handle in handles:
         maximum, _, fixed = _stream.pipeline_facts(handle)
