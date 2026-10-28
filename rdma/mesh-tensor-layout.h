@@ -52,6 +52,14 @@ struct MetalTensorSpan { NSInteger offset; NSUInteger count; };
     access:(uint32_t)access binding:(int32_t)binding;
 @end
 
+// Place one storage domain from declared use layouts. All indices and widths
+// use the caller's common scalar unit. `values` preserves typed element fields
+// and alignment; `uses`/`targets` impose relative positions for consumers.
+// A nil result means no common zero-copy placement exists. No data moves.
+FOUNDATION_EXPORT MetalTensorLayout * _Nullable MetalTensorPlace(NSUInteger count,
+    NSArray<MetalTensorLayout *> *uses, NSArray<MetalTensorLayout *> *targets,
+    NSArray<MetalTensorLayout *> *values, NSArray<NSNumber *> *widths);
+
 // The storage domain is the bridge's existing page table. This is compiler
 // metadata: it resolves local frontend handles once and emits backend bindings.
 // Neither this object nor a tensor layout is followed during execution.

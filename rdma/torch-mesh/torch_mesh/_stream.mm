@@ -1797,6 +1797,16 @@ static bool completed(pybind11::object observation) {
 // The group's calls (torch_mesh/backend.py): `issue` a group of calls, issued and not completed where `split` (a
 // MeshWork to wait on, its outputs `outputs`), else None (complete).
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
+  module.def("place_layout",[](NSUInteger count,const std::vector<TensorLayout> &uses,
+      const std::vector<TensorLayout> &targets,const std::vector<TensorLayout> &values,const std::vector<NSInteger> &widths)->pybind11::object {
+    auto layouts=[](const std::vector<TensorLayout> &items) {
+      NSMutableArray *result=[NSMutableArray array];for(const auto &item:items)[result addObject:item.value];return result;
+    };
+    @try {
+      MetalTensorLayout *placed=MetalTensorPlace(count,layouts(uses),layouts(targets),layouts(values),tensorNumbers(widths));
+      return placed?pybind11::cast(TensorLayout(placed)):pybind11::none();
+    } @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
+  });
   module.def("import_attributes",&import_attributes);
   module.def("completion", &completion);
   module.def("completed", &completed);

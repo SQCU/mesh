@@ -87,7 +87,7 @@ def prepare(inputs, input_slots, output_slots, output_strides, shapes, dtypes, d
         for index in slots:
             prepare_binding(index, value, True)
             write |= 1 << index
-    constants = {constant_slot: struct.pack(f'{len(words)}I', *(v & 0xffffffff for v in words))}
+    constants = {constant_slot: struct.pack(f'{len(words)}I', *(v & 0xffffffff for v in words))} if words else {}
     commands.append((pipeline(source, name, instance, layout.index_source(addresses)), buffers, constants, tuple(grid), tuple(threads), False,
                      read | (write << _stream.compilation['ACCESS_WRITE_SHIFT'])))
     return results, commands + after

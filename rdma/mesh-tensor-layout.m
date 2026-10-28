@@ -30,6 +30,109 @@ static NSArray *TensorInverseAxes(MetalTensorLayout *declared,NSInteger *origin)
     *origin=low;return axes;
 }
 
+// Weighted union-find: position(b) - position(a) = distance. These equations
+// exist only during placement; the result is the ordinary shared layout.
+struct TensorPosition { NSUInteger parent, size; NSInteger delta; };
+static NSUInteger TensorRoot(struct TensorPosition *nodes,NSUInteger i) {
+    if(nodes[i].parent!=i) {
+        const NSUInteger p=nodes[i].parent;
+        nodes[i].parent=TensorRoot(nodes,p);nodes[i].delta+=nodes[p].delta;
+    }
+    return nodes[i].parent;
+}
+static BOOL TensorJoin(struct TensorPosition *nodes,NSUInteger a,NSUInteger b,NSInteger distance) {
+    const NSUInteger x=TensorRoot(nodes,a),y=TensorRoot(nodes,b);
+    const NSInteger shift=distance+nodes[a].delta-nodes[b].delta;
+    if(x==y)return shift==0;
+    if(nodes[x].size>=nodes[y].size) {
+        nodes[y].parent=x;nodes[y].delta=shift;nodes[x].size+=nodes[y].size;
+    } else { nodes[x].parent=y;nodes[x].delta=-shift;nodes[y].size+=nodes[x].size; }
+    return YES;
+}
+static NSInteger TensorMod(NSInteger value,NSInteger modulus) {
+    const NSInteger remainder=value%modulus;return remainder<0?remainder+modulus:remainder;
+}
+struct TensorPlacementGroup { NSInteger low, high, phase, modulus, base; };
+static BOOL TensorAlign(struct TensorPlacementGroup *group,NSInteger phase,NSInteger modulus) {
+    // Combine two alignment congruences, including widths with different factors.
+    NSInteger a=group->modulus,b=modulus,x=1,y=0;
+    while(b){const NSInteger q=a/b,t=a%b;a=b;b=t;const NSInteger next=x-q*y;x=y;y=next;}
+    const NSInteger difference=phase-group->phase;
+    if(difference%a)return NO;
+    const NSInteger factor=modulus/a;
+    const NSInteger step=factor==1?0:TensorMod((difference/a)*x,factor);
+    group->phase+=group->modulus*step;group->modulus*=factor;
+    group->phase=TensorMod(group->phase,group->modulus);return YES;
+}
+static int TensorPositionCompare(const void *left,const void *right) {
+    const NSInteger a=((const struct TensorPosition *)left)->delta,b=((const struct TensorPosition *)right)->delta;
+    return (a>b)-(a<b);
+}
+MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *> *uses,
+    NSArray<MetalTensorLayout *> *targets,NSArray<MetalTensorLayout *> *values,NSArray<NSNumber *> *widths) {
+    NSCParameterAssert(uses.count==targets.count&&values.count==widths.count);
+    struct TensorPosition *nodes=calloc(count?count:1,sizeof *nodes);
+    struct TensorPlacementGroup *groups=calloc(count?count:1,sizeof *groups);
+    MetalTensorLayout *result=nil;
+    if(!nodes||!groups){free(nodes);free(groups);[NSException raise:NSMallocException format:@"tensor placement metadata"];}
+    for(NSUInteger i=0;i<count;i++) {
+        nodes[i]=(struct TensorPosition){i,1,0};
+        groups[i]=(struct TensorPlacementGroup){NSIntegerMax,NSIntegerMin,0,1,0};
+    }
+    // A typed scalar's components stay adjacent even when no API constrains
+    // that part of the allocation. Differently typed aliases contribute here too.
+    for(NSUInteger k=0;k<values.count;k++) {
+        MetalTensorLayout *value=values[k];const NSUInteger width=widths[k].unsignedIntegerValue;
+        NSCParameterAssert(width&&value.count%width==0);
+        for(NSUInteger i=0;i<value.count;i+=width) {
+            const NSUInteger first=(NSUInteger)[value index:i];NSCParameterAssert(first<count);
+            for(NSUInteger j=1;j<width;j++) {
+                const NSUInteger next=(NSUInteger)[value index:i+j];NSCParameterAssert(next<count);
+                if(!TensorJoin(nodes,first,next,(NSInteger)j))goto finished;
+            }
+        }
+    }
+    for(NSUInteger k=0;k<uses.count;k++) {
+        MetalTensorLayout *use=uses[k],*target=targets[k];NSCParameterAssert(use.count==target.count);
+        if(!use.count)continue;
+        const NSUInteger first=(NSUInteger)[use index:0];const NSInteger origin=[target index:0];
+        NSCParameterAssert(first<count);
+        for(NSUInteger i=1;i<use.count;i++) {
+            const NSUInteger next=(NSUInteger)[use index:i];NSCParameterAssert(next<count);
+            if(!TensorJoin(nodes,first,next,[target index:i]-origin))goto finished;
+        }
+    }
+    for(NSUInteger i=0;i<count;i++) {
+        const NSUInteger root=TensorRoot(nodes,i);const NSInteger offset=nodes[i].delta;
+        groups[root].low=MIN(groups[root].low,offset);groups[root].high=MAX(groups[root].high,offset);
+    }
+    for(NSUInteger k=0;k<values.count;k++) {
+        MetalTensorLayout *value=values[k];const NSUInteger width=widths[k].unsignedIntegerValue;
+        for(NSUInteger i=0;i<value.count;i+=width) {
+            const NSUInteger first=(NSUInteger)[value index:i],root=nodes[first].parent;
+            if(!TensorAlign(groups+root,-nodes[first].delta,(NSInteger)width))goto finished;
+        }
+    }
+    {
+        NSInteger cursor=0;
+        // Lay disjoint equation components beside one another. Their internal
+        // positions are already fixed; unconstrained values retain distinct slots.
+        for(NSUInteger i=0;i<count;i++)if(nodes[i].parent==i) {
+            struct TensorPlacementGroup *g=groups+i;
+            g->base=cursor-g->low;g->base+=TensorMod(g->phase-g->base,g->modulus);
+            cursor=g->base+g->high+1;
+        }
+        NSMutableData *data=[NSMutableData dataWithLength:count*sizeof(NSInteger)];NSInteger *out=data.mutableBytes;
+        for(NSUInteger i=0;i<count;i++)out[i]=nodes[i].delta+=groups[nodes[i].parent].base;
+        // Distinct source values cannot occupy the same physical scalar slot.
+        qsort(nodes,count,sizeof *nodes,TensorPositionCompare);
+        for(NSUInteger i=1;i<count;i++)if(nodes[i-1].delta==nodes[i].delta)goto finished;
+        result=[MetalTensorLayout shape:@[@(count)] strides:@[@1] offset:0 maps:@{} indices:data];
+    }
+finished:
+    free(nodes);free(groups);return result;
+}
+
 @implementation MetalTensorLayout
 + (instancetype)shape:(NSArray<NSNumber *> *)shape strides:(NSArray<NSNumber *> *)strides
     offset:(NSInteger)offset maps:(NSDictionary<NSNumber *,NSData *> *)maps indices:(NSData *)indices {

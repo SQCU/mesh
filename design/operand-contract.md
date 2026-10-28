@@ -90,8 +90,9 @@ This contract does not declare these existing paths complete:
 
 - Some fused consumers load order arrays whose static compositions could be
   resolved earlier. Numerical index tensors must remain data.
-- Producer placement does not yet solve every conflicting API requirement or
-  proper subdomain. Local materialization alone does not establish necessity.
+- Producer placement now handles compatible proper subdomains declared by
+  native kernels. Conflicting requirements, already assigned storage, and API
+  requirements not yet carried into that graph still need broader integration.
 - Foreign providers still need all internal views and dependencies exposed.
 Further integration belongs at these shared lowering boundaries. Numerical
 bodies contribute their work and uses, rather than separate memory systems.
@@ -125,9 +126,8 @@ does not walk a layout object or choose an indexing implementation.
 Top-k, scans, sampling, FWHT and matrix outputs use the same index emitter.
 Matrix inputs carry the current MPP consumer's strided requirement in
 `etc/compute/metal-apis.json`. A supplied gathered input that does not meet that
-requirement gets a prepared conversion edge. Solving producer placement for
-proper subdomains remains the work listed above; that conversion alone does
-not establish an optimal placement.
+requirement gets a prepared conversion edge. That conversion alone does not
+establish an optimal placement; the requirement must also reach graph placement.
 
 `orderedSpans` retains logical traversal and repeated reads for transport.
 It is distinct from the union of ranges used for dependencies. WRITE preparation
@@ -139,6 +139,34 @@ with alias and reduction consumers, and the numerical bindings listed above.
 The public FX frontend also accepted a prepared gathered operand. These were
 command and pipeline construction only; no numerical execution or performance
 measurement was performed.
+
+## Subview placement equations
+
+`MetalTensorPlace` is shared preparation code in `mesh-tensor-layout`. Each use
+supplies its source selection and the relative positions its consumer requires.
+The solver joins those position equations, preserves each typed element's
+contiguous fields and alignment, and lays out the independent groups. Its result
+is an ordinary `MetalTensorLayout`, used by the same index and access emitters.
+The equation graph does not survive into execution.
+
+The FX placement pass now includes declared subviews and producer writes. It
+binds the whole underlying storage relation, so unconstrained siblings and
+differently typed aliases retain their data. Common scalar units avoid expanding
+equal-width values into bytes. Collective destination assignments are supplied
+before layout placement, as are caller-owned inputs and outputs.
+
+Contradictory distances, incompatible alignments, or distinct values forced into
+one slot mean that the demands cannot share one placement. The existing resolver
+then supplies explicit conversion edges. This establishes feasibility for the
+joint demands, not a minimum-cost selection among conflicting demands. Native
+and foreign API declarations still need to reach this shared placement phase;
+having the function in a shared header alone does not complete that integration.
+
+Preparation on 2026-10-27 compiled a producer whose middle columns feed a
+contiguous consumer while a sibling slice feeds another calculation. The
+consumer recorded its numerical command with no conversion command. Wider typed
+aliases retained adjacent, aligned fields. The shared library, frontend extension
+and native rank/goal-a built. No numerical function was invoked.
 
 ## Collective operand binding
 

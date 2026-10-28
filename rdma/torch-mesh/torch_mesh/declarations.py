@@ -358,7 +358,6 @@ class BoundGraph:
                 if destination is not None:
                     placements.bind(described, destination)
         from .layout import place
-        place(graph.graph, placements, [logical for logical, _ in inputs_placed.bindings])
         # Solve from recipients back to producers before compiling any span.
         # A gather which feeds another gather inherits that gather's local view.
         for node in reversed(list(graph.graph.nodes)):
@@ -379,6 +378,9 @@ class BoundGraph:
                 if supplied is not None and not same_view(supplied, own):
                     raise ValueError('a gather input supplied by the caller must already occupy its final local slice')
                 placements.bind(source, own)
+        # Collective destinations are storage assignments. Layout equations
+        # consume those assignments before placing still-unbound producers.
+        place(graph.graph, placements, [logical for logical, _ in inputs_placed.bindings])
         for module, inputs, exported in sections(graph, cuts):
             args = tuple(values[node] for node in inputs)
             live = {n: v for n, v in zip((n for n in module.graph.nodes if n.op == 'placeholder'), args)}

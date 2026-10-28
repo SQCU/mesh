@@ -21,14 +21,6 @@ def strides(shape):
     return tuple(reversed(result))
 
 
-def matches(value, required):
-    return descriptor(value).matches(tuple(required))
-
-
-def _matches(shape, steps, required):
-    return _stream.TensorLayout(tuple(shape), tuple(steps)).matches(tuple(required))
-
-
 def index_source(bindings):
     """Emit addresses from the same descriptors carried into command accesses."""
     return _stream.view_prelude() + ''.join(_stream.operand_layout(value).declaration(index)
@@ -36,24 +28,15 @@ def index_source(bindings):
 
 
 def place(graph, placements, fixed):
-    """Propagate compatible API requirements back to whole-value producers.
+    """Place producer storage from all declared consumer subviews.
 
-    Caller storage and supplied destinations are fixed. A proper subdomain of
-    a larger value needs producer splitting; incompatible demands need distinct
-    layouts. Those cases retain their explicit materialization edges.
+    Caller-owned storage stays fixed. Uses with mutually inconsistent physical
+    requirements retain the shared resolver's explicit conversion edges.
     """
-    from .placement import relation
-    from .native import empty_strided
+    from .operand import restore
+    from . import empty
     from torch.utils._pytree import tree_flatten
     described = [v for n in graph.nodes for v in tree_flatten(n.meta.get('val'))[0]]
-    def whole(value):
-        step = 1
-        for n, stride in sorted(zip(value.shape, value.stride()), key=lambda axis: axis[1]):
-            if n > 1:
-                if stride != step:
-                    return False
-                step *= n
-        return value.storage_offset() == 0 and value.numel() * value.element_size() == value.untyped_storage().nbytes()
     groups = []
     for node in graph.nodes:
         schema = getattr(node.target, '_schema', None)
@@ -62,37 +45,48 @@ def place(graph, placements, fixed):
         args = {a.name: node.args[i] if i < len(node.args) else node.kwargs[a.name]
                 for i, a in enumerate(schema.arguments)}
         declarations = json.loads(args['operands'])
-        for source, slot in zip(args['inputs'], args['input_slots'], strict=True):
+        bindings = [(source.meta['val'], slot) for source, slot in zip(args['inputs'], args['input_slots'], strict=True)]
+        bindings.extend((value, slot) for value, slots in zip(node.meta['val'], args['output_slots'], strict=True) for slot in slots)
+        for value, slot in bindings:
             declaration = declarations[str(slot)]
             required = declaration['requirement']
-            if required == 'indexed' or declaration['view'] != declaration['source']:
+            if required == 'indexed':
                 continue
-            value = source.meta['val']
+            view = restore(declaration['view']).rebase(restore(declaration['source']), descriptor(value))
+            target = view.required(required if isinstance(required, str) else 'fixed',
+                                   () if isinstance(required, str) else tuple(required))
             group = next((g for g in groups if torch_alias(g[0][0], value)), None)
             if group is None:
                 group = []; groups.append(group)
-            group.append((value, tuple(required)))
+            group.append((value, view, target))
     for group in groups:
-        if all(matches(value, required) for value, required in group):
+        anchor = group[0][0]
+        if all(view == target for _, view, target in group):
             continue
-        anchor = next(((v, s) for v, s in group if whole(v)), None)
-        if anchor is None:
+        if any(torch_alias(anchor, v) for v in fixed) or any(torch_alias(anchor, v) for v, _ in placements.bindings):
             continue
-        value, required = anchor
-        if any(torch_alias(value, v) for v in fixed) or any(torch_alias(value, v) for v, _ in placements.bindings):
+        # The complete declared storage domain covers siblings and differently
+        # typed aliases as well as the constrained consumer slices.
+        domain = anchor.as_strided((anchor.untyped_storage().nbytes() // anchor.element_size(),), (1,), 0)
+        values = list({(value.element_size(), descriptor(value)): value
+                       for value in [domain, *(v for v in described if torch_alias(anchor, v))]}.values())
+        group = list({(value.element_size(), view, target): (value, view, target)
+                      for value, view, target in group}.values())
+        unit = math.gcd(*(value.element_size() for value in values))
+        fields = [value.element_size() // unit for value in values]
+        uses = [view.components(value.element_size() // unit) for value, view, _ in group]
+        targets = [target.components(value.element_size() // unit) for value, _, target in group]
+        typed = [descriptor(value).components(width) for value, width in zip(values, fields)]
+        placed = _stream.place_layout(anchor.untyped_storage().nbytes() // unit, uses, targets, typed, fields)
+        if placed is None:
             continue
-        try:
-            proposed = _stream.TensorLayout(tuple(value.shape), required)
-            compatible = all(relation(value, proposed, other).matches(steps) for other, steps in group)
-            if compatible:
-                for other in described:
-                    if torch_alias(value, other):
-                        relation(value, proposed, other)
-        except ValueError:
-            compatible = False
-        if compatible:
-            placed = empty_strided(tuple(value.shape), required, value.dtype, value.device.type)
-            placements.bind(value, placed)
+        width = domain.element_size() // unit
+        placed = placed.reshape((*domain.shape, width)).elements(width)
+        extent = max((offset + count for offset, count in placed.ordered_spans()), default=0)
+        alignment = math.lcm(*(value.element_size() for value in values)) // domain.element_size()
+        extent = -(-extent // alignment) * alignment
+        storage = empty((extent,), dtype=domain.dtype, device=domain.device.type)
+        placements.bind(domain, TensorView(storage, placed))
 
 
 def torch_alias(left, right):
