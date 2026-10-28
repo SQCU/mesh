@@ -138,8 +138,9 @@
    classic form's.  The group is encoded as compute dispatches between the encoder's commands before and after it, bound
    through the caller's argument table (at least 6 buffer bindings; no setBytes, each dispatch's arguments a record of
    the library's ring), on pipelines of the residency set's device, every buffer of the library's it touches added to
-   the caller's residency set (committed where one was added); nothing is committed or signalled.  The classic form reads residencySet only for a
-   fused crossing (below), whose steps the caller's kernels run by their bindings' GPU addresses:
+   the caller's residency set (committed where one was added); nothing is committed or signalled.  The classic form
+   reads residencySet only for a fused crossing (below), whose steps the caller's kernels run by their bindings' GPU
+   addresses:
    an id<MTLResidencySet> of the command buffer's device, to which the library adds every buffer those bindings name
    (committed where one was added), and which the caller makes resident for the command buffers its kernels are encoded
    into (its queue's addResidencySet:, or each command buffer's useResidencySet:), since a classic encoder makes resident
@@ -150,11 +151,12 @@
    communicator leases a page for its gate, pages of span tables (each made the first time its bytes are named and
    never written again), and, for each group definition (a declared group, or an undeclared group's calls, the 64
    most recently used kept), two slots of what its groups send from and land in that are not the caller's (a
-   reduce-scatter's partials of the other ranks' segments, a tree's scratch, a relay's generations, a combine's
-   landing area, credits): made at its first group, its groups taking turns at them, ncclMemAlloc called again only
-   where one must grow, a dropped definition's slots kept for the next, all returned at ncclCommDestroy.  Nothing is
-   copied into them from a caller's buffer but a premultiplied, partials-merging or fused call's operand where it holds
-   no result in place.  A group writes a slot only once the slot's last group has every landing awaited: the stream's
+   reduce-scatter's or a non-receiving rank's operand, a tree's scratch, a relay's generations, a combine's landing
+   area, credits): made at its first group, its groups taking turns at them, ncclMemAlloc called again only where one
+   must grow, a dropped definition's slots kept for the next, all returned at ncclCommDestroy.  Nothing is copied into
+   them from a caller's buffer but the operand of a call that cannot read its send buffer in place (a premultiplied,
+   partials-merging or fused call, or one whose pieces partly overlap), and from them only a reduce-scatter's own
+   segment, into recvbuff (its pieces may span segments).  A group writes a slot only once the slot's last group has every landing awaited: the stream's
    order, and a landed wait for those its stream did not await.  A SEND from a slot, or a write's (its producer's
    source, a relay's lease), whose arrival no later landing at its rank depends on is answered by a credit, an 8-byte
    SEND of its receiver's once those landings arrive on that cable, which the sender lands in the same group: so a
