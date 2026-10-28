@@ -37,10 +37,14 @@
 // native schedule owns prepared execution; this state names MPS data events.
 struct MeshStream {
   at::mps::MPSStream *const mps;
-  id<MTLSharedEvent> const progress;
+  id<MTLSharedEvent> const progress, passed;
   id<MTL4CommandQueue> const prepared;
   // the buffers this stream committed, the k-th signalling k on progress as the GPU reaches its end
   uint64_t committed = 0;
+  // the prepared functions enqueued from this stream, the k-th signalling k on passed as the prepared queue passes it,
+  // each holding what it runs until then
+  uint64_t enqueued = 0;
+  std::deque<std::pair<uint64_t, std::shared_ptr<void>>> running;
   // whether a group was issued on this stream since the host path last waited for it
   bool streamed = false;
   // the workspace of the group being encoded (the library's workspace allocator's context is the MeshStream, which
@@ -49,9 +53,9 @@ struct MeshStream {
   std::map<uint64_t, std::vector<at::Tensor>> holders;
 
   explicit MeshStream(at::mps::MPSStream *stream) : mps(stream), progress([stream->device() newSharedEvent]),
-      prepared([stream->device() newMTL4CommandQueue]) {
-    if (!progress || !prepared) {
-      [progress release]; [prepared release];
+      passed([stream->device() newSharedEvent]), prepared([stream->device() newMTL4CommandQueue]) {
+    if (!progress || !passed || !prepared) {
+      [progress release]; [passed release]; [prepared release];
       TORCH_CHECK(false,"preparing Metal context: shared event or command queue unavailable");
     }
   }
@@ -65,10 +69,12 @@ struct MeshStream {
 
   // On the host: the workspace `held` of the group issued as `ticket` kept until the library retires it (0: a group
   // complete in the stream's order once encoded, whose workspace's lease is held again here, where later work reuses
-  // it after the group's), and the workspace of every group retired by now released.
+  // it after the group's), and the workspace of every group retired by now released, with what each prepared function
+  // the prepared queue has passed held.
   void retire(uint64_t ticket, std::vector<at::Tensor> held) {
     if (ticket) holders[ticket] = std::move(held);
     holders.erase(holders.begin(), holders.upper_bound(ncclMeshRetired()));
+    for (const uint64_t at = passed.signaledValue; !running.empty() && running.front().first <= at;) running.pop_front();
   }
 };
 
@@ -437,16 +443,47 @@ static uint64_t issue(const std::vector<Call> &calls, int64_t comm, bool split, 
                 g.metal, split, comm, {}, unlock);
 }
 
-using Schedule = std::shared_ptr<MetalSchedule>;
+// A prepared function on its stream's prepared queue: its inputs wait for `gate` (its GPU part and the host steps that
+// follow no part), which torch's queue signals 1 where it is enqueued; a function with a host step signals 2 as it ends.
+struct Schedule {
+  std::shared_ptr<MetalSchedule> function;
+  id<MTLSharedEvent> gate = nil;  // the function's (MetalScheduleAfter holds it)
+  bool host = false;
+  MetalSchedule *get() const { return function.get(); }
+};
 
 static Schedule schedule_after_inputs() {
-  at::mps::MPSStream *stream=at::mps::getCurrentMPSStream();
-  MeshStream *source=&stream_of(stream);
-  Schedule schedule(MetalScheduleCreateOn(source->prepared,MetalFormEncoded),MetalScheduleFree);
-  TORCH_CHECK(schedule,"creating the prepared function command stream");
-  at::mps::dispatch_sync_with_rethrow(stream->queue(), ^{ source->signalled(false); });
-  MetalScheduleAfter(schedule.get(),source->progress,source->committed);
+  MeshStream *source=&stream_of(at::mps::getCurrentMPSStream());
+  id<MTLSharedEvent> gate=[source->mps->device() newSharedEvent];
+  Schedule schedule{{MetalScheduleCreateOn(source->prepared,MetalFormEncoded),MetalScheduleFree},gate};
+  if(schedule.function&&gate)MetalScheduleAfter(schedule.get(),gate,1);
+  [gate release];
+  TORCH_CHECK(schedule.function&&gate,"creating the prepared function command stream");
   return schedule;
+}
+
+// A prepared function enqueued in torch's stream order, with no host wait: its gate signalled at the end of torch's
+// buffer so far (committed, so what torch stored is visible to it and the NIC: metal-microbench docs/facts.md, 10-24),
+// and torch's later work waiting on the GPU for the prepared queue to pass it; it and `keep` held until then.
+static void ordered(const Schedule &schedule, std::shared_ptr<void> keep = {}) {
+  at::mps::MPSStream *stream=at::mps::getCurrentMPSStream();
+  MeshStream *s=&stream_of(stream);
+  s->retire(0,{});
+  MetalSchedule *function=schedule.get();
+  id<MTLSharedEvent> gate=schedule.gate;
+  const bool host=schedule.host;
+  const uint64_t at=++s->enqueued;
+  at::mps::dispatch_sync_with_rethrow(stream->queue(), ^{ @autoreleasepool {
+    s->mps->endKernelCoalescing();
+    [s->mps->commandBuffer() encodeSignalEvent:gate value:1];
+    s->mps->synchronize(at::mps::SyncType::COMMIT);
+    MetalScheduleEnqueue(function);
+    if(host)[s->prepared waitForEvent:gate value:2];
+    [s->prepared signalEvent:s->passed value:at];
+    [s->mps->commandBuffer() encodeWaitForEvent:s->passed value:at];
+  }});
+  s->running.emplace_back(at,schedule.function);
+  if(keep)s->running.emplace_back(at,std::move(keep));
 }
 
 static pybind11::capsule schedule_completion(const Schedule &schedule) {
@@ -788,7 +825,7 @@ struct Collectives {
     const auto held=operands;
     checked(MetalScheduleFinish(made.get(),^(NSError *){(void)held;}));executions.push_back(std::move(made));
   }
-  void enqueue() { MetalScheduleEnqueue(executions[next++].get()); }
+  void enqueue() { ordered(executions[next++]); }
   pybind11::capsule completion() { return schedule_completion(executions[next-1]); }
 
 };
@@ -1543,7 +1580,7 @@ static void compile_chain(PreparedChain &chain) {
 }
 
 static void chain_run(int64_t index) {
-  MetalScheduleEnqueue((*prepared_chains_)[index]->schedule.get());
+  ordered((*prepared_chains_)[index]->schedule);
 }
 static pybind11::capsule chain_completion(int64_t index) {
   return schedule_completion((*prepared_chains_)[index]->schedule);
@@ -1635,6 +1672,7 @@ struct ScheduleBinding {
   void host(const std::array<uintptr_t,4> &entry,const std::vector<pybind11::object> &inputs,
       const std::vector<pybind11::object> &outputs) { @autoreleasepool {
     for(auto pointer:entry)TORCH_CHECK(pointer,"host operation requires a complete native binding");
+    schedule.host=true;
     using Run=const char *(*)(void *);
     using Lifetime=void (*)(void *);
     auto run=reinterpret_cast<Run>(entry[0]);
@@ -1674,8 +1712,12 @@ struct ScheduleBinding {
     return fused_writes_impl(schedule.get(),send,landings,pairs,comm,polls,repeats,stride,row_bytes,rows,ready,ready_value,tile_bytes);
   }
 
-  void finish() { const auto held=operands; checked(MetalScheduleFinish(schedule.get(),^(NSError *){(void)held;})); }
-  void enqueue() { MetalScheduleEnqueue(schedule.get()); }
+  // a function with a host step ends where all its parts have (its gate 2: `ordered` waits for that)
+  void finish() {
+    const auto held=operands;id<MTLSharedEvent> ended=schedule.host?schedule.gate:nil;
+    checked(MetalScheduleFinish(schedule.get(),^(NSError *){(void)held;ended.signaledValue=2;}));
+  }
+  void enqueue() { ordered(schedule); }
   pybind11::capsule completion() { return schedule_completion(schedule); }
 };
 
@@ -1687,7 +1729,7 @@ struct Executions {
   size_t next=0;
   explicit Executions(pybind11::object value):output(std::move(value)){}
   void add(ScheduleBinding &binding){schedules.push_back(binding.schedule);}
-  pybind11::object run(){MetalScheduleEnqueue(schedules[next++].get());return output;}
+  pybind11::object run(){ordered(schedules[next++]);return output;}
   pybind11::capsule completion(){return schedule_completion(schedules[next-1]);}
 };
 
@@ -1759,7 +1801,8 @@ struct ViewWrites {
     const auto held=leases;
     checked(MetalScheduleFinish(made.get(),^(NSError *){(void)held;}));executions.push_back(std::move(made));
   }
-  void enqueue() { MetalScheduleEnqueue(executions[next++].get()); }
+  // its plans held while it runs (a configuration's writes are let go once enqueued)
+  void enqueue(std::shared_ptr<ViewWrites> self) { ordered(executions[next++],std::move(self)); }
   pybind11::capsule completion(){return schedule_completion(executions[next-1]);}
 
 };
@@ -1942,7 +1985,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def("append",[](ViewWrites &w,ScheduleBinding &s){w.append(s.schedule.get());
         s.operands.insert(s.operands.end(),w.leases.begin(),w.leases.end());})
     .def("completion", &ViewWrites::completion)
-    .def("enqueue", &ViewWrites::enqueue);
+    .def("enqueue", [](const std::shared_ptr<ViewWrites> &w){w->enqueue(w);});
   pybind11::class_<Collectives, std::shared_ptr<Collectives>>(module, "Collectives")
     .def(pybind11::init<const std::vector<Call> &, int64_t, std::vector<at::Tensor>,
                         const std::vector<CommandRecord> &, const std::vector<CommandRecord> &>(),
