@@ -122,7 +122,12 @@
    plain dispatches in the stream's order; a group on two or more, with each channel progressing on its own
    (rdma/NCCL.md "One track", "Per-channel progress").  A group's landings in a stream wait to be posted until the stream
    reaches the group (its first publication on the channel, or a gate store of its first dispatch), so no receive lands
-   in pages the stream's earlier work still reads. Its end does not await outgoing SEND completion.
+   in pages the stream's earlier work still reads. Its end does not await outgoing SEND completion.  A SEND reads the
+   caller's bytes as given (a send buffer read in place, an operand given in place, an all-to-all's segments) as the
+   NIC sees them, and the library stores none of them again: their producer stores them system-coherent, or its
+   command buffer has ended before the group publishes, since a plain store reaches the NIC only once its command
+   buffer ends (metal-microbench docs/facts.md, 10-24); a WRITE's or a fused crossing's producer stores so itself
+   (mesh_step_write).
    A wait is a kernel polling its holding's required `landed` count, and nothing else (rdma/mesh.metal mesh_wait_bounded), which the bridge sets ~0 where the link is
    lost; every wait is bounded by its lack of progress: the stream's `polls` is the most loads of a count a wait makes
    through which its communicator's lease does not move, the caller's bound for the group's crossings, which it derives
