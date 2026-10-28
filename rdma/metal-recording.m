@@ -187,12 +187,27 @@ NSString *MetalViewMappedIndexDeclaration(NSUInteger binding,const NSUInteger *s
         if(values)for(NSUInteger j=1;j<shape[d];j++)if(values[j]!=base+(NSInteger)j*step){period=j;break;}
         NSString *term=nil;
         if(period) {
-            const NSInteger jump=values[period]-base;
-            BOOL grouped=period>1;
+            // A slice can start inside a storage group. Preserve that phase
+            // in the emitted arithmetic instead of turning it into a LUT.
+            NSMutableDictionary *counts=[NSMutableDictionary dictionary];NSUInteger most=0;
+            for(NSUInteger j=1;j<shape[d];j++) {
+                NSNumber *delta=@(values[j]-values[j-1]);NSUInteger count=[counts[delta] unsignedIntegerValue]+1;
+                counts[delta]=@(count);if(count>most){most=count;step=delta.integerValue;}
+            }
+            NSUInteger first=0,last=0,span=0;NSInteger jump=0;BOOL grouped=YES;
+            for(NSUInteger j=1;j<shape[d]&&grouped;j++) {
+                const NSInteger delta=values[j]-values[j-1]-step;if(!delta)continue;
+                if(!first){first=j;jump=delta;}
+                else {if(!span)span=j-last;grouped=delta==jump&&j-last==span;}
+                last=j;
+            }
+            if(!span)span=MAX(first,shape[d]-first);
+            const NSUInteger phase=span>=first?span-first:0;
+            grouped=grouped&&first&&span>=first;
             for(NSUInteger j=0;grouped&&j<shape[d];j++)
-                grouped=values[j]==base+(NSInteger)(j/period)*jump+(NSInteger)(j%period)*step;
-            if(grouped)term=[NSString stringWithFormat:@"((%@ / %lul) * %ldl + (%@ %% %lul) * %ldl)",coordinate,
-                (unsigned long)period,(long)jump,coordinate,(unsigned long)period,(long)step];
+                grouped=values[j]==base+(NSInteger)j*step+(NSInteger)((j+phase)/span)*jump;
+            if(grouped)term=[NSString stringWithFormat:@"(%@ * %ldl + ((%@ + %lul) / %lul) * %ldl)",coordinate,
+                (long)step,coordinate,(unsigned long)phase,(unsigned long)span,(long)jump];
             else {
                 NSString *name=[NSString stringWithFormat:@"mesh_map_%lu_%lu",(unsigned long)binding,(unsigned long)d];
                 [source appendFormat:@"constant long %@[%lu] = {",name,(unsigned long)shape[d]];

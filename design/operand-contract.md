@@ -90,6 +90,9 @@ This contract does not declare these existing paths complete:
 
 - FX `placement.indices` and `FixedLayout` still describe aliases with strides
   alone. Arbitrary mappings must survive lowering without caller-owned copies.
+- GGUF file imports still require whole encoded blocks. Resident stored cuts
+  now use block-byte views and lane selections through the common decoder;
+  the file interface must carry that selection too.
 - Some fused consumers load order arrays whose static compositions could be
   resolved earlier. Numerical index tensors must remain data.
 - Producer placement does not yet solve every conflicting API requirement or
@@ -111,6 +114,13 @@ requirement, and explicit output device. Preparation composes the use with the
 producer's assigned storage. Several output bindings can select different parts
 of one output allocation. Commands and dependency records consume those same
 views.
+
+Native `StoredMatrix` describes the bytes of existing encoded blocks with a
+`TensorView`, plus their format, logical columns and first selected lane.
+Stored FFNs, stacked products, experts and conversion kernels use that operand.
+Resident row and column cuts compose on it without changing the stored codes.
+The shared index emitter retains grouped layouts as arithmetic when a cut starts
+inside a group; it does not introduce a lookup table for that phase.
 
 Preparation evidence on 2026-10-27: an FX FFN with distinct gate/up orders,
 37 logical neurons in 64 encoded lanes, a third down-input order, and non-unit
