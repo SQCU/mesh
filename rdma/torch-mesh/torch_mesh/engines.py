@@ -47,6 +47,27 @@ def host(t):
     return view
 
 
+def _host_address(value):
+    """Bind the shared allocation and its declared offset once at preparation."""
+    from .operand import TensorView
+    view = TensorView.of(value)
+    storage = host(view.storage)
+    return storage.data_ptr() + (view.layout.offset - view.storage.storage_offset()) * view.element_size()
+
+
+def _host_bindings(source, target, input_layouts, output_layouts, binding_layout):
+    """CPU and Core ML consume the same resolved operands and copy records."""
+    from . import layout
+    from .operand import TensorView
+    prepared, before, after = [], [], []
+    for values, requirements, writing in ((source, input_layouts, False), (target, output_layouts, True)):
+        devices = {name: 'cpu' if host(TensorView.of(value).storage) is None else value.device.type for name, value in values.items()}
+        placed, commands = layout.bindings(values, requirements, writing=writing, binding=binding_layout, devices=devices)
+        (after if writing else before).extend(commands)
+        prepared.append(placed)
+    return *prepared, before, after
+
+
 _CORE_ML = None
 
 
@@ -184,7 +205,15 @@ class Cpu(Engine):
         return cpu(op.gate[start:end]), cpu(op.up[start:end]), cpu(op.down[:, start:end])
 
     def bind(self, op, shard, x, out):
-        source, target = host(x), host(out)
+        from .compilation import api_layouts
+        layouts = api_layouts('cpu_matrix')
+        weights = (shard,) if op.kind == 'linear' else shard
+        inputs = dict(input=x, **{f'weight{i}': w for i, w in enumerate(weights)})
+        source, target, before, after = _host_bindings(inputs, {'output': out},
+            {name: layouts['input' if name == 'input' else 'weight'] for name in inputs},
+            {'output': layouts['output']}, 'indexed')
+        x, out = source['input'], target['output']
+        weights = tuple(source[f'weight{i}'] for i in range(len(weights)))
         native = _coreml()
         if native is None:
             raise RuntimeError('CPU commands require the native engine library')
@@ -192,19 +221,19 @@ class Cpu(Engine):
             command = CpuCommand(None,
                               x.shape[0], w.shape[0], x.shape[1], x.stride(0), w.stride(0), y.stride(0),
                               x.stride(1), w.stride(1), y.stride(1),
-                              x.data_ptr(), w.data_ptr(), y.data_ptr(), None)
+                              _host_address(x), _host_address(w), _host_address(y), None)
             if native.mesh_cpu_product_bind(ctypes.byref(command)):
                 raise ValueError('CPU matrix views could not be bound to a bulk contraction')
             return command
         if op.kind == 'linear':
-            return CpuProgram([product(source, shard, target)], (x, shard), (out,))
-        gate, up, down = shard
+            return CpuProgram([product(x, weights[0], out)], tuple(source.values()), (out,), before, after)
+        gate, up, down = weights
         from . import empty
-        g, u, scratch = (empty(source.shape[0], gate.shape[0], dtype=torch.float32, device='cpu') for _ in range(3))
+        g, u, scratch = (empty(x.shape[0], gate.shape[0], dtype=torch.float32, device='cpu') for _ in range(3))
         activation = CpuCommand(ctypes.cast(native.mesh_cpu_gelu, ctypes.c_void_p), g.shape[0], g.shape[1], 0, 0, 0, 0, 0, 0, 0,
                                  g.data_ptr(), u.data_ptr(), g.data_ptr(), scratch.data_ptr())
-        return CpuProgram([product(source, gate, g), product(source, up, u), activation, product(g, down, target)],
-                          (x, *shard), (out, g, u, scratch))
+        return CpuProgram([product(x, gate, g), product(x, up, u), activation, product(g, down, out)],
+                          tuple(source.values()), (out, g, u, scratch), before, after)
 
 
 class CpuCommand(ctypes.Structure):
@@ -220,7 +249,8 @@ def _native_entry(run, binding, retain, release):
 
 
 class CpuProgram:
-    def __init__(self, commands, inputs, outputs):
+    def __init__(self, commands, inputs, outputs, before, after):
+        from . import _stream
         self.native = _coreml()
         if self.native is None:
             raise RuntimeError('CPU commands require the native engine library')
@@ -231,11 +261,14 @@ class CpuProgram:
                 self.native.mesh_cpu_command_release(ctypes.byref(command))
             raise MemoryError('preparing CPU commands')
         self.inputs, self.outputs = inputs, outputs
+        self.before, self.after = _stream.Commands(before), _stream.Commands(after)
         self.entry = _native_entry(self.native.mesh_cpu_program_run, self.binding,
                                    self.native.mesh_cpu_program_retain, self.native.mesh_cpu_program_release)
 
     def append(self, schedule):
+        schedule.append(self.before)
         schedule.host(self.entry, self.inputs, self.outputs)
+        schedule.append(self.after)
 
     def __del__(self):
         if getattr(self, 'binding', None):
@@ -312,21 +345,10 @@ class ModelView(ctypes.Structure):
 class Prediction:
     """One Core ML invocation's views, bound before the numerical function."""
     def __init__(self, native, model, source, target, *, input_layouts, output_layouts, binding_layout):
-        from . import _stream, layout
+        from . import _stream
         from .operand import TensorView
         self.native = native
-        before, after = [], []
-        def resolve(values, requirements, writing):
-            if values.keys() != requirements.keys():
-                raise ValueError('each Core ML binding requires an explicit layout operand')
-            placed = {}
-            for name, value in values.items():
-                placed[name], commands = layout.resolve(value, requirements[name], writing=writing,
-                                                          device='cpu' if host(TensorView.of(value).storage) is None else None, binding=binding_layout)
-                (after if writing else before).extend(commands)
-            return placed
-        source = resolve(source, input_layouts, False)
-        target = resolve(target, output_layouts, True)
+        source, target, before, after = _host_bindings(source, target, input_layouts, output_layouts, binding_layout)
         self.before, self.after = _stream.Commands(before), _stream.Commands(after)
         self.inputs, self.outputs = tuple(source.values()), tuple(target.values())
         def views(values):
@@ -334,13 +356,11 @@ class Prediction:
             records = []
             for name, original in values.items():
                 operand = TensorView.of(original)
-                tensor = host(operand.storage)
-                if tensor is None or tensor.dtype not in types:
+                if operand.dtype not in types:
                     raise ValueError('Core ML views require shared fp16, fp32, int32 or fp64 storage')
                 rank = len(operand.shape)
-                address = tensor.data_ptr() + (operand.layout.offset - operand.storage.storage_offset()) * tensor.element_size()
-                records.append(ModelView(name.encode(), address, (ctypes.c_int64 * rank)(*operand.shape),
-                                         (ctypes.c_int64 * rank)(*operand.layout.strides), rank, types.index(tensor.dtype)))
+                records.append(ModelView(name.encode(), _host_address(operand), (ctypes.c_int64 * rank)(*operand.shape),
+                                         (ctypes.c_int64 * rank)(*operand.layout.strides), rank, types.index(operand.dtype)))
             return (ModelView * len(records))(*records)
         inputs, outputs = views(source), views(target)
         self.binding = native.mesh_coreml_bind(model, inputs, len(inputs), outputs, len(outputs))

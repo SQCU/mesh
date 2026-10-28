@@ -8,5 +8,17 @@
     "weight": "strided",
     "output": "indexed",
     "bias": "indexed"
+  },
+  "cpu_matrix": {
+    "input": "positive_strided",
+    "weight": "positive_strided",
+    "output": "positive_strided"
+  },
+  "graph_operands": {
+    "aten::mm": {"api": "matrix", "inputs": {"self": "input", "mat2": "weight"}, "output": "output"},
+    "aten::bmm": {"api": "matrix", "inputs": {"self": "input", "mat2": "weight"}, "output": "output"},
+    "aten::addmm": {"api": "matrix", "inputs": {"self": "bias", "mat1": "input", "mat2": "weight"}, "output": "output"},
+    "torch_mesh::linear": {"api": "matrix", "inputs": {"x": "input", "w": "weight", "bias": "bias", "x1": "input"}, "permutations": {"w": [1, 0]}, "output": "output"},
+    "torch_mesh::linears": {"api": "matrix", "inputs": {"x": "input", "w": "weight", "bias": "bias", "x1": "input"}, "permutations": {"w": [1, 0]}, "output": "output"}
   }
 }

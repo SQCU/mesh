@@ -90,9 +90,11 @@ This contract does not declare these existing paths complete:
 
 - Some fused consumers load order arrays whose static compositions could be
   resolved earlier. Numerical index tensors must remain data.
-- Producer placement now handles compatible proper subdomains declared by
-  native kernels. Conflicting requirements, already assigned storage, and API
-  requirements not yet carried into that graph still need broader integration.
+- Producer placement handles native-kernel subdomains and matrix API uses.
+  Host-engine shares still bind after their caller assigns storage; their
+  requirements need to enter the producer graph before that assignment.
+  Conflicting requirements also need cost-directed placement and conversion
+  choices, beyond the current placement feasibility solver.
 - Foreign providers still need all internal views and dependencies exposed.
 Further integration belongs at these shared lowering boundaries. Numerical
 bodies contribute their work and uses, rather than separate memory systems.
@@ -127,7 +129,8 @@ Top-k, scans, sampling, FWHT and matrix outputs use the same index emitter.
 Matrix inputs carry the current MPP consumer's strided requirement in
 `etc/compute/metal-apis.json`. A supplied gathered input that does not meet that
 requirement gets a prepared conversion edge. That conversion alone does not
-establish an optimal placement; the requirement must also reach graph placement.
+establish an optimal placement. Those requirements now also reach graph
+placement through declared schema operands.
 
 `orderedSpans` retains logical traversal and repeated reads for transport.
 It is distinct from the union of ranges used for dependencies. WRITE preparation
@@ -158,9 +161,46 @@ before layout placement, as are caller-owned inputs and outputs.
 Contradictory distances, incompatible alignments, or distinct values forced into
 one slot mean that the demands cannot share one placement. The existing resolver
 then supplies explicit conversion edges. This establishes feasibility for the
-joint demands, not a minimum-cost selection among conflicting demands. Native
-and foreign API declarations still need to reach this shared placement phase;
-having the function in a shared header alone does not complete that integration.
+chosen relative positions, not a minimum-cost selection among conflicting
+demands. Host-engine declarations still need to reach this shared placement
+phase; having the function in a shared header alone does not complete that
+integration.
+
+## API operand declarations
+
+`operand.graph_uses` supplies native-kernel and matrix uses to placement. Matrix
+schema names, input/output roles and weight permutations are declared in
+`etc/compute/metal-apis.json`. Placement and numerical binding consume the same
+API layout requirements. Batched products and lists of linear products retain
+each operand's own view.
+
+An API accepting strides does not require the original stride values. Placement
+first solves the exact layout demands, then checks flexible uses against the
+result. Compatible flexible uses keep that layout. Other uses contribute a
+concrete accepted target to another equation solve. This is preparation-time
+candidate construction, not a proof that every possible strided placement has
+been searched. Failed joint placement leaves conversion edges in the ordinary
+layout lowering.
+
+`layout.bindings` resolves named operands for matrix, CPU and Core ML bindings.
+CPU matrix layouts declare `positive_strided`, matching Accelerate's accepted
+representation. Mapped or reversed selections reach that API through the same
+prepared copy records used by other consumers. CPU and Core ML share host
+address binding; neither interprets a view during invocation. BLAS binding uses
+its actual leading-dimension requirements; other positive-stride operands use
+the existing BNNS contraction.
+
+The resolver returns `TensorView` for both retained and allocated storage.
+Singleton axes can receive positive stride metadata on the same pages. Python
+and Swift retain that metadata without copying values. Required allocations
+also support negative fixed strides, without asking a frontend tensor handle
+to represent them.
+
+Preparation on 2026-10-27 compiled a producer shared by an exact-layout kernel
+and a strided matrix consumer. The exact consumer recorded only its numerical
+command, with no conversion. CPU bindings prepared mapped input/output views,
+overlapping positive-stride reads, and singleton views. Singleton normalization
+recorded no copy. No numerical commands were submitted.
 
 Preparation on 2026-10-27 compiled a producer whose middle columns feed a
 contiguous consumer while a sibling slice feeds another calculation. The

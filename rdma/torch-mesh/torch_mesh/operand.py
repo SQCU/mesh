@@ -178,3 +178,40 @@ def requirement(value, declared):
 def requirements(value, declarations):
     return descriptor(value).requirements([
         (item, ()) if isinstance(item, str) else ('fixed', tuple(item)) for item in declarations])
+
+
+def graph_uses(node):
+    """Declared input/output selections and API needs, before page placement."""
+    import json
+    from torch.utils._pytree import tree_flatten
+    from .compilation import api_layouts
+    schema = getattr(node.target, '_schema', None)
+    if schema is None:
+        return
+    args = {a.name: node.args[i] if i < len(node.args) else node.kwargs.get(a.name, a.default_value)
+            for i, a in enumerate(schema.arguments)}
+    if schema.name == 'torch_mesh::native_kernel':
+        declarations = json.loads(args['operands'])
+        bindings = [(source.meta['val'], slot) for source, slot in zip(args['inputs'], args['input_slots'], strict=True)]
+        bindings.extend((value, slot) for value, slots in zip(node.meta['val'], args['output_slots'], strict=True) for slot in slots)
+        for value, slot in bindings:
+            declaration = declarations[str(slot)]
+            view = restore(declaration['view']).rebase(restore(declaration['source']), descriptor(value))
+            yield value, view, declaration['requirement']
+        return
+    declaration = api_layouts('graph_operands').get(schema.name)
+    if declaration is None:
+        return
+    layouts = api_layouts(declaration['api'])
+    for name, role in declaration['inputs'].items():
+        for source in tree_flatten(args[name])[0]:
+            if source is None:
+                continue
+            value = source.meta['val']
+            view = descriptor(value)
+            axes = declaration.get('permutations', {}).get(name)
+            if axes is not None:
+                view = view.permute(axes)
+            yield value, view, layouts[role]
+    for value in tree_flatten(node.meta['val'])[0]:
+        yield value, descriptor(value), layouts[declaration['output']]

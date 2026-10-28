@@ -37,6 +37,8 @@ struct MetalTensorSpan { NSInteger offset; NSUInteger count; };
 - (MetalTensorLayout *)rebase:(MetalTensorLayout *)declared onto:(MetalTensorLayout *)placed;
 // Required strides are an API operand. Indexed consumers accept this layout;
 // fixed-layout consumers either bind it directly or get a prepared copy edge.
+// positive_strided requires an affine view with positive strides. Unused axes
+// can change their stride metadata without changing any selected value.
 - (BOOL)matches:(NSArray<NSNumber *> *)strides;
 - (MetalTensorLayout *)required:(NSString *)kind strides:(NSArray<NSNumber *> *)strides;
 // Intersect explicit use/API requirements. No requirement is discarded by a

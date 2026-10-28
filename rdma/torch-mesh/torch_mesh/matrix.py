@@ -7,7 +7,7 @@ import torch
 from . import _stream, fused
 from .compilation import operands, api_layouts
 from .operand import TensorView
-from .layout import index_source, resolve
+from .layout import index_source, bindings
 
 
 @lru_cache(None)
@@ -52,15 +52,11 @@ def product(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, ready=
                 arrivals is None or arrivals.dtype != torch.int32 or arrivals.numel() != tiles or not arrivals.is_contiguous()):
             raise ValueError('tile publication needs one ready word and arrival count per batch row tile')
     layouts = api_layouts('matrix') if layouts is None else layouts
-    before, after = [], []
-    def bind(value, use, writing=False):
-        if value is None:
-            return None
-        placed, commands = resolve(value, layouts[use], writing=writing)
-        (after if writing else before).extend(commands)
-        return TensorView.of(placed)
-    x, w, x1 = bind(x, 'input'), bind(w, 'weight'), bind(x1, 'input')
-    out, bias = bind(out, 'output', True), bind(bias, 'bias')
+    inputs, before = bindings(dict(x=x, w=w, x1=x1, bias=bias),
+        dict(x=layouts['input'], w=layouts['weight'], x1=layouts['input'], bias=layouts['bias']))
+    outputs, after = bindings(dict(out=out), dict(out=layouts['output']), writing=True)
+    x, w, x1, bias = (None if value is None else TensorView.of(value) for value in inputs.values())
+    out = TensorView.of(outputs['out'])
     stride = lambda t: t.stride(0) if t.ndim == 3 and t.shape[0] > 1 else 0
     definitions = dict(INPUT=kinds[x.dtype], OUTPUT=kinds[out.dtype], AM=x.stride(-2), AK=x.stride(-1),
                        BK=w.stride(-2), BN=w.stride(-1),

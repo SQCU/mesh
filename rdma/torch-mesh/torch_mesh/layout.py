@@ -5,12 +5,11 @@ ordinary tiled data dependency, using preassigned region storage.
 """
 from functools import lru_cache
 import math
-import json
 from pathlib import Path
 
 from . import _stream
 from .compilation import operands
-from .operand import TensorView, descriptor, requirements
+from .operand import TensorView, descriptor, requirements, graph_uses
 
 
 def strides(shape):
@@ -33,35 +32,23 @@ def place(graph, placements, fixed):
     Caller-owned storage stays fixed. Uses with mutually inconsistent physical
     requirements retain the shared resolver's explicit conversion edges.
     """
-    from .operand import restore
     from . import empty
     from torch.utils._pytree import tree_flatten
     described = [v for n in graph.nodes for v in tree_flatten(n.meta.get('val'))[0]]
     groups = []
     for node in graph.nodes:
-        schema = getattr(node.target, '_schema', None)
-        if getattr(schema, 'name', '') != 'torch_mesh::native_kernel':
-            continue
-        args = {a.name: node.args[i] if i < len(node.args) else node.kwargs[a.name]
-                for i, a in enumerate(schema.arguments)}
-        declarations = json.loads(args['operands'])
-        bindings = [(source.meta['val'], slot) for source, slot in zip(args['inputs'], args['input_slots'], strict=True)]
-        bindings.extend((value, slot) for value, slots in zip(node.meta['val'], args['output_slots'], strict=True) for slot in slots)
-        for value, slot in bindings:
-            declaration = declarations[str(slot)]
-            required = declaration['requirement']
+        for value, view, required in graph_uses(node):
             if required == 'indexed':
                 continue
-            view = restore(declaration['view']).rebase(restore(declaration['source']), descriptor(value))
-            target = view.required(required if isinstance(required, str) else 'fixed',
-                                   () if isinstance(required, str) else tuple(required))
             group = next((g for g in groups if torch_alias(g[0][0], value)), None)
             if group is None:
                 group = []; groups.append(group)
-            group.append((value, view, target))
+            group.append((value, view, required if isinstance(required, str) else tuple(required)))
     for group in groups:
         anchor = group[0][0]
-        if all(view == target for _, view, target in group):
+        required = lambda view, kind: view.required(kind if isinstance(kind, str) else 'fixed',
+                                                  () if isinstance(kind, str) else kind)
+        if all(view == required(view, kind) for _, view, kind in group):
             continue
         if any(torch_alias(anchor, v) for v in fixed) or any(torch_alias(anchor, v) for v, _ in placements.bindings):
             continue
@@ -70,14 +57,31 @@ def place(graph, placements, fixed):
         domain = anchor.as_strided((anchor.untyped_storage().nbytes() // anchor.element_size(),), (1,), 0)
         values = list({(value.element_size(), descriptor(value)): value
                        for value in [domain, *(v for v in described if torch_alias(anchor, v))]}.values())
-        group = list({(value.element_size(), view, target): (value, view, target)
-                      for value, view, target in group}.values())
+        group = list({(value.element_size(), view, kind): (value, view, kind)
+                      for value, view, kind in group}.values())
         unit = math.gcd(*(value.element_size() for value in values))
         fields = [value.element_size() // unit for value in values]
-        uses = [view.components(value.element_size() // unit) for value, view, _ in group]
-        targets = [target.components(value.element_size() // unit) for value, _, target in group]
+        widths = [value.element_size() // unit for value, _, _ in group]
+        uses = [view.components(width) for (_, view, _), width in zip(group, widths)]
+        targets = [required(view, kind).components(width) for (_, view, kind), width in zip(group, widths)]
         typed = [descriptor(value).components(width) for value, width in zip(values, fields)]
-        placed = _stream.place_layout(anchor.untyped_storage().nbytes() // unit, uses, targets, typed, fields)
+        count = anchor.untyped_storage().nbytes() // unit
+        # Strided APIs accept a family of layouts, not the source's current
+        # distances. First solve exact demands, then retain each flexible use
+        # which that placement already satisfies.
+        flexible = [i for i, (_, _, kind) in enumerate(group) if kind in ('strided', 'positive_strided')]
+        exact = [i for i in range(len(group)) if i not in flexible]
+        placed = _stream.place_layout(count, [uses[i] for i in exact], [targets[i] for i in exact], typed, fields)
+        if placed is not None and flexible:
+            scalar_domain = _stream.TensorLayout((count,), (1,))
+            needs_layout = False
+            for i in flexible:
+                view = uses[i].rebase(scalar_domain, placed).elements(widths[i])
+                target = required(view, group[i][2])
+                needs_layout |= view != target
+                targets[i] = target.components(widths[i])
+            if needs_layout:
+                placed = _stream.place_layout(count, uses, targets, typed, fields)
         if placed is None:
             continue
         width = domain.element_size() // unit
@@ -137,8 +141,28 @@ def resolve(value, declared, *, writing=False, device=None, binding='indexed'):
     layout = requirements(value, (declared, binding))
     device = value.device.type if device is None else device
     if descriptor(value) == layout and value.device.type == device:
-        return value, []
-    from .native import empty_strided
+        return TensorView(TensorView.of(value).storage, layout), []
+    from . import empty
     allocation = layout if layout.affine else layout.required('contiguous')
-    placed = empty_strided(tuple(value.shape), tuple(allocation.strides), value.dtype, device)
+    steps = tuple(allocation.strides)
+    reach = [(n - 1) * step for n, step in zip(value.shape, steps)]
+    origin = -sum(min(0, step) for step in reach) if value.numel() else 0
+    extent = 1 + sum(abs(step) for step in reach) if value.numel() else 0
+    placed = TensorView(empty((extent,), dtype=value.dtype, device=device),
+                        _stream.TensorLayout(tuple(value.shape), steps, origin))
     return placed, copies(placed, value) if writing else copies(value, placed)
+
+
+def bindings(values, declarations, *, writing=False, binding='indexed', devices=None):
+    """Resolve named API operands through the one layout/copy lowering."""
+    if values.keys() != declarations.keys():
+        raise ValueError('each binding requires an explicit layout operand')
+    placed, commands = {}, []
+    for name, value in values.items():
+        if value is None:
+            placed[name] = None
+            continue
+        placed[name], edges = resolve(value, declarations[name], writing=writing, binding=binding,
+                                     device=None if devices is None else devices[name])
+        commands.extend(edges)
+    return placed, commands

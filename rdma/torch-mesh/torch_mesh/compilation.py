@@ -39,13 +39,17 @@ def parameters():
 
 
 @lru_cache(None)
-def api_layouts(name):
+def _api_configuration():
     """Physical operand requirements of a declared native API, at preparation."""
     import json
     from pathlib import Path
     import mesh_compute
     path = Path(mesh_compute.__file__).resolve().parents[1] / 'etc/compute/metal-apis.json'
-    return json.loads(path.read_text())[name]
+    return json.loads(path.read_text())
+
+
+def api_layouts(name):
+    return _api_configuration()[name]
 
 
 def lift_attributes(module, arguments):

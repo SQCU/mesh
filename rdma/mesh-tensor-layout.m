@@ -360,8 +360,16 @@ finished:
 }
 - (MetalTensorLayout *)required:(NSString *)kind strides:(NSArray<NSNumber *> *)strides {
     if([kind isEqual:@"indexed"]||([kind isEqual:@"strided"]&&self.affine))return self;
+    if([kind isEqual:@"positive_strided"]&&self.affine) {
+        NSMutableArray *steps=[NSMutableArray arrayWithArray:_strides];BOOL positive=YES;
+        NSArray *packed=TensorStrides(_shape);
+        for(NSUInteger d=0;d<_shape.count;d++)if([steps[d] integerValue]<=0) {
+            if([_shape[d] unsignedIntegerValue]<=1)steps[d]=packed[d];else positive=NO;
+        }
+        if(positive)return [MetalTensorLayout shape:_shape strides:steps offset:_offset maps:@{} indices:nil];
+    }
     NSArray *required=[kind isEqual:@"fixed"]?strides:TensorStrides(_shape);
-    NSParameterAssert([kind isEqual:@"fixed"]||[kind isEqual:@"strided"]||[kind isEqual:@"contiguous"]);
+    NSParameterAssert([kind isEqual:@"fixed"]||[kind isEqual:@"strided"]||[kind isEqual:@"contiguous"]||[kind isEqual:@"positive_strided"]);
     NSParameterAssert(required.count==_shape.count);
     if([self matches:required])return self;
     NSInteger offset=0;

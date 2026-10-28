@@ -49,20 +49,20 @@ static void mesh_cpu_product_strided(const MeshCpuCommand *c) {
 int mesh_cpu_product_bind(MeshCpuCommand *c) {
   if(c->input_column<=0||c->input_stride<=0||c->weight_column<=0||c->weight_stride<=0||
      c->output_column<=0||c->output_stride<=0)return -1;
-  if((c->input_column==1||c->input_stride==1) &&
-     (c->weight_column==1||c->weight_stride==1) &&
-     (c->output_column==1||c->output_stride==1)) {
-    if(c->output_column!=1) {
+  if(((c->input_column==1&&c->input_stride>=c->inner)||(c->input_stride==1&&c->input_column>=c->rows)) &&
+     ((c->weight_column==1&&c->weight_stride>=c->inner)||(c->weight_stride==1&&c->weight_column>=c->columns)) &&
+     ((c->output_column==1&&c->output_stride>=c->columns)||(c->output_stride==1&&c->output_column>=c->rows))) {
+    if(!(c->output_column==1&&c->output_stride>=c->columns)) {
       int n=c->rows;c->rows=c->columns;c->columns=n;
       float *p=c->input;c->input=c->weight;c->weight=p;
       n=c->input_stride;c->input_stride=c->weight_stride;c->weight_stride=n;
       n=c->input_column;c->input_column=c->weight_column;c->weight_column=n;
       c->output_stride=c->output_column;c->output_column=1;
     }
-    c->input_transpose=c->input_column==1?CblasNoTrans:CblasTrans;
-    c->weight_transpose=c->weight_column==1?CblasTrans:CblasNoTrans;
-    if(c->input_column!=1)c->input_stride=c->input_column;
-    if(c->weight_column!=1)c->weight_stride=c->weight_column;
+    c->input_transpose=c->input_column==1&&c->input_stride>=c->inner?CblasNoTrans:CblasTrans;
+    c->weight_transpose=c->weight_column==1&&c->weight_stride>=c->inner?CblasTrans:CblasNoTrans;
+    if(c->input_transpose==CblasTrans)c->input_stride=c->input_column;
+    if(c->weight_transpose==CblasNoTrans)c->weight_stride=c->weight_column;
     c->run=mesh_cpu_product;
     return 0;
   }
