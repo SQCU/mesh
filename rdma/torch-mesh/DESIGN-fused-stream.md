@@ -45,8 +45,8 @@ include those strides. `gather_publish` reads a strided source directly, without
 The generic publisher still writes a source segment in the collective's common layout, and `gather_land` still
 assembles the logical output. This path is not a claim that every existing tensor is sent from its original bytes
 or that all layout copies have disappeared. `allgatherv_out`/`fused_step_out` let the consumer write a supplied
-destination, removing the additional copy from an allocated result. `examples/lstm.py` uses this for persistent
-hidden state `h`; `examples/chain.py` reaches the same routed writes through its tensor operations.
+destination, removing the additional copy from an allocated result. metal-microbench `tools/mesh/workloads/lstm.py` uses this for persistent
+hidden state `h`; metal-microbench `tools/mesh/workloads/chain.py` reaches the same routed writes through its tensor operations.
 
 For a consumer with one threadgroup, its compile-time `WAIT` specialization observes the incoming prefixes inline.
 For multiple threadgroups, one `gather_ready` dispatch observes all relevant physical prefixes, then performs one
@@ -199,7 +199,7 @@ and then each of its channels is completed in the stream's order, one after anot
   `streamed`, and its `published()` for a publishing kernel. That is the one commit rule, the same as for every group.
 - The residency set is the device's one set, added once to each queue it meets.
 
-### The chain (examples/)
+### The chain (metal-microbench tools/mesh/workloads/)
 
 The host makes two calls a step: `fused.exchange` of the step's part, which only writes the records (a publication
 and a landing for each peer), and the kernel's encode. One more dispatch after the last step lands the last crossing.

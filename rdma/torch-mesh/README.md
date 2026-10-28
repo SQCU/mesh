@@ -184,7 +184,7 @@ program holding its share and calling the list collectives with unequal sizes (`
 library's MPI_Allgatherv and MPI_Reduce_scatter (`ncclMeshAllGatherV`, `ncclMeshReduceScatterV`, [NCCL.md](../NCCL.md)),
 not a broadcast or reduce rooted at each rank; where the list is the pieces of one contiguous tensor (`out.split(sizes)`,
 as `partition`'s collectives pass it) the call reads or writes that tensor in place. Its callers are metal-microbench
-`tools/torch_parallel/tp.py`, `cp.py` and `ep.py` and this repository's examples/chain* and lstm*. On DTensor the partition is a placement, `RaggedShard`, carried
+metal-microbench `tools/mesh/workloads/{tp,cp,ep}.py`, `chain*` and `lstm*`. On DTensor the partition is a placement, `RaggedShard`, carried
 by `RaggedTensor`, a DTensor subclass whose own dispatch keeps it capacity-shaped through every op (padding re-masked
 before contractions, gathered where an op needs the dimension whole); nothing of torch is patched.
 
@@ -411,7 +411,7 @@ and declared input/output views. The compiler derives dependencies from overlapp
 accesses, using the same records as native engine capture. Consumers need no token
 or explicit join. The operation-call allocator, shard loader, Python callback,
 thread pool and future joins are removed.
-`examples/engines.py` uses the same interface as an application.
+Application workloads (metal-microbench `tools/mesh/workloads/`) use the same interface.
 Its required `ENGINE_CAPACITIES` JSON object supplies one work rate per named engine for the configured shape.
 Missing rates fail before tensors or models are prepared; no equal-rate fallback is used. Zero explicitly excludes
 an engine. Accelerate remains one CPU backend; the inventory's core classes do not promise per-class CPU affinity.
