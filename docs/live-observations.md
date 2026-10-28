@@ -40,7 +40,7 @@ fetch source to discover a machine. A missing configured node fails preparation.
 The parallel installation commands verify each endpoint's actual bridge identity.
 
 Each workload's ranks are the nodes its `place` selects in `etc/mesh-nodes.json`
-(`Cluster.place`: a role and least values, the `root` first). Each rank runs under
+(`Cluster.place`: `compute` nodes with a role and least values, the `root` first). Each rank runs under
 `mesh_nodes.py node guard` on its node, in its own process group, which the guard
 kills at the rank's deadline or below the node's `guard_free_pages`, then confirms
 empty. A run ends by `run_seconds`; its workloads stop a minute earlier so the

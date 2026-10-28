@@ -51,12 +51,12 @@ class Cluster:
         return [*SSHO, *(['-i', self.key] if self.key else [])]
 
     def place(self, need=None):
-        """The members holding `need`'s role with at least its other values, in rank order: the root first, the rest
-        by bridge node number (metal-microbench tools/mesh/grid.py order)."""
+        """The compute members holding `need`'s role with at least its other values, in rank order: the root first,
+        the rest by bridge node number (metal-microbench tools/mesh/grid.py order)."""
         need = dict(need or {})
-        role = need.pop('role', None)
+        roles = {'compute', need.pop('role', 'compute')}
         chosen = [m for m in self.members.values()
-                  if (role is None or role in m.roles) and all(getattr(m, k) >= v for k, v in need.items())]
+                  if roles <= m.roles and all(getattr(m, k) >= v for k, v in need.items())]
         return sorted(chosen, key=lambda m: ('root' not in m.roles, int(m.number)))
 
 
