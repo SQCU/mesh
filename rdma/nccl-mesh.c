@@ -3927,8 +3927,10 @@ static const struct message *channel_publication(struct inflight *g, uint32_t h,
   return NULL;
 }
 
-/* channel h's send entries [published, upto) published, their steps' bytes written by the stream's work before:
-   one release storing the holding's `ready` past the last (one system fence, nccl-mesh-kernels.h mesh_step_release),
+/* channel h's send entries [published, upto) published, their steps' bytes written by the stream's work before,
+   system-coherent (the library's kernels store so; the caller's bytes a SEND reads as given are stored so again when
+   the group is encoded: launch_metal, given): one release storing the holding's `ready` past the last (one system
+   fence, which orders those stores and no plain one: nccl-mesh-kernels.h mesh_step_release),
    or, the fused crossing's, its record for its caller's kernel (metal_send_deferred), whose last threadgroup to write
    its operand stores it, its first repeat's alone (a later repeat's is the record's at its own j) */
 static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm, uint32_t h, uint64_t upto, int *published) {
@@ -4353,6 +4355,16 @@ static ncclResult_t complement_copy(struct metal_program *program, const struct 
   return result;
 }
 
+/* the caller's `bytes` at w, which a SEND of the group reads as the caller left them (no copy of the library's before
+   it), stored again in place system-coherent, before anything of the group is published: a plain store of the
+   caller's earlier work in the same command buffer reaches the NIC only once the buffer ends, and a later dispatch's
+   system fence, the one publish makes, does not make it reach it (metal-microbench docs/facts.md, 10-24); a coherent
+   store of each word again does (the laptop, 2026-10-28: of 65,536 and 4,194,304 words stored plainly, 63,616 and 27 read
+   stale after a later kernel's system fence and none once re-stored so) */
+static ncclResult_t given(struct metal_program *program, struct where w, size_t bytes) {
+  return bytes ? gpu(metal_copy(program, METAL_PLAIN, w.buffer, w.offset, w.buffer, w.offset, bytes), "the caller's bytes a SEND reads") : ncclSuccess;
+}
+
 /* a premultiplier as the kernels read it: a floating type's value as float32 bits, an integer's bits */
 static uint64_t scalar_bits(const struct call *c) {
   uint64_t bits = 0;
@@ -4569,7 +4581,10 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   }
   /* the operands made in place, after the group's entries are presented and before its gate opens or anything is
      published: a premultiply, or a copy within the region, where a call reads no send buffer in place; a scratch's
-     copy; an all-to-all's own segment */
+     copy; an all-to-all's own segment; and where the group's SENDs read the caller's bytes as given (its send buffer
+     read in place, an operand given in place, an all-to-all's segments to the others), those bytes made visible to
+     the NIC (given).  A WRITE's and a fused crossing's producer stores its bytes coherently itself (rdma/NCCL.md) */
+  const int sends = g && !g->fused;
   for (size_t i = 0; i < n && !result; i++) {
     struct call *c = list + i;
     struct steps *st = c->bound;
@@ -4582,12 +4597,17 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       if (part && !same(source,destination))
         result = gpu(metal_copy(program,METAL_PLAIN,destination.buffer,destination.offset,source.buffer,source.offset,part),
                      "an all-to-all's own segment");
+      for (int q = 0; sends && q < comm->nranks && !result; q++)
+        if (q != (int)r) result = given(program, view_at(c, 1, seg_first(c->segments, q) * z), c->segments[q] * z);
       continue;
     }
     if (!call_contributes(c) || !bytes) continue;
     size_t length = c->count;
     const size_t before = c->what == MESH_ALLGATHER ? segment_at(c, (int)r, &length) : 0;
     const struct where segment = view_at(c, 0, before * z);
+    if (c->direct && sends && c->send_views)
+      for (int q = 0; q < comm->nranks && !result; q++) result = given(program, c->send_views[q], (c->segments ? c->segments[q] : c->count) * z);
+    else if (c->direct && sends) result = given(program, send, sent_bytes(c));
     if (!c->direct && reducing(c->what)) {
       const int each = c->send_views || (st && st->partial);
       size_t at = 0;
@@ -4598,10 +4618,12 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
           result = gpu(metal_premultiply(program, c->type, to.buffer, to.offset, source.buffer, source.offset, count, scalar_bits(c)), "the operand");
         else if (count && !same(to, source))
           result = gpu(metal_copy(program, METAL_PLAIN, to.buffer, to.offset, source.buffer, source.offset, count * z), "the operand");
+        else if (sends) result = given(program, to, count * z);
         at += count * z;
       }
-    } else if (!c->direct && ((c->what == MESH_BROADCAST && c->root == comm->rank) || c->what == MESH_ALLGATHER) && !same(segment, send))
-      result = gpu(metal_copy(program, METAL_PLAIN, segment.buffer, segment.offset, send.buffer, send.offset, length * z), "the operand");
+    } else if (!c->direct && ((c->what == MESH_BROADCAST && c->root == comm->rank) || c->what == MESH_ALLGATHER))
+      result = !same(segment, send) ? gpu(metal_copy(program, METAL_PLAIN, segment.buffer, segment.offset, send.buffer, send.offset, length * z), "the operand")
+                                    : sends ? given(program, segment, length * z) : ncclSuccess;
     for (uint32_t b = 1; st && b < st->initialized && !result && !c->direct; b++) {
       const struct where from=c->receive_views?send:own;
       result = gpu(metal_copy(program, METAL_PLAIN, st->buffer[b].buffer, st->buffer[b].offset+(c->receive_views?before*z:0),
