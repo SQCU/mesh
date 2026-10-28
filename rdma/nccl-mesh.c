@@ -2969,9 +2969,10 @@ static uint32_t slot_take(struct ncclComm *comm, size_t bytes) {
   return best;
 }
 
-/* group x's next invocation's storage, a page each: its calls' buffers that are the communicator's (generation_buffer;
-   a write's credits), then its landing area (*area), in x's next slot (*slot), taken once for each of GENERATIONS and
-   again where it must grow.  Under group_lock */
+/* group x's next invocation's storage, a page each: its calls' buffers that are the communicator's (generation_buffer,
+   read on x's own calls: an issued call keeps its roles alone, never its declaration's recipients; a write's credits),
+   then its landing area (*area), in x's next slot (*slot), taken once for each of GENERATIONS and again where it must
+   grow.  Under group_lock */
 static ncclResult_t bind_slot(struct metal_program *program, struct ncclComm *comm, struct compiled *x, struct call *list, size_t n,
                               const struct schedule *plans, struct where *area, uint32_t *slot) {
   size_t need = 0;
@@ -2990,7 +2991,7 @@ static ncclResult_t bind_slot(struct metal_program *program, struct ncclComm *co
     for (size_t i = 0; i < n; i++)
       for (uint32_t b = 0, z = (uint32_t)SIZE[list[i].type]; list[i].bound && b < list[i].bound->buffers; b++) {
         struct steps *st = list[i].bound;
-        if (list[i].target ? !st->credit || b != st->credit : !generation_buffer(list + i, (uint32_t)comm->rank, b) || (!b && st->partial)) continue;
+        if (list[i].target ? !st->credit || b != st->credit : !generation_buffer(x->calls + i, (uint32_t)comm->rank, b) || (!b && st->partial)) continue;
         if (pass) st->buffer[b] = shifted(base, used);
         used += page_up(b < st->initialized ? elements(list + i) * z : st->extent[b], comm->page);
       }
