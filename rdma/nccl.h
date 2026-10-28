@@ -149,19 +149,24 @@
    Memory.  The process is one client of its node's bridge: one attach of the node's region, made at its first
    ncclMemAlloc or communicator, whose slot owns the process's leases and holds the streams its communicators use; a
    communicator leases a page for its gate, pages of span tables (each made the first time its bytes are named and
-   never written again), and, for each group definition (a declared group, or an undeclared group's calls, the 64
-   most recently used kept), two slots of what its groups send from and land in that are not the caller's (a
+   never written again; past 64 pages all are let go and made again as named, the bridge's reads of entries already
+   presented keeping their pages), and, for each group definition (a declared group, or an undeclared group's calls,
+   the 64 most recently used kept), two slots of what its groups send from and land in that are not the caller's (a
    reduce-scatter's partials of the others' segments, a non-receiving rank's operand, a tree's scratch, a relay's
    generations, a combine's landing area, credits): made at its first group, its groups taking turns at them,
-   ncclMemAlloc called again only where one must grow, a dropped definition's slots kept for the next, all returned at
-   ncclCommDestroy.  A result is made in recvbuff (a reduce-scatter's own segment too: no compiled piece spans two
+   ncclMemAlloc called again only where one must grow (to one of eight sizes an octave), a dropped definition's slots
+   kept for the next, one too small returned where its last group was the host path's and is done, all returned at
+   ncclCommDestroy.  A group's host bookkeeping (its schedules, its steps' state, its record in flight) is its
+   definition's too, made at its first groups and bound again at each later one.  A result is made in recvbuff (a reduce-scatter's own segment too: no compiled piece spans two
    segments), and nothing is copied into a slot from a caller's buffer but the operand of a premultiplied,
    partials-merging or fused call where it is not the result, and an in-place single-phase all-reduce's original.  A
    group writes a slot only once the slot's last group has every landing awaited: the stream's order, and a landed
-   wait for those its stream did not await.  A SEND from a slot, or a write's (its producer's source, a relay's
-   lease), whose arrival no later landing at its rank depends on is answered by a credit, an 8-byte SEND of its
-   receiver's once those landings arrive on that cable, which the sender lands in the same group: so a group whose
-   landings are complete has every such SEND read, and nothing waits on `sent`.  ncclMemAlloc is the lease,
+   wait for those its stream did not await.  A SEND whose arrival no later landing at its rank depends on, whatever it
+   reads (a slot, the caller's send buffer read in place or its recvbuff, an all-to-all's buffers, a write's producer's
+   source or relay's lease), is answered by a credit, an 8-byte SEND of its receiver's once those landings arrive on
+   that cable, which the sender lands in the same group: so a group whose landings are complete has every SEND read,
+   the caller's next producer after it in the stream overwrites nothing the NIC has yet to read, and nothing waits on
+   `sent`.  ncclMemAlloc is the lease,
    the call the operator's division of the work makes of the bridge ("the bridge is there to behave like a system
    call"): whole pages of the region covering size, which the bridge registered on every device when the device came up,
    before any queue pair existed; a lease registers nothing.  The client sizes its leases ("ontologically it must be the

@@ -8,6 +8,15 @@
 #include <unistd.h>
 #include <time.h>
 #include <errno.h>
+
+static void (*_Atomic expiry)(const char *,uint64_t);
+void mesh_expiry_set(void (*expired)(const char *,uint64_t)){ atomic_store(&expiry,expired); }
+/* d's time left; past its deadline the registered expiry (mesh_expiry_set), else mesh_expired */
+static uint64_t left_of(const struct mesh_deadline *d){
+  void (*const expired)(const char *,uint64_t)=atomic_load(&expiry);
+  if(expired && mesh_clock_ns()>=d->at)expired(d->wait,d->ns);
+  return mesh_deadline_left(d);
+}
 /* design/transport.md */
 static void mesh_reclaim(struct hdr *);
 
@@ -75,13 +84,13 @@ static int mesh_records_read(struct hdr *m,size_t length,struct mesh_record **ou
   for(;;){
     uint64_t before=atomic_load_explicit(&m->map,memory_order_acquire);
     if(before&1){
-      const uint64_t left=mesh_deadline_left(&deadline);
+      const uint64_t left=left_of(&deadline);
       if(os_sync_wait_on_address_with_timeout(&m->map,before,sizeof m->map,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
            OS_CLOCK_MACH_ABSOLUTE_TIME,left<MESH_PAUSE_NS?left:MESH_PAUSE_NS)<0 && errno==ETIMEDOUT &&
          mesh_gone((pid_t)atomic_load(&m->bridge_pid)))return -ESRCH;
       continue;
     }
-    mesh_deadline_left(&deadline);
+    left_of(&deadline);
     uint64_t count=atomic_load_explicit(&m->map_nodes,memory_order_relaxed),at=atomic_load_explicit(&m->map_off,memory_order_relaxed);
     int fits=at<=length && count<=(length-at)/sizeof(struct mesh_record);
     struct mesh_record *copy=fits?malloc((count?count:1)*sizeof *copy):NULL;
@@ -199,7 +208,7 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
   for(;;){
     const uint64_t before=atomic_load_explicit(&m->health,memory_order_acquire);
     if(before&1){
-      const uint64_t left=mesh_deadline_left(&deadline);
+      const uint64_t left=left_of(&deadline);
       if(os_sync_wait_on_address_with_timeout(&m->health,before,sizeof m->health,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
            OS_CLOCK_MACH_ABSOLUTE_TIME,left<MESH_PAUSE_NS?left:MESH_PAUSE_NS)<0 && errno==ETIMEDOUT &&
          mesh_gone((pid_t)atomic_load(&m->bridge_pid))){
@@ -207,7 +216,7 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
       }
       continue;
     }
-    mesh_deadline_left(&deadline);
+    left_of(&deadline);
     count=mesh_records_read(m,length,&r);
     if(count<0 || atomic_load_explicit(&m->health,memory_order_acquire)==before)break;
     free(r);r=NULL;
@@ -236,7 +245,7 @@ int mesh_map_wait(uint64_t *serial,uint64_t bound_ns){
   const uint64_t bridge=atomic_load_explicit(&m->bridge_pid,memory_order_acquire);
   uint64_t seen=atomic_load_explicit(&m->map,memory_order_acquire);
   while(!error && seen==*serial){
-    const uint64_t left=mesh_deadline_left(&deadline);
+    const uint64_t left=left_of(&deadline);
     os_sync_wait_on_address_with_timeout(&m->map,seen,sizeof m->map,OS_SYNC_WAIT_ON_ADDRESS_SHARED,OS_CLOCK_MACH_ABSOLUTE_TIME,
                                          left<MESH_PAUSE_NS?left:MESH_PAUSE_NS);
     seen=atomic_load_explicit(&m->map,memory_order_acquire);

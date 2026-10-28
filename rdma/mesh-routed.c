@@ -290,7 +290,7 @@ static int retirement_proofs(struct routed_piece *pieces,size_t count,uint64_t p
     for(size_t begin=0,k=0;k<count && !status;k++){
       if(k && pieces[k].rank!=pieces[k-1].rank)begin=k;
       const struct mesh_step *s=&pieces[k].transfer.step;
-      if(s->op!=MESH_STEP_COPY)continue;
+      if(s->op==MESH_STEP_SEND)continue; /* a COPY landing in place, or a combine into its buffer */
       const uint32_t stamp=(uint32_t)k+1,root=3*s->round;
       stack[0]=root;seen[root]=stamp;
       ancestors(first,edges,seen,stack,1,stamp);

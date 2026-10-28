@@ -15,6 +15,10 @@ struct mesh_ctx { struct hdr *M; size_t len; uint64_t client; uint32_t row_curso
    EINVAL where the region expired as the slot was taken (it is let go) */
 int mesh_attach(struct mesh_ctx *);
 int mesh_slot_take(struct mesh_ctx *,struct hdr *);
+/* design/transport.md section 5: the expiry the process's collective library registers for libmesh's own waits
+   (libnccl-mesh's mesh_library_expired, which stops the process's GPU work and posted receives first); none
+   registered, mesh.h mesh_expired */
+void mesh_expiry_set(void (*expired)(const char *wait,uint64_t ns));
 /* the slot retired (mesh_retire), and the region unmapped */
 int mesh_detach(struct mesh_ctx *);
 /* design/transport.md: a process gone (its slot's or the bridge's pid; 0: none) */
