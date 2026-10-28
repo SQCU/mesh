@@ -11,6 +11,7 @@ struct routed_piece {
   uint32_t rank,local,transaction,round,hop,consume;
   uint64_t offset;
   uint32_t *retired,retires;
+  unsigned char witnessed;
 };
 
 static int physical_order(const void *a,const void *b){
@@ -233,6 +234,16 @@ static int byte_retired(const struct routed_piece *pieces,const size_t *send,con
   if(frontier==end)*proven=1;
   free(states);free(covered);return status;
 }
+/* every strict causal ancestor of the events on `stack` stamped */
+static void ancestors(const size_t *first,const struct routed_edge *edges,uint32_t *seen,uint32_t *stack,size_t pending,uint32_t stamp){
+  while(pending){
+    const uint32_t at=stack[--pending];
+    for(size_t e=first[at];e<first[at+1];e++){
+      const uint32_t prior=edges[e].after;
+      if(seen[prior]!=stamp){seen[prior]=stamp;stack[pending++]=prior;}
+    }
+  }
+}
 static int retirement_proofs(struct routed_piece *pieces,size_t count,uint64_t page){
   if(count/2>UINT32_MAX/3)return EOVERFLOW;
   const uint32_t events=(uint32_t)(count/2)*3;
@@ -281,14 +292,8 @@ static int retirement_proofs(struct routed_piece *pieces,size_t count,uint64_t p
       const struct mesh_step *s=&pieces[k].transfer.step;
       if(s->op!=MESH_STEP_COPY)continue;
       const uint32_t stamp=(uint32_t)k+1,root=3*s->round;
-      size_t pending=1;stack[0]=root;seen[root]=stamp;
-      while(pending){
-        const uint32_t at=stack[--pending];
-        for(size_t e=first[at];e<first[at+1];e++){
-          const uint32_t prior=edges[e].after;
-          if(seen[prior]!=stamp){seen[prior]=stamp;stack[pending++]=prior;}
-        }
-      }
+      stack[0]=root;seen[root]=stamp;
+      ancestors(first,edges,seen,stack,1,stamp);
       for(size_t j=begin;j<k;j++){
         const struct mesh_step *a=&pieces[j].transfer.step;
         if(a->op!=MESH_STEP_SEND || !pieces_meet(a,s))continue;
@@ -300,6 +305,20 @@ static int retirement_proofs(struct routed_piece *pieces,size_t count,uint64_t p
         if(!more){status=ENOMEM;break;}
         pieces[k].retired=more;more[pieces[k].retires++]=(uint32_t)(j-begin);
       }
+    }
+    /* A SEND is witnessed where its arrival is a strict causal ancestor of a
+       later landing at its own rank: that landing proves the peer read it. */
+    for(size_t begin=0,end=0;!status && begin<count;begin=end){
+      while(end<count && pieces[end].rank==pieces[begin].rank)end++;
+      const uint32_t stamp=(uint32_t)(count+1+begin);
+      size_t pending=0;
+      for(size_t k=begin;k<end;k++){
+        const uint32_t root=3*pieces[k].transfer.step.round;
+        if(pieces[k].transfer.step.op!=MESH_STEP_SEND && seen[root]!=stamp){seen[root]=stamp;stack[pending++]=root;}
+      }
+      ancestors(first,edges,seen,stack,pending,stamp);
+      for(size_t k=begin;k<end;k++)
+        pieces[k].witnessed=pieces[k].transfer.step.op==MESH_STEP_SEND && seen[3*pieces[k].transfer.step.round+1]==stamp;
     }
   }
   free(edges);free(first);free(seen);free(stack);free(send);free(land);return status;
@@ -381,7 +400,7 @@ void mesh_routed_free(struct mesh_routed_program *p){
   if(!p)return;
   for(uint32_t r=0;p->rank && r<p->nodes;r++){
     free(p->rank[r].transfer);free(p->rank[r].consume);free(p->rank[r].extent);
-    free(p->rank[r].retired_first);free(p->rank[r].retired);
+    free(p->rank[r].retired_first);free(p->rank[r].retired);free(p->rank[r].witnessed);
   }
   free(p->rank);free(p->demand);free(p->route_units);*p=(struct mesh_routed_program){0};
 }
@@ -470,7 +489,7 @@ int mesh_routed_compile(const struct mesh_fabric *f,const struct mesh_paths *pat
         if(r==source){t.step.buffer=send->buffer;t.step.first+=send->first;local=k-first[r];}
         else if(r==destination){t.step.op=land->op;t.step.buffer=land->buffer;t.step.first+=land->first;local=receive-first[r];}
         else t.step.buffer=relay[r];
-        pieces[count++]=(struct routed_piece){t,r,local,transaction,send->round,hop,0,offset,NULL,0};
+        pieces[count++]=(struct routed_piece){t,r,local,transaction,send->round,hop,0,offset,NULL,0,0};
         made.rank[r].count++;
       }
       free(physical);
@@ -494,13 +513,14 @@ int mesh_routed_compile(const struct mesh_fabric *f,const struct mesh_paths *pat
       rank->transfer=calloc((size_t)rank->count+1,sizeof *rank->transfer);
       rank->consume=calloc((size_t)rank->count+1,sizeof *rank->consume);
       rank->retired_first=calloc((size_t)rank->count+1,sizeof *rank->retired_first);
+      rank->witnessed=calloc((size_t)rank->count+1,1);
       size_t total=0;for(uint32_t k=0;k<rank->count;k++)total+=pieces[at+k].retires;
       if(total>UINT32_MAX){status=EOVERFLOW;break;}
       rank->retired=malloc((total+1)*sizeof *rank->retired);
-      if(!rank->transfer || !rank->consume || !rank->retired_first || !rank->retired){status=ENOMEM;break;}
+      if(!rank->transfer || !rank->consume || !rank->retired_first || !rank->retired || !rank->witnessed){status=ENOMEM;break;}
       uint32_t retired=0;
       for(uint32_t k=0;k<rank->count;k++,at++){
-        rank->transfer[k]=pieces[at].transfer;rank->consume[k]=pieces[at].consume;
+        rank->transfer[k]=pieces[at].transfer;rank->consume[k]=pieces[at].consume;rank->witnessed[k]=pieces[at].witnessed;
         rank->retired_first[k]=retired;
         if(pieces[at].retires)memcpy(rank->retired+retired,pieces[at].retired,pieces[at].retires*sizeof *rank->retired);
         retired+=pieces[at].retires;
