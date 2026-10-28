@@ -160,6 +160,9 @@ has width `w` and stride `s`, its coordinates are
 `outer * w * s + lane * s + inner`. The next factor changes another set of
 coordinate bits. Local storage holds `w` floats, regardless of the full width.
 Signs belong to the first factor and normalization to the last.
+`Rotation` uses the full power-of-two factor of its declared width unless its
+caller explicitly chooses a different basis block. The local tile setting no
+longer changes that mathematical basis or inflates its dense mixing matrix.
 
 The view compiler resolves those coordinates to assigned pages. Tile records
 carry their reads and writes. Masked lanes do not add unrelated source-page

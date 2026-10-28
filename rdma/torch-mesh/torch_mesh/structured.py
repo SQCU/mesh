@@ -182,12 +182,11 @@ class Rotation:
     """A seeded random orthogonal transform of width n (module docstring)."""
 
     def __init__(self, n, seed, rounds=2, device='mps', *, block_width=None):
-        self.n, self.N, self.B = n, *_factor(n, operands()['FWHT_BLOCK_WIDTH'] if block_width is None else block_width)
+        self.n, self.N, self.B = n, *_factor(n, n if block_width is None else block_width)
         g = torch.Generator().manual_seed(int(seed))
         self.signs = [(torch.randint(0, 2, (n,), generator=g) * 2 - 1).float().to(device) for _ in range(rounds)]
         self.mixes = [torch.linalg.qr(torch.randn(self.B, self.B, generator=g, dtype=torch.float64))[0].float().to(device)
                       for _ in range(rounds)]
-        self.ones = torch.ones(self.n, device=device)
 
     def rows(self, x):
         """Each row of x [m, n] rotated (x R^T)."""
@@ -210,6 +209,6 @@ class Rotation:
         for sign, mix in reversed(list(zip(self.signs, self.mixes))):
             if self.B > 1:
                 y = torch.einsum('bc,mbn->mcn', mix, y.view(m, self.B, self.N)).reshape(m, self.n)
-            x = fwht(y, self.ones, self.N)
+            x = expand(y, sign, self.N, signed=False)
             y = x * sign
         return y
