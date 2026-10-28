@@ -43,9 +43,12 @@ Each workload's ranks are the nodes its `place` selects in `etc/mesh-nodes.json`
 (`Cluster.place`: `compute` nodes with a role and least values, the `root` first).
 Each rank runs under `mesh_nodes.py node guard` in its own session with the run's
 token (`MESH_RUN`), its operands the first line of a stdin its caller holds open.
-The guard ends it at its deadline, below the node's `guard_free_pages`
-(`vm.page_free_count`, read every 0.1 s; a failed read ends it too), when that stdin
-closes or on SIGTERM or SIGHUP. It then SIGKILLs the rank and each descendant it
+The guard ends it at its deadline, when the node's headroom falls below its
+`guard_headroom_gib`, when that stdin closes or on SIGTERM or SIGHUP. The headroom
+is memorystatus's numerator A, free + speculative + pageable internal and external
+pages, read every 0.1 s by `sysctlbyname` (`host_statistics64` is rate-limited);
+on a `workstation` it is A less `vm.compressor_bytes_used`. A failed read ends the
+rank too. It then SIGKILLs the rank and each descendant it
 tracked by parent pid, each pid checked against its start time, until none remains,
 and then every process of the user still carrying the token (`KERN_PROCARGS2`); it
 exits 125 naming any survivor. The rank's own alarm ends it should the guard die,
