@@ -54,6 +54,16 @@ struct MetalTensorSpan { NSInteger offset; NSUInteger count; };
     access:(uint32_t)access binding:(int32_t)binding;
 @end
 
+// Preparation maps ordered storage parts onto the caller's logical intervals.
+// Cuts from every participant are united before a fragment is requested. The
+// fragment is then a direct storage binding; execution never sees this object.
+struct MetalTensorFragment { NSUInteger part, count; NSInteger offset; };
+@interface MetalTensorTraversal : NSObject
+@property(nonatomic, readonly) NSArray<NSNumber *> *cuts;
++ (instancetype)layouts:(NSArray<MetalTensorLayout *> *)layouts domains:(NSArray<NSArray<NSNumber *> *> *)domains;
+- (struct MetalTensorFragment)fragment:(NSUInteger)first end:(NSUInteger)end;
+@end
+
 // Place one storage domain from declared use layouts. All indices and widths
 // use the caller's common scalar unit. `values` preserves typed element fields
 // and alignment; `uses`/`targets` impose relative positions for consumers.

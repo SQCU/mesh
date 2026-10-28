@@ -281,6 +281,24 @@ intervals. Contiguous bindings keep their original call count. Highly scattered
 selections may still produce many native records; this is a granularity limit
 of the current numerical binding, not a limitation of the page representation.
 
+`MetalTensorTraversal` now supplies the ordered boundary and fragment calculation
+to both FX and native crossings. It maps storage parts onto declared logical
+intervals during preparation. The Python-only position and alias calculations
+have been removed. No traversal object is read by numerical execution.
+
+Native `MeshRankCross` records the supplied source and destination layouts.
+Ranks unite their boundaries with the existing graph configuration, then bind
+each fragment to its original storage. Uneven gather and scatter counts retain
+their rank domains. Fragments of one crossing stay in one transport group.
+Contiguous bindings still make one call; mapped bindings add no layout copy.
+The native FFN passes its prepared result view to this interface. Goal A and
+LiteRT declare their existing linear operands through the same binding.
+
+Preparation on 2026-10-28 built the shared library, frontend, native rank and
+Goal A. FX collective preparation covered mapped scalars and structured rows.
+Native configuration preparation merged and bound mapped reductions, uneven
+gathers/scatters and broadcasts without a communicator or numerical invocation.
+
 On 2026-10-27, the extension built and local preparation constructed mapped
 collective bindings and record-copy pipelines. Mixed-row preparation copied
 only the scattered row. The inspection used no live communicator and submitted
@@ -386,7 +404,8 @@ Combining provider partials with GPU work takes an explicit addend operand;
 the destination no longer implicitly supplies that input. All three views feed
 the same indexing and dependency declarations.
 
-Existing native crossings still bind the network's result representation.
+Native crossings preserve the supplied result view; the network still declares
+its result scalar representation separately from a provider's representation.
 Provider output-backing guarantees remain unresolved as described above.
 
 Both convolution forms and their tap projections now consume the same typed

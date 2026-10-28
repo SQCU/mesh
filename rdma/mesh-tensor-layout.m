@@ -1,5 +1,56 @@
 #import "metal-recording.h"
 
+struct TensorRun { NSUInteger first, end, part; NSInteger offset; };
+@implementation MetalTensorTraversal {
+    NSData *_runs;
+    NSArray *_domains;
+}
++ (instancetype)layouts:(NSArray<MetalTensorLayout *> *)layouts domains:(NSArray<NSArray<NSNumber *> *> *)domains {
+    MetalTensorTraversal *result=[[[self alloc] init] autorelease];
+    NSMutableData *runs=[NSMutableData data];NSMutableArray *cuts=[NSMutableArray array];
+    NSUInteger count=0;
+    for(NSUInteger part=0;part<layouts.count;part++) {
+        NSData *data=[layouts[part] orderedSpans];const struct MetalTensorSpan *spans=data.bytes;
+        for(NSUInteger k=0;k<data.length/sizeof *spans;k++) {
+            struct TensorRun run={count,count+spans[k].count,part,spans[k].offset};
+            if(spans[k].count)[runs appendBytes:&run length:sizeof run];
+            count=run.end;
+        }
+    }
+    NSUInteger total=0;
+    for(NSArray *domain in domains) {
+        NSUInteger first=[domain[0] unsignedIntegerValue],end=[domain[1] unsignedIntegerValue];
+        NSParameterAssert(end>=first);total+=end-first;
+    }
+    NSParameterAssert(total==count);
+    const struct TensorRun *values=runs.bytes;
+    for(NSUInteger k=0;k+1<runs.length/sizeof *values;k++) {
+        NSUInteger local=values[k].end;
+        for(NSArray *domain in domains) {
+            NSUInteger first=[domain[0] unsignedIntegerValue],end=[domain[1] unsignedIntegerValue];
+            if(local<=end-first){[cuts addObject:@(first+local)];break;}
+            local-=end-first;
+        }
+    }
+    result->_runs=[runs copy];result->_domains=[domains copy];
+    result->_cuts=[[[[NSSet setWithArray:cuts] allObjects] sortedArrayUsingSelector:@selector(compare:)] copy];
+    return result;
+}
+- (void)dealloc { [_runs release];[_domains release];[_cuts release];[super dealloc]; }
+- (struct MetalTensorFragment)fragment:(NSUInteger)first end:(NSUInteger)end {
+    NSUInteger lo=0,hi=0;
+    for(NSArray *domain in _domains) {
+        NSUInteger start=[domain[0] unsignedIntegerValue],stop=[domain[1] unsignedIntegerValue];
+        lo+=MIN(MAX(first,start),stop)-start;hi+=MIN(MAX(end,start),stop)-start;
+    }
+    if(lo==hi)return (struct MetalTensorFragment){0,0,0};
+    const struct TensorRun *runs=_runs.bytes;NSUInteger left=0,right=_runs.length/sizeof *runs;
+    while(left<right){NSUInteger middle=left+(right-left)/2;if(runs[middle].end<=lo)left=middle+1;else right=middle;}
+    NSParameterAssert(left<_runs.length/sizeof *runs&&hi<=runs[left].end);
+    return (struct MetalTensorFragment){runs[left].part,hi-lo,runs[left].offset+(NSInteger)(lo-runs[left].first)};
+}
+@end
+
 static NSArray<NSNumber *> *TensorStrides(NSArray<NSNumber *> *shape) {
     NSMutableArray *steps=[NSMutableArray arrayWithCapacity:shape.count];
     for(NSUInteger d=0;d<shape.count;d++)[steps addObject:@0];
