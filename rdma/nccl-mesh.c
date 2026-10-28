@@ -2225,15 +2225,16 @@ static int credit_add(struct credit **list, size_t *n, struct credit x) {
   return 0;
 }
 static void credits_lay(struct steps *s, const struct credit *list, size_t n, uint32_t me, uint32_t round, uint32_t type) {
+  const uint32_t first = s->count;
   uint64_t slots = 0;
   for (size_t i = 0; i < n; i++) {
     if (list[i].from != me && list[i].to != me) continue;
     const int send = list[i].to == me;
     s->steps[s->count] = (struct mesh_step){send ? MESH_STEP_SEND : MESH_STEP_COPY, send ? list[i].from : list[i].to,
-                                            round + (uint32_t)i, s->credit, send ? 0 : ++slots, {type, 8, 1}};
+                                            round + (uint32_t)i, s->buffers, send ? 0 : ++slots, {type, 8, 1}};
     s->cable[s->count++] = list[i].cable;
   }
-  s->extent[s->credit] = 8 * (1 + slots);
+  if (s->count > first) s->extent[s->credit = s->buffers++] = 8 * (1 + slots);
 }
 
 /* design/whole-function.md#one-way-writes */
@@ -2241,36 +2242,24 @@ static ncclResult_t write_steps(struct call *c) {
   struct ncclComm *comm = c->comm;
   const struct mesh_paths *paths = comm->writes ? comm->writes + c->root * comm->nranks + c->target - 1 : NULL;
   const struct mesh_operand operand = {(uint32_t)c->type + 1, (uint32_t)SIZE[c->type], c->count};
-  const uint32_t me = (uint32_t)comm->rank;
-  const int count = mesh_write_compile(&comm->fabric, me, (uint32_t)c->root, (uint32_t)c->target - 1,
+  const int count = mesh_write_compile(&comm->fabric, (uint32_t)comm->rank, (uint32_t)c->root, (uint32_t)c->target - 1,
     paths, operand, comm->page, c->tile_bytes / SIZE[c->type], NULL, 0);
   if (count < 0) return fail(ncclInvalidUsage, "one-way write requires its compiled physical paths: %s", strerror(-count));
-  struct mesh_transfer *transfers = malloc(((size_t)count + 1) * sizeof *transfers);
-  int made = transfers ? mesh_write_compile(&comm->fabric, me, (uint32_t)c->root, (uint32_t)c->target - 1,
-    paths, operand, comm->page, c->tile_bytes / SIZE[c->type], transfers, (uint32_t)count + 1) : -ENOMEM;
-  /* every hop of a write is one-way: each sender's bytes (the producer's source, a relay's lease) are proved read
-     by a credit back */
-  struct credit *credit = NULL;
-  size_t credits = 0;
-  uint32_t round = 0;
-  for (int k = 0; k < made; k++) {
-    const struct mesh_step *t = &transfers[k].step;
-    if (t->round >= round) round = t->round + 1;
-    if (credit_add(&credit, &credits, t->op == MESH_STEP_SEND ? (struct credit){me, t->peer, transfers[k].cable}
-                                                               : (struct credit){t->peer, me, transfers[k].cable})) { made = -ENOMEM; break; }
-  }
-  const size_t room = (size_t)count + credits + 1;
+  const size_t room = 2 * (size_t)count + 1; /* a credit a transfer at most */
   struct steps *s = calloc(1, sizeof *s);
+  struct mesh_transfer *transfers = malloc(room * sizeof *transfers);
   uint32_t *received=malloc(room*sizeof *received);
-  if (s) *s = (struct steps){.references = 1, .count = (uint32_t)count, .buffers = 1 + !!credits, .initialized = 1, .credit = credits ? 1 : 0};
+  if (s) *s = (struct steps){.references = 1, .count = (uint32_t)count, .buffers = 1, .initialized = 1};
   if (!s || !transfers || !received || !(s->steps = calloc(room, sizeof *s->steps)) || !(s->done = calloc(room, 1)) ||
       !(s->channel = calloc(room, sizeof *s->channel)) || !(s->entry = calloc(room, sizeof *s->entry)) ||
       !(s->cable = calloc(room, sizeof *s->cable)) || !(s->consumption = calloc(room, sizeof *s->consumption)) ||
       !(s->prior_first = calloc(room, sizeof *s->prior_first)) ||
-      !(s->prior = malloc(room*sizeof *s->prior)) || !(s->extent = calloc(2, sizeof *s->extent)) || made < 0) {
-    steps_free(s); free(transfers); free(received); free(credit);
-    return made < 0 && made != -ENOMEM ? fail(ncclInternalError, "one-way write compile: %s", strerror(-made)) : fail(ncclSystemError, "out of memory");
+      !(s->prior = malloc(room*sizeof *s->prior)) || !(s->extent = calloc(2, sizeof *s->extent))) {
+    steps_free(s); free(transfers); free(received); return fail(ncclSystemError, "out of memory");
   }
+  const int made = mesh_write_compile(&comm->fabric, (uint32_t)comm->rank, (uint32_t)c->root, (uint32_t)c->target - 1,
+    paths, operand, comm->page, c->tile_bytes / SIZE[c->type], transfers, (uint32_t)room);
+  if (made < 0) { steps_free(s); free(transfers); free(received); return fail(ncclInternalError, "one-way write compile: %s", strerror(-made)); }
   for (int k = 0; k < made; k++) { s->steps[k] = transfers[k].step; s->cable[k] = transfers[k].cable; }
   /* WRITE paths own disjoint payload intervals, in increasing interval order.
      A relay's receive and send have identical tile cuts. Join those intervals
@@ -2283,14 +2272,26 @@ static ncclResult_t write_steps(struct call *c) {
     while(at<receives&&s->steps[received[at]].first<s->steps[k].first)at++;
     if(at==receives||received[at]>=k||s->steps[received[at]].first!=s->steps[k].first||
        s->steps[received[at]].piece.elements!=s->steps[k].piece.elements) {
-      steps_free(s);free(transfers);free(received);free(credit);return fail(ncclInternalError,"WRITE relay tile has no matching incoming interval");
+      steps_free(s);free(transfers);free(received);return fail(ncclInternalError,"WRITE relay tile has no matching incoming interval");
     }
     s->prior[s->priors++]=received[at];
   }
-  if (credits) credits_lay(s, credit, credits, me, round, operand.type);
-  for (uint32_t k = (uint32_t)count; k <= s->count; k++) s->prior_first[k] = s->priors;
-  free(received); free(credit);
-  free(transfers); c->bound = s;
+  /* every hop of a write is one-way: each sender's bytes (the producer's source, a relay's lease) are proved read by
+     a credit back */
+  struct credit *credit = NULL;
+  size_t credits = 0;
+  uint32_t round = 0, me = (uint32_t)comm->rank;
+  int error = 0;
+  for (uint32_t k = 0; k < (uint32_t)made && !error; k++) {
+    const struct mesh_step *t = s->steps + k;
+    if (t->round >= round) round = t->round + 1;
+    error = credit_add(&credit, &credits, t->op == MESH_STEP_SEND ? (struct credit){me, t->peer, s->cable[k]} : (struct credit){t->peer, me, s->cable[k]});
+  }
+  if (!error) credits_lay(s, credit, credits, me, round, operand.type);
+  for (uint32_t k = (uint32_t)made; k <= s->count; k++) s->prior_first[k] = s->priors;
+  free(received); free(transfers); free(credit);
+  if (error) { steps_free(s); return fail(ncclSystemError, "out of memory"); }
+  c->bound = s;
   return ncclSuccess;
 }
 
@@ -2329,13 +2330,9 @@ static ncclResult_t bind_routed_steps(struct call *c, const uint32_t *first, con
   ncclResult_t result = status ? fail(ncclInvalidUsage, "physical collective lowering for %s: %s", comm->name, strerror(status)) : ncclSuccess;
   if (!result) {
     struct mesh_routed_rank *rank = physical.rank + comm->rank;
-    uint32_t mine = 0;
-    for (size_t i = 0; i < credits; i++) mine += credit[i].from == (uint32_t)comm->rank || credit[i].to == (uint32_t)comm->rank;
-    const uint32_t count = rank->count + mine;
-    const size_t room = (size_t)count + 1;
+    const size_t room = (size_t)rank->count + credits + 1;
     struct steps *s = calloc(1, sizeof *s);
-    if (s) *s = (struct steps){.references = 1, .count = rank->count, .buffers = rank->buffers + !!mine, .initialized = rank->initialized,
-                               .credit = mine ? rank->buffers : 0};
+    if (s) *s = (struct steps){.references = 1, .count = rank->count, .buffers = rank->buffers, .initialized = rank->initialized};
     uint32_t *consume = rank->consume ? realloc(rank->consume, room * sizeof *consume) : NULL;
     if (consume) rank->consume = consume;
     uint32_t *retired_first = rank->retired_first ? realloc(rank->retired_first, room * sizeof *retired_first) : NULL;
@@ -2356,11 +2353,11 @@ static ncclResult_t bind_routed_steps(struct call *c, const uint32_t *first, con
       s->demand = physical.demand; physical.demand = NULL;
       s->route_units = physical.route_units; physical.route_units = NULL;
       for (uint32_t k = 0; k < s->count; k++) { s->steps[k] = rank->transfer[k].step; s->cable[k] = rank->transfer[k].cable; }
-      for (uint32_t k = s->count; k < count; k++) {
-        if (s->consume_order) s->consume_order[k] = UINT32_MAX - (count - k);
-        if (s->retired_first) s->retired_first[k + 1] = s->retired_first[s->count];
+      credits_lay(s, credit, credits, (uint32_t)comm->rank, round, logical[0].piece.type);
+      for (uint32_t k = rank->count; k < s->count; k++) {
+        if (s->consume_order) s->consume_order[k] = UINT32_MAX - (s->count - k);
+        s->retired_first[k + 1] = s->retired_first[rank->count];
       }
-      if (mine) credits_lay(s, credit, credits, (uint32_t)comm->rank, round, logical[0].piece.type);
       c->bound = s;
     }
   }
