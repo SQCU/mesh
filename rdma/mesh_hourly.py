@@ -205,7 +205,7 @@ def prepare_node(node, paths, record):
             if name == 'mesh':
                 node.source = destination
         commands.append(f'PYTHONPATH={home_path(node.source + "/rdma")} {cluster.python} -m mesh_nodes node prepare '
-                        + shlex.quote(record['commits']['mesh']) + ' ' + shlex.quote(node.number))
+                        + ' '.join(shlex.quote(word) for word in (record['commits']['mesh'], node.number, record['token'])))
         for name in paths:
             commands.append(f'{cluster.python} {home_path(node.source + "/rdma/mesh_source.py")} prune '
                             f'{home_path(cluster.checkouts + "/" + name)} current')

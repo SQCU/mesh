@@ -390,17 +390,17 @@ def node_install(commit, transition='0'):
     install_checkout(source, allow_source_transition=transition == '1')
 
 
-def ended(token):
-    """A run token (`run:host:pid:start`) whose launcher is provably gone: on this host, its pid's start time differs."""
-    fields = token.split(':')
-    return len(fields) == 4 and fields[1] == socket.gethostname() and fields[2].isdigit() and \
-        started(int(fields[2])) != fields[3]
+def ended(token, current):
+    """A run token (`run:launcher host:pid:start`) of an ended run: its launcher host is the `current` run's, whose
+    lease admits one run at a time, and its run is another."""
+    fields, now = token.split(':'), current.split(':')
+    return len(fields) == 4 and len(now) == 4 and fields[1] == now[1] and fields[0] != now[0]
 
 
-def node_prepare(commit, number):
+def node_prepare(commit, number, current):
     from mesh_install import environment, install_checkout
     from mesh_source import verify
-    if left := sweep(ended, time.monotonic() + 30):
+    if left := sweep(lambda token: ended(token, current), time.monotonic() + 30):
         raise RuntimeError(f'processes {left} of an ended run remain after SIGKILL')
     source = Path(__file__).resolve().parent.parent
     if verify(source) != commit:
