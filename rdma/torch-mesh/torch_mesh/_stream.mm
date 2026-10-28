@@ -664,10 +664,63 @@ static Dispatch encoded(int64_t handle, const std::vector<std::optional<at::Tens
   return d;
 }
 
+// The shared preparation layout is also the Python frontend's layout type.
+// Its object and maps never enter a replay record.
+static NSArray<NSNumber *> *tensorNumbers(const std::vector<NSInteger> &values) {
+  NSMutableArray *result=[NSMutableArray array];for(auto value:values)[result addObject:@(value)];return result;
+}
+static std::vector<NSInteger> tensorNumbers(NSArray<NSNumber *> *values) {
+  std::vector<NSInteger> result;for(NSNumber *value in values)result.push_back(value.integerValue);return result;
+}
+static NSData *tensorWords(const std::vector<NSInteger> &values) {
+  return [NSData dataWithBytes:values.data() length:values.size()*sizeof(NSInteger)];
+}
+struct TensorLayout {
+  MetalTensorLayout *value;
+  explicit TensorLayout(MetalTensorLayout *layout):value([layout retain]){}
+  TensorLayout(const TensorLayout &other):value([other.value retain]){}
+  TensorLayout(TensorLayout &&other):value(other.value){other.value=nil;}
+  ~TensorLayout(){[value release];}
+  static TensorLayout make(const std::vector<NSInteger> &shape,const std::vector<NSInteger> &strides,NSInteger offset,
+      const std::map<NSUInteger,std::vector<NSInteger>> &axes,const std::optional<std::vector<NSInteger>> &indices) {
+    NSMutableDictionary *maps=[NSMutableDictionary dictionary];
+    for(const auto &[axis,values]:axes)maps[@(axis)]=tensorWords(values);
+    return TensorLayout([MetalTensorLayout shape:tensorNumbers(shape) strides:tensorNumbers(strides) offset:offset
+        maps:maps indices:indices?tensorWords(*indices):nil]);
+  }
+  static TensorLayout tensor(const at::Tensor &t) {
+    return make({t.sizes().begin(),t.sizes().end()},{t.strides().begin(),t.strides().end()},t.storage_offset(),{},std::nullopt);
+  }
+};
+// Resolve a frontend storage handle to its bridge pages once, while preparing.
+// A tensor containing changing page indices remains an ordinary data operand;
+// neither this adapter nor TensorLayout reads those indices from its payload.
+static MetalTensorPages *tensorPages(const at::Tensor &t) {
+  TORCH_CHECK(t.is_mps()||t.device().is_cpu(),"page operands require CPU or Metal views of bridge storage");
+  @try {
+    return [(t.is_mps()?[MetalTensorPages storage:at::native::mps::getMTLBufferStorage(t)]
+                       :[MetalTensorPages host:t.storage().data_ptr().get()]) retain];
+  } @catch(NSException *error) { TORCH_CHECK(false,error.reason.UTF8String); }
+}
+struct TensorOperand {
+  at::Tensor storage;
+  MetalTensorPages *pages;
+  TensorLayout layout;
+  explicit TensorOperand(const pybind11::object &object):
+    storage((THPVariable_Check(object.ptr())?object:object.attr("storage")).cast<at::Tensor>()),
+    pages(tensorPages(storage)),
+    layout([pages bind:(THPVariable_Check(object.ptr())?TensorLayout::tensor(storage):object.attr("layout").cast<TensorLayout>()).value
+                 elementBytes:storage.element_size()]){}
+  ~TensorOperand(){[pages release];}
+};
+
 // FX's output is the native recorder's input. This constructor only binds
 // storage and constant operands; it neither runs nor records a framework call.
-using CommandRecord = std::tuple<int64_t, std::vector<std::optional<at::Tensor>>,
+using CommandRecord = std::tuple<int64_t, std::vector<pybind11::object>,
     std::map<uint32_t,pybind11::bytes>, std::array<NSUInteger,3>, std::array<NSUInteger,3>, bool, uint64_t>;
+static std::vector<pybind11::object> commandOperands(const std::vector<std::optional<at::Tensor>> &tensors) {
+  std::vector<pybind11::object> result;for(const auto &t:tensors)result.push_back(t?pybind11::cast(*t):pybind11::none());return result;
+}
 struct Commands {
   MetalReplay *replay=nullptr;
   std::vector<at::Tensor> operands;
@@ -677,57 +730,44 @@ struct Commands {
     std::vector<std::vector<MetalCommandBinding>> bindings(records.size());
     std::vector<std::vector<MetalReach>> reaches(records.size());
     std::vector<MetalCommandDescription> descriptions;
-    std::vector<id<MTLBuffer>> owned;
-    std::map<uintptr_t,id<MTLBuffer>> hostBuffers;
-    const NSUInteger page=(NSUInteger)sysconf(_SC_PAGESIZE);
+    std::vector<uint8_t> words;
+    std::vector<std::vector<std::array<NSUInteger,3>>> constants(records.size());
+    for(size_t k=0;k<records.size();k++)for(const auto &[index,scalar]:std::get<2>(records[k])) {
+      const std::string bytes=scalar;
+      words.resize((words.size()+MESH_COMMAND_DATA_ALIGNMENT-1)/MESH_COMMAND_DATA_ALIGNMENT*MESH_COMMAND_DATA_ALIGNMENT);
+      constants[k].push_back({index,words.size(),bytes.size()});
+      words.insert(words.end(),bytes.begin(),bytes.end());
+    }
+    id<MTLBuffer> constantBuffer=nil;size_t constantOffset=0;
+    if(!words.empty()) {
+      auto storage=region_empty({(int64_t)words.size()},at::empty({0},at::TensorOptions().dtype(at::kByte)),false);
+      memcpy(storage.data_ptr(),words.data(),words.size());
+      void *mapped=nullptr;checked(ncclMeshMemBuffer(storage.data_ptr(),&mapped,&constantOffset));
+      constantBuffer=(id<MTLBuffer>)mapped;operands.push_back(std::move(storage));
+    }
     for(size_t k=0;k<records.size();k++) {
       const auto &[handle,buffers,scalars,grid,group,threadGrid,access]=records[k];
       TORCH_CHECK(handle>=0&&handle<(int64_t)pipelines_.size(),"unprepared Metal kernel");
       auto &bound=bindings[k];
       auto &ranges=reaches[k];
-      for(size_t j=0;j<buffers.size();j++)if(buffers[j]) {
-        const auto &t=*buffers[j];
-        TORCH_CHECK(t.is_mps()||t.device().is_cpu(),"native command operands require shared CPU or Metal storage");
-        id<MTLBuffer> buffer=nil;
-        NSUInteger offset=t.storage_offset()*t.element_size();
-        if(t.is_mps())buffer=at::native::mps::getMTLBufferStorage(t);
-        else {
-          // Bind the existing host allocation once, without moving its data.
-          // This permits an API's layout copy to use the same command body
-          // whether its prepared operand is named by a CPU or Metal view.
-          const uintptr_t base=(uintptr_t)t.storage().data_ptr().get(),first=base/page*page;
-          auto found=hostBuffers.find(base);
-          if(found==hostBuffers.end()) {
-            const NSUInteger length=((base-first+t.storage().nbytes()+page-1)/page)*page;
-            buffer=[device newBufferWithBytesNoCopy:(void *)first length:length options:MTLResourceStorageModeShared deallocator:nil];
-            TORCH_CHECK(buffer,"native preparation could not map the supplied host storage");
-            hostBuffers.emplace(base,buffer);owned.push_back(buffer);
-          } else buffer=found->second;
-          offset+=base-first;
-        }
+      for(size_t j=0;j<buffers.size();j++)if(!buffers[j].is_none()) {
+        const TensorOperand operand(buffers[j]);const auto &t=operand.storage;const auto &layout=operand.layout;
+        id<MTLBuffer> buffer=operand.pages.buffer;
         const uint32_t mode=((access>>j)&1?MetalReachRead:0)|((access>>(MESH_ACCESS_WRITE_SHIFT+j))&1?MetalReachWritten:0);
-        bound.push_back({buffer,offset,t.nbytes(),(uint32_t)j,mode});
+        bound.push_back({buffer,(NSUInteger)layout.value.offset*t.element_size(),layout.value.count*t.element_size(),(uint32_t)j,mode});
         if(mode) {
-          std::vector<NSUInteger> shape(t.sizes().begin(),t.sizes().end());
-          std::vector<NSInteger> strides(t.strides().begin(),t.strides().end());
-          for(auto &stride:strides)stride*=t.element_size();
-          NSData *data=MetalViewReaches(buffer,offset,shape.data(),strides.data(),shape.size(),t.element_size(),mode,(int32_t)j);
+          NSData *data=[layout.value reaches:buffer base:0 elementBytes:t.element_size() access:mode binding:(int32_t)j];
           const auto *spans=(const MetalReach *)data.bytes;
           ranges.insert(ranges.end(),spans,spans+data.length/sizeof *spans);
         }
         operands.push_back(t);
       }
-      for(const auto &[index,scalar]:scalars) {
-        const std::string bytes=scalar;
-        id<MTLBuffer> buffer=[device newBufferWithBytes:bytes.data() length:bytes.size() options:MTLResourceStorageModeShared];
-        owned.push_back(buffer);
-        bound.push_back({buffer,0,bytes.size(),index,MetalReachRead});
-      }
+      for(const auto &constant:constants[k])
+        bound.push_back({constantBuffer,constantOffset+constant[1],constant[2],(uint32_t)constant[0],MetalReachRead});
       descriptions.push_back({pipelines_[handle],bound.data(),bound.size(),nullptr,0,ranges.data(),ranges.size(),
         MTLSizeMake(grid[0],grid[1],grid[2]),MTLSizeMake(group[0],group[1],group[2]),(BOOL)threadGrid});
     }
     replay=MetalReplayCommands(device,descriptions.data(),descriptions.size(),MetalFormEncoded);
-    for(id buffer:owned)[buffer release];
     TORCH_CHECK(replay,"native command preparation failed");
   }
   ~Commands(){MetalReplayFree(replay);}
@@ -867,7 +907,7 @@ static std::vector<CommandRecord> linear_commands(const std::vector<at::Tensor> 
   const int64_t split = linear_fit(least, first);
   if(P==1) {
     buffers.resize(6);buffers[5]=buffers[4];buffers[4]=std::nullopt;
-    return {{linear_pipeline(std::make_tuple(wide_w?MESH_LINEAR_VECTOR:1,wide_x?MESH_LINEAR_VECTOR:1,(int)split,(int)acts[0],1)),buffers,
+    return {{linear_pipeline(std::make_tuple(wide_w?MESH_LINEAR_VECTOR:1,wide_x?MESH_LINEAR_VECTOR:1,(int)split,(int)acts[0],1)),commandOperands(buffers),
         {{4,pybind11::bytes((char *)&words.dimensions[0],sizeof(LinearDimensions))}},
         {(NSUInteger)first,1,1},{(NSUInteger)(split*MESH_SIMD_WIDTH),1,1},false,UINT64_C(43)|(UINT64_C(4)<<MESH_ACCESS_WRITE_SHIFT)}};
   }
@@ -877,7 +917,7 @@ static std::vector<CommandRecord> linear_commands(const std::vector<at::Tensor> 
   packed.append((char *)words.activation,P*sizeof(*words.activation));
   uint64_t access=0;
   for(size_t p=0;p<P;p++)access|=(UINT64_C(27)<<(LINEAR_BINDINGS*p))|(UINT64_C(4)<<(MESH_ACCESS_WRITE_SHIFT+LINEAR_BINDINGS*p));
-  return {{linear_pipeline(key),buffers,{{LINEAR_BINDINGS*P,pybind11::bytes(packed)}},
+  return {{linear_pipeline(key),commandOperands(buffers),{{LINEAR_BINDINGS*P,pybind11::bytes(packed)}},
       {(NSUInteger)first,1,1},{(NSUInteger)(split*MESH_SIMD_WIDTH),1,1},false,access}};
 }
 
@@ -1521,8 +1561,8 @@ struct ScheduleBinding {
   std::vector<at::Tensor> operands;
   // Preparation supplies native run/context/retain/release operands. The
   // completion worker neither owns a Python callback nor acquires the GIL.
-  void host(const std::array<uintptr_t,4> &entry,const std::vector<at::Tensor> &inputs,
-      const std::vector<at::Tensor> &outputs) { @autoreleasepool {
+  void host(const std::array<uintptr_t,4> &entry,const std::vector<pybind11::object> &inputs,
+      const std::vector<pybind11::object> &outputs) { @autoreleasepool {
     for(auto pointer:entry)TORCH_CHECK(pointer,"host operation requires a complete native binding");
     using Run=const char *(*)(void *);
     using Lifetime=void (*)(void *);
@@ -1531,22 +1571,16 @@ struct ScheduleBinding {
     reinterpret_cast<Lifetime>(entry[2])(context);
     auto bound=std::shared_ptr<void>(context,reinterpret_cast<Lifetime>(entry[3]));
     std::vector<MetalReach> views;
-    auto declare=[&](const std::vector<at::Tensor> &tensors,uint32_t access) {
-      for(const auto &t:tensors) {
-        TORCH_CHECK(t.is_mps()||t.device().is_cpu(),"host views require shared CPU/Metal storage");
-        id<MTLBuffer> buffer=t.is_mps()?at::native::mps::getMTLBufferStorage(t):nil;
-        TORCH_CHECK(!buffer||buffer.storageMode==MTLStorageModeShared,"host views require shared Metal storage");
-        const NSUInteger offset=buffer?t.storage_offset()*t.element_size():(NSUInteger)t.data_ptr();
-        std::vector<NSUInteger> shape(t.sizes().begin(),t.sizes().end());
-        std::vector<NSInteger> strides(t.strides().begin(),t.strides().end());
-        for(auto &stride:strides)stride*=t.element_size();
-        NSData *data=MetalViewReaches(buffer,offset,shape.data(),strides.data(),shape.size(),t.element_size(),access,-1);
+    std::vector<at::Tensor> held;
+    auto declare=[&](const std::vector<pybind11::object> &tensors,uint32_t access) {
+      for(const auto &object:tensors) {
+        const TensorOperand operand(object);const auto &t=operand.storage;held.push_back(t);
+        NSData *data=[operand.layout.value reaches:operand.pages.buffer base:0 elementBytes:t.element_size() access:access binding:-1];
         const auto *spans=(const MetalReach *)data.bytes;
         views.insert(views.end(),spans,spans+data.length/sizeof *spans);
       }
     };
     declare(inputs,MetalReachRead);declare(outputs,MetalReachWritten);
-    auto held=inputs;held.insert(held.end(),outputs.begin(),outputs.end());
     MetalScheduleHost(schedule.get(),views.data(),views.size(),^NSError * {
       // Tensor handles retain the actual storage, including CPU-only weights.
       (void)held;
@@ -1709,10 +1743,44 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("completion", &completion);
   module.def("completed", &completed);
   module.def("pipeline", &pipeline);
-  module.def("view_matches", [](const std::vector<NSUInteger> &shape,const std::vector<NSInteger> &strides,const std::vector<NSInteger> &required) {
-    TORCH_CHECK(shape.size()==strides.size()&&shape.size()==required.size(),"a layout needs one stride per axis");
-    return bool(MetalViewLayoutMatches(shape.data(),strides.data(),required.data(),shape.size()));
+  pybind11::class_<TensorLayout>(module,"TensorLayout")
+    .def(pybind11::init(&TensorLayout::make),pybind11::arg("shape"),pybind11::arg("strides"),pybind11::arg("offset")=0,
+         pybind11::arg("maps")=std::map<NSUInteger,std::vector<NSInteger>>{},pybind11::arg("indices")=pybind11::none())
+    .def_property_readonly("shape",[](const TensorLayout &v){return tensorNumbers(v.value.shape);})
+    .def_property_readonly("strides",[](const TensorLayout &v){return tensorNumbers(v.value.strides);})
+    .def_property_readonly("offset",[](const TensorLayout &v){return v.value.offset;})
+    .def_property_readonly("count",[](const TensorLayout &v){return v.value.count;})
+    .def_property_readonly("affine",[](const TensorLayout &v){return bool(v.value.affine);})
+    .def("index",[](const TensorLayout &v,NSUInteger i){return [v.value index:i];})
+    .def("select",[](const TensorLayout &v,NSUInteger axis,const std::vector<NSInteger> &indices){return TensorLayout([v.value select:axis indices:tensorWords(indices)]);})
+    .def("slice",[](const TensorLayout &v,NSUInteger axis,NSInteger first,NSUInteger count,NSInteger step){return TensorLayout([v.value slice:axis first:first count:count step:step]);})
+    .def("element",[](const TensorLayout &v,NSUInteger axis,NSUInteger i){return TensorLayout([v.value element:axis at:i]);})
+    .def("permute",[](const TensorLayout &v,const std::vector<NSInteger> &axes){return TensorLayout([v.value permute:tensorNumbers(axes)]);})
+    .def("reshape",[](const TensorLayout &v,const std::vector<NSInteger> &shape){return TensorLayout([v.value reshape:tensorNumbers(shape)]);})
+    .def("components",[](const TensorLayout &v,NSUInteger count){return TensorLayout([v.value components:count]);})
+    .def("gather",[](const TensorLayout &v,const std::vector<NSInteger> &shape,const std::vector<NSInteger> &indices){return TensorLayout([v.value gather:tensorNumbers(shape) indices:tensorWords(indices)]);})
+    .def("matches",[](const TensorLayout &v,const std::vector<NSInteger> &steps){return bool([v.value matches:tensorNumbers(steps)]);})
+    .def("required",[](const TensorLayout &v,const std::string &kind,const std::vector<NSInteger> &steps){return TensorLayout([v.value required:@(kind.c_str()) strides:tensorNumbers(steps)]);},pybind11::arg("kind"),pybind11::arg("strides")=std::vector<NSInteger>{})
+    .def("requirements",[](const TensorLayout &v,const std::vector<std::pair<std::string,std::vector<NSInteger>>> &requirements){
+      NSMutableArray *values=[NSMutableArray array];
+      for(const auto &[kind,steps]:requirements)[values addObject:@{@"kind":@(kind.c_str()),@"strides":tensorNumbers(steps)}];
+      @try { return TensorLayout([v.value requirements:values]); }
+      @catch(NSException *error){TORCH_CHECK(false,error.reason.UTF8String);}
+    })
+    .def("declaration",[](const TensorLayout &v,NSUInteger binding){return std::string([v.value declaration:binding].UTF8String);})
+    .def("spans",[](const TensorLayout &v,NSUInteger bytes){
+      NSData *data=[v.value reaches:nil base:0 elementBytes:bytes access:MetalReachRead binding:0];
+      const MetalReach *spans=(const MetalReach *)data.bytes;std::vector<std::pair<NSUInteger,NSUInteger>> result;
+      for(NSUInteger i=0;i<data.length/sizeof *spans;i++)result.push_back({spans[i].offset,spans[i].length});return result;
+    })
+    .def("__eq__",[](const TensorLayout &v,const TensorLayout &w){return bool([v.value isEqual:w.value]);})
+    .def("__hash__",[](const TensorLayout &v){return v.value.hash;});
+  module.def("operand_layout",[](const pybind11::object &object){return TensorOperand(object).layout;});
+  module.def("same_operand",[](const pybind11::object &left,const pybind11::object &right){
+    const TensorOperand a(left),b(right);
+    return a.storage.scalar_type()==b.storage.scalar_type()&&a.pages.buffer==b.pages.buffer&&[a.layout.value isEqual:b.layout.value];
   });
+  module.def("view_prelude", [](){return std::string(MetalViewIndexPrelude().UTF8String);});
   auto viewSelection=[](NSDictionary *result) {
     auto values=[](NSData *data) {
       std::vector<int32_t> words(data.length/sizeof(int32_t));
@@ -1737,20 +1805,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
       tiles.push_back({{words+i,words+i+shape.size()},{words+i+shape.size(),words+i+2*shape.size()}});
     return tiles;
   });
-  using ViewAxisMaps=std::map<NSUInteger,std::map<NSUInteger,std::vector<NSInteger>>>;
-  module.def("view_indices", [](const std::vector<std::tuple<NSUInteger,std::vector<NSUInteger>,std::vector<NSInteger>,NSUInteger>> &bindings,
-                              const ViewAxisMaps &mapped) {
-    NSMutableString *source=[NSMutableString stringWithString:MetalViewIndexPrelude()];
-    for(const auto &[binding,shape,strides,offset]:bindings) {
-      TORCH_CHECK(shape.size()==strides.size(),"an index view needs one stride per axis");
-      NSMutableDictionary *maps=[NSMutableDictionary dictionary];
-      auto found=mapped.find(binding);
-      if(found!=mapped.end())for(const auto &[axis,values]:found->second)
-        maps[@(axis)]=[NSData dataWithBytes:values.data() length:values.size()*sizeof(NSInteger)];
-      [source appendString:MetalViewMappedIndexDeclaration(binding,shape.data(),strides.data(),shape.size(),offset,maps)];
-    }
-    return std::string(source.UTF8String);
-  },pybind11::arg("bindings"),pybind11::arg("maps")=ViewAxisMaps{});
   module.def("view_index", [](const std::vector<NSUInteger> &shape,const std::vector<NSInteger> &strides,const std::string &index) {
     TORCH_CHECK(shape.size()==strides.size(),"an index view needs one stride per axis");
     return std::string([MetalViewIndexExpression(shape.data(),strides.data(),shape.size(),@(index.c_str())) UTF8String]);

@@ -129,11 +129,11 @@ kernels: .build/libnccl-mesh.metallib
 	  [ "$$(cat $@ 2>/dev/null)" = "$$environment" ] || printf '%s\n' "$$environment" > $@
 $(IMAGES:%=.build/%) .build/nccl-mesh-kernels .build/libnccl-mesh.binarchive: .build/metal-environment
 .PHONY: FORCE kernels install-images install-nccl clean-kernels
-.build/libnccl-mesh.dylib: nccl-mesh.c mesh-statistics.c mesh-statistics.h metal-recording.m metal-recording.h mesh-write-order.h mesh-write-routes.h mesh-span-plan.h mesh-lease-retire.h nccl-mesh-metal.m nccl-mesh-metal.h nccl-mesh-kernels.h .build/libnccl-mesh.sha256 .build/mesh_metal.h nccl.h mesh-write-compiler.h \
+.build/libnccl-mesh.dylib: nccl-mesh.c mesh-statistics.c mesh-statistics.h metal-recording.m metal-recording.h mesh-tensor-layout.m mesh-tensor-layout.h mesh-write-order.h mesh-write-routes.h mesh-span-plan.h mesh-lease-retire.h nccl-mesh-metal.m nccl-mesh-metal.h nccl-mesh-kernels.h .build/libnccl-mesh.sha256 .build/mesh_metal.h nccl.h mesh-write-compiler.h \
   mesh-call.h mesh-dataflow.h mesh.h mesh-plan.h .build/libmesh.dylib Makefile $(METAL_CONFIGURATION)
 	cc -fblocks -O2 $(WARN) $(METAL_DEFINES) -dynamiclib -I .build -DKERNELS_SHA256=\"$$(cat .build/libnccl-mesh.sha256)\" \
 	  -Wl,-install_name,@rpath/libnccl-mesh.dylib -Wl,-rpath,@loader_path \
-	  $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ nccl-mesh.c mesh-statistics.c nccl-mesh-metal.m metal-recording.m -L.build -lmesh \
+	  $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ nccl-mesh.c mesh-statistics.c nccl-mesh-metal.m metal-recording.m mesh-tensor-layout.m -L.build -lmesh \
 	  -framework Metal -framework Foundation
 .build/libmesh-coreml.dylib: mesh-coreml.m mesh-coreml.h Makefile
 	mkdir -p .build

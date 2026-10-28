@@ -5029,7 +5029,7 @@ static ncclResult_t write_prepare_spans(struct ncclMeshWritePlan *plan) {
 static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_index start, size_t count, ncclDataType_t datatype,
     int source, int destination, uint32_t repeats, size_t stride, size_t max_packet,
     size_t row_bytes, size_t rows, const ncclMeshSpan *view, size_t views, int indexed, struct mesh_write_layout layout, ncclMeshWritePlan_t *out) {
-  if (!table || !out || *out || !table->comm->attach)
+  if (!table || !out || *out || !table->comm || !table->comm->attach)
     return fail(ncclInvalidArgument, "write preparation requires a page table and an empty output handle");
   const ncclComm_t comm = table->comm;
   const int metal = table->metal;
@@ -5166,7 +5166,7 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
   return ncclSuccess;
 }
 ncclResult_t ncclMeshPageTableCreate(const void *local, ncclComm_t comm, int metal, ncclMeshPageTable_t *out) {
-  if (!comm || !local || !out || *out || (metal != 0 && metal != 1))
+  if (!local || !out || *out || (metal != 0 && metal != 1))
     return fail(ncclInvalidArgument, "page table needs local storage and an empty result");
   const struct where binding=metal ? where_of(local) : (struct where){NULL,(size_t)local};
   const void *address=address_of(binding);
@@ -5174,7 +5174,7 @@ ncclResult_t ncclMeshPageTableCreate(const void *local, ncclComm_t comm, int met
   struct attach *owner=NULL;
   struct lease *lease=lease_at(address,&owner);
   struct ncclMeshPageTable *table=NULL;
-  if (lease && !lease->returned && owner==comm->attach) {
+  if (lease && !lease->returned && (!comm || owner==comm->attach)) {
     table=calloc(1,sizeof *table);
     if(table) {
       const size_t offset=(uintptr_t)address-(uintptr_t)lease->address;
@@ -5191,6 +5191,10 @@ ncclResult_t ncclMeshPageTableCreate(const void *local, ncclComm_t comm, int met
 ncclResult_t ncclMeshPageTableShape(ncclMeshPageTable_t table,size_t *pages,size_t *page_bytes) {
   if(!table||!pages||!page_bytes)return fail(ncclInvalidArgument,"page table shape operands");
   *pages=table->pages;*page_bytes=table->page_bytes;return ncclSuccess;
+}
+ncclResult_t ncclMeshPageTableBinding(ncclMeshPageTable_t table,ncclMeshBuffer *binding) {
+  if(!table||!binding)return fail(ncclInvalidArgument,"page table binding operands");
+  return ncclMeshMemBuffer(address_of(table->base),&binding->buffer,&binding->offset);
 }
 ncclResult_t ncclMeshPageTableDestroy(ncclMeshPageTable_t table) {free(table);return ncclSuccess;}
 

@@ -14,9 +14,8 @@ def output(shape, dtype, device, out=None):
 
 
 def same_view(a, b):
-    return (a.dtype == b.dtype and tuple(a.shape) == tuple(b.shape)
-            and torch._C._is_alias_of(a, b) and a.storage_offset() == b.storage_offset()
-            and all(n <= 1 or x == y for n, x, y in zip(a.shape, a.stride(), b.stride())))
+    from . import _stream
+    return _stream.same_operand(a, b)
 
 
 def indices(described, placed_strides, placed_offset, view):

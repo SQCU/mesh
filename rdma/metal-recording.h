@@ -1,6 +1,7 @@
 #pragma once
 #import <Metal/Metal.h>
 #include "metal-capabilities.h"
+#import "mesh-tensor-layout.h"
 
 #ifdef __cplusplus
 extern "C" {

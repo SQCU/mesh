@@ -9,6 +9,7 @@ from pathlib import Path
 
 from . import _stream
 from .compilation import operands
+from .operand import TensorView, descriptor, requirements
 
 
 def strides(shape):
@@ -20,16 +21,17 @@ def strides(shape):
 
 
 def matches(value, required):
-    return _matches(value.shape, value.stride(), required)
+    return descriptor(value).matches(tuple(required))
 
 
 def _matches(shape, steps, required):
-    return _stream.view_matches(shape, steps, required)
+    return _stream.TensorLayout(tuple(shape), tuple(steps)).matches(tuple(required))
 
 
-def index_source(bindings, maps=None):
-    """Specialize numerical indexing; no layout descriptor survives this pass."""
-    return _stream.view_indices(bindings, maps or {})
+def index_source(bindings):
+    """Emit addresses from the same descriptors carried into command accesses."""
+    return _stream.view_prelude() + ''.join(_stream.operand_layout(value).declaration(index)
+                                           for index, value in sorted(bindings.items()))
 
 
 def place(graph, placements, fixed):
@@ -94,12 +96,12 @@ def torch_alias(left, right):
 
 
 @lru_cache(None)
-def _copy_pipeline(shape, source, destination, width):
+def _copy_pipeline(source, destination, width):
     kind = {1: 'uchar', 2: 'ushort', 4: 'uint', 8: 'ulong'}[width]
-    prefix = (f'#define MESH_COPY_INPUT_TYPE {kind}\n#define MESH_COPY_OUTPUT_TYPE {kind}\n#define MESH_COPY_COUNT {math.prod(shape)}ul\n'
-              f'#define MESH_COPY_SOURCE ({_stream.view_index(shape, source, "i")})\n'
-              f'#define MESH_COPY_DESTINATION ({_stream.view_index(shape, destination, "i")})\n')
-    return _stream.pipeline(prefix + Path(__file__).with_suffix('.metal').read_text(), 'mesh_layout_copy')
+    prefix = (f'#define MESH_COPY_INPUT_TYPE {kind}\n#define MESH_COPY_OUTPUT_TYPE {kind}\n#define MESH_COPY_COUNT {source.count}ul\n'
+              '#define MESH_COPY_SOURCE (mesh_index<0>(i))\n#define MESH_COPY_DESTINATION (mesh_index<1>(i))\n')
+    return _stream.pipeline(_stream.view_prelude() + source.declaration(0) + destination.declaration(1)
+                            + prefix + Path(__file__).with_suffix('.metal').read_text(), 'mesh_layout_copy')
 
 
 def copies(source, destination):
@@ -109,18 +111,17 @@ def copies(source, destination):
         return []
     if source.shape != destination.shape or source.dtype != destination.dtype:
         raise ValueError('layout materialization preserves the declared values and type')
+    source, destination = TensorView.of(source), TensorView.of(destination)
     configuration = operands()
     limit = max(1, configuration['LAYOUT_COPY_TILE_BYTES'] // source.element_size())
-    shape = tuple(source.shape)
     commands = []
     width = math.gcd(source.element_size(), 8)
     units = source.element_size() // width
-    for origin, size in _stream.view_tiles(shape, limit):
-        region = tuple(slice(first, first + count) for first, count in zip(origin, size))
-        left, right = source[region], destination[region]
-        sizes = (*left.shape, units)
-        a, b = (*[s * units for s in left.stride()], 1), (*[s * units for s in right.stride()], 1)
-        handle = _copy_pipeline(sizes, a, b, width)
+    for origin, size in _stream.view_tiles(source.shape, limit):
+        left, right = source, destination
+        for axis, (first, count) in enumerate(zip(origin, size)):
+            left, right = left.slice(axis, first, count), right.slice(axis, first, count)
+        handle = _copy_pipeline(_stream.operand_layout(left).components(units), _stream.operand_layout(right).components(units), width)
         threads = min(configuration['GATHER_THREADS'], _stream.pipeline_facts(handle)[0])
         count = left.numel() * units
         commands.append((handle, [left, right], {}, (-(-count // threads), 1, 1), (threads, 1, 1), False,
@@ -128,18 +129,17 @@ def copies(source, destination):
     return commands
 
 
-def resolve(value, requirement, *, writing=False, device=None):
-    """Resolve one declared API binding before recording the function.
+def resolve(value, declared, *, writing=False, device=None, binding='indexed'):
+    """Realize an explicit API requirement before recording the function.
 
-    ``strided`` accepts the supplied view, ``contiguous`` requires row-major
-    storage, and an element-stride tuple describes an API-specific layout.
-    A materialization's direction follows its declared input/output role.
+    The result is either the supplied storage view or a preallocated destination
+    and ordinary copy edges. Direction comes from the declared input/output role.
     """
-    required = (value.stride() if requirement == 'strided' else
-                strides(value.shape) if requirement == 'contiguous' else tuple(requirement))
+    layout = requirements(value, (declared, binding))
     device = value.device.type if device is None else device
-    if matches(value, required) and value.device.type == device:
+    if descriptor(value) == layout and value.device.type == device:
         return value, []
     from .native import empty_strided
-    placed = empty_strided(tuple(value.shape), required, value.dtype, device)
+    allocation = layout if layout.affine else layout.required('contiguous')
+    placed = empty_strided(tuple(value.shape), tuple(allocation.strides), value.dtype, device)
     return placed, copies(placed, value) if writing else copies(value, placed)

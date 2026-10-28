@@ -999,6 +999,12 @@ typedef struct ncclMeshPageTable *ncclMeshPageTable_t;
 typedef struct { uint64_t page, first, count; } ncclMeshPageMask;
 ncclResult_t ncclMeshPageTableCreate(const void* local, ncclComm_t comm, int metal, ncclMeshPageTable_t* out);
 ncclResult_t ncclMeshPageTableShape(ncclMeshPageTable_t table, size_t* pages, size_t* page_bytes);
+/* Local compute preparation may pass a NULL communicator to Create. Binding
+   returns the backend view over those same bridge pages, never new storage.
+   These objects describe storage during preparation. Recorded bindings may
+   name pages containing indices produced during execution; a fixed binding
+   and fixed index-list width do not make those index values constant. */
+ncclResult_t ncclMeshPageTableBinding(ncclMeshPageTable_t table, ncclMeshBuffer* binding);
 ncclResult_t ncclMeshPageTableDestroy(ncclMeshPageTable_t table);
 /* A repeated local binding. Instance selection happens while compiling commands;
    execution reads the resulting page lists. Each rank supplies its own period

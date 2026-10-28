@@ -1,5 +1,6 @@
 {
   "model": {
+    "binding_layout": "strided",
     "input": {
       "name": "input",
       "dtype": "float16",

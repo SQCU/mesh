@@ -173,10 +173,14 @@ class Cpu(Engine):
         return torch.float32
 
     def prepare_linear(self, op, start, end):
-        return op.weight[start:end].detach().float().cpu()
+        from . import empty
+        weight = op.weight[start:end].detach()
+        return empty(weight.shape, dtype=torch.float32, device='cpu').copy_(weight)
 
     def prepare_ffn(self, op, start, end):
-        cpu = lambda t: t.detach().float().cpu()
+        from . import empty
+        def cpu(t):
+            return empty(t.shape, dtype=torch.float32, device='cpu').copy_(t.detach())
         return cpu(op.gate[start:end]), cpu(op.up[start:end]), cpu(op.down[:, start:end])
 
     def bind(self, op, shard, x, out):
@@ -195,8 +199,8 @@ class Cpu(Engine):
         if op.kind == 'linear':
             return CpuProgram([product(source, shard, target)], (x, shard), (out,))
         gate, up, down = shard
-        g = torch.empty(source.shape[0], gate.shape[0], dtype=torch.float32)
-        u, scratch = torch.empty_like(g), torch.empty_like(g)
+        from . import empty
+        g, u, scratch = (empty(source.shape[0], gate.shape[0], dtype=torch.float32, device='cpu') for _ in range(3))
         activation = CpuCommand(ctypes.cast(native.mesh_cpu_gelu, ctypes.c_void_p), g.shape[0], g.shape[1], 0, 0, 0, 0, 0, 0, 0,
                                  g.data_ptr(), u.data_ptr(), g.data_ptr(), scratch.data_ptr())
         return CpuProgram([product(source, gate, g), product(source, up, u), activation, product(g, down, target)],
@@ -294,7 +298,8 @@ class Ane(Engine):
         source, target = self.model['input'], self.model['output']
         try:
             return Prediction(native, handle, {source['name']: x}, {target['name']: out},
-                              input_layouts={source['name']: source['layout']}, output_layouts={target['name']: target['layout']})
+                              input_layouts={source['name']: source['layout']}, output_layouts={target['name']: target['layout']},
+                              binding_layout=self.model['binding_layout'])
         finally:
             native.mesh_coreml_release(handle)
 
@@ -306,8 +311,9 @@ class ModelView(ctypes.Structure):
 
 class Prediction:
     """One Core ML invocation's views, bound before the numerical function."""
-    def __init__(self, native, model, source, target, *, input_layouts, output_layouts):
+    def __init__(self, native, model, source, target, *, input_layouts, output_layouts, binding_layout):
         from . import _stream, layout
+        from .operand import TensorView
         self.native = native
         before, after = [], []
         def resolve(values, requirements, writing):
@@ -316,7 +322,7 @@ class Prediction:
             placed = {}
             for name, value in values.items():
                 placed[name], commands = layout.resolve(value, requirements[name], writing=writing,
-                                                          device='cpu' if host(value) is None else None)
+                                                          device='cpu' if host(TensorView.of(value).storage) is None else None, binding=binding_layout)
                 (after if writing else before).extend(commands)
             return placed
         source = resolve(source, input_layouts, False)
@@ -327,12 +333,14 @@ class Prediction:
             types = (torch.float16, torch.float32, torch.int32, torch.float64)
             records = []
             for name, original in values.items():
-                tensor = host(original)
+                operand = TensorView.of(original)
+                tensor = host(operand.storage)
                 if tensor is None or tensor.dtype not in types:
                     raise ValueError('Core ML views require shared fp16, fp32, int32 or fp64 storage')
-                rank = tensor.ndim
-                records.append(ModelView(name.encode(), tensor.data_ptr(), (ctypes.c_int64 * rank)(*tensor.shape),
-                                         (ctypes.c_int64 * rank)(*tensor.stride()), rank, types.index(tensor.dtype)))
+                rank = len(operand.shape)
+                address = tensor.data_ptr() + (operand.layout.offset - operand.storage.storage_offset()) * tensor.element_size()
+                records.append(ModelView(name.encode(), address, (ctypes.c_int64 * rank)(*operand.shape),
+                                         (ctypes.c_int64 * rank)(*operand.layout.strides), rank, types.index(tensor.dtype)))
             return (ModelView * len(records))(*records)
         inputs, outputs = views(source), views(target)
         self.binding = native.mesh_coreml_bind(model, inputs, len(inputs), outputs, len(outputs))
@@ -352,7 +360,7 @@ class Prediction:
         schedule.append(self.after)
 
 
-def coreml_graph(compiled, inputs, outputs, *, units, input_layouts, output_layouts):
+def coreml_graph(compiled, inputs, outputs, *, units, input_layouts, output_layouts, binding_layout):
     """Bind any compiled Core ML graph to named shared views at preparation.
 
     ``units`` is the caller's backend operand (0 CPU/ANE, 1 all, 2 CPU, 3 CPU/GPU).
@@ -360,7 +368,9 @@ def coreml_graph(compiled, inputs, outputs, *, units, input_layouts, output_layo
     model loading occurs in the returned host record. The common schedule
     derives dependencies from the declared input and output views. Per-name
     ``input_layouts`` and ``output_layouts`` declare strided, contiguous, or
-    exact element strides. Necessary copies are recorded at preparation.
+    exact element strides. ``binding_layout`` supplies the API representation
+    requirement from the backend configuration; it is intersected with each
+    use requirement. Necessary copies are recorded at preparation.
     """
     native = _coreml()
     if native is None:
@@ -369,12 +379,12 @@ def coreml_graph(compiled, inputs, outputs, *, units, input_layouts, output_layo
     if handle < 0:
         raise RuntimeError(native.mesh_coreml_error().decode())
     try:
-        return Prediction(native, handle, inputs, outputs, input_layouts=input_layouts, output_layouts=output_layouts)
+        return Prediction(native, handle, inputs, outputs, input_layouts=input_layouts, output_layouts=output_layouts, binding_layout=binding_layout)
     finally:
         native.mesh_coreml_release(handle)
 
 
-def export_coreml_graph(program, inputs, outputs, *, directory, units, deployment, precision, input_layouts, output_layouts):
+def export_coreml_graph(program, inputs, outputs, *, directory, units, deployment, precision, input_layouts, output_layouts, binding_layout):
     """Lower an exported tensor graph once, then bind the common host record.
 
     ``program`` is a torch.export.ExportedProgram (its graph and constants).
@@ -399,7 +409,7 @@ def export_coreml_graph(program, inputs, outputs, *, directory, units, deploymen
             raise RuntimeError(native.mesh_coreml_error().decode())
     finally:
         shutil.rmtree(package)
-    return coreml_graph(compiled, inputs, outputs, units=units, input_layouts=input_layouts, output_layouts=output_layouts)
+    return coreml_graph(compiled, inputs, outputs, units=units, input_layouts=input_layouts, output_layouts=output_layouts, binding_layout=binding_layout)
 
 
 def coreml_units(units):

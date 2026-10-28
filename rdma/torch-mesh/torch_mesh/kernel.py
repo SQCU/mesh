@@ -69,10 +69,9 @@ def prepare(inputs, input_slots, input_strides, indexed, output_slots, output_st
     count = max([constant_slot, *input_slots, *(i for slots in output_slots for i in slots)]) + 1
     buffers = [None] * count
     read = write = 0
-    commands, addresses, after = [], [], []
+    commands, addresses, after = [], {}, []
     def address(index, value):
-        offset = value.storage_offset() if value.is_mps else value.data_ptr() // value.element_size()
-        addresses.append((index, tuple(value.shape), tuple(value.stride()), offset))
+        addresses[index] = value
     for index, value, required in zip(input_slots, inputs, input_strides, strict=True):
         if index in indexed:
             address(index, value)
