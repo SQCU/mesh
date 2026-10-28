@@ -35,7 +35,10 @@ state with the same function and an explicit listen address.
 
 Discovery reads every configured node's live map (its mesh-stat, over its
 administration path in `etc/mesh-nodes.json`) and takes the union; the launcher
-need not be a fabric member. The fabric is the union's largest linked part. A
+need not be a fabric member. The fabric is the union's largest linked part, and it
+alone is the membership: a member with no configured entry is reached at its
+fabric-routed address through a configured member (bin/mesh-peers.sh), or recorded
+unreachable. A
 configured node that is unreachable, whose bridge is not up, or that is outside the
 fabric is recorded under `absent` with the reason, and the run goes on: every
 reachable node is installed, each workload is placed over the live, installed
@@ -70,7 +73,9 @@ record, kills its session past a minute, and ignores later stops while the recor
 is written and the lease released. The lease is the `mkdir` of `lock`, as every
 session's tools take it. Its owner file names the launcher and the driver (pid,
 start time, host); it is stale when neither lives, or when it has no owner file
-past `lock_grace_seconds` from its birth.
+past `lock_grace_seconds` from its birth. The hourly waits for it up to
+`lock_wait_seconds`, trying every 10 s, and every hourly appends one line to
+log.jsonl, one that cannot take the lease or start included.
 
 Each node keeps one `current` Git build checkout per repository. It fetches a
 selected commit from origin when needed and retains incremental build products.

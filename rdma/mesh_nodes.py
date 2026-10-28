@@ -52,6 +52,7 @@ class Cluster:
     key: 'str | None'
     lock: Path
     lock_grace: int
+    lock_wait: int
     run_seconds: int
     python: str
     checkouts: str
@@ -79,7 +80,7 @@ def load(path=ROOT / 'etc/mesh-nodes.json'):
                                         row.get('guard_headroom_gib', 0)) for row in raw['nodes'].values()}
     return Cluster(members, access.get('user') or getpass.getuser(),
                    str(Path(access['key']).expanduser()) if 'key' in access else None, Path(raw['lock']).expanduser(),
-                   raw['lock_grace_seconds'], raw['run_seconds'], raw['python'], raw['checkouts'], raw['rank_port'])
+                   raw['lock_grace_seconds'], raw['lock_wait_seconds'], raw['run_seconds'], raw['python'], raw['checkouts'], raw['rank_port'])
 
 
 def home_path(relative):
@@ -237,9 +238,11 @@ class Node:
 
 
 def discover(cluster, log=None, state=None, deadline=None):
-    """Read each configured node's live map over its administration path. The fabric is the largest linked part of
-    the maps' union. Returns the reachable nodes (their mesh-stat answered) and the absent ones, each with why:
-    unreachable, its bridge not up, or outside the fabric."""
+    """Read each configured node's live map over its administration path. The fabric, the membership, is the largest
+    linked part of the maps' union; the configuration says only how to reach a node. A member with no configured entry
+    is reached at its fabric-routed address through a reachable configured member (bin/mesh-peers.sh), as before
+    e4868b3d. Returns the reachable nodes (their mesh-stat answered) and the absent ones, each with why: unreachable,
+    its bridge not up, or outside the fabric."""
     here = str(Node(cluster, '-', 'localhost', local=True, deadline=deadline).stat()[1].get('node'))
     nodes = [Node(cluster, m.number, 'localhost' if m.number == here else m.management, ula=m.fabric,
                   local=m.number == here, deadline=deadline) for m in cluster.members.values()]
@@ -271,6 +274,21 @@ def discover(cluster, log=None, state=None, deadline=None):
         seen |= part
         parts.append(part)
     fabric = max(parts, key=len, default=set())
+    guide = next((n for n in nodes if n.number in fabric and reads[n.number][0] is not None), None)
+    unconfigured = sorted(fabric - set(cluster.members), key=int)
+    # mesh-peers.sh browses until stopped: 10 s, then SIGTERM to its group, whose trap ends its dns-sd children.
+    browse = (f"{cluster.python} -c 'import os, signal, subprocess, sys, time; p = subprocess.Popen(sys.argv[1:], "
+              f"start_new_session=True); time.sleep(10); os.killpg(p.pid, signal.SIGTERM); p.wait()' "
+              f"{home_path(guide.source + '/bin/mesh-peers.sh')}") if guide else ''
+    text = guide.run(browse, timeout=30)[1] if guide and unconfigured else ''
+    routes = {f[1]: f[3][5:] for f in map(str.split, text.splitlines()) if f[:1] == ['path'] and f[2:3] == ['kind=fabric-routed']}
+    for number in unconfigured:
+        if number in routes:
+            nodes.append(Node(cluster, number, routes[number], None if guide.local else guide.addr, routes[number],
+                              deadline=deadline))
+            reads[number] = read(nodes[-1])
+        else:
+            reads[number] = None, f'unreachable: no fabric-routed path to it through a configured member ({guide and guide.name})'
     absent = {number: why or f'outside the linked fabric {sorted(fabric, key=int)}: its map holds '
                              f'{sorted(map(str, report["map"]["nodes"]), key=int)}'
               for number, (report, why) in reads.items() if why or number not in fabric}
@@ -280,7 +298,7 @@ def discover(cluster, log=None, state=None, deadline=None):
     note(log, 'fabric ' + ' '.join(sorted(fabric, key=int)), *(f'absent {k}: {v}' for k, v in absent.items()))
     if state is not None:
         state.update(fabric=sorted(fabric, key=int), absent=absent,
-                     unconfigured=sorted(fabric - set(cluster.members), key=int))
+                     unconfigured=unconfigured)
     return reachable, absent
 
 
@@ -376,25 +394,28 @@ def stale(path, grace):
 
 
 @contextlib.contextmanager
-def exclusive_lock(owner, path, grace):
+def exclusive_lock(owner, path, grace, wait=0):
     """Shared cluster lease: the mkdir of `path`, as every session's tools take it, its owner file naming the launcher
     and then each holder `hold` adds (the driver) by pid, start time and host. A stale lease (stale) is removed under a
-    flock that serializes the sessions removing one."""
-    path = Path(path)
+    flock that serializes the sessions removing one. A held lease is tried every 10 s for up to `wait` seconds."""
+    path, began = Path(path), time.monotonic()
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path.with_name(path.name + '.reclaim'), 'a') as serial:
-        fcntl.flock(serial, fcntl.LOCK_EX)
-        if stale(path, grace):
-            with contextlib.suppress(OSError):
-                (path / 'owner').unlink(missing_ok=True)
-                path.rmdir()
-        try:
-            path.mkdir()
-        except FileExistsError:
+    while True:
+        with open(path.with_name(path.name + '.reclaim'), 'a') as serial:
+            fcntl.flock(serial, fcntl.LOCK_EX)
+            if stale(path, grace):
+                with contextlib.suppress(OSError):
+                    (path / 'owner').unlink(missing_ok=True)
+                    path.rmdir()
+            with contextlib.suppress(FileExistsError):
+                path.mkdir()
+                break
+        if time.monotonic() - began >= wait:
             held = 'no owner file'
             with contextlib.suppress(OSError):
                 held = (path / 'owner').read_text().strip()
-            raise RuntimeError(f'cluster is already leased: {held}') from None
+            raise RuntimeError(f'cluster is already leased: {held} (waited {time.monotonic() - began:.0f} s)')
+        time.sleep(10)
     (path / 'owner').write_text(f'{owner}\n{holder(os.getpid())}')
 
     def hold(pid):

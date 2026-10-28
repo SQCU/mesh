@@ -105,11 +105,29 @@ def stop(signum, _):
     raise Stopped('the run reached run_seconds' if signum == signal.SIGALRM else f'stopped by {signal.Signals(signum).name}')
 
 
+def ledger(output_root, tag, result):
+    """The run's result.json and its one line in log.jsonl."""
+    out = Path(output_root).resolve() / tag
+    out.mkdir(parents=True, exist_ok=True)
+    (out / 'result.json').write_text(json.dumps(result, separators=(',', ':')) + '\n')
+    with (out.parent / 'log.jsonl').open('a') as log:
+        log.write(json.dumps({'result': str(out / 'result.json')}, separators=(',', ':')) + '\n')
+
+
 def launcher(mesh_root, microbench_root, output_root):
+    """Every hourly leaves one ledger line, a run that cannot start (the lease not taken in lock_wait_seconds) too."""
     from mesh_nodes import exclusive_lock, load
-    cluster = load()
-    with exclusive_lock('committed hourly', cluster.lock, cluster.lock_grace) as hold:
-        return _launch(mesh_root, microbench_root, output_root, cluster, hold)
+    began, code, phase = time.time(), None, 'lock'
+    try:
+        cluster = load()
+        with exclusive_lock('committed hourly', cluster.lock, cluster.lock_grace, cluster.lock_wait) as hold:
+            phase = 'launch'
+            code = _launch(mesh_root, microbench_root, output_root, cluster, hold)
+    except Exception as error:
+        if code is None:
+            ledger(output_root, time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(began)) + f'-{phase}',
+                   {'schema': 3, 'commits': {}, 'unix': int(began), 'nodes': [], 'us,GB/s': {}, 'errors': [[phase, str(error)]]})
+    return 1 if code is None else code
 
 
 def _launch(mesh_root, microbench_root, output_root, cluster, hold):
@@ -183,9 +201,7 @@ def _launch(mesh_root, microbench_root, output_root, cluster, hold):
     record['finished_unix'] = time.time()
     for item in record['workloads']:
         HISTORY[item['tag']] = (HISTORY.get(item['tag'], []) + item.get('observations', []))[-64:]
-    (out / 'result.json').write_text(json.dumps(compact(record), separators=(',', ':')) + '\n')
-    with (output_root / 'log.jsonl').open('a') as log:
-        log.write(json.dumps({'result': str(out / 'result.json')}, separators=(',', ':')) + '\n')
+    ledger(output_root, tag, compact(record))
     return 0 if record['status'] == 'completed' else 1
 
 

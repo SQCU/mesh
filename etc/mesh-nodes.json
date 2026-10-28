@@ -5,6 +5,7 @@
   },
   "lock": "~/.claude-personal/jobs/15c469fa/tmp/nodes.lock",
   "lock_grace_seconds": 60,
+  "lock_wait_seconds": 2700,
   "run_seconds": 3300,
   "python": "~/.venv-mesh-uv/bin/python",
   "checkouts": ".cache/mesh-checkouts",
