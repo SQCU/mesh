@@ -6,6 +6,33 @@
 #ifndef MESH_OBSERVE_H
 #define MESH_OBSERVE_H
 #include "mesh.h"
+#include <fcntl.h>
+#include <stdarg.h>
+#include <sys/stat.h>
+/* design/transport.md section 14: a line of the node's bridge log, the launchd job's stderr (bin/mesh-user.sh
+   StandardErrorPath): the UTC time, `who` and the message, in one write; the losses and failures of the bridge and its
+   heartbeat, nothing on the data path's success.  A log that has reached MESH_LOG_BYTES is emptied first (the processes
+   that share it append: O_APPEND), so it holds at most that and a line */
+__attribute__((format(printf,2,3))) static inline void mesh_say(const char *who,const char *format,...){
+  char line[MESH_DIAGNOSTIC_BYTES];
+  struct timespec t;clock_gettime(CLOCK_REALTIME,&t);
+  struct tm utc;gmtime_r(&t.tv_sec,&utc);
+  int n=snprintf(line,sizeof line,"%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ %s: ",utc.tm_year+1900,utc.tm_mon+1,utc.tm_mday,
+                 utc.tm_hour,utc.tm_min,utc.tm_sec,t.tv_nsec/1000000,who);
+  va_list arguments;va_start(arguments,format);
+  if(n>0 && (size_t)n<sizeof line)n+=vsnprintf(line+n,sizeof line-(size_t)n,format,arguments);
+  va_end(arguments);
+  if(n<=0)return;
+  if((size_t)n>=sizeof line-1)n=(int)sizeof line-2;
+  line[n++]='\n';
+  struct stat log;
+  const int flags=fcntl(2,F_GETFL);
+  if(!fstat(2,&log) && S_ISREG(log.st_mode) && flags>=0){
+    if(!(flags&O_APPEND))fcntl(2,F_SETFL,flags|O_APPEND);
+    if(log.st_size>=MESH_LOG_BYTES)(void)!ftruncate(2,0);
+  }
+  (void)!write(2,line,(size_t)n);
+}
 /* a link's streams, and so the most ports: link p's streams are the region's p MESH_LINK_STREAMS to p MESH_LINK_STREAMS
    + MESH_LINK_STREAMS - 1 */
 #define MESH_PORTS (MESH_STREAMS/MESH_LINK_STREAMS)

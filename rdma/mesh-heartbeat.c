@@ -205,6 +205,7 @@ static void open_bridge(void){
   posix_spawn_file_actions_destroy(&actions);
   posix_spawnattr_destroy(&attributes);
   if(failed){
+    mesh_say("heartbeat","bridge %s not opened: %s",image,strerror(failed));
     reopen_later();
     return;
   }
@@ -226,6 +227,9 @@ static void bridge_ended(void){
   const int reaped=child && waitpid(was,&status,0)==was;
   bridge=0;child=0;
   const int expired=reaped && WIFEXITED(status) && WEXITSTATUS(status)==EX_TEMPFAIL;
+  if(!reaped)mesh_say("heartbeat","bridge %d ended",(int)was);
+  else if(WIFSIGNALED(status))mesh_say("heartbeat","bridge %d ended by signal %d%s",(int)was,WTERMSIG(status),asked?"":", unasked");
+  else mesh_say("heartbeat","bridge %d exited %d%s",(int)was,WEXITSTATUS(status),asked?"":", unasked");
   switch(asked){
   case ASKED_END:
     region_expire();
@@ -327,6 +331,8 @@ int main(int argc,char **argv){
       }
       else if(e->filter==EVFILT_TIMER && e->ident==TIMER_OPEN){timer_open=0;turn();}
       else if(e->filter==EVFILT_TIMER && e->ident==TIMER_END){
+        mesh_say("heartbeat","bridge %d has not ended %.0f s after it was asked: the heartbeat ends without it",(int)bridge,
+                 (double)(3*MESH_PLATFORM_NS)/1e9);
         region_expire();
         return 0;
       }
