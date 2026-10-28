@@ -132,6 +132,10 @@ int metal_wait(void *event, uint64_t value, uint64_t ns) { return [(id<MTLShared
 void metal_release(void *object) { [(id)object release]; }
 void *metal_retain(void *object) { return [(id)object retain]; }
 void *metal_command(const struct metal_program *program) { return [program->buffer retain]; }
+/* a command queue of the library's own, retained; a command buffer of it, retained; a command buffer's commit */
+void *metal_queue(void) { return [(id<MTLDevice>)metal_device() newCommandQueue]; }
+void *metal_queue_command(void *queue) { @autoreleasepool { return [[(id<MTLCommandQueue>)queue commandBuffer] retain]; } }
+void metal_commit(void *command) { [(id<MTLCommandBuffer>)command commit]; }
 int metal_ended(void *command) {
   const MTLCommandBufferStatus status = ((id<MTLCommandBuffer>)command).status;
   return status == MTLCommandBufferStatusError ? -1 : status == MTLCommandBufferStatusCompleted ? 1 : status < MTLCommandBufferStatusCommitted ? 2 : 0;

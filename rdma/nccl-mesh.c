@@ -288,7 +288,7 @@ struct ncclComm {
   _Atomic uint64_t *words;
   void *violation;
   uint64_t last, groups, counts, moved;
-  void *command;
+  void *command, *queue; /* the last GPU program's command buffer; the queue of its host groups' (launch_host) */
   struct ncclComm *next_touched, *next_live;
   struct plan *plan;
   _Atomic int runs;
@@ -448,7 +448,7 @@ static void comm_free(struct ncclComm *comm) {
   routes_free(comm, 1);
   for (uint32_t h = 0; h < comm->count; h++) { metal_release(comm->channels[h].buffer); metal_release(comm->channels[h].lists); }
   ncclMemFree((void *)comm->words);
-  metal_release(comm->command);
+  metal_release(comm->command); metal_release(comm->queue);
   plan_free(comm, comm->plan);
   free(comm->cache);
   comm_leave(comm);
@@ -4702,6 +4702,8 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     else if (reducing(list[i].what) && !on_gpu(list[i].type))
       result = fail(ncclInvalidArgument, "a float64 reduction on the Metal path (Apple GPUs have no float64 arithmetic)");
     else if (reducing(list[i].what)) result = reduction(list + i);
+    /* a host group's scalar in memory (launch_host: its call has no stream, so reduction takes it), read as it is encoded */
+    if (!result && list[i].scalar_at) memcpy(list[i].pre, list[i].scalar_at, SIZE[list[i].type]);
     remote |= crosses(list + i);
   }
   const int metal4 = list[0].table != NULL;
@@ -4898,10 +4900,67 @@ ncclResult_t ncclGroupStart(void) { depth++; return ncclSuccess; }
 
 /* one communicator's calls of a group, launched as its own group: on the Metal path (launch_metal) or the host path
    (launch), each taking what the calls own (freed, or moved to the group's issue); the list stays its caller's */
+/* R17: a group of the host's (no stream) on one communicator that crosses a link and has a kernel for every combine (no
+   float64 reduction: those alone stay on the host path, run) runs as the Metal path's group (launch_metal) in a
+   command buffer of its communicator's own queue, its buffers bound as their leases' Metal buffers, committed and
+   awaited before the call returns (NCCL's blocking host semantics, and the host path's own refusals first: GPU
+   groups issued and not complete, or its earlier GPU work not ended: gpu_finished); its end as gpu_finished reads it */
+static int host_gpu(const struct call *list, size_t n) {
+  int remote = 0;
+  for (size_t i = 0; i < n; i++) {
+    const struct call *c = list + i;
+    if (c->stream || (reducing(c->what) && !on_gpu(c->type))) return 0;
+    remote |= crosses(c);
+  }
+  return remote;
+}
+/* a host binding as its lease's Metal buffer: 0, ncclInvalidUsage where it lies in no lease */
+static ncclResult_t as_metal(struct where *w) {
+  if (w->buffer || !w->offset) return ncclSuccess;
+  void *buffer = NULL;
+  size_t offset = 0;
+  if (lease_buffer((const void *)w->offset, &buffer, &offset))
+    return fail(ncclInvalidUsage, "a host buffer at %p of a group that crosses a link is in no lease of this process (nccl.h, Memory)",
+                (void *)w->offset);
+  *w = (struct where){buffer, offset};
+  return ncclSuccess;
+}
+static ncclResult_t launch_host(struct call *list, size_t n) {
+  const ncclComm_t comm = list[0].comm;
+  pthread_mutex_lock(&group_lock);
+  ncclResult_t result = revoked(comm) ? revoked_fail(comm) : comm_failure(comm);
+  if (!result && comm_issued(comm))
+    result = fail(ncclInvalidUsage, "a host-path group while this communicator's GPU groups are issued and not complete (ncclMeshComplete)");
+  if (!result && finished && comm->last) result = gpu_finished(comm);
+  if (!result && !comm->queue && !(comm->queue = metal_queue())) result = fail(ncclSystemError, "a command queue for communicator %s", comm->name);
+  void *command = result ? NULL : metal_queue_command(comm->queue);
+  pthread_mutex_unlock(&group_lock);
+  if (!result && !command) result = fail(ncclSystemError, "a command buffer for communicator %s", comm->name);
+  for (size_t i = 0; i < n && !result; i++) {
+    struct call *c = list + i;
+    c->command = command;
+    result = as_metal(&c->send_at);
+    if (!result) result = as_metal(&c->recv_at);
+    for (int j = 0; j < 2 && !result; j++)
+      for (int r = 0; (j ? c->receive_views : c->send_views) && r < comm->nranks && !result; r++)
+        result = as_metal((j ? c->receive_views : c->send_views) + r);
+  }
+  if (result) { parts_free(list, n); metal_release(command); return result; }
+  result = launch_metal(list, n);
+  if (!result) {
+    metal_commit(command);
+    pthread_mutex_lock(&group_lock);
+    result = gpu_finished(comm);
+    pthread_mutex_unlock(&group_lock);
+  }
+  metal_release(command);
+  return result;
+}
+
 static ncclResult_t launch_one(struct call *list, size_t n) {
   const ncclComm_t comm = list[0].comm;
   if (list[0].stream) return launch_metal(list, n);
-  const ncclResult_t result = launch(list, n);
+  const ncclResult_t result = host_gpu(list, n) ? launch_host(list, n) : launch(list, n);
   if (result) comm->async = result;
   return result;
 }
@@ -5282,13 +5341,13 @@ static void plan_free(struct ncclComm *comm, struct plan *plan) {
 
 /* a declared group whose every call declares its bindings (nccl.h ncclMeshCall bindings; none a WRITE's, whose plan
    comes at its issue) laid and placed for them in each of its generations (issue_bind on copies of its calls, as their
-   issues will be: the Metal path's where a binding names a Metal buffer), so an issue with those buffers binds only its
-   entries.  Under group_lock */
+   issues will be: the Metal path's, a host binding as its lease's Metal buffer (launch_host), but for a float64
+   reduction, which the host path runs), so an issue with those buffers binds only its entries.  Under group_lock */
 static ncclResult_t prepared(struct ncclComm *comm, struct compiled *x, int remote) {
-  int metal = 0;
+  int metal = remote;
   for (size_t i = 0; i < x->n; i++) {
     if (!x->calls[i].phase || x->calls[i].target) return ncclSuccess;
-    metal |= x->calls[i].send_at.buffer || x->calls[i].recv_at.buffer;
+    if (reducing(x->calls[i].what) && !on_gpu(x->calls[i].type)) metal = 0;
   }
   struct call *list = malloc((x->n + 1) * sizeof *list);
   ncclResult_t result = list ? ncclSuccess : fail(ncclSystemError, "out of memory");
@@ -5297,6 +5356,8 @@ static ncclResult_t prepared(struct ncclComm *comm, struct compiled *x, int remo
     for (size_t i = 0; i < x->n && !result; i++) {
       list[i].bound = NULL; list[i].fused = x->calls[i].fused;
       if (reducing(list[i].what)) result = reduction(list + i);
+      if (!result && metal) result = as_metal(&list[i].send_at);
+      if (!result && metal) result = as_metal(&list[i].recv_at);
     }
     struct call *issued = list;
     struct schedule *plans = NULL;

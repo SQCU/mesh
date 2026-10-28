@@ -81,6 +81,10 @@ void metal_release(void *object);
 void *metal_retain(void *object);
 /* the command buffer a program is encoded into, retained (NULL where it has none: a Metal 4 encoder's) */
 void *metal_command(const struct metal_program *);
+/* a command queue of the library's own, retained; a command buffer of it, retained (NULL: none made); its commit */
+void *metal_queue(void);
+void *metal_queue_command(void *queue);
+void metal_commit(void *command);
 /* a command buffer's end as its status tells it: 1 completed, -1 ended in an error (the platform's watchdog ends one
    that overruns so), 0 committed and not ended, 2 not committed (nothing runs it until its committer commits it) */
 int metal_ended(void *command);
