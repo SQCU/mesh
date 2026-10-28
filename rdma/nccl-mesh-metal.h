@@ -213,5 +213,6 @@ void mesh_library_watch(void);
    the first to have had nothing arrive for its bound has waited, that wait named in `wait` (0: none) */
 unsigned MetalSchedulesInFlight(void);
 uint64_t MetalSchedulesStalled(char *wait, size_t room);
+double metal_poll_seconds(void *device);
 #pragma GCC visibility pop
 #endif

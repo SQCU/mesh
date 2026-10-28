@@ -1238,7 +1238,7 @@ struct MetalSchedule {
     NSMutableSet *waited;
     struct MetalSchedule *boundary, *nextActive, *cursor;
     os_unfair_lock submitting;
-    NSUInteger commands, ordinal;
+    NSUInteger commands, crossings, ordinal;
     _Atomic uint64_t progress;
     uint64_t input;
     _Atomic int status;
@@ -1260,6 +1260,8 @@ static MTLSharedEventListener *MetalListener(void) {
 static os_unfair_lock activeLock=OS_UNFAIR_LOCK_INIT;
 static struct MetalSchedule *active;
 static _Atomic unsigned inFlight;
+// A part's GPU time a crossing, the largest of recent parts', decaying by 1/16 a part (MetalCrossings).
+static _Atomic uint64_t crossingNs;
 static void MetalScheduleListed(struct MetalSchedule *root,BOOL listed) {
     os_unfair_lock_lock(&activeLock);
     struct MetalSchedule **at=&active;
@@ -1290,7 +1292,7 @@ static void MetalScheduleFlush(struct MetalSchedule *);
 static struct MetalSchedule *MetalScheduleWritable(struct MetalSchedule *);
 static void MetalScheduleFinishPart(struct MetalSchedule *);
 static void MetalScheduleArrived(struct MetalSchedule *);
-static void MetalScheduleCompleted(struct MetalSchedule *,NSError *);
+static void MetalScheduleCompleted(struct MetalSchedule *,NSError *,double);
 static void MetalScheduleSubmit(struct MetalSchedule *);
 static void MetalScheduleWait(struct MetalSchedule *root,id<MTLSharedEvent> event) {
     if([root->waited containsObject:event])return;
@@ -1303,7 +1305,7 @@ static void MetalScheduleWait(struct MetalSchedule *root,id<MTLSharedEvent> even
 // A part's command buffer opened for its actions: Metal 4's begun again on its own allocator, a
 // serial part's made anew with its input waits, which precede its encoder.
 static void MetalPartBegin(struct MetalSchedule *s) {
-    s->read=[NSMutableDictionary new];s->written=[NSMutableDictionary new];s->phase=0;s->commands=0;
+    s->read=[NSMutableDictionary new];s->written=[NSMutableDictionary new];s->phase=0;s->commands=s->crossings=0;
     if(s->form==MetalFormSerial) {
         [s->command release];s->command=[[(id<MTLCommandQueue>)s->queue commandBufferWithUnretainedReferences] retain];
         if(s->again&&s->after)[(id<MTLCommandBuffer>)s->command encodeWaitForEvent:s->after value:s->root->value];
@@ -1330,7 +1332,7 @@ static void MetalPartEnd(struct MetalSchedule *s) {
         [s->encoder endEncoding];
         if(s->event)[(id<MTLCommandBuffer>)s->command encodeSignalEvent:s->event value:s->root->generation];
         if(s->commands)[(id<MTLCommandBuffer>)s->command addCompletedHandler:^(id<MTLCommandBuffer> done){
-            MetalScheduleCompleted(s,done.error);
+            MetalScheduleCompleted(s,done.error,done.GPUEndTime-done.GPUStartTime);
         }];
     } else {
         [(id<MTL4CommandBuffer>)s->command useResidencySet:s->residency];
@@ -1479,13 +1481,31 @@ void MetalScheduleCompute(struct MetalSchedule *root,id<MTLComputePipelineState>
 }
 }
 
+// design/transport.md section 5: the crossings one part holds, so no command buffer runs near the platform's watchdog
+// (MESH_PLATFORM_NS): each crossing's GPU wait can run to its bound, NCCL_MESH_POLLS loads at the device's load period
+// (metal_poll_seconds; the configured slowest, MESH_PLATFORM_NS a bound, where it was not read), and a part holds as
+// many as fit half the watchdog, at least one. Once parts have run, as many as their measured GPU time a crossing leaves
+// room for beside one bound (a wait that fails ends the others on its failure words through their claim), if more.
+static NSUInteger MetalCrossings(id<MTLDevice> device) {
+    const double budget=MESH_PLATFORM_NS/2e9,period=metal_poll_seconds(device);
+    const double bound=period>0?NCCL_MESH_POLLS*period:MESH_PLATFORM_NS/1e9,each=atomic_load_explicit(&crossingNs,memory_order_relaxed)/1e9;
+    NSUInteger most=(NSUInteger)(budget/bound);
+    if(each>0&&budget>bound)most=MAX(most,(NSUInteger)((budget-bound)/each));
+    return MAX(most,(NSUInteger)1);
+}
+
 int MetalScheduleCross(struct MetalSchedule *root,MetalCrossing cross) {
     MetalScheduleFlush(root);
     // Collective marks preserve the declared transport order. All preceding
     // host outputs are available before this opaque transport declaration.
     for(MetalWork *host in root->hosts)MetalScheduleWait(root,host->event);
+    struct MetalSchedule *tail=MetalScheduleTail(root);
+    if(!tail->finished&&tail->crossings>=MetalCrossings(root->device))MetalScheduleFinishPart(tail);
     int error=MetalScheduleDo(root,[[^int(struct MetalSchedule *s){
-        s->commands++;
+        // A crossing that opens a later part follows the work before it on the queue.
+        if(!s->commands&&s->ordinal&&s->form!=MetalFormSerial)[(id<MTL4ComputeCommandEncoder>)s->encoder
+            barrierAfterQueueStages:MTLStageDispatch beforeStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+        s->commands++;s->crossings++;
         int failed=cross(s->encoder,s->table,s->residency,0,0);
         [s->read removeAllObjects];[s->written removeAllObjects];
         return failed;
@@ -1795,8 +1815,12 @@ static void MetalScheduleArrived(struct MetalSchedule *root) {
     }
 }
 
-static void MetalScheduleCompleted(struct MetalSchedule *s,NSError *error) {
+static void MetalScheduleCompleted(struct MetalSchedule *s,NSError *error,double seconds) {
     atomic_fetch_sub_explicit(&inFlight,1,memory_order_release);
+    if(s->crossings&&seconds>0) {
+        const uint64_t each=(uint64_t)(seconds*1e9/s->crossings),was=atomic_load_explicit(&crossingNs,memory_order_relaxed);
+        atomic_store_explicit(&crossingNs,MAX(each,was-was/16),memory_order_relaxed);
+    }
     [s->error release];s->error=[error retain];
     atomic_store_explicit(&s->status,error?-1:1,memory_order_release);
     MetalScheduleArrived(s->root);
@@ -1869,7 +1893,9 @@ static void MetalPartCommit(struct MetalSchedule *s) {
     }];
     // A commit's options call their feedback handler once.
     MTL4CommitOptions *options=[MTL4CommitOptions new];
-    [options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback){MetalScheduleCompleted(s,feedback.error);}];
+    [options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback){
+        MetalScheduleCompleted(s,feedback.error,feedback.GPUEndTime-feedback.GPUStartTime);
+    }];
     [(id<MTL4CommandQueue>)s->queue commit:(id<MTL4CommandBuffer> *)&s->command count:1 options:options];
     [options release];
     if(s->event)[(id<MTL4CommandQueue>)s->queue signalEvent:s->event value:g];
