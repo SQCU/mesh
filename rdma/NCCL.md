@@ -384,20 +384,27 @@ This is NCCL's per-peer progress, chosen by the operator on 2026-10-20 in place 
 
 Every GPU wait is bounded (design/transport.md; the operator, 2026-10-18: "you cannot be using a low level
 kernel like a dma or networking send/rcv channel for more than 5 seconds without something happening/concluding").
-`ncclMeshStream.polls` is the most loads of a count one wait of the group makes (`rdma/mesh.metal`
-`mesh_wait_bounded`): the caller's bound for the group's crossings, carried per crossing. 0, or more than
-`NCCL_MESH_POLLS` (nccl.h), is `NCCL_MESH_POLLS`, in either form: torch-mesh's waits and the engine's encoded crossings
-pass 0. The bound is the wait's deadline (design/data-model.md section 6; a kernel has no clock, so its deadline is a
-count of loads). A wait that reaches its bound records its entry, its channel and the bound in its communicator's
-failure words, and the program ends where the host first reads them, after the command buffer
-(`ncclCommGetAsyncError`, or the communicator's next group), naming the wait and its bound on stderr; a bound reached
-after a revoke, and a lost link, fail the group as a value. No kernel halts on the record: every later dispatch runs as encoded. But once
+`ncclMeshStream.polls` is the most loads of a count one wait of the group makes through which its communicator's
+lease does not move (`rdma/mesh.metal` `mesh_wait_bounded`, in rounds: nccl-mesh-kernels.h `mesh_step_wait`): the
+caller's bound for the group's crossings, carried per crossing. 0, or more than `NCCL_MESH_POLLS` (nccl.h), is
+`NCCL_MESH_POLLS`, in either form: torch-mesh's waits and the engine's encoded crossings pass 0. The lease is the
+communicator's failure word 5, which the process's watch raises every `MESH_PLATFORM_NS` / 20 while every stream the
+communicator holds is its own (a peer that has gone ends its holding) and some count of its links (presented, taken,
+ready, sent, landed) has moved within `MESH_PLATFORM_NS`. So the bound is on lack of progress, not on time: a wait on a
+peer that is late but alive and progressing goes on (a broadcast's root waiting for the credit of a receiver seconds
+behind), and one on links nothing has moved on for `MESH_PLATFORM_NS` ends within two bounds after, as does one whose
+process has ended (nothing renews its lease; a killed process's kernel no longer spins on). A wait that reaches its
+bound records its entry, its channel and the bound in its communicator's failure words, and the program ends when the
+watch reads them, within `MESH_PLATFORM_NS` / 20, naming the wait on stderr; a bound reached after a revoke, and a lost
+link, fail the group as a value. A stream no longer the communicator's own is recorded as a lost link by the watch
+itself, so the GPU waits on it end at once. No kernel halts on the record: every later dispatch runs as encoded. But once
 one wait has recorded a failure, every other wait on the same failure words ends: a later one at once
 (`mesh_step_failed`, read before each wait), and one under way within 2^10 loads (`mesh_wait_bounded`'s stop word, the
 failure claim). So a dispatch's waits hold the GPU about one bound in all, whatever its width: a wide landing's
 threadgroups run in waves where the grid passes the GPU's co-residency, and each wave's threadgroups wait on their own.
-The bound is a count of polls and nothing else: it exists because a GPU spin with no end halts the node (the Mini's
-watchdog reset, 2026-10-21), not to guard any buffer.
+The bound is a count of polls between the lease's moves and nothing else: it exists because a GPU spin with no end
+halts the node (the Mini's watchdog reset, 2026-10-21), not to guard any buffer. The tracks kernel bounds its idle
+passes the same way.
 `ncclMeshComplete` bounds the completion's waits by the stream it is given.
 
 The caller derives the bound from its plan: the lag it expects at the crossing (the record's wait there, times the
