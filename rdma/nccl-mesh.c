@@ -2532,8 +2532,45 @@ static ncclResult_t counted_steps(struct call *c) {
     first[r + 1] = first[r] + mesh_counted_steps(N, r, segments, (struct mesh_operand){(uint32_t)c->type + 1, (uint32_t)SIZE[c->type], 0},
                                                 logical + first[r]);
   }
-  if (!result) result = bind_routed_steps(c, first, logical, initialized, 0);
-  free(first); free(initialized); free(segments); free(logical);
+  /* each transfer cut alike at its two ends where the sender's send binding or the receiver's receive binding crosses
+     a registration extent (c->phase), its pieces' offsets in each buffer differing (nccl.h ncclMeshCall bindings) */
+  struct mesh_step *split = NULL;
+  uint32_t *at = NULL;
+  if (!result && c->phase) {
+    size_t room = 0;
+    for (uint32_t k = 0; k < first[N]; k++) room += 1 + 4 * (logical[k].piece.elements * SIZE[c->type] / MESH_DMA_EXTENT + 1);
+    split = calloc(room + 1, sizeof *split); at = calloc((size_t)N + 1, sizeof *at);
+    if (!split || !at) result = fail(ncclSystemError, "out of memory");
+  }
+  for (uint32_t r = 0, made = 0, k = 0; split && !result && r < N; at[++r] = made)
+    for (; k < first[r + 1]; k++) {
+      const struct mesh_step s = logical[k];
+      const uint32_t q = s.peer, from = s.op == MESH_STEP_SEND ? r : q, to = s.op == MESH_STEP_SEND ? q : r;
+      /* the transfer's first element in its sender's send buffer and in its receiver's receive buffer */
+      uint64_t sent = 0, landed = 0;
+      for (uint32_t p = 0; p < to; p++) sent += c->matrix[(size_t)from * N + p];
+      for (uint32_t p = 0; p < from; p++) landed += c->matrix[(size_t)p * N + to];
+      uint64_t cuts[64];
+      size_t n = 0;
+      const uint64_t ends[2][3] = {{c->phase[2 * from], sent}, {c->phase[2 * to + 1], landed}};
+      for (int e = 0; e < 2; e++) {
+        if (ends[e][0] == UINT64_MAX) continue;
+        for (uint64_t b = MESH_DMA_EXTENT - ends[e][0]; n < sizeof cuts / sizeof *cuts; b += MESH_DMA_EXTENT) {
+          if (b % SIZE[c->type]) { if (b / SIZE[c->type] >= ends[e][1] + s.piece.elements) break; continue; }
+          const uint64_t x = b / SIZE[c->type];
+          if (x >= ends[e][1] + s.piece.elements) break;
+          if (x > ends[e][1]) cuts[n++] = x - ends[e][1];
+        }
+      }
+      for (size_t i = 1; i < n; i++)
+        for (size_t j = i; j && cuts[j - 1] > cuts[j]; j--) { const uint64_t t = cuts[j]; cuts[j] = cuts[j - 1]; cuts[j - 1] = t; }
+      uint64_t lo = 0;
+      for (size_t i = 0; i < n; i++)
+        if (cuts[i] > lo) { split[made] = s; split[made].first = s.first + lo; split[made++].piece.elements = cuts[i] - lo; lo = cuts[i]; }
+      split[made] = s; split[made].first = s.first + lo; split[made++].piece.elements = s.piece.elements - lo;
+    }
+  if (!result) result = bind_routed_steps(c, split ? at : first, split ? split : logical, initialized, 0);
+  free(first); free(initialized); free(segments); free(logical); free(split); free(at);
   return result;
 }
 
@@ -5168,7 +5205,7 @@ static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call
   }
   if (d->what == WHAT_COUNTED && !d->counts) return fail(ncclInvalidArgument, "a declared all-to-all without its counts");
   /* its bindings' offsets within their registration extents, this rank's now, the others' at ncclMeshCommPlan */
-  if (d->bindings && d->what != WHAT_COUNTED && d->what != ncclMeshCallWrite) {
+  if (d->bindings && d->what != ncclMeshCallWrite) {
     if (!(c->phase = malloc(2 * (size_t)n * sizeof *c->phase))) return fail(ncclSystemError, "out of memory");
     const struct hdr *m = comm->attach->context.M;
     const uintptr_t data = (uintptr_t)m + m->data_off, end = data + (uintptr_t)mesh_arena_pages(m) * m->pgsz;

@@ -1115,8 +1115,8 @@ typedef struct {
      address}; {NULL, 0} where this rank has none). Given on every rank or on none for a call, CommPlan exchanges each
      rank's bindings' offsets within their registration extents once and cuts the call's pieces wherever some rank's
      binding crosses an extent, so no DMA span crosses one for a lease of any size where the call is issued with
-     bindings at those offsets (others fail as values at placement). Ordinary collectives; all-to-alls and WRITEs
-     have their own cuts. */
+     bindings at those offsets (others fail as values at placement). Collectives and all-to-alls; a WRITE has its
+     own cuts. */
   const ncclMeshBuffer* bindings;
 } ncclMeshCall;
 /* A communicator's plan (ncclMeshCommPlan): its `groups` declared groups, the groups one pass of its order issues
