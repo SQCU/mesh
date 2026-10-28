@@ -3145,38 +3145,41 @@ static uint32_t slot_take(struct ncclComm *comm, size_t bytes) {
   return best;
 }
 
-/* group x's next invocation's storage, a page each: its calls' buffers that are the communicator's (generation_buffer,
-   read on x's own calls: an issued call keeps its roles alone, never its declaration's recipients; a write's credits),
-   then its landing area (*area), in x's next slot (*slot), taken once for each of GENERATIONS and again where it must
+/* group x's storage for `list` (its calls: x's own at its declaration, an issued group's at its issue), a page each: its
+   calls' buffers that are the communicator's (generation_buffer, read on x's own calls: an issued call keeps its roles
+   alone, never its declaration's recipients; a write's credits), each laid from *base where given (st->buffer), then its
+   landing area (*area, where given), a page for each combine's landing of `plans`; its bytes */
+static size_t slot_laid(const struct ncclComm *comm, const struct compiled *x, const struct call *list, size_t n,
+                        const struct schedule *plans, const struct where *base, struct where *area) {
+  size_t used = 0;
+  for (size_t i = 0; i < n; i++)
+    for (uint32_t b = 0, z = (uint32_t)SIZE[list[i].type]; list[i].bound && b < list[i].bound->buffers; b++) {
+      struct steps *st = list[i].bound;
+      if (list[i].target ? !st->credit || b != st->credit : !generation_buffer(x->calls + i, (uint32_t)comm->rank, b) || (!b && st->partial)) continue;
+      if (base) st->buffer[b] = shifted(*base, used);
+      used += page_up(b < st->initialized ? elements(list + i) * z : st->extent[b], comm->page);
+    }
+  if (base && area) *area = shifted(*base, used);
+  for (uint32_t h = 0; h < comm->count; h++)
+    for (size_t k = 0; k < plans[h].ins; k++)
+      if (plans[h].in[k].c->bound->steps[plans[h].in[k].step].op == MESH_STEP_REDUCE) used += page_up(plans[h].in[k].bytes, comm->page);
+  return used;
+}
+/* group x's next invocation's storage (slot_laid) in x's next slot (*slot): taken at x's declaration
+   (ncclMeshCommPlan) for each of GENERATIONS, or an undeclared group's at its first groups, and again where it must
    grow.  Under group_lock */
 static ncclResult_t bind_slot(struct metal_program *program, struct ncclComm *comm, struct compiled *x, struct call *list, size_t n,
                               const struct schedule *plans, struct where *area, uint32_t *slot) {
-  size_t need = 0;
+  const size_t need = slot_laid(comm, x, list, n, plans, NULL, NULL);
+  uint32_t *held = x->slot + x->uses++ % GENERATIONS;
+  if (*held && comm->slots[*held - 1].bytes < need) { comm->slots[*held - 1].held = 0; *held = 0; }
+  if (!*held && !(*held = slot_take(comm, need))) return fail(ncclSystemError, "a group's storage: %s", last.text);
+  void *address = comm->slots[(*slot = *held) - 1].address;
   struct where base = {NULL, 0};
-  for (int pass = 0; pass < 2; pass++) {
-    if (pass) {
-      uint32_t *held = x->slot + x->uses++ % GENERATIONS;
-      if (*held && comm->slots[*held - 1].bytes < need) { comm->slots[*held - 1].held = 0; *held = 0; }
-      if (!*held && !(*held = slot_take(comm, need))) return fail(ncclSystemError, "a group's storage: %s", last.text);
-      void *address = comm->slots[(*slot = *held) - 1].address;
-      if (!program) base = (struct where){NULL, (size_t)address};
-      else if (lease_buffer(address, &base.buffer, &base.offset)) return fail(ncclSystemError, "no Metal buffer over a lease of the communicator's");
-      else metal_resident(program, base.buffer);
-    }
-    size_t used = 0;
-    for (size_t i = 0; i < n; i++)
-      for (uint32_t b = 0, z = (uint32_t)SIZE[list[i].type]; list[i].bound && b < list[i].bound->buffers; b++) {
-        struct steps *st = list[i].bound;
-        if (list[i].target ? !st->credit || b != st->credit : !generation_buffer(x->calls + i, (uint32_t)comm->rank, b) || (!b && st->partial)) continue;
-        if (pass) st->buffer[b] = shifted(base, used);
-        used += page_up(b < st->initialized ? elements(list + i) * z : st->extent[b], comm->page);
-      }
-    if (pass) *area = shifted(base, used);
-    for (uint32_t h = 0; !pass && h < comm->count; h++)
-      for (size_t k = 0; k < plans[h].ins; k++)
-        if (plans[h].in[k].c->bound->steps[plans[h].in[k].step].op == MESH_STEP_REDUCE) used += page_up(plans[h].in[k].bytes, comm->page);
-    need = used;
-  }
+  if (!program) base = (struct where){NULL, (size_t)address};
+  else if (lease_buffer(address, &base.buffer, &base.offset)) return fail(ncclSystemError, "no Metal buffer over a lease of the communicator's");
+  else metal_resident(program, base.buffer);
+  slot_laid(comm, x, list, n, plans, &base, area);
   return ncclSuccess;
 }
 
@@ -5151,6 +5154,12 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
     struct compiled *x = made->group + g;
     result = compile_group(comm, x->calls, x->n, &x->plans);
     for (uint32_t h = 0; h < comm->count && !result; h++) { made->entries[g][0] += x->plans[h].outs; made->entries[g][1] += x->plans[h].ins; }
+    /* its storage taken here, a slot for each generation (bind_slot finds them held): its issues take none */
+    int remote = 0;
+    for (size_t i = 0; !result && i < x->n; i++) remote |= crosses(x->calls + i);
+    const size_t need = remote ? slot_laid(comm, x, x->calls, x->n, x->plans, NULL, NULL) : 0;
+    for (uint32_t k = 0; remote && !result && k < GENERATIONS; k++)
+      if (!(x->slot[k] = slot_take(comm, need))) result = fail(ncclSystemError, "a declared group's storage: %s", last.text);
   }
   if (!result) {
     struct plan *was = comm->plan;
