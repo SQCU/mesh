@@ -100,6 +100,24 @@ This contract does not declare these existing paths complete:
 Further integration belongs at these shared lowering boundaries. Numerical
 bodies contribute their work and uses, rather than separate memory systems.
 
+CPU contraction workspace is now part of that boundary. Preparation asks BNNS
+for its required byte count, assigns bridge pages and binds their address.
+The host record retains those pages and declares their writes alongside its
+other operands. Its sequential instructions share one workspace sized for their
+largest declared need. The binding keeps instruction descriptors in private
+allocation. BNNS receives a non-null workspace even when its size query returns
+zero; this prevents its optional internal allocation path.
+
+This does not split a CPU function or a set of ANE models into additional host
+callbacks. The current scheduler creates a shared-event notification for each
+host record. Exposing internal declarations must not introduce such boundaries
+between instructions that can remain in one call.
+
+Core ML's public `MLPredictionOptions.outputBackings` contract still permits the
+provider to decline caller storage. The binding's current result-identity check
+reports that condition; it does not establish an AOT guarantee. Producer type
+placement and a stronger provider output contract remain unresolved.
+
 ## Frontend attributes become page operands
 
 The compiler lifts tensor attributes before splitting a function around its

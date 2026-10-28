@@ -100,7 +100,8 @@ def _coreml():
             lib.mesh_cpu_program_retain.argtypes = [ctypes.c_void_p]
             lib.mesh_cpu_program_release.argtypes = [ctypes.c_void_p]
             lib.mesh_cpu_product_bind.argtypes = [ctypes.POINTER(CpuCommand)]
-            lib.mesh_cpu_product_bind.restype = ctypes.c_int
+            lib.mesh_cpu_product_bind.restype = ctypes.c_int64
+            lib.mesh_cpu_product_workspace.argtypes = [ctypes.POINTER(CpuCommand), ctypes.c_void_p]
             lib.mesh_cpu_command_release.argtypes = [ctypes.POINTER(CpuCommand)]
             _CORE_ML = lib
         except OSError:
@@ -223,23 +224,38 @@ class Cpu(Engine):
         native = _coreml()
         if native is None:
             raise RuntimeError('CPU commands require the native engine library')
+        workspace = []
         def product(x, w, y):
             command = CpuCommand(None,
                               x.shape[0], w.shape[0], x.shape[1], x.stride(0), w.stride(0), y.stride(0),
                               x.stride(1), w.stride(1), y.stride(1),
                               _host_address(x), _host_address(w), _host_address(y), None)
-            if native.mesh_cpu_product_bind(ctypes.byref(command)):
+            size = native.mesh_cpu_product_bind(ctypes.byref(command))
+            if size < 0:
                 raise ValueError('CPU matrix views could not be bound to a bulk contraction')
+            if size:
+                workspace.append((command, size))
             return command
         if op.kind == 'linear':
-            return CpuProgram([product(x, weights[0], out)], tuple(source.values()), (out,), before, after)
-        gate, up, down = weights
-        from . import empty
-        g, u, scratch = (empty(x.shape[0], gate.shape[0], dtype=torch.float32, device='cpu') for _ in range(3))
-        activation = CpuCommand(ctypes.cast(native.mesh_cpu_gelu, ctypes.c_void_p), g.shape[0], g.shape[1], 0, 0, 0, 0, 0, 0, 0,
-                                 g.data_ptr(), u.data_ptr(), g.data_ptr(), scratch.data_ptr())
-        return CpuProgram([product(x, gate, g), product(x, up, u), activation, product(g, down, out)],
-                          tuple(source.values()), (out, g, u, scratch), before, after)
+            commands = [product(x, weights[0], out)]
+            outputs = (out,)
+        else:
+            gate, up, down = weights
+            from . import empty
+            g, u, scratch = (empty(x.shape[0], gate.shape[0], dtype=torch.float32, device='cpu') for _ in range(3))
+            activation = CpuCommand(ctypes.cast(native.mesh_cpu_gelu, ctypes.c_void_p), g.shape[0], g.shape[1], 0, 0, 0, 0, 0, 0, 0,
+                                     g.data_ptr(), u.data_ptr(), g.data_ptr(), scratch.data_ptr())
+            commands = [product(x, gate, g), product(x, up, u), activation, product(g, down, out)]
+            outputs = (out, g, u, scratch)
+        if workspace:
+            from . import empty
+            # These instructions run in order within one host call. Assign
+            # one workspace that covers all their declared requirements.
+            pages = empty(max(size for _, size in workspace), dtype=torch.uint8, device='cpu')
+            for command, _ in workspace:
+                native.mesh_cpu_product_workspace(ctypes.byref(command), _host_address(pages))
+            outputs += (pages,)
+        return CpuProgram(commands, tuple(source.values()), outputs, before, after)
 
 
 class CpuCommand(ctypes.Structure):

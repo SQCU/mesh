@@ -20,14 +20,6 @@ static _Thread_local char error_[2048];
 
 /* Prepared CPU numerical commands, on the same shared views as graph shares.
    Weights and scratch are bound by the compiler; execution allocates nothing. */
-typedef struct MeshCpuCommand {
-  void (*run)(const struct MeshCpuCommand *);
-  int rows, columns, inner, input_stride, weight_stride, output_stride;
-  int input_column, weight_column, output_column;
-  float *input, *weight, *output, *scratch;
-  int input_transpose, weight_transpose;
-} MeshCpuCommand;
-
 void mesh_cpu_product(const MeshCpuCommand *c) {
       cblas_sgemm(CblasRowMajor,c->input_transpose,c->weight_transpose,c->rows,c->columns,c->inner,
                   1,c->input,c->input_stride,c->weight,c->weight_stride,0,c->output,c->output_stride);
@@ -46,7 +38,7 @@ static void mesh_cpu_product_strided(const MeshCpuCommand *c) {
 
 /* Preparation chooses a whole-matrix instruction and binds its storage.
    Transposing the result swaps the operands: (X W^T)^T = W X^T. */
-int mesh_cpu_product_bind(MeshCpuCommand *c) {
+int64_t mesh_cpu_product_bind(MeshCpuCommand *c) {
   if(c->input_column<=0||c->input_stride<=0||c->weight_column<=0||c->weight_stride<=0||
      c->output_column<=0||c->output_stride<=0)return -1;
   if(((c->input_column==1&&c->input_stride>=c->inner)||(c->input_stride==1&&c->input_column>=c->rows)) &&
@@ -78,15 +70,19 @@ int mesh_cpu_product_bind(MeshCpuCommand *c) {
     .data=c->output,.data_type=BNNSDataTypeFloat32,.data_scale=1};
   ssize_t bytes=BNNSMatMulWorkspaceSize(false,true,1,&p->input,&p->weight,&p->output,NULL);
   if(bytes<0){free(p);return -1;}
-  p->workspace=malloc(bytes?bytes:1);
-  if(!p->workspace){free(p);return -1;}
   c->scratch=(float *)p;c->run=mesh_cpu_product_strided;
-  return 0;
+  /* Even a zero-size requirement needs a non-null address to keep BNNS from
+     allocating internally. One addressed byte satisfies that API contract. */
+  return bytes ? bytes : sizeof(uint8_t);
+}
+
+void mesh_cpu_product_workspace(MeshCpuCommand *c, void *workspace) {
+  MeshCpuProduct *p=(MeshCpuProduct *)c->scratch;p->workspace=workspace;
 }
 
 void mesh_cpu_command_release(MeshCpuCommand *c) {
   if(c->run==mesh_cpu_product_strided) {
-    MeshCpuProduct *p=(MeshCpuProduct *)c->scratch;free(p->workspace);free(p);
+    free(c->scratch);
   }
 }
 void mesh_cpu_gelu(const MeshCpuCommand *c) {
