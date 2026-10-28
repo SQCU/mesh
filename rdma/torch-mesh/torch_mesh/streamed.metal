@@ -749,6 +749,7 @@ template [[host_name("streamed_scale_rows_bfloat")]] [[kernel]] decltype(streame
 #define MESH_STREAMED_GATHER_PARAMETERS
 #define MESH_STREAMED_GATHER_HELPER_PARAMETERS
 #define MESH_STREAMED_GATHER_ARGUMENTS
+#define MESH_STREAMED_GATHER_STORE_MASKED(I,J,V,A)
 #define MESH_STREAMED_GATHER_STORE4(I,J,V,A)
 #endif
 #ifndef MESH_STREAMED_ROTATE_PARAMETERS
@@ -759,7 +760,7 @@ template [[host_name("streamed_scale_rows_bfloat")]] [[kernel]] decltype(streame
 #define MESH_STREAMED_HADAMARD_PARAMETERS
 #define MESH_STREAMED_HADAMARD_STORE(I,J,V)
 #endif
-template <uint STRIDE, bool Masked, uint Order, uint Slabs = 0, typename V, typename F, typename S, typename G, typename T, typename H, typename U>
+template <uint STRIDE, bool Masked, uint Order, uint Slabs = 0, typename Output = half, typename Scale = float, typename V, typename F, typename S, typename G, typename T, typename H, typename U>
 static inline void streamed_gather(V values, float factor, F first, S scale,
                                    G second, T secondScale, H third, U thirdScale,
                                    uint inputs, uint columns, uint rows, uint n, uint t, uint threads MESH_STREAMED_GATHER_HELPER_PARAMETERS) {
@@ -773,14 +774,30 @@ static inline void streamed_gather(V values, float factor, F first, S scale,
             #pragma unroll
             for (uint slab = 0; slab < Slabs; ++slab)
                 streamed_store_four(first, ulong(slab) * rows * columns + at,
-                    select(half4(0), half4(streamed_four<float4>(scale, ulong(slab) * columns + 4*q) * v), active));
+                    select(vec<Output,4>(0), vec<Output,4>(float4(streamed_four<vec<Scale,4>>(scale, ulong(slab) * columns + 4*q)) * v), active));
         } else {
-            streamed_store_four(first, at, select(half4(0), half4(streamed_four<float4>(scale, 4*q) * v), active));
-            if (inputs > 1) streamed_store_four(second, at, select(half4(0), half4(streamed_four<float4>(secondScale, 4*q) * v), active));
-            if (inputs > 2) streamed_store_four(third, at, select(half4(0), half4(streamed_four<float4>(thirdScale, 4*q) * v), active));
+            streamed_store_four(first, at, select(vec<Output,4>(0), vec<Output,4>(float4(streamed_four<vec<Scale,4>>(scale, 4*q)) * v), active));
+            if (inputs > 1) streamed_store_four(second, at, select(vec<Output,4>(0), vec<Output,4>(float4(streamed_four<vec<Scale,4>>(secondScale, 4*q)) * v), active));
+            if (inputs > 2) streamed_store_four(third, at, select(vec<Output,4>(0), vec<Output,4>(float4(streamed_four<vec<Scale,4>>(thirdScale, 4*q)) * v), active));
             MESH_STREAMED_GATHER_STORE4(at, 4*q, v, active)
         }
     }
+    for (uint j = columns / 4 * 4 + t; j < columns; j += threads) {
+        const int source = int(mesh_position<Order>(j));
+        const bool active = !Masked || source >= 0;
+        const float value = active ? factor * float(values[source]) : 0.0f;
+        const ulong at = STRIDE ? (ulong(j / max(STRIDE, 1u)) * rows + n) * STRIDE + j % max(STRIDE, 1u) : ulong(n) * columns + j;
+        if constexpr (Slabs) {
+            for (uint slab = 0; slab < Slabs; ++slab)
+                first[ulong(slab) * rows * columns + at] = active ? Output(float(scale[ulong(slab) * columns + j]) * value) : Output(0);
+        } else {
+            first[at] = active ? Output(float(scale[j]) * value) : Output(0);
+            if (inputs > 1) second[at] = active ? Output(float(secondScale[j]) * value) : Output(0);
+            if (inputs > 2) third[at] = active ? Output(float(thirdScale[j]) * value) : Output(0);
+            MESH_STREAMED_GATHER_STORE_MASKED(at, j, value, active)
+        }
+    }
+
 }
 
 // The coded inputs of up to three products sharing a column order (d.inputs of them) from plain rows x, a threadgroup a
@@ -788,11 +805,11 @@ static inline void streamed_gather(V values, float factor, F first, S scale,
 // (eps d.eps; a norm's gamma folded into the products' column scales: docs/kernels.md#stacked-products); the row staged
 // in threadgroup memory where WIDTH > 0 (d.columns at most WIDTH), else read in place (streamed_gather).
 // GivenFactor consumes the normalizer's per-row output; it needs no second reduction or staged row.
-template <bool Normed, uint WIDTH, uint STRIDE, bool Masked = false, uint InputColumns = 0, bool GivenFactor = false, typename Input = half, uint Slabs = 0>
-kernel void streamed_row_gather(MESH_STREAMED_GATHER_PARAMETERS device const Input *x [[buffer(0)]], device half *first [[buffer(1)]],
-                                device const float *scale [[buffer(3)]],
-                                device half *second [[buffer(5)]], device half *third [[buffer(6)]],
-                                device const float *secondScale [[buffer(7)]], device const float *thirdScale [[buffer(8)]],
+template <bool Normed, uint WIDTH, uint STRIDE, bool Masked = false, uint InputColumns = 0, bool GivenFactor = false, typename Input = half, uint Slabs = 0, typename Output = half, typename Scale = float>
+kernel void streamed_row_gather(MESH_STREAMED_GATHER_PARAMETERS device const Input *x [[buffer(0)]], device Output *first [[buffer(1)]],
+                                device const Scale *scale [[buffer(3)]],
+                                device Output *second [[buffer(5)]], device Output *third [[buffer(6)]],
+                                device const Scale *secondScale [[buffer(7)]], device const Scale *thirdScale [[buffer(8)]],
                                 device const float *factors [[buffer(9)]],
                                 constant streamed_dims &dims [[buffer(15)]], uint n [[threadgroup_position_in_grid]],
                                 uint t [[thread_index_in_threadgroup]], uint lanes [[threads_per_threadgroup]]) {
@@ -803,7 +820,7 @@ kernel void streamed_row_gather(MESH_STREAMED_GATHER_PARAMETERS device const Inp
     const uint columns = d.columns, inputColumns = InputColumns ? InputColumns : columns;
     if (WIDTH == 0) {
         const float factor = GivenFactor ? factors[mesh_index<9>(n)] : 1.0f;
-        streamed_gather<STRIDE, Masked, 2, Slabs>(mesh_view<0>(x, ulong(n) * inputColumns), factor,
+        streamed_gather<STRIDE, Masked, 2, Slabs, Output, Scale>(mesh_view<0>(x, ulong(n) * inputColumns), factor,
             mesh_view<1>(first), mesh_view<3>(scale), mesh_view<5>(second), mesh_view<7>(secondScale),
             mesh_view<6>(third), mesh_view<8>(thirdScale), d.inputs, columns, d.rows, n, t, threads MESH_STREAMED_GATHER_ARGUMENTS);
         return;
@@ -821,7 +838,7 @@ kernel void streamed_row_gather(MESH_STREAMED_GATHER_PARAMETERS device const Inp
     }
     const float factor = GivenFactor ? factors[mesh_index<9>(n)] : Normed ? streamed_rms(s, inputColumns, d.eps, partial, t, threads) : 1.0f;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    streamed_gather<STRIDE, Masked, 2, Slabs>((threadgroup const float *)values, factor,
+    streamed_gather<STRIDE, Masked, 2, Slabs, Output, Scale>((threadgroup const float *)values, factor,
         mesh_view<1>(first), mesh_view<3>(scale), mesh_view<5>(second), mesh_view<7>(secondScale),
         mesh_view<6>(third), mesh_view<8>(thirdScale), d.inputs, columns, d.rows, n, t, threads MESH_STREAMED_GATHER_ARGUMENTS);
 }
@@ -927,8 +944,10 @@ template [[host_name("streamed_rotate")]] [[kernel]] decltype(streamed_rotate<0>
 // sign masks. Simdgroup s takes blocks s, s + S, ...: a lane holds W = N / 32 consecutive values of a block, H_N is
 // structured.metal's butterfly with its stages below W in registers and the five above as lane shuffles; then column j
 // of the K blocks is read into registers by threads (g, j), g < threads / N, each mixing its K / (threads / N) rows
-// into a second region, which the puts read in their column order. Two barriers. N in {32, 64, 128}, K <= 20 and a
-// multiple of threads / N, K <= 3 S, columns <= 16 threads and <= 2560.
+// into a second region, which the puts read in their column order. Two barriers.
+// metal.def declares this fused schedule's register and storage geometry;
+// MetalHadamardLocal selects it. Other shapes use the shared butterfly factors
+// and matrix product instead of being rejected by the loader.
 template <uint InputColumns = 0, bool Masked = false, bool GivenFactor = false, typename Input = half, uint Slabs = 0>
 kernel void streamed_hadamard(MESH_STREAMED_HADAMARD_PARAMETERS device const Input *x [[buffer(0)]], device half *first [[buffer(1)]],
                               device half *second [[buffer(2)]],
@@ -941,11 +960,12 @@ kernel void streamed_hadamard(MESH_STREAMED_HADAMARD_PARAMETERS device const Inp
                               uint lane [[thread_index_in_simdgroup]], uint simds [[simdgroups_per_threadgroup]]) {
     const streamed_dims d = dims_of(dims);
     const uint threads = lanes_of(lanes);
-    constexpr uint P = 16, V = 4, R = 3, KM = 20, QM = 10;
-    threadgroup float v[5120];
-    threadgroup float partial[32];
-    threadgroup uint masks[20];
-    const uint columns = d.columns, N = d.per, shift = ctz(N), K = columns >> shift, W = N / 32;
+    constexpr uint P = MESH_HADAMARD_STORES, V = MESH_HADAMARD_VALUES, R = MESH_HADAMARD_BLOCKS;
+    constexpr uint KM = MESH_HADAMARD_MIX, QM = MESH_HADAMARD_MIX_ROWS, SIMD = MESH_SIMD_WIDTH;
+    threadgroup float v[MESH_HADAMARD_STORAGE];
+    threadgroup float partial[SIMD];
+    threadgroup uint masks[KM];
+    const uint columns = d.columns, N = d.per, shift = ctz(N), K = columns >> shift, W = N / SIMD;
     const float eps = d.eps;
     const uint inputColumns = InputColumns ? InputColumns : columns;
     const auto row = mesh_view<0>(x, ulong(n) * inputColumns);
@@ -974,7 +994,7 @@ kernel void streamed_hadamard(MESH_STREAMED_HADAMARD_PARAMETERS device const Inp
         }
         for (uint h = 1; h < V; h <<= 1) if (h < W)
             for (uint u = 0; u < V; u++) if (u < W && !(u & h)) { const float a0 = r[u], a1 = r[u + h]; r[u] = a0 + a1; r[u + h] = a0 - a1; }
-        for (uint h = 1; h < 32; h <<= 1)
+        for (uint h = 1; h < SIMD; h <<= 1)
             for (uint u = 0; u < V; u++) if (u < W) { const float other = simd_shuffle_xor(r[u], h); r[u] = (lane & h) ? other - r[u] : r[u] + other; }
         for (uint u = 0; u < V; u++) if (u < W) v[(b << shift) + lane * W + u] = r[u];
     }

@@ -123,9 +123,13 @@ The 1–4 integration pass on 2026-10-28 has these boundaries:
    normalization and convolution already receive the consumer requirements
    before emission; other native producers still bind assigned buffers.
    Conflicting requirements need cost-directed placement beyond feasibility.
-   The fixed Hadamard kernel's shape limits also remain embedded in its loader
-   and numerical implementation; those need a declared decomposition, not just
-   removal of the loader checks.
+   Hadamard widths now lower through `MetalButterflyPlan`, shared by FX and
+   native preparation. Device storage limits each local factor, not the whole
+   operation. The loader checks the basis's mathematical shape; the former
+   small-width list, mixing cap and thread-count divisibility are removed.
+   `MetalHadamardLocal` selects the existing fused schedule when its configured
+   workspace fits. Other shapes compose butterfly factors and a matrix product.
+   Both use the same sign, scale, order and page operands.
 3. **Adapters.** Stored Q/K/V and gate/up products now use `storedProducts` for
    normalization, product selection and destination binding. The gate/up helper
    adds its declared activation. The old `qkvCommands`, `ModelFeature.resolve`,
@@ -147,6 +151,43 @@ The 1–4 integration pass on 2026-10-28 has these boundaries:
    specializations also compile with row stores omitted. Both coupled product
    forms compile with unequal tile-row strides. This evidence involves
    no numerical execution, collective run, throughput result or latency result.
+
+### Wide butterfly factors
+
+`structured.expand` exposes the factors before FX partitioning. Native
+`butterflyCommands` uses the same `MetalButterflyPlan` and shader. If a factor
+has width `w` and stride `s`, its coordinates are
+`outer * w * s + lane * s + inner`. The next factor changes another set of
+coordinate bits. Local storage holds `w` floats, regardless of the full width.
+Signs belong to the first factor and normalization to the last.
+
+The view compiler resolves those coordinates to assigned pages. Tile records
+carry their reads and writes. Masked lanes do not add unrelated source-page
+dependencies; an entirely padded tile has no input read. Intermediates are
+ordinary float page operands. No descriptor interpreter or additional runtime
+submission interface is involved.
+
+Compressed bases retain their sign vector and mixing matrix. Loading no longer
+expands the butterfly into a dense square matrix. The inverse also uses the
+factors. The existing fused kernel's geometry lives in `metal.def`, and its
+eligibility is shared by both frontends. Shapes outside that geometry compose
+the factors with the existing matrix and gather operations.
+The inverse supplies its encoded order as a prepared view. The shared gather
+accepts explicit input, output and scale types, including int8 signs, and writes
+its final one to three values through the same views. It no longer drops that
+tail or needs an intermediate layout copy for a short logical output.
+
+Preparation accepts a 32,768-wide transform as two factors with at most 16 KiB
+of local workspace. Compressed `(mix, block)` shapes `(3, 32)`, `(24, 256)` and
+`(3, 16384)` prepare with mapped operands and padded input cuts; their former
+loader restrictions are gone. This is compilation evidence, not a numerical
+or performance result.
+
+The whole operation still needs a placement plan. Exposing factors does not
+automatically distribute them across peers or place a logical result larger
+than one node's memory. The native mixing command also retains a whole matrix
+access declaration. Further distribution belongs in graph placement and the
+shared product lowerer, using the same page operands and dependency relations.
 
 Further integration belongs at these shared lowering boundaries. Numerical
 bodies contribute their work and uses, rather than separate memory systems.

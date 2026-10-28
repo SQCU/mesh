@@ -120,6 +120,13 @@ def fwht(*args, out=None):
     return output
 
 
+def fwht_stage(*args, out=None):
+    from .structured import prepare_stage
+    output, commands = prepare_stage(*args, out=out)
+    _records.get().extend(commands)
+    return output
+
+
 def kernel(*args, outputs=None):
     from .kernel import prepare
     output, commands = prepare(*args, outputs=outputs)
@@ -253,6 +260,7 @@ def compile_graph(module, metadata, operands, *, destinations=None):
                      'torch.ops.torch_mesh.draw.default': 'draw',
                      'torch.ops.torch_mesh.retain.default': 'retain',
                      'torch.ops.torch_mesh.fwht.default': 'fwht',
+                     'torch.ops.torch_mesh.fwht_stage.default': 'fwht_stage',
                      'torch.ops.torch_mesh.native_kernel.default': 'kernel'}
             name = node.get_kernel_name()
             if name not in names:

@@ -623,7 +623,7 @@ def transform_stores(kind, pairs, values, scales, buffers):
     without a scale retains the numerical result for other consumers. No values
     are packed or read back to construct this source.
     """
-    parameters, helper, arguments, scalar, vector = [], [], [], [], []
+    parameters, helper, arguments, scalar, masked, vector = [], [], [], [], [], []
     for (output, scale), value, factor in zip(pairs, values, scales, strict=True):
         type = _TYPES[value.dtype][1]
         fields = [(output, type, value)] + ([(scale, 'const float', factor)] if scale is not None else [])
@@ -637,11 +637,12 @@ def transform_stores(kind, pairs, values, scales, buffers):
         scaled = f'extra{scale}[mesh_index<{scale}>(J)] * (V)' if scale is not None else '(V)'
         scaled4 = f'mesh_load4<{scale},float4>(extra{scale}, (J)) * (V)' if scale is not None else '(V)'
         scalar.append(f'extra{output}[mesh_index<{output}>(I)] = {type}({scaled});')
+        masked.append(f'extra{output}[mesh_index<{output}>(I)] = (A) ? {type}({scaled}) : {type}(0);')
         vector.append(f'mesh_store4<{output}>(extra{output}, (I), select(vec<{type},4>(0), vec<{type},4>({scaled4}), (A)));')
     tag = 'MESH_STREAMED_' + kind.upper()
     return ('\n'.join(f'#define {tag}_{suffix} {text}' for suffix, text in (
         ('PARAMETERS', ' '.join(parameters)), ('HELPER_PARAMETERS', ''.join(helper)), ('ARGUMENTS', ''.join(arguments)),
-        ('STORE(I,J,V)', ' '.join(scalar)), ('STORE4(I,J,V,A)', ' '.join(vector)))) + '\n')
+        ('STORE(I,J,V)', ' '.join(scalar)), ('STORE_MASKED(I,J,V,A)', ' '.join(masked)), ('STORE4(I,J,V,A)', ' '.join(vector)))) + '\n')
 
 
 def _half(n, width):
@@ -659,8 +660,7 @@ def widths_of(tiles):
 
 
 def _hadamard(signs, mix):
-    """T = (H_K (x) H_N) diag(signs) / sqrt(K N) (computed in float64, float32, on the CPU): the rows its rotated
-    coordinates (metal-microbench tools/model_code.py decode_layout's too)."""
+    """Explicit dense basis for offline export; the loader uses its factors."""
     k, K = signs.shape[0], mix.shape[0]
     H = torch.ones(1, 1, dtype=torch.float64)
     while H.shape[0] < k // K:
@@ -676,7 +676,7 @@ class Matrix(torch.Tensor):
     available to preparation, including while FX carries fake tensor operands.
     """
     FIELDS = ('codes', 'tiles', 'bands', 'row_scale', 'col_scale', 'row_order', 'col_order', 'rotation',
-              'rotation_scale', 'folded', 'signs', 'hadamard')
+              'rotation_scale', 'folded', 'signs', 'hadamard', 'mixing')
     __torch_function__ = torch._C._disabled_torch_function_impl
 
     @staticmethod
@@ -716,8 +716,9 @@ class Matrix(torch.Tensor):
         if f'{name}.signs' in tensors:
             fields['signs'], fields['hadamard'] = get('signs'), get('hadamard')
             k, K = fields['signs'].shape[0], fields['hadamard'].shape[0]
-            assert k // K in (32, 64, 128) and K <= 20 and K % (256 // (k // K)) == 0 and k <= 2560, f'{name}: a Hadamard basis streamed_hadamard runs'
-            fields['folded'] = _hadamard(tensors[f'{name}.signs'], tensors[f'{name}.hadamard'])[tensors[f'{name}.col_order'].long()].half().to(device)
+            if K <= 0 or k <= 0 or fields['hadamard'].shape != (K, K) or k % K or (k // K) & (k // K - 1):
+                raise ValueError(f'{name}: the basis needs a square mix and power-of-two butterfly blocks')
+            fields['mixing'] = tensors[f'{name}.hadamard'].float().to(device)
         return cls(fields, name)
 
     def like(self, transposed=None, dtype=None, *, logical_shape=None, metadata=None, input_domain=None, **fields):
@@ -731,8 +732,12 @@ class Matrix(torch.Tensor):
                       metadata,
                       self.input_domain if input_domain is None else input_domain)
 
+    @property
+    def rotated(self):
+        return self.folded is not None or self.signs is not None
+
     def __repr__(self):
-        return (f'Matrix({self.label} [{self.rows} x {self.columns}]{" rotated" if self.folded is not None else ""}'
+        return (f'Matrix({self.label} [{self.rows} x {self.columns}]{" rotated" if self.rotated else ""}'
                 f'{" transposed" if self.transposed else ""}, {self.dtype})')
 
     def __tensor_flatten__(self):
@@ -770,7 +775,7 @@ class Matrix(torch.Tensor):
             return self.like()
         group = COMPUTE['WEIGHT_ROW_GROUP']
         rb, row_order = _stream.view_block_slice(self.metadata['row_order'], *row_slice, group)
-        cb, col_order = (list(range(self.tiles_)), self.metadata['col_order']) if self.folded is not None else (
+        cb, col_order = (list(range(self.tiles_)), self.metadata['col_order']) if self.rotated else (
             _stream.view_block_slice(self.metadata['col_order'], *col_slice, group))
         ri = [b * group + j for b in rb for j in range(group)]
         ci = [b * group + j for b in cb for j in range(group)]
@@ -780,10 +785,11 @@ class Matrix(torch.Tensor):
                         col_scale=tuple(self.metadata['col_scale'][c] for c in ci), col_order=tuple(col_order))
         fields = {key: torch.tensor(values, dtype=getattr(self, key).dtype) for key, values in metadata.items()}
         fields['tiles'] = fields['tiles'].reshape(len(rb), len(cb))
-        input_domain = self.input_domain if self.folded is not None else tuple(range(len(ci)))
-        if self.folded is not None:
+        input_domain = self.input_domain if self.rotated else tuple(range(len(ci)))
+        if self.rotated:
             selection = slice(*col_slice)
-            fields['folded'] = self.folded[:, selection]
+            if self.folded is not None:
+                fields['folded'] = self.folded[:, selection]
             if self.rotation is not None:
                 fields['rotation'] = self.rotation[:, selection]
             if self.signs is not None:
@@ -823,18 +829,41 @@ class Matrix(torch.Tensor):
     def dense(self):
         """The matrix decoded in its own coordinates, its shape and dtype (a rotated matrix decoded in its coded
         columns, then times `folded`: the rotation V^T in coded column order, its scale applied)."""
-        width = self.columns if self.folded is not None else self.logical_shape[1]
+        width = self.columns if self.rotated else self.logical_shape[1]
         out = _half(self.logical_shape[0], width)
         if not all(self.logical_shape):
             return _half(*self.shape).to(self.dtype)
-        columns = tuple(range(self.columns)) if self.folded is not None else self.metadata['col_order']
+        columns = tuple(range(self.columns)) if self.rotated else self.metadata['col_order']
         name, line = instance('streamed_dense', int(self.row_masked or self.column_masked))
         out, = _encode(name, self._code() + [None, out, None, self.row_scale, None, None, self.col_scale],
                 _dims(tiles=self.tiles_, pitch=self.pitch, stride=width), self.rows // 32, self.tiles_, 32, line,
                 outputs=(4,), indexed=(6, 9), pitched=(1,), indices={5: self.metadata['row_order'], 8: columns})
-        if self.folded is not None:
-            out = torch.mm(out, self.folded)
+        if self.rotated:
+            out = self.unrotate(out)
         return (out.T if self.transposed else out).to(self.dtype)
+
+    def unrotate(self, values):
+        if self.signs is None:
+            return torch.mm(values, self.folded)
+        K, n = self.hadamard.shape[0], values.shape[0]
+        inverse = [-1] * self.columns
+        for at, column in enumerate(self.metadata['col_order']):
+            if column >= 0:
+                inverse[column] = at
+        from .structured import expand
+        from .operand import TensorView
+        transformed = expand(values, self.signs, self.columns // K, domain=inverse, normalization=self.columns, signed=False)
+        mixed = torch.einsum('ab,ran->rbn', self.mixing, transformed.reshape(n, K, self.columns // K)).reshape(n, self.columns)
+        selected = [0] * self.logical_shape[1]
+        for column, logical in enumerate(self.input_domain):
+            if logical >= 0:
+                selected[logical] = column
+        output = torch.empty((n, len(selected)), dtype=values.dtype, device=values.device)
+        name, line = instance('streamed_row_gather', 0, 0, 0, 0, self.columns, 0, 'float', 0, _TYPES[values.dtype][1], 'char')
+        output, = _encode(name, [mixed, output, None, TensorView.of(self.signs).select(0, selected)],
+            _dims(rows=n, columns=len(selected), inputs=1), n, 1, COMPUTE['GATHER_THREADS'], line,
+            outputs=(1,), indexed=(0, 3), indices={2: selected})
+        return output
 
     def coded_input(self, x, others=(), tables=None):
         """Declare every product's input transform, preserving basis and order.
@@ -847,7 +876,7 @@ class Matrix(torch.Tensor):
             return (a.columns == b.columns and a.logical_shape[1] == b.logical_shape[1]
                     and a.metadata['col_order'] == b.metadata['col_order'] and a.input_domain == b.input_domain
                     and all(getattr(a, key) is getattr(b, key)
-                            for key in ('rotation', 'rotation_scale', 'signs', 'hadamard', 'folded')))
+                            for key in ('rotation', 'rotation_scale', 'signs', 'hadamard', 'folded', 'mixing')))
 
         matrices = [self, *others]
         groups = []
@@ -869,11 +898,18 @@ class Matrix(torch.Tensor):
             return outputs, tables
 
         n, input_type = x.shape[0], _TYPES[x.dtype][1]
-        transform = ('gather' if self.folded is None else 'hadamard' if self.signs is not None
+        from . import _stream
+        from .structured import expand
+        local_hadamard = self.signs is not None and _stream.hadamard_local(self.columns, self.hadamard.shape[0])
+        transform = ('hadamard' if local_hadamard else 'gather' if self.signs is not None or not self.rotated
                      else 'rotate' if n <= max(POLICY['cooperative_rows']) else 'gather')
         # A folded matrix product is shared by every destination batch.
         source = torch.mm(x, self.folded.T) if transform == 'gather' and self.folded is not None else x
         positions = tuple(range(self.columns)) if self.folded is not None else self.metadata['col_order']
+        if self.signs is not None and not local_hadamard:
+            K = self.hadamard.shape[0]
+            source = expand(x, self.signs, self.columns // K, domain=self.input_domain, normalization=self.columns)
+            source = torch.einsum('ab,rbn->ran', self.mixing, source.reshape(n, K, self.columns // K)).reshape(n, self.columns)
         def emit(kind, source, products, positions, tables=None, unscaled=None):
             bindings = tuple(POLICY['transform_outputs'][kind])
             available = transform_bindings(kind)
@@ -909,7 +945,7 @@ class Matrix(torch.Tensor):
                     dims, groups = _dims(rows=n, columns=self.columns, inputs=len(batch), flags=int(tabled)), -(-self.columns // 32)
                     indexed, indices = (0, 4, 5, 6, 7), None
                 prefix = transform_stores(kind, extra, values, factors, buffers)
-                made = _encode(name, buffers, dims, groups, 1, 256, line,
+                made = _encode(name, buffers, dims, groups, 1, COMPUTE['HADAMARD_THREADS'] if kind == 'hadamard' else COMPUTE['GATHER_THREADS'], line,
                     outputs=bindings + tuple(output for output, _ in extra) + ((8,) if tabled else ()),
                     indexed=indexed + tuple(scale for _, scale in extra if scale is not None), indices=indices, prefix=prefix)
                 if tabled:
@@ -1022,10 +1058,10 @@ class Matrix(torch.Tensor):
                 _dims(columns=self.rows, rows=n, inputs=1), n, 1, 256, line, outputs=(1,), indexed=(0, 3),
                 indices={2: self.metadata['row_order']})
         partials = self.product_t(xt, n)
-        if self.folded is None:
+        if not self.rotated:
             return self.finish(partials, positions=self.metadata['col_order'], scale=self.col_scale, factor=factor, dtype=dtype,
                                columns=self.logical_shape[1])
-        y = torch.mm(self.finish(partials, positions=range(self.columns), scale=self.col_scale, columns=self.columns), self.folded)
+        y = self.unrotate(self.finish(partials, positions=range(self.columns), scale=self.col_scale, columns=self.columns))
         return y if factor is None else (y.float() / factor[:, None]).to(dtype)
 
     @staticmethod
@@ -1042,7 +1078,7 @@ class Matrix(torch.Tensor):
         if not n or not all(gate.logical_shape) or not down.logical_shape[0]:
             return torch.zeros(n, down.logical_shape[0], dtype=x.dtype, device=x.device)
         (gx, ux), _ = gate.coded_input(x16, (up,))
-        rotated = down.folded is not None
+        rotated = down.rotated
         order = tuple(range(down.logical_shape[1])) if rotated else down.metadata['col_order']
         hidden = _half(n, len(order))
         target = TensorView.of(hidden)
@@ -1193,9 +1229,9 @@ class Streamed:
             base = name[:-len('gate_proj')]
             gate, up = (self.matrices[base + p] for p in ('gate_proj', 'up_proj'))
             basis = [(getattr(gate, k), getattr(up, k)) for k in ('rotation', 'signs', 'hadamard')]
-            shared = gate.folded is not None and torch.equal(gate.col_order, up.col_order) and all(
+            shared = gate.rotated and torch.equal(gate.col_order, up.col_order) and all(
                 (a is None) == (b is None) and (a is None or torch.equal(a, b)) for a, b in basis)
-            self.matrices[base + 'up_proj'] = up.like(**({k: getattr(gate, k) for k in ('rotation', 'signs', 'hadamard', 'folded')}
+            self.matrices[base + 'up_proj'] = up.like(**({k: getattr(gate, k) for k in ('rotation', 'signs', 'hadamard', 'folded', 'mixing')}
                                                                              if shared else {}))
 
     def __getitem__(self, name):

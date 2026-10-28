@@ -1916,6 +1916,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
       tiles.push_back({{words+i,words+i+shape.size()},{words+i+shape.size(),words+i+2*shape.size()}});
     return tiles;
   });
+  module.def("butterfly_plan", [](NSUInteger width,NSUInteger localElements) {
+    NSData *data=MetalButterflyPlan(width,localElements);
+    const MetalButterflyStage *stages=(const MetalButterflyStage *)data.bytes;
+    std::vector<std::pair<NSUInteger,NSUInteger>> plan;
+    for(size_t i=0;i<data.length/sizeof *stages;i++)plan.push_back({stages[i].width,stages[i].step});
+    return plan;
+  });
+  module.def("hadamard_local", [](NSUInteger columns,NSUInteger mix) {
+    auto device=at::mps::MPSDevice::getInstance()->device();
+    return bool(MetalHadamardLocal(columns,mix,device.maxThreadsPerThreadgroup.width,device.maxThreadgroupMemoryLength));
+  });
   module.def("view_index", [](const std::vector<NSUInteger> &shape,const std::vector<NSInteger> &strides,const std::string &index) {
     TORCH_CHECK(shape.size()==strides.size(),"an index view needs one stride per axis");
     return std::string([MetalViewIndexExpression(shape.data(),strides.data(),shape.size(),@(index.c_str())) UTF8String]);

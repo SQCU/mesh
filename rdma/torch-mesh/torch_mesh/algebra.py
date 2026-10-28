@@ -2,6 +2,7 @@
 import math
 
 import torch
+from .structured import expand as butterfly
 
 
 def linear_backward(self, grad_output, weight, output_mask):
@@ -18,4 +19,5 @@ def linear_backward(self, grad_output, weight, output_mask):
             rows.sum(0) if output_mask[2] else None)
 
 
-decompositions = {torch.ops.aten.linear_backward.default: linear_backward}
+decompositions = {torch.ops.aten.linear_backward.default: linear_backward,
+                  torch.ops.torch_mesh.fwht.default: butterfly}

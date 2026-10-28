@@ -73,6 +73,13 @@ BOOL MetalViewLayoutMatches(const NSUInteger *shape, const NSInteger *strides,
     const NSInteger *required, size_t rank);
 // AOT copy tiles, packed as (origin[rank], shape[rank]) words per tile.
 NSData *MetalViewTiles(const NSUInteger *shape, size_t rank, NSUInteger elements);
+// Factor a power-of-two butterfly into local pieces. A stage transforms
+// `width` values separated by `step` in the logical row. The operation's
+// width is independent of the selected device's local storage capacity.
+struct MetalButterflyStage { NSUInteger width, step; };
+NSData *MetalButterflyPlan(NSUInteger width, NSUInteger localElements);
+// Eligibility of the configured fused schedule, never a limit on the graph.
+BOOL MetalHadamardLocal(NSUInteger columns, NSUInteger mix, NSUInteger threads, NSUInteger memory);
 // A logical slice of an encoded axis. `order` maps stored entries to logical
 // indices (-1 for unused entries). Bounds/step are the normalized slice;
 // block is the format's indivisible stored group. Returns int32 block indices

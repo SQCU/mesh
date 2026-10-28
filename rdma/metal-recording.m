@@ -2,6 +2,7 @@
 #include "nccl.h"
 #import <objc/runtime.h>
 #include <stdatomic.h>
+#include <limits.h>
 
 BOOL MetalViewLayoutMatches(const NSUInteger *shape,const NSInteger *strides,const NSInteger *required,size_t rank) {
     for(size_t d=0;d<rank;d++)if(!shape[d])return YES;
@@ -102,6 +103,36 @@ NSDictionary<NSString *,NSData *> *MetalViewBlockGather(const int32_t *order,siz
         return at<selectedCount&&entries[at].value==value?entries[at].output:-1;
     });
     free(entries);return result;
+}
+
+BOOL MetalHadamardLocal(NSUInteger columns,NSUInteger mix,NSUInteger threads,NSUInteger memory) {
+    enum {
+#define MESH_METAL_VALUE(name, value) Local_##name = value,
+#include "../etc/compute/metal.def"
+#undef MESH_METAL_VALUE
+    };
+    if(!mix || columns%mix)return NO;
+    NSUInteger n=columns/mix,t=Local_HADAMARD_THREADS,s=Local_SIMD_WIDTH;
+    if(!n || (n&(n-1)) || n<s || n>Local_HADAMARD_VALUES*s || n>t || t%n)return NO;
+    return t<=threads && mix<=Local_HADAMARD_MIX && mix<=sizeof(uint32_t)*CHAR_BIT && t/s<=s && mix%(t/n)==0
+        && mix<=Local_HADAMARD_BLOCKS*(t/s) && mix/(t/n)<=Local_HADAMARD_MIX_ROWS
+        && columns<=Local_HADAMARD_STORES*t && columns<=Local_HADAMARD_STORAGE/2
+        && (Local_HADAMARD_STORAGE+s+Local_HADAMARD_MIX)*sizeof(float)<=memory;
+}
+
+NSData *MetalButterflyPlan(NSUInteger width,NSUInteger localElements) {
+    if(!width || (width&(width-1)) || (width>1 && localElements<2))
+        [NSException raise:NSInvalidArgumentException format:@"butterfly needs a power-of-two width and storage for a pair"];
+    NSUInteger tile=1;
+    while(tile<=localElements/2 && tile<width)tile*=2;
+    NSMutableData *plan=[NSMutableData data];
+    NSUInteger step=1;
+    do {
+        struct MetalButterflyStage stage={MIN(tile,width/step),step};
+        [plan appendBytes:&stage length:sizeof stage];
+        step*=stage.width;
+    } while(step<width);
+    return plan;
 }
 
 NSData *MetalViewTiles(const NSUInteger *shape,size_t rank,NSUInteger elements) {

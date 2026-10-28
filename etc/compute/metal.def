@@ -37,6 +37,14 @@ MESH_METAL_VALUE(LAYOUT_COPY_TILE_BYTES, 262144)
 // Preferred Hadamard block; graph construction factors larger rows into blocks.
 // Workspace is specialized to the chosen width within the live memory limit.
 MESH_METAL_VALUE(FWHT_BLOCK_WIDTH, 4096)
+MESH_METAL_VALUE(FWHT_TILE_ELEMENTS, 4096)
+MESH_METAL_VALUE(HADAMARD_THREADS, 256)
+MESH_METAL_VALUE(HADAMARD_STORES, 16)
+MESH_METAL_VALUE(HADAMARD_VALUES, 4)
+MESH_METAL_VALUE(HADAMARD_BLOCKS, 3)
+MESH_METAL_VALUE(HADAMARD_MIX, 20)
+MESH_METAL_VALUE(HADAMARD_MIX_ROWS, 10)
+MESH_METAL_VALUE(HADAMARD_STORAGE, 5120)
 
 // Existing two-matrix attention page format. A different layout needs its compiled kernel.
 MESH_METAL_VALUE(ATTENTION_TILE_PAGE, 16)

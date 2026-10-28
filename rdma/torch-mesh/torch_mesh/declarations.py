@@ -201,12 +201,14 @@ def trace(function, *arguments, parameters=()):
     configuration errors, never an excuse to run a hidden measurement or probe.
     """
     from torch.fx.experimental.proxy_tensor import make_fx
+    from .algebra import decompositions
     parameters = tuple(parameters)
     gradients = [parameter.grad for parameter in parameters]
     try:
         for parameter in parameters:
             parameter.grad = None
-        graph = make_fx(function, tracing_mode='fake', _allow_non_fake_inputs=True)(*arguments)
+        graph = make_fx(function, decomposition_table=decompositions,
+                        tracing_mode='fake', _allow_non_fake_inputs=True)(*arguments)
     finally:
         for parameter, gradient in zip(parameters, gradients):
             parameter.grad = gradient
