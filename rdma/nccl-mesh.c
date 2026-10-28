@@ -2749,12 +2749,12 @@ static ncclResult_t compile_group(struct ncclComm *comm, struct call *list, size
    at GENERATIONS slots of storage (the plan's in-flight depth: bind_slot), `uses` of them bound so far; an undeclared
    group's definition is kept by its calls (signature), `stamp` when it was last bound */
 enum { GENERATIONS = 2, SIGNATURES = 64, TABLE_PAGES = 64 };
-/* what a group of a definition binds at its issue (group_bound): its schedules laid `repeats` times, its calls' steps
-   copies and its record in flight, made at its generation's first issue and bound again by each later one that finds
+/* what a group of a definition binds at its issue (group_bound): its calls, its schedules laid `repeats` times, its
+   calls' steps copies and its record in flight, made at its generation's first issue and bound again by each later one that finds
    it let go (`held` 0: issue_let, as its group is done); a group whose generation's is still held makes one of its own,
    as does a group of a dropped definition's still held (`dropped`), freed when let go: no allocation in steady state */
 struct inflight;
-struct issue { struct schedule *plans; struct steps **steps; struct inflight *group; size_t n; uint32_t repeats; int held, dropped; };
+struct issue { struct schedule *plans; struct steps **steps; struct inflight *group; struct call *calls; size_t n; uint32_t repeats; int held, dropped; };
 struct compiled { struct call *calls; size_t n; uint64_t repeat; struct schedule *plans; uint32_t slot[GENERATIONS], uses; uint64_t stamp;
                   struct issue *issue[GENERATIONS]; };
 /* a definition dropped: its slots back to the communicator's, for the next definition under the same guard, and its
@@ -2858,12 +2858,14 @@ static ncclResult_t definition_of(struct ncclComm *comm, struct call *list, size
   *group = x;
   return result;
 }
-/* group x bound in its next generation's issue (*issued; struct issue): *plans its entries on each channel from each
-   list's 0, laid `repeats` times (repeat_of), each call's steps that generation's copy and each message's call the
-   issued call at its place.  Under group_lock */
+/* group x's `n` calls (*list) bound in its next generation's issue (*issued; struct issue), *list then the issue's
+   copy of them (what they own moved there): *plans its entries on each channel from each list's 0, laid `repeats`
+   times (repeat_of), each call's steps that generation's copy and each message's call the issued call at its place.
+   Under group_lock */
 static struct issue *issue_make(struct ncclComm *comm, const struct compiled *x, uint32_t repeats);
-static ncclResult_t group_bound(struct ncclComm *comm, struct call *list, struct compiled *x, uint32_t repeats, size_t stride,
+static ncclResult_t group_bound(struct ncclComm *comm, struct call **calls, size_t n, struct compiled *x, uint32_t repeats, size_t stride,
                                 struct schedule **plans, struct issue **issued) {
+  if (n != x->n) return fail(ncclInvalidUsage, "a group of %zu calls issued as its declaration of %zu", n, x->n);
   struct issue **at = x->issue + x->uses % GENERATIONS, *u = *at;
   if (u && !u->held && u->repeats != repeats) { issue_free(comm, u); *at = u = NULL; }
   if (!u || u->held) {
@@ -2872,6 +2874,7 @@ static ncclResult_t group_bound(struct ncclComm *comm, struct call *list, struct
     else *at = u;
   }
   u->held = 1;
+  struct call *const list = *calls = memcpy(u->calls, *calls, n * sizeof *u->calls);
   for (size_t i = 0; i < x->n; i++)
     if ((list[i].bound = u->steps[i])) { steps_reset(u->steps[i]); atomic_fetch_add_explicit(&u->steps[i]->references, 1, memory_order_relaxed); }
   for (uint32_t h = 0; h < comm->count; h++) {
@@ -3585,23 +3588,23 @@ static ncclResult_t gpu_finished(struct ncclComm *comm) {
    may; its entries presented (schedule), run with the groups' lock released (run), then finished; a run's failure the
    communicator's (comm_fail: its lists stand mid-group) */
 static int comm_issued(const struct ncclComm *comm);
-static void calls_free(struct call *list, size_t n);
+static void parts_free(struct call *list, size_t n);
 static ncclResult_t launch(struct call *list, size_t n) {
   const ncclComm_t comm = list[0].comm;
   ncclResult_t result = ncclSuccess;
   int remote = 0;
-  for (size_t i = 0; i < n; i++) {
+  for (size_t i = 0; i < n && !result; i++) {
     /* a call on a stream is ordered by that stream's GPU work, which the host path cannot follow */
-    if (list[i].stream) return fail(ncclInvalidUsage, "a group on several streams");
-    if (reducing(list[i].what) && (result = reduction(list + i))) return result;
+    if (list[i].stream) result = fail(ncclInvalidUsage, "a group on several streams");
+    else if (reducing(list[i].what)) result = reduction(list + i);
     remote |= crosses(list + i);
   }
-  if (revoked(comm)) return revoked_fail(comm);
-  for (size_t i = 0; i < n; i++)
+  if (!result && revoked(comm)) result = revoked_fail(comm);
+  for (size_t i = 0; i < n && !result; i++)
     if (list[i].scalar_at) memcpy(list[i].pre, list[i].scalar_at, SIZE[list[i].type]);
   pthread_mutex_lock(&group_lock);
-  const uint64_t holder = ++comm->groups;
-  if (remote) result = comm_failure(comm);
+  const uint64_t holder = result ? comm->groups : ++comm->groups;
+  if (!result && remote) result = comm_failure(comm);
   if (!result && remote && comm_issued(comm))
     result = fail(ncclInvalidUsage, "a host-path group while this communicator's GPU groups are issued and not complete (ncclMeshComplete)");
   if (!result && remote && finished && comm->last) result = gpu_finished(comm);
@@ -3612,7 +3615,7 @@ static ncclResult_t launch(struct call *list, size_t n) {
   uint32_t slot = 0;
   if (!result) result = definition_of(comm, list, n, holder, &x);
   if (!result) result = operands_check(list, n);
-  if (!result) result = group_bound(comm, list, x, 1, 0, &plans, &u);
+  if (!result) result = group_bound(comm, &list, n, x, 1, 0, &plans, &u);
   if (!result && remote) result = bind_slot(NULL, comm, x, list, n, plans, &area, &slot);
   /* the host awaits nothing: a slot whose last user's landings no stream awaited (a fused crossing's) is not its */
   for (uint32_t h = 0; !result && slot && h < comm->count; h++)
@@ -3652,6 +3655,7 @@ static ncclResult_t launch(struct call *list, size_t n) {
     }
   }
   pthread_mutex_lock(&group_lock);
+  parts_free(list, n);
   issue_let(comm, u);
   atomic_fetch_sub(&comm->runs, 1);
   pthread_mutex_unlock(&group_lock);
@@ -3711,8 +3715,10 @@ static void call_parts_free(struct call *c) {
   free(c->contributors); free(c->recipients);
   free(c->production);
 }
+/* what calls own (their parts) freed, and with calls_free their list too */
+static void parts_free(struct call *list, size_t n) { for (size_t i = 0; i < n; i++) call_parts_free(list + i); }
 static void calls_free(struct call *list, size_t n) {
-  for (size_t i = 0; i < n; i++) call_parts_free(list + i);
+  parts_free(list, n);
   free(list);
 }
 
@@ -3721,7 +3727,8 @@ static void calls_free(struct call *list, size_t n) {
 static struct issue *issue_make(struct ncclComm *comm, const struct compiled *x, uint32_t repeats) {
   struct issue *u = calloc(1, sizeof *u);
   int made = u && (u->plans = calloc(comm->count + 1, sizeof *u->plans)) && (u->steps = calloc(x->n + 1, sizeof *u->steps)) &&
-             (u->group = calloc(1, sizeof *u->group)) && (u->group->start = calloc(2 * (size_t)comm->count + 1, sizeof *u->group->start));
+             (u->calls = calloc(x->n + 1, sizeof *u->calls)) && (u->group = calloc(1, sizeof *u->group)) &&
+             (u->group->start = calloc(2 * (size_t)comm->count + 1, sizeof *u->group->start));
   if (u) { u->n = x->n; u->repeats = repeats; }
   for (uint32_t h = 0; made && h < comm->count; h++) {
     const struct schedule *p = x->plans + h;
@@ -3738,7 +3745,7 @@ static void issue_free(struct ncclComm *comm, struct issue *u) {
   schedules_free(comm, u->plans);
   for (size_t i = 0; u->steps && i < u->n; i++) steps_free(u->steps[i]);
   if (u->group) free(u->group->start);
-  free(u->steps); free(u->group); free(u);
+  free(u->steps); free(u->calls); free(u->group); free(u);
 }
 /* an issue's group done with: it is bound again by its definition's next group of its generation, or freed where it is
    no definition's (dropped).  Under group_lock */
@@ -3748,9 +3755,9 @@ static void issue_let(struct ncclComm *comm, struct issue *u) {
   if (u->dropped) issue_free(comm, u);
 }
 
-/* a group done with: its calls, and its issue let go */
+/* a group done with: what its calls own (the list is its issue's), and its issue let go */
 static void inflight_free(struct inflight *g) {
-  calls_free(g->list, g->n);
+  parts_free(g->list, g->n);
   issue_let(g->comm, g->issue);
 }
 
@@ -4411,7 +4418,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   struct issue *u = NULL;
   if (!result) result = definition_of(comm, list, n, holder, &x);
   if (!result) result = operands_check(list, n);
-  if (result) { pthread_mutex_unlock(&group_lock); calls_free(list, n); return result; }
+  if (result) { pthread_mutex_unlock(&group_lock); parts_free(list, n); return result; }
   /* The compiled declaration fixes publication and landing arithmetic. */
   const int fused_kind = list[0].fused && remote;
   ncclMeshFused *const fused = fused_kind ? list[0].fused : NULL;
@@ -4424,7 +4431,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
                                          : metal_begin(&operands, list[0].command, list[0].encoder, fused ? list[0].residency : NULL, violation,
                                                        polls, &message);
   if (!program) {
-    pthread_mutex_unlock(&group_lock); calls_free(list, n);
+    pthread_mutex_unlock(&group_lock); parts_free(list, n);
     return fail(ncclSystemError, "%s", message);
   }
   if (remote) touch(comm);
@@ -4439,7 +4446,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
      (group_bound), and once it is bound the last user of the slot it took where that is another */
   const uint32_t last = remote ? x->slot[x->uses % GENERATIONS] : 0;
   if (remote && (fused || last)) result = guard(program, comm, fused ? 0 : last, &published);
-  if (!result) result = group_bound(comm, list, x, repeats, stride, &plans, &u);
+  if (!result) result = group_bound(comm, &list, n, x, repeats, stride, &plans, &u);
   if (!result && remote) result = bind_slot(program, comm, x, list, n, plans, &area, &slot);
   if (!result && remote && !fused && slot != last) result = guard(program, comm, slot, &published);
   if (!result) bind_calls(list, n);
@@ -4538,9 +4545,9 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   program_end(program, list[0].encoder != NULL, result);
   if (result && scheduled) walk_failed(comm, issue && !fused ? 0 : ticket, result);
   if (issue && !result) { issue->ticket = ticket > atomic_load(&retired) ? ticket : 0; issue->published = published; }
+  if (!scheduled) parts_free(list, n);
   issue_let(comm, u);
   pthread_mutex_unlock(&group_lock);
-  if (!scheduled) calls_free(list, n);
   if (result) comm->async = result;
   return result;
 }
@@ -4582,13 +4589,13 @@ const char *ncclMeshMetalPrelude(void) { return metal_prelude(); }
 
 ncclResult_t ncclGroupStart(void) { depth++; return ncclSuccess; }
 
-/* one communicator's calls of a group, launched as its own group: on the Metal path (launch_metal, which owns them) or
-   the host path (launch) */
+/* one communicator's calls of a group, launched as its own group: on the Metal path (launch_metal) or the host path
+   (launch), each taking what the calls own (freed, or moved to the group's issue); the list stays its caller's */
 static ncclResult_t launch_one(struct call *list, size_t n) {
+  const ncclComm_t comm = list[0].comm;
   if (list[0].stream) return launch_metal(list, n);
   const ncclResult_t result = launch(list, n);
-  if (result) list[0].comm->async = result;
-  calls_free(list, n);
+  if (result) comm->async = result;
   return result;
 }
 
@@ -4599,6 +4606,7 @@ static void *part_run(void *argument) {
   struct part *p = argument;
   p->result = launch_one(p->list, p->n);
   p->said = last;
+  free(p->list);
   return NULL;
 }
 /* whether any of a part's calls crosses a link */
@@ -4619,15 +4627,16 @@ static int part_crosses(const struct part *p) {
 ncclResult_t ncclGroupEnd(void) {
   if (depth <= 0) return fail(ncclInvalidUsage, "ncclGroupEnd without ncclGroupStart");
   if (--depth) return ncclSuccess;
+  /* the thread's list kept for its next group (its calls' own taken by their launch: launch_one) */
   struct call *list = calls;
   const size_t n = call_count;
-  calls = NULL; call_count = call_capacity = 0;
-  if (!n) { free(list); return ncclSuccess; }
+  call_count = 0;
+  if (!n) return ncclSuccess;
   for (size_t i = 0; i < n; i++) {
     ncclMeshFused *f = list[i].fused;
     if (!f) continue;
     if ((f->publishes && !f->publish) || (f->lands && !f->land)) {
-      calls_free(list, n);
+      parts_free(list, n);
       return fail(ncclInvalidArgument, "an ncclMeshFused with room for records and no list to hold them");
     }
     if (f->publishes) memset(f->publish, 0, f->publishes * sizeof *f->publish);
@@ -4638,7 +4647,7 @@ ncclResult_t ncclGroupEnd(void) {
   if (!several) return launch_one(list, n);
   struct part *part = calloc(n, sizeof *part);
   unsigned char *taken = calloc(n, 1);
-  if (!part || !taken) { free(part); free(taken); calls_free(list, n); return fail(ncclSystemError, "out of memory"); }
+  if (!part || !taken) { free(part); free(taken); parts_free(list, n); return fail(ncclSystemError, "out of memory"); }
   size_t parts = 0;
   for (size_t i = 0; i < n; i++) {
     if (taken[i]) continue;
@@ -4656,7 +4665,7 @@ ncclResult_t ncclGroupEnd(void) {
       }
     if (!p->list) { p->result = fail(ncclSystemError, "out of memory"); p->said = last; }
   }
-  free(taken); free(list);
+  free(taken);
   for (size_t b = 1; b < parts; b++)
     for (size_t a = 0; a < b && part[b].list; a++)
       if (part[a].list && part[b].list[0].fused && part[a].list[0].fused == part[b].list[0].fused && part_crosses(part + a) && part_crosses(part + b)) {
@@ -4687,6 +4696,7 @@ ncclResult_t ncclGroupEnd(void) {
     for (size_t i = 0; i < p->n; i++) p->list[i].issue = used;
     p->result = launch_one(p->list, p->n);
     p->said = last;
+    free(p->list);
     p->list = NULL;
     if (!p->result) { published |= used->published; ticket = used->ticket > ticket ? used->ticket : ticket; }
   }
