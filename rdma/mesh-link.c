@@ -72,7 +72,9 @@ static uint32_t link_pages(void){ return M->block; }
    `broken` (link_turn) */
 static void lane_lost(struct port *port,uint32_t lane,int64_t code){
   struct link *l=&port->link;
-  atomic_fetch_and_explicit(&l->served,~(UINT32_C(1)<<lane),memory_order_acq_rel);
+  if(atomic_fetch_and_explicit(&l->served,~(UINT32_C(1)<<lane),memory_order_acq_rel)>>lane&1)
+    mesh_say("bridge","link %u (%s): lane %u failed (code %lld): the link toward node %u lost",port->index,port->name,lane,
+             (long long)code,port->peer);
   atomic_store_explicit(&l->lost,code,memory_order_relaxed);
   atomic_fetch_or_explicit(&l->broken,UINT32_C(1)<<lane,memory_order_release);
   wake();
@@ -199,6 +201,8 @@ static void stream_end(struct port *port,uint32_t t){
   if(!sends && !receives){stream_free(x,0);return;}
   atomic_store_explicit(&x->live,0,memory_order_release);
   stream_free(x,MESH_STREAM_GIVEN);
+  mesh_say("bridge","link %u (%s): stream %u toward node %u: its holding ended with %llu SENDs and %llu receives outstanding: "
+           "the stream not live",port->index,port->name,t,port->peer,(unsigned long long)sends,(unsigned long long)receives);
   uint32_t live=0;
   for(uint32_t s=0;s<plan_streams(l->plan);s++)live|=atomic_load_explicit(&stream_of(port,s)->live,memory_order_acquire);
   if(live)return;
@@ -325,6 +329,8 @@ static __attribute__((always_inline)) inline uint32_t link_lane(const struct lin
 static void link_failed(struct port *port,int64_t code){
   struct link *l=&port->link;
   const uint32_t served=atomic_exchange_explicit(&l->served,0,memory_order_acq_rel);
+  if(served)mesh_say("bridge","link %u (%s): a completion or its poll failed (code %lld): no lane served, the link toward node %u lost",
+                     port->index,port->name,(long long)code,port->peer);
   atomic_store_explicit(&l->lost,code,memory_order_relaxed);
   atomic_fetch_or_explicit(&l->broken,served,memory_order_release);
   wake();
@@ -859,6 +865,8 @@ static void ports_stalled(void){
     }
     if(!out)continue;
     port->stuck=1;atomic_fetch_add(&port->epoch,1);guard_wake(port);
+    mesh_say("bridge","link %u (%s): its %s job out %.1f s: the port concluded around it",port->index,port->name,
+             opening?"open":"lane",(double)(now-(opening?port->job_at:l->job_at))/1e9);
     port->open=0;
     port_lost(port,ETIMEDOUT);
   }
@@ -929,6 +937,9 @@ static void port_heard(struct port *port,const struct message *heard,const unsig
    no port job on it, and no exit, for MESH_PLATFORM_NS, the operator's bound on the termination a loss may follow) */
 static void child_send(struct port *port,struct child_message said);
 void port_lost(struct port *port,int64_t code){
+  if(port->greeted||port->connecting)
+    mesh_say("bridge","link %u (%s): toward node %u lost (code %lld)%s",port->index,port->name,port->peer,(long long)code,
+             stop?": this bridge is stopping":port->parted?": its peer's bridge said farewell":"");
   quiet_until(&port->quiet_at,now+MESH_PLATFORM_NS);
   link_lost(port);
   if(port->child){
@@ -1364,7 +1375,8 @@ static void message_send(int fd,const struct child_message *said){
     if(sent<0 && errno==EINTR)continue;
     if(sent==0 || errno!=EAGAIN)return;
     const uint64_t t=clock_ns();
-    if(t>=until){exit(EX_SOFTWARE);}
+    if(t>=until){mesh_say("bridge","a message to a port's child or parent not taken in %.0f s: this process exits",
+                          (double)MESH_PLATFORM_NS/1e9);exit(EX_SOFTWARE);}
     struct pollfd room={.fd=fd,.events=POLLOUT};
     poll(&room,1,(int)((until-t+999999)/1000000));
   }
@@ -1527,6 +1539,7 @@ static void child_turn(struct port *port){
   if(!port->recycle || !port->child || port->ending || port->job || port->link.job || now<atomic_load(&port->quiet_at) ||
      now<atomic_load(&exit_at))return;
   child_send(port,(struct child_message){.kind=CHILD_END});
+  mesh_say("bridge","link %u (%s): child %d asked to end",port->index,port->name,(int)port->child);
   port->ending=1;
 }
 /* the port's child ended: its last messages taken, its exit reaped, a job of it out ended (ECHILD); one that ended
@@ -1543,6 +1556,7 @@ static void child_reaped(struct port *port){
   if(port->child_fd>=0)child_heard(port);
   if(port->child_fd>=0){close(port->child_fd);port->child_fd=-1;}
   while(waitpid(pid,&status,0)<0 && errno==EINTR){}
+  mesh_say("bridge","link %u (%s): child %d ended%s",port->index,port->name,(int)pid,port->ending?"":" unasked");
   port->child=0;
   if(port->holder<2*MESH_PORTS && mesh_bridge_pages(M)->child[port->holder].pid==(uint32_t)pid)
     mesh_bridge_pages(M)->child[port->holder]=(struct mesh_holder){0};
@@ -1975,7 +1989,7 @@ int main(int argc,char **argv){
     now=clock_ns();
     for(int i=0;i<count;i++){
       struct kevent64_s *e=ready+i;
-      if(e->filter==EVFILT_SIGNAL){stop=1;stop_reason=(int64_t)e->ident;}
+      if(e->filter==EVFILT_SIGNAL){stop=1;stop_reason=(int64_t)e->ident;mesh_say("bridge","signal %d: stopping",(int)e->ident);}
       /* design/transport.md section 14, "A process a port": a port's child's message or exit */
       else if(e->udata!=UINT64_MAX && (e->udata&TAG_CHILD)){
         struct port *port=(e->udata&0xff)<port_count?ports+(e->udata&0xff):NULL;
