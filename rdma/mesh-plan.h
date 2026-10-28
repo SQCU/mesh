@@ -283,8 +283,8 @@ int mesh_program_check_members(const struct mesh_program *,struct mesh_operand,c
    EINVAL. */
 int mesh_compile(const struct mesh_trees *,uint32_t what,uint32_t root,int whole,const uint64_t *contributors,
                  struct mesh_program *program,uint32_t *segment,double *log_weight,uint32_t *first,struct mesh_move *move);
-/* A rank's steps of a program for an operand, a step a move (none where its elements are none), at most first[rank +
-   1] - first[rank], over an operand cut into segments of the given sizes (MPI_Allgatherv's and MPI_Reduce_scatter's counts, one
+/* A rank's steps of a program for an operand, a step a move's parts in one segment (none where its elements are
+   none: no step spans two segments), at most (first[rank + 1] - first[rank]) x parts, over an operand cut into segments of the given sizes (MPI_Allgatherv's and MPI_Reduce_scatter's counts, one
    a segment in segment order: a reduce-scatter's and an all-gather's segment s is node s's, node s's of its
    contributors where it has them): segment s the segments[s] elements after the segments before it, the sizes as many
    as the program's segments (the most segment a part names, plus one) and summing to the operand's elements, a size 0
