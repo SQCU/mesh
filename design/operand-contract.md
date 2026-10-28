@@ -90,8 +90,9 @@ This contract does not declare these existing paths complete:
 
 - FX `placement.indices` and `FixedLayout` still describe aliases with strides
   alone. Arbitrary mappings must survive lowering without caller-owned copies.
-- Compressed FFN's `codeOrder` interface still assumes paired encoded rows.
-  Encoding blocks cannot define the allowed logical work shares.
+- Python compressed FFN composition still assumes paired encoded rows.
+  The native FFN now composes logical cuts through shared operand views;
+  its `codeOrder`, encoded-coordinate cut and tied-order interfaces are gone.
 - Some fused consumers load order arrays whose static compositions could be
   resolved earlier. Numerical index tensors must remain data.
 - Producer placement does not yet solve every conflicting API requirement or

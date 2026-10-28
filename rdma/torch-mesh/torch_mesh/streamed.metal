@@ -557,13 +557,13 @@ kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const ui
 // matrix (the first SK gate's, the rest up's: one walk's code for both, F tiles in flight). hidden[n][r] =
 // GELU(gateScale[r] g) * upScale[r] u, in the hidden's code order (down's coded input). Rows past d.rows repeat the
 // last row's loads and are not written. H: fragment_walk's.
-template <uint R, uint SK, uint TILES, uint WIDTHS, uint F, uint APART, uint LOADS, uint H, bool Masked = false>
+template <uint R, uint SK, uint TILES, uint WIDTHS, uint F, uint APART, uint LOADS, uint H, bool Masked = false, bool Scaled = false>
 kernel void streamed_couple(device const uint *gateCodes [[buffer(0)]], device const uint *gateTiles [[buffer(1)]],
                             device const uint *gateBands [[buffer(2)]], device const half *gx [[buffer(4)]],
                             device const uint *upCodes [[buffer(6)]], device const uint *upTiles [[buffer(7)]],
                             device const uint *upBands [[buffer(8)]], device const half *ux [[buffer(9)]],
                             device const float *upScale [[buffer(10)]], device half *hidden [[buffer(11)]], device const int *selected [[buffer(12)]],
-                            device const float *gateScale [[buffer(13)]], constant streamed_dims &dims [[buffer(15)]],
+                            device const float *gateScale [[buffer(13)]], device const float *inputScale [[buffer(14)]], constant streamed_dims &dims [[buffer(15)]],
                             uint2 group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
                             uint lane [[thread_index_in_simdgroup]], uint thread_id [[thread_index_in_threadgroup]]) {
     const streamed_dims d = dims_of(dims);
@@ -626,8 +626,9 @@ kernel void streamed_couple(device const uint *gateCodes [[buffer(0)]], device c
         for (uint s = 0; s < SK; s++) { gs += sums[0][s][n][r]; us += sums[1][s][n][r]; }
         const uint output = band * 32 + r;
         const bool active = !Masked || selected[mesh_index<12>(output)] >= 0;
-        hidden[mesh_index<11>(ulong(n) * d.outputs + output)] = active
-            ? half(streamed_gelu_of(gateScale[mesh_index<13>(output)] * gs, upScale[mesh_index<10>(output)] * us)) : half(0);
+        hidden[mesh_index<11>(ulong(n) * d.outputs + output)] = active ? half(
+            streamed_gelu_of(gateScale[mesh_index<13>(output)] * gs, upScale[mesh_index<10>(output)] * us)
+            * (Scaled ? inputScale[mesh_index<14>(output)] : 1.0f)) : half(0);
     }
 }
 
@@ -949,10 +950,11 @@ template [[host_name("streamed_hadamard")]] [[kernel]] decltype(streamed_hadamar
 // (T half). Each binding maps logical [row, output] indices to its declared view.
 // Each input declares its reduction stride: gate's d.split, up's d.per.
 // Four outputs a thread.
-template <typename T, bool Masked = false>
+template <typename T, bool Masked = false, bool Scaled = false>
 kernel void streamed_gelu(device const T *gate [[buffer(0)]], device const T *up [[buffer(1)]],
                           device const float *gateScale [[buffer(2)]], device const float *upScale [[buffer(3)]],
-                          device half *hidden [[buffer(4)]], device const int *selected [[buffer(5)]], constant streamed_dims &dims [[buffer(15)]],
+                          device half *hidden [[buffer(4)]], device const int *selected [[buffer(5)]], device const float *inputScale [[buffer(6)]],
+                          constant streamed_dims &dims [[buffer(15)]],
                           uint2 g [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
                           uint2 threads [[threads_per_threadgroup]]) {
     const streamed_dims d = dims_of(dims);
@@ -961,7 +963,8 @@ kernel void streamed_gelu(device const T *gate [[buffer(0)]], device const T *up
     for (uint r = first; r < min(first + 4, d.outputs); ++r)
         hidden[mesh_index<4>(ulong(n) * d.outputs + r)] = Masked && selected[mesh_index<5>(r)] < 0 ? half(0) : half(streamed_gelu_of(
             d.shares ? streamed_value(mesh_view<0>(gate), row + r, d.shares, d.split, gateScale[mesh_index<2>(r)]) : float(gate[mesh_index<0>(row + r)]),
-            d.inputs ? streamed_value(mesh_view<1>(up), row + r, d.inputs, d.per, upScale[mesh_index<3>(r)]) : float(up[mesh_index<1>(row + r)])));
+            d.inputs ? streamed_value(mesh_view<1>(up), row + r, d.inputs, d.per, upScale[mesh_index<3>(r)]) : float(up[mesh_index<1>(row + r)]))
+            * (Scaled ? inputScale[mesh_index<6>(r)] : 1.0f));
 }
 
 template [[host_name("streamed_gelu")]] [[kernel]] decltype(streamed_gelu<float>) streamed_gelu<float>;
