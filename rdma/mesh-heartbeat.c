@@ -42,7 +42,7 @@ extern char **environ;
 
 #define REOPEN_S 60u
 #define REPLACE_TICK_MS 1000
-enum { TIMER_OPEN=1, TIMER_END=2 };
+enum { TIMER_OPEN=1, TIMER_END=2, TIMER_REAP=3 };
 enum { TAG_BRIDGE=1, TAG_HOLDER=2 };
 
 static int events;
@@ -220,11 +220,27 @@ static void turn(void){
   else if(!bridge)replace_turn();
 }
 
-/* design/transport.md section 2: the bridge's end, as asked or not */
+/* design/transport.md section 2: the bridge's end, as asked or not; its exit reaped without blocking (an exit can wait on
+   a device's release with no deadline: mesh-link.c child_reaped), looked at again every REPLACE_TICK_MS while it is not
+   yet reapable (TIMER_REAP: the bridge counts as running meanwhile, so none is opened), and taken as ended unreaped
+   once MESH_PLATFORM_NS has passed */
+static uint64_t reap_from;
 static void bridge_ended(void){
   int status=0;
-  const pid_t was=bridge;
-  const int reaped=child && waitpid(was,&status,0)==was;
+  const pid_t was=bridge,got=child?waitpid(was,&status,WNOHANG):0;
+  if(child && !got){
+    const uint64_t now=mesh_clock_ns();
+    if(!reap_from)reap_from=now;
+    if(now-reap_from<MESH_PLATFORM_NS){
+      struct kevent64_s t;
+      EV_SET64(&t,TIMER_REAP,EVFILT_TIMER,EV_ADD|EV_ONESHOT,0,REPLACE_TICK_MS,0,0,0);
+      kevent64(events,&t,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
+      return;
+    }
+    mesh_say("heartbeat","bridge %d not reapable %.0f s after its exit was heard: taken as ended",(int)was,(double)MESH_PLATFORM_NS/1e9);
+  }
+  reap_from=0;
+  const int reaped=got==was;
   bridge=0;child=0;
   const int expired=reaped && WIFEXITED(status) && WEXITSTATUS(status)==EX_TEMPFAIL;
   if(!reaped)mesh_say("heartbeat","bridge %d ended",(int)was);
@@ -330,6 +346,7 @@ int main(int argc,char **argv){
         }
       }
       else if(e->filter==EVFILT_TIMER && e->ident==TIMER_OPEN){timer_open=0;turn();}
+      else if(e->filter==EVFILT_TIMER && e->ident==TIMER_REAP)bridge_ended();
       else if(e->filter==EVFILT_TIMER && e->ident==TIMER_END){
         mesh_say("heartbeat","bridge %d has not ended %.0f s after it was asked: the heartbeat ends without it",(int)bridge,
                  (double)(3*MESH_PLATFORM_NS)/1e9);
