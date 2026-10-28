@@ -190,14 +190,20 @@ int MetalScheduleEnqueue(struct MetalSchedule *);
 // already enqueued on the frontend's queue (holding that queue's later buffers behind it), is committed at the
 // invocation's end, or at once where the enqueue is refused (EBUSY while an invocation is in flight).
 int MetalScheduleEnqueueAfter(struct MetalSchedule *, uint64_t value, id<MTLCommandBuffer> then);
-// A frontend's expiry: the library's (nccl-mesh-metal.h mesh_library_expired), its GPU work and posted receives stopped
-// first, then the program ended, the wait named.
-__attribute__((noreturn)) void MetalExpired(const char *wait, uint64_t ns);
 // Ordinary completion observation: 0 pending, 1 complete, -1 failed.
 int MetalScheduleStatus(const struct MetalSchedule *, NSError **error);
 void MetalScheduleFree(struct MetalSchedule *);
 // A replay MetalRecord returned, destroyed and freed.
 void MetalReplayFree(struct MetalReplay *);
+// design/transport.md section 5: the program's end at a caller's own wait `wait` past its deadline of `ns`, its GPU
+// work stopped first as at the library's own expiries (every communicator's GPU waits ended, the library's GPU programs
+// and the prepared functions' command buffers awaited within MESH_PLATFORM_NS), then the wait named on stderr.
+__attribute__((noreturn)) void MetalExpired(const char *wait, uint64_t ns);
+// A committed command buffer's end awaited within MetalCompletionNs, twice MESH_PLATFORM_NS (the platform's watchdog
+// ends a running buffer within one: past two it waits on an event); past it MetalExpired.  The bound is a caller's too,
+// for its own waits on its GPU work.
+uint64_t MetalCompletionNs(void);
+void MetalAwait(id<MTLCommandBuffer>, const char *wait);
 
 #ifdef __cplusplus
 }
