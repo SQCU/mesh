@@ -91,8 +91,9 @@ This contract does not declare these existing paths complete:
 - Some fused consumers load order arrays whose static compositions could be
   resolved earlier. Numerical index tensors must remain data.
 - Producer placement handles native-kernel subdomains, matrix API uses and
-  declared CPU/Core ML calls in FX graphs. Native model builders still bind
-  ANE partners to already assigned producer buffers. Conflicting requirements
+  declared CPU/Core ML calls in FX graphs. Native normalization producers now
+  receive ANE input layout requirements before command emission. Other native
+  producers still bind already assigned buffers. Conflicting requirements
   also need cost-directed placement and conversion
   choices, beyond the current placement feasibility solver.
 - Foreign providers still need all internal views and dependencies exposed.
@@ -162,9 +163,9 @@ Contradictory distances, incompatible alignments, or distinct values forced into
 one slot mean that the demands cannot share one placement. The existing resolver
 then supplies explicit conversion edges. This establishes feasibility for the
 chosen relative positions, not a minimum-cost selection among conflicting
-demands. Native model builders still need to carry their producer declarations
-into this phase; having the function in a shared header alone does not complete
-that integration.
+demands. Native normalization builders use whole-operand requirements to place
+their outputs. They do not yet provide a complete graph of subview equations
+for all native producers.
 
 ## API operand declarations
 
@@ -268,6 +269,39 @@ On 2026-10-27, the extension built and local preparation constructed mapped
 collective bindings and record-copy pipelines. Mixed-row preparation copied
 only the scattered row. The inspection used no live communicator and submitted
 no numerical work; distributed execution and performance remain unmeasured.
+
+## Native numerical operands
+
+Native normalization, GELU, stored products, fused stacks, streamed input
+transforms and streamed output placement consume `TensorView`. Their old
+buffer/offset/row-pitch argument combinations have been removed at these
+boundaries. Both shader indexing and dependency ranges come from the supplied
+view. Gathered and strided views use the same type as contiguous views. Physical
+vector loads remain available where the compiled relation permits them.
+
+This also fixes the native GELU adapter's stale pitch arguments. Its shader
+already used logical indices, while the adapter still passed pitch fields that
+the shader ignored. Expert gate/up slices and per-layer inputs now carry those
+pitches in the same view used to emit their accesses.
+
+`PrefillPartner.inputLayouts` exposes the model and provider requirements before
+binding. The FFN normalization producer and Goal A use them to assign their
+destination pages. `TensorView.placed` assigns an unwritten result; it emits no
+copy. The provider's existing resolver still handles necessary type conversions
+and inputs whose producers have already fixed their placement.
+
+Compressed product kernels retain their declared slab layout, including gaps
+between each slab's active rows. A transformed input carries that layout as a
+view. The common resolver supplies a compiled conversion if a supplied view
+does not meet it. Gather and rotation producers accept indexed source views
+directly. Folded gamma scales retain their existing numerical meaning; this
+change does not claim to remove repeated normalization in mixed streamed/ANE
+execution.
+
+Preparation on 2026-10-27 built rank and Goal A and compiled stored product,
+expert, fused stack, normalization, gather, rotation and output pipelines with
+strided and gathered views. Literal product pipelines also compiled. These
+checks submitted no numerical work and establish no performance result.
 
 ## Compressed projections
 
