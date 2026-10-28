@@ -19,7 +19,7 @@
       "fabric": "fd6d:6573:68:b5d5:b9dc:d628:b4e3:3141",
       "memory_gib": 128,
       "roles": ["launcher", "compute"],
-      "guard_free_pages": 4096
+      "guard_free_pages": 0
     },
     "06594A7A-3279-5A27-9099-11169DE0D270": {
       "name": "Ms-Mac-mini",
@@ -30,7 +30,7 @@
       "fabric": "fd6d:6573:68:3af8:1a3c:9700:3034:715d",
       "memory_gib": 24,
       "roles": ["compute", "headless"],
-      "guard_free_pages": 65536
+      "guard_free_pages": 0
     },
     "E8F9C574-257D-5425-8501-E5BF6981BEA6": {
       "name": "m5ult1",
@@ -41,7 +41,7 @@
       "fabric": "fd6d:6573:68:577f:d1f4:93fc:f466:51a6",
       "memory_gib": 96,
       "roles": ["compute", "headless", "root"],
-      "guard_free_pages": 65536
+      "guard_free_pages": 0
     },
     "519B8DC8-FF1D-551F-9FC8-0A3168B1ED6A": {
       "name": "m5ult2",
@@ -52,7 +52,7 @@
       "fabric": "fd6d:6573:68:91e1:fbe5:72df:9c0b:bf0b",
       "memory_gib": 96,
       "roles": ["compute", "headless"],
-      "guard_free_pages": 65536
+      "guard_free_pages": 0
     }
   }
 }
