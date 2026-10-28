@@ -249,7 +249,8 @@ static const uint8_t WORD[KINDS] = {KINDS_OF(KIND_WORD)};
    and a consumption's end raising the track's count (system scope, release).  A group that chooses nothing for the
    program's polls of passes records its blocked items' failures (mesh_step_check for a landing, else the bound at its
    position, by its claimant: mesh_step_claim) and ends once nothing more can run; a track ends at its own bound, as a
-   wait does, and reads no other track's failure.  The records' layouts are struct track_head, track, track_item,
+   wait does, or, read every 2^10 idle passes, once its blocked item's failure claim is taken: by a wait that failed, or
+   by the host's stop, which bounds it in time (nccl-mesh.c mesh_library_expired); it reads no other track's failure.  The records' layouts are struct track_head, track, track_item,
    track_op and track_dep below, the host's alike; struct track_op's kind one of KINDS_OF's, the enum the host's */
 static NSString *const TRACKS =
   @"\n"
@@ -269,7 +270,9 @@ static NSString *const TRACKS =
   "volatile coherent(system) device ulong *v = (volatile coherent(system) device ulong *)it.v; "
   "if (!v || !mesh_step_claim(it.v)) return; "
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); "
-  "v[0] = " XSTR(METAL_BOUND) "UL; v[4] = ulong(polls); mesh_publish(v + 2, it.position + 1); }\n";
+  "v[0] = " XSTR(METAL_BOUND) "UL; v[4] = ulong(polls); mesh_publish(v + 2, it.position + 1); }\n"
+  "static inline bool track_stopped(constant track_item &it) { "
+  "return it.v && atomic_load_explicit((device atomic_uint *)(it.v + 8), memory_order_relaxed) != 0u; }\n";
 static NSString *const TRACK_KERNEL =
   @"kernel void tracks(constant uchar *base [[buffer(0)]], device uchar *ring [[buffer(1)]], uint t [[threadgroup_position_in_grid]], "
   "uint i [[thread_position_in_threadgroup]], uint g [[threads_per_threadgroup]]) { "
@@ -290,7 +293,8 @@ static NSString *const TRACK_KERNEL =
   "if (chosen == ~0u && next0 < tr.count[0]) { left = 1; if (track_ready(items[tr.first[0] + next0], deps, count)) { chosen = tr.first[0] + next0; next0++; } } "
   "if (chosen != ~0u) { looks = 0; expired = false; } "
   "else if (left && expired) left = 0; "
-  "else if (left && ++looks >= h.polls) { "
+  "else if (left && (++looks >= h.polls || (looks % MESH_STOP_POLL_PERIOD == 0u && "
+  "track_stopped(items[next1 < tr.count[1] ? tr.first[1] + next1 : tr.first[0] + next0])))) { "
   "if (next1 < tr.count[1]) track_expired(items[tr.first[1] + next1], ops, h.polls); "
   "if (next0 < tr.count[0]) track_expired(items[tr.first[0] + next0], ops, h.polls); expired = true; } "
   "pick[0] = chosen; pick[1] = left; } "

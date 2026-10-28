@@ -234,6 +234,12 @@ lock: each releases it for the wait and takes it again after, as a condition var
 other communicators' groups and revokes go on (rubric M4). A GPU wait keeps its poll bound; a link
 carries no keepalive.
 
+An expiry stops the process's GPU work before the program ends (rdma/nccl-mesh.c mesh_library_expired): it takes every
+communicator's failure claim and stop, so each GPU wait and the track kernel end within 2^10 loads, and awaits the
+library's committed GPU programs within MESH_PLATFORM_NS. A watch looks once a second for a communicator's command
+buffer committed and not ended while none of the library's programs has ended for twice MESH_PLATFORM_NS, and ends the
+program so, naming the wait.
+
 The only thing that cannot be stopped is a thread inside a kernel call that waits on something that never happens. A
 process in that state (STAT `U`) ignores every signal, SIGKILL included. Observed:
 - **September 5 (the Mini).** Test processes stayed in `U` in the release of their verbs objects, holding their

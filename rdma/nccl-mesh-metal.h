@@ -200,5 +200,10 @@ struct metal_result metal_present(struct metal_program *, void *lists, size_t li
     void *records, size_t record_offset, size_t count, uint64_t first,
     void *words, size_t taken, size_t presented);
 void metal_end(struct metal_program *, void *event, uint64_t value);
+/* design/transport.md section 5: an expiry's end of the program, its GPU work released first and awaited within
+   MESH_PLATFORM_NS (nccl-mesh.c); and the process's watch, once a second, for GPU work that makes no progress, which
+   it ends so, started by the first communicator realized or by a caller's first prepared function */
+__attribute__((noreturn)) void mesh_library_expired(const char *wait, uint64_t ns);
+void mesh_library_watch(void);
 #pragma GCC visibility pop
 #endif
