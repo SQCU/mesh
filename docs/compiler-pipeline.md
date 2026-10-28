@@ -324,10 +324,15 @@ coordinates; `named` and `bitmap` build that callable. It no longer takes raw MS
 predicate source. Preparation evaluates support once, merges adjacent kept
 intervals and emits output-tile and reduction-range operands. One TensorOps body
 consumes those operands for all three products. Exact tail extents replace padded
-input copies; weight-gradient zero tiles are stores in that same body. Input
-strides and output placement use `kernel.declare`, with no separate sparse eager
-executor. A change in support is a new compiled operand, not a device-side mask
-discovery step.
+input copies; weight-gradient zero tiles are stores in that same body. Input and
+weight types are independent. Backward writes each gradient in its declared type
+without whole-operand casts. API layout requirements come from the matrix
+declaration in `metal-apis.json`; the shader's stride constants come from the
+placed views, not the earlier traced storage. Output placement uses the same
+`kernel.declare` interface. Schedule tensors are built outside numerical tracing
+and enter the ordinary attribute importer; tracing their construction had left
+CPU copies in the graph. A change in support is a new compiled operand, not a
+device-side mask discovery step. There is no separate sparse eager executor.
 
 The native frontend carries the same kind of producer facts explicitly.
 `StreamedProduct` holds the selected instance and its output `OrderedReduction`.

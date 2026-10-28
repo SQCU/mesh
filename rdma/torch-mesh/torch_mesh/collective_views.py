@@ -8,6 +8,7 @@ from itertools import accumulate
 import math
 
 from .operand import TensorView, ordered_runs
+from . import _stream
 
 
 def _domains(call, rank, size):
@@ -27,18 +28,6 @@ def _domains(call, rank, size):
     return call.count, sends, receives
 
 
-def _before(domain, position):
-    return sum(max(0, min(position, end) - start) for start, end in domain)
-
-
-def _position(domain, local):
-    for start, end in domain:
-        if local <= end - start:
-            return start + local
-        local -= end - start
-    return domain[-1][1]
-
-
 def _binding(value, domain, unit, writing, layouts):
     """Resolve the numerical consumer's field constraint before cutting rows."""
     from .layout import resolve
@@ -46,7 +35,7 @@ def _binding(value, domain, unit, writing, layouts):
     runs, count = ordered_runs([(value.storage, value)])
     if count != sum(end - start for start, end in domain):
         raise ValueError('collective page selection must cover its declared local domain')
-    commands = []
+    commands, spans = [], [(value.storage, value)]
     # A scalar is one field. A record is indivisible numerical work, even when
     # its rows are gathered or separated by gaps in the original allocation.
     split = sorted({end // unit for _, end, _, _ in runs if end % unit})
@@ -69,18 +58,13 @@ def _binding(value, domain, unit, writing, layouts):
             first = end
         if first < count // unit:
             spans.append((value.storage, rows.slice(0, first, count // unit - first)))
-        runs, count = ordered_runs(spans)
-    return value, (runs, [end for _, end, _, _ in runs]), commands
+    traversal = _stream.TensorTraversal([view.layout for _, view in spans], domain)
+    return spans, traversal, commands
 
 
-def _alias(value, spans, domain, first, last):
-    lo, hi = _before(domain, first), _before(domain, last)
-    if lo == hi:
-        return value.storage.as_strided((0,), (1,), 0)
-    runs, ends = spans
-    at = bisect_right(ends, lo)
-    start, _, storage, offset = runs[at]
-    return storage.as_strided((hi - lo,), (1,), offset + lo - start)
+def _alias(spans, traversal, first, last):
+    part, offset, count = traversal.fragment(first, last)
+    return spans[part][0].as_strided((count,), (1,), offset)
 
 
 def lower(bindings, group):
@@ -116,10 +100,10 @@ def lower(bindings, group):
         for value, domain, writing in ((source, sends, False), (destination, receives, True)):
             if not domain or not any(end > start for start, end in domain):
                 value = exemplar.storage.as_strided((0,), (1,), 0)
-            value, spans, commands = _binding(value, domain, unit, writing, layouts)
+            spans, traversal, commands = _binding(value, domain, unit, writing, layouts)
             (after if writing else before).extend(commands)
-            cuts.extend(cursor + _position(domain, end) for end in spans[1][:-1])
-            values.append((value, spans, domain))
+            cuts.extend(cursor + end for end in traversal.cuts)
+            values.append((spans, traversal))
         prepared.append((call, cursor, total, values))
         cursor += total
         cuts.append(cursor)

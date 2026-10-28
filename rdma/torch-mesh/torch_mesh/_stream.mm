@@ -660,6 +660,18 @@ struct TensorLayout {
     return make({t.sizes().begin(),t.sizes().end()},{t.strides().begin(),t.strides().end()},t.storage_offset(),{},std::nullopt);
   }
 };
+struct TensorTraversal {
+  MetalTensorTraversal *value;
+  TensorTraversal(const std::vector<TensorLayout> &layouts,const std::vector<std::pair<NSUInteger,NSUInteger>> &domains) {
+    NSMutableArray *parts=[NSMutableArray array],*intervals=[NSMutableArray array];
+    for(const auto &layout:layouts)[parts addObject:layout.value];
+    for(const auto &[first,end]:domains)[intervals addObject:@[@(first),@(end)]];
+    @try { value=[[MetalTensorTraversal layouts:parts domains:intervals] retain]; }
+    @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
+  }
+  TensorTraversal(const TensorTraversal &other):value([other.value retain]){}
+  ~TensorTraversal(){[value release];}
+};
 // Resolve a frontend storage handle to its bridge pages once, while preparing.
 // A tensor containing changing page indices remains an ordinary data operand;
 // neither this adapter nor TensorLayout reads those indices from its payload.
@@ -1811,6 +1823,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("completion", &completion);
   module.def("completed", &completed);
   module.def("pipeline", &pipeline);
+  pybind11::class_<TensorTraversal>(module,"TensorTraversal")
+    .def(pybind11::init<const std::vector<TensorLayout> &,const std::vector<std::pair<NSUInteger,NSUInteger>> &>())
+    .def_property_readonly("cuts",[](const TensorTraversal &v){return tensorNumbers(v.value.cuts);})
+    .def("fragment",[](const TensorTraversal &v,NSUInteger first,NSUInteger end){
+      @try { auto f=[v.value fragment:first end:end];return std::make_tuple(f.part,f.offset,f.count); }
+      @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
+    });
   pybind11::class_<TensorLayout>(module,"TensorLayout")
     .def(pybind11::init(&TensorLayout::make),pybind11::arg("shape"),pybind11::arg("strides"),pybind11::arg("offset")=0,
          pybind11::arg("maps")=std::map<NSUInteger,std::vector<NSInteger>>{},pybind11::arg("indices")=pybind11::none())
@@ -1896,6 +1915,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("view_index", [](const std::vector<NSUInteger> &shape,const std::vector<NSInteger> &strides,const std::string &index) {
     TORCH_CHECK(shape.size()==strides.size(),"an index view needs one stride per axis");
     return std::string([MetalViewIndexExpression(shape.data(),strides.data(),shape.size(),@(index.c_str())) UTF8String]);
+  });
+  module.def("index_values", [](NSUInteger binding,const std::vector<NSInteger> &values) {
+    return std::string(MetalViewIndexValuesDeclaration(binding,values.data(),values.size()).UTF8String);
   });
   pybind11::dict compilation;
 #define MESH_METAL_VALUE(name, value) compilation[#name] = value;

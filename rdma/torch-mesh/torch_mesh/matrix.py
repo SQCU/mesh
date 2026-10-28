@@ -27,7 +27,7 @@ def row_tiles(rows):
 def product(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, ready=None, arrivals=None, layouts=None):
     """Bind matrix views, including batch strides, without packing or execution."""
     kinds = {torch.float16: 'half', torch.float32: 'float', torch.bfloat16: 'bfloat'}
-    if x.dtype != w.dtype or x.dtype not in kinds or out.dtype not in kinds:
+    if x.dtype not in kinds or w.dtype not in kinds or out.dtype not in kinds:
         raise ValueError('matrix operands require supported, explicit input and output types')
     if x.ndim not in (2, 3) or w.ndim != x.ndim or out.ndim != x.ndim:
         raise ValueError('matrix operands require two-dimensional or batched matrix views')
@@ -58,7 +58,7 @@ def product(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, ready=
     x, w, x1, bias = (None if value is None else TensorView.of(value) for value in inputs.values())
     out = TensorView.of(outputs['out'])
     stride = lambda t: t.stride(0) if t.ndim == 3 and t.shape[0] > 1 else 0
-    definitions = dict(INPUT=kinds[x.dtype], OUTPUT=kinds[out.dtype], AM=x.stride(-2), AK=x.stride(-1),
+    definitions = dict(INPUT=kinds[x.dtype], WEIGHT=kinds[w.dtype], OUTPUT=kinds[out.dtype], AM=x.stride(-2), AK=x.stride(-1),
                        BK=w.stride(-2), BN=w.stride(-1),
                        ABATCH=stride(x), BBATCH=stride(w),
                        BIAS_ROWS=bias.shape[0] if bias is not None and bias.ndim == 2 else 1,

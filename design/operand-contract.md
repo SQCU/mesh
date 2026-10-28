@@ -88,11 +88,9 @@ access structure.
 
 This contract does not declare these existing paths complete:
 
-- Some fused consumers load order arrays whose static compositions could be
-  resolved earlier. Numerical index tensors must remain data.
 - Producer placement handles native-kernel subdomains, matrix API uses and
-  declared CPU/Core ML calls in FX graphs. Native normalization producers now
-  receive ANE input layout requirements before command emission. Other native
+  declared CPU/Core ML calls in FX graphs. Native normalization and convolution
+  producers receive ANE input type and layout requirements before command emission. Other native
   producers still bind already assigned buffers. Conflicting requirements
   also need cost-directed placement and conversion
   choices, beyond the current placement feasibility solver.
@@ -115,8 +113,8 @@ between instructions that can remain in one call.
 
 Core ML's public `MLPredictionOptions.outputBackings` contract still permits the
 provider to decline caller storage. The binding's current result-identity check
-reports that condition; it does not establish an AOT guarantee. Producer type
-placement and a stronger provider output contract remain unresolved.
+reports that condition; it does not establish an AOT guarantee. A stronger
+provider output contract remains unresolved.
 
 ## Frontend attributes become page operands
 
@@ -150,6 +148,20 @@ Matrix inputs carry the current MPP consumer's strided requirement in
 requirement gets a prepared conversion edge. That conversion alone does not
 establish an optimal placement. Those requirements now also reach graph
 placement through declared schema operands.
+
+Sparse products use those same API requirements. Their independent input and
+weight types reach the TensorOps body, and gradient stores use the requested
+result type without separate casts. Affine stride constants come from the shared
+layout declaration after placement. The generic kernel binder emits these along
+with index expressions for every operand, so a sparse consumer no longer forces
+its producer to retain the strides seen during tracing. Schedule construction
+stays outside the numerical graph; its tables use the ordinary attribute importer.
+
+Preparation on 2026-10-28 compiled sparse products and both gradients with mixed
+types, changed input strides, mapped destinations and partial sparse tiles. Each
+prepared one numerical command without a layout conversion. The public
+`Function` interface also prepared the complete mixed-type forward/backward
+graph. No numerical commands were submitted.
 
 `orderedSpans` retains logical traversal and repeated reads for transport.
 It is distinct from the union of ranges used for dependencies. WRITE preparation
@@ -283,6 +295,24 @@ intervals. Contiguous bindings keep their original call count. Highly scattered
 selections may still produce many native records; this is a granularity limit
 of the current numerical binding, not a limitation of the page representation.
 
+`MetalTensorTraversal` now supplies the ordered boundary and fragment calculation
+to both FX and native crossings. It maps storage parts onto declared logical
+intervals during preparation. The Python-only position and alias calculations
+have been removed. No traversal object is read by numerical execution.
+
+Native `MeshRankCross` records the supplied source and destination layouts.
+Ranks unite their boundaries with the existing graph configuration, then bind
+each fragment to its original storage. Uneven gather and scatter counts retain
+their rank domains. Fragments of one crossing stay in one transport group.
+Contiguous bindings still make one call; mapped bindings add no layout copy.
+The native FFN passes its prepared result view to this interface. Goal A and
+LiteRT declare their existing linear operands through the same binding.
+
+Preparation on 2026-10-28 built the shared library, frontend, native rank and
+Goal A. FX collective preparation covered mapped scalars and structured rows.
+Native configuration preparation merged and bound mapped reductions, uneven
+gathers/scatters and broadcasts without a communicator or numerical invocation.
+
 On 2026-10-27, the extension built and local preparation constructed mapped
 collective bindings and record-copy pipelines. Mixed-row preparation copied
 only the scattered row. The inspection used no live communicator and submitted
@@ -302,11 +332,21 @@ already used logical indices, while the adapter still passed pitch fields that
 the shader ignored. Expert gate/up slices and per-layer inputs now carry those
 pitches in the same view used to emit their accesses.
 
-`PrefillPartner.inputLayouts` exposes the model and provider requirements before
-binding. The FFN normalization producer and Goal A use them to assign their
-destination pages. `TensorView.placed` assigns an unwritten result; it emits no
-copy. The provider's existing resolver still handles necessary type conversions
-and inputs whose producers have already fixed their placement.
+`PrefillPartner.inputRequirement` exposes the model's element type, element
+width and provider layouts before binding. The FFN normalization producer and
+Goal A use this declaration to assign their destination pages. `TensorOperand`
+carries the resulting view and type through producer emission and model binding.
+`TensorView.placed` assigns an unwritten result; it emits no copy. The provider's
+resolver handles inputs whose producers have already fixed their placement.
+
+The ordinary normalizer and fused residual finish can publish several typed
+destinations from one calculation. Compatible GPU and host consumers share the
+same destination. Different element types get direct stores into their declared
+pages; there is no intermediate half result merely to convert it for the host.
+Preparation expands the stores and their accesses. Replay receives no output
+list, type switch or layout interpreter. Only consumers using raw values need
+the separate row-factor output. Stored and large rotated products consume their
+normalized values, so an otherwise unused factor is not allocated or written.
 
 Compressed product kernels retain their declared slab layout, including gaps
 between each slab's active rows. A transformed input carries that layout as a
@@ -335,7 +375,94 @@ write the host's normalized values, the row factors and the GPU's gathered
 inputs together. The GPU gather uses the selected share's matrix. Host presence
 does not disable it. Both consumers retain the producer's views; neither
 reconstructs a destination from a readiness flag. An intervening convolution or
-collective puts normalization after that operation instead.
+collective prevents that earlier producer from supplying the FFN input.
+
+An input convolution consumes the normalized residual and writes the FFN's
+declared destinations itself. The partner's type and layout requirements reach
+this producer too. Compatible GPU and host uses share its result; different
+types receive direct stores from the same calculation. The FFN retains those
+views instead of rebuilding a half tensor from the network's buffer name.
+No post-convolution copy is needed merely to satisfy that partner declaration.
+
+Both convolution forms now use the common numerical helper and shared view
+indexing. Inputs, taps, bias, normalization weights, residual and optional scale
+carry the same layout into their shader bindings and dependency records. The
+standalone producer uses the existing typed-output emitter; the normalized
+finish preserves fp32 arithmetic through its final residual store. Launch width
+comes from the configured pointwise width and the compiled pipeline limit.
+
+Preparation on 2026-10-28 built native rank and Goal A and compiled convolution
+producers with half, float and integer destinations, mapped inputs and strided
+outputs. Both scaled and unscaled finishes compiled with mapped views. No
+numerical work or performance measurement ran.
+
+Residual normalization now consumes typed views for its input, normalization
+weights, residual, destination and optional scale. Its shared numerical template
+uses each view's prepared indices. Goal A uses this builder instead of its own
+dispatch and byte-count declarations. Dense and vision callers use the same
+interface. Destination reads within the calculation do not add an input
+dependency on the old destination contents.
+
+Scaling, residual normalization and fused finishes also share the declarations
+of their control operands. Words, control tables, vectors, gains and statistic
+outputs retain their views in both shader addressing and dependency records.
+Control values remain runtime page data. Preparation on 2026-10-28 built rank
+and Goal A and compiled typed residuals with mapped and strided operands,
+including controls without a scale. No numerical commands were submitted.
+
+FFN preparation now carries its typed result into the layer finish. A local
+provider result retains its declared output type and layout. Standalone and
+fused residual consumers read that operand directly, including the shared
+vector reader. GPU FFN products retain the supplied destination view too.
+Combining provider partials with GPU work takes an explicit addend operand;
+the destination no longer implicitly supplies that input. All three views feed
+the same indexing and dependency declarations.
+
+Native FFN preparation assigns the result's type and layout from its declared
+crossing, or from its local provider when no crossing consumes it. Compatible
+provider layout requirements enter that same placement. Stored and compressed
+GPU products write directly into this typed destination; their output interface
+no longer uses a float flag or a two-case scalar selector. The native scalar
+spellings for crossing types are operands in `etc/compute/metal-apis.json`.
+
+An expert FFN's crossing covers both dense and expert contribution planes.
+Those planes are views of the same placed operand. Expert combination writes
+its assigned view, including a partial final SIMD group. Branch normalization
+works in place and the shared typed reduction combines the planes; the separate
+half scratch and add command are removed. This also corrects the preceding
+native binding, which passed only the dense plane to that crossing.
+
+Preparation on 2026-10-28 built rank and Goal A and compiled stored, compressed
+and expert products with mapped half, float, bfloat and integer destinations,
+including masked output tails. No numerical commands were submitted. These
+changes do not establish Core ML's output-backing guarantee, which remains
+unresolved as described above.
+
+Both convolution forms and their tap projections now consume the same typed
+input operand. The compressed gather, rotation and Hadamard bodies read its
+declared scalar type through their prepared indices. Normalization and the
+folded matrix path retain that type too. The tap projection's separate half
+conversion has been removed. Coded product inputs remain the transform's
+declared half outputs; this change does not remove their numerical transform.
+
+Stored matrix products load typed vectors from that operand. Their tiled body
+declares its input, decoded weights and result storage in one threadgroup union,
+sized by the shader compiler. Host code no longer supplies a fixed byte count.
+FX matrix binding likewise carries input and weight types separately, so a
+folded rotation need not convert either whole operand just to match types.
+Normalization weights also carry their type and view into the shared index and
+dependency declarations. They no longer use a separate buffer-offset argument
+or assume linear storage.
+
+Preparation on 2026-10-28 built rank and Goal A and compiled mapped transforms,
+normalization and stored products with half, float, bfloat and integer inputs.
+Complete FX gather, small- and large-row rotation, and cut Hadamard graphs
+prepared with float and bfloat inputs. Mixed matrix operands prepared one
+numerical command. No numerical commands were submitted.
+
+Preparation on 2026-10-28 compiled provider-result finishes at widths 37 and 64
+with mapped half, float and integer inputs, and reductions with independently
+typed addends. Native rank and Goal A built. No numerical commands were submitted.
 
 Layer finishes return the gathered operand they actually produce. The next
 attention product consumes that view through the shared input resolver. A finish
@@ -366,6 +493,13 @@ native instance prelude at logical widths 64 and 37. Preparation covered masked
 gathers, strided normalization outputs and literal plain/partial reductions.
 This was source and pipeline preparation only; no numerical commands ran.
 
+The typed-output change (`metal-microbench` commit `d2ef9be7`) on 2026-10-28 built rank and Goal A and compiled
+half, float and integer normalization destinations, including mixed destinations,
+strided views and scalar tails. It also compiled the fused finish with and
+without a factor output. These checks submitted no numerical work. Core ML
+float64 declarations still require lowering to a provider that supports that
+arithmetic; this native Metal boundary has no float64 lowering.
+
 ## Compressed projections
 
 Native and Python FFNs retain each matrix's logical domain and encoded order.
@@ -373,6 +507,59 @@ Shared operand views compose the gate and up outputs with the down input.
 Matching projections can use the coupled numerical kernel. Other projections
 use the same product and reduction bodies with their declared views. A numerical
 basis transform remains work; a permutation alone adds no copy.
+
+Native `ScaledReduction` carries logical partials, scales and the result's
+origin. It replaces `OrderedReduction` and its identity-order buffer. Head
+consumers, fused normalization and per-layer products no longer load that
+identity or scatter through it. FX finishes compose the encoded positions into
+partial and scale views during preparation. Padded lanes leave the finish
+domain, and the common finish kernel writes its logical output view directly.
+
+Direct products, row gathers, Hadamard transforms, dense decoding and padded
+FFN activations carry their encoding positions through preparation. The FX
+kernel declaration and native library receive these positions
+as compiler metadata. Both use the shared index emitter, which simplifies the
+relation to arithmetic or a compact constant table. There is no order-buffer
+binding or read dependency for these positions. A required encoding relation has
+no implicit identity implementation; preparation supplies identity relations too.
+Computed index tensors remain ordinary page operands.
+
+The Hadamard input domain holds its source positions as preparation metadata.
+Cuts compose that domain with the selected logical columns. Identity and cut
+domains use the same relation emitter; neither allocates a separate source-order
+buffer. Dense decoding likewise declares both axis relations, and padded
+activations declare which encoded lanes hold values. Masks retain their numerical
+meaning while the order-buffer loads and bindings disappear.
+
+The native fused finish uses that same declaration for its next input gather.
+Its output count is a template operand, so an absent gather adds no runtime
+branch or unused encoding input. Each gather is prepared with its actual relation
+and pipeline limits; bare aliases with missing relations have been removed.
+
+Preparation on 2026-10-28 covered a complete FX compressed gather/product graph
+with 29 logical output rows and 37 input columns in 64-lane storage. Its commands
+have no order tensors among their inputs. Shared-library, frontend and native
+builds completed, and direct products, gathers and typed fused finishes compiled.
+These checks submitted no numerical work.
+
+The same preparation covered complete dense-decoding, cut Hadamard and padded
+FFN graphs, including different gate/up orders. Their runtime kernel inputs
+contain no encoding-order tensors. Native builds and masked/unmasked shader
+specializations completed without submitting numerical commands.
+
+Fused consumers carry the same views as standalone consumers. Their index
+expressions have a compiler namespace separate from the enclosing product's
+bindings. This namespace introduces no extra buffer or runtime lookup. Per-layer
+activation placement consumes prepared destination and scale views; its inverse
+column table is no longer a shader operand. Head normalization and publication
+also apply their declared views. Coherent output stores use the shared mapped
+store helper before the existing publication operation.
+
+Preparation on 2026-10-28 compiled standalone and fused consumers with mapped
+partials, strided destinations and non-unit scale strides. An FX finish with
+37 logical rows in 64 encoded lanes prepared one numerical command into a
+strided destination, with no order-buffer input or conversion command. Native
+rank and Goal A builds completed. No numerical commands were submitted.
 
 The FX kernel declaration carries each binding's source view, use view, layout
 requirement, and explicit output device. Preparation composes the use with the

@@ -36,6 +36,7 @@ NSString *MetalViewIndexExpression(const NSUInteger *shape,const NSInteger *stri
 
 static NSString *MetalViewIndexTemplates(void) {
     return @"template<uint B> inline long mesh_index(ulong i) { return long(i); }\n"
+        "template<uint B, uint A> constexpr long mesh_stride();\n"
         "template<uint B> constexpr bool mesh_vector4() { return true; }\n";
 }
 
@@ -164,6 +165,16 @@ NSDictionary<NSString *,id> *MetalViewNormalizeAxes(const NSInteger *strides,siz
         if(affine){held[axis.unsignedIntegerValue]=step;base+=first;[remaining removeObjectForKey:axis];}
     }
     return @{@"strides":steps,@"offset":@(base),@"maps":remaining};
+}
+
+NSString *MetalViewIndexValuesDeclaration(NSUInteger binding,const NSInteger *values,NSUInteger count) {
+    const NSInteger stride=0;
+    NSData *map=[NSData dataWithBytes:values length:count*sizeof *values];
+    return [NSString stringWithFormat:@"template<uint B> inline long mesh_position(ulong i);\n"
+        "namespace mesh_positions_%lu {\n%@%@}\n"
+        "template<> inline long mesh_position<%lu>(ulong i) { return mesh_positions_%lu::mesh_index<0>(i); }\n",
+        (unsigned long)binding,MetalViewIndexTemplates(),MetalViewMappedIndexDeclaration(0,&count,&stride,1,0,@{@0:map}),
+        (unsigned long)binding,(unsigned long)binding];
 }
 
 NSString *MetalViewMappedIndexDeclaration(NSUInteger binding,const NSUInteger *shape,const NSInteger *strides,

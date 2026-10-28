@@ -1,4 +1,16 @@
 {
+  "scalar_types": {
+    "FLOAT16": "half",
+    "FLOAT32": "float",
+    "FLOAT64": "double",
+    "BFLOAT16": "bfloat",
+    "INT8": "char",
+    "UINT8": "uchar",
+    "INT32": "int",
+    "UINT32": "uint",
+    "INT64": "long",
+    "UINT64": "ulong"
+  },
   "reduction": {
     "input": "contiguous",
     "output": "contiguous"

@@ -16,9 +16,8 @@ inline auto sparse_extents(int x, int y) {
     else return extents<int, X, Y>{};
 }
 
-template<typename In, typename Out, int R, int C, int K, int Groups, bool FullRows, bool FullColumns, bool FullInner,
-         int AM, int AK, int BK, int BN>
-kernel void sparse_product(device In* X [[buffer(0)]], device In* W [[buffer(1)]],
+template<typename In, typename Weight, typename Out, int R, int C, int K, int Groups, bool FullRows, bool FullColumns, bool FullInner>
+kernel void sparse_product(device In* X [[buffer(0)]], device Weight* W [[buffer(1)]],
                            device Out* Y [[buffer(2)]], device const uint4* tiles [[buffer(3)]],
                            device const uint2* pieces [[buffer(4)]], constant SparseShape& shape [[buffer(5)]],
                            uint group [[threadgroup_position_in_grid]],
@@ -26,6 +25,7 @@ kernel void sparse_product(device In* X [[buffer(0)]], device In* W [[buffer(1)]
     // Two records per SIMD tile: origin/extent, followed by its reduction range.
     const uint slot = (group * Groups + sg) * 2;
     const uint4 tile = tiles[slot], reduction = tiles[slot + 1];
+    constexpr int AM=mesh_stride<0,0>(), AK=mesh_stride<0,1>(), BK=mesh_stride<1,0>(), BN=mesh_stride<1,1>();
     auto A = tensor(X, dextents<int, 2>{int(shape.inner), int(shape.rows)}, array<int, 2>{AK, AM});
     auto B = tensor(W, dextents<int, 2>{int(shape.columns), int(shape.inner)}, array<int, 2>{BN, BK});
     constexpr auto desc = matmul2d_descriptor(R, C, K, false, false, false,

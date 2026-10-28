@@ -44,6 +44,8 @@ struct MetalTensorSpan { NSInteger offset; NSUInteger count; };
 // Intersect explicit use/API requirements. No requirement is discarded by a
 // later lowering. Conflicts are preparation errors, before any numerical work.
 - (MetalTensorLayout *)requirements:(NSArray<NSDictionary *> *)requirements;
+// Address expressions and, for affine views, per-axis stride constants for
+// numerical APIs. Both describe the assigned operand, after page placement.
 - (NSString *)declaration:(NSUInteger)binding;
 // Lower the affine storage indices of a frontend IR to this page selection.
 // The source index is compiler structure, not a payload index tensor.
@@ -52,6 +54,16 @@ struct MetalTensorSpan { NSInteger offset; NSUInteger count; };
 - (NSData *)orderedSpans;
 - (NSData *)reaches:(nullable id<MTLBuffer>)buffer base:(NSUInteger)base elementBytes:(NSUInteger)bytes
     access:(uint32_t)access binding:(int32_t)binding;
+@end
+
+// Preparation maps ordered storage parts onto the caller's logical intervals.
+// Cuts from every participant are united before a fragment is requested. The
+// fragment is then a direct storage binding; execution never sees this object.
+struct MetalTensorFragment { NSUInteger part, count; NSInteger offset; };
+@interface MetalTensorTraversal : NSObject
+@property(nonatomic, readonly) NSArray<NSNumber *> *cuts;
++ (instancetype)layouts:(NSArray<MetalTensorLayout *> *)layouts domains:(NSArray<NSArray<NSNumber *> *> *)domains;
+- (struct MetalTensorFragment)fragment:(NSUInteger)first end:(NSUInteger)end;
 @end
 
 // Place one storage domain from declared use layouts. All indices and widths
