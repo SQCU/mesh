@@ -242,7 +242,7 @@ struct channel {
   const uint64_t *wire;
   struct mesh_stream_view view;
   void *buffer, *lists;
-  size_t ready, landed, sent;
+  size_t ready, landed;
   uint64_t ready_at, sends, lands, published, consumed, waited;
   mesh_pages out, in;
 };
@@ -1307,12 +1307,12 @@ static int fabric_acquire(struct ncclComm *comm) {
    `ready`'s region offset */
 static int channel_buffer(struct channel *ch, const struct hdr *m) {
   const uintptr_t page = (uintptr_t)getpagesize();
-  const uintptr_t at[3] = {(uintptr_t)ch->view.ready, (uintptr_t)ch->view.landed, (uintptr_t)ch->view.sent};
+  const uintptr_t at[2] = {(uintptr_t)ch->view.ready, (uintptr_t)ch->view.landed};
   uintptr_t lo = at[0], hi = at[0] + sizeof(uint64_t);
-  for (int k = 1; k < 3; k++) { lo = at[k] < lo ? at[k] : lo; hi = at[k] + sizeof(uint64_t) > hi ? at[k] + sizeof(uint64_t) : hi; }
+  for (int k = 1; k < 2; k++) { lo = at[k] < lo ? at[k] : lo; hi = at[k] + sizeof(uint64_t) > hi ? at[k] + sizeof(uint64_t) : hi; }
   lo &= ~(page - 1);
   hi = (hi + page - 1) & ~(page - 1);
-  ch->ready = at[0] - lo; ch->landed = at[1] - lo; ch->sent = at[2] - lo;
+  ch->ready = at[0] - lo; ch->landed = at[1] - lo;
   ch->ready_at = at[0] - (uintptr_t)m;
   return (ch->buffer = metal_wrap((void *)lo, hi - lo)) ? 0 : ENOMEM;
 }
@@ -1823,7 +1823,7 @@ static ncclResult_t comm_failure(struct ncclComm *comm) {
       mesh_library_expired(wait, polls * (MESH_PLATFORM_NS / NCCL_MESH_POLLS));
     }
     return comm_fail(comm, ncclRemoteError, "entry %llu on the channel to node %u was not done within %llu polls of a GPU wait (its "
-                     "stream's bound, ncclMeshStream polls): its bytes had not landed or been sent, the peer's work there beginning that "
+                     "stream's bound, ncclMeshStream polls): its bytes had not landed, the peer's work there beginning that "
                      "much later, or its link was lost", (unsigned long long)(at - 1), node,
                      (unsigned long long)atomic_load_explicit(v + 4, memory_order_relaxed));
   }
@@ -2478,7 +2478,7 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
    they lie in (`row`); a landing's `need` (the send entries a combine into bytes an earlier SEND of its call on its
    channel reads waits to be published: that entry + 1, 0 none) */
 struct message { struct call *c; uint32_t step; uint64_t entry; mesh_pages pages, end; uint64_t need; size_t offset, bytes;
-                 struct where data; struct mesh_dma_span *spans; uint64_t table; double priority; uint64_t *retire; };
+                 struct where data; struct mesh_dma_span *spans; uint64_t table; double priority; };
 /* a group's entries on one channel, each list in its order from its first (`first`: [0] the send list's, [1] the
    landing list's), its landing entries' gate (`word` a region offset, 0 none; `base` the value it reaches: a page
    count of the holding's `ready`, or the number of a group at the communicator's gate word: gate_of), and each list's
@@ -2611,7 +2611,6 @@ static ncclResult_t schedule_group(struct ncclComm *comm, struct call *list, siz
 
 static void schedules_free(const struct ncclComm *comm, struct schedule *plans) {
   for (uint32_t h = 0; plans && h < comm->count; h++) {
-    for (size_t k = 0; k < plans[h].ins; k++) free(plans[h].in[k].retire);
     free(plans[h].out); free(plans[h].in); free(plans[h].consume);
   }
   free(plans);
@@ -3042,12 +3041,13 @@ static ncclResult_t place_group(struct ncclComm *comm, struct schedule *plans, s
   return ncclSuccess;
 }
 
-/* Bind only true overwrite hazards. Original-input bindings are disjoint
-   from reduction results, so they need no CQ condition. A local combine may
-   reuse bytes after every earlier overlapping physical SEND has retired. */
-static ncclResult_t bind_retirements(struct ncclComm *comm, struct schedule *plans) {
+/* Bind only true overwrite hazards. Original-input bindings are disjoint from reduction results. A landing that writes
+   bytes an earlier SEND of its call reads (a COPY landing in place, a combine into its buffer) takes the compiled proof
+   that the SEND's bytes arrived first (mesh-routed.c: a causal witness of that arrival), else the call fails as a
+   value, nothing presented: no wait reads `sent` (design/data-model.md section 6) */
+static ncclResult_t bind_retirements(struct ncclComm *comm, const struct schedule *plans) {
   for (uint32_t h = 0; h < comm->count; h++) for (size_t k = 0; k < plans[h].ins; k++) {
-    struct message *m = plans[h].in + k;
+    const struct message *m = plans[h].in + k;
     const struct steps *st = m->c->bound;
     const struct mesh_step *step = st->steps + m->step;
     /* Explicit WRITEs have one immutable generation per logical transaction;
@@ -3060,16 +3060,12 @@ static ncclResult_t bind_retirements(struct ncclComm *comm, struct schedule *pla
       if (o->c != m->c || o->step >= m->step) continue;
       const uintptr_t first = (uintptr_t)address_of(o->data), last = first + o->bytes;
       if (first >= end || begin >= last) continue;
-      if (step->op != MESH_STEP_REDUCE) {
-        int proven = 0;
-        for (uint32_t at = st->retired_first ? st->retired_first[m->step] : 0;
-             st->retired_first && at < st->retired_first[m->step + 1]; at++) proven |= st->retired[at] == o->step;
-        if (proven) continue;
-        return fail(ncclInvalidUsage, "COPY step %u overwrites SEND step %u without a causal source-read witness; declare distinct destination storage",
-                    m->step, o->step);
-      }
-      if (!m->retire && !(m->retire = calloc(comm->count, sizeof *m->retire))) return fail(ncclSystemError, "out of memory");
-      if (m->retire[q] < o->end.n) m->retire[q] = o->end.n;
+      int proven = 0;
+      for (uint32_t at = st->retired_first ? st->retired_first[m->step] : 0;
+           st->retired_first && at < st->retired_first[m->step + 1]; at++) proven |= st->retired[at] == o->step;
+      if (!proven)
+        return fail(ncclInvalidUsage, "%s step %u writes bytes SEND step %u reads, without a causal source-read witness; declare distinct "
+                    "destination storage", step->op == MESH_STEP_REDUCE ? "the combine of" : "COPY", m->step, o->step);
     }
   }
   return ncclSuccess;
@@ -3337,13 +3333,6 @@ static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
         struct steps *st = m->c->bound;
         const struct mesh_step *step = st->steps + m->step;
         if (!ready(st, m->step) || ch->published < m->need) break;
-        int retired = 1;
-        for (uint32_t q = 0; m->retire && q < comm->count; q++) if (m->retire[q]) {
-          const mesh_pages sent = count_of(comm->channels[q].view.sent);
-          if (pages_lost(sent)) return held_fail(comm, comm->channels + q);
-          if (sent.n < m->retire[q]) retired = 0;
-        }
-        if (!retired) break;
         const mesh_pages landed = count_of(ch->view.landed);
         if (pages_lost(landed))
           return fail(ncclRemoteError, "the link to node %u was lost at landing entry %llu (its holding's counts ~0)", ch->node,
@@ -3780,26 +3769,6 @@ static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm
   return result;
 }
 
-/* A retirement item uses the existing word predicate, before selection, so
-   a slow DMA completion cannot block another channel's ready publications.
-   Its position leaves the consumer frontier unchanged (0 - 1 wraps to the
-   predecessor of 0). Only the actual landing advances that frontier. */
-static ncclResult_t consume_retirements(struct metal_program *program, struct ncclComm *comm,
-                                       const struct message *m, uint32_t track, uint64_t at) {
-  for (uint32_t q = 0; m->retire && q < comm->count; q++) if (m->retire[q]) {
-    const struct channel *ch = comm->channels + q;
-    if (track != METAL_NONE) {
-      const ncclResult_t result = gpu(metal_record(program, track, METAL_CONSUME, at - 1, 0), "a source retirement's record");
-      if (result) return result;
-    }
-    const struct metal_wait wait = {ch->buffer, comm->violation, ch->buffer, ch->sent, ch->sent,
-      {m->retire[q]}, at, q, {0}};
-    const ncclResult_t result = gpu(metal_spin(program, &wait), "a source generation's local DMA retirement");
-    if (result) return result;
-  }
-  return ncclSuccess;
-}
-
 /* channel h's next AOT consumer entry (possibly a later physical landing), as its track's item (metal_record; rdma/NCCL.md "Per-channel progress") or,
    `base` METAL_NONE, as dispatches in the stream's order (complete_track): its first wait on the holding's `landed`
    past it; a combine's landed bytes combined
@@ -3883,10 +3852,7 @@ static ncclResult_t complete_track(struct metal_program *program, struct infligh
     if (upto > ch->published) { result = publish(program, comm, h, upto, published); continue; }
     struct inflight *x = ch->consumed < in ? inflight_at(comm, h, 1, ch->consumed) : NULL;
     const struct message *r = x ? in_at(x, h, ch->consumed) : NULL;
-    if (r && ready(r->c->bound, r->step) && ch->published >= r->need) {
-      result = consume_retirements(program, comm, r, METAL_NONE, ch->consumed);
-      if (!result) result = consume(program, comm, h, METAL_NONE);
-    }
+    if (r && ready(r->c->bound, r->step) && ch->published >= r->need) result = consume(program, comm, h, METAL_NONE);
     else
       result = fail(ncclInternalError, "channel %u's entries admit no order on one track (published %llu of %llu, consumed %llu of %llu)", h,
                     (unsigned long long)ch->published, (unsigned long long)out, (unsigned long long)ch->consumed, (unsigned long long)in);
@@ -4026,8 +3992,7 @@ static ncclResult_t complete(struct metal_program *program, struct inflight *thr
         const uint64_t at = ch->consumed;
         struct inflight *g = inflight_at(c, h, 1, at);
         if (!g || g->fused) { result = g ? fail(ncclInternalError, "a fused crossing's landing on two tracks") : outside_groups(c, h, 1, at); break; }
-        result = consume_retirements(program, c, in_at(g, h, at), track, at);
-        if (!result) result = gpu(metal_record(program, track, METAL_CONSUME, at, in_at(g, h, at)->need), "a consumption's record");
+        result = gpu(metal_record(program, track, METAL_CONSUME, at, in_at(g, h, at)->need), "a consumption's record");
         if (!result) result = consume(program, c, h, base[k]);
       }
     }
