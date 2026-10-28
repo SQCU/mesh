@@ -1734,9 +1734,12 @@ struct ViewWrites {
       }
     }
   }
-  ncclResult_t encode(ncclMeshStream *stream) {
+  // Each encoded execution is the plan's next invocation, so a plan with several
+  // instances cycles them; the library orders each reuse by landings and credits.
+  size_t invocations = 0;
+  ncclResult_t encode(ncclMeshStream *stream, size_t invocation) {
     ncclResult_t result = ncclGroupStart();
-    for (auto plan : plans.handles) if (!result) result = ncclMeshWriteExecute(plan, 0, stream);
+    for (auto plan : plans.handles) if (!result) result = ncclMeshWriteExecute(plan, invocation, stream);
     const ncclResult_t ended = ncclGroupEnd();
     return result ? result : ended;
   }
@@ -1747,11 +1750,12 @@ struct ViewWrites {
     MetalScheduleCommunicator(schedule,communicator(comm));
     prepare();
     ViewWrites *self=this;
+    const size_t invocation=invocations++;
     checked(MetalScheduleCross(schedule,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
         id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
       ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
         .residencySet=(__bridge void *)residency};
-      return (int)self->encode(&on);
+      return (int)self->encode(&on,invocation);
     }));
   }
   void realize() {

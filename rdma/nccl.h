@@ -154,10 +154,10 @@
    where one must grow, a dropped definition's slots kept for the next, all returned at ncclCommDestroy.  Nothing is
    copied into them from a caller's buffer but a premultiplied, partials-merging or fused call's operand where it holds
    no result in place.  A group writes a slot only once the slot's last group has every landing awaited: the stream's
-   order, and a landed wait for those its stream did not await.  A SEND from a slot whose arrival no later landing at
-   its rank depends on is answered by a credit, an 8-byte SEND of its receiver's once those landings arrive on that
-   cable, which the sender lands in the same group: so a group whose landings are complete has every such SEND read,
-   and nothing waits on `sent`.  ncclMemAlloc is the lease,
+   order, and a landed wait for those its stream did not await.  A SEND from a slot, or a write's (its producer's
+   source, a relay's lease), whose arrival no later landing at its rank depends on is answered by a credit, an 8-byte
+   SEND of its receiver's once those landings arrive on that cable, which the sender lands in the same group: so a
+   group whose landings are complete has every such SEND read, and nothing waits on `sent`.  ncclMemAlloc is the lease,
    the call the operator's division of the work makes of the bridge ("the bridge is there to behave like a system
    call"): whole pages of the region covering size, which the bridge registered on every device when the device came up,
    before any queue pair existed; a lease registers nothing.  The client sizes its leases ("ontologically it must be the

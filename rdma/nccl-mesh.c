@@ -2139,25 +2139,36 @@ static ncclResult_t write_steps(struct call *c) {
   struct ncclComm *comm = c->comm;
   const struct mesh_paths *paths = comm->writes ? comm->writes + c->root * comm->nranks + c->target - 1 : NULL;
   const struct mesh_operand operand = {(uint32_t)c->type + 1, (uint32_t)SIZE[c->type], c->count};
-  const int count = mesh_write_compile(&comm->fabric, (uint32_t)comm->rank, (uint32_t)c->root, (uint32_t)c->target - 1,
+  const uint32_t me = (uint32_t)comm->rank;
+  const int count = mesh_write_compile(&comm->fabric, me, (uint32_t)c->root, (uint32_t)c->target - 1,
     paths, operand, comm->page, c->tile_bytes / SIZE[c->type], NULL, 0);
   if (count < 0) return fail(ncclInvalidUsage, "one-way write requires its compiled physical paths: %s", strerror(-count));
-  const size_t room = (size_t)count + 1;
+  struct mesh_transfer *transfers = malloc(((size_t)count + 1) * sizeof *transfers);
+  int made = transfers ? mesh_write_compile(&comm->fabric, me, (uint32_t)c->root, (uint32_t)c->target - 1,
+    paths, operand, comm->page, c->tile_bytes / SIZE[c->type], transfers, (uint32_t)count + 1) : -ENOMEM;
+  /* every hop of a write is one-way: each sender's bytes (the producer's source, a relay's lease) are proved read
+     by a credit back */
+  struct credit *credit = NULL;
+  size_t credits = 0;
+  uint32_t round = 0;
+  for (int k = 0; k < made; k++) {
+    const struct mesh_step *t = &transfers[k].step;
+    if (t->round >= round) round = t->round + 1;
+    if (credit_add(&credit, &credits, t->op == MESH_STEP_SEND ? (struct credit){me, t->peer, transfers[k].cable}
+                                                               : (struct credit){t->peer, me, transfers[k].cable})) { made = -ENOMEM; break; }
+  }
+  const size_t room = (size_t)count + credits + 1;
   struct steps *s = calloc(1, sizeof *s);
-  struct mesh_transfer *transfers = malloc(room * sizeof *transfers);
   uint32_t *received=malloc(room*sizeof *received);
-  if (s) *s = (struct steps){.references = 1, .count = (uint32_t)count, .buffers = 1, .initialized = 1};
+  if (s) *s = (struct steps){.references = 1, .count = (uint32_t)count, .buffers = 1 + !!credits, .initialized = 1, .credit = credits ? 1 : 0};
   if (!s || !transfers || !received || !(s->steps = calloc(room, sizeof *s->steps)) || !(s->done = calloc(room, 1)) ||
       !(s->channel = calloc(room, sizeof *s->channel)) || !(s->entry = calloc(room, sizeof *s->entry)) ||
       !(s->cable = calloc(room, sizeof *s->cable)) || !(s->consumption = calloc(room, sizeof *s->consumption)) ||
       !(s->prior_first = calloc(room, sizeof *s->prior_first)) ||
-      !(s->prior = malloc(room*sizeof *s->prior)) ||
-      !(s->buffer = calloc(1, sizeof *s->buffer))) {
-    steps_free(s); free(transfers); free(received); return fail(ncclSystemError, "out of memory");
+      !(s->prior = malloc(room*sizeof *s->prior)) || !(s->extent = calloc(2, sizeof *s->extent)) || made < 0) {
+    steps_free(s); free(transfers); free(received); free(credit);
+    return made < 0 && made != -ENOMEM ? fail(ncclInternalError, "one-way write compile: %s", strerror(-made)) : fail(ncclSystemError, "out of memory");
   }
-  const int made = mesh_write_compile(&comm->fabric, (uint32_t)comm->rank, (uint32_t)c->root, (uint32_t)c->target - 1,
-    paths, operand, comm->page, c->tile_bytes / SIZE[c->type], transfers, (uint32_t)room);
-  if (made < 0) { steps_free(s); free(transfers); free(received); return fail(ncclInternalError, "one-way write compile: %s", strerror(-made)); }
   for (int k = 0; k < made; k++) { s->steps[k] = transfers[k].step; s->cable[k] = transfers[k].cable; }
   /* WRITE paths own disjoint payload intervals, in increasing interval order.
      A relay's receive and send have identical tile cuts. Join those intervals
@@ -2170,11 +2181,13 @@ static ncclResult_t write_steps(struct call *c) {
     while(at<receives&&s->steps[received[at]].first<s->steps[k].first)at++;
     if(at==receives||received[at]>=k||s->steps[received[at]].first!=s->steps[k].first||
        s->steps[received[at]].piece.elements!=s->steps[k].piece.elements) {
-      steps_free(s);free(transfers);free(received);return fail(ncclInternalError,"WRITE relay tile has no matching incoming interval");
+      steps_free(s);free(transfers);free(received);free(credit);return fail(ncclInternalError,"WRITE relay tile has no matching incoming interval");
     }
     s->prior[s->priors++]=received[at];
   }
-  s->prior_first[s->count]=s->priors;free(received);
+  if (credits) credits_lay(s, credit, credits, me, round, operand.type);
+  for (uint32_t k = (uint32_t)count; k <= s->count; k++) s->prior_first[k] = s->priors;
+  free(received); free(credit);
   free(transfers); c->bound = s;
   return ncclSuccess;
 }
@@ -2471,7 +2484,8 @@ static ncclResult_t schedule_group(struct ncclComm *comm, struct call *list, siz
         struct call *c = list + made[k].call;
         const struct mesh_step *step = c->bound->steps + x->step;
         if (c->bound->cable[x->step] != ch->cable) continue;
-        const mesh_pages pages = c->write_plan ? c->write_plan->step_units[write_span_index(c->write_plan,x->step,c->invocation)] : pages_of(piece_bytes(step), comm->page);
+        const mesh_pages pages = c->write_plan && !credit_step(c->bound, x->step) ? c->write_plan->step_units[write_span_index(c->write_plan,x->step,c->invocation)]
+                                                                                    : pages_of(piece_bytes(step), comm->page);
         end = pages_add(end, pages);
         const struct message m = {.c = c, .step = x->step, .entry = send ? p->outs : p->ins, .pages = pages, .end = end,
                                   .offset = step->first * step->piece.element_bytes, .bytes = piece_bytes(step)};
@@ -2518,7 +2532,7 @@ static int write_order(const void *left, const void *right) {
   const struct message *a = left, *b = right;
   if (a->priority != b->priority) return a->priority < b->priority ? -1 : 1;
   const uint32_t ar = a->c->bound->steps[a->step].round, br = b->c->bound->steps[b->step].round;
-  if (ar != br) return ar < br ? -1 : 1;
+  if (ar != br && !isinf(a->priority)) return ar < br ? -1 : 1; /* credits: rounds are each end's own */
   if (a->c != b->c) return a->c < b->c ? -1 : 1;
   return a->offset < b->offset ? -1 : a->offset > b->offset;
 }
@@ -2600,6 +2614,7 @@ static ncclResult_t order_writes(const struct ncclComm *comm, const struct call 
     const size_t n = send ? plans[h].outs : plans[h].ins;
     for (size_t k = 0; k < n; k++) {
       const struct mesh_step *step = items[k].c->bound->steps + items[k].step;
+      if (credit_step(items[k].c->bound, items[k].step)) { items[k].priority = INFINITY; continue; }
       const uint32_t source = send ? (uint32_t)comm->rank : step->peer;
       const struct write_fragment key={items[k].c,source,comm->channels[h].cable,step->round,items[k].offset,0};
       const uint32_t j=write_fragment_find(fragments,count,key);
@@ -2744,7 +2759,7 @@ static ncclResult_t group_bound(struct ncclComm *comm, struct call *list, size_t
       mesh_pages end = {0};
       for (size_t k = 0; k < count; k++) {
         struct message *m = items + k;
-        if (m->c->write_plan) m->pages = m->c->write_plan->step_units[write_span_index(m->c->write_plan,m->step,m->c->invocation)];
+        if (m->c->write_plan && !credit_step(m->c->bound, m->step)) m->pages = m->c->write_plan->step_units[write_span_index(m->c->write_plan,m->step,m->c->invocation)];
         end = pages_add(end, m->pages); m->end = end;
         if (k + 1 == count / repeats) q->each[!send] = end;
       }
@@ -2902,7 +2917,7 @@ static ncclResult_t place_group(struct ncclComm *comm, struct schedule *plans, s
         struct message *x = (send ? plans[h].out : plans[h].in) + k;
         const struct steps *st = x->c->bound;
         const struct mesh_step *step = st->steps + x->step;
-        const struct ncclMeshWritePlan *write = x->c->write_plan;
+        const struct ncclMeshWritePlan *write = credit_step(st, x->step) ? NULL : x->c->write_plan;
         const size_t instance = write ? x->c->invocation % write->layout.instances : 0;
         const uint64_t displacement = write_displacement(write, x->offset) + (write ? instance * write->layout.instance_stride : 0);
         const struct where origin = send && st->read && named(st->read[x->step]) ? st->read[x->step] : st->buffer[step->buffer];
@@ -3063,7 +3078,7 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
       const struct message *items = send ? plans[h].out : plans[h].in;
       for (size_t k = 0; k < count && !retained; k++) {
         const struct message *m = items + k;
-        if (m->c->write_plan) {
+        if (m->c->write_plan && !credit_step(m->c->bound, m->step)) {
           m->c->write_plan->uses[2 * h + !send].end = m->end.n;
           continue;
         }
@@ -3164,12 +3179,11 @@ static void commit_group(struct ncclComm *comm, const struct schedule *plans) {
    path's (`program` not NULL: gate_of, *gate whether its first dispatch stores the communicator's gate), presented
    (present_group) and counted (commit_group); a failure before any entry is presented is the call's alone, one after
    it the communicator's (its lists stand mid-group) */
-static ncclResult_t schedule(struct metal_program *program, struct ncclComm *comm, struct schedule *plans, struct where area, int *gate,
-                             int immutable_writes) {
+static ncclResult_t schedule(struct metal_program *program, struct ncclComm *comm, struct schedule *plans, struct where area, int *gate) {
   schedule_laid(comm, plans);
   ncclResult_t result = place_group(comm, plans, area);
   if (!result) result = bind_retirements(comm, plans);
-  if (!result && program && !immutable_writes) gate_of(comm, plans, gate);
+  if (!result && program) gate_of(comm, plans, gate);
   if (!result) result = present_group(program, comm, plans);
   if (result) return result;
   if (*gate) comm->gates++;
@@ -3479,7 +3493,7 @@ static ncclResult_t launch(struct call *list, size_t n) {
     }
   }
   int gate = 0, running = 0;
-  if (!result && remote && !(result = schedule(NULL, comm, plans, area, &gate, 0))) { running = 1; atomic_fetch_add(&comm->runs, 1); slot_used(comm, slot, 0); }
+  if (!result && remote && !(result = schedule(NULL, comm, plans, area, &gate))) { running = 1; atomic_fetch_add(&comm->runs, 1); slot_used(comm, slot, 0); }
   pthread_mutex_unlock(&group_lock);
   if (running) {
     if ((result = run(comm, plans))) {
@@ -4272,11 +4286,9 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       g->comm = comm; g->fused = fused_kind; g->repeats = repeats;
       g->end = g->start + comm->count;
       for (uint32_t h = 0; h < comm->count; h++) { g->start[h][0] = comm->channels[h].sends; g->start[h][1] = comm->channels[h].lands; }
-      /* Indexed writes carry immutable source/landing generations. Their
-         destinations need no local publication handshake, whether the GPU
-         producer is fused or was encoded before this call. A fused crossing's
-         landings take the gate: its storage is reused (guard). */
-      if (!(result = schedule(program, comm, plans, area, &gate, all_writes(list, n)))) {
+      /* every landing, a write's and a fused crossing's too, is gated on the stream's reaching the group: its
+         storage is reused (guard), never a generation of its own */
+      if (!(result = schedule(program, comm, plans, area, &gate))) {
         g->plans = plans; plans = NULL;
       }
     }
