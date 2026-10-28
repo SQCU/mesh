@@ -300,7 +300,7 @@ to both FX and native crossings. It maps storage parts onto declared logical
 intervals during preparation. The Python-only position and alias calculations
 have been removed. No traversal object is read by numerical execution.
 
-Native `MeshRankCross` records the supplied source and destination layouts.
+Native `MeshRankCross` records ordered storage-and-layout parts for its source and destination.
 Ranks unite their boundaries with the existing graph configuration, then bind
 each fragment to its original storage. Uneven gather and scatter counts retain
 their rank domains. Fragments of one crossing stay in one transport group.
@@ -586,3 +586,15 @@ mapped partials and writes the down input; there is no layout-copy command.
 No numerical commands were submitted. Library, frontend extension, and native
 rank/goal-a builds completed. This establishes preparation coverage, not measured
 throughput or numerical execution results.
+
+The native drafter uses the same logical matrix cut and collective traversal. Its
+products write into final column slices, and the recipient lists those slices in
+contributor order. The old encoded-band view and custom gather entry point are
+removed. Python preparation uses `Matrix.cut` in place of its duplicate band
+slicer. The configured partition grain remains a planner operand; it is no
+longer enforced as a storage-band limit in the native share parser.
+Each part retains its own storage, invocation stride and instance count through
+fragment binding. No part inherits another part's buffer. Native rank and Goal A
+built after this change; local collective preparation carried uneven column
+parts and distinct storage offsets through the shared traversal. No numerical
+commands were submitted, and no performance result is claimed here.
