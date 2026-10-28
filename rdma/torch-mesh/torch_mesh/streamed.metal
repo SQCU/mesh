@@ -750,11 +750,13 @@ static inline void streamed_gather(V values, float factor, device const int *ord
 // row (metal-microbench docs/kernels.md#one-kernel-interface, typed rows): with Normed times the row's RMS norm's factor
 // (eps d.eps; a norm's gamma folded into the products' column scales: docs/kernels.md#stacked-products); the row staged
 // in threadgroup memory where WIDTH > 0 (d.columns at most WIDTH), else read in place (streamed_gather).
-template <bool Normed, uint WIDTH, uint STRIDE, bool Masked = false, uint InputColumns = 0>
+// GivenFactor consumes the normalizer's per-row output; it needs no second reduction or staged row.
+template <bool Normed, uint WIDTH, uint STRIDE, bool Masked = false, uint InputColumns = 0, bool GivenFactor = false>
 kernel void streamed_row_gather(device const half *x [[buffer(0)]], device half *first [[buffer(1)]],
                                 device const int *order [[buffer(2)]], device const float *scale [[buffer(3)]],
                                 device half *second [[buffer(5)]], device half *third [[buffer(6)]],
                                 device const float *secondScale [[buffer(7)]], device const float *thirdScale [[buffer(8)]],
+                                device const float *factors [[buffer(9)]],
                                 constant streamed_dims &dims [[buffer(15)]], uint n [[threadgroup_position_in_grid]],
                                 uint t [[thread_index_in_threadgroup]], uint lanes [[threads_per_threadgroup]]) {
     const streamed_dims d = dims_of(dims);
@@ -763,21 +765,22 @@ kernel void streamed_row_gather(device const half *x [[buffer(0)]], device half 
     threadgroup float partial[32];
     const uint columns = d.columns, inputColumns = InputColumns ? InputColumns : columns;
     if (WIDTH == 0) {
-        streamed_gather<STRIDE, Masked>(mesh_view<0>(x, ulong(n) * inputColumns), 1.0f, order, first, scale, second, secondScale, third, thirdScale, d.inputs, columns, d.rows, n, t, threads);
+        const float factor = GivenFactor ? factors[mesh_index<9>(n)] : 1.0f;
+        streamed_gather<STRIDE, Masked>(mesh_view<0>(x, ulong(n) * inputColumns), factor, order, first, scale, second, secondScale, third, thirdScale, d.inputs, columns, d.rows, n, t, threads);
         return;
     }
     float s = 0.0f;
     for (uint q = t; q < inputColumns / 4; q += threads) {
         const float4 v = float4(mesh_load4<0,half4,(InputColumns ? InputColumns : WIDTH) % 4 == 0>(x, ulong(n) * inputColumns + 4*q));
         ((threadgroup float4 *)values)[q] = v;
-        s += dot(v, v);
+        if constexpr (!GivenFactor) s += dot(v, v);
     }
     for (uint q = inputColumns / 4 * 4 + t; q < inputColumns; q += threads) {
         const float v = float(x[mesh_index<0>(ulong(n) * inputColumns + q)]);
         values[q] = v;
-        s += v * v;
+        if constexpr (!GivenFactor) s += v * v;
     }
-    const float factor = Normed ? streamed_rms(s, inputColumns, d.eps, partial, t, threads) : 1.0f;
+    const float factor = GivenFactor ? factors[mesh_index<9>(n)] : Normed ? streamed_rms(s, inputColumns, d.eps, partial, t, threads) : 1.0f;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     streamed_gather<STRIDE, Masked>((threadgroup const float *)values, factor, order, first, scale, second, secondScale, third, thirdScale, d.inputs, columns, d.rows, n, t, threads);
 }
@@ -792,12 +795,13 @@ template [[host_name("streamed_gather_32")]] [[kernel]] decltype(streamed_row_ga
 // covers 4s columns. With flags bit 0 (eight simdgroups: a threadgroup a tile column t) it also writes the first
 // product's tables for 1-bit tiles, tables[n][t][kb][m] = the sum over j in m of its coded input kb + 8 j of the tile
 // (fp32, from the fp16 values it stored).
-template <uint InputColumns = 0>
+template <uint InputColumns = 0, bool GivenFactor = false>
 kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *first [[buffer(1)]],
                             device half *second [[buffer(2)]],
                             device const float *scale [[buffer(4)]], device const float *secondScale [[buffer(5)]],
                             device const char *rotation [[buffer(6)]], device const float *rotationScale [[buffer(7)]],
                             device float *tables [[buffer(8)]],
+                            device const float *factors [[buffer(9)]],
                             device const half *gamma [[buffer(11)]], constant streamed_dims &dims [[buffer(15)]],
                             uint group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
                             uint lane [[thread_index_in_simdgroup]], uint simds [[simdgroups_per_threadgroup]],
@@ -819,7 +823,10 @@ kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *fir
             float4 xv[4];
             for (uint k = 0; k < 4; k++) {
                 xv[k] = float4(mesh_load4<0,half4,InputColumns % 4 == 0>(x, ulong(n) * inputColumns + 4*(4*w+k)));
-                if (eps > 0.0f) { squares += dot(xv[k], xv[k]); xv[k] *= float4(mesh_load4<11,half4>(gamma, 4 * (4 * w + k))); }
+                if (eps > 0.0f) {
+                    if constexpr (!GivenFactor) squares += dot(xv[k], xv[k]);
+                    xv[k] *= float4(mesh_load4<11,half4>(gamma, 4 * (4 * w + k)));
+                }
             }
             for (uint c = 0; c < C; c++) {
                 if constexpr (InputColumns == 0) {
@@ -835,10 +842,13 @@ kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *fir
         }
         for (uint k = words * 16 + lane; k < inputColumns; k += MESH_SIMD_WIDTH) {
             float value = float(x[mesh_index<0>(ulong(n) * inputColumns + k)]);
-            if (eps > 0.0f) { squares += value * value; value *= float(gamma[mesh_index<11>(k)]); }
+            if (eps > 0.0f) {
+                if constexpr (!GivenFactor) squares += value * value;
+                value *= float(gamma[mesh_index<11>(k)]);
+            }
             for (uint c = 0; c < C; c++) acc[c] += value * float(rotation[mesh_index<6>(ulong(min(j0 + c, columns - 1)) * inputColumns + k)]);
         }
-        const float rms = eps > 0.0f ? streamed_rms(squares, inputColumns, eps, nullptr, lane, 32) : 1.0f;
+        const float rms = GivenFactor ? factors[mesh_index<9>(n)] : eps > 0.0f ? streamed_rms(squares, inputColumns, eps, nullptr, lane, 32) : 1.0f;
         for (uint c = 0; c < C; c++) {
             const float total = simd_sum(acc[c]) * rms;
             const uint j = j0 + c;
@@ -873,11 +883,12 @@ template [[host_name("streamed_rotate")]] [[kernel]] decltype(streamed_rotate<0>
 // of the K blocks is read into registers by threads (g, j), g < threads / N, each mixing its K / (threads / N) rows
 // into a second region, which the puts read in their column order. Two barriers. N in {32, 64, 128}, K <= 20 and a
 // multiple of threads / N, K <= 3 S, columns <= 16 threads and <= 2560.
-template <uint InputColumns = 0, bool Masked = false>
+template <uint InputColumns = 0, bool Masked = false, bool GivenFactor = false>
 kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *first [[buffer(1)]],
                               device half *second [[buffer(2)]], device const int *order [[buffer(3)]],
                               device const float *scale [[buffer(4)]], device const float *secondScale [[buffer(5)]],
                               device const char *signs [[buffer(6)]], device const char *mix [[buffer(7)]],
+                              device const float *factors [[buffer(9)]],
                               device const half *gamma [[buffer(11)]], device const int *sourceOrder [[buffer(12)]], constant streamed_dims &dims [[buffer(15)]],
                               uint n [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
                               uint lanes [[threads_per_threadgroup]], uint simd [[simdgroup_index_in_threadgroup]],
@@ -912,7 +923,7 @@ kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *f
             const uint i = (b << shift) + lane * W + u;
             const int source = Masked ? sourceOrder[mesh_index<12>(i)] : int(i);
             const float value = Masked ? (source >= 0 ? float(row[source]) : 0.0f) : float(row[i]);
-            squares += value * value;
+            if constexpr (!GivenFactor) { if (eps > 0.0f) squares += value * value; }
             r[u] = (eps > 0.0f && source >= 0 ? value * float(gamma[mesh_index<11>(source)]) : value) * float(signs[mesh_index<6>(i)]);
         }
         for (uint h = 1; h < V; h <<= 1) if (h < W)
@@ -921,8 +932,17 @@ kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *f
             for (uint u = 0; u < V; u++) if (u < W) { const float other = simd_shuffle_xor(r[u], h); r[u] = (lane & h) ? other - r[u] : r[u] + other; }
         for (uint u = 0; u < V; u++) if (u < W) v[(b << shift) + lane * W + u] = r[u];
     }
-    const float rms = streamed_rms<true>(squares, inputColumns, eps, partial, t, threads);
-    const float factor = rsqrt(float(columns)) * (eps > 0.0f ? rms : 1.0f);
+    float rms;
+    if constexpr (GivenFactor) {
+        rms = factors[mesh_index<9>(n)];
+        // The butterfly values and sign masks feed the next shared-memory use.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    } else if (eps > 0.0f) rms = streamed_rms<true>(squares, inputColumns, eps, partial, t, threads);
+    else {
+        rms = 1.0f;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    const float factor = rsqrt(float(columns)) * rms;
     const uint j = t & (N - 1), g = t >> shift, Q = K / (threads >> shift);
     threadgroup float *mixed = v + columns;
     float column[KM];

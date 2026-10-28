@@ -295,13 +295,31 @@ between each slab's active rows. A transformed input carries that layout as a
 view. The common resolver supplies a compiled conversion if a supplied view
 does not meet it. Gather and rotation producers accept indexed source views
 directly. Folded gamma scales retain their existing numerical meaning; this
-change does not claim to remove repeated normalization in mixed streamed/ANE
-execution.
+relation also matters when a normalizer has more than one consumer.
+
+The native normalizer can publish its RMS factor as a float view, one element
+per row. Mixed streamed/ANE preparation gives the host its normalized operand
+and gives the input transform that factor view. The transform keeps its raw
+input and folded gamma scales, so it applies gamma once and avoids another RMS
+reduction. Gather, int8 rotation and Hadamard lowering all consume the same
+factor operand. The folded-matrix path can apply a supplied factor through the
+same normalizer. Large rotated FFNs already share their normalized input.
+
+Factor reads and writes use the same view declarations as other data. Their
+presence is specialized during preparation. The direct gather needs no
+threadgroup staging for normalization. Hadamard still orders the butterfly
+values and sign masks before their shared-memory consumers; that dependency
+does not disappear with the RMS reduction.
 
 Preparation on 2026-10-27 built rank and Goal A and compiled stored product,
 expert, fused stack, normalization, gather, rotation and output pipelines with
 strided and gathered views. Literal product pipelines also compiled. These
 checks submitted no numerical work and establish no performance result.
+
+On 2026-10-28, native builds and shader compilation also covered factor
+production and consumption with strided page views, including masked tails.
+The native packed-rotation caller now uses the existing specialization instead
+of emitting a duplicate explicit template instantiation. No numerical work ran.
 
 ## Compressed projections
 
