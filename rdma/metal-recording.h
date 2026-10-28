@@ -192,6 +192,8 @@ int MetalScheduleEnqueue(struct MetalSchedule *);
 int MetalScheduleEnqueueAfter(struct MetalSchedule *, uint64_t value, id<MTLCommandBuffer> then);
 // Ordinary completion observation: 0 pending, 1 complete, -1 failed.
 int MetalScheduleStatus(const struct MetalSchedule *, NSError **error);
+// One more holder of a function, let go by MetalScheduleFree.
+struct MetalSchedule *MetalScheduleRetain(struct MetalSchedule *);
 void MetalScheduleFree(struct MetalSchedule *);
 // A replay MetalRecord returned, destroyed and freed.
 void MetalReplayFree(struct MetalReplay *);

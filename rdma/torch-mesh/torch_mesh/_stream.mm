@@ -479,8 +479,8 @@ static const Schedule &last_of(const std::vector<Schedule> &prepared, size_t nex
 }
 
 static pybind11::capsule schedule_completion(const Schedule &schedule) {
-  return pybind11::capsule(new Schedule(schedule),"mesh.prepared-function",[](PyObject *token) {
-    delete static_cast<Schedule *>(PyCapsule_GetPointer(token,"mesh.prepared-function"));
+  return pybind11::capsule(MetalScheduleRetain(schedule.get()),"mesh.prepared-function",[](PyObject *token) {
+    MetalScheduleFree(static_cast<MetalSchedule *>(PyCapsule_GetPointer(token,"mesh.prepared-function")));
   });
 }
 
@@ -1831,7 +1831,7 @@ static bool completed(pybind11::object observation) {
   auto token=observation.cast<pybind11::capsule>();
   if(!strcmp(token.name(),"mesh.prepared-function")) {
     NSError *error=nil;
-    int status=MetalScheduleStatus(static_cast<Schedule *>(token.get_pointer())->get(),&error);
+    int status=MetalScheduleStatus(static_cast<MetalSchedule *>(token.get_pointer()),&error);
     TORCH_CHECK(status>=0,"the prepared function failed: ",error.localizedDescription.UTF8String);return status==1;
   }
   id<MTLCommandBuffer> buffer = (id<MTLCommandBuffer>)token.get_pointer();

@@ -1216,6 +1216,7 @@ typedef int (^MetalAction)(struct MetalSchedule *);
     NSUInteger invocation, first, end;
     id<MTLSharedEvent> event;
     NSMutableArray *prerequisites;
+    id fire;
     _Atomic unsigned remaining;
     _Atomic int status;
     NSError *error;
@@ -1224,7 +1225,7 @@ typedef int (^MetalAction)(struct MetalSchedule *);
 @implementation MetalWork
 - (void)dealloc {
     [accesses release];[encode release];[operation release];[dependencies release];[successors release];
-    [event release];[prerequisites release];[error release];[super dealloc];
+    [event release];[prerequisites release];[fire release];[error release];[super dealloc];
 }
 @end
 
@@ -1262,6 +1263,8 @@ struct MetalSchedule {
     // a frontend's queue slot committed at the invocation's end (MetalScheduleEnqueueAfter); a part's last GPU time
     id<MTLCommandBuffer> then;
     _Atomic uint64_t measured;
+    // made once at preparation: a part's feedback handler and event listener, the function's input listener
+    id ended, arrive, resume;
 };
 // Host operations' prerequisites notify through one listener for the process.
 static MTLSharedEventListener *MetalListener(void) {
@@ -1704,10 +1707,20 @@ static void MetalScheduleBindHost(struct MetalSchedule *root,MetalWork *work,NSA
         if(root->after)add(root->after,YES);
     }
     work->prerequisites=[events.allValues mutableCopy];
+    // Only an invocation's last actual prerequisite invokes the native operation; no Python runs.
+    __block MetalWork *task=work;
+    work->fire=[^(id<MTLSharedEvent> reached,uint64_t value){
+        (void)reached;(void)value;
+        if(atomic_fetch_sub_explicit(&task->remaining,1,memory_order_acq_rel)!=1)return;
+        NSError *error=task->operation();task->error=[error retain];
+        atomic_store_explicit(&task->status,error?-1:1,memory_order_release);
+        task->event.signaledValue=root->generation;
+        MetalScheduleSubmit(root);
+        MetalScheduleArrived(root);
+    } copy];
 }
 
-// Each invocation's notifications: only the last actual prerequisite invokes the native
-// operation; no Python runs. A task's block retains it until the block runs.
+// Each invocation's notifications, each task's made at preparation (MetalScheduleBindHost).
 static void MetalScheduleArm(struct MetalSchedule *root) {
     const uint64_t g=root->generation,input=root->value;
     for(MetalWork *task in root->hosts) {
@@ -1716,16 +1729,7 @@ static void MetalScheduleArm(struct MetalSchedule *root) {
         atomic_store_explicit(&task->remaining,(unsigned)task->prerequisites.count,memory_order_release);
     }
     for(MetalWork *task in root->hosts)for(NSArray *prerequisite in task->prerequisites)
-        [(id<MTLSharedEvent>)prerequisite[0] notifyListener:MetalListener() atValue:[prerequisite[1] boolValue]?input:g
-            block:^(id<MTLSharedEvent> reached,uint64_t value){
-                (void)reached;(void)value;
-                if(atomic_fetch_sub_explicit(&task->remaining,1,memory_order_acq_rel)!=1)return;
-                NSError *error=task->operation();task->error=[error retain];
-                atomic_store_explicit(&task->status,error?-1:1,memory_order_release);
-                task->event.signaledValue=g;
-                MetalScheduleSubmit(root);
-                MetalScheduleArrived(root);
-            }];
+        [(id<MTLSharedEvent>)prerequisite[0] notifyListener:MetalListener() atValue:[prerequisite[1] boolValue]?input:g block:task->fire];
 }
 
 // Adjacent selected dispatches retain the recorder's batched ICB execution.
@@ -1873,6 +1877,9 @@ static void MetalScheduleFinishPart(struct MetalSchedule *s) {
     struct MetalSchedule *root=s->root;
     if(root->lastSubmission)root->lastSubmission->submit=s;else root->firstSubmission=s;
     root->lastSubmission=s;
+    if(s->form==MetalFormSerial)return;
+    s->ended=[^(id<MTL4CommitFeedback> feedback){MetalScheduleCompleted(s,feedback.error,feedback.GPUEndTime-feedback.GPUStartTime);} copy];
+    s->arrive=[^(id<MTLSharedEvent> e,uint64_t v){(void)e;(void)v;MetalScheduleArrived(root);} copy];
 }
 
 int MetalScheduleFinish(struct MetalSchedule *root,void (^completed)(NSError *)) {
@@ -1880,6 +1887,7 @@ int MetalScheduleFinish(struct MetalSchedule *root,void (^completed)(NSError *))
     [root->completed release];root->completed=[completed copy];
     MetalScheduleFinishPart(MetalScheduleTail(root));
     root->prepared=YES;
+    root->resume=[^(id<MTLSharedEvent> e,uint64_t v){(void)e;(void)v;MetalScheduleSubmit(root);MetalScheduleArrived(root);} copy];
     for(NSValue *value in root->communicators) {
         const ncclResult_t error=ncclMeshCommRealized(value.pointerValue);
         if(error)return error;
@@ -1926,14 +1934,10 @@ static void MetalPartCommit(struct MetalSchedule *s) {
     if(s->after&&!MetalShared(s->after))[(id<MTL4CommandQueue>)s->queue waitForEvent:s->after value:root->value];
     // The queue's signal runs after the feedback handler may have; the function, and so
     // its event, lives until the signal is seen.
-    if(s->event)[s->event notifyListener:MetalListener() atValue:g block:^(id<MTLSharedEvent> e,uint64_t v){
-        (void)e;(void)v;MetalScheduleArrived(root);
-    }];
-    // A commit's options call their feedback handler once.
+    if(s->event)[s->event notifyListener:MetalListener() atValue:g block:s->arrive];
+    // A commit's options call their feedback handler once: one call for three commits of one (the laptop, 2026-10-28).
     MTL4CommitOptions *options=[MTL4CommitOptions new];
-    [options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback){
-        MetalScheduleCompleted(s,feedback.error,feedback.GPUEndTime-feedback.GPUStartTime);
-    }];
+    [options addFeedbackHandler:s->ended];
     [(id<MTL4CommandQueue>)s->queue commit:(id<MTL4CommandBuffer> *)&s->command count:1 options:options];
     [options release];
     if(s->event)[(id<MTL4CommandQueue>)s->queue signalEvent:s->event value:g];
@@ -1949,9 +1953,7 @@ static void MetalScheduleSubmit(struct MetalSchedule *root) {
     const BOOL listen=input&&input.signaledValue<root->value;
     if(listen)atomic_fetch_add_explicit(&root->pending,1,memory_order_relaxed);
     os_unfair_lock_unlock(&root->submitting);
-    if(listen)[input notifyListener:MetalListener() atValue:root->value block:^(id<MTLSharedEvent> e,uint64_t v){
-        (void)e;(void)v;MetalScheduleSubmit(root);MetalScheduleArrived(root);
-    }];
+    if(listen)[input notifyListener:MetalListener() atValue:root->value block:root->resume];
 }
 
 int MetalScheduleEnqueue(struct MetalSchedule *root) {
@@ -2033,6 +2035,9 @@ uint64_t MetalSchedulesStalled(char *wait,size_t room) {
     return idle;
 }
 
+struct MetalSchedule *MetalScheduleRetain(struct MetalSchedule *s) {
+    atomic_fetch_add_explicit(&s->references,1,memory_order_relaxed);return s;
+}
 void MetalScheduleFree(struct MetalSchedule *s) {
     if(!s)return;
     if(atomic_fetch_sub_explicit(&s->references,1,memory_order_acq_rel)!=1)return;
@@ -2045,7 +2050,8 @@ void MetalScheduleFree(struct MetalSchedule *s) {
     [s->residency release];[s->owners release];[s->read release];[s->written release];[s->actions release];
     [s->event release];[s->start release];[s->work release];[s->hosts release];[s->waits release];[s->waited release];
     [s->then commit];[s->then release];
-    [s->completed release];[s->error release];[s->after release];[s->device release];[s->communicators release];free(s);
+    [s->completed release];[s->error release];[s->after release];[s->device release];[s->communicators release];
+    [s->ended release];[s->arrive release];[s->resume release];free(s);
 }
 
 id<MTLDevice> MetalRecordingDevice(id<MTLDevice> device,BOOL indirectPipelines) {
