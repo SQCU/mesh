@@ -6,41 +6,43 @@ of step k holds the peer's step k, whole, or it is a counterexample (torn: two v
 never_landed or unproduced: a word no step encodes; wrong_rank).
 
 Style A, pipelined one-sided writes (review critical 1). One Execution of STEPS realized WRITE steps from rank 0 to
-rank 1 (a ViewWrites binding, ncclMeshWriteExecute, as partition._follow_spans uses one): rank 0's step a producer
-kernel and the WRITE, rank 1's the WRITE and a consumer kernel (PASSES reads: the slow peer), all inside each rank's one
-prepared function. Each kernel takes its step from a device counter it advances, so torch's queue takes no part and
-critical 2 can neither cause nor mask a counterexample. Every step reuses the one source and the one destination, so
-step k+1's producer must wait for step k's source to be read (a credit), and step k+1 must not land before step k's
-consumer has read it (the landing gate). The write is one-way: a rank that also waited for its peer's landing each step
-would hold the two in lockstep and hide the source's reuse.
+every other rank (a ViewWrites binding, ncclMeshWriteExecute, as partition._follow_spans uses one): rank 0's step a
+producer kernel and the WRITEs, every other rank's the WRITEs and a consumer kernel (PASSES reads: the slow peers), all
+inside each rank's one prepared function. Each kernel takes its step from a device counter it advances, so torch's
+queue takes no part and critical 2 can neither cause nor mask a counterexample. The producer stores what it publishes
+through mesh_step_write and the consumer loads what landed through mesh_step_read (nccl-mesh-kernels.h), so the network
+card and the consumer see each store at once and a counterexample is an order the library allowed. Every step reuses
+the one source and the one destination, so step k+1's producer must wait for step k's source to be read (a credit),
+and step k+1 must not land before step k's consumer has read it (the landing gate). The write is one-way: a rank that
+also waited for its peer's landing each step would hold the two in lockstep and hide the source's reuse.
 
-Style B, overlapped consumer and update (review critical 2). UPDATES prepared WRITE steps, each with its own source and
-destination, so no WRITE generation is reused and critical 1 cannot reach them. Torch produces step k's source, the
-step is enqueued, and torch reads its destination into a record while the next step lands, with extra GPU work on
-rank 0. Unless torch's queue and the prepared queue are ordered, the step sends a source torch has not yet written, or
-torch reads a destination before it lands.
+Style B, overlapped consumer and update (review critical 2). UPDATES prepared WRITE steps from each rank to the next
+(a ring), each with its own source and destination, so no WRITE generation is reused and critical 1 cannot reach them.
+Torch produces step k's source, the step is enqueued, and torch reads its destination into a record while the next
+step lands, with extra GPU work on rank 0. Unless torch's queue and the prepared queue are ordered, the step sends a
+source torch has not yet written, or torch reads a destination before it lands.
 
 Each style prints its reads by kind, and style A its function's seconds (a record the hourly aggregates). The program
 exits 1 on any counterexample and 0 when every read held its step.
 Memory is region leases (torch_mesh.empty), made before their style runs and read on the host through their shared
-storage. A wait that sees no progress for PROGRESS seconds ends the program through the library's expiry
-(_stream.expired: its GPU work and posted receives stopped first), naming the wait; faulthandler ends a process stuck
-anywhere else, with every thread's traceback. Ranks come from the launcher (RANK, WORLD_SIZE,
-MASTER_ADDR, MASTER_PORT); the hourly places it on two nodes (metal-microbench tools/mesh/hourly/workloads.json).
+storage. Every end but the normal one is the library's expiry (_stream.expired: its GPU work and posted receives
+stopped first), naming what ended it: a wait that sees no progress for PROGRESS seconds, a store call past the
+library's preparation bound (torch_mesh.bounded), or a failure raised. Ranks come from the launcher (RANK, WORLD_SIZE,
+MASTER_ADDR, MASTER_PORT), as many as its placement gives, two or more (metal-microbench
+tools/mesh/hourly/workloads.json).
 """
 import collections
-import faulthandler
 import json
 import os
 import sys
 import time
-from datetime import timedelta
+import traceback
 
 import torch
 import torch.distributed as dist
 
 import torch_mesh
-from torch_mesh import _stream
+from torch_mesh import _stream, fused
 from torch_mesh.backend import WRITE, Call
 from torch_mesh.declarations import execution_sequence
 from torch_mesh.engines import host
@@ -52,22 +54,19 @@ UPDATE_WORDS = int(os.environ.get('DEMO_UPDATE_WORDS', 16384))
 PASSES = int(os.environ.get('DEMO_PASSES', 4))                # style A: the consumer's passes over each read
 EXTRA = int(os.environ.get('DEMO_EXTRA', 1024))               # style B: rank 0's extra work, an EXTRA-square half matmul
 PROGRESS = float(os.environ.get('DEMO_PROGRESS_SECONDS', 15))
-PREPARATION = float(os.environ.get('DEMO_PREPARATION_SECONDS', 120))
 SENTINEL, UNWRITTEN = 0x7E000000, 0x7D000000                  # never landed, never produced: no (rank, step) encodes them
-KERNELS = '''
-#include <metal_stdlib>
-using namespace metal;
+KERNELS = fused.steps() + '''
 // w: the words, the rank whose (rank, step) they encode, the consumer's passes over its read; each kernel one
-// threadgroup that advances its rank's step counter once every thread has read it
-kernel void produce(device uint *source [[buffer(0)]], device uint *counter [[buffer(1)]], constant uint *w [[buffer(2)]],
+// threadgroup that advances its rank's step counter once every thread has read it, published for the host's settle
+kernel void produce(device uchar *source [[buffer(0)]], device uint *counter [[buffer(1)]], constant uint *w [[buffer(2)]],
                     uint i [[thread_index_in_threadgroup]], uint n [[threads_per_threadgroup]]) {
   const uint step = counter[0] + 1, word = (w[1] << 24) | (step & 0xFFFFFF);
-  for (uint j = i; j < w[0]; j += n) source[j] = word;
+  for (uint j = i; j < w[0]; j += n) mesh_step_write(source, j, word);
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (i == 0) counter[0] = step;
+  if (i == 0) mesh_publish((volatile coherent(system) device uint *)counter, step);
 }
 // the step's read: its words differing from the step's, their least and greatest
-kernel void consume(device const uint *landing [[buffer(0)]], device uint *counter [[buffer(1)]], device uint *record [[buffer(2)]],
+kernel void consume(device const uchar *landing [[buffer(0)]], device uint *counter [[buffer(1)]], device uint *record [[buffer(2)]],
                     constant uint *w [[buffer(3)]], uint i [[thread_index_in_threadgroup]], uint n [[threads_per_threadgroup]],
                     uint lane [[thread_index_in_simdgroup]], uint g [[simdgroup_index_in_threadgroup]],
                     uint groups [[simdgroups_per_threadgroup]]) {
@@ -75,14 +74,14 @@ kernel void consume(device const uint *landing [[buffer(0)]], device uint *count
   const uint step = counter[0] + 1, expected = (w[1] << 24) | (step & 0xFFFFFF);
   uint bad = 0, lo = ~0u, hi = 0;
   for (uint p = 0; p < w[2]; p++)
-    for (uint j = i; j < w[0]; j += n) { const uint v = landing[j]; bad += v != expected; lo = min(lo, v); hi = max(hi, v); }
+    for (uint j = i; j < w[0]; j += n) { const uint v = mesh_step_read<uint>(landing, j); bad += v != expected; lo = min(lo, v); hi = max(hi, v); }
   bad = simd_sum(bad); lo = simd_min(lo); hi = simd_max(hi);
   if (lane == 0) { part[0][g] = bad; part[1][g] = lo; part[2][g] = hi; }
   threadgroup_barrier(mem_flags::mem_threadgroup);
   if (i == 0) {
     for (uint k = 1; k < groups; k++) { bad += part[0][k]; lo = min(lo, part[1][k]); hi = max(hi, part[2][k]); }
     record[3 * step] = bad; record[3 * step + 1] = lo; record[3 * step + 2] = hi;
-    counter[0] = step;
+    mesh_publish((volatile coherent(system) device uint *)counter, step);
   }
 }
 '''
@@ -105,12 +104,6 @@ def kind(bad, lo, hi, step, peer):
     return 'stale' if lo & 0xFFFFFF < step else 'ahead'
 
 
-def watch(seconds):
-    """The backstop: no progress for `seconds` ends the process (faulthandler dumps every thread, then _exit(1);
-    it needs no GIL)."""
-    faulthandler.dump_traceback_later(seconds, exit=True)
-
-
 def settle(done, progress, wait):
     """Poll `done` while `progress` moves; PROGRESS seconds without a move ends the program through the library's expiry,
     naming `wait`."""
@@ -118,25 +111,28 @@ def settle(done, progress, wait):
     while not done():
         if (now := progress()) != seen:
             seen, since = now, time.monotonic()
-            watch(2 * PROGRESS)
         elif time.monotonic() - since > PROGRESS:
             _stream.expired(f'demo error: {wait}, no progress at {seen}', int(PROGRESS * 1e9))
         time.sleep(0.001)
 
 
-def meet(store, name, rank):
-    """Both ranks prepared before either enqueues, so no crossing waits out a peer's preparation."""
-    store.set(f'demo/{name}/{rank}', '1')
-    store.wait([f'demo/{name}/{1 - rank}'], timedelta(seconds=PREPARATION))
+def meet(name, value=0):
+    """The sum of every rank's `value` once each has set its own, so every rank is prepared before any enqueues and no
+    crossing waits out a peer's preparation; within the library's preparation bound (torch_mesh.bounded)."""
+    store, keys = dist.distributed_c10d._get_default_store(), [f'demo/{name}/{r}' for r in range(dist.get_world_size())]
+    return torch_mesh.bounded(lambda: store.set(keys[dist.get_rank()], str(value)) or sum(int(store.get(k)) for k in keys),
+                              f"demo: every rank's {name} in the store")
 
 
-def writes(group, rank, sources, landings, words, issued, roots=(0, 1)):
-    """A step's WRITE from each of `roots` (its source to the other rank's landing), declared for `issued` steps."""
-    group.plan([([Call(WRITE, 4 * words, torch.uint8, root=a, destination=1 - a) for a in roots], issued)])
-    return [group.prepare_writes([(s if rank == a else d, a, 1 - a) for a in roots]) for s, d in zip(sources, landings)]
+def writes(group, rank, sources, landings, words, issued, pairs):
+    """A step's WRITE for each (a, b) of `pairs`, a's source to b's landing (a relay's lease on a rank that is neither:
+    backend.prepare_writes), declared for `issued` steps."""
+    group.plan([([Call(WRITE, 4 * words, torch.uint8, root=a, destination=b) for a, b in pairs], issued)])
+    return [group.prepare_writes([(s if rank == a else d if rank == b else torch_mesh.empty(words, dtype=torch.int32), a, b)
+                                  for a, b in pairs]) for s, d in zip(sources, landings)]
 
 
-def style_a(group, rank, store):
+def style_a(group, rank, size):
     shift = _stream.compilation['ACCESS_WRITE_SHIFT']
     operand, counter = torch_mesh.empty(WORDS, dtype=torch.int32), torch_mesh.empty(1, dtype=torch.int32)
     record = torch_mesh.empty(STEPS + 1, 3, dtype=torch.int32)
@@ -144,7 +140,7 @@ def style_a(group, rank, store):
         host(t).fill_(value)
     kernel = _stream.pipeline(KERNELS, 'consume' if rank else 'produce')
     width = min(1024, _stream.pipeline_facts(kernel)[0])
-    [write] = writes(group, rank, [operand], [operand], WORDS, STEPS, roots=(0,))
+    [write] = writes(group, rank, [operand], [operand], WORDS, STEPS, [(0, b) for b in range(1, size)])
 
     class Step:
         def append(self, schedule):
@@ -157,7 +153,7 @@ def style_a(group, rank, store):
 
     program = execution_sequence([Step()] * STEPS)
     program.realize()
-    meet(store, 'A', rank)
+    meet('A')
     started = time.monotonic()
     program.forward()
     done, count = program.completion(), host(counter)
@@ -167,16 +163,16 @@ def style_a(group, rank, store):
     return collections.Counter(kind(*row, step, 0) for step, row in enumerate(rows, 1)), STEPS
 
 
-def style_b(group, rank, store):
-    peer = 1 - rank
+def style_b(group, rank, size):
+    peer = (rank - 1) % size
     sources, landings, reads = (torch_mesh.empty(UPDATES, UPDATE_WORDS, dtype=torch.int32) for _ in range(3))
     extra = [torch_mesh.empty(EXTRA, EXTRA, dtype=torch.float16) for _ in range(3 * (rank == 0))]
     for t, value in zip((sources, landings, reads, *extra), (UNWRITTEN, SENTINEL, 0, 1 / EXTRA, 1 / EXTRA, 0)):
         host(t).fill_(value)
-    steps = writes(group, rank, sources, landings, UPDATE_WORDS, UPDATES)
+    steps = writes(group, rank, sources, landings, UPDATE_WORDS, UPDATES, [(a, (a + 1) % size) for a in range(size)])
     for step in steps:
         step.realize()
-    meet(store, 'B', rank)
+    meet('B')
     for k, step in enumerate(steps):
         if extra:
             torch.mm(*extra[:2], out=extra[2])
@@ -194,30 +190,31 @@ def style_b(group, rank, store):
 
 
 def main():
-    watch(PREPARATION)
-    dist.init_process_group(backend=os.environ.get('BACKEND', 'mesh'), device_id=torch.device('mps', 0))
+    torch_mesh.bounded(lambda: dist.init_process_group(backend=os.environ.get('BACKEND', 'mesh'),
+                                                       device_id=torch.device('mps', 0)), 'demo: init_process_group')
     rank, size = dist.get_rank(), dist.get_world_size()
-    if size != 2:
-        raise SystemExit(f'demo runs on 2 ranks, not {size}')
+    if size < 2:
+        raise ValueError(f'demo runs on 2 or more ranks, not {size}')
     group = dist.distributed_c10d._get_default_group()._get_backend(torch.device('mps'))
-    store = dist.distributed_c10d._get_default_store()
+    hits = 0
     for name, style in (('A (critical 1: pipelined one-sided writes)', style_a),
                         ('B (critical 2: overlapped consumer and update)', style_b)):
-        watch(PREPARATION)
-        reads, steps = style(group, rank, store)
+        reads, steps = style(group, rank, size)
         hit = sum(reads.values()) - reads['held']
-        store.add('demo/counterexamples', hit)
+        hits += hit
         print(f'rank{rank} style {name}: steps={steps} reads={sum(reads.values())} '
               + ' '.join(f'{k}={reads[k]}' for k in ('held', 'torn', 'ahead', 'stale', 'never_landed', 'unproduced', 'wrong_rank'))
               + f" -> {'COUNTEREXAMPLES' if hit else 'clean'}", flush=True)
-    meet(store, 'end', rank)
-    hits = store.add('demo/counterexamples', 0)
+    hits = meet('end', hits)
     if hits:
         print(f'demo error: the ranks read {hits} counterexamples', file=sys.stderr, flush=True)
-    watch(2 * PROGRESS)
-    dist.destroy_process_group()
+    torch_mesh.bounded(dist.destroy_process_group, 'demo: destroy_process_group')
     return 1 if hits else 0
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as error:
+        traceback.print_exc()
+        _stream.expired(f'demo error: {error}', 0)
