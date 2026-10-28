@@ -64,8 +64,15 @@ static inline struct metal_result metal_failed(int status) { return (struct meta
 
 void *metal_device(void);
 void *metal_wrap(void *address, size_t bytes);
-/* a buffer of `bytes` the host and the GPU both read and write, zeroed (its address metal_contents') */
-void *metal_shared(size_t bytes);
+/* bytes of the region the GPU reads once a program has encoded them (nccl-mesh.c, struct piece): metal_carve cuts
+   `bytes` (256-aligned) for one use, whose end metal_done names next (each of `n` words at `words` at least `value`;
+   a use never named is never done); metal_piece_hold takes a whole piece (*bytes of it) until metal_piece_give.  Under
+   the groups' lock but metal_piece_give; 0 or a piece, ENOMEM or NULL where the region cannot meet it */
+struct metal_bytes { void *buffer; size_t offset; void *contents; };
+int metal_carve(size_t bytes, struct metal_bytes *made);
+void metal_done(const _Atomic uint64_t *words, uint32_t n, uint64_t value);
+void *metal_piece_hold(struct metal_bytes *made, size_t *bytes);
+void metal_piece_give(void *piece);
 void *metal_event(void);
 uint64_t metal_signaled(void *event);
 /* 1 once `event` reaches `value`, 0 where `ns` pass first */

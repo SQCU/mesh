@@ -453,7 +453,7 @@ static void comm_free(struct ncclComm *comm) {
   bootstrap_close(comm);
   routes_free(comm, 1);
   for (uint32_t h = 0; h < comm->count; h++) { metal_release(comm->channels[h].buffer); metal_release(comm->channels[h].lists); }
-  if (comm->violation) metal_release(comm->violation);
+  ncclMemFree((void *)comm->words);
   metal_release(comm->command);
   plan_free(comm, comm->plan);
   free(comm->cache);
@@ -1384,8 +1384,9 @@ static int fabric_realize(struct ncclComm *comm) {
   size_t offset = 0;
   comm->page = (uint64_t)m->block * m->pgsz;
   int status = 0;
-  if (!(comm->violation = metal_shared((size_t)getpagesize()))) status = ENOMEM;
-  if (!status) comm->words = metal_contents(comm->violation);
+  void *words = NULL;
+  if (ncclMemAlloc(&words, (size_t)getpagesize()) || lease_buffer(words, &comm->violation, &offset) || offset) status = ENOMEM;
+  else { memset(words, 0, (size_t)getpagesize()); comm->words = words; }
   if (!status && !(comm->channels = calloc(comm->fabric.cables + 1, sizeof *comm->channels))) status = ENOMEM;
   if (!status && comm->nranks > 1 && (ncclMemAlloc(&comm->gate_word, sizeof(uint64_t)) || lease_buffer(comm->gate_word, &comm->gate, &offset) || offset))
     status = ENOMEM;
@@ -2993,17 +2994,75 @@ static void schedule_laid(struct ncclComm *comm, struct schedule *plans) {
 
 static size_t page_up(size_t bytes, uint64_t page) { return (size_t)((bytes + page - 1) / page * page); }
 
-/* *items (a list of `size`-byte items, *room of them) with room for `count` + 1, its room doubled where it has less:
+/* *items (a list of `size`-byte items, *room of them) with room for `count` + 1, its room doubled until it has:
    a list kept from call to call grows only to sizes it has not had; 0, or ENOMEM */
 static int grow(void *items, size_t *room, size_t count, size_t size) {
   void **at = items;
   if (count < *room) return 0;
-  const size_t more = *room ? 2 * *room : 8;
+  size_t more = *room ? 2 * *room : 8;
+  while (more <= count && more < SIZE_MAX / 2) more *= 2;
   void *made = more > SIZE_MAX / size ? NULL : realloc(*at, more * size);
   if (!made) return ENOMEM;
   *at = made; *room = more;
   return 0;
 }
+
+/* design/transport.md section 14 (region only): the bytes the GPU reads once a program has encoded them (present_group's
+   entries; nccl-mesh-metal.m's tracks and argument records), carved from leases of the region, each a piece with its
+   Metal buffer, made once and kept, so no Metal buffer is made at a call.  The carving piece is cut in order while it
+   has room; a piece is taken again once every use cut from it is done (`done`: each of a use's `n` words at least
+   `value`: the presented count past its entries, its tracks' ends) and none holds it whole (`held`: an argument
+   records' piece, held until its residency set ends: metal_piece_give); a new one is leased only where none free is
+   large enough.  Under group_lock (a give, from any thread, stores `held` alone) */
+struct use { const _Atomic uint64_t *words; uint32_t n; uint64_t value; };
+struct piece { void *address, *buffer; size_t bytes, used, uses, room; _Atomic int held; struct use *done; };
+static struct piece **pieces, *carving;
+static size_t piece_count, piece_room;
+static int piece_free(const struct piece *p) {
+  if (atomic_load_explicit(&p->held, memory_order_acquire)) return 0;
+  for (size_t u = 0; u < p->uses; u++)
+    for (uint32_t k = 0; k < p->done[u].n; k++)
+      if (!p->done[u].words || atomic_load_explicit(p->done[u].words + k, memory_order_acquire) < p->done[u].value) return 0;
+  return 1;
+}
+static int lease_buffer(const void *ptr, void **buffer, size_t *offset);
+/* a free piece of at least `bytes` (the least such), else one leased; NULL where the region cannot meet it */
+static struct piece *piece_take(size_t bytes) {
+  struct piece *best = NULL;
+  for (size_t k = 0; k < piece_count; k++)
+    if (pieces[k] != carving && pieces[k]->bytes >= bytes && (!best || pieces[k]->bytes < best->bytes) && piece_free(pieces[k])) best = pieces[k];
+  size_t offset;
+  if (!best && (best = calloc(1, sizeof *best)) &&
+      (grow(&pieces, &piece_room, piece_count, sizeof *pieces) || ncclMemAlloc(&best->address, bytes > MESH_COMMAND_DATA_BYTES ? bytes : MESH_COMMAND_DATA_BYTES) ||
+       lease_buffer(best->address, &best->buffer, &offset))) {
+    ncclMemFree(best->address); free(best); best = NULL;
+  } else if (best && !best->bytes) {
+    best->bytes = bytes > MESH_COMMAND_DATA_BYTES ? bytes : MESH_COMMAND_DATA_BYTES;
+    pieces[piece_count++] = best;
+  }
+  if (best) best->used = best->uses = 0;
+  return best;
+}
+/* nccl-mesh-metal.h metal_carve, metal_done, metal_piece_hold, metal_piece_give */
+int metal_carve(size_t bytes, struct metal_bytes *made) {
+  bytes = (bytes + 255) & ~(size_t)255;
+  if ((!carving || carving->used + bytes > carving->bytes) && !(carving = piece_take(bytes))) return ENOMEM;
+  if (grow(&carving->done, &carving->room, carving->uses, sizeof *carving->done)) return ENOMEM;
+  carving->done[carving->uses++] = (struct use){NULL, 1, 0};
+  *made = (struct metal_bytes){carving->buffer, carving->used, (char *)carving->address + carving->used};
+  carving->used += bytes;
+  return 0;
+}
+void metal_done(const _Atomic uint64_t *words, uint32_t n, uint64_t value) { carving->done[carving->uses - 1] = (struct use){words, n, value}; }
+void *metal_piece_hold(struct metal_bytes *made, size_t *bytes) {
+  struct piece *p = piece_take(MESH_COMMAND_DATA_BYTES);
+  if (!p) return NULL;
+  atomic_store_explicit(&p->held, 1, memory_order_release);
+  *made = (struct metal_bytes){p->buffer, 0, p->address};
+  *bytes = p->bytes;
+  return p;
+}
+void metal_piece_give(void *piece) { atomic_store_explicit(&((struct piece *)piece)->held, 0, memory_order_release); }
 
 /* the span table of `bytes` at region offset `offset`, a span a page, made the first time those bytes are named and
    never written again (the bridge may yet read it), in the communicator's pages of them (place_group lets them all go
@@ -3325,9 +3384,10 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
     const struct schedule *p = plans + h;
     int status = 0;
     if (!p->outs && !p->ins) continue;
-    void *compiled = program ? metal_shared((p->outs+p->ins)*sizeof(struct mesh_entry)) : NULL;
-    struct mesh_entry *records = compiled ? metal_contents(compiled) : NULL;
-    if (program && !compiled) return fail(ncclSystemError,"allocating compiled descriptor operands");
+    struct metal_bytes compiled = {0};
+    if (program && metal_carve((p->outs + p->ins) * sizeof(struct mesh_entry), &compiled))
+      return fail(ncclSystemError, "communicator %s: the region cannot hold a group's entries for its present", comm->name);
+    struct mesh_entry *records = compiled.contents;
 
     for (size_t k = 0; !status && k < p->outs; k++) {
       const struct message *m = p->out + k;
@@ -3372,17 +3432,18 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
     }
     if(program) {
       if(!ch->lists)ch->lists=metal_wrap(ch->view.list[0],2*MESH_STREAM_ENTRIES*sizeof(struct mesh_entry));
-      if(!ch->lists){metal_release(compiled);return fail(ncclSystemError,"binding bridge descriptor lists");}
-      metal_resident(program,ch->lists);metal_resident(program,compiled);
+      if(!ch->lists)return fail(ncclSystemError,"binding bridge descriptor lists");
+      metal_resident(program,ch->lists);metal_resident(program,compiled.buffer);
+      /* the records done with once the GPU has presented them all: the landing list's count past the group's */
+      metal_done(ch->view.presented[p->ins ? 1 : 0], 1, p->first[p->ins ? 1 : 0] + (p->ins ? p->ins : p->outs));
       const char *words=(const char *)ch->view.ready-ch->ready;
       for(int list=0;list<2&&!status;list++) {
         const size_t count=list?p->ins:p->outs;
         struct metal_result placed=metal_present(program,ch->lists,list*MESH_STREAM_ENTRIES*sizeof(struct mesh_entry),
-          compiled,list?p->outs*sizeof(struct mesh_entry):0,count,p->first[list],ch->buffer,
+          compiled.buffer,compiled.offset+(list?p->outs*sizeof(struct mesh_entry):0),count,p->first[list],ch->buffer,
           (const char *)ch->view.taken[list]-words,(const char *)ch->view.presented[list]-words);
         status=placed.status;
       }
-      metal_release(compiled);
     }
     if (status)
       return comm_fail(comm, status == ENOLINK || status == EPERM ? ncclRemoteError : ncclSystemError, "communicator %s: an entry toward node %u "
@@ -4689,9 +4750,13 @@ static void *part_run(void *argument) {
   struct part *p = argument;
   p->result = launch_one(p->list, p->n);
   p->said = last;
-  free(p->list);
   return NULL;
 }
+/* a thread's parts of its last group on several communicators, and their calls, each part's a run of them: kept for its
+   next such group (grow), so none is allocated once they have its size */
+static _Thread_local struct part *parts_kept;
+static _Thread_local struct call *sorted;
+static _Thread_local size_t parts_room, sorted_room;
 /* whether any of a part's calls crosses a link */
 static int part_crosses(const struct part *p) {
   int any = 0;
@@ -4728,33 +4793,27 @@ ncclResult_t ncclGroupEnd(void) {
   int several = 0;
   for (size_t i = 1; i < n; i++) several |= list[i].comm != list[0].comm;
   if (!several) return launch_one(list, n);
-  struct part *part = calloc(n, sizeof *part);
-  unsigned char *taken = calloc(n, 1);
-  if (!part || !taken) { free(part); free(taken); parts_free(list, n); return fail(ncclSystemError, "out of memory"); }
-  size_t parts = 0;
-  for (size_t i = 0; i < n; i++) {
-    if (taken[i]) continue;
-    const ncclComm_t comm = list[i].comm;
-    struct part *p = part + parts++;
-    p->metal = list[i].stream != NULL;
-    for (size_t j = i; j < n; j++) p->n += list[j].comm == comm;
-    p->list = malloc(p->n * sizeof *p->list);
-    size_t k = 0;
-    for (size_t j = i; j < n; j++)
-      if (list[j].comm == comm) {
-        taken[j] = 1;
-        if (p->list) p->list[k++] = list[j];
-        else call_parts_free(list + j);
-      }
-    if (!p->list) { p->result = fail(ncclSystemError, "out of memory"); p->said = last; }
+  if (grow(&parts_kept, &parts_room, n, sizeof *parts_kept) || grow(&sorted, &sorted_room, n, sizeof *sorted)) {
+    parts_free(list, n);
+    return fail(ncclSystemError, "out of memory");
   }
-  free(taken);
+  /* each communicator's calls a run of `sorted`, in their order, the communicators in the order the group names them */
+  struct part *part = parts_kept;
+  size_t parts = 0, placed = 0;
+  for (size_t i = 0; i < n; i++) {
+    size_t k = 0;
+    while (k < parts && part[k].list[0].comm != list[i].comm) k++;
+    if (k < parts) continue;
+    part[parts++] = (struct part){.list = sorted + placed, .metal = list[i].stream != NULL};
+    for (size_t j = i; j < n; j++) if (list[j].comm == list[i].comm) part[k].list[part[k].n++] = list[j];
+    placed += part[k].n;
+  }
   for (size_t b = 1; b < parts; b++)
     for (size_t a = 0; a < b && part[b].list; a++)
       if (part[a].list && part[b].list[0].fused && part[a].list[0].fused == part[b].list[0].fused && part_crosses(part + a) && part_crosses(part + b)) {
         part[b].result = fail(ncclInvalidUsage, "a fused crossing on several communicators: one ncclMeshFused holds one crossing's records");
         part[b].said = last;
-        calls_free(part[b].list, part[b].n);
+        parts_free(part[b].list, part[b].n);
         part[b].list = NULL;
       }
   /* the caller's issue record, and the stream the Metal parts complete on where it asked none: the last Metal part's,
@@ -4779,7 +4838,6 @@ ncclResult_t ncclGroupEnd(void) {
     for (size_t i = 0; i < p->n; i++) p->list[i].issue = used;
     p->result = launch_one(p->list, p->n);
     p->said = last;
-    free(p->list);
     p->list = NULL;
     if (!p->result) { published |= used->published; ticket = used->ticket > ticket ? used->ticket : ticket; }
   }
@@ -4797,7 +4855,7 @@ ncclResult_t ncclGroupEnd(void) {
     if (error) {
       p->result = fail(ncclSystemError, "a thread for communicator %s's calls: %s", p->list[0].comm->name, strerror(error));
       p->said = last;
-      calls_free(p->list, p->n);
+      parts_free(p->list, p->n);
     }
   }
   ncclResult_t result = ncclSuccess;
@@ -4806,7 +4864,6 @@ ncclResult_t ncclGroupEnd(void) {
     if (part[k].threaded) pthread_join(part[k].thread, NULL);
     if (part[k].result && !result) { result = part[k].result; first = part[k].said; }
   }
-  free(part);
   if (completed && !result) { result = completed; first = completing; }
   if (issue) *issue = (ncclMeshIssue){ticket, published};
   if (result) last = first;

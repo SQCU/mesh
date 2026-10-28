@@ -153,16 +153,20 @@
 
    Memory.  The process is one client of its node's bridge: one attach of the node's region, made at its first
    ncclMemAlloc or communicator, whose slot owns the process's leases and holds the streams its communicators use; a
-   communicator leases a page for its gate, pages of span tables (each made the first time its bytes are named and
-   never written again; past 64 pages all are let go and made again as named, the bridge's reads of entries already
-   presented keeping their pages), and, for each group definition (a declared group, or an undeclared group's calls,
+   communicator leases a page for its gate and one for its failure words, pages of span tables (each made the first
+   time its bytes are named and never written again; past 64 pages, or twice the most one group has made since, all are
+   let go and made again as named, the bridge's reads of entries already presented keeping their pages), and, for each group definition (a declared group, or an undeclared group's calls,
    the 64 most recently used kept), two slots of what its groups send from and land in that are not the caller's (a
    reduce-scatter's partials of the others' segments, a non-receiving rank's operand, a tree's scratch, a relay's
    generations, a combine's landing area, credits): made at its first group, its groups taking turns at them,
    ncclMemAlloc called again only where one must grow (to one of eight sizes an octave), a dropped definition's slots
    kept for the next, one too small returned where its last group was the host path's and is done, all returned at
-   ncclCommDestroy.  A group's host bookkeeping (its schedules, its steps' state, its record in flight) is its
-   definition's too, made at its first groups and bound again at each later one.  A result is made in recvbuff (a reduce-scatter's own segment too: no compiled piece spans two
+   ncclCommDestroy.  What the GPU reads of a group once it is encoded (its entries for the bridge's lists, its tracks'
+   records, a Metal 4 dispatch's argument record) is cut from the process's pieces of the region, each a lease with its
+   Metal buffer made once, taken again once the GPU has done with all cut from it (the entries presented, the tracks
+   ended, the residency set that holds argument records ended): no Metal buffer is made at a call.  A group's host
+   bookkeeping (its schedules, its steps' state, its record in flight) is its definition's too, made at its first
+   groups and bound again at each later one; a group on several communicators keeps its parts in its thread's lists.  A result is made in recvbuff (a reduce-scatter's own segment too: no compiled piece spans two
    segments), and nothing is copied into a slot from a caller's buffer but the operand of a premultiplied,
    partials-merging or fused call where it is not the result, and an in-place single-phase all-reduce's original.  A
    group writes a slot only once the slot's last group has every landing awaited: the stream's order, and a landed
