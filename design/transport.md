@@ -249,13 +249,15 @@ enqueued slot runs after it with no error 12 s later (the laptop, macOS 26.3, an
 The platform does not end a busy command buffer (7.2 s of ALU work in one on macOS 27.0), but on 27.0 it ends a
 kernel spinning on relaxed loads alone as a hang within 0.28 s (the library's fenced coherent loads ran 2 s). A
 prepared function is split into command buffers at its crossings: a part holds as many crossings as fit half of
-MESH_PLATFORM_NS beside one wait run to its bound (NCCL_MESH_POLLS loads at the device's load period, read once in a
-process by the spin kernel: 253 ns on the laptop, 1.14 s a bound), each other one taking the 2^10 loads in which its
-claim ends it (0.26 ms; about 5,200 crossings a part), or its measured GPU time once parts have run, if more
-(rdma/metal-recording.m MetalCrossings); and its other GPU work, once a GPU-only part has run, into parts of as many
-commands as their measured GPU time fits in half MESH_PLATFORM_NS (MetalScheduleRoom), so that a part's end, the
-watch's progress, comes within it. A part is not one a crossing: each Metal 4 command buffer encoded holds about
-170 KiB of its allocator's memory (the laptop, 2026-10-28), so 4,096 of them took 0.9 to 2.6 GiB.
+MESH_PLATFORM_NS at each one's measured GPU time once parts have run, and before that at the 2^10 loads in which a
+failed wait's claim ends it (at the device's load period, read once in a process by the spin kernel: 253 ns on the
+laptop, 0.26 ms, about 9,600 crossings a part) (rdma/metal-recording.m MetalCrossings); and its other GPU work, once a
+GPU-only part has run, into parts of as many commands as their measured GPU time fits in half MESH_PLATFORM_NS
+(MetalScheduleRoom), so that a part's end, the watch's progress, comes within it. A wait that runs to its bound
+(NCCL_MESH_POLLS loads, 1.14 s on the laptop) is a failure, which ends its part within that bound and that half. A
+part is not one a crossing: each Metal 4 command buffer costs about 40 us of GPU time (512 one-dispatch buffers took
+20-32 ms where one buffer of the same 512 dispatches took 0.6-1.5 ms) and holds about 170 KiB of its allocator's
+memory (4,096 of them took 0.9 to 2.6 GiB; the laptop, 2026-10-28).
 
 The only thing that cannot be stopped is a thread inside a kernel call that waits on something that never happens. A
 process in that state (STAT `U`) ignores every signal, SIGKILL included. Observed:

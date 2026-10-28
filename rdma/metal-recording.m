@@ -1496,17 +1496,17 @@ void MetalScheduleCompute(struct MetalSchedule *root,id<MTLComputePipelineState>
 }
 }
 
-// design/transport.md section 5: the crossings one part holds, as many as fit half MESH_PLATFORM_NS beside one GPU wait
-// run to its bound (NCCL_MESH_POLLS loads at the device's load period, metal_poll_seconds; MESH_PLATFORM_NS where it
-// was not read): a wait that fails ends the others on its failure words through their claim, each within
-// MESH_STOP_POLL_PERIOD loads, so each other crossing takes that, or its measured GPU time once parts have run, if more.
-// One per part would cost a command buffer's memory each (about 170 KiB each, measured on the laptop, 2026-10-28).
+// design/transport.md section 5: the crossings one part holds, as many as fit half MESH_PLATFORM_NS at each one's
+// measured GPU time once parts have run, and before that at MESH_STOP_POLL_PERIOD loads at the device's load period
+// (metal_poll_seconds; MESH_PLATFORM_NS where it was not read), the most a crossing takes once a failed wait's claim
+// ends it. A wait that runs to its bound is that failure, so it ends the part within its bound and that half. A part
+// is a Metal 4 command buffer: about 40 us of GPU time and 170 KiB of its allocator's memory each (the laptop,
+// 2026-10-28), which one a crossing costs every crossing.
 static NSUInteger MetalCrossings(id<MTLDevice> device) {
     static double period;static dispatch_once_t once;
     dispatch_once(&once,^{period=mesh_poll_seconds(device);});
-    const double budget=MESH_PLATFORM_NS/2e9,bound=period>0?NCCL_MESH_POLLS*period:MESH_PLATFORM_NS/1e9;
-    const double each=MAX(atomic_load_explicit(&crossingNs,memory_order_relaxed)/1e9,period>0?MESH_STOP_POLL_PERIOD*period:bound);
-    return budget>bound?MAX((NSUInteger)((budget-bound)/each),(NSUInteger)1):1;
+    const double each=MAX(atomic_load_explicit(&crossingNs,memory_order_relaxed)/1e9,period>0?MESH_STOP_POLL_PERIOD*period:MESH_PLATFORM_NS/1e9);
+    return MAX((NSUInteger)(MESH_PLATFORM_NS/2e9/each),(NSUInteger)1);
 }
 
 int MetalScheduleCross(struct MetalSchedule *root,MetalCrossing cross) {
