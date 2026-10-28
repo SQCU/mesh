@@ -879,6 +879,7 @@ static constexpr const char *LINEAR_PARAMETERS[]={"device const half* x", "devic
 constexpr size_t LINEAR_BINDINGS = sizeof(LINEAR_PARAMETERS) / sizeof(*LINEAR_PARAMETERS);
 constexpr size_t LINEAR_PRODUCTS = (MESH_BUFFER_BINDINGS - 1) / LINEAR_BINDINGS;
 struct LinearDimensions { uint32_t rows, inner, columns, bias, weight_stride, first, stride0, stride1, output_row, output_column; };
+static_assert(sizeof(LinearDimensions) == 10 * sizeof(uint32_t), "linear.metal's linear_dims, as prepare_chain binds it too");
 struct LinearGroupWords {
   LinearDimensions dimensions[LINEAR_PRODUCTS];
   uint32_t first[LINEAR_PRODUCTS], activation[LINEAR_PRODUCTS];
@@ -1436,7 +1437,7 @@ static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, c
     const at::Tensor &y = operands[5];
     const int64_t R = x.size(0), K = x.size(1), S = y.size(1);
     chain->products.push_back(encoded(products[0], {x, operands[0], y, y, std::nullopt, x},
-        {R, K, S, 0, K, K, K, K}, 4, linear_groups(R, S), 1, products[2] * MESH_SIMD_WIDTH));
+        {R, K, S, 0, K, K, K, K, y.stride(0), y.stride(1)}, 4, linear_groups(R, S), 1, products[2] * MESH_SIMD_WIDTH));
     std::vector<int64_t> publication{R, S, K, 0, S, S, S, S, 0, 0};
     publication.resize(10 + 24 * f.channels);
     chain->products.push_back(encoded(products[1], {y, operands[1], x, operands[7], y},
