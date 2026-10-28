@@ -2114,6 +2114,30 @@ struct call {
 static _Thread_local int depth;
 static _Thread_local struct call *calls;
 static _Thread_local size_t call_count, call_capacity;
+/* a thread's calls' own parts at each call's place in its list: a V form's counts, an all-to-all's count matrix, its
+   buffer views; kept from group to group, each grown only where a call needs more, so a call allocates none once its
+   place has room.  Only its group's launch reads them (ncclGroupEnd): no group in flight names one after */
+enum { ROOM_SEGMENTS, ROOM_MATRIX, ROOM_SEND_VIEWS, ROOM_RECEIVE_VIEWS, ROOMS };
+struct room { void *part[ROOMS]; size_t bytes[ROOMS]; };
+static _Thread_local struct room *rooms;
+static _Thread_local size_t room_count;
+/* `bytes` of part k at the place the thread's next call takes in its list; NULL where memory runs out */
+static void *room_of(int k, size_t bytes) {
+  if (call_count >= room_count) {
+    const size_t more = call_count + 16;
+    struct room *grown = realloc(rooms, more * sizeof *grown);
+    if (!grown) return NULL;
+    memset(grown + room_count, 0, (more - room_count) * sizeof *grown);
+    rooms = grown; room_count = more;
+  }
+  struct room *r = rooms + call_count;
+  if (bytes > r->bytes[k]) {
+    void *grown = realloc(r->part[k], bytes);
+    if (!grown) return NULL;
+    r->part[k] = grown; r->bytes[k] = bytes;
+  }
+  return r->part[k];
+}
 
 static int reducing(int what) { return what == MESH_ALLREDUCE || what == MESH_REDUCE || what == MESH_REDUCE_SCATTER; }
 /* a reduction's operand element in the call's elements (the partials merge's row, else one), and a piece of `bytes` as
@@ -3854,19 +3878,20 @@ static _Atomic uint64_t retired;
 static struct loss { uint64_t ticket; ncclResult_t result; char reason[256]; } *losses;
 static size_t lost;
 
+/* what an issued call owns: its write plan's reference and its steps copy's (its counts, matrix and views are its
+   thread's: room_of) */
 static void call_parts_free(struct call *c) {
   write_plan_drop(c->write_plan);
   steps_free(c->bound);
-  free(c->send_views); free(c->receive_views);
-  free(c->segments);
-  free(c->matrix);
-  free(c->contributors); free(c->recipients);
-  free(c->production);
 }
-/* what calls own (their parts) freed, and with calls_free their list too */
 static void parts_free(struct call *list, size_t n) { for (size_t i = 0; i < n; i++) call_parts_free(list + i); }
+/* a definition's calls (a declaration's, a cached group's): what each owns besides (its counts and matrix, its
+   declared masks and production), then the list */
 static void calls_free(struct call *list, size_t n) {
-  parts_free(list, n);
+  for (size_t i = 0; i < n; i++) {
+    call_parts_free(list + i);
+    free(list[i].segments); free(list[i].matrix); free(list[i].contributors); free(list[i].recipients); free(list[i].production);
+  }
   free(list);
 }
 
@@ -5817,7 +5842,7 @@ static ncclResult_t enqueue_counts(struct call c, const size_t *counts) {
   for (int r = 0; r < n; r++) equal &= counts[r] == counts[0];
   c.count = counts[c.comm->rank];
   if (equal) return enqueue(c);
-  if (!(c.segments = malloc((size_t)n * sizeof *c.segments))) { call_parts_free(&c); return fail(ncclSystemError, "out of memory"); }
+  if (!(c.segments = room_of(ROOM_SEGMENTS, (size_t)n * sizeof *c.segments))) return fail(ncclSystemError, "out of memory");
   for (int r = 0; r < n; r++) { c.segments[r] = counts[r]; c.total += counts[r]; }
   return enqueue(c);
 }
@@ -5826,8 +5851,9 @@ ncclResult_t ncclMeshAllGatherV(const void *sendbuff, void *recvbuff, const size
   return enqueue_counts((struct call){.what = MESH_ALLGATHER, .send = sendbuff, .recv = recvbuff, .type = datatype, .op = ncclSum, .comm = comm,
                                       .stream = stream}, counts);
 }
-static struct where *bind_views(void *const *buffers,ncclComm_t comm,cudaStream_t stream) {
-  struct where *views=calloc((size_t)comm->nranks,sizeof *views);
+/* the call's buffers, a rank's each, as its views (room k of its place: room_of) */
+static struct where *bind_views(int k,void *const *buffers,ncclComm_t comm,cudaStream_t stream) {
+  struct where *views=room_of(k,(size_t)comm->nranks*sizeof *views);
   for(int rank=0;views&&rank<comm->nranks;rank++)
     views[rank]=stream?where_of(buffers[rank]):(struct where){NULL,(size_t)buffers[rank]};
   return views;
@@ -5835,7 +5861,7 @@ static struct where *bind_views(void *const *buffers,ncclComm_t comm,cudaStream_
 ncclResult_t ncclMeshAllGatherBuffers(const void *sendbuff, void *const *recvbuffs, const size_t *counts,
     ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) {
   if (!comm || !recvbuffs || !counts) return fail(ncclInvalidArgument, "gather requires its configured final bindings");
-  struct where *views=bind_views(recvbuffs,comm,stream);
+  struct where *views=bind_views(ROOM_RECEIVE_VIEWS,recvbuffs,comm,stream);
   if (!views) return fail(ncclSystemError, "out of memory");
   return enqueue_counts((struct call){.what=MESH_ALLGATHER,.send=sendbuff,.recv=recvbuffs[0],.type=datatype,
     .op=ncclSum,.comm=comm,.stream=stream,.receive_views=views}, counts);
@@ -5850,7 +5876,7 @@ ncclResult_t ncclMeshReduceScatterV(const void *sendbuff, void *recvbuff, const 
 ncclResult_t ncclMeshReduceScatterBuffers(void *const *sendbuffs,void *recvbuff,const size_t *counts,
     ncclDataType_t datatype,ncclRedOp_t op,ncclComm_t comm,cudaStream_t stream) {
   if(!comm||!sendbuffs||!counts)return fail(ncclInvalidArgument,"reduction requires its configured source bindings");
-  struct where *views=bind_views(sendbuffs,comm,stream);if(!views)return fail(ncclSystemError,"out of memory");
+  struct where *views=bind_views(ROOM_SEND_VIEWS,sendbuffs,comm,stream);if(!views)return fail(ncclSystemError,"out of memory");
   return enqueue_counts((struct call){.what=MESH_REDUCE_SCATTER,.send=sendbuffs[0],.recv=recvbuff,.type=datatype,
     .op=op,.comm=comm,.stream=stream,.send_views=views},counts);
 }
@@ -5865,10 +5891,9 @@ static ncclResult_t routed(const void *sendbuff, void *recvbuff, const size_t *s
   const int n = comm->nranks, me = comm->rank, root = from < 0 ? to : from;
   if (root < -1 || root >= n) return fail(ncclInvalidArgument, "root %d of %d ranks", root, n);
   struct call c = {.what = WHAT_COUNTED, .send = sendbuff, .recv = recvbuff, .type = datatype, .op = ncclSum, .comm = comm, .stream = stream};
-  if (!(c.segments = malloc(2 * (size_t)n * sizeof *c.segments))) return fail(ncclSystemError, "out of memory");
+  if (!(c.segments = room_of(ROOM_SEGMENTS, 2 * (size_t)n * sizeof *c.segments))) return fail(ncclSystemError, "out of memory");
   if (!sendcounts && !recvcounts) {
-    c.matrix = malloc((size_t)n * n * sizeof *c.matrix);
-    if (!c.matrix) { free(c.segments); return fail(ncclSystemError, "out of memory"); }
+    if (!(c.matrix = room_of(ROOM_MATRIX, (size_t)n * n * sizeof *c.matrix))) return fail(ncclSystemError, "out of memory");
     for (int s = 0; s < n; s++) for (int d = 0; d < n; d++)
       c.matrix[(size_t)s * n + d] = (from < 0 || from == s) && (to < 0 || to == d) ? count : 0;
   }
@@ -5877,9 +5902,9 @@ static ncclResult_t routed(const void *sendbuff, void *recvbuff, const size_t *s
     c.segments[n + q] = recvcounts ? recvcounts[q] : (from < 0 || from == q) && (to < 0 || to == me) ? count : 0;
     if (q != me) c.count += c.segments[q] + c.segments[n + q];
   }
-  c.send_views=send_views?bind_views(send_views,comm,stream):NULL;
-  c.receive_views=receive_views?bind_views(receive_views,comm,stream):NULL;
-  if((send_views&&!c.send_views)||(receive_views&&!c.receive_views)){call_parts_free(&c);return fail(ncclSystemError,"out of memory");}
+  c.send_views=send_views?bind_views(ROOM_SEND_VIEWS,send_views,comm,stream):NULL;
+  c.receive_views=receive_views?bind_views(ROOM_RECEIVE_VIEWS,receive_views,comm,stream):NULL;
+  if((send_views&&!c.send_views)||(receive_views&&!c.receive_views))return fail(ncclSystemError,"out of memory");
   return enqueue(c);
 }
 ncclResult_t ncclMeshAlltoAllV(const void *sendbuff, const size_t *sendcounts, void *recvbuff, const size_t *recvcounts, ncclDataType_t datatype,
@@ -6015,14 +6040,18 @@ static ncclResult_t split(ncclComm_t comm, int color, int key, ncclComm_t *newco
 /* the calling thread's group set aside (`to` 1: its depth and calls kept, none open) or taken back (0), so a call that
    runs its own collectives at once (ncclCommSplit, ncclCommGrow) runs them inside a group as it does outside one */
 static void aside(int to) {
-  static _Thread_local struct { int depth; struct call *calls; size_t count, capacity; } kept;
+  static _Thread_local struct { int depth; struct call *calls; size_t count, capacity, room_count; struct room *rooms; } kept;
   if (to) {
     kept.depth = depth; kept.calls = calls; kept.count = call_count; kept.capacity = call_capacity;
-    depth = 0; calls = NULL; call_count = call_capacity = 0;
+    kept.rooms = rooms; kept.room_count = room_count;
+    depth = 0; calls = NULL; call_count = call_capacity = 0; rooms = NULL; room_count = 0;
     return;
   }
   free(calls);
+  for (size_t k = 0; k < room_count; k++) for (int j = 0; j < ROOMS; j++) free(rooms[k].part[j]);
+  free(rooms);
   depth = kept.depth; calls = kept.calls; call_count = kept.count; call_capacity = kept.capacity;
+  rooms = kept.rooms; room_count = kept.room_count;
 }
 
 ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newcomm, ncclConfig_t *config) {
