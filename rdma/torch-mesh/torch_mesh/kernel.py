@@ -71,8 +71,7 @@ def prepare(inputs, input_slots, output_slots, output_strides, shapes, dtypes, d
         placed, copies = layout.resolve(view, requirements, writing=writing)
         (after if writing else commands).extend(copies)
         buffers[index] = placed
-        if 'indexed' in requirements:
-            addresses[index] = placed
+        addresses[index] = placed
     for index, value in zip(input_slots, inputs, strict=True):
         prepare_binding(index, value, False)
         read |= 1 << index

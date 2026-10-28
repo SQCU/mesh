@@ -44,6 +44,8 @@ struct MetalTensorSpan { NSInteger offset; NSUInteger count; };
 // Intersect explicit use/API requirements. No requirement is discarded by a
 // later lowering. Conflicts are preparation errors, before any numerical work.
 - (MetalTensorLayout *)requirements:(NSArray<NSDictionary *> *)requirements;
+// Address expressions and, for affine views, per-axis stride constants for
+// numerical APIs. Both describe the assigned operand, after page placement.
 - (NSString *)declaration:(NSUInteger)binding;
 // Lower the affine storage indices of a frontend IR to this page selection.
 // The source index is compiler structure, not a payload index tensor.

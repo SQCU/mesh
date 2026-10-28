@@ -11,7 +11,7 @@ import math
 
 import torch
 
-from .compilation import operands
+from .compilation import operands, api_layouts
 
 
 class Closure:
@@ -108,32 +108,35 @@ def _schedule(m, k, n, support, tile, weight, geometry):
 
 def _product(a, b, support, tile, out, *, weight=False):
     from .kernel import declare
-    from .layout import strides
+    from torch._subclasses.fake_tensor import unset_fake_temporarily
+    from torch.fx.experimental.proxy_tensor import disable_proxy_modes_tracing
     m, k = a.shape
-    if b.shape[0] != k or a.dtype != b.dtype:
-        raise ValueError('sparse contraction operands must agree on inner dimension and type')
+    if b.shape[0] != k:
+        raise ValueError('sparse contraction operands must agree on inner dimension')
     n = b.shape[1]
     types = {torch.float16: 'half', torch.float32: 'float', torch.bfloat16: 'bfloat'}
     configuration = operands()
     geometry = tuple(configuration['MATRIX_' + key] for key in ('ROWS', 'COLUMNS', 'INNER')) + (
         configuration['MATRIX_ROW_GROUPS'] * configuration['MATRIX_COLUMN_GROUPS'],)
     records, pieces, groups = _schedule(m, k, n, support, tile, weight, geometry)
-    # These literals are lifted as graph operands. The recorder maps their CPU
-    # storage directly; they are never rebuilt by numerical execution.
-    tiles = torch.tensor(records, dtype=torch.int32).reshape(-1, 4)
-    spans = torch.tensor(pieces, dtype=torch.int32).reshape(-1, 2)
+    # Schedule construction is preparation. Capture the completed values as
+    # attributes; tracing torch.tensor itself would add per-call CPU copies.
+    with disable_proxy_modes_tracing(), unset_fake_temporarily():
+        tiles = torch.tensor(records, dtype=torch.int32).reshape(-1, 4)
+        spans = torch.tensor(pieces, dtype=torch.int32).reshape(-1, 2)
     result = torch.empty((m, n), dtype=out, device=a.device)
     rm, cn, inner, _ = geometry
     full = (int(m % rm == 0 and (not weight or tile % rm == 0)), int(n % cn == 0 and tile % cn == 0),
             int(all(length == inner for _, length in pieces)))
-    args = ', '.join(map(str, (types[a.dtype], types[out], *geometry, *full, *a.stride(), *b.stride())))
+    args = ', '.join(map(str, (types[a.dtype], types[b.dtype], types[out], *geometry, *full)))
     instance = f'template [[host_name("sparse_product_bound")]] [[kernel]] decltype(sparse_product<{args}>) sparse_product<{args}>;'
     buffers = [a, b, result, tiles, spans]
-    requirements = {i: v.stride() for i, v in enumerate(buffers)}
-    requirements[2] = strides(result.shape)
+    layouts = api_layouts('matrix')
+    requirements = {0: layouts['input'], 1: layouts['weight'], 2: layouts['output'],
+                    3: tiles.stride(), 4: spans.stride()}
     result, = declare('sparse.metal', 'sparse_product_bound', buffers, (2,), (m, k, n), 5,
                       (groups, 1, 1), (geometry[-1] * configuration['SIMD_WIDTH'], 1, 1), instance,
-                      indexed=(2,), requirements=requirements)
+                      indexed=(), requirements=requirements)
     return result
 
 
@@ -172,10 +175,9 @@ class LinearFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dy):
         x, w = ctx.saved_tensors
-        dy = dy.to(x.dtype)
         n, k = w.shape
         return (input_grad(dy, w, ctx.closure, out=x.dtype) if ctx.needs_input_grad[0] else None,
-                weight_grad(x, dy, ctx.closure, n, k).to(w.dtype) if ctx.needs_input_grad[1] else None, None)
+                weight_grad(x, dy, ctx.closure, n, k, out=w.dtype) if ctx.needs_input_grad[1] else None, None)
 
 
 def expand(mask, tile, shape):

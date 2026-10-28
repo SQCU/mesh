@@ -149,6 +149,20 @@ requirement gets a prepared conversion edge. That conversion alone does not
 establish an optimal placement. Those requirements now also reach graph
 placement through declared schema operands.
 
+Sparse products use those same API requirements. Their independent input and
+weight types reach the TensorOps body, and gradient stores use the requested
+result type without separate casts. Affine stride constants come from the shared
+layout declaration after placement. The generic kernel binder emits these along
+with index expressions for every operand, so a sparse consumer no longer forces
+its producer to retain the strides seen during tracing. Schedule construction
+stays outside the numerical graph; its tables use the ordinary attribute importer.
+
+Preparation on 2026-10-28 compiled sparse products and both gradients with mixed
+types, changed input strides, mapped destinations and partial sparse tiles. Each
+prepared one numerical command without a layout conversion. The public
+`Function` interface also prepared the complete mixed-type forward/backward
+graph. No numerical commands were submitted.
+
 `orderedSpans` retains logical traversal and repeated reads for transport.
 It is distinct from the union of ranges used for dependencies. WRITE preparation
 uses it for gathered operands and keeps compact row descriptions for affine

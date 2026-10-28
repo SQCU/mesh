@@ -436,9 +436,18 @@ finished:
     return result;
 }
 - (NSString *)declaration:(NSUInteger)binding {
-    if(_indices){const NSInteger step=1;return MetalViewMappedIndexDeclaration(binding,&_count,&step,1,(NSUInteger)_offset,@{@0:_indices});}
-    NSData *shape=TensorWords(_shape),*steps=TensorWords(_strides);
-    return MetalViewMappedIndexDeclaration(binding,shape.bytes,steps.bytes,_shape.count,(NSUInteger)_offset,_maps);
+    NSMutableString *result=[NSMutableString string];
+    if(_indices){const NSInteger step=1;[result appendString:MetalViewMappedIndexDeclaration(binding,&_count,&step,1,(NSUInteger)_offset,@{@0:_indices})];}
+    else {
+        NSData *shape=TensorWords(_shape),*steps=TensorWords(_strides);
+        [result appendString:MetalViewMappedIndexDeclaration(binding,shape.bytes,steps.bytes,_shape.count,(NSUInteger)_offset,_maps)];
+    }
+    // APIs that require affine operands consume the strides of the placed
+    // view, not strides captured before placement. These are shader constants.
+    if(self.affine)for(NSUInteger axis=0;axis<_shape.count;axis++)
+        [result appendFormat:@"template<> constexpr long mesh_stride<%lu, %lu>() { return %ldl; }\n",
+            (unsigned long)binding,(unsigned long)axis,(long)[_strides[axis] integerValue]];
+    return result;
 }
 - (NSString *)declaration:(NSUInteger)binding fromStorage:(MetalTensorLayout *)source {
     NSParameterAssert(source.affine&&[source.shape isEqual:_shape]);

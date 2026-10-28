@@ -36,6 +36,7 @@ NSString *MetalViewIndexExpression(const NSUInteger *shape,const NSInteger *stri
 
 static NSString *MetalViewIndexTemplates(void) {
     return @"template<uint B> inline long mesh_index(ulong i) { return long(i); }\n"
+        "template<uint B, uint A> constexpr long mesh_stride();\n"
         "template<uint B> constexpr bool mesh_vector4() { return true; }\n";
 }
 
