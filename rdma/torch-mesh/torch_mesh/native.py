@@ -13,7 +13,7 @@ import torch
 
 from . import _stream
 from .compilation import operands as compiler_operands
-from .operand import TensorView, descriptor
+from .operand import TensorView, descriptor, rebase_typed
 
 _records = ContextVar('mesh_native_commands')
 
@@ -222,8 +222,7 @@ def compile_graph(module, metadata, operands, *, destinations=None):
             original, physical = storage_layouts[data.get_name()]
             dtype = physical.dtype if dtype is None else dtype
             described = _stream.TensorLayout(tuple(map(int, size)), tuple(map(int, stride)), int(offset))
-            mapped = described.components(dtype.itemsize).rebase(
-                original.components(physical.element_size()), physical.layout.components(physical.element_size())).elements(dtype.itemsize)
+            mapped = rebase_typed(described, dtype.itemsize, original, physical.element_size(), physical.layout)
             views.append(TensorView(physical.storage_as(dtype), mapped))
             return f'mesh_views[{len(views) - 1}]'
 
@@ -343,9 +342,7 @@ def compile_graph(module, metadata, operands, *, destinations=None):
                     base = buffer.get_layout()
                     source_layout, base_layout = ir_layout(layout), ir_layout(base)
                     with unset_fake_temporarily():
-                        mapped = base_layout.components(base.dtype.itemsize).rebase(
-                            source_layout.components(layout.dtype.itemsize),
-                            destination.layout.components(destination.element_size())).elements(base.dtype.itemsize)
+                        mapped = rebase_typed(base_layout, base.dtype.itemsize, source_layout, layout.dtype.itemsize, destination.layout)
                         bound_storage[name] = TensorView(destination.storage_as(base.dtype), mapped)
                     storage_layouts[name] = (base_layout, bound_storage[name])
                     self.never_reuse_buffers.add(name)

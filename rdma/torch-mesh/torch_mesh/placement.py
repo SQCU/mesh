@@ -1,6 +1,6 @@
 """Preparation-only tensor placement relations, shared by graph binding/lowering."""
 import torch
-from .operand import TensorView, descriptor
+from .operand import TensorView, descriptor, rebase_typed
 
 
 def output(shape, dtype, device, out=None):
@@ -21,8 +21,7 @@ def same_view(a, b):
 def relation(described, placed, view):
     """Compose typed aliases with assigned pages using the shared algebra."""
     width, target_width = described.element_size(), view.element_size()
-    return descriptor(view).components(target_width).rebase(
-        descriptor(described).components(width), placed.components(width)).elements(target_width)
+    return rebase_typed(descriptor(view), target_width, descriptor(described), width, placed)
 
 
 def alias(described, placed, view):

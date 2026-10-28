@@ -162,6 +162,13 @@ def descriptor(value):
     return TensorView.of(value).layout
 
 
+def rebase_typed(view, width, declared, source_width, placed):
+    """Compose in scalar units when possible; bytes only for a type view."""
+    if width == source_width:
+        return view.rebase(declared, placed)
+    return view.components(width).rebase(declared.components(source_width), placed.components(source_width)).elements(width)
+
+
 def requirement(value, declared):
     """Resolve an explicit API requirement without allocating or copying values."""
     return descriptor(value).required(declared if isinstance(declared, str) else 'fixed',
