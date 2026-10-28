@@ -206,8 +206,10 @@ void metal_end(struct metal_program *, void *event, uint64_t value);
 __attribute__((noreturn)) void mesh_library_expired(const char *wait, uint64_t ns);
 void mesh_library_watch(void);
 /* the prepared functions in flight (metal-recording.m): their command buffers committed and not ended; the nanoseconds
-   the first to have had nothing arrive for its bound has waited, that wait named in `wait` (0: none) */
+   the first to have made no progress for its bound has waited, that wait named in `wait` (0: none); an expiry's stop
+   of every commit of theirs */
 unsigned MetalSchedulesInFlight(void);
+void MetalSchedulesStop(void);
 uint64_t MetalSchedulesStalled(char *wait, size_t room);
 double metal_poll_seconds(void *device);
 double mesh_poll_seconds(void *device);

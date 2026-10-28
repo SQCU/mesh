@@ -234,13 +234,19 @@ lock: each releases it for the wait and takes it again after, as a condition var
 other communicators' groups and revokes go on (rubric M4). A GPU wait keeps its poll bound; a link
 carries no keepalive.
 
-An expiry stops the process's GPU work before the program ends (rdma/nccl-mesh.c mesh_library_expired): it takes every
-communicator's failure claim, so each GPU wait and the track kernel end within 2^10 loads, and awaits the library's and
-the prepared functions' committed command buffers within MESH_PLATFORM_NS. A watch looks once a second for GPU work
-that makes no progress: a prepared function whose committed part has not ended for twice that part's last GPU time
-(at least 0.8 MESH_PLATFORM_NS; MESH_PREPARATION_NS for a part that has not run before), or whose next part awaits an
-input event that has not moved for twice MESH_PLATFORM_NS, or a communicator's command buffer committed and not ended
-for twice MESH_PLATFORM_NS, and ends the program so, naming the wait. A prepared function's part is committed only once
+An expiry stops the process's GPU work before the program ends (rdma/nccl-mesh.c mesh_library_expired): no prepared
+function commits a part, a host operation or a frontend's slot after it (rdma/metal-recording.m MetalSchedulesStop), it
+takes every communicator's failure claim, so each GPU wait and the track kernel end within 2^10 loads, and awaits the
+library's and the prepared functions' committed command buffers within MESH_PLATFORM_NS. A watch looks once a second
+for GPU work that makes no progress: a prepared function with nothing arrived (a part's end, a host operation's) and its
+input event not moved for MESH_PREPARATION_NS (MetalCompletionNs), counting, while its next part awaits that event, any
+arrival of a function enqueued before it, or a communicator's command buffer committed and not ended for twice
+MESH_PLATFORM_NS, and ends the program so, naming the wait. Nothing inside a part, a host operation or a frontend's
+buffer is seen between its commit and its end (a classic buffer reads Scheduled within 3 ms of its commit whatever
+queues before it, and GPUStartTime 0 until it ends: the laptop, 2026-10-28), so that bound is the longest any one of them
+may run. The watch compares only its own clock's readings: other threads count arrivals, and a reading of theirs
+stored after the watch's (a completion's) once made its unsigned difference wrap past every bound (bandwidth, 4 of 4
+runs on the Studios, 2026-10-28). A prepared function's part is committed only once
 the events it awaits have been reached (rdma/metal-recording.m MetalPartReady), and a frontend's later work waits
 behind a slot of its own queue that the library commits at the function's end (MetalScheduleEnqueueAfter), so no GPU
 queue holds an event wait: Metal 4 drops a queue's event wait about 4 s after the commit and runs the work behind it,
@@ -254,7 +260,7 @@ process by the spin kernel: 253 ns on the laptop, 1.14 s a bound), each other on
 claim ends it (0.26 ms; about 5,200 crossings a part), or its measured GPU time once parts have run, if more
 (rdma/metal-recording.m MetalCrossings); and its other GPU work, once a GPU-only part has run, into parts of as many
 commands as their measured GPU time fits in half MESH_PLATFORM_NS (MetalScheduleRoom), so that a part's end, the
-watch's progress, comes within it. A part is not one a crossing: each Metal 4 command buffer encoded holds about
+watch's progress, comes often. A part is not one a crossing: each Metal 4 command buffer encoded holds about
 170 KiB of its allocator's memory (the laptop, 2026-10-28), so 4,096 of them took 0.9 to 2.6 GiB.
 
 The only thing that cannot be stopped is a thread inside a kernel call that waits on something that never happens. A

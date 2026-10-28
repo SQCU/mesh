@@ -3,9 +3,9 @@
 #include "nccl-mesh-metal.h"
 #include <os/lock.h>
 
-// metal-recording.h MetalExpired, MetalAwait
+// metal-recording.h MetalExpired, MetalCompletionNs, MetalAwait
 void MetalExpired(const char *wait,uint64_t ns) { mesh_library_expired(wait,ns); }
-uint64_t MetalCompletionNs(void) { return 2*MESH_PLATFORM_NS; }
+uint64_t MetalCompletionNs(void) { return MESH_PREPARATION_NS; }
 void MetalAwait(id<MTLCommandBuffer> command,const char *wait) {
     const struct mesh_deadline deadline=mesh_deadline(wait,MetalCompletionNs());
     while(command.status<MTLCommandBufferStatusCompleted)
@@ -1250,8 +1250,9 @@ struct MetalSchedule {
     struct MetalSchedule *boundary, *nextActive, *cursor;
     os_unfair_lock submitting;
     NSUInteger commands, crossings, ordinal;
+    // its arrivals counted; the watch's own: the count and input value it last saw, and its clock's reading then
     _Atomic uint64_t progress;
-    uint64_t input;
+    uint64_t seen, input, since;
     _Atomic int status;
     _Atomic unsigned references;
     _Atomic unsigned pending;
@@ -1259,9 +1260,8 @@ struct MetalSchedule {
     void (^completed)(NSError *);
     id<MTLBuffer> data;
     NSUInteger used;
-    // a frontend's queue slot committed at the invocation's end (MetalScheduleEnqueueAfter); a part's last GPU time
+    // a frontend's queue slot committed at the invocation's end (MetalScheduleEnqueueAfter)
     id<MTLCommandBuffer> then;
-    _Atomic uint64_t measured;
 };
 // Host operations' prerequisites notify through one listener for the process.
 static MTLSharedEventListener *MetalListener(void) {
@@ -1270,10 +1270,12 @@ static MTLSharedEventListener *MetalListener(void) {
     return listener;
 }
 
-// The functions with an invocation in flight (Enqueue to its end), for the watch and an expiry's release.
+// The functions with an invocation in flight (Enqueue to its end), in the order enqueued, for the watch and an expiry's
+// release; whether an expiry has stopped every commit (MetalSchedulesStop).
 static os_unfair_lock activeLock=OS_UNFAIR_LOCK_INIT;
 static struct MetalSchedule *active;
 static _Atomic unsigned inFlight;
+static _Atomic int stopped;
 // A part's GPU time a crossing, the largest of recent parts', decaying by 1/16 a part (MetalCrossings); a GPU-only
 // part's a command, averaged over recent parts, each weighing 1/16 (MetalScheduleRoom).
 static _Atomic uint64_t crossingNs,commandNs;
@@ -1281,7 +1283,7 @@ static void MetalScheduleListed(struct MetalSchedule *root,BOOL listed) {
     os_unfair_lock_lock(&activeLock);
     struct MetalSchedule **at=&active;
     while(*at&&*at!=root)at=&(*at)->nextActive;
-    if(listed&&!*at){root->nextActive=active;active=root;}
+    if(listed&&!*at){root->nextActive=NULL;root->since=0;*at=root;}
     if(!listed&&*at)*at=root->nextActive;
     os_unfair_lock_unlock(&activeLock);
 }
@@ -1412,6 +1414,7 @@ struct MetalSchedule *MetalScheduleCommand(id<MTLCommandBuffer> command) {
 // Before Finish, the input event the function's first part awaits; after it, the value a later
 // invocation awaits on that event.
 void MetalScheduleAfter(struct MetalSchedule *s,id<MTLEvent> after,uint64_t value) {
+    if(after&&!MetalShared(after))[NSException raise:NSInvalidArgumentException format:@"a prepared function's input event must be an MTLSharedEvent: no GPU queue waits on it"];
     s->root->value=value;
     if(s->root->prepared)return;
     s=MetalScheduleTail(s);
@@ -1719,7 +1722,7 @@ static void MetalScheduleArm(struct MetalSchedule *root) {
         [(id<MTLSharedEvent>)prerequisite[0] notifyListener:MetalListener() atValue:[prerequisite[1] boolValue]?input:g
             block:^(id<MTLSharedEvent> reached,uint64_t value){
                 (void)reached;(void)value;
-                if(atomic_fetch_sub_explicit(&task->remaining,1,memory_order_acq_rel)!=1)return;
+                if(atomic_fetch_sub_explicit(&task->remaining,1,memory_order_acq_rel)!=1||atomic_load_explicit(&stopped,memory_order_acquire))return;
                 NSError *error=task->operation();task->error=[error retain];
                 atomic_store_explicit(&task->status,error?-1:1,memory_order_release);
                 task->event.signaledValue=g;
@@ -1837,14 +1840,15 @@ NSError *MetalScheduleAppend(struct MetalSchedule *root,struct MetalReplay *repl
 // or status of this one's, and one made once the frontend's later work runs, `completed` has run or
 // the status reads 1 is not refused.
 static void MetalScheduleArrived(struct MetalSchedule *root) {
-    atomic_store_explicit(&root->progress,mesh_clock_ns(),memory_order_relaxed);
+    atomic_fetch_add_explicit(&root->progress,1,memory_order_relaxed);
     if(atomic_fetch_sub_explicit(&root->pending,1,memory_order_acq_rel)==2) {
         MetalScheduleListed(root,NO);
         id<MTLCommandBuffer> then=root->then;root->then=nil;
         NSError *failure=nil;
         MetalScheduleStatus(root,&failure);[failure retain];
         atomic_store_explicit(&root->pending,0,memory_order_release);
-        [then commit];[then release];
+        if(!atomic_load_explicit(&stopped,memory_order_acquire))[then commit];
+        [then release];
         if(root->completed)root->completed(failure);
         [failure release];
         MetalScheduleFree(root);
@@ -1854,7 +1858,6 @@ static void MetalScheduleArrived(struct MetalSchedule *root) {
 static void MetalScheduleCompleted(struct MetalSchedule *s,NSError *error,double seconds) {
     atomic_fetch_sub_explicit(&inFlight,1,memory_order_release);
     if(seconds>0) {
-        atomic_store_explicit(&s->measured,(uint64_t)(seconds*1e9),memory_order_relaxed);
         _Atomic uint64_t *rate=s->crossings?&crossingNs:&commandNs;
         const uint64_t each=(uint64_t)(seconds*1e9/MAX(s->crossings?s->crossings:s->commands,(NSUInteger)1)),was=atomic_load_explicit(rate,memory_order_relaxed);
         atomic_store_explicit(rate,s->crossings?MAX(each,was-was/16):was?was-was/16+each/16:each,memory_order_relaxed);
@@ -1910,8 +1913,10 @@ int MetalScheduleStatus(const struct MetalSchedule *s,NSError **error) {
 // A part is committed once every event it awaits has been reached: no GPU queue holds an event wait, which Metal
 // abandons silently about 4 s after its commit, running the work after it (Metal 4's queue wait; a classic buffer's ends
 // in a timeout error at 5 s; measured on macOS 26.3 and 27.0, 2026-10-28). A part that waits is committed by the host operation
-// whose output it awaits, or by a listener on its input event; one whose input event is not shared keeps a GPU wait.
+// whose output it awaits, or by a listener on its input event (a shared one: MetalScheduleAfter). None is once an
+// expiry has fired (MetalSchedulesStop).
 static BOOL MetalPartReady(const struct MetalSchedule *s) {
+    if(atomic_load_explicit(&stopped,memory_order_acquire))return NO;
     id<MTLSharedEvent> input=MetalShared(s->after);
     if(input&&input.signaledValue<s->root->value)return NO;
     for(id<MTLSharedEvent> event in s->waits)if(event.signaledValue<s->root->generation)return NO;
@@ -1923,7 +1928,6 @@ static void MetalPartCommit(struct MetalSchedule *s) {
     atomic_fetch_add_explicit(&s->references,1,memory_order_relaxed);
     atomic_fetch_add_explicit(&inFlight,1,memory_order_relaxed);
     if(s->form==MetalFormSerial){[(id<MTLCommandBuffer>)s->command commit];return;}
-    if(s->after&&!MetalShared(s->after))[(id<MTL4CommandQueue>)s->queue waitForEvent:s->after value:root->value];
     // The queue's signal runs after the feedback handler may have; the function, and so
     // its event, lives until the signal is seen.
     if(s->event)[s->event notifyListener:MetalListener() atValue:g block:^(id<MTLSharedEvent> e,uint64_t v){
@@ -1969,7 +1973,6 @@ int MetalScheduleEnqueue(struct MetalSchedule *root) {
     atomic_store_explicit(&root->pending,count,memory_order_release);
     // One reference spans submission, another spans all native/GPU results.
     atomic_fetch_add_explicit(&root->references,2,memory_order_relaxed);
-    atomic_store_explicit(&root->progress,mesh_clock_ns(),memory_order_relaxed);
     MetalScheduleListed(root,YES);mesh_library_watch();
     MetalScheduleArm(root);
     root->cursor=root->firstSubmission;
@@ -1992,14 +1995,16 @@ int MetalScheduleEnqueueAfter(struct MetalSchedule *root,uint64_t value,id<MTLCo
 
 unsigned MetalSchedulesInFlight(void) { return atomic_load_explicit(&inFlight,memory_order_acquire); }
 
-// The watch's look at one invocation: nothing has arrived while its first part not ended is committed, for twice that
-// part's last GPU time and at least 0.8 MESH_PLATFORM_NS (parts are split under half of it once commands have been
-// measured, and its crossings' bounded waits end sooner), or for MESH_PREPARATION_NS where the part has not run before
-// (no busy command buffer is ended by the platform: 6.6 s measured on macOS 27.0, 2026-10-28, so a part's own time is
-// its progress); or, while that part awaits an input event that has not moved, for twice MESH_PLATFORM_NS.
-// The wait named: that part's input event or the host operation whose output it awaits, a committed part, or a host
+// design/transport.md section 5: the watch's look at one invocation, stalled once it has made no progress for
+// MetalCompletionNs.  Its progress is an arrival (a part's end, a host operation's, its submission's: `progress`
+// counts them) or its input event moving, and, while its next part awaits that event, an arrival of a function enqueued
+// before it (`upstream`, the latest look to have seen one), whose end the event follows.  Inside a part, a host
+// operation or the frontend's own work before the input nothing more is seen (a busy command buffer is never ended by
+// the platform: 6.6 s measured on macOS 27.0; a kernel's progress is not the library's to read), so that is the bound
+// on any one of them.  `since` is the watch's own clock's reading, as `now`: no other thread's time is compared.  The
+// wait named: that part's input event or the host operation whose output it awaits, a committed part, or a host
 // operation not ended.
-static uint64_t MetalScheduleStalled(struct MetalSchedule *root,uint64_t now,char *wait,size_t room) {
+static uint64_t MetalScheduleStalled(struct MetalSchedule *root,uint64_t now,uint64_t upstream,char *wait,size_t room) {
     struct MetalSchedule *s=root->firstSubmission;NSUInteger k=0;
     while(s&&atomic_load_explicit(&s->status,memory_order_acquire)){s=s->submit;k++;}
     os_unfair_lock_lock(&root->submitting);
@@ -2007,12 +2012,12 @@ static uint64_t MetalScheduleStalled(struct MetalSchedule *root,uint64_t now,cha
     for(struct MetalSchedule *at=root->cursor;at&&committed;at=at->submit)committed=at!=s;
     os_unfair_lock_unlock(&root->submitting);
     id<MTLSharedEvent> input=s&&!committed?MetalShared(s->after):nil;
-    const uint64_t reached=input.signaledValue;
-    if(input&&reached!=root->input){root->input=reached;atomic_store_explicit(&root->progress,now,memory_order_relaxed);}
+    const uint64_t reached=input.signaledValue,arrived=atomic_load_explicit(&root->progress,memory_order_relaxed);
+    if(!root->since||arrived!=root->seen||reached!=root->input){root->seen=arrived;root->input=reached;root->since=now;}
     const BOOL awaiting=input&&reached<root->value;
-    const uint64_t idle=now-atomic_load_explicit(&root->progress,memory_order_relaxed),ran=s?atomic_load_explicit(&s->measured,memory_order_relaxed):0;
-    const uint64_t bound=awaiting?2*MESH_PLATFORM_NS:!(s&&committed)?MESH_PLATFORM_NS/5*4:ran?MAX(2*ran,MESH_PLATFORM_NS/5*4):MESH_PREPARATION_NS;
-    if(idle<bound)return 0;
+    if(awaiting)root->since=MAX(root->since,upstream);
+    const uint64_t idle=now-root->since;
+    if(idle<MetalCompletionNs())return 0;
     const char *what=awaiting?"not committed, awaiting its input event (MetalScheduleAfter)":
         s&&committed?"committed and not ended (its GPU work, or a crossing's wait on a peer)":"its host operations";
     NSUInteger at=NSNotFound;
@@ -2026,11 +2031,23 @@ static uint64_t MetalScheduleStalled(struct MetalSchedule *root,uint64_t now,cha
     return idle;
 }
 uint64_t MetalSchedulesStalled(char *wait,size_t room) {
-    const uint64_t now=mesh_clock_ns();uint64_t idle=0;
+    uint64_t idle=0,upstream=0;
     os_unfair_lock_lock(&activeLock);
-    for(struct MetalSchedule *root=active;root&&!idle;root=root->nextActive)idle=MetalScheduleStalled(root,now,wait,room);
+    const uint64_t now=mesh_clock_ns();
+    for(struct MetalSchedule *root=active;root&&!idle;root=root->nextActive) {
+        idle=MetalScheduleStalled(root,now,upstream,wait,room);
+        upstream=MAX(upstream,root->since);
+    }
     os_unfair_lock_unlock(&activeLock);
     return idle;
+}
+// design/transport.md section 5: an expiry's first step (nccl-mesh.c mesh_library_expired): nothing is committed after
+// it (a part, a host operation, a frontend's slot), and a commit in progress, under its function's lock, has ended.
+void MetalSchedulesStop(void) {
+    atomic_store_explicit(&stopped,1,memory_order_release);
+    os_unfair_lock_lock(&activeLock);
+    for(struct MetalSchedule *root=active;root;root=root->nextActive){os_unfair_lock_lock(&root->submitting);os_unfair_lock_unlock(&root->submitting);}
+    os_unfair_lock_unlock(&activeLock);
 }
 
 void MetalScheduleFree(struct MetalSchedule *s) {

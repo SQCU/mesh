@@ -307,12 +307,14 @@ static uint64_t issued;
 static pthread_mutex_t live_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct ncclComm *live;
 
-/* design/transport.md section 5: the program's end at an expiry, its GPU work stopped first: every communicator's GPU
+/* design/transport.md section 5: the program's end at an expiry, its GPU work stopped first: no prepared function's
+   part, host operation or slot committed after it (metal-recording.m MetalSchedulesStop), every communicator's GPU
    waits ended through their failure words' claim (nccl-mesh-kernels.h mesh_step_failed, read every 2^10 loads, the
    tracks' too) and its stop (words[6]), and then the library's GPU programs and the prepared functions' committed
    command buffers (which hold no event wait: metal-recording.m MetalPartReady) awaited within MESH_PLATFORM_NS; the
    wait named (mesh.h mesh_expired) */
 void mesh_library_expired(const char *wait, uint64_t ns) {
+  MetalSchedulesStop();
   pthread_mutex_lock(&live_lock);
   for (struct ncclComm *c = live; c; c = c->next_live) {
     atomic_store_explicit(c->words + 6, 1, memory_order_release);

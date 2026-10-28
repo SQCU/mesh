@@ -140,6 +140,7 @@ struct MetalSchedule *MetalScheduleCreateOn(id queue, enum MetalForm);
 // An already encoded command from an external frontend enters the same
 // submission and completion path. The command has not been committed.
 struct MetalSchedule *MetalScheduleCommand(id<MTLCommandBuffer>);
+// The event is an MTLSharedEvent (no GPU queue waits on it: MetalScheduleEnqueueAfter); any other is refused.
 void MetalScheduleAfter(struct MetalSchedule *, id<MTLEvent>, uint64_t value);
 // Preparation records the function's collective result sources. Observers read
 // their existing failure state; this adds no command or transfer-time check.
@@ -199,9 +200,11 @@ void MetalReplayFree(struct MetalReplay *);
 // work stopped first as at the library's own expiries (every communicator's GPU waits ended, the library's GPU programs
 // and the prepared functions' command buffers awaited within MESH_PLATFORM_NS), then the wait named on stderr.
 __attribute__((noreturn)) void MetalExpired(const char *wait, uint64_t ns);
-// A committed command buffer's end awaited within MetalCompletionNs, twice MESH_PLATFORM_NS (the platform's watchdog
-// ends a running buffer within one: past two it waits on an event); past it MetalExpired.  The bound is a caller's too,
-// for its own waits on its GPU work.
+// The longest the library lets work it cannot see into go without progress, MESH_PREPARATION_NS: a command buffer, a
+// part or a host operation shows nothing between its commit and its end (no busy buffer is ended by the platform: 6.6 s
+// measured on macOS 27.0; a classic buffer reads Scheduled within 3 ms of its commit, whatever queues before it, and its
+// GPUStartTime 0 until its end: the laptop, 26.3.2, 2026-10-28).  MetalAwait: a committed command buffer's end awaited
+// within it, past which MetalExpired.  The bound is a caller's too, for its own waits on its GPU work.
 uint64_t MetalCompletionNs(void);
 void MetalAwait(id<MTLCommandBuffer>, const char *wait);
 
