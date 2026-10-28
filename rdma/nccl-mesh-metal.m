@@ -25,18 +25,20 @@ static const uint8_t TYPED[OPS][METAL_MERGE + 1] = {
 static const uint8_t COPY[2][METAL_LAND + 1] = {{KIND_copy_plain_4, KIND_copy_land_4}, {KIND_copy_plain_1, KIND_copy_land_1}};
 
 ARGS(args, uint64_t, uint32_t);
-/* Kernel lookup is shared; compiled argument pages belong to their function's
-   residency set and are never recycled while that function can execute. */
+/* Kernel lookup is shared; compiled argument pages, pieces of the region (nccl-mesh.c metal_piece_hold), belong to
+   their function's residency set, are never recycled while that function can execute, and are given back once that
+   set ends. */
 #define RECORD MESH_METAL_ARGUMENT_BYTES
 struct kernels { id<MTLDevice> device; id<MTLComputePipelineState> pipelines[PIPELINES]; };
 @interface MeshArgumentPages : NSObject {
 @public
-  id<MTLBuffer> page;
-  NSUInteger used;
+  struct metal_bytes page;
+  size_t bytes, used, count, room;
+  void **held;
 }
 @end
 @implementation MeshArgumentPages
-- (void)dealloc { [page release]; [super dealloc]; }
+- (void)dealloc { for (size_t k = 0; k < count; k++) metal_piece_give(held[k]); free(held); [super dealloc]; }
 @end
 static char argumentPagesKey;
 _Static_assert(sizeof(struct args) <= RECORD, "an argument record");
@@ -124,12 +126,6 @@ void *metal_wrap(void *address, size_t bytes) {
   return [(id<MTLDevice>)metal_device() newBufferWithBytesNoCopy:address length:bytes options:MTLResourceStorageModeShared deallocator:nil];
 }
 
-void *metal_shared(size_t bytes) {
-  id<MTLBuffer> made = [(id<MTLDevice>)metal_device() newBufferWithLength:bytes ? bytes : 16 options:MTLResourceStorageModeShared];
-  if (made) memset(made.contents, 0, made.length);
-  return made;
-}
-
 void *metal_event(void) { return [(id<MTLDevice>)metal_device() newSharedEvent]; }
 uint64_t metal_signaled(void *event) { return ((id<MTLSharedEvent>)event).signaledValue; }
 int metal_wait(void *event, uint64_t value, uint64_t ns) { return [(id<MTLSharedEvent>)event waitUntilSignaledValue:value timeoutMS:ns / 1000000]; }
@@ -208,17 +204,18 @@ static struct metal_result record4(struct metal_program *program, id<MTLBuffer> 
     objc_setAssociatedObject(program->residency,&argumentPagesKey,pages,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [pages release];
   }
-  if(!pages->page || pages->used+RECORD>pages->page.length) {
-    [pages->page release];
-    pages->page=[program->residency.device newBufferWithLength:MESH_COMMAND_DATA_BYTES options:MTLResourceStorageModeShared];
-    pages->used=0;
-    if(!pages->page)return metal_failed(ENOMEM);
-    metal_resident(program,pages->page);
+  if(!pages->count || pages->used+RECORD>pages->bytes) {
+    void **grown=pages->count<pages->room?pages->held:realloc(pages->held,(pages->count+4)*sizeof *grown);
+    if(grown&&grown!=pages->held){pages->held=grown;pages->room=pages->count+4;}
+    void *piece=grown?metal_piece_hold(&pages->page,&pages->bytes):NULL;
+    if(!piece)return metal_failed(ENOMEM);
+    pages->held[pages->count++]=piece;pages->used=0;
+    metal_resident(program,pages->page.buffer);
   }
   id<MTLBuffer> v = words ? words : program->violation ? program->violation : d;
   p.polls = v != d ? program->polls : 0;
   p.sequence=0;
-  const uint64_t argument=pages->page.gpuAddress+pages->used;
+  const uint64_t argument=((id<MTLBuffer>)pages->page.buffer).gpuAddress+pages->page.offset+pages->used;
   memcpy((char *)pages->page.contents+pages->used,&p,sizeof p);pages->used+=RECORD;
   for (id<MTLBuffer> b in @[d, s ? s : d, a ? a : d, v]) metal_resident(program, b);
   const uint64_t made[6] = {d.gpuAddress,(s?s:d).gpuAddress,argument,(a?a:d).gpuAddress,v.gpuAddress,argument};
@@ -497,12 +494,12 @@ struct metal_result metal_depend(struct metal_program *program, uint32_t other, 
 }
 
 /* the records as the track kernel reads them (TRACKS: track_head, track, track_item, track_op, track_dep) */
-struct track_head { uint64_t tracks_off, items_off, ops_off, deps_off, count_off, sequence, progress_off; uint32_t tracks, polls; };
+struct track_head { uint64_t tracks_off, items_off, ops_off, deps_off, count_off, done_off; uint32_t tracks, polls; };
 struct track_rec { uint32_t first[2], count[2]; };
 struct track_item { uint64_t position, need, target, word, v; uint32_t first_op, ops, first_dep, deps, wait_op, cursor; };
 struct track_op { uint64_t d, s, a, v; struct args p; uint32_t kind, pad; };
 struct track_dep { uint64_t count; uint32_t other, pad; };
-_Static_assert(sizeof(struct track_head) == 64 && sizeof(struct track_rec) == 16 && sizeof(struct track_item) == 64 &&
+_Static_assert(sizeof(struct track_head) == 56 && sizeof(struct track_rec) == 16 && sizeof(struct track_item) == 64 &&
                sizeof(struct track_op) == 120 && sizeof(struct track_dep) == 16, "the track records");
 
 static uint64_t up(uint64_t x) { return (x + 255) & ~(uint64_t)255; }
@@ -516,17 +513,18 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
     struct kernels *k = program_kernels(program, &message);
     if (!k) { recording_free(r); return (struct metal_result){EINVAL, message}; }
     id<MTLComputePipelineState> state = k->pipelines[KIND_tracks];
-    id<MTLDevice> device = k->device;
     const uint64_t T = r->tracks, at_tracks = up(sizeof(struct track_head)), at_items = up(at_tracks + T * sizeof(struct track_rec));
     const uint64_t at_ops = up(at_items + r->items * sizeof(struct track_item)), at_deps = up(at_ops + r->ops * sizeof(struct track_op));
-    const uint64_t at_count = up(at_deps + r->deps * sizeof(struct track_dep)), bytes = up(at_count + T * sizeof(uint64_t));
-    const uint64_t sequence=0,first=64;
-    id<MTLBuffer> records=[device newBufferWithLength:first+bytes options:MTLResourceStorageModeShared];
-    if(!records){recording_free(r);return metal_failed(ENOMEM);}
-    memset(records.contents,0,first);
-    unsigned char *base=(unsigned char *)records.contents+first;
-    const uint64_t address=records.gpuAddress;
-    *(struct track_head *)base = (struct track_head){at_tracks, at_items, at_ops, at_deps, first + at_count, sequence, 0, (uint32_t)T, program->polls};
+    const uint64_t at_count = up(at_deps + r->deps * sizeof(struct track_dep)), at_done = up(at_count + T * sizeof(uint64_t));
+    const uint64_t bytes = up(at_done + T * sizeof(uint64_t));
+    /* the records, a carved piece of the region, done with once every track has ended (each stores its done word) */
+    struct metal_bytes records;
+    if (metal_carve(bytes, &records)) { recording_free(r); return metal_failed(ENOMEM); }
+    unsigned char *base = records.contents;
+    memset(base + at_done, 0, T * sizeof(uint64_t));
+    metal_done((const _Atomic uint64_t *)(base + at_done), (uint32_t)T, 1);
+    const uint64_t address = ((id<MTLBuffer>)records.buffer).gpuAddress + records.offset;
+    *(struct track_head *)base = (struct track_head){at_tracks, at_items, at_ops, at_deps, at_count, at_done, (uint32_t)T, program->polls};
     struct track_rec *rec = (struct track_rec *)(base + at_tracks);
     struct track_item *item = (struct track_item *)(base + at_items);
     uint32_t placed = 0;
@@ -553,9 +551,9 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
     for (uint32_t t = 0; t < T; t++) count[t] = t < tracks ? consumed[t] : 0;
     const NSUInteger width = state.maxTotalThreadsPerThreadgroup < MESH_TRANSPORT_GROUP_THREADS ? state.maxTotalThreadsPerThreadgroup : MESH_TRANSPORT_GROUP_THREADS;
     if (program->encoder4) {
-      metal_resident(program, records);
+      metal_resident(program, records.buffer);
       for (id b in r->named) metal_resident(program, (void *)b);
-      [program->table setAddress:address + first atIndex:0];
+      [program->table setAddress:address atIndex:0];
       [program->table setAddress:address atIndex:1];
       id<MTL4ComputeCommandEncoder> encoder = program->encoder4;
       [encoder setComputePipelineState:state];
@@ -567,11 +565,10 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
       id<MTLComputeCommandEncoder> encoder = program->encoder;
       for (id b in r->named) [encoder useResource:(id<MTLBuffer>)b usage:MTLResourceUsageRead | MTLResourceUsageWrite];
       [encoder setComputePipelineState:state];
-      [encoder setBuffer:records offset:first atIndex:0];
-      [encoder setBuffer:records offset:0 atIndex:1];
+      [encoder setBuffer:(id<MTLBuffer>)records.buffer offset:records.offset atIndex:0];
+      [encoder setBuffer:(id<MTLBuffer>)records.buffer offset:records.offset atIndex:1];
       [encoder dispatchThreadgroups:MTLSizeMake(T, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
     }
-    [records release];
   }
   recording_free(r);
   return METAL_DONE;
