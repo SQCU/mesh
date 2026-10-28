@@ -3003,10 +3003,16 @@ static uint32_t slot_take(struct ncclComm *comm, size_t bytes) {
     comm->slots[comm->slot_count] = made;
     vacant = ++comm->slot_count;
   }
-  if (!best) {
-    struct slot *s = comm->slots + (best = vacant) - 1;
-    if (ncclMemAlloc(&s->address, bytes)) return 0;
-    s->bytes = bytes;
+  /* a slot within one registration extent where it fits one (no DMA span crosses one: mesh.h mesh_dma_span_valid): a
+     lease that straddles a boundary held while the next is leased, then freed */
+  for (void *crossing = NULL; !best;) {
+    struct slot *s = comm->slots + vacant - 1;
+    if (ncclMemAlloc(&s->address, bytes)) { s->address = NULL; ncclMemFree(crossing); return 0; }
+    const uint64_t at = (uint64_t)((char *)s->address - (char *)comm->attach->context.M) - comm->attach->context.M->data_off;
+    if (crossing || bytes > MESH_DMA_EXTENT || at / MESH_DMA_EXTENT == (at + bytes - 1) / MESH_DMA_EXTENT) {
+      ncclMemFree(crossing);
+      s->bytes = bytes; best = vacant;
+    } else crossing = s->address;
   }
   comm->slots[best - 1].held = 1;
   return best;
