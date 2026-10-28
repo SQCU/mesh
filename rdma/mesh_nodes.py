@@ -5,9 +5,9 @@ import codecs
 import collections
 import ctypes
 import dataclasses
-import fcntl
 import functools
 import getpass
+import hashlib
 import io
 import json
 import math
@@ -44,19 +44,18 @@ class Member:
 
 @dataclasses.dataclass(frozen=True)
 class Cluster:
-    """etc/mesh-nodes.json with the environment: members by bridge node number, the administrator's user and key, the
-    lease and its ownerless grace, a run's bound in seconds, the nodes' Python, their checkouts under home and the first
-    rank port."""
+    """etc/mesh-nodes.json with the environment: members by bridge node number, the administrator's user and key, a
+    run's bound in seconds, the nodes' Python, their per-commit checkouts under home and how many are kept, the first
+    rank port and how long a bridge swap waits for attached programs to detach."""
     members: dict
     user: str
     key: 'str | None'
-    lock: Path
-    lock_grace: int
-    lock_wait: int
     run_seconds: int
     python: str
     checkouts: str
+    kept: int
     rank_port: int
+    detach: int
 
     @property
     def ssh(self):
@@ -79,8 +78,8 @@ def load(path=ROOT / 'etc/mesh-nodes.json'):
                                         frozenset(row.get('roles', ())), row.get('memory_gib', 0),
                                         row.get('guard_headroom_gib', 0)) for row in raw['nodes'].values()}
     return Cluster(members, access.get('user') or getpass.getuser(),
-                   str(Path(access['key']).expanduser()) if 'key' in access else None, Path(raw['lock']).expanduser(),
-                   raw['lock_grace_seconds'], raw['lock_wait_seconds'], raw['run_seconds'], raw['python'], raw['checkouts'], raw['rank_port'])
+                   str(Path(access['key']).expanduser()) if 'key' in access else None,
+                   raw['run_seconds'], raw['python'], raw['checkouts'], raw['checkouts_kept'], raw['rank_port'], raw['detach_seconds'])
 
 
 def home_path(relative):
@@ -260,20 +259,7 @@ def discover(cluster, log=None, state=None, deadline=None):
     cables = collections.Counter()
     for report in up.values():
         cables |= collections.Counter(tuple(sorted(map(str, link[:2]))) for link in report['map']['links'])
-    linked = {str(x): set() for report in up.values() for x in report['map']['nodes']}
-    for a, b in cables:
-        linked[a].add(b)
-        linked[b].add(a)
-    parts, seen = [], set()
-    for start in sorted(linked, key=int):
-        part, todo = set(), [start] if start not in seen else []
-        while todo:
-            if (x := todo.pop()) not in part:
-                part.add(x)
-                todo.extend(linked[x] - part)
-        seen |= part
-        parts.append(part)
-    fabric = max(parts, key=len, default=set())
+    fabric = max(parts({str(x) for report in up.values() for x in report['map']['nodes']}, cables), key=len, default=set())
     guide = next((n for n in nodes if n.number in fabric and reads[n.number][0] is not None), None)
     unconfigured = sorted(fabric - set(cluster.members), key=int)
     # mesh-peers.sh browses until stopped: 10 s, then SIGTERM to its group, whose trap ends its dns-sd children.
@@ -300,6 +286,31 @@ def discover(cluster, log=None, state=None, deadline=None):
         state.update(fabric=sorted(fabric, key=int), absent=absent,
                      unconfigured=unconfigured)
     return reachable, absent
+
+
+def parts(names, pairs):
+    """The linked parts of `names` under `pairs`, each a set."""
+    linked = {x: set() for x in names}
+    for a, b in pairs:
+        if a in linked and b in linked:
+            linked[a].add(b)
+            linked[b].add(a)
+    found, seen = [], set()
+    for start in sorted(linked, key=int):
+        part, todo = set(), [start] if start not in seen else []
+        while todo:
+            if (x := todo.pop()) not in part:
+                part.add(x)
+                todo.extend(linked[x] - part)
+        seen |= part
+        found += [part] if part else []
+    return found
+
+
+def paired(nodes):
+    """The node pairs a PAIRED cable joins, as the nodes' bridges report them."""
+    return {tuple(sorted((n.number, str(p['node'])))) for n, (_, d) in zip(nodes, parallel([lambda n=n: n.stat() for n in nodes]))
+            for p in d.get('peers', []) if p.get('phase') == 'PAIRED'}
 
 
 def up(nodes, log=None):
@@ -373,83 +384,35 @@ def started(pid):
     return f'{seen[0][0]}.{seen[0][1]:06d}' if seen and seen[1] != 5 else None
 
 
-def holder(pid):
-    return f'pid {pid} start {started(pid)} host {socket.gethostname()}\n'
-
-
-def stale(path, grace):
-    """No holder the lease's owner file names (`pid P start S host H`) lives on this host, or it has no owner file and
-    its directory was made (st_birthtime) more than `grace` seconds ago."""
-    try:
-        text = (path / 'owner').read_text()
-    except FileNotFoundError:
-        with contextlib.suppress(FileNotFoundError):
-            return time.time() - path.stat().st_birthtime > grace
-        return False
-    except OSError:
-        return False
-    holders = re.findall(r'^pid (\d+) start (\S+) host (\S+)$', text, re.M)
-    return bool(holders) and all(host == socket.gethostname() and started(int(pid)) != start
-                                 for pid, start, host in holders)
-
-
-@contextlib.contextmanager
-def exclusive_lock(owner, path, grace, wait=0):
-    """Shared cluster lease: the mkdir of `path`, as every session's tools take it, its owner file naming the launcher
-    and then each holder `hold` adds (the driver) by pid, start time and host. A stale lease (stale) is removed under a
-    flock that serializes the sessions removing one. A held lease is tried every 10 s for up to `wait` seconds."""
-    path, began = Path(path), time.monotonic()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    while True:
-        with open(path.with_name(path.name + '.reclaim'), 'a') as serial:
-            fcntl.flock(serial, fcntl.LOCK_EX)
-            if stale(path, grace):
-                with contextlib.suppress(OSError):
-                    (path / 'owner').unlink(missing_ok=True)
-                    path.rmdir()
-            with contextlib.suppress(FileExistsError):
-                path.mkdir()
-                break
-        if time.monotonic() - began >= wait:
-            held = 'no owner file'
-            with contextlib.suppress(OSError):
-                held = (path / 'owner').read_text().strip()
-            raise RuntimeError(f'cluster is already leased: {held} (waited {time.monotonic() - began:.0f} s)')
-        time.sleep(10)
-    (path / 'owner').write_text(f'{owner}\n{holder(os.getpid())}')
-
-    def hold(pid):
-        with (path / 'owner').open('a') as owners:
-            owners.write(holder(pid))
-    try:
-        yield hold
-    finally:
-        (path / 'owner').unlink(missing_ok=True)
-        path.rmdir()
-
-
 def run(*argv, **kw):
     return subprocess.run([str(a) for a in argv], capture_output=True, text=True, stdin=subprocess.DEVNULL, **kw)
 
 
-def node_install(commit, transition='0'):
-    from mesh_install import install_checkout
-    from mesh_source import revision
-    source = Path(__file__).resolve().parent.parent
-    if revision(source) != commit:
-        raise ValueError('requested install commit differs from the imported checkout')
-    install_checkout(source, allow_source_transition=transition == '1')
+BRIDGE = ('mesh-link.c', 'mesh-records.c', 'mesh-heartbeat.c', 'mesh-dataflow.c', 'mesh-call.c', 'mesh-collective.c',
+          'mesh-fabric.c', 'mesh-routed.c', 'mesh-diagnostics.c', 'Makefile', '../etc/compute/metal.mk',
+          '../etc/bridge/thunderbolt.mk')
 
 
-def ended(token, current):
-    """A run token (`run:launcher host:pid:start`) of an ended run: its launcher host is the `current` run's, whose
-    lease admits one run at a time, and its run is another."""
-    fields, now = token.split(':'), current.split(':')
-    return len(fields) == 4 and len(now) == 4 and fields[1] == now[1] and fields[0] != now[0]
+def bridge_build(source):
+    """The bridge's build as its sources: sha256 over its images' (rdma/Makefile: mesh-flow, mesh-heartbeat, libmesh)
+    and every local header they include, so two checkouts are compared without building either bridge."""
+    rdma, digest, todo, seen = Path(source) / 'rdma', hashlib.sha256(), list(BRIDGE), set()
+    while todo:
+        if (name := os.path.normpath(todo.pop())) in seen or not (rdma / name).is_file():
+            continue
+        seen.add(name)
+        todo += [os.path.join(os.path.dirname(name), m.decode()) for m in
+                 re.findall(rb'#include "([^"]+)"', (rdma / name).read_bytes())]
+    for name in sorted(seen):
+        digest.update(name.encode() + b'\0' + (rdma / name).read_bytes())
+    return digest.hexdigest()
 
 
 def node_prepare(commit, number, current):
-    from mesh_install import environment, install_checkout
+    """Build this commit's client code once in its own checkout (its libraries and kernels, _mesh_c and torch_mesh's
+    extension, which ranks load by path; never the shared venv), and say whether the running bridge is this build:
+    {"bridge": "joined"}, or "differs" for `node swap`."""
+    from mesh_install import environment
     from mesh_source import verify
     if left := sweep(lambda token: ended(token, current), time.monotonic() + 30):
         raise RuntimeError(f'processes {left} of an ended run remain after SIGKILL')
@@ -458,12 +421,29 @@ def node_prepare(commit, number, current):
         raise ValueError('preparation source differs from the requested commit')
     if str(loads(run(source / 'bin/mesh-stat').stdout).get('node')) != number:
         raise ValueError('the administration endpoint does not own the configured bridge node')
-    receipt = source / 'rdma/.build/installed.json'
-    wanted = {'commit': commit, 'environment': environment()}
+    receipt, wanted = source / 'rdma/.build/client.json', {'commit': commit, 'environment': environment()}
     if not receipt.exists() or json.loads(receipt.read_text()) != wanted:
-        install_checkout(source, allow_source_transition=True)
-    else:
-        node_installed(commit, '1')
+        for where, *argv in (('rdma', 'make', '-s', 'install'), ('rdma', sys.executable, 'mesh_c_build.py'),
+                             ('rdma/torch-mesh', sys.executable, 'setup.py', '-q', 'build_ext', '--inplace',
+                              '--build-temp', '../.build/torch-mesh')):
+            done = run(*argv, cwd=source / where, env={**os.environ, 'MESH_RDMA': str(source / 'rdma')})
+            if done.returncode:
+                raise RuntimeError(f'{where}: {" ".join(argv[1:3])} failed: {(done.stderr or done.stdout)[-600:]}')
+        receipt.write_text(json.dumps(wanted) + '\n')
+    active = Path((HOME / '.cache/mesh/active-source').read_text().strip())
+    joined = (active / 'rdma').is_dir() and bridge_build(source) == bridge_build(active)
+    print(json.dumps({'bridge': 'joined' if joined else 'differs', 'active': str(active)}))
+
+
+def node_swap(commit, detach):
+    """Make this commit's checkout the node's bridge once its attached programs detach, waiting at most `detach`
+    seconds and killing none (mesh_install install_checkout)."""
+    from mesh_install import install_checkout
+    from mesh_source import verify
+    source = Path(__file__).resolve().parent.parent
+    if verify(source) != commit:
+        raise ValueError('swap source differs from the requested commit')
+    install_checkout(source, allow_source_transition=True, detach=float(detach))
 
 
 def node_installed(commit, exact_imported_source='0'):
@@ -521,7 +501,7 @@ def process(pid):
 def carrying(match):
     """This user's processes but this one whose environment's MESH_RUN `match` accepts (sysctl KERN_PROCARGS2). It does
     not read a zombie, another user's process, or a platform binary, whose environment macOS hides."""
-    pids, args, size, found = (ctypes.c_int * 16384)(), ctypes.create_string_buffer(1 << 20), ctypes.c_size_t(), []
+    pids, args, size, found = (ctypes.c_int * 16384)(), ctypes.create_string_buffer(1 << 20), ctypes.c_size_t(), {}
     for pid in pids[:max(0, LIBC.proc_listpids(4, os.getuid(), pids, ctypes.sizeof(pids))) // 4]:
         size.value = len(args)
         if pid in (0, os.getpid()) or LIBC.sysctl((ctypes.c_int * 3)(1, 49, pid), 3, args, ctypes.byref(size), None, 0):
@@ -532,7 +512,7 @@ def carrying(match):
         token = next((w[9:].decode(errors='replace') for w in words[first + int.from_bytes(raw[:4], sys.byteorder):]
                       if w.startswith(b'MESH_RUN=')), None)
         if token is not None and match(token):
-            found.append(pid)
+            found[pid] = token
     return found
 
 
@@ -573,6 +553,10 @@ def node_guard(seconds, floor, workstation, *argv):
     rank = subprocess.Popen(argv, stdin=operands, start_new_session=True,
                             preexec_fn=lambda: signal.alarm(math.ceil(float(seconds)) + 10))
     known, why, value, size = {rank.pid: process(rank.pid)[0]}, None, ctypes.c_uint64(), ctypes.c_size_t()
+    own, git = os.environ.get('MESH_RUN'), ROOT / '.git'
+    others = lambda: sorted(set(carrying(lambda token: token != own).values()))
+    head = Path(git.read_text().split()[-1] if git.is_file() else git) / 'HEAD'
+    print(json.dumps({'loaded': head.read_text().strip(), 'overlap': others()}), flush=True)
     live = lambda pid, start: (seen := process(pid)) is not None and seen[0] == start and seen[1] != zombie
     while why is None and process(rank.pid)[1] != zombie:
         for pid, start in list(known.items()):
@@ -592,6 +576,7 @@ def node_guard(seconds, floor, workstation, *argv):
                       else 'its caller closed stdin' if select.select([0], [], [], 0)[0] and not os.read(0, 1 << 16)
                       else None)
         time.sleep(0 if why else 0.1)
+    print(json.dumps({'overlap': others()}), flush=True)
     last = time.monotonic() + 30
     while (left := [pid for pid, start in known.items() if live(pid, start)]) and time.monotonic() < last:
         with contextlib.suppress(ProcessLookupError):
@@ -601,7 +586,7 @@ def node_guard(seconds, floor, workstation, *argv):
                 os.kill(pid, signal.SIGKILL)
         time.sleep(0.1)
     token = os.environ.get('MESH_RUN')
-    left += sweep(token.__eq__, time.monotonic() + 30) if token else []
+    left += list(sweep(token.__eq__, time.monotonic() + 30)) if token else []
     code = rank.poll()
     if why:
         print(f'{why}: rank {rank.pid} killed', file=sys.stderr, flush=True)
@@ -630,7 +615,8 @@ def main(argv=None):
     remote = bool(argv and argv[0] == 'node')
     if remote:
         argv.pop(0)
-    commands = {'install': node_install, 'prepare': node_prepare, 'installed': node_installed, 'resets': node_resets, 'guard': node_guard} \
+    commands = {'prepare': node_prepare, 'swap': node_swap, 'installed': node_installed,
+                'resets': node_resets, 'guard': node_guard} \
         if remote else {'installed': installed, 'discover': show}
     return commands[argv[0]](*argv[1:])
 

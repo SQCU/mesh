@@ -1,5 +1,6 @@
 """Run committed mesh/microbench Git checkouts fetched from each repository's origin."""
 import argparse
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -10,14 +11,12 @@ import subprocess
 import sys
 import time
 import traceback
+import zlib
 
 from mesh_source import checkout, revision, upstream, verify
 
 REQUIRED = ('rdma/mesh_hourly.py', 'rdma/mesh_nodes.py', 'rdma/mesh_source.py',
             'rdma/mesh_install.py', 'rdma/mesh-install-state.c')
-# Observations belong to the application lifetime, never the measurement ledger.
-HISTORY = {}
-
 FIGURES = ('steady_step_microseconds', 'step_microseconds', 'crossing_microseconds',
            'steady_tick_microseconds', 'tick_microseconds', 'aggregate_rows_per_second',
            'steady_aggregate_rows_per_second', 'per_stream_steps_per_second')
@@ -83,7 +82,10 @@ def compact(record):
     result = {'schema': 3, 'commits': record['commits'], 'unix': int(record['started_unix']),
               'nodes': [r['number'] for r in record['nodes'].values() if r['status'] == 'installed'],
               'us,GB/s': rows, **({'incomplete': incomplete} if incomplete else {}),
-              **({'absent': record['absent']} if record.get('absent') else {})}
+              **({'absent': record['absent']} if record.get('absent') else {}),
+              'loaded': sorted({commit for item in record['workloads'] for commit in item.get('loaded', ())}),
+              **({'overlapped': overlapped} if (overlapped := sorted({'@'.join(token.split(':')[:2]) for item in record['workloads']
+                                                                       for token in item.get('overlapped', ())})) else {})}
     if record['status'] != 'completed':
         result['errors'] = errors or [['run', 'incomplete']]
     return result
@@ -115,22 +117,18 @@ def ledger(output_root, tag, result):
 
 
 def launcher(mesh_root, microbench_root, output_root):
-    """Every hourly leaves one ledger line, a run that cannot start (the lease not taken in lock_wait_seconds) too."""
-    from mesh_nodes import exclusive_lock, load
-    began, code, phase = time.time(), None, 'lock'
+    """Every hourly leaves one ledger line, a run that cannot start too."""
+    from mesh_nodes import load
+    began, code = time.time(), None
     try:
-        cluster = load()
-        with exclusive_lock('committed hourly', cluster.lock, cluster.lock_grace, cluster.lock_wait) as hold:
-            phase = 'launch'
-            code = _launch(mesh_root, microbench_root, output_root, cluster, hold)
+        code = _launch(mesh_root, microbench_root, output_root, load())
     except Exception as error:
-        if code is None:
-            ledger(output_root, time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(began)) + f'-{phase}',
-                   {'schema': 3, 'commits': {}, 'unix': int(began), 'nodes': [], 'us,GB/s': {}, 'errors': [[phase, str(error)]]})
+        ledger(output_root, time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(began)) + '-launch',
+               {'schema': 3, 'commits': {}, 'unix': int(began), 'nodes': [], 'us,GB/s': {}, 'errors': [['launch', str(error)]]})
     return 1 if code is None else code
 
 
-def _launch(mesh_root, microbench_root, output_root, cluster, hold):
+def _launch(mesh_root, microbench_root, output_root, cluster):
     """Select main commits and launch the driver from its upstream Git checkout."""
     from mesh_nodes import started
     output_root = Path(output_root).resolve()
@@ -154,8 +152,8 @@ def _launch(mesh_root, microbench_root, output_root, cluster, hold):
         record['commits'] = {name: revision(root, 'refs/heads/main') for name, root in roots.items()}
         record['upstreams'] = {name: upstream(root) for name, root in roots.items()}
         for name, root in roots.items():
-            target = Path.home() / cluster.checkouts / name / 'current'
-            checkout(record['upstreams'][name], record['commits'][name], target)
+            target = Path.home() / cluster.checkouts / name / record['commits'][name]
+            checkout(record['upstreams'][name], record['commits'][name], target, max(1, record['deadline_unix'] - time.time()))
             record['checkouts'][name] = {'path': str(target)}
         committed_mesh = Path(record['checkouts']['mesh']['path'])
         committed_bench = Path(record['checkouts']['metal-microbench']['path'])
@@ -164,14 +162,14 @@ def _launch(mesh_root, microbench_root, output_root, cluster, hold):
             raise RuntimeError(f'pinned mesh commit lacks shared hourly prerequisites: {absent}')
         config = committed_bench / 'tools/mesh/hourly/workloads.json'
         record['configuration'] = {'path': str(config.relative_to(committed_bench))}
-        record['history'] = HISTORY
+        history = output_root / 'history.json'
+        record['history'] = known = json.loads(history.read_text()) if history.exists() else {}
         phase = 'build'
         subprocess.run(['make', '-s', '-C', str(committed_mesh / 'rdma'), 'statistics'],
                        check=True, stdout=subprocess.DEVNULL)
         phase = 'driver'
         child = subprocess.Popen([sys.executable, str(committed_mesh / 'rdma/mesh_hourly.py'), 'execute'], cwd=committed_mesh,
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, start_new_session=True)
-        hold(child.pid)
         stopped = None
         try:
             stdout = child.communicate(json.dumps(record))[0]
@@ -199,8 +197,10 @@ def _launch(mesh_root, microbench_root, output_root, cluster, hold):
         quiet()
         record['errors'].append({'stage': phase, 'error': str(error), 'traceback': traceback.format_exc()})
     record['finished_unix'] = time.time()
-    for item in record['workloads']:
-        HISTORY[item['tag']] = (HISTORY.get(item['tag'], []) + item.get('observations', []))[-64:]
+    if record['workloads']:
+        for item in record['workloads']:
+            known[item['tag']] = (known.get(item['tag'], []) + item.get('observations', []))[-64:]
+        history.write_text(json.dumps(known))
     ledger(output_root, tag, compact(record))
     return 0 if record['status'] == 'completed' else 1
 
@@ -215,22 +215,24 @@ def prepare_node(node, paths, record):
     try:
         commands = [f'export MESH_RUN={shlex.quote(record["token"])}']
         for name in paths:
-            destination = f'{cluster.checkouts}/{name}/current'
+            destination = f'{cluster.checkouts}/{name}/{record["commits"][name]}'
             result['sources'][name] = {'commit': record['commits'][name], 'remote_root': destination,
                                        'upstream': record['upstreams'][name]}
-            commands.append(checkout_command(record['upstreams'][name], record['commits'][name], '~/' + destination))
+            commands += [checkout_command(record['upstreams'][name], record['commits'][name], '~/' + destination),
+                         f'touch {home_path(destination)}.used']
             if name == 'mesh':
                 node.source = destination
         commands.append(f'PYTHONPATH={home_path(node.source + "/rdma")} {cluster.python} -m mesh_nodes node prepare '
                         + ' '.join(shlex.quote(word) for word in (record['commits']['mesh'], node.number, record['token'])))
         for name in paths:
             commands.append(f'{cluster.python} {home_path(node.source + "/rdma/mesh_source.py")} prune '
-                            f'{home_path(cluster.checkouts + "/" + name)} current')
+                            f'{home_path(cluster.checkouts + "/" + name)} {cluster.kept} {cluster.run_seconds}')
         code, output = node.run('\n'.join(commands))
         result['install_exit'] = code
         if code:
             raise RuntimeError(f'preparation failed ({code}): {output}')
-        result['status'] = 'installed'
+        result.update(status='installed', bridge=next((json.loads(line)['bridge'] for line in output.splitlines()
+                                                        if line.startswith('{"bridge"')), None))
     except Exception as error:
         result.update(status='failed', error=str(error))
     return result
@@ -275,10 +277,11 @@ def run_workload(item, nodes, paths, record, ordinal, cluster):
     try:
         if not selected:
             raise RuntimeError(f'placement unmet: no live, installed member meets {item["place"]}')
-        if not mesh.wait_paired(nodes, None, end):
-            raise RuntimeError('the discovered fabric has not paired before workload configuration')
+        if len(mesh.parts([node.number for node in selected], mesh.paired(selected))) > 1:
+            raise RuntimeError('placement unmet: its members are not linked by paired cables')
         history = record.get('history', {}).get(tag, [])[-64:]
-        env = f'PYTHONPATH={mesh.home_path(selected[0].source + "/rdma")} PYTHONDONTWRITEBYTECODE=1 '
+        env = (f'PYTHONPATH={mesh.home_path(selected[0].source + "/rdma")}:{mesh.home_path(selected[0].source + "/rdma/torch-mesh")} '
+               'PYTHONDONTWRITEBYTECODE=1 ')
         command = f'{cluster.python} {mesh.home_path(selected[0].source + "/examples/" + item["program"] + ".py")}'
         if item.get('configuration'):
             operands = json.loads((paths['metal-microbench'] / item['configuration']).read_text())
@@ -289,9 +292,12 @@ def run_workload(item, nodes, paths, record, ordinal, cluster):
             operands = history
             env += 'MESH_OBSERVATIONS_STDIN=1 '
         result.update(status='running', ranks={f'rank{k}': {} for k in range(len(selected))})
-        outputs = mesh.ranks(selected, tag, '.', command, cluster.rank_port + ordinal, env=env,
+        port = cluster.rank_port + zlib.crc32(record['run'].encode()) % 20 * 20 + ordinal
+        outputs = mesh.ranks(selected, tag, '.', command, port, env=env,
                              alarm=max(1, int(end - time.time())), input=json.dumps(operands).encode(), states=result['ranks'],
                              run=record['token'])
+        result['loaded'] = sorted({v['loaded'] for row in outputs.values() for v in row['records'] if 'loaded' in v})
+        result['overlapped'] = sorted({t for row in outputs.values() for v in row['records'] for t in v.get('overlap', ())})
         result['ranks'] = rank_results(outputs)
         result['observations'] = [row for rank in result['ranks'].values() for row in rank.pop('observations')]
         if len(result['ranks']) != len(selected) or any(v['exit'] != 0 for v in result['ranks'].values()):
@@ -324,12 +330,17 @@ def _execute_locked(record):
         installs = mesh.parallel([lambda n=n: prepare_node(n, paths, record)
                                   for n in found])
         record['nodes'] = {f'{node.number}@{node.addr}': result for node, result in zip(found, installs)}
-        ready = [node for node, result in zip(found, installs)
-                 if result['status'] == 'installed' and node.number not in record['absent']]
+        swaps = [node for node, result in zip(found, installs) if result.get('bridge') == 'differs']
+        record['stage'] = 'swap'
+        for node, (code, output) in zip(swaps, mesh.parallel([lambda n=n: n.py('swap', record['commits']['mesh'], cluster.detach)
+                                                              for n in swaps])):
+            if code:
+                record['nodes'][f'{node.number}@{node.addr}'].update(status='failed', error=f'bridge swap failed ({code}): {output[-400:]}')
+        ready = [node for node in found if record['nodes'][f'{node.number}@{node.addr}']['status'] == 'installed'
+                 and node.number not in record['absent']]
         record['stage'] = 'pairing'
         if ready and not mesh.wait_paired(ready, None, record['deadline_unix']):
-            record['errors'].append({'stage': 'pairing', 'error': 'not all current topology links paired'})
-            ready = []
+            record['errors'].append({'stage': 'pairing', 'error': 'not all links paired; each workload needs its own members paired'})
         for ordinal, item in enumerate(items):
             record['stage'] = item['tag']
             run_workload(item, ready, paths, record, ordinal, cluster)
@@ -358,11 +369,15 @@ def main(argv=None):
         for s in (signal.SIGTERM, signal.SIGHUP):
             signal.signal(s, halt)
         record = json.load(sys.stdin)
-        address = json.loads((Path(__file__).resolve().parents[1] / 'etc/statistics.json').read_text())['listen']
-        record['statistics'] = {'listen': address, 'pid': os.getpid()}
-        with serving(record, address):
-            print(f'Live state: http://{address[0]}:{address[1]}/STATS', file=sys.stderr, flush=True)
-            record = _execute_locked(record)
+        host, port = json.loads((Path(__file__).resolve().parents[1] / 'etc/statistics.json').read_text())['listen']
+        for port in range(port, port + 10):  # another run's driver may serve the first
+            with contextlib.suppress(OSError), serving(record, (host, port)):
+                record['statistics'] = {'listen': [host, port], 'pid': os.getpid()}
+                print(f'Live state: http://{host}:{port}/STATS', file=sys.stderr, flush=True)
+                record = _execute_locked(record)
+                break
+        else:
+            raise OSError(f'no statistics port free from {port - 9}')
         print(json.dumps(record, separators=(',', ':')))
         return 0 if record['status'] == 'completed' else 1
     return launcher(*args.paths)

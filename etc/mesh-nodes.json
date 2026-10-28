@@ -3,13 +3,12 @@
   "access": {
     "key": "~/.ssh/primeintellect_ed25519"
   },
-  "lock": "~/.claude-personal/jobs/15c469fa/tmp/nodes.lock",
-  "lock_grace_seconds": 60,
-  "lock_wait_seconds": 2700,
   "run_seconds": 3300,
   "python": "~/.venv-mesh-uv/bin/python",
   "checkouts": ".cache/mesh-checkouts",
+  "checkouts_kept": 4,
   "rank_port": 29600,
+  "detach_seconds": 60,
   "nodes": {
     "D7377D82-2E96-5084-A5D3-3139FDF3D6CE": {
       "name": "Ms-MacBook-Pro",

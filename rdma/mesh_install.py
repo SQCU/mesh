@@ -1,8 +1,9 @@
 """Explicit source-root transition for committed Git checkout installation.
 
 Normal mesh-user.sh installs retain their existing behavior. The hourly driver calls
-this entrypoint under the cluster lease; a node-local flock serializes installers.
-No client is killed. A failed transition excludes that node from measurement.
+this entrypoint for a bridge swap; a node-local flock serializes installers. It waits
+for attached clients to detach and kills none. A failed transition excludes that node
+from measurement.
 """
 import contextlib
 import fcntl
@@ -96,19 +97,19 @@ def verify_active(source, commit):
             'topology': check}
 
 
-def install_checkout(source, allow_source_transition=False):
+def install_checkout(source, allow_source_transition=False, detach=0):
     source = Path(source).resolve()
     commit = verify(source)
     cache = Path.home() / '.cache/mesh'
     cache.mkdir(parents=True, exist_ok=True)
     with (cache / 'install.lock').open('a') as lease:
         fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        result = _install_locked(source, commit, allow_source_transition)
+        result = _install_locked(source, commit, allow_source_transition, detach)
         (source / 'rdma/.build/installed.json').write_text(json.dumps({'commit': commit, 'environment': environment()}) + '\n')
         return result
 
 
-def _install_locked(source, commit, allow_source_transition):
+def _install_locked(source, commit, allow_source_transition, detach):
     domain, service = f'user/{os.getuid()}', f'user/{os.getuid()}/io.mesh.bridge'
     if disabled(domain):
         raise RuntimeError('operator-disabled bridge retained; checkout not installed')
@@ -130,9 +131,8 @@ def _install_locked(source, commit, allow_source_transition):
     observer.parent.mkdir(exist_ok=True)
     run('cc', '-O2', '-Wall', '-Wextra', '-Werror', '-o', observer, source / 'rdma/mesh-install-state.c')
     read_state = lambda: json.loads(run(observer).stdout)
-    initial = read_state()
-    if initial['clients']:
-        raise RuntimeError(f'live client holders prevent install: {initial["clients"]}')
+    # Attached programs are waited for, never killed: the swap fails if they do not detach in `detach` seconds.
+    wait_for(read_state, lambda state: not state['clients'], detach, f'clients still attached after {detach:.0f} s')
     released = unloaded = False
     try:
         if changing:

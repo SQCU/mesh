@@ -63,28 +63,27 @@ tracked by parent pid, each pid checked against its start time, until none remai
 and then every process of the user still carrying the token (`KERN_PROCARGS2`); it
 exits 125 naming any survivor. The rank's own alarm ends it should the guard die,
 and each node's preparation (whose builds carry the token too) sweeps every token
-naming the current run's launcher host and another run: that host's lease admits
-one run at a time, so that run has ended. Other hosts' tokens are left alone. A descendant still escapes when it leaves its parent between two samples and runs a
+naming the current run's launcher host and another run, which has ended. Other
+hosts' tokens are left alone. A descendant still escapes when it leaves its parent between two samples and runs a
 platform binary (whose environment macOS hides) or with `MESH_RUN` removed.
 A run ends by `run_seconds`: every command of its driver is bounded a minute
 earlier, so the driver returns its record. A stop (the bound, SIGTERM, SIGHUP,
 SIGINT) cancels the bound, has the driver close its ranks' stdin and return its
 record, kills its session past a minute, and ignores later stops while the record
-is written and the lease released. The lease is the `mkdir` of `lock`, as every
-session's tools take it. Its owner file names the launcher and the driver (pid,
-start time, host); it is stale when neither lives, or when it has no owner file
-past `lock_grace_seconds` from its birth. The hourly waits for it up to
-`lock_wait_seconds`, trying every 10 s, and every hourly appends one line to
-log.jsonl, one that cannot take the lease or start included.
+is written. Every hourly appends one line to log.jsonl, one that cannot start
+included, naming the commits its ranks loaded and the runs whose ranks shared its
+nodes. There is no node lock: runs of different commits share a bridge as clients.
 
-Each node keeps one `current` Git build checkout per repository. It fetches a
-selected commit from origin when needed and retains incremental build products.
-One administration command prepares both repositories and the installation.
-An installation receipt names the commit, OS build, SDK build and Python ABI;
-unchanged inputs reuse the installation after live bridge and package checks.
-Changed inputs enter the ordinary build dependencies. The Metal binary archive
-also depends on the OS/SDK record, rather than rebuilding on every invocation.
-Source revisions replace installer content hashes and temporary source copies.
+Each run uses its own commit's checkout on every node
+(`<checkouts>/<repo>/<sha>`, the `checkouts_kept` most recently used kept). A
+tensor program's client code (libnccl-mesh and its kernels, _mesh_c, torch_mesh's
+extension) is built there once per commit, under a receipt naming the commit, OS
+build, SDK build and Python ABI, and its ranks load it by path (PYTHONPATH and the
+libraries' rpath), never from the shared venv. So programs of different commits
+attach to the same resident bridge as ordinary clients. The bridge is swapped only
+when its own build differs (its images' sources and their headers, compared without
+building) and then politely: `node swap` waits up to `detach_seconds` for attached
+programs to detach, kills none, and fails the node if they do not.
 
 The application observer emits each completed whole-call record through
 `mesh_statistics.emit`. Late peer observations still enter the existing
