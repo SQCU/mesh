@@ -166,6 +166,16 @@ NSDictionary<NSString *,id> *MetalViewNormalizeAxes(const NSInteger *strides,siz
     return @{@"strides":steps,@"offset":@(base),@"maps":remaining};
 }
 
+NSString *MetalViewIndexValuesDeclaration(NSUInteger binding,const NSInteger *values,NSUInteger count) {
+    const NSInteger stride=0;
+    NSData *map=[NSData dataWithBytes:values length:count*sizeof *values];
+    return [NSString stringWithFormat:@"template<uint B> inline long mesh_position(ulong i);\n"
+        "namespace mesh_positions_%lu {\n%@%@}\n"
+        "template<> inline long mesh_position<%lu>(ulong i) { return mesh_positions_%lu::mesh_index<0>(i); }\n",
+        (unsigned long)binding,MetalViewIndexTemplates(),MetalViewMappedIndexDeclaration(0,&count,&stride,1,0,@{@0:map}),
+        (unsigned long)binding,(unsigned long)binding];
+}
+
 NSString *MetalViewMappedIndexDeclaration(NSUInteger binding,const NSUInteger *shape,const NSInteger *strides,
     size_t rank,NSUInteger elementOffset,NSDictionary<NSNumber *,NSData *> *maps) {
     if(!maps.count)return MetalViewIndexDeclaration(binding,shape,strides,rank,elementOffset);

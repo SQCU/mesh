@@ -101,6 +101,9 @@ NSDictionary<NSString *, id> *MetalViewNormalizeAxes(const NSInteger *strides, s
     NSDictionary<NSNumber *, NSData *> *maps);
 NSString *MetalViewMappedIndexDeclaration(NSUInteger binding, const NSUInteger *shape, const NSInteger *strides,
     size_t rank, NSUInteger elementOffset, NSDictionary<NSNumber *, NSData *> *maps);
+// Declared index relations, such as an encoding's row positions. These are
+// compiler metadata, never a substitute for a computed index tensor.
+NSString *MetalViewIndexValuesDeclaration(NSUInteger binding, const NSInteger *values, NSUInteger count);
 NSData *MetalViewMappedReaches(id<MTLBuffer> buffer, NSUInteger offset, const NSUInteger *shape,
     const NSInteger *strides, size_t rank, NSUInteger elementBytes, uint32_t access, int32_t binding,
     NSDictionary<NSNumber *, NSData *> *maps);

@@ -88,9 +88,8 @@ access structure.
 
 This contract does not declare these existing paths complete:
 
-- Direct compressed products and input transforms still load some order arrays
-  whose static compositions could be resolved earlier. Numerical index tensors
-  must remain data.
+- Rotated-basis transforms and some coupled consumers still load encoding
+  relations that preparation can compose. Numerical index tensors must remain data.
 - Producer placement handles native-kernel subdomains, matrix API uses and
   declared CPU/Core ML calls in FX graphs. Native normalization producers now
   receive ANE input type and layout requirements before command emission. Other native
@@ -398,6 +397,25 @@ consumers, fused normalization and per-layer products no longer load that
 identity or scatter through it. FX finishes compose the encoded positions into
 partial and scale views during preparation. Padded lanes leave the finish
 domain, and the common finish kernel writes its logical output view directly.
+
+Direct products and row gathers also carry their encoding positions through
+preparation. The FX kernel declaration and native library receive these positions
+as compiler metadata. Both use the shared index emitter, which simplifies the
+relation to arithmetic or a compact constant table. There is no order-buffer
+binding or read dependency for these positions. A required encoding relation has
+no implicit identity implementation; preparation supplies identity relations too.
+Computed index tensors remain ordinary page operands.
+
+The native fused finish uses that same declaration for its next input gather.
+Its output count is a template operand, so an absent gather adds no runtime
+branch or unused encoding input. Each gather is prepared with its actual relation
+and pipeline limits; bare aliases with missing relations have been removed.
+
+Preparation on 2026-10-28 covered a complete FX compressed gather/product graph
+with 29 logical output rows and 37 input columns in 64-lane storage. Its commands
+have no order tensors among their inputs. Shared-library, frontend and native
+builds completed, and direct products, gathers and typed fused finishes compiled.
+These checks submitted no numerical work.
 
 Fused consumers carry the same views as standalone consumers. Their index
 expressions have a compiler namespace separate from the enclosing product's

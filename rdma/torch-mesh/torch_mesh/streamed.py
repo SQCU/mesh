@@ -597,14 +597,14 @@ def coop_of(maps):
     return a | b << 3 | cj << 6 | d << 9 | sum(s << (12 + 3 * i) for i, s in enumerate(source))
 
 
-def _encode(name, buffers, dims, gx, gy, threads, line='', *, outputs, indexed=(), pitched=()):
+def _encode(name, buffers, dims, gx, gy, threads, line='', *, outputs, indexed=(), pitched=(), indices=None):
     from .kernel import declare
     from .layout import strides
     from .operand import descriptor
     requirements = {i: descriptor(value).strides if i in pitched else strides(value.shape)
                     for i, value in enumerate(buffers) if value is not None}
     return declare('streamed.metal', name, buffers, outputs, dims, 15, (gx, gy, 1), (threads, 1, 1), line,
-                   indexed=tuple(outputs) + tuple(indexed), requirements=requirements)
+                   indexed=tuple(outputs) + tuple(indexed), requirements=requirements, indices=indices)
 
 
 def _half(n, width):
@@ -819,10 +819,10 @@ class Matrix(torch.Tensor):
         if self.folded is None:
             pad = outs + [outs[0]] * (3 - len(outs))
             scales = [m.col_scale for m in matrices] + [self.col_scale] * (3 - len(matrices))
-            name, line = (instance('streamed_row_gather', 0, 0, 0, int(self.column_masked), self.logical_shape[1])
-                          if self.column_masked else ('streamed_gather', ''))
-            outs = _encode(name, [x, pad[0], self.col_order, scales[0], None, pad[1], pad[2], scales[1], scales[2]],
-                    _dims(columns=self.columns, inputs=len(matrices)), n, 1, 256, line, outputs=(1, 5, 6), indexed=(0, 2, 3, 7, 8))
+            name, line = instance('streamed_row_gather', 0, 0, 0, int(self.column_masked), self.logical_shape[1])
+            outs = _encode(name, [x, pad[0], None, scales[0], None, pad[1], pad[2], scales[1], scales[2]],
+                    _dims(columns=self.columns, inputs=len(matrices)), n, 1, 256, line, outputs=(1, 5, 6), indexed=(0, 3, 7, 8),
+                    indices={2: self.metadata['col_order']})
         elif self.signs is not None and len(outs) <= 2:
             second = outs[1] if len(outs) > 1 else outs[0]
             name, line = (instance('streamed_hadamard', self.logical_shape[1], 1)
@@ -847,9 +847,11 @@ class Matrix(torch.Tensor):
             rotated = torch.mm(x, self.folded.T)
             pad = outs + [outs[0]] * (3 - len(outs))
             scales = [m.col_scale for m in matrices] + [self.col_scale] * (3 - len(matrices))
-            outs = _encode('streamed_gather', [rotated, pad[0], _identity(self.columns), scales[0], None, pad[1], pad[2],
+            name, line = instance('streamed_row_gather', 0, 0, 0)
+            outs = _encode(name, [rotated, pad[0], None, scales[0], None, pad[1], pad[2],
                                         scales[1], scales[2]],
-                    _dims(columns=self.columns, inputs=len(matrices)), n, 1, 256, outputs=(1, 5, 6), indexed=(0, 2, 3, 7, 8))
+                    _dims(columns=self.columns, inputs=len(matrices)), n, 1, 256, line, outputs=(1, 5, 6), indexed=(0, 3, 7, 8),
+                    indices={2: tuple(range(self.columns))})
         return outs, tables
 
     def product(self, xt, op='product', tables=None, decomposition=None):
@@ -862,9 +864,10 @@ class Matrix(torch.Tensor):
         spec, name, line, gx, gy, threads, shares = self.dispatch(n, op, decomposition)
         assert (tables is not None) == bool(spec.get('LUT')), f'{name}: tables where it reads them'
         partials = torch.empty(shares, n, self.rows, dtype=torch.float32, device='mps')
-        buffers = self._code() + [tables, xt, partials] + ([None] * 5 + [xt, self.row_order, self.row_scale] if spec['kernel'] == 'panel' else [])
+        buffers = self._code() + [tables, xt, partials] + ([None] * 5 + [xt, None, self.row_scale] if spec['kernel'] == 'panel' else [])
         partials, = _encode(name, buffers, _dims(tiles=self.tiles_, outputs=self.rows, rows=n, per=-(-self.tiles_ // COMPUTE['STREAMED_PANEL_TILES']), split=n * self.rows,
-                                     pitch=self.pitch), gx, gy, threads, line, outputs=(5,), pitched=(1,))
+                                     pitch=self.pitch), gx, gy, threads, line, outputs=(5,), pitched=(1,),
+                indices={12: self.metadata['row_order']})
         return partials
 
     def product_t(self, xt, rows):
@@ -915,9 +918,10 @@ class Matrix(torch.Tensor):
             return self.finish(self.product(xt, decomposition=decomposition))
         _, name, line, gx, gy, threads, _ = self.dispatch(n, decomposition=decomposition)
         y = _half(n, self.logical_shape[0])
-        y, = _encode(name, self._code() + [None, xt, None, None, None, None, None, None, y, self.row_order, self.row_scale],
+        y, = _encode(name, self._code() + [None, xt, None, None, None, None, None, None, y, None, self.row_scale],
                 _dims(tiles=self.tiles_, outputs=self.rows, rows=n, per=-(-self.tiles_ // COMPUTE['STREAMED_PANEL_TILES']), stride=self.logical_shape[0], finish=1,
-                      pitch=self.pitch), gx, gy, threads, line, outputs=(11,), indexed=(12, 13), pitched=(1,))
+                      pitch=self.pitch), gx, gy, threads, line, outputs=(11,), indexed=(13,), pitched=(1,),
+                indices={12: self.metadata['row_order']})
         return y
 
     def times(self, x):
@@ -936,10 +940,10 @@ class Matrix(torch.Tensor):
             xt = self.coded_input(x16)[0][0]
             return self.apply(xt) if factor is None else self.finish(self.product(xt), factor=factor, dtype=dtype)
         xt = _half(n, self.rows)
-        name, line = (instance('streamed_row_gather', 0, 0, 32, int(self.row_masked), self.logical_shape[0])
-                      if self.row_masked else ('streamed_gather_32', ''))
-        xt, = _encode(name, [x16, xt, self.row_order, self.row_scale],
-                _dims(columns=self.rows, rows=n, inputs=1), n, 1, 256, line, outputs=(1,), indexed=(0, 2, 3))
+        name, line = instance('streamed_row_gather', 0, 0, 32, int(self.row_masked), self.logical_shape[0])
+        xt, = _encode(name, [x16, xt, None, self.row_scale],
+                _dims(columns=self.rows, rows=n, inputs=1), n, 1, 256, line, outputs=(1,), indexed=(0, 3),
+                indices={2: self.metadata['row_order']})
         partials = self.product_t(xt, n)
         if self.folded is None:
             return self.finish(partials, positions=self.metadata['col_order'], scale=self.col_scale, factor=factor, dtype=dtype,
