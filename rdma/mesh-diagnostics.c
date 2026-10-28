@@ -11,8 +11,10 @@ static uint64_t ns(void){ return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 static int order(const void *a,const void *b){ const uint64_t x=*(const uint64_t *)a,y=*(const uint64_t *)b; return (x>y)-(x<y); }
 static double at(uint64_t *v,size_t n,size_t num,size_t den){ qsort(v,n,sizeof *v,order); return n?v[n*num/den]/1e3:0; }
 static int lost(_Atomic uint64_t *word){ return atomic_load_explicit(word,memory_order_acquire)==UINT64_MAX; }
-static int wait_for(_Atomic uint64_t *word,uint64_t value){
-  while(atomic_load_explicit(word,memory_order_acquire)<value)if(lost(word))return 1;
+/* design/transport.md section 5: each wait within MESH_PLATFORM_NS, past which the probe ends, the wait named */
+static int wait_for(_Atomic uint64_t *word,uint64_t value,const char *wait){
+  const struct mesh_deadline deadline=mesh_deadline(wait,0);
+  while(atomic_load_explicit(word,memory_order_acquire)<value){if(lost(word))return 1;mesh_deadline_left(&deadline);}
   return lost(word);
 }
 
@@ -43,8 +45,9 @@ static void release_probe(struct mesh_ctx *c,uint32_t stream,int completed,
        On error retain tables until the old client's owner has disappeared.
        A different owner implies that the bridge ended this holding first.
        These observations are local teardown, never remote receipt messages. */
+    const struct mesh_deadline deadline=mesh_deadline("quiet: the bridge's end of the probe's holding (release_probe)",0);
     if(!completed)while((atomic_load_explicit(&mesh_stream_at(c->M,stream)->owner,memory_order_acquire)&
-                       ~MESH_STREAM_GIVEN)==c->client)usleep(1000);
+                       ~MESH_STREAM_GIVEN)==c->client){mesh_deadline_left(&deadline);usleep(1000);}
   }
   if(table.count)mesh_lease_return(c,table.first);
   for(uint32_t k=0;k<data.count;k++)mesh_lease_return(c,data.first+k*data.stride);
@@ -95,20 +98,20 @@ int mesh_diagnostic_quiet(int argc,char **argv){
   for(uint32_t k=0;k<rounds && !failed;k++){
     gap[k]=k%ngaps;
     if(role){
-      failed=wait_for(v.landed,k+1);
+      failed=wait_for(v.landed,k+1,"quiet: the peer's unit landed (wait_for landed)");
       if(failed)break;
       const uint64_t t0=ns();
       atomic_store_explicit(v.ready,k+1,memory_order_release);
-      failed|=wait_for(v.sent,k+1);
+      failed|=wait_for(v.sent,k+1,"quiet: the unit sent (wait_for sent)");
       done[k]=ns()-t0;
     }else{
       const uint64_t from=ns();
       while(ns()-from<gaps[gap[k]]){}
       const uint64_t t0=ns();
       atomic_store_explicit(v.ready,k+1,memory_order_release);
-      failed=wait_for(v.sent,k+1);
+      failed=wait_for(v.sent,k+1,"quiet: the unit sent (wait_for sent)");
       done[k]=ns()-t0;
-      failed|=wait_for(v.landed,k+1);
+      failed|=wait_for(v.landed,k+1,"quiet: the peer's unit landed (wait_for landed)");
       trip[k]=ns()-t0;
     }
   }

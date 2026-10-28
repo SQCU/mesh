@@ -1524,6 +1524,7 @@ static void child_heard(struct port *port){
 /* a port whose link was lost once its lanes were asked for (`recycle`) asks its child to end once its quiet window and
    the exit's have ended (B9, B9b: no release inside a termination) and no job of its own is out (B12) */
 static void child_turn(struct port *port){
+  if(port->reaping){child_reaped(port);return;}
   if(!port->recycle || !port->child || port->ending || port->job || port->link.job || now<atomic_load(&port->quiet_at) ||
      now<atomic_load(&exit_at))return;
   child_send(port,(struct child_message){.kind=CHILD_END});
@@ -1542,7 +1543,10 @@ static void child_reaped(struct port *port){
   int status=0;
   if(port->child_fd>=0)child_heard(port);
   if(port->child_fd>=0){close(port->child_fd);port->child_fd=-1;}
-  while(waitpid(pid,&status,0)<0 && errno==EINTR){}
+  /* design/transport.md section 5: its exit can wait on its device's release with no deadline (facts.md, 10-23:
+     IOThunderboltPath::deactivateSynchronous), so it is reaped at a later turn (child_turn), the event loop not held */
+  const pid_t reaped=waitpid(pid,&status,WNOHANG);
+  if((port->reaping=!reaped || (reaped<0 && errno==EINTR)))return;
   port->child=0;
   if(port->holder<2*MESH_PORTS && mesh_bridge_pages(M)->child[port->holder].pid==(uint32_t)pid)
     mesh_bridge_pages(M)->child[port->holder]=(struct mesh_holder){0};

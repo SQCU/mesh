@@ -2,6 +2,7 @@
    Compilation, model loading and named view binding are preparation operations.
    Run invokes the already-bound model; no copied-output substitute exists. */
 #include "mesh-coreml.h"
+#include "../etc/bridge/layout.h"
 #import <CoreML/CoreML.h>
 #import <Foundation/Foundation.h>
 #import <Accelerate/Accelerate.h>
@@ -230,7 +231,7 @@ void mesh_coreml_unbind(void *binding) { CFRelease(binding); }
 /* Where Core ML places each operation of a loaded model (MLComputePlan): "operator=device" a line, the device cpu, gpu,
    ane or unknown, written to `out` (at most `size` bytes); the operations' count, or -1.  Placement is Core ML's own
    choice within the compute units the model was loaded on: an operation on the CPU shares the performance cores with
-   anything else running there. */
+   anything else running there.  The plan's load is awaited within MESH_PREPARATION_NS, past which this fails (-1). */
 long mesh_coreml_placement(long handle, char *out, size_t size) {
   @autoreleasepool {
     NSURL *compiled; MLComputeUnits units;
@@ -248,7 +249,11 @@ long mesh_coreml_placement(long handle, char *out, size_t size) {
       __block NSError *failure = nil;
       [MLComputePlan loadContentsOfURL:compiled configuration:configuration
                      completionHandler:^(MLComputePlan *loaded, NSError *error) { plan = loaded; failure = error; dispatch_semaphore_signal(done); }];
-      dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+      if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)MESH_PREPARATION_NS))) {
+        snprintf(error_, sizeof error_, "compute plan: not loaded within its deadline of %.0f s (MESH_PREPARATION_NS)",
+                 (double)MESH_PREPARATION_NS / 1e9);
+        return -1;
+      }
       if (!plan) { snprintf(error_, sizeof error_, "compute plan: %s", failure.localizedDescription.UTF8String); return -1; }
       MLModelStructureProgramFunction *main = plan.modelStructure.program.functions[@"main"];
       NSMutableString *text = [NSMutableString string];
