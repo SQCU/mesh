@@ -404,9 +404,25 @@ Combining provider partials with GPU work takes an explicit addend operand;
 the destination no longer implicitly supplies that input. All three views feed
 the same indexing and dependency declarations.
 
-Native crossings preserve the supplied result view; the network still declares
-its result scalar representation separately from a provider's representation.
-Provider output-backing guarantees remain unresolved as described above.
+Native FFN preparation assigns the result's type and layout from its declared
+crossing, or from its local provider when no crossing consumes it. Compatible
+provider layout requirements enter that same placement. Stored and compressed
+GPU products write directly into this typed destination; their output interface
+no longer uses a float flag or a two-case scalar selector. The native scalar
+spellings for crossing types are operands in `etc/compute/metal-apis.json`.
+
+An expert FFN's crossing covers both dense and expert contribution planes.
+Those planes are views of the same placed operand. Expert combination writes
+its assigned view, including a partial final SIMD group. Branch normalization
+works in place and the shared typed reduction combines the planes; the separate
+half scratch and add command are removed. This also corrects the preceding
+native binding, which passed only the dense plane to that crossing.
+
+Preparation on 2026-10-28 built rank and Goal A and compiled stored, compressed
+and expert products with mapped half, float, bfloat and integer destinations,
+including masked output tails. No numerical commands were submitted. These
+changes do not establish Core ML's output-backing guarantee, which remains
+unresolved as described above.
 
 Both convolution forms and their tap projections now consume the same typed
 input operand. The compressed gather, rotation and Hadamard bodies read its
