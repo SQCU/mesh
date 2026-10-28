@@ -237,16 +237,25 @@ carries no keepalive.
 An expiry stops the process's GPU work before the program ends (rdma/nccl-mesh.c mesh_library_expired): it takes every
 communicator's failure claim, so each GPU wait and the track kernel end within 2^10 loads, and awaits the library's and
 the prepared functions' committed command buffers within MESH_PLATFORM_NS. A watch looks once a second for GPU work
-that makes no progress: a prepared function with nothing arriving for 0.8 MESH_PLATFORM_NS (twice that while its next
-part awaits an input event that has not moved), or a communicator's command buffer committed and not ended for twice
-MESH_PLATFORM_NS, and ends the program so, naming the wait. A prepared function's part is committed only once the events
-it awaits have been reached (rdma/metal-recording.m MetalPartReady), so no GPU queue holds an event wait: Metal 4 drops
-a queue's event wait about 4 s after the commit and runs the work behind it, silently, and a classic command buffer's
-wait ends in a timeout error at 5 s (the laptop, macOS 26.3, 2026-10-28). A prepared function is split into command
-buffers at its crossings so that none runs near the platform's watchdog: a part holds as many crossings as fit half of
-MESH_PLATFORM_NS at one bound each (NCCL_MESH_POLLS loads at the device's load period, read once in a process by the
-spin kernel: 253 ns on the laptop, 1.14 s a bound, two crossings a part), and once parts have run, as many as their
-measured GPU time a crossing leaves room for beside one bound (rdma/metal-recording.m MetalCrossings).
+that makes no progress: a prepared function whose committed part has not ended for twice that part's last GPU time
+(at least 0.8 MESH_PLATFORM_NS; MESH_PREPARATION_NS for a part that has not run before), or whose next part awaits an
+input event that has not moved for twice MESH_PLATFORM_NS, or a communicator's command buffer committed and not ended
+for twice MESH_PLATFORM_NS, and ends the program so, naming the wait. A prepared function's part is committed only once
+the events it awaits have been reached (rdma/metal-recording.m MetalPartReady), and a frontend's later work waits
+behind a slot of its own queue that the library commits at the function's end (MetalScheduleEnqueueAfter), so no GPU
+queue holds an event wait: Metal 4 drops a queue's event wait about 4 s after the commit and runs the work behind it,
+silently, and a classic command buffer's wait ends in a timeout error at 5 s, while a buffer committed behind an
+enqueued slot runs after it with no error 12 s later (the laptop, macOS 26.3, and m5ult1, macOS 27.0, 2026-10-28).
+The platform does not end a busy command buffer (7.2 s of ALU work in one on macOS 27.0), but on 27.0 it ends a
+kernel spinning on relaxed loads alone as a hang within 0.28 s (the library's fenced coherent loads ran 2 s). A
+prepared function is split into command buffers at its crossings: a part holds as many crossings as fit half of
+MESH_PLATFORM_NS beside one wait run to its bound (NCCL_MESH_POLLS loads at the device's load period, read once in a
+process by the spin kernel: 253 ns on the laptop, 1.14 s a bound), each other one taking the 2^10 loads in which its
+claim ends it (0.26 ms; about 5,200 crossings a part), or its measured GPU time once parts have run, if more
+(rdma/metal-recording.m MetalCrossings); and its other GPU work, once a GPU-only part has run, into parts of as many
+commands as their measured GPU time fits in half MESH_PLATFORM_NS (MetalScheduleRoom), so that a part's end, the
+watch's progress, comes within it. A part is not one a crossing: each Metal 4 command buffer encoded holds about
+170 KiB of its allocator's memory (the laptop, 2026-10-28), so 4,096 of them took 0.9 to 2.6 GiB.
 
 The only thing that cannot be stopped is a thread inside a kernel call that waits on something that never happens. A
 process in that state (STAT `U`) ignores every signal, SIGKILL included. Observed:

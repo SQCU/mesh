@@ -184,6 +184,15 @@ int MetalScheduleFinish(struct MetalSchedule *, void (^completed)(NSError *error
 // encodes the same parts again on the same objects (an external command runs once: EALREADY);
 // EBUSY while an invocation is in flight. MetalScheduleAfter between them sets the input value.
 int MetalScheduleEnqueue(struct MetalSchedule *);
+// A frontend's order on its own classic queue, with no GPU queue waiting on an event (a Metal 4 queue's wait is dropped
+// silently about 4 s after its commit and a classic buffer's ends in a timeout error at 5 s, on macOS 26.3 and 27.0):
+// the invocation commits no part before MetalScheduleAfter's event reaches `value`, and `then`, a command buffer
+// already enqueued on the frontend's queue (holding that queue's later buffers behind it), is committed at the
+// invocation's end, or at once where the enqueue is refused (EBUSY while an invocation is in flight).
+int MetalScheduleEnqueueAfter(struct MetalSchedule *, uint64_t value, id<MTLCommandBuffer> then);
+// A frontend's expiry: the library's (nccl-mesh-metal.h mesh_library_expired), its GPU work and posted receives stopped
+// first, then the program ended, the wait named.
+__attribute__((noreturn)) void MetalExpired(const char *wait, uint64_t ns);
 // Ordinary completion observation: 0 pending, 1 complete, -1 failed.
 int MetalScheduleStatus(const struct MetalSchedule *, NSError **error);
 void MetalScheduleFree(struct MetalSchedule *);
