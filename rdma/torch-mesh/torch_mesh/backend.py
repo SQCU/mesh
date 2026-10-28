@@ -28,7 +28,7 @@ import torch.distributed as dist
 from torch._C._distributed_c10d import ReduceOp, _create_work_from_future
 from torch.futures import Future
 
-from . import _stream, empty  # _stream's kernels for torch's functional collectives on MPS register as it loads
+from . import _stream, bounded, empty  # _stream's kernels for torch's functional collectives on MPS register as it loads
 
 import mesh  # noqa: E402  (rdma/mesh.py, on the path the mesh's install gives the environment: its _mesh_c)
 from routing import Fabric
@@ -96,9 +96,9 @@ class ProcessGroupMesh(dist.ProcessGroup):
         made, unique = ffi.new('ncclComm_t *'), ffi.new('ncclUniqueId *')
         if rank == 0:
             check(LIB.ncclGetUniqueId(unique))
-            store.set('mesh/unique', bytes(ffi.buffer(unique)))
+            bounded(lambda: store.set('mesh/unique', bytes(ffi.buffer(unique))), 'torch_mesh: store.set mesh/unique')
         else:
-            ffi.memmove(unique, store.get('mesh/unique'), ffi.sizeof('ncclUniqueId'))
+            ffi.memmove(unique, bounded(lambda: store.get('mesh/unique'), 'torch_mesh: rank 0\'s mesh/unique'), ffi.sizeof('ncclUniqueId'))
         check(LIB.ncclCommInitRank(made, size, unique[0], rank))
         self._held(rank, size, made[0])
 
@@ -311,8 +311,8 @@ class ProcessGroupMesh(dist.ProcessGroup):
         self._view_serial = serial + 1
         store = dist.distributed_c10d._get_default_store()
         key = f'mesh/views/{self.group_name}/{serial}'
-        store.set(f'{key}/{self.rank()}', json.dumps(value))
-        return [json.loads(store.get(f'{key}/{rank}')) for rank in range(self.size())]
+        bounded(lambda: store.set(f'{key}/{self.rank()}', json.dumps(value)), f'{key}: store.set')
+        return bounded(lambda: [json.loads(store.get(f'{key}/{rank}')) for rank in range(self.size())], f'{key}: every rank\'s value')
 
     def union_cuts(self, cuts):
         """Agree view boundaries during configuration, before the function runs."""
