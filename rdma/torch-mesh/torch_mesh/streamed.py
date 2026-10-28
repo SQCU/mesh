@@ -51,8 +51,7 @@ model there, else of the fit's prices (every served measurement moves the coeffi
 copies, each checked against float64, were deleted 2026-10-22 with the other test code (the fit reads served
 readings).
 
-  python examples/memory-read.py --mib M --rounds N
-                                                                this node's DRAM read bandwidth (streamed_read), a row of
+  streamed.prepare_read(data, output, count, rounds)           this node's DRAM read bandwidth (streamed_read), a row of
                                                                 kind bandwidth reported through mesh_statistics
   python -m torch_mesh.streamed fit OBSERVATIONS ...            this node's evidence fitted from records read on it (JSON
                                                                 lines: bandwidth's, observe's, the decode attention plans' rows
@@ -235,7 +234,7 @@ class Fit:
         path, (chip, cores) = _EVIDENCE_PATH, node()
         known = _EVIDENCE
         if known is None:
-            raise RuntimeError(f'{path}: no instance evidence on this {chip} ({cores} GPU cores): `python examples/memory-read.py`, '
+            raise RuntimeError(f'{path}: no instance evidence on this {chip} ({cores} GPU cores): `streamed.prepare_read`, '
                                f'`observe` and `fit` make it, or another {chip} of {cores} GPU cores gives its file (metal-microbench '
                                f'docs/kernels.md#the-instance-fit, Evidence)')
         if (known.get('node'), known.get('cores')) != (chip, cores) or not known.get('gbps') or not known.get('coefficients'):
@@ -1352,7 +1351,7 @@ def _fit(args):
         gbps, source = kept['gbps'], f'kept ({path})'
     else:
         raise SystemExit(f'no bandwidth read of this {here[0]} ({here[1]} GPU cores) among the observations, and no fit of it at {path} '
-                         f'(`python examples/memory-read.py --mib M --rounds N` reads it, a row of the observations)')
+                         f'(`streamed.prepare_read` reads it, a row of the observations)')
     fit = Fit(here[1], gbps)
     loss = fit.fit(obs)
     errors = sorted(abs(math.log(fit.time(spec, s, n) / t)) for spec, s, n, t, _ in obs)

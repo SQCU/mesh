@@ -215,7 +215,10 @@ def run_workload(item, nodes, paths, record, out, ordinal):
             raise RuntimeError('the discovered fabric has not paired before workload configuration')
         history = record.get('history', {}).get(tag, [])[-64:]
         env = f'PYTHONPATH={mesh.home_path(selected[0].source + "/rdma")} PYTHONDONTWRITEBYTECODE=1 '
-        command = f'{mesh.PY} {mesh.home_path(selected[0].source + "/examples/" + item["program"] + ".py")}'
+        # Workload programs live in metal-microbench (its checkout is the mesh checkout's sibling);
+        # the workload names its path there with program-path.
+        bench = selected[0].source.replace('/mesh/current', '/metal-microbench/current')
+        command = f'{mesh.PY} {mesh.home_path(bench + "/" + item["program-path"])}'
         if item.get('configuration'):
             operands = json.loads((paths['metal-microbench'] / item['configuration']).read_text())
             operands.update({key: item[key] for key in ('steps', 'rows') if key in item})

@@ -193,7 +193,7 @@ when some ranks only relay. [The `_native` adapter](../python/mesh/_native.py) s
 
 Sources: [declarations.py](../rdma/torch-mesh/torch_mesh/declarations.py),
 [compiler](../rdma/torch-mesh/torch_mesh/__init__.py), and
-[the current LSTM caller](../examples/lstm-service.py).
+the current LSTM caller (metal-microbench `tools/mesh/workloads/lstm-service.py`).
 
 ### Whole-function declaration
 

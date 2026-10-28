@@ -4,7 +4,7 @@ The mesh is not a language model server. Its library is for any linear algebra, 
 it. Transformers are one user, and they must be fast on it because all code must be fast on it. Its bridge moves
 bytes between Macs, and it does not care what the bytes mean.
 This page shows a program that uses the mesh and has nothing to do with language. The program is
-[examples/chain-service.py](../examples/chain-service.py). It names three kinds of program. For each one, it says what
+metal-microbench `tools/mesh/workloads/chain-service.py`. It names three kinds of program. For each one, it says what
 the program does and what it never does.
 
 ## The function
@@ -28,7 +28,7 @@ rot₀ and rot₁ are normalized Hadamard rotations of an operand's columns, in 
 block, a power of two that divides the width. A block of 1 is no rotation, and a block of the whole width is the full
 Hadamard. A Hadamard H is linear, symmetric and orthogonal, so rot₀(x) Aᵀ = x (A H)ᵀ and rot₁(y) B = y (H B). Rank 0
 holds the whole weights before it distributes them, so it folds each rotation into them there, once, in region tensors
-(`rotated` in examples/chain-service.py). rot₁ spans every rank's columns of y, and it folds all the same: each rank's
+(`rotated` in `tools/mesh/workloads/chain-service.py`). rot₁ spans every rank's columns of y, and it folds all the same: each rank's
 rows of H B are the rows its block of y meets. The step never rotates anything, and a rotation costs no time a step.
 An operand would have to be rotated as it is made only where its parameters are stored rotated and quantized, so that
 H cannot be folded into them; this example's parameters are float16.
@@ -75,7 +75,7 @@ crossing it calls the collective client. Everything about the data is the servic
 The service never opens a device, and it names no address, port or region. It does not ssh to a peer or start a
 bridge.
 The rank service in metal-microbench is a service of this kind for a language model, and
-`examples/chain-service.py` is one for this chain. Both can be clients of the same bridge at the same time.
+`metal-microbench tools/mesh/workloads/chain-service.py` is one for this chain. Both can be clients of the same bridge at the same time.
 
 ## How the example moves its data
 
@@ -150,7 +150,7 @@ Missing manifests, required fields or device facts fail preparation. The first t
 the recurrent frames per prepared write batch and the frames per input block. The third sets the longest
 dependent tile chain used by the fused products. The sample uses 128 recurrent frames and 512 input frames.
 `observations` supplies completed calls used for the next work assignment. It names no tensor files, shares or rank: each rank's block is the
-backend's. [examples/chain-service.json](../examples/chain-service.json) is a sample.
+backend's. metal-microbench `tools/mesh/hourly/chain-n2.json` is a sample.
 
 `chain.inputs(configuration, steps, rows)` returns input and weight arrays in region memory: standard normal inputs,
 and A and B standard normal over the square root of the width. The draw order and float16 values are the same as
@@ -165,7 +165,7 @@ node. A person or an agent starts each run, and nothing keeps the service reside
 
 ```
 RANK=0 WORLD_SIZE=2 MASTER_ADDR=<rank 0's cable address> MASTER_PORT=29500 \
-  ~/.venv-mesh-uv/bin/python examples/chain-service.py examples/chain-service.json
+  ~/.venv-mesh-uv/bin/python tools/mesh/workloads/chain-service.py tools/mesh/hourly/chain-n2.json
 ```
 
 Each rank prints one record at the end. It gives the backend's blocks, the rows, the steps and the whole call's
@@ -178,7 +178,7 @@ completion state. It does not add GPU timing events or wait for measurements ins
 
 ## The LSTM
 
-The LSTM (examples/lstm.py, lstm-service.py) is a program on torch-mesh's tensor-parallel backend
+The LSTM (metal-microbench `tools/mesh/workloads/lstm.py`, `lstm-service.py`) is a program on torch-mesh's tensor-parallel backend
 ([rdma/torch-mesh/torch_mesh/partition.py](../rdma/torch-mesh/torch_mesh/partition.py)) over the mesh backend of
 torch.distributed. It holds the math. Everything that crosses ranks is the library's. Each step, layer l takes
 u = [v, h_l(t - 1)], where v is the step's input for layer 0 and h_{l-1}(t) above it. It makes the gates z = u W_lᵀ + b_l,
