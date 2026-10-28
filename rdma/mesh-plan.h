@@ -213,6 +213,7 @@ struct mesh_routed_rank {
   uint32_t *consume; /* per-step AOT consumption event order, distinct from wire order */
   uint32_t *retired_first,*retired; /* prior local SENDs whose source read precedes this COPY arrival */
   uint64_t *extent;
+  unsigned char *witnessed; /* a SEND whose arrival precedes a later landing at its rank */
 };
 struct mesh_routed_program {
   uint32_t nodes,padding;
