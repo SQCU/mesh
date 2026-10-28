@@ -1232,7 +1232,7 @@ struct FusedForm {
   };
   std::map<int64_t, Sequence> sequences;
   Ring *ring = nullptr;
-  int64_t turn = 0, j = 0, half = 0;
+  int64_t turn = 0, half = 0;
   std::vector<int64_t> pbind, lbind;
   Schedule transport;
 };
@@ -1291,14 +1291,10 @@ static void fused_release(int64_t comm) {
   for (auto f = fused_forms_->begin(); f != fused_forms_->end();) f = f->second.comm == comm ? fused_forms_->erase(f) : std::next(f);
 }
 
-// Route changes happen between complete functions. A partially issued repeat
-// train still owns its schedule; discarding its bindings would strand data.
+// Route changes happen between complete functions; a chain still running holds the rings it runs (PreparedChain).
 static void fused_reconfigure(int64_t comm) {
   std::lock_guard<std::mutex> guard(*fused_lock_);
   release_chains(comm);
-  for (const auto &entry : *fused_forms_)
-    TORCH_CHECK(entry.second.comm != comm || entry.second.j == 0,
-                "route reconfiguration requires a complete fused repeat train");
   for (auto f = fused_forms_->begin(); f != fused_forms_->end();)
     f = f->second.comm == comm ? fused_forms_->erase(f) : std::next(f);
 }
@@ -1354,7 +1350,6 @@ static void fused_prepare(const at::Tensor &x, const std::optional<at::Tensor> &
   TORCH_CHECK(batches >= 1, "fused preparation requires a positive batch count");
   std::unique_lock<std::mutex> held(*fused_lock_);
   FusedForm &f = fused_form_of(x, w, dim, sizes, group, adds, held);
-  TORCH_CHECK(f.j == 0, "fused preparation requires a complete preceding repeat train");
   const bool fresh = std::any_of(f.counts.begin(), f.counts.end(), [](int64_t n) { return n == 0; });
   auto &sequence = f.sequences[repeats];
   sequence.rings.clear();
@@ -1404,9 +1399,12 @@ struct PreparedChain {
   MeshStream *stream;
   uint32_t channels;
   Schedule schedule;
+  // the form's rings its steps send from and land in, held with the chain (a reconfiguration lets the form go)
+  std::vector<FusedForm::Ring> rings;
 };
 static void compile_chain(PreparedChain &chain);
-static auto *prepared_chains_ = new std::vector<std::unique_ptr<PreparedChain>>;
+// each prepared chain, held too by its run until the prepared queue has passed it (ordered)
+static auto *prepared_chains_ = new std::vector<std::shared_ptr<PreparedChain>>;
 
 static void release_chains(int64_t comm) {
   for (auto &chain : *prepared_chains_) if (chain && chain->comm == comm) chain.reset();
@@ -1428,7 +1426,7 @@ static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, c
   buffers.push_back(x);  // previous landing; replaced by its compiled page below
   std::vector<int64_t> words = constants;
   words.resize(12 + 36 * f.channels);
-  auto chain = std::make_unique<PreparedChain>(PreparedChain{f.comm, operands, {}, {}, {}, {},
+  auto chain = std::make_shared<PreparedChain>(PreparedChain{f.comm, operands, {}, {}, {}, {},
       encoded(kernel, buffers, words, 15, groups, 1, threads),
       encoded(input_kernel, {}, std::vector<int64_t>(2 + 12 * f.channels), 15, 1, 1, MESH_SIMD_WIDTH),
       {}, {}, {}, nullptr, 6, 9, 12,
@@ -1510,6 +1508,7 @@ static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, c
     }
     append(steps, 0, x, previous, true);
   }
+  for (const auto &[count, ring] : f.rings) chain->rings.push_back(ring);
   compile_chain(*chain);
   (*prepared_chains_)[index] = std::move(chain);
 }
@@ -1597,7 +1596,8 @@ static void compile_chain(PreparedChain &chain) {
 }
 
 static void chain_run(int64_t index) {
-  ordered((*prepared_chains_)[index]->schedule);
+  const auto &chain = (*prepared_chains_)[index];
+  ordered(chain->schedule, chain);
 }
 static pybind11::capsule chain_completion(int64_t index) {
   return schedule_completion((*prepared_chains_)[index]->schedule);
@@ -1684,6 +1684,7 @@ struct ScheduleBinding {
   Schedule schedule;
   ScheduleBinding():schedule(schedule_after_inputs()){}
   std::vector<at::Tensor> operands;
+  std::vector<std::shared_ptr<void>> steps;  // the appended steps' replays and plans
   // Preparation supplies native run/context/retain/release operands. The
   // completion worker neither owns a Python callback nor acquires the GIL.
   void host(const std::array<uintptr_t,4> &entry,const std::vector<pybind11::object> &inputs,
@@ -1729,10 +1730,11 @@ struct ScheduleBinding {
     return fused_writes_impl(schedule.get(),send,landings,pairs,comm,polls,repeats,stride,row_bytes,rows,ready,ready_value,tile_bytes);
   }
 
-  // a function with a host step ends where all its parts have (its gate 2: `ordered` waits for that)
+  // its operands and steps held as long as the schedule; a function with a host step ends where all its parts have
+  // (its gate 2: `ordered` waits for that)
   void finish() {
-    const auto held=operands;id<MTLSharedEvent> ended=schedule.host?schedule.gate:nil;
-    checked(MetalScheduleFinish(schedule.get(),^(NSError *){(void)held;ended.signaledValue=2;}));
+    const auto held=operands;const auto kept=steps;id<MTLSharedEvent> ended=schedule.host?schedule.gate:nil;
+    checked(MetalScheduleFinish(schedule.get(),^(NSError *){(void)held;(void)kept;ended.signaledValue=2;}));
   }
   void enqueue() { ordered(schedule); }
   pybind11::capsule completion() { return schedule_completion(schedule); }
@@ -1966,7 +1968,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("linear_source", &linear_source);
   module.def("linear_groups", &linear_groups);
   module.def("linear_commands", &linear_commands);
-  pybind11::class_<Commands>(module,"Commands").def(pybind11::init<const std::vector<CommandRecord> &>());
+  pybind11::class_<Commands,std::shared_ptr<Commands>>(module,"Commands").def(pybind11::init<const std::vector<CommandRecord> &>());
   module.def("linear_split", &linear_split);
   module.def("device_facts", &device_facts);
   module.def("pipeline_facts", &pipeline_facts);
@@ -1988,8 +1990,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("fused_release", &fused_release);
   pybind11::class_<ScheduleBinding>(module,"Schedule")
     .def(pybind11::init<>())
-    .def("append",[](ScheduleBinding &s,Commands &commands){commands.append(s.schedule.get());
-        s.operands.insert(s.operands.end(),commands.operands.begin(),commands.operands.end());})
+    .def("append",[](ScheduleBinding &s,const std::shared_ptr<Commands> &commands){commands->append(s.schedule.get());
+        s.operands.insert(s.operands.end(),commands->operands.begin(),commands->operands.end());s.steps.push_back(commands);})
     .def("compute",&ScheduleBinding::compute)
     .def("writes",&ScheduleBinding::writes)
     .def("host",&ScheduleBinding::host)
@@ -1999,8 +2001,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   pybind11::class_<ViewWrites, std::shared_ptr<ViewWrites>>(module, "ViewWrites")
     .def(pybind11::init<const std::vector<ViewBinding> &, int64_t>())
     .def("realize", &ViewWrites::realize)
-    .def("append",[](ViewWrites &w,ScheduleBinding &s){w.append(s.schedule.get());
-        s.operands.insert(s.operands.end(),w.leases.begin(),w.leases.end());})
+    .def("append",[](const std::shared_ptr<ViewWrites> &w,ScheduleBinding &s){w->append(s.schedule.get());
+        s.operands.insert(s.operands.end(),w->leases.begin(),w->leases.end());s.steps.push_back(w);})
     .def("completion", &ViewWrites::completion)
     .def("enqueue", [](const std::shared_ptr<ViewWrites> &w){w->enqueue(w);});
   pybind11::class_<Collectives, std::shared_ptr<Collectives>>(module, "Collectives")
@@ -2009,8 +2011,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
          pybind11::arg("calls"),pybind11::arg("comm"),pybind11::arg("operands"),
          pybind11::arg("inputs")=std::vector<CommandRecord>{},pybind11::arg("outputs")=std::vector<CommandRecord>{})
     .def("realize", &Collectives::realize, pybind11::arg("repetitions")=1)
-    .def("append",[](Collectives &c,ScheduleBinding &s){c.append(s.schedule.get());
-        s.operands.insert(s.operands.end(),c.operands.begin(),c.operands.end());})
+    .def("append",[](const std::shared_ptr<Collectives> &c,ScheduleBinding &s){c->append(s.schedule.get());
+        s.operands.insert(s.operands.end(),c->operands.begin(),c->operands.end());s.steps.push_back(c);})
     .def("completion", &Collectives::completion)
     .def("enqueue", &Collectives::enqueue);
   pybind11::class_<Executions>(module,"Executions")
