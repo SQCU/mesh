@@ -3,7 +3,11 @@
   "access": {
     "key": "~/.ssh/primeintellect_ed25519"
   },
+  "lock": "~/.claude-personal/jobs/15c469fa/tmp/nodes.lock",
   "run_seconds": 3300,
+  "python": "~/.venv-mesh-uv/bin/python",
+  "checkouts": ".cache/mesh-checkouts",
+  "rank_port": 29600,
   "nodes": {
     "D7377D82-2E96-5084-A5D3-3139FDF3D6CE": {
       "name": "Ms-MacBook-Pro",
@@ -13,7 +17,8 @@
       "management": "100.102.120.16",
       "fabric": "fd6d:6573:68:b5d5:b9dc:d628:b4e3:3141",
       "memory_gib": 128,
-      "roles": ["launcher", "compute"]
+      "roles": ["launcher", "compute"],
+      "guard_free_pages": 4096
     },
     "06594A7A-3279-5A27-9099-11169DE0D270": {
       "name": "Ms-Mac-mini",
