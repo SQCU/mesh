@@ -1015,7 +1015,8 @@ struct RegionShape {
   std::vector<int64_t> sizes, strides;
 };
 
-// Held MPS leases (region_empty's `held`), by their bytes: each released once the stream's work on it had completed.
+// Held MPS leases (region_empty's `held`), by their bytes: each released once the stream's work on it had completed,
+// and taken again once the NIC's reads of it have ended too (ncclMeshMemReusable).
 static std::multimap<size_t, void *> held_;
 
 static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps, bool held) {
@@ -1024,10 +1025,14 @@ static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &lik
   void *memory = nullptr;
   {
     std::lock_guard<std::mutex> guard(region_tensors_lock_);
-    const auto found = held ? held_.find(bytes) : held_.end();
-    if (found != held_.end()) {
-      memory = found->second;
-      held_.erase(found);
+    for (auto [at, end] = held ? held_.equal_range(bytes) : std::make_pair(held_.end(), held_.end()); at != end; ++at) {
+      int reusable = 0;
+      checked(ncclMeshMemReusable(at->second, &reusable));
+      if (reusable) {
+        memory = at->second;
+        held_.erase(at);
+        break;
+      }
     }
   }
   if (!memory) {

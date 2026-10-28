@@ -1174,6 +1174,11 @@ const char* ncclMeshMetalPrelude(void);
    only their valid intervals; this API and the native transport introduce no hidden copy to repair an operand.
    ncclInvalidArgument where ptr is in no lease of this process. */
 ncclResult_t ncclMeshMemBuffer(const void* ptr, void** buffer, size_t* offset);
+/* Whether every registered local DMA read of the lease holding `ptr` has ended (*ready 1), including reads of SENDs
+   scheduled and not yet posted: the proof ncclMemFree's deferred retirement waits for, asked by an allocator pool that
+   keeps the lease to reuse it.  It proves nothing of GPU uses, incoming writes or destination consumers, which the
+   pool proves itself.  ncclInvalidArgument where ptr is in no lease of this process. */
+ncclResult_t ncclMeshMemReusable(const void* ptr, int* ready);
 /* The bytes of a page of comm's region (its block of pages, the unit of a lease and of an entry: design/
    pages-and-functions.md), on which each segment of a V collective and each entry starts (Memory, above).
    ncclInvalidArgument where comm or bytes is NULL. */

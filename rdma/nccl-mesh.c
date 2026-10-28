@@ -1604,6 +1604,17 @@ static int lease_buffer(const void *ptr, void **buffer, size_t *offset) {
   return status;
 }
 
+/* nccl.h ncclMeshMemReusable: the lease's retirement proof (lease_returnable's reads), asked without returning it */
+ncclResult_t ncclMeshMemReusable(const void *ptr, int *ready) {
+  if (!ptr || !ready) return fail(ncclInvalidArgument, "ncclMeshMemReusable: a NULL argument");
+  pthread_mutex_lock(&attach_lock);
+  struct attach *a = NULL;
+  struct lease *l = lease_at(ptr, &a);
+  *ready = l && !l->returned && mesh_lease_retire_ready(&l->reads, lease_read_sample, a);
+  pthread_mutex_unlock(&attach_lock);
+  return l ? ncclSuccess : fail(ncclInvalidArgument, "ncclMeshMemReusable: %p is in no lease of this process", ptr);
+}
+
 /* nccl.h ncclMeshMemBuffer */
 ncclResult_t ncclMeshMemBuffer(const void *ptr, void **buffer, size_t *offset) {
   if (!ptr || !buffer || !offset) return fail(ncclInvalidArgument, "ncclMeshMemBuffer: a NULL argument");
