@@ -27,6 +27,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (MetalTensorLayout *)gather:(NSArray<NSNumber *> *)shape indices:(NSData *)indices;
 // Subdivide each typed element into fixed-width components (e.g. bytes).
 - (MetalTensorLayout *)components:(NSUInteger)count;
+// Combine the declared last axis of scalar components into one typed element.
+- (MetalTensorLayout *)elements:(NSUInteger)count;
 - (MetalTensorLayout *)shift:(NSInteger)elements;
 // Compose a declared alias with its producer's assigned storage. Both source
 // layouts describe the same logical elements. Only preparation calls this.

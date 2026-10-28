@@ -1765,6 +1765,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def("permute",[](const TensorLayout &v,const std::vector<NSInteger> &axes){return TensorLayout([v.value permute:tensorNumbers(axes)]);})
     .def("reshape",[](const TensorLayout &v,const std::vector<NSInteger> &shape){return TensorLayout([v.value reshape:tensorNumbers(shape)]);})
     .def("components",[](const TensorLayout &v,NSUInteger count){return TensorLayout([v.value components:count]);})
+    .def("elements",[](const TensorLayout &v,NSUInteger count){return TensorLayout([v.value elements:count]);})
     .def("gather",[](const TensorLayout &v,const std::vector<NSInteger> &shape,const std::vector<NSInteger> &indices){return TensorLayout([v.value gather:tensorNumbers(shape) indices:tensorWords(indices)]);})
     .def("rebase",[](const TensorLayout &v,const TensorLayout &declared,const TensorLayout &placed){
       @try{return TensorLayout([v.value rebase:declared.value onto:placed.value]);}

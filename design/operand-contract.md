@@ -90,9 +90,6 @@ This contract does not declare these existing paths complete:
 
 - FX `placement.indices` and `FixedLayout` still describe aliases with strides
   alone. Arbitrary mappings must survive lowering without caller-owned copies.
-- GGUF file imports still require whole encoded blocks. Resident stored cuts
-  now use block-byte views and lane selections through the common decoder;
-  the file interface must carry that selection too.
 - Some fused consumers load order arrays whose static compositions could be
   resolved earlier. Numerical index tensors must remain data.
 - Producer placement does not yet solve every conflicting API requirement or
@@ -119,6 +116,11 @@ Native `StoredMatrix` describes the bytes of existing encoded blocks with a
 `TensorView`, plus their format, logical columns and first selected lane.
 Stored FFNs, stacked products, experts and conversion kernels use that operand.
 Resident row and column cuts compose on it without changing the stored codes.
+File imports return this same operand. They retain boundary block bytes, selected
+lanes and expert rows through numerical lowering. Padded storage rows do not
+become logical tensor rows. The separate buffer-only importer and projection
+format/offset fields have been removed. Conversion from component-byte views
+to typed element views uses the same layout algebra, preserving mappings.
 The shared index emitter retains grouped layouts as arithmetic when a cut starts
 inside a group; it does not introduce a lookup table for that phase.
 

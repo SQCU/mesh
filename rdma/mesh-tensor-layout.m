@@ -184,6 +184,29 @@ static NSData *TensorWords(NSArray<NSNumber *> *values) {
     if(!elements)return self;
     return [MetalTensorLayout shape:_shape strides:_strides offset:_offset+elements maps:_maps indices:_indices];
 }
+- (MetalTensorLayout *)elements:(NSUInteger)count {
+    NSParameterAssert(count&&[_shape.lastObject unsignedIntegerValue]==count);
+    MetalTensorLayout *base=[self element:_shape.count-1 at:0];
+    NSParameterAssert(base.offset%(NSInteger)count==0);
+    NSMutableArray *steps=[NSMutableArray array];
+    for(NSUInteger d=0;d<base.shape.count;d++) {
+        NSInteger step=[base.strides[d] integerValue];
+        NSParameterAssert([base.shape[d] unsignedIntegerValue]<=1||base.maps[@(d)]||step%(NSInteger)count==0);
+        [steps addObject:@(step/(NSInteger)count)];
+    }
+    NSData *(^divide)(NSData *)=^NSData *(NSData *data) {
+        if(!data)return nil;
+        NSMutableData *result=[NSMutableData dataWithLength:data.length];
+        const NSInteger *source=data.bytes;NSInteger *target=result.mutableBytes;
+        for(NSUInteger i=0;i<data.length/sizeof(NSInteger);i++) {
+            NSParameterAssert(source[i]%(NSInteger)count==0);target[i]=source[i]/(NSInteger)count;
+        }
+        return result;
+    };
+    NSMutableDictionary *maps=[NSMutableDictionary dictionary];
+    for(NSNumber *axis in base.maps)maps[axis]=divide(base.maps[axis]);
+    return [MetalTensorLayout shape:base.shape strides:steps offset:base.offset/(NSInteger)count maps:maps indices:divide(base.indices)];
+}
 - (MetalTensorLayout *)rebase:(MetalTensorLayout *)declared onto:(MetalTensorLayout *)placed {
     NSParameterAssert([declared.shape isEqual:placed.shape]);
     if([self isEqual:declared])return placed;
