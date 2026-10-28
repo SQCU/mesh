@@ -27,8 +27,9 @@
    ends, as it holds rows (mesh_stream_take: design/transport.md section 14), one communicator a stream (a holding's
    lists and counts are its holder's alone; a link has several, so communicators sharing a node pair hold their own;
    EBUSY where a physical cable has none free at both ends); the second gather carries each rank's holding's
-   status.  Each phase of the bootstrap (the connect or accepts, each gather) has a deadline, mesh.h MESH_PLATFORM_NS
-   from its start, past which the program ends (design/data-model.md section 6).  The data program names nodes and its own pages; the compiled fabric retains every physical cable.
+   status.  Each phase of the bootstrap (the connect or accepts, each gather) and each configuration exchange has a
+   deadline, MESH_PREPARATION_NS from its start (it covers the ranks' preparation skew), past which the program ends,
+   its GPU work stopped first, naming the phase and the rank awaited.  The data program names nodes and its own pages; the compiled fabric retains every physical cable.
    The bridge owns ports, lanes, frames, queue pairs and SEND sizing.  An init fails as a value where two ranks are on one node (its
    holdings are kept a node), a stream is held by another process,
    or its bridge is still ending its last holding, or gone; what it held is then let go and the next init reads the streams as they stand.  A

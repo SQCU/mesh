@@ -24,6 +24,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <dispatch/dispatch.h>
 #include <fcntl.h>
 
 
@@ -287,7 +288,7 @@ struct ncclComm {
   void *violation;
   uint64_t last, groups;
   void *command;
-  struct ncclComm *next_touched;
+  struct ncclComm *next_touched, *next_live;
   struct plan *plan;
   _Atomic int runs;
 };
@@ -297,6 +298,75 @@ struct ncclComm {
 static pthread_mutex_t group_lock = PTHREAD_MUTEX_INITIALIZER;
 static void *finished;
 static uint64_t issued;
+/* the communicators realized and not freed (fabric_realize, comm_free), for the expiry's stop */
+static pthread_mutex_t live_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct ncclComm *live;
+
+/* design/transport.md section 5: the program's end at an expiry, its GPU work stopped first: every communicator's GPU
+   waits ended through their failure words' claim (nccl-mesh-kernels.h mesh_step_failed, read every 2^10 loads, the
+   tracks' too) and its stop (words[6]), and then the library's GPU programs and the prepared functions' committed
+   command buffers (which hold no event wait: metal-recording.m MetalPartReady) awaited within MESH_PLATFORM_NS; the
+   wait named (mesh.h mesh_expired) */
+void mesh_library_expired(const char *wait, uint64_t ns) {
+  pthread_mutex_lock(&live_lock);
+  for (struct ncclComm *c = live; c; c = c->next_live) {
+    atomic_store_explicit(c->words + 6, 1, memory_order_release);
+    atomic_store_explicit(c->words + 1, 1, memory_order_release);
+  }
+  pthread_mutex_unlock(&live_lock);
+  const uint64_t until = mesh_clock_ns() + MESH_PLATFORM_NS, last = __atomic_load_n(&issued, __ATOMIC_ACQUIRE);
+  void *const event = __atomic_load_n(&finished, __ATOMIC_ACQUIRE);
+  while (mesh_clock_ns() < until && ((event && metal_signaled(event) < last) || MetalSchedulesInFlight())) usleep(1000);
+  mesh_expired(wait, ns);
+}
+/* the nanoseconds left before d's deadline; past it, the library's expiry (mesh_library_expired) */
+static uint64_t deadline_left(const struct mesh_deadline *d) {
+  const uint64_t now = mesh_clock_ns();
+  if (now >= d->at) mesh_library_expired(d->wait, d->ns);
+  return d->at - now;
+}
+/* design/transport.md section 5: once a second, the prepared functions' (MetalSchedulesStalled) and the library's own
+   GPU programs: a communicator's last program committed and not ended while `finished` has not moved for twice
+   MESH_PLATFORM_NS (the platform's watchdog ends a running command buffer within one, so it waits on an event), the
+   program ended there, the wait named; group_lock only where free (a holder's own waits are bounded) */
+static void watch_turn(void *unused) {
+  (void)unused;
+  static uint64_t seen, since;
+  char wait[MESH_DIAGNOSTIC_BYTES];
+  uint64_t idle = MetalSchedulesStalled(wait, sizeof wait);
+  if (!idle && !pthread_mutex_trylock(&group_lock)) {
+    const uint64_t now = mesh_clock_ns(), signaled = finished ? metal_signaled(finished) : 0;
+    if (signaled != seen || !since) { seen = signaled; since = now; }
+    pthread_mutex_lock(&live_lock);
+    for (struct ncclComm *c = live; c && !idle; c = c->next_live)
+      if (c->last > signaled && c->command && !metal_ended(c->command) && now - since > 2 * MESH_PLATFORM_NS) {
+        idle = now - since;
+        snprintf(wait, sizeof wait, "libnccl-mesh: communicator %s's GPU program %llu, committed and not ended (watch_turn)", c->name,
+                 (unsigned long long)c->last);
+      }
+    pthread_mutex_unlock(&live_lock);
+    pthread_mutex_unlock(&group_lock);
+  }
+  if (idle) mesh_library_expired(wait, idle);
+}
+static void watch_start(void *unused) {
+  (void)unused;
+  dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+  dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(MESH_PLATFORM_NS / 5)), MESH_PLATFORM_NS / 5, MESH_PLATFORM_NS / 50);
+  dispatch_source_set_event_handler_f(timer, watch_turn);
+  dispatch_resume(timer);
+}
+void mesh_library_watch(void) {
+  static dispatch_once_t once;
+  dispatch_once_f(&once, NULL, watch_start);
+}
+/* the device's GPU load period (nccl-mesh-metal.m metal_poll_seconds), read under group_lock, as its kernels are */
+double mesh_poll_seconds(void *device) {
+  pthread_mutex_lock(&group_lock);
+  const double seconds = metal_poll_seconds(device);
+  pthread_mutex_unlock(&group_lock);
+  return seconds;
+}
 
 static void program_free(struct mesh_program *program) {
   free((void *)program->segment); free((void *)program->log_weight); free((void *)program->first); free((void *)program->move);
@@ -370,6 +440,9 @@ static void comm_storage_free(struct ncclComm *comm) {
   comm->storage = NULL; comm->storage_count = 0; memset(comm->storage_current, 0, sizeof comm->storage_current); comm->gate_word = comm->gate = NULL;
 }
 static void comm_free(struct ncclComm *comm) {
+  pthread_mutex_lock(&live_lock);
+  for (struct ncclComm **at = &live; *at; at = &(*at)->next_live) if (*at == comm) { *at = comm->next_live; break; }
+  pthread_mutex_unlock(&live_lock);
   bootstrap_close(comm);
   routes_free(comm, 1);
   for (uint32_t k = 0; k < comm->scratches; k++) metal_release(comm->scratch[k]);
@@ -928,8 +1001,8 @@ const char *ncclGetLastError(ncclComm_t comm) { (void)comm; return last.text; }
    shuts the init's sockets down (`peers`), so its gathers end.  The connect and the accept hold nothing of the
    bridge's: a rank attaches once its bootstrap has connected, or accepted every rank (comm_init).  The first gather
    holds no stream of the bridge's; the second follows this rank's holds of its streams, on which its peers wait.
-   Each phase's waits (the connect, the accepts, each gather) end by the phase's deadline, mesh.h MESH_PLATFORM_NS
-   from its start, past which the program ends (design/data-model.md section 6).  A rank's report is struct report.  The id
+   Each phase's waits (the connect, the accepts, each gather) end by the phase's deadline, MESH_PREPARATION_NS from its
+   start (the ranks' preparation skew), past which the program ends naming the phase and the rank awaited (setup_left).  A rank's report is struct report.  The id
    is also the communicator's name where its init names none. */
 static struct { int fd; char id[NCCL_UNIQUE_ID_BYTES]; } root = {-1, {0}};
 
@@ -1016,19 +1089,30 @@ static int revoked(ncclComm_t comm) { return __atomic_load_n(&comm->revoked, __A
    SO_RCVTIMEO and SO_SNDTIMEO), after which the revoke and the phase's deadline (`until`) are read again: no wait of an
    init lasts past its phase's deadline, blocking or not, the program ending there (design/data-model.md section 6),
    and a revoke ends a non-blocking one within a slice */
-/* a poll's timeout in ms: a slice, or what is left of the phase's deadline where less (past it, the program ends) */
-static int bootstrap_slice(const struct ncclComm *comm) {
-  const uint64_t left = mesh_deadline_left(&comm->until);
+/* what is left of the phase's deadline (`until`, MESH_PREPARATION_NS from the phase's start: it covers the ranks'
+   preparation skew, so a peer still preparing is waited for); past it the program ends (mesh_library_expired), naming
+   the phase, this rank and the rank awaited (-1: a connection not yet identified) */
+static uint64_t setup_left(const struct ncclComm *comm, int peer) {
+  const uint64_t now = mesh_clock_ns();
+  if (now < comm->until.at) return comm->until.at - now;
+  char wait[MESH_DIAGNOSTIC_BYTES];
+  snprintf(wait, sizeof wait, "%s: communicator %s's rank %d of %d awaiting rank %d (MESH_PREPARATION_NS)", comm->until.wait, comm->name,
+           comm->rank, comm->nranks, peer);
+  mesh_library_expired(wait, comm->until.ns);
+}
+/* a poll's timeout in ms: a slice, or what is left of the phase's deadline where less (setup_left) */
+static int bootstrap_slice(const struct ncclComm *comm, int peer) {
+  const uint64_t left = setup_left(comm, peer);
   return left < (uint64_t)MESH_BOOTSTRAP_SLICE_MS * 1000000 ? (int)((left + 999999) / 1000000) : MESH_BOOTSTRAP_SLICE_MS;
 }
-/* `size` bytes sent or received whole on comm's bootstrap socket `fd`: 0, ECANCELED (revoked), ECONNRESET (the peer
-   closed), or the errno; past the phase's deadline the program ends */
-static int whole(struct ncclComm *comm, int fd, void *bytes, size_t size, int sending) {
+/* `size` bytes sent or received whole on comm's bootstrap socket `fd` to or from rank `peer`: 0, ECANCELED (revoked),
+   ECONNRESET (the peer closed), or the errno; past the phase's deadline the program ends (setup_left) */
+static int whole(struct ncclComm *comm, int fd, int peer, void *bytes, size_t size, int sending) {
   for (size_t done = 0; done < size;) {
     const ssize_t moved = sending ? send(fd, (char *)bytes + done, size - done, 0) : recv(fd, (char *)bytes + done, size - done, 0);
     if (moved < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
       if (revoked(comm)) return ECANCELED;
-      mesh_deadline_left(&comm->until);
+      setup_left(comm, peer);
       continue;
     }
     if (moved <= 0) return moved ? errno : ECONNRESET;
@@ -1062,7 +1146,7 @@ static void bootstrap_put(struct ncclComm *comm, int r, int fd) {
    peer closed it) or names no rank still to meet closed alone, the root accepting the next, though one that sends
    nothing holds the root's read until the phase ends) or a non-root's to the root
    (peers[0], placed once connected), each placed before the revoke is read, so a revoke either finds it or is read.  Its
-   phase's deadline (`until`) is MESH_PLATFORM_NS after it began: a non-root's connect, then its first gather; the
+   phase's deadline (`until`) is MESH_PREPARATION_NS after it began: a non-root's connect, then its first gather; the
    root's accepts, every rank's report and its first gather under the one deadline made as its accepts begin; past it
    the program ends: 0, ECANCELED (comm revoked), or the errno */
 static int bootstrap_open(struct ncclComm *comm, const char *id, struct report *reports) {
@@ -1072,7 +1156,7 @@ static int bootstrap_open(struct ncclComm *comm, const char *id, struct report *
   char *colon = strrchr(host, ':');
   if (!colon) return EINVAL;
   *colon = 0;
-  comm->until = mesh_deadline("libnccl-mesh: the bootstrap's connect to its root (bootstrap_open)", 0);
+  comm->until = mesh_deadline("libnccl-mesh: the bootstrap's connect to its root (bootstrap_open)", MESH_PREPARATION_NS);
   if (comm->rank) {
     struct addrinfo hint = {.ai_socktype = SOCK_STREAM}, *addresses = NULL;
     while (peers[0] < 0 && !revoked(comm)) {
@@ -1085,33 +1169,34 @@ static int bootstrap_open(struct ncclComm *comm, const char *id, struct report *
           socklen_t length = sizeof error;
           while (error == EINPROGRESS || error == EINTR)
             if (revoked(comm)) error = ECANCELED;
-            else if (poll(&look, 1, bootstrap_slice(comm)) < 0) error = errno == EINTR ? EINPROGRESS : errno;
+            else if (poll(&look, 1, bootstrap_slice(comm, 0)) < 0) error = errno == EINTR ? EINPROGRESS : errno;
             else if (look.revents && getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length)) error = errno;
           if (error) close(fd);
           else bootstrap_put(comm, 0, fd);
         }
         freeaddrinfo(addresses);
       }
-      if (peers[0] < 0) usleep((useconds_t)bootstrap_slice(comm) * 1000);
+      if (peers[0] < 0) usleep((useconds_t)bootstrap_slice(comm, 0) * 1000);
     }
-    comm->until = mesh_deadline("libnccl-mesh: the bootstrap's first gather, a rank's report and the table (gather)", 0);
+    comm->until = mesh_deadline("libnccl-mesh: the bootstrap's first gather, a rank's report and the table (gather)", MESH_PREPARATION_NS);
     return revoked(comm) ? ECANCELED : 0;
   }
   uint16_t port = (uint16_t)atoi(colon + 1);
   int listener = comm->listener >= 0 ? comm->listener : !strcmp(root.id, id) ? root.fd : -1;
   if (listener < 0 && (listener = bootstrap_listen(host, &port)) < 0) return errno;
-  comm->until = mesh_deadline("libnccl-mesh: the bootstrap's root, every rank's connect and report and the first gather (bootstrap_open)", 0);
+  comm->until = mesh_deadline("libnccl-mesh: the bootstrap's root, every rank's connect and report and the first gather (bootstrap_open)", MESH_PREPARATION_NS);
   for (int r = 1; r < comm->nranks && !status;) {
     struct report heard;
     struct pollfd look = {listener, POLLIN, 0};
-    int fd = -1;
+    int fd = -1, awaited = 1;
+    while (awaited < comm->nranks && peers[awaited] >= 0) awaited++;
     while (fd < 0 && !status)
       if (revoked(comm)) status = ECANCELED;
-      else if (poll(&look, 1, bootstrap_slice(comm)) < 0 && errno != EINTR) status = errno;
+      else if (poll(&look, 1, bootstrap_slice(comm, awaited)) < 0 && errno != EINTR) status = errno;
       else if ((fd = accept(listener, NULL, NULL)) < 0 && errno != EWOULDBLOCK && errno != ECONNABORTED && errno != EINTR) status = errno;
     if (!status) bootstrap_put(comm, 0, fd);
     if (!status && revoked(comm)) status = ECANCELED;
-    const int read = status ? status : whole(comm, fd, &heard, sizeof heard, 0);
+    const int read = status ? status : whole(comm, fd, -1, &heard, sizeof heard, 0);
     if (read == ECANCELED) status = read;
     if (status) { bootstrap_put(comm, 0, -1); break; }
     /* a connection whose report does not come, or names no rank still to meet, is closed alone */
@@ -1137,14 +1222,14 @@ static int gather(struct ncclComm *comm, int nranks, int rank, struct report *re
   int status = 0;
   if (rank) {
     const struct report kept = reports[rank];
-    if (!sent) status = whole(comm, peers[0], reports + rank, sizeof *reports, 1);
-    if (!status) status = whole(comm, peers[0], reports, table, 0);
+    if (!sent) status = whole(comm, peers[0], 0, reports + rank, sizeof *reports, 1);
+    if (!status) status = whole(comm, peers[0], 0, reports, table, 0);
     reports[rank] = kept;
     return status;
   }
   for (int r = 1; r < nranks && !status && !sent; r++)
-    if (!(status = whole(comm, peers[r], reports + r, sizeof *reports, 0)) && reports[r].rank != r) status = EPROTO;
-  for (int r = 1; r < nranks && !status; r++) status = whole(comm, peers[r], reports, table, 1);
+    if (!(status = whole(comm, peers[r], r, reports + r, sizeof *reports, 0)) && reports[r].rank != r) status = EPROTO;
+  for (int r = 1; r < nranks && !status; r++) status = whole(comm, peers[r], r, reports, table, 1);
   return status;
 }
 
@@ -1228,7 +1313,13 @@ static int fabric_realize(struct ncclComm *comm) {
   comm->page = (uint64_t)m->block * m->pgsz;
   int status = 0;
   if (!(comm->violation = metal_shared((size_t)getpagesize()))) status = ENOMEM;
-  if (!status) comm->words = metal_contents(comm->violation);
+  if (!status) {
+    comm->words = metal_contents(comm->violation);
+    pthread_mutex_lock(&live_lock);
+    comm->next_live = live; live = comm;
+    pthread_mutex_unlock(&live_lock);
+    mesh_library_watch();
+  }
   if (!status && !(comm->channels = calloc(comm->fabric.cables + 1, sizeof *comm->channels))) status = ENOMEM;
   if (!status && comm->nranks > 1 && (ncclMemAlloc(&comm->gate_word, sizeof(uint64_t)) || lease_buffer(comm->gate_word, &comm->gate, &offset) || offset))
     status = ENOMEM;
@@ -1252,7 +1343,7 @@ static int fabric_realize(struct ncclComm *comm) {
    node fail every rank alike: comm_apart, a bound); each rank holding the stream toward each member's node it is
    joined to (fabric_acquire); a second gather carrying each rank's holding's status (NCCL's own init exchanges each peer's
    connection through its bootstrap: ncclTransportP2pSetup), then its channels (fabric_realize).  A rank that cannot go on, a stream held by another (EBUSY) or gone (ENOLINK), a peer silent past
-   its phase's end (bootstrap_open, gather: MESH_PLATFORM_NS) or a revoke fails the init as a value, made holding nothing of its
+   its phase's end (bootstrap_open, gather: MESH_PREPARATION_NS) or a revoke fails the init as a value, made holding nothing of its
    bridge's (comm_leave) and its sockets closed; the next init reads the streams as they then stand.  Made, it keeps its
    sockets (closed at comm_free) */
 static ncclResult_t comm_init(struct ncclComm *made) {
@@ -1279,7 +1370,7 @@ static ncclResult_t comm_init(struct ncclComm *made) {
   if (!result && nranks > 1) {
     mine->status = fabric_discover(made, reports);
     if (!mine->status) mine->status = fabric_acquire(made);
-    made->until = mesh_deadline("libnccl-mesh: the init's second gather, after its holds (gather)", 0);
+    made->until = mesh_deadline("libnccl-mesh: the init's second gather, after its holds (gather)", MESH_PREPARATION_NS);
     if ((status = gather(made, nranks, rank, reports, 0))) result = fail(ncclRemoteError, "the bootstrap at %s: %s", made->id, strerror(status));
     for (int r = 0; !result && r < nranks; r++)
       if (reports[r].status) result = hold_fail(made->name, r, reports[r].status);
@@ -1397,14 +1488,14 @@ ncclResult_t ncclCommDestroy(ncclComm_t comm) {
   comm_stop(comm);
   if (comm->initing) {
     const struct mesh_deadline ended = mesh_deadline("ncclCommDestroy: its non-blocking init's end (init_run's `async`)", 0);
-    while (__atomic_load_n(&comm->async, __ATOMIC_ACQUIRE) == ncclInProgress) { mesh_deadline_left(&ended); usleep(20); }
+    while (__atomic_load_n(&comm->async, __ATOMIC_ACQUIRE) == ncclInProgress) { deadline_left(&ended); usleep(20); }
     pthread_join(comm->init, NULL);
   }
   const struct mesh_deadline returned = mesh_deadline("ncclCommDestroy: its host-path groups' return (`runs`)", 0);
   pthread_mutex_lock(&group_lock);
   while (atomic_load(&comm->runs)) {
     pthread_mutex_unlock(&group_lock);
-    mesh_deadline_left(&returned);
+    deadline_left(&returned);
     usleep(20);
     pthread_mutex_lock(&group_lock);
   }
@@ -1729,7 +1820,7 @@ static ncclResult_t comm_failure(struct ncclComm *comm) {
       char wait[320];
       snprintf(wait, sizeof wait, "libnccl-mesh: communicator %s's GPU wait for entry %llu on the channel to node %u, %llu polls (its "
                "stream's bound, ncclMeshStream polls)", comm->name, (unsigned long long)(at - 1), node, (unsigned long long)polls);
-      mesh_expired(wait, polls * (MESH_PLATFORM_NS / NCCL_MESH_POLLS));
+      mesh_library_expired(wait, polls * (MESH_PLATFORM_NS / NCCL_MESH_POLLS));
     }
     return comm_fail(comm, ncclRemoteError, "entry %llu on the channel to node %u was not done within %llu polls of a GPU wait (its "
                      "stream's bound, ncclMeshStream polls): its bytes had not landed or been sent, the peer's work there beginning that "
@@ -2860,7 +2951,7 @@ static ncclResult_t room_wait(struct ncclComm *comm, const struct channel *ch, i
     else if (!mesh_stream_held(&comm->attach->context, ch->stream, *ch->wire))
       result = fail(ncclRemoteError, "communicator %s: its holding of the stream toward node %u ended before the group's entries there were "
                     "presented (design/transport.md section 14); none was presented", comm->name, ch->node);
-    else mesh_deadline_left(&deadline);
+    else deadline_left(&deadline);
   pthread_mutex_lock(&group_lock);
   atomic_fetch_sub(&comm->runs, 1);
   if (mine) touch(comm);
@@ -3036,7 +3127,7 @@ static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
   const struct mesh_deadline landing = mesh_deadline("libnccl-mesh: a host-path group's landings and publications (run)", 0);
   for (;;) {
     if (revoked(comm)) return revoked_fail(comm);
-    mesh_deadline_left(&landing);
+    deadline_left(&landing);
     int open = 0;
     for (uint32_t h = 0; h < comm->count; h++) {
       struct channel *ch = comm->channels + h;
@@ -3199,7 +3290,7 @@ static int gpu_wait(struct ncclComm *comm, int group) {
       for (uint32_t h = 0; group && h < comm->count && ended == GPU_ENDED; h++)
         if (!mesh_stream_held(&comm->attach->context, comm->channels[h].stream, *comm->channels[h].wire)) ended = GPU_HOLDING;
       if (ended != GPU_ENDED) break;
-      const uint64_t left = mesh_deadline_left(&deadline);
+      const uint64_t left = deadline_left(&deadline);
       metal_wait(finished, last, left < MESH_PAUSE_NS ? left : MESH_PAUSE_NS);
     }
     metal_release(command);
@@ -4489,19 +4580,19 @@ static int prepare_exchange_locked(ncclComm_t comm, const void *local, size_t by
   int error = comm->peers ? 0 : ENOTCONN;
   if (!error && comm->rank) {
     if (comm->peers[0] < 0) error = ENOTCONN;
-    if (!error) error = whole(comm, comm->peers[0], (void *)local, bytes, 1);
-    if (!error) error = whole(comm, comm->peers[0], reports, (size_t)comm->nranks * bytes, 0);
+    if (!error) error = whole(comm, comm->peers[0], 0, (void *)local, bytes, 1);
+    if (!error) error = whole(comm, comm->peers[0], 0, reports, (size_t)comm->nranks * bytes, 0);
   } else if (!error) {
     for (int r = 1; r < comm->nranks && !error; r++)
-      error = comm->peers[r] < 0 ? ENOTCONN : whole(comm, comm->peers[r], (unsigned char *)reports + (size_t)r * bytes, bytes, 0);
-    for (int r = 1; r < comm->nranks && !error; r++) error = whole(comm, comm->peers[r], reports, (size_t)comm->nranks * bytes, 1);
+      error = comm->peers[r] < 0 ? ENOTCONN : whole(comm, comm->peers[r], r, (unsigned char *)reports + (size_t)r * bytes, bytes, 0);
+    for (int r = 1; r < comm->nranks && !error; r++) error = whole(comm, comm->peers[r], r, reports, (size_t)comm->nranks * bytes, 1);
   }
   return error;
 }
 static ncclResult_t prepare_exchange(struct ncclComm *comm, const void *local, size_t bytes, void *reports) {
   pthread_mutex_lock(&comm->prepare);
   atomic_fetch_add(&comm->runs, 1);
-  comm->until = mesh_deadline("libnccl-mesh: fixed function configuration metadata", 0);
+  comm->until = mesh_deadline("libnccl-mesh: fixed function configuration metadata", MESH_PREPARATION_NS);
   const int error = prepare_exchange_locked(comm, local, bytes, reports);
   atomic_fetch_sub(&comm->runs, 1);
   pthread_mutex_unlock(&comm->prepare);
@@ -5100,7 +5191,7 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
   }
   pthread_mutex_lock(&comm->prepare);
   atomic_fetch_add(&comm->runs, 1);
-  comm->until = mesh_deadline("libnccl-mesh: configuration-time write binding metadata", 0);
+  comm->until = mesh_deadline("libnccl-mesh: configuration-time write binding metadata", MESH_PREPARATION_NS);
   int error = prepare_exchange_locked(comm, &local, sizeof local, reports);
   int contiguous = !layout.tile_bytes;
   for (int r = 0; r < comm->nranks && !error; r++) {

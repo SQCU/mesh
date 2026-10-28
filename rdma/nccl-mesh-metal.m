@@ -344,6 +344,37 @@ struct metal_result metal_open_gate(struct metal_program *program, void *words, 
   return dispatch(program, KIND_publish, words, NULL, NULL, NULL, (struct args){.scalar = value, .aux = word}, 1, 1);
 }
 
+/* design/transport.md section 5: the seconds one GPU wait's load takes on `device`, read once in the process: the spin
+   kernel's bounded wait on a count that never reaches its target, 2^16 loads, timed by its command buffer, the second of
+   two (the GPU's clock risen), each on fresh failure words; 0 where it could not be read */
+double metal_poll_seconds(void *device) {
+  static double period;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{ @autoreleasepool {
+    const char *message = NULL;
+    struct kernels *k = kernels_of((id<MTLDevice>)device, &message);
+    id<MTLCommandQueue> queue = k ? [(id<MTLDevice>)device newCommandQueue] : nil;
+    id<MTLBuffer> words = [(id<MTLDevice>)device newBufferWithLength:128 options:MTLResourceStorageModeShared];
+    const struct args p = {.scalar = 1, .polls = 1u << 16};
+    for (int pass = 0; queue && words && pass < 2; pass++) {
+      memset(words.contents, 0, 128);
+      id<MTLCommandBuffer> command = [queue commandBuffer];
+      id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+      [encoder setComputePipelineState:k->pipelines[KIND_spin]];
+      for (NSUInteger i = 0; i < 6; i++) [encoder setBuffer:words offset:i == 4 ? 64 : 0 atIndex:i];
+      [encoder setBytes:&p length:sizeof p atIndex:2];
+      [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+      [encoder endEncoding];
+      [command commit];
+      const uint64_t until = mesh_clock_ns() + MESH_PLATFORM_NS;
+      while (command.status < MTLCommandBufferStatusCompleted && mesh_clock_ns() < until) usleep(100);
+      period = command.status == MTLCommandBufferStatusCompleted ? (command.GPUEndTime - command.GPUStartTime) / p.polls : 0;
+    }
+    [queue release]; [words release];
+  }});
+  return period;
+}
+
 struct metal_result metal_spin(struct metal_program *program, const struct metal_wait *w) {
   metal_uses(program, &w->data, w->data != NULL, 1);
   return dispatch(program, KIND_spin, w->words, w->words, NULL, w->violation, wait_args(w, 0, 1, 0), 1, 1);
