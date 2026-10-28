@@ -1,8 +1,7 @@
 #!/bin/bash
 # The substrate as its user's (design/transport.md): the user's mesh checkout built and installed (make all install:
-# the bridge and the libraries, each image that changed renamed into rdma/) with its Python bindings, ~/.venv-mesh-uv
-# with torch-mesh and the checkout's library on its path, and the bridge as the user's launchd agent io.mesh.bridge, run from
-# the checkout with the node's bridge configuration, the operand CONFIGURATION (a JSON, TOML or YAML document,
+# the bridge and the libraries, each image that changed renamed into rdma/), ~/.venv-mesh-uv with its base requirements,
+# and the bridge as the user's launchd agent io.mesh.bridge, run from the checkout with the node's bridge configuration, the operand CONFIGURATION (a JSON, TOML or YAML document,
 # etc/bridge/README.md): rdma/bridge_configuration.py writes its canonical form, which the launchd agent's
 # definition names, so the keeper's load at boot keeps it.  There is no default configuration.
 # A definition this script writes never changes with what it runs: a loaded launchd agent is left running (bin/mesh-launchd-agent.sh).  The document's path is recorded
@@ -25,16 +24,6 @@ uv=$(command -v uv || echo /usr/local/mesh/bin/uv)
 installed=$(make -s -C "$source/rdma" all install) || exit 1
 [ -x "$venv/bin/python" ] || "$uv" venv -q --python "$(cat "$source/.python-version")" "$venv" || exit 1
 "$uv" pip install -q --python "$venv/bin/python" -r "$source/rdma/requirements.txt" || exit 1
-bound=$("$venv/bin/python" -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))') || exit 1
-c_revision="$bound $(git -C "$source" log -1 --format=%H -- etc/bridge/layout.h rdma/mesh-plan.h rdma/nccl.h rdma/mesh-statistics.h rdma/mesh_c_build.py)"
-[ -f "$source/rdma/_mesh_c$bound" ] && [ "$(cat "$source/rdma/.build/mesh-c.revision" 2>/dev/null)" = "$c_revision" ] \
-  || { "$venv/bin/python" "$source/rdma/mesh_c_build.py" >/dev/null && printf '%s\n' "$c_revision" > "$source/rdma/.build/mesh-c.revision"; } || exit 1
-"$venv/bin/python" -c 'import sys, sysconfig; open(sysconfig.get_paths()["purelib"] + "/mesh.pth", "w").write(sys.argv[1] + "\n")' "$source/rdma" || exit 1
-package_revision="$source $bound $(git -C "$source" log -1 --format=%H -- rdma etc/compute etc/bridge) $(sw_vers -buildVersion) $(xcrun --show-sdk-build-version)"
-if [ "$(cat "$venv/torch-mesh.revision" 2>/dev/null)" != "$package_revision" ]; then
-  MESH_RDMA="$source/rdma" "$uv" pip install -q --python "$venv/bin/python" --no-build-isolation --reinstall-package torch-mesh "$source/rdma/torch-mesh" || exit 1
-  printf '%s\n' "$package_revision" > "$venv/torch-mesh.revision"
-fi
 configuration="$support/io.mesh.bridge/configuration.plist"; renew=
 "$venv/bin/python" "$source/rdma/bridge_configuration.py" "$document" "$configuration.new" || exit 1
 if cmp -s "$configuration.new" "$configuration"; then rm -f "$configuration.new"

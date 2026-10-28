@@ -1,9 +1,8 @@
-"""Explicit source-root transition for committed Git checkout installation.
+"""The bridge's source-root transition to a commit's checkout, when the bridge's own images differ.
 
-Normal mesh-user.sh installs retain their existing behavior. The hourly driver calls
-this entrypoint for a bridge swap; a node-local flock serializes installers. It waits
-for attached clients to detach and kills none. A failed transition excludes that node
-from measurement.
+Normal mesh-user.sh installs retain their existing behavior. The hourly calls this from
+node prepare; a node-local flock serializes installers. A failed transition excludes that
+node from measurement.
 """
 import contextlib
 import fcntl
@@ -13,16 +12,8 @@ from pathlib import Path
 import plistlib
 import re
 import subprocess
-import sysconfig
 import time
 
-from mesh_source import files, verify
-
-
-def environment():
-    return {'os': run('sw_vers', '-buildVersion').stdout.strip(),
-            'sdk': run('xcrun', '--show-sdk-build-version').stdout.strip(),
-            'python': sysconfig.get_config_var('EXT_SUFFIX')}
 
 
 def run(*args, check=True):
@@ -72,7 +63,7 @@ def loaded_program_arguments(service):
     return argv
 
 
-def verify_active(source, commit):
+def verify_active(source):
     source = Path(source).resolve()
     service = f'user/{os.getuid()}/io.mesh.bridge'
     expected = source / 'rdma/mesh-heartbeat'
@@ -93,31 +84,25 @@ def verify_active(source, commit):
     check = json.loads(run(source / 'rdma/mesh-stat').stdout.splitlines()[-1])
     if not check.get('up'):
         raise RuntimeError(f'new bridge is not up: {check}')
-    return {'commit': commit, 'active_heartbeat': str(expected), 'active_bridge': actual,
-            'topology': check}
+    return {'active_heartbeat': str(expected), 'active_bridge': actual, 'topology': check}
 
 
-def install_checkout(source, allow_source_transition=False, detach=0):
+def install_checkout(source):
     source = Path(source).resolve()
-    commit = verify(source)
     cache = Path.home() / '.cache/mesh'
     cache.mkdir(parents=True, exist_ok=True)
     with (cache / 'install.lock').open('a') as lease:
         fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        result = _install_locked(source, commit, allow_source_transition, detach)
-        (source / 'rdma/.build/installed.json').write_text(json.dumps({'commit': commit, 'environment': environment()}) + '\n')
-        return result
+        return _install_locked(source)
 
 
-def _install_locked(source, commit, allow_source_transition, detach):
+def _install_locked(source):
     domain, service = f'user/{os.getuid()}', f'user/{os.getuid()}/io.mesh.bridge'
     if disabled(domain):
         raise RuntimeError('operator-disabled bridge retained; checkout not installed')
     before = active_program(service)
     target = str(source / 'rdma/mesh-heartbeat')
     changing = before is not None and before != target
-    if changing and not allow_source_transition:
-        raise RuntimeError('active source-root transition requires its explicit configuration operand')
     plist = Path.home() / 'Library/LaunchAgents/io.mesh.bridge.plist'
     old = plist.read_bytes() if plist.exists() else None
     rollback = None
@@ -131,8 +116,6 @@ def _install_locked(source, commit, allow_source_transition, detach):
     observer.parent.mkdir(exist_ok=True)
     run('cc', '-O2', '-Wall', '-Wextra', '-Werror', '-o', observer, source / 'rdma/mesh-install-state.c')
     read_state = lambda: json.loads(run(observer).stdout)
-    # Attached programs are waited for, never killed: the swap fails if they do not detach in `detach` seconds.
-    wait_for(read_state, lambda state: not state['clients'], detach, f'clients still attached after {detach:.0f} s')
     released = unloaded = False
     try:
         if changing:
@@ -146,9 +129,7 @@ def _install_locked(source, commit, allow_source_transition, detach):
         print(output.stdout, end='', flush=True)
         wait_for(lambda: json.loads(run(source / 'rdma/mesh-stat').stdout.splitlines()[-1]),
                  lambda v: v.get('up') is True, 60, 'installed bridge did not start')
-        # Check the installed package against this Git checkout.
-        check_package(source)
-        result = verify_active(source, commit)
+        result = verify_active(source)
         active = Path.home() / '.cache/mesh/active-source'
         active.parent.mkdir(parents=True, exist_ok=True)
         active.write_text(str(source) + '\n')
@@ -174,16 +155,3 @@ def _install_locked(source, commit, allow_source_transition, detach):
             with contextlib.suppress(Exception):
                 run('launchctl', 'kill', 'SIGHUP', service)
         raise
-
-
-def check_package(source):
-    import glob
-    package = Path(next(iter(glob.glob(str(Path.home() / '.venv-mesh-uv/lib/python*/site-packages/torch_mesh'))), '-'))
-    prefix = 'rdma/torch-mesh/torch_mesh/'
-    for name in files(source, prefix):
-        if name.endswith(('.py', '.metal')):
-            installed = package / name
-            if not installed.is_file() or installed.read_bytes() != (Path(source) / prefix / name).read_bytes():
-                raise RuntimeError(f'installed torch_mesh differs from committed source: {name}')
-    if not list(package.glob('_stream*.so')):
-        raise RuntimeError('installed torch_mesh has no native extension')

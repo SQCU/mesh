@@ -61,11 +61,8 @@ on a `workstation` it is A less `vm.compressor_bytes_used`. A failed read ends t
 rank too. It then SIGKILLs the rank and each descendant it
 tracked by parent pid, each pid checked against its start time, until none remains,
 and then every process of the user still carrying the token (`KERN_PROCARGS2`); it
-exits 125 naming any survivor. The rank's own alarm ends it should the guard die,
-and each node's preparation (whose builds carry the token too) sweeps every token
-of the current run's launcher host whose run began more than its bound ago (the
-token names the run by its UTC start), so has ended. Other hosts' tokens are left
-alone. A descendant still escapes when it leaves its parent between two samples and runs a
+exits 125 naming any survivor. The rank's own alarm ends it should the guard die.
+A descendant still escapes when it leaves its parent between two samples and runs a
 platform binary (whose environment macOS hides) or with `MESH_RUN` removed.
 A run ends by `run_seconds`: every command of its driver is bounded a minute
 earlier, so the driver returns its record. A stop (the bound, SIGTERM, SIGHUP,
@@ -75,16 +72,14 @@ is written. Every hourly appends one line to log.jsonl, one that cannot start
 included, naming the commits its ranks loaded and the runs whose ranks shared its
 nodes. There is no node lock: runs of different commits share a bridge as clients.
 
-Each run uses its own commit's checkout on every node
-(`<checkouts>/<repo>/<sha>`, the `checkouts_kept` most recently used kept). A
-tensor program's client code (libnccl-mesh and its kernels, _mesh_c, torch_mesh's
-extension) is built there once per commit, under a receipt naming the commit, OS
-build, SDK build and Python ABI, and its ranks load it by path (PYTHONPATH and the
-libraries' rpath), never from the shared venv. So programs of different commits
-attach to the same resident bridge as ordinary clients. The bridge is swapped only
-when its own build differs (its images' sources and their headers, compared without
-building) and then politely: `node swap` waits up to `detach_seconds` for attached
-programs to detach, kills none, and fails the node if they do not.
+Each run uses its own commit's mesh checkout on every node
+(`<checkouts>/mesh/<sha>`, the `checkouts_kept` most recently used kept). node prepare
+runs make there (which rebuilds only what is stale), _mesh_c and torch_mesh's
+extension in place, and its ranks load them by path (PYTHONPATH and the libraries'
+rpath), never from the shared venv; each reports the commit it loaded. So programs
+of different commits attach to the same resident bridge as ordinary clients. The
+bridge is reinstalled from a run's checkout only when its own images (mesh-heartbeat,
+mesh-flow, libmesh.dylib) differ from the running bridge's.
 
 The application observer emits each completed whole-call record through
 `mesh_statistics.emit`. Late peer observations still enter the existing

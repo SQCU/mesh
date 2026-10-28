@@ -13,7 +13,7 @@ import time
 import traceback
 import zlib
 
-from mesh_source import checkout, revision, upstream, verify
+from mesh_source import checkout, prune, revision, upstream, verify
 
 REQUIRED = ('rdma/mesh_hourly.py', 'rdma/mesh_nodes.py', 'rdma/mesh_source.py',
             'rdma/mesh_install.py', 'rdma/mesh-install-state.c')
@@ -154,6 +154,8 @@ def _launch(mesh_root, microbench_root, output_root, cluster):
         for name, root in roots.items():
             target = Path.home() / cluster.checkouts / name / record['commits'][name]
             checkout(record['upstreams'][name], record['commits'][name], target, max(1, record['deadline_unix'] - time.time()))
+            target.with_name(target.name + '.used').touch()
+            prune(target.parent, cluster.kept)
             record['checkouts'][name] = {'path': str(target)}
         committed_mesh = Path(record['checkouts']['mesh']['path'])
         committed_bench = Path(record['checkouts']['metal-microbench']['path'])
@@ -205,30 +207,23 @@ def _launch(mesh_root, microbench_root, output_root, cluster):
     return 0 if record['status'] == 'completed' else 1
 
 
-def prepare_node(node, paths, record):
-    """One node-local Git/build transaction; existing build products stay in place."""
+def prepare_node(node, record):
+    """This commit's mesh checkout on the node, built there (node prepare) for ranks that load it by path; the
+    `checkouts_kept` most recently used kept."""
     from mesh_nodes import home_path
     from mesh_source import checkout_command
-    cluster = node.cluster
-    result = {'number': node.number, 'status': 'installing', 'sources': {}, 'commands': node.commands}
+    cluster, commit = node.cluster, record['commits']['mesh']
+    node.source = f'{cluster.checkouts}/mesh/{commit}'
+    result = {'number': node.number, 'status': 'installing', 'commit': commit, 'commands': node.commands}
     record['nodes'][f'{node.number}@{node.addr}'] = result
     try:
-        commands = [f'export MESH_RUN={shlex.quote(record["token"])}']
-        for name in paths:
-            destination = f'{cluster.checkouts}/{name}/{record["commits"][name]}'
-            result['sources'][name] = {'commit': record['commits'][name], 'remote_root': destination,
-                                       'upstream': record['upstreams'][name]}
-            commands += [checkout_command(record['upstreams'][name], record['commits'][name], '~/' + destination),
-                         f'touch {home_path(destination)}.used']
-            if name == 'mesh':
-                node.source = destination
-        commands.append(f'PYTHONPATH={home_path(node.source + "/rdma")} {cluster.python} -m mesh_nodes node prepare '
-                        + ' '.join(shlex.quote(str(word)) for word in (record['commits']['mesh'], node.number, record['token'],
-                                                                       cluster.run_seconds)))
-        for name in paths:
-            commands.append(f'{cluster.python} {home_path(node.source + "/rdma/mesh_source.py")} prune '
-                            f'{home_path(cluster.checkouts + "/" + name)} {cluster.kept} {cluster.run_seconds}')
-        code, output = node.run('\n'.join(commands))
+        code, output = node.run('\n'.join((
+            f'export MESH_RUN={shlex.quote(record["token"])}',
+            checkout_command(record['upstreams']['mesh'], commit, '~/' + node.source),
+            f'touch {home_path(node.source)}.used',
+            f'PYTHONPATH={home_path(node.source + "/rdma")} {cluster.python} -m mesh_nodes node prepare',
+            f'{cluster.python} {home_path(node.source + "/rdma/mesh_source.py")} prune '
+            f'{home_path(cluster.checkouts + "/mesh")} {cluster.kept}')))
         result['install_exit'] = code
         if code:
             raise RuntimeError(f'preparation failed ({code}): {output}')
@@ -328,17 +323,11 @@ def _execute_locked(record):
         record.update(stage='discovery', discovery={})
         found, record['absent'] = mesh.discover(cluster, state=record['discovery'], deadline=record['deadline_unix'])
         record['stage'] = 'installation'
-        installs = mesh.parallel([lambda n=n: prepare_node(n, paths, record)
+        installs = mesh.parallel([lambda n=n: prepare_node(n, record)
                                   for n in found])
         record['nodes'] = {f'{node.number}@{node.addr}': result for node, result in zip(found, installs)}
-        swaps = [node for node, result in zip(found, installs) if result.get('bridge') == 'differs']
-        record['stage'] = 'swap'
-        for node, (code, output) in zip(swaps, mesh.parallel([lambda n=n: n.py('swap', record['commits']['mesh'], cluster.detach)
-                                                              for n in swaps])):
-            if code:
-                record['nodes'][f'{node.number}@{node.addr}'].update(status='failed', error=f'bridge swap failed ({code}): {output[-400:]}')
-        ready = [node for node in found if record['nodes'][f'{node.number}@{node.addr}']['status'] == 'installed'
-                 and node.number not in record['absent']]
+        ready = [node for node, result in zip(found, installs)
+                 if result['status'] == 'installed' and node.number not in record['absent']]
         record['stage'] = 'pairing'
         if ready and not mesh.wait_paired(ready, None, record['deadline_unix']):
             record['errors'].append({'stage': 'pairing', 'error': 'not all links paired; each workload needs its own members paired'})

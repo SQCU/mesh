@@ -1,14 +1,13 @@
 """Shared node discovery, deployment and rank execution; runners supply operands only."""
 import concurrent.futures
 import contextlib
-import calendar
 import codecs
 import collections
 import ctypes
 import dataclasses
 import functools
+import filecmp
 import getpass
-import hashlib
 import io
 import json
 import math
@@ -45,8 +44,8 @@ class Member:
 @dataclasses.dataclass(frozen=True)
 class Cluster:
     """etc/mesh-nodes.json with the environment: members by bridge node number, the administrator's user and key, a
-    run's bound in seconds, the nodes' Python, their per-commit checkouts under home and how many are kept, the first
-    rank port and how long a bridge swap waits for attached programs to detach."""
+    run's bound in seconds, the nodes' Python, their per-commit checkouts under home and how many are kept, and the
+    first rank port."""
     members: dict
     user: str
     key: 'str | None'
@@ -55,7 +54,6 @@ class Cluster:
     checkouts: str
     kept: int
     rank_port: int
-    detach: int
 
     @property
     def ssh(self):
@@ -79,7 +77,7 @@ def load(path=ROOT / 'etc/mesh-nodes.json'):
                                         row.get('guard_headroom_gib', 0)) for row in raw['nodes'].values()}
     return Cluster(members, access.get('user') or getpass.getuser(),
                    str(Path(access['key']).expanduser()) if 'key' in access else None,
-                   raw['run_seconds'], raw['python'], raw['checkouts'], raw['checkouts_kept'], raw['rank_port'], raw['detach_seconds'])
+                   raw['run_seconds'], raw['python'], raw['checkouts'], raw['checkouts_kept'], raw['rank_port'])
 
 
 def home_path(relative):
@@ -325,11 +323,6 @@ def at(nodes, number):
     return next((n for n in nodes if n.number == number), None)
 
 
-def resolve(ref, repo=ROOT):
-    return subprocess.run(['git', '-C', repo, 'rev-parse', f'{ref}^{{commit}}'], check=True, capture_output=True,
-                          text=True).stdout.strip()
-
-
 def ports(n):
     d = n.stat()[1]
     peers, links = d.get('peers', []), d.get('map', {}).get('links', [])
@@ -388,88 +381,23 @@ def run(*argv, **kw):
     return subprocess.run([str(a) for a in argv], capture_output=True, text=True, stdin=subprocess.DEVNULL, **kw)
 
 
-def ended(token, current, seconds):
-    """A run token (`run:launcher host:pid:start`, the run named by its UTC start) of the `current` run's launcher host
-    whose run began more than its bound (`seconds`, the launcher's minute of grace and a minute more) ago, so ended."""
-    fields, now = token.split(':'), current.split(':')
-    with contextlib.suppress(ValueError):
-        began = calendar.timegm(time.strptime(fields[0][:16], '%Y%m%dT%H%M%SZ'))
-        return len(fields) == 4 and len(now) == 4 and fields[1] == now[1] and began + float(seconds) + 120 < time.time()
-    return False
-
-
-BRIDGE = ('mesh-link.c', 'mesh-records.c', 'mesh-heartbeat.c', 'mesh-dataflow.c', 'mesh-call.c', 'mesh-collective.c',
-          'mesh-fabric.c', 'mesh-routed.c', 'mesh-diagnostics.c', 'Makefile', '../etc/compute/metal.mk',
-          '../etc/bridge/thunderbolt.mk')
-
-
-def bridge_build(source):
-    """The bridge's build as its sources: sha256 over its images' (rdma/Makefile: mesh-flow, mesh-heartbeat, libmesh)
-    and every local header they include, so two checkouts are compared without building either bridge."""
-    rdma, digest, todo, seen = Path(source) / 'rdma', hashlib.sha256(), list(BRIDGE), set()
-    while todo:
-        if (name := os.path.normpath(todo.pop())) in seen or not (rdma / name).is_file():
-            continue
-        seen.add(name)
-        todo += [os.path.join(os.path.dirname(name), m.decode()) for m in
-                 re.findall(rb'#include "([^"]+)"', (rdma / name).read_bytes())]
-    for name in sorted(seen):
-        digest.update(name.encode() + b'\0' + (rdma / name).read_bytes())
-    return digest.hexdigest()
-
-
-def node_prepare(commit, number, current, seconds):
-    """Build this commit's client code once in its own checkout (its libraries and kernels, _mesh_c and torch_mesh's
-    extension, which ranks load by path; never the shared venv), and say whether the running bridge is this build:
-    {"bridge": "joined"}, or "differs" for `node swap`."""
-    from mesh_install import environment
-    from mesh_source import verify
-    if left := sweep(lambda token: ended(token, current, seconds), time.monotonic() + 30):
-        raise RuntimeError(f'processes {left} of an ended run remain after SIGKILL')
-    source = Path(__file__).resolve().parent.parent
-    if verify(source) != commit:
-        raise ValueError('preparation source differs from the requested commit')
-    if str(loads(run(source / 'bin/mesh-stat').stdout).get('node')) != number:
-        raise ValueError('the administration endpoint does not own the configured bridge node')
-    receipt, wanted = source / 'rdma/.build/client.json', {'commit': commit, 'environment': environment()}
-    if not receipt.exists() or json.loads(receipt.read_text()) != wanted:
-        for where, *argv in (('rdma', 'make', '-s', 'install'), ('rdma', sys.executable, 'mesh_c_build.py'),
-                             ('rdma/torch-mesh', sys.executable, 'setup.py', '-q', 'build_ext', '--inplace',
-                              '--build-temp', '../.build/torch-mesh')):
-            done = run(*argv, cwd=source / where, env={**os.environ, 'MESH_RDMA': str(source / 'rdma')})
-            if done.returncode:
-                raise RuntimeError(f'{where}: {" ".join(argv[1:3])} failed: {(done.stderr or done.stdout)[-600:]}')
-        receipt.write_text(json.dumps(wanted) + '\n')
-    active = Path((HOME / '.cache/mesh/active-source').read_text().strip())
-    joined = (active / 'rdma').is_dir() and bridge_build(source) == bridge_build(active)
-    print(json.dumps({'bridge': 'joined' if joined else 'differs', 'active': str(active)}))
-
-
-def node_swap(commit, detach):
-    """Make this commit's checkout the node's bridge once its attached programs detach, waiting at most `detach`
-    seconds and killing none (mesh_install install_checkout)."""
+def node_prepare():
+    """Build this commit's checkout for its ranks, which load it by path, never the shared venv: make (which rebuilds
+    only what is stale), _mesh_c and torch_mesh's extension in place. Reinstall the bridge from it only when its own
+    images differ from the running bridge's."""
     from mesh_install import install_checkout
-    from mesh_source import verify
-    source = Path(__file__).resolve().parent.parent
-    if verify(source) != commit:
-        raise ValueError('swap source differs from the requested commit')
-    install_checkout(source, allow_source_transition=True, detach=float(detach))
-
-
-def node_installed(commit, exact_imported_source='0'):
-    from mesh_install import check_package, verify_active, environment
-    from mesh_source import verify
+    for where, *argv in (('rdma', 'make', '-s', 'install'), ('rdma', sys.executable, 'mesh_c_build.py'),
+                         ('rdma/torch-mesh', sys.executable, 'setup.py', '-q', 'build_ext', '--inplace',
+                          '--build-temp', '../.build/torch-mesh')):
+        done = run(*argv, cwd=ROOT / where, env={**os.environ, 'MESH_RDMA': str(ROOT / 'rdma')})
+        if done.returncode:
+            raise RuntimeError(f'{where}: {" ".join(argv[1:3])} failed: {(done.stderr or done.stdout)[-600:]}')
     active = HOME / '.cache/mesh/active-source'
-    source = (Path(active.read_text().strip()) if exact_imported_source != '1' and active.exists()
-              else Path(__file__).resolve().parent.parent)
-    if verify(source) != commit:
-        raise ValueError('requested commit differs from the Git checkout')
-    receipt = source / 'rdma/.build/installed.json'
-    if not receipt.exists() or json.loads(receipt.read_text()) != {'commit': commit, 'environment': environment()}:
-        raise ValueError('requested source and build environment have not been installed')
-    check_package(source)
-    print(json.dumps({'installed': verify_active(source, commit)}))
-    return 0
+    active = Path(active.read_text().strip()) / 'rdma' if active.exists() else None
+    if not active or not all((active / f).exists() and filecmp.cmp(ROOT / 'rdma' / f, active / f, shallow=False)
+                             for f in ('mesh-heartbeat', 'mesh-flow', 'libmesh.dylib')):
+        install_checkout(ROOT)
+    print(json.dumps({'bridge': (HOME / '.cache/mesh/active-source').read_text().strip()}))
 
 
 def node_resets(since):
@@ -563,10 +491,9 @@ def node_guard(seconds, floor, workstation, *argv):
     rank = subprocess.Popen(argv, stdin=operands, start_new_session=True,
                             preexec_fn=lambda: signal.alarm(math.ceil(float(seconds)) + 10))
     known, why, value, size = {rank.pid: process(rank.pid)[0]}, None, ctypes.c_uint64(), ctypes.c_size_t()
-    own, git = os.environ.get('MESH_RUN'), ROOT / '.git'
+    own = os.environ.get('MESH_RUN')
     others = lambda: sorted(set(carrying(lambda token: token != own).values()))
-    head = Path(git.read_text().split()[-1] if git.is_file() else git) / 'HEAD'
-    print(json.dumps({'loaded': head.read_text().strip(), 'overlap': others()}), flush=True)
+    print(json.dumps({'loaded': ROOT.name, 'overlap': others()}), flush=True)
     live = lambda pid, start: (seen := process(pid)) is not None and seen[0] == start and seen[1] != zombie
     while why is None and process(rank.pid)[1] != zombie:
         for pid, start in list(known.items()):
@@ -605,14 +532,6 @@ def node_guard(seconds, floor, workstation, *argv):
     return 125 if left else 124 if why else code if code >= 0 else 128 - code
 
 
-def installed(sha, *names):
-    subprocess.run(['git', '-C', ROOT, 'fetch', '-q', 'origin'])
-    nodes, sha = [n for n in discover(load())[0] or [] if not names or n.name in names or n.number in names], resolve(sha)
-    lines = parallel([lambda n=n: (n.name, *n.py('installed', sha)) for n in nodes])
-    print(''.join(f'{name}: {text}' for name, _, text in lines), end='')
-    sys.exit(1 if any(code for _, code, _ in lines) or not lines else 0)
-
-
 def show():
     nodes = discover(load())[0] or []
     on = {n.number for n in up(nodes)}
@@ -625,9 +544,7 @@ def main(argv=None):
     remote = bool(argv and argv[0] == 'node')
     if remote:
         argv.pop(0)
-    commands = {'prepare': node_prepare, 'swap': node_swap, 'installed': node_installed,
-                'resets': node_resets, 'guard': node_guard} \
-        if remote else {'installed': installed, 'discover': show}
+    commands = {'prepare': node_prepare, 'resets': node_resets, 'guard': node_guard} if remote else {'discover': show}
     return commands[argv[0]](*argv[1:])
 
 

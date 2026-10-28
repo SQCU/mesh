@@ -1,11 +1,9 @@
 """Git checkouts used by installation and process launch, before numerical work."""
 import argparse
-import contextlib
 import os
 from pathlib import Path
 import shlex
 import subprocess
-import time
 
 
 def git(root, *args):
@@ -64,18 +62,15 @@ def files(root, relative):
     return git(Path(root) / relative, 'ls-files', '-z').decode().rstrip('\0').split('\0')
 
 
-def prune(root, kept, seconds):
-    """Remove the per-commit checkouts past the `kept` most recently used (`<name>.used`), never one used within
-    `seconds` (a run may still load it) or the running bridge's."""
+def prune(root, kept):
+    """Remove the per-commit checkouts past the `kept` most recently used (`<name>.used`), never the running bridge's."""
     root, active = Path(root), Path.home() / '.cache/mesh/active-source'
     active = active.read_text().strip() if active.exists() else ''
     used = lambda path: (root / f'{path.name}.used').stat().st_mtime if (root / f'{path.name}.used').exists() else 0
     for path in sorted((p for p in root.iterdir() if (p / '.git').is_file()), key=used, reverse=True)[int(kept):]:
-        if str(path) != active and time.time() - used(path) > float(seconds):
-            with contextlib.suppress(RuntimeError, subprocess.CalledProcessError):
-                verify(path)
-                git(root / 'repository.git', 'worktree', 'remove', '--force', str(path))
-                (root / f'{path.name}.used').unlink(missing_ok=True)
+        if str(path) != active:
+            git(root / 'repository.git', 'worktree', 'remove', '--force', str(path))
+            (root / f'{path.name}.used').unlink(missing_ok=True)
 
 
 def main():
