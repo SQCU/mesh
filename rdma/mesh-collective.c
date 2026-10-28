@@ -625,14 +625,16 @@ uint32_t mesh_program_steps_cut(const struct mesh_program *program,uint32_t rank
   uint64_t *lo=malloc(program->parts*sizeof *lo),*count=malloc(program->parts*sizeof *count);
   uint32_t k=0;
   if(lo && count && mesh_program_ranges(program,operand.elements,segments,mesh_quantum(page,operand.element_bytes),lo,count)){
+    /* a move's parts in one segment are one step: no step spans two segments, so a rank's own segment of a
+       reduce-scatter or an all-gather is a buffer of its own (libnccl-mesh partial_split) */
     for(uint32_t i=program->first[rank];i<program->first[rank+1];i++){
       const struct mesh_move *m=program->move+i;
-      const uint32_t last=m->part+m->parts-1;
-      const uint64_t elements=lo[last]+count[last]-lo[m->part];
-      if(!elements)continue;
-      struct mesh_operand piece=operand;
-      piece.elements=elements;
-      steps[k++]=(struct mesh_step){m->op,m->peer,m->round,m->buffer,lo[m->part],piece};
+      for(uint32_t p=m->part,end;p<m->part+m->parts;p=end){
+        for(end=p+1;end<m->part+m->parts && program->segment[end]==program->segment[p];end++);
+        struct mesh_operand piece=operand;
+        piece.elements=lo[end-1]+count[end-1]-lo[p];
+        if(piece.elements)steps[k++]=(struct mesh_step){m->op,m->peer,m->round,m->buffer,lo[p],piece};
+      }
     }
   }
   free(lo);free(count);

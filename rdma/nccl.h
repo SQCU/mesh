@@ -97,10 +97,9 @@
    ncclMeshBuffer (an id<MTLBuffer> and a byte offset into it: an MPS tensor's storage and offset) of any type, a
    crossing's over a lease (Memory, below); float64 moves as its bytes, and a float64 reduction there fails as a value
    (Apple GPUs have no float64 arithmetic).  With commandEncoder, the kernels go into that open compute encoder, left
-   open with nothing signalled at the group's end; workspace, where given, gives the scratch of a call that crosses no
-   link (an id<MTLBuffer> of at least `bytes`, valid until the group is complete; without it the communicator's own,
-   reused in the encoder's order: the scratch a crossing sends from or lands in is the communicator's, leases of its
-   pool), and the caller orders any later host-path group after the stream's work.  The calls of one group name one
+   open with nothing signalled at the group's end; workspace is not read (a call that crosses no link makes its result
+   in recvbuff, and what a crossing sends from or lands in that is not the caller's is the communicator's: Memory),
+   and the caller orders any later host-path group after the stream's work.  The calls of one group name one
    command buffer or encoder (the group's dispatches are one program); their bound is the greatest of their polls.  A
    group on several communicators is one group of each communicator's calls, in the order the group first names them,
    progressing together: on the Metal path each is issued and, where the stream asked no issue, all are completed
@@ -138,9 +137,9 @@
    classic form's.  The group is encoded as compute dispatches between the encoder's commands before and after it, bound
    through the caller's argument table (at least 6 buffer bindings; no setBytes, each dispatch's arguments a record of
    the library's ring), on pipelines of the residency set's device, every buffer of the library's it touches added to
-   the caller's residency set (committed where one was added); nothing is committed or signalled, and with no workspace
-   its scratch is the communicator's, reused in the encoder's order.  The classic form reads residencySet only for a
-   fused crossing (below), whose steps the caller's kernels run by their bindings' GPU addresses:
+   the caller's residency set (committed where one was added); nothing is committed or signalled.  The classic form
+   reads residencySet only for a fused crossing (below), whose steps the caller's kernels run by their bindings' GPU
+   addresses:
    an id<MTLResidencySet> of the command buffer's device, to which the library adds every buffer those bindings name
    (committed where one was added), and which the caller makes resident for the command buffers its kernels are encoded
    into (its queue's addResidencySet:, or each command buffer's useResidencySet:), since a classic encoder makes resident
@@ -148,9 +147,20 @@
 
    Memory.  The process is one client of its node's bridge: one attach of the node's region, made at its first
    ncclMemAlloc or communicator, whose slot owns the process's leases and holds the streams its communicators use; a
-   communicator leases a page for its gate and a pool of leases for the pages its groups send from and land in that are
-   not the caller's (a reduce-scatter's operand, a tree's scratch, a combine's landing area), held by a group until it
-   completes and returned at ncclCommDestroy.  ncclMemAlloc is the lease,
+   communicator leases a page for its gate, pages of span tables (each made the first time its bytes are named and
+   never written again), and, for each group definition (a declared group, or an undeclared group's calls, the 64
+   most recently used kept), two slots of what its groups send from and land in that are not the caller's (a
+   reduce-scatter's partials of the others' segments, a non-receiving rank's operand, a tree's scratch, a relay's
+   generations, a combine's landing area, credits): made at its first group, its groups taking turns at them,
+   ncclMemAlloc called again only where one must grow, a dropped definition's slots kept for the next, all returned at
+   ncclCommDestroy.  A result is made in recvbuff (a reduce-scatter's own segment too: no compiled piece spans two
+   segments), and nothing is copied into a slot from a caller's buffer but the operand of a premultiplied,
+   partials-merging or fused call where it is not the result, and an in-place single-phase all-reduce's original.  A
+   group writes a slot only once the slot's last group has every landing awaited: the stream's order, and a landed
+   wait for those its stream did not await.  A SEND from a slot, or a write's (its producer's source, a relay's
+   lease), whose arrival no later landing at its rank depends on is answered by a credit, an 8-byte SEND of its
+   receiver's once those landings arrive on that cable, which the sender lands in the same group: so a group whose
+   landings are complete has every such SEND read, and nothing waits on `sent`.  ncclMemAlloc is the lease,
    the call the operator's division of the work makes of the bridge ("the bridge is there to behave like a system
    call"): whole pages of the region covering size, which the bridge registered on every device when the device came up,
    before any queue pair existed; a lease registers nothing.  The client sizes its leases ("ontologically it must be the
@@ -1107,12 +1117,11 @@ ncclResult_t ncclMeshCommPlanRouteUnits(ncclComm_t comm, uint64_t* units, size_t
    placement; resuming begins at its first group without dropping the plan. */
 ncclResult_t ncclMeshCommPlanActive(ncclComm_t comm, int active);
 /* Every issued group through `ticket` that is not complete, completed on `stream` (its commandBuffer and
-   commandEncoder, or the Metal 4 form's, and its polls; issue and workspace not read); *published (may be NULL)
+   commandEncoder, or the Metal 4 form's, and its polls; issue not read); *published (may be NULL)
    whether a publication was encoded.  A ticket already complete encodes nothing; one whose communicator failed returns
    the failure. */
 ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream* stream, int* published);
-/* The highest ticket through which every issued group is complete (or lost with a failed communicator): its
-   workspace may be reused in the stream's order. */
+/* The highest ticket through which every issued group is complete (or lost with a failed communicator). */
 uint64_t ncclMeshRetired(void);
 /* Fused execution uses the same physical fragment compiler and channel bindings
    as ordinary compiled writes. A peer may have any number of parallel channels,
