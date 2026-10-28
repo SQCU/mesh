@@ -41,17 +41,26 @@ The parallel installation commands verify each endpoint's actual bridge identity
 
 Each workload's ranks are the nodes its `place` selects in `etc/mesh-nodes.json`
 (`Cluster.place`: `compute` nodes with a role and least values, the `root` first).
-Each rank runs under `mesh_nodes.py node guard` in its own session, its operands
-the first line of a stdin its caller holds open. The guard ends it at its deadline,
-below the node's `guard_free_pages` (`vm.page_free_count`, read every 0.1 s), when
-that stdin closes or on SIGTERM or SIGHUP, then SIGKILLs it and each descendant it
-tracked by parent pid until none remains, exiting 125 if one does. The rank's own
-alarm ends it should the guard die. A run ends by `run_seconds`: every command of
-its driver is bounded a minute earlier, so the driver returns its record. A stop
-(SIGTERM, SIGHUP, SIGINT) has the driver close its ranks' stdin and return its
-record before the lease is released. The lease is the shared `mkdir` at `lock`,
-its owner file naming the holder, pid and host; one whose pid on this host is
-gone is stale.
+Each rank runs under `mesh_nodes.py node guard` in its own session with the run's
+token (`MESH_RUN`), its operands the first line of a stdin its caller holds open.
+The guard ends it at its deadline, below the node's `guard_free_pages`
+(`vm.page_free_count`, read every 0.1 s; a failed read ends it too), when that stdin
+closes or on SIGTERM or SIGHUP. It then SIGKILLs the rank and each descendant it
+tracked by parent pid, each pid checked against its start time, until none remains,
+and then every process of the user still carrying the token (`KERN_PROCARGS2`); it
+exits 125 naming any survivor. The rank's own alarm ends it should the guard die,
+and each node's preparation (whose builds carry the token too) sweeps every token
+naming the current run's launcher host and another run: that host's lease admits
+one run at a time, so that run has ended. Other hosts' tokens are left alone. A descendant still escapes when it leaves its parent between two samples and runs a
+platform binary (whose environment macOS hides) or with `MESH_RUN` removed.
+A run ends by `run_seconds`: every command of its driver is bounded a minute
+earlier, so the driver returns its record. A stop (the bound, SIGTERM, SIGHUP,
+SIGINT) cancels the bound, has the driver close its ranks' stdin and return its
+record, kills its session past a minute, and ignores later stops while the record
+is written and the lease released. The lease is the `mkdir` of `lock`, as every
+session's tools take it. Its owner file names the launcher and the driver (pid,
+start time, host); it is stale when neither lives, or when it has no owner file
+past `lock_grace_seconds` from its birth.
 
 Each node keeps one `current` Git build checkout per repository. It fetches a
 selected commit from origin when needed and retains incremental build products.

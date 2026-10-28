@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shlex
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -91,19 +92,28 @@ class Stopped(Exception):
     """The run's bound (SIGALRM, etc/mesh-nodes.json run_seconds) or a stop: SIGTERM, SIGHUP or SIGINT."""
 
 
+def quiet():
+    """No further stop: the bound is cancelled and the stop signals ignored, so at most one Stopped is raised."""
+    signal.alarm(0)
+    for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGALRM):
+        signal.signal(s, signal.SIG_IGN)
+
+
 def stop(signum, _):
+    quiet()
     raise Stopped('the run reached run_seconds' if signum == signal.SIGALRM else f'stopped by {signal.Signals(signum).name}')
 
 
 def launcher(mesh_root, microbench_root, output_root):
     from mesh_nodes import exclusive_lock, load
     cluster = load()
-    with exclusive_lock('committed hourly', cluster.lock):
-        return _launch(mesh_root, microbench_root, output_root, cluster)
+    with exclusive_lock('committed hourly', cluster.lock, cluster.lock_grace) as hold:
+        return _launch(mesh_root, microbench_root, output_root, cluster, hold)
 
 
-def _launch(mesh_root, microbench_root, output_root, cluster):
+def _launch(mesh_root, microbench_root, output_root, cluster, hold):
     """Select main commits and launch the driver from its upstream Git checkout."""
+    from mesh_nodes import started
     output_root = Path(output_root).resolve()
     began = time.time()
     tag = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(began)) + f'-{time.time_ns() % 1000000000:09d}'
@@ -114,7 +124,7 @@ def _launch(mesh_root, microbench_root, output_root, cluster):
     signal.alarm(cluster.run_seconds)
     phase = 'checkout'
     record = {'schema': 2, 'run': tag, 'started_unix': began, 'deadline_unix': began + cluster.run_seconds - 60,
-              'commits': {}, 'checkouts': {},
+              'token': f'{tag}:{socket.gethostname()}:{os.getpid()}:{started(os.getpid())}', 'commits': {}, 'checkouts': {},
               'status': 'failed', 'errors': [], 'nodes': {}, 'workloads': [],
               'launcher': {'file': str(Path(__file__).resolve()),
                            'role': 'select commits; target helpers execute from upstream Git checkouts'}}
@@ -142,14 +152,13 @@ def _launch(mesh_root, microbench_root, output_root, cluster):
         phase = 'driver'
         child = subprocess.Popen([sys.executable, str(committed_mesh / 'rdma/mesh_hourly.py'), 'execute'], cwd=committed_mesh,
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, start_new_session=True)
+        hold(child.pid)
         stopped = None
         try:
             stdout = child.communicate(json.dumps(record))[0]
         except Stopped as error:
             # The driver ends its ranks, each guard confirming, and returns its record; past a minute its session ends.
             stopped = error
-            for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
-                signal.signal(s, signal.SIG_IGN)
             os.kill(child.pid, signal.SIGTERM)
             try:
                 stdout = child.communicate(timeout=60)[0]
@@ -166,9 +175,10 @@ def _launch(mesh_root, microbench_root, output_root, cluster):
             record['status'] = 'failed'
             if not record['errors'] and not any(item['status'] != 'completed' for item in record['workloads']):
                 record['errors'].append({'stage': 'committed-driver', 'exit': child.returncode})
+        quiet()
     except Exception as error:
+        quiet()
         record['errors'].append({'stage': phase, 'error': str(error), 'traceback': traceback.format_exc()})
-    signal.alarm(0)
     record['finished_unix'] = time.time()
     for item in record['workloads']:
         HISTORY[item['tag']] = (HISTORY.get(item['tag'], []) + item.get('observations', []))[-64:]
@@ -186,7 +196,7 @@ def prepare_node(node, paths, record):
     result = {'number': node.number, 'status': 'installing', 'sources': {}, 'commands': node.commands}
     record['nodes'][f'{node.number}@{node.addr}'] = result
     try:
-        commands = []
+        commands = [f'export MESH_RUN={shlex.quote(record["token"])}']
         for name in paths:
             destination = f'{cluster.checkouts}/{name}/current'
             result['sources'][name] = {'commit': record['commits'][name], 'remote_root': destination,
@@ -195,7 +205,7 @@ def prepare_node(node, paths, record):
             if name == 'mesh':
                 node.source = destination
         commands.append(f'PYTHONPATH={home_path(node.source + "/rdma")} {cluster.python} -m mesh_nodes node prepare '
-                        + shlex.quote(record['commits']['mesh']) + ' ' + shlex.quote(node.number))
+                        + ' '.join(shlex.quote(word) for word in (record['commits']['mesh'], node.number, record['token'])))
         for name in paths:
             commands.append(f'{cluster.python} {home_path(node.source + "/rdma/mesh_source.py")} prune '
                             f'{home_path(cluster.checkouts + "/" + name)} current')
@@ -263,7 +273,8 @@ def run_workload(item, nodes, paths, record, ordinal, cluster):
             env += 'MESH_OBSERVATIONS_STDIN=1 '
         result.update(status='running', ranks={f'rank{k}': {} for k in range(len(selected))})
         outputs = mesh.ranks(selected, tag, '.', command, cluster.rank_port + ordinal, env=env,
-                             alarm=max(1, int(end - time.time())), input=json.dumps(operands).encode(), states=result['ranks'])
+                             alarm=max(1, int(end - time.time())), input=json.dumps(operands).encode(), states=result['ranks'],
+                             run=record['token'])
         result['ranks'] = rank_results(outputs)
         result['observations'] = [row for rank in result['ranks'].values() for row in rank.pop('observations')]
         if len(result['ranks']) != len(selected) or any(v['exit'] != 0 for v in result['ranks'].values()):
