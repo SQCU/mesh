@@ -116,23 +116,28 @@
    it at once, ncclInvalidUsage), a revoke or a holding's end.  A group waits for room in its bridge's lists until the
    bridge takes its entries, a revoke or its holding's end.  A host-path group spins on
    its landings, never parks, and holds no lock another communicator's groups take; its waits end at their counts, a
-   count's ~0, its holding's end or a revoke.  Each of these waits has a deadline, MESH_PLATFORM_NS from its start,
-   past which the program ends (design/data-model.md section 6).  A group whose entries lie on one channel completes as
+   count's ~0, its holding's end or a revoke.  Each of these waits is bounded by its lack of progress: past
+   MESH_PLATFORM_NS in which no count of the communicator's links (presented, taken, ready, sent, landed) and nothing it
+   waits on moved, the program ends (design/data-model.md section 6); a peer late but progressing is waited for.  A group whose entries lie on one channel completes as
    plain dispatches in the stream's order; a group on two or more, with each channel progressing on its own
    (rdma/NCCL.md "One track", "Per-channel progress").  A group's landings in a stream wait to be posted until the stream
    reaches the group (its first publication on the channel, or a gate store of its first dispatch), so no receive lands
    in pages the stream's earlier work still reads. Its end does not await outgoing SEND completion.
    A wait is a kernel polling its holding's required `landed` count, and nothing else (rdma/mesh.metal mesh_wait_bounded), which the bridge sets ~0 where the link is
-   lost; every wait is bounded: the stream's `polls` is the most loads of a count a wait makes,
-   the caller's bound for the group's crossings, which it derives from its plan (the lag it expects at them, over the
-   period of one load on the node's GPU: rdma/NCCL.md "Bounded waits"); 0, or more than NCCL_MESH_POLLS, is
-   NCCL_MESH_POLLS (design/transport.md); the waits a group encodes at its call take its calls' greatest, and those
-   ncclMeshComplete encodes its stream's.  A wait that reaches its bound or reads a lost link records its
-   cause, entry and channel in its communicator's failure words, on which no kernel halts (every later dispatch runs as
-   encoded, a later wait on those words ending at once, one under way within 2^10 loads: nccl-mesh-kernels.h
-   mesh_step_failed), read by the host after its command buffer (ncclCommGetAsyncError, or the communicator's next
-   group): the bound is the wait's deadline, and a wait past it ends the program there (design/data-model.md section
-   6); a lost link, or a bound reached after a revoke, fails the group as a value.
+   lost; every wait is bounded by its lack of progress: the stream's `polls` is the most loads of a count a wait makes
+   through which its communicator's lease does not move, the caller's bound for the group's crossings, which it derives
+   from its plan (the lag it expects at them, over the period of one load on the node's GPU: rdma/NCCL.md "Bounded
+   waits"); 0, or more than NCCL_MESH_POLLS, is NCCL_MESH_POLLS (design/transport.md); the waits a group encodes at its
+   call take its calls' greatest, and those ncclMeshComplete encodes its stream's.  The process's watch raises the
+   lease every MESH_PLATFORM_NS / 20 while the communicator's streams are its own and its links have progressed within
+   MESH_PLATFORM_NS, so a wait on a peer that is late but alive and progressing goes on, and one on links nothing has
+   moved on, or in a process that has ended, ends within two bounds.  A wait that reaches its bound or reads a lost link
+   records its cause, entry and channel in its communicator's failure words, on which no kernel halts (every later
+   dispatch runs as encoded, a later wait on those words ending at once, one under way within 2^10 loads:
+   nccl-mesh-kernels.h mesh_step_failed), read by the watch within MESH_PLATFORM_NS / 20: a bound reached ends the
+   program (design/data-model.md section 6); a lost link (a count's ~0, or a stream no longer the communicator's own,
+   which the watch records itself), or a bound reached after a revoke, fails the group as a value
+   (ncclCommGetAsyncError, or the communicator's next group).
    The Metal 4 form: a stream whose argumentTable (an id<MTL4ArgumentTable>) is set, commandEncoder then an
    id<MTL4ComputeCommandEncoder> and residencySet an id<MTLResidencySet> (commandBuffer not read), its polls as the
    classic form's.  The group is encoded as compute dispatches between the encoder's commands before and after it, bound

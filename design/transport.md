@@ -229,18 +229,24 @@ presentation waits for its bridge to take its entries (`taken`), and a host-path
 a destroy's, end at the command buffer's completion status, which the platform's watchdog ends with an error where the
 buffer overruns (a buffer not yet committed fails a group at once, as a value, and a destroy does not await it:
 nothing runs it while its committer waits). A group's waits re-read the revoke and its holding between looks (rubric
-M3, 10-18), and no transaction fails because time passed (2026-10-22). None of these waits holds the library's groups'
-lock: each releases it for the wait and takes it again after, as a condition variable's wait releases its mutex, so
-other communicators' groups and revokes go on (rubric M4). A GPU wait keeps its poll bound; a link
-carries no keepalive.
+M3, 10-18), and no transaction fails because time passed (2026-10-22): each is bounded by its lack of progress,
+`MESH_PLATFORM_NS` in which no count of its communicator's links (presented, taken, ready, sent, landed) and nothing it
+waits on moved (the operator, 2026-10-18, above: "without something happening"). None of these waits holds the
+library's groups' lock: each releases it for the wait and takes it again after, as a condition variable's wait releases
+its mutex, so other communicators' groups and revokes go on (rubric M4). A GPU wait polls in rounds of its poll bound
+and goes on while its communicator's lease moved through the round: the process's watch raises the lease every
+`MESH_PLATFORM_NS` / 20 while the communicator's streams are its own (a peer that has gone ends its holding, which the
+watch records as a lost link, ending the waits at once) and its links have progressed within `MESH_PLATFORM_NS`. So a
+receiver seconds behind does not end its root's wait for its credit, links nothing moves on end their waits within two
+rounds, and a process that has ended renews nothing, so its kernels stop spinning. A link carries no keepalive.
 
 An expiry stops the process's GPU work before the program ends (rdma/nccl-mesh.c mesh_library_expired): it takes every
 communicator's failure claim, so each GPU wait and the track kernel end within 2^10 loads, and awaits the library's and
-the prepared functions' committed command buffers within MESH_PLATFORM_NS. A watch looks once a second for GPU work
-that makes no progress: a prepared function whose committed part has not ended for twice that part's last GPU time
+the prepared functions' committed command buffers within MESH_PLATFORM_NS. A watch looks every MESH_PLATFORM_NS / 20
+for GPU work that makes no progress: a GPU wait's bound recorded (the program ends, the wait named), and a prepared function whose committed part has not ended for twice that part's last GPU time
 (at least 0.8 MESH_PLATFORM_NS; MESH_PREPARATION_NS for a part that has not run before), or whose next part awaits an
 input event that has not moved for twice MESH_PLATFORM_NS, or a communicator's command buffer committed and not ended
-for twice MESH_PLATFORM_NS, and ends the program so, naming the wait. A prepared function's part is committed only once
+while neither it nor the communicator's links moved for twice MESH_PLATFORM_NS, and ends the program so, naming the wait. A prepared function's part is committed only once
 the events it awaits have been reached (rdma/metal-recording.m MetalPartReady), and a frontend's later work waits
 behind a slot of its own queue that the library commits at the function's end (MetalScheduleEnqueueAfter), so no GPU
 queue holds an event wait: Metal 4 drops a queue's event wait about 4 s after the commit and runs the work behind it,

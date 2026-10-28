@@ -79,17 +79,20 @@ void *metal_command(const struct metal_program *);
 int metal_ended(void *command);
 
 /* A program's waits bounded by `polls` wherever a dispatch has failure words to record in (the program's, `violation`
-   or metal_gate's, or those a wait names): at most `polls` loads of a count (rdma/mesh.metal mesh_wait_bounded), past
-   which the dispatch records a failure, which the host finds there after the command buffer (nccl-mesh.c
-   comm_failure): the bound is the wait's deadline, and its expiry ends the program there (design/data-model.md section
-   6), a revoke's or a lost link's being a value; no kernel halts on the record, every later dispatch running as encoded,
+   or metal_gate's, or those a wait names): rounds of `polls` loads of a count (rdma/mesh.metal mesh_wait_bounded), a
+   wait going on while its communicator's lease ([5]) moved through its last round (the host's watch raises it while
+   the communicator's links are held and have progressed within MESH_PLATFORM_NS: nccl-mesh.c watch_turn), past which
+   the dispatch records a failure, which the host's watch reads within MESH_PLATFORM_NS / 20 (nccl-mesh.c
+   bound_reached): a bound so reached ends the program (design/data-model.md section 6), a revoke's or a lost link's
+   being a value (the host records a stream no longer held as METAL_LOST itself: comm_lost); no kernel halts on the
+   record, every later dispatch running as encoded,
    a later wait on those failure words ending at once, and one under way within 2^10 loads (nccl-mesh-kernels.h
    mesh_step_failed), so a dispatch's waits spin about one bound in all, however many waves its threadgroups run in.  The failure words: [0] the cause (METAL_BOUND the bound reached,
    METAL_LOST the link's ~0, METAL_REVOKED the bound reached once a revoke set [6]; a landing is none, whatever its
    bytes), [1] the claim (its low 32 bits exchanged for 1 by every wait that fails, the one that found 0 recording [0],
-   [3], [4] and [2]: nccl-mesh-kernels.h mesh_step_claim), [2] 1 + the entry (stored last by the claimant, by the GPU
-   alone, which the host reads), [3] the channel, [4] the bound, and [6] the host's stop (a revoke's), which a failed
-   wait reads to name its cause.  The bound is the caller's, carried per crossing (nccl.h ncclMeshStream polls); 0, or
+   [3], [4] and [2]: nccl-mesh-kernels.h mesh_step_claim), [2] 1 + the entry (stored last by the claimant; UINT64_MAX
+   where the host recorded a stream lost), [3] the channel, [4] the bound, [5] the lease, and [6] the host's stop (a
+   revoke's), which a failed wait reads to name its cause.  The bound is the caller's, carried per crossing (nccl.h ncclMeshStream polls); 0, or
    more than nccl.h NCCL_MESH_POLLS, is NCCL_MESH_POLLS (design/transport.md; nccl-mesh-metal.m bound_of).  A load's
    period, the time a bound stands for, is the node's GPU's: on the M4 Pro (the Mini) 251 to 265 ns once the GPU's
    clock has risen, about 1.0 to 1.1 us while it rises (an idle GPU's first ~4 ms of work), in either of the library's
@@ -201,8 +204,8 @@ struct metal_result metal_present(struct metal_program *, void *lists, size_t li
     void *words, size_t taken, size_t presented);
 void metal_end(struct metal_program *, void *event, uint64_t value);
 /* design/transport.md section 5: an expiry's end of the program, its GPU work released first and awaited within
-   MESH_PLATFORM_NS (nccl-mesh.c); and the process's watch, once a second, for GPU work that makes no progress, which
-   it ends so, started by the first communicator or prepared function */
+   MESH_PLATFORM_NS (nccl-mesh.c); and the process's watch, every MESH_PLATFORM_NS / 20, renewing the communicators'
+   leases and ending GPU work that makes no progress, started by the first communicator or prepared function */
 __attribute__((noreturn)) void mesh_library_expired(const char *wait, uint64_t ns);
 void mesh_library_watch(void);
 /* the prepared functions in flight (metal-recording.m): their command buffers committed and not ended; the nanoseconds
