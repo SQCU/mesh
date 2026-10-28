@@ -273,6 +273,7 @@ def run_workload(item, nodes, paths, record, ordinal, cluster):
     try:
         if not selected:
             raise RuntimeError(f'placement unmet: no live, installed member meets {item["place"]}')
+        mesh.wait_paired(selected, None, end)  # a failed workload's ranks leave links re-pairing for a few seconds
         if len(mesh.parts([node.number for node in selected], mesh.paired(selected))) > 1:
             raise RuntimeError('placement unmet: its members are not linked by paired cables')
         history = record.get('history', {}).get(tag, [])[-64:]
