@@ -883,19 +883,26 @@ class Matrix(torch.Tensor):
                 -(-self.tiles_ // COMPUTE['STREAMED_PANEL_TILES']), -(-n // m) * shares, COMPUTE['STREAMED_PANEL_TILES'] * COMPUTE['SIMD_WIDTH'], line, outputs=(5,), pitched=(1,))
         return partials
 
-    def finish(self, partials, order=None, scale=None, factor=None, dtype=torch.float16, *, columns=None, masked=None):
-        """Partials [shares, n, k] finished into y [n, columns] of `dtype` at their logical positions (`order` and `scale`,
-        default the row side's), each row over its `factor` where given (streamed_scale_rows's)."""
-        shares, n, k = partials.shape
+    def finish(self, partials, *, positions=None, scale=None, factor=None, dtype=torch.float16, columns=None):
+        """Finish logical values through prepared views of partials and scales.
+
+        The encoded-to-logical positions are matrix metadata. Padded lanes do
+        not enter the reduction's domain; no order buffer is read at execution.
+        """
+        from .operand import TensorView
+        shares, n, _ = partials.shape
         columns = self.logical_shape[0] if columns is None else columns
-        masked = self.row_masked if masked is None else masked
+        positions = self.metadata['row_order'] if positions is None else positions
+        inverse = {value: at for at, value in enumerate(positions) if value >= 0}
+        selected = [inverse[value] for value in range(columns)]
+        values = TensorView.of(partials).select(2, selected)
+        scales = TensorView.of(self.row_scale if scale is None else scale).select(0, selected)
         y = torch.empty(n, columns, dtype=dtype, device='mps')
-        name, line = (instance('streamed_finish', {torch.float16: 'half', torch.float32: 'float', torch.bfloat16: 'bfloat'}[dtype], 1)
-                      if masked else ('streamed_finish' + _TYPES[dtype], ''))
-        y, = _encode(name, [partials, y, self.row_order if order is None else order,
-                                                   self.row_scale if scale is None else scale, factor],
-                _dims(outputs=k, stride=columns, shares=shares, split=n * k, count=n * k, inputs=int(factor is not None)),
-                -(-(n * k) // 256), 1, 256, line, outputs=(1,), indexed=(0, 2, 3, 4))
+        name, line = (instance('streamed_finish', 'bfloat') if dtype == torch.bfloat16
+                      else ('streamed_finish' + _TYPES[dtype], ''))
+        y, = _encode(name, [values, y, None, scales, factor],
+                _dims(outputs=columns, shares=shares, split=n * columns, count=n * columns, inputs=int(factor is not None)),
+                -(-(n * columns) // 256), 1, 256, line, outputs=(1,), indexed=(0, 3, 4))
         return y
 
     def apply(self, xt, decomposition=None):
@@ -935,9 +942,9 @@ class Matrix(torch.Tensor):
                 _dims(columns=self.rows, rows=n, inputs=1), n, 1, 256, line, outputs=(1,), indexed=(0, 2, 3))
         partials = self.product_t(xt, n)
         if self.folded is None:
-            return self.finish(partials, self.col_order, self.col_scale, factor, dtype,
-                               columns=self.logical_shape[1], masked=self.column_masked)
-        y = torch.mm(self.finish(partials, _identity(self.columns), self.col_scale, columns=self.columns, masked=False), self.folded)
+            return self.finish(partials, positions=self.metadata['col_order'], scale=self.col_scale, factor=factor, dtype=dtype,
+                               columns=self.logical_shape[1])
+        y = torch.mm(self.finish(partials, positions=range(self.columns), scale=self.col_scale, columns=self.columns), self.folded)
         return y if factor is None else (y.float() / factor[:, None]).to(dtype)
 
     @staticmethod

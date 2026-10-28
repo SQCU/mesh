@@ -88,8 +88,9 @@ access structure.
 
 This contract does not declare these existing paths complete:
 
-- Some fused consumers load order arrays whose static compositions could be
-  resolved earlier. Numerical index tensors must remain data.
+- Direct compressed products and input transforms still load some order arrays
+  whose static compositions could be resolved earlier. Numerical index tensors
+  must remain data.
 - Producer placement handles native-kernel subdomains, matrix API uses and
   declared CPU/Core ML calls in FX graphs. Native normalization producers now
   receive ANE input type and layout requirements before command emission. Other native
@@ -115,8 +116,8 @@ between instructions that can remain in one call.
 
 Core ML's public `MLPredictionOptions.outputBackings` contract still permits the
 provider to decline caller storage. The binding's current result-identity check
-reports that condition; it does not establish an AOT guarantee. Producer type
-placement and a stronger provider output contract remain unresolved.
+reports that condition; it does not establish an AOT guarantee. A stronger
+provider output contract remains unresolved.
 
 ## Frontend attributes become page operands
 
@@ -390,6 +391,27 @@ Shared operand views compose the gate and up outputs with the down input.
 Matching projections can use the coupled numerical kernel. Other projections
 use the same product and reduction bodies with their declared views. A numerical
 basis transform remains work; a permutation alone adds no copy.
+
+Native `ScaledReduction` carries logical partials, scales and the result's
+origin. It replaces `OrderedReduction` and its identity-order buffer. Head
+consumers, fused normalization and per-layer products no longer load that
+identity or scatter through it. FX finishes compose the encoded positions into
+partial and scale views during preparation. Padded lanes leave the finish
+domain, and the common finish kernel writes its logical output view directly.
+
+Fused consumers carry the same views as standalone consumers. Their index
+expressions have a compiler namespace separate from the enclosing product's
+bindings. This namespace introduces no extra buffer or runtime lookup. Per-layer
+activation placement consumes prepared destination and scale views; its inverse
+column table is no longer a shader operand. Head normalization and publication
+also apply their declared views. Coherent output stores use the shared mapped
+store helper before the existing publication operation.
+
+Preparation on 2026-10-28 compiled standalone and fused consumers with mapped
+partials, strided destinations and non-unit scale strides. An FX finish with
+37 logical rows in 64 encoded lanes prepared one numerical command into a
+strided destination, with no order-buffer input or conversion command. Native
+rank and Goal A builds completed. No numerical commands were submitted.
 
 The FX kernel declaration carries each binding's source view, use view, layout
 requirement, and explicit output device. Preparation composes the use with the
