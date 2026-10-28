@@ -32,7 +32,7 @@ def _shape(inputs, input_slots, output_slots, output_strides, shapes, dtypes, de
     return fake_outputs(shapes, output_strides, dtypes, devices)
 
 
-def declare(source, name, buffers, outputs, words, constant_slot, grid, threads, instance='', *, indexed, requirements):
+def declare(source, name, buffers, outputs, words, constant_slot, grid, threads, instance='', *, indexed, requirements, indices=None):
     """Carry each use's layout and requirement across FX's tensor schema.
 
     The serialized operand descriptions contain only compiler metadata. Values,
@@ -41,7 +41,12 @@ def declare(source, name, buffers, outputs, words, constant_slot, grid, threads,
     """
     from .operand import signature
     uses = {i: ('indexed' if i in indexed else requirements[i],) for i, value in enumerate(buffers) if value is not None}
-    return operation(**signature(buffers, outputs, uses), source=source, name=name, instance=instance,
+    operands = signature(buffers, outputs, uses)
+    if indices:
+        declarations = json.loads(operands['operands'])
+        declarations['indices'] = indices
+        operands['operands'] = json.dumps(declarations, separators=(',', ':'))
+    return operation(**operands, source=source, name=name, instance=instance,
                      words=list(words), constant_slot=constant_slot, grid=list(grid), threads=list(threads))
 
 
@@ -86,6 +91,6 @@ def prepare(inputs, input_slots, output_slots, output_strides, shapes, dtypes, d
             prepare_binding(index, value, True)
             write |= 1 << index
     constants = {constant_slot: struct.pack(f'{len(words)}I', *(v & 0xffffffff for v in words))} if words else {}
-    commands.append((pipeline(source, name, instance, layout.index_source(addresses)), buffers, constants, tuple(grid), tuple(threads), False,
+    commands.append((pipeline(source, name, instance, layout.index_source(addresses, declarations.get('indices'))), buffers, constants, tuple(grid), tuple(threads), False,
                      read | (write << _stream.compilation['ACCESS_WRITE_SHIFT'])))
     return results, commands + after

@@ -2007,6 +2007,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     TORCH_CHECK(shape.size()==strides.size(),"an index view needs one stride per axis");
     return std::string([MetalViewIndexExpression(shape.data(),strides.data(),shape.size(),@(index.c_str())) UTF8String]);
   });
+  module.def("index_values", [](NSUInteger binding,const std::vector<NSInteger> &values) {
+    return std::string(MetalViewIndexValuesDeclaration(binding,values.data(),values.size()).UTF8String);
+  });
   pybind11::dict compilation;
 #define MESH_METAL_VALUE(name, value) compilation[#name] = value;
 #include "metal.def"

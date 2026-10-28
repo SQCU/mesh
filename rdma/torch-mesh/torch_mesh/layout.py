@@ -20,10 +20,11 @@ def strides(shape):
     return tuple(reversed(result))
 
 
-def index_source(bindings):
+def index_source(bindings, indices=None):
     """Emit addresses from the same descriptors carried into command accesses."""
-    return _stream.view_prelude() + ''.join(_stream.operand_layout(value).declaration(index)
+    return (_stream.view_prelude() + ''.join(_stream.operand_layout(value).declaration(index)
                                            for index, value in sorted(bindings.items()))
+            + ''.join(_stream.index_values(int(index), values) for index, values in (indices or {}).items()))
 
 
 def place(graph, placements, fixed):

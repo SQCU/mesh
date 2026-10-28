@@ -72,6 +72,9 @@ template<uint B, typename P> struct mesh_operand {
     mesh_operand operator-(long offset) const { return {p, first-offset}; }
 };
 template<uint B, typename P> inline mesh_operand<B,P> mesh_view(P p, long first=0) { return {p,first}; }
+// Encoding positions must be supplied by preparation. Unlike a storage view's
+// default linear index, an omitted encoding relation has no implementation.
+template<uint B> inline long mesh_position(ulong i);
 template<uint B, typename T> inline void mesh_publish(mesh_operand<B, device T *> out, ulong i, T value) {
     ((volatile coherent(system) device T *)out.p)[mesh_index<B>(out.first + long(i))] = value;
 }
@@ -526,7 +529,7 @@ template <uint R, uint SK, uint BANDS, uint J, uint TILES, uint WIDTHS, uint OUT
 kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
                          device const uint *bands [[buffer(2)]], device const float *tables [[buffer(3)]],
                          device const half *xs [[buffer(4)]], device float *partials [[buffer(5)]],
-                         device Output *ys [[buffer(11)]], device const int *order [[buffer(12)]],
+                         device Output *ys [[buffer(11)]],
                          device const float *rowScale [[buffer(13)]], device atomic_uint *arrivals [[buffer(14)]],
                          constant streamed_dims &dims [[buffer(15)]], constant E &epilogue [[buffer(16)]],
                          device ulong *produced [[buffer(17)]], device atomic_uint *producing [[buffer(18)]],
@@ -554,7 +557,7 @@ kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const ui
         for (uint s = 0; s < SK; s++) total += sums[at][s][n][r];
         const uint output = (group.x * BANDS + at) * 32 + r;
         if (OUT == 0) { stores[mesh_index<5>(ulong(group.y) * d.split + n * d.outputs + output)] = total; continue; }
-        const int target = order[mesh_index<12>(output)];
+        const int target = int(mesh_position<12>(output));
         if (Masked && target < 0) continue;
         const float value = rowScale[mesh_index<13>(output)] * total;
         ys[mesh_index<11>(ulong(n) * d.stride + uint(target))] = Output(streamed_capped(value, d.cap));
@@ -739,12 +742,12 @@ template [[host_name("streamed_scale_rows_bfloat")]] [[kernel]] decltype(streame
 // time) written in blocks of s columns, block-major ([columns / s][rows][s]: a tensor operation's operand rows s apart
 // whatever the width). A row kernel ending in its consumers' inputs (metal-microbench docs/kernels.md#stacked-products,
 // the rows) calls it with its own staged row.
-template <uint STRIDE, bool Masked = false, typename V, typename O, typename F, typename S, typename G, typename T, typename H, typename U>
-static inline void streamed_gather(V values, float factor, O order, F first, S scale,
+template <uint STRIDE, bool Masked, uint Order, typename V, typename F, typename S, typename G, typename T, typename H, typename U>
+static inline void streamed_gather(V values, float factor, F first, S scale,
                                    G second, T secondScale, H third, U thirdScale,
                                    uint inputs, uint columns, uint rows, uint n, uint t, uint threads) {
     for (uint q = t; q < columns / 4; q += threads) {
-        const int4 o = streamed_four<int4>(order, 4*q);
+        const int4 o = int4(mesh_position<Order>(4*q), mesh_position<Order>(4*q+1), mesh_position<Order>(4*q+2), mesh_position<Order>(4*q+3));
         const int4 read = Masked ? max(o, int4(0)) : o;
         const float4 v = factor * float4(float(values[read.x]), float(values[read.y]), float(values[read.z]), float(values[read.w]));
         const ulong at = STRIDE ? (ulong(4 * q / max(STRIDE, 1u)) * rows + n) * STRIDE + 4 * q % max(STRIDE, 1u) : ulong(n) * columns + 4 * q;
@@ -762,7 +765,7 @@ static inline void streamed_gather(V values, float factor, O order, F first, S s
 // GivenFactor consumes the normalizer's per-row output; it needs no second reduction or staged row.
 template <bool Normed, uint WIDTH, uint STRIDE, bool Masked = false, uint InputColumns = 0, bool GivenFactor = false>
 kernel void streamed_row_gather(device const half *x [[buffer(0)]], device half *first [[buffer(1)]],
-                                device const int *order [[buffer(2)]], device const float *scale [[buffer(3)]],
+                                device const float *scale [[buffer(3)]],
                                 device half *second [[buffer(5)]], device half *third [[buffer(6)]],
                                 device const float *secondScale [[buffer(7)]], device const float *thirdScale [[buffer(8)]],
                                 device const float *factors [[buffer(9)]],
@@ -775,8 +778,8 @@ kernel void streamed_row_gather(device const half *x [[buffer(0)]], device half 
     const uint columns = d.columns, inputColumns = InputColumns ? InputColumns : columns;
     if (WIDTH == 0) {
         const float factor = GivenFactor ? factors[mesh_index<9>(n)] : 1.0f;
-        streamed_gather<STRIDE, Masked>(mesh_view<0>(x, ulong(n) * inputColumns), factor,
-            mesh_view<2>(order), mesh_view<1>(first), mesh_view<3>(scale), mesh_view<5>(second), mesh_view<7>(secondScale),
+        streamed_gather<STRIDE, Masked, 2>(mesh_view<0>(x, ulong(n) * inputColumns), factor,
+            mesh_view<1>(first), mesh_view<3>(scale), mesh_view<5>(second), mesh_view<7>(secondScale),
             mesh_view<6>(third), mesh_view<8>(thirdScale), d.inputs, columns, d.rows, n, t, threads);
         return;
     }
@@ -793,13 +796,11 @@ kernel void streamed_row_gather(device const half *x [[buffer(0)]], device half 
     }
     const float factor = GivenFactor ? factors[mesh_index<9>(n)] : Normed ? streamed_rms(s, inputColumns, d.eps, partial, t, threads) : 1.0f;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    streamed_gather<STRIDE, Masked>((threadgroup const float *)values, factor,
-        mesh_view<2>(order), mesh_view<1>(first), mesh_view<3>(scale), mesh_view<5>(second), mesh_view<7>(secondScale),
+    streamed_gather<STRIDE, Masked, 2>((threadgroup const float *)values, factor,
+        mesh_view<1>(first), mesh_view<3>(scale), mesh_view<5>(second), mesh_view<7>(secondScale),
         mesh_view<6>(third), mesh_view<8>(thirdScale), d.inputs, columns, d.rows, n, t, threads);
 }
 
-template [[host_name("streamed_gather")]] [[kernel]] decltype(streamed_row_gather<false, 0, 0>) streamed_row_gather<false, 0, 0>;
-template [[host_name("streamed_gather_32")]] [[kernel]] decltype(streamed_row_gather<false, 0, 32>) streamed_row_gather<false, 0, 32>;
 
 // The coded inputs of up to two products of a rotated basis (int8, stored in coded column order: row j the basis
 // vector of coded column j, scaled by rotationScale[j], as the export writes it); with eps > 0 the RMS norm of x times
@@ -1089,7 +1090,7 @@ static inline void fragment_coop_out(thread A &acc, P stores, ulong at, uint out
 template <uint M, uint SK, uint BANDS, uint J, uint TILES, uint WIDTHS, uint COOP, uint LOADS, uint RING, typename E = streamed_plain>
 kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
                           device const uint *bands [[buffer(2)]], device const half *xs [[buffer(4)]],
-                          device float *partials [[buffer(5)]], device const int *order [[buffer(12)]],
+                          device float *partials [[buffer(5)]],
                           device const float *rowScale [[buffer(13)]], device atomic_uint *arrivals [[buffer(14)]],
                           constant streamed_dims &dims [[buffer(15)]], constant E &epilogue [[buffer(16)]],
                           device ulong *produced [[buffer(17)]], device atomic_uint *producing [[buffer(18)]],
@@ -1271,7 +1272,7 @@ template <uint M, uint TILES, uint WIDTHS, uint LOADS, typename Output = half, b
 kernel void streamed_panel(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
                            device const uint *bands [[buffer(2)]], device const half *xs [[buffer(4)]],
                            device float *partials [[buffer(5)]], device Output *ys [[buffer(11)]],
-                           device const int *order [[buffer(12)]], device const float *rowScale [[buffer(13)]],
+                           device const float *rowScale [[buffer(13)]],
                            constant streamed_dims &dims [[buffer(15)]], uint2 group [[threadgroup_position_in_grid]],
                            uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
     const streamed_dims d = dims_of(dims);
@@ -1325,7 +1326,7 @@ kernel void streamed_panel(device const uint *codes [[buffer(0)]], device const 
         const uint n = row0 + uint(e[1]), r = group.x * 32 + uint(e[0]);
         if (n >= rows) continue;
         if (finish == 0) { partials[mesh_index<5>(ulong(share) * stride + ulong(n) * outputs + r)] = acc[i]; continue; }
-        const int target = order[mesh_index<12>(r)];
+        const int target = int(mesh_position<12>(r));
         if (Masked && target < 0) continue;
         const float value = rowScale[mesh_index<13>(r)] * acc[i];
         ys[mesh_index<11>(ulong(n) * stride + uint(target))] = Output(streamed_capped(value, cap));
