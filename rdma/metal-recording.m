@@ -1487,7 +1487,9 @@ void MetalScheduleCompute(struct MetalSchedule *root,id<MTLComputePipelineState>
 // many as fit half the watchdog, at least one. Once parts have run, as many as their measured GPU time a crossing leaves
 // room for beside one bound (a wait that fails ends the others on its failure words through their claim), if more.
 static NSUInteger MetalCrossings(id<MTLDevice> device) {
-    const double budget=MESH_PLATFORM_NS/2e9,period=metal_poll_seconds(device);
+    static double period;static dispatch_once_t once;
+    dispatch_once(&once,^{period=mesh_poll_seconds(device);});
+    const double budget=MESH_PLATFORM_NS/2e9;
     const double bound=period>0?NCCL_MESH_POLLS*period:MESH_PLATFORM_NS/1e9,each=atomic_load_explicit(&crossingNs,memory_order_relaxed)/1e9;
     NSUInteger most=(NSUInteger)(budget/bound);
     if(each>0&&budget>bound)most=MAX(most,(NSUInteger)((budget-bound)/each));
