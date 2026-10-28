@@ -364,6 +364,13 @@ void mesh_library_watch(void) {
   static dispatch_once_t once;
   dispatch_once_f(&once, NULL, watch_start);
 }
+/* the device's GPU load period (nccl-mesh-metal.m metal_poll_seconds), read under group_lock, as its kernels are */
+double mesh_poll_seconds(void *device) {
+  pthread_mutex_lock(&group_lock);
+  const double seconds = metal_poll_seconds(device);
+  pthread_mutex_unlock(&group_lock);
+  return seconds;
+}
 
 static void program_free(struct mesh_program *program) {
   free((void *)program->segment); free((void *)program->log_weight); free((void *)program->first); free((void *)program->move);

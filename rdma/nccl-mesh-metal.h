@@ -205,5 +205,9 @@ void metal_end(struct metal_program *, void *event, uint64_t value);
    it ends so, started by the first communicator realized or by a caller's first prepared function */
 __attribute__((noreturn)) void mesh_library_expired(const char *wait, uint64_t ns);
 void mesh_library_watch(void);
+/* the seconds one GPU wait's load takes on `device`, read once in the process (nccl-mesh-metal.m metal_poll_seconds;
+   0 where it could not be read): mesh_poll_seconds reads it under the groups' lock, as the library's kernels are */
+double metal_poll_seconds(void *device);
+double mesh_poll_seconds(void *device);
 #pragma GCC visibility pop
 #endif
