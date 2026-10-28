@@ -846,6 +846,40 @@ static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> 
   });
 }
 
+// Prepared command records run at once outside a Function (torch_mesh/kernel.py): each a dispatch in torch's open
+// compute encoder, in its stream's order, its operands bound where their views begin (a CPU view at its region buffer's
+// offset) and its constants set inline; no schedule, replay or constant storage is made.
+struct Run { id<MTLComputePipelineState> state; std::vector<std::tuple<id<MTLBuffer>,NSUInteger,NSUInteger>> bound;
+             std::vector<std::pair<uint32_t,std::string>> constants; MTLSize grid, group; bool threads; };
+static void run(const std::vector<CommandRecord> &records) {
+  std::vector<Run> made;
+  for(const auto &[handle,buffers,scalars,grid,group,threadGrid,access]:records) {
+    TORCH_CHECK(handle>=0&&handle<(int64_t)pipelines_.size(),"unprepared Metal kernel");
+    Run &r=made.emplace_back(Run{pipelines_[handle],{},{},MTLSizeMake(grid[0],grid[1],grid[2]),MTLSizeMake(group[0],group[1],group[2]),threadGrid});
+    for(size_t j=0;j<buffers.size();j++)if(!buffers[j].is_none()) {
+      const bool tensor=THPVariable_Check(buffers[j].ptr());
+      const at::Tensor t=(tensor?buffers[j]:buffers[j].attr("storage")).cast<at::Tensor>();
+      size_t at=(tensor?t.storage_offset():buffers[j].attr("layout").cast<TensorLayout>().value.offset)*t.element_size();
+      void *region=nullptr;
+      if(!t.is_mps())checked(ncclMeshMemBuffer((char *)t.storage().data()+at,&region,&at));
+      r.bound.emplace_back(t.is_mps()?at::native::mps::getMTLBufferStorage(t):(id<MTLBuffer>)region,at,j);
+    }
+    for(const auto &[index,scalar]:scalars)r.constants.emplace_back(index,std::string(scalar));
+  }
+  at::mps::MPSStream *stream=at::mps::getCurrentMPSStream();
+  const auto *list=&made;
+  dispatch_sync(stream->queue(),^{
+    id<MTLComputeCommandEncoder> encoder=stream->commandEncoder();
+    for(const Run &r:*list) {
+      [encoder setComputePipelineState:r.state];
+      for(const auto &[buffer,offset,index]:r.bound)[encoder setBuffer:buffer offset:offset atIndex:index];
+      for(const auto &[index,bytes]:r.constants)[encoder setBytes:bytes.data() length:bytes.size() atIndex:index];
+      if(r.threads)[encoder dispatchThreads:r.grid threadsPerThreadgroup:r.group];
+      else [encoder dispatchThreadgroups:r.grid threadsPerThreadgroup:r.group];
+    }
+  });
+}
+
 // Linear command geometry is compiled from the shared manifest and discovered GPU cores.
 static std::string linear_source_;
 static int64_t linear_cores_ = 0;
@@ -1960,6 +1994,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("device_facts", &device_facts);
   module.def("pipeline_facts", &pipeline_facts);
   module.attr("polls") = (int64_t)NCCL_MESH_POLLS;
+  module.def("run", &run);
   module.def("encode", &encode, pybind11::arg("handle"), pybind11::arg("buffers"), pybind11::arg("constants"), pybind11::arg("at"),
              pybind11::arg("gx"), pybind11::arg("gy"), pybind11::arg("threads"));
   module.def("issue", [](const std::vector<Call> &calls, int64_t comm, bool split, std::vector<at::Tensor> outputs) {
