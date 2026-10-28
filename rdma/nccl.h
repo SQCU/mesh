@@ -222,9 +222,11 @@
    inside its registered-memory extent. Prepared WRITE bindings jointly compile packet, registration, indexed-view
    and affine-row cuts during configuration; execution transmits only their declared payload, without a metadata
    exchange or a staging repair. Every crossing source and destination remains in this node's region.
-   Generic collective bindings must preserve those same physical constraints. Their current relative packet grid
-   does not yet compile registration cuts for every ragged placement: place_group reports an invalid span before
-   presentation if it crosses an extent. That integration gap is not a page-alignment requirement on the data model.
+   Generic collective bindings must preserve those same physical constraints. A lease that fits one registration
+   extent lies within one (mesh-dataflow.c mesh_arena_alloc), so no span of one, a slot of the library's or a caller's
+   buffer, crosses an extent. Over a lease larger than an extent, their relative packet grid does not yet compile
+   registration cuts for every ragged placement: place_group reports an invalid span before presentation if one
+   crosses. That integration gap is not a page-alignment requirement on the data model.
    A collective whose
    send buffer lies apart from its result reads it in place where its program allows (a SEND of a range no step of the
    rank wrote reads it, the first combine of such a range writes send op piece, the ranges of the result no step writes

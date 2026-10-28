@@ -335,9 +335,14 @@ static int mesh_claim(_Atomic uint64_t *own,_Atomic uint64_t *hot,uint32_t first
   for(uint32_t v=first/64;v<w;v++)atomic_fetch_and_explicit(&own[v],~mesh_word_mask(first,count,v),memory_order_acq_rel);
   return 0;
 }
-static uint32_t mesh_scan(uint32_t count,uint32_t align,uint32_t begin,uint32_t end,
+/* the first free run of `count` from `begin`, `align`-aligned; one that fits an `extent` (0: none) lies within one */
+static uint32_t mesh_scan(uint32_t count,uint32_t align,uint32_t extent,uint32_t begin,uint32_t end,
                           _Atomic uint64_t *own,_Atomic uint64_t *hot){
   for(uint32_t first=(begin+align-1)/align*align;first<=end && count<=end-first;){
+    if(extent && count<=extent && first/extent!=(first+count-1)/extent){
+      first=((first/extent+1)*extent+align-1)/align*align;
+      continue;
+    }
     uint32_t next=first;
     for(uint32_t w=first/64;w<=(first+count-1)/64;w++){
       uint64_t occupied=(atomic_load_explicit(&own[w],memory_order_acquire)|atomic_load_explicit(&hot[w],memory_order_acquire))&mesh_word_mask(first,count,w);
@@ -353,12 +358,12 @@ static uint32_t mesh_scan(uint32_t count,uint32_t align,uint32_t begin,uint32_t 
 /* The cursor resumes where the last allocation ended, so preparing N operands over P pages costs
    O(P) in total rather than O(N*P); a full scan and then a reclaim still back it, so the result is
    the same page the unresumed scan would have returned whenever nothing has been released. */
-static uint32_t mesh_allocate(struct mesh_ctx *c,uint32_t count,uint32_t align,uint32_t begin,uint32_t end,
+static uint32_t mesh_allocate(struct mesh_ctx *c,uint32_t count,uint32_t align,uint32_t extent,uint32_t begin,uint32_t end,
                               _Atomic uint64_t *own,_Atomic uint64_t *hot,uint32_t *cursor){
   uint32_t resume=*cursor<begin||*cursor>end?begin:*cursor;
-  uint32_t first=mesh_scan(count,align,resume,end,own,hot);
-  if(first==MESH_ABSENT && resume!=begin)first=mesh_scan(count,align,begin,end,own,hot);
-  if(first==MESH_ABSENT){ mesh_reclaim(c->M); first=mesh_scan(count,align,begin,end,own,hot); }
+  uint32_t first=mesh_scan(count,align,extent,resume,end,own,hot);
+  if(first==MESH_ABSENT && resume!=begin)first=mesh_scan(count,align,extent,begin,end,own,hot);
+  if(first==MESH_ABSENT){ mesh_reclaim(c->M); first=mesh_scan(count,align,extent,begin,end,own,hot); }
   if(first==MESH_ABSENT){ errno=ENOMEM; return MESH_ABSENT; }
   *cursor=first+count;
   return first;
@@ -366,7 +371,7 @@ static uint32_t mesh_allocate(struct mesh_ctx *c,uint32_t count,uint32_t align,u
 
 uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
   if(!count){ errno=EINVAL; return MESH_ABSENT; }
-  uint32_t first=mesh_allocate(c,count,1,0,mesh_rows(c->M),mesh_plane(c->M,MESH_ROW_OWN),mesh_plane(c->M,MESH_ROW_HOT),&c->row_cursor);
+  uint32_t first=mesh_allocate(c,count,1,0,0,mesh_rows(c->M),mesh_plane(c->M,MESH_ROW_OWN),mesh_plane(c->M,MESH_ROW_HOT),&c->row_cursor);
   if(first==MESH_ABSENT) return first;
   for(uint32_t r=first;r<first+count;r++){
     atomic_store_explicit(&mesh_page(c->M)[r].mapping,MESH_ABSENT,memory_order_release);
@@ -382,11 +387,13 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
 /* The arena's pages: every one addressable by every client and by the GPU, and registered on every port's device
    since that device came up (mesh-verbs.h device_up); a lease the region cannot meet is refused (ENOMEM).  The bits
    name no owner: a client's lease takes its pages with rows its slot owns (mesh-call.h mesh_section_create), which
-   carry them back at its retirement (mesh_buffer_reclaim) or its return (mesh_lease_return). */
+   carry them back at its retirement (mesh_buffer_reclaim) or its return (mesh_lease_return).  A run that fits one
+   registration extent (MESH_DMA_EXTENT from the arena's first page) lies within one, so no DMA span of it crosses one
+   (mesh.h mesh_dma_span_valid) and no compiled piece of it needs a cut there. */
 uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
   if(!pages || !align){ errno=EINVAL; return MESH_ABSENT; }
   _Atomic uint64_t *bits=mesh_arena_bits(c->M);
-  return mesh_allocate(c,pages,align,0,mesh_arena_pages(c->M),bits,bits,&c->arena_cursor);
+  return mesh_allocate(c,pages,align,(uint32_t)(MESH_DMA_EXTENT/c->M->pgsz),0,mesh_arena_pages(c->M),bits,bits,&c->arena_cursor);
 }
 
 /* design/transport.md */
