@@ -243,20 +243,27 @@ template <typename V, uint B, typename P> inline V streamed_four(mesh_operand<B,
     if constexpr (mesh_vector4<B>()) return streamed_four<V>(p.p, mesh_index<B>(p.first + long(i)));
     else return V(p[i], p[i+1], p[i+2], p[i+3]);
 }
+template <typename V, typename P> inline void streamed_store_four(P p, ulong i, V value) {
+    *(device V *)(p + i) = value;
+}
+template <typename V, uint B, typename P> inline void streamed_store_four(mesh_operand<B, P> p, ulong i, V value) {
+    if constexpr (mesh_vector4<B>()) streamed_store_four(p.p, mesh_index<B>(p.first + long(i)), value);
+    else { p[i] = value.x; p[i+1] = value.y; p[i+2] = value.z; p[i+3] = value.w; }
+}
 
 // A product's output row n at logical positions [first, first + count) into vals: from its partials (shares > 0:
 // coded row r of [first, first + count) lands at order[r] - first, its shares summed and scaled) or, where a crossing
 // has summed it into plain values, from `plain` (shares == 0, row stride `rows`). The row order permutes within the
 // range. V elements a thread (1, or 4: float4 partials, int4 orders and float4 scales; first, count, rows and stride
 // multiples of 4). Ends with a threadgroup barrier.
-template <uint V = 1, typename P, typename O, typename S>
-static inline void streamed_rows(P partials, device const half *plain, O order,
+template <uint V = 1, typename P, typename X, typename O, typename S>
+static inline void streamed_rows(P partials, X plain, O order,
                                  S scale, uint n, uint first, uint count, uint rows, uint shares,
                                  uint stride, threadgroup float *vals, uint t, uint threads) {
     if constexpr (V == 4) {
         for (uint q = t; q < count / 4; q += threads) {
             const ulong at = (ulong(n) * rows + first) / 4 + q;
-            if (shares == 0) { ((threadgroup float4 *)vals)[q] = float4(((device const half4 *)plain)[at]); continue; }
+            if (shares == 0) { ((threadgroup float4 *)vals)[q] = float4(streamed_four<half4>(plain, 4 * at)); continue; }
             const int4 o = streamed_four<int4>(order, first + 4 * q) - int(first);
             float4 v = 0.0f;
             for (uint j = 0; j < shares; ++j) v += streamed_four<float4>(partials, 4 * at + ulong(j) * stride);
@@ -730,19 +737,19 @@ template [[host_name("streamed_scale_rows_bfloat")]] [[kernel]] decltype(streame
 // time) written in blocks of s columns, block-major ([columns / s][rows][s]: a tensor operation's operand rows s apart
 // whatever the width). A row kernel ending in its consumers' inputs (metal-microbench docs/kernels.md#stacked-products,
 // the rows) calls it with its own staged row.
-template <uint STRIDE, bool Masked = false, typename V>
-static inline void streamed_gather(V values, float factor, device const int *order, device half *first, device const float *scale,
-                                   device half *second, device const float *secondScale, device half *third,
-                                   device const float *thirdScale, uint inputs, uint columns, uint rows, uint n, uint t, uint threads) {
+template <uint STRIDE, bool Masked = false, typename V, typename O, typename F, typename S, typename G, typename T, typename H, typename U>
+static inline void streamed_gather(V values, float factor, O order, F first, S scale,
+                                   G second, T secondScale, H third, U thirdScale,
+                                   uint inputs, uint columns, uint rows, uint n, uint t, uint threads) {
     for (uint q = t; q < columns / 4; q += threads) {
-        const int4 o = mesh_load4<2,int4>(order, 4*q);
+        const int4 o = streamed_four<int4>(order, 4*q);
         const int4 read = Masked ? max(o, int4(0)) : o;
         const float4 v = factor * float4(float(values[read.x]), float(values[read.y]), float(values[read.z]), float(values[read.w]));
         const ulong at = STRIDE ? (ulong(4 * q / max(STRIDE, 1u)) * rows + n) * STRIDE + 4 * q % max(STRIDE, 1u) : ulong(n) * columns + 4 * q;
         const bool4 active = Masked ? (o >= 0) : bool4(true);
-        mesh_store4<1>(first, at, select(half4(0), half4(mesh_load4<3,float4>(scale, 4*q) * v), active));
-        if (inputs > 1) mesh_store4<5>(second, at, select(half4(0), half4(mesh_load4<7,float4>(secondScale, 4*q) * v), active));
-        if (inputs > 2) mesh_store4<6>(third, at, select(half4(0), half4(mesh_load4<8,float4>(thirdScale, 4*q) * v), active));
+        streamed_store_four(first, at, select(half4(0), half4(streamed_four<float4>(scale, 4*q) * v), active));
+        if (inputs > 1) streamed_store_four(second, at, select(half4(0), half4(streamed_four<float4>(secondScale, 4*q) * v), active));
+        if (inputs > 2) streamed_store_four(third, at, select(half4(0), half4(streamed_four<float4>(thirdScale, 4*q) * v), active));
     }
 }
 
@@ -766,7 +773,9 @@ kernel void streamed_row_gather(device const half *x [[buffer(0)]], device half 
     const uint columns = d.columns, inputColumns = InputColumns ? InputColumns : columns;
     if (WIDTH == 0) {
         const float factor = GivenFactor ? factors[mesh_index<9>(n)] : 1.0f;
-        streamed_gather<STRIDE, Masked>(mesh_view<0>(x, ulong(n) * inputColumns), factor, order, first, scale, second, secondScale, third, thirdScale, d.inputs, columns, d.rows, n, t, threads);
+        streamed_gather<STRIDE, Masked>(mesh_view<0>(x, ulong(n) * inputColumns), factor,
+            mesh_view<2>(order), mesh_view<1>(first), mesh_view<3>(scale), mesh_view<5>(second), mesh_view<7>(secondScale),
+            mesh_view<6>(third), mesh_view<8>(thirdScale), d.inputs, columns, d.rows, n, t, threads);
         return;
     }
     float s = 0.0f;
@@ -782,7 +791,9 @@ kernel void streamed_row_gather(device const half *x [[buffer(0)]], device half 
     }
     const float factor = GivenFactor ? factors[mesh_index<9>(n)] : Normed ? streamed_rms(s, inputColumns, d.eps, partial, t, threads) : 1.0f;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    streamed_gather<STRIDE, Masked>((threadgroup const float *)values, factor, order, first, scale, second, secondScale, third, thirdScale, d.inputs, columns, d.rows, n, t, threads);
+    streamed_gather<STRIDE, Masked>((threadgroup const float *)values, factor,
+        mesh_view<2>(order), mesh_view<1>(first), mesh_view<3>(scale), mesh_view<5>(second), mesh_view<7>(secondScale),
+        mesh_view<6>(third), mesh_view<8>(thirdScale), d.inputs, columns, d.rows, n, t, threads);
 }
 
 template [[host_name("streamed_gather")]] [[kernel]] decltype(streamed_row_gather<false, 0, 0>) streamed_row_gather<false, 0, 0>;

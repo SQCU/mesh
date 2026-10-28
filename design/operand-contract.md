@@ -311,6 +311,28 @@ threadgroup staging for normalization. Hadamard still orders the butterfly
 values and sign masks before their shared-memory consumers; that dependency
 does not disappear with the RMS reduction.
 
+Native FFN preparation selects the GPU share, host share and input destinations
+before the preceding producer emits commands. Its fused residual finish can
+write the host's normalized values, the row factors and the GPU's gathered
+inputs together. The GPU gather uses the selected share's matrix. Host presence
+does not disable it. Both consumers retain the producer's views; neither
+reconstructs a destination from a readiness flag. An intervening convolution or
+collective puts normalization after that operation instead.
+
+Layer finishes return the gathered operand they actually produce. The next
+attention product consumes that view through the shared input resolver. A finish
+that emits no gather returns no such operand. Stored projections also consume
+already-normalized convolution results through their ordinary product interface.
+FFN activations have their own prepared pages: fitting inside the residual's
+allocation does not make that still-needed residual available for reuse.
+
+The shared gather helper takes typed operands from its caller. It no longer
+assumes that every caller uses the standalone gather's buffer numbers. The
+fused finish carries views for its residual, plain input, normalization outputs
+and gathered destinations. Its width is a preparation operand; scalar tails
+use the same lowering. Its definition and row controls live in the native
+template prelude, so masked specializations can be compiled from that prelude.
+
 Preparation on 2026-10-27 built rank and Goal A and compiled stored product,
 expert, fused stack, normalization, gather, rotation and output pipelines with
 strided and gathered views. Literal product pipelines also compiled. These
@@ -320,6 +342,11 @@ On 2026-10-28, native builds and shader compilation also covered factor
 production and consumption with strided page views, including masked tails.
 The native packed-rotation caller now uses the existing specialization instead
 of emitting a duplicate explicit template instantiation. No numerical work ran.
+
+The same day's fused handoff changes built rank and Goal A and compiled from the
+native instance prelude at logical widths 64 and 37. Preparation covered masked
+gathers, strided normalization outputs and literal plain/partial reductions.
+This was source and pipeline preparation only; no numerical commands ran.
 
 ## Compressed projections
 
