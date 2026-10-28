@@ -18,8 +18,8 @@ def operation(inputs: list[torch.Tensor], input_slots: list[int], output_slots: 
 
 @operation.register_fake
 def _shape(inputs, input_slots, output_slots, output_strides, shapes, dtypes, devices, operands, source, name, instance, words, constant_slot, grid, threads):
-    return [torch.empty_strided(shape, steps, dtype=getattr(torch, dtype), device=device)
-            for shape, steps, dtype, device in zip(shapes, output_strides, dtypes, devices, strict=True)]
+    from .operand import fake_outputs
+    return fake_outputs(shapes, output_strides, dtypes, devices)
 
 
 def declare(source, name, buffers, outputs, words, constant_slot, grid, threads, instance='', *, indexed, requirements):
@@ -29,22 +29,10 @@ def declare(source, name, buffers, outputs, words, constant_slot, grid, threads,
     including computed indices, stay in the tensor operands. Preparation composes
     these descriptions with producer placement and emits the common records.
     """
-    from .operand import TensorView
-    views = {i: TensorView.of(value) for i, value in enumerate(buffers) if value is not None}
-    declarations = {i: view.declaration('indexed' if i in indexed else tuple(requirements[i])) for i, view in views.items()}
-    results, slots = [], []
-    for index in outputs:
-        value = views[index].storage
-        found = next((j for j, held in enumerate(results) if held is value), None)
-        if found is None:
-            results.append(value); slots.append([]); found = len(results) - 1
-        slots[found].append(index)
-    input_slots = [i for i in views if i not in outputs]
-    return operation([views[i].storage for i in input_slots], input_slots, slots,
-                     [list(value.stride()) for value in results], [list(value.shape) for value in results],
-                     [str(value.dtype).removeprefix('torch.') for value in results], [str(value.device) for value in results],
-                     json.dumps(declarations, separators=(',', ':')),
-                     source, name, instance, list(words), constant_slot, list(grid), list(threads))
+    from .operand import signature
+    uses = {i: ('indexed' if i in indexed else requirements[i],) for i, value in enumerate(buffers) if value is not None}
+    return operation(**signature(buffers, outputs, uses), source=source, name=name, instance=instance,
+                     words=list(words), constant_slot=constant_slot, grid=list(grid), threads=list(threads))
 
 
 @lru_cache(None)
@@ -74,11 +62,11 @@ def prepare(inputs, input_slots, output_slots, output_strides, shapes, dtypes, d
     def prepare_binding(index, value, writing):
         declaration = declarations[str(index)]
         view = bind(value, declaration)
-        requirement = declaration['requirement']
-        placed, copies = layout.resolve(view, requirement, writing=writing)
+        requirements = declaration['requirements']
+        placed, copies = layout.resolve(view, requirements, writing=writing)
         (after if writing else commands).extend(copies)
         buffers[index] = placed
-        if requirement == 'indexed':
+        if 'indexed' in requirements:
             addresses[index] = placed
     for index, value in zip(input_slots, inputs, strict=True):
         prepare_binding(index, value, False)

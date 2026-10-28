@@ -321,7 +321,7 @@ class BoundGraph:
         graph, arguments = lift_attributes(graph, arguments)
         from torch.fx.node import map_arg
         from torch.utils._pytree import tree_map, tree_flatten
-        from . import backend
+        from . import backend, host
         from .native import empty_strided
         from .placement import Placements, alias, same_view
         # Waiting on a functional collective describes its result edge. The
@@ -336,7 +336,7 @@ class BoundGraph:
             target, _ = operation(node)
             if getattr(getattr(target, '_schema', None), 'name', '') == '_c10d_functional::wait_tensor':
                 node.replace_all_uses_with(node.args[0]);graph.graph.erase_node(node)
-        cuts = [at for i, node in enumerate(graph.graph.nodes) if _bound(node) for at in (i, i + 1)]
+        cuts = [at for i, node in enumerate(graph.graph.nodes) if _bound(node) or host.bound(node) for at in (i, i + 1)]
         values, arguments = {}, iter(arguments)
         self.groups, self.steps = {}, []
         for node in graph.graph.nodes:
@@ -406,7 +406,15 @@ class BoundGraph:
                             return alias(described, value, metadata)
                     return empty_strided(tuple(metadata.shape), tuple(metadata.stride()), metadata.dtype, metadata.device.type)
                 return tree_map(bind, _value(n))
+            host_call = next((n for n in module.graph.nodes if host.bound(n)), None)
             crossing = next((n for n in module.graph.nodes if _bound(n)), None)
+            if host_call is not None:
+                targets = map_arg(outputs, storage)
+                actual = map_arg(host_call.args, live.__getitem__)
+                keywords = map_arg(host_call.kwargs, live.__getitem__)
+                self.steps.append(host.prepare(*actual, **keywords, outputs=tree_flatten(targets)[0]))
+                values.update(zip(exported, targets))
+                continue
             if crossing is None:
                 # Keep the graph and its one FakeTensor shape environment.
                 # Retracing a split graph creates a second set of symbols
@@ -501,8 +509,11 @@ class Function:
         """Compile an existing complete graph without retracing its operators."""
         from functools import partial
         declarations = lower(graph) if declarations is None else declarations
-        if any(_bound(node) for node in graph.graph.nodes):
-            prepared = BoundGraph(graph, self.arguments, group, self.configuration, destinations)
+        from . import host
+        if any(_bound(node) or host.bound(node) for node in graph.graph.nodes):
+            from .compilation import bind
+            with bind(self.configuration):
+                prepared = BoundGraph(graph, self.arguments, group, self.configuration, destinations)
             self.graph, self.groups, self.execution = graph, prepared.groups, prepared.execution
         else:
             from . import compiler

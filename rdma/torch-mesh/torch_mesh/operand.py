@@ -134,8 +134,8 @@ class TensorView:
         base = self.storage.as_strided((int(bool(self.numel())),), (1,), first)
         return base, rows, spans
 
-    def declaration(self, requirement):
-        return dict(source=descriptor(self.storage).state, view=self.layout.state, requirement=requirement)
+    def declaration(self, *requirements):
+        return dict(source=descriptor(self.storage).state, view=self.layout.state, requirements=requirements)
 
 
 def ordered_runs(segments):
@@ -180,6 +180,31 @@ def requirements(value, declarations):
         (item, ()) if isinstance(item, str) else ('fixed', tuple(item)) for item in declarations])
 
 
+def signature(buffers, outputs, requirements):
+    """One operand schema for GPU and host declarations; no payload is read."""
+    import json
+    views = {i: TensorView.of(value) for i, value in enumerate(buffers) if value is not None}
+    declarations = {i: view.declaration(*requirements[i]) for i, view in views.items()}
+    results, slots = [], []
+    for index in outputs:
+        value = views[index].storage
+        found = next((j for j, held in enumerate(results) if held is value), None)
+        if found is None:
+            results.append(value); slots.append([]); found = len(results) - 1
+        slots[found].append(index)
+    inputs = [i for i in views if i not in outputs]
+    return dict(inputs=[views[i].storage for i in inputs], input_slots=inputs, output_slots=slots,
+                output_strides=[list(value.stride()) for value in results], shapes=[list(value.shape) for value in results],
+                dtypes=[str(value.dtype).removeprefix('torch.') for value in results], devices=[str(value.device) for value in results],
+                operands=json.dumps(declarations, separators=(',', ':')))
+
+
+def fake_outputs(shapes, strides, dtypes, devices):
+    import torch
+    return [torch.empty_strided(shape, steps, dtype=getattr(torch, dtype), device=device)
+            for shape, steps, dtype, device in zip(shapes, strides, dtypes, devices, strict=True)]
+
+
 def graph_uses(node):
     """Declared input/output selections and API needs, before page placement."""
     import json
@@ -190,14 +215,15 @@ def graph_uses(node):
         return
     args = {a.name: node.args[i] if i < len(node.args) else node.kwargs.get(a.name, a.default_value)
             for i, a in enumerate(schema.arguments)}
-    if schema.name == 'torch_mesh::native_kernel':
+    if schema.name in ('torch_mesh::native_kernel', 'torch_mesh::host_kernel'):
         declarations = json.loads(args['operands'])
         bindings = [(source.meta['val'], slot) for source, slot in zip(args['inputs'], args['input_slots'], strict=True)]
         bindings.extend((value, slot) for value, slots in zip(node.meta['val'], args['output_slots'], strict=True) for slot in slots)
         for value, slot in bindings:
             declaration = declarations[str(slot)]
             view = restore(declaration['view']).rebase(restore(declaration['source']), descriptor(value))
-            yield value, view, declaration['requirement']
+            for requirement in declaration['requirements']:
+                yield value, view, requirement
         return
     declaration = api_layouts('graph_operands').get(schema.name)
     if declaration is None:

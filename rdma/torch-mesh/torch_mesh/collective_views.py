@@ -62,7 +62,7 @@ def _binding(value, domain, unit, writing, layouts):
             if first < start:
                 spans.append((value.storage, rows.slice(0, first, start - first)))
             placed, copies = resolve(rows.slice(0, start, end - start),
-                                     layouts['output' if writing else 'input'], writing=writing)
+                                     (layouts['output' if writing else 'input'],), writing=writing)
             placed = TensorView.of(placed)
             spans.append((placed.storage, placed))
             commands.extend(copies)

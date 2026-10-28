@@ -132,13 +132,13 @@ def copies(source, destination):
     return commands
 
 
-def resolve(value, declared, *, writing=False, device=None, binding='indexed'):
+def resolve(value, declarations, *, writing=False, device=None):
     """Realize an explicit API requirement before recording the function.
 
     The result is either the supplied storage view or a preallocated destination
     and ordinary copy edges. Direction comes from the declared input/output role.
     """
-    layout = requirements(value, (declared, binding))
+    layout = requirements(value, declarations)
     device = value.device.type if device is None else device
     if descriptor(value) == layout and value.device.type == device:
         return TensorView(TensorView.of(value).storage, layout), []
@@ -162,7 +162,7 @@ def bindings(values, declarations, *, writing=False, binding='indexed', devices=
         if value is None:
             placed[name] = None
             continue
-        placed[name], edges = resolve(value, declarations[name], writing=writing, binding=binding,
+        placed[name], edges = resolve(value, (declarations[name], binding), writing=writing,
                                      device=None if devices is None else devices[name])
         commands.extend(edges)
     return placed, commands

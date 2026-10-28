@@ -1,8 +1,8 @@
 """Compute-share declarations for the common whole-function compiler.
 
 Declare shapes and choose shares before execution. ``Operation.prepare`` binds
-weights, outputs and host views. GPU spans use ``declarations.Function``; host
-shares use the native recorder's host producer/consumer records. Only result
+weights, outputs and host views through one ``declarations.Function`` graph.
+Host shares lower to the native recorder's host producer/consumer records. Only result
 consumers depend on host completion. No operation times itself, chooses shares,
 loads a model, or joins a future while it runs.
 """
@@ -204,14 +204,20 @@ class Cpu(Engine):
             return empty(t.shape, dtype=torch.float32, device='cpu').copy_(t.detach())
         return cpu(op.gate[start:end]), cpu(op.up[start:end]), cpu(op.down[:, start:end])
 
-    def bind(self, op, shard, x, out):
+    def declaration(self, op, shard, rows):
         from .compilation import api_layouts
         layouts = api_layouts('cpu_matrix')
         weights = (shard,) if op.kind == 'linear' else shard
+        weights = {f'weight{i}': w for i, w in enumerate(weights)}
+        return dict(definition=dict(provider='cpu', operation=op.kind, weights=list(weights)), weights=weights,
+                    input_layouts=dict(input=layouts['input'], **{name: layouts['weight'] for name in weights}),
+                    output_layouts={'output': layouts['output']}, binding_layout='indexed')
+
+    def bind(self, op, shard, x, out, *, input_layouts, output_layouts, binding_layout):
+        weights = (shard,) if op.kind == 'linear' else shard
         inputs = dict(input=x, **{f'weight{i}': w for i, w in enumerate(weights)})
         source, target, before, after = _host_bindings(inputs, {'output': out},
-            {name: layouts['input' if name == 'input' else 'weight'] for name in inputs},
-            {'output': layouts['output']}, 'indexed')
+            input_layouts, output_layouts, binding_layout)
         x, out = source['input'], target['output']
         weights = tuple(source[f'weight{i}'] for i in range(len(weights)))
         native = _coreml()
@@ -319,22 +325,12 @@ class Ane(Engine):
         numpy = lambda t: t.detach().to('cpu', getattr(torch, self.model['weight_dtype'])).numpy()
         return _Compiled('ffn', (numpy(op.gate[start:end]), numpy(op.up[start:end]), numpy(op.down[:, start:end])))
 
-    def bind(self, op, shard, x, out):
-        native = _coreml()
-        if native is None:
-            raise RuntimeError('Neural Engine requires the native shared-memory binding')
-        rows = x.shape[0]
-        compiled, shard.block, _ = neural_engine_share(shard.kind, shard.arrays, rows, self.tile, self.block, self.model)
-        handle = native.mesh_coreml_load(str(compiled).encode(), self.model['units'])
-        if handle < 0:
-            raise RuntimeError(native.mesh_coreml_error().decode())
+    def declaration(self, op, shard, rows):
+        compiled, _, _ = neural_engine_share(shard.kind, shard.arrays, rows, self.tile, self.block, self.model)
         source, target = self.model['input'], self.model['output']
-        try:
-            return Prediction(native, handle, {source['name']: x}, {target['name']: out},
-                              input_layouts={source['name']: source['layout']}, output_layouts={target['name']: target['layout']},
-                              binding_layout=self.model['binding_layout'])
-        finally:
-            native.mesh_coreml_release(handle)
+        return dict(definition=dict(provider='coreml', compiled=str(compiled), units=self.model['units']), weights={},
+                    input_layouts={source['name']: source['layout']}, output_layouts={target['name']: target['layout']},
+                    binding_layout=self.model['binding_layout'])
 
 
 class ModelView(ctypes.Structure):
@@ -558,13 +554,6 @@ class Engines:
         self.parameters = options.get('compilation', {})
 
 
-def _gpu(function, configuration=None):
-    from .declarations import Function
-    made = Function(function, configuration=configuration)
-    made.declare(None)
-    return made
-
-
 class Operation:
     """An operation declaration. Shares and shapes are configuration operands.
 
@@ -607,12 +596,12 @@ class Operation:
     def prepare(self, x, *, parts, output=None):
         return Prepared(self, x, parts, output)
 
-    def finish(self, y):
+    def finish(self, y, first=0):
         return y
 
 
 class Prepared:
-    """Fixed engine operands and data events for the declared invocations."""
+    """One declared graph for all engine shares, casts and their consumers."""
     def __init__(self, op, x, parts, output=None):
         self.op, self.x = op, x
         rows, dtype = x.shape[0], x.dtype
@@ -622,65 +611,57 @@ class Prepared:
         self.output = empty((rows, op.width), dtype=dtype) if output is None else output
         if self.output.shape != (rows, op.width) or self.output.dtype != dtype:
             raise ValueError('output must match the declared shape and dtype')
+        output_device = self.output.device
         configuration = {k: p['value'] for k, p in op.engines.parameters.items()}
-        sources, casts = {dtype: x}, []
-        for engine, count in zip(op.engines.engines, parts):
-            needed = engine.input_dtype(dtype)
-            if count and needed not in sources:
-                sources[needed] = empty(tuple(x.shape), dtype=needed)
-                casts.append((sources[needed], x))
-        def convert_inputs():
-            for destination, source in casts:
-                destination.copy_(source)
-        self.prologue = _gpu(convert_inputs, configuration) if casts else None
-        self.gpu, self.host = [], []
-        pieces, conversions, start = [], [], 0
+        shares, start = [], 0
         sum_types = [engine.sum_dtype() for engine, count in zip(op.engines.engines, parts) if count]
         from functools import reduce
-        accumulator = reduce(torch.promote_types, sum_types)
+        accumulator = reduce(torch.promote_types, sum_types, dtype)
         for engine, count in zip(op.engines.engines, parts):
             end = start + count
             if count:
                 if not engine.takes(op, dtype) or (engine.limits['constants'] and not op.constant):
                     raise ValueError(f'{engine.name} cannot execute the declared operation')
                 shard = engine.prepare(op, start, end)
-                shape = (rows, count if op.combine == 'concat' else op.width)
-                destination = self.output[:, start:end] if op.combine == 'concat' else self.output
-                direct = engine.out_dtype(dtype) == dtype and (op.combine == 'concat' or not pieces)
-                out = destination if direct else empty(shape, dtype=engine.out_dtype(dtype))
-                pieces.append(out)
-                if op.combine == 'concat' and not direct:
-                    conversions.append((destination, out))
-                if engine.host_side:
-                    bound = engine.bind(op, shard, sources[engine.input_dtype(dtype)], out)
-                    self.host.append(bound)
-                else:
-                    self.gpu.append(_gpu(lambda e=engine, w=shard, y=out, source=sources[engine.input_dtype(dtype)]: e.run(op, w, source, y), configuration))
+                declaration = engine.declaration(op, shard, rows) if engine.host_side else None
+                shares.append((engine, shard, start, end, declaration))
             start = end
-        def combine():
+
+        from .host import declare
+        def function(value):
+            sources, pieces = {dtype: value}, []
+            for engine, shard, first, end, declaration in shares:
+                needed = engine.input_dtype(dtype)
+                if needed not in sources:
+                    sources[needed] = value.to(dtype=needed, device=output_device)
+                source = sources[needed]
+                shape = (rows, end - first if op.combine == 'concat' else op.width)
+                out = torch.empty(shape, dtype=engine.out_dtype(dtype), device=output_device)
+                if declaration is None:
+                    engine.run(op, shard, source, out)
+                else:
+                    source_name, = [name for name in declaration['input_layouts'] if name not in declaration['weights']]
+                    target_name, = declaration['output_layouts']
+                    out = declare({source_name: source, **declaration['weights']}, {target_name: out}, declaration['definition'],
+                                  input_layouts=declaration['input_layouts'], output_layouts=declaration['output_layouts'],
+                                  binding_layout=declaration['binding_layout'])[target_name]
+                pieces.append(out)
             if op.combine == 'concat':
-                for destination, source in conversions:
-                    destination.copy_(source)
-                y = self.output
-            else:
-                y = pieces[0].to(accumulator)
-                for p in pieces[1:]:
-                    y = y + p.to(accumulator)
-                y = y.to(dtype)
-            return self.output.copy_(op.finish(y))
-        needs_combine = (op.combine == 'sum' and (len(pieces) > 1 or pieces[0] is not self.output)
-                         or bool(conversions) or getattr(op, 'bias', None) is not None)
-        self.combine = _gpu(combine, configuration) if needs_combine else None
+                return tuple(op.finish(piece.to(dtype), first) for piece, (_, _, first, _, _) in zip(pieces, shares))
+            y = pieces[0].to(accumulator) if pieces else torch.zeros((rows, op.width), dtype=accumulator, device=output_device)
+            for piece in pieces[1:]:
+                y = y + piece.to(accumulator)
+            return op.finish(y.to(dtype))
+
+        from .declarations import Function
+        from .operand import TensorView
+        destinations = ([TensorView.of(self.output).slice(1, first, end - first) for _, _, first, end, _ in shares]
+                        if op.combine == 'concat' else [self.output])
+        self.function = Function(function, x, configuration=configuration)
+        self.function.declare(None, destinations=destinations)
 
     def append(self, schedule):
-        if self.prologue is not None:
-            self.prologue.append(schedule)
-        for function in self.host:
-            function.append(schedule)
-        for function in self.gpu:
-            function.append(schedule)
-        if self.combine is not None:
-            self.combine.append(schedule)
+        self.function.append(schedule)
 
 
 class Linear(Operation):
@@ -694,8 +675,8 @@ class Linear(Operation):
     def torch(self, x):
         return torch.nn.functional.linear(x, self.weight, self.bias)
 
-    def finish(self, y):
-        return y if self.bias is None else y + self.bias
+    def finish(self, y, first=0):
+        return y if self.bias is None else y + self.bias.narrow(0, first, y.shape[-1])
 
 
 class FFN(Operation):

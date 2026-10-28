@@ -90,10 +90,10 @@ This contract does not declare these existing paths complete:
 
 - Some fused consumers load order arrays whose static compositions could be
   resolved earlier. Numerical index tensors must remain data.
-- Producer placement handles native-kernel subdomains and matrix API uses.
-  Host-engine shares still bind after their caller assigns storage; their
-  requirements need to enter the producer graph before that assignment.
-  Conflicting requirements also need cost-directed placement and conversion
+- Producer placement handles native-kernel subdomains, matrix API uses and
+  declared CPU/Core ML calls in FX graphs. Native model builders still bind
+  ANE partners to already assigned producer buffers. Conflicting requirements
+  also need cost-directed placement and conversion
   choices, beyond the current placement feasibility solver.
 - Foreign providers still need all internal views and dependencies exposed.
 Further integration belongs at these shared lowering boundaries. Numerical
@@ -162,9 +162,9 @@ Contradictory distances, incompatible alignments, or distinct values forced into
 one slot mean that the demands cannot share one placement. The existing resolver
 then supplies explicit conversion edges. This establishes feasibility for the
 chosen relative positions, not a minimum-cost selection among conflicting
-demands. Host-engine declarations still need to reach this shared placement
-phase; having the function in a shared header alone does not complete that
-integration.
+demands. Native model builders still need to carry their producer declarations
+into this phase; having the function in a shared header alone does not complete
+that integration.
 
 ## API operand declarations
 
@@ -201,6 +201,36 @@ and a strided matrix consumer. The exact consumer recorded only its numerical
 command, with no conversion. CPU bindings prepared mapped input/output views,
 overlapping positive-stride reads, and singleton views. Singleton normalization
 recorded no copy. No numerical commands were submitted.
+
+## Host calls in the complete graph
+
+`host.declare` records named CPU or Core ML uses in the FX graph. Its operands
+have the same schema as native GPU kernels: source storage, logical use, output
+slots and a list of layout requirements. A use requirement and an API binding
+requirement remain separate constraints through placement. Output storage can
+serve several declared use slots. The declaration reads no payload values.
+
+`BoundGraph` partitions host calls at the same boundary as collective calls.
+It places producers before binding either kind of call. Numerical spans keep
+their original FakeTensor metadata and assigned destinations. Host preparation
+returns the existing native host record. The graph operator, provider choice,
+and layout descriptions do not survive into invocation. The complete compiler
+configuration also scopes required host/collective conversion commands.
+
+`engines.Prepared` now captures its casts, engine shares and combinations in
+that graph. The separate cast prologue and GPU/host/combine lists are removed.
+Concatenated shares receive their final output slices as destinations. CPU and
+Core ML definitions carry explicit names, types and layout operands; Core ML
+compilation and model loading remain preparation work. The same declaration
+also accepts arbitrary named Core ML graph inputs and outputs, apart from the
+linear/FFN convenience builders.
+
+Preparation on 2026-10-27 compiled a GPU producer whose middle columns feed
+both a contiguous host use and a matrix product. The producer's assigned pages
+give the host its contiguous view directly. The ordinary engine projection
+and FFN callers prepared native CPU bindings through this graph path. No
+recorded numerical commands were submitted. Core ML's provider-internal
+dependencies and output-backing contract remain separate unresolved work.
 
 Preparation on 2026-10-27 compiled a producer whose middle columns feed a
 contiguous consumer while a sibling slice feeds another calculation. The

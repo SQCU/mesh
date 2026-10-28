@@ -149,7 +149,7 @@ buffers and command records once. It is not a runtime executor. `_stream.Command
 `MetalReplayCommands` and `MetalScheduleAppend`, the same interfaces used by native Metal and LiteRT.
 The old `TorchSchedule` start/join handoff and indexed crossing launcher are removed. Unknown numerical
 lowerings fail preparation; there is no eager or ATen execution substitute. The current native emitter
-supports Metal; the separate CPU/ANE share declarations use the common recorder's host records.
+supports Metal; CPU/ANE graph declarations lower to the common recorder's host records.
 
 The existing small-row linear kernel is preserved. Larger matrix products and the streamed DNN import
 one shared matrix body. Historical interposition-based record/replay is not restored. A statistics thread
@@ -236,24 +236,26 @@ older whole-operand staging fallback.
 
 ## Uneven engines within a node
 
-A node's engines are uneven too, which is fastest depends on the operation's shape, and engines running at once slow
-each other. `torch_mesh/engines.py` resolves an operation's backend as one joint decision: its units shared among the
-node's configured engines (`mps`: torch's GPU queue; `cpu`: fp32 products through Accelerate, the CPU's matrix units;
+A node can split an operation among engines with different work rates.
+`torch_mesh/engines.py` declares shares across the
+node's configured engines (`mps`: native Metal programs; `cpu`: fp32 products through Accelerate, the CPU's matrix units;
 `ane`: the Neural Engine, Core ML graphs of 1x1 convolutions with constant weights through `rdma/mesh-coreml.m`, which
-predicts on torch's shared MPS memory with no CPU copy), each holding its shard of the weights resident, the shares
+binds the bridge's shared pages), each holding its shard of the weights resident, the shares
 running at once on unified memory. Required work-rate operands seed the shares for each declared operation and shape.
 `assignment.assign` adjusts them from whole-function observations, using the same numerical interface as routing.
 CPU core classes and GPU counts come from `mesh_compute.hardware`; counts are not interchangeable work rates.
 
 ```python
 from torch_mesh import engines
-pool = engines.Engines(["mps", "cpu", "ane"], ane={"tile": 128, "block": 4096})
-ffn = engines.FFN(gate, up, down, engines=pool, name="ffn")          # without engines: torch's own
+from torch_mesh.declarations import execution_sequence
+pool = engines.Engines(["mps", "cpu", "ane"], ane=configuration["ane"])
+ffn = engines.FFN(gate, up, down, engines=pool, name="ffn")
 key = ffn.declare(x.shape[0], x.dtype, capacities=configuration["work_rates"])
-assigned = engines.placement(pool, observations)
-call = ffn.prepare(x, parts=assigned["parts"][key], repetitions=invocations)
-# The whole function uses this prepared call and its fixed output.
-call()
+assigned = engines.placement(pool, observations, step=episode)
+call = ffn.prepare(x, parts=assigned["parts"][key])
+program = execution_sequence([call] * invocations, call.output)
+program.realize()
+program.forward()
 y = call.output
 ```
 
@@ -400,6 +402,9 @@ w = s["lm_head"].to("cpu")                        # decoded
 
 `engines.Linear` and `engines.FFN` are declarations. Call `declare(rows, dtype, capacities=work_rates)`
 before choosing the allocation, then `prepare(input, parts=...)`.
+Preparation captures casts, GPU work, host calls and combinations in one FX graph.
+GPU and host declarations share the operand schema in `operand.py`; each use carries
+its layout requirements into placement before storage and commands are bound.
 The prepared share owns its fixed outputs and host views. Append it to `execution_sequence` with the
 other function parts. CPU/ANE work uses `MetalScheduleHost` with a native entry point
 and declared input/output views. The compiler derives dependencies from overlapping
