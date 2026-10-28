@@ -49,18 +49,18 @@ closes or on SIGTERM or SIGHUP. It then SIGKILLs the rank and each descendant it
 tracked by parent pid, each pid checked against its start time, until none remains,
 and then every process of the user still carrying the token (`KERN_PROCARGS2`); it
 exits 125 naming any survivor. The rank's own alarm ends it should the guard die,
-and each node's preparation sweeps every earlier run's token, its builds' too. A
-descendant still escapes when it leaves its parent between two samples and runs a
+and each node's preparation (whose builds carry the token too) sweeps every token
+whose launcher, named in it by host, pid and start time, has provably ended on that
+node's host; it leaves other hosts' tokens alone. A descendant still escapes when it leaves its parent between two samples and runs a
 platform binary (whose environment macOS hides) or with `MESH_RUN` removed.
 A run ends by `run_seconds`: every command of its driver is bounded a minute
 earlier, so the driver returns its record. A stop (the bound, SIGTERM, SIGHUP,
 SIGINT) cancels the bound, has the driver close its ranks' stdin and return its
 record, kills its session past a minute, and ignores later stops while the record
-is written and the lease released. The lease is the directory at `lock`, renamed
-into place whole (`renamex_np` `RENAME_EXCL`) beside the sessions that `mkdir` it.
-Its owner file names the launcher and the driver (pid, start time, host); it is
-stale when neither lives, or when it has no owner file past `lock_grace_seconds`
-from its birth. It is released by one rename.
+is written and the lease released. The lease is the `mkdir` of `lock`, as every
+session's tools take it. Its owner file names the launcher and the driver (pid,
+start time, host); it is stale when neither lives, or when it has no owner file
+past `lock_grace_seconds` from its birth.
 
 Each node keeps one `current` Git build checkout per repository. It fetches a
 selected commit from origin when needed and retains incremental build products.

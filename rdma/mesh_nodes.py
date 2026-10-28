@@ -8,14 +8,12 @@ import fcntl
 import functools
 import getpass
 import io
-import errno
 import json
 import math
 import os
 import re
 import select
 import shlex
-import shutil
 import signal
 import socket
 import subprocess
@@ -347,48 +345,36 @@ def stale(path, grace):
                                  for pid, start, host in holders)
 
 
-def remove(path):
-    """Take a lease away in one rename into a private directory, then delete it: an interruption leaves none."""
-    tomb = Path(tempfile.mkdtemp(prefix=path.name + '.removed.', dir=path.parent))
-    try:
-        os.rename(path, tomb / 'lease')
-    finally:
-        shutil.rmtree(tomb)
-
-
 @contextlib.contextmanager
 def exclusive_lock(owner, path, grace):
-    """Shared cluster lease: the directory at `path`, which every session's tools take by mkdir, here renamed into place
-    whole (renamex_np RENAME_EXCL, which fails while it exists) with its owner file naming the holder's pid, start time
-    and host. `hold` names another holder. A stale lease (stale) is removed under a flock that serializes the sessions
-    removing one; it is released by one rename."""
+    """Shared cluster lease: the mkdir of `path`, as every session's tools take it, its owner file naming the launcher
+    and then each holder `hold` adds (the driver) by pid, start time and host. A stale lease (stale) is removed under a
+    flock that serializes the sessions removing one."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    made = Path(tempfile.mkdtemp(prefix=path.name + '.made.', dir=path.parent))
-    (made / 'owner').write_text(f'{owner}\n{holder(os.getpid())}')
     with open(path.with_name(path.name + '.reclaim'), 'a') as serial:
         fcntl.flock(serial, fcntl.LOCK_EX)
         if stale(path, grace):
-            with contextlib.suppress(FileNotFoundError):
-                remove(path)
-        if LIBC.renamex_np(os.fsencode(made), os.fsencode(path), 4):
-            failure = ctypes.get_errno()
-            shutil.rmtree(made)
-            if failure != errno.EEXIST:
-                raise OSError(failure, os.strerror(failure), str(path))
+            with contextlib.suppress(OSError):
+                (path / 'owner').unlink(missing_ok=True)
+                path.rmdir()
+        try:
+            path.mkdir()
+        except FileExistsError:
             held = 'no owner file'
             with contextlib.suppress(OSError):
                 held = (path / 'owner').read_text().strip()
-            raise RuntimeError(f'cluster is already leased: {held}')
+            raise RuntimeError(f'cluster is already leased: {held}') from None
+    (path / 'owner').write_text(f'{owner}\n{holder(os.getpid())}')
 
     def hold(pid):
-        (path / 'owner.new').write_text((path / 'owner').read_text() + holder(pid))
-        os.replace(path / 'owner.new', path / 'owner')
+        with (path / 'owner').open('a') as owners:
+            owners.write(holder(pid))
     try:
         yield hold
     finally:
-        with contextlib.suppress(FileNotFoundError):
-            remove(path)
+        (path / 'owner').unlink(missing_ok=True)
+        path.rmdir()
 
 
 def run(*argv, **kw):
@@ -404,11 +390,18 @@ def node_install(commit, transition='0'):
     install_checkout(source, allow_source_transition=transition == '1')
 
 
-def node_prepare(commit, number, run):
+def ended(token):
+    """A run token (`run:host:pid:start`) whose launcher is provably gone: on this host, its pid's start time differs."""
+    fields = token.split(':')
+    return len(fields) == 4 and fields[1] == socket.gethostname() and fields[2].isdigit() and \
+        started(int(fields[2])) != fields[3]
+
+
+def node_prepare(commit, number):
     from mesh_install import environment, install_checkout
     from mesh_source import verify
-    if left := sweep(lambda token: token != run, time.monotonic() + 30):
-        raise RuntimeError(f'processes {left} of an earlier run remain after SIGKILL')
+    if left := sweep(ended, time.monotonic() + 30):
+        raise RuntimeError(f'processes {left} of an ended run remain after SIGKILL')
     source = Path(__file__).resolve().parent.parent
     if verify(source) != commit:
         raise ValueError('preparation source differs from the requested commit')

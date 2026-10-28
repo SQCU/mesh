@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shlex
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -112,6 +113,7 @@ def launcher(mesh_root, microbench_root, output_root):
 
 def _launch(mesh_root, microbench_root, output_root, cluster, hold):
     """Select main commits and launch the driver from its upstream Git checkout."""
+    from mesh_nodes import started
     output_root = Path(output_root).resolve()
     began = time.time()
     tag = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(began)) + f'-{time.time_ns() % 1000000000:09d}'
@@ -122,7 +124,7 @@ def _launch(mesh_root, microbench_root, output_root, cluster, hold):
     signal.alarm(cluster.run_seconds)
     phase = 'checkout'
     record = {'schema': 2, 'run': tag, 'started_unix': began, 'deadline_unix': began + cluster.run_seconds - 60,
-              'commits': {}, 'checkouts': {},
+              'token': f'{tag}:{socket.gethostname()}:{os.getpid()}:{started(os.getpid())}', 'commits': {}, 'checkouts': {},
               'status': 'failed', 'errors': [], 'nodes': {}, 'workloads': [],
               'launcher': {'file': str(Path(__file__).resolve()),
                            'role': 'select commits; target helpers execute from upstream Git checkouts'}}
@@ -194,7 +196,7 @@ def prepare_node(node, paths, record):
     result = {'number': node.number, 'status': 'installing', 'sources': {}, 'commands': node.commands}
     record['nodes'][f'{node.number}@{node.addr}'] = result
     try:
-        commands = [f'export MESH_RUN={shlex.quote(record["run"])}']
+        commands = [f'export MESH_RUN={shlex.quote(record["token"])}']
         for name in paths:
             destination = f'{cluster.checkouts}/{name}/current'
             result['sources'][name] = {'commit': record['commits'][name], 'remote_root': destination,
@@ -203,7 +205,7 @@ def prepare_node(node, paths, record):
             if name == 'mesh':
                 node.source = destination
         commands.append(f'PYTHONPATH={home_path(node.source + "/rdma")} {cluster.python} -m mesh_nodes node prepare '
-                        + ' '.join(shlex.quote(word) for word in (record['commits']['mesh'], node.number, record['run'])))
+                        + shlex.quote(record['commits']['mesh']) + ' ' + shlex.quote(node.number))
         for name in paths:
             commands.append(f'{cluster.python} {home_path(node.source + "/rdma/mesh_source.py")} prune '
                             f'{home_path(cluster.checkouts + "/" + name)} current')
@@ -271,7 +273,7 @@ def run_workload(item, nodes, paths, record, ordinal, cluster):
         result.update(status='running', ranks={f'rank{k}': {} for k in range(len(selected))})
         outputs = mesh.ranks(selected, tag, '.', command, cluster.rank_port + ordinal, env=env,
                              alarm=max(1, int(end - time.time())), input=json.dumps(operands).encode(), states=result['ranks'],
-                             run=record['run'])
+                             run=record['token'])
         result['ranks'] = rank_results(outputs)
         result['observations'] = [row for rank in result['ranks'].values() for row in rank.pop('observations')]
         if len(result['ranks']) != len(selected) or any(v['exit'] != 0 for v in result['ranks'].values()):
