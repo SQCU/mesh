@@ -23,9 +23,9 @@ torch reads a destination before it lands.
 Each style prints its reads by kind, and style A its function's seconds (a record the hourly aggregates). The program
 exits 1 on any counterexample and 0 when every read held its step.
 Memory is region leases (torch_mesh.empty), made before their style runs and read on the host through their shared
-storage. A wait that sees no progress for PROGRESS seconds revokes the communicator (ncclCommRevoke: its GPU waits end;
-torch_mesh exposes no other part of the library's expiry) and ends the program naming the wait; faulthandler ends a
-process stuck anywhere else, with every thread's traceback. Ranks come from the launcher (RANK, WORLD_SIZE,
+storage. A wait that sees no progress for PROGRESS seconds ends the program through the library's expiry
+(_stream.expired: its GPU work and posted receives stopped first), naming the wait; faulthandler ends a process stuck
+anywhere else, with every thread's traceback. Ranks come from the launcher (RANK, WORLD_SIZE,
 MASTER_ADDR, MASTER_PORT); the hourly places it on two nodes (metal-microbench tools/mesh/hourly/workloads.json).
 """
 import collections
@@ -111,17 +111,16 @@ def watch(seconds):
     faulthandler.dump_traceback_later(seconds, exit=True)
 
 
-def settle(group, done, progress, wait):
-    """Poll `done` while `progress` moves; PROGRESS seconds without a move ends the program naming `wait`."""
+def settle(done, progress, wait):
+    """Poll `done` while `progress` moves; PROGRESS seconds without a move ends the program through the library's expiry,
+    naming `wait`."""
     seen, since = progress(), time.monotonic()
     while not done():
         if (now := progress()) != seen:
             seen, since = now, time.monotonic()
             watch(2 * PROGRESS)
         elif time.monotonic() - since > PROGRESS:
-            print(f'demo error: {wait}: no progress for {PROGRESS:g} s (at {seen}); the program ends', file=sys.stderr, flush=True)
-            group.revoke()
-            os._exit(1)
+            _stream.expired(f'demo error: {wait}, no progress at {seen}', int(PROGRESS * 1e9))
         time.sleep(0.001)
 
 
@@ -162,7 +161,7 @@ def style_a(group, rank, store):
     started = time.monotonic()
     program.forward()
     done, count = program.completion(), host(counter)
-    settle(group, lambda: _stream.completed(done), lambda: int(count[0]), "style A's prepared function (its step counter)")
+    settle(lambda: _stream.completed(done), lambda: int(count[0]), "style A's prepared function (its step counter)")
     print(json.dumps({'seconds': time.monotonic() - started, 'useful_output_bytes': 4 * WORDS * STEPS}), flush=True)
     rows = host(record)[1:].tolist() if rank else []
     return collections.Counter(kind(*row, step, 0) for step, row in enumerate(rows, 1)), STEPS
@@ -186,7 +185,7 @@ def style_b(group, rank, store):
         reads[k].copy_(landings[k])
     done, torch_done = [step.completion() for step in steps], torch.mps.Event()
     torch_done.record()
-    settle(group, lambda: torch_done.query() and all(map(_stream.completed, done)),
+    settle(lambda: torch_done.query() and all(map(_stream.completed, done)),
            lambda: (torch_done.query(), sum(map(_stream.completed, done))), "style B's prepared steps and torch's reads")
     rows = host(reads)
     expected = torch.tensor([encode(peer, k + 1) for k in range(UPDATES)], dtype=torch.int32)
