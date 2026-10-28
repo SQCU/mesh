@@ -46,3 +46,40 @@ def api_layouts(name):
     import mesh_compute
     path = Path(mesh_compute.__file__).resolve().parents[1] / 'etc/compute/metal-apis.json'
     return json.loads(path.read_text())[name]
+
+
+def lift_attributes(module, arguments):
+    """Bind tensor attributes once, before a whole graph is split into spans.
+
+    Imported contents remain ordinary page data. Keeping them as operands also
+    preserves writes and aliases across numerical and collective boundaries.
+    """
+    import torch
+    if not any(node.op == 'get_attr' for node in module.graph.nodes):
+        return module, list(arguments)
+    graph = torch.fx.Graph()
+    graph.output(graph.graph_copy(module.graph, {}))
+    lifted = torch.fx.GraphModule(module, graph)
+    values, bindings = [], {}
+    first = next(node for node in graph.nodes if node.op != 'placeholder')
+    for node in list(graph.nodes):
+        if node.op != 'get_attr':
+            continue
+        value = lifted
+        for name in node.target.split('.'):
+            value = getattr(value, name)
+        if not isinstance(value, torch.Tensor):
+            continue
+        operand = bindings.get(id(value))
+        if operand is None:
+            with graph.inserting_before(first):
+                operand = graph.placeholder(f'_mesh_attribute_{len(values)}')
+            operand.meta = node.meta.copy()
+            bindings[id(value)] = operand
+            values.append(value)
+        node.replace_all_uses_with(operand)
+        if node is first:
+            first = node.next
+        graph.erase_node(node)
+    lifted.recompile()
+    return lifted, [*arguments, *_stream.import_attributes(values)]

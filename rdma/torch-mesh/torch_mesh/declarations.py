@@ -316,6 +316,8 @@ class BoundGraph:
     generated execution sequence. Numerical spans use the existing compiler.
     """
     def __init__(self, graph, arguments, group, configuration, destinations=None):
+        from .compilation import lift_attributes
+        graph, arguments = lift_attributes(graph, arguments)
         from torch.fx.node import map_arg
         from torch.utils._pytree import tree_map, tree_flatten
         from . import backend

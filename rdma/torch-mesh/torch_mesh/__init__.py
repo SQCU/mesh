@@ -136,37 +136,17 @@ def _compile(gm, example_inputs, destinations):
     # Functionalization receives every tensor as an operand, including
     # weights and prebound outputs. It can then lower out= operations
     # while retaining their writes to those exact destinations.
-    copied = torch.fx.Graph()
-    copied.output(copied.graph_copy(gm.graph, {}))
-    lifted = torch.fx.GraphModule(gm, copied)
-    constants = []
-    first = next(node for node in copied.nodes if node.op != 'placeholder')
-    for node in list(copied.nodes):
-        if node.op != 'get_attr':
-            continue
-        value = lifted
-        for name in node.target.split('.'):
-            value = getattr(value, name)
-        if isinstance(value, torch.Tensor):
-            with copied.inserting_before(first):
-                operand = copied.placeholder(f'_mesh_constant_{len(constants)}')
-            operand.meta = node.meta.copy()
-            constants.append(value)
-            node.replace_all_uses_with(operand)
-            if node is first:
-                first = node.next
-            copied.erase_node(node)
-    lifted.recompile()
+    from .compilation import lift_attributes
+    lifted, operands = lift_attributes(gm, example_inputs)
     described = [node.meta['val'] for node in gm.graph.nodes if 'val' in node.meta]
     mode = detect_fake_mode(described) or FakeTensorMode(allow_non_fake_inputs=True)
-    operands = [*example_inputs, *constants]
     from .operand import TensorView
     def described_input(value, node):
         if isinstance(value, TensorView):
             return node.meta['val']
         return mode.from_tensor(value) if isinstance(value, torch.Tensor) else value
     inputs = [tree_map(lambda value: described_input(value, node), value)
-              for node, value in zip((n for n in copied.nodes if n.op == 'placeholder'), operands, strict=True)]
+              for node, value in zip((n for n in lifted.graph.nodes if n.op == 'placeholder'), operands, strict=True)]
     with mode:
         lowered = make_fx(dispatch_functionalize(lifted, propagate_input_mutations=True), decomposition_table=select_decomp_table() | decompositions,
                           tracing_mode='fake', _allow_non_fake_inputs=True)(*inputs)

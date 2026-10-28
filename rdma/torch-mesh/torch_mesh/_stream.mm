@@ -21,6 +21,8 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <numeric>
+#include <limits>
 #include <optional>
 #include <unordered_map>
 #include <utility>
@@ -1020,6 +1022,61 @@ static uint64_t address(const at::Tensor &t) {
   return (uint64_t)(uintptr_t)at;
 }
 
+// Import frontend attributes once, before recording the function.
+// Existing bridge operands retain their pages. Aliases of foreign storage
+// share one region allocation and retain their typed views of the same bytes.
+static std::vector<at::Tensor> import_attributes(const std::vector<at::Tensor> &values) {
+  struct Import {
+    std::vector<size_t> members;
+    std::vector<std::pair<size_t,size_t>> spans;
+    size_t low=std::numeric_limits<size_t>::max(),high=0,alignment=1;
+  };
+  std::map<const c10::StorageImpl *,Import> groups;
+  std::vector<at::Tensor> result=values;
+  bool mps=false;
+  for(size_t i=0;i<values.size();i++) {
+    const auto &value=values[i];
+    if(address(value))continue;
+    TORCH_CHECK(value.is_cpu()||value.is_mps(),"attribute import requires declared CPU or MPS storage");
+    auto &group=groups[value.storage().unsafeGetStorageImpl()];group.members.push_back(i);
+    const size_t width=value.element_size();group.alignment=std::lcm(group.alignment,width);
+    NSData *data=[TensorLayout::tensor(value).value orderedSpans];
+    const auto *spans=(const MetalTensorSpan *)data.bytes;
+    for(size_t j=0;j<data.length/sizeof *spans;j++) {
+      const size_t first=spans[j].offset*width,last=first+spans[j].count*width;
+      group.spans.emplace_back(first,last);group.low=std::min(group.low,first);group.high=std::max(group.high,last);
+    }
+    mps|=value.is_mps()&&value.numel();
+  }
+  // A foreign MPS attribute may still be produced by its frontend's setup
+  // commands. Complete that producer before the host reads its initial bytes.
+  // This import is called only by preparation, never by a recorded invocation.
+  if(mps)at::mps::synchronizeAllMPSStreams(at::mps::SyncType::COMMIT_AND_WAIT);
+  for(auto &[key,group]:groups) {
+    const auto &source=values[group.members.front()];
+    const size_t low=group.spans.empty()?0:group.low/group.alignment*group.alignment;
+    const size_t bytes=group.spans.empty()?0:(group.high-low+group.alignment-1)/group.alignment*group.alignment;
+    at::Tensor storage=region_empty({(int64_t)bytes},at::empty({0},at::TensorOptions().dtype(at::kByte)),source.is_mps());
+    const void *from=source.is_mps()?[at::native::mps::getMTLBufferStorage(source) contents]:source.storage().data();
+    TORCH_CHECK(from||!bytes,"attribute import requires host-visible source storage");
+    auto *to=(char *)(uintptr_t)address(storage);
+    std::sort(group.spans.begin(),group.spans.end());
+    size_t first=0,last=0;
+    for(const auto &span:group.spans) {
+      if(span.first<=last){last=std::max(last,span.second);continue;}
+      if(last>first)memcpy(to+first-low,(const char *)from+first,last-first);
+      first=span.first;last=span.second;
+    }
+    if(last>first)memcpy(to+first-low,(const char *)from+first,last-first);
+    for(size_t i:group.members) {
+      const auto &value=values[i];const size_t width=value.element_size();
+      const size_t offset=storage.storage_offset()+(value.numel()?value.storage_offset()*width-low:0);
+      result[i]=storage.view(value.scalar_type()).as_strided(value.sizes(),value.strides(),offset/width);
+    }
+  }
+  return result;
+}
+
 // The region tensors' leases live now: each its address and bytes.
 static std::vector<std::pair<uint64_t, uint64_t>> records() {
   std::lock_guard<std::mutex> guard(region_tensors_lock_);
@@ -1740,6 +1797,7 @@ static bool completed(pybind11::object observation) {
 // The group's calls (torch_mesh/backend.py): `issue` a group of calls, issued and not completed where `split` (a
 // MeshWork to wait on, its outputs `outputs`), else None (complete).
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
+  module.def("import_attributes",&import_attributes);
   module.def("completion", &completion);
   module.def("completed", &completed);
   module.def("pipeline", &pipeline);

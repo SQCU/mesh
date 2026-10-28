@@ -88,8 +88,6 @@ access structure.
 
 This contract does not declare these existing paths complete:
 
-- Lifted FX constants still need a common import into bridge pages when their
-  source storage lies outside the region.
 - Some fused consumers load order arrays whose static compositions could be
   resolved earlier. Numerical index tensors must remain data.
 - Producer placement does not yet solve every conflicting API requirement or
@@ -100,6 +98,23 @@ This contract does not declare these existing paths complete:
   crossings need that same binding contract.
 Further integration belongs at these shared lowering boundaries. Numerical
 bodies contribute their work and uses, rather than separate memory systems.
+
+## Frontend attributes become page operands
+
+The compiler lifts tensor attributes before splitting a function around its
+collectives. Every numerical span then receives the same bound operands. This
+preserves aliases and state shared across those spans.
+
+Attributes already in bridge pages keep their storage. Foreign attributes are
+imported once during preparation. Aliases of one source allocation share one
+destination allocation, with their shapes, strides and relative byte positions
+intact. Only referenced source ranges are copied. Foreign MPS setup work is
+completed before that host copy reads its initial values; page-backed attributes
+need no import wait or copy. Neither action is part of recorded invocation.
+
+Imported contents remain ordinary data. Compiled work can read and write them
+through its declared page operands. Lifting an attribute does not turn its
+contents, such as indices, into constant compiler metadata.
 
 ## FX placement and numerical bindings
 
