@@ -1,9 +1,11 @@
 """Run committed mesh/microbench Git checkouts fetched from each repository's origin."""
 import argparse
+import contextlib
 import json
 import os
 from pathlib import Path
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -25,14 +27,6 @@ def workload_configuration(microbench_root):
     """One canonical configuration for hourly and interactive comparison entrypoints."""
     root = Path(microbench_root)
     return json.loads((root / 'tools/mesh/hourly/workloads.json').read_text())['workloads']
-
-
-def comparison_configuration(microbench_root):
-    items = workload_configuration(microbench_root)
-    runs = tuple((item['tag'], item['program'], item.get('reference', 'no record yet'),
-                  item['steps'], item['rows'], tuple(item['nodes'])) for item in items if 'steps' in item and 'nodes' in item)
-    scripts = tuple(item['program'] + '.py' for item in items if 'steps' not in item or 'nodes' not in item)
-    return runs, scripts, Path(microbench_root) / 'output_data/hourly/log.jsonl'
 
 
 def measurement_values(record, tag):
@@ -62,14 +56,17 @@ def compact(record):
     def rounded(value):
         number = float(format(value, '.3g'))
         return int(number) if number.is_integer() else number
-    rows, errors = {}, []
+    rows, incomplete, errors = {}, {}, []
     for item in record['workloads']:
-        rows[item['tag']] = [
+        values = [
             [rounded(m.get('function_seconds', m.get('amortized_seconds_per_call')) * 1e6),
              rounded(m['useful_gigabytes_per_second']),
              *([round(m['aggregate_rows_per_second'])] if 'aggregate_rows_per_second' in m else [])]
             for m in item['metrics']]
-        if item['status'] != 'completed':
+        if item['status'] == 'completed':
+            rows[item['tag']] = values
+        else:
+            incomplete[item['tag']] = {'status': item['status'], 'us,GB/s': values}
             failures = [[item['tag'] + '/' + rank, value['error'][:160]]
                         for rank, value in item.get('ranks', {}).items() if value.get('error')]
             errors.extend(failures or [[item['tag'], item.get('error', 'incomplete')[:160]]])
@@ -79,26 +76,34 @@ def compact(record):
                   for name, node in record['nodes'].items() if node['status'] != 'installed')
     result = {'schema': 3, 'commits': record['commits'], 'unix': int(record['started_unix']),
               'nodes': [r['number'] for r in record['nodes'].values() if r['status'] == 'installed'],
-              'us,GB/s': rows}
+              'us,GB/s': rows, **({'incomplete': incomplete} if incomplete else {})}
     if record['status'] != 'completed':
         result['errors'] = errors or [['run', 'incomplete']]
     return result
 
 
 def launcher(mesh_root, microbench_root, output_root):
-    from mesh_nodes import exclusive_lock
-    with exclusive_lock('committed hourly'):
-        return _launch(mesh_root, microbench_root, output_root)
+    from mesh_nodes import exclusive_lock, load
+    cluster = load()
+    with exclusive_lock('committed hourly', cluster.lock):
+        return _launch(mesh_root, microbench_root, output_root, cluster.run_seconds)
 
 
-def _launch(mesh_root, microbench_root, output_root):
+def expired(signum, _):
+    raise TimeoutError('the run reached its bound (etc/mesh-nodes.json run_seconds)')
+
+
+def _launch(mesh_root, microbench_root, output_root, seconds):
     """Select main commits and launch the driver from its upstream Git checkout."""
     output_root = Path(output_root).resolve()
     began = time.time()
     tag = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(began)) + f'-{time.time_ns() % 1000000000:09d}'
     out = output_root / tag
     out.mkdir(parents=True)
-    record = {'schema': 2, 'run': tag, 'started_unix': began, 'commits': {}, 'checkouts': {},
+    signal.signal(signal.SIGALRM, expired)
+    signal.alarm(seconds)
+    record = {'schema': 2, 'run': tag, 'started_unix': began, 'deadline_unix': began + seconds - 60,
+              'commits': {}, 'checkouts': {},
               'status': 'failed', 'errors': [], 'nodes': {}, 'workloads': [],
               'launcher': {'file': str(Path(__file__).resolve()),
                            'role': 'select commits; target helpers execute from upstream Git checkouts'}}
@@ -122,10 +127,20 @@ def _launch(mesh_root, microbench_root, output_root):
         record['history'] = HISTORY
         subprocess.run(['make', '-s', '-C', str(committed_mesh / 'rdma'), 'statistics'],
                        check=True, stdout=subprocess.DEVNULL)
-        child = subprocess.run([sys.executable, str(committed_mesh / 'rdma/mesh_hourly.py'), 'execute'],
-                               cwd=committed_mesh, input=json.dumps(record), stdout=subprocess.PIPE, text=True)
-        if child.stdout:
-            record = json.loads(child.stdout)
+        child = subprocess.Popen([sys.executable, str(committed_mesh / 'rdma/mesh_hourly.py'), 'execute'], cwd=committed_mesh,
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, start_new_session=True)
+        try:
+            stdout = child.communicate(json.dumps(record))[0]
+        except BaseException:
+            # SIGTERM first: a local rank's guard (mesh_nodes node_guard) then ends that rank's own group.
+            for kill, grace in ((signal.SIGTERM, 30), (signal.SIGKILL, None)):
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(child.pid, kill)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    child.wait(grace)
+            raise
+        if stdout:
+            record = json.loads(stdout)
         record.pop('history', None)
         record['driver_exit'] = child.returncode
         if child.returncode:
@@ -134,6 +149,7 @@ def _launch(mesh_root, microbench_root, output_root):
                 record['errors'].append({'stage': 'committed-driver', 'exit': child.returncode})
     except Exception as error:
         record['errors'].append({'stage': 'git-checkout', 'error': str(error), 'traceback': traceback.format_exc()})
+    signal.alarm(0)
     record['finished_unix'] = time.time()
     for item in record['workloads']:
         HISTORY[item['tag']] = (HISTORY.get(item['tag'], []) + item.get('observations', []))[-64:]
@@ -200,12 +216,11 @@ def rank_results(outputs):
 
 
 
-def run_workload(item, nodes, paths, record, out, ordinal):
+def run_workload(item, nodes, paths, record, out, ordinal, cluster):
     import mesh_nodes as mesh
     from mesh_statistics import aggregate
     tag = item['tag']
-    selected = ([mesh.at(nodes, str(n)) for n in item['nodes']] if item.get('nodes')
-                else nodes[:item.get('rank_limit', len(nodes))])
+    selected = [mesh.at(nodes, m.number) for m in cluster.place(item.get('place'))]
     result = {'tag': tag, 'configuration': item, 'status': 'preparing', 'metrics': []}
     record['workloads'].append(result)
     try:
@@ -225,8 +240,9 @@ def run_workload(item, nodes, paths, record, out, ordinal):
             operands = history
             env += 'MESH_OBSERVATIONS_STDIN=1 '
         result.update(status='running', ranks={f'rank{k}': {} for k in range(len(selected))})
+        alarm = max(1, min(item.get('timeout', 300), int(record['deadline_unix'] - time.time())))
         outputs = mesh.ranks(selected, None, tag, '.', command, 29600 + ordinal,
-                             env=env, alarm=item.get('timeout', 300), input=json.dumps(operands).encode(), states=result['ranks'])
+                             env=env, alarm=alarm, input=json.dumps(operands).encode(), states=result['ranks'])
         result['ranks'] = rank_results(outputs)
         result['observations'] = [row for rank in result['ranks'].values() for row in rank.pop('observations')]
         if len(result['ranks']) != len(selected) or any(v['exit'] != 0 for v in result['ranks'].values()):
@@ -252,16 +268,16 @@ def _execute_locked(record):
         for name, root in paths.items():
             if verify(root) != record['commits'][name]:
                 raise ValueError(f'{name}: checkout differs from the selected commit')
-        mesh.configure(paths['mesh'], paths['metal-microbench'])
+        cluster = mesh.load()
         items = workload_configuration(paths['metal-microbench'])
         record.update(stage='discovery', discovery={})
-        found, _ = mesh.discover(state=record['discovery'])
+        found, _ = mesh.discover(cluster, state=record['discovery'])
         record['stage'] = 'installation'
         installs = mesh.parallel([lambda n=n: prepare_node(n, paths, record)
                                   for n in found])
         record['nodes'] = {f'{node.number}@{node.addr}': result for node, result in zip(found, installs)}
         ready = [node for node, result in zip(found, installs) if result['status'] == 'installed']
-        required = {str(number) for item in items for number in item.get('nodes', ())}
+        required = {m.number for item in items for m in cluster.place(item.get('place'))}
         missing = required - {node.number for node in ready}
         if missing:
             raise RuntimeError(f'configured cluster is incomplete; no workloads submitted: missing {sorted(missing)}')
@@ -270,7 +286,7 @@ def _execute_locked(record):
             ready = []
         for ordinal, item in enumerate(items):
             record['stage'] = item['tag']
-            result = run_workload(item, ready, paths, record, out, ordinal)
+            result = run_workload(item, ready, paths, record, out, ordinal, cluster)
             if result['status'] != 'completed':
                 raise RuntimeError(f'{item["tag"]} did not complete; no further workloads submitted')
         record['status'] = 'completed' if (ready and not record['errors'] and
