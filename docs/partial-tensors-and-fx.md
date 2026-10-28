@@ -283,10 +283,10 @@ the native chain; it is not a separate FX executor.
 Affine views have an empty span list; irregular views have zero row operands. There is one prepared executor.
 `Collectives` binds reduction `Call` operands through the same native preparation and encoder as generic
 collectives. Its `enqueue()` includes the GPU consumer dependencies without creating a host Work handle.
-`views.byte_layout(shape, byte_strides, itemsize)` returns a base displacement, compact row operands and any
-irregular spans. It reads metadata, not tensor values. Reversed and broadcast dimensions retain their mappings.
-`byte_rows` resolves affine geometry in time bounded by dimensions. `byte_spans` expands intervals for alias
-analysis callers; transport frontends use `byte_layout` directly.
+`mesh_view_layout(shape, byte_strides, rank, itemsize, ...)` (`rdma/mesh-write-compiler.h`; `mesh.view_layout` from
+Python) returns a base displacement, compact row operands and any irregular spans. It reads metadata, not tensor
+values. Reversed and broadcast dimensions retain their mappings. Affine geometry resolves in time bounded by
+dimensions, with no span.
 
 `MeshWork.wait`, `isCompleted` and `getFuture` concern host encoding completion in this adapter. They are not
 a passive GPU completion clock. `_stream.completion()` and `_stream.completed(token)` expose ordinary command

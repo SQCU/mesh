@@ -108,8 +108,7 @@ def _row_pitch(array, row_bytes, rows):
         raise ValueError('a WRITE binding is a numpy array without Python objects')
     if row_bytes <= 0 or rows <= 0 or row_bytes * rows != array.nbytes or row_bytes % array.itemsize:
         raise ValueError('row_bytes * rows must cover exactly the array, in whole dtype elements')
-    from views import byte_rows
-    width, count, pitch = byte_rows(array.shape, array.strides, array.itemsize)
+    width, count, pitch = mesh.view_layout(array.shape, array.strides, array.itemsize)[1]
     if count and pitch == width:
         return row_bytes
     if (width, count) != (row_bytes, rows):
@@ -330,11 +329,10 @@ class Comm:
         views and spans outside one live lease. The original view retains its
         storage; no contiguous temporary or numerical copy is constructed.
         """
-        from views import byte_layout
         own = sendbuf if self.rank == source else landingbuf
         if not isinstance(own, np.ndarray) or own.dtype.hasobject:
             raise ValueError('a WRITE binding is a numpy array without Python objects')
-        shift, (width, rows, _), spans = byte_layout(own.shape, own.strides, own.dtype.itemsize)
+        shift, (width, rows, _), spans = mesh.view_layout(own.shape, own.strides, own.dtype.itemsize)
         if rows:
             return self.Write_rows_prepare(sendbuf, landingbuf, source, destination,
                                            row_bytes=width, rows=rows, max_packet=max_packet)

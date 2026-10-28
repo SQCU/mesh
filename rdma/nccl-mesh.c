@@ -5876,6 +5876,45 @@ ncclResult_t mesh_compile_spans(const void *source_buffer,void *landing_buffer,c
                                  0,0,spans,nspans,1,layout,out);
   ncclMeshPageTableDestroy(table);return result;
 }
+/* mesh-write-compiler.h mesh_view_layout */
+long mesh_view_layout(const uint64_t *shape, const int64_t *strides, size_t rank, uint64_t itemsize,
+                      int64_t *shift, uint64_t *rows, ncclMeshSpan *spans, size_t room) {
+  *shift = 0; rows[0] = rows[1] = rows[2] = 0;
+  if (rank && (!shape || !strides)) return -1;
+  int empty = !itemsize;
+  for (size_t i = 0; i < rank; i++) empty |= !shape[i];
+  if (empty) return 0;
+  /* the trailing dense dimensions are one row of `width` bytes, the `outer` dimensions above it its rows */
+  uint64_t width = itemsize;
+  size_t outer = rank;
+  while (outer && (shape[outer - 1] == 1 || strides[outer - 1] == (int64_t)width)) { outer--; width *= shape[outer]; }
+  /* affine: the outer dimensions longer than one nested at whole multiples of the innermost one's pitch */
+  int64_t pitch = (int64_t)width;
+  for (size_t i = 0; i < outer; i++) if (shape[i] > 1) pitch = strides[i];
+  int affine = pitch >= (int64_t)width;
+  uint64_t count = 1;
+  for (size_t i = outer; i-- > 0;)
+    if (shape[i] > 1) { affine = affine && strides[i] == pitch * (int64_t)count; count *= shape[i]; }
+  if (affine) { rows[0] = width; rows[1] = count; rows[2] = (uint64_t)pitch; return 0; }
+  int64_t lowest = 0;
+  for (size_t i = 0; i < rank; i++) if (strides[i] < 0) lowest += (int64_t)(shape[i] - 1) * strides[i];
+  *shift = lowest;
+  /* every row in logical order (an odometer over the outer dimensions), adjacent rows one span */
+  uint64_t index[rank ? rank : 1];
+  memset(index, 0, sizeof index);
+  long n = 0;
+  uint64_t end = 0;
+  for (int more = 1; more;) {
+    int64_t at = -lowest;
+    for (size_t i = 0; i < outer; i++) at += (int64_t)index[i] * strides[i];
+    if (n && end == (uint64_t)at) { if ((size_t)n <= room) spans[n - 1].bytes += width; }
+    else { if ((size_t)n < room) spans[n] = (ncclMeshSpan){(uint64_t)at, width}; n++; }
+    end = (uint64_t)at + width;
+    more = 0;
+    for (size_t i = outer; i-- > 0;) { if (++index[i] < shape[i]) { more = 1; break; } index[i] = 0; }
+  }
+  return n;
+}
 ncclResult_t mesh_compile_rows(const void *source_buffer,void *landing_buffer,size_t row_bytes,size_t rows,
     size_t pitch,int source,int destination,ncclComm_t comm,int metal,size_t max_packet,struct mesh_write_layout layout,ncclMeshWritePlan_t *out) {
   if(!comm||!rows||!row_bytes||rows>SIZE_MAX/row_bytes)

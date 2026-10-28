@@ -266,7 +266,7 @@ list inside one lease. Local lists can have different counts, gaps, and physical
 ordering while naming the same logical byte sequence. Common cuts are the
 union of all participants' view boundaries, packet cuts and actual registration
 crossings. Repeated source bytes are permitted; overlapping landing intervals
-are rejected. The metadata-only `views.byte_spans` helper maps ndarray/tensor
+are rejected. The metadata-only `mesh_view_layout` compiler (rdma/mesh-write-compiler.h) maps ndarray/tensor
 shapes and byte strides to this contract, including negative strides. Distinct
 leases use ordered shared WRITE declarations. Neither form adds a numerical
 packing pass or runtime metadata exchange. Indexed preparation has local

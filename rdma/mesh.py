@@ -198,3 +198,22 @@ def lease(nbytes):
     held, size = ffi.new('void **'), max(1, nbytes)
     check(lib.ncclMemAlloc(held, size))
     return ffi.buffer(ffi.gc(ffi.cast('char *', held[0]), lib.ncclMemFree), size)
+
+
+def view_layout(shape, strides, itemsize):
+    """A strided view's bytes in logical (C) element order, the order a WRITE binds them (mesh-write-compiler.h
+    mesh_view_layout): ``(base_shift, (row_bytes, rows, pitch), spans)``, offsets relative to the lowest addressed
+    byte at ``base_shift`` from the first element; an affine view's rows and no span, else zero rows and the spans,
+    a broadcast view's repeated bytes repeated.  Strides are bytes; no value is read."""
+    import operator
+    shape, strides = [operator.index(n) for n in shape], [operator.index(s) for s in strides]
+    itemsize = operator.index(itemsize)
+    if len(shape) != len(strides) or itemsize < 0 or any(n < 0 for n in shape):
+        raise ValueError('a byte view needs matching nonnegative shape and element width')
+    dims = ffi.new('uint64_t[]', shape or [0]), ffi.new('int64_t[]', strides or [0])
+    shift, rows = ffi.new('int64_t *'), ffi.new('uint64_t[3]')
+    needed = lib.mesh_view_layout(dims[0], dims[1], len(shape), itemsize, shift, rows, ffi.NULL, 0)
+    spans = ffi.new('ncclMeshSpan[]', max(needed, 1))
+    if needed > 0:
+        lib.mesh_view_layout(dims[0], dims[1], len(shape), itemsize, shift, rows, spans, needed)
+    return shift[0], (rows[0], rows[1], rows[2]), [(spans[k].offset, spans[k].bytes) for k in range(needed)]

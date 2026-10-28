@@ -12,7 +12,8 @@ data and add barriers between them. Narrowing that declaration does not by itsel
 `MetalViewReaches` in `rdma/metal-recording.m` now lowers shape, byte strides and element width for both
 FX's `_stream.Commands` and Swift's `Reach.view`. Dense dimensions coalesce; transposes, broadcast
 dimensions, reversed strides, gaps and empty views retain their actual access union. This calculation
-runs at preparation. Transport's logical byte order remains the separate `views.byte_spans` operation.
+runs at preparation. Transport's logical byte order is the separate C compiler `mesh_view_layout`
+(`rdma/mesh-write-compiler.h`; `mesh.view_layout` from Python).
 
 | Native command | Declaration now supplied |
 |---|---|
@@ -336,9 +337,9 @@ planner used the first slot's phase. Cuts also retain logical publication bounda
 Contiguous row/page/span edges impose no extra cut. Contiguous payloads and typed repetitions keep the existing
 modular residue solver, without a per-packet walk across peers.
 
-`views.byte_layout` keeps affine NumPy and Torch views compact before crossing the native binding. The old
+`mesh_view_layout` (`mesh.view_layout` from Python) keeps affine NumPy and Torch views compact before crossing the native binding. The old
 `SpanWrites` binding is replaced by `ViewWrites`, which supplies row operands or irregular selections to the
-same native preparer. `byte_rows` also replaces the NumPy adapter's separate affine-layout calculation.
+same native preparer. Its row operands also replace the NumPy adapter's separate affine-layout calculation.
 Explicit indexed selections that describe affine rows collapse to a fixed report. Reversed and aliased source
 views retain their mapping; overlapping destination selections fail preparation.
 
