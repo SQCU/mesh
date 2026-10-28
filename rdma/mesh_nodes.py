@@ -1,6 +1,7 @@
 """Shared node discovery, deployment and rank execution; runners supply operands only."""
 import concurrent.futures
 import contextlib
+import calendar
 import codecs
 import collections
 import ctypes
@@ -16,7 +17,6 @@ import re
 import select
 import shlex
 import signal
-import socket
 import subprocess
 import sys
 import tempfile
@@ -388,6 +388,16 @@ def run(*argv, **kw):
     return subprocess.run([str(a) for a in argv], capture_output=True, text=True, stdin=subprocess.DEVNULL, **kw)
 
 
+def ended(token, current, seconds):
+    """A run token (`run:launcher host:pid:start`, the run named by its UTC start) of the `current` run's launcher host
+    whose run began more than its bound (`seconds`, the launcher's minute of grace and a minute more) ago, so ended."""
+    fields, now = token.split(':'), current.split(':')
+    with contextlib.suppress(ValueError):
+        began = calendar.timegm(time.strptime(fields[0][:16], '%Y%m%dT%H%M%SZ'))
+        return len(fields) == 4 and len(now) == 4 and fields[1] == now[1] and began + float(seconds) + 120 < time.time()
+    return False
+
+
 BRIDGE = ('mesh-link.c', 'mesh-records.c', 'mesh-heartbeat.c', 'mesh-dataflow.c', 'mesh-call.c', 'mesh-collective.c',
           'mesh-fabric.c', 'mesh-routed.c', 'mesh-diagnostics.c', 'Makefile', '../etc/compute/metal.mk',
           '../etc/bridge/thunderbolt.mk')
@@ -408,13 +418,13 @@ def bridge_build(source):
     return digest.hexdigest()
 
 
-def node_prepare(commit, number, current):
+def node_prepare(commit, number, current, seconds):
     """Build this commit's client code once in its own checkout (its libraries and kernels, _mesh_c and torch_mesh's
     extension, which ranks load by path; never the shared venv), and say whether the running bridge is this build:
     {"bridge": "joined"}, or "differs" for `node swap`."""
     from mesh_install import environment
     from mesh_source import verify
-    if left := sweep(lambda token: ended(token, current), time.monotonic() + 30):
+    if left := sweep(lambda token: ended(token, current, seconds), time.monotonic() + 30):
         raise RuntimeError(f'processes {left} of an ended run remain after SIGKILL')
     source = Path(__file__).resolve().parent.parent
     if verify(source) != commit:

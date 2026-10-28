@@ -63,8 +63,9 @@ tracked by parent pid, each pid checked against its start time, until none remai
 and then every process of the user still carrying the token (`KERN_PROCARGS2`); it
 exits 125 naming any survivor. The rank's own alarm ends it should the guard die,
 and each node's preparation (whose builds carry the token too) sweeps every token
-naming the current run's launcher host and another run, which has ended. Other
-hosts' tokens are left alone. A descendant still escapes when it leaves its parent between two samples and runs a
+of the current run's launcher host whose run began more than its bound ago (the
+token names the run by its UTC start), so has ended. Other hosts' tokens are left
+alone. A descendant still escapes when it leaves its parent between two samples and runs a
 platform binary (whose environment macOS hides) or with `MESH_RUN` removed.
 A run ends by `run_seconds`: every command of its driver is bounded a minute
 earlier, so the driver returns its record. A stop (the bound, SIGTERM, SIGHUP,
