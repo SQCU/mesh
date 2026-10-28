@@ -60,18 +60,18 @@ struct MeshStream {
     }
   }
 
-  // On torch's queue: the open buffer committed (and waited for, where `wait`), its end signalling the next count.
-  void signalled(bool wait) {
+  // On torch's queue: the open buffer committed, its end signalling the next count.
+  void signalled() {
     mps->endKernelCoalescing();
     [mps->commandBuffer() encodeSignalEvent:progress value:++committed];
-    mps->synchronize(wait ? at::mps::SyncType::COMMIT_AND_WAIT : at::mps::SyncType::COMMIT);
+    mps->synchronize(at::mps::SyncType::COMMIT);
   }
 
   // On torch's queue, before a collective sends what torch stored: the open buffer ended and committed, and the next
   // waiting on the GPU for its end (metal-microbench docs/facts.md, 10-24: neither a later kernel of one buffer nor a
   // commit alone makes a kernel's plain stores visible to the NIC).
   void released() {
-    signalled(false);
+    signalled();
     [mps->commandBuffer() encodeWaitForEvent:progress value:committed];
   }
 
@@ -109,21 +109,29 @@ static std::vector<MeshStream *> streams_made() {
   return made;
 }
 
-// A host wait of the library's on stream s, on torch's queue: a publication still waiting committed, and with `wait`
-// the stream committed and waited for (torch's COMMIT_AND_WAIT, taken here on its queue), on the stream queue.
-static void host_wait(MeshStream &s, bool wait) {
-  MeshStream *self = &s;
-  at::mps::dispatch_sync_with_rethrow(s.mps->queue(), ^{
-    @autoreleasepool {
-      self->signalled(wait);
-    }
-  });
+// No wait of torch_mesh's outlives its deadline: past it the program ends, naming the wait (the operator, 2026-10-28;
+// the library's mesh_expired).  No turn of torch's queue taken here waits, so its dispatch_sync waits only on torch's
+// own turns, whose GPU waits on a prepared function `watch` bounds.
+[[noreturn]] static void expired(const char *wait, uint64_t ns) {
+  fprintf(stderr, "%s: past its deadline of %.3f s; the program ends\n", wait, (double)ns / 1e9);
+  _exit(1);
 }
 
-// Before a host wait outside torch's streams (a recording's compile meeting): every stream's waiting
-// publication committed.
-static void commit() {
-  for (MeshStream *s : streams_made()) host_wait(*s, false);
+// The host until `event` reaches `value`, within `ns` (0: MESH_PLATFORM_NS) of `from` (a CLOCK_MONOTONIC reading; 0: now).
+static void bounded(id<MTLSharedEvent> event, uint64_t value, const char *wait, uint64_t ns = 0, uint64_t from = 0) {
+  ns = ns ? ns : MESH_PLATFORM_NS;
+  const uint64_t until = (from ? from : clock_gettime_nsec_np(CLOCK_MONOTONIC)) + ns;
+  for (uint64_t now; event.signaledValue < value;) {
+    if ((now = clock_gettime_nsec_np(CLOCK_MONOTONIC)) >= until) expired(wait, ns);
+    [event waitUntilSignaledValue:value timeoutMS:(until - now + 999999) / 1000000];
+  }
+}
+
+// Stream s's work so far complete: its buffer committed, then the host's wait for its end, bounded.
+static void settled(MeshStream &s, const char *wait, uint64_t ns = 0) {
+  MeshStream *self = &s;
+  at::mps::dispatch_sync_with_rethrow(s.mps->queue(), ^{ @autoreleasepool { self->signalled(); } });
+  bounded(s.progress, s.committed, wait, ns);
 }
 
 // Configuration-time migration may read existing tensors produced by ordinary
@@ -132,7 +140,7 @@ static void commit() {
 static void publish_boundary() {
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
   MeshStream *s = &stream_of(stream);
-  at::mps::dispatch_sync_with_rethrow(stream->queue(), ^{ s->signalled(false); });
+  at::mps::dispatch_sync_with_rethrow(stream->queue(), ^{ s->signalled(); });
 }
 
 // The library's workspace allocator: a region lease (region_empty, held: taken again by the next workspace of its size
@@ -204,9 +212,8 @@ static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &c
   return issue.ticket;
 }
 
-// every issued group through `ticket` completed on torch's stream where it is waited, the turn of torch's queue within
-// `ns` is retained for the c10d completion signature.
-static void complete(uint64_t ticket, uint64_t ns = 0) {
+// every issued group through `ticket` completed on torch's stream where it is waited
+static void complete(uint64_t ticket) {
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
   MeshStream *s = &stream_of(stream);
   if (ncclMeshRetired() >= ticket) return s->retire(0, {});
@@ -227,14 +234,21 @@ static void complete(uint64_t ticket, uint64_t ns = 0) {
 
 // c10d's Work for a group issued and not completed: waiting (or synchronizing, asking whether it completed, or
 // asking for its future) encodes the rest on torch's current stream, where every later kernel reads its results; a
-// c10d completion follows the submitted stream's dependency.
+// c10d completion follows the submitted stream's dependency.  A wait given a timeout (c10d's kNoTimeout is 0) has the
+// host wait for the stream within it too, as NCCL's blocking wait does.
 class MeshWork : public c10d::Work {
  public:
   MeshWork(uint64_t ticket, std::vector<at::Tensor> outputs, int64_t comm)
       : c10d::Work(-1, c10d::OpType::UNKNOWN), ticket_(ticket), outputs_(std::move(outputs)), comm_(comm) {}
   bool isCompleted() override { finish(); return true; }
   bool isSuccess() const override { return finished_; }
-  bool wait(std::chrono::milliseconds timeout) override { finish((uint64_t)std::max<int64_t>(timeout.count(), 0) * 1000000); return true; }
+  bool wait(std::chrono::milliseconds timeout) override {
+    finish();
+    if (timeout.count() > 0)
+      settled(stream_of(at::mps::getCurrentMPSStream()), "MeshWork::wait: its group's completion on torch's MPS stream",
+              (uint64_t)timeout.count() * 1000000);
+    return true;
+  }
   void synchronize() override { finish(); }
   c10::intrusive_ptr<c10::ivalue::Future> getFuture() override {
     finish();
@@ -244,10 +258,10 @@ class MeshWork : public c10d::Work {
   }
 
  private:
-  void finish(uint64_t ns = 0) {
+  void finish() {
     if (finished_) return;
     finished_ = true;
-    complete(ticket_, ns);
+    complete(ticket_);
   }
   uint64_t ticket_;
   std::vector<at::Tensor> outputs_;
@@ -432,7 +446,7 @@ static uint64_t submit(const std::function<ncclResult_t(ncclMeshStream *)> &call
       const MeshStream *current = &stream_of(at::mps::getCurrentMPSStream());
       for (MeshStream *s : streams_made())
         if (s->streamed || s == current) {
-          host_wait(*s, true);
+          settled(*s, "torch_mesh: torch's MPS stream, before a host-path collective (submit)");
           s->retire(0, {});
           s->streamed = false;
         }
@@ -474,6 +488,20 @@ static Schedule schedule_after_inputs() {
   return schedule;
 }
 
+// Each function `ordered` enqueued watched off the host's path (torch's later work waits for it on the GPU): its gate
+// within MESH_PLATFORM_NS of the later of its enqueue and the previous one's pass, and its pass within MESH_PLATFORM_NS
+// of its gate, or the program ends.
+static void watch(id<MTLSharedEvent> gate, id<MTLSharedEvent> passed, uint64_t at) {
+  static dispatch_queue_t watching = dispatch_queue_create("torch_mesh.passed", DISPATCH_QUEUE_SERIAL);
+  static uint64_t last = 0;  // the previous function's pass, read and written on `watching`
+  const uint64_t enqueued = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+  dispatch_async(watching, ^{
+    bounded(gate, 1, "torch_mesh: torch's MPS work before a prepared function (its gate, ordered)", 0, std::max(last, enqueued));
+    bounded(passed, at, "torch_mesh: a prepared function's run on the prepared queue (ordered)");
+    last = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+  });
+}
+
 // A prepared function enqueued in torch's stream order, with no host wait: its gate signalled at the end of torch's
 // buffer so far (committed, so what torch stored is visible to it and the NIC: metal-microbench docs/facts.md, 10-24),
 // and torch's later work waiting on the GPU for the prepared queue to pass it; it and `keep` held until then.
@@ -494,6 +522,7 @@ static void ordered(const Schedule &schedule, std::shared_ptr<void> keep = {}) {
     [s->prepared signalEvent:s->passed value:at];
     [s->mps->commandBuffer() encodeWaitForEvent:s->passed value:at];
   }});
+  watch(gate,s->passed,at);
   s->running.emplace_back(at,schedule.function);
   if(keep)s->running.emplace_back(at,std::move(keep));
 }
@@ -1130,7 +1159,7 @@ static std::vector<at::Tensor> import_attributes(const std::vector<at::Tensor> &
   // A foreign MPS attribute may still be produced by its frontend's setup
   // commands. Complete that producer before the host reads its initial bytes.
   // This import is called only by preparation, never by a recorded invocation.
-  if(mps)at::mps::synchronizeAllMPSStreams(at::mps::SyncType::COMMIT_AND_WAIT);
+  if(mps)settled(stream_of(at::mps::getCurrentMPSStream()),"torch_mesh: a foreign attribute's producer on torch's MPS stream (import_attributes)");
   for(auto &[key,group]:groups) {
     const auto &source=values[group.members.front()];
     const size_t low=group.spans.empty()?0:group.low/group.alignment*group.alignment;
@@ -1994,7 +2023,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     return work_of(issue(calls, comm, split, true), std::move(outputs), comm);
   });
   module.def("attach", &attach);
-  module.def("commit", &commit);
   module.def("publish_boundary", &publish_boundary);
   module.def("region_empty", [](std::vector<int64_t> sizes, const at::Tensor &like, bool mps, bool held) { return region_empty(sizes, like, mps, held); },
              pybind11::arg("sizes"), pybind11::arg("like"), pybind11::arg("mps"), pybind11::arg("held") = false);
