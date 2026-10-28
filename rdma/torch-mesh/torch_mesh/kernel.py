@@ -22,7 +22,7 @@ def _shape(inputs, input_slots, output_slots, output_strides, shapes, dtypes, de
     return fake_outputs(shapes, output_strides, dtypes, devices)
 
 
-def declare(source, name, buffers, outputs, words, constant_slot, grid, threads, instance='', *, indexed, requirements, indices=None):
+def declare(source, name, buffers, outputs, words, constant_slot, grid, threads, instance='', *, indexed, requirements, indices=None, prefix=''):
     """Carry each use's layout and requirement across FX's tensor schema.
 
     The serialized operand descriptions contain only compiler metadata. Values,
@@ -32,18 +32,21 @@ def declare(source, name, buffers, outputs, words, constant_slot, grid, threads,
     from .operand import signature
     uses = {i: ('indexed' if i in indexed else requirements[i],) for i, value in enumerate(buffers) if value is not None}
     operands = signature(buffers, outputs, uses)
-    if indices:
+    if indices or prefix:
         declarations = json.loads(operands['operands'])
-        declarations['indices'] = indices
+        if indices:
+            declarations['indices'] = indices
+        if prefix:
+            declarations['prefix'] = prefix
         operands['operands'] = json.dumps(declarations, separators=(',', ':'))
     return operation(**operands, source=source, name=name, instance=instance,
                      words=list(words), constant_slot=constant_slot, grid=list(grid), threads=list(threads))
 
 
 @lru_cache(None)
-def pipeline(source, name, instance, indices):
+def pipeline(source, name, instance, indices, prefix=''):
     from . import _stream
-    return _stream.pipeline(_stream.metal_prelude() + indices + Path(__file__).with_name(source).read_text() + '\n' + instance, name)
+    return _stream.pipeline(_stream.metal_prelude() + indices + prefix + Path(__file__).with_name(source).read_text() + '\n' + instance, name)
 
 
 def prepare(inputs, input_slots, output_slots, output_strides, shapes, dtypes, devices, operands, source, name, instance, words, constant_slot, grid, threads, *, outputs=None):
@@ -80,6 +83,6 @@ def prepare(inputs, input_slots, output_slots, output_strides, shapes, dtypes, d
             prepare_binding(index, value, True)
             write |= 1 << index
     constants = {constant_slot: struct.pack(f'{len(words)}I', *(v & 0xffffffff for v in words))} if words else {}
-    commands.append((pipeline(source, name, instance, layout.index_source(addresses, declarations.get('indices'))), buffers, constants, tuple(grid), tuple(threads), False,
+    commands.append((pipeline(source, name, instance, layout.index_source(addresses, declarations.get('indices')), declarations.get('prefix', '')), buffers, constants, tuple(grid), tuple(threads), False,
                      read | (write << _stream.compilation['ACCESS_WRITE_SHIFT'])))
     return results, commands + after

@@ -745,10 +745,24 @@ template [[host_name("streamed_scale_rows_bfloat")]] [[kernel]] decltype(streame
 // the rows) calls it with its own staged row. Slabs > 0 declares one logical
 // [slab,row,column] output and [slab,column] scale view; compilation expands the
 // stores while sharing the gathered values. Slabs == 0 uses separate bindings.
+#ifndef MESH_STREAMED_GATHER_PARAMETERS
+#define MESH_STREAMED_GATHER_PARAMETERS
+#define MESH_STREAMED_GATHER_HELPER_PARAMETERS
+#define MESH_STREAMED_GATHER_ARGUMENTS
+#define MESH_STREAMED_GATHER_STORE4(I,J,V,A)
+#endif
+#ifndef MESH_STREAMED_ROTATE_PARAMETERS
+#define MESH_STREAMED_ROTATE_PARAMETERS
+#define MESH_STREAMED_ROTATE_STORE(I,J,V)
+#endif
+#ifndef MESH_STREAMED_HADAMARD_PARAMETERS
+#define MESH_STREAMED_HADAMARD_PARAMETERS
+#define MESH_STREAMED_HADAMARD_STORE(I,J,V)
+#endif
 template <uint STRIDE, bool Masked, uint Order, uint Slabs = 0, typename V, typename F, typename S, typename G, typename T, typename H, typename U>
 static inline void streamed_gather(V values, float factor, F first, S scale,
                                    G second, T secondScale, H third, U thirdScale,
-                                   uint inputs, uint columns, uint rows, uint n, uint t, uint threads) {
+                                   uint inputs, uint columns, uint rows, uint n, uint t, uint threads MESH_STREAMED_GATHER_HELPER_PARAMETERS) {
     for (uint q = t; q < columns / 4; q += threads) {
         const int4 o = int4(mesh_position<Order>(4*q), mesh_position<Order>(4*q+1), mesh_position<Order>(4*q+2), mesh_position<Order>(4*q+3));
         const int4 read = Masked ? max(o, int4(0)) : o;
@@ -764,6 +778,7 @@ static inline void streamed_gather(V values, float factor, F first, S scale,
             streamed_store_four(first, at, select(half4(0), half4(streamed_four<float4>(scale, 4*q) * v), active));
             if (inputs > 1) streamed_store_four(second, at, select(half4(0), half4(streamed_four<float4>(secondScale, 4*q) * v), active));
             if (inputs > 2) streamed_store_four(third, at, select(half4(0), half4(streamed_four<float4>(thirdScale, 4*q) * v), active));
+            MESH_STREAMED_GATHER_STORE4(at, 4*q, v, active)
         }
     }
 }
@@ -774,7 +789,7 @@ static inline void streamed_gather(V values, float factor, F first, S scale,
 // in threadgroup memory where WIDTH > 0 (d.columns at most WIDTH), else read in place (streamed_gather).
 // GivenFactor consumes the normalizer's per-row output; it needs no second reduction or staged row.
 template <bool Normed, uint WIDTH, uint STRIDE, bool Masked = false, uint InputColumns = 0, bool GivenFactor = false, typename Input = half, uint Slabs = 0>
-kernel void streamed_row_gather(device const Input *x [[buffer(0)]], device half *first [[buffer(1)]],
+kernel void streamed_row_gather(MESH_STREAMED_GATHER_PARAMETERS device const Input *x [[buffer(0)]], device half *first [[buffer(1)]],
                                 device const float *scale [[buffer(3)]],
                                 device half *second [[buffer(5)]], device half *third [[buffer(6)]],
                                 device const float *secondScale [[buffer(7)]], device const float *thirdScale [[buffer(8)]],
@@ -790,7 +805,7 @@ kernel void streamed_row_gather(device const Input *x [[buffer(0)]], device half
         const float factor = GivenFactor ? factors[mesh_index<9>(n)] : 1.0f;
         streamed_gather<STRIDE, Masked, 2, Slabs>(mesh_view<0>(x, ulong(n) * inputColumns), factor,
             mesh_view<1>(first), mesh_view<3>(scale), mesh_view<5>(second), mesh_view<7>(secondScale),
-            mesh_view<6>(third), mesh_view<8>(thirdScale), d.inputs, columns, d.rows, n, t, threads);
+            mesh_view<6>(third), mesh_view<8>(thirdScale), d.inputs, columns, d.rows, n, t, threads MESH_STREAMED_GATHER_ARGUMENTS);
         return;
     }
     float s = 0.0f;
@@ -808,7 +823,7 @@ kernel void streamed_row_gather(device const Input *x [[buffer(0)]], device half
     threadgroup_barrier(mem_flags::mem_threadgroup);
     streamed_gather<STRIDE, Masked, 2, Slabs>((threadgroup const float *)values, factor,
         mesh_view<1>(first), mesh_view<3>(scale), mesh_view<5>(second), mesh_view<7>(secondScale),
-        mesh_view<6>(third), mesh_view<8>(thirdScale), d.inputs, columns, d.rows, n, t, threads);
+        mesh_view<6>(third), mesh_view<8>(thirdScale), d.inputs, columns, d.rows, n, t, threads MESH_STREAMED_GATHER_ARGUMENTS);
 }
 
 
@@ -820,7 +835,7 @@ kernel void streamed_row_gather(device const Input *x [[buffer(0)]], device half
 // product's tables for 1-bit tiles, tables[n][t][kb][m] = the sum over j in m of its coded input kb + 8 j of the tile
 // (fp32, from the fp16 values it stored).
 template <uint InputColumns = 0, bool GivenFactor = false, typename Input = half, uint Slabs = 0>
-kernel void streamed_rotate(device const Input *x [[buffer(0)]], device half *first [[buffer(1)]],
+kernel void streamed_rotate(MESH_STREAMED_ROTATE_PARAMETERS device const Input *x [[buffer(0)]], device half *first [[buffer(1)]],
                             device half *second [[buffer(2)]],
                             device const float *scale [[buffer(4)]], device const float *secondScale [[buffer(5)]],
                             device const char *rotation [[buffer(6)]], device const float *rotationScale [[buffer(7)]],
@@ -886,6 +901,7 @@ kernel void streamed_rotate(device const Input *x [[buffer(0)]], device half *fi
                 } else {
                     first[mesh_index<1>(ulong(n) * columns + j)] = put;
                     if (outputs > 1) second[mesh_index<2>(ulong(n) * columns + j)] = half(secondScale[mesh_index<5>(j)] * value);
+                    MESH_STREAMED_ROTATE_STORE(ulong(n) * columns + j, j, value)
                 }
                 if (tabled) values[simd * C + c] = float(put);
             }
@@ -914,7 +930,7 @@ template [[host_name("streamed_rotate")]] [[kernel]] decltype(streamed_rotate<0>
 // into a second region, which the puts read in their column order. Two barriers. N in {32, 64, 128}, K <= 20 and a
 // multiple of threads / N, K <= 3 S, columns <= 16 threads and <= 2560.
 template <uint InputColumns = 0, bool Masked = false, bool GivenFactor = false, typename Input = half, uint Slabs = 0>
-kernel void streamed_hadamard(device const Input *x [[buffer(0)]], device half *first [[buffer(1)]],
+kernel void streamed_hadamard(MESH_STREAMED_HADAMARD_PARAMETERS device const Input *x [[buffer(0)]], device half *first [[buffer(1)]],
                               device half *second [[buffer(2)]],
                               device const float *scale [[buffer(4)]], device const float *secondScale [[buffer(5)]],
                               device const char *signs [[buffer(6)]], device const char *mix [[buffer(7)]],
@@ -995,6 +1011,7 @@ kernel void streamed_hadamard(device const Input *x [[buffer(0)]], device half *
         } else {
             first[mesh_index<1>(ulong(n) * columns + at)] = half(firstScale[p] * value);
             if (d.inputs > 1) second[mesh_index<2>(ulong(n) * columns + at)] = half(otherScale[p] * value);
+            MESH_STREAMED_HADAMARD_STORE(ulong(n) * columns + at, at, value)
         }
     }
 }

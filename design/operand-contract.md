@@ -105,11 +105,18 @@ The 1–4 integration pass on 2026-10-28 has these boundaries:
    Independent products still meet at one standalone consumer command, whose
    accesses cover all its inputs. Per-product/tile consumer fusion remains
    unfinished; this pass does not establish equal latency for that case.
-   FX small rotations and Hadamard transforms still repeat across separate
-   scale-binding batches. Their missing piece is a shared binding declaration
-   for disjoint scale storage; replacing the actual scale operands with cached
-   metadata would change the function. These are unfinished lowering work,
-   not restrictions sanctioned for tensor programs.
+   FX gathers, small rotations and Hadamard transforms now declare additional
+   destination/scale pairs through the shared kernel interface. Preparation
+   expands their stores in the existing numerical body. Each scale remains a
+   tensor input, with its own view and dependencies; no scale packing or cached
+   values replace it. The encoding manifest names occupied bindings and the
+   device operand supplies binding capacity. Groups which fit those bindings
+   share one transform. For larger rotated/Hadamard groups, that command also
+   writes its unscaled float result into preassigned pages. The remaining
+   destinations use the existing typed gather/scaling body to consume it. The
+   basis transform occurs once, and no half-width rounding is inserted before
+   those consumers apply their scales. Plain gathers need only batches of
+   their ordinary stores; they have no basis transform to repeat.
 2. **Constraints.** `TensorRequirement` now resolves both native streamed and
    Core ML operands. The feature declaration supplies type and layout, and the
    same resolver places storage and emits any required tiled conversion. Native
@@ -130,8 +137,11 @@ The 1–4 integration pass on 2026-10-28 has these boundaries:
    into that use's gather scales; already normalized inputs use the raw scales.
 4. **Preparation.** Native rank and Goal A build. Complete FX graphs retain five
    product results through mapped gathers, rotation, Hadamard and product lowering.
-   The folded graph has one matrix transform; the small-transform batching gap
-   above is visible in its emitted graph. Native slab shader specializations
+   The folded graph has one matrix transform. Compatible groups of five now
+   have one small rotation or Hadamard command, including when the scale and
+   destination pages are mapped. At binding capacity, all destinations share
+   that command; above capacity, preparation emits one basis transform and a
+   float-input gather for its remaining consumers. Native slab shader specializations
    compile with capacity gaps. Standalone head specializations compile with
    independent value partials and mapped destinations; fused and standalone
    specializations also compile with row stores omitted. Both coupled product

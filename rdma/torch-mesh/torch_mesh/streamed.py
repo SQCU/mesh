@@ -597,14 +597,51 @@ def coop_of(maps):
     return a | b << 3 | cj << 6 | d << 9 | sum(s << (12 + 3 * i) for i, s in enumerate(source))
 
 
-def _encode(name, buffers, dims, gx, gy, threads, line='', *, outputs, indexed=(), pitched=(), indices=None):
+def _encode(name, buffers, dims, gx, gy, threads, line='', *, outputs, indexed=(), pitched=(), indices=None, prefix=''):
     from .kernel import declare
     from .layout import strides
     from .operand import descriptor
     requirements = {i: descriptor(value).strides if i in pitched else strides(value.shape)
                     for i, value in enumerate(buffers) if value is not None}
     return declare('streamed.metal', name, buffers, outputs, dims, 15, (gx, gy, 1), (threads, 1, 1), line,
-                   indexed=tuple(outputs) + tuple(indexed), requirements=requirements, indices=indices)
+                   indexed=tuple(outputs) + tuple(indexed), requirements=requirements, indices=indices, prefix=prefix)
+
+
+def transform_bindings(kind):
+    """The numerical signature plus available device bindings for more stores."""
+    from .compilation import operands
+    occupied = POLICY['transform_bindings'][kind]
+    free = [slot for slot in range(operands()['BUFFER_BINDINGS']) if slot not in occupied]
+    return tuple(zip(free[::2], free[1::2]))
+
+
+def transform_stores(kind, pairs, values, scales, buffers):
+    """Expand stores over real operands before shader compilation.
+
+    Extra destinations share the transform's numerical values. Each scale and
+    destination keeps its own view and dependency declaration. A destination
+    without a scale retains the numerical result for other consumers. No values
+    are packed or read back to construct this source.
+    """
+    parameters, helper, arguments, scalar, vector = [], [], [], [], []
+    for (output, scale), value, factor in zip(pairs, values, scales, strict=True):
+        type = _TYPES[value.dtype][1]
+        fields = [(output, type, value)] + ([(scale, 'const float', factor)] if scale is not None else [])
+        buffers.extend([None] * max(0, max(slot for slot, _, _ in fields) + 1 - len(buffers)))
+        for slot, field_type, operand in fields:
+            buffers[slot] = operand
+            argument = f'device {field_type} *extra{slot}'
+            parameters.append(f'{argument} [[buffer({slot})]],')
+            helper.append(f', {argument}')
+            arguments.append(f', extra{slot}')
+        scaled = f'extra{scale}[mesh_index<{scale}>(J)] * (V)' if scale is not None else '(V)'
+        scaled4 = f'mesh_load4<{scale},float4>(extra{scale}, (J)) * (V)' if scale is not None else '(V)'
+        scalar.append(f'extra{output}[mesh_index<{output}>(I)] = {type}({scaled});')
+        vector.append(f'mesh_store4<{output}>(extra{output}, (I), select(vec<{type},4>(0), vec<{type},4>({scaled4}), (A)));')
+    tag = 'MESH_STREAMED_' + kind.upper()
+    return ('\n'.join(f'#define {tag}_{suffix} {text}' for suffix, text in (
+        ('PARAMETERS', ' '.join(parameters)), ('HELPER_PARAMETERS', ''.join(helper)), ('ARGUMENTS', ''.join(arguments)),
+        ('STORE(I,J,V)', ' '.join(scalar)), ('STORE4(I,J,V,A)', ' '.join(vector)))) + '\n')
 
 
 def _half(n, width):
@@ -802,8 +839,8 @@ class Matrix(torch.Tensor):
     def coded_input(self, x, others=(), tables=None):
         """Declare every product's input transform, preserving basis and order.
 
-        Compatible products share launches within their declared output arity.
-        Folded matrix multiplication is shared across destination batches.
+        Compatible products share the numerical transform. Device binding
+        capacity determines which scaled stores can fuse into its command.
         Each product retains its actual scale operand, including graph inputs.
         """
         def compatible(a, b):
@@ -834,38 +871,64 @@ class Matrix(torch.Tensor):
         n, input_type = x.shape[0], _TYPES[x.dtype][1]
         transform = ('gather' if self.folded is None else 'hadamard' if self.signs is not None
                      else 'rotate' if n <= max(POLICY['cooperative_rows']) else 'gather')
-        bindings = tuple(POLICY['transform_outputs'][transform])
         # A folded matrix product is shared by every destination batch.
         source = torch.mm(x, self.folded.T) if transform == 'gather' and self.folded is not None else x
         positions = tuple(range(self.columns)) if self.folded is not None else self.metadata['col_order']
-        outputs = []
-        for first in range(0, len(matrices), len(bindings)):
-            batch = matrices[first:first + len(bindings)]
-            outs = [_half(n, self.columns) for _ in batch]
-            outs += [outs[0]] * (len(bindings) - len(batch))
-            scales = [m.col_scale for m in batch] + [batch[0].col_scale] * (len(bindings) - len(batch))
-            if transform == 'gather':
-                name, line = instance('streamed_row_gather', 0, 0, 0, int(-1 in positions), source.shape[1], 0, _TYPES[source.dtype][1])
-                made = _encode(name, [source, outs[0], None, scales[0], None, outs[1], outs[2], scales[1], scales[2]],
-                        _dims(rows=n, columns=self.columns, inputs=len(batch)), n, 1, 256, line,
-                        outputs=bindings, indexed=(0, 3, 7, 8), indices={2: positions})
-            elif transform == 'hadamard':
-                name, line = instance('streamed_hadamard', self.logical_shape[1], int(-1 in self.input_domain), 0, input_type)
-                made = _encode(name, [x, outs[0], outs[1], None, scales[0], scales[1], self.signs, self.hadamard],
-                        _dims(rows=n, columns=self.columns, per=self.columns // self.hadamard.shape[0], inputs=len(batch)),
-                        n, 1, 256, line, outputs=bindings, indexed=(0, 4, 5, 6, 7),
-                        indices={3: self.metadata['col_order'], 12: self.input_domain})
-            else:
-                packed = self.rotation.shape[1] == self.columns and self.rotation.stride() == (self.columns, 1)
-                name, line = (('streamed_rotate', '') if packed and input_type == 'half'
-                              else instance('streamed_rotate', 0 if packed else self.logical_shape[1], 0, input_type))
-                tabled = first == 0 and tables is not None
-                made = _encode(name, [x, outs[0], outs[1], None, scales[0], scales[1], self.rotation, self.rotation_scale, tables if tabled else None],
-                        _dims(rows=n, columns=self.columns, inputs=len(batch), flags=int(tabled)),
-                        -(-self.columns // 32), 1, 256, line, outputs=bindings + ((8,) if tabled else ()), indexed=(0, 4, 5, 6, 7))
+        def emit(kind, source, products, positions, tables=None, unscaled=None):
+            bindings = tuple(POLICY['transform_outputs'][kind])
+            available = transform_bindings(kind)
+            capacity = len(bindings) + len(available)
+            outputs = []
+            for first in range(0, len(products), capacity):
+                batch = products[first:first + capacity]
+                outs = [_half(n, self.columns) for _ in batch]
+                outs += [outs[0]] * (len(bindings) - len(batch))
+                scales = [m.col_scale for m in batch] + [batch[0].col_scale] * (len(bindings) - len(batch))
+                extra = list(available[:max(0, len(batch) - len(bindings))])
+                values, factors = outs[len(bindings):], scales[len(bindings):]
+                if unscaled is not None:
+                    extra.append((available[len(extra)][0], None))
+                    values.append(unscaled); factors.append(None)
+                tabled = False
+                if kind == 'gather':
+                    name, line = instance('streamed_row_gather', 0, 0, 0, int(-1 in positions), source.shape[1], 0, _TYPES[source.dtype][1])
+                    buffers = [source, outs[0], None, scales[0], None, outs[1], outs[2], scales[1], scales[2]]
+                    dims, groups = _dims(rows=n, columns=self.columns, inputs=len(batch)), n
+                    indexed, indices = (0, 3, 7, 8), {2: positions}
+                elif kind == 'hadamard':
+                    name, line = instance('streamed_hadamard', self.logical_shape[1], int(-1 in self.input_domain), 0, input_type)
+                    buffers = [source, outs[0], outs[1], None, scales[0], scales[1], self.signs, self.hadamard]
+                    dims, groups = _dims(rows=n, columns=self.columns, per=self.columns // self.hadamard.shape[0], inputs=len(batch)), n
+                    indexed, indices = (0, 4, 5, 6, 7), {3: self.metadata['col_order'], 12: self.input_domain}
+                else:
+                    packed = self.rotation.shape[1] == self.columns and self.rotation.stride() == (self.columns, 1)
+                    name, line = (('streamed_rotate', '') if packed and input_type == 'half'
+                                  else instance('streamed_rotate', 0 if packed else self.logical_shape[1], 0, input_type))
+                    tabled = first == 0 and tables is not None
+                    buffers = [source, outs[0], outs[1], None, scales[0], scales[1], self.rotation, self.rotation_scale, tables if tabled else None]
+                    dims, groups = _dims(rows=n, columns=self.columns, inputs=len(batch), flags=int(tabled)), -(-self.columns // 32)
+                    indexed, indices = (0, 4, 5, 6, 7), None
+                prefix = transform_stores(kind, extra, values, factors, buffers)
+                made = _encode(name, buffers, dims, groups, 1, 256, line,
+                    outputs=bindings + tuple(output for output, _ in extra) + ((8,) if tabled else ()),
+                    indexed=indexed + tuple(scale for _, scale in extra if scale is not None), indices=indices, prefix=prefix)
                 if tabled:
                     tables = made[-1]
-            outputs.extend(made[:len(batch)])
+                if unscaled is not None:
+                    unscaled = made[len(batch)]
+                outputs.extend(made[:len(batch)])
+            return outputs, tables, unscaled
+
+        capacity = len(POLICY['transform_outputs'][transform]) + len(transform_bindings(transform))
+        if transform != 'gather' and len(matrices) > capacity:
+            # Keep the numerical result at its computation width. The first
+            # transform also writes its direct consumers; later consumers only
+            # gather and scale these values, without repeating the transform.
+            value = torch.empty((n, self.columns), dtype=torch.float32, device=x.device)
+            outputs, tables, value = emit(transform, source, matrices[:capacity - 1], positions, tables, value)
+            rest, _, _ = emit('gather', value, matrices[capacity - 1:], tuple(range(self.columns)))
+            return outputs + rest, tables
+        outputs, tables, _ = emit(transform, source, matrices, positions, tables)
         return outputs, tables
 
     def product(self, xt, op='product', tables=None, decomposition=None):
