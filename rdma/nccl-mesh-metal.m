@@ -43,7 +43,6 @@ _Static_assert(sizeof(struct args) <= RECORD, "an argument record");
 
 static id<MTLDevice> device_;
 static NSMutableDictionary *kernels_;
-static NSMutableArray *retiring_;
 /* the text of this thread's last failure here that is composed (say): a result's message (struct metal_result), its
    caller's to carry before the thread's next step */
 static _Thread_local char said_[MESH_NCCL_DIAGNOSTIC_BYTES];
@@ -73,7 +72,7 @@ void *metal_device(void) {
    value, and nothing is kept, so a later call reads the files again (rdma/NCCL.md "The library's kernels") */
 static struct kernels *kernels_of(id<MTLDevice> device, const char **message) {
   @autoreleasepool {
-    if (!kernels_) { kernels_ = [NSMutableDictionary new]; retiring_ = [NSMutableArray new]; }
+    if (!kernels_) kernels_ = [NSMutableDictionary new];
     NSValue *key = [NSValue valueWithPointer:(__bridge const void *)device];
     NSValue *held = kernels_[key];
     if (held) return held.pointerValue;
@@ -125,10 +124,6 @@ void *metal_wrap(void *address, size_t bytes) {
   return [(id<MTLDevice>)metal_device() newBufferWithBytesNoCopy:address length:bytes options:MTLResourceStorageModeShared deallocator:nil];
 }
 
-void *metal_scratch(size_t bytes) {
-  return [(id<MTLDevice>)metal_device() newBufferWithLength:bytes ? bytes : 16 options:MTLResourceStorageModePrivate];
-}
-
 void *metal_shared(size_t bytes) {
   id<MTLBuffer> made = [(id<MTLDevice>)metal_device() newBufferWithLength:bytes ? bytes : 16 options:MTLResourceStorageModeShared];
   if (made) memset(made.contents, 0, made.length);
@@ -155,7 +150,6 @@ struct metal_program *metal_begin(struct metal_program *program, void *command_b
   *program = (struct metal_program){0};
   program->buffer = [(id<MTLCommandBuffer>)command_buffer retain];
   if (encoder) { program->encoder = [(id<MTLComputeCommandEncoder>)encoder retain]; program->borrowed = 1; }
-  if (!encoder) program->kept = [NSMutableArray new];
   program->violation = [(id<MTLBuffer>)violation retain];
   program->polls = bound_of(polls);
   /* Deferred records and the payloads they name belong to this residency set. */
@@ -597,8 +591,6 @@ const char *metal_prelude(void) {
   return text.UTF8String;
 }
 
-void metal_keep(struct metal_program *program, void *object) { [program->kept addObject:(id)object]; }
-
 struct metal_result metal_present(struct metal_program *program,void *lists,size_t list_offset,
     void *records,size_t record_offset,size_t count,uint64_t first,void *words,size_t taken,size_t presented) {
   if(program->encoder4&&count) {
@@ -618,33 +610,16 @@ struct metal_result metal_present(struct metal_program *program,void *lists,size
                   .at=presented,.count=MESH_STREAM_ENTRIES},count,1);
 }
 
-/* the program's end signals `event` to `value`; what it kept is released once the event has passed it
-   (metal_collect); one with no event (a failed group's, nccl-mesh.c program_end) signals nothing, and what its own
-   encoder's commands kept is held by its command buffer (a completion handler's capture) until that buffer completes
-   or is freed; a program in a borrowed encoder keeps nothing; the residency set (the Metal 4 form's, a fused classic
+/* the program's end signals `event` to `value`; one with no event (a failed group's, nccl-mesh.c program_end) signals
+   nothing; the residency set (the Metal 4 form's, a fused classic
    program's) committed where the program made a buffer resident */
 void metal_end(struct metal_program *program, void *event, uint64_t value) {
   recording_free(program->recording);
   program->recording = NULL;
   close_encoder(program);
-  if (event) {
-    [program->buffer encodeSignalEvent:(id<MTLEvent>)event value:value];
-    @autoreleasepool { [retiring_ addObject:@[@(value), program->kept]]; }
-  } else if (!program->borrowed && program->buffer) {
-    NSMutableArray *kept = program->kept;
-    [program->buffer addCompletedHandler:^(id<MTLCommandBuffer> done) { (void)done; (void)kept; }];
-  }
+  if (event) [program->buffer encodeSignalEvent:(id<MTLEvent>)event value:value];
   if (program->added) [program->residency commit];
-  [program->kept release];
   [program->buffer release];
   [program->encoder4 release]; [program->table release]; [program->residency release]; [program->violation release];
 }
 
-void metal_collect(void *event) {
-  const uint64_t signaled = metal_signaled(event);
-  @autoreleasepool {
-    NSIndexSet *done = [retiring_ indexesOfObjectsPassingTest:^BOOL(NSArray *entry, NSUInteger index, BOOL *stop) {
-      (void)index; (void)stop; return [entry[0] unsignedLongLongValue] <= signaled; }];
-    [retiring_ removeObjectsAtIndexes:done];
-  }
-}

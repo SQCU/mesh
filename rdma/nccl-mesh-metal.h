@@ -43,7 +43,6 @@ struct kernels;
 struct metal_program {
   METAL_HANDLE(id<MTLCommandBuffer>) buffer;
   METAL_HANDLE(id<MTLComputeCommandEncoder>) encoder;
-  METAL_HANDLE(NSMutableArray *) kept;
   int borrowed;
   METAL_HANDLE(id<MTL4ComputeCommandEncoder>) encoder4;
   METAL_HANDLE(id<MTL4ArgumentTable>) table;
@@ -65,7 +64,6 @@ static inline struct metal_result metal_failed(int status) { return (struct meta
 
 void *metal_device(void);
 void *metal_wrap(void *address, size_t bytes);
-void *metal_scratch(size_t bytes);
 /* a buffer of `bytes` the host and the GPU both read and write, zeroed (its address metal_contents') */
 void *metal_shared(size_t bytes);
 void *metal_event(void);
@@ -196,14 +194,12 @@ struct metal_result metal_tracks(struct metal_program *, uint32_t tracks, const 
 /* rdma/mesh.metal as this library was built with it, then the steps' Metal text: the argument record, a deferred step's
    bindings as one record (mesh_step_binding) and mesh_step_*; what a caller's kernel compiles after */
 const char *metal_prelude(void);
-void metal_keep(struct metal_program *, void *object);
 /* Publish a compiled descriptor list. Its only dependency is reuse of slots
    already read by the local bridge; no peer acknowledgement is introduced. */
 struct metal_result metal_present(struct metal_program *, void *lists, size_t list_offset,
     void *records, size_t record_offset, size_t count, uint64_t first,
     void *words, size_t taken, size_t presented);
 void metal_end(struct metal_program *, void *event, uint64_t value);
-void metal_collect(void *event);
 /* design/transport.md section 5: an expiry's end of the program, its GPU work released first and awaited within
    MESH_PLATFORM_NS (nccl-mesh.c); and the process's watch, once a second, for GPU work that makes no progress, which
    it ends so, started by the first communicator or prepared function */
