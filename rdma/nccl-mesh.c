@@ -3119,10 +3119,11 @@ static ncclResult_t table_of(struct ncclComm *comm, uint64_t offset, uint64_t by
 /* a free slot of at least `bytes` (the least such), else a new one (ncclMemAlloc) of `bytes` rounded up to one of eight
    sizes an octave (at most an eighth more: so a slot made for one definition fits others, and the slots made of each
    size are never more than are held at once, whatever sizes the definitions name), held; its number + 1, 0 where the
-   region cannot meet it (the failure formatted).  A free slot too small whose last group was the host path's and has
-   every landing awaited (`waited`: no GPU work of the library's can still reach it) is returned to the region
-   (ncclMemFree), its entry vacant for the next; one a Metal-path group used last is returned at ncclCommDestroy (the
-   host cannot tell when a caller's command buffer that touches it has run).  Under group_lock */
+   region cannot meet it (the failure formatted).  A free slot too small is returned to the region (ncclMemFree), its
+   entry vacant for the next, once no GPU work of the library's can still reach it: its last group the host path's,
+   every landing awaited (`waited`); or its last group a Metal path's (`ticket`), whose stream has stored that ticket in
+   the slot's word of the communicator's failure words' page (word 8 + its index), as the stream does once it has run
+   past that group where its generation let the slot go (launch_metal); else at ncclCommDestroy.  Under group_lock */
 static uint32_t slot_take(struct ncclComm *comm, size_t bytes) {
   size_t step = comm->page ? comm->page : 1;
   if (bytes > SIZE_MAX / 4) { fail(ncclSystemError, "a slot of %zu bytes", bytes); return 0; }
@@ -3132,8 +3133,9 @@ static uint32_t slot_take(struct ncclComm *comm, size_t bytes) {
   uint32_t best = 0, vacant = 0;
   for (uint32_t k = 0; k < comm->slot_count; k++) {
     struct slot *s = comm->slots + k;
-    int done = !s->held && !s->ticket;
-    for (uint32_t h = 0; done && h < comm->count; h++) done = comm->channels[h].waited >= s->lands[h];
+    const int released = s->ticket && 8 + k < (size_t)getpagesize() / 8 && atomic_load_explicit(comm->words + 8 + k, memory_order_acquire) == s->ticket;
+    int done = !s->held && (released || !s->ticket);
+    for (uint32_t h = 0; done && !released && h < comm->count; h++) done = comm->channels[h].waited >= s->lands[h];
     if (!s->held && s->bytes >= bytes) { if (!best || s->bytes < comm->slots[best - 1].bytes) best = k + 1; }
     else if (done) { ncclMemFree(s->address); s->address = NULL; s->bytes = 0; vacant = k + 1; }
   }
@@ -4618,6 +4620,10 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   if (!result) result = group_bound(comm, &list, n, x, repeats, stride, &plans, &u);
   if (!result && remote) result = bind_slot(program, comm, x, list, n, plans, &area, &slot);
   if (!result && remote && !fused && slot != last) result = guard(program, comm, slot, &published);
+  /* the slot this generation let go, too small (bind_slot): its last group ran in the stream before this point (guard,
+     above), so the stream stores that group's ticket in the slot's word, and the slot is then returnable (slot_take) */
+  if (!result && remote && !fused && last && slot != last && comm->slots[last - 1].ticket && 8 + last <= (size_t)getpagesize() / 8)
+    result = gpu(metal_open_gate(program, comm->violation, (7 + (size_t)last) * 8, comm->slots[last - 1].ticket), "a slot let go");
   if (!result) bind_calls(list, n);
   struct inflight *g = NULL, *before = NULL;
   uint64_t ticket = 0;
