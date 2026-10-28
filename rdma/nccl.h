@@ -1118,7 +1118,8 @@ typedef struct {
      rank's bindings' offsets within their registration extents once and cuts the call's pieces wherever some rank's
      binding crosses an extent, so no DMA span crosses one for a lease of any size where the call is issued with
      bindings at those offsets (others fail as values at placement). Collectives and all-to-alls; a WRITE has its
-     own cuts. */
+     own cuts. A group whose every call declares its bindings is laid and placed for them at CommPlan, in each of its
+     generations, so its issues with those buffers bind only their entries. */
   const ncclMeshBuffer* bindings;
 } ncclMeshCall;
 /* A communicator's plan (ncclMeshCommPlan): its `groups` declared groups, the groups one pass of its order issues

@@ -5257,6 +5257,9 @@ static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call
       const uintptr_t at = (uintptr_t)address_of((struct where){d->bindings[j].buffer, d->bindings[j].offset});
       if (at >= data && at < end) c->phase[2 * me + j] = (uint64_t)(at - data) % MESH_DMA_EXTENT;
     }
+    /* the bindings as the issued call's buffers (admit): its group's generations laid and placed for them (prepared) */
+    c->send_at = (struct where){d->bindings[0].buffer, d->bindings[0].offset};
+    c->recv_at = (struct where){d->bindings[1].buffer, d->bindings[1].offset};
   }
   if (v && !(c->segments = malloc((size_t)v * sizeof *c->segments))) return fail(ncclSystemError, "out of memory");
   for (int k = 0; k < v; k++) { c->segments[k] = d->counts[k]; c->total += d->counts[k]; }
@@ -5275,6 +5278,38 @@ static void plan_free(struct ncclComm *comm, struct plan *plan) {
   for (uint32_t g = 0; plan && plan->group && g < plan->view.groups; g++) compiled_drop(comm, plan->group + g);
   if (plan) { free(plan->group); free(plan->order); free(plan->ends); free(plan->entries); }
   free(plan);
+}
+
+/* a declared group whose every call declares its bindings (nccl.h ncclMeshCall bindings; none a WRITE's, whose plan
+   comes at its issue) laid and placed for them in each of its generations (issue_bind on copies of its calls, as their
+   issues will be: the Metal path's where a binding names a Metal buffer), so an issue with those buffers binds only its
+   entries.  Under group_lock */
+static ncclResult_t prepared(struct ncclComm *comm, struct compiled *x, int remote) {
+  int metal = 0;
+  for (size_t i = 0; i < x->n; i++) {
+    if (!x->calls[i].phase || x->calls[i].target) return ncclSuccess;
+    metal |= x->calls[i].send_at.buffer || x->calls[i].recv_at.buffer;
+  }
+  struct call *list = malloc((x->n + 1) * sizeof *list);
+  ncclResult_t result = list ? ncclSuccess : fail(ncclSystemError, "out of memory");
+  for (uint32_t k = 0; !result && k < GENERATIONS; k++) {
+    memcpy(list, x->calls, x->n * sizeof *list);
+    for (size_t i = 0; i < x->n && !result; i++) {
+      list[i].bound = NULL; list[i].fused = x->calls[i].fused;
+      if (reducing(list[i].what)) result = reduction(list + i);
+    }
+    struct call *issued = list;
+    struct schedule *plans = NULL;
+    struct issue *u = NULL;
+    struct where area = {NULL, 0};
+    uint32_t slot = 0;
+    if (!result) result = issue_bind(comm, &issued, x->n, x, 1, 0, metal, remote, &plans, &u, &area, &slot);
+    for (size_t i = 0; u && i < x->n; i++) steps_free(issued[i].bound);
+    issue_let(comm, u);
+  }
+  x->uses = 0;
+  free(list);
+  return result;
 }
 
 /* each declared call's bindings' extent offsets (struct call `phase`), every rank's, by one configuration exchange of
@@ -5357,6 +5392,7 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
     const size_t need = remote ? slot_laid(comm, x, x->calls, x->n, x->plans, NULL, NULL) : 0;
     for (uint32_t k = 0; remote && !result && k < GENERATIONS; k++)
       if (!(x->slot[k] = slot_take(comm, need))) result = fail(ncclSystemError, "a declared group's storage: %s", last.text);
+    if (!result) result = prepared(comm, x, remote);
   }
   if (!result) {
     struct plan *was = comm->plan;
