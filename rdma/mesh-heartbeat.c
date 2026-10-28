@@ -222,8 +222,10 @@ static void turn(void){
 
 /* design/transport.md section 2: the bridge's end, as asked or not; its exit reaped without blocking (an exit can wait on
    a device's release with no deadline: mesh-link.c child_reaped), looked at again every REPLACE_TICK_MS while it is not
-   yet reapable (TIMER_REAP: the bridge counts as running meanwhile, so none is opened), and taken as ended unreaped
-   once MESH_PLATFORM_NS has passed */
+   yet reapable (TIMER_REAP: the bridge counts as running meanwhile, so none is opened).  Not reapable MESH_PLATFORM_NS
+   after its exit was heard, the heartbeat ends, naming the wait (a release's or an end's region expired first, and 0,
+   so launchd leaves the node released; else 1, so launchd starts the heartbeat again): launchd, the bridge's parent
+   then, reaps it, and no bridge is opened beside it by this heartbeat */
 static uint64_t reap_from;
 static void bridge_ended(void){
   int status=0;
@@ -237,7 +239,11 @@ static void bridge_ended(void){
       kevent64(events,&t,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
       return;
     }
-    mesh_say("heartbeat","bridge %d not reapable %.0f s after its exit was heard: taken as ended",(int)was,(double)MESH_PLATFORM_NS/1e9);
+    const int released=asked==ASKED_RELEASE || asked==ASKED_END;
+    mesh_say("heartbeat","bridge %d not reapable %.0f s after its exit was heard: past its deadline; the heartbeat ends",(int)was,
+             (double)MESH_PLATFORM_NS/1e9);
+    if(released)region_expire();
+    exit(!released);
   }
   reap_from=0;
   const int reaped=got==was;
