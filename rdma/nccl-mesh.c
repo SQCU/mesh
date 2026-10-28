@@ -2084,6 +2084,9 @@ struct call {
   ncclMeshProduction *production;
   uint64_t *segments, *matrix;
   uint64_t *contributors, *recipients;
+  /* a declaration's: each rank's bindings' offsets within their registration extents ([2r] its send buffer's, [2r + 1]
+     its receive buffer's; UINT64_MAX none), exchanged at ncclMeshCommPlan (nccl.h ncclMeshCall bindings) */
+  uint64_t *phase;
   /* Configuration owns masks. Issued calls retain only their local roles and
      reduction cardinality, so an in-flight call never borrows a plan's masks. */
   uint32_t roles, participants;
@@ -2455,6 +2458,32 @@ static ncclResult_t bind_routed_steps(struct call *c, const uint32_t *first, con
   return result;
 }
 
+/* the operand's elements, in order, at which some rank's declared binding crosses a registration extent (c->phase):
+   a binding's bytes run from its operand element `base` (an all-gather's send buffer and a reduce-scatter's receive
+   buffer hold their rank's segment alone, of `cut` elements a rank; other bindings the whole operand), and a cut
+   lies where an extent's boundary falls on an element; their count, at most `room` */
+static size_t extent_cuts(const struct call *c, struct mesh_operand operand, const uint64_t *cut, uint64_t *out, size_t room) {
+  const uint32_t N = (uint32_t)c->comm->nranks;
+  const uint64_t z = operand.element_bytes;
+  size_t n = 0;
+  for (uint32_t r = 0; r < N; r++)
+    for (int j = 0; j < 2; j++) {
+      const uint64_t phase = c->phase[2 * r + j];
+      if (phase == UINT64_MAX) continue;
+      const int segment = cut && ((!j && c->what == MESH_ALLGATHER) || (j && c->what == MESH_REDUCE_SCATTER));
+      uint64_t first = 0, length = operand.elements;
+      for (uint32_t q = 0; segment && q < r; q++) first += cut[q];
+      if (segment) length = cut[r];
+      for (uint64_t at = MESH_DMA_EXTENT - phase; at < length * z && n < room; at += MESH_DMA_EXTENT)
+        if (!(at % z) && first + at / z < operand.elements) out[n++] = first + at / z;
+    }
+  for (size_t i = 1; i < n; i++)
+    for (size_t k = i; k && out[k - 1] > out[k]; k--) { const uint64_t t = out[k]; out[k] = out[k - 1]; out[k - 1] = t; }
+  size_t kept = 0;
+  for (size_t i = 0; i < n; i++) if (!kept || out[kept - 1] != out[i]) out[kept++] = out[i];
+  return kept;
+}
+
 static ncclResult_t routed_steps(struct call *c, const struct mesh_program *program,
                                   struct mesh_operand operand, const uint64_t *cut) {
   const uint32_t N = (uint32_t)c->comm->nranks;
@@ -2465,8 +2494,28 @@ static ncclResult_t routed_steps(struct call *c, const struct mesh_program *prog
     initialized[r] = 1 + program->scratch;
     first[r + 1] = first[r] + mesh_program_steps_cut(program, r, operand, cut, c->comm->page, logical + first[r]);
   }
-  if (!result) result = bind_routed_steps(c, first, logical, initialized, 1);
-  free(first); free(initialized); free(logical);
+  /* every rank's steps cut alike where some rank's declared binding crosses a registration extent, so no piece, and
+     no DMA unit of one, spans an extent boundary at any rank (nccl.h ncclMeshCall bindings) */
+  const size_t room = 2 * (size_t)N * (operand.elements * operand.element_bytes / MESH_DMA_EXTENT + 1);
+  uint64_t *cuts = !result && c->phase ? malloc(room * sizeof *cuts) : NULL;
+  if (!result && c->phase && !cuts) result = fail(ncclSystemError, "out of memory");
+  const size_t n = cuts ? extent_cuts(c, operand, cut, cuts, room) : 0;
+  struct mesh_step *split = n ? calloc((size_t)first[N] * (n + 1) + 1, sizeof *split) : NULL;
+  if (!result && n && !split) result = fail(ncclSystemError, "out of memory");
+  for (uint32_t r = 0, at = 0, k = 0; split && !result && r < N; r++) {
+    for (; k < first[r + 1]; k++) {
+      const struct mesh_step s = logical[k];
+      uint64_t lo = s.first;
+      for (size_t i = 0; i < n; i++)
+        if (cuts[i] > lo && cuts[i] < s.first + s.piece.elements) {
+          split[at] = s; split[at].first = lo; split[at++].piece.elements = cuts[i] - lo; lo = cuts[i];
+        }
+      split[at] = s; split[at].first = lo; split[at++].piece.elements = s.first + s.piece.elements - lo;
+    }
+    first[r + 1] = at;
+  }
+  if (!result) result = bind_routed_steps(c, first, split ? split : logical, initialized, 1);
+  free(first); free(initialized); free(logical); free(split); free(cuts);
   return result;
 }
 
@@ -3891,6 +3940,7 @@ static void calls_free(struct call *list, size_t n) {
   for (size_t i = 0; i < n; i++) {
     call_parts_free(list + i);
     free(list[i].segments); free(list[i].matrix); free(list[i].contributors); free(list[i].recipients); free(list[i].production);
+    free(list[i].phase);
   }
   free(list);
 }
@@ -5117,6 +5167,17 @@ static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call
     }
   }
   if (d->what == WHAT_COUNTED && !d->counts) return fail(ncclInvalidArgument, "a declared all-to-all without its counts");
+  /* its bindings' offsets within their registration extents, this rank's now, the others' at ncclMeshCommPlan */
+  if (d->bindings && d->what != WHAT_COUNTED && d->what != ncclMeshCallWrite) {
+    if (!(c->phase = malloc(2 * (size_t)n * sizeof *c->phase))) return fail(ncclSystemError, "out of memory");
+    const struct hdr *m = comm->attach->context.M;
+    const uintptr_t data = (uintptr_t)m + m->data_off, end = data + (uintptr_t)mesh_arena_pages(m) * m->pgsz;
+    for (int k = 0; k < 2 * n; k++) c->phase[k] = UINT64_MAX;
+    for (int j = 0; j < 2; j++) {
+      const uintptr_t at = (uintptr_t)address_of((struct where){d->bindings[j].buffer, d->bindings[j].offset});
+      if (at >= data && at < end) c->phase[2 * me + j] = (uint64_t)(at - data) % MESH_DMA_EXTENT;
+    }
+  }
   if (v && !(c->segments = malloc((size_t)v * sizeof *c->segments))) return fail(ncclSystemError, "out of memory");
   for (int k = 0; k < v; k++) { c->segments[k] = d->counts[k]; c->total += d->counts[k]; }
   if (v && d->what != WHAT_COUNTED) c->count = d->counts[me];
@@ -5134,6 +5195,33 @@ static void plan_free(struct ncclComm *comm, struct plan *plan) {
   for (uint32_t g = 0; plan && plan->group && g < plan->view.groups; g++) compiled_drop(comm, plan->group + g);
   if (plan) { free(plan->group); free(plan->order); free(plan->ends); free(plan->entries); }
   free(plan);
+}
+
+/* each declared call's bindings' extent offsets (struct call `phase`), every rank's, by one configuration exchange of
+   those this rank declared, in the plan's order (the same calls declare bindings on every rank) */
+static ncclResult_t phases_exchange(struct ncclComm *comm, struct plan *plan) {
+  const size_t N = (size_t)comm->nranks;
+  size_t k = 0;
+  for (uint32_t g = 0; plan && g < plan->view.groups; g++)
+    for (size_t i = 0; i < plan->group[g].n; i++) k += plan->group[g].calls[i].phase != NULL;
+  if (!k || N == 1) return ncclSuccess;
+  uint64_t *local = malloc(2 * k * sizeof *local), *reports = malloc(N * 2 * k * sizeof *reports);
+  ncclResult_t result = local && reports ? ncclSuccess : fail(ncclSystemError, "out of memory");
+  size_t at = 0;
+  for (uint32_t g = 0; !result && g < plan->view.groups; g++)
+    for (size_t i = 0; i < plan->group[g].n; i++)
+      if (plan->group[g].calls[i].phase) memcpy(local + 2 * at++, plan->group[g].calls[i].phase + 2 * comm->rank, 2 * sizeof *local);
+  if (!result) result = prepare_exchange(comm, local, 2 * k * sizeof *local, reports);
+  at = 0;
+  for (uint32_t g = 0; !result && g < plan->view.groups; g++)
+    for (size_t i = 0; i < plan->group[g].n; i++) {
+      uint64_t *phase = plan->group[g].calls[i].phase;
+      if (!phase) continue;
+      for (size_t r = 0; r < N; r++) memcpy(phase + 2 * r, reports + r * 2 * k + 2 * at, 2 * sizeof *reports);
+      at++;
+    }
+  free(local); free(reports);
+  return result;
 }
 
 /* Compile group definitions, then bind the function's repeated-block order.
@@ -5160,6 +5248,7 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
     struct compiled *x = made->group + g;
     result = declared(comm, calls + i, x->calls + x->n++);
   }
+  if (!result) result = phases_exchange(comm, made);
   if (made && !result) {
     if(runs>SIZE_MAX/sizeof *made->order || runs>SIZE_MAX/sizeof *made->ends ||
        !(made->order=malloc(runs*sizeof *made->order)) || !(made->ends=malloc(runs*sizeof *made->ends)))

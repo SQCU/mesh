@@ -1110,6 +1110,14 @@ typedef struct {
      writes to its root; ReduceScatter owners have nonzero counts. */
   const uint64_t* contributors;
   const uint64_t* recipients;
+  /* Optional actual bindings, an extension (NULL: none, as before): [0] the send buffer and [1] the receive buffer
+     the call will be issued with, as it passes them (on a stream the ncclMeshBuffer itself, on the host {NULL,
+     address}; {NULL, 0} where this rank has none). Given on every rank or on none for a call, CommPlan exchanges each
+     rank's bindings' offsets within their registration extents once and cuts the call's pieces wherever some rank's
+     binding crosses an extent, so no DMA span crosses one for a lease of any size where the call is issued with
+     bindings at those offsets (others fail as values at placement). Ordinary collectives; all-to-alls and WRITEs
+     have their own cuts. */
+  const ncclMeshBuffer* bindings;
 } ncclMeshCall;
 /* A communicator's plan (ncclMeshCommPlan): its `groups` declared groups, the groups one pass of its order issues
    (`issues`, the sum of each block's count times repeat), the number of the communicator's group the order starts at (`first`: its groups
