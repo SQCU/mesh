@@ -261,7 +261,7 @@ template <typename V, uint B, typename P> inline void streamed_store_four(mesh_o
 // composes that order with the stored partials and scales before this body runs.
 // V keeps vector loads where their views permit them. Plain rows use the same
 // logical positions after a collective has finished the reduction.
-template <uint V = 1, typename P, typename X, typename S>
+template <uint V = 1, typename Plain = half, typename P, typename X, typename S>
 static inline void streamed_rows(P partials, X plain, S scale, uint n, uint first,
                                  uint count, uint rows, uint shares, uint stride,
                                  threadgroup float *vals, uint t, uint threads) {
@@ -269,7 +269,7 @@ static inline void streamed_rows(P partials, X plain, S scale, uint n, uint firs
         for (uint q = t; q < count / 4; q += threads) {
             const ulong at = ulong(n) * rows + first + 4 * q;
             float4 v;
-            if (shares == 0) v = float4(streamed_four<half4>(plain, at));
+            if (shares == 0) v = float4(streamed_four<vec<Plain, 4>>(plain, at));
             else {
                 v = 0.0f;
                 for (uint j = 0; j < shares; ++j) v += streamed_four<float4>(partials, at + ulong(j) * stride);

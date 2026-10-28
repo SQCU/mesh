@@ -4,11 +4,12 @@
 using namespace metal;
 kernel void mesh_sum(device const MESH_SUM_INPUT *values [[buffer(0)]],
                      device MESH_SUM_OUTPUT *output [[buffer(1)]],
+                     device const MESH_SUM_ADDEND *addend [[buffer(2)]],
                      uint i [[thread_position_in_grid]]) {
     if (i >= MESH_SUM_COUNT) return;
     MESH_SUM_ACCUMULATOR value = 0;
     for (uint j = 0; j < MESH_SUM_SHARES; ++j)
         value += MESH_SUM_ACCUMULATOR(values[mesh_index<0>(ulong(j) * MESH_SUM_COUNT + i)]);
-    if constexpr (MESH_SUM_ADD) value += MESH_SUM_ACCUMULATOR(output[mesh_index<1>(i)]);
+    if constexpr (MESH_SUM_ADD) value += MESH_SUM_ACCUMULATOR(addend[mesh_index<2>(i)]);
     output[mesh_index<1>(i)] = MESH_SUM_OUTPUT(value);
 }

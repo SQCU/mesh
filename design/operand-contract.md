@@ -378,6 +378,24 @@ Control values remain runtime page data. Preparation on 2026-10-28 built rank
 and Goal A and compiled typed residuals with mapped and strided operands,
 including controls without a scale. No numerical commands were submitted.
 
+FFN preparation now carries its typed result into the layer finish. A local
+provider result retains its declared output type and layout. Standalone and
+fused residual consumers read that operand directly, including the shared
+vector reader. GPU FFN products retain the supplied destination view too.
+Combining provider partials with GPU work takes an explicit addend operand;
+the destination no longer implicitly supplies that input. All three views feed
+the same indexing and dependency declarations.
+
+Existing native crossings still bind the network's result representation.
+The normalized convolution reads the typed result, but its tap projection
+still consumes half values. Its required conversion uses the ordinary layout
+lowering. These remaining consumer constraints do not apply to every result.
+Provider output-backing guarantees remain unresolved as described above.
+
+Preparation on 2026-10-28 compiled provider-result finishes at widths 37 and 64
+with mapped half, float and integer inputs, and reductions with independently
+typed addends. Native rank and Goal A built. No numerical commands were submitted.
+
 Layer finishes return the gathered operand they actually produce. The next
 attention product consumes that view through the shared input resolver. A finish
 that emits no gather returns no such operand. Stored projections also consume
