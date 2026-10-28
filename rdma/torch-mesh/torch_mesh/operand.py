@@ -54,6 +54,21 @@ class TensorView:
     def reshape(self, shape):
         return TensorView(self.storage, self.layout.reshape(shape))
 
+    def declaration(self, requirement):
+        return dict(source=descriptor(self.storage).state, view=self.layout.state, requirement=requirement)
+
+
+def restore(state):
+    shape, steps, offset, maps, indices = state
+    return _stream.TensorLayout(shape, steps, offset, {axis: values for axis, values in enumerate(maps) if values}, indices or None)
+
+
+def bind(value, declaration):
+    """Compose the declared use with the producer's assigned pages once."""
+    placed = TensorView.of(value)
+    view = restore(declaration['view']).rebase(restore(declaration['source']), placed.layout)
+    return TensorView(placed.storage, view)
+
 def descriptor(value):
     return TensorView.of(value).layout
 

@@ -600,7 +600,8 @@ def coop_of(maps):
 def _encode(name, buffers, dims, gx, gy, threads, line='', *, outputs, indexed=(), pitched=()):
     from .kernel import declare
     from .layout import strides
-    requirements = {i: value.stride() if i in pitched else strides(value.shape)
+    from .operand import descriptor
+    requirements = {i: descriptor(value).strides if i in pitched else strides(value.shape)
                     for i, value in enumerate(buffers) if value is not None}
     return declare('streamed.metal', name, buffers, outputs, dims, 15, (gx, gy, 1), (threads, 1, 1), line,
                    indexed=tuple(outputs) + tuple(indexed), requirements=requirements)
@@ -807,6 +808,11 @@ class Matrix(torch.Tensor):
         """x [n, columns] fp16 in this matrix's coded input coordinates (and those of up to two matrices sharing its
         column order and rotation): gathered and scaled, or rotated (with `tables` [n, tiles, 8, 16] fp32, the first's
         tables for 1-bit tiles too)."""
+        if any(self.columns != m.columns or self.logical_shape[1] != m.logical_shape[1]
+               or self.metadata['col_order'] != m.metadata['col_order'] or self.input_domain != m.input_domain
+               or any(getattr(self, key) is not getattr(m, key) for key in ('rotation', 'signs', 'hadamard', 'folded')) for m in others):
+            first, tables = self.coded_input(x, tables=tables)
+            return first + [m.coded_input(x)[0][0] for m in others], tables
         n = x.shape[0]
         matrices = [self, *others]
         outs = [_half(n, self.columns) for _ in matrices]
@@ -936,32 +942,53 @@ class Matrix(torch.Tensor):
 
     @staticmethod
     def ffn(x, gate, up, down, decomposition=None):
-        """The fused GELU FFN couple down(GELU(x gate^T) * (x up^T)) of coded matrices sharing the hidden order (gate's
-        and up's rows, down's columns: Streamed's FFNs), x [n, columns]: the input rotated or gathered once for gate and
-        up; gate and up together in one kernel with the GELU in its reduction (streamed_couple) where the fit prices it
-        below their two products and streamed_gelu (couple), else those; down's coded input, down's product finished.
-        A `decomposition` (an instance spec: spec_of) runs the three products as that instance, gate's and up's then
-        streamed_gelu."""
+        """Compose the projections through their logical neuron domain.
+
+        Each encoded order remains part of its operand. The activation writes
+        the down product's input directly where no numerical basis transform
+        is required. Products, reductions and stores use shared tensor views.
+        """
+        from .operand import TensorView
         x16 = x.half()
         n = x16.shape[0]
         if not n or not all(gate.logical_shape) or not down.logical_shape[0]:
             return torch.zeros(n, down.logical_shape[0], dtype=x.dtype, device=x.device)
         (gx, ux), _ = gate.coded_input(x16, (up,))
-        hidden = _half(n, gate.rows)
-        spec = None if decomposition is not None else couple(Fit.node(), slice_units(gate), slice_units(up), n, widths=max(gate.widths, up.widths))[0]
+        rotated = down.folded is not None
+        order = tuple(range(down.logical_shape[1])) if rotated else down.metadata['col_order']
+        hidden = _half(n, len(order))
+        target = TensorView.of(hidden)
+        scaled = not rotated and any(v != 1 for v in down.metadata['col_scale'])
+        paired = (not gate.row_masked and gate.metadata['row_order'] == up.metadata['row_order']
+                  and gate.columns == up.columns and gate.pitch == up.pitch and -1 not in order)
+        spec = None if decomposition is not None or not paired else couple(
+            Fit.node(), slice_units(gate), slice_units(up), n, widths=max(gate.widths, up.widths))[0]
         if spec is not None:
-            name, line = spec_instance(spec, gate.tiles_, max(gate.widths, up.widths), masked=gate.row_masked)
+            positions = {value: at for at, value in enumerate(order)}
+            stores = [positions[value] for value in gate.metadata['row_order']]
+            kernel, args = spec_arguments(spec, gate.tiles_, max(gate.widths, up.widths))
+            name, line = instance('streamed_' + kernel, *args, 0, int(scaled))
             (groups, _), threads, _ = launch(spec, gate.rows, n)
-            hidden, = _encode(name, gate._code() + [None, gx, None] + up._code() + [ux, up.row_scale, hidden, gate.row_order, gate.row_scale],
-                    _dims(tiles=gate.tiles_, outputs=gate.rows, rows=n, pitch=gate.pitch), groups, 1, threads, line,
-                    outputs=(11,), indexed=(10, 12, 13), pitched=(1, 7))
-            return down.apply(hidden).to(x.dtype)
-        g, u = gate.product(gx, decomposition=decomposition), up.product(ux, decomposition=decomposition)
-        name, line = instance('streamed_gelu', 'float', 1) if gate.row_masked else ('streamed_gelu', '')
-        hidden, = _encode(name, [g, u, gate.row_scale, up.row_scale, hidden, gate.row_order],
-                _dims(outputs=gate.rows, shares=g.shape[0], inputs=u.shape[0], split=n * gate.rows, per=n * up.rows),
-                -(-gate.rows // 1024), n, 256, line, outputs=(4,), indexed=(0, 1, 2, 3, 5))
-        return down.apply(hidden, decomposition).to(x.dtype)
+            scale = TensorView.of(down.col_scale).select(0, stores) if scaled else None
+            hidden, = _encode(name, gate._code() + [None, gx, None] + up._code()
+                + [ux, up.row_scale, target.select(1, stores), gate.row_order, gate.row_scale, scale],
+                _dims(tiles=gate.tiles_, outputs=gate.rows, rows=n, pitch=gate.pitch), groups, 1, threads, line,
+                outputs=(11,), indexed=(10, 12, 13, 14), pitched=(1, 7))
+        else:
+            g, u = gate.product(gx, decomposition=decomposition), up.product(ux, decomposition=decomposition)
+            def rows(matrix):
+                positions = {value: at for at, value in enumerate(matrix.metadata['row_order']) if value >= 0}
+                return [positions[value] if value >= 0 else 0 for value in order]
+            gi, ui = rows(gate), rows(up)
+            name, line = instance('streamed_gelu', 'float', int(-1 in order), int(scaled))
+            threads = COMPUTE['STREAMED_SCALE_THREADS']
+            hidden, = _encode(name, [TensorView.of(g).select(2, gi), TensorView.of(u).select(2, ui),
+                                    TensorView.of(gate.row_scale).select(0, gi), TensorView.of(up.row_scale).select(0, ui),
+                                    target, down.col_order if -1 in order else None, down.col_scale if scaled else None],
+                _dims(outputs=len(order), shares=g.shape[0], inputs=u.shape[0], split=n * len(order), per=n * len(order)),
+                -(-len(order) // (4 * threads)), n, threads, line, outputs=(4,), indexed=(0, 1, 2, 3, 5, 6))
+        coded = down.coded_input(hidden)[0][0] if rotated else hidden
+        return down.apply(coded, decomposition).to(x.dtype)
 
 
 def pair_units(sg, su):
@@ -1058,9 +1085,7 @@ _OPERATIONS = {
 
 
 class Streamed:
-    """Every coded matrix of an export, by name: an FFN's hidden in its code order (gate's and up's rows, down's
-    columns: one permutation of the neurons, so the FFN is unchanged), so its neurons [a, b) are its codes' rows or
-    columns [a, b); on `device` (Matrix.load)."""
+    """Every coded matrix of an export, with its logical axes and encoded orders intact."""
 
     def __init__(self, path, device='mps'):
         from safetensors import safe_open
@@ -1077,16 +1102,12 @@ class Streamed:
             if not name.endswith('.mlp.gate_proj'):
                 continue
             base = name[:-len('gate_proj')]
-            gate, up, down = (self.matrices[base + p] for p in ('gate_proj', 'up_proj', 'down_proj'))
-            assert torch.equal(gate.row_order, up.row_order) and torch.equal(gate.row_order, down.col_order), base
-            identity = torch.arange(gate.rows, dtype=torch.int32, device=device)
-            self.matrices[base + 'gate_proj'] = gate.like(row_order=identity)
+            gate, up = (self.matrices[base + p] for p in ('gate_proj', 'up_proj'))
             basis = [(getattr(gate, k), getattr(up, k)) for k in ('rotation', 'signs', 'hadamard')]
             shared = gate.folded is not None and torch.equal(gate.col_order, up.col_order) and all(
                 (a is None) == (b is None) and (a is None or torch.equal(a, b)) for a, b in basis)
-            self.matrices[base + 'up_proj'] = up.like(row_order=identity, **({k: getattr(gate, k) for k in ('rotation', 'signs', 'hadamard', 'folded')}
+            self.matrices[base + 'up_proj'] = up.like(**({k: getattr(gate, k) for k in ('rotation', 'signs', 'hadamard', 'folded')}
                                                                              if shared else {}))
-            self.matrices[base + 'down_proj'] = down.like(col_order=identity)
 
     def __getitem__(self, name):
         return self.matrices[name]

@@ -90,9 +90,6 @@ This contract does not declare these existing paths complete:
 
 - FX `placement.indices` and `FixedLayout` still describe aliases with strides
   alone. Arbitrary mappings must survive lowering without caller-owned copies.
-- Python compressed FFN composition still assumes paired encoded rows.
-  The native FFN now composes logical cuts through shared operand views;
-  its `codeOrder`, encoded-coordinate cut and tied-order interfaces are gone.
 - Some fused consumers load order arrays whose static compositions could be
   resolved earlier. Numerical index tensors must remain data.
 - Producer placement does not yet solve every conflicting API requirement or
@@ -100,3 +97,25 @@ This contract does not declare these existing paths complete:
 - Foreign providers still need all internal views and dependencies exposed.
 Further integration belongs at these shared lowering boundaries. Numerical
 bodies contribute their work and uses, rather than separate memory systems.
+
+## Compressed projections
+
+Native and Python FFNs retain each matrix's logical domain and encoded order.
+Shared operand views compose the gate and up outputs with the down input.
+Matching projections can use the coupled numerical kernel. Other projections
+use the same product and reduction bodies with their declared views. A numerical
+basis transform remains work; a permutation alone adds no copy.
+
+The FX kernel declaration carries each binding's source view, use view, layout
+requirement, and explicit output device. Preparation composes the use with the
+producer's assigned storage. Several output bindings can select different parts
+of one output allocation. Commands and dependency records consume those same
+views.
+
+Preparation evidence on 2026-10-27: an FX FFN with distinct gate/up orders,
+37 logical neurons in 64 encoded lanes, a third down-input order, and non-unit
+down scales compiled to seven native command records. Its activation reads the
+mapped partials and writes the down input; there is no layout-copy command.
+No numerical commands were submitted. Library, frontend extension, and native
+rank/goal-a builds completed. This establishes preparation coverage, not measured
+throughput or numerical execution results.

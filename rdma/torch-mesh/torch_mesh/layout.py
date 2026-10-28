@@ -5,6 +5,7 @@ ordinary tiled data dependency, using preassigned region storage.
 """
 from functools import lru_cache
 import math
+import json
 from pathlib import Path
 
 from . import _stream
@@ -60,8 +61,11 @@ def place(graph, placements, fixed):
             continue
         args = {a.name: node.args[i] if i < len(node.args) else node.kwargs[a.name]
                 for i, a in enumerate(schema.arguments)}
-        for source, slot, required in zip(args['inputs'], args['input_slots'], args['input_strides'], strict=True):
-            if slot in args['indexed']:
+        declarations = json.loads(args['operands'])
+        for source, slot in zip(args['inputs'], args['input_slots'], strict=True):
+            declaration = declarations[str(slot)]
+            required = declaration['requirement']
+            if required == 'indexed' or declaration['view'] != declaration['source']:
                 continue
             value = source.meta['val']
             group = next((g for g in groups if torch_alias(g[0][0], value)), None)

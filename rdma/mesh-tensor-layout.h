@@ -28,6 +28,9 @@ NS_ASSUME_NONNULL_BEGIN
 // Subdivide each typed element into fixed-width components (e.g. bytes).
 - (MetalTensorLayout *)components:(NSUInteger)count;
 - (MetalTensorLayout *)shift:(NSInteger)elements;
+// Compose a declared alias with its producer's assigned storage. Both source
+// layouts describe the same logical elements. Only preparation calls this.
+- (MetalTensorLayout *)rebase:(MetalTensorLayout *)declared onto:(MetalTensorLayout *)placed;
 // Required strides are an API operand. Indexed consumers accept this layout;
 // fixed-layout consumers either bind it directly or get a prepared copy edge.
 - (BOOL)matches:(NSArray<NSNumber *> *)strides;

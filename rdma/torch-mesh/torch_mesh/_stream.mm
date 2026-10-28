@@ -1751,6 +1751,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def_property_readonly("offset",[](const TensorLayout &v){return v.value.offset;})
     .def_property_readonly("count",[](const TensorLayout &v){return v.value.count;})
     .def_property_readonly("affine",[](const TensorLayout &v){return bool(v.value.affine);})
+    .def_property_readonly("state",[](const TensorLayout &v){
+      std::vector<std::vector<NSInteger>> maps(v.value.shape.count);
+      for(NSNumber *axis in v.value.maps){NSData *data=v.value.maps[axis];const auto *p=(const NSInteger *)data.bytes;maps[axis.unsignedIntegerValue]={p,p+data.length/sizeof *p};}
+      std::vector<NSInteger> indices;
+      if(v.value.indices){const auto *p=(const NSInteger *)v.value.indices.bytes;indices={p,p+v.value.indices.length/sizeof *p};}
+      return pybind11::make_tuple(tensorNumbers(v.value.shape),tensorNumbers(v.value.strides),v.value.offset,maps,indices);
+    })
     .def("index",[](const TensorLayout &v,NSUInteger i){return [v.value index:i];})
     .def("select",[](const TensorLayout &v,NSUInteger axis,const std::vector<NSInteger> &indices){return TensorLayout([v.value select:axis indices:tensorWords(indices)]);})
     .def("slice",[](const TensorLayout &v,NSUInteger axis,NSInteger first,NSUInteger count,NSInteger step){return TensorLayout([v.value slice:axis first:first count:count step:step]);})
@@ -1759,6 +1766,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def("reshape",[](const TensorLayout &v,const std::vector<NSInteger> &shape){return TensorLayout([v.value reshape:tensorNumbers(shape)]);})
     .def("components",[](const TensorLayout &v,NSUInteger count){return TensorLayout([v.value components:count]);})
     .def("gather",[](const TensorLayout &v,const std::vector<NSInteger> &shape,const std::vector<NSInteger> &indices){return TensorLayout([v.value gather:tensorNumbers(shape) indices:tensorWords(indices)]);})
+    .def("rebase",[](const TensorLayout &v,const TensorLayout &declared,const TensorLayout &placed){
+      @try{return TensorLayout([v.value rebase:declared.value onto:placed.value]);}
+      @catch(NSException *error){TORCH_CHECK(false,error.reason.UTF8String);}
+    })
     .def("matches",[](const TensorLayout &v,const std::vector<NSInteger> &steps){return bool([v.value matches:tensorNumbers(steps)]);})
     .def("required",[](const TensorLayout &v,const std::string &kind,const std::vector<NSInteger> &steps){return TensorLayout([v.value required:@(kind.c_str()) strides:tensorNumbers(steps)]);},pybind11::arg("kind"),pybind11::arg("strides")=std::vector<NSInteger>{})
     .def("requirements",[](const TensorLayout &v,const std::vector<std::pair<std::string,std::vector<NSInteger>>> &requirements){

@@ -184,6 +184,43 @@ static NSData *TensorWords(NSArray<NSNumber *> *values) {
     if(!elements)return self;
     return [MetalTensorLayout shape:_shape strides:_strides offset:_offset+elements maps:_maps indices:_indices];
 }
+- (MetalTensorLayout *)rebase:(MetalTensorLayout *)declared onto:(MetalTensorLayout *)placed {
+    NSParameterAssert([declared.shape isEqual:placed.shape]);
+    if([self isEqual:declared])return placed;
+    if([[declared shift:-declared.offset] isEqual:[placed shift:-placed.offset]])
+        return [self shift:placed.offset-declared.offset];
+    NSArray *logical=TensorStrides(declared.shape);
+    NSMutableArray *axes=[NSMutableArray array];NSInteger low=declared.offset;
+    for(NSUInteger d=0;d<declared.shape.count;d++) {
+        const NSInteger n=[declared.shape[d] integerValue],s=[declared.strides[d] integerValue];
+        if(n>1&&s){[axes addObject:@(d)];low+=MIN(0,(n-1)*s);}
+    }
+    [axes sortUsingComparator:^NSComparisonResult(NSNumber *a,NSNumber *b) {
+        NSInteger x=labs([declared.strides[a.unsignedIntegerValue] integerValue]),y=labs([declared.strides[b.unsignedIntegerValue] integerValue]);
+        return x>y?NSOrderedAscending:x<y?NSOrderedDescending:NSOrderedSame;
+    }];
+    NSMutableDictionary *inverse=nil;
+    NSMutableData *data=[NSMutableData dataWithLength:_count*sizeof(NSInteger)];NSInteger *out=data.mutableBytes;
+    for(NSUInteger i=0;i<_count;i++) {
+        const NSInteger address=[self index:i];NSInteger remainder=address-low;NSUInteger at=0;
+        BOOL found=declared.affine&&remainder>=0;
+        for(NSNumber *axis in axes)if(found) {
+            const NSUInteger d=axis.unsignedIntegerValue,n=[declared.shape[d] unsignedIntegerValue];
+            const NSInteger s=[declared.strides[d] integerValue],q=remainder/labs(s);
+            found=(NSUInteger)q<n;remainder-=q*labs(s);
+            at+=(s<0?n-1-q:q)*[logical[d] unsignedIntegerValue];
+        }
+        found=found&&remainder==0;
+        if(!found) {
+            if(!inverse){inverse=[NSMutableDictionary dictionary];for(NSUInteger j=0;j<declared.count;j++)inverse[@([declared index:j])]=@(j);}
+            NSNumber *index=inverse[@(address)];
+            if(!index)[NSException raise:NSInvalidArgumentException format:@"operand alias names storage outside its declared producer"];
+            at=index.unsignedIntegerValue;
+        }
+        out[i]=[placed index:at];
+    }
+    return [MetalTensorLayout shape:_shape strides:TensorStrides(_shape) offset:0 maps:@{} indices:data];
+}
 - (BOOL)matches:(NSArray<NSNumber *> *)strides {
     if(!_count)return YES;
     if(!self.affine)return NO;
