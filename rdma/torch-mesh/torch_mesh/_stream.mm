@@ -498,6 +498,16 @@ static void ordered(const Schedule &schedule, std::shared_ptr<void> keep = {}) {
   if(keep)s->running.emplace_back(at,std::move(keep));
 }
 
+// The next of a function's invocations prepared ahead, each enqueued once, and the last enqueued.
+static const Schedule &next_of(const std::vector<Schedule> &prepared, size_t &next) {
+  TORCH_CHECK(next < prepared.size(), "enqueue past the ", prepared.size(), " prepared invocations: realize more first");
+  return prepared[next++];
+}
+static const Schedule &last_of(const std::vector<Schedule> &prepared, size_t next) {
+  TORCH_CHECK(next, "no prepared invocation has been enqueued");
+  return prepared[next-1];
+}
+
 static pybind11::capsule schedule_completion(const Schedule &schedule) {
   return pybind11::capsule(new Schedule(schedule),"mesh.prepared-function",[](PyObject *token) {
     delete static_cast<Schedule *>(PyCapsule_GetPointer(token,"mesh.prepared-function"));
@@ -837,8 +847,8 @@ struct Collectives {
     const auto held=operands;
     checked(MetalScheduleFinish(made.get(),^(NSError *){(void)held;}));executions.push_back(std::move(made));
   }
-  void enqueue() { ordered(executions[next++]); }
-  pybind11::capsule completion() { return schedule_completion(executions[next-1]); }
+  void enqueue() { ordered(next_of(executions,next)); }
+  pybind11::capsule completion() { return schedule_completion(last_of(executions,next)); }
 
 };
 
@@ -1596,12 +1606,16 @@ static void compile_chain(PreparedChain &chain) {
   checked(MetalScheduleFinish(schedule,nil));
 }
 
+static const std::shared_ptr<PreparedChain> &chain_at(int64_t index) {
+  TORCH_CHECK(index >= 0 && index < (int64_t)prepared_chains_->size() && (*prepared_chains_)[index], "no prepared chain ", index);
+  return (*prepared_chains_)[index];
+}
 static void chain_run(int64_t index) {
-  const auto &chain = (*prepared_chains_)[index];
+  const auto &chain = chain_at(index);
   ordered(chain->schedule, chain);
 }
 static pybind11::capsule chain_completion(int64_t index) {
-  return schedule_completion((*prepared_chains_)[index]->schedule);
+  return schedule_completion(chain_at(index)->schedule);
 }
 
 // A declared set of routed writes. Bindings name physical channels, including
@@ -1749,8 +1763,8 @@ struct Executions {
   size_t next=0;
   explicit Executions(pybind11::object value):output(std::move(value)){}
   void add(ScheduleBinding &binding){schedules.push_back(binding.schedule);}
-  pybind11::object run(){ordered(schedules[next++]);return output;}
-  pybind11::capsule completion(){return schedule_completion(schedules[next-1]);}
+  pybind11::object run(){ordered(next_of(schedules,next));return output;}
+  pybind11::capsule completion(){return schedule_completion(last_of(schedules,next));}
 };
 
 // Compact row geometry and explicit indexed selections lower to one prepared
@@ -1822,8 +1836,8 @@ struct ViewWrites {
     checked(MetalScheduleFinish(made.get(),^(NSError *){(void)held;}));executions.push_back(std::move(made));
   }
   // its plans held while it runs (a configuration's writes are let go once enqueued)
-  void enqueue(std::shared_ptr<ViewWrites> self) { ordered(executions[next++],std::move(self)); }
-  pybind11::capsule completion(){return schedule_completion(executions[next-1]);}
+  void enqueue(std::shared_ptr<ViewWrites> self) { ordered(next_of(executions,next),std::move(self)); }
+  pybind11::capsule completion(){return schedule_completion(last_of(executions,next));}
 
 };
 
