@@ -2,6 +2,7 @@
 import concurrent.futures
 import contextlib
 import codecs
+import collections
 import ctypes
 import dataclasses
 import fcntl
@@ -236,23 +237,51 @@ class Node:
 
 
 def discover(cluster, log=None, state=None, deadline=None):
-    """Read the local bridge's existing cluster map and bind configured endpoints."""
-    local = Node(cluster, '-', 'localhost', local=True, deadline=deadline)
+    """Read each configured node's live map over its administration path. The fabric is the largest linked part of
+    the maps' union. Returns the reachable nodes (their mesh-stat answered) and the absent ones, each with why:
+    unreachable, its bridge not up, or outside the fabric."""
+    here = str(Node(cluster, '-', 'localhost', local=True, deadline=deadline).stat()[1].get('node'))
+    nodes = [Node(cluster, m.number, 'localhost' if m.number == here else m.management, ula=m.fabric,
+                  local=m.number == here, deadline=deadline) for m in cluster.members.values()]
     if state is not None:
-        state['localhost'] = local.commands
-    report = local.stat()[1]
-    if not report.get('up'):
-        raise RuntimeError(f'local bridge topology is unavailable: {report}')
-    expected = {int(number) for number in cluster.members}
-    found = set(report['map']['nodes'])
-    if found != expected:
-        raise RuntimeError(f'live topology differs from configured nodes: missing {expected - found}, unconfigured {found - expected}')
-    nodes = [Node(cluster, m.number, 'localhost' if int(m.number) == report['node'] else m.management,
-                  ula=m.fabric, local=int(m.number) == report['node'], deadline=deadline) for m in cluster.members.values()]
-    for node in nodes:
-        node.discovered_links = sum(int(node.number) in link[:2] for link in report['map']['links'])
-    note(log, 'map ' + ' '.join(node.number for node in nodes))
-    return nodes, [node.addr for node in nodes]
+        state.update({n.name: n.commands for n in nodes})
+
+    def read(node):
+        try:
+            line, report = node.stat()
+        except Exception as error:
+            return None, f'unreachable: {error}'
+        return (report, None) if report.get('up') else (report or None, f'its bridge is not up: {line[-200:]}')
+    reads = dict(zip((n.number for n in nodes), parallel([lambda n=n: read(n) for n in nodes])))
+    up = {number: report for number, (report, why) in reads.items() if not why}
+    cables = collections.Counter()
+    for report in up.values():
+        cables |= collections.Counter(tuple(sorted(map(str, link[:2]))) for link in report['map']['links'])
+    linked = {str(x): set() for report in up.values() for x in report['map']['nodes']}
+    for a, b in cables:
+        linked[a].add(b)
+        linked[b].add(a)
+    parts, seen = [], set()
+    for start in sorted(linked, key=int):
+        part, todo = set(), [start] if start not in seen else []
+        while todo:
+            if (x := todo.pop()) not in part:
+                part.add(x)
+                todo.extend(linked[x] - part)
+        seen |= part
+        parts.append(part)
+    fabric = max(parts, key=len, default=set())
+    absent = {number: why or f'outside the linked fabric {sorted(fabric, key=int)}: its map holds '
+                             f'{sorted(map(str, report["map"]["nodes"]), key=int)}'
+              for number, (report, why) in reads.items() if why or number not in fabric}
+    reachable = [n for n in nodes if reads[n.number][0] is not None]
+    for node in reachable:
+        node.discovered_links = sum(count for pair, count in cables.items() if node.number in pair)
+    note(log, 'fabric ' + ' '.join(sorted(fabric, key=int)), *(f'absent {k}: {v}' for k, v in absent.items()))
+    if state is not None:
+        state.update(fabric=sorted(fabric, key=int), absent=absent,
+                     unconfigured=sorted(fabric - set(cluster.members), key=int))
+    return reachable, absent
 
 
 def up(nodes, log=None):

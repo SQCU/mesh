@@ -82,7 +82,8 @@ def compact(record):
                   for name, node in record['nodes'].items() if node['status'] != 'installed')
     result = {'schema': 3, 'commits': record['commits'], 'unix': int(record['started_unix']),
               'nodes': [r['number'] for r in record['nodes'].values() if r['status'] == 'installed'],
-              'us,GB/s': rows, **({'incomplete': incomplete} if incomplete else {})}
+              'us,GB/s': rows, **({'incomplete': incomplete} if incomplete else {}),
+              **({'absent': record['absent']} if record.get('absent') else {})}
     if record['status'] != 'completed':
         result['errors'] = errors or [['run', 'incomplete']]
     return result
@@ -251,12 +252,13 @@ def run_workload(item, nodes, paths, record, ordinal, cluster):
     from mesh_statistics import aggregate
     tag = item['tag']
     end = min(time.time() + item.get('timeout', 300), record['deadline_unix'])
-    selected = [mesh.at(nodes, m.number) for m in cluster.place(item['place'])]
-    result = {'tag': tag, 'configuration': item, 'status': 'preparing', 'metrics': []}
+    selected = [node for node in (mesh.at(nodes, m.number) for m in cluster.place(item['place'])) if node]
+    result = {'tag': tag, 'configuration': item, 'nodes': [node.number for node in selected], 'status': 'preparing',
+              'metrics': []}
     record['workloads'].append(result)
     try:
-        if not selected or None in selected:
-            raise RuntimeError('required nodes are absent or did not install the pinned source successfully')
+        if not selected:
+            raise RuntimeError(f'placement unmet: no live, installed member meets {item["place"]}')
         if not mesh.wait_paired(nodes, None, end):
             raise RuntimeError('the discovered fabric has not paired before workload configuration')
         history = record.get('history', {}).get(tag, [])[-64:]
@@ -301,16 +303,13 @@ def _execute_locked(record):
         cluster = mesh.load()
         items = workload_configuration(paths['metal-microbench'])
         record.update(stage='discovery', discovery={})
-        found, _ = mesh.discover(cluster, state=record['discovery'], deadline=record['deadline_unix'])
+        found, record['absent'] = mesh.discover(cluster, state=record['discovery'], deadline=record['deadline_unix'])
         record['stage'] = 'installation'
         installs = mesh.parallel([lambda n=n: prepare_node(n, paths, record)
                                   for n in found])
         record['nodes'] = {f'{node.number}@{node.addr}': result for node, result in zip(found, installs)}
-        ready = [node for node, result in zip(found, installs) if result['status'] == 'installed']
-        required = {m.number for item in items for m in cluster.place(item['place'])}
-        missing = required - {node.number for node in ready}
-        if missing:
-            raise RuntimeError(f'configured cluster is incomplete; no workloads submitted: missing {sorted(missing)}')
+        ready = [node for node, result in zip(found, installs)
+                 if result['status'] == 'installed' and node.number not in record['absent']]
         record['stage'] = 'pairing'
         if ready and not mesh.wait_paired(ready, None, record['deadline_unix']):
             record['errors'].append({'stage': 'pairing', 'error': 'not all current topology links paired'})
@@ -318,7 +317,7 @@ def _execute_locked(record):
         for ordinal, item in enumerate(items):
             record['stage'] = item['tag']
             result = run_workload(item, ready, paths, record, ordinal, cluster)
-            if result['status'] != 'completed':
+            if result['status'] != 'completed' and result['nodes']:
                 raise RuntimeError(f'{item["tag"]} did not complete; no further workloads submitted')
         record['status'] = 'completed' if (ready and not record['errors'] and
             all(value['status'] == 'completed' for value in record['workloads'])) else 'failed'

@@ -33,11 +33,17 @@ owner's state directly. It has no numerical executor, synchronization command,
 disk cache or write endpoint. Other administrative callers can serve their own
 state with the same function and an explicit listen address.
 
-Discovery reads the local bridge's existing cluster map and binds the administration
-and fabric addresses in `etc/mesh-nodes.json`. Each command is visible in
-`discovery` as it runs. It does not browse DNS, probe unrelated Tailnet hosts, or
-fetch source to discover a machine. A missing configured node fails preparation.
-The parallel installation commands verify each endpoint's actual bridge identity.
+Discovery reads every configured node's live map (its mesh-stat, over its
+administration path in `etc/mesh-nodes.json`) and takes the union; the launcher
+need not be a fabric member. The fabric is the union's largest linked part. A
+configured node that is unreachable, whose bridge is not up, or that is outside the
+fabric is recorded under `absent` with the reason, and the run goes on: every
+reachable node is installed, each workload is placed over the live, installed
+members, and a workload with none is recorded failed while the others run. Pairing
+is checked against the union's links. Each command is visible in `discovery` as it
+runs. It does not browse DNS, probe unrelated Tailnet hosts, or fetch source to
+discover a machine. The parallel installation commands verify each endpoint's
+actual bridge identity.
 
 Each workload's ranks are the nodes its `place` selects in `etc/mesh-nodes.json`
 (`Cluster.place`: `compute` nodes with a role and least values, the `root` first).
