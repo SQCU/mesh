@@ -2818,6 +2818,8 @@ static ncclResult_t signature(struct ncclComm *comm, const struct call *list, si
     made.calls[i] = c;
   }
   if (!result) result = compile_group(comm, made.calls, n, &made.plans);
+  /* an all-to-all's count matrix stays the issued call's (calls_free frees it there): compile_group reads it alone */
+  for (size_t i = 0; i < made.n; i++) made.calls[i].matrix = NULL;
   if (result) { compiled_drop(comm, &made); return result; }
   uint32_t at = comm->cached;
   if (at == SIGNATURES) {
