@@ -55,6 +55,8 @@ def placement(mesh, name, workload, observations, *, parameters):
 def bind(configuration, groups, prepare):
     c = configuration
     mesh, name, group = c['mesh'], c['name'], c['group']
+    # Traced, bound and leased once: the route install below changes no part, so the same groups are declared again.
+    groups = groups() if callable(groups) else groups
     production_seconds = (assignment.producer_seconds(c['assignment'], c['decisions'],
                                 {name: [[rank] for rank in range(c['size'])]}) if c['records'] else [0.0] * c['size'])
     partition.plan(mesh, name, groups, production_seconds=production_seconds)
