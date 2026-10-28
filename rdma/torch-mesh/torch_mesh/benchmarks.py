@@ -70,11 +70,11 @@ def bandwidth(config):
         calls = min(config['most_calls'], max(config['least_calls'], config['bytes_per_size'] // requested))
         for what in ('all_reduce_max', 'broadcast', 'all_gather', 'reduce_scatter_max', 'exchange'):
             source, output, useful, declaration = collective_operands(what, n, rank, size)
-            cases.append((source, output, useful, declaration, calls, what, requested))
-    group.plan([([declaration], calls) for _, _, _, declaration, calls, _, _ in cases])
+            binding, declarations = prepare_fragments([(declaration, source, output)], group)
+            cases.append((binding, useful, declarations, calls, what, requested))
+    group.plan([(declarations, calls) for _, _, declarations, calls, _, _ in cases])
     prepared = []
-    for source, output, useful, declaration, calls, what, requested in cases:
-        binding, _ = prepare_fragments([(declaration, source, output)], group)
+    for binding, useful, _, calls, what, requested in cases:
         binding.realize(calls)
         prepared.append((binding, useful, calls, what, requested))
     observer = rollout.start(dist.distributed_c10d._get_default_store(), 'mesh/bandwidth', rank, size,

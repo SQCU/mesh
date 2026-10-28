@@ -93,9 +93,6 @@ This contract does not declare these existing paths complete:
 - Producer placement does not yet solve every conflicting API requirement or
   proper subdomain. Local materialization alone does not establish necessity.
 - Foreign providers still need all internal views and dependencies exposed.
-- Generic reduction crossings still accept tensor handles. Gather WRITE plans
-  and reduce-scatter cuts now retain ordered page selections; the remaining
-  crossings need that same binding contract.
 Further integration belongs at these shared lowering boundaries. Numerical
 bodies contribute their work and uses, rather than separate memory systems.
 
@@ -142,6 +139,37 @@ with alias and reduction consumers, and the numerical bindings listed above.
 The public FX frontend also accepted a prepared gathered operand. These were
 command and pipeline construction only; no numerical execution or performance
 measurement was performed.
+
+## Collective operand binding
+
+FX crossings, partial tensors and the bandwidth demo now use
+`collective_views.lower` through `backend.prepare_fragments`. The separate
+partial-tensor alias cutter and the unused schedule-level collective binder
+have been removed. Each caller plans the declarations returned by binding.
+
+The call carries its operator's `element_shape`. Scalar reductions have scalar
+elements; the partials merge has whole `[m,l,O]` rows. Ordered page selections
+become common logical cuts during preparation. Uneven gathers, reduce-scatters
+and exchanges retain their rank counts, roles and complete exchange matrix.
+An absent local contribution does not erase the declared transaction extent.
+
+The native numerical consumer requires contiguous fields within each element,
+as declared in `etc/compute/metal-apis.json`. Gaps between whole rows require
+no copy. A row whose fields are scattered gets a conversion through the shared
+layout compiler. Only the affected rows are materialized. Those commands use
+preassigned pages and the existing native schedule. Producer placement can
+still remove conversions; local binding does not establish their global
+necessity or an optimal schedule.
+
+Native collective fragments remain proportional to the common contiguous
+intervals. Contiguous bindings keep their original call count. Highly scattered
+selections may still produce many native records; this is a granularity limit
+of the current numerical binding, not a limitation of the page representation.
+
+On 2026-10-27, the extension built and local preparation constructed mapped
+collective bindings and record-copy pipelines. Mixed-row preparation copied
+only the scattered row. The inspection used no live communicator and submitted
+no numerical work; distributed execution and performance remain unmeasured.
 
 ## Compressed projections
 

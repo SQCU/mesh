@@ -41,8 +41,9 @@ ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL = range(6)
 WRITE = 8
 # a declared call (ProcessGroupMesh.plan): its kind, its elements, its dtype, its root or peer, its operator and, for an
 # all-gather or a reduce-scatter, each rank's elements (an all-to-all's to each rank, then from each)
-Call = collections.namedtuple('Call', 'kind count dtype root op counts destination fused contributors matrix recipients tile_bytes production',
-                              defaults=(0, ReduceOp.SUM, None, 0, False, None, None, None, 0, None))
+# element_shape declares one indivisible numerical element in those scalar units.
+Call = collections.namedtuple('Call', 'kind count dtype root op counts destination fused contributors matrix recipients tile_bytes production element_shape',
+                              defaults=(0, ReduceOp.SUM, None, 0, False, None, None, None, 0, None, ()))
 WHAT = {ALLREDUCE: LIB.MESH_ALLREDUCE, REDUCE: LIB.MESH_REDUCE, BROADCAST: LIB.MESH_BROADCAST, ALLGATHER: LIB.MESH_ALLGATHER,
         REDUCE_SCATTER: LIB.MESH_REDUCE_SCATTER, ALLTOALL: LIB.ncclMeshCallAlltoAllV, WRITE: LIB.ncclMeshCallWrite}
 TYPES = {torch.int8: LIB.ncclInt8, torch.uint8: LIB.ncclUint8, torch.bool: LIB.ncclUint8, torch.int32: LIB.ncclInt32,
@@ -303,16 +304,20 @@ class ProcessGroupMesh(dist.ProcessGroup):
                     for view, source, destination in deliveries]
         return _stream.ViewWrites(bindings, self.handle)
 
-    def union_cuts(self, cuts):
-        """Agree view boundaries during configuration, before the function runs."""
+    def exchange_configuration(self, value):
+        """Share preparation operands before compiling the function."""
         import json
-        cuts = sorted(set(cuts))
         serial = getattr(self, '_view_serial', 0)
         self._view_serial = serial + 1
         store = dist.distributed_c10d._get_default_store()
         key = f'mesh/views/{self.group_name}/{serial}'
-        store.set(f'{key}/{self.rank()}', json.dumps(cuts))
-        rows = [json.loads(store.get(f'{key}/{rank}')) for rank in range(self.size())]
+        store.set(f'{key}/{self.rank()}', json.dumps(value))
+        return [json.loads(store.get(f'{key}/{rank}')) for rank in range(self.size())]
+
+    def union_cuts(self, cuts):
+        """Agree view boundaries during configuration, before the function runs."""
+        cuts = sorted(set(cuts))
+        rows = self.exchange_configuration(cuts)
         if any(row[0] != 0 or row[-1] != cuts[-1] for row in rows):
             raise ValueError('collective views have different logical extents across ranks')
         return sorted(set(cut for row in rows for cut in row))
@@ -421,15 +426,15 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
 def prepare_fragments(bindings, group):
     """The common AOT binding for partial blocks and frontend graph crossings."""
-    from .operand import TensorView
+    from .collective_views import lower
+    bindings, declarations, before, after = lower(bindings, group)
     calls, operands = [], []
     for declaration, source, destination in bindings:
-        source = None if source is None else TensorView.of(source).tensor()
-        destination = None if destination is None else TensorView.of(destination).tensor()
         code = declaration.op if isinstance(declaration.op, int) else op(declaration.op)
-        calls.append((declaration.kind, [source], [destination], declaration.counts or [], code, declaration.root))
+        counts = [declaration.count] if declaration.kind in (ALLREDUCE, REDUCE, BROADCAST) else declaration.counts
+        calls.append((declaration.kind, [source], [destination], counts or [], code, declaration.root))
         operands.extend(t for t in (source, destination) if t is not None)
-    return _stream.Collectives(calls, group.handle, operands), [call for call, _, _ in bindings]
+    return _stream.Collectives(calls, group.handle, operands, before, after), declarations
 
 
 def bind_gather_views(gathers, group):
@@ -464,25 +469,12 @@ def bind_scatter_views(source, output, dim, sizes, reduction, group):
     The partial-tensor API uses the same alias/cut calculation and native
     reductions. No transpose, packed operand or received-result copy is made.
     """
-    from views import cut_runs
-    from .operand import TensorView, ordered_runs
-    views = list(source.split(sizes, dim))
-    runs, total = ordered_runs(enumerate(views))
-    local, extent = ordered_runs([(group.rank(), output)])
-    start = sum(view.numel() for view in views[:group.rank()])
-    cuts = group.union_cuts([0, total, *(end for _, end, _, _ in runs), start,
-                             *(start + end for _, end, _, _ in local)])
-    own_cuts = [cut - start for cut in cuts if start <= cut <= start + extent]
-    own = iter(cut_runs(local, own_cuts))
-    absent = empty(0, dtype=source.dtype, device=source.device.type)
+    from .operand import TensorView
+    source, output = TensorView.of(source), TensorView.of(output)
     bindings = []
-    for root, offset, count in cut_runs(runs, cuts):
-        send = TensorView.of(source).storage.as_strided((count,), (1,), offset)
-        receive = absent
-        if root == group.rank():
-            _, at, length = next(own)
-            receive = TensorView.of(output).storage.as_strided((length,), (1,), at)
-        bindings.append((Call(REDUCE, count, source.dtype, root=root, op=reduction), send, receive))
+    for root, send in enumerate(source.split(sizes, dim)):
+        bindings.append((Call(REDUCE, send.numel(), source.dtype, root=root, op=reduction), send,
+                         output if root == group.rank() else None))
     return prepare_fragments(bindings, group)
 
 

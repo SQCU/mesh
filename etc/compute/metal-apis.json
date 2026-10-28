@@ -1,4 +1,8 @@
 {
+  "reduction": {
+    "input": "contiguous",
+    "output": "contiguous"
+  },
   "matrix": {
     "input": "strided",
     "weight": "strided",

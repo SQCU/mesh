@@ -76,31 +76,3 @@ def byte_spans(shape, strides, itemsize):
         spans = ([(0, width * rows)] if pitch == width else
                  [(row * pitch, width) for row in range(rows)])
     return shift, spans
-
-
-def alias_runs(segments):
-    """Concatenate described views in logical order, without reading their data.
-
-    Each segment is (identity, shape, strides, base offset). Units may be bytes
-    or typed elements; strides and offsets use the same unit throughout.
-    """
-    runs, cursor = [], 0
-    for identity, shape, strides, base in segments:
-        shift, spans = byte_spans(shape, strides, 1)
-        for offset, width in spans:
-            runs.append((cursor, cursor + width, identity, base + shift + offset))
-            cursor += width
-    return runs, cursor
-
-
-def cut_runs(runs, cuts):
-    """Resolve agreed logical cuts to contiguous aliases of the original views."""
-    pieces, index = [], 0
-    for first, last in zip(cuts, cuts[1:]):
-        while runs[index][1] <= first:
-            index += 1
-        lo, hi, identity, offset = runs[index]
-        if first < lo or last > hi:
-            raise ValueError('common fragment crosses a local contiguous alias')
-        pieces.append((identity, offset + first - lo, last - first))
-    return pieces

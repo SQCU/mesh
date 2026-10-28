@@ -52,13 +52,6 @@ class World:
         self.size = dist.get_world_size(group) if group is not None else 1
         self.groups = {}
 
-    def union_cuts(self, task, cuts):
-        """Agree logical alias-fragment boundaries once during realization."""
-        cuts = sorted(set(cuts))
-        if self.group is None or self.size == 1:
-            return cuts
-        return self.group._get_backend(torch.device(self.device)).union_cuts(cuts)
-
     # design/algorithm-sources.md#independent-native-queues
     def prepare(self, keys):
         for queue, members in sorted(set(keys)):
@@ -87,12 +80,13 @@ class World:
 
 
 def call(kind, count, scalar, *, counts=None, op='sum', root=0, contributors=None, matrix=None, recipients=None,
-         destination=0):
+         destination=0, element_shape=()):
     """One declaration in the common Torch/native collective metadata type."""
     from torch_mesh import backend
     return backend.Call(getattr(backend, kind), count, scalar, root=root,
                         op=OPS[op] if isinstance(op, str) else op, counts=counts,
-                        contributors=contributors, matrix=matrix, recipients=recipients, destination=destination)
+                        contributors=contributors, matrix=matrix, recipients=recipients, destination=destination,
+                        element_shape=element_shape)
 
 
 def prepare_writes(deliveries, group):
@@ -110,4 +104,6 @@ def allocate(numel, scalar, device, in_region):
 
 def prepare_fragments(bindings, group):
     from torch_mesh.backend import prepare_fragments
-    return prepare_fragments(bindings, group)
+    bindings = list(bindings)
+    operand = next(value for _, source, destination in bindings for value in (source, destination) if value is not None)
+    return prepare_fragments(bindings, group._get_backend(operand.device))

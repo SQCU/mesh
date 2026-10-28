@@ -265,10 +265,8 @@ struct Operand {
   ncclDataType_t type = ncclUint8;
 };
 
-// A group's operands: one device's tensors (MPS: the Metal path; CPU: the host path), each contiguous; a non-contiguous
-// one fails as a value, as nothing is copied to make it one (the operator, 2026-10-21: "zero copy methods must always
-// be used over access by copy because memory bandwidth and flops are too scarce on this hardware api"; "code which
-// can't perform well can fail instead of being run").
+// A group's prepared fragments. The shared view lowerer resolves logical page
+// selections and typed record boundaries before these native scalar bindings.
 struct Group {
   bool metal = false;
   std::deque<ncclMeshBuffer> buffers;
@@ -301,7 +299,7 @@ struct Group {
   }
 };
 
-// A call's operands and counts, made before its group is encoded (a staging copy is torch's work on its own queue).
+// A call's prepared operands and counts, made before its group is encoded.
 struct Issue {
   int64_t kind, op, root;
   std::vector<Operand> sends, receives;
@@ -356,6 +354,12 @@ static Issue prepare(const Call &call, Group &g) {
     break;
   }
   default: TORCH_CHECK(false, "no collective of kind ", what);
+  }
+  if ((what == ALLREDUCE || what == REDUCE || what == BROADCAST) && !counts.empty()) {
+    const auto &t = tensor(sends,0);
+    const size_t per = what != BROADCAST && t.is_complex() ? 2 :
+      kind(t.scalar_type()) == ncclNumTypes ? t.element_size() : 1;
+    i.sends.front().count = (size_t)counts[0] * per;
   }
   for(const auto &view:i.sends)i.source_views.push_back((void *)view.at);
   for(const auto &view:i.receives)i.destination_views.push_back((void *)view.at);
@@ -450,44 +454,6 @@ static pybind11::capsule schedule_completion(const Schedule &schedule) {
     delete static_cast<Schedule *>(PyCapsule_GetPointer(token,"mesh.prepared-function"));
   });
 }
-
-// Fixed operands for a declared block graph. Preparation uses the same operand
-// conversion as issue(); submission uses the same encoder, without a Work or a
-// second task scheduler. The enclosing function retains these tensor bindings.
-struct Collectives {
-  int64_t comm;
-  Group group{true};
-  std::vector<Issue> issues;
-  std::vector<at::Tensor> operands;
-  Collectives(const std::vector<Call> &calls, int64_t comm, std::vector<at::Tensor> operands)
-      : comm(comm), operands(std::move(operands)) {
-    for (const Call &call : calls) issues.push_back(prepare(call, group));
-  }
-  std::vector<Schedule> executions;
-  size_t next=0;
-  void append(MetalSchedule *schedule,size_t repetitions=1) {
-    const auto *list=&issues;const ncclComm_t handle=communicator(comm);
-    MetalScheduleCommunicator(schedule,handle);
-    checked(MetalScheduleCross(schedule,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
-        id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
-      ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
-        .residencySet=(__bridge void *)residency};
-      for(size_t k=0;k<repetitions;k++) {
-        const int result=(int)encoded(*list,handle,&on);
-        if(result)return result;
-      }
-      return 0;
-    }));
-  }
-  void realize(size_t repetitions=1) {
-    auto made=schedule_after_inputs();append(made.get(),repetitions);
-    const auto held=operands;
-    checked(MetalScheduleFinish(made.get(),^(NSError *){(void)held;}));executions.push_back(std::move(made));
-  }
-  void enqueue() { MetalScheduleEnqueue(executions[next++].get()); }
-  pybind11::capsule completion() { return schedule_completion(executions[next-1]); }
-
-};
 
 // torch's functional collectives (_c10d_functional, what DTensor and a compiled graph call) on MPS tensors: kernels
 // for the MPS dispatch key, as torch/csrc/distributed/c10d/Functional.cpp implements them for every device but
@@ -779,6 +745,54 @@ struct Commands {
     TORCH_CHECK(!error,error?error.localizedDescription.UTF8String:"");
   }
 };
+// Fixed operands for a declared block graph. Shared lowering supplies scalar
+// fragments and any required numerical conversion edges. They record through
+// the same native schedule; invocation creates no layout or tensor bindings.
+struct Collectives {
+  int64_t comm;
+  Group group{true};
+  std::vector<Issue> issues;
+  std::vector<at::Tensor> operands;
+  Commands before, after;
+  Collectives(const std::vector<Call> &calls, int64_t comm, std::vector<at::Tensor> operands,
+              const std::vector<CommandRecord> &inputs, const std::vector<CommandRecord> &outputs)
+      : comm(comm), operands(std::move(operands)), before(inputs), after(outputs) {
+    this->operands.insert(this->operands.end(),before.operands.begin(),before.operands.end());
+    this->operands.insert(this->operands.end(),after.operands.begin(),after.operands.end());
+    for (const Call &call : calls) issues.push_back(prepare(call, group));
+  }
+  std::vector<Schedule> executions;
+  size_t next=0;
+  void append(MetalSchedule *schedule,size_t repetitions=1) {
+    const auto *list=&issues;const ncclComm_t handle=communicator(comm);
+    MetalScheduleCommunicator(schedule,handle);
+    const size_t batches=before.replay||after.replay?repetitions:(size_t)(repetitions!=0);
+    const size_t repeat=batches==1?repetitions:1;
+    for(size_t k=0;k<batches;k++) {
+      before.append(schedule);
+      checked(MetalScheduleCross(schedule,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
+        id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
+      ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
+        .residencySet=(__bridge void *)residency};
+      for(size_t r=0;r<repeat;r++) {
+        const int result=(int)encoded(*list,handle,&on);
+        if(result)return result;
+      }
+      return 0;
+    }));
+      after.append(schedule);
+    }
+  }
+  void realize(size_t repetitions=1) {
+    auto made=schedule_after_inputs();append(made.get(),repetitions);
+    const auto held=operands;
+    checked(MetalScheduleFinish(made.get(),^(NSError *){(void)held;}));executions.push_back(std::move(made));
+  }
+  void enqueue() { MetalScheduleEnqueue(executions[next++].get()); }
+  pybind11::capsule completion() { return schedule_completion(executions[next-1]); }
+
+};
+
 static void encode_in(id<MTLComputeCommandEncoder> encoder, const Dispatch &d) {
   [encoder setComputePipelineState:d.state];
   for (size_t i = 0; i < d.bound.size(); i++)
@@ -1659,21 +1673,7 @@ struct ScheduleBinding {
     if(ready)operands.push_back(*ready);
     return fused_writes_impl(schedule.get(),send,landings,pairs,comm,polls,repeats,stride,row_bytes,rows,ready,ready_value,tile_bytes);
   }
-  void collectives(const std::vector<Call> &calls,int64_t comm) {
-    MetalScheduleCommunicator(schedule.get(),communicator(comm));
-    Group group{true};std::vector<Issue> issues;
-    for(const auto &call:calls) {
-      issues.push_back(prepare(call,group));
-      for(const auto *list:{&std::get<1>(call),&std::get<2>(call)})for(const auto &t:*list)if(t)operands.push_back(*t);
-    }
-    const auto *list=&issues;
-    checked(MetalScheduleCross(schedule.get(),^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
-        id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
-      ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
-        .residencySet=(__bridge void *)residency};
-      return (int)encoded(*list,communicator(comm),&on);
-    }));
-  }
+
   void finish() { const auto held=operands; checked(MetalScheduleFinish(schedule.get(),^(NSError *){(void)held;})); }
   void enqueue() { MetalScheduleEnqueue(schedule.get()); }
   pybind11::capsule completion() { return schedule_completion(schedule); }
@@ -1922,7 +1922,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
         s.operands.insert(s.operands.end(),commands.operands.begin(),commands.operands.end());})
     .def("compute",&ScheduleBinding::compute)
     .def("writes",&ScheduleBinding::writes)
-    .def("collectives",&ScheduleBinding::collectives)
     .def("host",&ScheduleBinding::host)
     .def("finish",&ScheduleBinding::finish)
     .def("enqueue",&ScheduleBinding::enqueue)
@@ -1935,7 +1934,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def("completion", &ViewWrites::completion)
     .def("enqueue", &ViewWrites::enqueue);
   pybind11::class_<Collectives, std::shared_ptr<Collectives>>(module, "Collectives")
-    .def(pybind11::init<const std::vector<Call> &, int64_t, std::vector<at::Tensor>>())
+    .def(pybind11::init<const std::vector<Call> &, int64_t, std::vector<at::Tensor>,
+                        const std::vector<CommandRecord> &, const std::vector<CommandRecord> &>(),
+         pybind11::arg("calls"),pybind11::arg("comm"),pybind11::arg("operands"),
+         pybind11::arg("inputs")=std::vector<CommandRecord>{},pybind11::arg("outputs")=std::vector<CommandRecord>{})
     .def("realize", &Collectives::realize, pybind11::arg("repetitions")=1)
     .def("append",[](Collectives &c,ScheduleBinding &s){c.append(s.schedule.get());
         s.operands.insert(s.operands.end(),c.operands.begin(),c.operands.end());})

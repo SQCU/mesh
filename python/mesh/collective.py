@@ -1,7 +1,7 @@
 """The partial tensors' collectives (design/algorithm-sources.md#collective-movement, #collectivereduce_scatter): the
 verbs over a program's blocks, each block row one declared group on the full physical communicator. Movement
-binds original and final strided views to exact indexed native WRITEs. Reductions bind original contiguous
-fragments to native reductions, by SUM, MAX or MIN; a softmax over a split uses the native log-sum-exp merge of
+binds original and final strided views to exact indexed native WRITEs. Reductions pass their views to the shared
+operand lowerer, by SUM, MAX or MIN; a softmax over a split uses the native log-sum-exp merge of
 partials, PARTIALS (ncclMeshRedOpCreatePartials over complete rows of [m, l, O]). Any other associative combine is a supplied
 kernel declaring `combine` (Swift's `using combine:`): the terms moved to their owner by one all-to-all and combined
 there by a tree of its calls.  Every member records every verb (the program is SPMD); `peers` and `owners` are ranks
@@ -42,18 +42,6 @@ def _record(program, kind, members, roles, run, queue):
 # design/algorithm-sources.md#collective-movement
 def _buffer(program, dtype, numel):
     return _native.allocate(numel, dtype, program.device, program.size > 1)[:numel]
-
-
-def _alias_fragments(program, task, refs):
-    """AOT union cuts, each interval aliasing contiguous original operand bytes."""
-    from views import alias_runs, cut_runs
-    runs, cursor = alias_runs((ref, ref.shape, (ref.row_stride, ref.column_stride), ref.offset) for ref in refs)
-    cuts = program._world.union_cuts(task.index, [0, cursor, *(end for _, end, _, _ in runs)])
-    return cut_runs(runs, cuts)
-
-
-def _alias(ref, offset, count):
-    return ref.backing.flat().narrow(0, offset, count)
 
 
 def _prepare_all_gather(program, task):
@@ -159,10 +147,10 @@ def _prepare_reduce_scatter(program, task):
     owners = {id(ref): rank for rank, segment in enumerate(segments) for ref in segment}
     empty = _buffer(program, refs[0].dtype, 0)
     bindings = []
-    for ref, offset, count in _alias_fragments(program, task, refs):
+    for ref in refs:
         owner = owners[id(ref)]
-        alias = _alias(ref, offset, count) if program.rank in peers or program.rank == owner else empty
-        call = _native.call('REDUCE', count, ref.dtype, op=op, root=owner,
+        alias = ref.tensor if program.rank in peers or program.rank == owner else empty
+        call = _native.call('REDUCE', ref.rows * ref.columns, ref.dtype, op=op, root=owner,
                             contributors=tuple(peers), recipients=(owner,))
         bindings.append((call, alias if program.rank in peers else empty,
                          alias if program.rank == owner else empty))
@@ -170,29 +158,19 @@ def _prepare_reduce_scatter(program, task):
 
 
 def _prepare_partials(program, task):
-    """Native PARTIALS records have contiguous float32 fields [m,l,O].
-
-    Records may be separated by arbitrary row gaps or backing allocations.
-    Configuration fragments only between complete records; it never packs a
-    transposed/strided field list or emulates the numerical merge in Python.
-    """
+    """Declare whole [m,l,O] records to the common operand lowerer."""
     _, refs, roots, peers = task.run
-    for ref in refs:
-        if (ref.dtype != torch.float32 or ref.columns < 3 or ref.column_stride != 1
-                or ref.rows > 1 and ref.row_stride < ref.columns):
-            raise ValueError('PARTIALS requires nonoverlapping records of contiguous float32 [m,l,O] fields')
     owners = {id(ref): root for ref, root in zip(refs, roots)}
     group = program._world.of(task.queue, task.members)
     backend = group._get_backend(torch.device(program.device))
     empty, bindings = _buffer(program, refs[0].dtype, 0), []
-    for ref, offset, count in _alias_fragments(program, task, refs):
-        if (offset - ref.offset) % max(ref.row_stride, ref.columns) % ref.columns or count % ref.columns:
-            raise ValueError('PARTIALS common fragment must contain complete typed records')
+    for ref in refs:
         root = owners[id(ref)]
         receives = program.rank in task.participants if root is None else program.rank == root
-        alias = _alias(ref, offset, count) if program.rank in peers or receives else empty
-        call = _native.call('ALLREDUCE' if root is None else 'REDUCE', count, ref.dtype,
+        alias = ref.tensor if program.rank in peers or receives else empty
+        call = _native.call('ALLREDUCE' if root is None else 'REDUCE', ref.rows * ref.columns, ref.dtype,
                             op=backend.partials_operator(ref.columns), root=0 if root is None else root,
+                            element_shape=(ref.columns,),
                             contributors=tuple(peers), recipients=task.participants if root is None else (root,))
         bindings.append((call, alias if program.rank in peers else empty, alias if receives else empty))
     return _native.prepare_fragments(bindings, group)
@@ -245,9 +223,9 @@ def _prepare_all_reduce(program, task):
     _, refs, op = task.run
     empty = _buffer(program, refs[0].dtype, 0)
     bindings = []
-    for ref, offset, count in _alias_fragments(program, task, refs):
-        alias = _alias(ref, offset, count) if program.rank in task.participants else empty
-        call = _native.call('ALLREDUCE', count, ref.dtype, op=op,
+    for ref in refs:
+        alias = ref.tensor if program.rank in task.participants else empty
+        call = _native.call('ALLREDUCE', ref.rows * ref.columns, ref.dtype, op=op,
                             contributors=task.participants, recipients=task.participants)
         bindings.append((call, alias, alias))
     return _native.prepare_fragments(bindings, program._world.of(task.queue, task.members))

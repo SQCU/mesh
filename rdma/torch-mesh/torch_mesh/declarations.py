@@ -133,6 +133,7 @@ def lower(graph, *, forms=None):
             rows = args.get('rows', [])
             calls = [backend.Call(backend.REDUCE_SCATTER if rows else backend.ALLREDUCE if root < 0 else backend.REDUCE,
                                   x.numel(), x.dtype, root=max(0, root), op=operator,
+                                  element_shape=(x.shape[-1],),
                                   counts=[r * x.shape[-1] for r in rows] if rows else None)]
         elif name in ('all_reduce', 'all_reduce_'):
             calls = [backend.Call(backend.ALLREDUCE, x.numel(), x.dtype, op=_operation(reduction))]
@@ -452,8 +453,9 @@ class BoundGraph:
                 sources = named.get('inputs', [source])
                 if len(outputs_flat) != len(calls[0]) or len(sources) != len(calls[0]):
                     raise ValueError('each declared collective needs its source and final output')
-                made, _ = backend.prepare_fragments(list(zip(calls[0], sources, outputs_flat)), native)
+                made, lowered = backend.prepare_fragments(list(zip(calls[0], sources, outputs_flat)), native)
                 self.steps.append(made)
+                declarations[metadata['group_name']] = [lowered]
             for name, calls in declarations.items():
                 self.groups.setdefault(name, []).extend(calls)
             values.update(zip(exported, targets))
