@@ -102,20 +102,23 @@ static std::vector<MeshStream *> streams_made() {
   return made;
 }
 
-// Stream s's work so far complete: its buffer committed, then the host's wait for its end, within `ns` (0:
-// MESH_PLATFORM_NS) of torch's own work: no time is counted while a prepared function it follows is in flight (the
-// library's watch bounds that by its progress).  Past it the program ends through the library's expiry, its GPU work
-// and posted receives stopped first, the wait named (the operator, 2026-10-28).  No turn of torch's queue taken here
-// waits, so its dispatch_sync waits only on torch's own turns.
-static void settled(MeshStream &s, const char *wait, uint64_t ns = 0) {
+// Stream s's work so far complete: its buffer committed, then the host's wait for its end, bounded on its progress: the
+// stream's count moving (a buffer it committed ended) or a prepared function it follows in flight (the library's watch
+// bounds that by its own).  Torch's buffers between show nothing (metal-recording.h MetalCompletionNs), so past `ns`
+// (0: MetalCompletionNs) with neither the result is false where `ns` was given, and otherwise the program ends through
+// the library's expiry, its GPU work and posted receives stopped first, the wait named (the operator, 2026-10-28).  No
+// turn of torch's queue taken here waits, so its dispatch_sync waits only on torch's own turns.
+static bool settled(MeshStream &s, const char *wait, uint64_t ns = 0) {
   MeshStream *self = &s;
   at::mps::dispatch_sync_with_rethrow(s.mps->queue(), ^{ @autoreleasepool { self->signalled(); } });
-  ns = ns ? ns : MESH_PLATFORM_NS;
-  for (uint64_t from = clock_gettime_nsec_np(CLOCK_MONOTONIC), now; s.progress.signaledValue < s.committed;) {
-    if (s.retire()) from = clock_gettime_nsec_np(CLOCK_MONOTONIC);
-    else if ((now = clock_gettime_nsec_np(CLOCK_MONOTONIC)) - from >= ns) MetalExpired(wait, ns);
+  const uint64_t bound = ns ? ns : MetalCompletionNs();
+  for (uint64_t seen = 0, since = 0, reached, now; (reached = s.progress.signaledValue) < s.committed;) {
+    now = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    if (!since || reached != seen || s.retire()) seen = reached, since = now;
+    else if (now - since >= bound) { if (ns) return false; MetalExpired(wait, bound); }
     [s.progress waitUntilSignaledValue:s.committed timeoutMS:100];
   }
+  return true;
 }
 
 // Configuration-time migration may read existing tensors produced by ordinary
@@ -201,7 +204,8 @@ static void complete(uint64_t ticket) {
 // c10d's Work for a group issued and not completed: waiting (or synchronizing, asking whether it completed, or
 // asking for its future) encodes the rest on torch's current stream, where every later kernel reads its results; a
 // c10d completion follows the submitted stream's dependency.  A wait given a timeout (c10d's kNoTimeout is 0) has the
-// host wait for the stream within it too, as NCCL's blocking wait does.
+// host wait for the stream too, as NCCL's blocking wait does, and raises DistBackendError where the stream made no
+// progress for that long (settled).
 class MeshWork : public c10d::Work {
  public:
   MeshWork(uint64_t ticket, std::vector<at::Tensor> outputs)
@@ -210,9 +214,9 @@ class MeshWork : public c10d::Work {
   bool isSuccess() const override { return finished_; }
   bool wait(std::chrono::milliseconds timeout) override {
     finish();
-    if (timeout.count() > 0)
-      settled(stream_of(at::mps::getCurrentMPSStream()), "MeshWork::wait: its group's completion on torch's MPS stream",
-              (uint64_t)timeout.count() * 1000000);
+    TORCH_CHECK_WITH(DistBackendError, timeout.count() <= 0 || settled(stream_of(at::mps::getCurrentMPSStream()),
+        "MeshWork::wait", (uint64_t)timeout.count() * 1000000), "MeshWork::wait: its group's completion on torch's MPS "
+        "stream made no progress within its timeout of ", timeout.count(), " ms");
     return true;
   }
   void synchronize() override { finish(); }

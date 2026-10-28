@@ -26,19 +26,17 @@ def start(store, key, rank, ranks, history):
 
 
 def close(observer):
-    """The collection's records, or its error: it ends within its deadline of the last observation (_collect), each store
-    call within the library's preparation bound (torch_mesh.bounded); past that bound this wait ends the program through
-    the library's expiry."""
+    """The collection's records, or its error as the collection raised it (its TimeoutError names the quiet ranks): it
+    ends within its deadline of the last observation (_collect), each store call within the library's preparation bound
+    (torch_mesh.bounded); past that bound this wait ends the program through the library's expiry."""
     import mesh
-    from concurrent.futures import TimeoutError
+    from concurrent.futures import wait
     from torch_mesh import _stream
     outgoing, stopping, worker, future = observer
     stopping.set()
-    try:
-        records = future.result(timeout=mesh.lib.MESH_PREPARATION_NS / 1e9)
-    except TimeoutError:
+    if not wait([future], mesh.lib.MESH_PREPARATION_NS / 1e9).done:
         _stream.expired('rollout: the observation collection (rollout.close)', mesh.lib.MESH_PREPARATION_NS)
-    emit([{'observations': records}])
+    emit([{'observations': future.result()}])
 
 
 def _collect(store, key, rank, ranks, history, outgoing, stopping):
