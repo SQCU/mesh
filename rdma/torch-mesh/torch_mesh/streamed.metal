@@ -571,7 +571,8 @@ kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const ui
 // matrix (the first SK gate's, the rest up's: one walk's code for both, F tiles in flight). hidden[n][r] =
 // GELU(gateScale[r] g) * upScale[r] u, in the hidden's code order (down's coded input). Rows past d.rows repeat the
 // last row's loads and are not written. H: fragment_walk's.
-template <uint R, uint SK, uint TILES, uint WIDTHS, uint F, uint APART, uint LOADS, uint H, bool Masked = false, bool Scaled = false>
+template <uint R, uint SK, uint TILES, uint WIDTHS, uint F, uint APART, uint LOADS, uint H, bool Masked = false, bool Scaled = false,
+          uint GatePitch = 0, uint UpPitch = 0>
 kernel void streamed_couple(device const uint *gateCodes [[buffer(0)]], device const uint *gateTiles [[buffer(1)]],
                             device const uint *gateBands [[buffer(2)]], device const half *gx [[buffer(4)]],
                             device const uint *upCodes [[buffer(6)]], device const uint *upTiles [[buffer(7)]],
@@ -584,19 +585,20 @@ kernel void streamed_couple(device const uint *gateCodes [[buffer(0)]], device c
     constexpr uint STEPS = (TILES + SK - 1) / SK, COLUMNS = TILES * 32, THREADS = (APART ? 64 : 32) * SK;
     threadgroup float sums[2][SK][R][32];
     const uint band = group.x, rows = d.rows, pitch = d.pitch ? d.pitch : TILES;
+    const uint gatePitch = GatePitch ? GatePitch : pitch, upPitch = UpPitch ? UpPitch : pitch;
     if (APART) {
         const uint matrix = simd / SK, part = simd % SK;
         const bool up = matrix != 0;
         float2 acc[R][4];
         float out[R];
-        fragment_walk<R, SK, STEPS, WIDTHS, 0, F, LOADS, H>(up ? upCodes : gateCodes, (up ? upTiles : gateTiles) + band * pitch,
+        fragment_walk<R, SK, STEPS, WIDTHS, 0, F, LOADS, H>(up ? upCodes : gateCodes, (up ? upTiles : gateTiles) + band * (up ? upPitch : gatePitch),
                                                  streamed_base((up ? upBands : gateBands)[band]), nullptr, up ? ux : gx, COLUMNS,
                                                  rows, 0, TILES, part, lane, acc);
         const uint row = fragment_reduce<R>(acc, lane, out);
         for (uint n = 0; n < R; n++) sums[matrix][part][n][row] = out[n];
     } else {
         const uint kb = fragment_kb(lane);
-        device const uint *gw = gateTiles + band * pitch, *uw = upTiles + band * pitch;
+        device const uint *gw = gateTiles + band * gatePitch, *uw = upTiles + band * upPitch;
         const uint gheld = fragment_words<SK, STEPS>(gw, TILES, simd, lane), uheld = fragment_words<SK, STEPS>(uw, TILES, simd, lane);
         device const uint *gp = gateCodes + (streamed_base(gateBands[band]) * MESH_STREAMED_PLANE_WORDS) + lane, *up = upCodes + (streamed_base(upBands[band]) * MESH_STREAMED_PLANE_WORDS) + lane;
         float2 gacc[R][4], uacc[R][4];

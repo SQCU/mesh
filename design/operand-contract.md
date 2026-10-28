@@ -93,11 +93,18 @@ The 1–4 integration pass on 2026-10-28 has these boundaries:
    transform is emitted once across its destination batches. Native transforms
    can write a declared slab view in one launch, including its capacity gaps;
    they do not repeat the rotation or normalization for each output batch.
-   Native `StreamedMatrix.stacked` still requires a shared code buffer, column
-   domain and basis. Its packed band word also carries a bounded slab index.
-   That physical encoding is not a complete product-list contract. The remaining
-   change is to retain independent `StreamedProduct`/`ScaledReduction` operands
-   through composition instead of requiring a synthetic common matrix.
+   Native `StreamedProducts` retains each matrix's code storage, basis, scales
+   and logical output domain. `StreamedMatrix.coalesced` can combine compatible
+   products; a different code buffer, basis or slab count leaves the independent
+   products intact. Cuts of an existing combined matrix preserve its slab
+   layout. They do not invent additional input slabs.
+   Native FFN and head consumers take the resulting `ScaledReduction` operands
+   without a join copy. Independent head inputs retain their own reduction
+   counts, strides and origins. Cache fill selects only key/value products and
+   omits row-output stores in both fused and standalone consumers.
+   Independent products still meet at one standalone consumer command, whose
+   accesses cover all its inputs. Per-product/tile consumer fusion remains
+   unfinished; this pass does not establish equal latency for that case.
    FX small rotations and Hadamard transforms still repeat across separate
    scale-binding batches. Their missing piece is a shared binding declaration
    for disjoint scale storage; replacing the actual scale operands with cached
@@ -115,14 +122,21 @@ The 1–4 integration pass on 2026-10-28 has these boundaries:
 3. **Adapters.** Stored Q/K/V and gate/up products now use `storedProducts` for
    normalization, product selection and destination binding. The gate/up helper
    adds its declared activation. The old `qkvCommands`, `ModelFeature.resolve`,
-   `TensorView.resolved` and pair-only layout resolver are removed. The native
-   compressed constructors above still need replacement by composition operands.
+   `TensorView.resolved` and pair-only layout resolver are removed. The forced
+   `StreamedMatrix.stacked` constructor and attention's separate stack dispatcher
+   are also removed. Product input transforms use `streamedCommands` for every
+   row class. Normalization is an explicit use operand, not a property baked
+   into stored weights. Preparation can fold a generation's constant gamma
+   into that use's gather scales; already normalized inputs use the raw scales.
 4. **Preparation.** Native rank and Goal A build. Complete FX graphs retain five
    product results through mapped gathers, rotation, Hadamard and product lowering.
    The folded graph has one matrix transform; the small-transform batching gap
    above is visible in its emitted graph. Native slab shader specializations
-   compile with capacity gaps. This evidence involves no numerical execution,
-   collective run, throughput result or latency result.
+   compile with capacity gaps. Standalone head specializations compile with
+   independent value partials and mapped destinations; fused and standalone
+   specializations also compile with row stores omitted. Both coupled product
+   forms compile with unequal tile-row strides. This evidence involves
+   no numerical execution, collective run, throughput result or latency result.
 
 Further integration belongs at these shared lowering boundaries. Numerical
 bodies contribute their work and uses, rather than separate memory systems.
@@ -537,10 +551,12 @@ arithmetic; this native Metal boundary has no float64 lowering.
 
 ## Compressed projections
 
-Python FFNs retain each matrix's logical domain and encoded order. Native FFNs
-retain logical cuts but still construct a common encoded matrix first, with the
-composition limits listed above. Shared operand views compose gate and up results
+Python and native FFNs retain each matrix's logical domain, encoded order and
+input basis. Native composition retains the product list before choosing any
+physical coalescing. Shared operand views compose gate and up results
 with the down input. Matching projections can use the coupled numerical kernel.
+The coupled kernel receives each product's tile-row stride independently in
+both frontends; unequal strides no longer exclude fusion.
 Separate projections use the same product and reduction bodies with their views. A numerical
 basis transform remains work; a permutation alone adds no copy.
 

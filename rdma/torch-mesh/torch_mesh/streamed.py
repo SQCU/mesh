@@ -985,14 +985,14 @@ class Matrix(torch.Tensor):
         target = TensorView.of(hidden)
         scaled = not rotated and any(v != 1 for v in down.metadata['col_scale'])
         paired = (not gate.row_masked and gate.metadata['row_order'] == up.metadata['row_order']
-                  and gate.columns == up.columns and gate.pitch == up.pitch and -1 not in order)
+                  and gate.columns == up.columns and -1 not in order)
         spec = None if decomposition is not None or not paired else couple(
             Fit.node(), slice_units(gate), slice_units(up), n, widths=max(gate.widths, up.widths))[0]
         if spec is not None:
             positions = {value: at for at, value in enumerate(order)}
             stores = [positions[value] for value in gate.metadata['row_order']]
             kernel, args = spec_arguments(spec, gate.tiles_, max(gate.widths, up.widths))
-            name, line = instance('streamed_' + kernel, *args, 0, int(scaled))
+            name, line = instance('streamed_' + kernel, *args, 0, int(scaled), gate.pitch, up.pitch)
             (groups, _), threads, _ = launch(spec, gate.rows, n)
             scale = TensorView.of(down.col_scale).select(0, stores) if scaled else None
             hidden, = _encode(name, gate._code() + [None, gx, None] + up._code()
