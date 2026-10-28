@@ -4259,19 +4259,23 @@ static ncclResult_t losses_through(uint64_t ticket) {
 /* The one place a reuse of storage is ordered: before a group writes a slot, the slot's last group's landings have
    landed, so its SENDs from it were read (a witness or a credit: credits_lay) and its consumers ran earlier in the
    stream; that group completed first where it is in flight, then `landed` awaited past the landings no work in the
-   stream awaited (a fused crossing's relay and credit landings).  No `sent`.  Under group_lock */
+   stream awaited (a fused crossing's relay and credit landings).  With no slot (0), before a fused crossing's caller
+   writes its operands, which any earlier group of the communicator may still be sending, whatever its definition (one
+   since evicted, one sharing the source): every group in flight completed, then every landing presented on each
+   channel.  No `sent`.  Under group_lock */
 static ncclResult_t guard(struct metal_program *program, struct ncclComm *comm, uint32_t slot, int *published) {
-  const struct slot *s = comm->slots + slot - 1;
-  struct inflight *g = inflight;
-  while (g && g->ticket != s->ticket) g = g->next_group;
+  const struct slot *s = slot ? comm->slots + slot - 1 : NULL;
+  struct inflight *g = s ? inflight : inflight_last;
+  while (s && g && g->ticket != s->ticket) g = g->next_group;
   ncclResult_t result = g ? walk(program, NULL, g, published) : ncclSuccess;
   if (g && !result) result = retire(program);
   for (uint32_t h = 0; !result && h < comm->count; h++) {
     struct channel *ch = comm->channels + h;
-    if (ch->waited >= s->lands[h]) continue;
-    const struct metal_wait wait = {ch->buffer, comm->violation, ch->buffer, ch->landed, ch->landed, s->in[h], s->lands[h] - 1, h, {0}};
+    const uint64_t lands = s ? s->lands[h] : ch->lands;
+    if (ch->waited >= lands) continue;
+    const struct metal_wait wait = {ch->buffer, comm->violation, ch->buffer, ch->landed, ch->landed, s ? s->in[h] : ch->in, lands - 1, h, {0}};
     result = gpu(metal_spin(program, &wait), "the last landings of a reused generation");
-    ch->waited = s->lands[h];
+    ch->waited = lands;
   }
   return result;
 }
@@ -4348,9 +4352,9 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   struct where area = {NULL, 0};
   uint32_t slot = 0;
   if (remote) result = bind_slot(program, comm, x, list, n, plans, &area, &slot);
-  /* a fused crossing's caller writes its operands after this group is encoded: every earlier user of x's storage first */
-  for (uint32_t k = 0; !result && remote && k < GENERATIONS; k++)
-    if (x->slot[k] && (fused || x->slot[k] == slot)) result = guard(program, comm, x->slot[k], &published);
+  /* a fused crossing's caller writes its operands after this group is encoded: every earlier group of its communicator
+     first (guard), else the slot's last user */
+  if (!result && remote) result = guard(program, comm, fused ? 0 : slot, &published);
   if (!result) bind_calls(list, n);
   struct inflight *g = NULL, *before = NULL;
   uint64_t ticket = 0;
