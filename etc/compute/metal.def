@@ -61,6 +61,9 @@ MESH_METAL_VALUE(ATTENTION_MERGE_PARTS_PER_LANE, 2)
 // budget. Wider logical heads stream through the same assigned page operands.
 MESH_METAL_VALUE(ATTENTION_QUERY_CACHE_BYTES, 8192)
 MESH_METAL_VALUE(ATTENTION_ACCUMULATOR_VALUES_PER_LANE, 32)
+// The vector producer retains at most the old width-512 query footprint per
+// lane. Wider queries read the same page operands in bounded fragments.
+MESH_METAL_VALUE(ATTENTION_VECTOR_QUERY_VALUES_PER_LANE, 64)
 MESH_METAL_VALUE(SPEC_THREADS, 1024)
 MESH_METAL_VALUE(DRAW_THREADS, 256)
 MESH_METAL_VALUE(DRAW_MAX_BLOCKS, 256)

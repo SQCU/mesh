@@ -279,11 +279,9 @@ result is established. Paired accumulation changes floating-point summation
 order; numerical execution remains to be measured after the structural pass.
 
 This is still one local norm reduction per head. Collective placement must
-expose its partial sum before a head can span nodes. The model loader's
-256/512-only head filter also remains: the separate vector attention producer
-still truncates channel dimensions. The tile producer now has masked channel
-tails and bounded storage, described below. Both producer forms must be lowered
-before removing that model-wide filter.
+expose its partial sum before a head can span nodes. The vector and tile
+attention producers now mask channel tails and bound their working storage,
+as described below. The model loader's 256/512-only head filter is removed.
 
 ### Row reductions and gathered consumers
 
@@ -378,9 +376,8 @@ folding them into the existing scaled-partial merge is unfinished. Other
 whole-dimension rules in `partition.py` are also still present.
 Native fused row norms still need their distributed factor operands connected
 through the complete graph. These are remaining lowering and fusion tasks.
-The native model loader's 256/512 head-width filter and vector-width assumptions
-in its attention producers remain. Their domains still need to reach all
-producer loops; accepting the input alone would leave omitted lanes.
+Native attention now carries logical channel extents through both producer
+forms; the model loader no longer restricts heads to widths 256 and 512.
 
 ### Centered moments across owners
 
@@ -530,10 +527,9 @@ Native rank and Goal A built after the page-sizing change. These are preparation
 results only; no numerical work or timing/throughput measurement was submitted.
 
 This removes limits from the merge of already-produced partial results. The
-vector attention producer still truncates channel dimensions; the tile producer
-has the bounded lowering described next. LiteRT's draw/kept adapters still use the old four-lane slice
-indexing. The delegate's
-internal tensor views also remain a separate integration requirement. Placing
+producer lowering is described next. LiteRT's draw/kept adapters still use the
+old four-lane slice indexing. The delegate's internal tensor views also remain
+a separate integration requirement. Placing
 the partial numerical work across nodes remains part of the graph's reduction
 lowering, rather than a property of this merge.
 
@@ -574,9 +570,35 @@ also compiled. Native rank and Goal A built. These were source compilation and
 builds only; numerical equivalence and whole-function latency/throughput remain
 unmeasured.
 
-The vector producer's width assumptions still need to be removed before the
-ordinary model loader can drop its 256/512 filter. Placing one head's
-inner-product reduction across several nodes remains separate graph-lowering work.
+### Bounded vector channels
+
+The vector producer also separates logical width from its physical launch.
+Preparation derives channel tiles and position groups which divide that launch
+and its KV pages. A final tile masks channels beyond the declared width. Query
+cuts use a ceiling division, so the inner product includes the final channels.
+Query registers have a per-lane budget in `metal.def`; larger queries read
+fragments from their input pages.
+
+The shared `mesh_attention` computes each key chunk's scores and softmax once.
+All channel tiles consume those probabilities. A single tile keeps its sums in
+registers. Wider rows keep sums in their assigned partial-result pages between
+chunks. The existing completion word covers the whole row; channel batches do
+not create new completion counters or queue submissions. The int8 operand
+continues to use the same algorithm with one channel batch.
+
+Both vector and tile producers now preserve logical row strides and mask tails
+on reads and writes. The ordinary model loader's 256/512 filter is removed.
+Preparation compiled vector widths 1 through 1,048,577 with both configured
+launch splits, one and multiple contributors, fresh KV and received queries.
+Wide rows used 320/336 bytes of shared storage at 128 threads and 608/624 bytes
+at 256 threads, depending on whether the fused contributor merge was present.
+The previous 256/512 specializations retained their shared storage sizes.
+Native rank and Goal A built. No numerical commands or performance measurements
+were run.
+
+Placing one head's inner-product reduction across several nodes remains
+separate graph-lowering work. Removing the local width filter does not finish
+that distributed lowering or establish numerical results for a complete model.
 
 ### Host storage contracts
 

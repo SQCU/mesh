@@ -5,12 +5,14 @@
 // and the parts of a range merge as the KV type says (Flash-Decoding [Dao et al. 2023]). The KV type A is the operand:
 //
 //   A::rows, A::simdgroups, A::slices (DS), A::groups (G = W / DS), A::grouprows (rows a round of the groups' sum),
-//   A::fresh (the groups' memory aliases nothing the chunks read), A::score (float or float4: a lane's positions of a
+//   A::channel_batches, A::fresh (the groups' memory aliases nothing the chunks read), A::score (float or float4: a lane's positions of a
 //   row) and A::mask (bool or bool4); members words (2 R simdgroups floats), red (round (G - 1) DS float4s), s, lane, d, g;
 //   chunk(i): whether the task holds chunk i; scores(i, sc): the lane's scores of chunk i, scaled, a dead position
 //   -3e38, and their mask; put(r, p): a row's probabilities of the lane's positions into the chunk's memory (between the
 //   chunk's two barriers); values(i, acc): the chunk's value product of the thread's channel slice; finish(m, l, o): the
-//   parts' merge (mesh_merge) and the store.
+//   parts' merge (mesh_merge) and the store. With more than one channel batch, load_accumulator(i, b, acc) selects the
+//   batch and reads its prior sums (zero for the first chunk); store_accumulator writes its assigned partial pages.
+//   Such a batch uses one position group. Finish publishes the complete row once all channel batches are written.
 //
 // Each instance is a literal kernel of its operand: the KV type's constants are its own, and the recorder makes the
 // dispatch's sizes and fixed constants literals (metal-microbench docs/kernels.md#one-kernel-interface). Below it the
@@ -29,9 +31,9 @@ __attribute__((always_inline)) static inline float mesh_lanes_sum(float4 v) { re
 
 // One chunk's online softmax of R rows: every lane's masked scores sc[r], the chunk's maxima and sums through `words`
 // (2 R NSG floats), each row's probabilities to put(r, p) after the first barrier, and each row's running maximum m, sum
-// l and accumulator acc rescaled after the second.
+// l and the accumulator's rescale factor alpha after the second.
 template <uint R, uint NSG, typename S, typename B, typename Put>
-__attribute__((always_inline)) static inline void mesh_softmax_chunk(thread S *sc, B in, thread float *m, thread float *l, thread float4 *acc,
+__attribute__((always_inline)) static inline void mesh_softmax_chunk(thread S *sc, B in, thread float *m, thread float *l, thread float *alpha,
                                       threadgroup float *words, uint s, uint lane, Put put) {
     for (uint r = 0; r < R; r++) {
         const float top = simd_max(mesh_lanes_max(sc[r]));
@@ -52,9 +54,8 @@ __attribute__((always_inline)) static inline void mesh_softmax_chunk(thread S *s
     for (uint r = 0; r < R; r++) {
         float total = 0.0f;
         for (uint q = 0; q < NSG; q++) total += words[(R + r) * NSG + q];
-        const float alpha = exp(m[r] - mn[r]);
-        l[r] = l[r] * alpha + total;
-        acc[r] *= alpha;
+        alpha[r] = exp(m[r] - mn[r]);
+        l[r] = l[r] * alpha[r] + total;
         m[r] = mn[r];
     }
 }
@@ -86,13 +87,27 @@ __attribute__((always_inline)) static inline void mesh_attention(thread A &a) {
     for (uint i = 0; a.chunk(i); i++) {
         typename A::score sc[R];
         const typename A::mask in = a.scores(i, sc);
-        mesh_softmax_chunk<R, A::simdgroups>(sc, in, m, l, acc, a.words, a.s, a.lane,
+        float alpha[R];
+        mesh_softmax_chunk<R, A::simdgroups>(sc, in, m, l, alpha, a.words, a.s, a.lane,
                                              [&](uint r, typename A::score p) { a.put(r, p); });
-        a.values(i, acc);
+        for (uint b = 0; b < A::channel_batches; ++b) {
+            if constexpr (A::channel_batches > 1) a.load_accumulator(i, b, acc);
+            for (uint r = 0; r < R; ++r) acc[r] *= alpha[r];
+            a.values(i, acc);
+            if constexpr (A::channel_batches > 1) a.store_accumulator(acc);
+        }
     }
     float4 o[R];
     mesh_position_groups<R, A::grouprows, A::slices, A::groups, (A::fresh != 0)>(acc, o, a.red, a.d, a.g);
     a.finish(m, l, o);
+}
+
+// Position groups share a bounded launch. Pad a channel tile only enough to
+// divide both the launch and the positions; logical channels remain masked.
+constexpr uint mesh_attention_groups(uint slices, uint threads, uint positions) {
+    for (uint g = positions; g > 1; --g)
+        if (threads % g == 0 && positions % g == 0 && threads / g >= slices) return g;
+    return 1;
 }
 
 // The parts' merge (Flash-Decoding's [Dao et al. 2023]; FlashInfer's state merge): the J parts of one row, each its maximum
@@ -139,7 +154,7 @@ __attribute__((always_inline)) static inline void mesh_merge(P parts, uint J, ui
         : min(uint(MESH_SIMD_WIDTH), Threads - ((g * DS + d) % Threads) / MESH_SIMD_WIDTH * MESH_SIMD_WIDTH);
     const uint batch = Shared ? SharedWeights : Cached * lanes;
     float top = -3.0e38f, total = 0.0f;
-    if (!Shared || g * DS + d < MESH_SIMD_WIDTH) {
+    if (!Shared || g * DS + d % DS < MESH_SIMD_WIDTH) {
         for (uint p = lane; p < J; p += lanes) if (parts.l(p) > 0.0f) top = max(top, parts.m(p));
         top = simd_max(top);
     }
@@ -149,7 +164,7 @@ __attribute__((always_inline)) static inline void mesh_merge(P parts, uint J, ui
         const uint end = min(J, first + batch);
         float w[Cached];
         if constexpr (Shared) {
-            if (g * DS + d < MESH_SIMD_WIDTH) {
+            if (g * DS + d % DS < MESH_SIMD_WIDTH) {
                 for (uint p = first + lane; p < end; p += lanes) {
                     const float le = parts.l(p), we = le > 0.0f ? exp(parts.m(p) - top) : 0.0f;
                     weights[p - first] = we;
@@ -189,9 +204,9 @@ __attribute__((always_inline)) static inline void mesh_merge(P parts, uint J, ui
         if (Shared && end < J) threadgroup_barrier(mem_flags::mem_threadgroup);
     }
     if (G > 1) {
-        if (g > 0) red[(g - 1) * DS + d] = sum;
+        if (g > 0) red[(g - 1) * DS + d % DS] = sum;
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (g == 0) for (uint e = 1; e < G; ++e) sum += red[(e - 1) * DS + d];
+        if (g == 0) for (uint e = 1; e < G; ++e) sum += red[(e - 1) * DS + d % DS];
     }
     if (g == 0) store(Shared ? scalars[1] : top, Shared ? scalars[0] : total, sum);
 }
