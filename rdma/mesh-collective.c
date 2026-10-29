@@ -554,14 +554,6 @@ static uint32_t mesh_program_segments(const struct mesh_program *program){
   return segments;
 }
 
-/* The elements a cut of the program's own lies on: the least multiple of `page` bytes and of an element's bytes, in
-   elements (1: any element) */
-static uint64_t mesh_quantum(uint64_t page,uint32_t element){
-  uint64_t a=page,b=element?element:1;
-  if(page<=1)return 1;
-  while(b){const uint64_t t=a%b;a=b;b=t;}
-  return page/a;
-}
 
 /* The operand's segments: `sizes` where given (segment g the sizes[g] elements after the segments before it: mesh
    430cf7b2^ mesh_cut's rule, MPI_Reduce_scatter's and MPI_Allgatherv's counts), else its quanta of `q` elements cut
@@ -624,7 +616,7 @@ uint32_t mesh_program_steps_cut(const struct mesh_program *program,uint32_t rank
   if(rank>=program->nodes || !program->parts)return 0;
   uint64_t *lo=malloc(program->parts*sizeof *lo),*count=malloc(program->parts*sizeof *count);
   uint32_t k=0;
-  if(lo && count && mesh_program_ranges(program,operand.elements,segments,mesh_quantum(page,operand.element_bytes),lo,count)){
+  if(lo && count && mesh_program_ranges(program,operand.elements,segments,mesh_page_quantum(page,operand.element_bytes),lo,count)){
     /* a move's parts in one segment are one step: no step spans two segments, so a rank's own segment of a
        reduce-scatter or an all-gather is a buffer of its own (libnccl-mesh partial_split) */
     for(uint32_t i=program->first[rank];i<program->first[rank+1];i++){
@@ -701,7 +693,7 @@ int mesh_program_check_members(const struct mesh_program *program,struct mesh_op
     }
     if(found && !positive)return EINVAL;
   }
-  const uint64_t quantum=mesh_quantum(page,operand.element_bytes);
+  const uint64_t quantum=mesh_page_quantum(page,operand.element_bytes);
   if(operand.elements>UINT64_MAX-(quantum-1))return EOVERFLOW;
   if(cut){
     uint64_t sum=0;

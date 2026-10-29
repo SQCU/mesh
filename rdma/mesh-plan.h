@@ -156,6 +156,9 @@ enum { MESH_STEP_SEND, MESH_STEP_REDUCE, MESH_STEP_COPY };
 struct mesh_step { uint32_t op,peer,round,buffer; uint64_t first; struct mesh_operand piece; };
 /* a step's piece's bytes; the first element of rank q's segment, the segments packed in rank order */
 static inline uint64_t mesh_step_bytes(const struct mesh_step *step){ return step->piece.elements*step->piece.element_bytes; }
+/* The elements a page-aligned cut lies on: the least multiple of `page` bytes and of an element's bytes, in elements
+   (1 where a page is 0 or 1 byte, any element; an element of 0 bytes counted as 1) */
+static inline uint64_t mesh_page_quantum(uint64_t page,uint64_t element){ if(page<=1)return 1; uint64_t a=page,b=element?element:1; while(b){const uint64_t t=a%b;a=b;b=t;} return page/a; }
 static inline uint64_t mesh_segment_first(const uint64_t *segment,uint32_t q){ uint64_t at=0; for(uint32_t r=0;r<q;r++)at+=segment[r]; return at; }
 
 /* design/whole-function.md#fabric */

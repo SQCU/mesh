@@ -97,9 +97,7 @@ int mesh_fabric_refine(const struct mesh_transfer *in,uint32_t count,uint64_t pa
       if(a->first+a->piece.elements<end)cuts[n++]=a->first+a->piece.elements;
     }
     qsort(cuts,n,sizeof *cuts,mesh_cut_order);
-    uint64_t a=page,b=s->piece.element_bytes;
-    while(b){const uint64_t r=a%b;a=b;b=r;}
-    const uint64_t quantum=page/a;
+    const uint64_t quantum=mesh_page_quantum(page,s->piece.element_bytes);
     uint64_t first=s->first;
     int64_t owner=-2;
     for(size_t i=0;i+1<n;i++){
@@ -176,9 +174,7 @@ int mesh_write_compile(const struct mesh_fabric *f,uint32_t rank,uint32_t source
   if(check || rank>=f->nodes || !operand.element_bytes || !page)return -(check?check:EINVAL);
   if(!operand.elements)return 0;
   const uint32_t P=paths->count;
-  uint64_t a=page,b=operand.element_bytes;
-  while(b){const uint64_t r=a%b;a=b;b=r;}
-  const uint64_t q=page/a,units=(operand.elements-1)/q+1;
+  const uint64_t q=mesh_page_quantum(page,operand.element_bytes),units=(operand.elements-1)/q+1;
   uint64_t *count=calloc(P,sizeof *count),*base=calloc(P,sizeof *base);
   uint64_t *remainder=calloc(P,sizeof *remainder);
   if(!count || !base || !remainder){free(count);free(base);free(remainder);return -ENOMEM;}

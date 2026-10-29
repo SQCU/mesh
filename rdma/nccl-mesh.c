@@ -5058,8 +5058,7 @@ static ncclResult_t plan_routes(ncclComm_t comm, uint64_t *demand, size_t entrie
         uint64_t bytes = 0;
         if (c->target) {
           if (e == (size_t)c->root * comm->nranks + c->target - 1) {
-            const uint64_t a = mesh_span_gcd(comm->page, SIZE[c->type]);
-            bytes = resolution ? (c->count ? (c->count - 1) / (comm->page / a) + 1 : 0) : c->count * SIZE[c->type];
+            bytes = resolution ? (c->count ? (c->count - 1) / mesh_page_quantum(comm->page, SIZE[c->type]) + 1 : 0) : c->count * SIZE[c->type];
           }
         }
         else if (c->bound && c->bound->demand && (!resolution || c->bound->route_units))
