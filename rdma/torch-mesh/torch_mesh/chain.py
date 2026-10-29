@@ -28,8 +28,7 @@ def _form(K, S, rows, ranks, channels, resident_tiles, capabilities):
     threads, memory = (capabilities[k] for k in ('max_threads_per_threadgroup', 'threadgroup_memory_bytes'))
     source = fused.steps() + argmax.SOURCE + '\n' + Path(__file__).with_suffix('.metal').read_text()
     tile = capabilities['simdgroup_matrix_edge']
-    probe = _stream.pipeline('kernel void width_probe(device uint* x [[buffer(0)]]) { x[0] = 0; }', 'width_probe')
-    simd, cores = _stream.pipeline_facts(probe)[1], capabilities['hardware']['gpu']['cores']
+    simd, cores = _stream.compilation['SIMD_WIDTH'], capabilities['hardware']['gpu']['cores']
     kt, st, rt = K // tile, S // tile, rows // tile
     # Independent row tiles and columns share the observed cores. These groups
     # may run in waves: no numerical phase requires them to reside together.
