@@ -1359,7 +1359,7 @@ does not round a column boundary down to a byte. Byte-aligned cuts use ordinary
 array slices. Unaligned cuts compose storage words without unpacking the entire
 constant or producing an element-index table.
 
-The same `slice_constant` takes the tensor's sparse storage relation. Traversal
+The same `select_constant` takes the tensor's sparse storage relation. Traversal
 order, dense dimensions, CSR segments and indices, and block dimensions stay
 with the encoded values throughout a cut. For a cut within a block, the compiler
 uses the greatest block width which divides the old width and both cut
@@ -1370,7 +1370,7 @@ runtime conversion. The storage declaration supplies the permitted index-vector
 types; their required width follows from the emitted metadata. These fields
 follow the [LiteRT schema](https://github.com/google-ai-edge/LiteRT/blob/main/tflite/converter/schema/schema.fbs).
 
-Outer and decomposition graphs use the same `slice_graph` operation for constant
+Outer and decomposition graphs use the same `select_graph` operation for constant
 data, logical shape and quantization fields. A changed constant gets its own
 buffer, and identical cuts share that buffer. The sharing key includes the sparse
 relation, so aliases with different traversal orders remain distinct. Other aliases retain the original
@@ -1381,6 +1381,15 @@ removed. The planner consumes the declared grain directly; it no longer adds
 an implicit 64-column alignment. These are preparation writes to the exported
 model, not copies added to numerical execution.
 
+Selections use ordered `(first, width, step, count)` records. One record can
+describe an interval, a repeated stripe, a reversal or repeated values. Several
+selected axes use this same operation for encoded values, logical shape and
+quantization fields. An identity selection retains the original buffer. Sparse
+selection finds the selected stored coordinates without enumerating absent
+values or empty repetitions. Preparation on 2026-10-29 retained two stored rows
+in a selection of half a billion logical rows, and preserved scalar bits,
+quantization fields and sparse metadata in ordered and repeated selections.
+
 `partition_axes` and `slice_axis` carry declared axes through projections,
 pointwise uses and composite graphs. FFN partitioning starts from the down
 projection's input axis and uses those same operations as head partitioning.
@@ -1388,6 +1397,12 @@ The old search for every tensor dimension equal to the FFN width is removed.
 Equal batch, neuron and output extents do not make them one partition axis.
 Broadcast operands carry the relation on their own rank, and projected biases
 follow the output-channel relation.
+
+The partition mark `(axis, unit)` selects a digit in each repeated group on that
+axis. Reshape carries the digit by its flat span: a channel selection in
+`[batch, heads, channels]` becomes stripes in `[batch, heads * channels]`.
+Shape constants retain the whole selected dimension, including its repeats.
+The constant selector consumes one compact record for those stripes.
 
 Preparation on 2026-10-28 preserved dense INT2/INT4 tails and fixed-width scalar
 bits across axes, odd extents and empty domains. Cut graphs serialized with
@@ -1458,9 +1473,20 @@ Preparation on 2026-10-29 serialized uneven internal and final sums through that
 member builder, including composite graphs and repeated returned aliases. The
 nonlinear consumer stayed after the internal sum. Transposes and broadcast batch
 axes retained their shapes, the reference-model cuts still prepared, and the
-LiteRT library built. No numerical commands ran. This does not complete striped
-reshape cuts or simultaneous cuts on several axes of one tensor; those still
-limit within-head channel placement.
+LiteRT library built. No numerical commands ran. Reshape relations spanning
+several target axes and simultaneous graph cuts on several axes of one tensor
+remain open. The planner also still declares whole-head shares.
+
+Static review on 2026-10-29 found a separate external binding gap. The model
+export retains a cut tensor's shape, but its ordinary provider binding uses a
+name and offset zero. A consumer selecting columns from an earlier full result
+therefore loses the relation between its local columns and that result's pages.
+Serialization and graph-order checks do not establish correct numerical binding.
+The original-to-selected relation must reach the shared layout placement and
+provider requirement lowering. A required contiguous view must use direct
+placement where possible, or the shared prepared layout-copy operation where
+the provider's fixed layout requires it. Numerical execution remains deferred
+until that relation is carried through the boundary.
 
 ### Encoded numerical operands
 
