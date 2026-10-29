@@ -120,19 +120,15 @@ class TensorView:
         rows = math.prod(self.shape[d] for d in axes[:-1])
         return self.permute(axes).reshape((rows, width))
 
-    def transfer(self):
-        """The common WRITE descriptor, retaining order and repeated reads."""
-        from mesh import view_layout
-        size = self.element_size()
-        if self.layout.affine:
-            shift, rows, spans = view_layout(self.shape, [s * size for s in self.layout.strides], size)
-            first = self.layout.offset + shift // size
-        else:
-            runs = self.layout.ordered_spans()
-            first = min((at for at, _ in runs), default=self.layout.offset)
-            rows, spans = (0, 0, 0), [((at - first) * size, count * size) for at, count in runs]
-        base = self.storage.as_strided((int(bool(self.numel())),), (1,), first)
-        return base, rows, spans
+    def write_layout(self):
+        """This view as a WRITE names it (nccl.h ncclMeshLayout): its storage (a view at the storage's first element, for
+        its page table), element bits, shape, strides and offset in elements; a mapped view's logical-order element runs
+        in place of strides.  Abstract layout: the library lowers it to pages, no address is read here."""
+        start = self.storage.as_strided((int(bool(self.storage.numel())),), (1,), 0)
+        runs = [] if self.layout.affine else [value for run in self.layout.ordered_spans() for value in run]
+        strides = list(self.layout.strides) if self.layout.affine else []
+        return (start, 8 * self.element_size(), list(self.shape), strides, int(self.layout.offset),
+                not self.layout.affine, runs)
 
     def declaration(self, *requirements):
         return dict(source=descriptor(self.storage).state, view=self.layout.state, requirements=requirements)

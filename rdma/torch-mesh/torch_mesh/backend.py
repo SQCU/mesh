@@ -310,7 +310,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
         may differ; native preparation agrees their common logical byte units.
         """
         from .operand import TensorView
-        bindings = [(*TensorView.of(view).transfer(), int(source), int(destination))
+        bindings = [(*TensorView.of(view).write_layout(), int(source), int(destination))
                     for view, source, destination in deliveries]
         return _stream.ViewWrites(bindings, self.handle)
 

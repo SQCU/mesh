@@ -1657,7 +1657,9 @@ struct Executions {
 
 // Compact row geometry and explicit indexed selections lower to one prepared
 // page WRITE. Layout resolution ends before native commands are recorded.
-using ViewBinding = std::tuple<at::Tensor, std::array<uint64_t, 3>, std::vector<std::array<uint64_t, 2>>, int, int>;
+// a view as a WRITE names it (operand.py TensorView.write_layout): its storage, element bits, shape, strides and offset in
+// elements, whether it is mapped and its runs; then source and destination ranks
+using ViewBinding = std::tuple<at::Tensor, int64_t, std::vector<int64_t>, std::vector<int64_t>, int64_t, bool, std::vector<int64_t>, int, int>;
 struct ViewWrites {
   int64_t comm;
   bool metal;
@@ -1672,17 +1674,18 @@ struct ViewWrites {
   void prepare() {
     if(!plans.handles.empty())return;
     Group g{metal};
-    for (const auto &[base, geometry, indexed, source, destination] : bindings) {
-      TORCH_CHECK(base.is_mps() == metal, "view writes require one local device");
-      const void *at = g.where(base);
+    for (const auto &[storage, bits, shape, strides, offset, mapped, runs, source, destination] : bindings) {
+      TORCH_CHECK(storage.is_mps() == metal, "view writes require one local device");
+      ncclMeshPageTable_t table = nullptr;
+      checked(ncclMeshPageTableCreate(g.where(storage), communicator(comm), metal, &table));
+      const std::vector<uint64_t> dims(shape.begin(), shape.end()), elements(runs.begin(), runs.end());
+      const ncclMeshLayout layout{table, (uint32_t)bits, (uint32_t)dims.size(), dims.data(), strides.data(), (uint64_t)offset,
+                                  mapped ? elements.data() : nullptr, elements.size() / 2};
       plans.handles.push_back(nullptr);
-      const auto [width, rows, pitch] = geometry;
-      const uint64_t view[3] = {(uint64_t)width, (uint64_t)rows, (uint64_t)pitch};
-      std::vector<ncclMeshSpan> spans;
-      for (const auto &row : indexed) spans.push_back({row[0], row[1]});
-      // rows or spans as the layout gives them, bounded by the binding's lease (mesh_compile_view: write_prepare)
-      checked(mesh_compile_view(at, (void *)at, view, spans.data(), spans.size(), source, destination, communicator(comm),
-                                metal, 0, mesh_write_layout{.instances=1,.invocations=1}, &plans.handles.back()));
+      const ncclResult_t made = ncclMeshWriteLayoutPrepare(&layout, source, destination, 0, ncclMeshWriteLayout{0, 1, 0, 1},
+                                                           &plans.handles.back());
+      ncclMeshPageTableDestroy(table);
+      checked(made);
     }
   }
   // Each encoded execution is the plan's next invocation, cycling the plan's instances: NFE k+1 writes other pages

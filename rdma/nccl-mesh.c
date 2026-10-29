@@ -5629,22 +5629,30 @@ ncclResult_t ncclMeshWriteLayoutPrepare(const ncclMeshLayout *v, int source, int
   uint64_t shape[64], itemsize = bits / 8;
   int64_t strides[64];
   const int packed = bits % 8 != 0;
-  if (packed && (!v->rank || v->strides[last] != 1 || v->shape[last] * bits % 8 || v->offset * bits % 8))
+  if (packed && !v->runs && (!v->rank || v->strides[last] != 1 || v->shape[last] * bits % 8 || v->offset * bits % 8))
     return fail(ncclInvalidArgument, "a sub-byte write's innermost axis must pack whole bytes, contiguously");
   for (uint32_t i = 0; i < v->rank; i++) {
     shape[i] = packed && i == last ? v->shape[i] * bits / 8 : v->shape[i];
-    if (packed && i != last && (uint64_t)llabs(v->strides[i]) * bits % 8)
+    if (packed && !v->runs && i != last && (uint64_t)llabs(v->strides[i]) * bits % 8)
       return fail(ncclInvalidArgument, "a sub-byte write's strides must fall on bytes");
     strides[i] = packed ? (i == last ? 1 : v->strides[i] * (int64_t)bits / 8) : v->strides[i] * (int64_t)itemsize;
   }
   if (packed) itemsize = 1;
   int64_t shift = 0;
-  uint64_t rows[3];
-  const long needed = mesh_view_layout(shape, strides, v->rank, itemsize, &shift, rows, NULL, 0);
+  uint64_t rows[3] = {0, 0, 0}, lowest = v->offset;
+  /* a mapped view's runs as byte spans from its lowest run, every edge on a byte */
+  for (size_t k = 0; v->runs && k < v->nruns; k++) {
+    if (v->runs[2 * k] * bits % 8 || v->runs[2 * k + 1] * bits % 8)
+      return fail(ncclInvalidArgument, "a sub-byte write's runs must fall on bytes");
+    if (!k || v->runs[2 * k] < lowest) lowest = v->runs[2 * k];
+  }
+  const long needed = v->runs ? (long)v->nruns : mesh_view_layout(shape, strides, v->rank, itemsize, &shift, rows, NULL, 0);
   ncclMeshSpan *spans = needed > 0 ? calloc((size_t)needed, sizeof *spans) : NULL;
   if (needed < 0 || (needed > 0 && !spans)) { free(spans); return fail(needed < 0 ? ncclInvalidArgument : ncclSystemError, "a write's layout spans"); }
-  if (needed > 0) mesh_view_layout(shape, strides, v->rank, itemsize, &shift, rows, spans, (size_t)needed);
-  const int64_t first = (int64_t)(v->offset * bits / 8) + shift;
+  for (size_t k = 0; v->runs && k < v->nruns; k++)
+    spans[k] = (ncclMeshSpan){(v->runs[2 * k] - lowest) * bits / 8, v->runs[2 * k + 1] * bits / 8};
+  if (!v->runs && needed > 0) mesh_view_layout(shape, strides, v->rank, itemsize, &shift, rows, spans, (size_t)needed);
+  const int64_t first = (int64_t)((v->runs ? lowest : v->offset) * bits / 8) + shift;
   ncclResult_t result = first < 0 ? fail(ncclInvalidArgument, "a write's view reaches before its storage") : ncclSuccess;
   const size_t page = v->storage->page_bytes;
   const struct write_page_index start = {(size_t)first / page, (size_t)first % page};
@@ -5670,15 +5678,6 @@ static ncclResult_t tensor_pages(const void *local,ncclComm_t comm,int metal,
   return ncclSuccess;
 }
 
-ncclResult_t mesh_compile_spans(const void *source_buffer,void *landing_buffer,const ncclMeshSpan *spans,size_t nspans,
-    int source,int destination,ncclComm_t comm,int metal,size_t max_packet,struct mesh_write_layout layout,ncclMeshWritePlan_t *out) {
-  if(!comm)return fail(ncclInvalidArgument,"tensor view requires a communicator");
-  ncclMeshPageTable_t table=NULL;struct write_page_index start={0};
-  ncclResult_t result=tensor_pages(comm->rank==source?source_buffer:landing_buffer,comm,metal,&table,&start);
-  if(!result)result=write_prepare(table,start,0,source,destination,1,0,max_packet,
-                                 0,0,spans,nspans,1,layout,out);
-  ncclMeshPageTableDestroy(table);return result;
-}
 /* mesh-write-compiler.h mesh_view_layout */
 long mesh_view_layout(const uint64_t *shape, const int64_t *strides, size_t rank, uint64_t itemsize,
                       int64_t *shift, uint64_t *rows, ncclMeshSpan *spans, size_t room) {
@@ -5727,13 +5726,6 @@ ncclResult_t mesh_compile_rows(const void *source_buffer,void *landing_buffer,si
   if(!result)result=write_prepare(table,start,rows*row_bytes,source,destination,1,pitch,max_packet,
                                  row_bytes,rows,NULL,0,0,layout,out);
   ncclMeshPageTableDestroy(table);return result;
-}
-/* mesh-write-compiler.h mesh_compile_view */
-ncclResult_t mesh_compile_view(const void *source_buffer,void *landing_buffer,const uint64_t rows[3],const ncclMeshSpan *spans,
-    size_t nspans,int source,int destination,ncclComm_t comm,int metal,size_t max_packet,struct mesh_write_layout layout,
-    ncclMeshWritePlan_t *out) {
-  return rows[1] ? mesh_compile_rows(source_buffer,landing_buffer,rows[0],rows[1],rows[2],source,destination,comm,metal,max_packet,layout,out)
-                 : mesh_compile_spans(source_buffer,landing_buffer,spans,nspans,source,destination,comm,metal,max_packet,layout,out);
 }
 ncclResult_t mesh_compile_write(const void *source_buffer,void *landing_buffer,size_t bytes,
     int source,int destination,ncclComm_t comm,int metal,uint32_t repeats,size_t stride,size_t max_packet,ncclMeshWritePlan_t *out) {
