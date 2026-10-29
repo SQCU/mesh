@@ -3,12 +3,14 @@ import itertools
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import torch.distributed as dist
 import assignment
 import rollout
 from mesh_source import revision
+from mesh_statistics import emit
 from . import partition
 from .streamed import node
 
@@ -54,6 +56,7 @@ def placement(mesh, name, workload, observations, *, parameters):
                                                  'operands': {k: int(v) for k, v in operands['operands'].items()}}))
     operands = {**operands, **json.loads(store.get(key + '/proposal'))}
     partition._attach(mesh, name, operands['parts'][name])
+    emit({'phase': 'placed', 'unix': time.time()})   # every member leaves together: each waited for rank 0's proposal
     return {'mesh': mesh, 'name': name, 'group': group, 'rank': rank, 'size': size,
             'store': store, 'key': key, 'history': history, 'workload': workload, 'records': records,
             'decisions': decisions, 'assignment': operands, 'graphs': graphs,
@@ -74,6 +77,7 @@ def bind(configuration, groups, prepare):
     assignment.install(group.comm, operands, name)
     partition._replan(mesh, name)
     prepare()
+    emit({'phase': 'prepared', 'unix': time.time()})
     c.update(decisions=decisions, graphs={name: graph}, assignment={**c['assignment'], 'parts': operands})
     c['observer'] = rollout.start(c['store'], c['key'] + '/observations', c['rank'], c['size'], c['history'])
     group._observers = getattr(group, '_observers', []) + [c['observer']]

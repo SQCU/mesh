@@ -70,7 +70,12 @@ def compact(record):
         if item['status'] == 'completed':
             rows[item['tag']] = values
         else:
-            incomplete[item['tag']] = {'status': item['status'], 'us,GB/s': values}
+            # each rank's phases (configuration.py: placed, prepared), wall-clock seconds after the first rank's placement
+            phases = {rank: value.get('phases', {}) for rank, value in item.get('ranks', {}).items()}
+            first = min((t for p in phases.values() for t in p.values()), default=0)
+            incomplete[item['tag']] = {'status': item['status'], 'us,GB/s': values,
+                                       **({'phases': {r: {k: round(t - first, 2) for k, t in p.items()} for r, p in phases.items()}}
+                                          if first else {})}
             failures = [[item['tag'] + '/' + rank, value['error'][:160]]
                         for rank, value in item.get('ranks', {}).items() if value.get('error')]
             errors.extend(failures or [[item['tag'], item.get('error', 'incomplete')[:160]]])
@@ -239,10 +244,12 @@ def rank_results(outputs):
     for name, output in outputs.items():
         lines = output['diagnostics']
         code = output['exit']
-        values, observations = [], []
+        values, observations, phases = [], [], {}
         for value in output['records']:
             if 'observations' in value:
                 observations.extend(value['observations'])
+            elif 'phase' in value:
+                phases[value['phase']] = value['unix']
             else:
                 values.append(value)
         failures = [line.strip() for line in lines if any(word in line.lower()
@@ -254,7 +261,7 @@ def rank_results(outputs):
             if line.startswith('Exception raised from '):
                 detail = next((prior.strip() for prior in reversed(lines[:index]) if prior.strip()), detail)
                 break
-        result[name] = {'exit': code, 'measurements': values, 'observations': observations,
+        result[name] = {'exit': code, 'measurements': values, 'observations': observations, 'phases': phases,
                         'error': f'exit {code}: {detail}' if code else ''}
 
     return result
