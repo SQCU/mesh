@@ -826,14 +826,7 @@ static int attach_current(struct attach **out) {
   return 0;
 }
 
-static int lease_room(struct attach *a) {
-  const size_t room = a->room ? 2 * a->room : 64;
-  struct lease *grown = realloc(a->leases, room * sizeof *grown);
-  if (!grown) return ENOMEM;
-  a->leases = grown;
-  a->room = room;
-  return 0;
-}
+static int grow(void *items, size_t *room, size_t count, size_t size);
 
 /* the process's attach not made (attach_current's error) for what `format` names: every client slot of the region held
    (EBUSY), or no region (no bridge has made it) */
@@ -1674,7 +1667,7 @@ static ncclResult_t mem_alloc(void **ptr, size_t size, enum mesh_backing backing
   if (!status) leases_reap(a);
   if (status)
     result = attach_fail(status, "ncclMemAlloc of %zu bytes", size);
-  else if ((a->count == a->room && lease_room(a)) ||
+  else if (grow(&a->leases, &a->room, a->count, sizeof *a->leases) ||
            (!a->lease_of && !(a->lease_of = calloc(mesh_rows(a->context.M), sizeof *a->lease_of))))
     result = fail(ncclSystemError, "out of memory");
   else if ((status = mesh_section_create(&a->context, bytes, 1, backing, &lease))) {
@@ -4261,12 +4254,7 @@ static int spans_meet(const struct spans *w, uint64_t lo, uint64_t hi) {
 /* [lo, hi) written: merged into the ranges; 0, or ENOMEM */
 static int spans_add(struct spans *w, uint64_t lo, uint64_t hi) {
   if (lo >= hi) return 0;
-  if (w->count == w->room) {
-    const size_t room = w->room ? 2 * w->room : 8;
-    uint64_t (*grown)[2] = realloc(w->span, room * sizeof *grown);
-    if (!grown) return ENOMEM;
-    w->span = grown; w->room = room;
-  }
+  if (grow(&w->span, &w->room, w->count, sizeof *w->span)) return ENOMEM;
   size_t at = 0;
   while (at < w->count && w->span[at][0] < lo) at++;
   memmove(w->span + at + 1, w->span + at, (w->count - at) * sizeof *w->span);
@@ -4925,12 +4913,7 @@ static ncclResult_t enqueue(struct call c) {
   const ncclResult_t refused = admit(&c);
   if (refused) { call_parts_free(&c); return refused; }
   ncclGroupStart();
-  if (call_count == call_capacity) {
-    const size_t capacity = call_capacity ? 2 * call_capacity : 16;
-    struct call *grown = realloc(calls, capacity * sizeof *grown);
-    if (!grown) { depth--; call_parts_free(&c); return fail(ncclSystemError, "out of memory"); }
-    calls = grown; call_capacity = capacity;
-  }
+  if (grow(&calls, &call_capacity, call_count, sizeof *calls)) { depth--; call_parts_free(&c); return fail(ncclSystemError, "out of memory"); }
   calls[call_count++] = c;
   return ncclGroupEnd();
 }
