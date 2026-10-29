@@ -5673,6 +5673,13 @@ ncclResult_t mesh_compile_rows(const void *source_buffer,void *landing_buffer,si
                                  row_bytes,rows,NULL,0,0,layout,out);
   ncclMeshPageTableDestroy(table);return result;
 }
+/* mesh-write-compiler.h mesh_compile_view */
+ncclResult_t mesh_compile_view(const void *source_buffer,void *landing_buffer,const uint64_t rows[3],const ncclMeshSpan *spans,
+    size_t nspans,int source,int destination,ncclComm_t comm,int metal,size_t max_packet,struct mesh_write_layout layout,
+    ncclMeshWritePlan_t *out) {
+  return rows[1] ? mesh_compile_rows(source_buffer,landing_buffer,rows[0],rows[1],rows[2],source,destination,comm,metal,max_packet,layout,out)
+                 : mesh_compile_spans(source_buffer,landing_buffer,spans,nspans,source,destination,comm,metal,max_packet,layout,out);
+}
 ncclResult_t mesh_compile_write(const void *source_buffer,void *landing_buffer,size_t count,ncclDataType_t datatype,
     int source,int destination,ncclComm_t comm,int metal,uint32_t repeats,size_t stride,size_t max_packet,ncclMeshWritePlan_t *out) {
   if(!comm)return fail(ncclInvalidArgument,"tensor write requires a communicator");

@@ -29,7 +29,6 @@ the same native AOT exact-byte WRITE bindings as other front ends; their WritePl
 without exchanging layout metadata. Explicit spans and metadata-derived ndarray views preserve arbitrary byte
 strides and original array owners without packing values. This adds no alternative collective planner."""
 import math
-import operator
 import os
 import weakref
 
@@ -96,24 +95,6 @@ def segments(spec, size):
     if len(counts) != size or sum(counts) != array.size or (displacements is not None and [int(d) for d in displacements] != packed):
         raise ValueError(f'counts {counts}: one a rank of {size}, summing to the array\'s {array.size}, packed in rank order')
     return array, counts
-
-
-def _row_pitch(array, row_bytes, rows):
-    """Prove the array's logical C-order bytes equal one positive affine row map.
-
-    This only reads shape/strides, never array contents. General indexed views
-    belong in the shared native view compiler; this binding does not pack them.
-    """
-    if not isinstance(array, np.ndarray) or array.dtype.hasobject:
-        raise ValueError('a WRITE binding is a numpy array without Python objects')
-    if row_bytes <= 0 or rows <= 0 or row_bytes * rows != array.nbytes or row_bytes % array.itemsize:
-        raise ValueError('row_bytes * rows must cover exactly the array, in whole dtype elements')
-    width, count, pitch = mesh.view_layout(array.shape, array.strides, array.itemsize)[1]
-    if count and pitch == width:
-        return row_bytes
-    if (width, count) != (row_bytes, rows):
-        raise ValueError('the requested rows are not the affine intervals of this view')
-    return pitch
 
 
 class PageTable:
@@ -303,24 +284,15 @@ class Comm:
         """
         own = sendbuf if self.rank == source else landingbuf
         row_bytes, rows = int(row_bytes), int(rows)
-        pitch = _row_pitch(own, row_bytes, rows)
-        pointer, made = ffi.cast('void *', own.ctypes.data), ffi.new('ncclMeshWritePlan_t *')
-        check(lib.mesh_compile_rows(pointer if self.rank == source else ffi.NULL,
-            ffi.NULL if self.rank == source else pointer, row_bytes, rows, pitch,
-            source, destination, self.comm, 0, max_packet, {'instances': 1, 'invocations': 1}, made))
-        return WritePlan(self, made[0], (own,))
-
-    def _write_spans_prepare(self, own, spans, source, destination, max_packet, base_shift=0):
         if not isinstance(own, np.ndarray) or own.dtype.hasobject:
             raise ValueError('a WRITE binding is a numpy array without Python objects')
-        spans = [(operator.index(offset), operator.index(length)) for offset, length in spans]
-        metadata = ffi.new('ncclMeshSpan[]', spans) if spans else ffi.NULL
-        pointer = ffi.cast('void *', own.ctypes.data + base_shift)
-        made = ffi.new('ncclMeshWritePlan_t *')
-        check(lib.mesh_compile_spans(pointer if self.rank == source else ffi.NULL,
-            ffi.NULL if self.rank == source else pointer, metadata, len(spans), source, destination,
-            self.comm, 0, max_packet, {'instances': 1, 'invocations': 1}, made))
-        return WritePlan(self, made[0], (own,))
+        if row_bytes <= 0 or rows <= 0 or row_bytes * rows != own.nbytes or row_bytes % own.itemsize:
+            raise ValueError('row_bytes * rows must cover exactly the array, in whole dtype elements')
+        width, count, pitch = mesh.view_layout(own.shape, own.strides, own.itemsize)[1]
+        if not (count and pitch == width) and (width, count) != (row_bytes, rows):
+            raise ValueError('the requested rows are not the affine intervals of this view')
+        # rows over one contiguous run cut as that run does (one cut walker), so either form is the view's plan
+        return self.Write_view_prepare(sendbuf, landingbuf, source, destination, max_packet=max_packet)
 
     def Write_view_prepare(self, sendbuf, landingbuf, source, destination, *, max_packet=0):
         """Bind an arbitrary ndarray view in logical row-major element order.
@@ -333,11 +305,13 @@ class Comm:
         own = sendbuf if self.rank == source else landingbuf
         if not isinstance(own, np.ndarray) or own.dtype.hasobject:
             raise ValueError('a WRITE binding is a numpy array without Python objects')
-        shift, (width, rows, _), spans = mesh.view_layout(own.shape, own.strides, own.dtype.itemsize)
-        if rows:
-            return self.Write_rows_prepare(sendbuf, landingbuf, source, destination,
-                                           row_bytes=width, rows=rows, max_packet=max_packet)
-        return self._write_spans_prepare(own, spans, source, destination, max_packet, shift)
+        shift, rows, spans = mesh.view_layout(own.shape, own.strides, own.dtype.itemsize)
+        metadata = ffi.new('ncclMeshSpan[]', spans) if spans else ffi.NULL
+        pointer, made = ffi.cast('void *', own.ctypes.data + shift), ffi.new('ncclMeshWritePlan_t *')
+        check(lib.mesh_compile_view(pointer if self.rank == source else ffi.NULL, ffi.NULL if self.rank == source else pointer,
+            list(rows), metadata, len(spans), source, destination, self.comm, 0, max_packet,
+            {'instances': 1, 'invocations': 1}, made))
+        return WritePlan(self, made[0], (own,))
 
     def Allreduce(self, sendbuf, recvbuf, op=SUM):
         send = recvbuf if sendbuf is IN_PLACE else sendbuf

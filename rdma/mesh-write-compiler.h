@@ -22,8 +22,13 @@ ncclResult_t mesh_compile_rows(const void* source_buffer, void* landing_buffer, 
 ncclResult_t mesh_compile_spans(const void* source_buffer, void* landing_buffer,
     const ncclMeshSpan* spans, size_t nspans, int source, int destination, ncclComm_t comm,
     int metal, size_t max_packet, struct mesh_write_layout layout, ncclMeshWritePlan_t* out);
-/* A strided view's bytes in logical (C) element order, the transfer order every frontend binds (mesh_compile_rows,
-   mesh_compile_spans): an affine view's rows (rows[0] bytes each, rows[1] of them, rows[2] apart, ascending) and no
+/* A view as mesh_view_layout gives it, `source_buffer`/`landing_buffer` at its lowest addressed byte (its first element
+   moved by *shift): its rows where rows[1] (mesh_compile_rows), else its spans (mesh_compile_spans). */
+ncclResult_t mesh_compile_view(const void* source_buffer, void* landing_buffer, const uint64_t rows[3], const ncclMeshSpan* spans,
+    size_t nspans, int source, int destination, ncclComm_t comm, int metal, size_t max_packet, struct mesh_write_layout layout,
+    ncclMeshWritePlan_t* out);
+/* A strided view's bytes in logical (C) element order, the transfer order every frontend binds (mesh_compile_view):
+   an affine view's rows (rows[0] bytes each, rows[1] of them, rows[2] apart, ascending) and no
    span; else spans ({offset, bytes}, adjacent ones merged, a broadcast view's repeated bytes repeated) relative to its
    lowest addressed byte, *shift bytes from its first element, up to `room` of them written.  Strides are bytes;
    trailing dense dimensions are one row.  The spans needed (0 for an affine or empty view, its rows 0 when empty), or
