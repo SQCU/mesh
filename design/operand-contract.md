@@ -57,6 +57,34 @@ in the tensor, including values used as indices. Both static and dynamic
 indexing need declared dependencies. A scale, rotation or reduction remains
 numerical work; a layout change cannot stand in for it.
 
+### Compact reshapes and aliases
+
+Reshaping a non-contiguous view no longer expands every element when its
+existing factors suffice. Adjacent affine axes form linear runs, including
+negative and zero strides. New axes split those runs. An axis map stays one
+map when only singleton axes change, and splits into smaller maps when its
+values separate across the new axes. The surrounding rows add no index words.
+These are normal forms of `MetalTensorLayout`; callers use the same interface.
+
+Rebasing a shape alias applies that reshape to its assigned pages. Affine
+subviews use the declared coordinate basis and its bounds to compose their
+new origin and strides. Slices, permutations and broadcasts therefore retain
+affine bindings when the placement allows them. The shared coordinate inverse
+also serves the general indexed composition. No relation object or coordinate
+search is introduced into numerical execution.
+
+Preparation on 2026-10-28 described 2,061,584,302,080 logical elements with six
+axis-map entries, then factored the same map into strides alone. Large sliced,
+permuted, reversed and broadcast aliases also retained strides. Sampled index
+relations agreed, and the emitted index declarations compiled as Metal source.
+These descriptors allocated no tensor payload. Complete mapped reduction and
+gradient graphs prepared; native rank and Goal A built. No numerical commands
+were submitted and no throughput or latency improvement is claimed here.
+
+Nonseparable joint maps can still require a table over the complete logical
+extent. Compact representation for those compositions remains unfinished, as
+does the distributed ownership gap described under exact partition boundaries.
+
 ## Place values for their consumers
 
 Each use declares its type and layout requirements. Indexed consumers can use
