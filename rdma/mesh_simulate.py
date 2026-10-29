@@ -368,7 +368,7 @@ def judge_writes(lib, fabric, routes, n, calls, repeats, page):
                 if made[r][k].step.piece.elements != made[q][j].step.piece.elements:
                     return [f'{root}->{destination}: cable {cable} {a}->{b} pairs a SEND of {made[r][k].step.piece.elements} '
                             f'elements with a receive of {made[q][j].step.piece.elements}']
-            entries[(cable, a, b)] = entries.get((cable, a, b), 0) + len(sends) * repeats
+            entries[(cable, a, b)] = entries.get((cable, a, b), 0) + len(sends)
         # progress and result: the root's elements are their indices; a relay's SEND waits on its receive
         held = {root: list(range(count))}
         done = {(r, k): False for r in range(n) for k in range(len(made[r]))}
@@ -401,9 +401,14 @@ def judge_writes(lib, fabric, routes, n, calls, repeats, page):
                     f'transfer {stuck[1]} first']
         if held.get(destination) != list(range(count)):
             return [f'{root}->{destination}: the destination does not hold the root\'s {count} elements']
+    # the chain's window as torch_mesh.chain.operands sizes it: two windows' entries fit each list
+    most = max(entries.values(), default=0)
+    if repeats > 1:
+        repeats = max(1, min(repeats, ENTRIES // 2 // max(1, most)))
     for (cable, a, b), laid in entries.items():
-        if laid > ENTRIES:
-            failures.append(f'the group lays {laid} entries on cable {cable} {a}->{b}, past the {ENTRIES} a list holds')
+        if laid * repeats > ENTRIES:
+            failures.append(f'the group lays {laid * repeats} entries ({repeats} repeats) on cable {cable} {a}->{b}, past '
+                            f'the {ENTRIES} a list holds')
     return failures[:3]
 
 
