@@ -2058,9 +2058,8 @@ struct steps {
   uint32_t *retired_first, *retired; /* strict AOT arrival witnesses for prior SEND generations */
   uint32_t *cable, *prior_first, *prior;
   uint32_t priors;
-  /* the buffer of the call's credits (credits_lay; 0 none): word 0 the source of the credits it sends, each credit
-     it receives a word after; a reduce-scatter's partials of the other ranks' segments (partial_split; 0 none) */
-  uint32_t credit, partial;
+  /* a reduce-scatter's partials of the other ranks' segments (partial_split; 0 none) */
+  uint32_t partial;
   uint64_t *complement; /* a copy's room for its call's complement (plan_direct) */
 };
 
@@ -2270,7 +2269,7 @@ static struct steps *steps_copy(struct steps *from) {
   struct steps *s = calloc(1, sizeof *s);
   if (s) {
     *s = (struct steps){.references = 1, .source = from, .count = from->count, .buffers = from->buffers,
-      .initialized = from->initialized, .priors = from->priors, .credit = from->credit, .partial = from->partial, .steps = from->steps, .cable = from->cable,
+      .initialized = from->initialized, .priors = from->priors, .partial = from->partial, .steps = from->steps, .cable = from->cable,
       .prior_first = from->prior_first, .prior = from->prior, .extent = from->extent,
       .consume_order = from->consume_order, .retired_first = from->retired_first, .retired = from->retired};
     atomic_fetch_add_explicit(&from->references, 1, memory_order_relaxed);
@@ -2305,35 +2304,6 @@ static void steps_rebind(struct steps *s) {
 }
 
 static size_t piece_bytes(const struct mesh_step *step) { return step->piece.elements * step->piece.element_bytes; }
-static int credit_step(const struct steps *s, uint32_t k) { return s->credit && s->steps[k].buffer == s->credit; }
-
-/* A SEND that no later landing at its rank witnesses (mesh-routed.c), whatever it reads (a slot of the communicator's,
-   the caller's send buffer read in place, a result in recvbuff, an all-to-all's buffers), is proved read by a credit:
-   a word its receiver sends back once the call's landings on that cable have landed (present_group), which the
-   sender lands, so a group's landings prove its SENDs read (guard), and the caller's next producer, after the group in
-   the stream, writes no byte the NIC has yet to read.  Rank me's credit steps, after `round`, in buffer s->credit:
-   word 0 the source of those it sends, then a word for each it lands */
-struct credit { uint32_t from, to, cable; };
-static int credit_add(struct credit **list, size_t *n, struct credit x) {
-  for (size_t k = 0; k < *n; k++) if (!memcmp(*list + k, &x, sizeof x)) return 0;
-  struct credit *grown = realloc(*list, (*n + 1) * sizeof *grown);
-  if (!grown) return ENOMEM;
-  (*list = grown)[(*n)++] = x;
-  return 0;
-}
-static void credits_lay(struct steps *s, const struct credit *list, size_t n, uint32_t me, uint32_t round, uint32_t type) {
-  const uint32_t first = s->count;
-  uint64_t slots = 0;
-  for (size_t i = 0; i < n; i++) {
-    if (list[i].from != me && list[i].to != me) continue;
-    const int send = list[i].to == me;
-    s->steps[s->count] = (struct mesh_step){send ? MESH_STEP_SEND : MESH_STEP_COPY, send ? list[i].from : list[i].to,
-                                            round + (uint32_t)i, s->buffers, send ? 0 : ++slots, {type, 8, 1}};
-    s->cable[s->count++] = list[i].cable;
-  }
-  if (s->count > first) s->extent[s->credit = s->buffers++] = 8 * (1 + slots);
-}
-
 /* design/whole-function.md#one-way-writes */
 static ncclResult_t write_steps(struct call *c) {
   struct ncclComm *comm = c->comm;
@@ -2342,7 +2312,7 @@ static ncclResult_t write_steps(struct call *c) {
   const int count = mesh_write_compile(&comm->fabric, (uint32_t)comm->rank, (uint32_t)c->root, (uint32_t)c->target - 1,
     paths, operand, comm->page, c->tile_bytes / SIZE[c->type], NULL, 0);
   if (count < 0) return fail(ncclInvalidUsage, "one-way write requires its compiled physical paths: %s", strerror(-count));
-  const size_t room = 2 * (size_t)count + 1; /* a credit a transfer at most */
+  const size_t room = (size_t)count + 1;
   struct steps *s = calloc(1, sizeof *s);
   struct mesh_transfer *transfers = malloc(room * sizeof *transfers);
   uint32_t *received=malloc(room*sizeof *received);
@@ -2373,21 +2343,8 @@ static ncclResult_t write_steps(struct call *c) {
     }
     s->prior[s->priors++]=received[at];
   }
-  /* every hop of a write is one-way: each sender's bytes (the producer's source, a relay's lease) are proved read by
-     a credit back */
-  struct credit *credit = NULL;
-  size_t credits = 0;
-  uint32_t round = 0, me = (uint32_t)comm->rank;
-  int error = 0;
-  for (uint32_t k = 0; k < (uint32_t)made && !error; k++) {
-    const struct mesh_step *t = s->steps + k;
-    if (t->round >= round) round = t->round + 1;
-    error = credit_add(&credit, &credits, t->op == MESH_STEP_SEND ? (struct credit){me, t->peer, s->cable[k]} : (struct credit){t->peer, me, s->cable[k]});
-  }
-  if (!error) credits_lay(s, credit, credits, me, round, operand.type);
-  for (uint32_t k = (uint32_t)made; k <= s->count; k++) s->prior_first[k] = s->priors;
-  free(received); free(transfers); free(credit);
-  if (error) { steps_free(s); return fail(ncclSystemError, "out of memory"); }
+  s->prior_first[s->count] = s->priors;
+  free(received); free(transfers);
   c->bound = s;
   return ncclSuccess;
 }
@@ -2413,21 +2370,10 @@ static ncclResult_t bind_routed_steps(struct call *c, const uint32_t *first, con
   if (!status) status = mesh_routed_compile(&comm->fabric, composed ? composed : comm->writes,
                                            first, logical, initialized, comm->page, &physical);
   mesh_write_routes_free(composed, comm->fabric.nodes);
-  /* the credits every rank finds alike, from every rank's transfers, after every round */
-  struct credit *credit = NULL;
-  size_t credits = 0;
-  uint32_t round = 0;
-  for (uint32_t r = 0; !status && r < physical.nodes; r++)
-    for (uint32_t k = 0; !status && k < physical.rank[r].count; k++) {
-      const struct mesh_transfer *t = physical.rank[r].transfer + k;
-      if (t->step.round >= round) round = t->step.round + 1;
-      if (t->step.op == MESH_STEP_SEND && !physical.rank[r].witnessed[k])
-        status = credit_add(&credit, &credits, (struct credit){r, t->step.peer, t->cable});
-    }
   ncclResult_t result = status ? fail(ncclInvalidUsage, "physical collective lowering for %s: %s", comm->name, strerror(status)) : ncclSuccess;
   if (!result) {
     struct mesh_routed_rank *rank = physical.rank + comm->rank;
-    const size_t room = (size_t)rank->count + credits + 1;
+    const size_t room = (size_t)rank->count + 1;
     struct steps *s = calloc(1, sizeof *s);
     if (s) *s = (struct steps){.references = 1, .count = rank->count, .buffers = rank->buffers, .initialized = rank->initialized};
     uint32_t *consume = rank->consume ? realloc(rank->consume, room * sizeof *consume) : NULL;
@@ -2450,15 +2396,9 @@ static ncclResult_t bind_routed_steps(struct call *c, const uint32_t *first, con
       s->demand = physical.demand; physical.demand = NULL;
       s->route_units = physical.route_units; physical.route_units = NULL;
       for (uint32_t k = 0; k < s->count; k++) { s->steps[k] = rank->transfer[k].step; s->cable[k] = rank->transfer[k].cable; }
-      credits_lay(s, credit, credits, (uint32_t)comm->rank, round, logical[0].piece.type);
-      for (uint32_t k = rank->count; k < s->count; k++) {
-        if (s->consume_order) s->consume_order[k] = UINT32_MAX - (s->count - k);
-        s->retired_first[k + 1] = s->retired_first[rank->count];
-      }
       c->bound = s;
     }
   }
-  free(credit);
   mesh_routed_free(&physical);
   return result;
 }
@@ -2673,10 +2613,10 @@ struct message { struct call *c; uint32_t step; uint64_t entry; mesh_pages pages
    pages a repeat (`each`: issue_lay) */
 struct schedule { struct message *out, *in; size_t outs, ins; uint64_t first[2], word, base; mesh_pages each[2];
                   size_t *consume; /* consumer ordinal -> physical landing index */ };
-/* whether a SEND entry waits on its holding's `ready` (a publication): not a credit's or a write's with producer words,
-   which name their own word */
+/* whether a SEND entry waits on its holding's `ready` (a publication): not a write's with producer words, which name
+   their own word */
 static int needs_publication(const struct message *m) {
-  return !credit_step(m->c->bound, m->step) && !(m->c->write_plan && m->c->write_plan->ready_value);
+  return !(m->c->write_plan && m->c->write_plan->ready_value);
 }
 static struct message *consumption_at(const struct schedule *p, size_t at) {
   return p->in + (p->consume ? p->consume[at] : at);
@@ -2764,8 +2704,8 @@ static ncclResult_t schedule_group(struct ncclComm *comm, struct call *list, siz
         struct call *c = list + made[k].call;
         const struct mesh_step *step = c->bound->steps + x->step;
         if (c->bound->cable[x->step] != ch->cable) continue;
-        const mesh_pages pages = c->write_plan && !credit_step(c->bound, x->step) ? c->write_plan->step_units[write_span_index(c->write_plan,x->step,c->invocation)]
-                                                                                    : pages_of(piece_bytes(step), comm->page);
+        const mesh_pages pages = c->write_plan ? c->write_plan->step_units[write_span_index(c->write_plan,x->step,c->invocation)]
+                                               : pages_of(piece_bytes(step), comm->page);
         end = pages_add(end, pages);
         const struct message m = {.c = c, .step = x->step, .entry = send ? p->outs : p->ins, .pages = pages, .end = end,
                                   .offset = step->first * step->piece.element_bytes, .bytes = piece_bytes(step)};
@@ -2811,7 +2751,7 @@ static int write_order(const void *left, const void *right) {
   const struct message *a = left, *b = right;
   if (a->priority != b->priority) return a->priority < b->priority ? -1 : 1;
   const uint32_t ar = a->c->bound->steps[a->step].round, br = b->c->bound->steps[b->step].round;
-  if (ar != br && !isinf(a->priority)) return ar < br ? -1 : 1; /* credits: rounds are each end's own */
+  if (ar != br) return ar < br ? -1 : 1;
   if (a->c != b->c) return a->c < b->c ? -1 : 1;
   return a->offset < b->offset ? -1 : a->offset > b->offset;
 }
@@ -2893,7 +2833,6 @@ static ncclResult_t order_writes(const struct ncclComm *comm, const struct call 
     const size_t n = send ? plans[h].outs : plans[h].ins;
     for (size_t k = 0; k < n; k++) {
       const struct mesh_step *step = items[k].c->bound->steps + items[k].step;
-      if (credit_step(items[k].c->bound, items[k].step)) { items[k].priority = INFINITY; continue; }
       const uint32_t source = send ? (uint32_t)comm->rank : step->peer;
       const struct write_fragment key={items[k].c,source,comm->channels[h].cable,step->round,items[k].offset,0};
       const uint32_t j=write_fragment_find(fragments,count,key);
@@ -2983,7 +2922,7 @@ static struct message repeat_of(const struct message *m, size_t n, size_t k, siz
   struct message x = m[k % n];
   x.c = list + (x.c - calls);
   x.entry += k / n * n;
-  if (!credit_step(x.c->bound, x.step)) x.offset += k / n * (x.c->write_plan ? x.c->write_plan->stride : stride);
+  x.offset += k / n * (x.c->write_plan ? x.c->write_plan->stride : stride);
   x.end = pages_add(x.end, (mesh_pages){k / n * m[n - 1].end.n});
   return x;
 }
@@ -3066,7 +3005,7 @@ static void issue_lay(struct ncclComm *comm, const struct compiled *x, struct is
       mesh_pages end = {0};
       for (size_t k = 0; k < count; k++) {
         struct message *m = items + k;
-        if (m->c->write_plan && !credit_step(m->c->bound, m->step)) m->pages = m->c->write_plan->step_units[write_span_index(m->c->write_plan,m->step,m->c->invocation)];
+        if (m->c->write_plan) m->pages = m->c->write_plan->step_units[write_span_index(m->c->write_plan,m->step,m->c->invocation)];
         end = pages_add(end, m->pages); m->end = end;
         m->listed = m->entry; m->laid = m->end;
         if (k + 1 == count / repeats) q->each[!send] = end;
@@ -3226,7 +3165,7 @@ static uint32_t slot_take(struct ncclComm *comm, size_t bytes) {
 
 /* group x's storage for `list` (its calls: x's own at its declaration, an issued group's at its issue), a page each: its
    calls' buffers that are the communicator's (generation_buffer, read on x's own calls: an issued call keeps its roles
-   alone, never its declaration's recipients; a write's credits), each laid from *base where given (st->buffer), then its
+   alone, never its declaration's recipients; a write's none), each laid from *base where given (st->buffer), then its
    landing area (*area, where given), a page for each combine's landing of `plans`; its bytes */
 static size_t slot_laid(const struct ncclComm *comm, const struct compiled *x, const struct call *list, size_t n,
                         const struct schedule *plans, const struct where *base, struct where *area) {
@@ -3234,7 +3173,7 @@ static size_t slot_laid(const struct ncclComm *comm, const struct compiled *x, c
   for (size_t i = 0; i < n; i++)
     for (uint32_t b = 0, z = (uint32_t)SIZE[list[i].type]; list[i].bound && b < list[i].bound->buffers; b++) {
       struct steps *st = list[i].bound;
-      if (list[i].target ? !st->credit || b != st->credit : !generation_buffer(x->calls + i, (uint32_t)comm->rank, b) || (!b && st->partial)) continue;
+      if (list[i].target || !generation_buffer(x->calls + i, (uint32_t)comm->rank, b) || (!b && st->partial)) continue;
       if (base) st->buffer[b] = shifted(*base, used);
       used += page_up(b < st->initialized ? elements(list + i) * z : st->extent[b], comm->page);
     }
@@ -3285,7 +3224,7 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u, struct w
           struct message *x = (send ? plans[h].out : plans[h].in) + k;
           const struct steps *st = x->c->bound;
           const struct mesh_step *step = st->steps + x->step;
-          const struct ncclMeshWritePlan *write = credit_step(st, x->step) ? NULL : x->c->write_plan;
+          const struct ncclMeshWritePlan *write = x->c->write_plan;
           if (!pass) {
             const size_t instance = write ? x->c->invocation % write->layout.instances : 0;
             const uint64_t displacement = write_displacement(write, x->offset) + (write ? instance * write->layout.instance_stride : 0);
@@ -3458,7 +3397,7 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
       const struct message *items = send ? plans[h].out : plans[h].in;
       for (size_t k = 0; k < count && !retained; k++) {
         const struct message *m = items + k;
-        if (m->c->write_plan && !credit_step(m->c->bound, m->step)) {
+        if (m->c->write_plan) {
           m->c->write_plan->uses[2 * h + !send].end = m->end.n;
           continue;
         }
@@ -3487,19 +3426,10 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
       const struct message *m = p->out + k;
       struct mesh_entry entry = {m->table, pages_to_word(m->pages), 0, pages_to_word(pages_sub(m->end, m->pages))};
       const struct steps *s = m->c->bound;
-      const int credit = credit_step(s, m->step);
-      const int32_t dependency = credit ? -1 : m->c->target && comm->rank != m->c->root ? (int32_t)s->prior[s->prior_first[m->step]] : forwards(s, m->step, comm->page);
+      const int32_t dependency = m->c->target && comm->rank != m->c->root ? (int32_t)s->prior[s->prior_first[m->step]] : forwards(s, m->step, comm->page);
       const uint32_t repeats = m->c->fused && m->c->fused->repeats ? m->c->fused->repeats : 1;
       const size_t repeat = k / (p->outs / repeats);
-      if (credit) {
-        /* a credit (credits_lay) goes once the call's landings on this channel in its repeat have landed */
-        status = EPROTO;
-        for (size_t j = (repeat + 1) * (p->ins / repeats); status && j > repeat * (p->ins / repeats); j--)
-          if (p->in[j - 1].c == m->c && !credit_step(s, p->in[j - 1].step)) {
-            entry.word = (uint64_t)((char *)ch->view.landed - (char *)context->M);
-            entry.base = pages_to_word(p->in[j - 1].end) - 1; status = 0;
-          }
-      } else if (dependency >= 0) {
+      if (dependency >= 0) {
         const uint32_t incoming = s->channel[dependency];
         const struct schedule *received = plans + incoming;
         const struct message *from = received->in + s->entry[dependency] - received->first[1] -
@@ -4135,7 +4065,7 @@ static int publishable(struct ncclComm *comm, uint32_t h, uint64_t at) {
    dispatches; under group_lock, for one launch_metal */
 static struct { ncclMeshFused *out; uint32_t room[2], published, landed; } fusing;
 
-/* Explicit producer words, credits' and relay landing words already name readiness.  The last entry of [first, end)
+/* Explicit producer words and relay landing words already name readiness.  The last entry of [first, end)
    on channel h that needs a publication (needs_publication), NULL none */
 static const struct message *channel_publication(struct inflight *g, uint32_t h, uint64_t first, uint64_t end) {
   for (uint64_t at = end; at > first; at--) {
@@ -4280,7 +4210,7 @@ static ncclResult_t complete_track(struct metal_program *program, struct infligh
 static uint64_t own_landing(const struct inflight *g, uint32_t h) {
   const struct schedule *p = g->plans + h;
   for (size_t k = p->ins / g->repeats; k; k--)
-    if ((!p->in[k - 1].c->target || p->in[k - 1].c->target == g->comm->rank + 1) && !credit_step(p->in[k - 1].c->bound, p->in[k - 1].step) &&
+    if ((!p->in[k - 1].c->target || p->in[k - 1].c->target == g->comm->rank + 1) &&
         !(p->in[k - 1].c->write_plan && p->in[k - 1].c->write_plan->land_records)) return g->start[h][1] + k;
   return g->start[h][1];
 }
@@ -4523,7 +4453,6 @@ static int plan_direct(struct call *c, struct where own) {
   int direct = w && st->read && st->fresh;
   for (uint32_t k = 0; direct && k < st->count; k++) {
     const struct mesh_step *step = st->steps + k;
-    if (credit_step(st, k)) continue; /* a credit's word is its own buffer's, never the operand's */
     const uint64_t from = step->first, to = step->first + step->piece.elements;
     const struct where source=view_at(c,1,(size_t)(from-lo)*z);
     const struct where map={source.buffer,source.offset-(size_t)from*z};
@@ -4659,9 +4588,9 @@ static ncclResult_t losses_through(uint64_t ticket) {
 }
 
 /* The one place a reuse of storage is ordered: before a group writes a slot, the slot's last group's landings have
-   landed, so its SENDs from it were read (a witness or a credit: credits_lay) and its consumers ran earlier in the
+   landed, so its SENDs from it were read (witnessed: mesh-routed.c) and its consumers ran earlier in the
    stream; that group completed first where it is in flight, then `landed` awaited past the landings no work in the
-   stream awaited (a fused crossing's relay and credit landings).  With no slot (0), before a fused crossing's caller
+   stream awaited (a fused crossing's relay landings).  With no slot (0), before a fused crossing's caller
    writes its operands, which any earlier group of the communicator may still be sending, whatever its definition (one
    since evicted, one sharing the source): every group in flight completed, then every landing presented on each
    channel.  No `sent`.  Under group_lock */

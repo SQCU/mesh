@@ -165,7 +165,7 @@
    group, or an undeclared group's calls,
    the 64 most recently used kept), two slots of what its groups send from and land in that are not the caller's (a
    reduce-scatter's partials of the others' segments, a non-receiving rank's operand, a tree's scratch, a relay's
-   generations, a combine's landing area, credits): a declared group's made at its declaration (ncclMeshCommPlan, which
+   generations, a combine's landing area): a declared group's made at its declaration (ncclMeshCommPlan, which
    fails as a value where the region cannot hold them), an undeclared one's at its first group, its groups taking turns
    at them,
    ncclMemAlloc called again only where one must grow (to one of eight sizes an octave), a dropped definition's slots
@@ -183,12 +183,8 @@
    segments), and nothing is copied into a slot from a caller's buffer but the operand of a premultiplied,
    partials-merging or fused call where it is not the result, and an in-place single-phase all-reduce's original.  A
    group writes a slot only once the slot's last group has every landing awaited: the stream's order, and a landed
-   wait for those its stream did not await.  A SEND whose arrival no later landing at its rank depends on, whatever it
-   reads (a slot, the caller's send buffer read in place or its recvbuff, an all-to-all's buffers, a write's producer's
-   source or relay's lease), is answered by a credit, an 8-byte SEND of its receiver's once those landings arrive on
-   that cable, which the sender lands in the same group: so a group whose landings are complete has every SEND read,
-   the caller's next producer after it in the stream overwrites nothing the NIC has yet to read, and nothing waits on
-   `sent`.  ncclMemAlloc is the lease,
+   wait for those its stream did not await.  A SEND's source is reused as design/pages-and-functions.md (Freeing) states:
+   after a natural downstream landing or the bridge's own DMA-read completion; nothing is sent back.  ncclMemAlloc is the lease,
    the call the operator's division of the work makes of the bridge ("the bridge is there to behave like a system
    call"): whole pages of the region covering size, which the bridge registered on every device when the device came up,
    before any queue pair existed; a lease registers nothing.  The client sizes its leases ("ontologically it must be the
