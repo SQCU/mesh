@@ -252,7 +252,8 @@ static uint64_t bound_reached(const struct ncclComm *comm, char *wait, size_t ro
   const _Atomic uint64_t *v = comm->words;
   const uint64_t at = v ? atomic_load_explicit(v + 2, memory_order_acquire) : 0;
   if (!at || atomic_load_explicit(v, memory_order_relaxed) != METAL_BOUND) return 0;
-  const uint64_t h = atomic_load_explicit(v + 3, memory_order_relaxed), polls = atomic_load_explicit(v + 4, memory_order_relaxed);
+  const uint64_t h = atomic_load_explicit(v + 3, memory_order_relaxed), polls = atomic_load_explicit(v + 4, memory_order_relaxed),
+                 read = atomic_load_explicit(v + 5, memory_order_relaxed);
   /* that channel's counts as the wait ended: whether the peer had landed anything, and whether this rank had published
      and sent what the peer awaits first (a cycle) or the peer is behind (a stalled producer) */
   char counts[256] = "";
@@ -268,8 +269,9 @@ static uint64_t bound_reached(const struct ncclComm *comm, char *wait, size_t ro
              (unsigned long long)atomic_load_explicit(w->taken[1], memory_order_acquire));
   }
   snprintf(wait, room, "libnccl-mesh: communicator %s's GPU wait for entry %llu on the channel to node %u, through %llu polls (its stream's "
-           "bound, ncclMeshStream polls: the wait's deadline, fixed when it was made)%s",
-           comm->name, (unsigned long long)(at - 1), h < comm->count ? comm->channels[h].node : UINT32_MAX, (unsigned long long)polls, counts);
+           "bound, ncclMeshStream polls: the wait's deadline, fixed when it was made), its awaited count last read %llu%s",
+           comm->name, (unsigned long long)(at - 1), h < comm->count ? comm->channels[h].node : UINT32_MAX, (unsigned long long)polls,
+           (unsigned long long)read, counts);
   return MESH_PLATFORM_NS;
 }
 /* the device's GPU load period (nccl-mesh-metal.m metal_poll_seconds), read under group_lock, as its kernels are */

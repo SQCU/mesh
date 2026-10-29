@@ -43,7 +43,7 @@
    mesh_step_claim: failure word [1]'s low half exchanged for 1, true in the one caller that found it 0, so of every wait
    that fails (a dispatch's threadgroups', the tracks') one records.  mesh_step_failed: whether that claim is taken,
    where p.polls names failure words (a dispatch with none has no claim).  mesh_step_check: the wait's failure recorded by its claimant in
-   failure words [0] (its cause, nccl-mesh-metal.h METAL_*), [3] and [4] and then [2], stored last by the claimant; a
+   failure words [0] (its cause, nccl-mesh-metal.h METAL_*), [3], [4] and [5] (the count it last read), and then [2], stored last by the claimant; a
    loser records nothing and waits for nothing: a revoke, the link lost or the bound reached; a landing is no failure,
    whatever its bytes (a dud's among them: placed where a send must happen and its producer is gone, never a value a
    consumer reads as a signal, design/rubrics.md M4).  The host reads the record after the command buffer and fails the
@@ -89,7 +89,7 @@ static NSString *const STEPS =
   "cause = status == ~0UL ? " XSTR(METAL_LOST) "UL : v[6] ? " XSTR(METAL_REVOKED) "UL : " XSTR(METAL_BOUND) "UL; "
   "if (!mesh_step_claim(vb)) return; "
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); "
-  "v[0] = cause; v[3] = ulong(p.channel); v[4] = ulong(p.polls); mesh_publish(v + 2, p.at + 1); }\n"
+  "v[0] = cause; v[3] = ulong(p.channel); v[4] = ulong(p.polls); v[5] = status; mesh_publish(v + 2, p.at + 1); }\n"
   "static inline void mesh_step_counts(constant mesh_args &p, device uchar *words, device uchar *vb, uint j = 0) { "
   "const ulong target = p.scalar + ulong(j) * p.stride; "
   "if (p.scalar && !mesh_step_failed(p, vb)) mesh_step_check(p, mesh_step_wait(p, words + p.aux, target, vb), target, vb); }\n"
