@@ -2,11 +2,16 @@
 import argparse
 from pathlib import Path
 import shlex
+import os
 import subprocess
 
 
 def git(root, *args):
-    return subprocess.run(['git', '-C', str(root), *args], check=True, capture_output=True).stdout
+    """git's output; its failure raised with git's own message (an hourly's ledger keeps only the error's text)."""
+    done = subprocess.run(['git', '-C', str(root), *args], capture_output=True, env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
+    if done.returncode:
+        raise RuntimeError(f'git {" ".join(args)} in {root} failed ({done.returncode}): {done.stderr.decode(errors="replace").strip()}')
+    return done.stdout
 
 
 def revision(root, ref='HEAD'):
