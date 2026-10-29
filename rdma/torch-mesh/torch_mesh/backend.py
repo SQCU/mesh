@@ -42,8 +42,10 @@ WRITE = 8
 # a declared call (ProcessGroupMesh.plan): its kind, its elements, its dtype, its root or peer, its operator and, for an
 # all-gather or a reduce-scatter, each rank's elements (an all-to-all's to each rank, then from each)
 # element_shape declares one indivisible numerical element in those scalar units.
-Call = collections.namedtuple('Call', 'kind count dtype root op counts destination fused contributors matrix recipients tile_bytes production element_shape',
-                              defaults=(0, ReduceOp.SUM, None, 0, False, None, None, None, 0, None, ()))
+# bindings, where given, are the (send, receive) tensors the call is issued with (nccl.h ncclMeshCall bindings).
+# design/eager-execution.md#what-follows
+Call = collections.namedtuple('Call', 'kind count dtype root op counts destination fused contributors matrix recipients tile_bytes production element_shape bindings',
+                              defaults=(0, ReduceOp.SUM, None, 0, False, None, None, None, 0, None, (), None))
 WHAT = {ALLREDUCE: LIB.MESH_ALLREDUCE, REDUCE: LIB.MESH_REDUCE, BROADCAST: LIB.MESH_BROADCAST, ALLGATHER: LIB.MESH_ALLGATHER,
         REDUCE_SCATTER: LIB.MESH_REDUCE_SCATTER, ALLTOALL: LIB.ncclMeshCallAlltoAllV, WRITE: LIB.ncclMeshCallWrite}
 TYPES = {torch.int8: LIB.ncclInt8, torch.uint8: LIB.ncclUint8, torch.bool: LIB.ncclUint8, torch.int32: LIB.ncclInt32,
@@ -80,6 +82,16 @@ def done(result):
 
 def _flat(value):
     return [value] if isinstance(value, torch.Tensor) else [t for v in value for t in _flat(v)]
+
+
+def _binding(tensor):
+    """A tensor as an issue passes it (_stream.mm Group::where; nccl.h ncclMeshCall bindings): an MPS one its storage's
+    MTLBuffer and byte offset, a CPU one {NULL, its address}, None {NULL, 0}."""
+    if tensor is None:
+        return (ffi.NULL, 0)
+    if tensor.is_mps:
+        return (ffi.cast('void *', tensor.untyped_storage().data_ptr()), tensor.storage_offset() * tensor.element_size())
+    return (ffi.NULL, tensor.data_ptr())
 
 
 class ProcessGroupMesh(dist.ProcessGroup):
@@ -240,12 +252,15 @@ class ProcessGroupMesh(dist.ProcessGroup):
                 if len(c.production) != tiles:
                     raise ValueError('producer records must cover every logical publication tile')
             kept.append(ffi.new('ncclMeshProduction[]', c.production) if c.production is not None else ffi.NULL)
+            production = kept[-1]
             if c.production is not None and production_seconds is not None:
-                check(LIB.ncclMeshProductionTimes(kept[-1], len(c.production),
+                check(LIB.ncclMeshProductionTimes(production, len(c.production),
                       production_seconds[c.root] / producer_groups[c.root]))
+            # design/eager-execution.md#what-follows
+            kept.append(ffi.new('ncclMeshBuffer[2]', [_binding(t) for t in c.bindings]) if c.bindings is not None else ffi.NULL)
             made.append({'what': WHAT[c.kind], 'peer': c.root, 'count': c.count * per, 'type': nccl, 'op': code,
                          'group': g, 'destination': c.destination, 'fused': int(c.fused), 'tile_bytes': c.tile_bytes,
-                         'production': kept[-1],
+                         'production': production, 'bindings': kept[-1],
                          'counts': counts, 'matrix': matrix, 'contributors': masks[0], 'recipients': masks[1]})
         view = ffi.new('ncclMeshPlan **')
         check(LIB.ncclMeshCommPlan(self.comm, ffi.new('ncclMeshCall[]', made or 1), len(made),
@@ -428,6 +443,9 @@ def prepare_fragments(bindings, group):
     """The common AOT binding for partial blocks and frontend graph crossings."""
     from .collective_views import lower
     bindings, declarations, before, after = lower(bindings, group)
+    # each declaration names the tensors its issue passes, so CommPlan lays and places it for them.
+    # design/eager-execution.md#what-follows
+    declarations = [d._replace(bindings=(source, destination)) for d, source, destination in bindings]
     calls, operands = [], []
     for declaration, source, destination in bindings:
         code = declaration.op if isinstance(declaration.op, int) else op(declaration.op)
