@@ -39,6 +39,16 @@ On 2026-10-29:
     relay's phase;
   - the plan holds the relay with its owned form, and write_plan_drop frees it after owned_end;
   - the five frontends listed under across 4 stop allocating relays.
+  - Two constraints the code must meet:
+    - Phase before the exchange. Every rank's packet cuts come from the phases reported in write_prepare's binding
+      exchange (write_view_packets), and they must be identical on every rank. So a library-chosen relay's phase must
+      be reported in that exchange: either its lease is taken from local information before it, or it is taken at an
+      extent boundary, whose phase is 0 by construction.
+    - Its period follows reuse. The frontends size relays by how soon a slot may be reused: mb's columns_prepare one
+      per invocation, the fused ring two generations of repeats, the chain count x numel. The library's sizing must
+      follow the plan's own reuse rule (its landing gate and generations), not a fixed bytes x max(repeats, instances).
+  - ncclMeshPageTableCreate(NULL, comm, ...) can name the library's relay: a table of no pages bound to comm, which
+    write_prepare's existing table->comm already requires.
 
 Considered and not landed: within 7 (one WRITE compile: it saved no compiles), within 8's operands_check (it catches
 a returned lease at issue), within 12's write_call (definition and issue differ on tile_bytes), within 17–19 (code
