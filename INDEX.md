@@ -58,6 +58,11 @@ other projects, such as a game bot, and old dated records; they are not listed h
 - [design/deliverables.md](design/deliverables.md): the streaming partial-tensor collective library: its definition,
   its invariants with the operator's statements behind them, its public surface and deliverables, and what is not part
   of the library, with the three program types of 2026-10-17.
+- [design/eager-execution.md](design/eager-execution.md): why an eager, undeclared collective cannot be made safe on
+  one-sided writes. It ranks a guarded eager call below the grouped-GEMM form called eagerly, and that below the same
+  form compiled, which is meshlib's own. It shows that a guard can halt a call with no party at fault, that a routing
+  operand over a declared range needs no guard, and that no program we run needs an eager call, with the code that
+  follows.
 - [design/algorithm-sources.md](design/algorithm-sources.md): the published prior art behind each part of the Python
   surface (`python/mesh`), its kernels and the transport, under the section names the source cites as anchors. It
   opens with the operator's statements on prior literature and on deleted implementations.
