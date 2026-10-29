@@ -893,16 +893,26 @@ static id TensorBind(id expression,NSDictionary *values) {
     for(NSUInteger k=1;k<[expression count];k++)[terms addObject:TensorBind(expression[k],values)];
     return terms;
 }
+static NSMutableDictionary *TensorParameters(NSArray *shape,NSDictionary *parameters) {
+    NSMutableDictionary *values=[[parameters mutableCopy] autorelease];values[@"count"]=@(TensorCount(shape));
+    for(NSUInteger d=0;d<shape.count;d++)values[[NSString stringWithFormat:@"extent.%lu",(unsigned long)d]]=shape[d];
+    return values;
+}
+NSInteger MetalTensorConstant(id expression,NSArray *shape,NSDictionary *parameters) {
+    isl_ctx *ctx=isl_ctx_alloc();
+    isl_pw_aff *value=MeshIndexExpression(ctx,TensorBind(expression,TensorParameters(shape,parameters)),0,1);
+    isl_val *constant=isl_pw_aff_min_val(value);NSInteger result=isl_val_get_num_si(constant);
+    isl_val_free(constant);isl_ctx_free(ctx);return result;
+}
 
 @implementation MetalTensorLayout
 @synthesize coordinates=_coordinates;
 + (instancetype)shape:(NSArray<NSNumber *> *)shape index:(id)expression parameters:(NSDictionary<NSString *,NSNumber *> *)parameters {
     const NSUInteger count=TensorCount(shape);
     if(!count)return [self shape:shape strides:TensorStrides(shape) offset:0 maps:@{} indices:nil];
-    NSMutableDictionary *values=[[parameters mutableCopy] autorelease];values[@"count"]=@(count);values[@"i"]=@"i";
+    NSMutableDictionary *values=TensorParameters(shape,parameters);values[@"i"]=@"i";
     NSArray *digits=TensorDigits(shape);
     for(NSUInteger d=0;d<shape.count;d++) {
-        values[[NSString stringWithFormat:@"extent.%lu",(unsigned long)d]]=shape[d];
         values[[NSString stringWithFormat:@"axis.%lu",(unsigned long)d]]=digits[d];
     }
     isl_ctx *ctx=isl_ctx_alloc();

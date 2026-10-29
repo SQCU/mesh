@@ -229,6 +229,15 @@ grouping and configured storage use the same function representation.
 `storageSpan` uses the relation's image bounds to size a backing interval.
 LiteRT binding sizes and native strided allocations use that same query;
 neither enumerates dependency ranges merely to find an allocation's end.
+Configured API layouts also declare their physical capacity in scalar elements.
+`MetalTensorConstant` resolves these bound integer terms through the same isl
+algebra, including when the logical domain is empty. Logical indexing remains
+separate from the padded footprint. Provider and native storage declarations
+retain both; neither changes a tensor's logical extent to obtain padding.
+The API's reserved byte count is a further allocation requirement, not a claim
+that an operation touches every reserved byte. Direct-output placement and
+recorded provider views use the declared footprint. Reservation slack alone
+therefore cannot force a copy across another live value.
 Component-byte views scale the relation and append a component axis. Combining
 components checks that they name adjacent, aligned parts of each typed element.
 It no longer requires a particular stride factorization to express that fact.
@@ -1561,9 +1570,17 @@ inverse and component lowering retained large repeated and transposed domains
 as compact emitted arithmetic. Libraries and native callers built. No numerical
 commands ran.
 
+Provider footprints now reach allocation sizing, direct-binding decisions and
+recorded views. Split-cache slots no longer round their logical count to a
+four-slot boundary. Preparation retained odd position counts, allocated each
+configured packed footprint, and distinguished harmless API reservation slack
+from actual padded writes across live values. Existing provider/native, mask
+and cache-view shaders still prepared. Native callers built; no numerical
+commands ran.
+
 The boundary remains incomplete. Several state-update declarations still
-lack typed access relations. Provider padding footprints must also reach
-allocation sizing without rounding the logical slot extent in the caller.
+lack typed access relations. The empty-owner one-slot placeholder remains an
+implicit API accommodation and needs constraint/empty-domain lowering.
 Placement across all future consumer constraints remains necessary:
 sequential preparation can still convert a flexible native output when a later
 fixed-layout provider could have guided its original placement. General

@@ -5,6 +5,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 struct MetalTensorSpan { NSInteger offset; NSUInteger count; };
 
+// Resolve a configuration's scalar integer term during preparation. Extents,
+// domain size and named parameters use the layout expression's same algebra;
+// logical coordinates are not inputs to a scalar storage requirement.
+FOUNDATION_EXPORT NSInteger MetalTensorConstant(id expression, NSArray<NSNumber *> *shape,
+    NSDictionary<NSString *, NSNumber *> *parameters);
+
 // Preparation data, never a runtime tensor or a descriptor followed by a kernel.
 // Every coordinate denotes one logical element. Its storage relation can be
 // affine, separable, or joint across axes; these are normal forms of one type.
