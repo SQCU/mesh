@@ -241,29 +241,31 @@ __attribute__((always_inline)) static inline void mesh_merge_row(P parts, uint i
 // query heads that read it) over part j of the KV range, its scores and value products 8 x 8 simdgroup matrices; its one
 // operand is mesh_tile (below) over a KV type. Each
 // chunk is one page a simdgroup (A::simdgroups pages, C = 16 A::simdgroups positions): the page's scores S = Q K^T (two
-// 8 x 8 blocks over D / 8 products), the rows' online softmax (8 / A::simdgroups rows a simdgroup, C / 32 positions a
+// 8 x 8 blocks with masked final channels), the rows' online softmax (8 / A::simdgroups rows a simdgroup, C / 32 positions a
 // lane), the accumulators rescaled by the diagonal of the rows' factors, and O += P V over the chunk's pages, each
-// simdgroup holding the 8 x 8 blocks of every (A::simdgroups)th column block. The operand A:
+// simdgroup holding a bounded batch of every (A::simdgroups)th column block. The operand A:
 //
-//   A::dims (D), A::simdgroups; members qs (8 D halves, the rows' queries: load_q writes them and ends with a barrier),
+//   A::dims (D), A::simdgroups, A::accumulator_blocks; load_q prepares any declared query cache,
 //   ss (8 C floats), ps (8 C halves), diag (64 floats), places (A::simdgroups ulongs), scale (the scores' factor), stride
 //   (elements from a position's K or V line to the next's), s, lane, t; chunk(i): whether the task holds chunk i; page(i,
 //   w, k, v): page w of chunk i, the addresses of its K and V lines (false where the task reads none of it); first(i, w):
 //   the page's first position;
 //   live(r, position): whether row r attends the position; finish(o, m, l): the parts' merge and the store, o the
 //   simdgroup's column blocks, m and l its rows'.
-//   load_k/load_v(matrix, page_address, chunk, page, row, column): the task's compiled storage layout.
+//   load_query/load_k/load_v: the task's compiled storage layout, including channel masks.
+//   load_output/store_output bind accumulator tiles to the assigned partial-result pages where they exceed the register budget.
 template <typename A>
 __attribute__((always_inline)) static inline void mesh_attention_tile(thread A &a) {
-    constexpr uint D = A::dims, NSG = A::simdgroups, PAGE = A::page_extent, C = NSG * PAGE, DB = D / 8, OB = DB / NSG, RS = 8 / NSG > 0 ? 8 / NSG : 1;
+    constexpr uint D = A::dims, NSG = A::simdgroups, PAGE = A::page_extent, C = NSG * PAGE,
+                   DB = (D + 7) / 8, OB = (DB + NSG - 1) / NSG, CB = A::accumulator_blocks, RS = 8 / NSG > 0 ? 8 / NSG : 1;
     static_assert(PAGE == MESH_ATTENTION_TILE_PAGE, "attention kernel and declared KV page layout disagree");
     const uint s = a.s, lane = a.lane;
     for (uint e = a.t; e < 64; e += NSG * 32) a.diag[e] = 0.0f;
     a.load_q();
     float m[RS], l[RS];
     for (uint k = 0; k < RS; k++) { m[k] = -3.0e38f; l[k] = 0.0f; }
-    simdgroup_float8x8 o[OB];
-    for (uint b = 0; b < OB; b++) o[b] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+    simdgroup_float8x8 o[CB];
+    for (uint b = 0; b < CB; b++) o[b] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
     for (uint i = 0; a.chunk(i); i++) {
         ulong kq = 0ul, vq = 0ul;
         const bool cached = a.page(i, s, kq, vq);
@@ -278,8 +280,8 @@ __attribute__((always_inline)) static inline void mesh_attention_tile(thread A &
                 }
                 for (uint u = 0; u < 8; u += 2) {
                     simdgroup_half8x8 q0, q1;
-                    simdgroup_load(q0, a.qs + 8 * (d0 + u), D, ulong2(0, 0), true);
-                    simdgroup_load(q1, a.qs + 8 * (d0 + u) + 8, D, ulong2(0, 0), true);
+                    a.load_query(q0, 8 * (d0 + u));
+                    a.load_query(q1, 8 * (d0 + u + 1));
                     simdgroup_multiply_accumulate(s0, k[2 * u], q0, s0);
                     simdgroup_multiply_accumulate(s1, k[2 * u + 1], q0, s1);
                     simdgroup_multiply_accumulate(s2, k[2 * u + 2], q1, s2);
@@ -318,17 +320,27 @@ __attribute__((always_inline)) static inline void mesh_attention_tile(thread A &
         threadgroup_barrier(mem_flags::mem_threadgroup);
         simdgroup_float8x8 scale;
         simdgroup_load(scale, a.diag, 8);
-        for (uint b = 0; b < OB; b++) simdgroup_multiply(o[b], scale, o[b]);
-        for (uint w = 0; w < NSG; w++) {
-            const ulong place = a.places[w];
-            if (place == 0ul) continue;
-            device const half *v = (device const half *)place;
-            for (uint h = 0; h < 2; h++) {
-                simdgroup_half8x8 p, vm[OB];
-                simdgroup_load(p, a.ps + w * PAGE + 8 * h, C);
-                for (uint b = 0; b < OB; b++) a.load_v(vm[b], v, i, w, 8 * h, 8 * (b * NSG + s));
-                for (uint b = 0; b < OB; b++) simdgroup_multiply_accumulate(o[b], p, vm[b], o[b]);
+        for (uint first = 0; first < OB; first += CB) {
+            const uint active = min(CB, OB - first);
+            if constexpr (CB < OB) {
+                for (uint b = 0; b < active; b++) {
+                    o[b] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+                    if (i) a.load_output(o[b], first + b);
+                }
             }
+            for (uint b = 0; b < active; b++) simdgroup_multiply(o[b], scale, o[b]);
+            for (uint w = 0; w < NSG; w++) {
+                const ulong place = a.places[w];
+                if (place == 0ul) continue;
+                device const half *v = (device const half *)place;
+                for (uint h = 0; h < 2; h++) {
+                    simdgroup_half8x8 p, vm[CB];
+                    simdgroup_load(p, a.ps + w * PAGE + 8 * h, C);
+                    for (uint b = 0; b < active; b++) a.load_v(vm[b], v, i, w, 8 * h, 8 * ((first + b) * NSG + s));
+                    for (uint b = 0; b < active; b++) simdgroup_multiply_accumulate(o[b], p, vm[b], o[b]);
+                }
+            }
+            if constexpr (CB < OB) for (uint b = 0; b < active; b++) a.store_output(o[b], first + b);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
@@ -360,23 +372,34 @@ struct mesh_unmasked {
 // layout() places the threadgroup memory a wrapper declares (region floats, 64 diag floats, simdgroups places)
 // and span() the pages of the rows' union and J, the configuration's part count (each part written: an empty one's l = 0,
 // which the merge passes over).
-struct mesh_attention_access {
-    __attribute__((always_inline)) half4 query(device const half *q, ulong at) const { return ((device const half4 *)q)[at]; }
-    __attribute__((always_inline)) void load(thread simdgroup_half8x8 &out, device const half *p, uint, uint row, uint column,
-                                            uint stride, uint, bool) const {
-        simdgroup_load(out, p + ulong(row) * stride + column, stride);
-    }
-};
-
 inline uint mesh_matrix_lane(uint lane) {
     const uint q = lane / 4;
     return ((q & 4) + (lane / 2) % 4) * 8 + (q & 2) * 2 + (lane % 2) * 2;
 }
 
+template<uint D> struct mesh_attention_access {
+    __attribute__((always_inline)) half4 query(device const half *q, ulong at) const { return ((device const half4 *)q)[at]; }
+    __attribute__((always_inline)) half query_element(device const half *q, ulong at) const { return q[at]; }
+    __attribute__((always_inline)) void load(thread simdgroup_half8x8 &out, device const half *p, uint, uint row, uint column,
+                                            uint stride, uint lane, bool) const {
+        if (D % 64 == 0 || (D % 8 == 0 && column + 8 <= D)) simdgroup_load(out, p + ulong(row) * stride + column, stride);
+        else {
+            const uint e = mesh_matrix_lane(lane), r = row + e / 8, c = column + e % 8;
+            for (uint k = 0; k < 2; k++) out.thread_elements()[k] = c + k < D ? p[ulong(r) * stride + c + k] : half(0);
+        }
+    }
+};
+
 template <uint D, typename KV, typename F = device float *, typename F4 = device float4 *, typename M = mesh_unmasked,
-          typename Access = mesh_attention_access>
+          typename Access = mesh_attention_access<D>>
 struct mesh_tile {
-    enum : uint { dims = D, page_extent = KV::page_extent, simdgroups = 4, region = 8 * D > 4 * D + 12 * 64 ? 8 * D : 4 * D + 12 * 64 };
+    enum : uint { dims = D, page_extent = KV::page_extent, simdgroups = 4,
+                  query_pitch = (D + 7) / 8 * 8, columns = simdgroups * page_extent,
+                  output_blocks = (D + 8 * simdgroups - 1) / (8 * simdgroups),
+                  accumulator_blocks = output_blocks < MESH_ATTENTION_ACCUMULATOR_VALUES_PER_LANE / 2 ? output_blocks : MESH_ATTENTION_ACCUMULATOR_VALUES_PER_LANE / 2,
+                  cache_query = 8 * query_pitch * sizeof(half) <= MESH_ATTENTION_QUERY_CACHE_BYTES &&
+                      8 * query_pitch * sizeof(half) + (12 * columns + 64) * sizeof(float) + simdgroups * sizeof(ulong) + sizeof(uint) <= MESH_DEVICE_THREADGROUP_BYTES,
+                  query_words = cache_query ? 4 * query_pitch : 0, region = query_words + 12 * columns };
     KV kv;
     device const half *Q;
     F mp;
@@ -387,7 +410,6 @@ struct mesh_tile {
     threadgroup half *ps;
     threadgroup float *diag;
     threadgroup ulong *places;
-    threadgroup float *stage;
     float scale;
     uint stride, s, lane, t, J, j, base, pages, parts;
     uint rows[8], lo[8], hi[8];
@@ -396,8 +418,8 @@ struct mesh_tile {
     Access access;
 
     __attribute__((always_inline)) void layout(threadgroup float *region, threadgroup float *d, threadgroup ulong *p) {
-        qs = (threadgroup half *)region; ss = region + 4 * D; ps = (threadgroup half *)(region + 4 * D + 8 * 64);
-        diag = d; places = p; stage = region;
+        qs = (threadgroup half *)region; ss = region + query_words; ps = (threadgroup half *)(ss + 8 * columns);
+        diag = d; places = p;
     }
 
     __attribute__((always_inline)) void span(uint splits) {
@@ -411,11 +433,34 @@ struct mesh_tile {
     }
 
     __attribute__((always_inline)) void load_q() {
-        for (uint e = t; e < 2 * D; e += 32 * simdgroups) {
-            const uint i = rows[e / (D / 4)];
-            ((threadgroup half4 *)qs)[e] = i != 0xFFFFFFFFu ? access.query(Q, ulong(i) * (D / 4) + e % (D / 4)) : half4(0.0h);
+        if constexpr (cache_query) {
+            if constexpr (D % 4 == 0) {
+                for (uint e = t; e < 2 * query_pitch; e += 32 * simdgroups) {
+                    const uint i = rows[e / (query_pitch / 4)], c = e % (query_pitch / 4);
+                    ((threadgroup half4 *)qs)[e] = i != 0xFFFFFFFFu && (D % 8 == 0 || 4 * c < D)
+                        ? access.query(Q, ulong(i) * (D / 4) + c) : half4(0.0h);
+                }
+            } else for (uint e = t; e < 8 * query_pitch; e += 32 * simdgroups) {
+                const uint i = rows[e / query_pitch], c = e % query_pitch;
+                qs[e] = i != 0xFFFFFFFFu && c < D ? access.query_element(Q, ulong(i) * D + c) : half(0);
+            }
         }
+        // Also publishes the initialized diagonal when queries are read in place.
         threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    __attribute__((always_inline)) void load_query(thread simdgroup_half8x8 &out, uint column) {
+        if constexpr (cache_query) {
+            if (D % 64 == 0 || column < query_pitch) simdgroup_load(out, qs + column, query_pitch, ulong2(0, 0), true);
+            else out = make_filled_simdgroup_matrix<half, 8, 8>(0.0h);
+        } else {
+            const uint e = mesh_matrix_lane(lane), c = column + e / 8;
+            for (uint k = 0; k < 2; k++) {
+                const uint i = rows[e % 8 + k];
+                out.thread_elements()[k] = i != 0xFFFFFFFFu && (D % 64 == 0 || c < D)
+                    ? access.query_element(Q, ulong(i) * D + c) : half(0);
+            }
+        }
     }
 
     __attribute__((always_inline)) bool chunk(uint i) { return j + J * simdgroups * i < pages; }
@@ -438,9 +483,28 @@ struct mesh_tile {
         return position >= lo[r] && position < hi[r] && (M::exact || mod.keep(query[r].x, query[r].y, position));
     }
 
+    __attribute__((always_inline)) void load_output(thread simdgroup_float8x8 &out, uint block) {
+        const uint e = mesh_matrix_lane(lane), i = rows[e / 8], c = 8 * (block * simdgroups + s) + e % 8;
+        const F values = (F)op;
+        for (uint k = 0; k < 2; k++) out.thread_elements()[k] = i != 0xFFFFFFFFu && (D % (8 * simdgroups) == 0 || c + k < D)
+            ? values[(ulong(i) * parts + j) * D + c + k] : 0.0f;
+    }
+
+    __attribute__((always_inline)) void store_output(thread const simdgroup_float8x8 &out, uint block) {
+        const uint e = mesh_matrix_lane(lane), i = rows[e / 8], c = 8 * (block * simdgroups + s) + e % 8;
+        const F values = (F)op;
+        for (uint k = 0; k < 2; k++) if (i != 0xFFFFFFFFu && (D % (8 * simdgroups) == 0 || c + k < D))
+            values[(ulong(i) * parts + j) * D + c + k] = out.thread_elements()[k];
+    }
+
     __attribute__((always_inline)) void finish(thread simdgroup_float8x8 *o, thread const float *m, thread const float *l) {
-        constexpr uint NSG = simdgroups, OB = D / 8 / NSG, RS = 8 / NSG, D4 = D / 4;
-        for (uint b = 0; b < OB; b++) simdgroup_store(o[b], stage + 8 * (b * NSG + s), D);
+        constexpr uint NSG = simdgroups, RS = 8 / NSG;
+        if constexpr (accumulator_blocks == output_blocks) {
+            for (uint b = 0; b < output_blocks; b++) store_output(o[b], b);
+        } else if (!chunk(0)) {
+            const auto zero = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+            for (uint b = 0; b < output_blocks; b++) store_output(zero, b);
+        }
         if (lane == 0)
             for (uint k = 0; k < RS; k++) {
                 const uint i = rows[s * RS + k];
@@ -448,11 +512,6 @@ struct mesh_tile {
                 mp[ulong(i) * parts + j] = l[k] > 0.0f ? m[k] : -INFINITY;
                 lp[ulong(i) * parts + j] = l[k];
             }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint e = t; e < 2 * D; e += 32 * NSG) {
-            const uint i = rows[e / D4];
-            if (i != 0xFFFFFFFFu) op[(ulong(i) * parts + j) * D4 + e % D4] = ((threadgroup const float4 *)stage)[e];
-        }
     }
 };
 
@@ -517,7 +576,7 @@ __attribute__((always_inline)) static inline uint mesh_shared_tail(thread mesh_t
     }
     task.mp += range.splits;
     task.lp += range.splits;
-    task.op += ulong(range.splits) * (D / 4);
+    task.op = (F4)((F)task.op + ulong(range.splits) * D);
     task.span(splits);
     return range.splits + splits;
 }

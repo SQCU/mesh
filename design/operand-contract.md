@@ -280,9 +280,10 @@ order; numerical execution remains to be measured after the structural pass.
 
 This is still one local norm reduction per head. Collective placement must
 expose its partial sum before a head can span nodes. The model loader's
-256/512-only head filter also remains: the attention tile code still uses
-truncated `D/4` and `D/8` dimensions. Removing that filter requires masked
-channel-tail lowering, not just deleting the check.
+256/512-only head filter also remains: the separate vector attention producer
+still truncates channel dimensions. The tile producer now has masked channel
+tails and bounded storage, described below. Both producer forms must be lowered
+before removing that model-wide filter.
 
 ### Row reductions and gathered consumers
 
@@ -528,17 +529,58 @@ width 256 with one SIMD group per page, and 2,672 bytes at width 512 with two.
 Native rank and Goal A built after the page-sizing change. These are preparation
 results only; no numerical work or timing/throughput measurement was submitted.
 
-This removes limits from the merge of already-produced partial results. It
-does not yet make every producer width-independent: the native forward
-attention kernels still truncate channel dimensions. Their query staging and
-output accumulator geometry must also be tiled before a head can have an
-arbitrary width. LiteRT's draw/kept adapters still use the old four-lane slice
+This removes limits from the merge of already-produced partial results. The
+vector attention producer still truncates channel dimensions; the tile producer
+has the bounded lowering described next. LiteRT's draw/kept adapters still use the old four-lane slice
 indexing. The delegate's
 internal tensor views also remain a separate integration requirement. Placing
 the partial numerical work across nodes remains part of the graph's reduction
 lowering, rather than a property of this merge.
 
-CPU contraction workspace is now part of that boundary. Preparation asks BNNS
+### Bounded attention tile storage
+
+`mesh_attention_tile` and `mesh_tile` now carry logical width through query,
+key, value, accumulator and output indexing. Matrix fragments mask the final
+channels. Partial-result rows contain exactly their logical values, even when
+their width is odd. A shared-prefix tail shifts its output by scalar elements;
+it no longer rounds that offset down to whole four-value vectors.
+
+The query cache has a byte budget in `metal.def`, checked against the device's
+declared threadgroup capacity. Within that budget, the query matrix is staged
+once and its final matrix columns are zeroed. Beyond it, matrix fragments read
+their query values directly from the input pages. This is a source
+specialization, with no runtime storage choice or descriptor walk.
+
+The accumulator register budget is also an operand in `metal.def`. A row which
+fits retains its accumulators across key chunks. Wider rows use bounded column
+batches and keep their running float sums in the already assigned partial-result
+pages. The score calculation and online softmax run once per key chunk. Each
+column batch reads those same probabilities and updates its own values; it does
+not repeat the score calculation. No extra dispatch or payload allocation is
+introduced.
+
+Matrix accumulators now write their assigned output positions directly. The
+former full-row shared-memory staging, barrier and copy to partial-result pages
+are removed. Native tile publication and its fused final merge also cover
+channel tiles, including odd tails. Widths 256 and 512 retain their existing
+number of concurrent query rows in that merge.
+
+Preparation on 2026-10-28 compiled the actual native tile and shared-prefix
+producers from width 1 through 1,048,577, including odd widths, received queries
+and fresh KV operands. With the declared budgets, widths above 512 used 3,376
+bytes of static threadgroup memory in the tile producer and 3,360 in the
+shared-prefix producer. The width-256/512 vector producers and bounded merges
+also compiled. Native rank and Goal A built. These were source compilation and
+builds only; numerical equivalence and whole-function latency/throughput remain
+unmeasured.
+
+The vector producer's width assumptions still need to be removed before the
+ordinary model loader can drop its 256/512 filter. Placing one head's
+inner-product reduction across several nodes remains separate graph-lowering work.
+
+### Host storage contracts
+
+CPU contraction workspace is declared during preparation. The compiler asks BNNS
 for its required byte count, assigns bridge pages and binds their address.
 The host record retains those pages and declares their writes alongside its
 other operands. Its sequential instructions share one workspace sized for their

@@ -57,6 +57,10 @@ MESH_METAL_VALUE(ATTENTION_TILE_PAGE, 16)
 // the number of local/remote contributors to the result.
 MESH_METAL_VALUE(ATTENTION_MERGE_THREADS, 256)
 MESH_METAL_VALUE(ATTENTION_MERGE_PARTS_PER_LANE, 2)
+// Retain the former width-512 tile's query cache and accumulator register
+// budget. Wider logical heads stream through the same assigned page operands.
+MESH_METAL_VALUE(ATTENTION_QUERY_CACHE_BYTES, 8192)
+MESH_METAL_VALUE(ATTENTION_ACCUMULATOR_VALUES_PER_LANE, 32)
 MESH_METAL_VALUE(SPEC_THREADS, 1024)
 MESH_METAL_VALUE(DRAW_THREADS, 256)
 MESH_METAL_VALUE(DRAW_MAX_BLOCKS, 256)
