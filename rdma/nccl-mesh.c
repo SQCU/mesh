@@ -2767,7 +2767,11 @@ struct bound { struct where send, recv, sum, *views[2]; uint64_t occurrence, ins
 struct issue { struct schedule *plans; struct steps **steps; struct inflight *group; struct call *calls; size_t n; uint32_t repeats; int held, dropped;
                /* laid and placed (`laid`) for a binding (`bound`, `stride`), in
                   slot `slot` (its storage at `base`, its landing area at `area`), its span tables a lease (`tables`) */
-               int laid; size_t stride; uint32_t slot; struct where base, area; struct bound *bound; void *tables; };
+               int laid; size_t stride; uint32_t slot; struct where base, area; struct bound *bound; void *tables;
+               /* the leases its entries read (`owned`, `metadata` a descriptor table's), held from its placement to its
+                  end as a prepared WRITE's are (owned_begin, owned_end): a channel's sends' and landings' uses
+                  (`uses`), each fixed at the placement but `end`, which present_group advances */
+               const void **owned; unsigned char *metadata; size_t owns; struct mesh_lease_retire_dep *uses; uint32_t channels; };
 struct compiled { struct call *calls; size_t n; uint64_t repeat; struct schedule *plans; uint32_t slot[GENERATIONS], uses;
                   struct issue *issue[GENERATIONS]; };
 /* a definition dropped: its slots back to the communicator's, for the next definition under the same guard, and its
@@ -3071,13 +3075,68 @@ static ncclResult_t bind_slot(struct ncclComm *comm, struct compiled *x, uint32_
 }
 
 
+/* `address`'s lease among those `u` holds, once (`metadata` its descriptor tables'), while it is placed.  0, ENOMEM */
+static int owned_add(struct issue *u, const void *address, unsigned metadata) {
+  for (size_t i = 0; i < u->owns; i++) if (u->owned[i] == address) return 0;
+  const void **owned = realloc(u->owned, (u->owns + 1) * sizeof *owned);
+  if (owned) u->owned = owned;
+  unsigned char *kinds = owned ? realloc(u->metadata, u->owns + 1) : NULL;
+  if (!kinds) return ENOMEM;
+  u->metadata = kinds;
+  u->owned[u->owns] = address; u->metadata[u->owns++] = (unsigned char)metadata;
+  return 0;
+}
+/* `u`'s leases let go, each scope owned_begin opened ended after the uses its presents advanced are handed to it
+   (`marks`), as a released prepared WRITE's are (write_plan_drop): a lease is reused only once the reads of its entries
+   complete (mesh_lease_retire_ready).  A use that cannot be recorded leaves its scope open: the lease is never reused.
+   Under attach_lock */
+static void owned_end(struct issue *u, int marks) {
+  for (size_t i = 0; u->uses && i < u->owns; i++) {
+    struct lease *l = lease_at(u->owned[i], NULL);
+    int error = l ? 0 : EINVAL;
+    for (uint32_t k = 0; !error && marks && k < 2 * u->channels; k++) {
+      const struct mesh_lease_retire_dep *d = u->uses + k;
+      error = mesh_lease_retire_mark_use(&l->reads, d->stream, d->wire, d->holding, d->end, d->direction, u->metadata[i]);
+    }
+    if (!error) mesh_lease_retire_end(&l->reads);
+    else fail(ncclInternalError, "releasing an issue's leases: %s", strerror(error));
+  }
+  free(u->owned); free(u->metadata); free(u->uses);
+  u->owned = NULL; u->metadata = NULL; u->uses = NULL; u->owns = 0; u->channels = 0;
+}
+/* `u`'s leases held as a prepared WRITE's are (ncclMeshWritePlan `uses`): a registration scope open on each, so no
+   present registers its reads (mesh-lease-retire.h: an open scope covers the uses not yet enumerated), and its uses a
+   channel's direction each.  0, EINVAL (an address no live lease of this process's), ENOMEM.  Under attach_lock */
+static int owned_begin(struct ncclComm *comm, struct issue *u) {
+  if (!(u->uses = calloc(2 * (size_t)comm->count, sizeof *u->uses))) return ENOMEM;
+  u->channels = comm->count;
+  for (uint32_t h = 0; h < comm->count; h++) {
+    const struct channel *ch = comm->channels + h;
+    const struct hold *hold = comm->attach->holds + comm->endpoint[ch->cable];
+    for (unsigned d = 0; d < 2; d++)
+      u->uses[2 * h + d] = (struct mesh_lease_retire_dep){.stream = ch->stream, .wire = hold->wire, .holding = hold->generation, .direction = d};
+  }
+  size_t begun = 0;
+  int error = 0;
+  for (; begun < u->owns && !error; begun++) {
+    struct lease *l = lease_at(u->owned[begun], NULL);
+    error = !l || l->returned ? EINVAL : mesh_lease_retire_begin(&l->reads);
+  }
+  if (error) { u->owns = begun - 1; owned_end(u, 0); }
+  return error;
+}
+
 /* where each entry's pages lie (struct message `data`): a SEND's in the buffer its step reads (the send buffer, where
    it reads that in place), a COPY's in its step's buffer, a combine's in the group's landing area (`area`: bind_slot,
    each entry from a page of it); each in a live lease, its span table, a span a page, in its issue's lease of them
    (`tables`, made for its binding; the one it replaces let go, kept by the bridge's reads of the entries presented
-   from it: present_group's marks).  0, else the call fails as a value, naming the piece (ncclInvalidUsage: the piece's
+   from it: the uses owned_end hands it), the leases held by the issue from here to its next placement or its end
+   (owned_begin).  0, else the call fails as a value, naming the piece (ncclInvalidUsage: the piece's
    buffer is no lease, or a span crosses a registration extent; nothing is copied to move it), nothing presented */
 static ncclResult_t place_group(struct ncclComm *comm, struct issue *u, struct where area) {
+  pthread_mutex_lock(&attach_lock);
+  owned_end(u, 1);
+  pthread_mutex_unlock(&attach_lock);
   const unsigned char *region = (const unsigned char *)comm->attach->context.M;
   struct schedule *plans = u->plans;
   size_t used = 0, length = 0;
@@ -3117,9 +3176,11 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u, struct w
             pthread_mutex_lock(&attach_lock);
             const struct lease *held = in_region(comm, x->data, x->bytes) ? lease_at(address, NULL) : NULL;
             const int valid = held && !held->returned && x->bytes <= held->bytes - (size_t)(address - (const unsigned char *)held->address);
+            const void *owner = valid ? held->address : NULL;
             pthread_mutex_unlock(&attach_lock);
             if (!valid) return fail(ncclInvalidUsage, "%s on %s: %zu bytes at byte %zu are outside a live local lease",
                                     call_name(x->c), comm->name, x->bytes, x->offset);
+            if (owned_add(u, owner, 0)) return fail(ncclSystemError, "out of memory");
           }
           if (!x->pages.n) continue;
           if (x->pages.n > SIZE_MAX / 2 / sizeof *x->spans) return fail(ncclSystemError, "out of memory");
@@ -3136,6 +3197,11 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u, struct w
           x->table = (uint64_t)((unsigned char *)made - region);
         }
   }
+  int error = u->tables ? owned_add(u, u->tables, 1) : 0;
+  pthread_mutex_lock(&attach_lock);
+  if (!error) error = owned_begin(comm, u);
+  pthread_mutex_unlock(&attach_lock);
+  if (error) return fail(ncclInvalidUsage, "holding a group's leases from its placement: %s", strerror(error));
   return ncclSuccess;
 }
 
@@ -3253,7 +3319,7 @@ static void touch(struct ncclComm *comm) {
    passes them (word 0), a landing entry gated as gate_of says.  0; ncclSystemError where a list's entries are more than
    the bridge ever takes (nothing presented, the call's failure alone); a refused presentation fails comm (its lists
    stand mid-group).  Under group_lock */
-static ncclResult_t present_group(struct metal_program *program, struct ncclComm *comm, struct schedule *plans) {
+static ncclResult_t present_group(struct metal_program *program, struct ncclComm *comm, struct issue *owner, struct schedule *plans) {
   struct mesh_ctx *context = &comm->attach->context;
   for (uint32_t h = 0; h < comm->count; h++)
     for (int list = 0; list < 2; list++) {
@@ -3264,34 +3330,18 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
                     "not yet done (mesh.h MESH_STREAM_ENTRIES); none was presented", comm->name, (unsigned long long)need, list ? "landing" : "send",
                     ch->node, MESH_STREAM_ENTRIES);
     }
-  /* Retain payload AND immutable descriptor tables for both directions before
-     presenting anything. Metadata additionally needs local bridge CPU-reader
-     quiescence on cancellation; it cannot borrow the payload DMA-pin proof. */
-  int retained = 0;
-  pthread_mutex_lock(&attach_lock);
-  for (uint32_t h = 0; h < comm->count && !retained; h++) {
-    const struct channel *ch = comm->channels + h;
-    const struct hold *hold = comm->attach->holds + comm->endpoint[ch->cable];
-    for (int send = 1; send >= 0 && !retained; send--) {
+  /* every entry's payload and descriptor tables are held by its owner since its preparation, a prepared WRITE (its
+     plan) or its issue (owned_begin), each a registration scope open on its leases: a present only advances its
+     channel's use, before anything is presented */
+  for (uint32_t h = 0; h < comm->count; h++)
+    for (int send = 1; send >= 0; send--) {
       const size_t count = send ? plans[h].outs : plans[h].ins;
       const struct message *items = send ? plans[h].out : plans[h].in;
-      for (size_t k = 0; k < count && !retained; k++) {
+      for (size_t k = 0; k < count; k++) {
         const struct message *m = items + k;
-        if (m->c->write_plan) {
-          m->c->write_plan->uses[2 * h + !send].end = m->end.n;
-          continue;
-        }
-        struct lease *payload = lease_at(address_of(m->data), NULL);
-        struct lease *metadata = lease_at(m->spans, NULL);
-        const unsigned direction = send ? MESH_LEASE_SEND : MESH_LEASE_LAND;
-        retained = !payload || payload->returned || !metadata || metadata->returned ? EINVAL :
-          mesh_lease_retire_mark_use(&payload->reads, ch->stream, hold->wire, hold->generation, m->end.n, direction, 0);
-        if (!retained) retained = mesh_lease_retire_mark_use(&metadata->reads, ch->stream, hold->wire, hold->generation, m->end.n, direction, 1);
+        (m->c->write_plan ? m->c->write_plan->uses : owner->uses)[2 * h + !send].end = m->end.n;
       }
     }
-  }
-  pthread_mutex_unlock(&attach_lock);
-  if (retained) return comm_fail(comm, ncclSystemError, "registering DMA lifetimes: %s", strerror(retained));
   for (uint32_t h = 0; h < comm->count; h++) {
     struct channel *ch = comm->channels + h;
     const struct schedule *p = plans + h;
@@ -3352,10 +3402,10 @@ static void commit_group(struct ncclComm *comm, const struct schedule *plans) {
    (schedule_laid), its landings gated (gate_of, *gate whether its first dispatch stores the communicator's gate),
    presented (present_group) and counted (commit_group); a failure
    before any entry is presented is the call's alone, one after it the communicator's (its lists stand mid-group) */
-static ncclResult_t schedule(struct metal_program *program, struct ncclComm *comm, struct schedule *plans, int *gate) {
+static ncclResult_t schedule(struct metal_program *program, struct ncclComm *comm, struct issue *owner, struct schedule *plans, int *gate) {
   schedule_laid(comm, plans);
   gate_of(comm, plans, gate);
-  ncclResult_t result = present_group(program, comm, plans);
+  ncclResult_t result = present_group(program, comm, owner, plans);
   if (result) return result;
   if (*gate) comm->gates++;
   commit_group(comm, plans);
@@ -3673,6 +3723,9 @@ static void issue_free(struct ncclComm *comm, struct issue *u) {
   for (size_t i = 0; u->steps && i < u->n; i++) steps_free(u->steps[i]);
   if (u->group) free(u->group->start);
   for (size_t i = 0; u->bound && i < u->n; i++) { free(u->bound[i].views[0]); free(u->bound[i].views[1]); free(u->bound[i].segments); }
+  pthread_mutex_lock(&attach_lock);
+  owned_end(u, 1);
+  pthread_mutex_unlock(&attach_lock);
   if (u->tables) ncclMemFree(u->tables);
   free(u->steps); free(u->calls); free(u->bound); free(u->group); free(u);
 }
@@ -4392,7 +4445,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     for (uint32_t h = 0; h < comm->count; h++) { g->start[h][0] = comm->channels[h].sends; g->start[h][1] = comm->channels[h].lands; }
     /* every landing, a write's and a fused crossing's too, is gated on the stream's reaching the group: its storage is
        reused (guard), never a generation of its own; the issue let go with the group (inflight_free) */
-    if (!(result = schedule(program, comm, plans, &gate))) { g->plans = plans; plans = NULL; u = NULL; }
+    if (!(result = schedule(program, comm, u, plans, &gate))) { g->plans = plans; plans = NULL; u = NULL; }
     else g = NULL;
     if (!result) {
       for (uint32_t h = 0; h < comm->count; h++) { g->end[h][0] = comm->channels[h].sends; g->end[h][1] = comm->channels[h].lands; }
