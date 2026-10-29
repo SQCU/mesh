@@ -1516,6 +1516,22 @@ static pybind11::capsule chain_completion(int64_t index) {
 
 // A declared set of routed writes. Bindings name physical channels, including
 // parallel cables; relay readiness stays in the compiled stream entries.
+// A tensor's WRITE from its abstract layout (nccl.h ncclMeshLayout): its storage's page table, its sizes, strides and
+// storage offset in elements and its element bits; no address or byte geometry (design/pointer-lowering-2026-10-28.md).
+static void tensor_write(Group &g, const at::Tensor &view, int source, int destination, ncclComm_t comm, bool metal,
+                         ncclMeshWriteLayout layout, ncclMeshWritePlan_t *out) {
+  const at::Tensor start = view.as_strided({view.storage().nbytes() ? 1 : 0}, {1}, 0);
+  ncclMeshPageTable_t table = nullptr;
+  checked(ncclMeshPageTableCreate(g.where(start), comm, metal, &table));
+  const std::vector<uint64_t> dims(view.sizes().begin(), view.sizes().end());
+  const std::vector<int64_t> steps(view.strides().begin(), view.strides().end());
+  const ncclMeshLayout local{table, (uint32_t)(8 * view.element_size()), (uint32_t)dims.size(), dims.data(), steps.data(),
+                             (uint64_t)view.storage_offset(), nullptr, 0};
+  const ncclResult_t made = ncclMeshWriteLayoutPrepare(&local, source, destination, 0, layout, out);
+  ncclMeshPageTableDestroy(table);
+  checked(made);
+}
+
 static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> fused_writes_impl(
     MetalSchedule *schedule, const at::Tensor &send, const std::vector<at::Tensor> &landings,
     const std::vector<std::array<int, 2>> &pairs, int64_t comm, int64_t polls, int64_t repeats, int64_t stride,
@@ -1561,8 +1577,9 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
   plans.handles.resize(pairs.size(), nullptr);
   for (size_t i = 0; i < pairs.size(); i++) {
     if (tile_bytes) {
-      checked(mesh_compile_rows(out.at, (void *)in[i].at, send.nbytes(), 1, send.nbytes(),
-          pairs[i][0], pairs[i][1], c, 1, 0, mesh_write_layout{.tile_bytes=(size_t)tile_bytes,.instances=1,.invocations=1}, &plans.handles[i]));
+      // the rank's own view: the source's values on the source, its landing on every other rank
+      tensor_write(g, rank == pairs[i][0] ? send : landings[i], pairs[i][0], pairs[i][1], c, true,
+                   ncclMeshWriteLayout{(size_t)tile_bytes, 1, 0, 1}, &plans.handles[i]);
       if(rank==pairs[i][1])checked(ncclMeshWriteLandings(plans.handles[i],tile_landings.data(),(uint32_t)plans.land.size(),
           ncclMeshTileLayout{.columns=tiles,.tile_stride=record_words*sizeof(uint64_t),.instances=1}));
     } else if (rows) {
