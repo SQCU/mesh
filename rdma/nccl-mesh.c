@@ -193,7 +193,7 @@ struct ncclComm {
   _Atomic uint64_t *words;
   void *violation;
   uint64_t last, groups;
-  void *command, *queue; /* the last GPU program's command buffer; the queue of its host groups' (launch_host) */
+  void *command, *queue; /* the last GPU program's command buffer; the queue of its host groups' (host_commit) */
   struct ncclMeshWritePlan *compiled_writes; /* the plans holding definitions of it (write_definitions) */
   struct ncclComm *next_touched, *next_live;
   struct plan *plan;
@@ -4300,7 +4300,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     else if (reducing(list[i].what) && !on_gpu(list[i].type))
       result = fail(ncclInvalidArgument, "a float64 reduction on the Metal path (Apple GPUs have no float64 arithmetic)");
     else if (reducing(list[i].what)) result = reduction(list + i);
-    /* a host group's scalar in memory (launch_host: its call has no stream, so reduction takes it), read as it is encoded */
+    /* a host group's scalar in memory (host_commit: its call has no stream, so reduction takes it), read as it is encoded */
     if (!result && list[i].scalar_at) memcpy(list[i].pre, list[i].scalar_at, SIZE[list[i].type]);
     remote |= crosses(list + i);
   }
@@ -4339,7 +4339,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     return fail(ncclSystemError, "%s", message);
   }
   /* its program kept as comm's last (program_end), so a host group, whose command buffer the library made and commits,
-     returns once it ends whether or not it crosses (launch_host: gpu_finished) */
+     returns once it ends whether or not it crosses (host_finish: gpu_finished) */
   if (remote || !list[0].stream) touch(comm);
   for (uint32_t h = 0; remote && h < comm->count; h++) metal_resident(program, comm->channels[h].buffer);
   if (remote && comm->gate) metal_resident(program, comm->gate);
@@ -4509,8 +4509,11 @@ static ncclResult_t as_metal(struct where *w) {
   *w = (struct where){buffer, offset};
   return ncclSuccess;
 }
-static ncclResult_t launch_host(struct call *list, size_t n) {
+/* a host group (no stream) encoded as the Metal path's on its communicator's own queue, its bindings as their leases'
+   Metal buffers, and committed: *made its command buffer, for host_finish; its calls taken (launch_metal) */
+static ncclResult_t host_commit(struct call *list, size_t n, void **made) {
   const ncclComm_t comm = list[0].comm;
+  *made = NULL;
   pthread_mutex_lock(&group_lock);
   ncclResult_t result = revoked(comm) ? revoked_fail(comm) : comm_failure(comm);
   if (!result && comm_issued(comm))
@@ -4531,36 +4534,36 @@ static ncclResult_t launch_host(struct call *list, size_t n) {
   }
   if (result) { parts_free(list, n); metal_release(command); return result; }
   result = launch_metal(list, n);
-  if (!result) {
-    metal_commit(command);
-    pthread_mutex_lock(&group_lock);
-    result = gpu_finished(comm);
-    pthread_mutex_unlock(&group_lock);
-  }
+  if (result) { metal_release(command); return result; }
+  metal_commit(command);
+  *made = command;
+  return ncclSuccess;
+}
+/* a committed host group's end awaited (gpu_finished: its program is comm's last), its command buffer let go */
+static ncclResult_t host_finish(ncclComm_t comm, void *command) {
+  pthread_mutex_lock(&group_lock);
+  const ncclResult_t result = gpu_finished(comm);
+  pthread_mutex_unlock(&group_lock);
   metal_release(command);
   return result;
 }
 
 /* one communicator's calls of a group, launched as its own group on the Metal path: on their stream (launch_metal) or
-   on its own queue (launch_host), each taking what the calls own (freed, or moved to the group's issue); the list stays
+   on its own queue, committed and awaited (host_commit, host_finish), each taking what the calls own (freed, or moved to the group's issue); the list stays
    its caller's */
 static ncclResult_t launch_one(struct call *list, size_t n) {
   const ncclComm_t comm = list[0].comm;
   if (list[0].stream) return launch_metal(list, n);
-  const ncclResult_t result = launch_host(list, n);
+  void *command = NULL;
+  ncclResult_t result = host_commit(list, n, &command);
+  if (!result) result = host_finish(comm, command);
   if (result) comm->async = result;
   return result;
 }
 
-/* a group's calls of one communicator (ncclGroupEnd), launched as a group of their own (launch_one: on a thread of its
-   own where they take the host path), its result and its message */
-struct part { struct call *list; size_t n; ncclResult_t result; struct said said; pthread_t thread; int threaded, metal; };
-static void *part_run(void *argument) {
-  struct part *p = argument;
-  p->result = launch_one(p->list, p->n);
-  p->said = last;
-  return NULL;
-}
+/* a group's calls of one communicator (ncclGroupEnd), launched as a group of their own (launch_one; a host part
+   committed with the others before any is awaited: host_commit, `command`), its result and its message */
+struct part { struct call *list; size_t n; ncclResult_t result; struct said said; ncclComm_t comm; void *command; int metal; };
 /* a thread's parts of its last group on several communicators, and their calls, each part's a run of them: kept for its
    next such group (grow), so none is allocated once they have its size */
 static _Thread_local struct part *parts_kept;
@@ -4655,23 +4658,21 @@ ncclResult_t ncclGroupEnd(void) {
     int any = 0;
     if ((completed = ncclMeshComplete(ticket, &on, &any))) completing = last;
   }
+  /* every host part committed before any is awaited, so their programs run together (R17: no wait per part) */
   for (size_t k = 0; k < parts; k++) {
     struct part *p = part + k;
     if (!p->list || p->metal) continue;
-    const int error = pthread_create(&p->thread, NULL, part_run, p);
-    p->threaded = !error;
-    if (error) {
-      p->result = fail(ncclSystemError, "a thread for communicator %s's calls: %s", p->list[0].comm->name, strerror(error));
-      p->said = last;
-      parts_free(p->list, p->n);
-    }
+    p->comm = p->list[0].comm;
+    if ((p->result = host_commit(p->list, p->n, &p->command))) { p->said = last; p->comm->async = p->result; }
+  }
+  for (size_t k = 0; k < parts; k++) {
+    struct part *p = part + k;
+    if (p->command && (p->result = host_finish(p->comm, p->command))) { p->said = last; p->comm->async = p->result; }
   }
   ncclResult_t result = ncclSuccess;
   struct said first = {0, ""};
-  for (size_t k = 0; k < parts; k++) {
-    if (part[k].threaded) pthread_join(part[k].thread, NULL);
-    if (part[k].result && !result) { result = part[k].result; first = part[k].said; }
-  }
+  for (size_t k = 0; k < parts && !result; k++)
+    if (part[k].result) { result = part[k].result; first = part[k].said; }
   if (completed && !result) { result = completed; first = completing; }
   if (issue) *issue = (ncclMeshIssue){ticket, published};
   if (result) last = first;
@@ -4919,7 +4920,7 @@ static void plan_free(struct ncclComm *comm, struct plan *plan) {
 
 /* a declared group whose every call declares its bindings (nccl.h ncclMeshCall bindings; none a WRITE's, whose plan
    comes at its issue) laid and placed for them in each of its generations (issue_bind on copies of its calls, as their
-   issues will be: the Metal path's, a host binding as its lease's Metal buffer: launch_host; a float64 reduction is
+   issues will be: the Metal path's, a host binding as its lease's Metal buffer: host_commit; a float64 reduction is
    refused there, launch_metal), so an issue with those buffers binds only its entries.  Under group_lock */
 static ncclResult_t prepared(struct ncclComm *comm, struct compiled *x, int remote) {
   for (size_t i = 0; i < x->n; i++)
