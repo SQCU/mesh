@@ -741,7 +741,6 @@ def _follow_bytes(placement, local, logical_shape, logical_stride, key, rank, gr
              (incoming[0].rows == 1 or incoming[0].source_stride == incoming[0].row_bytes))
     result = (original.narrow(0, incoming[0].source_offset // size, extent).view(program.destination_shapes[rank])
               if alias else _empty(program.destination_shapes[rank], local, group))
-    source_bytes, destination_bytes = original.view(torch.uint8), result.view(-1).view(torch.uint8)
     channels = len(group.fabric.adjacent[rank])
     jobs = []
     # Allocate leases and compile kernels before any plan can present receives.
@@ -756,27 +755,29 @@ def _follow_bytes(placement, local, logical_shape, logical_stride, key, rank, gr
             jobs.append((run, _migration_kernel('migration_local', vector, channels, run.row_bytes // vector),
                          words, groups, None, 0))
             continue
+        # the run as an element view of the rank's own tensor (its rows of `run.row_bytes`, `stride` apart), its layout
+        # the library's to lower (design/pointer-lowering-2026-10-28.md); a relay's rows its own lease, packed
+        if any(n % size for n in (run.source_offset, run.destination_offset, run.row_bytes, run.source_stride, run.destination_stride)):
+            raise ValueError('mesh: a migration run is whole elements')
+        rows, width = run.rows, run.row_bytes // size
         if rank == run.source:
-            first = source_bytes.narrow(0, run.source_offset, run.row_bytes)
-            stride = run.source_stride
+            view = original.as_strided((rows, width), (run.source_stride // size, 1), original.storage_offset() + run.source_offset // size)
             kernel = _migration_kernel('migration_publish_existing', channels)
         elif rank == run.destination:
-            first = destination_bytes.narrow(0, run.destination_offset, run.row_bytes)
-            stride = run.destination_stride
+            flat = result.view(-1)
+            view = flat.as_strided((rows, width), (run.destination_stride // size, 1), flat.storage_offset() + run.destination_offset // size)
             kernel = _migration_kernel('migration_ready', channels)
         else:
-            relay = _empty((run.bytes,), local, group, torch.uint8)
-            first, stride, kernel = relay.narrow(0, 0, run.row_bytes), run.row_bytes, None
-        jobs.append((run, kernel, _migration_words(run, run.row_bytes, 1), 1, first, stride))
+            view, kernel = _empty((rows, width), local, group), None
+        jobs.append((run, kernel, _migration_words(run, run.row_bytes, 1), 1, view, 0))
     schedule = _stream.Schedule()
     consumers = []
-    for run, kernel, words, groups, first, stride in jobs:
+    for run, kernel, words, groups, view, _ in jobs:
         if run.source == run.destination:
             schedule.compute(kernel, [local, result], fused._encode_words(words, channels, None, None),
                              15, groups, 1, _GATHER_THREADS, 1 | (2 << _stream.compilation['ACCESS_WRITE_SHIFT']))
             continue
-        crossing = fused.write_rows(schedule, first, [first], [(run.source, run.destination)], group,
-                                    row_bytes=run.row_bytes, rows=run.rows, stride=stride)
+        crossing = fused.write_rows(schedule, view, [view], [(run.source, run.destination)], group)
         if rank == run.source:
             schedule.compute(kernel, [], fused._encode_words(words, channels, None, crossing),
                              15, 1, 1, _GATHER_THREADS, 0)

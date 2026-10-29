@@ -1535,17 +1535,15 @@ static pybind11::capsule chain_completion(int64_t index) {
 static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> fused_writes_impl(
     MetalSchedule *schedule, const at::Tensor &send, const std::vector<at::Tensor> &landings,
     const std::vector<std::array<int, 2>> &pairs, int64_t comm, int64_t polls, int64_t repeats, int64_t stride,
-    int64_t row_bytes, int64_t rows, const std::optional<at::Tensor> &ready, int64_t ready_value, int64_t tile_bytes) {
+    const std::optional<at::Tensor> &ready, int64_t ready_value, int64_t tile_bytes) {
   TORCH_CHECK(landings.size() == pairs.size(), "fused writes: one landing lease per declared write");
   TORCH_CHECK(polls >= 0 && polls <= (int64_t)UINT32_MAX, "fused writes: polls is a 32-bit count of loads");
   TORCH_CHECK(repeats > 0 && repeats <= (int64_t)UINT32_MAX && stride >= 0,
               "fused writes: positive 32-bit frame count and nonnegative byte stride required");
   const ncclComm_t c = communicator(comm);
-  TORCH_CHECK(tile_bytes >= 0 && (!tile_bytes || (ready && repeats == 1 && rows == 0)),
+  TORCH_CHECK(tile_bytes >= 0 && (!tile_bytes || (ready && repeats == 1)),
               "tiled writes require a contiguous publication family and its source words");
   const size_t tiles = tile_bytes && send.nbytes() ? (send.nbytes()-1)/(size_t)tile_bytes+1 : 1;
-  TORCH_CHECK(rows >= 0 && row_bytes >= 0 && (!rows || (row_bytes > 0 && stride >= row_bytes)),
-              "affine writes need positive row bytes and a local pitch at least that large");
   const auto framed = [repeats, stride](const at::Tensor &tensor) {
     const size_t bytes = tensor.nbytes(), offset = tensor.storage_offset() * tensor.element_size();
     TORCH_CHECK(!stride || (size_t)(repeats - 1) <= (SIZE_MAX - bytes) / (size_t)stride,
@@ -1554,7 +1552,7 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
     TORCH_CHECK(offset <= tensor.storage().nbytes() && extent <= tensor.storage().nbytes() - offset,
                 "fused writes: all frames must lie inside the tensor's backing storage");
   };
-  if (!rows) framed(send);
+  framed(send);
   Group g{true};
   const Operand out = g.moving(send);
   std::optional<Operand> produced;
@@ -1565,12 +1563,12 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
   }
   std::vector<Operand> in;
   for (const at::Tensor &landing : landings) {
-    if (!rows) framed(landing);
+    framed(landing);
     in.push_back(g.moving(landing));
     TORCH_CHECK(in.back().bytes == out.bytes, "fused writes: a landing holds the source's bytes (a WRITE moves bytes, not typed values)");
   }
   PreparedWrites plans;
-  plans.prepare(comm, polls, repeats, rows ? 0 : stride);
+  plans.prepare(comm, polls, repeats, stride);
   const size_t binding_words=sizeof(ncclMeshBinding)/sizeof(uint64_t),record_words=1+plans.land.size()*binding_words;
   std::vector<uint64_t> tile_landings(tile_bytes ? tiles*record_words : 0);
   int rank=0;checked(ncclCommUserRank(c,&rank));
@@ -1582,11 +1580,6 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
                    ncclMeshWriteLayout{(size_t)tile_bytes, 1, 0, 1}, &plans.handles[i]);
       if(rank==pairs[i][1])checked(ncclMeshWriteLandings(plans.handles[i],tile_landings.data(),(uint32_t)plans.land.size(),
           ncclMeshTileLayout{.columns=tiles,.tile_stride=record_words*sizeof(uint64_t),.instances=1}));
-    } else if (rows) {
-      TORCH_CHECK(out.bytes == (size_t)row_bytes,
-                  "affine write bindings name the first row as a contiguous byte view");
-      checked(mesh_compile_rows(out.at, (void *)in[i].at, (size_t)row_bytes, (size_t)rows, (size_t)stride,
-                                      pairs[i][0], pairs[i][1], c, 1, 0, mesh_write_layout{.instances=1,.invocations=1}, &plans.handles[i]));
     } else {
       TORCH_CHECK(stride % send.element_size() == 0, "fused writes: a frame stride is whole elements");
       tensor_write(g, rank == pairs[i][0] ? send : landings[i], pairs[i][0], pairs[i][1], c, true, ncclMeshWriteLayout{0, 1, 0, 1},
@@ -1652,10 +1645,10 @@ struct ScheduleBinding {
   }
   auto writes(const at::Tensor &send,const std::vector<at::Tensor> &landings,
       const std::vector<std::array<int,2>> &pairs,int64_t comm,int64_t polls,int64_t repeats,int64_t stride,
-      int64_t row_bytes,int64_t rows,const std::optional<at::Tensor> &ready,int64_t ready_value,int64_t tile_bytes) {
+      const std::optional<at::Tensor> &ready,int64_t ready_value,int64_t tile_bytes) {
     operands.push_back(send);operands.insert(operands.end(),landings.begin(),landings.end());
     if(ready)operands.push_back(*ready);
-    return fused_writes_impl(schedule.get(),send,landings,pairs,comm,polls,repeats,stride,row_bytes,rows,ready,ready_value,tile_bytes);
+    return fused_writes_impl(schedule.get(),send,landings,pairs,comm,polls,repeats,stride,ready,ready_value,tile_bytes);
   }
 
   void finish() { const auto held=operands; checked(MetalScheduleFinish(schedule.get(),^(NSError *){(void)held;})); }

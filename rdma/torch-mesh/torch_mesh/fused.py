@@ -69,21 +69,15 @@ def writes(schedule, send, landings, pairs, group, polls=0, *, repeats=1, stride
     channel's last required prefix.
     """
     publish, land = schedule.writes(send, list(landings), list(pairs), group.handle,
-                                    int(polls), int(repeats), int(stride), 0, 0, ready, int(ready_value), int(tile_bytes))
+                                    int(polls), int(repeats), int(stride), ready, int(ready_value), int(tile_bytes))
     return Crossing(tuple(map(tuple, publish)), tuple(map(tuple, land)))
 
 
 
-def write_rows(schedule, send, landings, pairs, group, row_bytes, rows, stride):
-    """One exact affine WRITE over original row views, with a rank-local pitch.
-
-    Only useful row bytes cross links. Row and registration boundaries are
-    compiled into a single logical unit sequence; no packing or row-count limit
-    from the stream entry ring is introduced. Ordinary source publication and
-    final landing bindings use repeat index zero.
-    """
-    publish, land = schedule.writes(send, list(landings), list(pairs), group.handle,
-                                    0, 1, int(stride), int(row_bytes), int(rows), None, 0, 0)
+def write_rows(schedule, send, landings, pairs, group):
+    """One exact WRITE of a view (rows of it at a rank-local pitch, whatever its layout): the library lowers each rank's
+    own view's layout, so only its bytes cross links, with no packing; publication and landing use repeat index zero."""
+    publish, land = schedule.writes(send, list(landings), list(pairs), group.handle, 0, 1, 0, None, 0, 0)
     return Crossing(tuple(map(tuple, publish)), tuple(map(tuple, land)))
 
 def _encode_words(constants, channels, land, publish):
