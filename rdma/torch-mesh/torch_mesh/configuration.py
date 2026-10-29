@@ -69,6 +69,7 @@ def bind(configuration, groups, prepare):
     production_seconds = (assignment.producer_seconds(c['assignment'], c['decisions'],
                                 {name: [[rank] for rank in range(c['size'])]}) if c['records'] else [0.0] * c['size'])
     partition.plan(mesh, name, groups, production_seconds=production_seconds)
+    emit({'phase': 'declared', 'unix': time.time()})   # the function traced and compiled (partition.plan's groups)
     graph = {**assignment.graph(group.comm), 'production_seconds': list(production_seconds)}
     decisions = assignment.domains({k: v for k, v in c['decisions'].items() if not k.startswith('flow:')}, {name: graph})
     previous = c['assignment']['parts']
@@ -76,6 +77,7 @@ def bind(configuration, groups, prepare):
     group.reset_fused_configuration()
     assignment.install(group.comm, operands, name)
     partition._replan(mesh, name)
+    emit({'phase': 'installed', 'unix': time.time()})   # the parts installed and planned again; then the recording
     prepare()
     emit({'phase': 'prepared', 'unix': time.time()})
     c.update(decisions=decisions, graphs={name: graph}, assignment={**c['assignment'], 'parts': operands})
