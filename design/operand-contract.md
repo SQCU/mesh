@@ -754,16 +754,32 @@ a fixed output-page contract, the binding must use an API/model contract which
 actually guarantees the supplied storage. Internal provider work and dependencies
 also remain opaque. No new runtime recovery or copy path has been added.
 
-The native ANE share has another preparation constraint imposed by our code.
-`rates.engine_block` uses the stored model's channel block as the allocation
-grain; `engine_extent` excludes a share without a boundary on that block grid.
-`NeuralEngineManifest.Layer.models(in:)` can then select only complete stored
-models. This is a cached-model restriction, not a declared ANE hardware limit.
-The shared `neural_engine_model` builder already accepts row and channel tails,
-but the native manifest and assignment contracts do not expose arbitrary cuts
-to it. Relaxing the assignment alone would leave those cuts without a model.
-That contract still needs reconciliation with bounded model preparation and
-the output-page requirement above.
+The native ANE allocator now uses its declared allocation grain independently
+of the model build block. It can assign intervals within one block, and ranges
+whose ends are both off that grid. Preparation clips each block to the exact
+selected columns and retains the row tails supported by `neural_engine_model`.
+The model manifest, preparation identity and native binder carry those same
+ranges and feature requirements. The configured block still bounds one model
+conversion's memory; changing an assignment does not enlarge that bound.
+
+Changes to these constant-weight shares use the existing asynchronous model
+preparation path before the new assignment becomes executable. The program key
+includes the exact model ranges, so a ragged range change cannot select an older
+manifest. Only the assigned blocks are built. Compiled shares count toward the
+ordinary program cache budget; the former permanent-block exemption is removed.
+The allocator still describes one GPU interval and one ANE interval. General
+sets of backend assignments and the provider output-page contract above remain
+open; this change does not turn a model block into a hardware restriction.
+
+Preparation on 2026-10-29 carried off-grid intervals through allocation and
+member identity, including both start and end assignments. The shared model
+builder converted 19 rows as 7/7/5 tiles and 13 channels as 5/5/3 blocks. Core ML
+compiled that graph and reported both CPU and ANE support for its operations,
+but preferred CPU placement for this small shape. The ANE-only configuration
+therefore still declines that provider placement. This preference is not an
+alignment requirement and has not been promoted into one. Provider placement
+control remains open alongside the output-backing contract. No prediction or
+numerical dispatch was submitted; temporary compilation artifacts were removed.
 
 ## Frontend attributes become page operands
 
