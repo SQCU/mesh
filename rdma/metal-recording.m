@@ -606,7 +606,9 @@ static NSUInteger MetalFrontierFirst(const struct MetalSpan *spans,NSUInteger co
 static void MetalSpanAdd(NSMutableDictionary *spans,id key,NSUInteger lo,NSUInteger hi,NSUInteger node) {
     NSMutableData *held=spans[key];
     if(!held){held=spans[key]=[NSMutableData data];const struct MetalSpan head={0,0,0};[held appendBytes:&head length:sizeof head];}
-    NSUInteger count;struct MetalSpan *at=MetalFrontier(held,&count);const NSUInteger place=MetalFrontierFirst(at,count,lo);
+    NSUInteger count;struct MetalSpan *at=MetalFrontier(held,&count);
+    /* views arrive in order (MetalQueueViews reads MetalRangeAdd's sorted spans), so one at or past the last is appended */
+    const NSUInteger place=!count||at[count-1].lo<=lo?count:MetalFrontierFirst(at,count,lo);
     [held increaseLengthBy:sizeof(struct MetalSpan)];
     struct MetalSpan *head=held.mutableBytes;at=head+1;
     memmove(at+place+1,at+place,(count-place)*sizeof *at);at[place]=(struct MetalSpan){lo,hi,node};
