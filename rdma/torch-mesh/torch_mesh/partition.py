@@ -1362,7 +1362,8 @@ def _view_region(spec, coordinates):
         if p.is_shard():
             shape[p.dim], offset = p._local_shard_size_and_offset(shape[p.dim], spec.mesh.size(i), rank)
             origin += offset * stride[p.dim]
-    if not math.prod(shape):
+    elements = math.prod(shape)
+    if not elements:
         return None
     axes = []
     for step, count in sorted((s, n) for s, n in zip(stride, shape) if s and n > 1):
@@ -1370,7 +1371,9 @@ def _view_region(spec, coordinates):
             axes[-1] = axes[-1][0], axes[-1][1] * count
         else:
             axes.append((step, count))
-    return origin, tuple(axes)
+    # Broadcast axes repeat values without extending the address set. A local
+    # reshape must preserve those repetitions as well as the addresses.
+    return origin, elements, tuple(axes)
 
 
 def _reshape(op, args, kwargs):

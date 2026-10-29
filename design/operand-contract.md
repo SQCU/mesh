@@ -429,6 +429,10 @@ Context consumers likewise require the declared sequence length.
 Shape-only views compare the actual affine regions assigned to each rank
 before choosing their output shard axis. This bypasses upstream's requirement
 that a flattened axis divide the number of ranks. Compatible cuts stay local.
+The comparison retains each shard's logical element count: broadcast axes
+repeat values even though they add no addresses. It must not equate a six-value
+local view with a proposed five-value shape merely because both repeat one page
+value. That case previously selected the wrong shape and failed preparation.
 An incompatible cut still declares a gather: the current `RaggedShard` cannot
 describe every mapped output selection. Replacing that gather with the common
 page-selection relation remains unfinished; this change does not claim that
