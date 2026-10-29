@@ -1036,23 +1036,26 @@ static std::vector<at::Tensor> import_attributes(const std::vector<at::Tensor> &
     const size_t low=group.spans.empty()?0:group.low/group.alignment*group.alignment;
     const size_t bytes=group.spans.empty()?0:(group.high-low+group.alignment-1)/group.alignment*group.alignment;
     at::Tensor storage=region_empty({(int64_t)bytes},at::empty({0},at::TensorOptions().dtype(at::kByte)),source.is_mps());
-    const void *from=source.is_mps()?[at::native::mps::getMTLBufferStorage(source) contents]:source.storage().data();
-    TORCH_CHECK(from||!bytes,"attribute import requires host-visible source storage");
-    auto *to=(char *)(uintptr_t)address(storage);
+    // the source storage's bytes as a tensor over it, its spans' merged runs copied by torch on its device (a private
+    // MPS buffer has no host view; no address is read)
+    const at::Tensor from=at::empty({0},source.options().dtype(at::kByte)).set_(source.storage(),0,{(int64_t)source.storage().nbytes()},{1});
     std::sort(group.spans.begin(),group.spans.end());
     size_t first=0,last=0;
+    const auto copy=[&](size_t a,size_t b){if(b>a)storage.narrow(0,(int64_t)(a-low),(int64_t)(b-a)).copy_(from.narrow(0,(int64_t)a,(int64_t)(b-a)));};
     for(const auto &span:group.spans) {
       if(span.first<=last){last=std::max(last,span.second);continue;}
-      if(last>first)memcpy(to+first-low,(const char *)from+first,last-first);
+      copy(first,last);
       first=span.first;last=span.second;
     }
-    if(last>first)memcpy(to+first-low,(const char *)from+first,last-first);
+    copy(first,last);
     for(size_t i:group.members) {
       const auto &value=values[i];const size_t width=value.element_size();
       const size_t offset=storage.storage_offset()+(value.numel()?value.storage_offset()*width-low:0);
       result[i]=storage.view(value.scalar_type()).as_strided(value.sizes(),value.strides(),offset/width);
     }
   }
+  // the copies complete before a prepared function, on its own queue, reads them (preparation only)
+  if(mps)at::mps::synchronizeAllMPSStreams(at::mps::SyncType::COMMIT_AND_WAIT);
   return result;
 }
 
