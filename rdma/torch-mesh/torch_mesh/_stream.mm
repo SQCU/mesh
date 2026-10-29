@@ -30,7 +30,6 @@
 #include <unistd.h>
 #include "metal-recording.h"
 #include "nccl.h"
-#include "mesh-plan.h"
 
 // allocator.mm: torch's MPS allocator made the region's, and its leases live now (address, bytes)
 void install_region_allocator();

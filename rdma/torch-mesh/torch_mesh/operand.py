@@ -122,10 +122,10 @@ class TensorView:
 
     def transfer(self):
         """The common WRITE descriptor, retaining order and repeated reads."""
-        from views import byte_layout
+        from mesh import view_layout
         size = self.element_size()
         if self.layout.affine:
-            shift, rows, spans = byte_layout(self.shape, [s * size for s in self.layout.strides], size)
+            shift, rows, spans = view_layout(self.shape, [s * size for s in self.layout.strides], size)
             first = self.layout.offset + shift // size
         else:
             runs = self.layout.ordered_spans()

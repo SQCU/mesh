@@ -194,7 +194,7 @@ or installing a separate optimization policy.
 `Comm.Write_spans_prepare(sendbuf, landingbuf, spans, source, destination)`
 binds an ordered list of `(offset, bytes)` intervals relative to the used
 array's first element. `Comm.Write_view_prepare(...)` derives that list from
-shape, byte strides and element width through shared `views.byte_spans`,
+shape, byte strides and element width through shared `mesh.view_layout` (mesh-write-compiler.h `mesh_view_layout`),
 including reversed axes and broadcast source views. The original array owner
 is retained; no values are read at preparation. Native
 `ncclMeshWriteSpansPrepare` accepts different local lists with the same total

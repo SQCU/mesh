@@ -195,7 +195,7 @@ partition adapter emits a numerical operation, copy, wait, route or new executio
 FX and native command operands carry their accessed byte ranges into the shared recorder.
 `MetalViewReaches` computes their union from shape, byte strides and element width during preparation.
 Both frontends call this function; the former Python `views.access_spans` implementation is removed.
-Transfer lists still use `views.byte_spans` to retain logical element order.
+Transfer lists still use `mesh.view_layout` (mesh-write-compiler.h `mesh_view_layout`) to retain logical element order.
 A dense transpose is one range, broadcast dimensions add no repeated range, and holes in a strided
 view are not reads or writes. Empty views declare no bytes instead of the remainder of their buffer.
 

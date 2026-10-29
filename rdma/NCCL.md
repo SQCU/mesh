@@ -677,7 +677,7 @@ its fixed native bindings; `plan.Free()` destroys them. Repeated invocations
 must respect the compiled source-read and destination-consumer lifetimes:
 returning from a source-only invocation does not prove a remote consumer has
 finished, or permit mutation before every scheduled DMA read retires. A `with` block
-also frees the plan. The indexed wrappers use the shared `views.byte_spans`
+also frees the plan. The indexed wrappers use the shared `mesh.view_layout` (mesh-write-compiler.h `mesh_view_layout`)
 metadata mapper and the native span preparation; see the
 [client coverage manifest](../design/collective-client-coverage.md#numpy-fixed-bindings-and-indexed-views).
 
