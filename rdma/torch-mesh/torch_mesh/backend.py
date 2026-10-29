@@ -27,7 +27,7 @@ import torch
 import torch.distributed as dist
 from torch._C._distributed_c10d import ReduceOp
 
-from . import _stream, empty  # _stream's kernels for torch's functional collectives on MPS register as it loads
+from . import _stream  # _stream's kernels for torch's functional collectives on MPS register as it loads
 
 import mesh  # noqa: E402  (rdma/mesh.py, on the path the mesh's install gives the environment: its _mesh_c)
 from routing import Fabric
@@ -352,8 +352,9 @@ def bind_gather_views(gathers, group):
             for b in range(group.size()):
                 if a == b:
                     continue
+                # a relay is its shape and type alone: the library leases it where a route crosses this rank
                 view = (source if group.rank() == a else segment if group.rank() == b else
-                        empty(segment.numel() * segment.element_size(), dtype=torch.uint8, device=source.device.type))
+                        torch.empty(segment.numel() * segment.element_size(), dtype=torch.uint8, device='meta'))
                 deliveries.append((view, a, b))
     return group.prepare_writes(deliveries) if deliveries else None
 

@@ -770,8 +770,8 @@ def _follow_bytes(placement, local, logical_shape, logical_stride, key, rank, gr
             flat = result.view(-1)
             view = flat.as_strided((rows, width), (run.destination_stride // size, 1), flat.storage_offset() + run.destination_offset // size)
             kernel = _migration_kernel('migration_ready', channels)
-        else:
-            view, kernel = _empty((rows, width), local, group), None
+        else:   # a relay: its shape and type alone, the library's lease where a route crosses this rank (ncclMeshCommWriteForwards)
+            view, kernel = torch.empty((rows, width), dtype=local.dtype, device='meta'), None
         jobs.append((run, kernel, _migration_words(run, run.row_bytes, 1), 1, view, 0))
     schedule = _stream.Schedule()
     consumers = []
@@ -780,7 +780,7 @@ def _follow_bytes(placement, local, logical_shape, logical_stride, key, rank, gr
             schedule.compute(kernel, [local, result], fused._encode_words(words, channels, None, None),
                              15, groups, 1, _GATHER_THREADS, 1 | (2 << _stream.compilation['ACCESS_WRITE_SHIFT']))
             continue
-        crossing = fused.write_rows(schedule, view, [view], [(run.source, run.destination)], group)
+        crossing = fused.write_rows(schedule, view, [None if view.is_meta else view], [(run.source, run.destination)], group)
         if rank == run.source:
             schedule.compute(kernel, [], fused._encode_words(words, channels, None, crossing),
                              15, 1, 1, _GATHER_THREADS, 0)
