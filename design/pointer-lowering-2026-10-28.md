@@ -79,11 +79,17 @@ Landed on mesh main:
 - 1370f15a: frame trains are layout (`ncclMeshLayout.frames`, `frame_stride` in elements): the fused ring, the chain
   and fused writes with repeats. `mesh_compile_write` is deleted.
 
+- f1cdef43: migration runs are element views of each rank's own tensor. `fused.write_rows` and `fused_writes_impl`
+  take no byte geometry, and the uint8 byte views in `_follow_bytes` are gone.
+
 Open, in order:
-3. **Migration.** partition.py `_follow_bytes` narrows uint8 views at the byte runs `migration.compile_rows` computes
+3. *(landed, f1cdef43)* **Migration.** partition.py `_follow_bytes` narrows uint8 views at the byte runs `migration.compile_rows` computes
    (G2 #24, G1 #16-18). It should emit element layouts of the real source and destination views, after which
    `fused.write_rows` and `mesh_compile_rows` go.
 4. **mesh_rank.m** (metal-microbench): its crossings' `mesh_compile_rows` and fragment offsets (G2 #22-23, G4 #14-16).
+   Its slots repeat at a byte stride per invocation (`CrossBinding.stride`). The layout entry takes that period from
+   `ncclMeshWriteLayout.instance_pages`, in whole pages. The period is local, like frames, so it moves into
+   `ncclMeshLayout` in elements. `ncclMeshWriteLayout` then keeps what every rank shares: tile bytes and invocations.
 5. **G6.** Collective issue pointers. Declared bindings become layouts too, and issue binds the declaration.
 
 ## Inventory
