@@ -2155,10 +2155,9 @@ static size_t elements(const struct call *c) {
 }
 /* rank r's segment of a reduce-scatter's or all-gather's operand: the elements before it, and *length its own (r x
    count and count; an uneven call's, its counts') */
-static uint64_t seg_first(const uint64_t *seg, int q);
 static size_t segment_at(const struct call *c, int r, size_t *length) {
   *length = c->segments ? c->segments[r] : c->count;
-  return c->segments ? seg_first(c->segments, r) : (size_t)r * c->count;
+  return c->segments ? mesh_segment_first(c->segments, (uint32_t)r) : (size_t)r * c->count;
 }
 /* Logical collective offsets become final local bindings during realization. */
 static struct where view_at(const struct call *c, int send, size_t offset) {
@@ -2173,11 +2172,6 @@ static struct where view_at(const struct call *c, int send, size_t offset) {
   return views[c->comm->rank]; /* empty local contribution */
 }
 /* the entries before rank q's segment of a count a rank (an all-to-all's sendcounts or recvcounts) */
-static uint64_t seg_first(const uint64_t *seg, int q) {
-  uint64_t at = 0;
-  for (int r = 0; r < q; r++) at += seg[r];
-  return at;
-}
 /* the name of a call's kind, its failures' */
 static const char *call_name(const struct call *c) {
   static const char *const names[] = {"ncclAllReduce", "ncclBroadcast", "ncclReduce", "ncclReduceScatter", "ncclAllGather"};
@@ -2204,7 +2198,7 @@ static size_t sent_bytes(const struct call *c) {
   size_t length = 0;
   if (!call_contributes(c)) return 0;
   if (c->what == MESH_ALLGATHER) { segment_at(c, c->comm->rank, &length); return length * z; }
-  if (counted(c)) return seg_first(c->segments, c->comm->nranks) * z;
+  if (counted(c)) return mesh_segment_first(c->segments, (uint32_t)c->comm->nranks) * z;
   if (c->what == MESH_BROADCAST) return c->count * z;
   return elements(c) * z;
 }
@@ -2287,7 +2281,6 @@ static void steps_rebind(struct steps *s) {
   memset(s->consumption, 0, most * sizeof *s->consumption);
 }
 
-static size_t piece_bytes(const struct mesh_step *step) { return step->piece.elements * step->piece.element_bytes; }
 /* design/whole-function.md#one-way-writes */
 static ncclResult_t write_steps(struct call *c) {
   struct ncclComm *comm = c->comm;
@@ -2689,10 +2682,10 @@ static ncclResult_t schedule_group(struct ncclComm *comm, struct call *list, siz
         const struct mesh_step *step = c->bound->steps + x->step;
         if (c->bound->cable[x->step] != ch->cable) continue;
         const mesh_pages pages = c->write_plan ? c->write_plan->step_units[write_span_index(c->write_plan,x->step,c->invocation)]
-                                               : pages_of(piece_bytes(step), comm->page);
+                                               : pages_of(mesh_step_bytes(step), comm->page);
         end = pages_add(end, pages);
         const struct message m = {.c = c, .step = x->step, .entry = send ? p->outs : p->ins, .pages = pages, .end = end,
-                                  .offset = step->first * step->piece.element_bytes, .bytes = piece_bytes(step)};
+                                  .offset = step->first * step->piece.element_bytes, .bytes = mesh_step_bytes(step)};
         if (send) p->out[p->outs++] = m; else p->in[p->ins++] = m;
       }
     }
@@ -2715,7 +2708,7 @@ static ncclResult_t schedule_group(struct ncclComm *comm, struct call *list, siz
       }
     }
     for (uint32_t k = 0; st && !result && k < st->count; k++)
-      if (st->steps[k].op != MESH_STEP_SEND && !piece_bytes(st->steps + k)) st->done[k] = 1;
+      if (st->steps[k].op != MESH_STEP_SEND && !mesh_step_bytes(st->steps + k)) st->done[k] = 1;
   }
   free(steps); free(counts); free(group_calls); free(made); free(scratch);
   return result;
@@ -2794,10 +2787,10 @@ static ncclResult_t order_writes(const struct ncclComm *comm, const struct call 
       fragments[count] = (struct write_fragment){c, (uint32_t)r, t->cable, t->step.round, t->step.first * SIZE[c->type],count};
       tasks[count++] = (struct mesh_write_task){
         .arc = 2 * t->cable + ((uint32_t)r == comm->fabric.cable[t->cable].node[1]), .parent = UINT32_MAX,
-        .bytes = (double)piece_bytes(&t->step),
-        .first_bytes = c->write_plan ? fmin((double)piece_bytes(&t->step),
+        .bytes = (double)mesh_step_bytes(&t->step),
+        .first_bytes = c->write_plan ? fmin((double)mesh_step_bytes(&t->step),
           (double)(write_packets(c->write_plan,c->invocation)->cuts[span_after(write_packets(c->write_plan,c->invocation), t->step.first * SIZE[c->type])] -
-                   t->step.first * SIZE[c->type])) : fmin((double)piece_bytes(&t->step), (double)comm->page),
+                   t->step.first * SIZE[c->type])) : fmin((double)mesh_step_bytes(&t->step), (double)comm->page),
         .release = production.seconds, .production = production.order};
     }
   }
@@ -3746,7 +3739,7 @@ static ncclResult_t reduction(struct call *c) {
    what it sends itself and what it receives from itself (each in its own segment's bytes) */
 static size_t own_segment(const struct call *c, size_t *sent, size_t *landed) {
   const int n = c->comm->nranks, me = c->comm->rank;
-  *sent = seg_first(c->segments, me) * SIZE[c->type]; *landed = seg_first(c->segments + n, me) * SIZE[c->type];
+  *sent = mesh_segment_first(c->segments, (uint32_t)me) * SIZE[c->type]; *landed = mesh_segment_first(c->segments + n, (uint32_t)me) * SIZE[c->type];
   const uint64_t out = c->segments[me], in = c->segments[n + me];
   return (out < in ? out : in) * SIZE[c->type];
 }
@@ -5191,8 +5184,8 @@ static ncclResult_t declared_members(struct call *c, const ncclMeshCall *d) {
         return fail(ncclInvalidArgument, "rank %u has a nonzero segment but is not a declared owner", r);
   }
   if (counted(c)) {
-    if ((!call_contributes(c) && seg_first(c->segments, (int)n)) ||
-        (!call_receives(c) && seg_first(c->segments + n, (int)n)))
+    if ((!call_contributes(c) && mesh_segment_first(c->segments, (uint32_t)n)) ||
+        (!call_receives(c) && mesh_segment_first(c->segments + n, (uint32_t)n)))
       return fail(ncclInvalidArgument, "a counted transaction's local extents contradict its declared operand roles");
   }
   return ncclSuccess;
@@ -5408,8 +5401,7 @@ static ncclResult_t plan_routes(ncclComm_t comm, uint64_t *demand, size_t entrie
         uint64_t bytes = 0;
         if (c->target) {
           if (e == (size_t)c->root * comm->nranks + c->target - 1) {
-            uint64_t a = comm->page, b = SIZE[c->type];
-            while (b) { const uint64_t rest = a % b; a = b; b = rest; }
+            const uint64_t a = mesh_span_gcd(comm->page, SIZE[c->type]);
             bytes = resolution ? (c->count ? (c->count - 1) / (comm->page / a) + 1 : 0) : c->count * SIZE[c->type];
           }
         }
@@ -5632,7 +5624,7 @@ static ncclResult_t write_prepare_spans(struct ncclMeshWritePlan *plan) {
   for (int k = 0; !result && k < count; k++) for(size_t instance=0;!result&&instance<plan->occurrences;instance++) {
     const struct mesh_step *s = &transfers[k].step;
     const size_t index=write_span_index(plan,(size_t)k,instance);
-    const uint64_t units = span_units(write_packets(plan,instance), s->first * s->piece.element_bytes, piece_bytes(s));
+    const uint64_t units = span_units(write_packets(plan,instance), s->first * s->piece.element_bytes, mesh_step_bytes(s));
     plan->step_units[index] = (mesh_pages){units};
     if (units > (SIZE_MAX / sizeof *plan->spans - plan->span_first[index]) / plan->repeats)
       result = fail(ncclInvalidUsage, "prepared write descriptors overflow address space");
@@ -5645,7 +5637,7 @@ static ncclResult_t write_prepare_spans(struct ncclMeshWritePlan *plan) {
   const uint64_t origin = count ? (uint64_t)(address_of(binding) - (const unsigned char *)m) : 0;
   for (int k = 0; !result && k < count; k++) for(size_t instance=0;!result&&instance<plan->occurrences;instance++) {
     const struct mesh_step *s = &transfers[k].step;
-    const uint64_t logical = s->first * s->piece.element_bytes, bytes = piece_bytes(s);
+    const uint64_t logical = s->first * s->piece.element_bytes, bytes = mesh_step_bytes(s);
     const size_t index=write_span_index(plan,(size_t)k,instance);
     const size_t units = plan->step_units[index].n;
     const struct mesh_span_plan *packets=write_packets(plan,instance);
@@ -5825,8 +5817,7 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
   // exceeds the function extent; never union cuts from different occurrences.
   plan->occurrences=1;
   for(int r=0;!error&&r<comm->nranks;r++) {
-    size_t a=plan->occurrences,b=reports[r].layout.instances;
-    while(b){size_t rest=a%b;a=b;b=rest;}
+    const size_t a=mesh_span_gcd(plan->occurrences,reports[r].layout.instances);
     const size_t factor=reports[r].layout.instances/a;
     plan->occurrences=factor>layout.invocations/plan->occurrences?layout.invocations:plan->occurrences*factor;
   }

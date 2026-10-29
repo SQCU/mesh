@@ -914,7 +914,6 @@ done:
 
 /* -- the lists: the entries a program's steps take on a holding's send list and landing list --------------------------- */
 
-static uint64_t mesh_step_bytes(const struct mesh_step *step){ return step->piece.elements*step->piece.element_bytes; }
 
 /* whether steps are in round order (mesh_program_steps_cut's order: a compiled program's are) */
 static int mesh_rounds_sorted(const struct mesh_step *steps,uint32_t count){
@@ -936,11 +935,6 @@ uint64_t mesh_lay(const struct mesh_step *steps,uint32_t count,uint32_t peer,int
 
 /* Counted exchanges describe logical transactions. Physical routing and range
    dependencies are supplied by the same compiler as ordinary collectives. */
-static uint64_t mesh_segment_first(const uint64_t *segment,uint32_t q){
-  uint64_t at=0;
-  for(uint32_t r=0;r<q;r++)at+=segment[r];
-  return at;
-}
 uint32_t mesh_counted_steps(uint32_t nodes,uint32_t rank,const uint64_t *segments,struct mesh_operand element,struct mesh_step *steps){
   uint32_t k=0;
   for(uint32_t q=0;q<2*nodes;q++)
