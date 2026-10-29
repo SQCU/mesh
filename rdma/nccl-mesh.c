@@ -5559,20 +5559,29 @@ static int write_view_rows(const ncclMeshSpan *view, size_t count, uint64_t byte
    or pages. Contiguous selections across page/row/span edges stay contiguous.
    Publication tiles restart the packet grid. All operands were checked once
    before this occurrence's cuts are compiled. */
-static int write_view_packets(const struct write_binding_report *reports, const ncclMeshSpan *views,
-    size_t stride, const uint64_t *phases, uint32_t participants, uint32_t packet, struct mesh_span_plan *out) {
-  const uint64_t bytes = reports[0].bytes;
+static int write_view_packets(const struct write_binding_report *reports, const ncclMeshSpan *views, size_t stride,
+    const uint64_t *phases, const uint64_t *strides, uint64_t repeats, uint32_t participants, uint32_t packet, struct mesh_span_plan *out) {
+  const uint64_t bytes = reports[0].bytes, extent = MESH_DMA_EXTENT, tile = reports[0].layout.tile_bytes;
   size_t *index = calloc(participants, sizeof *index);
-  uint64_t *begin = calloc(participants, sizeof *begin);
-  struct mesh_span_residues cuts = {0};
-  int error = index && begin ? mesh_span_residue_add(&cuts, 0) : ENOMEM;
+  uint64_t *begin = calloc(participants, sizeof *begin), *flat = calloc(2 * (size_t)participants + 1, sizeof *flat);
+  struct mesh_span_residues cuts = {0}, lattice = {0};
+  uint32_t flats = 0;
+  int error = index && begin && flat ? mesh_span_residue_add(&cuts, 0) : ENOMEM;
+  /* an untiled payload's flat participants: every registration boundary any repeat meets (mesh_span_residues) */
+  for (uint32_t r = 0; !error && !tile && r < participants; r++)
+    if (!reports[r].indexed && !(reports[r].rows > 1 && reports[r].stride != reports[r].row_bytes)) {
+      flat[flats] = phases[r]; flat[participants + flats++] = strides[r];
+    }
+  if (!error && bytes && flats) error = mesh_span_residues(flat, flat + participants, flats, bytes, repeats, packet, &lattice);
   for (uint64_t at = 0; !error && at < bytes;) {
-    const uint64_t tile=reports[0].layout.tile_bytes,within=tile?at%tile:at;
+    const uint64_t within = tile ? at % tile : at;
     uint64_t length = packet - within % packet;
-    if(tile && length>tile-within)length=tile-within;
+    if (tile && length > tile - within) length = tile - within;
     if (length > bytes - at) length = bytes - at;
     for (uint32_t r = 0; r < participants; r++) {
       const struct write_binding_report *p = reports + r;
+      const int strided = p->rows > 1 && p->stride != p->row_bytes;
+      if (!tile && !p->indexed && !strided) continue; /* the lattice's */
       uint64_t offset = at, left = bytes - at;
       if (p->indexed) {
         const ncclMeshSpan *view = views + r * stride;
@@ -5588,13 +5597,20 @@ static int write_view_packets(const struct write_binding_report *reports, const 
         left = p->row_bytes - into;
       }
       if (length > left) length = left;
-      const uint64_t phase=(phases[r] + offset % MESH_DMA_EXTENT) % MESH_DMA_EXTENT;
-      if(length>MESH_DMA_EXTENT-phase)length=MESH_DMA_EXTENT-phase;
+      const uint64_t phase = (phases[r] + offset % extent) % extent;
+      if (length > extent - phase) length = extent - phase;
+    }
+    if (lattice.count) {
+      const uint64_t base = at - at % extent, into = at % extent;
+      size_t k = 0;
+      while (k < lattice.count && lattice.at[k] <= into) k++;
+      const uint64_t next = k < lattice.count ? base + lattice.at[k] : base + extent + lattice.at[0];
+      if (length > next - at) length = next - at;
     }
     at += length;
     error = mesh_span_residue_add(&cuts, at);
   }
-  free(index); free(begin);
+  free(index); free(begin); free(flat); free(lattice.at);
   if (error) { free(cuts.at); return error; }
   *out = (struct mesh_span_plan){cuts.at, cuts.count};
   return 0;
@@ -5785,7 +5801,6 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
   atomic_fetch_add(&comm->runs, 1);
   comm->until = mesh_deadline("libnccl-mesh: configuration-time write binding metadata", MESH_PREPARATION_NS);
   int error = prepare_exchange_locked(comm, &local, sizeof local, reports);
-  int contiguous = !layout.tile_bytes;
   for (int r = 0; r < comm->nranks && !error; r++) {
     const struct write_binding_report *p = reports + r;
     error = p->status;
@@ -5793,7 +5808,6 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
         p->repeats != local.repeats || p->type != local.type || p->source != local.source || p->destination != local.destination ||
         p->layout.tile_bytes != local.layout.tile_bytes || p->layout.invocations != local.layout.invocations)) error = EPROTO;
     strides[r] = p->stride;
-    if (p->indexed || (p->rows > 1 && p->stride != p->row_bytes)) contiguous = 0;
   }
   size_t most = 0;
   ncclMeshSpan *all_views = NULL, *local_views = NULL;
@@ -5827,10 +5841,7 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
     for(int r=0;r<comm->nranks;r++)
       phases[r]=(reports[r].phase+(uint64_t)((__uint128_t)(occurrence%reports[r].layout.instances)*
         reports[r].layout.instance_stride%MESH_DMA_EXTENT))%MESH_DMA_EXTENT;
-    // Keep the existing arithmetic union for contiguous payloads and repeats;
-    // only actual local discontinuities/publication tiles need a view cursor.
-    if(contiguous)error=mesh_span_plan_create(phases,strides,(uint32_t)comm->nranks,local.bytes,repeats,(uint32_t)packet,plan->packets+occurrence);
-    else error=write_view_packets(reports,all_views,most,phases,(uint32_t)comm->nranks,(uint32_t)packet,plan->packets+occurrence);
+    error=write_view_packets(reports,all_views,most,phases,strides,repeats,(uint32_t)comm->nranks,(uint32_t)packet,plan->packets+occurrence);
   }
   if(!error && indexed && views) {
     plan->view=malloc(views*sizeof *plan->view);
