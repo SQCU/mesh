@@ -229,8 +229,8 @@ def prepare_node(node, record):
         result['install_exit'] = code
         if code:
             raise RuntimeError(f'preparation failed ({code}): {output}')
-        result.update(status='installed', bridge=next((json.loads(line)['bridge'] for line in output.splitlines()
-                                                        if line.startswith('{"bridge"')), None))
+        told = next((json.loads(line) for line in output.splitlines() if line.startswith('{"bridge"')), {})
+        result.update(status='installed', bridge=told.get('bridge'), services=told.get('services'))
     except Exception as error:
         result.update(status='failed', error=str(error))
     return result
