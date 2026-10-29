@@ -907,7 +907,7 @@ NSInteger MetalTensorConstant(id expression,NSArray *shape,NSDictionary *paramet
 
 @implementation MetalTensorLayout
 @synthesize coordinates=_coordinates;
-+ (instancetype)shape:(NSArray<NSNumber *> *)shape index:(id)expression parameters:(NSDictionary<NSString *,NSNumber *> *)parameters {
++ (instancetype)shape:(NSArray<NSNumber *> *)shape index:(id)expression parameters:(NSDictionary<NSString *,id> *)parameters {
     const NSUInteger count=TensorCount(shape);
     if(!count)return [self shape:shape strides:TensorStrides(shape) offset:0 maps:@{} indices:nil];
     NSMutableDictionary *values=TensorParameters(shape,parameters);values[@"i"]=@"i";
@@ -916,6 +916,8 @@ NSInteger MetalTensorConstant(id expression,NSArray *shape,NSDictionary *paramet
         values[[NSString stringWithFormat:@"axis.%lu",(unsigned long)d]]=digits[d];
     }
     isl_ctx *ctx=isl_ctx_alloc();
+    for(NSString *name in parameters)if([parameters[name] isKindOfClass:MetalTensorLayout.class])
+        values[name]=MeshIndexTerms(MeshIndexFunction(ctx,[parameters[name] reshape:shape]));
     isl_pw_aff *relation=MeshIndexExpression(ctx,TensorBind(expression,values),0,count);
     MetalTensorLayout *result=TensorFunctionLayout(relation,shape);isl_ctx_free(ctx);return result;
 }

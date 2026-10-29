@@ -1647,9 +1647,29 @@ chain reaches execution. The former independent `axes`, `permutation` and
 Preparation compiled a view with interleaved transposes, reshapes, reversed
 cuts and two further groupings, plus the MTP state-update shaders. Independent
 collective domains retained their earlier mapped bindings. Libraries and native
-callers built; no numerical commands ran. Cache relocation's phase-column
-matching still reconstructs cuts by axis role; it needs a general relation join
-before arbitrary transformations across those roles are supported there.
+callers built; no numerical commands ran.
+
+`reindex` composes a selection with a declared index relation. Its arithmetic
+can refer to another selection through a preparation-only `lookup` term.
+Repeated terms share the same prepared composition. The shared index constructor
+accepts named relations beside scalar parameters and substitutes them through
+isl before emission. This adds no runtime table, descriptor or function lookup.
+
+Cache relocation uses this operation to match coordinate identities. The
+destination's complete selection gives each column's identity; the source's
+complete selection resolves that identity to its pages. The old removal and
+copying of axis-cut lists is deleted, along with the requirement for the same
+number of column axes in both phases. Both bindings take the same declared
+batch/source-position/destination-slot/column domain. This virtual domain does
+not allocate another tensor: each binding retains its existing physical pages.
+The copy still launches over the cell's actual rows and columns.
+
+Preparation retained reversed source columns and a destination reshape whose
+column identities vary by row. The composed indices matched those identities,
+and both operands shared their backing without conversion. The earlier repeated
+grouping also retained its indices. Libraries and native callers built; no
+numerical commands ran. Global producer placement, empty-domain API constraints
+and the remaining external/signature bindings are still separate work.
 
 ### Encoded numerical operands
 

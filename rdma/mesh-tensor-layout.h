@@ -35,8 +35,9 @@ FOUNDATION_EXPORT NSInteger MetalTensorConstant(id expression, NSArray<NSNumber 
     offset:(NSInteger)offset maps:(NSDictionary<NSNumber *, NSData *> *)maps indices:(nullable NSData *)indices;
 // The same integer terms as coordinates, with bound configuration operands.
 // "axis.N", "extent.N" and "count" name logical coordinates, axis extents and
-// domain size. All other names come from parameters. isl performs the algebra.
-+ (instancetype)shape:(NSArray<NSNumber *> *)shape index:(id)expression parameters:(NSDictionary<NSString *, NSNumber *> *)parameters;
+// domain size. Parameters bind constants or other index relations over this
+// domain. isl composes them before emission; no relation lookup runs at execution.
++ (instancetype)shape:(NSArray<NSNumber *> *)shape index:(id)expression parameters:(NSDictionary<NSString *, id> *)parameters;
 // Restore/compose flat factor coordinates, retaining no parent view. Coordinate
 // expressions contain integer constants, "i", arithmetic, and the scalar
 // selections emitted from piecewise integer relations. These are preparation
