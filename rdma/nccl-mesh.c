@@ -5255,9 +5255,6 @@ static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call
       const uintptr_t at = (uintptr_t)address_of((struct where){d->bindings[j].buffer, d->bindings[j].offset});
       if (at >= data && at < end) c->phase[2 * me + j] = (uint64_t)(at - data) % MESH_DMA_EXTENT;
     }
-    /* the bindings as the issued call's buffers (admit): its group's generations laid and placed for them (prepared) */
-    c->send_at = (struct where){d->bindings[0].buffer, d->bindings[0].offset};
-    c->recv_at = (struct where){d->bindings[1].buffer, d->bindings[1].offset};
   }
   if (v && !(c->segments = malloc((size_t)v * sizeof *c->segments))) return fail(ncclSystemError, "out of memory");
   for (int k = 0; k < v; k++) { c->segments[k] = d->counts[k]; c->total += d->counts[k]; }
@@ -5265,6 +5262,12 @@ static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call
   if (d->what == WHAT_COUNTED) c->count = c->total - c->segments[me] - c->segments[n + me];
   const ncclResult_t refused = admit(c);
   if (refused) return refused;
+  /* the bindings as the issued call's buffers, set after admit, which gives a call with no stream its own (none):
+     its group's generations laid and placed for them (prepared).  design/eager-execution.md#what-follows */
+  if (d->bindings && d->what != ncclMeshCallWrite) {
+    c->send_at = (struct where){d->bindings[0].buffer, d->bindings[0].offset};
+    c->recv_at = (struct where){d->bindings[1].buffer, d->bindings[1].offset};
+  }
   const ncclResult_t members = declared_members(c, d);
   if (members) return members;
   if (counted(c)) return prepare_counted(c, d->matrix);
