@@ -388,12 +388,16 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
    since that device came up (mesh-verbs.h device_up); a lease the region cannot meet is refused (ENOMEM).  The bits
    name no owner: a client's lease takes its pages with rows its slot owns (mesh-call.h mesh_section_create), which
    carry them back at its retirement (mesh_buffer_reclaim) or its return (mesh_lease_return).  A run that fits one
-   registration extent (MESH_DMA_EXTENT from the arena's first page) lies within one, so no DMA span of it crosses one
-   (mesh.h mesh_dma_span_valid) and no compiled piece of it needs a cut there. */
+   registration extent (MESH_DMA_EXTENT from the arena's first page) lies within one where one has room, so no DMA span
+   of it crosses one (mesh.h mesh_dma_span_valid) and no compiled piece of it needs a cut there. Where no extent has
+   room for it whole, it lies across a boundary, as a run larger than an extent always does: a page's span never
+   crosses one, and a compiled piece is cut there (nccl-mesh.c extent_cuts). The region's free pages are taken whatever
+   extents the leases before broke up (2026-10-29: a 1 GiB lease refused with 2,583,791 of 5,373,952 pages free). */
 uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
   if(!pages || !align){ errno=EINVAL; return MESH_ABSENT; }
   _Atomic uint64_t *bits=mesh_arena_bits(c->M);
-  return mesh_allocate(c,pages,align,(uint32_t)(MESH_DMA_EXTENT/c->M->pgsz),0,mesh_arena_pages(c->M),bits,bits,&c->arena_cursor);
+  const uint32_t first=mesh_allocate(c,pages,align,(uint32_t)(MESH_DMA_EXTENT/c->M->pgsz),0,mesh_arena_pages(c->M),bits,bits,&c->arena_cursor);
+  return first!=MESH_ABSENT || errno!=ENOMEM ? first : mesh_allocate(c,pages,align,0,0,mesh_arena_pages(c->M),bits,bits,&c->arena_cursor);
 }
 
 /* design/transport.md */
