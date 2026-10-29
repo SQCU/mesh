@@ -215,6 +215,11 @@ frontend's storage indices; there is no separate greedy stride inverse.
 
 Layout equality uses relation equality. A composed layout which is affine can
 therefore retain a direct strided binding even when its expressions differ.
+Configured API layouts use those same integer terms. `shape:index:parameters:`
+binds logical coordinates, extents and explicit API parameters before handing
+the expression to isl. Products and divisors can include bound constant
+expressions. The resulting layout retains only the ordinary emitted terms;
+neither the configuration nor its names reach numerical execution.
 `storageSpan` uses the relation's image bounds to size a backing interval.
 LiteRT binding sizes and native strided allocations use that same query;
 neither enumerates dependency ranges merely to find an allocation's end.
@@ -709,8 +714,8 @@ lowering, rather than a property of this merge.
 Draw, retained logits and the final token selection now consume
 `MetalTensorLayout`. The importer passes each graph tensor's full shape and the
 provider's configured scalar type, byte width, lanes and physical axis order.
-`selection_storage` and `partial_row_storage` declare `orders` by tensor rank.
-A missing order has no inferred replacement. Leading axes and symbolic batch
+`selection_storage` and `partial_row_storage` name configured storage relations.
+A missing relation has no inferred replacement. Leading axes and symbolic batch
 extents survive into the same source-index and dependency-range lowering.
 The old `litert_slice` and `litert_at` formulas are removed. Their other users,
 prefill-mask stores and activation-row selection, also consume declared views.
@@ -1409,14 +1414,26 @@ boundaries; no numerical view operation or wait is added. The exported binding
 names its final producer directly, without a chain of view descriptors.
 
 The provider binder now resolves those relations through `MetalTensorLayout`.
-`configs/litert-storage.json` declares each provider buffer class's physical
-axis order, lane padding and scalar encoding; preparation exports that contract
-with the graph. In the current LiteRT Metal provider, ordinary `MetalBuffer`
-means PHWC4 storage, not dense logical rows. `MetalBufferFp16` also changes a
-logical float32 value's physical encoding. The provider reports concrete tensor
-shapes and buffer classes; neither a name nor an allocation size supplies a
-layout. These properties follow from LiteRT's `gpu_backend_metal_litert.mm` and
-`buffer_handler_utils.cc` in the locally built vendor source.
+`configs/litert-storage.json` declares each provider buffer class's integer
+storage relation and scalar encoding; preparation exports that contract with
+the graph. Ordinary `MetalBuffer` tensors use PHWC4 storage. `MetalBufferFp16`
+also changes a logical float32 value's physical encoding. Composite operators
+can declare another layout: `odml.cache_update` writes packed key and value
+relations whose parameters include its declared head width. Its int8 graph
+outputs hold unsigned cache codes. These are explicit format operands, consumed
+by the same binder. They retain the buffer class's encoding except for declared
+overrides. Neither a tensor name nor an allocation size supplies a layout.
+These properties follow from LiteRT's `gpu_backend_metal_litert.mm`,
+`buffer_handler_utils.cc`, `add_values_to_cache_parser.cc` and
+`add_values_to_cache_kernel.cc` in the locally built vendor source.
+
+Operator declarations attach those formats to their tensor ports. Graph copies,
+selections and stage exports preserve them. Signatures retain typed operands
+beside their names; a composed model reads the source operand's declaration.
+Append keeps a view when the physical API requirement changes even if its
+logical selection is unchanged. The existing stage splitter and binding-copy
+lowering then see that requirement. The former hand-written provider layout
+builder is removed: ordinary and packed layouts use the shared integer algebra.
 
 A compatible selection binds directly to its source pages. Shared layout
 equivalence compares integer relations without expanding a repeated logical
@@ -1506,6 +1523,14 @@ directly; irregular views and tails retain their declared positions. Native
 source assembly includes the common mesh Metal prelude before library imports.
 Preparation compiled widths 1, 3, 37 and 64 with mapped and PHWC4 outputs, and
 retained direct native/provider bindings. No numerical commands ran.
+
+Preparation on 2026-10-29 imported the reference model's actual cache-update
+declarations and retained them through extraction and striped position cuts.
+Configured storage expressions compiled for several batches and heads, including
+head-width and position tails. A native use bound directly to the packed
+provider's pages with its declared unsigned encoding. Existing provider,
+native and mask preparation still compiled. These are metadata and shader
+preparation results; no model or numerical commands ran.
 
 The boundary remains incomplete. Raw cache relocation and several state-update
 declarations still lack typed access relations. Placement across all future consumer constraints remains necessary:

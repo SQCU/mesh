@@ -27,6 +27,10 @@ struct MetalTensorSpan { NSInteger offset; NSUInteger count; };
 @property(nonatomic, readonly) struct MetalTensorSpan storageSpan;
 + (instancetype)shape:(NSArray<NSNumber *> *)shape strides:(NSArray<NSNumber *> *)strides
     offset:(NSInteger)offset maps:(NSDictionary<NSNumber *, NSData *> *)maps indices:(nullable NSData *)indices;
+// The same integer terms as coordinates, with bound configuration operands.
+// "axis.N", "extent.N" and "count" name logical coordinates, axis extents and
+// domain size. All other names come from parameters. isl performs the algebra.
++ (instancetype)shape:(NSArray<NSNumber *> *)shape index:(id)expression parameters:(NSDictionary<NSString *, NSNumber *> *)parameters;
 // Restore/compose flat factor coordinates, retaining no parent view. Coordinate
 // expressions contain integer constants, "i", arithmetic, and the scalar
 // selections emitted from piecewise integer relations. These are preparation

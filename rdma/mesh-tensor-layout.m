@@ -880,8 +880,35 @@ finished:
     free(nodes);free(groups);return result;
 }
 
+// Bind configured names into the existing integer term type. The result goes
+// straight to isl; this is neither a second algebra nor a runtime evaluator.
+static id TensorBind(id expression,NSDictionary *values) {
+    if(TensorConstant(expression))return expression;
+    if([expression isKindOfClass:NSString.class]) {
+        id value=values[expression];
+        if(!value)[NSException raise:NSInvalidArgumentException format:@"missing storage operand %@",expression];
+        return value;
+    }
+    NSMutableArray *terms=[NSMutableArray arrayWithObject:expression[0]];
+    for(NSUInteger k=1;k<[expression count];k++)[terms addObject:TensorBind(expression[k],values)];
+    return terms;
+}
+
 @implementation MetalTensorLayout
 @synthesize coordinates=_coordinates;
++ (instancetype)shape:(NSArray<NSNumber *> *)shape index:(id)expression parameters:(NSDictionary<NSString *,NSNumber *> *)parameters {
+    const NSUInteger count=TensorCount(shape);
+    if(!count)return [self shape:shape strides:TensorStrides(shape) offset:0 maps:@{} indices:nil];
+    NSMutableDictionary *values=[[parameters mutableCopy] autorelease];values[@"count"]=@(count);values[@"i"]=@"i";
+    NSArray *digits=TensorDigits(shape);
+    for(NSUInteger d=0;d<shape.count;d++) {
+        values[[NSString stringWithFormat:@"extent.%lu",(unsigned long)d]]=shape[d];
+        values[[NSString stringWithFormat:@"axis.%lu",(unsigned long)d]]=digits[d];
+    }
+    isl_ctx *ctx=isl_ctx_alloc();
+    isl_pw_aff *relation=MeshIndexExpression(ctx,TensorBind(expression,values),0,count);
+    MetalTensorLayout *result=TensorRelationLayout(isl_map_from_pw_aff(relation),shape);isl_ctx_free(ctx);return result;
+}
 + (instancetype)shape:(NSArray<NSNumber *> *)shape strides:(NSArray<NSNumber *> *)strides
     offset:(NSInteger)offset maps:(NSDictionary<NSNumber *,NSData *> *)maps indices:(NSData *)indices {
     NSParameterAssert(shape.count==strides.count);

@@ -19,10 +19,11 @@ isl_pw_aff *MeshIndexExpression(isl_ctx *ctx,id expression,NSUInteger first,NSUI
     NSString *op=expression[0];
     isl_pw_aff *a=MeshIndexExpression(ctx,expression[1],first,end);
     if([op isEqual:@"mul"]||[op isEqual:@"div"]||[op isEqual:@"mod"]) {
-        isl_val *n=isl_val_int_from_si(ctx,[expression[2] integerValue]);
-        if([op isEqual:@"mul"])return isl_pw_aff_scale_val(a,n);
-        if([op isEqual:@"mod"])return isl_pw_aff_mod_val(a,n);
-        return isl_pw_aff_floor(isl_pw_aff_scale_down_val(a,n));
+        isl_pw_aff *b=MeshIndexExpression(ctx,expression[2],first,end);
+        if([op isEqual:@"mul"])return isl_pw_aff_mul(a,b);
+        if([op isEqual:@"div"])return isl_pw_aff_floor(isl_pw_aff_div(a,b));
+        isl_pw_aff *q=isl_pw_aff_floor(isl_pw_aff_div(isl_pw_aff_copy(a),isl_pw_aff_copy(b)));
+        return isl_pw_aff_sub(a,isl_pw_aff_mul(q,b));
     }
     if([op isEqual:@"select"])
         return isl_pw_aff_cond(a,MeshIndexExpression(ctx,expression[2],first,end),
