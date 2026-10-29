@@ -49,6 +49,14 @@ On 2026-10-29:
       follow the plan's own reuse rule (its landing gate and generations), not a fixed bytes x max(repeats, instances).
   - ncclMeshPageTableCreate(NULL, comm, ...) can name the library's relay: a table of no pages bound to comm, which
     write_prepare's existing table->comm already requires.
+  - Landed, the off-path half (mesh a9248d17, mb 8ec8f40a):
+    - ncclMeshCommWriteForwards says whether a rank lies on a path of nonzero weight.
+    - The empty page table binds a rank that forwards nothing.
+    - _stream.mm's fused ring and chain, and mb's columns_prepare, lease relays only where the rank forwards.
+  - Left of the off-path half: partition.py _follow_bytes and backend.py bind_gather_views. A relay rank there hands its
+    relay to ScheduleBinding::writes as both send and landing, and fused_writes_impl frames and registers send. So a
+    rank that sends nothing needs its own form first: no send tensor, only the shape and type the other ranks report.
+  - Left of the whole plan: sizing on-path relays in the library (the two constraints above).
 
 Considered and not landed: within 7 (one WRITE compile: it saved no compiles), within 8's operands_check (it catches
 a returned lease at issue), within 12's write_call (definition and issue differ on tile_bytes), within 17–19 (code
