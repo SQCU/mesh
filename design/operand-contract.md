@@ -189,158 +189,61 @@ in the tensor, including values used as indices. Both static and dynamic
 indexing need declared dependencies. A scale, rotation or reduction remains
 numerical work; a layout change cannot stand in for it.
 
-### Compact reshapes and aliases
+### Compact layouts and relation algebra
 
-`shape` describes logical axes. `indexShape`, strides and maps describe the
-factors of its storage relation. `coordinates` maps a logical flat index to
-those factor digits. A reshape changes logical axes without changing the
-relation. A cut can select fewer values than the factor domain contains.
-Neither operation needs a parent descriptor. Numerical indexing and dependency
-records consume the same factors and coordinates.
+`shape` describes logical axes. `indexShape`, strides, maps and `coordinates`
+are compact forms of the same storage relation. Views retain no parent
+layout. An unchanged outer extent does not repeat an inner map. Static layout
+terms are preparation data; computed page indices remain ordinary tensor data.
 
-Adjacent affine axes form linear runs, including
-negative and zero strides. New axes split those runs. An axis map stays one
-map when only singleton axes change, and splits into smaller maps when its
-values separate across the new axes. The surrounding rows add no index words.
-These are normal forms of `MetalTensorLayout`; callers use the same interface.
-Component-byte views scale the factors and append a component axis. Removing
-that axis restores the typed view without repeating each scalar's map entries.
-Axis removal uses the shared reshape operation; logical axis numbers do not
-index address factors after a nonseparable reshape.
+`rdma/mesh-index-relation.h` supplies the conversion between these declarations
+and isl's integer relations. The algebra itself is isl, including composition,
+inverse, image, equality and lexicographic selection. Finite maps become unions
+of affine runs over their own domains. Their surrounding axes stay arithmetic.
+The pinned source and build choices are in `etc/compute/isl.mk`; `rdma/isl.mk`
+builds the library with its bundled integer backend and links it statically.
+A node needs no separately installed isl or GMP library.
 
-Rebasing a shape alias applies that reshape to its assigned pages. Affine
-subviews use the declared coordinate basis and its bounds to compose their
-new origin and strides. Slices, permutations and broadcasts therefore retain
-affine bindings when the placement allows them. The shared coordinate inverse
-also serves the general indexed composition. No relation object or coordinate
-search is introduced into numerical execution.
+Alias placement composes the consumer selection, the inverse of the declared
+producer relation, and the assigned storage relation. This replaces
+`TensorSelectedRebase`, `TensorCoordinateRebase`, `TensorFactorRebase` and the
+recursive interval search. When several producer positions name the same
+value, the existing last-preimage alias convention selects a representative
+with `lexmax`. The inverse relation itself retains all preimages. Repeated
+consumer reads remain repeated. The same inverse and composition lower a
+frontend's storage indices; there is no separate greedy stride inverse.
 
-Preparation on 2026-10-28 described 2,061,584,302,080 logical elements with six
-axis-map entries, then factored the same map into strides alone. Large sliced,
-permuted, reversed and broadcast aliases also retained strides. Sampled index
-relations agreed, and the emitted index declarations compiled as Metal source.
-These descriptors allocated no tensor payload. Complete mapped reduction and
-gradient graphs prepared; native rank and Goal A built. No numerical commands
-were submitted and no throughput or latency improvement is claimed here.
+Layout equality uses relation equality. A composed layout which is affine can
+therefore retain a direct strided binding even when its expressions differ.
+Component-byte views scale the relation and append a component axis. Combining
+components checks that they name adjacent, aligned parts of each typed element.
+It no longer requires a particular stride factorization to express that fact.
 
-The later 2026-10-28 pass retained six nonseparable map entries for that same
-2,061,584,302,080-element domain after changing its logical axes. Serialization,
-component-byte round trips and whole-view alias placement preserved the source
-index expression. Python, Swift and LiteRT declarations carry the same index
-factors. The LiteRT importer compiled the same compact declaration. Shared
-library, frontend and native builds completed; no numerical commands ran.
+The solver emits integer index terms and declared constants. Scalar selections
+express piecewise index arithmetic; they are not runtime validity checks. The
+solver context is released during preparation. Numerical commands retain no
+solver objects, relation walkers, allocator or alias lookup. Ordered transfers
+and dependency unions still consume the same resulting layout. Required
+alignment and vector lanes are decided during preparation.
 
-Selections and permutations now separate independent domains at shared
-logical/index boundaries. A cut composes the domain containing its axis.
-A permutation moves independent domains intact and combines domains only when
-their coupled axes interleave. Unchanged rows do not repeat a small map.
-The result is the same flat layout; these domains exist only in preparation.
-Moving singleton axes remains a reshape with the original index expression.
+`select:runs:` makes a union directly from the ordered run declarations. Several
+runs now stay compact, including reversals and repeated values. The old path
+which expanded every repetition into a list of indices is removed.
 
-Rectangular aliases of affine declarations use that same composition when
-their producer receives mapped pages. The coordinate relation supplies slices,
-reversals, permutations and broadcast axes. It does not build an inverse table
-over the whole producer merely because its assigned storage is mapped.
+Preparation on 2026-10-29 compiled Metal index declarations for overlapping,
+repeated, negative-stride and transposed domains through 1,604,938,257 logical
+elements. Two compact runs selected 500 million positions without an expanded
+map. Component-byte round trips, provider views, collective views and native
+bindings retained their declared storage. Native rank and Goal A built. No
+numerical commands ran; these results establish lowering and shader compilation,
+not throughput or latency.
 
-Preparation on 2026-10-28 kept six map entries after cutting or transposing a
-68,719,476,736-row view, and four after selecting part of its coupled domain.
-An interleaved permutation composed 30 entries while preserving the row factor.
-Two coupled groups likewise composed 60 entries while moving a billion-row
-factor intact. Alias placement retained compact cuts, transposes and broadcasts.
-Preparation covered negative and zero strides, repeated selections, singleton
-and empty axes, serialization and ordered/dependency spans. Shared libraries and
-Metal declarations compiled without numerical submission.
-
-An independent index boundary can fall inside an unchanged logical axis after
-a reshape. Composition now splits that logical axis at the boundary, performs
-the selected cut in its own domain, then restores the declared logical shape.
-It does not repeat the selected map across the unchanged extent.
-
-Linear cuts also resolve against the index factors before building a table.
-When the selected interval is a rectangular range of those factors, preparation
-cuts their digits directly. A stride which divides a factor fixes its residue;
-a negative step reverses the selected digits. Repeating one value uses a zero
-stride. The result uses the same layout type, serialization and source emitter.
-No additional index relation is read during execution.
-
-Preparation on 2026-10-28 retained six entries for aligned cuts, full reversals
-and strided selections of a 2,061,584,302,080-element flat view. Cuts through a
-logical axis with an independent row factor retained four entries. Smaller
-compositions preserved exact indices, ordered transfers and dependency spans;
-the large declarations compiled as Metal source. No numerical work ran.
-
-Nonrectangular cuts and interleaved permutations now substitute integer
-coordinates into the existing factors. The preparation terms contain constants,
-the logical index, addition, integer scaling, floor division and remainder.
-Normalization removes terms and folds fixed residues before source emission.
-Shaders receive ordinary integer expressions and the existing map entries;
-there is no expression interpreter, parent view or extra lookup per transform.
-Computed page indices remain ordinary tensor values, not these compiler terms.
-
-Byte components, alias placement, saved FX declarations and native LiteRT
-`index_coordinates` carry this relation. A byte view scales the same factors;
-removing its component axis restores the typed view. A nonrectangular alias of
-a dense affine declaration uses its coordinate inverse. An alias retaining its
-producer's factor basis composes directly with the assigned placement. Ordered
-transfers follow prepared affine runs of the relation. Dependency spans use the
-same runs and the shared range union, including repeated and reversed reads.
-Preparation checks alignment and adjacent lanes algebraically; it emits vector
-accesses when that relation holds and adds no runtime alignment guard.
-When a selection leaves only an affine part of a map, normalization restores
-an ordinary strided binding. A strided consumer can then use it directly.
-
-Preparation on 2026-10-29 retained six map words for nonrectangular cuts and
-interleaved permutations of a 2,061,584,302,080-element domain. Their coordinate
-JSON occupied at most 148 bytes. Smaller compositions preserved ordered
-transfers, exact byte-access unions, byte-view round trips and saved declarations.
-The emitted Metal source compiled. These are layout-preparation results, not
-numerical execution or throughput measurements.
-
-Explicit selections now compose each factor with the selected positions during
-preparation. Common coordinate terms stay arithmetic. An unchanged map stays
-one map. Other terms separate their repeated residue from their linear advance;
-only the distinct residue and selected positions become a table. Each table
-contains final storage indices, so execution adds no nested map lookup. Native
-and FX consumers use the same result, serialization and source emitter.
-
-Preparation on 2026-10-29 selected repeated, out-of-order columns across the
-factor boundaries of a 606,348,324,135-element view. The result held 300 map
-entries and 145 bytes of coordinate expressions, the same as its smaller
-875-element counterpart. Exact ordered transfers, dependency spans, byte views
-and serialization agreed on smaller declarations. Metal source compiled without
-allocating tensor payload or submitting numerical work.
-
-Alias placement now composes independent mapped factors through the same
-selection operation as affine factors. The declaration supplies the source
-relation and assigned pages. Preparation resolves the selected coordinates,
-then applies their cuts, reordering and repetition to the assigned relation.
-An affine outer extent does not repeat the inner map or acquire a table of its
-own. This also covers an affine cut through an irregular source axis.
-
-The general inverse no longer builds a dictionary over every producer element.
-It bounds intervals of the declared coordinate expressions and resolves affine
-runs directly. Range summaries cover only the supplied maps. Repeated address
-patterns restrict the search to their last period, preserving the existing
-representative for aliased values. Repeated selections likewise emit one period
-of output indices. All of this is preparation work; execution consumes the
-resulting flat layout. Poorly separated relations can still need many interval
-searches.
-
-Preparation on 2026-10-29 rebased an 824,633,720,688-element mapped cut with four
-map entries, including reordered columns, repeated columns and a reversed
-axis. A 687,194,767,360-element affine cut through a mapped source retained no
-map entries. A cut through two mapped axes covered 4,123,168,603,740 elements
-with seven map entries. Sparse aliases into a 2,061,584,302,080-element producer
-resolved without enumerating that producer; a trillion-element repeated alias
-needed fifteen output entries. Smaller declarations preserved exact ordered
-transfers, dependency spans, typed views and serialization. Their Metal index
-source compiled. No tensor payload was allocated or numerical work submitted.
-
-A coupled selection or alias with no compact composition can still materialize
-its selected domain. The distributed ownership gap under exact partition
-boundaries also remains unfinished. An irreducible table supplied by a caller
-occupies its own domain; reshaping, slicing or permuting it no longer duplicates
-that table across surrounding dimensions.
+This closes the partial-inverse gap. It does not supply a frontend's missing
+operand declarations or a backend's missing output-placement contract. Explicit
+selection tables still use the existing compact-factor composition. General
+ownership and API constraint integration remain the work described below.
+The source build currently uses isl's ordinary preparation allocations; a
+page-backed solver workspace has not been implemented.
 
 ## Place values for their consumers
 
@@ -1405,8 +1308,8 @@ Shape constants retain the whole selected dimension, including its repeats.
 The constant selector consumes one compact record for those stripes.
 
 The shared `MetalTensorLayout.select:runs:` consumes these same ordered records.
-A single repeated run composes into its integer coordinates without expanding
-its repetitions. Other ordered runs use the existing mapped-layout composition.
+Their union composes into integer coordinates without expanding repetitions,
+whether the declaration contains one run or several.
 The FX binding exposes the same operation as `select_runs`; both return the
 ordinary layout type with the same dependency methods. Preparation covered
 reversed and repeated selections, mapped inputs, empty domains and a single

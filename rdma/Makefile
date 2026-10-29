@@ -5,6 +5,7 @@ IMAGES = libmesh.dylib libnccl-mesh.dylib libmesh-coreml.dylib libmesh-statistic
 .DEFAULT_GOAL := all
 METAL_CONFIGURATION ?= ../etc/compute/metal.mk
 include $(METAL_CONFIGURATION)
+include isl.mk
 METAL_DEFINES = -DMESH_METAL_LANGUAGE=$(MESH_METAL_LANGUAGE_ENUM)
 RDMA_CONFIGURATION ?= ../etc/bridge/thunderbolt.mk
 include $(RDMA_CONFIGURATION)
@@ -129,11 +130,11 @@ kernels: .build/libnccl-mesh.metallib
 	  [ "$$(cat $@ 2>/dev/null)" = "$$environment" ] || printf '%s\n' "$$environment" > $@
 $(IMAGES:%=.build/%) .build/nccl-mesh-kernels .build/libnccl-mesh.binarchive: .build/metal-environment
 .PHONY: FORCE kernels install-images install-nccl clean-kernels
-.build/libnccl-mesh.dylib: nccl-mesh.c mesh-statistics.c mesh-statistics.h metal-recording.m metal-recording.h mesh-tensor-layout.m mesh-tensor-layout.h mesh-write-order.h mesh-span-plan.h mesh-landing.h mesh-lease-retire.h nccl-mesh-metal.m nccl-mesh-metal.h nccl-mesh-kernels.h .build/libnccl-mesh.sha256 .build/mesh_metal.h nccl.h mesh-write-compiler.h \
+.build/libnccl-mesh.dylib: nccl-mesh.c mesh-statistics.c mesh-statistics.h metal-recording.m metal-recording.h mesh-tensor-layout.m mesh-tensor-layout.h mesh-index-relation.m mesh-index-relation.h $(ISL_ARCHIVE) mesh-write-order.h mesh-span-plan.h mesh-landing.h mesh-lease-retire.h nccl-mesh-metal.m nccl-mesh-metal.h nccl-mesh-kernels.h .build/libnccl-mesh.sha256 .build/mesh_metal.h nccl.h mesh-write-compiler.h \
   mesh-call.h mesh-dataflow.h mesh.h mesh-plan.h mesh-fabric.h .build/libmesh.dylib Makefile $(METAL_CONFIGURATION)
-	cc -fblocks -O2 $(WARN) $(METAL_DEFINES) -dynamiclib -I .build -DKERNELS_SHA256=\"$$(cat .build/libnccl-mesh.sha256)\" \
+	cc -fblocks -O2 $(WARN) $(METAL_DEFINES) -dynamiclib $(ISL_HEADERS) -I .build -DKERNELS_SHA256=\"$$(cat .build/libnccl-mesh.sha256)\" \
 	  -Wl,-install_name,@rpath/libnccl-mesh.dylib -Wl,-rpath,@loader_path \
-	  $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ nccl-mesh.c mesh-statistics.c nccl-mesh-metal.m metal-recording.m mesh-tensor-layout.m -L.build -lmesh \
+	  $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ nccl-mesh.c mesh-statistics.c nccl-mesh-metal.m metal-recording.m mesh-tensor-layout.m mesh-index-relation.m $(ISL_ARCHIVE) -L.build -lmesh \
 	  -framework Metal -framework Foundation
 .build/libmesh-coreml.dylib: mesh-coreml.m mesh-coreml.h Makefile
 	mkdir -p .build

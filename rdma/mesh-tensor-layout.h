@@ -25,11 +25,13 @@ struct MetalTensorSpan { NSInteger offset; NSUInteger count; };
 + (instancetype)shape:(NSArray<NSNumber *> *)shape strides:(NSArray<NSNumber *> *)strides
     offset:(NSInteger)offset maps:(NSDictionary<NSNumber *, NSData *> *)maps indices:(nullable NSData *)indices;
 // Restore/compose flat factor coordinates, retaining no parent view. Coordinate
-// expressions contain integer constants, "i", and [add|mul|div|mod, ...] nodes.
+// expressions contain integer constants, "i", arithmetic, and the scalar
+// selections emitted from piecewise integer relations. These are preparation
+// terms; execution receives their compiled index source, never this tree.
 - (MetalTensorLayout *)shaped:(NSArray<NSNumber *> *)shape coordinates:(NSArray *)coordinates;
 - (NSInteger)index:(NSUInteger)logical;
-// Compare the selected element positions, even when their factorizations
-// differ. This preparation operation walks affine pieces and shared periods.
+// Compare the selected element positions as integer relations, even when
+// their factorizations differ. This operation runs only during preparation.
 - (BOOL)equivalent:(MetalTensorLayout *)other;
 // Compose transformations now; the result never retains a parent descriptor.
 - (MetalTensorLayout *)select:(NSUInteger)axis indices:(NSData *)indices;
@@ -43,7 +45,9 @@ struct MetalTensorSpan { NSInteger offset; NSUInteger count; };
 - (MetalTensorLayout *)gather:(NSArray<NSNumber *> *)shape indices:(NSData *)indices;
 // Subdivide each typed element into fixed-width components (e.g. bytes).
 - (MetalTensorLayout *)components:(NSUInteger)count;
-// Combine the declared last axis of scalar components into one typed element.
+// Combine the declared last axis of adjacent, aligned scalar components into
+// one typed element. The relation determines this property, not its strides'
+// particular factorization.
 - (MetalTensorLayout *)elements:(NSUInteger)count;
 - (MetalTensorLayout *)shift:(NSInteger)elements;
 // Compose a declared alias with its producer's assigned storage. Both source
@@ -64,7 +68,7 @@ struct MetalTensorSpan { NSInteger offset; NSUInteger count; };
 // The binding's layout as the constants form's function-constant values (metal-recording.h MetalViewIndexConstants), nil
 // where the view is mapped or does not fit it.
 - (NSArray<NSArray<NSNumber *> *> *)constants:(NSUInteger)binding;
-// Lower the affine storage indices of a frontend IR to this page selection.
+// Lower the declared storage indices of a frontend IR to this page selection.
 // The source index is compiler structure, not a payload index tensor.
 - (NSString *)declaration:(NSUInteger)binding fromStorage:(MetalTensorLayout *)source;
 // Logical traversal order, including repeated reads; unlike dependency union.
