@@ -1,5 +1,6 @@
-// torch's allocators and Python's object arenas over region leases (ncclMemAlloc), so no tensor and no small Python
-// object of a mesh process lies outside the region: every pymalloc arena is a lease (PyObject_SetArenaAllocator); every CPU
+// torch's allocators and Python's over region leases (ncclMemAlloc), so no tensor and no Python object of a mesh process
+// lies outside the region but its blocks of 513 bytes to 64 KiB: every pymalloc arena is a lease (PyObject_SetArenaAllocator),
+// every raw block of 64 KiB or more is one (PyMem_SetAllocator, PYMEM_DOMAIN_RAW); every CPU
 // tensor is a lease, its DataPtr the lease's address, returned (ncclMemFree) when its storage is released; every MPS
 // tensor is a lease, its DataPtr the lease's no-copy MTLBuffer.  Torch 2.14 has no MPS allocator hook, so this one is constructed in place over the fixed instance
 // at::mps::getIMPSAllocator(), whose 16 bytes are kept as the delegate for pointers it did not make.  A block let go
@@ -13,6 +14,7 @@
 #include <c10/core/Storage.h>
 #include <c10/util/Exception.h>
 #include <cstring>
+#include <malloc/malloc.h>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -114,6 +116,57 @@ void arena_return(void *, void *memory, size_t bytes) {
   }
   if (ours) ncclMemFree(memory);
   else pythons_.free(pythons_.ctx, memory, bytes);
+}
+
+// Python's raw domain (the interpreter's own blocks, and pymalloc's above 512 bytes): a block of four region pages or more
+// is a lease, so rounding to whole pages costs it at most a quarter; a smaller one is the previous allocator's.  A realloc
+// across the line moves the block, the previous allocator's size its malloc_size.
+constexpr size_t LARGE_BLOCK = 64 << 10;
+PyMemAllocatorEx raws_;
+auto *blocks_ = new std::unordered_map<void *, size_t>;
+void *block_lease(size_t bytes) {
+  void *memory = nullptr;
+  if (ncclMemAlloc(&memory, bytes)) return nullptr;
+  std::lock_guard<std::mutex> guard(*lock_);
+  blocks_->emplace(memory, bytes);
+  return memory;
+}
+size_t block_bytes(void *memory) {
+  std::lock_guard<std::mutex> guard(*lock_);
+  const auto found = blocks_->find(memory);
+  return found == blocks_->end() ? 0 : found->second;
+}
+void *raw_malloc(void *, size_t bytes) {
+  void *memory = bytes >= LARGE_BLOCK ? block_lease(bytes) : nullptr;
+  return memory ? memory : raws_.malloc(raws_.ctx, bytes);
+}
+void *raw_calloc(void *, size_t count, size_t size) {
+  size_t bytes = 0;
+  if (__builtin_mul_overflow(count, size, &bytes)) return nullptr;
+  void *memory = bytes >= LARGE_BLOCK ? block_lease(bytes) : nullptr;
+  if (memory) return std::memset(memory, 0, bytes);
+  return raws_.calloc(raws_.ctx, count, size);
+}
+void raw_free(void *, void *memory) {
+  if (!memory) return;
+  bool ours;
+  {
+    std::lock_guard<std::mutex> guard(*lock_);
+    ours = blocks_->erase(memory) == 1;
+  }
+  if (ours) ncclMemFree(memory);
+  else raws_.free(raws_.ctx, memory);
+}
+void *raw_realloc(void *, void *memory, size_t bytes) {
+  const size_t held = memory ? block_bytes(memory) : 0;
+  if (!held && bytes < LARGE_BLOCK) return raws_.realloc(raws_.ctx, memory, bytes);
+  if (held && bytes <= held && bytes >= LARGE_BLOCK) return memory;
+  void *moved = raw_malloc(nullptr, bytes);
+  if (!moved || !memory) return moved;
+  const size_t had = held ? held : malloc_size(memory);
+  std::memcpy(moved, memory, had < bytes ? had : bytes);
+  raw_free(nullptr, memory);
+  return moved;
 }
 
 void release_host(void *memory) {
@@ -240,6 +293,9 @@ void install_region_allocator() {
   PyObject_GetArenaAllocator(&pythons_);
   PyObjectArenaAllocator region = {nullptr, arena_take, arena_return};
   PyObject_SetArenaAllocator(&region);
+  PyMem_GetAllocator(PYMEM_DOMAIN_RAW, &raws_);
+  PyMemAllocatorEx blocks = {nullptr, raw_malloc, raw_calloc, raw_realloc, raw_free};
+  PyMem_SetAllocator(PYMEM_DOMAIN_RAW, &blocks);
   at::mps::IMPSAllocator *instance = at::mps::getIMPSAllocator();
   const char *type = typeid(*instance).name();
   TORCH_CHECK(!strcmp(type, "N2at3mps12MPSAllocatorE"), "torch_mesh: torch's MPS allocator instance (at::mps::getIMPSAllocator) "
