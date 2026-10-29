@@ -116,9 +116,10 @@ signature selections. A general inverse would cover them all; three partial inve
 relation. With a general inverse, the remaining-case list stops growing. Until then, each case is a new branch.
 
 D4 ranks foreign code called above foreign code rewritten. isl and MLIR's Presburger library implement layer 1,
-lexmin and the generation of piecewise quasi-affine code. Calling either at preparation ranks above extending the
-subset. One open question is the operator's: both allocate through malloc. That is preparation-time memory outside the
-region, which the region-only rule may or may not permit.
+lexmin and the generation of piecewise quasi-affine code. Calling either in lowering ranks above extending the subset.
+Lowering is ahead of time, so a solver's heap never reaches a run. Only its output does: emitted index source,
+constants and page relations, all serialized. Where foreign code does run in a mesh process, mesh already moves its
+memory into the region: torch's CPU and MPS allocators are region leases (e91d8091, e961c8d4).
 
 ## The work, as tickets
 
