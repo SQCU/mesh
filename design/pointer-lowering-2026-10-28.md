@@ -75,13 +75,11 @@ Landed on mesh main:
   offset, or a mapped view's element runs. `TensorView.transfer`, `mesh_compile_view` and `mesh_compile_spans` are
   deleted (G2 #6, #8, #19; G3 #6, #8).
 
+- e327689a: a tiled fused write binds each rank's own tensor by its layout (`tensor_write`).
+- 1370f15a: frame trains are layout (`ncclMeshLayout.frames`, `frame_stride` in elements): the fused ring, the chain
+  and fused writes with repeats. `mesh_compile_write` is deleted.
+
 Open, in order:
-1. **_stream.mm fused writes.** The tiled contiguous form (dnn.py's `fused.writes`) can go onto
-   `ncclMeshWriteLayoutPrepare` as it is.
-2. **Frame trains.** The fused ring (`fused_allocate_ring`) and the chain (`prepare_chain`) run `repeats` frames
-   `stride` bytes apart, compiled once. That is a WRITE feature a layout does not express yet, and it is the slot ring
-   the recurrent crossings use (Freeing 7). It becomes a declared part of the WRITE's layout, in frames and
-   elements, after which `mesh_compile_write` goes.
 3. **Migration.** partition.py `_follow_bytes` narrows uint8 views at the byte runs `migration.compile_rows` computes
    (G2 #24, G1 #16-18). It should emit element layouts of the real source and destination views, after which
    `fused.write_rows` and `mesh_compile_rows` go.
