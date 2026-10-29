@@ -158,6 +158,14 @@ typedef int (^MetalCrossing)(id<MTL4ComputeCommandEncoder> encoder, id<MTL4Argum
 // docs/kernels.md#collectives
 struct MetalSchedule;
 struct ncclComm;
+// design/replay-templates-2026-10-29.md: what a frontend makes a host operation or a crossing from again, for a
+// template: its kind, its bytes, and the places in them that name a region lease's memory or a communicator. An
+// address place holds a host pointer; a buffer place holds an id<MTLBuffer> and, after it, its byte offset (an
+// ncclMeshBuffer); a communicator place holds a struct ncclComm *. Instantiation rewrites each place to the instance's
+// operand or communicator before the frontend reads the bytes.
+enum MetalRelocation { MetalRelocationAddress, MetalRelocationBuffer, MetalRelocationCommunicator };
+struct MetalPlace { size_t at; enum MetalRelocation relocation; };
+struct MetalDeclaration { const char *kind; const void *bytes; size_t length; const struct MetalPlace *places; size_t count; };
 // The execution context supplies its queue. Preparing invocation slots cannot
 // create more queues; the number of slots is not a hardware resource count.
 struct MetalSchedule *MetalScheduleCreateOn(id queue, enum MetalForm);
@@ -168,7 +176,9 @@ void MetalScheduleAfter(struct MetalSchedule *, id<MTLEvent>, uint64_t value);
 // Preparation records the function's collective result sources. Observers read
 // their existing failure state; this adds no command or transfer-time check.
 void MetalScheduleCommunicator(struct MetalSchedule *, struct ncclComm *);
-void MetalScheduleHost(struct MetalSchedule *, const struct MetalReach *, size_t count, NSError *(^operation)(void));
+// A host operation over its declared views; its declaration (NULL: none, and its function makes no template).
+void MetalScheduleHost(struct MetalSchedule *, const struct MetalReach *, size_t count, const struct MetalDeclaration *,
+    NSError *(^operation)(void));
 id<MTLResidencySet> MetalScheduleResources(struct MetalSchedule *);
 // Explicit bindings from a compiler which already has its pipelines. These
 // enter the same access ordering and encoding used by captured commands.
@@ -198,7 +208,8 @@ void MetalReplayEncode(struct MetalReplay *, id<MTLCommandBuffer>, NSRange comma
 struct MetalCommandBinding MetalScheduleData(struct MetalSchedule *, const void *, size_t bytes, uint32_t index);
 void MetalScheduleCompute(struct MetalSchedule *, id<MTLComputePipelineState>,
     const struct MetalCommandBinding *, size_t count, MTLSize groups, MTLSize threads);
-int MetalScheduleCross(struct MetalSchedule *, MetalCrossing);
+// A crossing, encoded now; its declaration (NULL: none, and its function makes no template).
+int MetalScheduleCross(struct MetalSchedule *, const struct MetalDeclaration *, MetalCrossing);
 NSError *MetalScheduleAppend(struct MetalSchedule *, struct MetalReplay *, NSRange invocations,
     NSArray<NSNumber *> *marks, MetalCrossing);
 // Finish all local parts and exchange their compiled list ends with peers.
@@ -230,8 +241,16 @@ NSError *MetalTemplateWrite(NSDictionary *, NSString *directory);
 // A template read from `directory` for `device`: its libraries loaded, and its pipelines for this device's
 // architecture where they were written.
 NSDictionary *MetalTemplateRead(id<MTLDevice>, NSString *directory, NSError **error);
-// A template's calls made on `schedule`, `bound` its first operands; its kept operands are leased anew.
-NSError *MetalScheduleInstantiate(struct MetalSchedule *, NSDictionary *, NSArray<id<MTLBuffer>> *bound);
+// A template's calls made on `schedule`, `bound` its first operands; its kept operands are leased anew, and its
+// communicators are `communicators` (each a struct ncclComm * as an NSValue), in the order its crossings first named
+// theirs. A host operation's or crossing's declaration, its places rewritten to the instance's, is made again by the
+// frontend's `host` or `cross` (nil, with the reason, where it cannot be), which returns an autoreleased block that
+// lives as long as `schedule`.
+typedef NSError *(^MetalHostOperation)(void);
+typedef MetalHostOperation (^MetalTemplateHost)(NSString *kind, NSData *bytes, NSError **error);
+typedef MetalCrossing (^MetalTemplateCross)(NSString *kind, NSData *bytes, struct MetalSchedule *schedule, NSError **error);
+NSError *MetalScheduleInstantiate(struct MetalSchedule *, NSDictionary *, NSArray<id<MTLBuffer>> *bound,
+    NSArray<NSValue *> *communicators, MetalTemplateHost host, MetalTemplateCross cross);
 
 #ifdef __cplusplus
 }

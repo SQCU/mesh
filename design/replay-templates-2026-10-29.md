@@ -107,6 +107,28 @@ As landed (R1–R3):
 - **Members of one collective** run one template with their own operand tables and shares. Uneven shares (C2) need
   the parametric sizes above.
 
+## Declarations (R4, R5)
+
+A host operation or crossing is made again from a declaration, not from its closure. The declaration is a kind, the
+frontend's own bytes, and places: offsets in those bytes that hold a host address, an `ncclMeshBuffer`, or an
+`ncclComm *`. At export, each place becomes (operand, offset in its lease) or (communicator index), and its bytes are
+cleared. At instantiation, the places are written with the instance's operands and communicators, and the
+frontend's resolver makes the operation or crossing from the bytes with the native constructor it always uses.
+- **CPU programs.** These are declared before binding: `mesh_cpu_product_bind` rewrites a command, and its BNNS form
+  holds its own pointers. Preparation and the rebuild bind through one function (engines `_cpu_program`).
+- **Core ML predictions.** These are declared as their compiled model, units and views. The model is loaded from its
+  path again.
+- **Crossings.** A group of NCCL calls is declared as its issues. A crossing assumes its communicator's plan
+  (`ncclMeshCommPlan`, made on every rank in one order, over the actual buffers), so in a new process the plan must be
+  declared again before the crossing is encoded. Without that plan, a crossing fails as a value.
+  - A plan's buffers can be kept operands that only the recorder holds, so the plan is captured where it is made
+    (libnccl-mesh) and declared again by the recorder: the next step of R5.
+  - WRITE plans (`ncclMeshWritePlan_t`) have no declaration yet, so a function with one makes no template.
+- **Local checks** (M5 Max, not committed):
+  - A CPU product rebuilt in a second process was exact on new data.
+  - A 1-rank all-reduce crossing, loaded with the second process's communicator after it planned the same call,
+    took 2.3 ms and produced y = x on new data.
+
 ## Steps
 
 | Step | Scope | Interfaces touched |
@@ -114,8 +136,8 @@ As landed (R1–R3):
 | R1 | Export: a schedule keeps its calls; pipelines are declared where made (landed) | `MetalPipelineMake`, `MetalPipelineDeclare`, `MetalScheduleTemplate` |
 | R2 | The template directory: plist, libraries, per-architecture pipeline archive (landed) | `MetalTemplateWrite`, `MetalTemplateRead` |
 | R3 | Instantiation of GPU-only functions: data, compute, append (landed) | `MetalScheduleInstantiate`; torch_mesh `Schedule.save`, `Schedule.load` |
-| R4 | Host operations named by kind; `MetalRecordHost` takes the name and its views | `MetalRecordHost`, `MetalScheduleHost` |
-| R5 | Crossings named by their collective call; the program recompiled at load | `MetalCrossing` |
+| R4 | Host operations declared: (kind, bytes, places); the engine rebuilds them (landed: CPU programs, Core ML predictions) | `MetalDeclaration`, `MetalScheduleHost`; engines `rebuild` |
+| R5 | Crossings declared the same way, communicators a place (landed: NCCL-call groups). Next: the communicator's plan (`ncclMeshCommPlan`) captured and declared again at instantiation; WRITE plans | `MetalScheduleCross`; `MetalScheduleInstantiate` communicators |
 | R6 | Geometry as a function of device capabilities; per-family archives | the recording of grid and group |
 | R7 | Parametric sizes from the lowering relations | depends on design/lowering-closure-2026-10-29.md T1–T3 |
 

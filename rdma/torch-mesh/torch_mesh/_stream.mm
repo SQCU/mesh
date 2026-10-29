@@ -325,6 +325,84 @@ static ncclResult_t encoded(const std::vector<Issue> &issues, ncclComm_t comm, n
   return result ? result : ended;
 }
 
+// design/replay-templates-2026-10-29.md: a group's calls as its crossing's declaration, and the crossing made again
+// from one. Each issue's scalars and counts, then its operands, each with its place (an ncclMeshBuffer on the Metal
+// path, a host pointer on the host path); the communicator is a place of its own.
+struct DeclaredGroup { ncclComm_t comm; uint64_t repeat; uint32_t issues, metal; };
+struct DeclaredIssue { int64_t kind, op, root, type; uint64_t sends, receives, counts; };
+struct DeclaredOperand { const void *at; size_t offset, count, bytes; int64_t type; };
+
+static void declare_group(const std::vector<Issue> &issues, ncclComm_t comm, size_t repeat, bool metal,
+                          std::vector<uint8_t> &bytes, std::vector<MetalPlace> &places) {
+  auto put = [&](const void *data, size_t n) { const auto *b = (const uint8_t *)data; bytes.insert(bytes.end(), b, b + n); };
+  const DeclaredGroup head{comm, repeat, (uint32_t)issues.size(), metal};
+  places.push_back({offsetof(DeclaredGroup, comm), MetalRelocationCommunicator});
+  put(&head, sizeof head);
+  for (const Issue &i : issues) {
+    const DeclaredIssue d{i.kind, i.op, i.root, (int64_t)i.type, i.sends.size(), i.receives.size(), i.counts.size()};
+    put(&d, sizeof d);
+    put(i.counts.data(), i.counts.size() * sizeof(size_t));
+    for (const auto *list : {&i.sends, &i.receives}) for (const Operand &o : *list) {
+      DeclaredOperand e{nullptr, 0, o.count, o.bytes, (int64_t)o.type};
+      if (o.at) {
+        if (metal) { const auto *b = (const ncclMeshBuffer *)o.at; e.at = b->buffer; e.offset = b->offset; }
+        else e.at = o.at;
+        places.push_back({bytes.size() + offsetof(DeclaredOperand, at), metal ? MetalRelocationBuffer : MetalRelocationAddress});
+      }
+      put(&e, sizeof e);
+    }
+  }
+}
+
+struct DeclaredCalls { Group group; std::vector<Issue> issues; ncclComm_t comm = nullptr; size_t repeat = 0; };
+
+static std::shared_ptr<DeclaredCalls> declared_calls(NSData *bytes) {
+  auto made = std::make_shared<DeclaredCalls>();
+  const auto *at = (const uint8_t *)bytes.bytes, *end = at + bytes.length;
+  auto take = [&](void *into, size_t n) {
+    TORCH_CHECK(at + n <= end, "template: a collective declaration ends early");
+    memcpy(into, at, n); at += n;
+  };
+  DeclaredGroup head; take(&head, sizeof head);
+  made->group.metal = head.metal; made->comm = head.comm; made->repeat = head.repeat;
+  for (uint32_t k = 0; k < head.issues; k++) {
+    DeclaredIssue d; take(&d, sizeof d);
+    Issue i{d.kind, d.op, d.root};
+    i.type = (ncclDataType_t)d.type;
+    i.counts.resize(d.counts); take(i.counts.data(), d.counts * sizeof(size_t));
+    for (auto *list : {&i.sends, &i.receives}) for (uint64_t j = 0; j < (list == &i.sends ? d.sends : d.receives); j++) {
+      DeclaredOperand e; take(&e, sizeof e);
+      Operand o{nullptr, e.count, (ncclDataType_t)e.type, e.bytes};
+      if (e.at && head.metal) { made->group.buffers.push_back({(void *)e.at, e.offset}); o.at = &made->group.buffers.back(); }
+      else o.at = e.at;
+      list->push_back(o);
+    }
+    for (const auto &view : i.sends) i.source_views.push_back((void *)view.at);
+    for (const auto &view : i.receives) i.destination_views.push_back((void *)view.at);
+    made->issues.push_back(std::move(i));
+  }
+  return made;
+}
+
+// A native host entry (run, context, retain, release) as the recorder's host operation, the storage it reads held
+// with it; `owned`: the caller's reference to its context passes to the operation, else the operation takes its own.
+static MetalHostOperation host_operation(const std::array<uintptr_t,4> &entry, bool owned, std::vector<at::Tensor> held) {
+  for (auto pointer : entry) TORCH_CHECK(pointer, "host operation requires a complete native binding");
+  using Run = const char *(*)(void *);
+  using Lifetime = void (*)(void *);
+  auto run = reinterpret_cast<Run>(entry[0]);
+  auto context = reinterpret_cast<void *>(entry[1]);
+  if (!owned) reinterpret_cast<Lifetime>(entry[2])(context);
+  auto bound = std::shared_ptr<void>(context, reinterpret_cast<Lifetime>(entry[3]));
+  MetalHostOperation operation = ^NSError * {
+    // Tensor handles retain the actual storage, including CPU-only weights.
+    (void)held;
+    const char *error = run(bound.get());
+    return error ? [NSError errorWithDomain:@"mesh.host-operation" code:1 userInfo:@{NSLocalizedDescriptionKey:@(error)}] : nil;
+  };
+  return [[operation copy] autorelease];
+}
+
 using Schedule = std::shared_ptr<MetalSchedule>;
 
 static Schedule schedule_after_inputs() {
@@ -707,9 +785,12 @@ struct Collectives {
     MetalScheduleCommunicator(schedule,handle);
     const size_t batches=before.replay||after.replay?repetitions:(size_t)(repetitions!=0);
     const size_t repeat=batches==1?repetitions:1;
+    std::vector<uint8_t> declared;std::vector<MetalPlace> places;
+    declare_group(*list,handle,repeat,group.metal,declared,places);
+    const MetalDeclaration declaration{"collectives",declared.data(),declared.size(),places.data(),places.size()};
     for(size_t k=0;k<batches;k++) {
       before.append(schedule);
-      checked(MetalScheduleCross(schedule,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
+      checked(MetalScheduleCross(schedule,&declaration,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
         id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
       ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
         .residencySet=(__bridge void *)residency};
@@ -1052,7 +1133,8 @@ static void prepare_fused_writes(MetalSchedule *schedule,PreparedWrites &plans) 
   plans.records.publishes=plans.publish.size();plans.records.lands=plans.land.size();
   if(plans.handles.empty()){plans.records.publishes=plans.records.lands=0;return;}
   PreparedWrites *p=&plans;
-  checked(MetalScheduleCross(schedule,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
+  // design/replay-templates-2026-10-29.md: a WRITE plan's crossing has no declaration yet, so its function makes no template
+  checked(MetalScheduleCross(schedule,nullptr,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
       id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
     ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
       .residencySet=(__bridge void *)residency,.polls=p->polls,.fused=&p->records};
@@ -1578,15 +1660,11 @@ struct ScheduleBinding {
   std::vector<at::Tensor> operands;
   // Preparation supplies native run/context/retain/release operands. The
   // completion worker neither owns a Python callback nor acquires the GIL.
+  // `declaration` (kind, bytes, places as (offset, relocation)): what the engine makes the operation from again
+  // (design/replay-templates-2026-10-29.md); None: the function makes no template.
+  using HostDeclaration=std::tuple<std::string,pybind11::bytes,std::vector<std::pair<size_t,int>>>;
   void host(const std::array<uintptr_t,4> &entry,const std::vector<pybind11::object> &inputs,
-      const std::vector<pybind11::object> &outputs) { @autoreleasepool {
-    for(auto pointer:entry)TORCH_CHECK(pointer,"host operation requires a complete native binding");
-    using Run=const char *(*)(void *);
-    using Lifetime=void (*)(void *);
-    auto run=reinterpret_cast<Run>(entry[0]);
-    auto context=reinterpret_cast<void *>(entry[1]);
-    reinterpret_cast<Lifetime>(entry[2])(context);
-    auto bound=std::shared_ptr<void>(context,reinterpret_cast<Lifetime>(entry[3]));
+      const std::vector<pybind11::object> &outputs,const std::optional<HostDeclaration> &declaration) { @autoreleasepool {
     std::vector<MetalReach> views;
     std::vector<at::Tensor> held;
     auto declare=[&](const std::vector<pybind11::object> &tensors,uint32_t access) {
@@ -1598,13 +1676,13 @@ struct ScheduleBinding {
       }
     };
     declare(inputs,MetalReachRead);declare(outputs,MetalReachWritten);
-    MetalScheduleHost(schedule.get(),views.data(),views.size(),^NSError * {
-      // Tensor handles retain the actual storage, including CPU-only weights.
-      (void)held;
-      const char *error=run(bound.get());
-      return error?[NSError errorWithDomain:@"mesh.host-operation" code:1
-        userInfo:@{NSLocalizedDescriptionKey:@(error)}]:nil;
-    });
+    std::string kind,bytes;std::vector<MetalPlace> places;
+    if(declaration) {
+      kind=std::get<0>(*declaration);bytes=std::get<1>(*declaration);
+      for(const auto &[at,relocation]:std::get<2>(*declaration))places.push_back({at,(MetalRelocation)relocation});
+    }
+    const MetalDeclaration declared{kind.c_str(),bytes.data(),bytes.size(),places.data(),places.size()};
+    MetalScheduleHost(schedule.get(),views.data(),views.size(),declaration?&declared:nullptr,host_operation(entry,false,held));
   }}
   void compute(int64_t kernel,const Tensors &buffers,const std::vector<int64_t> &words,
       int64_t at,int64_t gx,int64_t gy,int64_t threads,uint64_t access) {
@@ -1656,12 +1734,52 @@ struct ScheduleBinding {
     TORCH_CHECK(!error,"template ",directory,": ",error.localizedDescription.UTF8String);
   }
   // The template in `directory` made on a new function after torch's inputs, `bound` its operands in order.
-  static std::unique_ptr<ScheduleBinding> load(const std::string &directory,const std::vector<at::Tensor> &bound) {
+  // `communicators` the instance's, in the order the template's crossings first named theirs; `host(kind, bytes)` the
+  // native entry (run, context, retain, release) a host operation's declaration makes, its context the caller's to pass.
+  static std::unique_ptr<ScheduleBinding> load(const std::string &directory,const std::vector<at::Tensor> &bound,
+      const std::vector<int64_t> &communicators,const std::optional<pybind11::function> &host) {
     auto made=std::make_unique<ScheduleBinding>();
     NSError *error=nil;
     NSDictionary *read=MetalTemplateRead(at::mps::MPSDevice::getInstance()->device(),@(directory.c_str()),&error);
     TORCH_CHECK(read,"template ",directory,": ",error.localizedDescription.UTF8String);
-    error=MetalScheduleInstantiate(made->schedule.get(),read,storages(bound));
+    NSMutableArray *comms=[NSMutableArray array];
+    for(auto comm:communicators)[comms addObject:[NSValue valueWithPointer:(void *)communicator(comm)]];
+    const std::vector<at::Tensor> held=bound;
+    MetalTemplateHost made_host=nil;
+    if(host)made_host=^MetalHostOperation(NSString *kind,NSData *bytes,NSError **failed){
+      try {
+        auto entry=(*host)(std::string(kind.UTF8String),pybind11::bytes((const char *)bytes.bytes,bytes.length)).cast<std::array<uintptr_t,4>>();
+        return host_operation(entry,true,held);
+      } catch(const std::exception &e) {
+        if(failed)*failed=[NSError errorWithDomain:@"mesh.template" code:1 userInfo:@{NSLocalizedDescriptionKey:@(e.what())}];
+        return (MetalHostOperation)nil;
+      }
+    };
+    MetalTemplateCross made_cross=^MetalCrossing(NSString *kind,NSData *bytes,MetalSchedule *schedule,NSError **failed){
+      if(![kind isEqualToString:@"collectives"]) {
+        if(failed)*failed=[NSError errorWithDomain:@"mesh.template" code:1 userInfo:@{NSLocalizedDescriptionKey:
+          [NSString stringWithFormat:@"no crossing of kind %@",kind]}];
+        return (MetalCrossing)nil;
+      }
+      std::shared_ptr<DeclaredCalls> calls;
+      try { calls=declared_calls(bytes); } catch(const std::exception &e) {
+        if(failed)*failed=[NSError errorWithDomain:@"mesh.template" code:1 userInfo:@{NSLocalizedDescriptionKey:@(e.what())}];
+        return (MetalCrossing)nil;
+      }
+      MetalScheduleCommunicator(schedule,calls->comm);
+      MetalCrossing crossing=^int(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,id<MTLResidencySet> residency,
+          NSUInteger,NSUInteger) {
+        ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
+          .residencySet=(__bridge void *)residency};
+        for(size_t r=0;r<calls->repeat;r++) {
+          const int result=(int)encoded(calls->issues,calls->comm,&on);
+          if(result)return result;
+        }
+        return 0;
+      };
+      return [[crossing copy] autorelease];
+    };
+    error=MetalScheduleInstantiate(made->schedule.get(),read,storages(bound),comms,made_host,made_cross);
     TORCH_CHECK(!error,"template ",directory,": ",error.localizedDescription.UTF8String);
     made->operands=bound;
     return made;
@@ -1744,7 +1862,7 @@ struct ViewWrites {
     prepare();
     ViewWrites *self=this;
     const size_t invocation=invocations++;
-    checked(MetalScheduleCross(schedule,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
+    checked(MetalScheduleCross(schedule,nullptr,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
         id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
       ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
         .residencySet=(__bridge void *)residency};
@@ -1971,12 +2089,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   pybind11::class_<ScheduleBinding>(module,"Schedule")
     .def(pybind11::init<>(), pybind11::call_guard<Drained>())
     .def("save",&ScheduleBinding::save, pybind11::call_guard<Drained>())
-    .def_static("load",&ScheduleBinding::load, pybind11::call_guard<Drained>())
+    .def_static("load",&ScheduleBinding::load, pybind11::arg("directory"), pybind11::arg("bound"),
+                pybind11::arg("communicators")=std::vector<int64_t>{}, pybind11::arg("host")=pybind11::none(),
+                pybind11::call_guard<Drained>())
     .def("append",[](ScheduleBinding &s,Commands &commands){commands.append(s.schedule.get());
         s.operands.insert(s.operands.end(),commands.operands.begin(),commands.operands.end());}, pybind11::call_guard<Drained>())
     .def("compute",&ScheduleBinding::compute, pybind11::call_guard<Drained>())
     .def("writes",&ScheduleBinding::writes, pybind11::call_guard<Drained>())
-    .def("host",&ScheduleBinding::host, pybind11::call_guard<Drained>())
+    .def("host",&ScheduleBinding::host, pybind11::arg("entry"), pybind11::arg("inputs"), pybind11::arg("outputs"),
+         pybind11::arg("declaration")=pybind11::none(), pybind11::call_guard<Drained>())
     .def("finish",&ScheduleBinding::finish, pybind11::call_guard<Drained>())
     .def("enqueue",&ScheduleBinding::enqueue, pybind11::call_guard<Drained>())
     .def("completion",&ScheduleBinding::completion, pybind11::call_guard<Drained>());
