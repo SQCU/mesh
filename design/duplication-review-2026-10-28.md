@@ -31,6 +31,14 @@ On 2026-10-29:
 - Within 4, two forms of lease retention, landed. An issue holds its leases from its placement (c05241a8), and every
   prepared owner uses one form, struct owned (92661101). A present registers nothing.
 - A byte's lease is its arena page's entry, and a freed lease is given back without a scan (517ad9e0).
+- The per-issue lease registration is gone. A present registers nothing (c05241a8, 92661101). A placed issue's leases
+  are found and held once at placement, and a lookup is one page-index load (517ad9e0). An issue of a placed group
+  (issue_same) touches no lease.
+- Critical 1 (alternating page sets for producers) is dropped, not deferred. The operator's direction ("why do you think
+  you need anything besides pages"; refactoring consolidates and removes mechanisms) rules out a second slot or page
+  set. Reuse safety stays the retire ledger's and the landing gate's (transport.md section 14).
+- The recorder's preparation cost, found by profiling cp's rank 0 five times, is fixed. Access spans are sorted
+  (91c37d16), and the dependency frontier is bucketed by 1 MiB (a8856dd4). cp passes since (mb docs/facts.md).
 - Across 4, relay landings, is next. The plan:
   - a rank that is neither endpoint passes an empty page table, its communicator's, meaning the library chooses;
   - write_prepare decides from the installed paths (ncclMeshCommWritePaths: weight > 0 through this rank), before the
