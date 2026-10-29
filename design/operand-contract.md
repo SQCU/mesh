@@ -1439,6 +1439,29 @@ ran. This completes the existing section-output contraction boundary; it does
 not yet lower a contraction inside a head across its channel axis or establish
 which providers accept each sparse format.
 
+`partition_stages` now also exposes internal contracted values. Batched matrix
+products use their transpose flags and aligned batch axes to carry the cut in
+either direction. The shared partial/finish split retains each consumer after
+the sum, including quantization and nonlinear operations. Fully connected
+products propagate both their input and output relations instead of ignoring
+one when another is already marked.
+
+The importer expands only composite decompositions which contain such a sum.
+Returned aliases remain tensor identities through extraction and append. Stage
+metadata carries their names to the existing page binder; no reshape or copy
+command is added. The ordinary member builder emits internal crossings with the
+configured accumulator type and symbolic transfer extents. Preparation resolves
+those extents and aliases before recording. Execution consumes the same recorded
+collectives as section-output sums.
+
+Preparation on 2026-10-29 serialized uneven internal and final sums through that
+member builder, including composite graphs and repeated returned aliases. The
+nonlinear consumer stayed after the internal sum. Transposes and broadcast batch
+axes retained their shapes, the reference-model cuts still prepared, and the
+LiteRT library built. No numerical commands ran. This does not complete striped
+reshape cuts or simultaneous cuts on several axes of one tensor; those still
+limit within-head channel placement.
+
 ### Encoded numerical operands
 
 Python and native FFNs retain each matrix's logical domain, encoded order and
