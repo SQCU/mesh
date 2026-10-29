@@ -138,6 +138,35 @@ frontend's resolver makes the operation or crossing from the bytes with the nati
   - A 1-rank all-reduce crossing was loaded with the second process's communicator, and that process planned
     nothing. Its template is [plan, cross]. It took 2.2 ms and produced y = x on new data.
 
+## Other architectures and other views (R6, R7)
+
+**R6.** A template's libraries are AIR, which every Apple GPU loads, but they are compiled with the device's
+threadgroup facts as macros (`MetalDeviceCompilerOptions`: `MESH_DEVICE_THREADGROUP_THREADS`, `_BYTES`).
+- **Compile facts.** The template keeps those facts. An instance on a device with other facts fails as a value
+  naming both. Every Apple GPU of this collective (M4 Pro, M5 Max, M5 Ultra) has 1024 threads and 32 KiB, so the AIR
+  carries over.
+- **Pipelines.** Pipeline binaries are per architecture. A load on an architecture without them compiles them from
+  the AIR, with no source parse, and writes `pipelines.<architecture>.metallib` beside the others
+  (`MetalTemplateArchive`).
+- **Thread limits.** A pipeline's thread limit follows its register use, so it can differ between architectures. A
+  dispatch whose recorded threadgroup exceeds this device's pipeline fails as a value naming it.
+- **What is not re-derived.** Geometry that the frontend chose for a device (shares, splits by core count) is not
+  re-derived. It is the frontend's choice, made at its preparation.
+
+**R7.** A bound operand is a view: the template keeps where the view starts in its lease, and an instance's view
+elsewhere moves every use of that lease by the difference. So one template recorded on one layer's slice of a
+stacked weight runs on any other layer's slice of the same shape.
+- **Restriction.** Bound views lie in distinct leases; two bound views of one lease are one operand.
+- **Shape parameters.** Sizes that vary between members (uneven shares) are not parameters yet. Grids, offsets and
+  data words are recorded as numbers. They become functions of sizes only where the frontend lowers sizes
+  symbolically, through the relations of design/lowering-closure-2026-10-29.md, which torch_mesh's lowering does not
+  yet emit.
+- **Local checks** (M5 Max, not committed):
+  - A two-stage function recorded on layer 0 of [4, 2¹⁶] stacks, loaded in new processes on layers 2 and 1, computed
+    4x + 3y on those layers and left the others zero.
+  - A load without this architecture's archive wrote one.
+  - A template with altered compile facts failed, naming them.
+
 ## Steps
 
 | Step | Scope | Interfaces touched |
@@ -147,8 +176,8 @@ frontend's resolver makes the operation or crossing from the bytes with the nati
 | R3 | Instantiation of GPU-only functions: data, compute, append (landed) | `MetalScheduleInstantiate`; torch_mesh `Schedule.save`, `Schedule.load` |
 | R4 | Host operations declared: (kind, bytes, places); the engine rebuilds them (landed: CPU programs, Core ML predictions) | `MetalDeclaration`, `MetalScheduleHost`; engines `rebuild` |
 | R5 | Crossings declared the same way, communicators a place; the communicator's plan captured where it is made and declared again at instantiation (landed: NCCL-call groups). WRITE plans remain | `MetalScheduleCross`; `ncclMeshCommPlanDeclaration`, `ncclMeshCommPlanDeclared` |
-| R6 | Geometry as a function of device capabilities; per-family archives | the recording of grid and group |
-| R7 | Parametric sizes from the lowering relations | depends on design/lowering-closure-2026-10-29.md T1–T3 |
+| R6 | Another architecture: per-architecture archives kept on first load; compile facts and pipeline thread limits checked as values (landed) | `MetalTemplateArchive`; `MetalScheduleInstantiate` |
+| R7 | Bound operands are views, their byte offset the parameter (landed). Shape parameters need symbolic sizes from lowering | `MetalScheduleTemplate`/`Instantiate` offsets |
 
 R1–R3 are an encapsulated extension in the operator's sense of 2026-10-28: a new file and one accessor, no change to
 an internal interface. A replay holding host operations or crossings fails to save, as a value, until R4–R5. R4 and

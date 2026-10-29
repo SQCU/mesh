@@ -1715,20 +1715,24 @@ struct ScheduleBinding {
   void enqueue() { MetalScheduleEnqueue(schedule.get()); }
   pybind11::capsule completion() { return schedule_completion(schedule); }
 
-  // design/replay-templates-2026-10-29.md: each bound tensor's storage, as the recorder names it
-  static NSArray *storages(const std::vector<at::Tensor> &bound) {
-    NSMutableArray *buffers=[NSMutableArray array];
+  // design/replay-templates-2026-10-29.md: each bound tensor's storage, as the recorder names it, and its view's byte
+  // offset in that storage, so a template binds any view of the same shape
+  static NSArray *storages(const std::vector<at::Tensor> &bound,NSArray **offsets) {
+    NSMutableArray *buffers=[NSMutableArray array],*at=[NSMutableArray array];
     for(const auto &t:bound) {
+      [at addObject:@((NSUInteger)(t.storage_offset()*t.element_size()))];
       if(t.is_mps()){[buffers addObject:at::native::mps::getMTLBufferStorage(t)];continue;}
       MetalTensorPages *pages=tensorPages(t);[buffers addObject:pages.buffer];[pages release];
     }
+    *offsets=at;
     return buffers;
   }
   // The function as a template in `directory`: `bound` (its inputs, outputs and the weights a later instance
   // replaces) its operands in order, every other storage it names kept by value.
   void save(const std::string &directory,const std::vector<at::Tensor> &bound) {
-    NSError *error=nil;
-    NSDictionary *made=MetalScheduleTemplate(schedule.get(),storages(bound),&error);
+    NSError *error=nil;NSArray *offsets=nil;
+    NSArray *buffers=storages(bound,&offsets);
+    NSDictionary *made=MetalScheduleTemplate(schedule.get(),buffers,offsets,&error);
     TORCH_CHECK(made,"template: ",error.localizedDescription.UTF8String);
     error=MetalTemplateWrite(made,@(directory.c_str()));
     TORCH_CHECK(!error,"template ",directory,": ",error.localizedDescription.UTF8String);
@@ -1779,8 +1783,12 @@ struct ScheduleBinding {
       };
       return [[crossing copy] autorelease];
     };
-    error=MetalScheduleInstantiate(made->schedule.get(),read,storages(bound),comms,made_host,made_cross);
+    NSArray *offsets=nil;NSArray *buffers=storages(bound,&offsets);
+    error=MetalScheduleInstantiate(made->schedule.get(),read,buffers,offsets,comms,made_host,made_cross);
     TORCH_CHECK(!error,"template ",directory,": ",error.localizedDescription.UTF8String);
+    // a device of an architecture the template has no pipelines for compiles them from its libraries, and keeps them
+    if((error=MetalTemplateArchive(read,@(directory.c_str()))))
+      TORCH_WARN("template ",directory,": this architecture's pipelines were not kept: ",error.localizedDescription.UTF8String);
     made->operands=bound;
     return made;
   }

@@ -2243,7 +2243,13 @@ static id<MTLBuffer> MetalTemplateLease(id<MTLBuffer> buffer,NSUInteger *delta) 
     *delta=offset;return (id<MTLBuffer>)lease;
 }
 
-NSDictionary *MetalScheduleTemplate(struct MetalSchedule *root,NSArray<id<MTLBuffer>> *bound,NSError **error) {
+// The compile facts a device's libraries take (MetalDeviceCompilerOptions)
+static NSDictionary *MetalTemplateDevice(id<MTLDevice> device) {
+    return @{@"threads":@(device.maxThreadsPerThreadgroup.width),@"bytes":@(device.maxThreadgroupMemoryLength)};
+}
+
+NSDictionary *MetalScheduleTemplate(struct MetalSchedule *root,NSArray<id<MTLBuffer>> *bound,NSArray<NSNumber *> *offsets,
+    NSError **error) {
     root=root->root;
     NSMutableArray *operands=[NSMutableArray array],*pipelines=[NSMutableArray array],*libraries=[NSMutableArray array],
         *script=[NSMutableArray array];
@@ -2251,10 +2257,10 @@ NSDictionary *MetalScheduleTemplate(struct MetalSchedule *root,NSArray<id<MTLBuf
         *libraryAt=[NSMutableDictionary dictionary],*dataAt=[NSMutableDictionary dictionary];
     // a bound operand's offsets are its lease's; where its buffer starts in the lease (delta) moves them to the buffer
     // that instantiation binds in its place
-    for(id<MTLBuffer> buffer in bound) {
-        NSUInteger delta=0;NSValue *key=[NSValue valueWithPointer:(void *)MetalTemplateLease(buffer,&delta)];
+    for(NSUInteger i=0;i<bound.count;i++) {
+        NSUInteger delta=0;NSValue *key=[NSValue valueWithPointer:(void *)MetalTemplateLease(bound[i],&delta)];
         if(!operandAt[key])operandAt[key]=@(operands.count);
-        [operands addObject:@{@"bound":@(operands.count),@"delta":@(delta)}];
+        [operands addObject:@{@"bound":@(operands.count),@"delta":@(delta+[offsets[i] unsignedIntegerValue])}];
     }
     __block NSString *failure=nil;
     int32_t (^operand)(id<MTLBuffer>,NSUInteger *)=^int32_t(id<MTLBuffer> buffer,NSUInteger *delta){
@@ -2279,7 +2285,8 @@ NSDictionary *MetalScheduleTemplate(struct MetalSchedule *root,NSArray<id<MTLBuf
         if(!libraryAt[library]){libraryAt[library]=@(libraries.count);[libraries addObject:declared[@"library"]];}
         pipelineAt[key]=at=@(pipelines.count);
         [pipelines addObject:@{@"library":libraryAt[library],@"function":declared[@"function"],
-            @"constants":declared[@"constants"],@"descriptor":declared[@"descriptor"]}];
+            @"constants":declared[@"constants"],@"descriptor":declared[@"descriptor"],
+            @"threads":@([pipeline maxTotalThreadsPerThreadgroup])}];
         return at.unsignedIntValue;
     };
     // a reach's operand: its buffer's lease, or (a host view: no buffer, its address its offset) its address's
@@ -2380,8 +2387,29 @@ NSDictionary *MetalScheduleTemplate(struct MetalSchedule *root,NSArray<id<MTLBuf
         if(failure)break;
     }
     if(failure){if(error)*error=MetalReplayFailure(EINVAL,failure);return nil;}
-    return @{@"format":@1,@"form":@(root->form),@"sizes":MetalTemplateSizes(),@"libraries":libraries,
-        @"pipelines":pipelines,@"operands":operands,@"communicators":@(communicators.count),@"script":script};
+    return @{@"format":@1,@"form":@(root->form),@"sizes":MetalTemplateSizes(),@"device":MetalTemplateDevice(root->device),
+        @"libraries":libraries,@"pipelines":pipelines,@"operands":operands,@"communicators":@(communicators.count),@"script":script};
+}
+
+// The pipelines of the device its libraries are on, as pipelines.<architecture>.metallib in `directory`
+static NSError *MetalTemplateWriteArchive(NSDictionary *made,NSString *directory) {
+    NSArray *libraries=made[@"libraries"];NSError *error=nil;
+    if(!libraries.count)return nil;
+    id<MTLDevice> device=[libraries[0] device];
+    id<MTLBinaryArchive> archive=[[device newBinaryArchiveWithDescriptor:[[MTLBinaryArchiveDescriptor new] autorelease] error:&error] autorelease];
+    if(!archive)return error;
+    for(NSDictionary *pipeline in made[@"pipelines"]) {
+        MTLComputePipelineDescriptor *descriptor=MetalPipelineDescriptor(libraries[[pipeline[@"library"] unsignedIntegerValue]],
+            pipeline[@"function"],pipeline[@"constants"],pipeline[@"descriptor"],&error);
+        if(!descriptor||![archive addComputePipelineFunctionsWithDescriptor:descriptor error:&error])return error;
+    }
+    NSString *name=[NSString stringWithFormat:@"pipelines.%@.metallib",device.architecture.name];
+    if(![archive serializeToURL:[NSURL fileURLWithPath:[directory stringByAppendingPathComponent:name]] error:&error])return error;
+    return nil;
+}
+
+NSError *MetalTemplateArchive(NSDictionary *made,NSString *directory) {
+    return made[@"archive"]?nil:MetalTemplateWriteArchive(made,directory);
 }
 
 NSError *MetalTemplateWrite(NSDictionary *made,NSString *directory) {
@@ -2394,18 +2422,7 @@ NSError *MetalTemplateWrite(NSDictionary *made,NSString *directory) {
         if(![library serializeToURL:[NSURL fileURLWithPath:[directory stringByAppendingPathComponent:name]] error:&error])return error;
         [names addObject:name];
     }
-    if(libraries.count) {
-        id<MTLDevice> device=[libraries[0] device];
-        id<MTLBinaryArchive> archive=[[device newBinaryArchiveWithDescriptor:[[MTLBinaryArchiveDescriptor new] autorelease] error:&error] autorelease];
-        if(!archive)return error;
-        for(NSDictionary *pipeline in made[@"pipelines"]) {
-            MTLComputePipelineDescriptor *descriptor=MetalPipelineDescriptor(libraries[[pipeline[@"library"] unsignedIntegerValue]],
-                pipeline[@"function"],pipeline[@"constants"],pipeline[@"descriptor"],&error);
-            if(!descriptor||![archive addComputePipelineFunctionsWithDescriptor:descriptor error:&error])return error;
-        }
-        NSString *name=[NSString stringWithFormat:@"pipelines.%@.metallib",device.architecture.name];
-        if(![archive serializeToURL:[NSURL fileURLWithPath:[directory stringByAppendingPathComponent:name]] error:&error])return error;
-    }
+    if((error=MetalTemplateWriteArchive(made,directory)))return error;
     NSMutableDictionary *listed=[[made mutableCopy] autorelease];
     listed[@"libraries"]=names;[listed removeObjectForKey:@"archive"];
     NSData *data=[NSPropertyListSerialization dataWithPropertyList:listed format:NSPropertyListBinaryFormat_v1_0 options:0 error:&error];
@@ -2513,9 +2530,13 @@ static struct MetalReplay *MetalTemplateReplayMake(id<MTLDevice> device,NSDictio
 }
 
 NSError *MetalScheduleInstantiate(struct MetalSchedule *s,NSDictionary *made,NSArray<id<MTLBuffer>> *bound,
-    NSArray<NSValue *> *communicators,MetalTemplateHost host,MetalTemplateCross cross) {
+    NSArray<NSNumber *> *offsets,NSArray<NSValue *> *communicators,MetalTemplateHost host,MetalTemplateCross cross) {
     struct MetalSchedule *root=s->root;
     @try {
+        NSDictionary *facts=MetalTemplateDevice(root->device);
+        if(![made[@"device"] isEqual:facts])
+            return MetalReplayFailure(EINVAL,[NSString stringWithFormat:@"the template's kernels were compiled for threadgroups of %@ threads and "
+                "%@ bytes; this device's are %@ and %@",made[@"device"][@"threads"],made[@"device"][@"bytes"],facts[@"threads"],facts[@"bytes"]]);
         if(communicators.count<[made[@"communicators"] unsignedIntegerValue])
             return MetalReplayFailure(EINVAL,[NSString stringWithFormat:@"the template names %@ communicators, %lu given",
                 made[@"communicators"],(unsigned long)communicators.count]);
@@ -2530,6 +2551,12 @@ NSError *MetalScheduleInstantiate(struct MetalSchedule *s,NSDictionary *made,NSA
             if(!pipeline)return error;
             [pipelines addObject:pipeline];[pipeline release];
         }
+        // a dispatch's threadgroup was chosen for the recording device's pipeline; this device's may take fewer threads
+        NSString *(^fits)(NSUInteger,MTLSize)=^NSString *(NSUInteger p,MTLSize group){
+            const NSUInteger threads=group.width*group.height*group.depth,most=[pipelines[p] maxTotalThreadsPerThreadgroup];
+            return threads<=most?nil:[NSString stringWithFormat:@"pipeline %@ takes %lu threads a threadgroup on this device, its dispatch %lu",
+                made[@"pipelines"][p][@"function"],(unsigned long)most,(unsigned long)threads];
+        };
         NSMutableArray *buffers=[NSMutableArray array];
         NSMutableData *moved=[NSMutableData dataWithLength:[made[@"operands"] count]*sizeof(NSInteger)];
         NSInteger *shifts=moved.mutableBytes;
@@ -2539,7 +2566,7 @@ NSError *MetalScheduleInstantiate(struct MetalSchedule *s,NSDictionary *made,NSA
                 if(at>=bound.count)return MetalReplayFailure(EINVAL,[NSString stringWithFormat:@"the template binds operand %lu of %lu given",
                     (unsigned long)at,(unsigned long)bound.count]);
                 NSUInteger delta=0;id<MTLBuffer> lease=MetalTemplateLease(bound[at],&delta);
-                shifts[buffers.count]=(NSInteger)delta-[operand[@"delta"] integerValue];
+                shifts[buffers.count]=(NSInteger)(delta+[offsets[at] unsignedIntegerValue])-[operand[@"delta"] integerValue];
                 [buffers addObject:lease];
             } else {
                 NSData *contents=operand[@"contents"];
@@ -2568,10 +2595,17 @@ NSError *MetalScheduleInstantiate(struct MetalSchedule *s,NSDictionary *made,NSA
                     }
                 }
                 NSArray *groups=call[@"groups"],*threads=call[@"threads"];
+                const MTLSize group=MTLSizeMake([threads[0] unsignedIntegerValue],[threads[1] unsignedIntegerValue],[threads[2] unsignedIntegerValue]);
+                NSString *unfit=fits([call[@"pipeline"] unsignedIntegerValue],group);
+                if(unfit)return MetalReplayFailure(EINVAL,unfit);
                 MetalScheduleCompute(s,pipelines[[call[@"pipeline"] unsignedIntegerValue]],target,n,
-                    MTLSizeMake([groups[0] unsignedIntegerValue],[groups[1] unsignedIntegerValue],[groups[2] unsignedIntegerValue]),
-                    MTLSizeMake([threads[0] unsignedIntegerValue],[threads[1] unsignedIntegerValue],[threads[2] unsignedIntegerValue]));
+                    MTLSizeMake([groups[0] unsignedIntegerValue],[groups[1] unsignedIntegerValue],[groups[2] unsignedIntegerValue]),group);
             } else if([kind isEqual:@"append"]) {
+                NSData *records=call[@"records"];const struct MetalTemplateDispatch *recorded=records.bytes;
+                for(NSUInteger i=0;i<records.length/sizeof *recorded;i++) {
+                    NSString *unfit=fits(recorded[i].pipeline,recorded[i].record.group);
+                    if(unfit)return MetalReplayFailure(EINVAL,unfit);
+                }
                 MetalTemplateReplay *held=[[MetalTemplateReplay new] autorelease];
                 held->replay=MetalTemplateReplayMake(root->device,call,pipelines,buffers,shifts);
                 [root->owners addObject:held];
