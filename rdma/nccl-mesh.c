@@ -5,6 +5,7 @@
 #include "mesh-plan.h"
 #include "mesh.h"
 #include "mesh-span-plan.h"
+#include "mesh-landing.h"
 #include "mesh-write-routes.h"
 #include "nccl-mesh-metal.h"
 #include <errno.h>
@@ -2181,7 +2182,6 @@ static int reducing(int what) { return what == MESH_ALLREDUCE || what == MESH_RE
 static uint32_t unit_of(const struct call *c) { return c->combine == COMBINE_MERGE ? c->unit : 1; }
 static int ktype(const struct call *c) { return c->combine == COMBINE_MERGE ? METAL_MERGE : (int)c->type; }
 static int kop(const struct call *c) { return c->combine == COMBINE_MERGE ? (int)c->unit : c->combine; }
-static size_t kcount(const struct call *c, size_t bytes) { return bytes / (SIZE[c->type] * unit_of(c)); }
 static int counted(const struct call *c) { return c->what == WHAT_COUNTED; }
 static int call_contributes(const struct call *c) {
   if (c->target) return c->comm->rank == c->root;
@@ -2645,6 +2645,7 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
    channel reads waits to be published: that entry + 1, 0 none) */
 struct message { struct call *c; uint32_t step; uint64_t entry; mesh_pages pages, end; uint64_t need; size_t offset, bytes;
                  struct where data; struct mesh_dma_span *spans; uint64_t table; double priority;
+                 const struct mesh_landing_run *landings; size_t landing_count;
                  uint64_t listed; mesh_pages laid; /* its entry and end in its issue's own lists (issue_lay), schedule_laid's base */
                  uint64_t needs; /* a landing's need past its channel's first send entry, 0 none (landing_needs) */
                  /* a SEND's landing it forwards: its channel (UINT32_MAX none) and its base past that channel's landing
@@ -2921,6 +2922,7 @@ struct issue { struct schedule *plans; struct steps **steps; struct inflight *gr
                /* laid and placed (`laid`) for a binding (`bound`, `stride`), in
                   slot `slot` (its storage at `base`, its landing area at `area`), its span tables a lease (`tables`) */
                int laid; size_t stride; uint32_t slot; struct where base, area; struct bound *bound; void *tables;
+               struct mesh_landing_run *landings;
                struct owned owned; /* the leases its entries read, held from its placement to the next or its end */ };
 struct compiled { struct call *calls; size_t n; uint64_t repeat; struct schedule *plans; uint32_t slot[GENERATIONS], uses;
                   struct issue *issue[GENERATIONS]; };
@@ -3225,6 +3227,32 @@ static ncclResult_t bind_slot(struct ncclComm *comm, struct compiled *x, uint32_
 }
 
 
+/* Compile numerical readiness once with the placed DMA spans. Regular page
+   trains remain one run, regardless of their page count. */
+static int landing_runs(const struct ncclComm *comm, struct issue *u) {
+  free(u->landings); u->landings = NULL;
+  size_t count = 0;
+  for (int pass = 0; pass < 2; pass++) {
+    if (pass && count) {
+      if (count > SIZE_MAX / sizeof *u->landings || !(u->landings = malloc(count * sizeof *u->landings))) return ENOMEM;
+      count = 0;
+    }
+    for (uint32_t h = 0; h < comm->count; h++) for (size_t k = 0; k < u->plans[h].ins; k++) {
+      struct message *m = u->plans[h].in + k;
+      if (m->c->bound->steps[m->step].op != MESH_STEP_REDUCE) continue;
+      struct mesh_landing_cursor cursor = {0};
+      struct mesh_landing_run run;
+      const size_t first = count;
+      while (mesh_landing_next(m->spans, m->pages.n, SIZE[m->c->type] * unit_of(m->c), &cursor, &run)) {
+        if (pass) u->landings[count] = run;
+        count++;
+      }
+      if (pass) { m->landings = u->landings ? u->landings + first : NULL; m->landing_count = count - first; }
+    }
+  }
+  return 0;
+}
+
 /* where each entry's pages lie (struct message `data`): a SEND's in the buffer its step reads (the send buffer, where
    it reads that in place), a COPY's in its step's buffer, a combine's in the group's landing area (`area`: bind_slot,
    each entry from a page of it); each in a live lease, its span table, a span a page, in its issue's lease of them
@@ -3299,7 +3327,8 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u, struct w
           x->table = (uint64_t)((unsigned char *)made - region);
         }
   }
-  int error = u->tables ? owned_add(&u->owned, u->tables, OWNED_TABLE) : 0;
+  int error = landing_runs(comm, u);
+  if (!error && u->tables) error = owned_add(&u->owned, u->tables, OWNED_TABLE);
   pthread_mutex_lock(&attach_lock);
   if (!error) error = owned_uses(comm, &u->owned);
   if (!error) error = owned_begin(&u->owned, 0);
@@ -3831,7 +3860,7 @@ static void issue_free(struct ncclComm *comm, struct issue *u) {
   owned_end(&u->owned, 1);
   pthread_mutex_unlock(&attach_lock);
   if (u->tables) ncclMemFree(u->tables);
-  free(u->steps); free(u->calls); free(u->bound); free(u->group); free(u);
+  free(u->steps); free(u->calls); free(u->bound); free(u->group); free(u->landings); free(u);
 }
 /* an issue's group done with: it is bound again by its definition's next group of its generation, or freed where it is
    no definition's (dropped).  Under group_lock */
@@ -3977,7 +4006,8 @@ static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm
       if (!result)
         result = gpu(metal_combine3(program, m->c->type, m->c->combine, to.buffer, to.offset, m->data.buffer, m->data.offset, with.buffer, with.offset,
                                     m->bytes / SIZE[m->c->type]), "a first combine");
-    } else result = gpu(metal_land(program, ktype(m->c), kop(m->c), to.buffer, to.offset, kcount(m->c, m->bytes), m->pages, comm->page, &wait), "a landing");
+    } else result = gpu(metal_land(program, ktype(m->c), kop(m->c), to.buffer, to.offset,
+      SIZE[m->c->type] * unit_of(m->c), m->pages, m->landings, m->landing_count, &wait), "a landing");
   } else if (!result && g->fused && (at - g->start[h][1]) * g->repeats < g->end[h][1] - g->start[h][1]) {
     if (fusing.landed >= fusing.room[1])
       return fail(ncclInvalidUsage, "a fused crossing's landings past the %u its ncclMeshFused has room for (ncclMeshPlan's entries)", fusing.room[1]);

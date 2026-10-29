@@ -168,11 +168,12 @@ void metal_uses(struct metal_program *, void *const *buffers, size_t n, int writ
 struct metal_result metal_open_gate(struct metal_program *, void *words, size_t word, uint64_t value);
 /* the wait alone (a COPY's landing in place), one threadgroup */
 struct metal_result metal_spin(struct metal_program *, const struct metal_wait *);
-/* the landed bytes combined into dst (an ncclDataType_t, op as above), n elements, each four as the page they are in
-   lands (nccl-mesh-kernels.h LANDS), the entry's `pages` pages of `page` bytes; METAL_MERGE's n rows after the whole
-   landing, each threadgroup awaiting the counts on its own (mesh_step_await) */
-struct metal_result metal_land(struct metal_program *, int type, int op, void *dst, size_t dst_offset, size_t n, mesh_pages pages, uint64_t page,
-                               const struct metal_wait *);
+/* Encode the numerical groups as their last required packet arrives. The
+   prepared span lengths lower to arithmetic readiness runs (mesh-landing.h),
+   including rows split across packets. No packet list is read by the kernel. */
+struct mesh_landing_run;
+struct metal_result metal_land(struct metal_program *, int type, int op, void *dst, size_t dst_offset,
+                               size_t element_bytes, mesh_pages packets, const struct mesh_landing_run *, size_t runs, const struct metal_wait *);
 /* the same two steps run by the caller's kernel (nccl.h ncclMeshFused: the Metal 4 form, or a classic program begun with
    a residency set): each one's record written to the function's immutable argument pages as a Metal 4 dispatch's would be, the
    buffers it names made resident, and its six bindings' addresses given in `bound` (0 d, 1 s, 2 the record, 3 a, 4 v,

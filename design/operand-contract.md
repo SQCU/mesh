@@ -71,12 +71,35 @@ scalar bindings retained their ranges through all-reduce, broadcast, reduce,
 unequal gather and reduce-scatter. Bridge-row snapshots and subrange splitting
 preserved selected locations. This was metadata preparation, not a cluster run.
 
+Numerical landings now compile their readiness from DMA packet lengths through
+`mesh-landing.h`. Scalar elements and structured rows use one relation: each
+needs the packet containing its final byte. A row may span several packets.
+Equal page runs, including their short final packet, stay one arithmetic record.
+Irregular lengths become further records at preparation; kernels neither walk
+packet lists nor load a per-element readiness table.
+
+The ordinary two-operand reduction encoder consumes those prepared records.
+Structured merges no longer await the whole message before using its early rows.
+The track scheduler's square-root-of-packet-count threshold is removed; its
+initial dependency comes from the first complete element. Each kernel group
+then awaits the bytes that group uses. This is a local data dependency on
+one-sided arrivals, with no receipt or peer handshake.
+
+Preparation on 2026-10-29 checked the arithmetic against final-byte packet
+positions, including rows wider than a page, irregular packet lengths and tails.
+Ordinary page trains retained one record. Shared libraries, shaders, the torch
+extension and native callers built. No numerical function was submitted, so
+these changes carry no new throughput or latency result. The separate first
+combine into an unwritten result still uses its prior whole-message dependency;
+its original-input binding must be carried into the shared landing kernel too.
+
 Scattered allocation is still unfinished. The allocator requires consecutive
 row slots and arena pages. Its host/Metal views, region-membership checks and
 descriptor-table bindings still rely on linear region addresses. Internal
 relay and reduction storage must join the backing calculation too. A backing
-break inside a structured numerical element also needs a byte-level packet
-cut while the numerical step keeps that whole element. The current collective
+break inside a structured numerical element still needs common byte-level
+packet cuts at both wire endpoints. Its numerical consumer now accepts such
+cuts without splitting the element. The current collective
 step splitter projects backing cuts onto whole elements; the original byte
 relation remains in its backing operand. These remaining bindings must be
 lowered before the allocator can supply scattered pages to all consumers.

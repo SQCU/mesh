@@ -14,11 +14,12 @@
 #define XSTR(...) STR(__VA_ARGS__)
 /* a kernel's arguments, one layout for the host (struct args) and the kernels (struct mesh_args): a wait's count at
    aux until scalar, a publication's count at aux stored scalar, each repeat j of a fused crossing's at scalar + j x
-   stride (the pages a repeat adds to the count: nccl.h ncclMeshFused repeats); a landing's count is its first page's,
-   of count pages of mask bytes (nccl-mesh-metal.m metal_land).
+   stride (the packets a repeat adds to the count: nccl.h ncclMeshFused repeats).
+   A landing element j needs scalar + ((phase + j * step) >> mask), compiled
+   from its packet lengths before execution (mesh-landing.h).
    A holding's counts are pages, as words here (nccl-mesh-metal.m wait_args, release_args); aux and first are byte
    offsets, at an entry */
-#define ARGS(NAME, U64, U32) struct NAME { U64 dst, src, n, scalar, aux; U32 op, polls; U64 at, sequence; U32 count, mask, channel, stride; }
+#define ARGS(NAME, U64, U32) struct NAME { U64 dst, src, n, scalar, aux; U32 op, polls; U64 at, sequence; U32 count, mask, channel, stride; U64 phase, step; }
 
 /* a step of a compiled program, the library's one implementation of it (metal-microbench docs/acceptance-20261014.md
    A39), after rdma/mesh.metal: libnccl-mesh's kernels call these, and so does a caller's kernel that runs a step its
@@ -129,8 +130,8 @@ static NSString *const STEPS =
    thread (a vector where the operand and the landed bytes are both aligned to one, else one by one), its thread 0
    awaiting the count of the block's last page first where the count it last read is short of it (LANDS: the sum page
    by page as they land), and ends its waits at once after any has failed
-   (mesh_step_failed); a merge's every threadgroup awaits the
-   whole landing (l, its thread in its threadgroup: mesh_step_counts), and a track runs its body in one threadgroup (l its thread there) */
+   (mesh_step_failed). A merge uses the same arrival relation for each group of
+   complete rows. A track runs its body in one threadgroup (l its thread there). */
 static NSString *const KERNELS =
   @"\n"
   "#define PARAMS device uchar *d, device uchar *s, constant mesh_args &p, device uchar *a, device uchar *vb, device ulong *progress, uint i, uint g, uint l, uint t, threadgroup ulong *tg\n"
@@ -139,7 +140,6 @@ static NSString *const KERNELS =
   "#define HEAD(name) static void body_##name(PARAMS); kernel void name(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant mesh_args &p [[buffer(2)]], device uchar *a [[buffer(3)]], device uchar *vb [[buffer(4)]], device ulong *progress [[buffer(5)]], uint i [[thread_position_in_grid]], uint g [[threads_per_grid]], uint l [[thread_position_in_threadgroup]], uint t [[threads_per_threadgroup]]) { threadgroup ulong tg[4]; body_##name(d, s, p, a, vb, progress, i, g, l, t, tg); } static void body_##name(PARAMS)\n"
   "#define GROUP(name) static void body_##name(PARAMS); kernel void name(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant mesh_args &p [[buffer(2)]], device uchar *a [[buffer(3)]], device uchar *vb [[buffer(4)]], device ulong *progress [[buffer(5)]], uint i [[thread_position_in_threadgroup]], uint g [[threads_per_threadgroup]]) { threadgroup ulong tg[4]; body_##name(d, s, p, a, vb, progress, i, g, i, g, tg); } static void body_##name(PARAMS)\n"
   "#define LOOP for (ulong k = i; k < p.n; k += g)\n"
-  "#define AWAIT mesh_step_await(p, a, vb, l);\n"
   "#define COPY(Z, W) "
   "HEAD(copy_plain_##Z) { ENTER(i == 0) volatile coherent(system) device W *x = (volatile coherent(system) device W *)(d + p.dst); device const W *y = (device const W *)(s + p.src); LOOP x[k] = y[k]; } "
   "HEAD(copy_land_##Z) { ENTER(i == 0) volatile coherent(system) device W *x = (volatile coherent(system) device W *)(d + p.dst); volatile coherent(system) device const W *y = (volatile coherent(system) device const W *)(s + p.src); LOOP x[k] = mesh_payload(y + k); }\n"
@@ -156,14 +156,14 @@ static NSString *const KERNELS =
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); }\n"
   "#define LANDS(T, OP) volatile coherent(system) device T *x = (volatile coherent(system) device T *)(d + p.dst); volatile coherent(system) device const T *xs = (volatile coherent(system) device const T *)(d + p.dst); "
   "volatile coherent(system) device const T *y = (volatile coherent(system) device const T *)(s + p.src); "
-  "const ulong block = 4 * ulong(t), step = 4 * ulong(g); const uint shift = ctz(uint(p.mask / sizeof(T))); ulong seen = 0; uint looked = 0; "
+  "const ulong block = 4 * ulong(t), step = 4 * ulong(g); ulong seen = 0; uint looked = 0; "
   "if ((p.dst | p.src) % (4 * sizeof(T)) == 0) for (ulong b = 4 * ulong(i - l); b < p.n; b += step) { "
-  "mesh_pages_await(p, a, vb, tg, l, p.scalar + ((min(b + block, p.n) - 1) >> shift), seen, looked); const ulong k = b + 4 * l; "
+  "mesh_pages_await(p, a, vb, tg, l, p.scalar + ((p.phase + (min(b + block, p.n) - 1) * p.step) >> p.mask), seen, looked); const ulong k = b + 4 * l; "
   "if (k + 4 <= p.n) { const vec<T, 4> u = mesh_payload((volatile coherent(system) device const vec<T, 4> *)(xs + k)), w = mesh_payload((volatile coherent(system) device const vec<T, 4> *)(y + k)); "
   "vec<T, 4> r; for (int c = 0; c < 4; c++) r[c] = OP(u[c], w[c], p.op); *(volatile coherent(system) device vec<T, 4> *)(x + k) = r; } "
   "else for (ulong e = k; e < p.n; e++) x[e] = OP(mesh_payload(xs + e), mesh_payload(y + e), p.op); } "
   "else for (ulong b = 4 * ulong(i - l); b < p.n; b += step) { const ulong end = min(b + block, p.n); "
-  "mesh_pages_await(p, a, vb, tg, l, p.scalar + ((end - 1) >> shift), seen, looked); "
+  "mesh_pages_await(p, a, vb, tg, l, p.scalar + ((p.phase + (end - 1) * p.step) >> p.mask), seen, looked); "
   "for (ulong e = b + l; e < end; e += t) x[e] = OP(mesh_payload(xs + e), mesh_payload(y + e), p.op); }\n"
   "#define COMBINE(name, T, OP) HEAD(land_##name) { ENTER(i == 0) LANDS(T, OP) } "
   "HEAD(combine3_##name) { "
@@ -198,9 +198,11 @@ static NSString *const KERNELS =
   "if (!mine || !theirs) { for (uint j = 0; j < u; j++) x[j] = theirs ? mesh_payload(y + j) : j ? 0.0f : PARTIAL_NONE; return; } "
   "const float top = max(mx, m), a = exp(mx - top), b = exp(m - top); x[0] = top; "
   "for (uint j = 1; j < u; j++) x[j] = (a > 0.0f ? mesh_payload(xs + j) * a : 0.0f) + (b > 0.0f ? mesh_payload(y + j) * b : 0.0f); }\n"
-  "#define MERGE volatile coherent(system) device float *x = (volatile coherent(system) device float *)(d + p.dst); volatile coherent(system) device const float *y = (volatile coherent(system) device const float *)(s + p.src); "
-  "for (ulong r = i; r < p.n; r += g) merge_row(x + r * p.op, y + r * p.op, p.op);\n"
-  "HEAD(land_merge) { ENTER(i == 0) AWAIT MERGE }\n"
+  "HEAD(land_merge) { ENTER(i == 0) volatile coherent(system) device float *x = (volatile coherent(system) device float *)(d + p.dst); "
+  "volatile coherent(system) device const float *y = (volatile coherent(system) device const float *)(s + p.src); ulong seen = 0; uint looked = 0; "
+  "for (ulong b = i - l; b < p.n; b += g) { const ulong end = min(b + t, p.n); "
+  "mesh_pages_await(p, a, vb, tg, l, p.scalar + ((p.phase + (end - 1) * p.step) >> p.mask), seen, looked); "
+  "const ulong r = b + l; if (r < end) merge_row(x + r * p.op, y + r * p.op, p.op); } }\n"
   "GROUP(present) { ENTER_G const ulong end = p.scalar + p.n; "
   "if (i == 0) { const ulong need = end > p.count ? end - p.count : 0; "
   "const ulong got = mesh_step_wait(p, a + p.aux, need, vb); mesh_step_check(p, got, need, vb); tg[0] = got >= need; } "
@@ -215,19 +217,19 @@ static NSString *const KERNELS =
    from this list by the preprocessor, so neither names a kind the other lacks); each kernel's name, which the Metal
    library's lookup takes, once a process (nccl-mesh-metal.m kernels_of) and once an install (nccl-mesh-kernels.m)
    (newFunctionWithName, an interface the library does not implement: design/rubrics.md, Strings are messages) and whose body the switch calls, and the word a consumption's item awaits in it (record_step:
-   WORD_D a spin's, in its d; WORD_A a merge's, in its a; WORD_P a landing's first pages', in its a; 0 none) */
-enum { WORD_D = 1, WORD_A, WORD_P };
+   WORD_D a spin's, in its d; WORD_A a landing's first complete element, in its a; 0 none) */
+enum { WORD_D = 1, WORD_A };
 #define KINDS_OF(X) \
   X(copy_plain_4, 0) X(copy_land_4, 0) X(copy_plain_1, 0) X(copy_land_1, 0) \
-  X(land_i8, WORD_P) X(combine3_i8, 0) X(premul_i8, 0) X(truncdiv_i8, 0) \
-  X(land_u8, WORD_P) X(combine3_u8, 0) X(premul_u8, 0) X(truncdiv_u8, 0) \
-  X(land_i32, WORD_P) X(combine3_i32, 0) X(premul_i32, 0) X(truncdiv_i32, 0) \
-  X(land_u32, WORD_P) X(combine3_u32, 0) X(premul_u32, 0) X(truncdiv_u32, 0) \
-  X(land_i64, WORD_P) X(combine3_i64, 0) X(premul_i64, 0) X(truncdiv_i64, 0) \
-  X(land_u64, WORD_P) X(combine3_u64, 0) X(premul_u64, 0) X(truncdiv_u64, 0) \
-  X(land_f16, WORD_P) X(combine3_f16, 0) X(premul_f16, 0) X(land_f32, WORD_P) X(combine3_f32, 0) X(premul_f32, 0) \
-  X(land_bf16, WORD_P) X(combine3_bf16, 0) X(premul_bf16, 0) X(land_e4m3, WORD_P) X(combine3_e4m3, 0) X(premul_e4m3, 0) \
-  X(land_e5m2, WORD_P) X(combine3_e5m2, 0) X(premul_e5m2, 0) \
+  X(land_i8, WORD_A) X(combine3_i8, 0) X(premul_i8, 0) X(truncdiv_i8, 0) \
+  X(land_u8, WORD_A) X(combine3_u8, 0) X(premul_u8, 0) X(truncdiv_u8, 0) \
+  X(land_i32, WORD_A) X(combine3_i32, 0) X(premul_i32, 0) X(truncdiv_i32, 0) \
+  X(land_u32, WORD_A) X(combine3_u32, 0) X(premul_u32, 0) X(truncdiv_u32, 0) \
+  X(land_i64, WORD_A) X(combine3_i64, 0) X(premul_i64, 0) X(truncdiv_i64, 0) \
+  X(land_u64, WORD_A) X(combine3_u64, 0) X(premul_u64, 0) X(truncdiv_u64, 0) \
+  X(land_f16, WORD_A) X(combine3_f16, 0) X(premul_f16, 0) X(land_f32, WORD_A) X(combine3_f32, 0) X(premul_f32, 0) \
+  X(land_bf16, WORD_A) X(combine3_bf16, 0) X(premul_bf16, 0) X(land_e4m3, WORD_A) X(combine3_e4m3, 0) X(premul_e4m3, 0) \
+  X(land_e5m2, WORD_A) X(combine3_e5m2, 0) X(premul_e5m2, 0) \
   X(publish, 0) X(spin, WORD_D) X(land_merge, WORD_A) X(present, 0)
 #define KIND_ENUM(name, word) KIND_##name,
 #define KIND_NAME(name, word) #name,
