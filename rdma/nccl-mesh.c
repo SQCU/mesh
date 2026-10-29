@@ -627,6 +627,33 @@ ncclResult_t ncclMeshCommWriteRoutes(ncclComm_t comm, int source, int destinatio
   return ncclSuccess;
 }
 
+/* whether this rank forwards a WRITE from `source` to `destination`: an endpoint of a cable of an installed path of
+   nonzero weight, and neither end of the write; 1 where no path is installed (the routes are the library's to choose) */
+static int write_forwards(ncclComm_t comm, int source, int destination) {
+  const int me = comm->rank;
+  if (me == source || me == destination) return 0;
+  const struct mesh_paths *paths = comm->writes ? comm->writes + (size_t)source * comm->nranks + destination : NULL;
+  if (!paths || !paths->first) return 1;
+  for (uint32_t p = 0; p < paths->count; p++) {
+    if (!paths->weight[p]) continue;
+    for (uint32_t k = paths->first[p]; k < paths->first[p + 1]; k++) {
+      const struct mesh_cable *c = comm->fabric.cable + paths->cable[k];
+      if ((int)c->node[0] == me || (int)c->node[1] == me) return 1;
+    }
+  }
+  return 0;
+}
+
+/* nccl.h ncclMeshCommWriteForwards */
+ncclResult_t ncclMeshCommWriteForwards(ncclComm_t comm, int source, int destination, int *forwards) {
+  if (!comm || !forwards || source < 0 || destination < 0 || source >= comm->nranks || destination >= comm->nranks || source == destination)
+    return fail(ncclInvalidArgument, "relay inspection requires distinct endpoints of the physical communicator");
+  pthread_mutex_lock(&group_lock);
+  *forwards = write_forwards(comm, source, destination);
+  pthread_mutex_unlock(&group_lock);
+  return ncclSuccess;
+}
+
 ncclResult_t ncclMeshCommWritePaths(ncclComm_t comm, int source, int destination, const struct mesh_paths **paths) {
   if (!comm || !paths || source < 0 || destination < 0 || source >= comm->nranks || destination >= comm->nranks || source == destination)
     return fail(ncclInvalidArgument, "route inspection requires distinct endpoints of the physical communicator");
@@ -5494,6 +5521,13 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
   if (source < 0 || source >= comm->nranks || destination < 0 ||
       destination >= comm->nranks || source == destination || !repeats || !packet || packet > UINT32_MAX ||
       (metal != 0 && metal != 1) || !layout.instances || !layout.invocations) local.status = EINVAL;
+  /* a table of no pages binds nothing: only a rank that neither ends nor forwards this write gives one (its phase 0) */
+  const int unbound = !table->pages;
+  if (!local.status && unbound) {
+    pthread_mutex_lock(&group_lock);
+    if (write_forwards(comm, source, destination) || comm->rank == source || comm->rank == destination) local.status = EINVAL;
+    pthread_mutex_unlock(&group_lock);
+  }
   uint64_t view_extent = 0, view_origin = 0;
   if (!local.status && indexed) {
     if (rows || repeats != 1 || stride) local.status = EINVAL;
@@ -5520,7 +5554,7 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
   else origin += view_origin;
   const struct where binding = shifted(table->base, origin);
   const unsigned char *address = address_of(binding);
-  if (!local.status && local.bytes) {
+  if (!local.status && local.bytes && !unbound) {
     size_t extent = indexed ? (size_t)view_extent : rows ? row_bytes + (rows - 1) * stride : local.bytes + (repeats - 1) * stride;
     if (layout.instance_stride && layout.instances - 1 > (SIZE_MAX - extent) / layout.instance_stride) local.status = EOVERFLOW;
     else extent += (layout.instances - 1) * layout.instance_stride;
@@ -5623,8 +5657,15 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
   return ncclSuccess;
 }
 ncclResult_t ncclMeshPageTableCreate(const void *local, ncclComm_t comm, int metal, ncclMeshPageTable_t *out) {
-  if (!local || !out || *out || (metal != 0 && metal != 1))
-    return fail(ncclInvalidArgument, "page table needs local storage and an empty result");
+  if (!out || *out || (metal != 0 && metal != 1) || (!local && !comm))
+    return fail(ncclInvalidArgument, "page table needs local storage (or, empty, a communicator) and an empty result");
+  /* no storage: a table of no pages, a WRITE's binding on a rank that neither ends nor forwards it (nccl.h) */
+  if (!local) {
+    struct ncclMeshPageTable *table = calloc(1, sizeof *table);
+    if (!table) return fail(ncclSystemError, "out of memory");
+    table->comm = comm; table->metal = metal; table->page_bytes = comm->page;
+    *out = table; return ncclSuccess;
+  }
   const struct where binding=metal ? where_of(local) : (struct where){NULL,(size_t)local};
   const void *address=address_of(binding);
   pthread_mutex_lock(&attach_lock);

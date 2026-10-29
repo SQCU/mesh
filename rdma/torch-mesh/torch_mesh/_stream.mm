@@ -1128,15 +1128,25 @@ static void fused_reconfigure(int64_t comm) {
 // A tensor's WRITE from its abstract layout (nccl.h ncclMeshLayout): its storage's page table, its sizes, strides and
 // storage offset in elements and its element bits; no address or byte geometry (design/pointer-lowering-2026-10-28.md).
 // `frames` frames of `view`, `frame_stride` elements apart, are one train (nccl.h ncclMeshLayout frames).
+// An undefined `view` is a rank that neither ends nor forwards the WRITE (ncclMeshCommWriteForwards): no relay, its
+// binding an empty page table over `unbound` contiguous elements of `like`'s type, the bytes every rank reports.
 static void tensor_write(Group &g, const at::Tensor &view, int source, int destination, ncclComm_t comm, bool metal,
-                         ncclMeshWriteLayout layout, ncclMeshWritePlan_t *out, int64_t frames = 1, int64_t frame_stride = 0) {
-  const at::Tensor start = view.as_strided({view.storage().nbytes() ? 1 : 0}, {1}, 0);
+                         ncclMeshWriteLayout layout, ncclMeshWritePlan_t *out, int64_t frames = 1, int64_t frame_stride = 0,
+                         int64_t unbound = 0, const at::Tensor &like = at::Tensor()) {
   ncclMeshPageTable_t table = nullptr;
-  checked(ncclMeshPageTableCreate(g.where(start), comm, metal, &table));
-  const std::vector<uint64_t> dims(view.sizes().begin(), view.sizes().end());
-  const std::vector<int64_t> steps(view.strides().begin(), view.strides().end());
-  const ncclMeshLayout local{table, (uint32_t)(8 * view.element_size()), (uint32_t)dims.size(), dims.data(), steps.data(),
-                             (uint64_t)view.storage_offset(), nullptr, 0, (uint32_t)frames, frame_stride};
+  if (view.defined()) {
+    const at::Tensor start = view.as_strided({view.storage().nbytes() ? 1 : 0}, {1}, 0);
+    checked(ncclMeshPageTableCreate(g.where(start), comm, metal, &table));
+  } else {
+    checked(ncclMeshPageTableCreate(nullptr, comm, metal, &table));
+  }
+  const std::vector<uint64_t> dims = view.defined() ? std::vector<uint64_t>(view.sizes().begin(), view.sizes().end())
+                                                    : std::vector<uint64_t>{(uint64_t)unbound};
+  const std::vector<int64_t> steps = view.defined() ? std::vector<int64_t>(view.strides().begin(), view.strides().end())
+                                                    : std::vector<int64_t>{1};
+  const int64_t element = view.defined() ? view.element_size() : like.element_size();
+  const ncclMeshLayout local{table, (uint32_t)(8 * element), (uint32_t)dims.size(), dims.data(), steps.data(),
+                             (uint64_t)(view.defined() ? view.storage_offset() : 0), nullptr, 0, (uint32_t)frames, frame_stride};
   const ncclResult_t made = ncclMeshWriteLayoutPrepare(&local, source, destination, 0, layout, out);
   ncclMeshPageTableDestroy(table);
   checked(made);
@@ -1169,14 +1179,21 @@ static void fused_allocate_ring(FusedForm &f, FusedForm::Ring &ring, const at::T
         const at::Tensor source_view = ring.segments[h][0][source];
         at::Tensor landing_view = source_view;
         int64_t local_stride = f.slot * (int64_t)xc.element_size();
+        int forwards = 1;
         if (f.rank != source && f.rank != destination) {
-          ring.relays[h].push_back(region_empty({repeats * f.counts[source]}, xc, true));
-          landing_view = ring.relays[h].back().narrow(0, 0, f.counts[source]);
+          // a relay only where an installed path of nonzero weight crosses this rank (ncclMeshCommWriteForwards)
+          checked(ncclMeshCommWriteForwards(communicator(f.comm), (int)source, (int)destination, &forwards));
+          landing_view = at::Tensor();
+          if (forwards) {
+            ring.relays[h].push_back(region_empty({repeats * f.counts[source]}, xc, true));
+            landing_view = ring.relays[h].back().narrow(0, 0, f.counts[source]);
+          }
           local_stride = f.counts[source] * (int64_t)xc.element_size();
         }
         prepared->handles.push_back(nullptr);
         tensor_write(g, f.rank == source ? source_view : landing_view, (int)source, (int)destination, communicator(f.comm), true,
-                     ncclMeshWriteLayout{0, 1, 0, 1}, &prepared->handles.back(), repeats, local_stride / (int64_t)xc.element_size());
+                     ncclMeshWriteLayout{0, 1, 0, 1}, &prepared->handles.back(), repeats, local_stride / (int64_t)xc.element_size(),
+                     f.counts[source], xc);
       }
     prepared->prepare(f.comm, f.polls, repeats, f.slot * (int64_t)xc.element_size());
     ring.plans[h] = std::move(prepared);
@@ -1300,14 +1317,20 @@ static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, c
       at::Tensor landing = source;
       size_t stride = input_pitch;
       if (f.rank != 0 && f.rank != destination) {
-        chain->held.push_back(region_empty({count * source.numel()}, input, true));
-        landing = chain->held.back().narrow(0, 0, source.numel());
+        // a relay only where an installed path of nonzero weight crosses this rank (ncclMeshCommWriteForwards)
+        int forwards = 1;
+        checked(ncclMeshCommWriteForwards(communicator(f.comm), 0, (int)destination, &forwards));
+        landing = at::Tensor();
+        if (forwards) {
+          chain->held.push_back(region_empty({count * source.numel()}, input, true));
+          landing = chain->held.back().narrow(0, 0, source.numel());
+        }
         stride = source.nbytes();
       }
       prepared->handles.push_back(nullptr);
       TORCH_CHECK(stride % (size_t)source.element_size() == 0, "a chain's frame pitch is whole elements");
       tensor_write(g, f.rank == 0 ? source : landing, 0, (int)destination, communicator(f.comm), true, ncclMeshWriteLayout{0, 1, 0, 1},
-                   &prepared->handles.back(), count, (int64_t)(stride / (size_t)source.element_size()));
+                   &prepared->handles.back(), count, (int64_t)(stride / (size_t)source.element_size()), source.numel(), source);
     }
     prepared->prepare(f.comm, f.polls, count, input_pitch);
     chain->inputs.push_back(std::move(prepared));

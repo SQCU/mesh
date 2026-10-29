@@ -1010,6 +1010,11 @@ ncclResult_t ncclMeshCommWriteRoutes(ncclComm_t comm, int source, int destinatio
    weights. The borrowed value remains valid until that pair is reconfigured or
    the communicator is destroyed. Execution does not query routing policy. */
 ncclResult_t ncclMeshCommWritePaths(ncclComm_t comm, int source, int destination, const struct mesh_paths** paths);
+/* Whether this rank forwards a WRITE from source to destination: it ends a cable of an installed path of nonzero weight,
+   and neither end of the write (1 where no paths are installed). A rank that does not forward holds no relay. It
+   binds its WRITE with an empty page table, ncclMeshPageTableCreate(NULL, comm, metal, &table), and its layout's other
+   fields as any rank's. */
+ncclResult_t ncclMeshCommWriteForwards(ncclComm_t comm, int source, int destination, int* forwards);
 /* Realization metadata only, before function execution: each rank's fixed
    bytes gathered into rank-major reports. Uses the retained configuration
    channel, with the communicator's deadline; never a payload receipt. */
