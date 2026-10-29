@@ -1489,8 +1489,8 @@ Preparation on 2026-10-29 built rank and Goal A, composed reordered, repeated an
 empty input selections, and compiled the fused and factored shaders with both
 ordinary and repeated sources. FX fake forward/backward retained the declared
 shapes and relation. Scalar byte views retained the selected addresses. No
-numerical commands ran. General stored-quantized column selections, the ANE
-allocator's range sets and the provider guarantees described above remain open.
+numerical commands ran. The ANE allocator's range sets and the provider
+guarantees described above remain open.
 
 The native fused finish uses that same declaration for its next input gather.
 Its output count is a template operand, so an absent gather adds no runtime
@@ -1529,7 +1529,7 @@ of one output allocation. Commands and dependency records consume those same
 views.
 
 Native `StoredMatrix` describes the bytes of existing encoded blocks with a
-`TensorView`, plus their format, logical columns and first selected lane.
+`TensorView`, plus their format and ordered logical column selection.
 Stored FFNs, stacked products, experts and conversion kernels use that operand.
 Resident row and column cuts compose on it without changing the stored codes.
 File imports return this same operand. They retain boundary block bytes, selected
@@ -1539,6 +1539,26 @@ format/offset fields have been removed. Conversion from component-byte views
 to typed element views uses the same layout algebra, preserving mappings.
 The shared index emitter retains grouped layouts as arithmetic when a cut starts
 inside a group; it does not introduce a lookup table for that phase.
+
+The numerical byte view composes each selected column with its encoded block
+during preparation. The decoder reads that address directly. It does not use a
+column-table result to index another block table. Its lane relation supplies the
+position within the encoding. The shared emitter states where consecutive lanes
+form runs, so contiguous and shifted selections retain vector decoding. Irregular
+selections use the same decoder with a single lane; no decoded-weight copy is
+needed. Scalar formats compose the entire relation into their byte view.
+
+Stacked products retain each binding's own relation. They no longer inherit one
+matrix's pitch or first lane, or exclude fusion because those differ. Conversion
+uses the same source operand and a declared destination view. Preparation
+instantiates each requested format operation with those bindings; the former
+bulk instantiations with absent operands are removed.
+
+Preparation on 2026-10-29 built rank and Goal A and compiled stored products,
+tiled products and conversions for every supported scalar and quantized format.
+Their declarations covered contiguous, shifted, reordered and repeated columns,
+partial tails and independently selected stack bindings. Shared layout indices
+retained the selected encoded bytes. No numerical commands were submitted.
 
 Preparation evidence on 2026-10-27: an FX FFN with distinct gate/up orders,
 37 logical neurons in 64 encoded lanes, a third down-input order, and non-unit

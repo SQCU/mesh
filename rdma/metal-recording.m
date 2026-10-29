@@ -281,12 +281,19 @@ NSDictionary<NSString *,id> *MetalViewNormalizeAxes(const NSInteger *strides,siz
 
 NSString *MetalViewIndexValuesDeclaration(NSUInteger binding,const NSInteger *values,NSUInteger count) {
     const NSInteger stride=0;
+    NSUInteger span=0;
+    for(NSUInteger i=1;i<count;i++)
+        if(values[i-1]==NSIntegerMax||values[i]!=values[i-1]+1)
+            span=MetalViewAlignment(span,(NSInteger)i);
     NSData *map=[NSData dataWithBytes:values length:count*sizeof *values];
     return [NSString stringWithFormat:@"template<uint B> inline long mesh_position(ulong i);\n"
+        "template<uint B> constexpr ulong mesh_position_span();\n"
         "namespace mesh_positions_%lu {\n%@%@}\n"
-        "template<> inline long mesh_position<%lu>(ulong i) { return mesh_positions_%lu::mesh_index<0>(i); }\n",
+        "template<> inline long mesh_position<%lu>(ulong i) { return mesh_positions_%lu::mesh_index<0>(i); }\n"
+        "template<> constexpr ulong mesh_position_span<%lu>() { return %luul; }\n",
         (unsigned long)binding,MetalViewIndexTemplates(),MetalViewMappedIndexDeclaration(0,&count,&stride,1,0,@{@0:map},nil,0),
-        (unsigned long)binding,(unsigned long)binding];
+        (unsigned long)binding,(unsigned long)binding,
+        (unsigned long)binding,(unsigned long)span];
 }
 
 NSString *MetalViewMappedIndexDeclaration(NSUInteger binding,const NSUInteger *shape,const NSInteger *strides,
