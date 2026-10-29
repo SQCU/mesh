@@ -1550,7 +1550,8 @@ def _observe(args):
             for plan, label in (('vector', rf'decode_attention_{dims}(?:_[12])?(?:_mesh_[a-z]+_[0-9]+_)?'), ('tile', rf'decode_attention_tile_{dims}(?:_mesh_[a-z]+_[0-9]+_)?')):
                 seen = [c['least_us'] for l, c in commands.items() if re.fullmatch(label, l)]
                 if seen:
-                    merge = commands.get(f'decode_attention_merge_{dims}', {}).get('least_us', 0.0) if plan == 'tile' else 0.0
+                    merge = min((c['least_us'] for label, c in commands.items()
+                        if re.fullmatch(rf'decode_attention_merge_{dims}(?:_[0-9]+)?(?:_mesh_[a-z]+_[0-9]+_)?', label)), default=0.0) if plan == 'tile' else 0.0
                     rows, positions = int(cls.split()[1]), window or args.ctx
                     out.append({'kind': 'attention', 'plan': plan, 'dims': dims, 'rows': rows, 'heads': heads, 'positions': positions, 'window': window,
                                 'reads': attention_reads(plan, dims, rows, heads, positions), 'best_us': min(seen) + merge,

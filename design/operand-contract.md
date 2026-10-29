@@ -258,6 +258,44 @@ channel-tail lowering, not just deleting the check. The separate
 `streamed_finish_norm_add` body also still stages a full logical row in
 threadgroup storage. These are remaining lowering tasks.
 
+### Partial-result merge capacity
+
+The shared `mesh_merge` no longer limits a row to 64 contributors or requires
+its channel slices to fill complete SIMD groups. It reads weights in bounded
+batches, using the register budget in `metal.def`. Each batch continues the
+same accumulation over the row's parts. A final partial SIMD group uses its
+active lanes; channel groups may cross SIMD boundaries.
+
+Logical width and launch width are separate compilation operands. Native and
+LiteRT preparation split wide outputs into channel tiles. Each tile merges
+the same partial-result records into its own output channels. A row can span
+many threadgroups without adding a runtime allocator, choosing another merge
+body or copying the row to change its layout. Its last tile masks absent
+channels. Native row offsets and LiteRT slice offsets use full address width.
+
+The partial record still contains two scalars and exactly the logical number
+of values. LiteRT's provider uses four-lane slices, so its input and output
+bindings include physical tail padding; that padding does not enter the
+partial records. Both adapters call the shared merge. The importer no longer
+requires widths divisible by 128.
+
+Preparation on 2026-10-28 compiled native merges from width 1 through 65,537,
+contributor counts through 1,025, and partial SIMD launches. The ordinary
+merge shaders use zero static threadgroup memory. The actual LiteRT importer
+prepared tiled row export and merge stages, including odd widths and width
+65,537; their shaders compiled. Existing vector, tile and int8 attention
+producers also compiled. Native rank and Goal A built. No numerical execution
+or throughput/latency result is established by this preparation.
+
+This removes limits from the merge of already-produced partial results. It
+does not yet make every producer width-independent: the native forward
+attention kernels still truncate channel dimensions, and their fused merge
+still needs shared weight storage sized for its contributor count. The
+LiteRT partial-row adapter also still assumes a leading axis of one. That
+provider layout must become an explicit lowering operand before this last
+filter can be removed. Placing the partial numerical work across nodes remains
+part of the graph's reduction lowering, rather than a property of this merge.
+
 CPU contraction workspace is now part of that boundary. Preparation asks BNNS
 for its required byte count, assigns bridge pages and binds their address.
 The host record retains those pages and declares their writes alongside its

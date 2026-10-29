@@ -53,6 +53,10 @@ MESH_METAL_VALUE(HADAMARD_STORAGE, 5120)
 
 // Existing two-matrix attention page format. A different layout needs its compiled kernel.
 MESH_METAL_VALUE(ATTENTION_TILE_PAGE, 16)
+// Merge geometry bounds one launch and its register cache, not head width or
+// the number of local/remote contributors to the result.
+MESH_METAL_VALUE(ATTENTION_MERGE_THREADS, 256)
+MESH_METAL_VALUE(ATTENTION_MERGE_PARTS_PER_LANE, 2)
 MESH_METAL_VALUE(SPEC_THREADS, 1024)
 MESH_METAL_VALUE(DRAW_THREADS, 256)
 MESH_METAL_VALUE(DRAW_MAX_BLOCKS, 256)

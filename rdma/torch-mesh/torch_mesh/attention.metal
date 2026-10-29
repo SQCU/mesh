@@ -97,7 +97,7 @@ __attribute__((always_inline)) static inline void mesh_attention(thread A &a) {
 
 // The parts' merge (Flash-Decoding's [Dao et al. 2023]; FlashInfer's state merge): the J parts of one row, each its maximum
 // m_j, sum l_j and unnormalized accumulator o_j (P::m(j), P::l(j), P::o(j, d)), weighed e^(m_j - M) over the parts with
-// l_j > 0. Each part's weight is held by lane j % 32 of every simdgroup (J <= 64) and shuffled, the sums and the total
+// l_j > 0. Each bounded batch of weights is held across a SIMD group and shuffled, the sums and the total
 // sum_j w_j l_j taken in part order (the sequential merge's arithmetic, to the bit: a lane tree's total moves LiteRT's
 // int8 program, metal-microbench docs/kernels.md#decode-attention), one part-group; or with Shared computed by the first
 // simdgroup into `weights` (J floats; the total, a lane tree's, and M into `scalars`, read by the store) and read from
@@ -105,7 +105,7 @@ __attribute__((always_inline)) static inline void mesh_attention(thread A &a) {
 // summing through `red` ((G - 1) DS float4s); group 0 calls store(M, sum_j w_j l_j, sum_j w_j o_j). Scheduled Single (a
 // threadgroup a row: mesh_merge_row and the hosts' kernels) or LastArrival (the last of a row's parts to arrive:
 // argmax.metal's mesh_last_arrival, the merge, then mesh_arrival_reset).
-template <typename F, typename F4, uint DS>
+template <typename F, typename F4, uint D>
 struct mesh_split_parts {
     F ms;
     F ls;
@@ -113,44 +113,70 @@ struct mesh_split_parts {
     ulong base;
     __attribute__((always_inline)) float m(uint j) { return ms[base + j]; }
     __attribute__((always_inline)) float l(uint j) { return ls[base + j]; }
-    __attribute__((always_inline)) float4 o(uint j, uint d) { return os[(base + j) * DS + d]; }
+    __attribute__((always_inline)) float4 o(uint j, uint d) {
+        if constexpr (D % 4 == 0) return 4 * d < D ? os[(base + j) * (D / 4) + d] : float4(0);
+        else {
+            F values = (F)os;
+            float4 value = 0;
+            for (uint e = 0; e < 4; ++e)
+                if (4 * d + e < D) value[e] = values[(base + j) * D + 4 * d + e];
+            return value;
+        }
+    }
 };
 
 __attribute__((always_inline)) static inline float4 mesh_merged(float total, float4 sum) { return total > 0.0f ? sum / total : float4(0.0f); }
 
-template <uint DS, uint G, bool Shared = false, typename P, typename Store>
+template <uint DS, uint G, bool Shared = false, uint Threads = DS * G, typename P, typename Store>
 __attribute__((always_inline)) static inline void mesh_merge(P parts, uint J, uint d, uint g, uint lane, threadgroup float4 *red, Store store,
                                                             threadgroup float *weights = nullptr, threadgroup float *scalars = nullptr) {
-    static_assert(DS % 32 == 0, "a simdgroup's lanes hold one part-group");
-    static_assert(Shared || G == 1, "the lanes' weights are one part-group's");
-    float top = -3.0e38f, w[2] = {0.0f, 0.0f}, total = 0.0f;
-    if (!Shared || g * DS + d < 32) {
-        for (uint p = lane; p < J; p += 32) if (parts.l(p) > 0.0f) top = max(top, parts.m(p));
+    constexpr uint Cached = MESH_ATTENTION_MERGE_PARTS_PER_LANE;
+    const uint lanes = Threads % MESH_SIMD_WIDTH == 0 ? MESH_SIMD_WIDTH
+        : min(uint(MESH_SIMD_WIDTH), Threads - ((g * DS + d) % Threads) / MESH_SIMD_WIDTH * MESH_SIMD_WIDTH);
+    const uint batch = Cached * lanes;
+    float top = -3.0e38f, total = 0.0f;
+    if (!Shared || g * DS + d < MESH_SIMD_WIDTH) {
+        for (uint p = lane; p < J; p += lanes) if (parts.l(p) > 0.0f) top = max(top, parts.m(p));
         top = simd_max(top);
         if (Shared) {
-            for (uint p = lane; p < J; p += 32) {
+            for (uint p = lane; p < J; p += lanes) {
                 const float le = parts.l(p), we = le > 0.0f ? exp(parts.m(p) - top) : 0.0f;
                 weights[p] = we;
                 total += we * le;
             }
             total = simd_sum(total);
             if (lane == 0) { scalars[0] = total; scalars[1] = top; }
-        } else
-            for (uint k = 0; k < 2; ++k) {
-                const uint p = lane + 32 * k;
-                w[k] = p < J && parts.l(p) > 0.0f ? exp(parts.m(p) - top) : 0.0f;
-            }
+        }
     }
     if (Shared) threadgroup_barrier(mem_flags::mem_threadgroup);
     float4 sum = float4(0.0f);
-    for (uint p = g; p < J; p += 8 * G) {
-        float4 y[8];
-        for (uint u = 0; u < 8; ++u) y[u] = p + u * G < J ? parts.o(p + u * G, d) : float4(0.0f);
-        for (uint u = 0; u < 8; ++u) {
-            const uint q = p + u * G;
-            const float wq = q < J ? (Shared ? weights[q] : simd_shuffle(w[q / 32], ushort(q % 32))) : 0.0f;
-            sum += wq * y[u];
-            if (!Shared && q < J) total += wq * parts.l(q);
+    for (uint first = 0; first < J; first += Shared ? J : batch) {
+        const uint end = Shared ? J : min(J, first + batch);
+        float w[Cached];
+        if constexpr (!Shared) {
+            for (uint k = 0; k < Cached; ++k) {
+                const uint p = first + lane + lanes * k;
+                w[k] = p < end && parts.l(p) > 0.0f ? exp(parts.m(p) - top) : 0.0f;
+            }
+        }
+        if constexpr (!Shared && G > 1) {
+            // All lanes name the same weight before selecting its value group.
+            // A channel group may start or end inside a physical SIMD group.
+            for (uint q = first; q < end; ++q) {
+                const float wq = simd_shuffle(w[(q - first) / lanes], ushort((q - first) % lanes));
+                total += wq * parts.l(q);
+                if (q % G == g) sum += wq * parts.o(q, d);
+            }
+        } else for (uint p = first + g; p < end; p += 8 * G) {
+            float4 y[8];
+            for (uint u = 0; u < 8; ++u) y[u] = p + u * G < end ? parts.o(p + u * G, d) : float4(0.0f);
+            for (uint u = 0; u < 8; ++u) {
+                const uint q = p + u * G;
+                const float wq = q < end ? (Shared ? weights[q]
+                    : simd_shuffle(w[(q - first) / lanes], ushort((q - first) % lanes))) : 0.0f;
+                sum += wq * y[u];
+                if (!Shared && G == 1 && q < end) total += wq * parts.l(q);
+            }
         }
     }
     if (G > 1) {
@@ -163,15 +189,15 @@ __attribute__((always_inline)) static inline void mesh_merge(P parts, uint J, ui
 
 // The gathered store (metal-microbench docs/kernels.md#decode-attention, the epilogue): a thread's four outputs from `out`
 // at their places in o's gathered input (O[n columns + inverse[c]] = scale[inverse[c]] value) where `columns` is nonzero,
-// else in place. The places are 32-bit element indices (an operand of fewer than 2^32 elements; out and columns multiples
-// of 4, so one column c for the four), held from the task's start to its store.
-__attribute__((always_inline)) static inline void mesh_gathered_places(uint out, device const int *inverse, device const float *scale, uint columns,
-                                                                      thread uint4 &dst, thread float4 &cs, uint stride) {
-    dst = uint4(out) + uint4(0, 1, 2, 3);
+// else in place. Row offsets retain their full address width. Only the logical
+// tail's active elements read destination indices and scales.
+__attribute__((always_inline)) static inline void mesh_gathered_places(ulong out, device const int *inverse, device const float *scale, uint columns,
+                                                                      thread ulong4 &dst, thread float4 &cs, uint stride, uint count = 4) {
+    dst = ulong4(out) + ulong4(0, 1, 2, 3);
     cs = float4(1.0f);
     if (columns != 0) {
         const uint c = out % columns;
-        for (uint i = 0; i < 4; ++i) {
+        for (uint i = 0; i < count; ++i) {
             const uint to = uint(inverse[c + i]);
             dst[i] = (out / columns) * stride + to;
             cs[i] = scale[to];
@@ -179,21 +205,26 @@ __attribute__((always_inline)) static inline void mesh_gathered_places(uint out,
     }
 }
 
-__attribute__((always_inline)) static inline void mesh_gathered_store(device half *O, uint4 dst, float4 scale, uint columns, float4 value) {
-    if (columns == 0) { *(device half4 *)(O + dst.x) = half4(value); return; }
-    for (uint i = 0; i < 4; ++i) O[dst[i]] = half(scale[i] * value[i]);
+__attribute__((always_inline)) static inline void mesh_gathered_store(device half *O, ulong4 dst, float4 scale, uint columns, float4 value,
+                                                                    uint count = 4, bool aligned = true) {
+    if (columns == 0 && count == 4 && aligned) { *(device half4 *)(O + dst.x) = half4(value); return; }
+    for (uint i = 0; i < count; ++i) O[dst[i]] = half(scale[i] * value[i]);
 }
 
-// Single, a threadgroup of D / 4 threads a row (thread d its float4 d): a row's J parts (P, mesh_split_parts) merged into
-// row i of O, gathered (mesh_gathered_store: o's input, `columns` its width) or plain (columns 0). A host's kernel calls it
-// (no kernel is defined here: a source including this file stays one kernel's).
-template <uint D, typename P>
+// A prepared channel tile of one row: d is its absolute float4 index, Threads
+// its physical launch width. The host covers ceil(D / 4) slices with bounded
+// launches. Every lane participates in the weight shuffles; inactive tail lanes
+// read and write no channels. The same row helper serves local and peer parts.
+template <uint D, uint Threads, typename P>
 __attribute__((always_inline)) static inline void mesh_merge_row(P parts, uint i, uint J, uint d, uint lane, device half *O, device const int *inverse,
                                                                 device const float *scale, uint columns, uint stride) {
-    uint4 dst;
+    const uint count = 4 * d < D ? min(4u, D - 4 * d) : 0;
+    ulong4 dst;
     float4 cs;
-    mesh_gathered_places(i * D + 4 * d, inverse, scale, columns, dst, cs, stride);
-    mesh_merge<D / 4, 1>(parts, J, d, 0u, lane, nullptr, [&](float, float total, float4 sum) { mesh_gathered_store(O, dst, cs, columns, mesh_merged(total, sum)); });
+    mesh_gathered_places(ulong(i) * D + 4 * d, inverse, scale, columns, dst, cs, stride, count);
+    mesh_merge<(D + 3) / 4, 1, false, Threads>(parts, J, d, 0u, lane, nullptr, [&](float, float total, float4 sum) {
+        mesh_gathered_store(O, dst, cs, columns, mesh_merged(total, sum), count, D % 4 == 0);
+    });
 }
 
 // The Tile plan (metal-microbench docs/kernels.md#decode-attention, the verify plan; FlashInfer's tensor-core decode for
