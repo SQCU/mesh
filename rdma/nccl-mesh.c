@@ -247,8 +247,10 @@ static uint64_t deadline_left(const struct mesh_deadline *d) {
   if (now >= d->at) mesh_library_expired(d->wait, d->ns);
   return d->at - now;
 }
+static void channel_counts(const struct ncclComm *comm, char *out, size_t room, int lists);
 /* the GPU wait whose bound a communicator's failure words record (METAL_BOUND, nccl-mesh-kernels.h mesh_step_check),
-   named into `wait`; its deadline, 0 where they record none */
+   named into `wait`; its deadline, 0 where they record none.  Every channel's counts, its lists' too, a line of their
+   own on stderr: which ring of which channel stood still, past the one the wait was on */
 static uint64_t bound_reached(const struct ncclComm *comm, char *wait, size_t room) {
   const _Atomic uint64_t *v = comm->words;
   const uint64_t at = v ? atomic_load_explicit(v + 2, memory_order_acquire) : 0;
@@ -273,6 +275,10 @@ static uint64_t bound_reached(const struct ncclComm *comm, char *wait, size_t ro
            "bound, ncclMeshStream polls: the wait's deadline, fixed when it was made), its awaited count last read %llu%s",
            comm->name, (unsigned long long)(at - 1), h < comm->count ? comm->channels[h].node : UINT32_MAX, (unsigned long long)polls,
            (unsigned long long)read, counts);
+  char every[2048], line[2304];
+  channel_counts(comm, every, sizeof every, 1);
+  const int n = every[0] ? snprintf(line, sizeof line, "libnccl-mesh: communicator %s as its GPU wait ended%s\n", comm->name, every) : 0;
+  if (n > 0) (void)!write(2, line, (size_t)n < sizeof line ? (size_t)n : sizeof line - 1);
   return MESH_PLATFORM_NS;
 }
 /* the device's GPU load period (nccl-mesh-metal.m metal_poll_seconds), read under group_lock, as its kernels are */
@@ -1903,16 +1909,22 @@ static ncclResult_t comm_fail(struct ncclComm *comm, ncclResult_t result, const 
 
 /* every channel's counts, compactly: its peer node, the units landed from it, and this rank's units ready and sent toward
    it ("" where the channels are not bound), so a failure names where each rank's stream stood */
-static void channel_counts(const struct ncclComm *comm, char *out, size_t room) {
+static void channel_counts(const struct ncclComm *comm, char *out, size_t room, int lists) {
   size_t used = 0;
   out[0] = 0;
   for (uint32_t h = 0; h < comm->count && used + 1 < room; h++) {
     const struct mesh_stream_view *w = &comm->channels[h].view;
     if (!w->landed || !w->sent || !w->ready) continue;
-    const int n = snprintf(out + used, room - used, "%s%u landed %llu, ready %llu, sent %llu", used ? "; " : " (channels: ",
-                           comm->channels[h].node, (unsigned long long)atomic_load_explicit(w->landed, memory_order_acquire),
-                           (unsigned long long)atomic_load_explicit(w->ready, memory_order_acquire),
-                           (unsigned long long)atomic_load_explicit(w->sent, memory_order_acquire));
+    int n = snprintf(out + used, room - used, "%s%u landed %llu, ready %llu, sent %llu", used ? "; " : " (channels: ",
+                     comm->channels[h].node, (unsigned long long)atomic_load_explicit(w->landed, memory_order_acquire),
+                     (unsigned long long)atomic_load_explicit(w->ready, memory_order_acquire),
+                     (unsigned long long)atomic_load_explicit(w->sent, memory_order_acquire));
+    if (n >= 0 && lists && w->presented[0] && w->taken[0] && (size_t)n < room - used)
+      n += snprintf(out + used + n, room - used - n, ", presented %llu/%llu, taken %llu/%llu",
+                    (unsigned long long)atomic_load_explicit(w->presented[0], memory_order_acquire),
+                    (unsigned long long)atomic_load_explicit(w->presented[1], memory_order_acquire),
+                    (unsigned long long)atomic_load_explicit(w->taken[0], memory_order_acquire),
+                    (unsigned long long)atomic_load_explicit(w->taken[1], memory_order_acquire));
     if (n < 0) break;
     used += (size_t)n < room - used ? (size_t)n : room - used - 1;
   }
@@ -1932,7 +1944,7 @@ static ncclResult_t comm_failure(struct ncclComm *comm) {
   for (uint32_t k = 0; comm->held && k < MESH_STREAMS; k++)
     if ((comm->held >> k & 1) && !mesh_stream_held(&a->context, a->holds[k].stream, a->holds[k].wire)) {
       char counts[320];
-      channel_counts(comm, counts, sizeof counts);
+      channel_counts(comm, counts, sizeof counts, 0);
       return comm_fail(comm, ncclRemoteError, "the link to node %u was lost and paired again: communicator %s's stream there is no "
                        "longer its own (design/transport.md section 14); it is made again (ncclCommDestroy, then an init)%s",
                        a->holds[k].node, comm->name, counts);
