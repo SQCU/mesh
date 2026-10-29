@@ -332,6 +332,12 @@ the compulsory compiler interface. Single-rank copies and products remain their 
 
 ### R17. Implicit stream drains and a synchronous host collective executor
 
+Updated 2026-10-28. The synchronous host executor is deleted from `nccl-mesh.c`: `launch`, `run`, `stage`, `finish`
+and the host operators (`combine_into`, `premultiply`, `truncdiv`, `merge_rows`). Every stream-less group runs as the
+Metal path's group on its communicator's queue (`launch_host`). Crossing groups already did; now one-rank groups do too.
+A float64 reduction fails there, as on a stream. No caller in this repository, metal-microbench or xonotic reduces
+float64. `submit`'s drain stays: `launch_host` refuses a group while GPU groups of its communicator are in flight.
+
 - **Remove:** `submit`'s whole-stream completion/drain before a host collective in `_stream.mm`, and the
   synchronous numerical scheduling contract of `launch`/`run` in `nccl-mesh.c`. `run` inspects step readiness
   and retirement state while carrying out a collective; the host adapter blocks until that execution finishes.

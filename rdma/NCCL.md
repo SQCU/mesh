@@ -240,8 +240,8 @@ metadata, not extra wire payload. Hardware SEND/RECV posting remains the
 bridge's mechanism; the application interface is a declared one-sided WRITE.
 See [transport.md](../design/transport.md) for registration and credit units.
 
-- **Host path.** A NULL stream: host pointers into the region (leases), sent from and landed in in place, combined on
-  the host. Each call is synchronous and returns once its landings are consumed, its SENDs perhaps not yet done
+- **Host path.** A NULL stream: host pointers into the region (leases), sent from and landed in in place, run as the
+  Metal path's group on the communicator's own queue over the leases' Metal buffers. Each call is synchronous and returns once its landings are consumed, its SENDs perhaps not yet done
   ([Failures](#failures)). It works for any lease on any node whose
   bridge runs (NumPy, CPU region tensors). It is functional, not the measured path.
 - **Metal path.** An `ncclMeshStream`: the group is encoded into a Metal command buffer, and every buffer is an
@@ -419,8 +419,8 @@ bound passes 5 s there.
 
 Types: the Metal path moves and combines the integer types, float16, float32, bfloat16 and fp8 (e4m3fn, e5m2: decoded,
 combined in float32 and encoded to nearest even as the host does, overflow to NaN or infinity; metal-microbench
-docs/kernels.md Float8), and moves float64 (Apple GPUs have no float64 arithmetic, so a float64 reduction there fails as
-a value); the host path combines float64 too.
+docs/kernels.md Float8), and moves float64 (Apple GPUs have no float64 arithmetic, so a float64 reduction fails as a
+value, on either path).
 Ops: sum, prod, max, min, avg; premul-sum's scalar read when it is made (a host immediate) or, in device memory, at
 each host-path call (a Metal-path call by it fails as a value: the kernels take the scalar when the group is encoded);
 an operator reduces the datatype it was made for alone; a communicator makes as many operators as its handles hold.

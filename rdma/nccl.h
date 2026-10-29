@@ -93,9 +93,9 @@
    (ncclMeshAllGatherV, ncclMeshReduceScatterV, below), whose count vector every rank passes alike.
 
    Host path: a NULL stream.  Buffers are host pointers into this node's region (a lease's: Memory, below), sent from
-   and landed in in place; a group that crosses a link runs as the Metal path's group in a command buffer of its
-   communicator's own queue, its buffers as their leases' Metal buffers, committed and awaited before its call returns,
-   but for a float64 reduction, combined on the host as its landings arrive; every call returns once its publications
+   and landed in in place; a group runs as the Metal path's group in a command buffer of its communicator's own queue,
+   its buffers as their leases' Metal buffers, committed and awaited before its call returns (a float64 reduction fails
+   as it does there); every call returns once its publications
    and required landings have run; outgoing buffer lifetimes remain the caller's.  Metal path: a stream that
    is an ncclMeshStream.  The group is encoded into its commandBuffer (the caller commits it), every buffer argument an
    ncclMeshBuffer (an id<MTLBuffer> and a byte offset into it: an MPS tensor's storage and offset) of any type, a
