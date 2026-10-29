@@ -581,7 +581,9 @@ def node_guard(seconds, floor, workstation, *argv):
     operands = tempfile.TemporaryFile()
     operands.write(line[:-1])
     operands.seek(0)
-    rank = subprocess.Popen(argv, stdin=operands, start_new_session=True,
+    # PYTHONFAULTHANDLER: a rank's fatal signal, and the SIGABRT that ends it past its deadline, writes every thread's
+    # traceback to its stderr, so a rank that hangs names where (the guard pauses no rank to look)
+    rank = subprocess.Popen(argv, stdin=operands, start_new_session=True, env={**os.environ, 'PYTHONFAULTHANDLER': '1'},
                             preexec_fn=lambda: signal.alarm(math.ceil(float(seconds)) + 10))
     known, why, value, size = {rank.pid: process(rank.pid)[0]}, None, ctypes.c_uint64(), ctypes.c_size_t()
     own = os.environ.get('MESH_RUN')
@@ -608,6 +610,11 @@ def node_guard(seconds, floor, workstation, *argv):
                       else None)
         time.sleep(0 if why else 0.1)
     print(json.dumps({'overlap': others()}), flush=True)
+    if why and why.startswith('deadline') and live(rank.pid, known[rank.pid]):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(rank.pid, signal.SIGABRT)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            rank.wait(5)
     last = time.monotonic() + 30
     # EPERM from killpg is a group of zombies or of a member this user cannot signal (macOS), not a failure of the
     # rank: each tracked pid is killed alone, and those still live after 30 s are named (exit 125)
