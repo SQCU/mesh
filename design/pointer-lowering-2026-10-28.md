@@ -86,7 +86,7 @@ Open, in order:
 3. *(landed, f1cdef43)* **Migration.** partition.py `_follow_bytes` narrows uint8 views at the byte runs `migration.compile_rows` computes
    (G2 #24, G1 #16-18). It should emit element layouts of the real source and destination views, after which
    `fused.write_rows` and `mesh_compile_rows` go.
-4. **mesh_rank.m** (metal-microbench): its crossings' `mesh_compile_rows` and fragment offsets (G2 #22-23, G4 #14-16).
+4. *(landed: mesh 92af4f48, metal-microbench f16bdcb7; mesh_compile_rows and tensor_pages deleted after)* **mesh_rank.m** (metal-microbench): its crossings' `mesh_compile_rows` and fragment offsets (G2 #22-23, G4 #14-16).
    Its slots repeat at a byte stride per invocation (`CrossBinding.stride`). The layout entry takes that period from
    `ncclMeshWriteLayout.instance_pages`, in whole pages. The period is local, like frames, so it moves into
    `ncclMeshLayout` in elements. `ncclMeshWriteLayout` then keeps what every rank shares: tile bytes and invocations.
