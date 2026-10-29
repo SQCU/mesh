@@ -6,7 +6,6 @@
 #include "mesh.h"
 #include "mesh-span-plan.h"
 #include "mesh-landing.h"
-#include "mesh-write-routes.h"
 #include "nccl-mesh-metal.h"
 #include <errno.h>
 #include <math.h>

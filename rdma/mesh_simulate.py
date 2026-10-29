@@ -62,6 +62,23 @@ class Step(C.Structure):
                 ('first', C.c_uint64), ('piece', Operand)]
 
 
+class Cable(C.Structure):
+    _fields_ = [('wire', C.c_uint64), ('bandwidth', C.c_uint64), ('node', C.c_uint32 * 2)]
+
+
+class Fabric(C.Structure):
+    _fields_ = [('nodes', C.c_uint32), ('cables', C.c_uint32), ('cable', C.POINTER(Cable))]
+
+
+class Paths(C.Structure):
+    _fields_ = [('count', C.c_uint32), ('first', C.POINTER(C.c_uint32)), ('cable', C.POINTER(C.c_uint32)),
+                ('weight', C.POINTER(C.c_uint64))]
+
+
+class Transfer(C.Structure):
+    _fields_ = [('step', Step), ('cable', C.c_uint32), ('padding', C.c_uint32)]
+
+
 class Place(C.Structure):
     _fields_ = [('step', C.c_uint32), ('send', C.c_uint32), ('entry', C.c_uint64)]
 
@@ -86,6 +103,10 @@ def library(path):
     lib.mesh_lay.argtypes = [C.POINTER(Step), C.c_uint32, C.c_uint32, C.c_int, C.c_uint64, C.POINTER(Place),
                              C.POINTER(C.c_uint32)]
     lib.mesh_lay.restype = C.c_uint64
+    lib.mesh_write_routes_default.argtypes = [C.POINTER(Fabric), C.POINTER(C.POINTER(Paths))]
+    lib.mesh_write_routes_free.argtypes = [C.POINTER(Paths), C.c_uint32]
+    lib.mesh_write_compile.argtypes = [C.POINTER(Fabric), C.c_uint32, C.c_uint32, C.c_uint32, C.POINTER(Paths), Operand,
+                                       C.c_uint64, C.c_uint64, C.POINTER(Transfer), C.c_uint32]
     return lib
 
 
@@ -284,6 +305,108 @@ def judge(lib, program, n, what, root, elements, page):
     return failures
 
 
+def fabric_of(n, links, rates, rng):
+    """The fabric as fabric_discover makes it of real nodes' records: a cable each link, its wire a distinct identity,
+    its nodes the lower first, the cables in cable_order (nodes, then wire)."""
+    cables = sorted(((min(a, b), max(a, b)), rng.getrandbits(63) | 1, int(rate)) for (a, b), rate in zip(links, rates))
+    cables.sort(key=lambda c: (c[0][0], c[0][1], c[1]))
+    array = (Cable * len(cables))(*[Cable(wire, rate, (C.c_uint32 * 2)(*ends)) for ends, wire, rate in cables])
+    return Fabric(n, len(cables), array), array
+
+
+def write_calls(n, rng):
+    """One group of WRITEs shaped as a real program submits them: the chain's input window (chain.operands: root 0 to
+    every other rank, rows x width halves, input_frames repeats) or the LSTM's weight scatter (partition
+    distribute_tensor: root 0 to each rank, its shard of a 4 x H x (K + H) weight)."""
+    if rng.random() < 0.5:
+        rows, width, frames = 8, rng.choice((128, 1024, 16384)), 512
+        return f'chain input window, width {width}', [(0, d, rows * width) for d in range(1, n)], frames
+    h = rng.choice((128, 1024, 16384))
+    shard = 4 * h * 2 * h // n
+    return f'lstm weight scatter, H {h}', [(0, d, shard) for d in range(1, n)], 1
+
+
+def judge_writes(lib, fabric, routes, n, calls, repeats, page):
+    """The failures of one group of WRITEs, every rank compiling every call as write_steps does."""
+    failures, entries = [], {}
+    for root, destination, count in calls:
+        operand = Operand(7, 2, count)
+        made = []
+        for r in range(n):
+            pair = routes[root * n + destination]
+            needed = lib.mesh_write_compile(C.byref(fabric), r, root, destination, C.byref(pair), operand, page, 0, None, 0)
+            if needed < 0:
+                return [f'rank {r}: mesh_write_compile {root}->{destination} returned {needed}']
+            transfers = (Transfer * (needed + 1))()
+            got = lib.mesh_write_compile(C.byref(fabric), r, root, destination, C.byref(pair), operand, page, 0,
+                                         transfers, needed + 1)
+            if got != needed:
+                return [f'rank {r}: mesh_write_compile {root}->{destination} counted {needed}, wrote {got}']
+            made.append([transfers[i] for i in range(got)])
+        # write_steps: a relay's SEND has an earlier receive of the same interval
+        for r in range(n):
+            if r == root:
+                continue
+            for k, t in enumerate(made[r]):
+                if t.step.op == SEND and not any(u.step.op != SEND and u.step.first == t.step.first and
+                                                 u.step.piece.elements == t.step.piece.elements for u in made[r][:k]):
+                    return [f'{root}->{destination}: rank {r} relays elements {t.step.first} + {t.step.piece.elements} '
+                            'with no matching incoming interval (write_steps)']
+        # each directed cable's SENDs and receives, in each end's order
+        lanes = {}
+        for r in range(n):
+            for k, t in enumerate(made[r]):
+                key = (t.cable, r, t.step.peer) if t.step.op == SEND else (t.cable, t.step.peer, r)
+                lanes.setdefault(key, ([], []))[0 if t.step.op == SEND else 1].append((r, k))
+        for (cable, a, b), (sends, lands) in lanes.items():
+            ends = fabric.cable[cable].node
+            if sorted((a, b)) != sorted((ends[0], ends[1])):
+                return [f'{root}->{destination}: a transfer {a}->{b} names cable {cable}, which joins {ends[0]} and {ends[1]}']
+            if len(sends) != len(lands):
+                return [f'{root}->{destination}: cable {cable} {a}->{b} carries {len(sends)} SENDs against {len(lands)} receives']
+            for (r, k), (q, j) in zip(sends, lands):
+                if made[r][k].step.piece.elements != made[q][j].step.piece.elements:
+                    return [f'{root}->{destination}: cable {cable} {a}->{b} pairs a SEND of {made[r][k].step.piece.elements} '
+                            f'elements with a receive of {made[q][j].step.piece.elements}']
+            entries[(cable, a, b)] = entries.get((cable, a, b), 0) + len(sends) * repeats
+        # progress and result: the root's elements are their indices; a relay's SEND waits on its receive
+        held = {root: list(range(count))}
+        done = {(r, k): False for r in range(n) for k in range(len(made[r]))}
+        match = {}
+        for (cable, a, b), (sends, lands) in lanes.items():
+            for send, land in zip(sends, lands):
+                match[land] = send
+        sent, progressed = {}, True
+        while progressed:
+            progressed = False
+            for (r, k), finished in done.items():
+                if finished:
+                    continue
+                t = made[r][k].step
+                lo, hi = t.first, t.first + t.piece.elements
+                if t.op == SEND:
+                    if r != root and not any(done[(r, i)] and made[r][i].step.op != SEND and made[r][i].step.first == lo
+                                             for i in range(k)):
+                        continue
+                    sent[(r, k)] = held.get(r, [None] * count)[lo:hi]
+                else:
+                    if match.get((r, k)) not in sent:
+                        continue
+                    buffer = held.setdefault(r, [None] * count)
+                    buffer[lo:hi] = sent[match[(r, k)]]
+                done[(r, k)] = progressed = True
+        if not all(done.values()):
+            stuck = next(key for key, finished in done.items() if not finished)
+            return [f'{root}->{destination}: {sum(not v for v in done.values())} transfers never run, rank {stuck[0]} '
+                    f'transfer {stuck[1]} first']
+        if held.get(destination) != list(range(count)):
+            return [f'{root}->{destination}: the destination does not hold the root\'s {count} elements']
+    for (cable, a, b), laid in entries.items():
+        if laid > ENTRIES:
+            failures.append(f'the group lays {laid} entries on cable {cable} {a}->{b}, past the {ENTRIES} a list holds')
+    return failures[:3]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--samples', type=int, default=200)
@@ -303,6 +426,22 @@ def main(argv=None):
             print(f'sample {sample}: k {k}, largest part {n} nodes, {len(links)} links: {solved}', flush=True)
             continue
         _, trees, _ = solved
+        fabric, keep = fabric_of(n, links, rates, rng)
+        routes = C.POINTER(Paths)()
+        error = lib.mesh_write_routes_default(C.byref(fabric), C.byref(routes))
+        if error:
+            failed += 1
+            print(f'sample {sample}: k {k}, largest part {n} nodes, {len(links)} links: mesh_write_routes_default {error}',
+                  flush=True)
+        else:
+            shape, calls, repeats = write_calls(n, rng)
+            programs += 1
+            failures = judge_writes(lib, fabric, routes, n, calls, repeats, args.page or 16384)
+            lib.mesh_write_routes_free(routes, n)
+            if failures:
+                failed += 1
+                print(f'sample {sample}: k {k}, largest part {n} nodes, {len(links)} links: {shape}: {"; ".join(failures)}',
+                      flush=True)
         roots = sorted({0, n - 1, rng.randrange(n)})
         forms = [(ALLREDUCE, 0, 0), (ALLREDUCE, 0, 1), (REDUCE_SCATTER, 0, 0), (ALLGATHER, 0, 0)] + \
                 [(what, r, 0) for r in roots for what in (BROADCAST, REDUCE)]

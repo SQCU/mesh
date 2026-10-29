@@ -194,6 +194,15 @@ int mesh_paths_check(const struct mesh_fabric *,uint32_t source,uint32_t destina
 int mesh_write_compile(const struct mesh_fabric *,uint32_t rank,uint32_t source,uint32_t destination,
                         const struct mesh_paths *,struct mesh_operand,uint64_t page,uint64_t tile,
                         struct mesh_transfer *,uint32_t room);
+/* A fabric's write routes (mesh-fabric.c), the communicator's defaults (nccl-mesh.c fabric_discover) and a tool's alike:
+   mesh_write_routes_default every simple node path of every ordered pair, parallel cables distinct choices, each of
+   weight 1, into *out (NULL on entry), a nodes x nodes table; mesh_write_routes_compose those routes with every pair a
+   cable joins realized on its cables (by bandwidth), but where `overrides` marks it; each 0 or an errno, *out unchanged on
+   a failure; mesh_write_routes_free a table either made. */
+int mesh_write_routes_default(const struct mesh_fabric *,struct mesh_paths **out);
+int mesh_write_routes_compose(const struct mesh_fabric *,const struct mesh_paths *routes,const unsigned char *overrides,
+                              struct mesh_paths **out);
+void mesh_write_routes_free(struct mesh_paths *routes,uint32_t nodes);
 
 /* Physical lowering of a complete typed dataflow. first/steps contain every
    rank's logical steps in dependency order, including matching endpoint-only
