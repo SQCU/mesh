@@ -36,7 +36,6 @@ class Member:
     management: str
     fabric: str
     roles: frozenset = frozenset()
-    memory_gib: float = 0
     guard_headroom_gib: float = 0
 
 
@@ -58,22 +57,13 @@ class Cluster:
     def ssh(self):
         return [*SSHO, *(['-i', self.key] if self.key else [])]
 
-    def place(self, need):
-        """The `compute` members also holding `need`'s role, with at least its other values, in rank order: the root
-        first, the rest by bridge node number (metal-microbench tools/mesh/grid.py order)."""
-        roles = {'compute', need.get('role', 'compute')}
-        chosen = [m for m in self.members.values()
-                  if roles <= m.roles and all(getattr(m, k) >= v for k, v in need.items() if k != 'role')]
-        return sorted(chosen, key=lambda m: ('root' not in m.roles, int(m.number)))
-
 
 @functools.cache
 def load(path=ROOT / 'etc/mesh-nodes.json'):
     raw = json.loads(Path(path).read_text())
     access = raw.get('access', {})
     members = {str(row['node']): Member(str(row['node']), row['name'], row['management'], row['fabric'],
-                                        frozenset(row.get('roles', ())), row.get('memory_gib', 0),
-                                        row.get('guard_headroom_gib', 0)) for row in raw['nodes'].values()}
+                                        frozenset(row.get('roles', ())), row.get('guard_headroom_gib', 0)) for row in raw['nodes'].values()}
     return Cluster(members, access.get('user') or getpass.getuser(),
                    str(Path(access['key']).expanduser()) if 'key' in access else None,
                    raw['run_seconds'], raw['python'], raw['checkouts'], raw['checkouts_kept'], raw['rank_port'])

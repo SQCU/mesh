@@ -22,15 +22,12 @@ FIGURES = ('steady_step_microseconds', 'step_microseconds', 'crossing_microsecon
 
 
 def workload_configuration(microbench_root):
-    """One canonical configuration for hourly and interactive comparison entrypoints: schema 2, each workload placed
-    by etc/mesh-nodes.json roles (`place`), none by node (`nodes`, `rank_limit`)."""
+    """The hourly's workloads (schema 3): each an end-to-end program the whole live fabric runs, on the largest set of
+    nodes its paired cables link (run_workload). None names, counts or selects nodes."""
     raw = json.loads((Path(microbench_root) / 'tools/mesh/hourly/workloads.json').read_text())
-    items = raw.get('placed_workloads') or []
-    unplaced = [item.get('tag') for item in items if 'place' not in item or {'nodes', 'rank_limit'} & item.keys()]
-    if raw.get('schema') != 2 or not items or unplaced:
-        raise ValueError(f'tools/mesh/hourly/workloads.json is schema {raw.get("schema")}; mesh needs schema 2, its '
-                         f'placed_workloads each with a `place` and no `nodes` or `rank_limit` (unplaced: {unplaced})')
-    return items
+    if raw.get('schema') != 3 or not raw.get('workloads'):
+        raise ValueError(f'tools/mesh/hourly/workloads.json is schema {raw.get("schema")}; mesh reads schema 3 `workloads`')
+    return raw['workloads']
 
 
 def measurement_values(record, tag):
@@ -273,18 +270,16 @@ def run_workload(item, nodes, paths, record, ordinal, cluster):
     from mesh_statistics import aggregate
     tag = item['tag']
     end = min(time.time() + item.get('timeout', 300), record['deadline_unix'])
-    selected = [node for node in (mesh.at(nodes, m.number) for m in cluster.place(item['place'])) if node]
+    # every live, installed node, by bridge node number; then the largest set of them their paired cables link
+    selected = sorted(nodes, key=lambda node: int(node.number))
     result = {'tag': tag, 'configuration': item, 'nodes': [node.number for node in selected], 'status': 'preparing',
               'metrics': []}
     record['workloads'].append(result)
     try:
         if not selected:
-            raise RuntimeError(f'placement unmet: no live, installed member meets {item["place"]}')
+            raise RuntimeError('no live, installed node')
         mesh.wait_paired(selected, None, end)  # a failed workload's ranks leave links re-pairing for a few seconds
-        # the largest collective its paired cables link (the root's on a tie): a cable down narrows the case's members,
-        # it never stops the case
-        largest = max(mesh.parts([node.number for node in selected], mesh.paired(selected)),
-                      key=lambda part: (len(part), selected[0].number in part))
+        largest = max(mesh.parts([node.number for node in selected], mesh.paired(selected)), key=len)
         selected = [node for node in selected if node.number in largest]
         result['nodes'] = [node.number for node in selected]
         history = record.get('history', {}).get(tag, [])[-64:]
