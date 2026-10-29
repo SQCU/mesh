@@ -1,6 +1,6 @@
 // torch's allocators and Python's over region leases (ncclMemAlloc), so no tensor and no Python object of a mesh process
-// lies outside the region but its blocks of 513 bytes to 64 KiB: every pymalloc arena is a lease (PyObject_SetArenaAllocator),
-// every raw block of 64 KiB or more is one (PyMem_SetAllocator, PYMEM_DOMAIN_RAW); every CPU
+// lies outside the region but its blocks of 513 bytes to 16 KiB: every pymalloc arena is a lease (PyObject_SetArenaAllocator),
+// every raw block of a region page (16 KiB) or more is one (PyMem_SetAllocator, PYMEM_DOMAIN_RAW); every CPU
 // tensor is a lease, its DataPtr the lease's address, returned (ncclMemFree) when its storage is released; every MPS
 // tensor is a lease, its DataPtr the lease's no-copy MTLBuffer.  Torch 2.14 has no MPS allocator hook, so this one is constructed in place over the fixed instance
 // at::mps::getIMPSAllocator(), whose 16 bytes are kept as the delegate for pointers it did not make.  A block let go
@@ -15,6 +15,7 @@
 #include <c10/util/Exception.h>
 #include <cstring>
 #include <malloc/malloc.h>
+#include <unistd.h>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -118,10 +119,11 @@ void arena_return(void *, void *memory, size_t bytes) {
   else pythons_.free(pythons_.ctx, memory, bytes);
 }
 
-// Python's raw domain (the interpreter's own blocks, and pymalloc's above 512 bytes): a block of four region pages or more
-// is a lease, so rounding to whole pages costs it at most a quarter; a smaller one is the previous allocator's.  A realloc
-// across the line moves the block, the previous allocator's size its malloc_size.
-constexpr size_t LARGE_BLOCK = 64 << 10;
+// Python's raw domain (the interpreter's own blocks, and pymalloc's above 512 bytes): a block of a region page or more is a
+// lease (rounding to whole pages at most doubles one just past a page, and finding or returning a lease is one page
+// index's load: nccl-mesh.c lease_at); a smaller one is the previous allocator's.  A realloc across the line moves the
+// block, the previous allocator's size its malloc_size.
+const size_t LARGE_BLOCK = (size_t)getpagesize();
 PyMemAllocatorEx raws_;
 auto *blocks_ = new std::unordered_map<void *, size_t>;
 void *block_lease(size_t bytes) {

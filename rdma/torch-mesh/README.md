@@ -56,9 +56,9 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   bridge's region (`torch_mesh.empty`). A program's CPU tensor in the region is
   `torch_mesh.empty(shape, dtype=..., device="cpu")`.
 - Region Python objects: pymalloc's arenas, which hold every Python object of 512 bytes or less, are leases
-  (`PyObject_SetArenaAllocator`, as `_stream` loads), returned when emptied, and so is every raw block of 64 KiB or more
+  (`PyObject_SetArenaAllocator`, as `_stream` loads), returned when emptied, and so is every raw block of a region page (16 KiB) or more
   (`PyMem_SetAllocator`, `PYMEM_DOMAIN_RAW`: large lists, dicts, bytes), which a realloc across that size moves. Blocks
-  of 513 bytes to 64 KiB, and what was made before the load, stay with the allocator that made them.
+  of 513 bytes to 16 KiB, and what was made before the load, stay with the allocator that made them.
 - Region CPU tensors: every CPU tensor's bytes are a lease's pages, `torch_mesh.empty(shape, dtype=..., device="cpu")`
   and torch's own alike. `_stream` makes torch's CPU allocator the region's as it loads (`c10::SetCPUAllocator`, above
   torch's default). A lease the region cannot meet is torch's out-of-memory error, and a tensor's release returns its
