@@ -1096,7 +1096,7 @@ arithmetic; this native Metal boundary has no float64 lowering.
 
 ## Compressed projections
 
-### LiteRT dense constant cuts
+### LiteRT constant cuts
 
 `configs/litert-storage.json` in metal-microbench declares scalar widths, the
 storage word type and the partition grain. `tools/litert_storage.py` consumes
@@ -1106,9 +1106,21 @@ does not round a column boundary down to a byte. Byte-aligned cuts use ordinary
 array slices. Unaligned cuts compose storage words without unpacking the entire
 constant or producing an element-index table.
 
+The same `slice_constant` takes the tensor's sparse storage relation. Traversal
+order, dense dimensions, CSR segments and indices, and block dimensions stay
+with the encoded values throughout a cut. For a cut within a block, the compiler
+uses the greatest block width which divides the old width and both cut
+boundaries. It retains the other block dimensions. It rebuilds sparse relations
+over stored runs, preserving trailing dense values as runs and joining adjacent
+source ranges before copying. It neither expands missing values nor inserts a
+runtime conversion. The storage declaration supplies the permitted index-vector
+types; their required width follows from the emitted metadata. These fields
+follow the [LiteRT schema](https://github.com/google-ai-edge/LiteRT/blob/main/tflite/converter/schema/schema.fbs).
+
 Outer and decomposition graphs use the same `slice_graph` operation for constant
 data, logical shape and quantization fields. A changed constant gets its own
-buffer, and identical cuts share that buffer. Other aliases retain the original
+buffer, and identical cuts share that buffer. The sharing key includes the sparse
+relation, so aliases with different traversal orders remain distinct. Other aliases retain the original
 constant. Graph extraction and slicing share the same buffer collector, so
 unreferenced original constants do not remain in the exported model.
 The former higher-axis and decomposition-constant rejection paths are
@@ -1129,9 +1141,14 @@ bits across axes, odd extents and empty domains. Cut graphs serialized with
 uncut aliases intact; a composite's internal constant was sliced through the
 same operation. A square FFN retained its batch and final output extents while
 cutting its neuron axis and a broadcast scale. No model execution or performance
-measurement ran. This does
-not add sparse-encoding metadata lowering or partition a head's contracted
-channel axis; those remain separate graph-lowering work.
+measurement ran. The later sparse preparation preserved encoded values and
+stored positions across reordered traversal, multiple CSR axes, empty cuts and
+both axes of a block. Its billion-row declaration retained one nine-value run
+without constructing coordinates for absent values. FlatBuffer serialization
+retained the revised metadata, and differently interpreted aliases received
+different cuts. No numerical commands ran. Partitioning a head's contracted
+channel axis and selecting providers for their accepted sparse formats remain
+separate graph-lowering work.
 
 ### Encoded numerical operands
 
