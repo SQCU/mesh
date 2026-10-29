@@ -11,9 +11,12 @@ struct MetalTensorSpan { NSInteger offset; NSUInteger count; };
 // Offsets and maps use elements. Buffer binding supplies the element's byte type.
 @interface MetalTensorLayout : NSObject <NSCopying>
 @property(nonatomic, readonly) NSArray<NSNumber *> *shape;
+// Index factors cover the same linear domain as shape. A reshape may change
+// logical axes without changing these factors or the emitted address formula.
+// Strides and maps describe indexShape; affine layouts have shape == indexShape.
+@property(nonatomic, readonly) NSArray<NSNumber *> *indexShape;
 @property(nonatomic, readonly) NSArray<NSNumber *> *strides;
 @property(nonatomic, readonly) NSDictionary<NSNumber *, NSData *> *maps;
-@property(nonatomic, readonly, nullable) NSData *indices;
 @property(nonatomic, readonly) NSInteger offset;
 @property(nonatomic, readonly) NSUInteger count;
 @property(nonatomic, readonly) BOOL affine;

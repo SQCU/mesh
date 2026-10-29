@@ -46,7 +46,8 @@ and Python `operand.TensorView` use this preparation type. Logical shape is
 distinct from an allocation's capacity or an encoding block. Shape, element
 type, storage placement and access relations travel together through lowering.
 
-Strides, axis maps and joint maps describe the same kind of view. Slice,
+Strides, axis maps and joint maps describe the same kind of view. A joint
+table becomes one index factor; it has no separate storage or emission path. Slice,
 selection, permutation, reshape and gather compose those relations before
 execution. Results retain no parent descriptors. Component views subdivide
 typed elements for byte-preserving copies. Known maps simplify to arithmetic
@@ -59,12 +60,21 @@ numerical work; a layout change cannot stand in for it.
 
 ### Compact reshapes and aliases
 
-Reshaping a non-contiguous view no longer expands every element when its
-existing factors suffice. Adjacent affine axes form linear runs, including
+`shape` describes logical axes. `indexShape`, strides and maps describe the
+factors of its flat index domain. Both shapes have the same element count.
+A reshape changes the logical axes and retains the factors when they do not
+separate along the new axes. It adds no map entries or parent descriptor.
+Numerical indexing and dependency records consume those same factors.
+
+Adjacent affine axes form linear runs, including
 negative and zero strides. New axes split those runs. An axis map stays one
 map when only singleton axes change, and splits into smaller maps when its
 values separate across the new axes. The surrounding rows add no index words.
 These are normal forms of `MetalTensorLayout`; callers use the same interface.
+Component-byte views scale the factors and append a component axis. Removing
+that axis restores the typed view without repeating each scalar's map entries.
+Axis removal uses the shared reshape operation; logical axis numbers do not
+index address factors after a nonseparable reshape.
 
 Rebasing a shape alias applies that reshape to its assigned pages. Affine
 subviews use the declared coordinate basis and its bounds to compose their
@@ -81,9 +91,18 @@ These descriptors allocated no tensor payload. Complete mapped reduction and
 gradient graphs prepared; native rank and Goal A built. No numerical commands
 were submitted and no throughput or latency improvement is claimed here.
 
-Nonseparable joint maps can still require a table over the complete logical
-extent. Compact representation for those compositions remains unfinished, as
-does the distributed ownership gap described under exact partition boundaries.
+The later 2026-10-28 pass retained six nonseparable map entries for that same
+2,061,584,302,080-element domain after changing its logical axes. Serialization,
+component-byte round trips and whole-view alias placement preserved the source
+index expression. Python, Swift and LiteRT declarations carry the same index
+factors. The LiteRT importer compiled the same compact declaration. Shared
+library, frontend and native builds completed; no numerical commands ran.
+
+General changed-axis selections, permutations and alias compositions can still
+materialize tables over their result domain. Their compact composition remains
+unfinished, as does the distributed ownership gap under exact partition
+boundaries. An irreducible table supplied by a caller still occupies its own
+domain; reshaping it no longer duplicates that table.
 
 ## Place values for their consumers
 
