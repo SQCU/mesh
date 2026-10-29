@@ -666,19 +666,26 @@ static NSData *MetalCommandReaches(const struct MetalRecordedDispatch *command,c
 @end
 static char queueAccessKey,encoderAccessKey;
 
+// An allocation's spans are kept sorted, disjoint and not touching: an added range finds its place by binary search and
+// merges only the neighbours it meets (lo <= their hi and their lo <= hi), so a segment of many disjoint ranges costs
+// its count's logarithm a range, not a scan of every span (cp's recording, 2026-10-29: 260 s in MetalRangeAdd).
 static void MetalRangeAdd(NSMapTable *map,id allocation,NSUInteger lo,NSUInteger hi) {
     if(lo==hi)return;
     NSMutableData *data=[map objectForKey:allocation];
     if(!data){data=[NSMutableData data];[map setObject:data forKey:allocation];}
+    const NSUInteger n=data.length/sizeof(struct MetalSpan);
     struct MetalSpan *spans=data.mutableBytes;
-    for(NSUInteger i=0;i<data.length/sizeof(*spans);) {
-        if(spans[i].lo<=hi&&lo<=spans[i].hi) {
-            lo=MIN(lo,spans[i].lo);hi=MAX(hi,spans[i].hi);
-            spans[i]=spans[data.length/sizeof(*spans)-1];data.length-=sizeof(*spans);
-            spans=data.mutableBytes;i=0;
-        } else i++;
+    NSUInteger a=0,b=n;
+    while(a<b){const NSUInteger m=a+(b-a)/2;if(spans[m].hi<lo)a=m+1;else b=m;}
+    NSUInteger e=a;
+    while(e<n&&spans[e].lo<=hi){lo=MIN(lo,spans[e].lo);hi=MAX(hi,spans[e].hi);e++;}
+    const struct MetalSpan span={lo,hi,0};
+    if(e==a) {
+        [data increaseLengthBy:sizeof span];spans=data.mutableBytes;
+        memmove(spans+a+1,spans+a,(n-a)*sizeof *spans);spans[a]=span;
+    } else {
+        spans[a]=span;memmove(spans+a+1,spans+e,(n-e)*sizeof *spans);data.length=(n-(e-a-1))*sizeof *spans;
     }
-    const struct MetalSpan span={lo,hi,0};[data appendBytes:&span length:sizeof span];
 }
 
 static void MetalRangesMerge(NSMapTable *into,NSMapTable *from) {
