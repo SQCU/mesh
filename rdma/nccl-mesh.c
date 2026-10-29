@@ -3500,6 +3500,15 @@ static void commit_group(struct ncclComm *comm, const struct schedule *plans) {
   }
 }
 
+/* a batch of the buffers a group's entries use (metal_uses), consecutive repeats dropped: a group's entries name a
+   few buffers (slot, send, receive), so its uses are a call per batch of distinct buffers, not one per entry */
+struct uses { void *buffers[64]; size_t n; };
+static void uses_add(struct metal_program *program, struct uses *batch, void *buffer, int write) {
+  if (batch->n && batch->buffers[batch->n - 1] == buffer) return;
+  if (batch->n == sizeof batch->buffers / sizeof *batch->buffers) { metal_uses(program, batch->buffers, batch->n, write); batch->n = 0; }
+  batch->buffers[batch->n++] = buffer;
+}
+
 /* the group's laid and placed entries (issue_bind) bound on each channel from its last scheduled entry and page
    (schedule_laid), its landings gated (gate_of, *gate whether its first dispatch stores the communicator's gate),
    presented (present_group) and counted (commit_group); a failure
@@ -3957,13 +3966,9 @@ static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm
                  "a fused publication's record");
     fusing.published += !result;
   } else if (!g->fused) {
-    void *operands[64];
-    size_t n = 0;
-    for (uint64_t at = ch->published; at < upto; at++) {
-      if (n == sizeof operands / sizeof *operands) { metal_uses(program, operands, n, 0); n = 0; }
-      operands[n++] = out_at(inflight_at(comm, h, 0, at), h, at)->data.buffer;
-    }
-    metal_uses(program, operands, n, 0);
+    struct uses batch = {0};
+    for (uint64_t at = ch->published; at < upto; at++) uses_add(program, &batch, out_at(inflight_at(comm, h, 0, at), h, at)->data.buffer, 0);
+    metal_uses(program, batch.buffers, batch.n, 0);
     result = gpu(metal_publish(program, &release), "a publication");
   }
   if (!result) { ch->published = upto; *published = 1; }
@@ -4621,8 +4626,11 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
                              from.buffer, from.offset, c->receive_views?length*z:bytes), "a scratch copy");
     }
   }
-  for (uint32_t h = 0; !result && gate && g && h < comm->count; h++)
-    for (size_t k = 0; k < g->plans[h].ins; k++) metal_uses(program, &g->plans[h].in[k].data.buffer, 1, 1);
+  for (uint32_t h = 0; !result && gate && g && h < comm->count; h++) {
+    struct uses batch = {0};
+    for (size_t k = 0; k < g->plans[h].ins; k++) uses_add(program, &batch, g->plans[h].in[k].data.buffer, 1);
+    metal_uses(program, batch.buffers, batch.n, 1);
+  }
   if (!result && gate) result = gpu(metal_open_gate(program, comm->gate, 0, comm->gates), "the group's gate");
   if (!result && g) {
     uint32_t lands = 0, publishes = 0;
