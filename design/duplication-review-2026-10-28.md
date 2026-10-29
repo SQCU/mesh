@@ -27,6 +27,19 @@ Later the same night:
   partition's declared configuration transfers (`_configuration_exchange`: `group.configuration` declares the call,
   then `dist.scatter`/`dist.all_to_all_single` issues it). They go when those transfers become prepared plans.
 
+On 2026-10-29:
+- Within 4, two forms of lease retention, landed. An issue holds its leases from its placement (c05241a8), and every
+  prepared owner uses one form, struct owned (92661101). A present registers nothing.
+- A byte's lease is its arena page's entry, and a freed lease is given back without a scan (517ad9e0).
+- Across 4, relay landings, is next. The plan:
+  - a rank that is neither endpoint passes an empty page table, its communicator's, meaning the library chooses;
+  - write_prepare decides from the installed paths (ncclMeshCommWritePaths: weight > 0 through this rank), before the
+    binding exchange, whether this rank forwards anything;
+  - if it does, it leases the compact relay itself (bytes x max(repeats, instances), pitch row_bytes) and reports that
+    relay's phase;
+  - the plan holds the relay with its owned form, and write_plan_drop frees it after owned_end;
+  - the five frontends listed under across 4 stop allocating relays.
+
 Considered and not landed: within 7 (one WRITE compile: it saved no compiles), within 8's operands_check (it catches
 a returned lease at issue), within 12's write_call (definition and issue differ on tile_bytes), within 17–19 (code
 shape only).
