@@ -2817,8 +2817,12 @@ static size_t call_segments(const struct call *c) {
   return counted(c) ? 2 * n : c->what == MESH_ALLGATHER || c->what == MESH_REDUCE_SCATTER ? n : 0;
 }
 /* whether issued call c is the call declared as d: its kind, type, operator, root, target and counts (a call that
-   holds none has equal ones, `count` each: enqueue_counts) */
+   holds none has equal ones, `count` each: enqueue_counts); a WRITE its bytes */
 static int declared_as(const struct call *c, const struct call *d) {
+  /* a WRITE moves bytes: a view binds them as ncclUint8 (mesh_compile_view), its declaration may count them in the
+     tensor's own type */
+  if (c->target || d->target)
+    return c->what == d->what && c->root == d->root && c->target == d->target && c->count * SIZE[c->type] == d->count * SIZE[d->type];
   if (c->what != d->what || c->type != d->type || c->op != d->op || c->root != d->root || c->target != d->target) return 0;
   if (!counted(d) && c->count != d->count) return 0;
   for (size_t k = 0, v = call_segments(d); k < v && (c->segments || d->segments); k++)
@@ -5460,12 +5464,19 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
   atomic_fetch_add(&comm->runs, 1);
   comm->until = mesh_deadline("libnccl-mesh: configuration-time write binding metadata", MESH_PREPARATION_NS);
   int error = prepare_exchange_locked(comm, &local, sizeof local, reports);
+  /* every rank binds the same logical write: the first report field a rank differs on, its value and this rank's */
+  static const char *const named[] = {"bytes", "count", "packet", "repeats", "type", "source", "destination", "tile bytes", "invocations"};
+  int differs = -1, differing = 0;
+  uint64_t theirs = 0, ours = 0;
   for (int r = 0; r < comm->nranks && !error; r++) {
     const struct write_binding_report *p = reports + r;
+    const uint64_t a[] = {p->bytes, p->count, p->packet, p->repeats, p->type, p->source, p->destination, p->layout.tile_bytes,
+                          p->layout.invocations},
+                   b[] = {local.bytes, local.count, local.packet, local.repeats, local.type, local.source, local.destination,
+                          local.layout.tile_bytes, local.layout.invocations};
     error = p->status;
-    if (!error && (p->bytes != local.bytes || p->count != local.count || p->packet != local.packet ||
-        p->repeats != local.repeats || p->type != local.type || p->source != local.source || p->destination != local.destination ||
-        p->layout.tile_bytes != local.layout.tile_bytes || p->layout.invocations != local.layout.invocations)) error = EPROTO;
+    for (int f = 0; !error && f < (int)(sizeof a / sizeof *a); f++)
+      if (a[f] != b[f]) { error = EPROTO; differs = f; differing = r; theirs = a[f]; ours = b[f]; }
     strides[r] = p->stride;
   }
   size_t most = 0;
@@ -5514,6 +5525,9 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
   }
   free(reports); free(phases); free(strides); free(all_views); free(local_views);
   if (error) { write_packets_free(plan); free(plan->view); free(plan->view_first); free(plan);
+    if (differs >= 0)
+      return fail(ncclInvalidUsage, "preparing exact-byte write bindings: rank %d's %s %llu is not rank %d's %llu (every rank binds "
+                  "the same logical write)", differing, named[differs], (unsigned long long)theirs, comm->rank, (unsigned long long)ours);
     return fail(ncclInvalidUsage, "preparing exact-byte write bindings: %s", strerror(error)); }
   atomic_init(&plan->refs, 1);
   plan->layout = layout;
