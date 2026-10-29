@@ -52,6 +52,17 @@
       "memory_gib": 96,
       "roles": ["compute", "headless"],
       "guard_headroom_gib": 1.25
+    },
+    "BC53501D-2E24-5389-96BB-46AFE7D55F1B": {
+      "name": "m5ult4",
+      "model": "Mac17,15",
+      "serial": "PW49RQ6Q0R",
+      "node": 371057962,
+      "management": "100.107.135.46",
+      "fabric": "fd6d:6573:68:5e3b:7204:7848:33de:3c6a",
+      "memory_gib": 96,
+      "roles": ["compute", "headless"],
+      "guard_headroom_gib": 1.25
     }
   }
 }

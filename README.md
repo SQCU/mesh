@@ -59,14 +59,30 @@ Hands-on, once, ~5 minutes:
    every boot waits at a keyboard) and Activation Lock disabled.
 2. **Recovery**: power held → Terminal → `rdma_ctl enable` → reboot. This writes
    `rdma-enable=1` to NVRAM, which then persists.
-3. **Bootstrap**, in Terminal:
+3. **Bootstrap**, in Terminal. Cabled by Thunderbolt to a node of the mesh, with
+   `bin/mesh-serve-bootstrap.sh` running on that node:
+
+   ```
+   curl m.local|sh
+   ```
+
+   It asks for the account's password once. The node serves `bootstrap.sh` over the
+   cable alone, as the mDNS name `m.local`, until the script is stopped; it finds the
+   port by the new Mac's link-local address, which is not the EUI-64 one
+   `mesh-fabric-init` gives a node. With no cable to a node, the same script comes
+   from GitHub:
 
    ```
    curl -fsSL https://raw.githubusercontent.com/SQCU/mesh/main/bootstrap.sh | sudo bash
    ```
 
-   This opens sshd *first*, then fetches and runs `install.sh`; port 22 answers
-   from then on.
+   Either way it opens sshd *first*, then fetches and runs `install.sh`; port 22
+   answers from then on.
+
+   Leave the account logged in at the screen until the bridge has first run. Where
+   Local Network privacy holds the bridge's job, a dialog then asks to allow
+   `mesh-heartbeat`, and a logout before it is answered records a refusal
+   (NODE-STANDUPS.md, 2026-10-28).
 
 Everything after that is remote: `ssh node.local` and a rerun of `sudo install.sh`.
 
@@ -393,6 +409,7 @@ the node's uplink.
 |---|---|
 | `install.sh` | provision/converge a node, run by hand. Idempotent — re-running is the drift fix, and nothing reruns it. Each run sets the power policy, the firewall, sshd, screen sharing and NTP, runs the networks, fabric and tailnet inits and the health report, loads every unloaded `io.mesh.*` system daemon (one whose userspace provider runs excepted) and the admin user's LaunchAgents that declare the Background session type (into user/<uid>), and starts the beacon, telemetry and the observer where they are not running. It deletes `io.mesh.update`, `io.mesh.keeper`, `io.mesh.cartlane.learner` and `io.mesh.cartlane.viewer` where they remain, the update's bootout last since that job may be the run's own parent. It runs with root's home: macOS `sudo` keeps the caller's `HOME`, so the first hand-run install on the M5 Ultra Studio (2026-10-21) left uv's cache, Pythons and receipt root-owned in the admin's home, and the admin's own build (`mesh-user.sh`) could not open them. |
 | `bootstrap.sh` | one-shot entry for the physical visit. Opens sshd, then runs `install.sh`. |
+| `bin/mesh-serve-bootstrap.sh` | run by hand on a node with a new Mac on its cable: serves `bootstrap.sh` on that cable's link-local address as `m.local` (an mDNS proxy record) until stopped, so the new Mac's Terminal takes `curl m.local\|sh`. No launchd job runs it. |
 | `enable-autologin.sh` | boot into a GUI session so session-bound workloads survive a reboot. |
 | `CLAUDE.md` | where to start: `design/rubric-actionable.md`, then `THREAT-MODEL.md` and `INDEX.md`. |
 | `INDEX.md` | the documents that describe the current system, each with a short note. |
@@ -408,7 +425,7 @@ the node's uplink.
 | `bin/mesh-router-init.sh` | identity `/128` on each fabric port, babeld across every fabric port. Resident; launchd restarts it. |
 | `vendor/babeld-arm64` | prebuilt Babel daemon, so a node needs no toolchain. Provenance in `vendor/PROVENANCE.md`. |
 | `bin/mesh-nodeinfo.sh` | the node's identity, facts and topology, run by the node's resident rank for a `{"facts"}` request (metal-microbench docs/elastic.md#call-delivery). |
-| `bin/mesh-launchd-agent.sh` | `mesh-launchd-agent.sh NEW [DOMAIN [PLIST]]` puts a launchd job's definition NEW in place as PLIST (default NEW without `.new`) and loads the job in DOMAIN (default the user's background domain user/<uid>, which Local Network privacy does not hold) where it is not loaded (`launchctl print`, else `launchctl list` where print refuses a user domain); a definition that does not parse is refused. A loaded job is left running: launchd removes a booted-out service only some time after its process exits, with no event, so replacing a loaded definition races by construction, and nothing does it. A definition never changes with what its job runs (no digest, nothing derived from binaries or configuration), so a changed one is the repo's own edit, in place for the job's next load (login or boot), and said so. **launchd.** No job runs on a schedule. The router and the tailnet's `tailscaled` are KeepAlive with `ThrottleInterval` 1 (launchd starts one again at once after an exit, at most once a second; its default is 10); the beacon, telemetry and the observer run from their load (`RunAtLoad`), once a boot, and launchd does not start one again after an exit (`install.sh` starts one that is not running); the bridge's is its own: its job runs its heartbeat (`ThrottleInterval` 60,
+| `bin/mesh-launchd-agent.sh` | `mesh-launchd-agent.sh NEW [DOMAIN [PLIST]]` puts a launchd job's definition NEW in place as PLIST (default NEW without `.new`) and loads the job in DOMAIN (default the user's background domain user/<uid>, which Local Network privacy can hold too: where it does, the bridge's sends to its cables fail with EHOSTUNREACH until someone logged in at the node's screen allows `mesh-heartbeat` once, in its dialog or in System Settings, Privacy & Security, Local Network, and SIP keeps that decision from root; which nodes it held is in NODE-STANDUPS.md) where it is not loaded (`launchctl print`, else `launchctl list` where print refuses a user domain); a definition that does not parse is refused. A loaded job is left running: launchd removes a booted-out service only some time after its process exits, with no event, so replacing a loaded definition races by construction, and nothing does it. A definition never changes with what its job runs (no digest, nothing derived from binaries or configuration), so a changed one is the repo's own edit, in place for the job's next load (login or boot), and said so. **launchd.** No job runs on a schedule. The router and the tailnet's `tailscaled` are KeepAlive with `ThrottleInterval` 1 (launchd starts one again at once after an exit, at most once a second; its default is 10); the beacon, telemetry and the observer run from their load (`RunAtLoad`), once a boot, and launchd does not start one again after an exit (`install.sh` starts one that is not running); the bridge's is its own: its job runs its heartbeat (`ThrottleInterval` 60,
 KeepAlive {SuccessfulExit: false}), which restarts the bridge, and itself, on a deploy's SIGHUP (design/transport.md
 section 2). The beacon, the router, telemetry and the observer take a new program by `install.sh`'s `launchctl kickstart -k` (launchd's own restart of an unchanged definition) where their programs, or the documents telemetry and the observer read at their start, changed (`install-user.sh`'s for a userspace provider); an edit to a node's `observer.json` takes effect at the observer's next start (`sudo launchctl kickstart -k system/io.mesh.observer`). The bridge's `ExitTimeOut` is 60, the longest launchd gives a stop at logout or shutdown before its SIGKILL; the heartbeat
 ends when its bridge has ended after its SIGTERM, and expires the region (ASKED_END): the bridge's stop has no wait, and
