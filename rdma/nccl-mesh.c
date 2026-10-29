@@ -2281,6 +2281,16 @@ static void steps_rebind(struct steps *s) {
   memset(s->consumption, 0, most * sizeof *s->consumption);
 }
 
+/* a call's steps, `initial` with each per-step array made for `room` steps; NULL where memory runs out */
+static struct steps *steps_make(size_t room, struct steps initial) {
+  struct steps *s = calloc(1, sizeof *s);
+  if (s) *s = initial;
+  if (s && (s->steps = calloc(room, sizeof *s->steps)) && (s->done = calloc(room, 1)) && (s->channel = calloc(room, sizeof *s->channel)) &&
+      (s->entry = calloc(room, sizeof *s->entry)) && (s->cable = calloc(room, sizeof *s->cable)) &&
+      (s->consumption = calloc(room, sizeof *s->consumption)) && (s->prior_first = calloc(room, sizeof *s->prior_first))) return s;
+  steps_free(s);
+  return NULL;
+}
 /* design/whole-function.md#one-way-writes */
 static ncclResult_t write_steps(struct call *c) {
   struct ncclComm *comm = c->comm;
@@ -2290,15 +2300,10 @@ static ncclResult_t write_steps(struct call *c) {
     paths, operand, comm->page, c->tile_bytes / SIZE[c->type], NULL, 0);
   if (count < 0) return fail(ncclInvalidUsage, "one-way write requires its compiled physical paths: %s", strerror(-count));
   const size_t room = (size_t)count + 1;
-  struct steps *s = calloc(1, sizeof *s);
+  struct steps *s = steps_make(room, (struct steps){.references = 1, .count = (uint32_t)count, .buffers = 1, .initialized = 1});
   struct mesh_transfer *transfers = malloc(room * sizeof *transfers);
   uint32_t *received=malloc(room*sizeof *received);
-  if (s) *s = (struct steps){.references = 1, .count = (uint32_t)count, .buffers = 1, .initialized = 1};
-  if (!s || !transfers || !received || !(s->steps = calloc(room, sizeof *s->steps)) || !(s->done = calloc(room, 1)) ||
-      !(s->channel = calloc(room, sizeof *s->channel)) || !(s->entry = calloc(room, sizeof *s->entry)) ||
-      !(s->cable = calloc(room, sizeof *s->cable)) || !(s->consumption = calloc(room, sizeof *s->consumption)) ||
-      !(s->prior_first = calloc(room, sizeof *s->prior_first)) ||
-      !(s->prior = malloc(room*sizeof *s->prior)) || !(s->extent = calloc(2, sizeof *s->extent))) {
+  if (!s || !transfers || !received || !(s->prior = malloc(room*sizeof *s->prior)) || !(s->extent = calloc(2, sizeof *s->extent))) {
     steps_free(s); free(transfers); free(received); return fail(ncclSystemError, "out of memory");
   }
   const int made = mesh_write_compile(&comm->fabric, (uint32_t)comm->rank, (uint32_t)c->root, (uint32_t)c->target - 1,
@@ -2351,19 +2356,14 @@ static ncclResult_t bind_routed_steps(struct call *c, const uint32_t *first, con
   if (!result) {
     struct mesh_routed_rank *rank = physical.rank + comm->rank;
     const size_t room = (size_t)rank->count + 1;
-    struct steps *s = calloc(1, sizeof *s);
-    if (s) *s = (struct steps){.references = 1, .count = rank->count, .buffers = rank->buffers, .initialized = rank->initialized};
+    struct steps *s = steps_make(room, (struct steps){.references = 1, .count = rank->count, .buffers = rank->buffers, .initialized = rank->initialized});
     uint32_t *consume = rank->consume ? realloc(rank->consume, room * sizeof *consume) : NULL;
     if (consume) rank->consume = consume;
     uint32_t *retired_first = rank->retired_first ? realloc(rank->retired_first, room * sizeof *retired_first) : NULL;
     if (retired_first) rank->retired_first = retired_first;
     uint64_t *extent = realloc(rank->extent, ((size_t)rank->buffers + 1) * sizeof *extent);
     if (extent) rank->extent = extent;
-    if (!s || !(s->steps = calloc(room, sizeof *s->steps)) || !(s->done = calloc(room, 1)) ||
-        !(s->channel = calloc(room, sizeof *s->channel)) || !(s->entry = calloc(room, sizeof *s->entry)) ||
-        !(s->cable = calloc(room, sizeof *s->cable)) || !(s->consumption = calloc(room, sizeof *s->consumption)) ||
-        !(s->prior_first = calloc(room, sizeof *s->prior_first)) || !extent || (rank->consume && !consume) ||
-        (rank->retired_first && !retired_first)) {
+    if (!s || !extent || (rank->consume && !consume) || (rank->retired_first && !retired_first)) {
       steps_free(s); result = fail(ncclSystemError, "out of memory");
     } else {
       s->extent = rank->extent; rank->extent = NULL;
