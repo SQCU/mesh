@@ -1728,6 +1728,18 @@ static bool completed(pybind11::object observation) {
 
 // The module: prepared functions, their collectives (Collectives, ViewWrites) and fused crossings; no collective is
 // issued at a call (design/eager-execution.md).
+// Every call from Python drains the autorelease pool it pushed: Python's thread has no run loop, so an object
+// autoreleased with no pool of its own goes to the thread's implicit pool, which is popped only at the thread's end, and
+// lives, outside the region, for the process's life (2026-10-29: 600,000 such objects in a chain rank on m5ult1).
+extern "C" void *objc_autoreleasePoolPush(void);
+extern "C" void objc_autoreleasePoolPop(void *);
+struct Drained {
+  void *pool = objc_autoreleasePoolPush();
+  Drained() = default;
+  Drained(const Drained &) = delete;
+  ~Drained() { objc_autoreleasePoolPop(pool); }
+};
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   install_region_allocator();
   module.def("place_layout",[](NSUInteger count,const std::vector<TensorLayout> &uses,
@@ -1739,24 +1751,24 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
       MetalTensorLayout *placed=MetalTensorPlace(count,layouts(uses),layouts(targets),layouts(values),tensorNumbers(widths));
       return placed?pybind11::cast(TensorLayout(placed)):pybind11::none();
     } @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
-  });
-  module.def("import_attributes",&import_attributes);
-  module.def("completion", &completion);
-  module.def("completed", &completed);
-  module.def("pipeline", &pipeline);
-  module.def("pipeline_specialized", &pipeline_specialized);
-  module.def("index_constant_prelude", [](){return std::string(MetalViewIndexConstantPrelude().UTF8String);});
+  }, pybind11::call_guard<Drained>());
+  module.def("import_attributes",&import_attributes, pybind11::call_guard<Drained>());
+  module.def("completion", &completion, pybind11::call_guard<Drained>());
+  module.def("completed", &completed, pybind11::call_guard<Drained>());
+  module.def("pipeline", &pipeline, pybind11::call_guard<Drained>());
+  module.def("pipeline_specialized", &pipeline_specialized, pybind11::call_guard<Drained>());
+  module.def("index_constant_prelude", [](){return std::string(MetalViewIndexConstantPrelude().UTF8String);}, pybind11::call_guard<Drained>());
   pybind11::class_<TensorTraversal>(module,"TensorTraversal")
-    .def(pybind11::init<const std::vector<TensorLayout> &,const std::vector<std::pair<NSUInteger,NSUInteger>> &>())
+    .def(pybind11::init<const std::vector<TensorLayout> &,const std::vector<std::pair<NSUInteger,NSUInteger>> &>(), pybind11::call_guard<Drained>())
     .def_property_readonly("cuts",[](const TensorTraversal &v){return tensorNumbers(v.value.cuts);})
     .def("fragment",[](const TensorTraversal &v,NSUInteger first,NSUInteger end){
       @try { auto f=[v.value fragment:first end:end];return std::make_tuple(f.part,f.offset,f.count); }
       @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
-    });
+    }, pybind11::call_guard<Drained>());
   pybind11::class_<TensorLayout>(module,"TensorLayout")
     .def(pybind11::init(&TensorLayout::make),pybind11::arg("shape"),pybind11::arg("strides"),pybind11::arg("offset")=0,
          pybind11::arg("maps")=std::map<NSUInteger,std::vector<NSInteger>>{},pybind11::arg("indices")=pybind11::none(),
-         pybind11::arg("index_shape")=pybind11::none(),pybind11::arg("index_coordinates")=pybind11::none())
+         pybind11::arg("index_shape")=pybind11::none(),pybind11::arg("index_coordinates")=pybind11::none(), pybind11::call_guard<Drained>())
     .def_property_readonly("shape",[](const TensorLayout &v){return tensorNumbers(v.value.shape);})
     .def_property_readonly("index_shape",[](const TensorLayout &v){return tensorNumbers(v.value.indexShape);})
     .def_property_readonly("strides",[](const TensorLayout &v){return tensorNumbers(v.value.strides);})
@@ -1770,60 +1782,60 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
       return pybind11::make_tuple(tensorNumbers(v.value.shape),tensorNumbers(v.value.strides),v.value.offset,maps,
           tensorNumbers(v.value.indexShape),std::string((const char *)data.bytes,data.length));
     })
-    .def("index",[](const TensorLayout &v,NSUInteger i){return [v.value index:i];})
-    .def("equivalent",[](const TensorLayout &v,const TensorLayout &other){return bool([v.value equivalent:other.value]);})
-    .def("select",[](const TensorLayout &v,NSUInteger axis,const std::vector<NSInteger> &indices){return TensorLayout([v.value select:axis indices:tensorWords(indices)]);})
+    .def("index",[](const TensorLayout &v,NSUInteger i){return [v.value index:i];}, pybind11::call_guard<Drained>())
+    .def("equivalent",[](const TensorLayout &v,const TensorLayout &other){return bool([v.value equivalent:other.value]);}, pybind11::call_guard<Drained>())
+    .def("select",[](const TensorLayout &v,NSUInteger axis,const std::vector<NSInteger> &indices){return TensorLayout([v.value select:axis indices:tensorWords(indices)]);}, pybind11::call_guard<Drained>())
     .def("select_runs",[](const TensorLayout &v,NSUInteger axis,const std::vector<std::vector<NSInteger>> &runs){
       NSMutableArray *parts=[NSMutableArray array];for(const auto &run:runs)[parts addObject:tensorNumbers(run)];
       return TensorLayout([v.value select:axis runs:parts]);
-    })
-    .def("slice",[](const TensorLayout &v,NSUInteger axis,NSInteger first,NSUInteger count,NSInteger step){return TensorLayout([v.value slice:axis first:first count:count step:step]);})
-    .def("element",[](const TensorLayout &v,NSUInteger axis,NSUInteger i){return TensorLayout([v.value element:axis at:i]);})
-    .def("permute",[](const TensorLayout &v,const std::vector<NSInteger> &axes){return TensorLayout([v.value permute:tensorNumbers(axes)]);})
-    .def("reshape",[](const TensorLayout &v,const std::vector<NSInteger> &shape){return TensorLayout([v.value reshape:tensorNumbers(shape)]);})
-    .def("components",[](const TensorLayout &v,NSUInteger count){return TensorLayout([v.value components:count]);})
-    .def("elements",[](const TensorLayout &v,NSUInteger count){return TensorLayout([v.value elements:count]);})
-    .def("gather",[](const TensorLayout &v,const std::vector<NSInteger> &shape,const std::vector<NSInteger> &indices){return TensorLayout([v.value gather:tensorNumbers(shape) indices:tensorWords(indices)]);})
+    }, pybind11::call_guard<Drained>())
+    .def("slice",[](const TensorLayout &v,NSUInteger axis,NSInteger first,NSUInteger count,NSInteger step){return TensorLayout([v.value slice:axis first:first count:count step:step]);}, pybind11::call_guard<Drained>())
+    .def("element",[](const TensorLayout &v,NSUInteger axis,NSUInteger i){return TensorLayout([v.value element:axis at:i]);}, pybind11::call_guard<Drained>())
+    .def("permute",[](const TensorLayout &v,const std::vector<NSInteger> &axes){return TensorLayout([v.value permute:tensorNumbers(axes)]);}, pybind11::call_guard<Drained>())
+    .def("reshape",[](const TensorLayout &v,const std::vector<NSInteger> &shape){return TensorLayout([v.value reshape:tensorNumbers(shape)]);}, pybind11::call_guard<Drained>())
+    .def("components",[](const TensorLayout &v,NSUInteger count){return TensorLayout([v.value components:count]);}, pybind11::call_guard<Drained>())
+    .def("elements",[](const TensorLayout &v,NSUInteger count){return TensorLayout([v.value elements:count]);}, pybind11::call_guard<Drained>())
+    .def("gather",[](const TensorLayout &v,const std::vector<NSInteger> &shape,const std::vector<NSInteger> &indices){return TensorLayout([v.value gather:tensorNumbers(shape) indices:tensorWords(indices)]);}, pybind11::call_guard<Drained>())
     .def("rebase",[](const TensorLayout &v,const TensorLayout &declared,const TensorLayout &placed){
       @try{return TensorLayout([v.value rebase:declared.value onto:placed.value]);}
       @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
-    })
-    .def("matches",[](const TensorLayout &v,const std::vector<NSInteger> &steps){return bool([v.value matches:tensorNumbers(steps)]);})
-    .def("required",[](const TensorLayout &v,const std::string &kind,const std::vector<NSInteger> &steps){return TensorLayout([v.value required:@(kind.c_str()) strides:tensorNumbers(steps)]);},pybind11::arg("kind"),pybind11::arg("strides")=std::vector<NSInteger>{})
+    }, pybind11::call_guard<Drained>())
+    .def("matches",[](const TensorLayout &v,const std::vector<NSInteger> &steps){return bool([v.value matches:tensorNumbers(steps)]);}, pybind11::call_guard<Drained>())
+    .def("required",[](const TensorLayout &v,const std::string &kind,const std::vector<NSInteger> &steps){return TensorLayout([v.value required:@(kind.c_str()) strides:tensorNumbers(steps)]);},pybind11::arg("kind"),pybind11::arg("strides")=std::vector<NSInteger>{}, pybind11::call_guard<Drained>())
     .def("requirements",[](const TensorLayout &v,const std::vector<std::pair<std::string,std::vector<NSInteger>>> &requirements){
       NSMutableArray *values=[NSMutableArray array];
       for(const auto &[kind,steps]:requirements)[values addObject:@{@"kind":@(kind.c_str()),@"strides":tensorNumbers(steps)}];
       @try { return TensorLayout([v.value requirements:values]); }
       @catch(NSException *error){TORCH_CHECK(false,error.reason.UTF8String);}
-    })
-    .def("declaration",[](const TensorLayout &v,NSUInteger binding){return std::string([v.value declaration:binding].UTF8String);})
+    }, pybind11::call_guard<Drained>())
+    .def("declaration",[](const TensorLayout &v,NSUInteger binding){return std::string([v.value declaration:binding].UTF8String);}, pybind11::call_guard<Drained>())
     .def("constants",[](const TensorLayout &v,NSUInteger binding)->pybind11::object{
       NSArray<NSArray<NSNumber *> *> *values=[v.value constants:binding];
       if(!values)return pybind11::none();
       pybind11::list out;
       for(NSArray<NSNumber *> *c in values)out.append(pybind11::make_tuple(c[0].longLongValue,c[1].longLongValue,c[2].longLongValue));
-      return out;})
+      return out;}, pybind11::call_guard<Drained>())
     .def("storage_declaration",[](const TensorLayout &v,NSUInteger binding,const TensorLayout &source){
-      return std::string([v.value declaration:binding fromStorage:source.value].UTF8String);})
+      return std::string([v.value declaration:binding fromStorage:source.value].UTF8String);}, pybind11::call_guard<Drained>())
     .def("ordered_spans",[](const TensorLayout &v){
       NSData *data=[v.value orderedSpans];const auto *spans=(const MetalTensorSpan *)data.bytes;
       std::vector<std::pair<NSInteger,NSUInteger>> result;
       for(NSUInteger i=0;i<data.length/sizeof *spans;i++)result.emplace_back(spans[i].offset,spans[i].count);
       return result;
-    })
+    }, pybind11::call_guard<Drained>())
     .def("spans",[](const TensorLayout &v,NSUInteger bytes){
       NSData *data=[v.value reaches:nil base:0 elementBytes:bytes access:MetalReachRead binding:0];
       const MetalReach *spans=(const MetalReach *)data.bytes;std::vector<std::pair<NSUInteger,NSUInteger>> result;
       for(NSUInteger i=0;i<data.length/sizeof *spans;i++)result.push_back({spans[i].offset,spans[i].length});return result;
-    })
-    .def("__eq__",[](const TensorLayout &v,const TensorLayout &w){return bool([v.value isEqual:w.value]);})
-    .def("__hash__",[](const TensorLayout &v){return v.value.hash;});
-  module.def("operand_layout",[](const pybind11::object &object){return TensorOperand(object).layout;});
+    }, pybind11::call_guard<Drained>())
+    .def("__eq__",[](const TensorLayout &v,const TensorLayout &w){return bool([v.value isEqual:w.value]);}, pybind11::call_guard<Drained>())
+    .def("__hash__",[](const TensorLayout &v){return v.value.hash;}, pybind11::call_guard<Drained>());
+  module.def("operand_layout",[](const pybind11::object &object){return TensorOperand(object).layout;}, pybind11::call_guard<Drained>());
   module.def("same_operand",[](const pybind11::object &left,const pybind11::object &right){
     const TensorOperand a(left),b(right);
     return a.storage.scalar_type()==b.storage.scalar_type()&&a.pages.buffer==b.pages.buffer&&[a.layout.value isEqual:b.layout.value];
-  });
-  module.def("view_prelude", [](){return std::string(MetalViewIndexPrelude().UTF8String);});
+  }, pybind11::call_guard<Drained>());
+  module.def("view_prelude", [](){return std::string(MetalViewIndexPrelude().UTF8String);}, pybind11::call_guard<Drained>());
   auto viewSelection=[](NSDictionary *result) {
     auto values=[](NSData *data) {
       std::vector<int32_t> words(data.length/sizeof(int32_t));
@@ -1834,10 +1846,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   };
   module.def("view_block_slice", [viewSelection](const std::vector<int32_t> &order,NSInteger first,NSInteger end,NSInteger step,NSUInteger block) {
     return viewSelection(MetalViewBlockSlice(order.data(),order.size(),first,end,step,block));
-  });
+  }, pybind11::call_guard<Drained>());
   module.def("view_block_gather", [viewSelection](const std::vector<int32_t> &order,const std::vector<int32_t> &selected,NSUInteger block) {
     return viewSelection(MetalViewBlockGather(order.data(),order.size(),selected.data(),selected.size(),block));
-  });
+  }, pybind11::call_guard<Drained>());
   module.def("view_tiles", [](const std::vector<NSUInteger> &shape,NSUInteger elements) {
     using Tile=std::pair<std::vector<NSUInteger>,std::vector<NSUInteger>>;
     if(shape.empty())return std::vector<Tile>{{{}, {}}};
@@ -1847,88 +1859,88 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     for(size_t i=0;i<data.length/sizeof *words;i+=2*shape.size())
       tiles.push_back({{words+i,words+i+shape.size()},{words+i+shape.size(),words+i+2*shape.size()}});
     return tiles;
-  });
+  }, pybind11::call_guard<Drained>());
   module.def("butterfly_plan", [](NSUInteger width,NSUInteger localElements) {
     NSData *data=MetalButterflyPlan(width,localElements);
     const MetalButterflyStage *stages=(const MetalButterflyStage *)data.bytes;
     std::vector<std::pair<NSUInteger,NSUInteger>> plan;
     for(size_t i=0;i<data.length/sizeof *stages;i++)plan.push_back({stages[i].width,stages[i].step});
     return plan;
-  });
+  }, pybind11::call_guard<Drained>());
   module.def("hadamard_local", [](NSUInteger columns,NSUInteger mix) {
     auto device=at::mps::MPSDevice::getInstance()->device();
     return bool(MetalHadamardLocal(columns,mix,device.maxThreadsPerThreadgroup.width,device.maxThreadgroupMemoryLength));
-  });
+  }, pybind11::call_guard<Drained>());
   module.def("view_index", [](const std::vector<NSUInteger> &shape,const std::vector<NSInteger> &strides,const std::string &index) {
     TORCH_CHECK(shape.size()==strides.size(),"an index view needs one stride per axis");
     return std::string([MetalViewIndexExpression(shape.data(),strides.data(),shape.size(),@(index.c_str())) UTF8String]);
-  });
+  }, pybind11::call_guard<Drained>());
   module.def("index_values", [](NSUInteger binding,const std::vector<NSInteger> &values) {
     return std::string(MetalViewIndexValuesDeclaration(binding,values.data(),values.size()).UTF8String);
-  });
+  }, pybind11::call_guard<Drained>());
   pybind11::dict compilation;
 #define MESH_METAL_VALUE(name, value) compilation[#name] = value;
 #include "metal.def"
 #undef MESH_METAL_VALUE
   compilation["LINEAR_PRODUCTS"] = LINEAR_PRODUCTS;
   module.attr("compilation") = compilation;
-  module.def("linear_source", &linear_source);
-  module.def("linear_groups", &linear_groups);
-  module.def("linear_commands", &linear_commands);
+  module.def("linear_source", &linear_source, pybind11::call_guard<Drained>());
+  module.def("linear_groups", &linear_groups, pybind11::call_guard<Drained>());
+  module.def("linear_commands", &linear_commands, pybind11::call_guard<Drained>());
   pybind11::class_<Commands>(module,"Commands").def(pybind11::init<const std::vector<CommandRecord> &>());
-  module.def("linear_split", &linear_split);
-  module.def("device_facts", &device_facts);
-  module.def("pipeline_facts", &pipeline_facts);
+  module.def("linear_split", &linear_split, pybind11::call_guard<Drained>());
+  module.def("device_facts", &device_facts, pybind11::call_guard<Drained>());
+  module.def("pipeline_facts", &pipeline_facts, pybind11::call_guard<Drained>());
   module.attr("polls") = (int64_t)NCCL_MESH_POLLS;
   module.def("encode", &encode, pybind11::arg("handle"), pybind11::arg("buffers"), pybind11::arg("constants"), pybind11::arg("at"),
-             pybind11::arg("gx"), pybind11::arg("gy"), pybind11::arg("threads"));
-  module.def("attach", &attach);
-  module.def("commit", &commit);
-  module.def("publish_boundary", &publish_boundary);
-  module.def("region_empty", &region_empty);
-  module.def("address", &address);
-  module.def("records", &region_allocations);   // the region tensors' leases live now: each its address and bytes
-  module.def("metal_prelude", &metal_prelude);
-  module.def("fused_maker", &fused_maker);
-  module.def("fused_release", &fused_release);
+             pybind11::arg("gx"), pybind11::arg("gy"), pybind11::arg("threads"), pybind11::call_guard<Drained>());
+  module.def("attach", &attach, pybind11::call_guard<Drained>());
+  module.def("commit", &commit, pybind11::call_guard<Drained>());
+  module.def("publish_boundary", &publish_boundary, pybind11::call_guard<Drained>());
+  module.def("region_empty", &region_empty, pybind11::call_guard<Drained>());
+  module.def("address", &address, pybind11::call_guard<Drained>());
+  module.def("records", &region_allocations, pybind11::call_guard<Drained>());   // the region tensors' leases live now: each its address and bytes
+  module.def("metal_prelude", &metal_prelude, pybind11::call_guard<Drained>());
+  module.def("fused_maker", &fused_maker, pybind11::call_guard<Drained>());
+  module.def("fused_release", &fused_release, pybind11::call_guard<Drained>());
   pybind11::class_<ScheduleBinding>(module,"Schedule")
-    .def(pybind11::init<>())
+    .def(pybind11::init<>(), pybind11::call_guard<Drained>())
     .def("append",[](ScheduleBinding &s,Commands &commands){commands.append(s.schedule.get());
-        s.operands.insert(s.operands.end(),commands.operands.begin(),commands.operands.end());})
-    .def("compute",&ScheduleBinding::compute)
-    .def("writes",&ScheduleBinding::writes)
-    .def("host",&ScheduleBinding::host)
-    .def("finish",&ScheduleBinding::finish)
-    .def("enqueue",&ScheduleBinding::enqueue)
-    .def("completion",&ScheduleBinding::completion);
+        s.operands.insert(s.operands.end(),commands.operands.begin(),commands.operands.end());}, pybind11::call_guard<Drained>())
+    .def("compute",&ScheduleBinding::compute, pybind11::call_guard<Drained>())
+    .def("writes",&ScheduleBinding::writes, pybind11::call_guard<Drained>())
+    .def("host",&ScheduleBinding::host, pybind11::call_guard<Drained>())
+    .def("finish",&ScheduleBinding::finish, pybind11::call_guard<Drained>())
+    .def("enqueue",&ScheduleBinding::enqueue, pybind11::call_guard<Drained>())
+    .def("completion",&ScheduleBinding::completion, pybind11::call_guard<Drained>());
   pybind11::class_<ViewWrites, std::shared_ptr<ViewWrites>>(module, "ViewWrites")
-    .def(pybind11::init<const std::vector<ViewBinding> &, int64_t>())
-    .def("realize", &ViewWrites::realize)
+    .def(pybind11::init<const std::vector<ViewBinding> &, int64_t>(), pybind11::call_guard<Drained>())
+    .def("realize", &ViewWrites::realize, pybind11::call_guard<Drained>())
     .def("append",[](ViewWrites &w,ScheduleBinding &s){w.append(s.schedule.get());
-        s.operands.insert(s.operands.end(),w.leases.begin(),w.leases.end());})
-    .def("completion", &ViewWrites::completion)
-    .def("enqueue", &ViewWrites::enqueue);
+        s.operands.insert(s.operands.end(),w.leases.begin(),w.leases.end());}, pybind11::call_guard<Drained>())
+    .def("completion", &ViewWrites::completion, pybind11::call_guard<Drained>())
+    .def("enqueue", &ViewWrites::enqueue, pybind11::call_guard<Drained>());
   pybind11::class_<Collectives, std::shared_ptr<Collectives>>(module, "Collectives")
     .def(pybind11::init<const std::vector<Call> &, int64_t, std::vector<at::Tensor>,
                         const std::vector<CommandRecord> &, const std::vector<CommandRecord> &>(),
          pybind11::arg("calls"),pybind11::arg("comm"),pybind11::arg("operands"),
-         pybind11::arg("inputs")=std::vector<CommandRecord>{},pybind11::arg("outputs")=std::vector<CommandRecord>{})
-    .def("realize", &Collectives::realize, pybind11::arg("repetitions")=1)
+         pybind11::arg("inputs")=std::vector<CommandRecord>{},pybind11::arg("outputs")=std::vector<CommandRecord>{}, pybind11::call_guard<Drained>())
+    .def("realize", &Collectives::realize, pybind11::arg("repetitions")=1, pybind11::call_guard<Drained>())
     .def("append",[](Collectives &c,ScheduleBinding &s){c.append(s.schedule.get());
-        s.operands.insert(s.operands.end(),c.operands.begin(),c.operands.end());})
-    .def("completion", &Collectives::completion)
-    .def("enqueue", &Collectives::enqueue);
+        s.operands.insert(s.operands.end(),c.operands.begin(),c.operands.end());}, pybind11::call_guard<Drained>())
+    .def("completion", &Collectives::completion, pybind11::call_guard<Drained>())
+    .def("enqueue", &Collectives::enqueue, pybind11::call_guard<Drained>());
   pybind11::class_<Executions>(module,"Executions")
-    .def(pybind11::init<pybind11::object>())
-    .def("add",&Executions::add)
-    .def("run",&Executions::run)
-    .def("completion",&Executions::completion);
-  module.def("fused_reconfigure", &fused_reconfigure);
-  module.def("chain_slot", &chain_slot);
-  module.def("prepare_chain", &prepare_chain);
-  module.def("chain_run", &chain_run);
-  module.def("chain_completion", &chain_completion);
+    .def(pybind11::init<pybind11::object>(), pybind11::call_guard<Drained>())
+    .def("add",&Executions::add, pybind11::call_guard<Drained>())
+    .def("run",&Executions::run, pybind11::call_guard<Drained>())
+    .def("completion",&Executions::completion, pybind11::call_guard<Drained>());
+  module.def("fused_reconfigure", &fused_reconfigure, pybind11::call_guard<Drained>());
+  module.def("chain_slot", &chain_slot, pybind11::call_guard<Drained>());
+  module.def("prepare_chain", &prepare_chain, pybind11::call_guard<Drained>());
+  module.def("chain_run", &chain_run, pybind11::call_guard<Drained>());
+  module.def("chain_completion", &chain_completion, pybind11::call_guard<Drained>());
   module.def("fused_prepare", &fused_prepare, pybind11::arg("x"), pybind11::arg("w"), pybind11::arg("dim"),
              pybind11::arg("sizes"), pybind11::arg("group"), pybind11::arg("adds"),
-             pybind11::arg("repeats") = 1, pybind11::arg("batches") = 1);
+             pybind11::arg("repeats") = 1, pybind11::arg("batches") = 1, pybind11::call_guard<Drained>());
 }

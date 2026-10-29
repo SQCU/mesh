@@ -221,7 +221,8 @@ static struct metal_result record4(struct metal_program *program, id<MTLBuffer> 
   p.sequence=0;
   const uint64_t argument=((id<MTLBuffer>)pages->page.buffer).gpuAddress+pages->page.offset+pages->used;
   memcpy((char *)pages->page.contents+pages->used,&p,sizeof p);pages->used+=RECORD;
-  for (id<MTLBuffer> b in @[d, s ? s : d, a ? a : d, v]) metal_resident(program, b);
+  const id<MTLBuffer> used[4] = {d, s ? s : d, a ? a : d, v};
+  for (int k = 0; k < 4; k++) metal_resident(program, used[k]);
   const uint64_t made[6] = {d.gpuAddress,(s?s:d).gpuAddress,argument,(a?a:d).gpuAddress,v.gpuAddress,argument};
   memcpy(bound, made, sizeof made);
   return METAL_DONE;
@@ -447,7 +448,8 @@ static struct metal_result record_step(struct metal_program *program, uint32_t k
   r->op = ops;
   const struct host_op made = {d, s ? s : d, a ? a : d, v ? v : d, p, kind};
   r->op[r->ops++] = made;
-  for (id b in @[(id)made.d, (id)made.s, (id)made.a, (id)made.v]) [r->named addObject:b];
+  const id named[4] = {(id)made.d, (id)made.s, (id)made.a, (id)made.v};
+  for (int k = 0; k < 4; k++) [r->named addObject:named[k]];
   struct host_item *it = r->item + r->current;
   it->ops++;
   if (it->cursor == METAL_CONSUME && it->wait_op == UINT32_MAX && WORD[kind] && p.scalar) {

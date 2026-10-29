@@ -620,22 +620,28 @@ static void MetalSpanErase(NSMutableDictionary *spans,id key,NSUInteger lo,NSUIn
     for(NSUInteger b=lo>>MESH_FRONTIER_BITS;b<=(hi-1)>>MESH_FRONTIER_BITS;b++) {
         NSMutableData *data=buckets[@(b)];
         const NSUInteger count=data.length/sizeof(struct MetalSpan);if(!count)continue;NSUInteger kept=0;
-        NSMutableData *tails=[NSMutableData data];struct MetalSpan *pieces=data.mutableBytes;
+        NSMutableData *tails=nil;struct MetalSpan *pieces=data.mutableBytes;
         for(NSUInteger i=0;i<count;i++) {
             struct MetalSpan piece=pieces[i];
             if(piece.lo>=hi||piece.hi<=lo){pieces[kept++]=piece;continue;}
-            if(piece.hi>hi){const struct MetalSpan tail={hi,piece.hi,piece.node};[tails appendBytes:&tail length:sizeof tail];}
+            if(piece.hi>hi){
+                const struct MetalSpan tail={hi,piece.hi,piece.node};
+                if(!tails)tails=[[NSMutableData alloc] init];
+                [tails appendBytes:&tail length:sizeof tail];
+            }
             if(piece.lo<lo){piece.hi=lo;pieces[kept++]=piece;}
         }
-        data.length=kept*sizeof *pieces;[data appendData:tails];
+        data.length=kept*sizeof *pieces;
+        if(tails){[data appendData:tails];[tails release];}
     }
 }
 
 static NSIndexSet *MetalViewPrior(NSMutableDictionary *read,NSMutableDictionary *written,NSData *views) {
     NSMutableIndexSet *prior=[NSMutableIndexSet indexSet];
     MetalViewAccesses(views,^(id key,NSUInteger lo,NSUInteger hi,uint32_t access){
-        for(NSMutableDictionary *set in (access&MetalReachWritten?@[written,read]:@[written])) {
-            NSMutableDictionary *buckets=set[key];if(!buckets||lo>=hi)continue;
+        NSMutableDictionary *const sets[2]={written,read};
+        for(int s=0;s<(access&MetalReachWritten?2:1);s++) {
+            NSMutableDictionary *buckets=sets[s][key];if(!buckets||lo>=hi)continue;
             for(NSUInteger b=lo>>MESH_FRONTIER_BITS;b<=(hi-1)>>MESH_FRONTIER_BITS;b++) {
                 NSData *data=buckets[@(b)];const struct MetalSpan *pieces=data.bytes;const NSUInteger n=data.length/sizeof *pieces;
                 for(NSUInteger i=0;i<n;i++)if(pieces[i].lo<hi&&lo<pieces[i].hi)[prior addIndex:pieces[i].node];
@@ -658,7 +664,7 @@ static void MetalViewDefine(NSMutableDictionary *read,NSMutableDictionary *writt
 NSArray<NSIndexSet *> *MetalViewDependencies(NSArray<NSData *> *accesses) {
     NSMutableDictionary *read=[NSMutableDictionary dictionary],*written=[NSMutableDictionary dictionary];
     NSMutableArray *dependencies=[NSMutableArray arrayWithCapacity:accesses.count];
-    for(NSUInteger i=0;i<accesses.count;i++) {
+    for(NSUInteger i=0;i<accesses.count;i++) @autoreleasepool {
         [dependencies addObject:MetalViewPrior(read,written,accesses[i])];
         MetalViewDefine(read,written,accesses[i],i);
     }
@@ -774,7 +780,7 @@ static void MetalDataflow(MetalCapture *capture) {
     struct MetalRecordedDispatch *commands=capture->dispatches.mutableBytes;
     NSUInteger phase=0,count=capture->dispatches.length/sizeof(*commands);
     NSMutableDictionary *written=[NSMutableDictionary dictionary],*read=[NSMutableDictionary dictionary];
-    for(NSUInteger i=0;i<count;i++)commands[i].barrier=MetalOrder(read,written,&phase,commands+i,capture->reaches.bytes,0);
+    for(NSUInteger i=0;i<count;i++) @autoreleasepool { commands[i].barrier=MetalOrder(read,written,&phase,commands+i,capture->reaches.bytes,0); }
 }
 
 @interface MetalForwarder : NSProxy {
