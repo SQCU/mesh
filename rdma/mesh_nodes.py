@@ -378,20 +378,22 @@ def node_prepare():
     jobs = {**os.environ, 'MESH_RDMA': str(ROOT / 'rdma'), 'MAKEFLAGS': f'-j{os.cpu_count() or 1}'}
     with open(ROOT.parent / 'prepare.lock', 'a') as turn:
         fcntl.flock(turn, fcntl.LOCK_EX)
-        installed = None
+        installed, seconds = None, {}
         for where, *argv in (('.', ROOT / 'bin/mesh-user.sh', (HOME / 'Library/Application Support/io.mesh.bridge/'
                                                                'document').read_text().strip(), ROOT),
                              ('rdma', sys.executable, 'mesh_c_build.py'),
                              ('rdma/torch-mesh', sys.executable, 'setup.py', '-q', 'build_ext', '--inplace',
                               '--build-temp', '../.build/torch-mesh')):
+            began = time.time()
             done = run(*argv, cwd=ROOT / where, env=jobs)
+            seconds[os.path.basename(str(argv[1] if argv[0] == sys.executable else argv[0]))] = round(time.time() - began, 2)
             if done.returncode:
                 raise RuntimeError(f'{where}: {" ".join(map(str, argv[:3]))} failed: {(done.stderr or done.stdout)[-600:]}')
             installed = installed or done
     services = services_refresh(ROOT)
     done = installed
     if 'restarts the bridge' not in done.stdout:
-        print(json.dumps({'bridge': 'unchanged', 'services': services}))
+        print(json.dumps({'bridge': 'unchanged', 'services': services, 'seconds': seconds}))
         return
     # standup (the operator, 2026-10-29): a machine whose bridge does not answer its restart signal, and that has no
     # kernel fault, is restarted; one with a fault is left as it is, its fault reported
@@ -400,7 +402,7 @@ def node_prepare():
         time.sleep(2)
         began = bridge_began()
     if began and began >= signalled:
-        print(json.dumps({'bridge': 'restarted', 'services': services}))
+        print(json.dumps({'bridge': 'restarted', 'services': services, 'seconds': seconds}))
         return
     boot = int(re.search(r'\{ sec = (\d+)', run('sysctl', '-n', 'kern.boottime').stdout).group(1))
     faults = run('sudo', '-n', 'find', '/Library/Logs/DiagnosticReports', '-type', 'f', '-newermt',

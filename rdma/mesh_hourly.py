@@ -82,6 +82,8 @@ def compact(record):
                   for name, node in record['nodes'].items() if node['status'] != 'installed')
     result = {'schema': 3, 'commits': record['commits'], 'unix': int(record['started_unix']),
               'nodes': [r['number'] for r in record['nodes'].values() if r['status'] == 'installed'],
+              # each node's preparation: its whole and its build steps, seconds
+              'prepared': {r['number']: r['seconds'] for r in record['nodes'].values() if r.get('seconds')},
               'us,GB/s': rows, **({'incomplete': incomplete} if incomplete else {}),
               **({'absent': record['absent']} if record.get('absent') else {}),
               'loaded': sorted({commit for item in record['workloads'] for commit in item.get('loaded', ())}),
@@ -217,6 +219,7 @@ def prepare_node(node, record):
     node.source = f'{cluster.checkouts}/mesh/current'
     result = {'number': node.number, 'status': 'installing', 'commit': commit, 'commands': node.commands}
     record['nodes'][f'{node.number}@{node.addr}'] = result
+    began = time.time()
     try:
         code, output = node.run('\n'.join((
             f'export MESH_RUN={shlex.quote(record["token"])}',
@@ -226,7 +229,8 @@ def prepare_node(node, record):
         if code:
             raise RuntimeError(f'preparation failed ({code}): {output}')
         told = next((json.loads(line) for line in output.splitlines() if line.startswith('{"bridge"')), {})
-        result.update(status='installed', bridge=told.get('bridge'), services=told.get('services'))
+        result.update(status='installed', bridge=told.get('bridge'), services=told.get('services'),
+                      seconds={'whole': round(time.time() - began, 1), **(told.get('seconds') or {})})
     except Exception as error:
         result.update(status='failed', error=str(error))
     return result
