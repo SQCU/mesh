@@ -1,5 +1,6 @@
 """Numerical graph rewrites shared by tensor frontends, before native lowering."""
 import math
+from functools import partial
 
 import torch
 from torch import _prims_common as types
@@ -72,6 +73,35 @@ def vector_norm(self, ord=2, dim=None, keepdim=False, *, dtype=None):
     return values.pow(ord).sum(dim, keepdim=keepdim).pow(1.0 / ord).to(result_type)
 
 
+def moments(self, dim=None, unbiased=None, keepdim=False, *, correction=None, root=False, mean=False):
+    """Centered moments as sums over the declared global reduction domain.
+
+    The mean and centered-square sum cross partition boundaries as summaries.
+    Unequal or empty local shares never change the count or the correction.
+    All arithmetic remains in the computation type until the result is cast.
+    """
+    if isinstance(dim, bool):
+        dim, unbiased = None, dim
+    if isinstance(dim, int):
+        dim = (dim,)
+    dims = types.reduction_dims(self.shape, dim or None)
+    count = math.prod(self.shape[d] for d in dims) if self.ndim else 1
+    correction = types.set_correction(unbiased, correction)
+    computation, result_type = types.reduction_dtypes(self, types.REDUCTION_OUTPUT_TYPE_KIND.COMPLEX_TO_FLOAT)
+    values = self.to(computation)
+    average = values.sum(dims, keepdim=True) / count
+    centered = values - average
+    squares = centered.real.square() + centered.imag.square() if values.dtype.is_complex else centered.square()
+    result = squares.sum(dims, keepdim=keepdim) / max(0, count - correction)
+    if root:
+        result = result.sqrt()
+    result = result.to(result_type)
+    if not mean:
+        return result
+    average = average if keepdim else average.squeeze(dims)
+    return result, average.to(self.dtype)
+
+
 decompositions = {torch.ops.aten.linear_backward.default: linear_backward,
                   torch.ops.torch_mesh.fwht.default: butterfly,
                   torch.ops.aten._softmax.default: softmax,
@@ -79,3 +109,8 @@ decompositions = {torch.ops.aten.linear_backward.default: linear_backward,
                   torch.ops.aten._softmax_backward_data.default: softmax_backward,
                   torch.ops.aten._log_softmax_backward_data.default: log_softmax_backward,
                   torch.ops.aten.linalg_vector_norm.default: vector_norm}
+
+for name, root, mean in (('var', False, False), ('std', True, False),
+                         ('var_mean', False, True), ('std_mean', True, True)):
+    for overload in ('default', 'dim', 'correction'):
+        decompositions[getattr(getattr(torch.ops.aten, name), overload)] = partial(moments, root=root, mean=mean)

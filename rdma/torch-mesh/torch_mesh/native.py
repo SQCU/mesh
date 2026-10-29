@@ -211,6 +211,16 @@ def compile_graph(module, metadata, operands, *, destinations=None):
             with self.access(name):
                 return super().store_reduction(name, index, value)
 
+        def reduction(self, dtype, src_dtype, reduction_type, value):
+            # A broadcast value still covers the entire reduction domain.
+            # Establish its loop before choosing accumulator scope, even when
+            # no load has yet needed the reduction index. A later fused load
+            # must not move that value into a loop without its accumulator.
+            for tree in self.range_trees:
+                if tree.is_reduction:
+                    tree.full_range().codegen()
+            return super().reduction(dtype, src_dtype, reduction_type, value)
+
     class PageView(ir.ReinterpretView):
         def codegen_reference(self, writer=None):
             index = len(views)

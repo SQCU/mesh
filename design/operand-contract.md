@@ -373,13 +373,42 @@ graphs also compiled with this split policy. No numerical replay was run.
 
 The multidimensional declaration still contains a separate all-reduce for
 each reduced mesh dimension. Softmax still declares maximum and sum separately;
-folding them into the existing scaled-partial merge is unfinished. Variance
-and the other whole-dimension rules in `partition.py` are also still present.
+folding them into the existing scaled-partial merge is unfinished. Other
+whole-dimension rules in `partition.py` are also still present.
 Native fused row norms still need their distributed factor operands connected
 through the complete graph. These are remaining lowering and fusion tasks.
 The native model loader's 256/512 head-width filter and vector-width assumptions
 in its attention producers remain. Their domains still need to reach all
 producer loops; accepting the input alone would leave omitted lanes.
+
+### Centered moments across owners
+
+The shared algebra now expands functional variance, standard deviation and
+their paired mean forms into a mean and a centered-square sum. Both reductions
+use the declared global count, including the caller's correction. Unequal and
+empty local shares do not change that denominator. Complex inputs contribute
+the squared real and imaginary parts; low-precision inputs use the computation
+type until the result conversion. These are ordinary graph operations over
+the existing page operands, with no new numerical executor.
+
+Preparation described a normalization and gradient graph at width 1,048,577
+on all four ranks, including an empty share. Its crossings contained row
+summaries rather than input gathers. Complete mapped native graphs compiled
+at widths 37, 32,769 and 1,048,577 with half, bfloat and float inputs. Scalar,
+empty and multi-axis metadata also lowered. No numerical commands were run.
+
+That preparation exposed a shared emitter error: a reduction of a broadcast
+value chose its accumulator before a later fused load opened the reduction
+loop. The page emitter now establishes every reduction domain first, so its
+accumulator covers all loop iterations and remains in scope afterward.
+
+The small distributed backward graphs still expose whole-input gathers chosen
+by upstream placement. At widths 3 and 37, it keeps a broadcast gradient partial
+and gathers the sharded value it multiplies, instead of reducing the small
+gradient first. Repeated mean-summary reductions also remain in the declared
+graph. Those placement and common-work issues are unfinished; the wide graph
+does not establish their absence for other shapes or complete distributed
+moment support for mutable output forms.
 
 ### Exact partition boundaries
 
