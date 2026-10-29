@@ -133,11 +133,16 @@ BOOL MeshIndexEqual(id left,id right,NSUInteger count) {
     if(equal==isl_bool_error)[NSException raise:NSInvalidArgumentException format:@"index relation equality could not be resolved"];
     return equal==isl_bool_true;
 }
-struct MeshIndexBounds MeshIndexBoundsOf(id expression,NSUInteger first,NSUInteger end) {
-    isl_ctx *ctx=isl_ctx_alloc();isl_pw_aff *value=MeshIndexExpression(ctx,expression,first,end);
-    isl_val *low=isl_pw_aff_min_val(isl_pw_aff_copy(value)),*high=isl_pw_aff_max_val(value);
+struct MeshIndexBounds MeshIndexImageBounds(isl_map *relation) {
+    isl_set *image=isl_map_range(relation);
+    isl_val *low=isl_set_dim_min_val(isl_set_copy(image),0),*high=isl_set_dim_max_val(image,0);
     struct MeshIndexBounds result={isl_val_get_num_si(low),isl_val_get_num_si(high)};
-    isl_val_free(low);isl_val_free(high);isl_ctx_free(ctx);return result;
+    isl_val_free(low);isl_val_free(high);return result;
+}
+struct MeshIndexBounds MeshIndexBoundsOf(id expression,NSUInteger first,NSUInteger end) {
+    isl_ctx *ctx=isl_ctx_alloc();
+    struct MeshIndexBounds result=MeshIndexImageBounds(isl_map_from_pw_aff(MeshIndexExpression(ctx,expression,first,end)));
+    isl_ctx_free(ctx);return result;
 }
 struct MeshIndexRun MeshIndexRunOf(id expression,NSUInteger first,NSUInteger end) {
     struct MeshIndexBounds a=MeshIndexBoundsOf(expression,first,first+1);

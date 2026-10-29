@@ -980,6 +980,11 @@ finished:
 }
 - (id)copyWithZone:(NSZone *)zone { return [self retain]; }
 - (BOOL)affine { return !_coordinates&&!_maps.count&&[_shape isEqual:_indexShape]; }
+- (struct MetalTensorSpan)storageSpan {
+    if(!_count)return (struct MetalTensorSpan){_offset,0};
+    isl_ctx *ctx=isl_ctx_alloc();struct MeshIndexBounds bounds=MeshIndexImageBounds(MeshIndexRelation(ctx,self));
+    isl_ctx_free(ctx);return (struct MetalTensorSpan){bounds.low,(NSUInteger)(bounds.high-bounds.low+1)};
+}
 - (BOOL)equivalent:(MetalTensorLayout *)other {
     if(![_shape isEqual:other.shape])return NO;
     if([self isEqual:other]||!_count)return YES;
@@ -1207,10 +1212,8 @@ finished:
     id terms=MeshIndexTerms(isl_pw_multi_aff_get_pw_aff(function,0));isl_pw_multi_aff_free(function);
     // Storage indices can have gaps and can start below zero. The emitted
     // expression is valid on the declared source image; it adds no validity guard.
-    isl_set *image=isl_map_range(MeshIndexRelation(ctx,source));
-    isl_val *minimum=isl_set_dim_min_val(isl_set_copy(image),0),*maximum=isl_set_dim_max_val(image,0);
-    NSInteger low=isl_val_get_num_si(minimum),high=isl_val_get_num_si(maximum);
-    isl_val_free(minimum);isl_val_free(maximum);isl_ctx_free(ctx);
+    struct MeshIndexBounds bounds=MeshIndexImageBounds(MeshIndexRelation(ctx,source));isl_ctx_free(ctx);
+    NSInteger low=bounds.low,high=bounds.high;
     terms=TensorSubstitute(terms,TensorSum(@[@"i",@(low)]));
     return [[self declaration:binding] stringByAppendingFormat:@"inline long mesh_storage_%lu(long storage) { long i = storage - %ldl; return %@; }\n",
         (unsigned long)binding,(long)low,TensorExpressionSource(terms,MAX(1,high-low+1))];

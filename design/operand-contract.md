@@ -215,6 +215,9 @@ frontend's storage indices; there is no separate greedy stride inverse.
 
 Layout equality uses relation equality. A composed layout which is affine can
 therefore retain a direct strided binding even when its expressions differ.
+`storageSpan` uses the relation's image bounds to size a backing interval.
+LiteRT binding sizes and native strided allocations use that same query;
+neither enumerates dependency ranges merely to find an allocation's end.
 Component-byte views scale the relation and append a component axis. Combining
 components checks that they name adjacent, aligned parts of each typed element.
 It no longer requires a particular stride factorization to express that fact.
@@ -242,8 +245,16 @@ This closes the partial-inverse gap. It does not supply a frontend's missing
 operand declarations or a backend's missing output-placement contract. Explicit
 selection tables still use the existing compact-factor composition. General
 ownership and API constraint integration remain the work described below.
-The source build currently uses isl's ordinary preparation allocations; a
-page-backed solver workspace has not been implemented.
+The source build currently uses isl's ordinary preparation allocations. A
+page-backed workspace can supply the same C objects from bridge pages without
+changing the relation algorithms. The pinned archive imports `malloc`,
+`calloc`, `realloc`, `free` and `strdup`. Coverage must include context creation,
+options, identifiers, parser and printer strings, and the bundled imath integer
+storage; changing only `isl_malloc_or_die` and its two companions is incomplete.
+The workspace must retain alignment and resize semantics, preserve independent
+solver contexts, and release its pages after the lowered output has been kept.
+This allocator extension is not implemented. It belongs to preparation; emitted
+commands acquire no allocator or solver lookup.
 
 ## Place values for their consumers
 
@@ -703,7 +714,7 @@ A missing order has no inferred replacement. Leading axes and symbolic batch
 extents survive into the same source-index and dependency-range lowering.
 The old `litert_slice` and `litert_at` formulas are removed. Their other users,
 prefill-mask stores and activation-row selection, also consume declared views.
-The mask word layout is a configuration operand. Activation selection receives
+The mask's logical scalar type and storage layout are configuration operands. Activation selection receives
 the source shape, type and lane width, including its own padded row extent.
 
 Partial-row and selection adapters share `provider_view`. Native stage
@@ -1408,8 +1419,8 @@ layout. These properties follow from LiteRT's `gpu_backend_metal_litert.mm` and
 `buffer_handler_utils.cc` in the locally built vendor source.
 
 A compatible selection binds directly to its source pages. Shared layout
-equivalence compares address expressions and their periods without expanding a
-repeated logical domain. During recording, `MetalBindingView` resolves the
+equivalence compares integer relations without expanding a repeated logical
+domain. During recording, `MetalBindingView` resolves the
 provider's distinct buffer handles to final page buffers, offsets, invocation
 strides and access ranges. Replay has no provider-handle lookup. This relocation
 covers direct Metal buffer arguments; the importer disables provider argument
@@ -1488,10 +1499,16 @@ Draw and retention consumed the provider's float32 pages through their declared
 type parameters. An explicit contiguous read/write requirement retained the
 input and writeback mappings. No numerical commands ran.
 
+The prefill mask now writes the declared logical Boolean tensor through the
+shared `mesh_store4` helper and prepared indices. The old packed-word producer
+and its byte reinterpretation are removed. Compatible provider pages bind
+directly; irregular views and tails retain their declared positions. Native
+source assembly includes the common mesh Metal prelude before library imports.
+Preparation compiled widths 1, 3, 37 and 64 with mapped and PHWC4 outputs, and
+retained direct native/provider bindings. No numerical commands ran.
+
 The boundary remains incomplete. Raw cache relocation and several state-update
-declarations still lack typed access relations. Mask words also need an explicit
-bit view of the provider's byte-valued mask; a numerical scalar cast is not that
-relation. Placement across all future consumer constraints remains necessary:
+declarations still lack typed access relations. Placement across all future consumer constraints remains necessary:
 sequential preparation can still convert a flexible native output when a later
 fixed-layout provider could have guided its original placement. General
 shape-changing collective outputs, external/signature selections and changed

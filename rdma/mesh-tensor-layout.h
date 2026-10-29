@@ -22,6 +22,9 @@ struct MetalTensorSpan { NSInteger offset; NSUInteger count; };
 @property(nonatomic, readonly) NSInteger offset;
 @property(nonatomic, readonly) NSUInteger count;
 @property(nonatomic, readonly) BOOL affine;
+// Smallest enclosing storage interval, in elements. This is an image-bounds
+// query during preparation; it does not enumerate pages or dependency ranges.
+@property(nonatomic, readonly) struct MetalTensorSpan storageSpan;
 + (instancetype)shape:(NSArray<NSNumber *> *)shape strides:(NSArray<NSNumber *> *)strides
     offset:(NSInteger)offset maps:(NSDictionary<NSNumber *, NSData *> *)maps indices:(nullable NSData *)indices;
 // Restore/compose flat factor coordinates, retaining no parent view. Coordinate

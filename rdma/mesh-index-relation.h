@@ -14,5 +14,6 @@ id MeshIndexTerms(isl_pw_aff *expression); // consumes the expression
 BOOL MeshIndexEqual(id left, id right, NSUInteger count);
 struct MeshIndexBounds { NSInteger low, high; };
 struct MeshIndexRun { NSInteger value, step; NSUInteger end; };
+struct MeshIndexBounds MeshIndexImageBounds(isl_map *relation); // consumes a nonempty bounded relation
 struct MeshIndexBounds MeshIndexBoundsOf(id expression, NSUInteger first, NSUInteger end);
 struct MeshIndexRun MeshIndexRunOf(id expression, NSUInteger first, NSUInteger end);
