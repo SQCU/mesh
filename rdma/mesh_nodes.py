@@ -379,6 +379,9 @@ def node_prepare():
     with open(ROOT.parent / 'prepare.lock', 'a') as turn:
         fcntl.flock(turn, fcntl.LOCK_EX)
         installed, seconds = None, {}
+        # the bridge's restart is asked within the first step (bin/mesh-user.sh's SIGHUP), so a bridge started at or
+        # after this time answered it, however long the later steps take
+        asked = time.time()
         for where, *argv in (('.', ROOT / 'bin/mesh-user.sh', (HOME / 'Library/Application Support/io.mesh.bridge/'
                                                                'document').read_text().strip(), ROOT),
                              ('rdma', sys.executable, 'mesh_c_build.py'),
@@ -396,11 +399,11 @@ def node_prepare():
     # heartbeat is not this checkout's installed one (a loaded job takes a new definition only at its next load, a
     # boot: bin/mesh-user.sh), is restarted where this boot has no kernel fault; one with a fault is left as it is, named
     if 'restarts the bridge' in installed.stdout:
-        signalled, began = time.time(), None
-        while time.time() < signalled + BRIDGE_RESTART_SECONDS and not (began and began >= signalled):
+        deadline, began = time.time() + BRIDGE_RESTART_SECONDS, bridge_began()
+        while not (began and began >= int(asked)) and time.time() < deadline:
             time.sleep(2)
             began = bridge_began()
-        if not (began and began >= signalled):
+        if not (began and began >= int(asked)):
             restart_unless_faulted(f'the bridge did not restart within {BRIDGE_RESTART_SECONDS} s of its signal')
         told['bridge'] = 'restarted'
     else:
@@ -436,11 +439,14 @@ def heartbeat_stale(root):
     if not pid:
         return 'no heartbeat runs'
     program = run('ps', '-o', 'comm=', '-p', pid).stdout.strip()
-    started = run('ps', '-o', 'lstart=', '-p', pid).stdout.strip()
     if program != str(image):
         return f'the heartbeat runs {program}, not {image}'
-    if started and image.is_file() and time.mktime(time.strptime(started, '%a %b %d %H:%M:%S %Y')) < image.stat().st_mtime:
-        return f'the heartbeat started {started}, before {image} was installed'
+    # a heartbeat runs its image again on its restart signal (mesh-heartbeat.c: execv, its pid and start time kept), so
+    # whether it runs the installed image is the file it executes (its first text, lsof), not when it started
+    running = next((line[1:] for line in run('lsof', '-a', '-p', pid, '-d', 'txt', '-Fi').stdout.splitlines()
+                    if line.startswith('i')), None)
+    if running and image.is_file() and int(running) != image.stat().st_ino:
+        return f'the heartbeat runs an earlier {image} (file {running}; the installed one is {image.stat().st_ino})'
     return None
 
 
