@@ -1695,8 +1695,8 @@ struct ViewWrites {
       }
     }
   }
-  // Each encoded execution is the plan's next invocation, so a plan with several
-  // instances cycles them; the library orders each reuse by landings and credits.
+  // Each encoded execution is the plan's next invocation, cycling the plan's instances: NFE k+1 writes other pages
+  // than NFE k sends from only where the plan declares more than one (design/pages-and-functions.md, Freeing 7).
   size_t invocations = 0;
   ncclResult_t encode(ncclMeshStream *stream, size_t invocation) {
     ncclResult_t result = ncclGroupStart();
