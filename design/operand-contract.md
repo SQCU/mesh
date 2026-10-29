@@ -527,11 +527,47 @@ Native rank and Goal A built after the page-sizing change. These are preparation
 results only; no numerical work or timing/throughput measurement was submitted.
 
 This removes limits from the merge of already-produced partial results. The
-producer lowering is described next. LiteRT's draw/kept adapters still use the
-old four-lane slice indexing. The delegate's internal tensor views also remain
-a separate integration requirement. Placing
+producer lowering is described next. LiteRT's native selection adapters now
+consume the shared views described below. The delegate's internal tensor views
+remain a separate integration requirement. Placing
 the partial numerical work across nodes remains part of the graph's reduction
 lowering, rather than a property of this merge.
+
+### LiteRT selection views
+
+Draw, retained logits and the final token selection now consume
+`MetalTensorLayout`. The importer passes each graph tensor's full shape and the
+provider's configured scalar type, byte width, lanes and physical axis order.
+`selection_storage` and `partial_row_storage` declare `orders` by tensor rank.
+A missing order has no inferred replacement. Leading axes and symbolic batch
+extents survive into the same source-index and dependency-range lowering.
+The old `litert_slice` and `litert_at` formulas are removed. Their other users,
+prefill-mask stores and activation-row selection, also consume declared views.
+The mask word layout is a configuration operand. Activation selection receives
+the source shape, type and lane width, including its own padded row extent.
+
+Partial-row and selection adapters share `provider_view`. Native stage
+preparation also passes explicit axis maps and joint indices to the shared
+layout algebra. These are declared storage relations; computed indices remain
+runtime page contents. No descriptor walk or layout copy is added to execution.
+
+The importer declares retained logits using the draw's same input operands.
+`native_call` prepares both through one implementation, and `record_native`
+records both. The former host reconstruction of logits names, row counts,
+types and a separate pipeline is removed. Retained record fields use the
+shared selection function's write callback and their declared output view.
+The old pointer-pair call no longer matched that shared function.
+
+Preparation on 2026-10-28 compiled selection declarations with two, three and
+four axes; odd and zero vocabulary widths; half, bfloat and float storage;
+two-, four- and eight-lane provider layouts; and symbolic batch extents on
+multiple axes. Explicit axis and joint maps used the same native preparation.
+Partial-row adapters also prepared after adopting the shared provider helper.
+The mask and activation-selector shaders compiled with odd widths and a
+non-unit leading axis. Native libraries and rank built. No tensor payload or numerical commands were
+submitted by those preparation programs. This does not establish alternate
+storage support in the packaged delegate, complete-model numerics or measured
+latency/throughput.
 
 ### Bounded attention tile storage
 
