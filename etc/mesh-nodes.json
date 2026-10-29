@@ -53,6 +53,17 @@
       "roles": ["compute", "headless"],
       "guard_headroom_gib": 1.25
     },
+    "FFA75B2F-E060-527E-9CB3-C5816237FD8A": {
+      "name": "m5ult3",
+      "model": "Mac17,15",
+      "serial": "HHKWRYF41Q",
+      "node": 597453729,
+      "management": "100.65.151.124",
+      "fabric": "fd6d:6573:68:353a:d161:f544:3d5a:1df7",
+      "memory_gib": 96,
+      "roles": ["compute", "headless"],
+      "guard_headroom_gib": 1.25
+    },
     "BC53501D-2E24-5389-96BB-46AFE7D55F1B": {
       "name": "m5ult4",
       "model": "Mac17,15",
