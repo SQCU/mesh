@@ -49,22 +49,24 @@ def _compiled(text, name):
 
 
 @lru_cache(None)
-def _specialized(text, name, constants):
-    return _stream.pipeline_specialized(text, name, [list(c) for c in constants])
+def _specialized(base, instance, name, constants):
+    return _stream.pipeline_specialized(base, instance, name, [list(c) for c in constants])
 
 
-def pipeline(head, bindings, tail, name, indices=None):
-    """Kernel `name` of `head`, the bindings' (TensorViews or TensorLayouts) index declarations and `tail`.
+def pipeline(head, bindings, tail, name, indices=None, instance=''):
+    """Kernel `name` of `head`, the bindings' (TensorViews or TensorLayouts) index declarations, `tail` and the explicit
+    instantiation `instance` (its line, '' for a kernel that is no template).
 
     Where every binding is affine and the text reads no layout as a C++ constant expression (mesh_stride), the
     declarations are one prelude's function constants: commands that differ only in layout share one library, and each
-    pipeline is specialized from its own values (design/compile-once-2026-10-29.md). Otherwise they are source text
+    pipeline is specialized from its own values (design/compile-once-2026-10-29.md). The instances of one text wait until
+    a pipeline of them is read, then compile as one library (_stream batch_compile). Otherwise they are source text
     (index_source): mapped views' index tables, and mesh_stride's constant strides.
     """
     constants = None if indices or 'mesh_stride<' in head + tail else index_constants(bindings)
     if constants is None:
-        return _compiled(head + index_source(bindings, indices) + tail, name)
-    return _specialized(head + _stream.index_constant_prelude() + tail, name, constants)
+        return _compiled(head + index_source(bindings, indices) + tail + instance, name)
+    return _specialized(head + _stream.index_constant_prelude() + tail, instance, name, constants)
 
 
 def place(graph, placements, fixed):

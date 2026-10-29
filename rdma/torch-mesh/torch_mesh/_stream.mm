@@ -25,6 +25,7 @@
 #include <limits>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <array>
 #include <vector>
@@ -413,10 +414,9 @@ static std::shared_ptr<Library> library_of(const std::string &source) {
   return held;
 }
 
-static int64_t pipeline_specialized(const std::string &source, const std::string &name, const std::vector<std::array<int64_t, 3>> &constants) {
-  auto library = library_of(source);
-  auto made = std::make_shared<Compiled>();
-  made->done = dispatch_semaphore_create(0);
+// `made` specialized from `library` once it is compiled: function `name` with `constants` ([index, type, value])
+static void specialize(std::shared_ptr<Library> library, const std::string &name, const std::vector<std::array<int64_t, 3>> &constants,
+                       std::shared_ptr<Compiled> made) {
   const std::string function_name = name;
   const std::vector<std::array<int64_t, 3>> values = constants;
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -447,9 +447,45 @@ static int64_t pipeline_specialized(const std::string &source, const std::string
       dispatch_semaphore_signal(made->done);
     }
   });
+}
+
+// A specialized pipeline is its source's text without instances (`base`) and its instance line. The pipelines of a base
+// not yet compiled wait in its batch; the first of them a caller needs (state_of) compiles one library of the base and
+// every instance line waiting, and each is specialized from it. So a source is parsed once for all the instances a
+// preparation names before it reads a pipeline (design/compile-once-2026-10-29.md).
+struct Waiting { std::string instance, name; std::vector<std::array<int64_t, 3>> constants; std::shared_ptr<Compiled> made; };
+static std::unordered_map<std::string, std::vector<Waiting>> batches_;
+static std::unordered_map<const Compiled *, std::string> waiting_on_;
+
+static int64_t pipeline_specialized(const std::string &base, const std::string &instance, const std::string &name,
+                                    const std::vector<std::array<int64_t, 3>> &constants) {
+  auto made = std::make_shared<Compiled>();
+  made->done = dispatch_semaphore_create(0);
   std::lock_guard<std::mutex> guard(pipelines_lock_);
+  batches_[base].push_back({instance, name, constants, made});
+  waiting_on_[made.get()] = base;
   pipelines_.push_back(made);
   return (int64_t)pipelines_.size() - 1;
+}
+
+// the batch `made` waits in compiled as one library and specialized; nothing where it waits in none
+static void batch_compile(const Compiled *made) {
+  std::string base;
+  std::vector<Waiting> batch;
+  {
+    std::lock_guard<std::mutex> guard(pipelines_lock_);
+    const auto found = waiting_on_.find(made);
+    if (found == waiting_on_.end()) return;
+    base = found->second;
+    batch = std::move(batches_[base]);
+    batches_.erase(base);
+    for (const auto &w : batch) waiting_on_.erase(w.made.get());
+  }
+  std::string text = base + "\n";
+  std::unordered_set<std::string> lines;
+  for (const auto &w : batch) if (lines.insert(w.instance).second) text += w.instance + "\n";
+  auto library = library_of(text);
+  for (const auto &w : batch) specialize(library, w.name, w.constants, w.made);
 }
 
 static id<MTLComputePipelineState> state_of(int64_t handle, const char *what) {
@@ -460,6 +496,7 @@ static id<MTLComputePipelineState> state_of(int64_t handle, const char *what) {
     made = pipelines_[(size_t)handle];
   }
   if (!made->ready.load(std::memory_order_acquire)) {
+    batch_compile(made.get());
     if (dispatch_semaphore_wait(made->done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)MESH_PREPARATION_NS)))
       throw std::runtime_error(std::string(what) + ": kernel " + std::to_string(handle) + " not compiled within the preparation's deadline");
     made->ready.store(true, std::memory_order_release);

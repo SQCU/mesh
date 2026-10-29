@@ -164,7 +164,7 @@ def _kernel(width, normalization, signed, input_type, sign_type, masked, binding
     from .layout import pipeline
     instance = f'structured_butterfly<{width},{normalization},{str(signed).lower()},{input_type},{sign_type},{str(masked).lower()}>'
     declaration = f'\ntemplate [[host_name("butterfly")]] [[kernel]] decltype({instance}) {instance};'
-    return pipeline(_stream.metal_prelude(), bindings, SOURCE + declaration, 'butterfly', indices)
+    return pipeline(_stream.metal_prelude(), bindings, SOURCE, 'butterfly', indices, declaration)
 
 
 def _factor(n, block_width):

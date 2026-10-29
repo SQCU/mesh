@@ -82,8 +82,8 @@ def prepare(inputs, input_slots, output_slots, output_strides, shapes, dtypes, d
             prepare_binding(index, value, True)
             write |= 1 << index
     constants = {constant_slot: struct.pack(f'{len(words)}I', *(v & 0xffffffff for v in words))} if words else {}
-    handle = layout.pipeline(_stream.metal_prelude(), addresses, declarations.get('prefix', '') + _text(source) + '\n' + instance, name,
-                             declarations.get('indices'))
+    handle = layout.pipeline(_stream.metal_prelude(), addresses, declarations.get('prefix', '') + _text(source) + '\n', name,
+                             declarations.get('indices'), instance)
     commands.append((handle, buffers, constants, tuple(grid), tuple(threads), False,
                      read | (write << _stream.compilation['ACCESS_WRITE_SHIFT'])))
     return results, commands + after

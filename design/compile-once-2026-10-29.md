@@ -55,6 +55,11 @@ constants)`, a higher-order lookup of one compiled library. No kernel body chang
   - metal-recording.m: `MetalViewIndexConstantPrelude` and `MetalViewIndexConstants` share the axis collapse
     (`MetalViewAxes`) with `MetalViewIndexExpression`.
   - Bindings 0-15 with up to 8 collapsed axes have the form. Others take the source form.
-- Still per instance: a library's text holds its instance line, so instances with different template arguments still
-  compile separately. One library per source and preparation would need every instance line known before the first
-  compile.
+- Landed: one library for a source's instances. A specialized pipeline is its text without instances plus its
+  instance line. Pipelines of one text wait until a caller reads one (state_of). That compiles a single library of the
+  text and every waiting instance line, and specializes each pipeline from it.
+  - kernel.py's commands are read only when a function's Commands are made, so every instance of a source that a
+    preparation names before then compiles once.
+  - A caller that reads a pipeline at once still compiles its own: the layout copy's pipeline_facts.
+  - Twelve instances of a large source took 145 ms batched against 625 ms one at a time, cold. With Metal's shader
+    cache warm it was 25 ms against 31.

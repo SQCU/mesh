@@ -31,7 +31,7 @@ THREADS = _stream.compilation['DRAW_THREADS']
 def _kernel(kernel, bindings, *arguments):
     from .layout import pipeline
     name, line = instance(kernel, THREADS, *arguments)
-    return pipeline('', bindings, SOURCE + '\n' + line + '\n', name)
+    return pipeline('', bindings, SOURCE + '\n', name, instance=line + '\n')
 
 
 def _rows(z, keys):
