@@ -1393,6 +1393,42 @@ different cuts. No numerical commands ran. Partitioning a head's contracted
 channel axis and selecting providers for their accepted sparse formats remain
 separate graph-lowering work.
 
+### Partial contraction boundaries
+
+LiteRT section preparation now finds the output contraction in the result's
+dependency cone. It no longer assumes that the final two operators are a
+projection and a dequantization. `contraction_parts` takes the chosen operation
+and accumulator type and produces two ordinary graphs through `mesh_graph`.
+The first emits additive partials. The second adds the original bias, applies
+the original fused activation and restores the result's original encoding after
+the collective sum. Its later consumers retain their operators and dependencies.
+An empty finish is an input/output alias and emits no numerical operation.
+This preserves the declared rounding boundary; it does not promise bitwise
+agreement between different floating-point reduction orders.
+
+The old `rounded` helper is removed. It selected a quantizer from elsewhere in
+the section and reconstructed the finish from operator positions. Partitioning
+now cuts the partial graph through the existing axis and constant slicers. The
+finish stays after the sum, including for an odd sparse contraction cut.
+
+`engine.crossing_value` declares the scalar type and width for ordinary value
+crossings. The native configuration declares float16 and the LiteRT reference
+configuration declares float32. The planner carries this operand into the
+program, byte counts, gather counts and crossing types. The importer consumes
+the point's type for its partial result. The former float16 transport declaration
+over float32 LiteRT partials is removed. Auxiliary graphs use the same collective
+record builder, including its dtype and recipient fields.
+
+Preparation on 2026-10-29 serialized a sparse, quantized odd cut with bias,
+activation and distinct input/output quantizers. It also retained an identity
+finish without an added operation. The reference model's decode attention and
+MLP sections prepared head and odd-column cuts through these same functions.
+Configured float32, float16 and bfloat16 planner records retained their scalar
+widths and transfer extents. No numerical execution or performance measurement
+ran. This completes the existing section-output contraction boundary; it does
+not yet lower a contraction inside a head across its channel axis or establish
+which providers accept each sparse format.
+
 ### Encoded numerical operands
 
 Python and native FFNs retain each matrix's logical domain, encoded order and
