@@ -40,10 +40,14 @@ def spans(graph, cuts=()):
 
 
 def _value(argument):
+    """A node's traced value; None for an operator that returns nothing (make_fx records no value for one, such as
+    allgatherv_out, which writes its `out` operand)."""
     if isinstance(argument, torch.fx.Node):
-        if 'val' not in argument.meta:
-            raise ValueError(f'collective operand {argument.name} has no AOT tensor metadata')
-        return argument.meta['val']
+        if 'val' in argument.meta:
+            return argument.meta['val']
+        if argument.op == 'call_function' and not getattr(getattr(argument.target, '_schema', None), 'returns', True):
+            return None
+        raise ValueError(f'collective operand {argument.name} has no AOT tensor metadata')
     return argument
 
 
