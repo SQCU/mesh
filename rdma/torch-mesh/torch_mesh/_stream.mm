@@ -1463,8 +1463,9 @@ static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, c
   if (linear) {
     const at::Tensor &y = operands[5];
     const int64_t R = x.size(0), K = x.size(1), S = y.size(1);
+    // linear.metal linear_dims, all ten words: y's row and element strides (LDY, SDY) as linears binds them
     chain->products.push_back(encoded(products[0], {x, operands[0], y, y, std::nullopt, x},
-        {R, K, S, 0, K, K, K, K}, 4, linear_groups(R, S), 1, products[2] * MESH_SIMD_WIDTH));
+        {R, K, S, 0, K, K, K, K, y.stride(0), y.stride(1)}, 4, linear_groups(R, S), 1, products[2] * MESH_SIMD_WIDTH));
     std::vector<int64_t> publication{R, S, K, 0, S, S, S, S, 0, 0};
     publication.resize(10 + 24 * f.channels);
     chain->products.push_back(encoded(products[1], {y, operands[1], x, operands[7], y},
