@@ -13,7 +13,7 @@ import time
 import traceback
 import zlib
 
-from mesh_source import checkout, git, prune, upstream, verify
+from mesh_source import checkout, git, upstream, verify
 
 REQUIRED = ('rdma/mesh_hourly.py', 'rdma/mesh_nodes.py', 'rdma/mesh_source.py', 'bin/mesh-user.sh')
 FIGURES = ('steady_step_microseconds', 'step_microseconds', 'crossing_microseconds',
@@ -154,10 +154,9 @@ def _launch(mesh_root, microbench_root, output_root, cluster):
         record['commits'] = {name: git(root, 'ls-remote', record['upstreams'][name], 'refs/heads/main').split()[0].decode()
                              for name, root in roots.items()}
         for name, root in roots.items():
-            target = Path.home() / cluster.checkouts / name / record['commits'][name]
+            # each repository's one checkout here, moved to the commit
+            target = Path.home() / cluster.checkouts / name / 'current'
             checkout(record['upstreams'][name], record['commits'][name], target, max(1, record['deadline_unix'] - time.time()))
-            target.with_name(target.name + '.used').touch()
-            prune(target.parent, cluster.kept)
             record['checkouts'][name] = {'path': str(target)}
         committed_mesh = Path(record['checkouts']['mesh']['path'])
         committed_bench = Path(record['checkouts']['metal-microbench']['path'])
@@ -210,22 +209,19 @@ def _launch(mesh_root, microbench_root, output_root, cluster):
 
 
 def prepare_node(node, record):
-    """This commit's mesh checkout on the node, built there (node prepare) for ranks that load it by path, the
-    bridge's own checkout moved to it; the `checkouts_kept` most recently used kept."""
+    """The node's one mesh checkout, `current` (its bridge's and its ranks', which load it by path), moved to this
+    commit and built there (node prepare)."""
     from mesh_nodes import home_path
     from mesh_source import checkout_command
     cluster, commit = node.cluster, record['commits']['mesh']
-    node.source = f'{cluster.checkouts}/mesh/{commit}'
+    node.source = f'{cluster.checkouts}/mesh/current'
     result = {'number': node.number, 'status': 'installing', 'commit': commit, 'commands': node.commands}
     record['nodes'][f'{node.number}@{node.addr}'] = result
     try:
         code, output = node.run('\n'.join((
             f'export MESH_RUN={shlex.quote(record["token"])}',
             checkout_command(record['upstreams']['mesh'], commit, '~/' + node.source),
-            f'touch {home_path(node.source)}.used',
-            f'PYTHONPATH={home_path(node.source + "/rdma")} {cluster.python} -m mesh_nodes node prepare',
-            f'{cluster.python} {home_path(node.source + "/rdma/mesh_source.py")} prune '
-            f'{home_path(cluster.checkouts + "/mesh")} {cluster.kept}')))
+            f'PYTHONPATH={home_path(node.source + "/rdma")} {cluster.python} -m mesh_nodes node prepare')))
         result['install_exit'] = code
         if code:
             raise RuntimeError(f'preparation failed ({code}): {output}')

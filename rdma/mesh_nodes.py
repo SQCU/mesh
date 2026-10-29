@@ -42,15 +42,14 @@ class Member:
 @dataclasses.dataclass(frozen=True)
 class Cluster:
     """etc/mesh-nodes.json with the environment: members by bridge node number, the administrator's user and key, a
-    run's bound in seconds, the nodes' Python, their per-commit checkouts under home and how many are kept, and the
-    first rank port."""
+    run's bound in seconds, the nodes' Python, the directory under home of each repository's one checkout
+    (`<repository>/current`), and the first rank port."""
     members: dict
     user: str
     key: 'str | None'
     run_seconds: int
     python: str
     checkouts: str
-    kept: int
     rank_port: int
 
     @property
@@ -66,7 +65,7 @@ def load(path=ROOT / 'etc/mesh-nodes.json'):
                                         frozenset(row.get('roles', ())), row.get('guard_headroom_gib', 0)) for row in raw['nodes'].values()}
     return Cluster(members, access.get('user') or getpass.getuser(),
                    str(Path(access['key']).expanduser()) if 'key' in access else None,
-                   raw['run_seconds'], raw['python'], raw['checkouts'], raw['checkouts_kept'], raw['rank_port'])
+                   raw['run_seconds'], raw['python'], raw['checkouts'], raw['rank_port'])
 
 
 def home_path(relative):
@@ -371,26 +370,26 @@ def run(*argv, **kw):
 
 
 def node_prepare():
-    """Build this commit's checkout for its ranks, which load it by path, never the shared venv: make (which rebuilds
-    only what is stale), _mesh_c and torch_mesh's extension in place. The bridge runs from its own checkout beside it,
-    `current`, moved to this commit and installed by bin/mesh-user.sh, which restarts the bridge (SIGHUP, its region
-    kept) only when its images changed. A node's preparations take turns."""
+    """Build the node's one checkout, `current` (the bridge's and the ranks', moved to this commit before this runs),
+    as nothing but make's and ninja's staleness decide: bin/mesh-user.sh's `make all install` (in parallel), the one
+    build of the libraries and the bridge, which restarts the bridge (SIGHUP, its region kept) only where its images
+    changed; then _mesh_c and torch_mesh's extension in place. A node's preparations take turns."""
     import fcntl
-    bridge = ROOT.parent / 'current'
+    jobs = {**os.environ, 'MESH_RDMA': str(ROOT / 'rdma'), 'MAKEFLAGS': f'-j{os.cpu_count() or 1}'}
     with open(ROOT.parent / 'prepare.lock', 'a') as turn:
         fcntl.flock(turn, fcntl.LOCK_EX)
-        for where, *argv in (('rdma', 'make', '-s', 'install'), ('rdma', sys.executable, 'mesh_c_build.py'),
+        installed = None
+        for where, *argv in (('.', ROOT / 'bin/mesh-user.sh', (HOME / 'Library/Application Support/io.mesh.bridge/'
+                                                               'document').read_text().strip(), ROOT),
+                             ('rdma', sys.executable, 'mesh_c_build.py'),
                              ('rdma/torch-mesh', sys.executable, 'setup.py', '-q', 'build_ext', '--inplace',
-                              '--build-temp', '../.build/torch-mesh'),
-                             ('.', 'git', '--git-dir', ROOT.parent / 'repository.git', 'worktree', 'add', '--detach',
-                              bridge, ROOT.name) if not bridge.exists() else
-                             ('.', 'git', '-C', bridge, 'checkout', '--quiet', '--detach', ROOT.name),
-                             ('.', bridge / 'bin/mesh-user.sh', (HOME / 'Library/Application Support/io.mesh.bridge/'
-                                                                 'document').read_text().strip(), bridge)):
-            done = run(*argv, cwd=ROOT / where, env={**os.environ, 'MESH_RDMA': str(ROOT / 'rdma')})
+                              '--build-temp', '../.build/torch-mesh')):
+            done = run(*argv, cwd=ROOT / where, env=jobs)
             if done.returncode:
                 raise RuntimeError(f'{where}: {" ".join(map(str, argv[:3]))} failed: {(done.stderr or done.stdout)[-600:]}')
+            installed = installed or done
     services = services_refresh(ROOT)
+    done = installed
     if 'restarts the bridge' not in done.stdout:
         print(json.dumps({'bridge': 'unchanged', 'services': services}))
         return
@@ -556,7 +555,8 @@ def node_guard(seconds, floor, workstation, *argv):
     known, why, value, size = {rank.pid: process(rank.pid)[0]}, None, ctypes.c_uint64(), ctypes.c_size_t()
     own = os.environ.get('MESH_RUN')
     others = lambda: sorted(set(carrying(lambda token: token != own).values()))
-    print(json.dumps({'loaded': ROOT.name, 'overlap': others()}), flush=True)
+    from mesh_source import revision
+    print(json.dumps({'loaded': revision(ROOT), 'overlap': others()}), flush=True)
     live = lambda pid, start: (seen := process(pid)) is not None and seen[0] == start and seen[1] != zombie
     while why is None and process(rank.pid)[1] != zombie:
         for pid, start in list(known.items()):

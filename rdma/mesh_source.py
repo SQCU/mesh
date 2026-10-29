@@ -63,23 +63,13 @@ def checkout(origin, commit, destination, timeout=None):
         raise RuntimeError(f'Git checkout {commit} from {origin} failed ({result.returncode}): {result.stderr.strip()}')
 
 
-def prune(root, kept):
-    """Remove the per-commit checkouts past the `kept` most recently used, each marked by `<name>.used`."""
-    for used in sorted(Path(root).glob('*.used'), key=lambda path: path.stat().st_mtime, reverse=True)[int(kept):]:
-        git(Path(root) / 'repository.git', 'worktree', 'remove', '--force', str(used.with_suffix('')))
-        used.unlink()
-
-
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=('revision', 'verify', 'prune'))
+    parser.add_argument('action', choices=('revision', 'verify'))
     parser.add_argument('root', type=Path)
-    parser.add_argument('kept', nargs='?', type=int)
     args = parser.parse_args()
     if args.action == 'revision':
         print(revision(args.root))
-    elif args.action == 'prune':
-        prune(args.root, args.kept)
     else:
         print(verify(args.root))
 
