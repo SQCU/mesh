@@ -51,7 +51,8 @@ using namespace metal;
 // The identity specialization is the existing direct address calculation.
 #ifndef MESH_INDEX_DECLARED
 template<uint B> inline long mesh_index(ulong i) { return long(i); }
-template<uint B> constexpr bool mesh_vector4() { return true; }
+template<uint B> constexpr ulong mesh_vector_span() { return 0; }
+template<uint B> constexpr bool mesh_vector4() { return mesh_vector_span<B>() % 4 == 0; }
 #endif
 template<uint B, typename V, bool Aligned = true, typename T>
 inline V mesh_load4(device const T *p, ulong i) {

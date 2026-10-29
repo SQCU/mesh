@@ -38,7 +38,8 @@ NSString *MetalViewIndexExpression(const NSUInteger *shape,const NSInteger *stri
 static NSString *MetalViewIndexTemplates(void) {
     return @"template<uint B> inline long mesh_index(ulong i) { return long(i); }\n"
         "template<uint B, uint A> constexpr long mesh_stride();\n"
-        "template<uint B> constexpr bool mesh_vector4() { return true; }\n";
+        "template<uint B> constexpr ulong mesh_vector_span() { return 0; }\n"
+        "template<uint B> constexpr bool mesh_vector4() { return mesh_vector_span<B>() % 4 == 0; }\n";
 }
 
 NSString *MetalViewIndexPrelude(void) {
@@ -158,6 +159,12 @@ NSData *MetalViewTiles(const NSUInteger *shape,size_t rank,NSUInteger elements) 
     free(tile);return result;
 }
 
+static NSUInteger MetalViewAlignment(NSUInteger span,NSInteger distance) {
+    NSUInteger d=distance<0?(NSUInteger)(-(distance+1))+1:(NSUInteger)distance;
+    while(d){NSUInteger next=span%d;span=d;d=next;}
+    return span;
+}
+
 static NSString *MetalViewAffineIndexDeclaration(NSUInteger binding,const NSUInteger *shape,const NSInteger *strides,
     size_t rank,NSUInteger elementOffset,NSInteger base) {
     NSString *expression=MetalViewIndexExpression(shape,strides,rank,@"i");
@@ -165,16 +172,16 @@ static NSString *MetalViewAffineIndexDeclaration(NSUInteger binding,const NSUInt
     NSMutableString *source=[NSMutableString string];
     if(![expression isEqualToString:@"long(i)"])
         [source appendFormat:@"template<> inline long mesh_index<%lu>(ulong i) { return %@; }\n",(unsigned long)binding,expression];
-    // A logical group of four can retain its vector instruction only when it
-    // is physically adjacent and aligned. This is a compilation decision.
+    // The aligned contiguous span is measured in this view's elements. A byte
+    // view and a scalar view can therefore describe the same vector correctly.
     NSUInteger inner=1,prefix=rank;
     for(size_t d=rank;d--;) {
         if(shape[d]>1&&strides[d]!=(NSInteger)inner)break;
         inner*=shape[d];prefix=d;
     }
-    BOOL vector=((NSInteger)elementOffset+base)%4==0&&(!prefix||inner%4==0);
-    for(size_t d=0;d<prefix;d++)if(shape[d]>1&&strides[d]%4)vector=NO;
-    if(!vector)[source appendFormat:@"template<> constexpr bool mesh_vector4<%lu>() { return false; }\n",(unsigned long)binding];
+    NSUInteger vector=MetalViewAlignment(prefix?inner:0,(NSInteger)elementOffset+base);
+    for(size_t d=0;d<prefix;d++)if(shape[d]>1)vector=MetalViewAlignment(vector,strides[d]);
+    if(vector)[source appendFormat:@"template<> constexpr ulong mesh_vector_span<%lu>() { return %lul; }\n",(unsigned long)binding,(unsigned long)vector];
     return source;
 }
 
@@ -218,7 +225,7 @@ NSString *MetalViewMappedIndexDeclaration(NSUInteger binding,const NSUInteger *s
     NSMutableString *source=[NSMutableString string];
     NSMutableArray *terms=[NSMutableArray array];
     if(shift)[terms addObject:[NSString stringWithFormat:@"%ldl",(long)shift]];
-    NSUInteger divisor=1,contiguous=1;NSInteger origin=(NSInteger)elementOffset+shift;BOOL inner=YES,vector=YES;
+    NSUInteger divisor=1,contiguous=1,vector=0;NSInteger origin=(NSInteger)elementOffset+shift;BOOL inner=YES;
     for(size_t d=rank;d--;) {
         if(!shape[d])return MetalViewIndexDeclaration(binding,shape,strides,rank,elementOffset);
         NSString *coordinate=divisor==1?@"long(i)":[NSString stringWithFormat:@"(long(i) / %lul)",(unsigned long)divisor];
@@ -263,17 +270,18 @@ NSString *MetalViewMappedIndexDeclaration(NSUInteger binding,const NSUInteger *s
         origin+=base;
         if(shape[d]>1) {
             if(inner&&!period&&step==(NSInteger)contiguous)contiguous*=shape[d];
-            else {inner=NO;vector&=contiguous%4==0;}
+            else {inner=NO;vector=MetalViewAlignment(vector,(NSInteger)contiguous);}
             if(!inner) {
-                if(values){for(NSUInteger j=0;j<shape[d];j++)vector&=(values[j]-base)%4==0;}
-                else vector&=step%4==0;
+                if(values){for(NSUInteger j=0;j<shape[d];j++)vector=MetalViewAlignment(vector,values[j]-base);}
+                else vector=MetalViewAlignment(vector,step);
             }
         }
         divisor*=shape[d];
     }
     NSString *expression=terms.count?[terms componentsJoinedByString:@" + "]:@"0";
     [source appendFormat:@"template<> inline long mesh_index<%lu>(ulong i) { return %@; }\n",(unsigned long)binding,expression];
-    if(!vector||origin%4)[source appendFormat:@"template<> constexpr bool mesh_vector4<%lu>() { return false; }\n",(unsigned long)binding];
+    vector=MetalViewAlignment(vector,origin);
+    if(vector)[source appendFormat:@"template<> constexpr ulong mesh_vector_span<%lu>() { return %lul; }\n",(unsigned long)binding,(unsigned long)vector];
     return source;
 }
 

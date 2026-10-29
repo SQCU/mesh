@@ -2,29 +2,35 @@
 #include <metal_tensor>
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 using namespace mpp::tensor_ops;
-struct ProductArgs {
-    uint4 shape;
-};
-kernel void product(device INPUT *X [[buffer(0)]], device WEIGHT *W [[buffer(1)]], device uchar *Y [[buffer(2)]],
-                    device atomic_uint *arrivals [[buffer(3)]], constant ProductArgs &s [[buffer(4)]], device OUTPUT *bias [[buffer(5)]],
-                    device INPUT *X1 [[buffer(6)]], device ulong *ready [[buffer(7)]],
+kernel void product(device const INPUT *X [[buffer(0)]], device const WEIGHT *W [[buffer(1)]], device uchar *Y [[buffer(2)]],
+                    device atomic_uint *arrivals [[buffer(3)]], device OUTPUT *bias [[buffer(5)]],
+                    device const INPUT *X1 [[buffer(6)]], device ulong *ready [[buffer(7)]],
                     uint3 tg [[threadgroup_position_in_grid]], uint3 lane [[thread_position_in_threadgroup]],
                     ushort sg [[simdgroup_index_in_threadgroup]]) {
-    const int M=s.shape.x, N=s.shape.z;
+    constexpr int M=PRODUCT_ROWS, N=PRODUCT_COLUMNS, K=PRODUCT_INNER;
     const int row=int(tg.x)*ROWS*ROW_GROUPS+(sg/COLUMN_GROUPS)*ROWS, col=int(tg.y)*COLUMNS*COLUMN_GROUPS+(sg%COLUMN_GROUPS)*COLUMNS;
-    auto A=tensor(X + tg.z * ABATCH, dextents<int,2>{K0,M}, array<int,2>{AK,AM});
-    auto B=tensor(W + tg.z * BBATCH, dextents<int,2>{N,K0}, array<int,2>{BN,BK});
     constexpr auto desc=matmul2d_descriptor(ROWS,COLUMNS,INNER,false,false,false,matmul2d_descriptor::mode::multiply_accumulate);
     matmul2d<desc, execution_simdgroup> op;
-    auto acc=op.get_destination_cooperative_tensor<decltype(A),decltype(B),float>();
+    const ulong abase=BATCH_A ? ulong(tg.z)*M*K0 : 0, bbase=BATCH_B ? ulong(tg.z)*K*N : 0;
+    using Left=decltype(mesh_matrix_operand<true,0,AFFINE_A,ROWS,INNER,AM,AK,INPUT,WEIGHT>(op,X,abase,int2(K0,M),int2(0,row)));
+    using Right=decltype(mesh_matrix_operand<false,1,AFFINE_B,INNER,COLUMNS,BK,BN,INPUT,WEIGHT>(op,W,bbase,int2(N,K0),int2(col,0)));
+    auto acc=op.get_destination_cooperative_tensor<Left,Right,float>();
+    #pragma unroll
     for(uint i=0;i<acc.get_capacity();i++)acc[i]=0;
-    for(int at=0;at<K0;at+=INNER){auto a=A.slice<INNER,ROWS>(at,row);auto b=B.slice<COLUMNS,INNER>(col,at);op.run(a,b,acc);}
+    for(int at=0;at<K0;at+=INNER){
+        auto a=mesh_matrix_operand<true,0,AFFINE_A,ROWS,INNER,AM,AK,INPUT,WEIGHT>(op,X,abase,int2(K0,M),int2(at,row));
+        auto b=mesh_matrix_operand<false,1,AFFINE_B,INNER,COLUMNS,BK,BN,INPUT,WEIGHT>(op,W,bbase,int2(N,K0),int2(col,at));
+        op.run(a,b,acc);
+    }
 #if SEGMENTED
-    const int K=s.shape.y;
-    auto A1=tensor(X1 + tg.z * A1BATCH, dextents<int,2>{K-K0,M}, array<int,2>{A1K,A1M});
-    auto B1=tensor(W + tg.z * BBATCH + K0 * BK, dextents<int,2>{N,K-K0}, array<int,2>{BN,BK});
-    for(int at=0;at<K-K0;at+=INNER){auto a=A1.slice<INNER,ROWS>(at,row);auto b=B1.slice<COLUMNS,INNER>(col,at);op.run(a,b,acc);}
+    const ulong a1base=BATCH_A1 ? ulong(tg.z)*M*(K-K0) : 0;
+    for(int at=0;at<K-K0;at+=INNER){
+        auto a=mesh_matrix_operand<true,6,AFFINE_A1,ROWS,INNER,A1M,A1K,INPUT,WEIGHT>(op,X1,a1base,int2(K-K0,M),int2(at,row));
+        auto b=mesh_matrix_operand<false,1,AFFINE_B,INNER,COLUMNS,BK,BN,INPUT,WEIGHT>(op,W,bbase+ulong(K0)*N,int2(N,K-K0),int2(col,at));
+        op.run(a,b,acc);
+    }
 #endif
+    #pragma unroll
     for(uint i=0;i<acc.get_capacity();i++)if(acc.is_valid_element(i)){
         auto e=acc.get_multidimensional_index(i);
         if(row+e[1]<M && col+e[0]<N) {
@@ -40,12 +46,12 @@ kernel void product(device INPUT *X [[buffer(0)]], device WEIGHT *W [[buffer(1)]
     const uint local = lane.x, rowGroups = (M+ROWS*ROW_GROUPS-1)/(ROWS*ROW_GROUPS),
         columnGroups = (N+COLUMNS*COLUMN_GROUPS-1)/(COLUMNS*COLUMN_GROUPS), slot = tg.z*rowGroups+tg.x;
     threadgroup uint last[1];
-    if (mesh_last_arrival<true>(arrivals, slot, columnGroups, local, last)) {
+    if (mesh_last_arrival<true>(arrivals + mesh_index<3>(slot), 0, columnGroups, local, last)) {
         // The publication value is a marker shared by this family. The final
         // short tile still transfers only its masked payload bytes.
-        const ulong bytes = ulong(min(uint(ROWS*ROW_GROUPS), uint(M)))*N*sizeof(OUTPUT);
-        mesh_source_release(ready, slot, bytes, local);
-        mesh_arrival_reset(arrivals, slot, local);
+        const ulong bytes = ulong(min(uint(ROWS*ROW_GROUPS), uint(M)-tg.x*ROWS*ROW_GROUPS))*N*sizeof(OUTPUT);
+        mesh_source_release(ready + mesh_index<7>(slot), 0, bytes, local);
+        mesh_arrival_reset(arrivals + mesh_index<3>(slot), 0, local);
     }
 #endif
 }

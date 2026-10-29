@@ -192,6 +192,38 @@ than one node's memory. The native mixing command also retains a whole matrix
 access declaration. Further distribution belongs in graph placement and the
 shared product lowerer, using the same page operands and dependency relations.
 
+### Mapped matrix operands
+
+`matrix_operand.metal` loads the existing view's logical coordinates into Metal
+cooperative registers. FX matrix products and native scalar-format products use
+that shared loader. Affine FX operands retain direct tensor loads; the compiler
+selects the load expression from the same view type. This adds no runtime layout
+choice, whole-operand materialization, or separate dispatch. Matrix inputs and
+weights now declare `indexed` as their API requirement.
+
+Batch selection, segmented contraction domains, bias, result pages and tile
+publication words keep their prepared mappings. The matrix dimensions are
+compiled constants. Each segment masks its own contraction tail, so the final
+local tile cannot consume lanes from the next segment.
+
+The native stored-product geometry comes from `metal.def`. Scalar formats use
+independent SIMD-group matrix tiles with register inputs. Encoded formats retain
+their shared decoded input tiles. Both write accumulator values straight to
+their output views; neither stages the accumulator in a shared output buffer.
+Scalar weight decoding retains fp32 and bf16 values without a half conversion.
+The shared index emitter describes the aligned contiguous span in the view's
+own units. A four-byte run is enough for four byte values, but not for four
+fp32 values. The decoder consumes that compiled span at its actual load width;
+it does not guess layout or check it during execution.
+
+Preparation on 2026-10-28 compiled mapped fp16, fp32 and bf16 products as one
+command, including a segmented batched product with mapped publication words.
+Public FX compilation prepared mapped forward and backward graphs. Native raw
+and quantized product shaders compiled with typed inputs and mapped outputs.
+No numerical commands were submitted. This removes a layout-copy requirement;
+it does not establish collective placement or early publication for every native
+product, and it provides no new throughput or latency measurement.
+
 Further integration belongs at these shared lowering boundaries. Numerical
 bodies contribute their work and uses, rather than separate memory systems.
 
@@ -548,9 +580,10 @@ folded matrix path retain that type too. The tap projection's separate half
 conversion has been removed. Coded product inputs remain the transform's
 declared half outputs; this change does not remove their numerical transform.
 
-Stored matrix products load typed vectors from that operand. Their tiled body
-declares its input, decoded weights and result storage in one threadgroup union,
-sized by the shader compiler. Host code no longer supplies a fixed byte count.
+Stored matrix products load typed vectors from that operand. Quantized tiled
+products declare their decoded input storage in the shader. Scalar tiled
+products load cooperative registers directly. Results go straight to their
+assigned views. Host code supplies no fixed workspace byte count.
 FX matrix binding likewise carries input and weight types separately, so a
 folded rotation need not convert either whole operand just to match types.
 Normalization weights also carry their type and view into the shared index and

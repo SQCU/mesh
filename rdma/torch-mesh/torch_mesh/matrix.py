@@ -1,7 +1,6 @@
 """Native matrix command operands shared by FX and the streamed DNN program."""
 from functools import lru_cache
 from pathlib import Path
-import struct
 
 import torch
 from . import _stream, fused
@@ -14,6 +13,7 @@ from .layout import index_source, bindings
 def pipeline(definitions, indices):
     source = fused.steps() + '\n' + indices + ''.join(f'#define {key} {value}\n' for key, value in definitions)
     source += Path(__file__).with_name('argmax.metal').read_text() + '\n'
+    source += Path(__file__).with_name('matrix_operand.metal').read_text() + '\n'
     return _stream.pipeline(source + Path(__file__).with_suffix('.metal').read_text(), 'product')
 
 
@@ -48,8 +48,8 @@ def product(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, ready=
         raise ValueError('matrix bias requires the output dtype and a broadcastable row view')
     if ready is not None:
         tiles = len(row_tiles(rows)) * batches
-        if (ready.dtype != torch.int64 or ready.numel() != tiles or not ready.is_contiguous() or
-                arrivals is None or arrivals.dtype != torch.int32 or arrivals.numel() != tiles or not arrivals.is_contiguous()):
+        if (ready.dtype != torch.int64 or ready.numel() != tiles or
+                arrivals is None or arrivals.dtype != torch.int32 or arrivals.numel() != tiles):
             raise ValueError('tile publication needs one ready word and arrival count per batch row tile')
     layouts = api_layouts('matrix') if layouts is None else layouts
     inputs, before = bindings(dict(x=x, w=w, x1=x1, bias=bias),
@@ -57,28 +57,28 @@ def product(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, ready=
     outputs, after = bindings(dict(out=out), dict(out=layouts['output']), writing=True)
     x, w, x1, bias = (None if value is None else TensorView.of(value) for value in inputs.values())
     out = TensorView.of(outputs['out'])
-    stride = lambda t: t.stride(0) if t.ndim == 3 and t.shape[0] > 1 else 0
-    definitions = dict(INPUT=kinds[x.dtype], WEIGHT=kinds[w.dtype], OUTPUT=kinds[out.dtype], AM=x.stride(-2), AK=x.stride(-1),
-                       BK=w.stride(-2), BN=w.stride(-1),
-                       ABATCH=stride(x), BBATCH=stride(w),
+    def step(value, axis):
+        return value.stride(axis) if value is not None and value.layout.affine else 0
+    definitions = dict(INPUT=kinds[x.dtype], WEIGHT=kinds[w.dtype], OUTPUT=kinds[out.dtype], AM=step(x,-2), AK=step(x,-1),
+                       BK=step(w,-2), BN=step(w,-1), AFFINE_A=int(x.layout.affine), AFFINE_B=int(w.layout.affine),
+                       BATCH_A=int(x.ndim == 3 and x.shape[0] > 1), BATCH_B=int(w.ndim == 3 and w.shape[0] > 1),
                        BIAS_ROWS=bias.shape[0] if bias is not None and bias.ndim == 2 else 1,
                        BIAS_COLUMNS=bias.shape[-1] if bias is not None else 1,
                        ACTIVATE=int(act), BIAS=int(bias is not None), ALPHA=repr(float(alpha))+'f',
                        BETA=repr(float(beta))+'f', PRODUCED=int(ready is not None),
-                       SEGMENTED=int(x1 is not None), K0=first,
-                       A1M=x1.stride(-2) if x1 is not None else 0,
-                       A1K=x1.stride(-1) if x1 is not None else 0,
-                       A1BATCH=stride(x1) if x1 is not None else 0)
+                       SEGMENTED=int(x1 is not None), K0=first, PRODUCT_ROWS=rows, PRODUCT_COLUMNS=columns, PRODUCT_INNER=inner,
+                       A1M=step(x1,-2), A1K=step(x1,-1), AFFINE_A1=int(x1 is not None and x1.layout.affine),
+                       BATCH_A1=int(x1 is not None and x1.ndim == 3 and x1.shape[0] > 1))
     geometry = operands()
     definitions.update((key, geometry['MATRIX_' + key])
                        for key in ('ROWS', 'COLUMNS', 'INNER', 'ROW_GROUPS', 'COLUMN_GROUPS'))
     row_tile = definitions['ROWS'] * definitions['ROW_GROUPS']
     column_tile = definitions['COLUMNS'] * definitions['COLUMN_GROUPS']
     threads = definitions['ROW_GROUPS'] * definitions['COLUMN_GROUPS'] * geometry['SIMD_WIDTH']
-    words = [rows, inner, columns, batches]
-    indices = index_source({2: out, **({5: bias} if bias is not None else {})})
+    indices = index_source({0: x, 1: w, 2: out, **({5: bias} if bias is not None else {}), **({6: x1} if x1 is not None else {}),
+                            **({3: arrivals, 7: ready} if ready is not None else {})})
     record = (pipeline(tuple(definitions.items()), indices), [x, w, out, arrivals, None, bias, x1, ready],
-            {4: struct.pack(f'{len(words)}I', *words)}, (-(-rows // row_tile), -(-columns // column_tile), batches),
+            {}, (-(-rows // row_tile), -(-columns // column_tile), batches),
             (threads, 1, 1), False, 3 | (32 if bias is not None else 0) | (64 if x1 is not None else 0)
             | ((140 if ready is not None else 4) << _stream.compilation['ACCESS_WRITE_SHIFT']))
     return [*before, record, *after]

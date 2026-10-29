@@ -16,8 +16,8 @@
     "output": "contiguous"
   },
   "matrix": {
-    "input": "strided",
-    "weight": "strided",
+    "input": "indexed",
+    "weight": "indexed",
     "output": "indexed",
     "bias": "indexed"
   },
