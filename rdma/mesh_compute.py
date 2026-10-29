@@ -1,5 +1,6 @@
 """Hardware inputs read once during preparation, never during numerical calls."""
 from functools import cache
+import ctypes
 import json
 import plistlib
 import subprocess
@@ -30,11 +31,23 @@ def _read(*command):
     return result.stdout
 
 
-def _sysctl(name):
-    value = _read('sysctl', '-n', name).decode().strip()
-    if not value:
+_LIBC = ctypes.CDLL(None, use_errno=True)
+
+
+def _sysctl(name, text=False):
+    """`name`'s value as sysctl(8) prints it, read in this process (sysctlbyname): a forked sysctl would copy this
+    process's page tables, a rank's region among them, to print one number."""
+    size = ctypes.c_size_t(0)
+    if _LIBC.sysctlbyname(name.encode(), None, ctypes.byref(size), None, 0) or not size.value:
         raise RuntimeError(f'compute capability {name}: no value')
-    return value
+    value = ctypes.create_string_buffer(size.value)
+    if _LIBC.sysctlbyname(name.encode(), value, ctypes.byref(size), None, 0):
+        raise RuntimeError(f'compute capability {name}: {ctypes.get_errno()}')
+    raw = value.raw[:size.value]
+    result = raw.rstrip(b'\0').decode().strip() if text else str(int.from_bytes(raw, 'little', signed=True))
+    if not result:
+        raise RuntimeError(f'compute capability {name}: no value')
+    return result
 
 
 @cache
@@ -47,7 +60,7 @@ def hardware():
     levels = []
     for index in range(int(_sysctl('hw.nperflevels'))):
         prefix = f'hw.perflevel{index}'
-        levels.append({'name': _sysctl(prefix + '.name'), **{
+        levels.append({'name': _sysctl(prefix + '.name', True), **{
             field: int(_sysctl(prefix + '.' + key)) for field, key in (
                 ('physical_cores', 'physicalcpu'), ('logical_cores', 'logicalcpu'),
                 ('cores_per_l2', 'cpusperl2'), ('l2_bytes', 'l2cachesize'))}})
@@ -60,9 +73,9 @@ def hardware():
     counts = {device['gpu-core-count'] for device in devices if 'gpu-core-count' in device}
     if len(counts) != 1 or next(iter(counts)) <= 0:
         raise RuntimeError(f'compute capability: expected one positive gpu-core-count, got {sorted(counts)}')
-    return {'model': _sysctl('hw.model'), 'chip': _sysctl('machdep.cpu.brand_string'),
-            'os': {'version': _read('sw_vers', '-productVersion').decode().strip(),
-                   'build': _read('sw_vers', '-buildVersion').decode().strip()},
+    system = plistlib.loads(Path('/System/Library/CoreServices/SystemVersion.plist').read_bytes())   # what sw_vers prints
+    return {'model': _sysctl('hw.model', True), 'chip': _sysctl('machdep.cpu.brand_string', True),
+            'os': {'version': system['ProductVersion'], 'build': system['ProductBuildVersion']},
             'cpu': {'physical_cores': physical, 'logical_cores': logical, 'levels': levels},
             'gpu': {'cores': counts.pop()}}
 
