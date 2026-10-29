@@ -612,8 +612,8 @@ static NSIndexSet *MetalViewPrior(NSMutableDictionary *read,NSMutableDictionary 
     NSMutableIndexSet *prior=[NSMutableIndexSet indexSet];
     MetalViewAccesses(views,^(id key,NSUInteger lo,NSUInteger hi,uint32_t access){
         for(NSMutableDictionary *set in (access&MetalReachWritten?@[written,read]:@[written])) {
-            NSData *data=set[key];const struct MetalSpan *spans=data.bytes;
-            for(NSUInteger i=0;i<data.length/sizeof *spans;i++)
+            NSData *data=set[key];const struct MetalSpan *spans=data.bytes;const NSUInteger n=data.length/sizeof *spans;
+            for(NSUInteger i=0;i<n;i++)
                 if(spans[i].lo<hi&&lo<spans[i].hi)[prior addIndex:spans[i].node];
         }
     });
