@@ -30,6 +30,7 @@
 #include <unistd.h>
 #include "metal-recording.h"
 #include "nccl.h"
+#include "layout.h" /* MESH_PREPARATION_NS: the preparation deadline a kernel compile waits within */
 
 // allocator.mm: torch's MPS allocator made the region's, and its leases live now (address, bytes)
 void install_region_allocator();
@@ -360,21 +361,49 @@ static int64_t communicator_of(const c10::IValue &name) {
 // 4.0 (tensor operations), and a dispatch of it encoded in torch's open compute encoder on its queue, ordered with
 // torch's own work and waited on by no host: buffers by index (a tensor's storage at its offset), 32-bit constants at
 // one index, the grid in threadgroups.
-static std::vector<id<MTLComputePipelineState>> pipelines_;
+// A kernel compiles from the moment it is asked for, on the Metal compiler service, so a preparation's compiles run
+// together across the node's cores instead of one after another; its first use (state_of) waits for it, within the
+// preparation's deadline (MESH_PREPARATION_NS), and raises its compile error there.
+struct Compiled { dispatch_semaphore_t done; std::atomic<bool> ready{false}; id<MTLComputePipelineState> state = nil; std::string error; };
+static std::vector<std::shared_ptr<Compiled>> pipelines_;
+static std::mutex pipelines_lock_;
 
 static int64_t pipeline(const std::string &source, const std::string &name) {
   id<MTLDevice> device = at::mps::MPSDevice::getInstance()->device();
   MTLCompileOptions *options = MetalDeviceCompilerOptions(device);
-  NSError *error = nil;
-  id<MTLLibrary> library = [device newLibraryWithSource:@(source.c_str()) options:options error:&error];
-  if (!library) throw std::runtime_error(std::string("kernel source: ") + error.localizedDescription.UTF8String);
-  id<MTLFunction> function = [library newFunctionWithName:@(name.c_str())];
-  if (!function) throw std::runtime_error("kernel source: no function " + name);
-  id<MTLComputePipelineState> state = [device newComputePipelineStateWithFunction:function error:&error];
-  if (!state) throw std::runtime_error(std::string("kernel pipeline: ") + error.localizedDescription.UTF8String);
-  [function release]; [library release];
-  pipelines_.push_back(state);
+  auto made = std::make_shared<Compiled>();
+  made->done = dispatch_semaphore_create(0);
+  const std::string function_name = name;
+  [device newLibraryWithSource:@(source.c_str()) options:options completionHandler:^(id<MTLLibrary> library, NSError *error) {
+    id<MTLFunction> function = library ? [library newFunctionWithName:@(function_name.c_str())] : nil;
+    NSError *failed = nil;
+    id<MTLComputePipelineState> state = function ? [device newComputePipelineStateWithFunction:function error:&failed] : nil;
+    if (!library) made->error = std::string("kernel source: ") + error.localizedDescription.UTF8String;
+    else if (!function) made->error = "kernel source: no function " + function_name;
+    else if (!state) made->error = std::string("kernel pipeline: ") + failed.localizedDescription.UTF8String;
+    [function release];
+    made->state = state;
+    dispatch_semaphore_signal(made->done);
+  }];
+  std::lock_guard<std::mutex> guard(pipelines_lock_);
+  pipelines_.push_back(made);
   return (int64_t)pipelines_.size() - 1;
+}
+
+static id<MTLComputePipelineState> state_of(int64_t handle, const char *what) {
+  std::shared_ptr<Compiled> made;
+  {
+    std::lock_guard<std::mutex> guard(pipelines_lock_);
+    if (handle < 0 || handle >= (int64_t)pipelines_.size()) throw std::runtime_error(std::string(what) + ": no kernel " + std::to_string(handle));
+    made = pipelines_[(size_t)handle];
+  }
+  if (!made->ready.load(std::memory_order_acquire)) {
+    if (dispatch_semaphore_wait(made->done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)MESH_PREPARATION_NS)))
+      throw std::runtime_error(std::string(what) + ": kernel " + std::to_string(handle) + " not compiled within the preparation's deadline");
+    made->ready.store(true, std::memory_order_release);
+  }
+  if (!made->state) throw std::runtime_error(made->error);
+  return made->state;
 }
 
 // What Metal reports of the device a kernel runs on (its MTLDevice: its Apple GPU family, the n of the newest
@@ -392,8 +421,7 @@ static std::tuple<int64_t, int64_t, int64_t> device_facts() {
 }
 
 static std::tuple<int64_t, int64_t, int64_t> pipeline_facts(int64_t handle) {
-  if (handle < 0 || handle >= (int64_t)pipelines_.size()) throw std::runtime_error("pipeline_facts: no kernel " + std::to_string(handle));
-  id<MTLComputePipelineState> state = pipelines_[handle];
+  id<MTLComputePipelineState> state = state_of(handle, "pipeline_facts");
   return {(int64_t)state.maxTotalThreadsPerThreadgroup, (int64_t)state.threadExecutionWidth,
           (int64_t)state.staticThreadgroupMemoryLength};
 }
@@ -413,8 +441,7 @@ struct Dispatch {
 };
 static Dispatch encoded(int64_t handle, const std::vector<std::optional<at::Tensor>> &buffers, const std::vector<int64_t> &constants,
                         int64_t at, int64_t gx, int64_t gy, int64_t threads) {
-  if (handle < 0 || handle >= (int64_t)pipelines_.size()) throw std::runtime_error("encode: no kernel " + std::to_string(handle));
-  Dispatch d{pipelines_[handle], std::vector<id<MTLBuffer>>(buffers.size(), nil), std::vector<NSUInteger>(buffers.size(), 0), std::vector<NSUInteger>(buffers.size(), 0),
+  Dispatch d{state_of(handle, "encode"), std::vector<id<MTLBuffer>>(buffers.size(), nil), std::vector<NSUInteger>(buffers.size(), 0), std::vector<NSUInteger>(buffers.size(), 0),
              std::vector<uint32_t>(constants.begin(), constants.end()), (NSUInteger)at, MTLSizeMake((NSUInteger)gx, (NSUInteger)gy, 1),
              MTLSizeMake((NSUInteger)threads, 1, 1)};
   for (size_t i = 0; i < buffers.size(); i++)
@@ -525,7 +552,7 @@ struct Commands {
     }
     for(size_t k=0;k<records.size();k++) {
       const auto &[handle,buffers,scalars,grid,group,threadGrid,access]=records[k];
-      TORCH_CHECK(handle>=0&&handle<(int64_t)pipelines_.size(),"unprepared Metal kernel");
+
       auto &bound=bindings[k];
       auto &ranges=reaches[k];
       for(size_t j=0;j<buffers.size();j++)if(!buffers[j].is_none()) {
@@ -542,7 +569,7 @@ struct Commands {
       }
       for(const auto &constant:constants[k])
         bound.push_back({constantBuffer,constantOffset+constant[1],constant[2],(uint32_t)constant[0],MetalReachRead});
-      descriptions.push_back({pipelines_[handle],bound.data(),bound.size(),nullptr,0,ranges.data(),ranges.size(),
+      descriptions.push_back({state_of(handle,"commands"),bound.data(),bound.size(),nullptr,0,ranges.data(),ranges.size(),
         MTLSizeMake(grid[0],grid[1],grid[2]),MTLSizeMake(group[0],group[1],group[2]),(BOOL)threadGrid});
     }
     replay=MetalReplayCommands(device,descriptions.data(),descriptions.size(),MetalFormEncoded);
