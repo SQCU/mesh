@@ -25,8 +25,7 @@ import math
 
 import torch
 import torch.distributed as dist
-from torch._C._distributed_c10d import ReduceOp, _create_work_from_future
-from torch.futures import Future
+from torch._C._distributed_c10d import ReduceOp
 
 from . import _stream, empty  # _stream's kernels for torch's functional collectives on MPS register as it loads
 
@@ -69,21 +68,6 @@ def typed(dtype, reduces):
     return (TYPES[dtype], 1) if dtype in TYPES else (LIB.ncclUint8, torch.empty(0, dtype=dtype).element_size())
 
 
-def asynchronous(opts):
-    """An async op (torch sets the option's asyncOp from async_op): issued now, completed where it is waited."""
-    return bool(getattr(opts, 'asyncOp', False))
-
-
-def done(result):
-    future = Future()
-    future.set_result(result)
-    return _create_work_from_future(future)
-
-
-def _flat(value):
-    return [value] if isinstance(value, torch.Tensor) else [t for v in value for t in _flat(v)]
-
-
 def _binding(tensor):
     """A tensor as an issue passes it (_stream.mm Group::where; nccl.h ncclMeshCall bindings): an MPS one its storage's
     MTLBuffer and byte offset, a CPU one {NULL, its address}, None {NULL, 0}."""
@@ -115,7 +99,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
         self._held(rank, size, made[0])
 
     def _held(self, rank, size, comm):
-        self._rank, self._size, self._pending, self._operators = rank, size, None, {}
+        self._rank, self._size, self._operators = rank, size, {}
         self._declaration = ([], [])
         self.comm = comm
         self.handle = int(ffi.cast('uintptr_t', self.comm))
@@ -193,14 +177,6 @@ class ProcessGroupMesh(dist.ProcessGroup):
         return dist.distributed_c10d._world.pg_names[self]
 
     pg_name = group_name
-
-    def _issue(self, calls, result, split=False):
-        """Submit the configured bindings through the common native collective path."""
-        if self._pending is not None:
-            self._pending.append((calls, result))
-            return done(result)
-        work = _stream.issue(calls, self.handle, bool(split), _flat(result))
-        return done(result) if work is None else work
 
     def plan(self, groups, *, order=None, production_seconds=None):
         """This group's collectives declared once, in their order (nccl.h ncclMeshCommPlan): `groups` the groups its
@@ -332,87 +308,6 @@ class ProcessGroupMesh(dist.ProcessGroup):
             raise ValueError('collective views have different logical extents across ranks')
         return sorted(set(cut for row in rows for cut in row))
 
-    def _alltoall(self, sends, receives, result, opts):
-        """MPI_Alltoallv (ncclMeshAlltoAllV): sends[q] to rank q and receives[q] from it, None moving none."""
-        counts = [0 if t is None else t.numel() for t in (*sends, *receives)]
-        return self._issue([(ALLTOALL, sends, receives, counts, 0, 0)], result, asynchronous(opts))
-
-    def _rooted(self, root, tensor):
-        """A rooted all-to-all's list: `tensor` to or from `root` alone."""
-        return [tensor if q == root else None for q in range(self._size)]
-
-    def start_coalescing(self, device):
-        self._pending = []
-
-    def end_coalescing(self, device):
-        pending, self._pending = self._pending, None
-        return self._issue([c for calls, _ in pending for c in calls], [r for _, r in pending])
-
-    def allreduce(self, tensors, opts=dist.AllreduceOptions()):
-        return self._issue([(ALLREDUCE, [t], [], [], op(opts.reduceOp), 0) for t in tensors], tensors, asynchronous(opts))
-
-    def allreduce_coalesced(self, tensors, opts=None):
-        return self.allreduce(tensors, opts or dist.AllreduceOptions())
-
-    def reduce(self, tensors, opts=dist.ReduceOptions()):
-        return self._issue([(REDUCE, [t], [], [], op(opts.reduceOp), opts.rootRank) for t in tensors], tensors, asynchronous(opts))
-
-    def broadcast(self, tensors, opts=dist.BroadcastOptions()):
-        return self._issue([(BROADCAST, [t], [], [], 0, opts.rootRank) for t in tensors], tensors, asynchronous(opts))
-
-    def barrier(self, opts=None):
-        return self.allreduce([empty(1, dtype=torch.float32, device='cpu').fill_(1)])
-
-    def all_gather_single_coalesced(self, outputs, inputs, opts=None):
-        return self._issue([(ALLGATHER, [i], [o], [i.numel()] * self._size, 0, 0) for o, i in zip(outputs, inputs)], outputs,
-                           asynchronous(opts))
-
-    def all_gather_single(self, output, input, opts=None):
-        return self.all_gather_single_coalesced([output], [input], opts)
-
-    allgather_into_tensor_coalesced = all_gather_single_coalesced
-
-    def allgather(self, outputs, inputs, opts=None):
-        """Gather into final list bindings through the same collective compiler.
-
-        Independently allocated outputs remain separate bindings. No packed
-        receive allocation or copy-back callback is constructed.
-        """
-        return self._issue([(ALLGATHER, [value], destinations, [t.numel() for t in destinations], 0, 0)
-                            for destinations, value in zip(outputs, inputs)], outputs, asynchronous(opts))
-
-    def reduce_scatter_single_coalesced(self, outputs, inputs, opts=dist.ReduceScatterOptions()):
-        return self._issue([(REDUCE_SCATTER, [i], [o], [o.numel()] * self._size, op(opts.reduceOp), 0) for o, i in zip(outputs, inputs)],
-                           outputs, asynchronous(opts))
-
-    def reduce_scatter_single(self, output, input, opts=dist.ReduceScatterOptions()):
-        return self.reduce_scatter_single_coalesced([output], [input], opts)
-
-    reduce_scatter_tensor_coalesced = reduce_scatter_single_coalesced
-
-    def reduce_scatter(self, outputs, inputs, opts=dist.ReduceScatterOptions()):
-        """Reduce original list bindings directly; the compiler supplies fragment offsets."""
-        return self._issue([(REDUCE_SCATTER, parts, [out], [x.numel() for x in parts], op(opts.reduceOp), 0)
-                            for out, parts in zip(outputs, inputs)], outputs, asynchronous(opts))
-
-    def alltoall(self, outputs, inputs, opts=None):
-        return self._alltoall(inputs, outputs, outputs, opts)
-
-    def all_to_all_single(self, output, input, output_split_sizes, input_split_sizes, opts=None):
-        def pieces(t, sizes):
-            return list(t.split(list(sizes) or [t.shape[0] // self._size] * self._size))
-        return self._alltoall(pieces(input, input_split_sizes), pieces(output, output_split_sizes), output, opts)
-
-    def gather(self, outputs, inputs, opts=dist.GatherOptions()):
-        """Every rank's input to the root's list of outputs, any sizes (MPI_Gatherv): the rooted all-to-all."""
-        receives = list(outputs[0]) if self._rank == opts.rootRank else [None] * self._size
-        return self._alltoall(self._rooted(opts.rootRank, inputs[0]), receives, outputs, opts)
-
-    def scatter(self, outputs, inputs, opts=dist.ScatterOptions()):
-        """The root's list of inputs, one to each rank, any sizes (MPI_Scatterv): the rooted all-to-all."""
-        sends = list(inputs[0]) if self._rank == opts.rootRank else [None] * self._size
-        return self._alltoall(sends, self._rooted(opts.rootRank, outputs[0]), outputs, opts)
-
     def partials_operator(self, width):
         """Realize a partial-row reduction operator before declaring a function."""
         if width not in self._operators:
@@ -420,19 +315,6 @@ class ProcessGroupMesh(dist.ProcessGroup):
             check(LIB.ncclMeshRedOpCreatePartials(made, width - 2, LIB.ncclFloat32, self.comm))
             self._operators[width] = made[0]
         return self._operators[width]
-
-    def merge_partials(self, out, partials, rows=None, root=-1, async_op=False):
-        """Split-KV attention partials merged by their log-sum-exp, by the library's partials operator (nccl.h
-        ncclMeshRedOpCreatePartials, one an operand width, made at its first use): `partials` this member's float32 rows
-        of [m, l, O] (partial), merged into `out` (it may be `partials`) on every member (an all-reduce), at `root` (a
-        reduce), or, where `rows` gives each rank's rows of them in rank order, rank r's rows[r] merged into its `out`
-        (ncclMeshReduceScatterV).  One call of the one path, coalesced like any other."""
-        width = partials.shape[-1]
-        merge = self.partials_operator(width)
-        call = ((REDUCE_SCATTER, [partials], [out], [r * width for r in rows], merge, 0) if rows is not None
-                else (ALLREDUCE, [partials], [out], [], merge, 0) if root < 0 else (REDUCE, [partials], [out], [], merge, root))
-        return self._issue([call], [out], async_op)
-
 
 def prepare_fragments(bindings, group):
     """The common AOT binding for partial blocks and frontend graph crossings."""
@@ -519,11 +401,9 @@ def _mesh(group_name, what):
 def merge_partials(partials: torch.Tensor, root: int, group_name: str, rows: list[int]) -> torch.Tensor:
     """The partials merge on the mesh group named `group_name` as a torch operator (torch_mesh.merge_partials):
     float32 rows of [m, l, O] (partial) merged by their log-sum-exp, on every member (`root` -1) or at `root`."""
-    group = _mesh(group_name, 'merge_partials')
-    shape = (rows[group.rank()], partials.shape[-1]) if rows else partials.shape
-    out = empty(shape, dtype=partials.dtype, device=partials.device)
-    group.merge_partials(out, partials, rows=rows or None, root=root)
-    return out
+    _mesh(group_name, 'merge_partials')
+    raise RuntimeError('torch_mesh::merge_partials runs inside a prepared function (declarations.Function), whose '
+                       'preparation declares it; an eager collective is not executed (design/eager-execution.md)')
 
 
 @merge_partials.register_fake

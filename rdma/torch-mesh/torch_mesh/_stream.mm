@@ -162,85 +162,6 @@ static void checked(int64_t result) {
   TORCH_CHECK(!result, "libnccl-mesh: ", ncclGetErrorString((ncclResult_t)result), ": ", ncclGetLastError(nullptr));
 }
 
-// A group encoded in one turn of torch's stream queue: its command buffer and open encoder, the group encoded into them,
-// with the enclosing function responsible for submission. Its workspace is held:
-// split, it is issued and not completed, its ticket (0: complete at once) keeping them until the library retires it.
-static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &call, bool split, int64_t comm, std::vector<at::Tensor> held) {
-  const auto *encode = &call;
-  at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
-  MeshStream *s = &stream_of(stream);
-  s->scratch = std::move(held);
-  __block ncclResult_t result = ncclSuccess;
-  __block ncclMeshIssue issue = {0, 0};
-  {
-    dispatch_sync(stream->queue(), ^{
-      @autoreleasepool {
-        ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, split ? &issue : nullptr};
-        result = (*encode)(&on);
-      }
-    });
-  }
-  s->streamed = true;
-  s->retire(issue.ticket && !result ? issue.ticket : 0, std::exchange(s->scratch, {}));
-  checked(result);
-  return issue.ticket;
-}
-
-// every issued group through `ticket` completed on torch's stream where it is waited, the turn of torch's queue within
-// `ns` is retained for the c10d completion signature.
-static void complete(uint64_t ticket, uint64_t ns = 0) {
-  at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
-  MeshStream *s = &stream_of(stream);
-  if (ncclMeshRetired() >= ticket) return s->retire(0, {});
-  __block ncclResult_t result = ncclSuccess;
-  {
-    dispatch_sync(stream->queue(), ^{
-      @autoreleasepool {
-        ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, nullptr};
-        int published = 0;
-        result = ncclMeshComplete(ticket, &on, &published);
-      }
-    });
-  }
-  s->retire(0, std::exchange(s->scratch, {}));
-  checked(result);
-}
-
-// c10d's Work for a group issued and not completed: waiting (or synchronizing, asking whether it completed, or
-// asking for its future) encodes the rest on torch's current stream, where every later kernel reads its results; a
-// c10d completion follows the submitted stream's dependency.
-class MeshWork : public c10d::Work {
- public:
-  MeshWork(uint64_t ticket, std::vector<at::Tensor> outputs, int64_t comm)
-      : c10d::Work(-1, c10d::OpType::UNKNOWN), ticket_(ticket), outputs_(std::move(outputs)), comm_(comm) {}
-  bool isCompleted() override { finish(); return true; }
-  bool isSuccess() const override { return finished_; }
-  bool wait(std::chrono::milliseconds timeout) override { finish((uint64_t)std::max<int64_t>(timeout.count(), 0) * 1000000); return true; }
-  void synchronize() override { finish(); }
-  c10::intrusive_ptr<c10::ivalue::Future> getFuture() override {
-    finish();
-    auto future = c10::make_intrusive<c10::ivalue::Future>(c10::ListType::create(c10::TensorType::get()));
-    future->markCompleted(c10::IValue(outputs_));
-    return future;
-  }
-
- private:
-  void finish(uint64_t ns = 0) {
-    if (finished_) return;
-    finished_ = true;
-    complete(ticket_, ns);
-  }
-  uint64_t ticket_;
-  std::vector<at::Tensor> outputs_;
-  int64_t comm_;
-  bool finished_ = false;
-};
-
-static c10::intrusive_ptr<c10d::Work> work_of(uint64_t ticket, std::vector<at::Tensor> outputs, int64_t comm) {
-  if (!ticket) return {};
-  return c10::make_intrusive<MeshWork>(ticket, std::move(outputs), comm);
-}
-
 static ncclComm_t communicator(int64_t comm) { return (ncclComm_t)(uintptr_t)comm; }
 
 static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps);
@@ -397,45 +318,6 @@ static ncclResult_t encoded(const std::vector<Issue> &issues, ncclComm_t comm, n
   }
   const ncclResult_t ended = ncclGroupEnd();
   return result ? result : ended;
-}
-
-// One group of `calls` on comm: on MPS tensors encoded on torch's stream, issued and not completed where `split` (its
-// ticket; 0 complete); on CPU tensors the host path, first completing every group
-// issued on torch's streams (ncclMeshComplete encodes every issued group's completion on the current one) and waiting
-// for each stream a group was issued on (the session's positions run in its order), the GIL released while it runs
-// where `unlock`.
-static uint64_t submit(const std::function<ncclResult_t(ncclMeshStream *)> &call, bool metal,
-                       bool split, int64_t comm, std::vector<at::Tensor> held, bool unlock) {
-  if (metal) return on_stream(call, split, comm, std::move(held));
-  {
-    bool streamed = false;
-    for (MeshStream *s : streams_made()) streamed |= s->streamed;
-    if (streamed) {
-      complete(UINT64_MAX);
-      const MeshStream *current = &stream_of(at::mps::getCurrentMPSStream());
-      for (MeshStream *s : streams_made())
-        if (s->streamed || s == current) {
-          host_wait(*s, true);
-          s->retire(0, {});
-          s->streamed = false;
-        }
-    }
-    std::optional<pybind11::gil_scoped_release> unlocked;
-    if (unlock) unlocked.emplace();
-    checked(call(nullptr));
-  }
-  return 0;
-}
-
-static uint64_t issue(const std::vector<Call> &calls, int64_t comm, bool split, bool unlock) {
-  Group g;
-  for (const Call &c : calls)
-    for (const Tensors *list : {&std::get<1>(c), &std::get<2>(c)})
-      for (const std::optional<at::Tensor> &t : *list) g.metal |= t && t->is_mps();
-  std::vector<Issue> issues;
-  for (const Call &c : calls) issues.push_back(prepare(c, g));
-  return submit([&](ncclMeshStream *stream) { return encoded(issues, communicator(comm), stream); },
-                g.metal, split, comm, {}, unlock);
 }
 
 using Schedule = std::shared_ptr<MetalSchedule>;
@@ -1683,8 +1565,8 @@ static bool completed(pybind11::object observation) {
   return buffer.status == MTLCommandBufferStatusCompleted;
 }
 
-// The group's calls (torch_mesh/backend.py): `issue` a group of calls, issued and not completed where `split` (a
-// MeshWork to wait on, its outputs `outputs`), else None (complete).
+// The module: prepared functions, their collectives (Collectives, ViewWrites) and fused crossings; no collective is
+// issued at a call (design/eager-execution.md).
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   install_region_allocator();
   module.def("place_layout",[](NSUInteger count,const std::vector<TensorLayout> &uses,
@@ -1824,9 +1706,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.attr("polls") = (int64_t)NCCL_MESH_POLLS;
   module.def("encode", &encode, pybind11::arg("handle"), pybind11::arg("buffers"), pybind11::arg("constants"), pybind11::arg("at"),
              pybind11::arg("gx"), pybind11::arg("gy"), pybind11::arg("threads"));
-  module.def("issue", [](const std::vector<Call> &calls, int64_t comm, bool split, std::vector<at::Tensor> outputs) {
-    return work_of(issue(calls, comm, split, true), std::move(outputs), comm);
-  });
   module.def("attach", &attach);
   module.def("commit", &commit);
   module.def("publish_boundary", &publish_boundary);

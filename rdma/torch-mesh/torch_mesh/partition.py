@@ -402,6 +402,9 @@ def reduce_scatterv(x: torch.Tensor, dim: int, sizes: list[int], rank: int, op: 
     contiguous copy into a region tensor (mesh f9898875), and the output a region tensor of its own, so what it sends
     lies in the region and the output holds no lease of the input."""
     group = dist.distributed_c10d._resolve_process_group(group_name)
+    if hasattr(group, 'prepare_writes'):
+        raise RuntimeError('torch_mesh::reduce_scatterv on a mesh group runs inside a prepared function (bind_scatter_views); '
+                           'an eager collective is not executed (design/eager-execution.md)')
     y = x.movedim(dim, 0)
     held = _empty(y.shape, y) if not _in_region(y) else None
     y = held.copy_(y) if held is not None else y.contiguous()
