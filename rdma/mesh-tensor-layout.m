@@ -121,6 +121,120 @@ static MetalTensorLayout *TensorReshape(MetalTensorLayout *source,NSArray<NSNumb
     return [MetalTensorLayout shape:shape strides:steps offset:origin maps:maps indices:nil];
 }
 
+// Shared logical/index boundaries split a view into independent additive
+// domains. Transforms compose only the domains they change during preparation.
+struct TensorSection { NSUInteger first,end,indexFirst,indexEnd; };
+static NSData *TensorSections(MetalTensorLayout *source) {
+    NSMutableDictionary *boundaries=[NSMutableDictionary dictionaryWithObject:@0 forKey:@1];
+    NSUInteger product=1;
+    for(NSUInteger d=0;d<source.indexShape.count;d++) {
+        product*=[source.indexShape[d] unsignedIntegerValue];boundaries[@(product)]=@(d+1);
+    }
+    NSMutableData *result=[NSMutableData data];product=1;
+    NSUInteger first=0,indexFirst=0;
+    for(NSUInteger d=0;d<source.shape.count;d++) {
+        product*=[source.shape[d] unsignedIntegerValue];NSNumber *boundary=boundaries[@(product)];
+        if(!boundary)continue;
+        const struct TensorSection section={first,d+1,indexFirst,boundary.unsignedIntegerValue};
+        [result appendBytes:&section length:sizeof section];first=d+1;indexFirst=section.indexEnd;
+    }
+    return result;
+}
+static MetalTensorLayout *TensorSectionLayout(MetalTensorLayout *source,struct TensorSection section) {
+    const NSRange range=NSMakeRange(section.indexFirst,section.indexEnd-section.indexFirst);
+    NSMutableDictionary *maps=[NSMutableDictionary dictionary];
+    for(NSUInteger d=section.indexFirst;d<section.indexEnd;d++)
+        if(source.maps[@(d)])maps[@(d-section.indexFirst)]=source.maps[@(d)];
+    MetalTensorLayout *result=[MetalTensorLayout shape:[source.indexShape subarrayWithRange:range]
+        strides:[source.strides subarrayWithRange:range] offset:0 maps:maps indices:nil];
+    return [result reshape:[source.shape subarrayWithRange:NSMakeRange(section.first,section.end-section.first)]];
+}
+static MetalTensorLayout *TensorProduct(NSArray<MetalTensorLayout *> *parts) {
+    NSMutableArray *shape=[NSMutableArray array],*basis=[NSMutableArray array],*steps=[NSMutableArray array];
+    NSMutableDictionary *maps=[NSMutableDictionary dictionary];NSInteger origin=0;
+    for(MetalTensorLayout *part in parts) {
+        for(NSNumber *axis in part.maps)maps[@(basis.count+axis.unsignedIntegerValue)]=part.maps[axis];
+        [shape addObjectsFromArray:part.shape];[basis addObjectsFromArray:part.indexShape];
+        [steps addObjectsFromArray:part.strides];origin+=part.offset;
+    }
+    MetalTensorLayout *result=[MetalTensorLayout shape:basis strides:steps offset:origin maps:maps indices:nil];
+    return [result reshape:shape];
+}
+static MetalTensorLayout *TensorAxisTransform(MetalTensorLayout *source,NSUInteger axis,
+    MetalTensorLayout *(^transform)(MetalTensorLayout *,NSUInteger)) {
+    if(!source.count||[source.shape isEqual:source.indexShape])return transform(source,axis);
+    NSData *storage=TensorSections(source);const struct TensorSection *sections=storage.bytes;
+    NSMutableArray *parts=[NSMutableArray array];
+    for(NSUInteger k=0;k<storage.length/sizeof *sections;k++) {
+        const struct TensorSection section=sections[k];MetalTensorLayout *part=TensorSectionLayout(source,section);
+        if(axis>=section.first&&axis<section.end)part=transform(part,axis-section.first);
+        [parts addObject:part];
+    }
+    return [TensorProduct(parts) shift:source.offset];
+}
+static MetalTensorLayout *TensorSelect(MetalTensorLayout *source,NSUInteger axis,NSData *indices) {
+    const NSUInteger count=indices.length/sizeof(NSInteger);const NSInteger *selected=indices.bytes;
+    NSMutableArray *shape=[[source.shape mutableCopy] autorelease];shape[axis]=@(count);
+    if([source.shape isEqual:source.indexShape]) {
+        NSMutableDictionary *maps=[[source.maps mutableCopy] autorelease];
+        NSMutableData *data=[NSMutableData dataWithLength:indices.length];NSInteger *target=data.mutableBytes;
+        const NSInteger *values=((NSData *)source.maps[@(axis)]).bytes;const NSInteger step=[source.strides[axis] integerValue];
+        for(NSUInteger i=0;i<count;i++)target[i]=values?values[selected[i]]:selected[i]*step;
+        maps[@(axis)]=data;
+        return [MetalTensorLayout shape:shape strides:source.strides offset:source.offset maps:maps indices:nil];
+    }
+    const NSUInteger total=TensorCount(shape);NSArray *steps=TensorStrides(source.shape),*newSteps=TensorStrides(shape);
+    NSMutableData *data=[NSMutableData dataWithLength:total*sizeof(NSInteger)];NSInteger *out=data.mutableBytes;
+    for(NSUInteger i=0;i<total;i++) {
+        NSUInteger old=0;
+        for(NSUInteger d=0;d<shape.count;d++) {
+            NSUInteger at=(i/[newSteps[d] unsignedIntegerValue])%[shape[d] unsignedIntegerValue];
+            old+=(d==axis?selected[at]:at)*[steps[d] unsignedIntegerValue];
+        }
+        out[i]=[source index:old];
+    }
+    return [MetalTensorLayout shape:shape strides:newSteps offset:0 maps:@{} indices:data];
+}
+static MetalTensorLayout *TensorSlice(MetalTensorLayout *source,NSUInteger axis,NSInteger first,NSUInteger count,NSInteger step) {
+    if([source.shape isEqual:source.indexShape]&&!source.maps[@(axis)]) {
+        NSMutableArray *shape=[[source.shape mutableCopy] autorelease],*strides=[[source.strides mutableCopy] autorelease];
+        shape[axis]=@(count);strides[axis]=@(step*[source.strides[axis] integerValue]);
+        return [MetalTensorLayout shape:shape strides:strides offset:source.offset+first*[source.strides[axis] integerValue]
+            maps:source.maps indices:nil];
+    }
+    NSMutableData *data=[NSMutableData dataWithLength:count*sizeof(NSInteger)];NSInteger *out=data.mutableBytes;
+    for(NSUInteger i=0;i<count;i++)out[i]=first+(NSInteger)i*step;
+    return TensorSelect(source,axis,data);
+}
+static BOOL TensorPermutationIsReshape(MetalTensorLayout *source,NSArray<NSNumber *> *axes) {
+    NSInteger previous=-1;
+    for(NSNumber *axis in axes)if([source.shape[axis.unsignedIntegerValue] unsignedIntegerValue]>1) {
+        if(axis.integerValue<previous)return NO;
+        previous=axis.integerValue;
+    }
+    return YES;
+}
+static MetalTensorLayout *TensorPermute(MetalTensorLayout *source,NSArray<NSNumber *> *axes) {
+    NSMutableArray *shape=[NSMutableArray array];
+    for(NSNumber *axis in axes)[shape addObject:source.shape[axis.unsignedIntegerValue]];
+    if(TensorPermutationIsReshape(source,axes)||!source.count)return [source reshape:shape];
+    if([source.shape isEqual:source.indexShape]) {
+        NSMutableArray *strides=[NSMutableArray array];NSMutableDictionary *maps=[NSMutableDictionary dictionary];
+        for(NSUInteger d=0;d<axes.count;d++) {
+            NSNumber *axis=axes[d];[strides addObject:source.strides[axis.unsignedIntegerValue]];
+            if(source.maps[axis])maps[@(d)]=source.maps[axis];
+        }
+        return [MetalTensorLayout shape:shape strides:strides offset:source.offset maps:maps indices:nil];
+    }
+    NSArray *old=TensorStrides(source.shape),*steps=TensorStrides(shape);
+    NSMutableData *data=[NSMutableData dataWithLength:source.count*sizeof(NSInteger)];NSInteger *out=data.mutableBytes;
+    for(NSUInteger i=0;i<source.count;i++) {
+        NSUInteger at=0;for(NSUInteger d=0;d<axes.count;d++)at+=(i/[steps[d] unsignedIntegerValue])%[shape[d] unsignedIntegerValue]*[old[[axes[d] unsignedIntegerValue]] unsignedIntegerValue];
+        out[i]=[source index:at];
+    }
+    return [MetalTensorLayout shape:shape strides:steps offset:0 maps:@{} indices:data];
+}
+
 static NSArray *TensorInverseAxes(MetalTensorLayout *declared,NSInteger *origin) {
     NSMutableArray *axes=[NSMutableArray array];NSInteger low=declared.offset;
     for(NSUInteger d=0;d<declared.shape.count;d++) {
@@ -146,8 +260,8 @@ static BOOL TensorCoordinates(MetalTensorLayout *layout,NSArray *axes,NSInteger 
     return remainder==0;
 }
 
-static MetalTensorLayout *TensorAffineRebase(MetalTensorLayout *view,MetalTensorLayout *declared,MetalTensorLayout *placed) {
-    if(!view.affine||!declared.affine||!placed.affine)return nil;
+static MetalTensorLayout *TensorCoordinateRebase(MetalTensorLayout *view,MetalTensorLayout *declared,MetalTensorLayout *placed) {
+    if(!view.affine||!declared.affine)return nil;
     for(NSUInteger d=0;d<declared.shape.count;d++)
         if([declared.shape[d] unsignedIntegerValue]>1&&![declared.strides[d] integerValue])return nil;
     NSInteger low;NSArray *axes=TensorInverseAxes(declared,&low);NSInteger reach=1;
@@ -167,7 +281,9 @@ static MetalTensorLayout *TensorAffineRebase(MetalTensorLayout *view,MetalTensor
         NSInteger *delta=base+(d+1)*dimensions,step=0;
         if([view.shape[d] unsignedIntegerValue]>1) {
             if(!TensorCoordinates(declared,axes,low,view.offset+[view.strides[d] integerValue],delta))return nil;
-            for(NSUInteger a=0;a<dimensions;a++){delta[a]-=base[a];step+=delta[a]*[placed.strides[a] integerValue];}
+            for(NSUInteger a=0;a<dimensions;a++) {
+                delta[a]-=base[a];if(placed.affine)step+=delta[a]*[placed.strides[a] integerValue];
+            }
         }
         [steps addObject:@(step)];
     }
@@ -179,9 +295,38 @@ static MetalTensorLayout *TensorAffineRebase(MetalTensorLayout *view,MetalTensor
             first+=MIN(0,span);last+=MAX(0,span);
         }
         if(first<0||last>=[declared.shape[a] integerValue])return nil;
-        origin+=base[a]*[placed.strides[a] integerValue];
+        if(placed.affine)origin+=base[a]*[placed.strides[a] integerValue];
     }
-    return [MetalTensorLayout shape:view.shape strides:steps offset:origin maps:@{} indices:nil];
+    if(placed.affine)return [MetalTensorLayout shape:view.shape strides:steps offset:origin maps:@{} indices:nil];
+    // A rectangular alias of an affine declaration selects the same logical
+    // coordinates after mapped placement. Compose the ordinary view operations;
+    // do not enumerate the producer's full storage domain to invert its map.
+    NSMutableDictionary *variables=[NSMutableDictionary dictionary];NSMutableIndexSet *used=[NSMutableIndexSet indexSet];
+    for(NSUInteger d=0;d<view.shape.count;d++) {
+        NSInteger found=-1;const NSInteger *delta=base+(d+1)*dimensions;
+        for(NSUInteger a=0;a<dimensions;a++)if(delta[a]) {
+            if(found>=0||variables[@(a)])return nil;
+            found=(NSInteger)a;
+        }
+        if(found>=0){variables[@(found)]=@(d);[used addIndex:d];}
+    }
+    MetalTensorLayout *result=placed;NSMutableArray *order=[NSMutableArray array];
+    for(NSUInteger a=0;a<dimensions;a++) {
+        NSNumber *variable=variables[@(a)];const NSUInteger d=variable.unsignedIntegerValue;
+        result=[result slice:a first:base[a] count:variable?[view.shape[d] unsignedIntegerValue]:1
+            step:variable?base[(d+1)*dimensions+a]:1];
+        if(variable)[order addObject:variable];
+    }
+    for(NSUInteger a=dimensions;a--;)if(!variables[@(a)])result=[result element:a at:0];
+    NSMutableArray *broadcast=[NSMutableArray array],*zero=[NSMutableArray array],*permutation=[NSMutableArray array];
+    NSMutableArray *positions=[NSMutableArray array];
+    for(NSUInteger d=0;d<view.shape.count;d++)if(![used containsIndex:d]) {
+        [broadcast addObject:view.shape[d]];[zero addObject:@0];[positions addObject:@(d)];
+    }
+    [positions addObjectsFromArray:order];
+    for(NSUInteger d=0;d<view.shape.count;d++)[permutation addObject:@([positions indexOfObject:@(d)])];
+    MetalTensorLayout *repeated=[MetalTensorLayout shape:broadcast strides:zero offset:0 maps:@{} indices:nil];
+    return [TensorProduct(@[repeated,result]) permute:permutation];
 }
 
 // Weighted union-find: position(b) - position(a) = distance. These equations
@@ -374,38 +519,15 @@ finished:
     return [MetalTensorLayout shape:shape strides:TensorStrides(shape) offset:0 maps:@{} indices:data];
 }
 - (MetalTensorLayout *)select:(NSUInteger)axis indices:(NSData *)indices {
-    const NSUInteger count=indices.length/sizeof(NSInteger);const NSInteger *selected=indices.bytes;
-    NSMutableArray *shape=[[_shape mutableCopy] autorelease];shape[axis]=@(count);
-    if([_shape isEqual:_indexShape]) {
-        NSMutableDictionary *maps=[[_maps mutableCopy] autorelease];
-        NSMutableData *data=[NSMutableData dataWithLength:indices.length];NSInteger *target=data.mutableBytes;
-        const NSInteger *source=((NSData *)_maps[@(axis)]).bytes;const NSInteger step=[_strides[axis] integerValue];
-        for(NSUInteger i=0;i<count;i++)target[i]=source?source[selected[i]]:selected[i]*step;
-        maps[@(axis)]=data;
-        return [MetalTensorLayout shape:shape strides:_strides offset:_offset maps:maps indices:nil];
-    }
-    const NSUInteger total=TensorCount(shape);NSArray *steps=TensorStrides(_shape),*newSteps=TensorStrides(shape);
-    NSMutableData *data=[NSMutableData dataWithLength:total*sizeof(NSInteger)];NSInteger *out=data.mutableBytes;
-    for(NSUInteger i=0;i<total;i++) {
-        NSUInteger old=0;
-        for(NSUInteger d=0;d<shape.count;d++) {
-            NSUInteger at=(i/[newSteps[d] unsignedIntegerValue])%[shape[d] unsignedIntegerValue];
-            old+=(d==axis?selected[at]:at)*[steps[d] unsignedIntegerValue];
-        }
-        out[i]=[self index:old];
-    }
-    return [MetalTensorLayout shape:shape strides:newSteps offset:0 maps:@{} indices:data];
+    return TensorAxisTransform(self,axis,^MetalTensorLayout *(MetalTensorLayout *part,NSUInteger local) {
+        return TensorSelect(part,local,indices);
+    });
 }
 - (MetalTensorLayout *)slice:(NSUInteger)axis first:(NSInteger)first count:(NSUInteger)count step:(NSInteger)step {
     if(first==0&&count==[_shape[axis] unsignedIntegerValue]&&step==1)return self;
-    if([_shape isEqual:_indexShape]&&!_maps[@(axis)]) {
-        NSMutableArray *shape=[[_shape mutableCopy] autorelease],*strides=[[_strides mutableCopy] autorelease];
-        shape[axis]=@(count);strides[axis]=@(step*[_strides[axis] integerValue]);
-        return [MetalTensorLayout shape:shape strides:strides offset:_offset+first*[_strides[axis] integerValue] maps:_maps indices:nil];
-    }
-    NSMutableData *data=[NSMutableData dataWithLength:count*sizeof(NSInteger)];NSInteger *out=data.mutableBytes;
-    for(NSUInteger i=0;i<count;i++)out[i]=first+(NSInteger)i*step;
-    return [self select:axis indices:data];
+    return TensorAxisTransform(self,axis,^MetalTensorLayout *(MetalTensorLayout *part,NSUInteger local) {
+        return TensorSlice(part,local,first,count,step);
+    });
 }
 - (MetalTensorLayout *)element:(NSUInteger)axis at:(NSUInteger)index {
     MetalTensorLayout *one=[self slice:axis first:index count:1 step:1];
@@ -413,26 +535,34 @@ finished:
     return [one reshape:shape];
 }
 - (MetalTensorLayout *)permute:(NSArray<NSNumber *> *)axes {
-    BOOL ordered=YES;NSInteger previous=-1;
-    for(NSNumber *axis in axes)if([_shape[axis.unsignedIntegerValue] unsignedIntegerValue]>1) {
-        ordered=ordered&&axis.integerValue>previous;previous=axis.integerValue;
+    if(!self.count||[_shape isEqual:_indexShape]||TensorPermutationIsReshape(self,axes))return TensorPermute(self,axes);
+    NSData *storage=TensorSections(self);const struct TensorSection *sections=storage.bytes;
+    const NSUInteger count=storage.length/sizeof *sections;
+    NSMutableArray *owners=[NSMutableArray array],*ends=[NSMutableArray array];
+    for(NSUInteger k=0;k<count;k++) {
+        [ends addObject:@0];
+        for(NSUInteger d=sections[k].first;d<sections[k].end;d++)[owners addObject:@(k)];
     }
-    if(ordered) {
-        NSMutableArray *shape=[NSMutableArray array];for(NSNumber *axis in axes)[shape addObject:_shape[axis.unsignedIntegerValue]];
-        return [self reshape:shape];
+    for(NSUInteger d=0;d<axes.count;d++)ends[[owners[[axes[d] unsignedIntegerValue]] unsignedIntegerValue]]=@(d+1);
+    NSMutableArray *parts=[NSMutableArray array];
+    for(NSUInteger first=0;first<axes.count;) {
+        // Interleaved coupled axes form one domain. Independent domains keep
+        // their own factors, even when moved across a coupled domain.
+        NSUInteger end=first+1;NSMutableIndexSet *members=[NSMutableIndexSet indexSet];
+        for(NSUInteger d=first;d<end;d++) {
+            const NSUInteger member=[owners[[axes[d] unsignedIntegerValue]] unsignedIntegerValue];
+            [members addIndex:member];end=MAX(end,[ends[member] unsignedIntegerValue]);
+        }
+        NSMutableArray *inputs=[NSMutableArray array],*local=[NSMutableArray array];
+        NSMutableDictionary *positions=[NSMutableDictionary dictionary];NSUInteger position=0;
+        for(NSUInteger k=members.firstIndex;k!=NSNotFound;k=[members indexGreaterThanIndex:k]) {
+            [inputs addObject:TensorSectionLayout(self,sections[k])];
+            for(NSUInteger d=sections[k].first;d<sections[k].end;d++)positions[@(d)]=@(position++);
+        }
+        for(NSUInteger d=first;d<end;d++)[local addObject:positions[axes[d]]];
+        [parts addObject:TensorPermute(TensorProduct(inputs),local)];first=end;
     }
-    NSMutableArray *shape=[NSMutableArray array],*strides=[NSMutableArray array];NSMutableDictionary *maps=[NSMutableDictionary dictionary];
-    for(NSUInteger d=0;d<axes.count;d++) {
-        const NSUInteger at=[axes[d] unsignedIntegerValue];[shape addObject:_shape[at]];[strides addObject:[_shape isEqual:_indexShape]?_strides[at]:@0];
-        if([_shape isEqual:_indexShape]&&_maps[@(at)])maps[@(d)]=_maps[@(at)];
-    }
-    if([_shape isEqual:_indexShape])return [MetalTensorLayout shape:shape strides:strides offset:_offset maps:maps indices:nil];
-    NSArray *old=TensorStrides(_shape),*steps=TensorStrides(shape);
-    NSMutableData *data=[NSMutableData dataWithLength:_count*sizeof(NSInteger)];NSInteger *out=data.mutableBytes;
-    for(NSUInteger i=0;i<_count;i++) {
-        out[i]=0;for(NSUInteger d=0;d<axes.count;d++)out[i]+=(i/[steps[d] unsignedIntegerValue])%[shape[d] unsignedIntegerValue]*[old[[axes[d] unsignedIntegerValue]] unsignedIntegerValue];
-    }
-    return [self gather:shape indices:data];
+    return [TensorProduct(parts) shift:_offset];
 }
 - (MetalTensorLayout *)reshape:(NSArray<NSNumber *> *)shape {
     NSParameterAssert(TensorCount(shape)==_count);
@@ -491,7 +621,7 @@ finished:
         MetalTensorLayout *reshaped=[declared reshape:_shape];
         if([reshaped isEqual:self])return [placed reshape:_shape];
     }
-    MetalTensorLayout *affine=TensorAffineRebase(self,declared,placed);if(affine)return affine;
+    MetalTensorLayout *rebased=TensorCoordinateRebase(self,declared,placed);if(rebased)return rebased;
     NSArray *logical=TensorStrides(declared.shape);
     NSInteger low=0;NSArray *axes=declared.affine?TensorInverseAxes(declared,&low):@[];
     NSMutableDictionary *inverse=nil;

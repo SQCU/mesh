@@ -98,11 +98,33 @@ index expression. Python, Swift and LiteRT declarations carry the same index
 factors. The LiteRT importer compiled the same compact declaration. Shared
 library, frontend and native builds completed; no numerical commands ran.
 
-General changed-axis selections, permutations and alias compositions can still
-materialize tables over their result domain. Their compact composition remains
-unfinished, as does the distributed ownership gap under exact partition
-boundaries. An irreducible table supplied by a caller still occupies its own
-domain; reshaping it no longer duplicates that table.
+Selections and permutations now separate independent domains at shared
+logical/index boundaries. A cut composes the domain containing its axis.
+A permutation moves independent domains intact and combines domains only when
+their coupled axes interleave. Unchanged rows do not repeat a small map.
+The result is the same flat layout; these domains exist only in preparation.
+Moving singleton axes remains a reshape with the original index expression.
+
+Rectangular aliases of affine declarations use that same composition when
+their producer receives mapped pages. The coordinate relation supplies slices,
+reversals, permutations and broadcast axes. It does not build an inverse table
+over the whole producer merely because its assigned storage is mapped.
+
+Preparation on 2026-10-28 kept six map entries after cutting or transposing a
+68,719,476,736-row view, and four after selecting part of its coupled domain.
+An interleaved permutation composed 30 entries while preserving the row factor.
+Two coupled groups likewise composed 60 entries while moving a billion-row
+factor intact. Alias placement retained compact cuts, transposes and broadcasts.
+Preparation covered negative and zero strides, repeated selections, singleton
+and empty axes, serialization and ordered/dependency spans. Shared libraries and
+Metal declarations compiled without numerical submission.
+
+A coupled domain can still become large when a reshape merges an independent
+extent into a mapped axis, or a permutation inserts that extent between coupled
+axes. Such compositions still materialize their coupled domain. General
+nonrectangular alias composition and the distributed ownership gap under exact
+partition boundaries also remain unfinished. An irreducible table supplied by a
+caller still occupies its own domain; reshaping it does not duplicate that table.
 
 ## Place values for their consumers
 
