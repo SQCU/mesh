@@ -287,7 +287,7 @@ struct ncclComm {
   uint64_t gate_at, gates;
   _Atomic uint64_t *words;
   void *violation;
-  uint64_t last, groups, counts, moved;
+  uint64_t last, groups;
   void *command, *queue; /* the last GPU program's command buffer; the queue of its host groups' (launch_host) */
   struct ncclMeshWritePlan *compiled_writes; /* the plans holding definitions of it (write_definitions) */
   struct ncclComm *next_touched, *next_live;
@@ -326,26 +326,6 @@ static uint64_t deadline_left(const struct mesh_deadline *d) {
   if (now >= d->at) mesh_library_expired(d->wait, d->ns);
   return d->at - now;
 }
-/* design/transport.md section 5: what moves as a communicator's links progress: its channels' counts (presented, taken,
-   ready, sent and landed), summed, each of which only rises (a lost link's ~0 moves it too) */
-static uint64_t comm_counts(const struct ncclComm *comm) {
-  uint64_t sum = 0;
-  for (uint32_t h = 0; h < comm->count; h++) {
-    const struct mesh_stream_view *v = &comm->channels[h].view;
-    _Atomic uint64_t *const words[] = {v->presented[0], v->presented[1], v->taken[0], v->taken[1], v->ready, v->sent, v->landed};
-    for (size_t k = 0; k < sizeof words / sizeof *words; k++) sum += atomic_load_explicit(words[k], memory_order_acquire);
-  }
-  return sum;
-}
-/* a host wait's deadline (*d), MESH_PLATFORM_NS made again whenever comm's links (comm_counts) or the wait's own
-   count `also` have moved since the last look (*counts), so the wait is bounded by its lack of progress, not by its
-   length (the operator, 2026-10-18: no channel is used "for more than 5 seconds without something happening");
-   past it, the library's expiry */
-static uint64_t progress_left(const struct ncclComm *comm, struct mesh_deadline *d, uint64_t *counts, uint64_t also) {
-  const uint64_t now = comm_counts(comm) + also;
-  if (now != *counts) { *counts = now; *d = mesh_deadline(d->wait, 0); }
-  return deadline_left(d);
-}
 /* the GPU wait whose bound a communicator's failure words record (METAL_BOUND, nccl-mesh-kernels.h mesh_step_check),
    named into `wait`; its deadline, 0 where they record none */
 static uint64_t bound_reached(const struct ncclComm *comm, char *wait, size_t room) {
@@ -354,7 +334,7 @@ static uint64_t bound_reached(const struct ncclComm *comm, char *wait, size_t ro
   if (!at || atomic_load_explicit(v, memory_order_relaxed) != METAL_BOUND) return 0;
   const uint64_t h = atomic_load_explicit(v + 3, memory_order_relaxed), polls = atomic_load_explicit(v + 4, memory_order_relaxed);
   snprintf(wait, room, "libnccl-mesh: communicator %s's GPU wait for entry %llu on the channel to node %u, through %llu polls (its stream's "
-           "bound, ncclMeshStream polls) after its links last progressed (its lease, not renewed after MESH_PLATFORM_NS without it)",
+           "bound, ncclMeshStream polls: the wait's deadline, fixed when it was made)",
            comm->name, (unsigned long long)(at - 1), h < comm->count ? comm->channels[h].node : UINT32_MAX, (unsigned long long)polls);
   return MESH_PLATFORM_NS;
 }
@@ -788,13 +768,12 @@ static void comm_lost(struct ncclComm *comm, uint32_t h) {
   atomic_store_explicit(comm->words + 3, h, memory_order_relaxed);
   atomic_store_explicit(comm->words + 2, UINT64_MAX, memory_order_release);
 }
-/* design/transport.md section 5: every MESH_PLATFORM_NS / 20, each communicator's lease (failure word 5, which a GPU
-   wait's rounds read: nccl-mesh-kernels.h mesh_step_wait, the tracks) raised while it is not revoked, every stream it
-   holds is still its own (a peer gone ends its holding: mesh_stream_held, its loss recorded, comm_lost) and its links have progressed
-   (comm_counts) within MESH_PLATFORM_NS, so a GPU wait on a peer late but alive runs on and one on links nothing has
-   moved on ends; a bound a GPU wait records (bound_reached) ends the program at once, named.  Then the library's own
-   GPU programs: a communicator's last program committed and not ended, seen so at every look since `finished` and its
-   links last moved for twice MESH_PLATFORM_NS, the program ended there, the wait named; a look that finds none
+/* design/transport.md section 5: every MESH_PLATFORM_NS / 20, each communicator's streams read: one no longer its own
+   (a peer gone ends its holding: mesh_stream_held) is recorded as a loss (comm_lost), ending its GPU waits at once as a
+   value; a bound a GPU wait records (bound_reached) ends the program at once, named.  No wait is extended: each GPU
+   wait's bound and each host wait's deadline is fixed when it is made (design/eager-execution.md assumption A4).
+   Then the library's own GPU programs: a communicator's last program committed and not ended, seen so at every look
+   since `finished` last moved for twice MESH_PLATFORM_NS, the program ended there, the wait named; a look that finds none
    committed and not ended starts the count again, so time with no program does not count; group_lock only where free
    (a holder's own waits are bounded) */
 static void watch_turn(void *unused) {
@@ -804,12 +783,9 @@ static void watch_turn(void *unused) {
   uint64_t idle = 0, now = mesh_clock_ns();
   pthread_mutex_lock(&live_lock);
   for (struct ncclComm *c = live; c && !idle; c = c->next_live) {
-    const uint64_t counts = comm_counts(c);
-    if (counts != c->counts || !c->moved) { c->counts = counts; c->moved = now; }
     int held = !__atomic_load_n(&c->revoked, __ATOMIC_ACQUIRE);
     for (uint32_t h = 0; held && h < c->count; h++)
       if (!(held = mesh_stream_held(&c->attach->context, c->channels[h].stream, *c->channels[h].wire))) comm_lost(c, h);
-    if (held && now - c->moved < MESH_PLATFORM_NS) atomic_fetch_add_explicit(c->words + 5, 1, memory_order_release);
     idle = bound_reached(c, wait, sizeof wait);
   }
   pthread_mutex_unlock(&live_lock);
@@ -820,7 +796,7 @@ static void watch_turn(void *unused) {
     pthread_mutex_lock(&live_lock);
     for (const struct ncclComm *c = live; c && !pending; c = c->next_live)
       if (c->last > signaled && c->command && !metal_ended(c->command)) pending = c;
-    if (!pending || signaled != seen || !since || pending->moved > since) { seen = signaled; since = pending ? now : 0; }
+    if (!pending || signaled != seen || !since) { seen = signaled; since = pending ? now : 0; }
     else if (now - since > 2 * MESH_PLATFORM_NS) {
       idle = now - since;
       snprintf(wait, sizeof wait, "libnccl-mesh: communicator %s's GPU program %llu, committed and not ended (watch_turn)", pending->name,
@@ -1548,9 +1524,9 @@ ncclResult_t ncclCommRevoke(ncclComm_t comm, int revokeFlags) {
    host-path groups returned (each at its next look) and the GPU work the library committed for it awaited (gpu_wait,
    group_lock released for it: its command buffer's Completed or Error status, which the platform's watchdog gives
    one that overruns; the stop that is the destroy's own does not end it, and a buffer not committed is not awaited:
-   nothing would run it while its committer waits), its groups in flight lost, each of these waits bounded by its lack
-   of progress, MESH_PLATFORM_NS in which nothing it waits on moved (progress_left), past which the program ends
-   (design/data-model.md section 6); then its streams
+   nothing would run it while its committer waits), its groups in flight lost, each of these waits with a deadline
+   MESH_PLATFORM_NS from its start, past which the program ends (the operator, 2026-10-23: no wait runs longer than a
+   deadline presented when it was made; design/eager-execution.md assumption A4); then its streams
    given back (its bridge posts nothing more of their holdings), its tables and slots returned, and comm freed.  Work encoded in a caller's encoder is the
    caller's to finish first (NCCL's: no communicator is destroyed under its own operations in flight): a kernel of it
    still queued would write the stream given back (rdma/NCCL.md "Failures") */
@@ -1564,11 +1540,10 @@ ncclResult_t ncclCommDestroy(ncclComm_t comm) {
     pthread_join(comm->init, NULL);
   }
   struct mesh_deadline returned = mesh_deadline("ncclCommDestroy: its host-path groups' return (`runs`), none returning", 0);
-  uint64_t counts = 0;
   pthread_mutex_lock(&group_lock);
   while (atomic_load(&comm->runs)) {
     pthread_mutex_unlock(&group_lock);
-    progress_left(comm, &returned, &counts, (uint64_t)atomic_load(&comm->runs));
+    deadline_left(&returned);
     usleep(20);
     pthread_mutex_lock(&group_lock);
   }
@@ -3338,8 +3313,8 @@ static int room_for(const struct channel *ch, int list, uint64_t need) {
    (design/rubrics.md M3, M4: other communicators' groups and revokes go on meanwhile): comm kept from its destroy
    (`runs`), and the list of communicators the program being encoded touched set aside (it is comm alone where a group
    presents, launch_metal), so a program another thread encodes meanwhile ends with its own; each look spins, ending at
-   the bridge's `taken` advancing, at a revoke or at the holding's end, and past MESH_PLATFORM_NS in which comm's links
-   did not progress (progress_left), the program (design/data-model.md section 6); then the lock taken again, the
+   the bridge's `taken` advancing, at a revoke or at the holding's end, and past its deadline, MESH_PLATFORM_NS from its
+   start, the program (design/eager-execution.md assumption A4); then the lock taken again, the
    list restored and comm's failure read again (comm_failure: a group in flight of it may have failed meanwhile).
    Under group_lock */
 static ncclResult_t room_wait(struct ncclComm *comm, const struct channel *ch, int list, uint64_t need) {
@@ -3348,14 +3323,13 @@ static ncclResult_t room_wait(struct ncclComm *comm, const struct channel *ch, i
   atomic_fetch_add(&comm->runs, 1);
   pthread_mutex_unlock(&group_lock);
   ncclResult_t result = ncclSuccess;
-  struct mesh_deadline deadline = mesh_deadline("libnccl-mesh: room on a stream's list for a group's entries, its links not progressing (room_wait)", 0);
-  uint64_t counts = 0;
+  struct mesh_deadline deadline = mesh_deadline("libnccl-mesh: room on a stream's list for a group's entries (room_wait)", 0);
   while (!result && !room_for(ch, list, need))
     if (revoked(comm)) result = revoked_fail(comm);
     else if (!mesh_stream_held(&comm->attach->context, ch->stream, *ch->wire))
       result = fail(ncclRemoteError, "communicator %s: its holding of the stream toward node %u ended before the group's entries there were "
                     "presented (design/transport.md section 14); none was presented", comm->name, ch->node);
-    else progress_left(comm, &deadline, &counts, 0);
+    else deadline_left(&deadline);
   pthread_mutex_lock(&group_lock);
   atomic_fetch_sub(&comm->runs, 1);
   if (mine) touch(comm);
@@ -3522,8 +3496,8 @@ static mesh_pages count_of(_Atomic uint64_t *word) { return pages_from_word(atom
    No SEND-completion wait is added here (design/data-model.md section 6). Every landing wait ends at an event: its
    count, a count's ~0 (the link lost, the bridge stopped), the end of its holding with work left (its stream no
    longer the communicator's own, mesh_stream_held: a pairing lost and made again, a bridge restarted), or a revoke,
-   each read at every look; the landings and publications are bounded by their lack of progress: past MESH_PLATFORM_NS
-   in which no count of comm's links moved (progress_left), the program ends (design/data-model.md section 6).  Every
+   each read at every look; the landings and publications have one deadline, MESH_PLATFORM_NS from the group's start, past
+   which the program ends (design/eager-execution.md assumption A4).  Every
    look spins: nothing parks */
 static ncclResult_t held_fail(const struct ncclComm *comm, const struct channel *ch) {
   return fail(ncclRemoteError, "communicator %s: its holding of the stream toward node %u ended with the group's entries there not done (the "
@@ -3531,11 +3505,10 @@ static ncclResult_t held_fail(const struct ncclComm *comm, const struct channel 
               comm->name, ch->node);
 }
 static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
-  struct mesh_deadline landing = mesh_deadline("libnccl-mesh: a host-path group's landings and publications, its links not progressing (run)", 0);
-  uint64_t counts = 0;
+  struct mesh_deadline landing = mesh_deadline("libnccl-mesh: a host-path group's landings and publications (run)", 0);
   for (;;) {
     if (revoked(comm)) return revoked_fail(comm);
-    progress_left(comm, &landing, &counts, 0);
+    deadline_left(&landing);
     int open = 0;
     for (uint32_t h = 0; h < comm->count; h++) {
       struct channel *ch = comm->channels + h;
@@ -3777,13 +3750,11 @@ enum { GPU_ENDED, GPU_ERROR, GPU_UNCOMMITTED, GPU_REVOKED, GPU_HOLDING };
    read under the lock; the wait in MESH_PAUSE_NS slices, ending at the signal or at the buffer's end as its status tells
    it (Completed, or Error, which the platform's watchdog gives a buffer that overruns: nccl-mesh-metal.m metal_ended),
    and for a group (`group`: comm kept from its destroy meanwhile by `runs`) at a revoke or a holding's end too, and
-   past MESH_PLATFORM_NS in which neither comm's links nor the library's programs (`finished`) progressed
-   (progress_left), the program (design/data-model.md section 6); then the lock taken again, and a later program that
+   past its deadline, MESH_PLATFORM_NS from its start, the program (design/eager-execution.md assumption A4); then the lock taken again, and a later program that
    touched comm meanwhile awaited too, under the same bound.  Under group_lock */
 static int gpu_wait(struct ncclComm *comm, int group) {
   int ended = GPU_ENDED;
-  struct mesh_deadline deadline = mesh_deadline("libnccl-mesh: a communicator's GPU programs' end, neither they nor its links progressing (gpu_wait)", 0);
-  uint64_t counts = 0;
+  struct mesh_deadline deadline = mesh_deadline("libnccl-mesh: a communicator's GPU programs' end (gpu_wait)", 0);
   while (ended == GPU_ENDED && finished && comm->last && metal_signaled(finished) < comm->last) {
     const uint64_t last = comm->last;
     void *command = metal_retain(comm->command);
@@ -3796,7 +3767,7 @@ static int gpu_wait(struct ncclComm *comm, int group) {
       for (uint32_t h = 0; group && h < comm->count && ended == GPU_ENDED; h++)
         if (!mesh_stream_held(&comm->attach->context, comm->channels[h].stream, *comm->channels[h].wire)) ended = GPU_HOLDING;
       if (ended != GPU_ENDED) break;
-      const uint64_t left = progress_left(comm, &deadline, &counts, metal_signaled(finished));
+      const uint64_t left = deadline_left(&deadline);
       metal_wait(finished, last, left < MESH_PAUSE_NS ? left : MESH_PAUSE_NS);
     }
     metal_release(command);

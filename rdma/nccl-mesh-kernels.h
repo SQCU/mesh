@@ -37,13 +37,9 @@
    (nccl-mesh-metal.m record4: a record is written again only once its dispatch began); a classic dispatch's record is
    its setBytes, its sequence 0, and it stores none.  It reads nothing, and its result is true (kept so that a caller's
    kernel that tests it compiles as it is).  mesh_step_wait: a wait on a holding's count at `word` until it reaches
-   `target`, in rounds of p.polls loads (mesh_wait_bounded: the program's bound, at most NCCL_MESH_POLLS, metal_begin),
-   ended by the count, by the link's loss (~0), or by a round through which its communicator's lease (failure word 5,
-   which the host's watch raises while the communicator's links are held and have progressed within MESH_PLATFORM_NS:
-   nccl-mesh.c watch_turn) did not move: a wait on a peer that is late, but alive and progressing, runs on; one on a
-   peer gone, or on links nothing has moved on, ends within two rounds of the lease's last move, and within two rounds
-   of the host's own end; without failure words (p.polls 0) one load; given the failure words vb, ended also once their
-   claim is taken, read every 2^10 loads (mesh.metal mesh_wait_bounded's stop).
+   `target`, at most p.polls loads (mesh_wait_bounded: the program's bound, at most NCCL_MESH_POLLS, metal_begin),
+   ended by the count, by the link's loss (~0) or by the bound, reading nothing but that word; given the failure words
+   vb, ended also once their claim is taken, read every 2^10 loads (mesh.metal mesh_wait_bounded's stop).
    mesh_step_claim: failure word [1]'s low half exchanged for 1, true in the one caller that found it 0, so of every wait
    that fails (a dispatch's threadgroups', the tracks') one records.  mesh_step_failed: whether that claim is taken,
    where p.polls names failure words (a dispatch with none has no claim).  mesh_step_check: the wait's failure recorded by its claimant in
@@ -85,11 +81,8 @@ static NSString *const STEPS =
   "return atomic_exchange_explicit((device atomic_uint *)(vb + 8), 1u, memory_order_relaxed) == 0u; }\n"
   "static inline bool mesh_step_failed(constant mesh_args &p, device uchar *vb) { "
   "return p.polls && atomic_load_explicit((device atomic_uint *)(vb + 8), memory_order_relaxed) != 0u; }\n"
-  "static inline ulong mesh_step_lease(device uchar *vb) { return mesh_wait_bounded((volatile coherent(system) device const ulong *)(vb + 40), 0, 1); }\n"
   "static inline ulong mesh_step_wait(constant mesh_args &p, device uchar *word, ulong target, device uchar *vb) { "
-  "ulong held = p.polls ? mesh_step_lease(vb) : 0, seen; "
-  "for (;;) { seen = mesh_wait_bounded((volatile coherent(system) device const ulong *)word, target, p.polls, p.polls ? (device atomic_uint *)(vb + 8) : nullptr); "
-  "if (seen >= target || !p.polls || mesh_step_failed(p, vb) || mesh_step_lease(vb) == held) return seen; held = mesh_step_lease(vb); } }\n"
+  "return mesh_wait_bounded((volatile coherent(system) device const ulong *)word, target, p.polls, p.polls ? (device atomic_uint *)(vb + 8) : nullptr); }\n"
   "static inline void mesh_step_check(constant mesh_args &p, ulong status, ulong target, device uchar *vb) { "
   "if (!p.polls) return; "
   "volatile coherent(system) device ulong *v = (volatile coherent(system) device ulong *)vb; "
@@ -254,11 +247,10 @@ static const uint8_t WORD[KINDS] = {KINDS_OF(KIND_WORD)};
    into bytes a SEND of its channel reads (`need` that send entry + 1; 0 none), that publication run (the publication
    cursor past it), its own wait; every thread running the item's steps by their bodies,
    and a consumption's end raising the track's count (system scope, release).  A group that chooses nothing for the
-   program's polls of passes through which its blocked item's communicator's lease did not move (mesh_step_wait's
-   rounds) records its blocked items' failures (mesh_step_check for a landing, else the bound at its position, by its
-   claimant: mesh_step_claim) and ends once nothing more can run; a track ends at its own bound, as a wait does, or,
-   read every 2^10 idle passes, once its blocked item's failure claim is taken: by a wait that failed, or by the host's
-   stop, which bounds it in time (nccl-mesh.c mesh_library_expired); it reads no other track's failure.  The records' layouts are struct track_head, track, track_item,
+   program's polls of passes records its blocked items' failures (mesh_step_check for a landing, else the bound at its
+   position, by its claimant: mesh_step_claim) and ends once nothing more can run; a track ends at its own bound, as a
+   wait does, or, read every 2^10 idle passes, once its blocked item's failure claim is taken: by a wait that failed, or
+   by the host's stop, which bounds it in time (nccl-mesh.c mesh_library_expired); it reads no other track's failure.  The records' layouts are struct track_head, track, track_item,
    track_op and track_dep below, the host's alike; struct track_op's kind one of KINDS_OF's, the enum the host's */
 static NSString *const TRACKS =
   @"\n"
@@ -280,8 +272,7 @@ static NSString *const TRACKS =
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); "
   "v[0] = " XSTR(METAL_BOUND) "UL; v[4] = ulong(polls); mesh_publish(v + 2, it.position + 1); }\n"
   "static inline bool track_stopped(constant track_item &it) { "
-  "return it.v && atomic_load_explicit((device atomic_uint *)(it.v + 8), memory_order_relaxed) != 0u; }\n"
-  "static inline ulong track_lease(constant track_item &it) { return it.v ? mesh_step_lease(it.v) : 0; }\n";
+  "return it.v && atomic_load_explicit((device atomic_uint *)(it.v + 8), memory_order_relaxed) != 0u; }\n";
 static NSString *const TRACK_KERNEL =
   @"kernel void tracks(constant uchar *base [[buffer(0)]], device uchar *ring [[buffer(1)]], uint t [[threadgroup_position_in_grid]], "
   "uint i [[thread_position_in_threadgroup]], uint g [[threads_per_threadgroup]]) { "
@@ -293,7 +284,7 @@ static NSString *const TRACK_KERNEL =
   "constant track_dep *deps = (constant track_dep *)(base + h.deps_off); "
   "volatile coherent(system) device ulong *count = (volatile coherent(system) device ulong *)(ring + h.count_off); "
   "threadgroup ulong tg[4]; threadgroup uint pick[2]; "
-  "uint next0 = 0, next1 = 0; ulong looks = 0, held = 0; bool expired = false; "
+  "uint next0 = 0, next1 = 0; ulong looks = 0; bool expired = false; "
   "for (;;) { "
   "if (i == 0) { uint chosen = ~0u, left = 0; "
   "if (next1 < tr.count[1]) { left = 1; constant track_item &c = items[tr.first[1] + next1]; "
@@ -301,13 +292,10 @@ static NSString *const TRACK_KERNEL =
   "if (chosen == ~0u && next0 < tr.count[0]) { left = 1; if (track_ready(items[tr.first[0] + next0], deps, count)) { chosen = tr.first[0] + next0; next0++; } } "
   "if (chosen != ~0u) { looks = 0; expired = false; } "
   "else if (left && expired) left = 0; "
-  "else if (left) { constant track_item &b = items[next1 < tr.count[1] ? tr.first[1] + next1 : tr.first[0] + next0]; "
-  "if (++looks == 1) held = track_lease(b); "
-  "const bool stop = looks % MESH_STOP_POLL_PERIOD == 0u && track_stopped(b); "
-  "if (!stop && looks >= h.polls && track_lease(b) != held) { held = track_lease(b); looks = 1; } "
-  "else if (stop || looks >= h.polls) { "
+  "else if (left && (++looks >= h.polls || (looks % MESH_STOP_POLL_PERIOD == 0u && "
+  "track_stopped(items[next1 < tr.count[1] ? tr.first[1] + next1 : tr.first[0] + next0])))) { "
   "if (next1 < tr.count[1]) track_expired(items[tr.first[1] + next1], ops, h.polls); "
-  "if (next0 < tr.count[0]) track_expired(items[tr.first[0] + next0], ops, h.polls); expired = true; } } "
+  "if (next0 < tr.count[0]) track_expired(items[tr.first[0] + next0], ops, h.polls); expired = true; } "
   "pick[0] = chosen; pick[1] = left; } "
   "threadgroup_barrier(mem_flags::mem_threadgroup); "
   "const uint chosen = pick[0]; "
