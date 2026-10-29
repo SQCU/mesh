@@ -797,8 +797,8 @@ struct Collectives {
     const auto held=operands;
     checked(MetalScheduleFinish(made.get(),^(NSError *){(void)held;}));executions.push_back(std::move(made));
   }
-  void enqueue() { MetalScheduleEnqueue(executions[next++].get()); }
-  pybind11::capsule completion() { return schedule_completion(executions[next-1]); }
+  void enqueue() { TORCH_CHECK(next < executions.size(), "a prepared function runs each realization once: its recorded channel positions are absolute (realize it again)"); MetalScheduleEnqueue(executions[next++].get()); }
+  pybind11::capsule completion() { TORCH_CHECK(next, "a prepared function has no enqueued realization yet"); return schedule_completion(executions[next-1]); }
 
 };
 
@@ -1648,8 +1648,8 @@ struct Executions {
   size_t next=0;
   explicit Executions(pybind11::object value):output(std::move(value)){}
   void add(ScheduleBinding &binding){schedules.push_back(binding.schedule);}
-  pybind11::object run(){MetalScheduleEnqueue(schedules[next++].get());return output;}
-  pybind11::capsule completion(){return schedule_completion(schedules[next-1]);}
+  pybind11::object run(){TORCH_CHECK(next<schedules.size(),"a prepared function runs each realization once: its recorded channel positions are absolute (realize it again)");MetalScheduleEnqueue(schedules[next++].get());return output;}
+  pybind11::capsule completion(){TORCH_CHECK(next,"a prepared function has no enqueued realization yet");return schedule_completion(schedules[next-1]);}
 };
 
 // Compact row geometry and explicit indexed selections lower to one prepared
@@ -1724,8 +1724,8 @@ struct ViewWrites {
     const auto held=leases;
     checked(MetalScheduleFinish(made.get(),^(NSError *){(void)held;}));executions.push_back(std::move(made));
   }
-  void enqueue() { MetalScheduleEnqueue(executions[next++].get()); }
-  pybind11::capsule completion(){return schedule_completion(executions[next-1]);}
+  void enqueue() { TORCH_CHECK(next < executions.size(), "a prepared function runs each realization once: its recorded channel positions are absolute (realize it again)"); MetalScheduleEnqueue(executions[next++].get()); }
+  pybind11::capsule completion(){TORCH_CHECK(next,"a prepared function has no enqueued realization yet");return schedule_completion(executions[next-1]);}
 
 };
 
