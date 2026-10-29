@@ -29,7 +29,7 @@
       "fabric": "fd6d:6573:68:3af8:1a3c:9700:3034:715d",
       "memory_gib": 24,
       "roles": ["compute", "headless"],
-      "guard_headroom_gib": 1.25
+      "guard_headroom_gib": 0.75
     },
     "E8F9C574-257D-5425-8501-E5BF6981BEA6": {
       "name": "m5ult1",
@@ -40,7 +40,7 @@
       "fabric": "fd6d:6573:68:577f:d1f4:93fc:f466:51a6",
       "memory_gib": 96,
       "roles": ["compute", "headless", "root"],
-      "guard_headroom_gib": 1.25
+      "guard_headroom_gib": 0.75
     },
     "519B8DC8-FF1D-551F-9FC8-0A3168B1ED6A": {
       "name": "m5ult2",
@@ -51,7 +51,7 @@
       "fabric": "fd6d:6573:68:91e1:fbe5:72df:9c0b:bf0b",
       "memory_gib": 96,
       "roles": ["compute", "headless"],
-      "guard_headroom_gib": 1.25
+      "guard_headroom_gib": 0.75
     },
     "FFA75B2F-E060-527E-9CB3-C5816237FD8A": {
       "name": "m5ult3",
@@ -62,7 +62,7 @@
       "fabric": "fd6d:6573:68:353a:d161:f544:3d5a:1df7",
       "memory_gib": 96,
       "roles": ["compute", "headless"],
-      "guard_headroom_gib": 1.25
+      "guard_headroom_gib": 0.75
     },
     "BC53501D-2E24-5389-96BB-46AFE7D55F1B": {
       "name": "m5ult4",
@@ -73,7 +73,7 @@
       "fabric": "fd6d:6573:68:5e3b:7204:7848:33de:3c6a",
       "memory_gib": 96,
       "roles": ["compute", "headless"],
-      "guard_headroom_gib": 1.25
+      "guard_headroom_gib": 0.75
     }
   }
 }
