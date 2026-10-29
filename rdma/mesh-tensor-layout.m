@@ -767,6 +767,11 @@ finished:
             (unsigned long)binding,(unsigned long)axis,(long)[_strides[axis] integerValue]];
     return result;
 }
+- (NSArray<NSArray<NSNumber *> *> *)constants:(NSUInteger)binding {
+    if(_maps.count)return nil;   /* a mapped view keeps its source declaration (design/compile-once-2026-10-29.md) */
+    NSData *shape=TensorWords(_indexShape),*steps=TensorWords(_strides);
+    return MetalViewIndexConstants(binding,shape.bytes,steps.bytes,_indexShape.count,(NSUInteger)_offset);
+}
 - (NSString *)declaration:(NSUInteger)binding fromStorage:(MetalTensorLayout *)source {
     NSParameterAssert(source.affine&&[source.shape isEqual:_shape]);
     NSMutableString *result=[NSMutableString stringWithString:[self declaration:binding]];

@@ -44,9 +44,8 @@ def declare(source, name, buffers, outputs, words, constant_slot, grid, threads,
 
 
 @lru_cache(None)
-def pipeline(source, name, instance, indices, prefix=''):
-    from . import _stream
-    return _stream.pipeline(_stream.metal_prelude() + indices + prefix + Path(__file__).with_name(source).read_text() + '\n' + instance, name)
+def _text(source):
+    return Path(__file__).with_name(source).read_text()
 
 
 def prepare(inputs, input_slots, output_slots, output_strides, shapes, dtypes, devices, operands, source, name, instance, words, constant_slot, grid, threads, *, outputs=None):
@@ -83,6 +82,8 @@ def prepare(inputs, input_slots, output_slots, output_strides, shapes, dtypes, d
             prepare_binding(index, value, True)
             write |= 1 << index
     constants = {constant_slot: struct.pack(f'{len(words)}I', *(v & 0xffffffff for v in words))} if words else {}
-    commands.append((pipeline(source, name, instance, layout.index_source(addresses, declarations.get('indices')), declarations.get('prefix', '')), buffers, constants, tuple(grid), tuple(threads), False,
+    handle = layout.pipeline(_stream.metal_prelude(), addresses, declarations.get('prefix', '') + _text(source) + '\n' + instance, name,
+                             declarations.get('indices'))
+    commands.append((handle, buffers, constants, tuple(grid), tuple(threads), False,
                      read | (write << _stream.compilation['ACCESS_WRITE_SHIFT'])))
     return results, commands + after

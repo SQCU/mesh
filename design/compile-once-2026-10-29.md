@@ -44,6 +44,17 @@ constants)`, a higher-order lookup of one compiled library. No kernel body chang
 
 ## Status
 
-- Landed: compiling in parallel (mesh 2c26ca3c), and a pointless probe compile deleted (a8b6e797).
-- Not started: the function-constant prelude, the generator change in metal-recording.m, and the library-per-source
-  lookup in kernel.py and `_stream.pipeline`.
+- Landed: compiling in parallel (mesh 2c26ca3c); a pointless probe compile deleted (a8b6e797); the vector path chosen
+  by a plain `if` (632392a8).
+- Landed: the constants form. One function owns the choice, `layout.pipeline(head, bindings, tail, name, indices)`,
+  for every caller that used to write declarations into its text: kernel.py's commands, argmax, matrix, structured
+  and the layout copy.
+  - The constants form applies where every binding is affine and the text reads no `mesh_stride<`. Its library is
+    keyed by text that holds no layout, and each pipeline is specialized by `newFunctionWithName:constantValues:`.
+  - Otherwise the source form applies, unchanged: mapped views' index tables, and sparse.metal's constant strides.
+  - metal-recording.m: `MetalViewIndexConstantPrelude` and `MetalViewIndexConstants` share the axis collapse
+    (`MetalViewAxes`) with `MetalViewIndexExpression`.
+  - Bindings 0-15 with up to 8 collapsed axes have the form. Others take the source form.
+- Still per instance: a library's text holds its instance line, so instances with different template arguments still
+  compile separately. One library per source and preparation would need every instance line known before the first
+  compile.

@@ -67,6 +67,11 @@ NSData *MetalViewReaches(id<MTLBuffer>, NSUInteger offset, const NSUInteger *sha
 NSString *MetalViewIndexExpression(const NSUInteger *shape, const NSInteger *strides,
     size_t rank, NSString *index);
 NSString *MetalViewIndexPrelude(void);
+// design/compile-once-2026-10-29.md: the index prelude whose layouts are function constants, one text for every command,
+// and an affine view's values for it ([index, type (0 bool, 1 uint, 2 long, 3 ulong), value] each; nil: use the source form)
+NSString *MetalViewIndexConstantPrelude(void);
+NSArray<NSArray<NSNumber *> *> *MetalViewIndexConstants(NSUInteger binding, const NSUInteger *shape, const NSInteger *strides,
+    size_t rank, NSUInteger elementOffset);
 // Required API strides are equivalent when they address the same elements.
 // Empty and singleton axes do not impose a different physical layout.
 BOOL MetalViewLayoutMatches(const NSUInteger *shape, const NSInteger *strides,

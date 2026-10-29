@@ -390,6 +390,67 @@ static int64_t pipeline(const std::string &source, const std::string &name) {
   return (int64_t)pipelines_.size() - 1;
 }
 
+// design/compile-once-2026-10-29.md: one library of a source per process, compiled once on the compiler service, and
+// each command's pipeline specialized from it by its layout's function constants ([index, type, value]: 0 bool, 1 uint,
+// 2 long, 3 ulong), so commands that differ only in layout share one compile.
+struct Library { dispatch_semaphore_t done; id<MTLLibrary> library = nil; std::string error; };
+static std::unordered_map<std::string, std::shared_ptr<Library>> libraries_;
+
+static std::shared_ptr<Library> library_of(const std::string &source) {
+  std::lock_guard<std::mutex> guard(pipelines_lock_);
+  auto &held = libraries_[source];
+  if (held) return held;
+  held = std::make_shared<Library>();
+  held->done = dispatch_semaphore_create(0);
+  id<MTLDevice> device = at::mps::MPSDevice::getInstance()->device();
+  auto made = held;
+  [device newLibraryWithSource:@(source.c_str()) options:MetalDeviceCompilerOptions(device) completionHandler:^(id<MTLLibrary> library, NSError *error) {
+    if (library) made->library = [library retain];
+    else made->error = std::string("kernel source: ") + error.localizedDescription.UTF8String;
+    dispatch_semaphore_signal(made->done);
+  }];
+  return held;
+}
+
+static int64_t pipeline_specialized(const std::string &source, const std::string &name, const std::vector<std::array<int64_t, 3>> &constants) {
+  auto library = library_of(source);
+  auto made = std::make_shared<Compiled>();
+  made->done = dispatch_semaphore_create(0);
+  const std::string function_name = name;
+  const std::vector<std::array<int64_t, 3>> values = constants;
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    @autoreleasepool {
+      if (dispatch_semaphore_wait(library->done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)MESH_PREPARATION_NS))) {
+        made->error = "kernel source: not compiled within the preparation's deadline";
+      } else {
+        dispatch_semaphore_signal(library->done);   /* the library stays ready for every later specialization */
+        if (!library->library) made->error = library->error;
+        else {
+          MTLFunctionConstantValues *set = [[MTLFunctionConstantValues new] autorelease];
+          static const MTLDataType types[4] = {MTLDataTypeBool, MTLDataTypeUInt, MTLDataTypeLong, MTLDataTypeULong};
+          for (const auto &[index, type, value] : values) {
+            const bool flag = value != 0; const uint32_t word = (uint32_t)value; const int64_t wide = value; const uint64_t unsigned_wide = (uint64_t)value;
+            const void *at = type == 0 ? (const void *)&flag : type == 1 ? (const void *)&word : type == 2 ? (const void *)&wide : (const void *)&unsigned_wide;
+            [set setConstantValue:at type:types[type & 3] atIndex:(NSUInteger)index];
+          }
+          NSError *error = nil;
+          id<MTLFunction> function = [library->library newFunctionWithName:@(function_name.c_str()) constantValues:set error:&error];
+          id<MTLDevice> device = library->library.device;
+          id<MTLComputePipelineState> state = function ? [device newComputePipelineStateWithFunction:function error:&error] : nil;
+          if (!function) made->error = "kernel source: no function " + function_name + (error ? std::string(": ") + error.localizedDescription.UTF8String : "");
+          else if (!state) made->error = std::string("kernel pipeline: ") + error.localizedDescription.UTF8String;
+          [function release];
+          made->state = state;
+        }
+      }
+      dispatch_semaphore_signal(made->done);
+    }
+  });
+  std::lock_guard<std::mutex> guard(pipelines_lock_);
+  pipelines_.push_back(made);
+  return (int64_t)pipelines_.size() - 1;
+}
+
 static id<MTLComputePipelineState> state_of(int64_t handle, const char *what) {
   std::shared_ptr<Compiled> made;
   {
@@ -1610,6 +1671,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("completion", &completion);
   module.def("completed", &completed);
   module.def("pipeline", &pipeline);
+  module.def("pipeline_specialized", &pipeline_specialized);
+  module.def("index_constant_prelude", [](){return std::string(MetalViewIndexConstantPrelude().UTF8String);});
   pybind11::class_<TensorTraversal>(module,"TensorTraversal")
     .def(pybind11::init<const std::vector<TensorLayout> &,const std::vector<std::pair<NSUInteger,NSUInteger>> &>())
     .def_property_readonly("cuts",[](const TensorTraversal &v){return tensorNumbers(v.value.cuts);})
@@ -1654,6 +1717,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
       @catch(NSException *error){TORCH_CHECK(false,error.reason.UTF8String);}
     })
     .def("declaration",[](const TensorLayout &v,NSUInteger binding){return std::string([v.value declaration:binding].UTF8String);})
+    .def("constants",[](const TensorLayout &v,NSUInteger binding)->pybind11::object{
+      NSArray<NSArray<NSNumber *> *> *values=[v.value constants:binding];
+      if(!values)return pybind11::none();
+      pybind11::list out;
+      for(NSArray<NSNumber *> *c in values)out.append(pybind11::make_tuple(c[0].longLongValue,c[1].longLongValue,c[2].longLongValue));
+      return out;})
     .def("storage_declaration",[](const TensorLayout &v,NSUInteger binding,const TensorLayout &source){
       return std::string([v.value declaration:binding fromStorage:source.value].UTF8String);})
     .def("ordered_spans",[](const TensorLayout &v){

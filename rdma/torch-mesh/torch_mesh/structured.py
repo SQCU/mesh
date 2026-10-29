@@ -11,7 +11,6 @@ none of them decomposing E.  The same seed gives the same rotation, so a kernel 
 
   Rotation(n, seed); .rows(x) rotates each row of x [m, n] (x R^T); .columns(x) each column of x [n, k] (R x);
   .rows_inverse(y) undoes .rows (y R)"""
-from functools import lru_cache
 from pathlib import Path
 
 import torch
@@ -121,7 +120,6 @@ def stage_views(value, width, step):
 def prepare_stage(x, signs, width, step, normalization, signed, domain, *, out=None):
     from .placement import output
     from .operand import TensorView
-    from .layout import index_source
     import math
     import struct
     y = output((x.shape[0], signs.shape[0]), torch.float32, x.device, out)
@@ -151,7 +149,7 @@ def prepare_stage(x, signs, width, step, normalization, signed, domain, *, out=N
             reads = (TensorView.of(x).slice(0, origin[0], size[0]).select(1,
                      [column if column >= 0 else valid for column in positions]).reshape(size)) if valid is not None else None
         views = {1: writes, **({0: reads} if reads is not None else {}), **({2: signs_view} if signed else {})}
-        handle = _kernel(width, normalization, signed, kinds[x.dtype], kinds[signs.dtype], bool(mask), index_source(views, mask))
+        handle = _kernel(width, normalization, signed, kinds[x.dtype], kinds[signs.dtype], bool(mask), views, mask)
         maximum, lanes, _ = _stream.pipeline_facts(handle)
         threads = min(maximum, max(lanes, width // 2))
         groups = math.prod(size) // width
@@ -162,11 +160,11 @@ def prepare_stage(x, signs, width, step, normalization, signed, domain, *, out=N
     return y, commands
 
 
-@lru_cache(None)
-def _kernel(width, normalization, signed, input_type, sign_type, masked, indices):
+def _kernel(width, normalization, signed, input_type, sign_type, masked, bindings, indices):
+    from .layout import pipeline
     instance = f'structured_butterfly<{width},{normalization},{str(signed).lower()},{input_type},{sign_type},{str(masked).lower()}>'
     declaration = f'\ntemplate [[host_name("butterfly")]] [[kernel]] decltype({instance}) {instance};'
-    return _stream.pipeline(_stream.metal_prelude() + indices + SOURCE + declaration, 'butterfly')
+    return pipeline(_stream.metal_prelude(), bindings, SOURCE + declaration, 'butterfly', indices)
 
 
 def _factor(n, block_width):

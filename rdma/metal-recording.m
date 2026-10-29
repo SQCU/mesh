@@ -10,19 +10,29 @@ BOOL MetalViewLayoutMatches(const NSUInteger *shape,const NSInteger *strides,con
     return YES;
 }
 
-NSString *MetalViewIndexExpression(const NSUInteger *shape,const NSInteger *strides,size_t rank,NSString *index) {
-    // Collapse adjacent axes before emitting arithmetic. Contiguous views
-    // become the original index, with no table, descriptor load or branch.
-    struct { NSUInteger count, divisor; NSInteger stride; } axes[rank?rank:1];
+// The axes a view's index sums, adjacent ones collapsed, innermost first: each its count, divisor and stride. Their
+// number, or SIZE_MAX for an empty view (whose every index is 0). Shared by the source form (MetalViewIndexExpression)
+// and the constants form (MetalViewIndexConstants).
+typedef struct { NSUInteger count, divisor; NSInteger stride; } MetalViewAxis;
+static size_t MetalViewAxes(const NSUInteger *shape,const NSInteger *strides,size_t rank,MetalViewAxis *axes) {
     NSUInteger divisor=1,used=0;
     for(size_t d=rank;d--;) {
-        if(!shape[d])return @"0";
+        if(!shape[d])return SIZE_MAX;
         if(shape[d]==1)continue;
         if(used&&strides[d]==axes[used-1].stride*(NSInteger)axes[used-1].count)
             axes[used-1].count*=shape[d];
         else {axes[used].count=shape[d];axes[used].divisor=divisor;axes[used++].stride=strides[d];}
         divisor*=shape[d];
     }
+    return used;
+}
+
+NSString *MetalViewIndexExpression(const NSUInteger *shape,const NSInteger *strides,size_t rank,NSString *index) {
+    // Collapse adjacent axes before emitting arithmetic. Contiguous views
+    // become the original index, with no table, descriptor load or branch.
+    MetalViewAxis axes[rank?rank:1];
+    const size_t used=MetalViewAxes(shape,strides,rank,axes);
+    if(used==SIZE_MAX)return @"0";
     NSMutableArray *terms=[NSMutableArray array];
     for(NSUInteger a=0;a<used;a++) {
         if(!axes[a].stride)continue;
@@ -33,6 +43,70 @@ NSString *MetalViewIndexExpression(const NSUInteger *shape,const NSInteger *stri
         [terms addObject:term];
     }
     return terms.count?[terms componentsJoinedByString:@" + "]:@"0";
+}
+
+// design/compile-once-2026-10-29.md: binding B's affine layout as function constants, at MESH_FC_FIRST + 32 B + its
+// field (0 set, 1 axes, 2 base, 3 vector span, then each axis a's count, divisor and stride at 4 + 3a), so one
+// library of a source serves every command and each command's pipeline is specialized from its own values.
+#define MESH_FC_FIRST 1024u
+#define MESH_FC_AXES 8u
+#define MESH_FC_BINDINGS 16u
+static NSUInteger MetalViewConstant(NSUInteger binding,NSUInteger field) { return MESH_FC_FIRST+32u*binding+field; }
+
+NSString *MetalViewIndexConstantPrelude(void) {
+    NSMutableString *s=[NSMutableString stringWithString:@"#ifndef MESH_INDEX_DECLARED\n#include <metal_stdlib>\nusing namespace metal;\n"
+        "#define MESH_INDEX_DECLARED 1\n"
+        "template<uint B> inline long mesh_index(ulong i) { return long(i); }\ntemplate<uint B, uint A> constexpr long mesh_stride();\n"
+        "template<uint B> inline ulong mesh_vector_span() { return 0; }\ntemplate<uint B> inline bool mesh_vector4() { return mesh_vector_span<B>() % 4 == 0; }\n"];
+    const char *names[3]={"count","divisor","stride"},*types[3]={"ulong","ulong","long"};
+    for(NSUInteger b=0;b<MESH_FC_BINDINGS;b++) {
+        [s appendFormat:@"constant bool mesh_set_%lu [[function_constant(%lu)]];\n",(unsigned long)b,(unsigned long)MetalViewConstant(b,0)];
+        [s appendFormat:@"constant bool mesh_on_%lu = is_function_constant_defined(mesh_set_%lu) && mesh_set_%lu;\n",(unsigned long)b,(unsigned long)b,(unsigned long)b];
+        [s appendFormat:@"constant uint mesh_axes_%lu_v [[function_constant(%lu)]];\nconstant uint mesh_axes_%lu = mesh_on_%lu ? mesh_axes_%lu_v : 0;\n",
+            (unsigned long)b,(unsigned long)MetalViewConstant(b,1),(unsigned long)b,(unsigned long)b,(unsigned long)b];
+        [s appendFormat:@"constant long mesh_base_%lu_v [[function_constant(%lu)]];\nconstant long mesh_base_%lu = mesh_on_%lu ? mesh_base_%lu_v : 0;\n",
+            (unsigned long)b,(unsigned long)MetalViewConstant(b,2),(unsigned long)b,(unsigned long)b,(unsigned long)b];
+        [s appendFormat:@"constant ulong mesh_span_%lu_v [[function_constant(%lu)]];\nconstant ulong mesh_span_%lu = mesh_on_%lu ? mesh_span_%lu_v : 0;\n",
+            (unsigned long)b,(unsigned long)MetalViewConstant(b,3),(unsigned long)b,(unsigned long)b,(unsigned long)b];
+        for(NSUInteger a=0;a<MESH_FC_AXES;a++) for(int f=0;f<3;f++)
+            [s appendFormat:@"constant %s mesh_%s_%lu_%lu_v [[function_constant(%lu)]];\nconstant %s mesh_%s_%lu_%lu = mesh_axes_%lu > %lu ? mesh_%s_%lu_%lu_v : %s;\n",
+                types[f],names[f],(unsigned long)b,(unsigned long)a,(unsigned long)MetalViewConstant(b,4+3*a+(NSUInteger)f),types[f],names[f],
+                (unsigned long)b,(unsigned long)a,(unsigned long)b,(unsigned long)a,names[f],(unsigned long)b,(unsigned long)a,f==2?"0":"1"];
+        [s appendFormat:@"template<> inline long mesh_index<%lu>(ulong i) {\n  if (!mesh_on_%lu) return long(i);\n  long r = mesh_base_%lu;\n",
+            (unsigned long)b,(unsigned long)b,(unsigned long)b];
+        for(NSUInteger a=0;a<MESH_FC_AXES;a++)
+            [s appendFormat:@"  if (mesh_axes_%lu > %lu) { long q = long(i) / long(mesh_divisor_%lu_%lu); if (mesh_axes_%lu > %lu) q %%= long(mesh_count_%lu_%lu); r += q * mesh_stride_%lu_%lu; }\n",
+                (unsigned long)b,(unsigned long)a,(unsigned long)b,(unsigned long)a,(unsigned long)b,(unsigned long)a+1,(unsigned long)b,(unsigned long)a,(unsigned long)b,(unsigned long)a];
+        [s appendFormat:@"  return r;\n}\ntemplate<> inline ulong mesh_vector_span<%lu>() { return mesh_span_%lu; }\n",(unsigned long)b,(unsigned long)b];
+    }
+    [s appendString:@"#endif\n"];
+    return s;
+}
+
+static NSUInteger MetalViewAlignment(NSUInteger span,NSInteger distance);
+// binding's function-constant values (the constants form of MetalViewAffineIndexDeclaration, base 0): each as its
+// index, type (0 bool, 1 uint, 2 long, 3 ulong) and value; nil where the view does not fit the form (more axes than
+// MESH_FC_AXES, a binding past MESH_FC_BINDINGS, or an empty view)
+NSArray<NSArray<NSNumber *> *> *MetalViewIndexConstants(NSUInteger binding,const NSUInteger *shape,const NSInteger *strides,
+    size_t rank,NSUInteger elementOffset) {
+    MetalViewAxis axes[rank?rank:1];
+    const size_t used=MetalViewAxes(shape,strides,rank,axes);
+    if(binding>=MESH_FC_BINDINGS||used==SIZE_MAX||used>MESH_FC_AXES)return nil;
+    NSUInteger inner=1,prefix=rank;
+    for(size_t d=rank;d--;) {
+        if(shape[d]>1&&strides[d]!=(NSInteger)inner)break;
+        inner*=shape[d];prefix=d;
+    }
+    NSUInteger vector=MetalViewAlignment(prefix?inner:0,(NSInteger)elementOffset);
+    for(size_t d=0;d<prefix;d++)if(shape[d]>1)vector=MetalViewAlignment(vector,strides[d]);
+    NSMutableArray *values=[NSMutableArray arrayWithObjects:@[@(MetalViewConstant(binding,0)),@0,@1],@[@(MetalViewConstant(binding,1)),@1,@(used)],
+        @[@(MetalViewConstant(binding,2)),@2,@0],@[@(MetalViewConstant(binding,3)),@3,@(vector)],nil];
+    for(size_t a=0;a<used;a++) {
+        [values addObject:@[@(MetalViewConstant(binding,4+3*a)),@3,@(axes[a].count)]];
+        [values addObject:@[@(MetalViewConstant(binding,5+3*a)),@3,@(axes[a].divisor)]];
+        [values addObject:@[@(MetalViewConstant(binding,6+3*a)),@2,@(axes[a].stride)]];
+    }
+    return values;
 }
 
 static NSString *MetalViewIndexTemplates(void) {

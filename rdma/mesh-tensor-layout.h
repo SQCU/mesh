@@ -50,6 +50,9 @@ struct MetalTensorSpan { NSInteger offset; NSUInteger count; };
 // Address expressions and, for affine views, per-axis stride constants for
 // numerical APIs. Both describe the assigned operand, after page placement.
 - (NSString *)declaration:(NSUInteger)binding;
+// The binding's layout as the constants form's function-constant values (metal-recording.h MetalViewIndexConstants), nil
+// where the view is mapped or does not fit it.
+- (NSArray<NSArray<NSNumber *> *> *)constants:(NSUInteger)binding;
 // Lower the affine storage indices of a frontend IR to this page selection.
 // The source index is compiler structure, not a payload index tensor.
 - (NSString *)declaration:(NSUInteger)binding fromStorage:(MetalTensorLayout *)source;

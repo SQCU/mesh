@@ -1,20 +1,20 @@
 """Native matrix command operands shared by FX and the streamed DNN program."""
-from functools import lru_cache
 from pathlib import Path
 
 import torch
 from . import _stream, fused
 from .compilation import operands, api_layouts
 from .operand import TensorView
-from .layout import index_source, bindings
+from .layout import bindings, pipeline as layout_pipeline
 
 
-@lru_cache(None)
-def pipeline(definitions, indices):
-    source = fused.steps() + '\n' + indices + ''.join(f'#define {key} {value}\n' for key, value in definitions)
-    source += Path(__file__).with_name('argmax.metal').read_text() + '\n'
-    source += Path(__file__).with_name('matrix_operand.metal').read_text() + '\n'
-    return _stream.pipeline(source + Path(__file__).with_suffix('.metal').read_text(), 'product')
+_SOURCE = ''.join(Path(__file__).with_name(f).read_text() + '\n' for f in ('argmax.metal', 'matrix_operand.metal')) + \
+    Path(__file__).with_suffix('.metal').read_text()
+
+
+def pipeline(definitions, bindings):
+    defined = ''.join(f'#define {key} {value}\n' for key, value in definitions)
+    return layout_pipeline(fused.steps() + '\n', bindings, defined + _SOURCE, 'product')
 
 
 def row_tiles(rows):
@@ -75,9 +75,9 @@ def product(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, ready=
     row_tile = definitions['ROWS'] * definitions['ROW_GROUPS']
     column_tile = definitions['COLUMNS'] * definitions['COLUMN_GROUPS']
     threads = definitions['ROW_GROUPS'] * definitions['COLUMN_GROUPS'] * geometry['SIMD_WIDTH']
-    indices = index_source({0: x, 1: w, 2: out, **({5: bias} if bias is not None else {}), **({6: x1} if x1 is not None else {}),
-                            **({3: arrivals, 7: ready} if ready is not None else {})})
-    record = (pipeline(tuple(definitions.items()), indices), [x, w, out, arrivals, None, bias, x1, ready],
+    views = {0: x, 1: w, 2: out, **({5: bias} if bias is not None else {}), **({6: x1} if x1 is not None else {}),
+             **({3: arrivals, 7: ready} if ready is not None else {})}
+    record = (pipeline(tuple(definitions.items()), views), [x, w, out, arrivals, None, bias, x1, ready],
             {}, (-(-rows // row_tile), -(-columns // column_tile), batches),
             (threads, 1, 1), False, 3 | (32 if bias is not None else 0) | (64 if x1 is not None else 0)
             | ((140 if ready is not None else 4) << _stream.compilation['ACCESS_WRITE_SHIFT']))

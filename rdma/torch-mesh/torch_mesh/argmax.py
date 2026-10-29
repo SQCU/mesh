@@ -19,7 +19,6 @@ draw(z, seed, positions) takes is in it.  A divergence over a record takes what 
 1 - sum exp(z - log Z) over the ids (the other row's at the same ids, over its own log Z): the coarse-grained KL is at
 most the rows' (the log-sum inequality), and equal to it where nothing is excluded."""
 import math
-from functools import lru_cache
 from pathlib import Path
 
 import torch
@@ -29,10 +28,10 @@ from .streamed import instance
 
 SOURCE = Path(__file__).with_name('argmax.metal').read_text()
 THREADS = _stream.compilation['DRAW_THREADS']
-@lru_cache(None)
-def _kernel(kernel, indices, *arguments):
+def _kernel(kernel, bindings, *arguments):
+    from .layout import pipeline
     name, line = instance(kernel, THREADS, *arguments)
-    return _stream.pipeline(indices + SOURCE + '\n' + line + '\n', name)
+    return pipeline('', bindings, SOURCE + '\n' + line + '\n', name)
 
 
 def _rows(z, keys):
@@ -89,8 +88,7 @@ def prepare_draw(z, keys, cutoff, seed, first, *, out=None):
     ids = output((rows,), torch.int64, z.device, out)
     parts, arrivals = empty((2 * rows * blocks,)), empty((rows,), dtype=torch.int32)
     host(arrivals).zero_()
-    from .layout import index_source
-    record = (_kernel('mesh_draw_rows', index_source({0: z, 1: keys, 2: cutoff, 3: ids})), [z, keys, cutoff, ids, parts, arrivals],
+    record = (_kernel('mesh_draw_rows', {0: z, 1: keys, 2: cutoff, 3: ids}), [z, keys, cutoff, ids, parts, arrivals],
               {6: struct.pack('4I', width, seed & 0xffffffff, first & 0xffffffff, blocks)}, (blocks, rows, 1), (THREADS, 1, 1), False,
               7 | (56 << _stream.compilation['ACCESS_WRITE_SHIFT']))
     return ids, [record] if rows else []
@@ -105,8 +103,7 @@ def prepare_retain(z, keys, seed, head, tail, *, outputs=None):
                        zip(((rows, head + tail), (rows, head + tail), (rows,)),
                            (torch.int64, torch.float32, torch.float32),
                            outputs if outputs is not None else (None, None, None), strict=True)]
-    from .layout import index_source
-    record = (_kernel('mesh_retain_rows', index_source({0: z, 1: keys, 2: ids, 3: kept, 4: log_z}), head, tail), [z, keys, ids, kept, log_z],
+    record = (_kernel('mesh_retain_rows', {0: z, 1: keys, 2: ids, 3: kept, 4: log_z}, head, tail), [z, keys, ids, kept, log_z],
               {5: struct.pack('2I', width, seed & 0xffffffff)}, (1, rows, 1), (THREADS, 1, 1), False,
               3 | (28 << _stream.compilation['ACCESS_WRITE_SHIFT']))
     return (ids, kept, log_z), [record] if rows else []

@@ -20,11 +20,51 @@ def strides(shape):
     return tuple(reversed(result))
 
 
+def _layouts(bindings):
+    return {index: value if isinstance(value, _stream.TensorLayout) else _stream.operand_layout(value)
+            for index, value in sorted(bindings.items())}
+
+
 def index_source(bindings, indices=None):
     """Emit addresses from the same descriptors carried into command accesses."""
-    return (_stream.view_prelude() + ''.join(_stream.operand_layout(value).declaration(index)
-                                           for index, value in sorted(bindings.items()))
+    return (_stream.view_prelude() + ''.join(layout.declaration(index) for index, layout in _layouts(bindings).items())
             + ''.join(_stream.index_values(int(index), values) for index, values in (indices or {}).items()))
+
+
+def index_constants(bindings):
+    """Every binding's layout as function constants (_stream TensorLayout.constants), as one tuple; None where one
+    binding does not have the form (a mapped view), which then keeps the source form (index_source)."""
+    constants = []
+    for index, layout in _layouts(bindings).items():
+        own = layout.constants(index)
+        if own is None:
+            return None
+        constants.extend(tuple(c) for c in own)
+    return tuple(constants)
+
+
+@lru_cache(None)
+def _compiled(text, name):
+    return _stream.pipeline(text, name)
+
+
+@lru_cache(None)
+def _specialized(text, name, constants):
+    return _stream.pipeline_specialized(text, name, [list(c) for c in constants])
+
+
+def pipeline(head, bindings, tail, name, indices=None):
+    """Kernel `name` of `head`, the bindings' (TensorViews or TensorLayouts) index declarations and `tail`.
+
+    Where every binding is affine and the text reads no layout as a C++ constant expression (mesh_stride), the
+    declarations are one prelude's function constants: commands that differ only in layout share one library, and each
+    pipeline is specialized from its own values (design/compile-once-2026-10-29.md). Otherwise they are source text
+    (index_source): mapped views' index tables, and mesh_stride's constant strides.
+    """
+    constants = None if indices or 'mesh_stride<' in head + tail else index_constants(bindings)
+    if constants is None:
+        return _compiled(head + index_source(bindings, indices) + tail, name)
+    return _specialized(head + _stream.index_constant_prelude() + tail, name, constants)
 
 
 def place(graph, placements, fixed):
@@ -104,8 +144,7 @@ def _copy_pipeline(source, destination, width):
     kind = {1: 'uchar', 2: 'ushort', 4: 'uint', 8: 'ulong'}[width]
     prefix = (f'#define MESH_COPY_INPUT_TYPE {kind}\n#define MESH_COPY_OUTPUT_TYPE {kind}\n#define MESH_COPY_COUNT {source.count}ul\n'
               '#define MESH_COPY_SOURCE (mesh_index<0>(i))\n#define MESH_COPY_DESTINATION (mesh_index<1>(i))\n')
-    return _stream.pipeline(_stream.view_prelude() + source.declaration(0) + destination.declaration(1)
-                            + prefix + Path(__file__).with_suffix('.metal').read_text(), 'mesh_layout_copy')
+    return pipeline('', {0: source, 1: destination}, prefix + Path(__file__).with_suffix('.metal').read_text(), 'mesh_layout_copy')
 
 
 def copies(source, destination):
