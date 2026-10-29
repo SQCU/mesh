@@ -100,7 +100,7 @@ static inline const _Atomic uint64_t *region_word(uint64_t offset){
 /* design/transport.md section 14: the entries a holder has presented on one of its lists taken into the walk, as far
    as its ring has room: each copied once and typed (struct taken), whether it is the holder's to name (`whole`) read,
    its first unit over the holding counted, and the list's `taken` stored past them */
-static int walk_take(struct walk *w,struct mesh_stream *x,int land){
+static int walk_take(struct port *port,uint32_t s,struct walk *w,struct mesh_stream *x,int land){
   const uint64_t n=atomic_load_explicit(land?&x->lands:&x->sends,memory_order_acquire);
   const struct mesh_entry *list=(const struct mesh_entry *)((char *)M+x->lists)+(uint64_t)land*MESH_STREAM_ENTRIES;
   uint64_t t=w->taken;
@@ -108,7 +108,14 @@ static int walk_take(struct walk *w,struct mesh_stream *x,int land){
     struct taken *k=w->ring+t%MESH_STREAM_ENTRIES;
     const struct mesh_entry e=list[t%MESH_STREAM_ENTRIES];
     const _Atomic uint64_t *word=e.word?region_word(e.word):land?NULL:&x->ready;
-    if(!mesh_entry_table_valid(M,e) || e.units>=UINT64_MAX-w->units.n)return 0;
+    if(!mesh_entry_table_valid(M,e) || e.units>=UINT64_MAX-w->units.n){
+      mesh_say("bridge","link %u (%s): stream %u toward node %u: its %s entry %llu of %llu presented refused: table %llu, "
+               "units %llu, base %llu, word %llu (region data %llu to %llu, %llu units taken before it)",port->index,port->name,s,
+               port->peer,land?"landing":"send",(unsigned long long)t,(unsigned long long)n,(unsigned long long)e.spans,
+               (unsigned long long)e.units,(unsigned long long)e.base,(unsigned long long)e.word,(unsigned long long)M->data_off,
+               (unsigned long long)M->length,(unsigned long long)w->units.n);
+      return 0;
+    }
     k->spans=(const struct mesh_dma_span *)((const char *)M+e.spans);
     k->units=(struct mesh_units){e.units};k->base=(struct mesh_units){e.base};
     k->whole=word || !e.word;k->word=word;k->unit=w->units;
@@ -210,6 +217,16 @@ static void stream_end(struct port *port,uint32_t t){
   atomic_fetch_or_explicit(&l->broken,l->plan>>MESH_LANE_FIRST<<MESH_LANE_FIRST,memory_order_release);
   wake();
 }
+/* a taken entry's unit the bridge refuses to post (rubric M10: the loss named by its cause and owner): stream s's
+   `way` (0 a SEND, 1 a receive) entry e, the walk's place, its unit `unit`, and why; then the link fails (EINVAL) */
+static void unit_refused(struct port *port,uint32_t s,int way,const struct walk *w,const struct taken *e,uint64_t unit,const char *why){
+  const struct mesh_dma_span span=e->spans[unit];
+  mesh_say("bridge","link %u (%s): stream %u toward node %u: its %s entry %llu (%llu units from unit %llu of the holding), unit %llu "
+           "refused: %s (span %llu, %llu bytes; word %s)",port->index,port->name,s,port->peer,way?"landing":"send",
+           (unsigned long long)w->at,(unsigned long long)e->units.n,(unsigned long long)e->unit.n,(unsigned long long)unit,why,
+           (unsigned long long)span.offset,(unsigned long long)span.bytes,e->word?"in the region":e->whole?"none":"outside the region");
+  link_failed(port,EINVAL);
+}
 /* design/transport.md section 14: stream t's holding at its port's progress thread, each pass.  An owner word holding
    a client's while none is served begins a holding, its walks' bases its lanes' SENDs and receives posted so far (no
    unit of an earlier holding is outstanding: each ended with none, or its stream serves no holding again in the
@@ -234,8 +251,8 @@ static void stream_turn(struct port *port,uint32_t t){
     l->landing[t]=(struct walk){.ring=l->landing[t].ring,.base={s[0].posted+s[1].posted}};
   }
   if(owner==l->held[t] && owned(owner)){
-    if(!walk_take(l->sending+t,x,0))link_failed(port,EINVAL);
-    else if(!walk_take(l->landing+t,x,1))link_failed(port,EINVAL);
+    if(!walk_take(port,t,l->sending+t,x,0))link_failed(port,EINVAL);
+    else if(!walk_take(port,t,l->landing+t,x,1))link_failed(port,EINVAL);
   }
   else l->hold[t]=HOLD_END;
 }
@@ -257,11 +274,11 @@ static void stream_send(struct port *port,uint32_t t,uint32_t served){
     const struct taken *e=walk_unit(w,q);
     if(!e)break;
     if(pinned!=e){metadata_pin(x,e);pinned=e;if(!holding_kept(x,l->held[t]))break;}
-    if(!e->whole){link_failed(port,EINVAL);break;}
     const struct mesh_units i=mesh_units_sub(q,e->unit);
+    if(!e->whole){unit_refused(port,t,0,w,e,i.n,"its word is not a word of the region");break;}
     if(!mesh_units_lt(mesh_units_add(e->base,i),mesh_units_load(e->word)))break;
     const struct mesh_dma_span bytes=e->spans[i.n];
-    if(!mesh_dma_span_valid(M,bytes)){link_failed(port,EINVAL);break;}
+    if(!mesh_dma_span_valid(M,bytes)){unit_refused(port,t,0,w,e,i.n,"its span is not within one registration extent of the arena");break;}
     const struct frames each=frames_of(bytes.bytes);
     struct send_gate *gate=l->gate+lane;
     if(each.n>gate->capacity.n){link_failed(port,EMSGSIZE);break;}
@@ -294,10 +311,10 @@ static void stream_post(struct port *port,uint32_t t,uint32_t served){
     const struct taken *e=walk_unit(w,q);
     if(!e)break;
     if(pinned!=e){metadata_pin(x,e);pinned=e;if(!holding_kept(x,l->held[t]))break;}
-    if(!e->whole){link_failed(port,EINVAL);break;}
+    if(!e->whole){unit_refused(port,t,1,w,e,mesh_units_sub(q,e->unit).n,"its word is not a word of the region");break;}
     if(e->word && mesh_units_lt(mesh_units_load(e->word),e->base))break;
     const struct mesh_dma_span bytes=e->spans[mesh_units_sub(q,e->unit).n];
-    if(!mesh_dma_span_valid(M,bytes)){link_failed(port,EINVAL);break;}
+    if(!mesh_dma_span_valid(M,bytes)){unit_refused(port,t,1,w,e,mesh_units_sub(q,e->unit).n,"its span is not within one registration extent of the arena");break;}
     const struct frames each=frames_of(bytes.bytes);
     if(each.n>state->frame_capacity){link_failed(port,EMSGSIZE);break;}
     if(((state->frames_posted-state->frames_retired)&MESH_GATE_MASK)+each.n>state->frame_capacity)break;
