@@ -34,6 +34,17 @@ static inline uint64_t mesh_span_inverse(uint64_t a, uint64_t modulus) {
   return t;
 }
 
+/* The elements x, lo < x < hi, of a buffer whose byte 0 lies `phase` bytes into a registration extent, at which an
+   extent's boundary falls on an element of z bytes (x * z + phase a multiple of MESH_DMA_EXTENT), ascending; at most
+   `room` written, their count. */
+static inline size_t mesh_span_extent_cuts(uint64_t phase, uint64_t z, uint64_t lo, uint64_t hi, uint64_t *out, size_t room) {
+  size_t n = 0;
+  uint64_t b = MESH_DMA_EXTENT - phase;
+  if (b <= lo * z) b += (lo * z - b) / MESH_DMA_EXTENT * MESH_DMA_EXTENT + MESH_DMA_EXTENT;
+  for (; n < room && b / z < hi; b += MESH_DMA_EXTENT)
+    if (!(b % z) && b / z > lo) out[n++] = b / z;
+  return n;
+}
 static inline int mesh_span_cut_compare(const void *a, const void *b) {
   const uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
   return (x > y) - (x < y);

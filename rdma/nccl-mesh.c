@@ -2299,11 +2299,11 @@ static size_t extent_cuts(const struct call *c, struct mesh_operand operand, con
       const uint64_t phase = c->phase[2 * r + j];
       if (phase == UINT64_MAX) continue;
       const int segment = cut && ((!j && c->what == MESH_ALLGATHER) || (j && c->what == MESH_REDUCE_SCATTER));
-      uint64_t first = 0, length = operand.elements;
-      for (uint32_t q = 0; segment && q < r; q++) first += cut[q];
-      if (segment) length = cut[r];
-      for (uint64_t at = MESH_DMA_EXTENT - phase; at < length * z && n < room; at += MESH_DMA_EXTENT)
-        if (!(at % z) && first + at / z < operand.elements) out[n++] = first + at / z;
+      const uint64_t first = segment ? mesh_segment_first(cut, r) : 0, length = segment ? cut[r] : operand.elements;
+      const size_t made = mesh_span_extent_cuts(phase, z, 0, length < operand.elements - first ? length : operand.elements - first,
+                                                out + n, room - n);
+      for (size_t k = n; k < n + made; k++) out[k] += first;
+      n += made;
     }
   for (size_t i = 1; i < n; i++)
     for (size_t k = i; k && out[k - 1] > out[k]; k--) { const uint64_t t = out[k]; out[k] = out[k - 1]; out[k - 1] = t; }
@@ -2383,12 +2383,10 @@ static ncclResult_t counted_steps(struct call *c) {
       const uint64_t ends[2][3] = {{c->phase[2 * from], sent}, {c->phase[2 * to + 1], landed}};
       for (int e = 0; e < 2; e++) {
         if (ends[e][0] == UINT64_MAX) continue;
-        for (uint64_t b = MESH_DMA_EXTENT - ends[e][0]; n < sizeof cuts / sizeof *cuts; b += MESH_DMA_EXTENT) {
-          if (b % SIZE[c->type]) { if (b / SIZE[c->type] >= ends[e][1] + s.piece.elements) break; continue; }
-          const uint64_t x = b / SIZE[c->type];
-          if (x >= ends[e][1] + s.piece.elements) break;
-          if (x > ends[e][1]) cuts[n++] = x - ends[e][1];
-        }
+        const size_t made = mesh_span_extent_cuts(ends[e][0], SIZE[c->type], ends[e][1], ends[e][1] + s.piece.elements, cuts + n,
+                                                  sizeof cuts / sizeof *cuts - n);
+        for (size_t k = n; k < n + made; k++) cuts[k] -= ends[e][1];
+        n += made;
       }
       for (size_t i = 1; i < n; i++)
         for (size_t j = i; j && cuts[j - 1] > cuts[j]; j--) { const uint64_t t = cuts[j]; cuts[j] = cuts[j - 1]; cuts[j - 1] = t; }
