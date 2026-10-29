@@ -15,6 +15,18 @@ What landed from them, on mesh main:
 - one program compile (f891a3e9);
 - a WRITE compared by its bytes (368f60bd).
 
+Later the same night:
+- a WRITE has no type (8f1fa367);
+- the pointer lowering (design/pointer-lowering-2026-10-28.md);
+- the mesh backend registered on import (04dac936);
+- one placement proposal on every member (c3451281);
+- device-copied attribute import (bb4c7b34).
+- Across-files 1, in part (33504a46): `_stream.mm`'s `_c10d_functional` MPS kernels, a run-time copy of
+  declarations.py's op mapping, are deleted. A sweep found no hourly workload reaching them on real tensors.
+  `ProcessGroupMesh`'s per-call methods, `_issue` and `submit` (with R17's drain) stay, because they carry
+  partition's declared configuration transfers (`_configuration_exchange`: `group.configuration` declares the call,
+  then `dist.scatter`/`dist.all_to_all_single` issues it). They go when those transfers become prepared plans.
+
 Considered and not landed: within 7 (one WRITE compile: it saved no compiles), within 8's operands_check (it catches
 a returned lease at issue), within 12's write_call (definition and issue differ on tile_bytes), within 17–19 (code
 shape only).
