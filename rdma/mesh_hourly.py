@@ -265,6 +265,9 @@ def rank_results(outputs):
 
 
 
+PAIRING_SECONDS = 30
+
+
 def run_workload(item, nodes, paths, record, ordinal, cluster):
     import mesh_nodes as mesh
     from mesh_statistics import aggregate
@@ -278,7 +281,9 @@ def run_workload(item, nodes, paths, record, ordinal, cluster):
     try:
         if not selected:
             raise RuntimeError('no live, installed node')
-        mesh.wait_paired(selected, None, end)  # a failed workload's ranks leave links re-pairing for a few seconds
+        # a failed workload's ranks leave links re-pairing for a few seconds; a node gone (unreachable, restarting) never
+        # pairs, so the wait is that long and no longer, and the case runs on the largest set linked by then
+        mesh.wait_paired(selected, None, min(end, time.time() + PAIRING_SECONDS))
         largest = max(mesh.parts([node.number for node in selected], mesh.paired(selected)), key=len)
         selected = [node for node in selected if node.number in largest]
         result['nodes'] = [node.number for node in selected]
