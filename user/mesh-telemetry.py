@@ -265,22 +265,26 @@ def fabric_services():
 def fabric(now):
     return {"bridges": fabric_bridges(now), "ports": fabric_ports(), **fabric_services()}
 
-class TelemetryRecord(dict):
-    def __init__(self, value):
-        super().__init__(value)
-        self.wire = {}
-        self.wire_lock = threading.Lock()
 
+class TelemetryRecord(dict):
     def encode(self, projected=False):
         def scalars(value):
             return {key: scalars(child) for key, child in value.items()} if isinstance(value, dict) else {"array_length": len(value)} if isinstance(value, list) else value
-        with self.wire_lock:
-            if projected not in self.wire:
-                sample = self["sample"]
-                workload = sample.get("workload", {})
-                value = {**self, "sample": {**sample, "workload": {**workload, "measure_projection": "scalars_and_array_lengths", "producers": [{**row, "measures": scalars(row.get("measures", {}))} for row in workload.get("producers", [])]}}} if projected else self
-                self.wire[projected] = json.dumps(value, separators=(",", ":")).encode()
-            return self.wire[projected]
+        sample = self["sample"]
+        workload = sample.get("workload", {})
+        value = {**self, "sample": {**sample, "workload": {**workload, "measure_projection": "scalars_and_array_lengths", "producers": [{**row, "measures": scalars(row.get("measures", {}))} for row in workload.get("producers", [])]}}} if projected else self
+        return json.dumps(value, separators=(",", ":")).encode()
+
+
+def shared(value, prior):
+    """`value` with each part equal to `prior`'s the prior object itself (records are never changed in place)"""
+    if value == prior:
+        return prior
+    if isinstance(value, dict) and isinstance(prior, dict):
+        return {key: shared(child, prior[key]) if key in prior else child for key, child in value.items()}
+    if isinstance(value, list) and isinstance(prior, list) and len(value) == len(prior):
+        return [shared(child, old) for child, old in zip(value, prior)]
+    return value
 
 
 class TelemetryRing:
@@ -421,6 +425,10 @@ class TelemetryRing:
                 self.records[-1] = TelemetryRecord({**previous, "sample": {**previous["sample"], "workload": compact}})
             self.sequence += 1
             sample = dict(sample)
+            if self.records:   # what did not change since the last sample is that sample's own objects: one copy in the ring
+                prior = self.records[-1]["sample"]
+                sample = {key: value if key in ("workload", "stream") or key not in prior else shared(value, prior[key])
+                          for key, value in sample.items()}
             sample["stream"] = {"schema": 1, "sequence": self.sequence, "sampled_at": time.time(), "monotonic_ns": time.monotonic_ns()}
             record = TelemetryRecord(sample["stream"])
             record["sample"] = sample
