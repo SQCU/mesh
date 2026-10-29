@@ -1671,28 +1671,15 @@ struct ViewWrites {
     Group g{metal};
     for (const auto &[base, geometry, indexed, source, destination] : bindings) {
       TORCH_CHECK(base.is_mps() == metal, "view writes require one local device");
-      const size_t offset = base.storage_offset() * base.element_size();
-      const size_t storage = base.storage().nbytes();
       const void *at = g.where(base);
       plans.handles.push_back(nullptr);
-      const mesh_write_layout layout{.instances=1,.invocations=1};
       const auto [width, rows, pitch] = geometry;
-      if (rows) {
-        TORCH_CHECK(indexed.empty() && width && pitch >= width && offset <= storage && width <= storage - offset &&
-                    rows - 1 <= (storage - offset - width) / pitch, "affine write lies outside its tensor storage");
-        checked(mesh_compile_rows(at, (void *)at, width, rows, pitch, source, destination,
-                                  communicator(comm), metal, 0, layout, &plans.handles.back()));
-      } else {
-        std::vector<ncclMeshSpan> spans;
-        spans.reserve(indexed.size());
-        for (const auto &row : indexed) {
-          TORCH_CHECK(offset <= storage && row[0] <= storage - offset && row[1] <= storage - offset - row[0],
-                      "indexed write lies outside its tensor storage");
-          spans.push_back({row[0], row[1]});
-        }
-        checked(mesh_compile_spans(at, (void *)at, spans.data(), spans.size(), source, destination,
-                                   communicator(comm), metal, 0, layout, &plans.handles.back()));
-      }
+      const uint64_t view[3] = {(uint64_t)width, (uint64_t)rows, (uint64_t)pitch};
+      std::vector<ncclMeshSpan> spans;
+      for (const auto &row : indexed) spans.push_back({row[0], row[1]});
+      // rows or spans as the layout gives them, bounded by the binding's lease (mesh_compile_view: write_prepare)
+      checked(mesh_compile_view(at, (void *)at, view, spans.data(), spans.size(), source, destination, communicator(comm),
+                                metal, 0, mesh_write_layout{.instances=1,.invocations=1}, &plans.handles.back()));
     }
   }
   // Each encoded execution is the plan's next invocation, cycling the plan's instances: NFE k+1 writes other pages
