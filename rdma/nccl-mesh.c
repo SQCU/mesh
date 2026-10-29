@@ -454,7 +454,6 @@ static void comm_free(struct ncclComm *comm) {
   free(comm);
 }
 
-/* a program's own copy */
 static int program_copy(struct mesh_program *made, const struct mesh_program *from) {
   const uint32_t moves = from->first[from->nodes];
   uint32_t *segment = malloc((from->parts + 1) * sizeof *segment), *first = malloc((from->nodes + 1) * sizeof *first);
@@ -938,8 +937,6 @@ static void comm_let_go(struct ncclComm *comm) {
   comm->held = 0;
   leases_reap(comm->attach);
 }
-/* a communicator's holds let go (comm_let_go), its tables and slots returned (comm_storage_free), and its hold of its
-   attach let go */
 static void comm_leave(struct ncclComm *comm) {
   pthread_mutex_lock(&attach_lock);
   if (comm->attach) comm_let_go(comm);
@@ -1725,8 +1722,6 @@ ncclResult_t ncclMemFree(void *ptr) {
   return found ? ncclSuccess : fail(ncclInvalidArgument, "ncclMemFree of %p: no live lease of this process", ptr);
 }
 
-/* the lease holding `ptr` (any byte of it): the Metal buffer over the whole lease (made at its first use, kept until
-   ncclMemFree) and ptr's offset in it; 0, ENOENT where no lease of this process holds ptr, ENOMEM */
 /* the lease holding ptr and its attach (*held, where held is not NULL), under attach_lock (NULL: none) */
 static struct lease *lease_at(const void *ptr, struct attach **held) {
   for (struct attach *a = attaches; a; a = a->next)
@@ -1740,6 +1735,8 @@ static struct lease *lease_at(const void *ptr, struct attach **held) {
   return NULL;
 }
 
+/* the lease holding `ptr` (any byte of it): the Metal buffer over the whole lease (made at its first use, kept until
+   ncclMemFree) and ptr's offset in it; 0, ENOENT where no lease of this process holds ptr, ENOMEM */
 static int lease_buffer(const void *ptr, void **buffer, size_t *offset) {
   pthread_mutex_lock(&attach_lock);
   struct attach *a = NULL;
@@ -2171,7 +2168,6 @@ static struct where view_at(const struct call *c, int send, size_t offset) {
   }
   return views[c->comm->rank]; /* empty local contribution */
 }
-/* the entries before rank q's segment of a count a rank (an all-to-all's sendcounts or recvcounts) */
 /* the name of a call's kind, its failures' */
 static const char *call_name(const struct call *c) {
   static const char *const names[] = {"ncclAllReduce", "ncclBroadcast", "ncclReduce", "ncclReduceScatter", "ncclAllGather"};
@@ -2635,7 +2631,6 @@ static void group_of(size_t n, uint32_t N, const struct mesh_step **steps, uint3
   *group = (struct mesh_group){N, (uint32_t)n, calls, page};
 }
 
-/* whether two steps' pieces meet in one buffer */
 static int meet(const struct mesh_step *x, const struct mesh_step *y) {
   return x->buffer == y->buffer && x->first < y->first + y->piece.elements && y->first < x->first + x->piece.elements;
 }
@@ -3444,7 +3439,6 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
   return ncclSuccess;
 }
 
-/* the group's entries counted on each channel */
 static void commit_group(struct ncclComm *comm, const struct schedule *plans) {
   for (uint32_t h = 0; h < comm->count; h++) {
     struct channel *ch = comm->channels + h;
@@ -3980,7 +3974,6 @@ static void inflight_free(struct inflight *g) {
   issue_let(g->comm, g->issue);
 }
 
-/* whether a group of comm is in flight */
 static int comm_issued(const struct ncclComm *comm) {
   for (const struct inflight *g = inflight; g; g = g->next_group)
     if (g->comm == comm) return 1;
@@ -4893,7 +4886,6 @@ static void *part_run(void *argument) {
 static _Thread_local struct part *parts_kept;
 static _Thread_local struct call *sorted;
 static _Thread_local size_t parts_room, sorted_room;
-/* whether any of a part's calls crosses a link */
 static int part_crosses(const struct part *p) {
   int any = 0;
   for (size_t i = 0; i < p->n; i++) any |= crosses(p->list + i);
