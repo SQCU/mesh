@@ -1128,13 +1128,70 @@ struct PreparedWrites {
   ~PreparedWrites() { for (auto plan : handles) ncclMeshWritePlanDestroy(plan); }
 };
 
+// design/replay-templates-2026-10-29.md: WRITE plans as a crossing's declaration: the communicator (a place), the polls,
+// repeats and stride of a fused crossing, the invocation a view's crossing encodes, then each plan's declaration
+// (ncclMeshWritePlanDeclaration) after its length, 16-aligned, its places moved by where it lies. False where a plan
+// has no declaration, and its crossing then has none.
+struct DeclaredWrites { ncclComm_t comm; uint64_t polls, repeats, stride, invocation, plans; };
+static bool declare_writes(const std::vector<ncclMeshWritePlan_t> &handles, ncclComm_t comm, uint64_t polls, uint64_t repeats,
+                           uint64_t stride, uint64_t invocation, std::vector<uint8_t> &bytes, std::vector<MetalPlace> &places) {
+  const DeclaredWrites head{comm, polls, repeats, stride, invocation, handles.size()};
+  places.push_back({offsetof(DeclaredWrites, comm), MetalRelocationCommunicator});
+  bytes.insert(bytes.end(), (const uint8_t *)&head, (const uint8_t *)(&head + 1));
+  for (auto plan : handles) {
+    size_t length = 0, count = 0;
+    if (ncclMeshWritePlanDeclaration(plan, nullptr, &length, nullptr, nullptr, &count) || !length) return false;
+    const uint64_t declared = length;
+    bytes.insert(bytes.end(), (const uint8_t *)&declared, (const uint8_t *)(&declared + 1));
+    bytes.resize((bytes.size() + 15) / 16 * 16);
+    const size_t at = bytes.size();
+    bytes.resize(at + length);
+    std::vector<size_t> offsets(count); std::vector<uint32_t> kinds(count);
+    if (ncclMeshWritePlanDeclaration(plan, bytes.data() + at, &length, offsets.data(), kinds.data(), &count)) return false;
+    for (size_t k = 0; k < count; k++) places.push_back({at + offsets[k], (MetalRelocation)kinds[k]});
+  }
+  return true;
+}
+
+// The plans a WRITE crossing's declaration makes again, each on every rank as its prepare is
+struct DeclaredPlans {
+  DeclaredWrites head{};
+  std::vector<ncclMeshWritePlan_t> handles;
+  ~DeclaredPlans() { for (auto plan : handles) ncclMeshWritePlanDestroy(plan); }
+};
+static std::shared_ptr<DeclaredPlans> declared_plans(NSData *bytes) {
+  auto made = std::make_shared<DeclaredPlans>();
+  // the declaration's own copy, 16-aligned, as each plan's arrays are laid in it
+  std::vector<uint64_t> copy((bytes.length + 7) / 8);
+  memcpy(copy.data(), bytes.bytes, bytes.length);
+  const auto *base = (const uint8_t *)copy.data();
+  size_t at = 0;
+  auto take = [&](void *into, size_t n) {
+    TORCH_CHECK(at + n <= bytes.length, "template: a WRITE declaration ends early");
+    memcpy(into, base + at, n); at += n;
+  };
+  take(&made->head, sizeof made->head);
+  for (uint64_t k = 0; k < made->head.plans; k++) {
+    uint64_t length = 0; take(&length, sizeof length);
+    at = (at + 15) / 16 * 16;
+    TORCH_CHECK(at + length <= bytes.length, "template: a WRITE plan's declaration ends early");
+    ncclMeshWritePlan_t plan = nullptr;
+    checked(ncclMeshWritePlanDeclared(base + at, length, &plan));
+    made->handles.push_back(plan);
+    at += length;
+  }
+  return made;
+}
+
 static void prepare_fused_writes(MetalSchedule *schedule,PreparedWrites &plans) {
   MetalScheduleCommunicator(schedule,plans.comm);
   plans.records.publishes=plans.publish.size();plans.records.lands=plans.land.size();
   if(plans.handles.empty()){plans.records.publishes=plans.records.lands=0;return;}
   PreparedWrites *p=&plans;
-  // design/replay-templates-2026-10-29.md: a WRITE plan's crossing has no declaration yet, so its function makes no template
-  checked(MetalScheduleCross(schedule,nullptr,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
+  std::vector<uint8_t> declared;std::vector<MetalPlace> places;
+  const bool whole=declare_writes(plans.handles,plans.comm,plans.polls,plans.records.repeats,plans.records.stride,0,declared,places);
+  const MetalDeclaration declaration{"writes",declared.data(),declared.size(),places.data(),places.size()};
+  checked(MetalScheduleCross(schedule,whole?&declaration:nullptr,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
       id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
     ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
       .residencySet=(__bridge void *)residency,.polls=p->polls,.fused=&p->records};
@@ -1769,6 +1826,31 @@ static pybind11::list load(const std::string &directory,const std::vector<at::Te
       }
     };
     MetalTemplateCross made_cross=^MetalCrossing(NSString *kind,NSData *bytes,MetalSchedule *schedule,NSError **failed){
+      if([kind isEqualToString:@"writes"]||[kind isEqualToString:@"views"]) {
+        std::shared_ptr<DeclaredPlans> plans;
+        try { plans=declared_plans(bytes); } catch(const std::exception &e) {
+          if(failed)*failed=[NSError errorWithDomain:@"mesh.template" code:1 userInfo:@{NSLocalizedDescriptionKey:@(e.what())}];
+          return (MetalCrossing)nil;
+        }
+        MetalScheduleCommunicator(schedule,plans->head.comm);
+        // a fused crossing's records (its publications and landings), as PreparedWrites lays them for its communicator
+        auto fused=std::make_shared<PreparedWrites>();
+        const bool views=[kind isEqualToString:@"views"];
+        if(!views) {
+          fused->prepare((int64_t)(uintptr_t)plans->head.comm,(int64_t)plans->head.polls,(int64_t)plans->head.repeats,(int64_t)plans->head.stride);
+          fused->records.publishes=fused->publish.size();fused->records.lands=fused->land.size();
+        }
+        const size_t invocation=plans->head.invocation;
+        MetalCrossing crossing=^int(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,id<MTLResidencySet> residency,
+            NSUInteger,NSUInteger) {
+          ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
+            .residencySet=(__bridge void *)residency,.polls=views?0u:fused->polls,.fused=views?nullptr:&fused->records};
+          ncclResult_t result=ncclGroupStart();
+          for(auto plan:plans->handles)if(!result)result=ncclMeshWriteExecute(plan,views?invocation:0,&on);
+          const ncclResult_t ended=ncclGroupEnd();return (int)(result?result:ended);
+        };
+        return [[crossing copy] autorelease];
+      }
       if(![kind isEqualToString:@"collectives"]) {
         if(failed)*failed=[NSError errorWithDomain:@"mesh.template" code:1 userInfo:@{NSLocalizedDescriptionKey:
           [NSString stringWithFormat:@"no crossing of kind %@",kind]}];
@@ -1879,7 +1961,10 @@ struct ViewWrites {
     prepare();
     ViewWrites *self=this;
     const size_t invocation=invocations++;
-    checked(MetalScheduleCross(schedule,nullptr,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
+    std::vector<uint8_t> declared;std::vector<MetalPlace> places;
+    const bool whole=declare_writes(plans.handles,communicator(comm),0,0,0,invocation,declared,places);
+    const MetalDeclaration declaration{"views",declared.data(),declared.size(),places.data(),places.size()};
+    checked(MetalScheduleCross(schedule,whole?&declaration:nullptr,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
         id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
       ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
         .residencySet=(__bridge void *)residency};

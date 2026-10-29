@@ -2014,6 +2014,11 @@ struct ncclMeshWritePlan {
   int from, to, metal;
   struct compiled *compiled; /* its definitions, an occurrence each, where it runs alone (write_definitions) */
   struct ncclMeshWritePlan *next_compiled;
+  /* design/replay-templates-2026-10-29.md: the calls that made it (write_declared), and the landing records a plan made
+     from a declaration holds for itself */
+  struct write_declared *declared;
+  size_t declared_bytes;
+  void *own_records;
 };
 static size_t write_span_index(const struct ncclMeshWritePlan *p, size_t step, size_t invocation) {
   return step*p->occurrences+invocation%p->occurrences;
@@ -2074,7 +2079,8 @@ static void write_plan_drop(struct ncclMeshWritePlan *p) {
     owned_end(&p->owned, 1);
     pthread_mutex_unlock(&attach_lock);
     if (p->spans) ncclMemFree(p->spans);
-    write_packets_free(p); free(p->span_first); free(p->step_units); free(p->view); free(p->view_first); free(p->ready_offsets); free(p);
+    write_packets_free(p); free(p->span_first); free(p->step_units); free(p->view); free(p->view_first); free(p->ready_offsets);
+    free(p->declared); free(p->own_records); free(p);
   }
 }
 /* First cut strictly after a logical byte offset. */
@@ -6050,7 +6056,7 @@ static ncclResult_t write_pages_prepare(ncclMeshPageTable_t table,const ncclMesh
   free(spans);return result;
 }
 
-ncclResult_t ncclMeshWritePagesPrepare(ncclMeshPageTable_t table,const ncclMeshPageMask *masks,size_t count,
+static ncclResult_t write_pages_declared(ncclMeshPageTable_t table,const ncclMeshPageMask *masks,size_t count,
     int source,int destination,size_t max_packet,ncclMeshWriteLayout layout,ncclMeshWritePlan_t *out) {
   if(!table || layout.instance_pages>SIZE_MAX/table->page_bytes)
     return fail(ncclInvalidArgument,"repeated page table geometry");
@@ -6061,7 +6067,7 @@ ncclResult_t ncclMeshWritePagesPrepare(ncclMeshPageTable_t table,const ncclMeshP
 /* nccl.h ncclMeshWriteLayoutPrepare: the view in bytes (whole-byte elements scaled; sub-byte ones packed along their
    innermost axis, whose stride must be one element, every boundary on a byte), its rows or spans (mesh_view_layout)
    from its lowest byte's page index in the table, and the common WRITE compiler (write_prepare) */
-ncclResult_t ncclMeshWriteLayoutPrepare(const ncclMeshLayout *v, int source, int destination, size_t max_packet,
+static ncclResult_t write_layout_declared(const ncclMeshLayout *v, int source, int destination, size_t max_packet,
     ncclMeshWriteLayout layout, ncclMeshWritePlan_t *out) {
   if (!v || !v->storage || !v->element_bits || v->rank > 64 || (v->rank && (!v->shape || !v->strides)))
     return fail(ncclInvalidArgument, "a write's layout (nccl.h ncclMeshLayout)");
@@ -6156,6 +6162,123 @@ long mesh_view_layout(const uint64_t *shape, const int64_t *strides, size_t rank
   }
   return n;
 }
+/* design/replay-templates-2026-10-29.md: the calls a WRITE plan was made by, flat, for a template: its page table's
+   storage as ncclMeshPageTableCreate took it (where_of's buffer and offset on Metal, a host address otherwise; NULL: an
+   empty table), its prepare (`kind` 0: pages, 1: layout) with its arrays after the struct (shape, strides and runs, or
+   masks), and the readiness and landings set on it since. Landing records are an output of preparation, so a plan made
+   from a declaration holds records of its own. */
+struct write_declared {
+  ncclComm_t comm;
+  const void *table; size_t table_offset;
+  const void *ready; size_t ready_offset;
+  ncclMeshWriteLayout layout;
+  ncclMeshTileLayout ready_layout, land_layout;
+  uint64_t max_packet, ready_value, masks, element_bits, rank, offset, nruns, frames, instances;
+  int64_t frame_stride, instance_stride;
+  int32_t metal, kind, source, destination, runs, readied, landed;
+  uint32_t capacity;
+};
+
+static void write_declare(ncclMeshWritePlan_t plan, ncclMeshPageTable_t table, const ncclMeshPageMask *masks, size_t count,
+                          const ncclMeshLayout *v, int source, int destination, size_t max_packet, ncclMeshWriteLayout layout) {
+  const size_t arrays = v ? (size_t)v->rank * (sizeof *v->shape + sizeof *v->strides) + (v->runs ? 2 * v->nruns * sizeof *v->runs : 0)
+                          : count * sizeof *masks;
+  struct write_declared *d = calloc(1, sizeof *d + arrays);
+  if (!d) return;   /* no declaration: the plan's function makes no template */
+  *d = (struct write_declared){.comm = table->comm, .layout = layout, .max_packet = max_packet, .metal = table->metal,
+                               .kind = v != NULL, .source = source, .destination = destination};
+  if (table->pages) {
+    d->table = table->metal ? table->base.buffer : (const void *)table->base.offset;
+    d->table_offset = table->metal ? table->base.offset : 0;
+  }
+  char *after = (char *)(d + 1);
+  if (v) {
+    d->element_bits = v->element_bits; d->rank = v->rank; d->offset = v->offset; d->nruns = v->nruns; d->frames = v->frames;
+    d->frame_stride = v->frame_stride; d->instances = v->instances; d->instance_stride = v->instance_stride; d->runs = v->runs != NULL;
+    if (v->rank) {
+      memcpy(after, v->shape, v->rank * sizeof *v->shape); after += v->rank * sizeof *v->shape;
+      memcpy(after, v->strides, v->rank * sizeof *v->strides); after += v->rank * sizeof *v->strides;
+    }
+    if (v->runs && v->nruns) memcpy(after, v->runs, 2 * v->nruns * sizeof *v->runs);
+  } else {
+    d->masks = count;
+    if (count) memcpy(after, masks, count * sizeof *masks);
+  }
+  plan->declared = d; plan->declared_bytes = sizeof *d + arrays;
+}
+
+ncclResult_t ncclMeshWritePagesPrepare(ncclMeshPageTable_t table,const ncclMeshPageMask *masks,size_t count,
+    int source,int destination,size_t max_packet,ncclMeshWriteLayout layout,ncclMeshWritePlan_t *out) {
+  const ncclResult_t result = write_pages_declared(table, masks, count, source, destination, max_packet, layout, out);
+  if (!result) write_declare(*out, table, masks, count, NULL, source, destination, max_packet, layout);
+  return result;
+}
+
+ncclResult_t ncclMeshWriteLayoutPrepare(const ncclMeshLayout *v, int source, int destination, size_t max_packet,
+    ncclMeshWriteLayout layout, ncclMeshWritePlan_t *out) {
+  const ncclResult_t result = write_layout_declared(v, source, destination, max_packet, layout, out);
+  if (!result) write_declare(*out, v->storage, NULL, 0, v, source, destination, max_packet, layout);
+  return result;
+}
+
+/* nccl.h ncclMeshWritePlanDeclaration */
+ncclResult_t ncclMeshWritePlanDeclaration(ncclMeshWritePlan_t plan, void *bytes, size_t *length, size_t *places,
+                                          uint32_t *kinds, size_t *count) {
+  if (!plan || !length || !count) return fail(ncclInvalidArgument, "ncclMeshWritePlanDeclaration's arguments");
+  const struct write_declared *d = plan->declared;
+  size_t at[3]; uint32_t kind[3]; size_t many = 0;
+  if (d) {
+    at[many] = offsetof(struct write_declared, comm); kind[many++] = 2;
+    if (d->table) { at[many] = offsetof(struct write_declared, table); kind[many++] = d->metal ? 1 : 0; }
+    if (d->readied && d->ready) { at[many] = offsetof(struct write_declared, ready); kind[many++] = d->metal ? 1 : 0; }
+  }
+  const size_t have = d ? plan->declared_bytes : 0;
+  if ((bytes || places || kinds) && (*length < have || *count < many))
+    return fail(ncclInvalidArgument, "ncclMeshWritePlanDeclaration: %zu bytes and %zu places", have, many);
+  if (bytes && have) memcpy(bytes, d, have);
+  if (places) memcpy(places, at, many * sizeof *at);
+  if (kinds) memcpy(kinds, kind, many * sizeof *kind);
+  *length = have; *count = many;
+  return ncclSuccess;
+}
+
+/* nccl.h ncclMeshWritePlanDeclared */
+ncclResult_t ncclMeshWritePlanDeclared(const void *bytes, size_t length, ncclMeshWritePlan_t *out) {
+  struct write_declared d;
+  if (!bytes || !out || length < sizeof d) return fail(ncclInvalidArgument, "ncclMeshWritePlanDeclared's arguments");
+  memcpy(&d, bytes, sizeof d);
+  const char *after = (const char *)bytes + sizeof d;
+  const size_t arrays = d.kind ? d.rank * (sizeof(uint64_t) + sizeof(int64_t)) + (d.runs ? 2 * d.nruns * sizeof(uint64_t) : 0)
+                               : d.masks * sizeof(ncclMeshPageMask);
+  if (d.rank > 64 || arrays > length - sizeof d || (uintptr_t)after % sizeof(uint64_t))
+    return fail(ncclInvalidArgument, "ncclMeshWritePlanDeclared: a declaration of %zu bytes", length);
+  ncclMeshBuffer storage = {(void *)d.table, d.table_offset}, words = {(void *)d.ready, d.ready_offset};
+  ncclMeshPageTable_t table = NULL;
+  ncclResult_t result = ncclMeshPageTableCreate(!d.table ? NULL : d.metal ? (const void *)&storage : d.table, d.comm, d.metal, &table);
+  if (result) return result;
+  *out = NULL;
+  if (d.kind) {
+    const ncclMeshLayout v = {.storage = table, .element_bits = (uint32_t)d.element_bits, .rank = (uint32_t)d.rank,
+      .shape = (const uint64_t *)after, .strides = (const int64_t *)(after + d.rank * sizeof(uint64_t)), .offset = d.offset,
+      .runs = d.runs ? (const uint64_t *)(after + d.rank * (sizeof(uint64_t) + sizeof(int64_t))) : NULL, .nruns = d.nruns,
+      .frames = (uint32_t)d.frames, .frame_stride = d.frame_stride, .instances = d.instances, .instance_stride = d.instance_stride};
+    result = ncclMeshWriteLayoutPrepare(&v, d.source, d.destination, d.max_packet, d.layout, out);
+  } else result = ncclMeshWritePagesPrepare(table, (const ncclMeshPageMask *)after, d.masks, d.source, d.destination,
+                                            d.max_packet, d.layout, out);
+  if (!result && d.readied)
+    result = ncclMeshWriteSourceReady(*out, !d.ready ? NULL : d.metal ? (const void *)&words : d.ready, d.ready_value, d.ready_layout);
+  if (!result && d.landed) {
+    size_t extent = 0;
+    if (tile_extent(d.land_layout, write_tiles(*out), sizeof(uint64_t) + (size_t)d.capacity * sizeof(ncclMeshBinding), &extent) ||
+        !((*out)->own_records = calloc(1, extent ? extent : 1)))
+      result = fail(ncclSystemError, "a declared WRITE's landing records");
+    else result = ncclMeshWriteLandings(*out, (*out)->own_records, d.capacity, d.land_layout);
+  }
+  if (result && *out) { ncclMeshWritePlanDestroy(*out); *out = NULL; }
+  ncclMeshPageTableDestroy(table);
+  return result;
+}
+
 ncclResult_t ncclMeshWriteSourceReady(ncclMeshWritePlan_t plan, const void *words, uint64_t value, ncclMeshTileLayout layout) {
   if (!plan || !value || value < (plan->layout.tile_bytes && plan->layout.tile_bytes < plan->bytes ? plan->layout.tile_bytes : plan->bytes) || plan->ready_value)
     return fail(ncclInvalidArgument, "source readiness needs a fresh plan and a value covering one logical tile");
@@ -6185,6 +6308,11 @@ ncclResult_t ncclMeshWriteSourceReady(ncclMeshWritePlan_t plan, const void *word
     plan->ready_offsets=offsets;plan->ready_tiles=tiles;
   }
   plan->ready_value = value; plan->ready_layout = layout;
+  if (plan->declared) {
+    const struct where at = !words ? (struct where){NULL, 0} : plan->metal ? where_of(words) : (struct where){(void *)words, 0};
+    plan->declared->readied = 1; plan->declared->ready = at.buffer; plan->declared->ready_offset = at.offset;
+    plan->declared->ready_value = value; plan->declared->ready_layout = layout;
+  }
   return ncclSuccess;
 }
 ncclResult_t ncclMeshWriteExecute(ncclMeshWritePlan_t plan, size_t invocation, cudaStream_t stream) {
@@ -6205,6 +6333,7 @@ ncclResult_t ncclMeshWriteLandings(ncclMeshWritePlan_t plan, void *records, uint
     *(uint64_t *)((char *)records+tile_offset(layout,t,i))=0;
   }
   plan->land_records=records;plan->land_capacity=capacity;plan->land_layout=layout;
+  if(plan->declared){plan->declared->landed=1;plan->declared->capacity=capacity;plan->declared->land_layout=layout;}
   return ncclSuccess;
 }
 ncclResult_t ncclMeshWritePlanDestroy(ncclMeshWritePlan_t plan) {

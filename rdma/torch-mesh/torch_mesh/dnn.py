@@ -59,11 +59,12 @@ kernel void fold(device const float *own [[buffer(0)]], {inputs}device float *ou
     }}
 }}
 '''
-        self.fold = _stream.pipeline(source, 'fold')
+        self.source = source   # compiled where the program is recorded (prepare); a template brings its pipeline
         self.parts = None
         self.tiles = [(first, min(args.tile_rows, B - first)) for first in range(0, B, args.tile_rows)]
 
-    def prepare(self, parts):
+    def storage(self, parts):
+        """This rank's shares of the weights and its hidden rows, laid for `parts` (the configuration's)."""
         rank, B, H = self.group.rank(), self.args.rows, self.args.width
         share = parts['compute']
         if share != self.parts:
@@ -75,6 +76,30 @@ kernel void fold(device const float *own [[buffer(0)]], {inputs}device float *ou
                 self.local.append((ag, bg))
             self.hidden = torch_mesh.empty(B, width)
             self.parts = list(share)
+
+    def bound(self):
+        """design/replay-templates-2026-10-29.md: what a template of the program binds: its input and output, its weight
+        shares and its partial, landing and hidden rows. Its readiness and arrival words are kept by value."""
+        return [self.input, self.x, *(w for pair in self.local for w in pair), *self.partial,
+                *(t for row in self.landing for t in row), self.hidden]
+
+    def load(self, parts, directory):
+        """The program made from its template in `directory`, on this rank's storage, with no recording."""
+        self.storage(parts)
+        schedule, = _stream.load(directory, self.bound(), communicators=[self.group.handle])
+        schedule.finish()
+        self.prepared(schedule)
+
+    def prepared(self, schedule):
+        self.schedule = schedule
+        self.completion = schedule.completion()
+        self.run = schedule.enqueue
+
+    def prepare(self, parts):
+        rank, B, H = self.group.rank(), self.args.rows, self.args.width
+        self.storage(parts)
+        if not hasattr(self, 'fold'):
+            self.fold = _stream.pipeline(self.source, 'fold')
         schedule = _stream.Schedule()
         for first, rows in self.tiles:
             x = self.input.narrow(0, first, rows)
@@ -104,9 +129,7 @@ kernel void fold(device const float *own [[buffer(0)]], {inputs}device float *ou
                                  ((1 << output) - 1) | (1 << (32 + output)))
                 x = result
         schedule.finish()
-        self.schedule = schedule
-        self.completion = schedule.completion()
-        self.run = schedule.enqueue
+        self.prepared(schedule)
 
     def declare(self):
         from .backend import Call, WRITE

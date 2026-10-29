@@ -1094,6 +1094,14 @@ ncclResult_t ncclMeshWriteLandings(ncclMeshWritePlan_t plan, void* records, uint
    a generation; WRITEs grouped together their group's declared or first-compiled definition. */
 ncclResult_t ncclMeshWriteExecute(ncclMeshWritePlan_t plan, size_t invocation, cudaStream_t stream);
 ncclResult_t ncclMeshWritePlanDestroy(ncclMeshWritePlan_t plan);
+/* design/replay-templates-2026-10-29.md: the calls `plan` was made by (its page table's storage, its prepare, and the
+   readiness and landings set on it since), flat: `length` bytes, and the `count` places in them that name memory or the
+   communicator, each its offset and its kind (0 a host address, 1 an ncclMeshBuffer, 2 a communicator). With bytes,
+   places and kinds NULL, only their sizes (0: none); else each holds at least as many. */
+ncclResult_t ncclMeshWritePlanDeclaration(ncclMeshWritePlan_t plan, void* bytes, size_t* length, size_t* places,
+    uint32_t* kinds, size_t* count);
+/* The WRITE plan such bytes declare, made on every rank as its prepare is (its landing records its own). */
+ncclResult_t ncclMeshWritePlanDeclared(const void* bytes, size_t length, ncclMeshWritePlan_t* out);
 /* A call a program declares ahead (ncclMeshCommPlan): `what` (ncclMeshCallAllReduce, ncclMeshCallBroadcast,
    ncclMeshCallReduce, ncclMeshCallReduceScatter, ncclMeshCallAllGather, ncclMeshCallAlltoAllV or ncclMeshCallWrite:
    the first five the planner's mesh-plan.h MESH_*), its `peer` (a

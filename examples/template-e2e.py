@@ -1,13 +1,15 @@
-"""design/replay-templates-2026-10-29.md: the end-to-end test of templates, on a real program (the bandwidth workload).
+"""design/replay-templates-2026-10-29.md: the end-to-end test of templates, on a real program: the configuration's
+`program` (examples/<program>.py), bandwidth by default (collectives alone), or fabric-dnn (its fold kernel compiled
+from source and its products' pipelines at every preparation, and its WRITE plans).
 
   python examples/template-e2e.py CONFIGURATION|-     (each rank, as any example; RANK, WORLD_SIZE, MASTER_ADDR/PORT)
 
 Each rank runs the program twice, each time a new process with its own communicator. The first prepares the program as
-it always does (lowering, planning, recording), measures it and saves it as one template. The second makes the program
-from that template on newly allocated operands, with no lowering or planning, and measures it. Each run's rows are the
-program's own (us, GB/s per collective and size, implementation template-save or template-load, its preparation
-seconds), in the program's order, the saving run's then the loading run's; each run checks its outputs against what
-each collective defines, and a run whose outputs differ fails. The template lives in a temporary directory, removed
+it always does (lowering, planning, recording, compiling), measures it and saves it as one template. The second makes
+the program from that template on newly allocated operands, with no lowering, recording or compiling, and measures it.
+Each run's rows are the program's own (us, GB/s, with its phase and preparation seconds), the saving run's then the
+loading run's. Each run checks its outputs: bandwidth's against what each collective defines, fabric-dnn's loaded output
+against the recorded one, bit for bit. A run whose outputs differ fails. The template lives in a temporary directory, removed
 after both runs."""
 import json
 import os
@@ -16,8 +18,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-BANDWIDTH = Path(__file__).with_name('bandwidth.py')
-
 
 def main():
     configuration = json.load(sys.stdin) if sys.argv[1] == '-' else json.loads(Path(sys.argv[1]).read_text())
@@ -25,7 +25,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix='template-') as directory:
         for k, phase in enumerate(('save', 'load')):
             run = {**configuration, 'template': {'directory': directory, 'phase': phase}}
-            subprocess.run([sys.executable, str(BANDWIDTH), '-'], input=json.dumps(run).encode(),
+            program = Path(__file__).with_name(configuration.get('program', 'bandwidth') + '.py')
+            subprocess.run([sys.executable, str(program), '-'], input=json.dumps(run).encode(),
                            env={**os.environ, 'MASTER_PORT': str(port + k)}, check=True)
 
 

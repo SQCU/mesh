@@ -133,7 +133,13 @@ frontend's resolver makes the operation or crossing from the bytes with the nati
     the buffers they do not bind are kept by value. Declaring a plan again replaces the one in force, so a template
     with a plan is instantiated where that plan is not in use (a new process, or after the function it was made from
     is released).
-  - WRITE plans (`ncclMeshWritePlan_t`) have no declaration yet, so a function with one makes no template.
+  - A WRITE plan keeps the calls that made it (`write_declared`): its page table's storage, its prepare from masks or a
+    layout with its arrays, and the readiness and landings set on it since. `ncclMeshWritePlanDeclared` makes the
+    calls again.
+    - Landing records are an output of preparation: the frontend reads them once into the fold kernel's words, which
+      the template records as data. So a plan made from a declaration holds records of its own.
+    - torch_mesh declares its fused crossings ("writes": polls, repeats, stride) and its view crossings ("views": the
+      invocation) as their plans' declarations, and makes them again with fresh fused records.
 - **Local checks** (M5 Max), since replaced by examples/template-e2e.py:
   - A CPU product rebuilt in a second process was exact on new data.
   - A 1-rank all-reduce crossing was loaded with the second process's communicator, and that process planned
@@ -190,6 +196,16 @@ interface.
   whose outputs differ fails.
 - **In the hourly.** The case `bandwidth-template` reports the saving run's tuples and then the loading run's, in one
   order.
+- **A program that compiles kernels.** `fabric-dnn-template` runs the fabric-dnn workload the same way, on the entire
+  collective, as every node run is. Its fold kernel compiles from source, and its products' pipelines, at every
+  preparation, so the saving run compiles and the loading run does not. The loading run's preparation is the
+  difference.
+  - Its input and weights come from a fixed seed, so the loading run's output must equal the recording run's bit for
+    bit. Each rank saved its output beside its template.
+  - The loading run binds the recording run's assignment (its parts and operands, written beside the template), so
+    both bind the same shapes.
+  - Its partial, landing and hidden rows are bound, not kept, so the template stays small.
+  - Its crossings are WRITE plans, so it is also the first end-to-end run of WRITE-plan capture.
 - **One rank on the M5 Max (2026-10-29).**
   - 45 functions in each run, every output as defined.
   - Preparation 0.116–0.119 s recorded and 0.107–0.120 s loaded. This program compiles no kernels, and its
@@ -206,7 +222,7 @@ interface.
 | R2 | The template directory: plist, libraries, per-architecture pipeline archive (landed) | `MetalTemplateWrite`, `MetalTemplateRead` |
 | R3 | Instantiation of GPU-only functions: data, compute, append (landed) | `MetalScheduleInstantiate`; torch_mesh `Schedule.save`, `Schedule.load` |
 | R4 | Host operations declared: (kind, bytes, places); the engine rebuilds them (landed: CPU programs, Core ML predictions) | `MetalDeclaration`, `MetalScheduleHost`; engines `rebuild` |
-| R5 | Crossings declared the same way, communicators a place; the communicator's plan captured where it is made and declared again at instantiation (landed: NCCL-call groups). WRITE plans remain | `MetalScheduleCross`; `ncclMeshCommPlanDeclaration`, `ncclMeshCommPlanDeclared` |
+| R5 | Crossings declared, communicators a place; the communicator's plan and each WRITE plan captured where they are made and made again at instantiation (landed) | `MetalScheduleCross`; `ncclMeshCommPlanDeclaration`/`Declared`, `ncclMeshWritePlanDeclaration`/`Declared` |
 | R6 | Another architecture: per-architecture archives kept on first load; compile facts and pipeline thread limits checked as values (landed) | `MetalTemplateArchive`; `MetalScheduleInstantiate` |
 | R7 | Bound operands are views, their byte offset the parameter (landed). Shape parameters need symbolic sizes from lowering | `MetalScheduleTemplate`/`Instantiate` offsets |
 
