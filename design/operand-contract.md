@@ -48,63 +48,65 @@ prior compiler. A short tail of a petabyte-scale logical declaration resolved
 from one backing run without page expansion. Shared-library and native builds
 completed; no numerical execution ran.
 
-Ordinary collective declarations now carry the same backing runs. A fixed
-report holds a contiguous binding in full; scattered bindings send their extra
-runs in one further preparation exchange for the whole function. All-to-all
-retains each end's logical origin and joins both ends' cuts. Its former fixed
-64-entry cut array is removed. The shared step splitter allocates the actual
-split count, rather than space for every cut at every step. An absent required
-binding fails preparation.
+Ordinary collectives carry `mesh_packet_view` from the physical route compiler
+through placement. Each view names a byte interval in a common domain.
+Reductions, broadcasts and gathers use their shared operand coordinates;
+counted transactions retain independent domains with distinct endpoint origins.
+Relays retain those coordinates while using their own local storage.
 
-Both collective payload descriptors and WRITE readiness words resolve through
-the bridge rows during preparation. Submission reads the recorded readiness
-offset; it no longer derives it from a process address. Page-table construction
-and collective binding snapshots share the same backing reader.
-Readiness retains its own slot period. Preparation resolved three readiness
-slots over scattered pages alongside two payload slots; reusing a payload
-binding does not reuse the wrong readiness word.
+`ncclMeshBufferSlots` declares each input and output's view, stride and slot
+count. The native recorder now passes these operands into its collective
+statement; it no longer discards them. Native, torch and host declarations use
+the header's type. A linear native invocation sequence supplies its declared
+invocation count when it resolves its slots. No count is guessed from an address.
 
-Preparation on 2026-10-29 carried three-rank all-to-all transactions of 32–93 GiB
-through the real physical route compiler without allocating their payloads.
-The complete logical ranges and both ends' routed byte totals agreed. Scattered
-scalar bindings retained their ranges through all-reduce, broadcast, reduce,
-unequal gather and reduce-scatter. Bridge-row snapshots and subrange splitting
-preserved selected locations. This was metadata preparation, not a cluster run.
+Preparation places both internal storage generations and visits each declared
+binding period. Endpoints, reduction landings and relays contribute their actual
+backing breaks and registration boundaries. A preparation exchange joins these
+cuts in common byte coordinates. Fragment endpoints join them too. The regular
+page grid stays implicit until descriptor emission. There is no packet-size
+exchange during numerical execution.
 
-Numerical landings now compile their readiness from DMA packet lengths through
-`mesh-landing.h`. Scalar elements and structured rows use one relation: each
-needs the packet containing its final byte. A row may span several packets.
-Equal page runs, including their short final packet, stay one arithmetic record.
-Irregular lengths become further records at preparation; kernels neither walk
-packet lists nor load a per-element readiness table.
+The earlier whole-element backing splitter and its separate binding exchange
+are removed. A backing break inside a row cuts its DMA packets while the
+numerical operation keeps the whole row. The same byte compiler handles counted
+transactions and ordinary collectives. Compiled packet counts drive channel
+prefixes and relay dependencies. Relays no longer require a forwarded range to
+start at a nominal page boundary.
 
-The ordinary two-operand reduction encoder consumes those prepared records.
-Structured merges no longer await the whole message before using its early rows.
-The track scheduler's square-root-of-packet-count threshold is removed; its
-initial dependency comes from the first complete element. Each kernel group
-then awaits the bytes that group uses. This is a local data dependency on
-one-sided arrivals, with no receipt or peer handshake.
+A declaration without bindings can describe geometry for demand queries. It
+cannot record transfers. A changed binding must name one of the declared slots
+before its descriptors are built. These are preparation contracts; GPU execution
+consumes the recorded page descriptors and numerical arguments.
 
-Preparation on 2026-10-29 checked the arithmetic against final-byte packet
-positions, including rows wider than a page, irregular packet lengths and tails.
-Ordinary page trains retained one record. Shared libraries, shaders, the torch
-extension and native callers built. No numerical function was submitted, so
-these changes carry no new throughput or latency result. The separate first
-combine into an unwritten result still uses its prior whole-message dependency;
-its original-input binding must be carried into the shared landing kernel too.
+WRITE readiness words also resolve through bridge rows during preparation.
+Readiness keeps its own slot period, independently of the payload slots.
+Submission reads the recorded offset rather than deriving it from a host address.
 
-Scattered allocation is still unfinished. The allocator requires consecutive
-row slots and arena pages. Its host/Metal views, region-membership checks and
-descriptor-table bindings still rely on linear region addresses. Internal
-relay and reduction storage must join the backing calculation too. A backing
-break inside a structured numerical element still needs common byte-level
-packet cuts at both wire endpoints. Its numerical consumer now accepts such
-cuts without splitting the element. The current collective
-step splitter projects backing cuts onto whole elements; the original byte
-relation remains in its backing operand. These remaining bindings must be
-lowered before the allocator can supply scattered pages to all consumers.
-The large-allocation refusal in metal-microbench's `docs/facts.md` is therefore
-not fully resolved by these changes.
+Numerical landings use `mesh-landing.h`. Each scalar or structured row needs the
+packet containing its final byte. Equal page runs and their short final packet
+remain one arithmetic record; kernels do not walk packet lists. Structured
+merges can use their early rows before the whole message arrives. The former
+square-root packet threshold is removed. The separate first combine into an
+unwritten result still has its old whole-message dependency; its original-input
+binding must join the shared landing kernel.
+
+Preparation on 2026-10-29 exercised the real route compiler and packet-cut
+preparation with three-rank relays, uneven all-to-all origins, scattered backing,
+different slot periods and both storage generations. Every physical pair had
+the same byte packets. Each packet stayed within its backing run and registration
+extent; numerical readiness matched the final byte of each complete row.
+The configuration exchange used in-process peers and synthetic backing metadata;
+no payload was allocated or sent. Shared libraries, header-derived Python
+bindings, the torch extension and native callers built. These checks do not
+provide a new throughput or latency measurement.
+
+Scattered allocation remains unfinished. The allocator still requires
+consecutive row slots and arena pages. Host/Metal views, region-membership
+checks and descriptor-table bindings still rely on linear region addresses.
+Those local bindings must be lowered before the allocator can supply scattered
+pages to every consumer. The large-allocation refusal recorded in
+metal-microbench's `docs/facts.md` is therefore not yet fully resolved.
 
 ## Known access structure, changing contents
 

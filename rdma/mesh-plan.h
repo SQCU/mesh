@@ -209,6 +209,11 @@ int mesh_write_compile(const struct mesh_fabric *,uint32_t rank,uint32_t source,
    demand[s*nodes+d] counts useful logical bytes before physical relay expansion.
    The result owns its storage; release it with mesh_routed_free. Returns errno.
    This is the common lowering for standard, counted, and declared point calls. */
+/* Packet coordinates are explicit compiler operands: a collective's one
+   logical operand, or independent transactions with distinct endpoint origins.
+   Every physical view uses the same byte-domain representation. */
+enum mesh_packet_coordinates { MESH_PACKET_OPERAND, MESH_PACKET_TRANSACTIONS };
+struct mesh_packet_view { uint64_t first; uint32_t domain, padding; };
 struct mesh_routed_rank {
   uint32_t count,buffers,initialized,padding;
   struct mesh_transfer *transfer;
@@ -216,16 +221,17 @@ struct mesh_routed_rank {
   uint32_t *retired_first,*retired; /* prior local SENDs whose source read precedes this receive (a COPY's arrival, a combine's) */
   uint64_t *extent;
   unsigned char *witnessed; /* a SEND whose arrival precedes a later landing at its rank */
+  struct mesh_packet_view *views;
 };
 struct mesh_routed_program {
-  uint32_t nodes,padding;
+  uint32_t nodes,domains;
   struct mesh_routed_rank *rank;
   uint64_t *demand;
   uint64_t *route_units; /* largest logical transaction's independently allocatable units, per pair */
 };
 int mesh_routed_compile(const struct mesh_fabric *,const struct mesh_paths *,
                          const uint32_t *first,const struct mesh_step *,
-                         const uint32_t *initialized,uint64_t page,
+                         const uint32_t *initialized,uint64_t page,enum mesh_packet_coordinates,
                          struct mesh_routed_program *);
 void mesh_routed_free(struct mesh_routed_program *);
 

@@ -124,43 +124,27 @@ static inline int mesh_page_run_cuts(const struct mesh_page_runs *runs,uint64_t 
   return 0;
 }
 
-/* Project the backing relation onto whole numerical elements. The original
-   runs retain intra-element byte breaks for independent DMA packet lowering. */
-static inline int mesh_page_element_cuts(const struct mesh_page_runs *runs,uint64_t first,uint64_t elements,
-    uint64_t element_bytes,struct mesh_span_residues *cuts) {
-  if(!runs->count||!elements)return 0;
-  const size_t begin=cuts->count;
-  uint64_t previous=UINT64_MAX;
-  int error=mesh_page_run_cuts(runs,first*element_bytes,elements*element_bytes,0,0,MESH_DMA_EXTENT,&previous,cuts);
-  size_t kept=begin;
-  for(size_t k=begin;k<cuts->count;k++)
-    if(!(cuts->at[k]%element_bytes))cuts->at[kept++]=first+cuts->at[k]/element_bytes;
-  cuts->count=kept;
-  return error;
-}
-
 static inline size_t mesh_span_lower_bound(const uint64_t *cuts,size_t count,uint64_t value) {
   size_t first=0;
   while(first<count){size_t middle=first+(count-first)/2;if(cuts[middle]<value)first=middle+1;else count=middle;}
   return first;
 }
-/* A numerical step split at its interior cuts, translated by origin. A null
-   output counts the exact storage needed; neither operation truncates a list. */
-static inline size_t mesh_step_cut(struct mesh_step step,const struct mesh_span_residues *cuts,uint64_t origin,struct mesh_step *out) {
-  const uint64_t first=step.first-origin,end=first+step.piece.elements;
-  const size_t begin=mesh_span_lower_bound(cuts->at,cuts->count,first+!!step.piece.elements),
-               stop=mesh_span_lower_bound(cuts->at,cuts->count,end);
-  if(out) {
-    uint64_t at=step.first;
-    for(size_t k=begin;k<stop;k++) {
-      out[k-begin]=step;out[k-begin].first=at;out[k-begin].piece.elements=origin+cuts->at[k]-at;
-      at=origin+cuts->at[k];
-    }
-    out[stop-begin]=step;out[stop-begin].first=at;out[stop-begin].piece.elements=step.first+step.piece.elements-at;
-  }
-  return stop-begin+1;
-}
 
+/* Common byte packets in transaction coordinates. Page size bounds each DMA
+   interval; backing breaks and fragment boundaries cut that same sequence.
+   Numerical row widths do not participate in this calculation. */
+struct mesh_packet_cursor { uint64_t at, end; size_t cut; };
+static inline struct mesh_packet_cursor mesh_packet_begin(const struct mesh_span_residues *cuts,uint64_t first,uint64_t bytes) {
+  return (struct mesh_packet_cursor){first,first+bytes,mesh_span_lower_bound(cuts->at,cuts->count,first+!!bytes)};
+}
+static inline uint64_t mesh_packet_next(const struct mesh_span_residues *cuts,uint64_t page,struct mesh_packet_cursor *p) {
+  if(p->at==p->end)return 0;
+  uint64_t bytes=page-p->at%page;
+  if(bytes>p->end-p->at)bytes=p->end-p->at;
+  if(p->cut<cuts->count&&cuts->at[p->cut]-p->at<=bytes)bytes=cuts->at[p->cut++]-p->at;
+  p->at+=bytes;
+  return bytes;
+}
 /* Keep only distinct registration-boundary residues that can occur inside
    this payload. Enumerate the smaller of the repeat orbit and the candidate
    residue lattice; a billion repeats of a tiny payload need not be visited.

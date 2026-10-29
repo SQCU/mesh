@@ -2077,6 +2077,9 @@ struct steps {
   struct steps *source; /* immutable compiler tables retained by an issued binding */
   struct mesh_step *steps;
   uint32_t count;
+  struct mesh_packet_view *views;
+  struct mesh_span_residues *packets;
+  uint32_t domains;
   unsigned char *done;
   /* the buffers the steps name: 0 the operand, made in place; b >= 1 the rank's scratch b (`buffers` of them) */
   uint32_t buffers, initialized;
@@ -2117,9 +2120,8 @@ struct call {
   ncclMeshProduction *production;
   uint64_t *segments, *matrix;
   uint64_t *contributors, *recipients;
-  /* A declaration's page backing, [2r] send and [2r + 1] receive, in binding
-     coordinates with registration-relative offsets. Empty means no binding. */
-  struct mesh_page_runs *backing;
+  int declared_bindings;
+  ncclMeshBufferSlots bindings[2];
   /* Configuration owns masks. Issued calls retain only their local roles and
      reduction cardinality, so an in-flight call never borrows a plan's masks. */
   uint32_t roles, participants;
@@ -2254,12 +2256,6 @@ static size_t sent_bytes(const struct call *c) {
   if (c->what == MESH_BROADCAST) return c->count * z;
   return elements(c) * z;
 }
-static size_t received_bytes(const struct call *c) {
-  if (!call_receives(c)) return 0;
-  const size_t count = counted(c) ? mesh_segment_first(c->segments + c->comm->nranks, (uint32_t)c->comm->nranks) :
-    c->what == MESH_REDUCE_SCATTER ? c->count : elements(c);
-  return count * SIZE[c->type];
-}
 /* Snapshot a declared local binding in the shared page relation. Registered
    offsets, not its host pointer, determine its transport cuts. */
 static ncclResult_t binding_backing(struct ncclComm *comm, struct where binding, size_t bytes, struct mesh_page_runs *out) {
@@ -2309,6 +2305,8 @@ static void steps_free(struct steps *s) {
   free(s->consumption); free(s->complement);
   if (s->source) steps_free(s->source);
   else {
+    for (uint32_t k = 0; s->packets && k < s->domains; k++) free(s->packets[k].at);
+    free(s->packets); free(s->views);
     free(s->steps); free(s->cable); free(s->prior_first); free(s->prior);
     free(s->extent); free(s->demand); free(s->route_units); free(s->consume_order);
     free(s->retired_first); free(s->retired);
@@ -2325,7 +2323,8 @@ static struct steps *steps_copy(struct steps *from) {
     *s = (struct steps){.references = 1, .source = from, .count = from->count, .buffers = from->buffers,
       .initialized = from->initialized, .priors = from->priors, .partial = from->partial, .steps = from->steps, .cable = from->cable,
       .prior_first = from->prior_first, .prior = from->prior, .extent = from->extent,
-      .consume_order = from->consume_order, .retired_first = from->retired_first, .retired = from->retired};
+      .consume_order = from->consume_order, .retired_first = from->retired_first, .retired = from->retired,
+      .views = from->views, .packets = from->packets, .domains = from->domains};
     atomic_fetch_add_explicit(&from->references, 1, memory_order_relaxed);
   }
   if (!s || !(s->done = malloc(most)) ||
@@ -2426,23 +2425,25 @@ static ncclResult_t bind_routed_steps(struct call *c, const uint32_t *first, con
   struct mesh_paths *composed = NULL;
   int status = routed ? mesh_write_routes_compose(&comm->fabric, comm->writes, comm->write_overrides, &composed) : 0;
   if (!status) status = mesh_routed_compile(&comm->fabric, composed ? composed : comm->writes,
-                                           first, logical, initialized, comm->page, &physical);
+                                           first, logical, initialized, comm->page, counted(c) ? MESH_PACKET_TRANSACTIONS : MESH_PACKET_OPERAND, &physical);
   mesh_write_routes_free(composed, comm->fabric.nodes);
   ncclResult_t result = status ? fail(ncclInvalidUsage, "physical collective lowering for %s: %s", comm->name, strerror(status)) : ncclSuccess;
   if (!result) {
     struct mesh_routed_rank *rank = physical.rank + comm->rank;
     const size_t room = (size_t)rank->count + 1;
     struct steps *s = steps_make(room, (struct steps){.references = 1, .count = rank->count, .buffers = rank->buffers, .initialized = rank->initialized});
+    if (s) { s->domains = physical.domains; s->packets = calloc((size_t)s->domains + 1, sizeof *s->packets); }
     uint32_t *consume = rank->consume ? realloc(rank->consume, room * sizeof *consume) : NULL;
     if (consume) rank->consume = consume;
     uint32_t *retired_first = rank->retired_first ? realloc(rank->retired_first, room * sizeof *retired_first) : NULL;
     if (retired_first) rank->retired_first = retired_first;
     uint64_t *extent = realloc(rank->extent, ((size_t)rank->buffers + 1) * sizeof *extent);
     if (extent) rank->extent = extent;
-    if (!s || !extent || (rank->consume && !consume) || (rank->retired_first && !retired_first)) {
+    if (!s || !s->packets || !extent || (rank->consume && !consume) || (rank->retired_first && !retired_first)) {
       steps_free(s); result = fail(ncclSystemError, "out of memory");
     } else {
       s->extent = rank->extent; rank->extent = NULL;
+      s->views = rank->views; rank->views = NULL;
       s->consume_order = rank->consume; rank->consume = NULL;
       s->retired_first = rank->retired_first; rank->retired_first = NULL;
       s->retired = rank->retired; rank->retired = NULL;
@@ -2456,30 +2457,6 @@ static ncclResult_t bind_routed_steps(struct call *c, const uint32_t *first, con
   return result;
 }
 
-/* The operand's elements at which a declared binding's backing changes:
-   a binding's bytes run from its operand element `base` (an all-gather's send buffer and a reduce-scatter's receive
-   buffer hold their rank's segment alone, of `cut` elements a rank; other bindings the whole operand), and a cut
-   lies at a whole numerical element. No fixed-size list bounds these cuts. */
-static int extent_cuts(const struct call *c, struct mesh_operand operand, const uint64_t *cut, struct mesh_span_residues *out) {
-  const uint32_t N = (uint32_t)c->comm->nranks;
-  const uint64_t z = operand.element_bytes;
-  int error = 0;
-  uint64_t rank_first = 0;
-  for (uint32_t r = 0; !error && r < N; r++) {
-    for (int j = 0; !error && j < 2; j++) {
-      const struct mesh_page_runs *backing = c->backing + 2 * r + j;
-      const int segment = cut && ((!j && c->what == MESH_ALLGATHER) || (j && c->what == MESH_REDUCE_SCATTER));
-      const uint64_t first = segment ? rank_first : 0, length = segment ? cut[r] : operand.elements;
-      const size_t begin = out->count;
-      error = mesh_page_element_cuts(backing, 0, length < operand.elements - first ? length : operand.elements - first, z, out);
-      for (size_t k = begin; k < out->count; k++) out->at[k] += first;
-    }
-    if (cut) rank_first += cut[r];
-  }
-  mesh_span_residues_sort(out);
-  return error;
-}
-
 static ncclResult_t routed_steps(struct call *c, const struct mesh_program *program,
                                   struct mesh_operand operand, const uint64_t *cut) {
   const uint32_t N = (uint32_t)c->comm->nranks;
@@ -2490,18 +2467,8 @@ static ncclResult_t routed_steps(struct call *c, const struct mesh_program *prog
     initialized[r] = 1 + program->scratch;
     first[r + 1] = first[r] + mesh_program_steps_cut(program, r, operand, cut, c->comm->page, logical + first[r]);
   }
-  struct mesh_span_residues cuts = {0};
-  if (!result && c->backing && extent_cuts(c, operand, cut, &cuts)) result = fail(ncclSystemError, "allocating collective page cuts");
-  size_t room = 0;
-  for (uint32_t k = 0; !result && cuts.count && k < first[N]; k++) room += mesh_step_cut(logical[k], &cuts, 0, NULL);
-  struct mesh_step *split = room && room <= UINT32_MAX ? calloc(room, sizeof *split) : NULL;
-  if (!result && room && !split) result = fail(ncclSystemError, "allocating collective steps");
-  for (uint32_t r = 0, at = 0, k = 0; split && !result && r < N; r++) {
-    for (; k < first[r + 1]; k++) at += (uint32_t)mesh_step_cut(logical[k], &cuts, 0, split + at);
-    first[r + 1] = at;
-  }
-  if (!result) result = bind_routed_steps(c, first, split ? split : logical, initialized, 1);
-  free(first); free(initialized); free(logical); free(split); free(cuts.at);
+  if (!result) result = bind_routed_steps(c, first, logical, initialized, 1);
+  free(first); free(initialized); free(logical);
   return result;
 }
 
@@ -2518,50 +2485,8 @@ static ncclResult_t counted_steps(struct call *c) {
     first[r + 1] = first[r] + mesh_counted_steps(N, r, segments, (struct mesh_operand){(uint32_t)c->type + 1, (uint32_t)SIZE[c->type], 0},
                                                 logical + first[r]);
   }
-  /* Each transaction shares its two ends' physical cuts. The source and
-     destination keep their own logical origin in the all-to-all count graph. */
-  struct mesh_step *split = NULL;
-  uint32_t *at = NULL;
-  struct mesh_span_residues *cuts = !result && c->backing ? calloc((size_t)N * N, sizeof *cuts) : NULL;
-  if (!result && c->backing && !cuts) result = fail(ncclSystemError, "allocating transaction page cuts");
-  if (!result && cuts) memset(segments, 0, N * sizeof *segments); /* receive prefixes, advanced once per source */
-  for (uint32_t from = 0; cuts && !result && from < N; from++) {
-    uint64_t sent = 0;
-    for (uint32_t to = 0; !result && to < N; to++) {
-      const size_t flow = (size_t)from * N + to;
-      const uint64_t elements = c->matrix[flow], origins[2] = {sent, segments[to]};
-      const struct mesh_page_runs *ends[2] = {c->backing + 2 * from, c->backing + 2 * to + 1};
-      for (int end = 0; from != to && !result && end < 2; end++) {
-        const size_t begin = cuts[flow].count;
-        if (mesh_page_element_cuts(ends[end], origins[end], elements, SIZE[c->type], cuts + flow))
-          result = fail(ncclSystemError, "allocating transaction page cuts");
-        for (size_t k = begin; k < cuts[flow].count; k++) cuts[flow].at[k] -= origins[end];
-      }
-      mesh_span_residues_sort(cuts + flow);
-      sent += elements; segments[to] += elements;
-    }
-  }
-  size_t room = 0;
-  for (uint32_t r = 0, k = 0; cuts && !result && r < N; r++)
-    for (; k < first[r + 1]; k++) {
-      const struct mesh_step s = logical[k];
-      const uint32_t from = s.op == MESH_STEP_SEND ? r : s.peer, to = s.op == MESH_STEP_SEND ? s.peer : r;
-      room += mesh_step_cut(s, cuts + (size_t)from * N + to, s.first, NULL);
-    }
-  if (!result && room > first[N]) {
-    split = room <= UINT32_MAX ? calloc(room, sizeof *split) : NULL; at = calloc((size_t)N + 1, sizeof *at);
-    if (!split || !at) result = fail(ncclSystemError, "allocating transaction steps");
-  }
-  for (uint32_t r = 0, made = 0, k = 0; split && !result && r < N; at[++r] = made)
-    for (; k < first[r + 1]; k++) {
-      const struct mesh_step s = logical[k];
-      const uint32_t from = s.op == MESH_STEP_SEND ? r : s.peer, to = s.op == MESH_STEP_SEND ? s.peer : r;
-      made += (uint32_t)mesh_step_cut(s, cuts + (size_t)from * N + to, s.first, split + made);
-    }
-  if (!result) result = bind_routed_steps(c, split ? at : first, split ? split : logical, initialized, 0);
-  free(first); free(initialized); free(segments); free(logical); free(split); free(at);
-  for (size_t k = 0; cuts && k < (size_t)N * N; k++) free(cuts[k].at);
-  free(cuts);
+  if (!result) result = bind_routed_steps(c, first, logical, initialized, 0);
+  free(first); free(initialized); free(segments); free(logical);
   return result;
 }
 
@@ -2708,13 +2633,12 @@ static int meet(const struct mesh_step *x, const struct mesh_step *y) {
 
 /* the receive whose bytes SEND step k sends on unchanged, page by page as they land (design/data-model.md section 9: a
    relay is the identity at a rank), or -1: the last receive before it that meets its piece, a COPY into the same
-   buffer whose piece holds its own, from a page of it (step k not reading the send buffer in place) */
-static int32_t forwards(const struct steps *s, uint32_t k, uint64_t page) {
+   buffer whose piece holds its own (step k not reading the send buffer in place) */
+static int32_t forwards(const struct steps *s, uint32_t k) {
   if (s->prior_first[k] == s->prior_first[k + 1] || (s->read && named(s->read[k]))) return -1;
   const uint32_t r = s->prior[s->prior_first[k + 1] - 1];
   const struct mesh_step *a = s->steps + r, *b = s->steps + k;
-  return a->op == MESH_STEP_COPY && a->first <= b->first && b->first + b->piece.elements <= a->first + a->piece.elements &&
-         (b->first - a->first) * b->piece.element_bytes % page == 0 ? (int32_t)r : -1;
+  return a->op == MESH_STEP_COPY && a->first <= b->first && b->first + b->piece.elements <= a->first + a->piece.elements ? (int32_t)r : -1;
 }
 
 /* each channel's entries for the group, each list from its 0 (mesh_group_lay: schedule_laid lays them from the last
@@ -3024,6 +2948,21 @@ static ncclResult_t definition_of(struct ncclComm *comm, struct call *list, size
   *group = x;
   return result;
 }
+/* Prefixes depend on compiled packet counts, not on nominal page lengths. */
+static void schedule_units(struct schedule *q, uint32_t repeats) {
+  for (int send = 1; send >= 0; send--) {
+    struct message *items = send ? q->out : q->in;
+    const size_t count = send ? q->outs : q->ins;
+    mesh_pages end = {0};
+    for (size_t k = 0; k < count; k++) {
+      struct message *m = items + k;
+      end = pages_add(end, m->pages); m->end = end;
+      m->listed = m->entry; m->laid = m->end;
+      if (k + 1 == count / repeats) q->each[!send] = end;
+    }
+  }
+}
+
 /* issue u's entries laid from group x's compiled ones `repeats` times (repeat_of), `stride` bytes a repeat, each
    message's call the issued call at its place in `list` and its entry and end in u's own lists (`listed`, `laid`:
    schedule_laid binds them on the channels) */
@@ -3039,15 +2978,12 @@ static void issue_lay(struct ncclComm *comm, const struct compiled *x, struct is
     for (int send = 1; send >= 0; send--) {
       struct message *items = send ? q->out : q->in;
       const size_t count = send ? q->outs : q->ins;
-      mesh_pages end = {0};
       for (size_t k = 0; k < count; k++) {
         struct message *m = items + k;
         if (m->c->write_plan) m->pages = m->c->write_plan->step_units[write_span_index(m->c->write_plan,m->step,m->c->invocation)];
-        end = pages_add(end, m->pages); m->end = end;
-        m->listed = m->entry; m->laid = m->end;
-        if (k + 1 == count / repeats) q->each[!send] = end;
       }
     }
+    schedule_units(q, repeats);
     for (size_t k = 0; p->consume && k < q->ins; k++) q->consume[k] = k / p->ins * p->ins + p->consume[k % p->ins];
   }
 }
@@ -3227,6 +3163,26 @@ static ncclResult_t bind_slot(struct ncclComm *comm, struct compiled *x, uint32_
 }
 
 
+/* Bind local operand views before collecting physical cuts. This is also the
+   binding used to emit the DMA descriptors; no second address calculation. */
+static void place_data(const struct ncclComm *comm, struct issue *u, struct where area) {
+  size_t used = 0;
+  for (uint32_t h = 0; h < comm->count; h++) for (int send = 1; send >= 0; send--)
+    for (size_t k = 0; k < (send ? u->plans[h].outs : u->plans[h].ins); k++) {
+      struct message *x = (send ? u->plans[h].out : u->plans[h].in) + k;
+      const struct steps *st = x->c->bound;
+      const struct mesh_step *step = st->steps + x->step;
+      const struct ncclMeshWritePlan *write = x->c->write_plan;
+      const size_t instance = write ? x->c->invocation % write->layout.instances : 0;
+      const uint64_t displacement = write_displacement(write, x->offset) + (write ? instance * write->layout.instance_stride : 0);
+      const struct where origin = send && st->read && named(st->read[x->step]) ? st->read[x->step] : st->buffer[step->buffer];
+      if (!send && step->op == MESH_STEP_REDUCE) { x->data = shifted(area, used); used += page_up(x->bytes, comm->page); }
+      else x->data = shifted(origin, displacement);
+      if (counted(x->c) && step->buffer < 2) x->data = view_at(x->c, step->buffer == 0, x->offset);
+      else if (x->c->receive_views && step->buffer == 0) x->data = view_at(x->c, 0, x->offset);
+    }
+}
+
 /* Compile numerical readiness once with the placed DMA spans. Regular page
    trains remain one run, regardless of their page count. */
 static int landing_runs(const struct ncclComm *comm, struct issue *u) {
@@ -3255,18 +3211,18 @@ static int landing_runs(const struct ncclComm *comm, struct issue *u) {
 
 /* where each entry's pages lie (struct message `data`): a SEND's in the buffer its step reads (the send buffer, where
    it reads that in place), a COPY's in its step's buffer, a combine's in the group's landing area (`area`: bind_slot,
-   each entry from a page of it); each in a live lease, its span table, a span a page, in its issue's lease of them
+   each entry from a page of it); each in a live lease, its common byte-packet span table in its issue's lease of them
    (`tables`, made for its binding; the one it replaces let go, kept by the bridge's reads of the entries presented
    from it: the uses owned_end hands it), the leases held by the issue from here to its next placement or its end
    (owned_begin).  0, else the call fails as a value, naming the piece (ncclInvalidUsage: the piece's
    buffer is no lease, or a span crosses a registration extent; nothing is copied to move it), nothing presented */
-static ncclResult_t place_group(struct ncclComm *comm, struct issue *u, struct where area) {
+static ncclResult_t place_group(struct ncclComm *comm, struct issue *u) {
   pthread_mutex_lock(&attach_lock);
   owned_end(&u->owned, 1);
   pthread_mutex_unlock(&attach_lock);
   const unsigned char *region = (const unsigned char *)comm->attach->context.M;
   struct schedule *plans = u->plans;
-  size_t used = 0, length = 0;
+  size_t length = 0;
   const size_t align = MESH_RECORD_ALIGNMENT;
   for (int pass = 0; pass < 2; pass++) {
     if (pass) {
@@ -3282,15 +3238,6 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u, struct w
           const struct steps *st = x->c->bound;
           const struct mesh_step *step = st->steps + x->step;
           const struct ncclMeshWritePlan *write = x->c->write_plan;
-          if (!pass) {
-            const size_t instance = write ? x->c->invocation % write->layout.instances : 0;
-            const uint64_t displacement = write_displacement(write, x->offset) + (write ? instance * write->layout.instance_stride : 0);
-            const struct where origin = send && st->read && named(st->read[x->step]) ? st->read[x->step] : st->buffer[step->buffer];
-            if (!send && step->op == MESH_STEP_REDUCE) { x->data = shifted(area, used); used += page_up(x->bytes, comm->page); }
-            else x->data = shifted(origin, displacement);
-            if (counted(x->c) && step->buffer < 2) x->data = view_at(x->c, step->buffer == 0, x->offset);
-            else if (x->c->receive_views && step->buffer == 0) x->data = view_at(x->c, 0, x->offset);
-          }
           if (write) {
             const uint64_t logical = step->first * step->piece.element_bytes;
             const size_t repeat = write->stride ? (x->offset - logical) / write->stride : 0;
@@ -3312,21 +3259,29 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u, struct w
                                     call_name(x->c), comm->name, x->bytes, x->offset);
             if (owned_add(&u->owned, owner, 0)) return fail(ncclSystemError, "out of memory");
           }
+          const struct mesh_packet_view view = st->views[x->step];
+          const struct mesh_span_residues *cuts = st->packets + view.domain;
+          if (!cuts->count) return fail(ncclInvalidUsage, "declare actual collective page bindings before recording transfers");
+          struct mesh_packet_cursor packets = mesh_packet_begin(cuts, view.first, x->bytes);
+          if (!pass) {
+            x->pages.n = 0;
+            while (mesh_packet_next(cuts, comm->page, &packets)) x->pages.n++;
+          }
           if (!x->pages.n) continue;
           if (x->pages.n > SIZE_MAX / 2 / sizeof *x->spans) return fail(ncclSystemError, "out of memory");
           struct mesh_dma_span *made = pass ? (struct mesh_dma_span *)((char *)u->tables + length) : NULL;
           length += (x->pages.n * sizeof *x->spans + align - 1) / align * align;
           if (!pass) continue;
-          for (uint64_t unit = 0, at = 0; unit < x->pages.n; unit++, at += comm->page) {
-            made[unit] = (struct mesh_dma_span){mesh_page_offset(comm->attach->context.M, row, position + at),
-              x->bytes - at < comm->page ? x->bytes - at : comm->page};
+          for (uint64_t unit = 0, at = 0, bytes; (bytes = mesh_packet_next(cuts, comm->page, &packets)); unit++, at += bytes) {
+            made[unit] = (struct mesh_dma_span){mesh_page_offset(comm->attach->context.M, row, position + at), bytes};
             if (!mesh_dma_span_valid(comm->attach->context.M, made[unit]))
-              return fail(ncclInvalidUsage, "DMA span crosses a registration extent; prepare its common byte cuts before execution");
+              return fail(ncclInvalidUsage, "collective binding differs from its prepared page backing");
           }
           x->spans = made;
           x->table = (uint64_t)((unsigned char *)made - region);
         }
   }
+  for (uint32_t h = 0; h < comm->count; h++) schedule_units(plans + h, u->repeats);
   int error = landing_runs(comm, u);
   if (!error && u->tables) error = owned_add(&u->owned, u->tables, OWNED_TABLE);
   pthread_mutex_lock(&attach_lock);
@@ -3369,7 +3324,7 @@ static void send_dependencies(struct ncclComm *comm, struct schedule *plans) {
     for (size_t k = 0; k < plans[h].outs; k++) {
       struct message *m = plans[h].out + k;
       const struct steps *s = m->c->bound;
-      const int32_t dependency = m->c->target && comm->rank != m->c->root ? (int32_t)s->prior[s->prior_first[m->step]] : forwards(s, m->step, comm->page);
+      const int32_t dependency = m->c->target && comm->rank != m->c->root ? (int32_t)s->prior[s->prior_first[m->step]] : forwards(s, m->step);
       m->dep_h = UINT32_MAX;
       if (dependency < 0) continue;
       const uint32_t repeats = m->c->fused && m->c->fused->repeats ? m->c->fused->repeats : 1;
@@ -3377,10 +3332,9 @@ static void send_dependencies(struct ncclComm *comm, struct schedule *plans) {
       const uint32_t incoming = s->channel[dependency];
       const struct schedule *received = plans + incoming;
       const struct message *from = received->in + s->entry[dependency] - (repeats - 1 - repeat) * (received->ins / repeats);
-      const struct mesh_step *before = s->steps + dependency;
       const uint64_t delta = m->offset - from->offset;
-      const mesh_pages units = m->c->write_plan ? (mesh_pages){span_units(write_packets(m->c->write_plan, m->c->invocation),
-        before->first * before->piece.element_bytes, delta)} : pages_of(delta, comm->page);
+      mesh_pages units = {0};
+      for (uint64_t bytes = 0; bytes < delta; units.n++) bytes += from->spans[units.n].bytes;
       m->dep_h = incoming;
       m->dep_rel = pages_add(pages_sub(from->laid, from->pages), units);
     }
@@ -3608,6 +3562,28 @@ static int issue_same(const struct ncclComm *comm, const struct issue *u, const 
   }
   return 1;
 }
+/* Bind the same prepared storage before physical packet compilation and before
+   descriptor emission. The compiler's generation storage has already been reserved. */
+static ncclResult_t issue_layout(struct ncclComm *comm, struct compiled *x, struct issue *u, struct call *list,
+    size_t n, uint32_t generation, uint32_t repeats, size_t stride, int remote, struct where *area, uint32_t *slot) {
+  for (size_t i = 0; i < n; i++) if (list[i].bound) steps_reset(list[i].bound);
+  issue_lay(comm, x, u, list, repeats, stride);
+  ncclResult_t result = remote ? bind_slot(comm, x, generation, list, n, u->plans, &u->base, area, slot) : ncclSuccess;
+  if (!result) bind_calls(list, n);
+  if (!result && remote) place_data(comm, u, *area);
+  return result;
+}
+
+/* A newly recorded binding must be one of the declared page slots. Existing
+   prepared bindings take issue_same; this is never a payload execution check. */
+static int binding_contains(const ncclMeshBufferSlots *b, struct where value) {
+  const uintptr_t first = (uintptr_t)address_of((struct where){b->buffer.buffer, b->buffer.offset});
+  const uintptr_t at = (uintptr_t)address_of(value);
+  if (at < first) return 0;
+  const size_t delta = at - first;
+  return !b->stride ? !delta : delta % b->stride == 0 && delta / b->stride < b->instances;
+}
+
 /* group x's `n` calls (*calls) bound in its next generation's issue (*issued; struct issue), *calls then the issue's copy
    of them (what they own moved there) and *plans its entries: an issue laid and placed for the same binding (issue_same)
    takes it again, its steps' progress made again (steps_rebind) and its calls' bound results restored, and its slot and
@@ -3648,12 +3624,15 @@ static ncclResult_t issue_bind(struct ncclComm *comm, struct call **calls, size_
     *area = u->area; *slot = u->slot;
     return ncclSuccess;
   }
+  for (size_t i = 0; i < n; i++) if (!list[i].target) {
+    const struct call *declared = x->calls + i;
+    if (!declared->declared_bindings || !binding_contains(declared->bindings, list[i].send_at) ||
+        !binding_contains(declared->bindings + 1, list[i].recv_at))
+      return fail(ncclInvalidUsage, "record collective operands from their declared page slots");
+  }
   u->laid = 0;
-  for (size_t i = 0; i < n; i++) if (list[i].bound) steps_reset(list[i].bound);
-  issue_lay(comm, x, u, list, repeats, stride);
-  ncclResult_t result = remote ? bind_slot(comm, x, k, list, n, u->plans, &u->base, area, slot) : ncclSuccess;
-  if (!result) bind_calls(list, n);
-  if (!result && remote) result = place_group(comm, u, *area);
+  ncclResult_t result = issue_layout(comm, x, u, list, n, k, repeats, stride, remote, area, slot);
+  if (!result && remote) result = place_group(comm, u);
   if (!result && remote) result = bind_retirements(comm, u->plans);
   if (!result && remote) { landing_needs(comm, u->plans); send_dependencies(comm, u->plans); }
   for (size_t i = 0; !result && i < n; i++) {
@@ -3825,8 +3804,6 @@ static void calls_free(struct call *list, size_t n) {
   for (size_t i = 0; i < n; i++) {
     call_parts_free(list + i);
     free(list[i].segments); free(list[i].matrix); free(list[i].contributors); free(list[i].recipients); free(list[i].production);
-    for (int k = 0; list[i].backing && k < 2 * list[i].comm->nranks; k++) free(list[i].backing[k].at);
-    free(list[i].backing);
   }
   free(list);
 }
@@ -5109,15 +5086,21 @@ static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call
   /* the bindings as the issued call's buffers, set after admit, which gives a call with no stream its own (none):
      its group's generations laid and placed for them (prepared).  design/eager-execution.md#what-follows */
   if (d->bindings && d->what != ncclMeshCallWrite) {
-    c->send_at = (struct where){d->bindings[0].buffer, d->bindings[0].offset};
-    c->recv_at = (struct where){d->bindings[1].buffer, d->bindings[1].offset};
-    if (!(c->backing = calloc(2 * (size_t)n, sizeof *c->backing))) return fail(ncclSystemError, "allocating collective page bindings");
+    memcpy(c->bindings, d->bindings, sizeof c->bindings);
+    for (int j = 0; j < 2; j++) {
+      ncclMeshBufferSlots *b = c->bindings + j;
+      if (!b->stride) b->instances = 1;
+      if (!b->instances) return fail(ncclInvalidArgument, "a strided collective binding needs its slot count");
+      if (b->instances - 1 > (SIZE_MAX - b->buffer.offset) / (b->stride ? b->stride : 1))
+        return fail(ncclInvalidArgument, "collective binding slot extent overflows");
+    }
+    c->send_at = (struct where){d->bindings[0].buffer.buffer, d->bindings[0].buffer.offset};
+    c->recv_at = (struct where){d->bindings[1].buffer.buffer, d->bindings[1].buffer.offset};
+    c->declared_bindings = 1;
   }
   ncclResult_t result = declared_members(c, d);
   if (!result && counted(c)) result = prepare_counted(c, d->matrix);
   if (!result && reducing(c->what)) result = reduction(c);
-  if (!result && c->backing) result = binding_backing(comm, c->send_at, sent_bytes(c), c->backing + 2 * me);
-  if (!result && c->backing) result = binding_backing(comm, c->recv_at, received_bytes(c), c->backing + 2 * me + 1);
   return result;
 }
 
@@ -5128,15 +5111,114 @@ static void plan_free(struct ncclComm *comm, struct plan *plan) {
   free(plan);
 }
 
+/* Every endpoint and relay contributes physical backing cuts in the declared
+   operand or transaction coordinates. Union all generation placements before emitting
+   either end's descriptors. These exchanges belong solely to declaration. */
+static ncclResult_t packets_prepare(struct ncclComm *comm, struct compiled *x) {
+  ncclResult_t result = ncclSuccess;
+  uint64_t phases = 1;
+  for (size_t i = 0; i < x->n; i++) {
+    const uint64_t a = x->calls[i].bindings[0].instances, b = x->calls[i].bindings[1].instances;
+    const uint64_t divisor = mesh_span_gcd(a, b);
+    if (a / divisor > UINT64_MAX / b) return fail(ncclInvalidArgument, "collective binding period overflows");
+    const uint64_t period = a / divisor * b;
+    if (period > phases) phases = period;
+  }
+  for (uint32_t g = 0; !result && g < GENERATIONS; g++) for (uint64_t phase = 0; !result && phase < phases; phase++) {
+    struct issue *u = x->issue[g];
+    for (size_t i = 0; !result && i < x->n; i++) {
+      const struct call *d = x->calls + i;
+      u->calls[i].send_at = shifted(d->send_at, phase % d->bindings[0].instances * d->bindings[0].stride);
+      u->calls[i].recv_at = shifted(d->recv_at, phase % d->bindings[1].instances * d->bindings[1].stride);
+      result = as_metal(&u->calls[i].send_at);
+      if (!result) result = as_metal(&u->calls[i].recv_at);
+    }
+    if (!result) result = issue_layout(comm, x, u, u->calls, x->n, g, 1, 0, 1, &u->area, &u->slot);
+    for (uint32_t h = 0; !result && h < comm->count; h++) for (int send = 1; send >= 0; send--)
+      for (size_t k = 0; !result && k < (send ? u->plans[h].outs : u->plans[h].ins); k++) {
+        const struct message *m = (send ? u->plans[h].out : u->plans[h].in) + k;
+        const struct steps *st = m->c->bound;
+        const struct mesh_packet_view view = st->views[m->step];
+        struct mesh_span_residues *cuts = st->packets + view.domain;
+        struct mesh_page_runs backing = {0};
+        result = binding_backing(comm, m->data, m->bytes, &backing);
+        uint64_t previous = UINT64_MAX;
+        int error = result ? 0 : mesh_span_residue_add(cuts, view.first);
+        if (!result && !error) error = mesh_span_residue_add(cuts, view.first + m->bytes);
+        if (!result && !error) error = mesh_page_run_cuts(&backing, 0, m->bytes, view.first, 0, MESH_DMA_EXTENT, &previous, cuts);
+        free(backing.at);
+        if (error) result = fail(ncclSystemError, "collective packet cuts: %s", strerror(error));
+      }
+  }
+  size_t domains = 0;
+  for (size_t i = 0; i < x->n; i++) if (x->calls[i].bound) domains += x->calls[i].bound->domains;
+  if (!domains) return result;
+  const size_t N = (size_t)comm->nranks;
+  struct mesh_span_residues **cuts = calloc(domains + 1, sizeof *cuts);
+  uint64_t *local = calloc(domains + 1, sizeof *local), *counts = calloc(N * (domains + 1), sizeof *counts);
+  int error = cuts && local && counts ? 0 : ENOMEM;
+  size_t at = 0;
+  for (size_t i = 0; !result && !error && i < x->n; i++) {
+    struct steps *st = x->calls[i].bound;
+    for (uint32_t t = 0; st && t < st->domains; t++, at++) {
+      cuts[at] = st->packets + t;
+      mesh_span_residues_sort(cuts[at]); local[at] = cuts[at]->count;
+    }
+  }
+  uint64_t *extra = NULL, *all = NULL;
+  pthread_mutex_lock(&comm->prepare);
+  atomic_fetch_add(&comm->runs, 1);
+  comm->until = mesh_deadline("libnccl-mesh: prepared collective packet cuts", MESH_PREPARATION_NS);
+  if (!result && !error) error = prepare_exchange_locked(comm, local, domains * sizeof *local, counts);
+  size_t most = 0;
+  for (size_t r = 0; !result && !error && r < N; r++) {
+    size_t count = 0;
+    for (size_t t = 0; t < domains; t++) {
+      if (counts[r * domains + t] > SIZE_MAX - count) { error = EOVERFLOW; break; }
+      count += counts[r * domains + t];
+    }
+    if (count > most) most = count;
+  }
+  if (!result && !error && most) {
+    if (most > SIZE_MAX / N / sizeof *extra) error = EOVERFLOW;
+    else if (!(extra = calloc(most, sizeof *extra)) || !(all = calloc(N * most, sizeof *all))) error = ENOMEM;
+    at = 0;
+    for (size_t t = 0; !error && t < domains; t++) {
+      if (local[t]) memcpy(extra + at, cuts[t]->at, local[t] * sizeof *extra);
+      at += local[t];
+    }
+    if (!error) error = prepare_exchange_locked(comm, extra, most * sizeof *extra, all);
+  }
+  atomic_fetch_sub(&comm->runs, 1);
+  pthread_mutex_unlock(&comm->prepare);
+  for (size_t r = 0; !result && !error && r < N; r++) if (r != (size_t)comm->rank) {
+    at = 0;
+    for (size_t t = 0; !error && t < domains; t++)
+      for (uint64_t k = 0; !error && k < counts[r * domains + t]; k++, at++)
+        error = mesh_span_residue_add(cuts[t], all[r * most + at]);
+  }
+  for (size_t t = 0; !result && !error && t < domains; t++) mesh_span_residues_sort(cuts[t]);
+  free(cuts); free(local); free(counts); free(extra); free(all);
+  return result ? result : error ? fail(ncclSystemError, "preparing collective packets: %s", strerror(error)) : ncclSuccess;
+}
+
 /* a declared group whose every call declares its bindings (nccl.h ncclMeshCall bindings; none a WRITE's, whose plan
    comes at its issue) laid and placed for them in each of its generations (issue_bind on copies of its calls, as their
    issues will be: the Metal path's, a host binding as its lease's Metal buffer: host_commit; a float64 reduction is
    refused there, launch_metal), so an issue with those buffers binds only its entries.  Under group_lock */
 static ncclResult_t prepared(struct ncclComm *comm, struct compiled *x, int remote) {
   for (size_t i = 0; i < x->n; i++)
-    if (!x->calls[i].backing || x->calls[i].target || (reducing(x->calls[i].what) && !on_gpu(x->calls[i].type))) return ncclSuccess;
+    if (!x->calls[i].declared_bindings || x->calls[i].target || (reducing(x->calls[i].what) && !on_gpu(x->calls[i].type))) return ncclSuccess;
+  ncclResult_t result = ncclSuccess;
+  for (uint32_t k = 0; !result && k < GENERATIONS; k++) {
+    struct issue *u = x->issue[k] = issue_make(comm, x, 1);
+    if (!u) { result = fail(ncclSystemError, "allocating prepared generation"); break; }
+    memcpy(u->calls, x->calls, x->n * sizeof *u->calls);
+    for (size_t i = 0; i < x->n; i++) u->calls[i].bound = u->steps[i];
+  }
+  if (!result && remote) result = packets_prepare(comm, x);
   struct call *list = malloc((x->n + 1) * sizeof *list);
-  ncclResult_t result = list ? ncclSuccess : fail(ncclSystemError, "out of memory");
+  if (!result && !list) result = fail(ncclSystemError, "out of memory");
   for (uint32_t k = 0; !result && k < GENERATIONS; k++) {
     memcpy(list, x->calls, x->n * sizeof *list);
     for (size_t i = 0; i < x->n && !result; i++) {
@@ -5157,68 +5239,6 @@ static ncclResult_t prepared(struct ncclComm *comm, struct compiled *x, int remo
   x->uses = 0;
   free(list);
   return result;
-}
-
-/* Each declared binding's backing relation, once for the whole function.
-   A fixed report holds a contiguous binding in full. Only scattered bindings
-   need the second exchange of additional runs. No process address is sent. */
-static ncclResult_t bindings_exchange(struct ncclComm *comm, struct plan *plan) {
-  const size_t N = (size_t)comm->nranks;
-  size_t k = 0;
-  for (uint32_t g = 0; plan && g < plan->view.groups; g++)
-    for (size_t i = 0; i < plan->group[g].n; i++) if (plan->group[g].calls[i].backing) k += 2;
-  if (!k || N == 1) return ncclSuccess;
-  struct binding_report { uint64_t count; struct mesh_page_run first; };
-  struct binding_report *local = calloc(k, sizeof *local), *reports = calloc(N * k, sizeof *reports);
-  struct mesh_page_runs **bindings = malloc(k * sizeof *bindings);
-  struct mesh_page_run *extra = NULL, *all = NULL;
-  int error = local && reports && bindings ? 0 : ENOMEM;
-  size_t at = 0;
-  for (uint32_t g = 0; !error && g < plan->view.groups; g++)
-    for (size_t i = 0; i < plan->group[g].n; i++)
-      if (plan->group[g].calls[i].backing) for (int j = 0; j < 2; j++) {
-        bindings[at] = plan->group[g].calls[i].backing + j;
-        const struct mesh_page_runs *p = bindings[at] + 2 * comm->rank;
-        local[at].count = p->count;
-        if (p->count) local[at].first = p->at[0];
-        at++;
-      }
-  pthread_mutex_lock(&comm->prepare);
-  atomic_fetch_add(&comm->runs, 1);
-  comm->until = mesh_deadline("libnccl-mesh: collective page binding metadata", MESH_PREPARATION_NS);
-  if (!error) error = prepare_exchange_locked(comm, local, k * sizeof *local, reports);
-  size_t most = 0;
-  for (size_t r = 0; !error && r < N; r++) {
-    size_t count = 0;
-    for (size_t i = 0; i < k; i++) if (reports[r * k + i].count) count += reports[r * k + i].count - 1;
-    if (count > most) most = count;
-  }
-  if (!error && most) {
-    if (most > SIZE_MAX / N / sizeof *extra) error = EOVERFLOW;
-    else if (!(extra = calloc(most, sizeof *extra)) || !(all = calloc(N * most, sizeof *all))) error = ENOMEM;
-    at = 0;
-    for (size_t i = 0; !error && i < k; i++) {
-      const struct mesh_page_runs *p = bindings[i] + 2 * comm->rank;
-      if (p->count > 1) { memcpy(extra + at, p->at + 1, (p->count - 1) * sizeof *extra); at += p->count - 1; }
-    }
-    if (!error) error = prepare_exchange_locked(comm, extra, most * sizeof *extra, all);
-  }
-  atomic_fetch_sub(&comm->runs, 1);
-  pthread_mutex_unlock(&comm->prepare);
-  for (size_t r = 0; !error && r < N; r++) if (r != (size_t)comm->rank) {
-    at = 0;
-    for (size_t i = 0; !error && i < k; i++) {
-      const struct binding_report *report = reports + r * k + i;
-      struct mesh_page_runs *p = bindings[i] + 2 * r;
-      if (!report->count) continue;
-      p->at = malloc(report->count * sizeof *p->at);
-      if (!p->at) { error = ENOMEM; break; }
-      p->count = p->room = report->count; p->at[0] = report->first;
-      if (p->count > 1) { memcpy(p->at + 1, all + r * most + at, (p->count - 1) * sizeof *p->at); at += p->count - 1; }
-    }
-  }
-  free(bindings); free(local); free(reports); free(extra); free(all);
-  return error ? fail(ncclInvalidUsage, "preparing collective page bindings: %s", strerror(error)) : ncclSuccess;
 }
 
 /* Compile group definitions, then bind the function's repeated-block order.
@@ -5245,7 +5265,6 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
     struct compiled *x = made->group + g;
     result = declared(comm, calls + i, x->calls + x->n++);
   }
-  if (!result) result = bindings_exchange(comm, made);
   if (made && !result) {
     if(runs>SIZE_MAX/sizeof *made->order || runs>SIZE_MAX/sizeof *made->ends ||
        !(made->order=malloc(runs*sizeof *made->order)) || !(made->ends=malloc(runs*sizeof *made->ends)))

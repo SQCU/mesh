@@ -233,7 +233,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
                 check(LIB.ncclMeshProductionTimes(production, len(c.production),
                       production_seconds[c.root] / producer_groups[c.root]))
             # design/eager-execution.md#what-follows
-            kept.append(ffi.new('ncclMeshBuffer[2]', [_binding(t) for t in c.bindings]) if c.bindings is not None else ffi.NULL)
+            kept.append(ffi.new('ncclMeshBufferSlots[2]', [{'buffer': _binding(t), 'instances': 1} for t in c.bindings]) if c.bindings is not None else ffi.NULL)
             made.append({'what': WHAT[c.kind], 'peer': c.root, 'count': c.count * per, 'type': nccl, 'op': code,
                          'group': g, 'destination': c.destination, 'fused': int(c.fused), 'tile_bytes': c.tile_bytes,
                          'production': production, 'bindings': kept[-1],

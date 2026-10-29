@@ -1114,6 +1114,10 @@ typedef struct { double seconds; uint64_t order; } ncclMeshProduction;
 /* Preparation only. Map an explicit producer traversal onto the fitted duration
    of this group. Predictions order physical descriptors; they add no wait. */
 ncclResult_t ncclMeshProductionTimes(ncclMeshProduction* records, size_t count, double seconds);
+/* A prepared operand's page-backed local view and its storage slots. Zero
+   stride names one view. Nonzero stride requires the declared slot count;
+   invocation i binds buffer.offset + (i % instances) * stride bytes. */
+typedef struct { ncclMeshBuffer buffer; size_t stride, instances; } ncclMeshBufferSlots;
 typedef struct {
   int what, peer;
   size_t count;
@@ -1133,15 +1137,13 @@ typedef struct {
      writes to its root; ReduceScatter owners have nonzero counts. */
   const uint64_t* contributors;
   const uint64_t* recipients;
-  /* Optional actual bindings, an extension (NULL: none, as before): [0] the send buffer and [1] the receive buffer
-     the call will be issued with, as it passes them (on a stream the ncclMeshBuffer itself, on the host {NULL,
-     address}; {NULL, 0} where this rank has none). Given on every rank or on none for a call, CommPlan exchanges each
-     rank's page-backing runs once and cuts numerical steps at whole-element backing and registration boundaries.
-     Both ends of an all-to-all transaction retain their own logical origin and share every cut, without a fixed
-     cut-list capacity. Descriptor offsets come from the bridge page table. A WRITE has its own byte-level cuts.
-     A group whose every call declares its bindings is laid and placed for them at CommPlan, in each of its
-     generations, so its issues with those buffers bind only their entries. */
-  const ncclMeshBuffer* bindings;
+  /* Actual source and destination page bindings, including their slot layouts.
+     Supply on every rank to prepare execution; {NULL,0} is a rank's absent
+     operand. A declaration without bindings describes geometry for planning
+     queries only. Its transfers cannot be recorded until it is bound.
+     Preparation joins endpoint and relay backing cuts in common byte domains,
+     across all declared slots, without splitting numerical rows. */
+  const ncclMeshBufferSlots* bindings;
 } ncclMeshCall;
 /* A communicator's plan (ncclMeshCommPlan): its `groups` declared groups, the groups one pass of its order issues
    (`issues`, the sum of each block's count times repeat), the number of the communicator's group the order starts at (`first`: its groups

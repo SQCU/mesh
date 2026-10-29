@@ -12,6 +12,7 @@ struct routed_piece {
   uint64_t offset;
   uint32_t *retired,retires;
   unsigned char witnessed;
+  struct mesh_packet_view view;
 };
 
 static int physical_order(const void *a,const void *b){
@@ -104,7 +105,7 @@ static int refine_pieces(struct routed_piece **storage,size_t *length,uint64_t p
           uint64_t first=0;
           for(uint32_t j=0;j<cut->count;j++){
             struct routed_piece p=pieces[k];
-            p.offset+=first;p.transfer.step.first+=first;
+            p.offset+=first;p.transfer.step.first+=first;p.view.first+=first*p.transfer.step.piece.element_bytes;
             p.transfer.step.piece.elements=cut->end[j]-first;
             next[written++]=p;first=cut->end[j];
           }
@@ -401,13 +402,14 @@ void mesh_routed_free(struct mesh_routed_program *p){
   for(uint32_t r=0;p->rank && r<p->nodes;r++){
     free(p->rank[r].transfer);free(p->rank[r].consume);free(p->rank[r].extent);
     free(p->rank[r].retired_first);free(p->rank[r].retired);free(p->rank[r].witnessed);
+    free(p->rank[r].views);
   }
   free(p->rank);free(p->demand);free(p->route_units);*p=(struct mesh_routed_program){0};
 }
 
 int mesh_routed_compile(const struct mesh_fabric *f,const struct mesh_paths *paths,
                          const uint32_t *first,const struct mesh_step *steps,
-                         const uint32_t *initialized,uint64_t page,struct mesh_routed_program *out){
+                         const uint32_t *initialized,uint64_t page,enum mesh_packet_coordinates coordinates,struct mesh_routed_program *out){
   if(!out)return EINVAL;
   *out=(struct mesh_routed_program){0};
   if(mesh_fabric_check(f) || !paths || !first || !steps || !initialized || !page || first[0])return EINVAL;
@@ -489,7 +491,9 @@ int mesh_routed_compile(const struct mesh_fabric *f,const struct mesh_paths *pat
         if(r==source){t.step.buffer=send->buffer;t.step.first+=send->first;local=k-first[r];}
         else if(r==destination){t.step.op=land->op;t.step.buffer=land->buffer;t.step.first+=land->first;local=receive-first[r];}
         else t.step.buffer=relay[r];
-        pieces[count++]=(struct routed_piece){t,r,local,transaction,send->round,hop,0,offset,NULL,0,0};
+        pieces[count++]=(struct routed_piece){t,r,local,transaction,send->round,hop,0,offset,NULL,0,0,
+          {(offset+(coordinates==MESH_PACKET_OPERAND?send->first:0))*send->piece.element_bytes,
+           coordinates==MESH_PACKET_OPERAND?0:transaction,0}};
         made.rank[r].count++;
       }
       free(physical);
@@ -514,13 +518,15 @@ int mesh_routed_compile(const struct mesh_fabric *f,const struct mesh_paths *pat
       rank->consume=calloc((size_t)rank->count+1,sizeof *rank->consume);
       rank->retired_first=calloc((size_t)rank->count+1,sizeof *rank->retired_first);
       rank->witnessed=calloc((size_t)rank->count+1,1);
+      rank->views=calloc((size_t)rank->count+1,sizeof *rank->views);
       size_t total=0;for(uint32_t k=0;k<rank->count;k++)total+=pieces[at+k].retires;
       if(total>UINT32_MAX){status=EOVERFLOW;break;}
       rank->retired=malloc((total+1)*sizeof *rank->retired);
-      if(!rank->transfer || !rank->consume || !rank->retired_first || !rank->retired || !rank->witnessed){status=ENOMEM;break;}
+      if(!rank->transfer || !rank->consume || !rank->retired_first || !rank->retired || !rank->witnessed || !rank->views){status=ENOMEM;break;}
       uint32_t retired=0;
       for(uint32_t k=0;k<rank->count;k++,at++){
         rank->transfer[k]=pieces[at].transfer;rank->consume[k]=pieces[at].consume;rank->witnessed[k]=pieces[at].witnessed;
+        rank->views[k]=pieces[at].view;
         rank->retired_first[k]=retired;
         if(pieces[at].retires)memcpy(rank->retired+retired,pieces[at].retired,pieces[at].retires*sizeof *rank->retired);
         retired+=pieces[at].retires;
@@ -530,6 +536,7 @@ int mesh_routed_compile(const struct mesh_fabric *f,const struct mesh_paths *pat
   }
   for(size_t k=0;k<count;k++)free(pieces[k].retired);
   free(pieces);free(matched);free(relay);
+  made.domains=coordinates==MESH_PACKET_OPERAND?!!transaction:transaction;
   if(status)mesh_routed_free(&made);else *out=made;
   return status;
 }
