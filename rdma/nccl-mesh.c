@@ -5622,9 +5622,11 @@ ncclResult_t ncclMeshWritePagesPrepare(ncclMeshPageTable_t table,const ncclMeshP
    from its lowest byte's page index in the table, and the common WRITE compiler (write_prepare) */
 ncclResult_t ncclMeshWriteLayoutPrepare(const ncclMeshLayout *v, int source, int destination, size_t max_packet,
     ncclMeshWriteLayout layout, ncclMeshWritePlan_t *out) {
-  if (!v || !v->storage || !v->element_bits || v->rank > 64 || (v->rank && (!v->shape || !v->strides)) ||
-      layout.instance_pages > SIZE_MAX / v->storage->page_bytes)
+  if (!v || !v->storage || !v->element_bits || v->rank > 64 || (v->rank && (!v->shape || !v->strides)))
     return fail(ncclInvalidArgument, "a write's layout (nccl.h ncclMeshLayout)");
+  /* a binding's period is its own layout's (ncclMeshLayout instances), not the WRITE's shared one */
+  if (layout.instances > 1 || layout.instance_pages || v->instance_stride < 0 || (uint64_t)v->instance_stride * v->element_bits % 8)
+    return fail(ncclInvalidArgument, "a write's instances are its local layout's, a whole number of bytes apart (ncclMeshLayout)");
   const uint64_t bits = v->element_bits, last = v->rank ? v->rank - 1 : 0;
   uint64_t shape[64], itemsize = bits / 8;
   int64_t strides[64];
@@ -5656,7 +5658,8 @@ ncclResult_t ncclMeshWriteLayoutPrepare(const ncclMeshLayout *v, int source, int
   ncclResult_t result = first < 0 ? fail(ncclInvalidArgument, "a write's view reaches before its storage") : ncclSuccess;
   const size_t page = v->storage->page_bytes;
   const struct write_page_index start = {(size_t)first / page, (size_t)first % page};
-  const struct mesh_write_layout local = {layout.tile_bytes, layout.instances, layout.instance_pages * page, layout.invocations};
+  const struct mesh_write_layout local = {layout.tile_bytes, v->instances > 1 ? v->instances : 1,
+                                          (size_t)v->instance_stride * bits / 8, layout.invocations};
   /* a train of frames: one contiguous run each, `frame_stride` elements apart (the flat form's repeats) */
   const uint32_t frames = v->frames > 1 ? v->frames : 1;
   if (!result && frames > 1 && (v->runs || rows[1] > 1 || v->frame_stride <= 0 || (uint64_t)v->frame_stride * bits % 8))

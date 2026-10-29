@@ -1053,11 +1053,15 @@ ncclResult_t ncclMeshWritePagesPrepare(ncclMeshPageTable_t table, const ncclMesh
    the table's first byte; or, where `runs` (not NULL), a mapped view's `nruns` runs in logical order, each its first
    element's offset past the table's first byte and its element count (runs[2k], runs[2k + 1]).  `frames` (0 or 1: one)
    equal frames of a contiguous view, `frame_stride` elements apart, are one train compiled once, each frame its own
-   publication (a ring of slots, a chain's steps); each rank's stride its own.  Abstract layout, never an
+   publication (a ring of slots, a chain's steps); each rank's stride its own.  `instances` (0 or 1: one) slots of the
+   view, `instance_stride` elements apart, are its binding's period: invocation i reads or lands in slot i % instances
+   (each rank's period and stride its own; the WRITE's ncclMeshWriteLayout then names only what every rank shares, its
+   tile bytes and invocations).  Abstract layout, never an
    address: preparation lowers it to the table's pages, affine rows where it is affine, else its spans in logical order
    (mesh-write-compiler.h mesh_view_layout). */
 typedef struct { ncclMeshPageTable_t storage; uint32_t element_bits, rank; const uint64_t* shape; const int64_t* strides;
-                 uint64_t offset; const uint64_t* runs; size_t nruns; uint32_t frames; int64_t frame_stride; } ncclMeshLayout;
+                 uint64_t offset; const uint64_t* runs; size_t nruns; uint32_t frames; int64_t frame_stride;
+                 uint64_t instances; int64_t instance_stride; } ncclMeshLayout;
 /* The WRITE whose local view is `local`: the source's values on `source`, the landing on `destination`, a relay's on any
    other rank; every rank's view holds the same logical bytes, in its own layout. */
 ncclResult_t ncclMeshWriteLayoutPrepare(const ncclMeshLayout* local, int source, int destination, size_t max_packet,
