@@ -1,9 +1,11 @@
-// torch's allocators over region leases (ncclMemAlloc), so no tensor of a mesh process lies outside the region: every CPU
+// torch's allocators and Python's object arenas over region leases (ncclMemAlloc), so no tensor and no small Python
+// object of a mesh process lies outside the region: every pymalloc arena is a lease (PyObject_SetArenaAllocator); every CPU
 // tensor is a lease, its DataPtr the lease's address, returned (ncclMemFree) when its storage is released; every MPS
 // tensor is a lease, its DataPtr the lease's no-copy MTLBuffer.  Torch 2.14 has no MPS allocator hook, so this one is constructed in place over the fixed instance
 // at::mps::getIMPSAllocator(), whose 16 bytes are kept as the delegate for pointers it did not make.  A block let go
 // returns its lease (ncclMemFree: the pages kept until every DMA read from them ends) when the command buffer open on
 // torch's stream completes, as torch's allocator returns a buffer in use, and commits it (torch's kernels never do).
+#include <Python.h>
 #include <ATen/mps/MPSAllocatorInterface.h>
 #include <c10/core/CPUAllocator.h>
 #include <ATen/mps/MPSEvent.h>
@@ -17,6 +19,7 @@
 #include <optional>
 #include <typeinfo>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #import <Metal/Metal.h>
 #include "nccl.h"
@@ -90,6 +93,27 @@ c10::DataPtr lease(size_t bytes) {
   std::lock_guard<std::mutex> guard(*lock_);
   leases_->emplace(buffer, Lease{memory, bytes, ++made_, {}, nullptr});
   return {buffer, buffer, &release, at::Device(at::DeviceType::MPS, 0)};
+}
+
+// pymalloc's arenas (its 1 MiB blocks of small objects): each a lease, those made before the region's held by the
+// allocator that made them, which also returns them
+PyObjectArenaAllocator pythons_;
+auto *arenas_ = new std::unordered_set<void *>;
+void *arena_take(void *, size_t bytes) {
+  void *memory = nullptr;
+  if (ncclMemAlloc(&memory, bytes)) return nullptr;   // pymalloc's out-of-memory: a MemoryError
+  std::lock_guard<std::mutex> guard(*lock_);
+  arenas_->insert(memory);
+  return memory;
+}
+void arena_return(void *, void *memory, size_t bytes) {
+  bool ours;
+  {
+    std::lock_guard<std::mutex> guard(*lock_);
+    ours = arenas_->erase(memory) == 1;
+  }
+  if (ours) ncclMemFree(memory);
+  else pythons_.free(pythons_.ctx, memory, bytes);
 }
 
 void release_host(void *memory) {
@@ -213,6 +237,9 @@ static_assert(sizeof(RegionAllocator) == sizeof(at::mps::IMPSAllocator) && sizeo
 void install_region_allocator() {
   static RegionHostAllocator host;
   c10::SetCPUAllocator(&host, 1);
+  PyObject_GetArenaAllocator(&pythons_);
+  PyObjectArenaAllocator region = {nullptr, arena_take, arena_return};
+  PyObject_SetArenaAllocator(&region);
   at::mps::IMPSAllocator *instance = at::mps::getIMPSAllocator();
   const char *type = typeid(*instance).name();
   TORCH_CHECK(!strcmp(type, "N2at3mps12MPSAllocatorE"), "torch_mesh: torch's MPS allocator instance (at::mps::getIMPSAllocator) "
