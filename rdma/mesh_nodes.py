@@ -391,28 +391,57 @@ def node_prepare():
                 raise RuntimeError(f'{where}: {" ".join(map(str, argv[:3]))} failed: {(done.stderr or done.stdout)[-600:]}')
             installed = installed or done
     services = services_refresh(ROOT)
-    done = installed
-    if 'restarts the bridge' not in done.stdout:
-        print(json.dumps({'bridge': 'unchanged', 'services': services, 'seconds': seconds}))
-        return
-    # standup (the operator, 2026-10-29): a machine whose bridge does not answer its restart signal, and that has no
-    # kernel fault, is restarted; one with a fault is left as it is, its fault reported
-    signalled, began = time.time(), None
-    while time.time() < signalled + BRIDGE_RESTART_SECONDS and not (began and began >= signalled):
-        time.sleep(2)
-        began = bridge_began()
-    if began and began >= signalled:
-        print(json.dumps({'bridge': 'restarted', 'services': services, 'seconds': seconds}))
-        return
-    boot = int(re.search(r'\{ sec = (\d+)', run('sysctl', '-n', 'kern.boottime').stdout).group(1))
-    faults = run('sudo', '-n', 'find', '/Library/Logs/DiagnosticReports', '-type', 'f', '-newermt',
-                 time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(boot)), '-name', 'panic-full*').stdout.split()
+    told = {'services': services, 'seconds': seconds}
+    # standup (the operator, 2026-10-29): a machine whose bridge does not answer its restart signal, or whose running
+    # heartbeat is not this checkout's installed one (a loaded job takes a new definition only at its next load, a
+    # boot: bin/mesh-user.sh), is restarted where this boot has no kernel fault; one with a fault is left as it is, named
+    if 'restarts the bridge' in installed.stdout:
+        signalled, began = time.time(), None
+        while time.time() < signalled + BRIDGE_RESTART_SECONDS and not (began and began >= signalled):
+            time.sleep(2)
+            began = bridge_began()
+        if not (began and began >= signalled):
+            restart_unless_faulted(f'the bridge did not restart within {BRIDGE_RESTART_SECONDS} s of its signal')
+        told['bridge'] = 'restarted'
+    else:
+        told['bridge'] = 'unchanged'
+    stale = heartbeat_stale(ROOT)
+    if stale:
+        restart_unless_faulted(stale)
+    print(json.dumps({'bridge': told.pop('bridge'), **told}))
+
+
+def kernel_faults():
+    """This boot's kernel faults: a bridge or heartbeat process in an uninterruptible kernel wait (ps state U, as in a
+    driver call that never returns), each named. A running machine has had no panic this boot (a panic reboots it):
+    a panic report is written at the boot after its panic and describes the boot before (node resets reports those)."""
+    rows = [line.split(None, 2) for line in run('ps', '-axo', 'pid=,stat=,comm=').stdout.splitlines()]
+    return [f'{os.path.basename(r[2])} {r[0]} in state {r[1]}' for r in rows
+            if len(r) == 3 and os.path.basename(r[2]) in ('mesh-flow', 'mesh-heartbeat') and 'U' in r[1]]
+
+
+def restart_unless_faulted(why):
+    faults = kernel_faults()
     if faults:
-        raise RuntimeError(f'the bridge did not restart within {BRIDGE_RESTART_SECONDS} s of its signal, and this boot '
-                           f'has a kernel fault, so the machine is left as it is: {faults}')
+        raise RuntimeError(f'{why}, and this boot has a kernel fault, so the machine is left as it is: {faults}')
     run('sudo', '-n', 'shutdown', '-r', 'now')
-    raise RuntimeError(f'the bridge did not restart within {BRIDGE_RESTART_SECONDS} s of its signal; no kernel fault '
-                       'this boot, so the machine is restarting')
+    raise RuntimeError(f'{why}; no kernel fault this boot, so the machine is restarting')
+
+
+def heartbeat_stale(root):
+    """Why the running heartbeat is not this checkout's installed one (its program another's, or started before this
+    image was installed), or None where it is."""
+    image = root / 'rdma/mesh-heartbeat'
+    pid = next(iter(run('pgrep', '-x', 'mesh-heartbeat').stdout.split()), None)
+    if not pid:
+        return 'no heartbeat runs'
+    program = run('ps', '-o', 'comm=', '-p', pid).stdout.strip()
+    started = run('ps', '-o', 'lstart=', '-p', pid).stdout.strip()
+    if program != str(image):
+        return f'the heartbeat runs {program}, not {image}'
+    if started and image.is_file() and time.mktime(time.strptime(started, '%a %b %d %H:%M:%S %Y')) < image.stat().st_mtime:
+        return f'the heartbeat started {started}, before {image} was installed'
+    return None
 
 
 BRIDGE_RESTART_SECONDS = 180
