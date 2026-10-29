@@ -165,11 +165,25 @@ transfers, exact byte-access unions, byte-view round trips and saved declaration
 The emitted Metal source compiled. These are layout-preparation results, not
 numerical execution or throughput measurements.
 
-Explicit arbitrary selections over coupled factors and non-affine alias
-inverses can still materialize their selected domain. The distributed ownership
-gap under exact partition boundaries also remains unfinished. An irreducible
-table supplied by a caller occupies its own domain; reshaping, slicing or
-permuting it no longer duplicates that table across surrounding dimensions.
+Explicit selections now compose each factor with the selected positions during
+preparation. Common coordinate terms stay arithmetic. An unchanged map stays
+one map. Other terms separate their repeated residue from their linear advance;
+only the distinct residue and selected positions become a table. Each table
+contains final storage indices, so execution adds no nested map lookup. Native
+and FX consumers use the same result, serialization and source emitter.
+
+Preparation on 2026-10-29 selected repeated, out-of-order columns across the
+factor boundaries of a 606,348,324,135-element view. The result held 300 map
+entries and 145 bytes of coordinate expressions, the same as its smaller
+875-element counterpart. Exact ordered transfers, dependency spans, byte views
+and serialization agreed on smaller declarations. Metal source compiled without
+allocating tensor payload or submitting numerical work.
+
+A coupled selection with no extracted repetition can still materialize its
+selected domain. Non-affine alias inversion and the distributed ownership gap
+under exact partition boundaries also remain unfinished. An irreducible table
+supplied by a caller occupies its own domain; reshaping, slicing or permuting
+it no longer duplicates that table across surrounding dimensions.
 
 ## Place values for their consumers
 

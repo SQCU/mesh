@@ -458,6 +458,52 @@ static MetalTensorLayout *TensorAxisTransform(MetalTensorLayout *source,NSUInteg
     }
     return [TensorProduct(parts) shift:source.offset];
 }
+// A term repeats after period positions, with a fixed additive change. Zero
+// means that no complete period fits this declared domain. This is preparation
+// arithmetic; its quotient and finite residue become ordinary index factors.
+struct TensorPeriod { NSUInteger period; NSInteger delta; };
+static struct TensorPeriod TensorExpressionPeriod(id expression,NSUInteger count) {
+    if(TensorConstant(expression))return (struct TensorPeriod){1,0};
+    if([expression isEqual:@"i"])return (struct TensorPeriod){1,1};
+    NSString *op=expression[0];
+    if([op isEqual:@"add"]) {
+        struct TensorPeriod result={1,0};
+        for(NSUInteger k=1;k<[expression count];k++) {
+            struct TensorPeriod part=TensorExpressionPeriod(expression[k],count);
+            if(!part.period)return part;
+            NSUInteger factor=part.period/TensorGCD(result.period,part.period);
+            if(result.period>count/factor)return (struct TensorPeriod){0,0};
+            NSUInteger period=result.period*factor;
+            result.delta=result.delta*(NSInteger)factor+part.delta*(NSInteger)(period/part.period);result.period=period;
+        }
+        return result;
+    }
+    struct TensorPeriod value=TensorExpressionPeriod(expression[1],count);
+    if(!value.period)return value;
+    NSInteger n=[expression[2] integerValue];
+    if([op isEqual:@"mul"]){value.delta*=n;return value;}
+    NSUInteger factor=n/TensorGCD(labs(value.delta),n);
+    if(value.period>count/factor)return (struct TensorPeriod){0,0};
+    value.period*=factor;value.delta=[op isEqual:@"mod"]?0:value.delta*(NSInteger)factor/n;
+    return value;
+}
+// Append one additive factor, folding its origin now. Maps hold final storage
+// indices: selecting a mapped view never emits a lookup into another lookup.
+static void TensorSelectionFactor(NSMutableArray *basis,NSMutableArray *steps,NSMutableDictionary *maps,
+    NSMutableArray *coordinates,NSInteger *origin,NSData *map,id expression,NSUInteger count) {
+    expression=TensorNormalize(expression,count);
+    if(TensorConstant(expression)) {
+        NSInteger value=[expression integerValue];*origin+=map?((const NSInteger *)map.bytes)[value]:value;return;
+    }
+    NSUInteger size;
+    if(map)size=map.length/sizeof(NSInteger);
+    else {
+        struct TensorExpressionRange range=TensorRange(expression,count);*origin+=range.low;
+        expression=TensorSum(@[expression,@(-range.low)]);size=range.high-range.low+1;
+    }
+    if(map)maps[@(basis.count)]=map;
+    [basis addObject:@(size)];[steps addObject:@1];[coordinates addObject:expression];
+}
 static MetalTensorLayout *TensorSelect(MetalTensorLayout *source,NSUInteger axis,NSData *indices) {
     const NSUInteger count=indices.length/sizeof(NSInteger);const NSInteger *selected=indices.bytes;
     NSMutableArray *shape=[[source.shape mutableCopy] autorelease];shape[axis]=@(count);
@@ -469,17 +515,82 @@ static MetalTensorLayout *TensorSelect(MetalTensorLayout *source,NSUInteger axis
         maps[@(axis)]=data;
         return [MetalTensorLayout shape:shape strides:source.strides offset:source.offset maps:maps indices:nil];
     }
-    const NSUInteger total=TensorCount(shape);NSArray *steps=TensorStrides(source.shape),*newSteps=TensorStrides(shape);
-    NSMutableData *data=[NSMutableData dataWithLength:total*sizeof(NSInteger)];NSInteger *out=data.mutableBytes;
-    for(NSUInteger i=0;i<total;i++) {
-        NSUInteger old=0;
-        for(NSUInteger d=0;d<shape.count;d++) {
-            NSUInteger at=(i/[newSteps[d] unsignedIntegerValue])%[shape[d] unsignedIntegerValue];
-            old+=(d==axis?selected[at]:at)*[steps[d] unsignedIntegerValue];
-        }
-        out[i]=[source index:old];
+    const NSUInteger total=TensorCount(shape);
+    if(!total)return [MetalTensorLayout shape:shape strides:TensorStrides(shape) offset:source.offset maps:@{} indices:nil];
+    const NSUInteger inner=[TensorStrides(shape)[axis] unsignedIntegerValue],width=[source.shape[axis] unsignedIntegerValue];
+    const NSUInteger domain=source.count/width;
+    id selectedDigit=TensorDigits(shape)[axis];
+    id rest=TensorSum(@[TensorScale(TensorQuotient(@"i",count*inner,NO),inner),TensorQuotient(@"i",inner,YES)]);
+    id old=TensorSum(@[TensorScale(TensorQuotient(@"i",inner,NO),width*inner),TensorQuotient(@"i",inner,YES)]);
+    NSMutableArray *terms=[NSMutableArray array],*tables=[NSMutableArray array],*linear=[NSMutableArray array];
+    NSArray *digits=source.coordinates;
+    for(NSUInteger d=0;d<digits.count;d++) {
+        NSData *map=source.maps[@(d)];
+        if(map){[terms addObject:digits[d]];[tables addObject:map];}
+        else [linear addObject:TensorScale(digits[d],[source.strides[d] integerValue])];
     }
-    return [MetalTensorLayout shape:shape strides:newSteps offset:0 maps:@{} indices:data];
+    [terms addObject:TensorSum(linear)];[tables addObject:NSNull.null];
+    NSMutableArray *basis=[NSMutableArray array],*steps=[NSMutableArray array],*coordinates=[NSMutableArray array],*affine=[NSMutableArray array];
+    NSMutableDictionary *maps=[NSMutableDictionary dictionary];NSInteger origin=source.offset;
+    for(NSUInteger t=0;t<terms.count;t++) {
+        NSData *map=tables[t]==NSNull.null?nil:tables[t];const NSInteger *values=map.bytes;
+        NSMutableArray *variants=[NSMutableArray array];
+        for(NSUInteger k=0;k<count;k++)
+            [variants addObject:TensorNormalize(TensorSubstitute(terms[t],TensorSum(@[old,@(selected[k]*(NSInteger)inner)])),domain)];
+        id first=variants[0];BOOL unchanged=YES;
+        for(id value in variants)unchanged&=[value isEqual:first];
+        if(map&&unchanged) {
+            TensorSelectionFactor(basis,steps,maps,coordinates,&origin,map,TensorSubstitute(first,rest),total);continue;
+        }
+        NSMutableArray *common=[NSMutableArray arrayWithArray:TensorOp(first,@"add")?[first subarrayWithRange:NSMakeRange(1,[first count]-1)]:@[first]];
+        for(id value in variants) {
+            NSArray *parts=TensorOp(value,@"add")?[value subarrayWithRange:NSMakeRange(1,[value count]-1)]:@[value];
+            for(NSUInteger k=common.count;k--;)if(![parts containsObject:common[k]])[common removeObjectAtIndex:k];
+        }
+        id shared=TensorSum(common);NSMutableArray *residuals=[NSMutableArray array];BOOL constant=YES;
+        for(id value in variants) {
+            id residual=TensorNormalize(TensorSum(@[value,TensorScale(shared,-1)]),domain);
+            [residuals addObject:residual];constant&=TensorConstant(residual);
+        }
+        if(map&&constant) {
+            // Common coordinates plus one constant per selected position. Fuse
+            // that small Cartesian map once, without repeating surrounding rows.
+            struct TensorExpressionRange range=TensorRange(shared,domain);
+            for(NSNumber *shift in residuals){range.low=MAX(range.low,-shift.integerValue);range.high=MIN(range.high,(NSInteger)(map.length/sizeof(NSInteger))-1-shift.integerValue);}
+            NSUInteger extent=range.high-range.low+1;
+            NSMutableData *data=[NSMutableData dataWithLength:extent*count*sizeof(NSInteger)];NSInteger *out=data.mutableBytes;
+            for(NSUInteger j=0;j<extent;j++)for(NSUInteger k=0;k<count;k++)out[j*count+k]=values[range.low+(NSInteger)j+[residuals[k] integerValue]];
+            id index=TensorSum(@[TensorScale(TensorSum(@[TensorSubstitute(shared,rest),@(-range.low)]),count),selectedDigit]);
+            TensorSelectionFactor(basis,steps,maps,coordinates,&origin,data,index,total);continue;
+        }
+        if(!map) {
+            [affine addObject:TensorSubstitute(shared,rest)];
+            variants=residuals;
+        }
+        NSUInteger period=1;NSInteger delta=0;BOOL repeating=YES;NSMutableArray *periods=[NSMutableArray array];
+        for(id value in variants) {
+            struct TensorPeriod part=TensorExpressionPeriod(value,domain);
+            if(!part.period){repeating=NO;break;}
+            NSUInteger factor=part.period/TensorGCD(period,part.period);
+            if(period>domain/factor){repeating=NO;break;}
+            period*=factor;[periods addObject:@[@(part.period),@(part.delta)]];
+        }
+        if(repeating)for(NSUInteger k=0;k<count;k++) {
+            NSInteger change=[periods[k][1] integerValue]*(NSInteger)(period/[periods[k][0] unsignedIntegerValue]);
+            if(k==0)delta=change;else repeating&=delta==change;
+        }
+        if(!repeating||(map&&delta)){period=domain;delta=0;}
+        NSMutableData *data=[NSMutableData dataWithLength:period*count*sizeof(NSInteger)];NSInteger *out=data.mutableBytes;
+        for(NSUInteger j=0;j<period;j++)for(NSUInteger k=0;k<count;k++) {
+            NSInteger value=TensorEvaluate(variants[k],j);out[j*count+k]=map?values[value]:value;
+        }
+        if(delta)[affine addObject:TensorScale(TensorQuotient(rest,period,NO),delta)];
+        id index=TensorSum(@[TensorScale(TensorQuotient(rest,period,YES),count),selectedDigit]);
+        TensorSelectionFactor(basis,steps,maps,coordinates,&origin,data,index,total);
+    }
+    TensorSelectionFactor(basis,steps,maps,coordinates,&origin,nil,TensorSum(affine),total);
+    MetalTensorLayout *result=[MetalTensorLayout shape:basis strides:steps offset:origin maps:maps indices:nil];
+    return [result shaped:shape coordinates:coordinates];
 }
 // A linear interval can be a rectangular selection of the existing factors.
 // Resolve those digits before making a table: huge affine factors stay affine,
