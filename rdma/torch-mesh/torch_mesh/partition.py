@@ -2,12 +2,10 @@
 dimension by parts the backend moves between calls by the measured residual (design/heterogeneity.md §4, R3, R14).
 
 Stock PyTorch splits every sharded extent equally (Shard follows torch.chunk).  Here a program declares a mesh
-dimension's P units, attach(mesh, tp=P), the same on every rank, and the backend gives coordinate r a part p_r >= 1 of
-them, an even split, and a capacity c_r, its part.  An extent N that P divides (any
-other raises ValueError, on every rank alike) is split N p_r / P per coordinate in rank order, as the logical tensor
-reads, and rank r holds its share, N p_r / P elements along that dimension, with no padding: the blocks laid end to
-end in rank order are the logical tensor.  The parts are a tensor operand (operand(mesh, "tp").parts) read by the ops
-below when they run.  follow(*ts) moves sharded tensors onto the parts the Balancer attached, one group a move.  On raw
+dimension's P relative units, attach(mesh, tp=P), the same on every rank. Each rank holds the interval between
+two integer-rounded cumulative shares of the declared extent. These intervals cover the axis exactly, including
+odds, tails and empty shares. Divisible extents retain their previous boundaries. The capacity and index operands
+are fixed during preparation; a later assignment constructs a new generation.  follow(*ts) moves sharded tensors onto the parts the Balancer attached, one group a move.  On raw
 tensors split(mesh, "tp", N) gives the valid blocks in rank order, the ones the list collectives take
 (dist.all_gather into a list of unequal outputs, dist.reduce_scatter of a list of unequal inputs: MPI's v-collectives
 in torch's spelling).
@@ -16,7 +14,7 @@ On DTensor the partition is a placement, RaggedShard(dim, key) [veScale's Ragged
 held by the tensors it splits.  A DTensor holding one is a
 RaggedTensor, a DTensor subclass whose own dispatch keeps it ragged through every op.  distribute_tensor, from_local and
 redistribute below are torch's, with a Shard on an attached mesh dimension that dimension's RaggedShard; from_local
-without shape= means "a capacity block" (global = local P / c_r).  ColwiseParallel, RowwiseParallel and
+requires the declared global shape and stride for a ragged local operand.  ColwiseParallel, RowwiseParallel and
 SequenceParallel below are torch's parallel styles over them.  A tensor that meets a RaggedShard on its mesh dimension
 holds the same one or none there (R6: a plain Shard or another partition raises ValueError).
 
@@ -25,7 +23,7 @@ or reduction over a partitioned dimension giving the Partial its sharding gives,
 - Count-dependent: mean over a partitioned dimension is the sum divided by its logical count. Vector norms,
   softmax, log-softmax and their gradients use the shared algebra before sharding propagation. Their sum/max/min
   summaries are reduced across the split dimensions; their input rows remain sharded. An op whose sharding gives
-  another Partial there (avg, embedding's mask), or a ragged output extent P does not divide (a view), and convolution,
+  another Partial there (avg, embedding's mask), a reshape that changes rank ownership, and convolution,
   argmax, argmin and equal still get the dimension whole first. Variance, sort, top-k, scans and indexing retain
   DTensor's own whole-dimension rules until their lowering is extended.
 - Attention: SDPA on query, key and value split along the sequence by one RaggedShard (on any mesh dimension) is ring
@@ -38,7 +36,7 @@ the blocks, which laid end to end are the logical tensor; Replicate to Shard tak
 Shard reduce-scatters the blocks; Shard to Partial places this rank's block among zeros; Shard(d) to Shard(d') goes
 through Replicate; Shard's scatter from a source rank is the rooted V (the backend's scatter, MPI_Scatterv through
 ncclMeshAlltoAllV), each segment carrying its exact useful element count. Context parallelism's head-tail split keeps
-each half at its capacity: rank r's block is its head's valid positions, padding, its tail's, padding
+each half at its exact weighted boundaries: rank r holds its head positions followed by its tail positions
 (context_parallel_buffers, context_parallel_unshard, ring_attention: torch's context_parallel, its unshard and its
 ring, called in their place).
 The ring is split-KV attention [Dao et al. 2023, Flash-Decoding]: every rank's query block gathered (one Allgatherv),
@@ -99,6 +97,7 @@ import math
 import resource
 import weakref
 from pathlib import Path
+from allocate import partition_bounds
 
 import torch
 import torch.distributed as dist
@@ -147,25 +146,10 @@ _NAMED = {}
 _KEYS = itertools.count()
 
 
-def _units(o, N):
-    """An extent N's grain over a partition: P must divide N, so that every rank infers the same global extent from its
-    local one (global = local P / c_r)."""
-    if N % o.units:
-        raise ValueError(f'mesh: an extent of {N} split over {o.units} units is no multiple of them')
-    return N // o.units
-
-
 def _blocks(o, N):
-    """(sizes, offsets) of the local buffers of an extent N over a partition: the capacities' (static)."""
-    g = _units(o, N)
-    sizes = [g * c for c in o.capacity]
-    return sizes, [sum(sizes[:r]) for r in range(len(sizes))]
-
-
-def _along(mask, dim, ndim):
-    shape = [1] * ndim
-    shape[dim] = -1
-    return mask.view(shape)
+    """Exact local sizes and origins of the declared logical extent."""
+    bounds = partition_bounds(o.capacity, N)
+    return [b - a for a, b in zip(bounds, bounds[1:])], list(bounds[:-1])
 
 
 # The collectives, each block its part, the split dimension moved to the front.
@@ -603,14 +587,14 @@ class RaggedShard(Shard):
 
 # The operand's API.
 def attach(mesh, **dims):
-    """Partition mesh dimensions by name: attach(mesh, tp=units), the units every extent the program splits along the
-    dimension is a multiple of, the same on every rank.  The backend splits them evenly over the coordinates in rank
+    """Partition mesh dimensions by name: attach(mesh, tp=units), the relative work units, the same on every rank.
+    The backend splits them evenly over the coordinates in rank
     order (the first units mod n one more)."""
     for name, units in dims.items():
         n = mesh.size(mesh.mesh_dim_names.index(name)) if name in (mesh.mesh_dim_names or ()) else 0
-        if not 0 < n <= units:
+        if n <= 0 or units <= 0:
             raise ValueError(f'mesh: partition {name}: {units} units over a mesh dimension of {mesh.mesh_dim_names}, '
-                             f'at least one a coordinate')
+                             f'positive units and a named mesh dimension are required')
         _attach(mesh, name, [units // n + (r < units % n) for r in range(n)])
 
 
@@ -955,9 +939,9 @@ def follow(*tensors):
                 continue
             rows = h[1].movedim(d, 0)
             old, rest = _OPERANDS[p.key], rows.shape[1:]
-            a, b = (list(itertools.accumulate(o.parts.tolist(), initial=0)) for o in (old, _OPERANDS[key]))
-            g, n, row = _units(old, h[2][p.dim]), len(old.capacity), math.prod(rest)
-            span = lambda r, q: g * max(0, min(a[r + 1], b[q + 1]) - max(a[r], b[q]))
+            a, b = (partition_bounds(o.capacity, h[2][p.dim]) for o in (old, _OPERANDS[key]))
+            n, row = len(old.capacity), math.prod(rest)
+            span = lambda r, q: max(0, min(a[r + 1], b[q + 1]) - max(a[r], b[q]))
             sends, receives = [span(rank, q) for q in range(n)], [span(r, rank) for r in range(n)]
             first, into = list(itertools.accumulate(sends, initial=0)), list(itertools.accumulate(receives, initial=0))
             out = [0 if q == rank else c * row for q, c in enumerate(sends)]
@@ -1059,7 +1043,7 @@ def _replan(mesh, name):
 def split(mesh, name, N):
     """The valid blocks of an extent N along partitioned mesh dimension `name` under the current parts, in rank order."""
     o = operand(mesh, name)
-    return [_units(o, N) * p for p in o.parts.tolist()]
+    return _blocks(o, N)[0]
 
 
 def _ragged(placements):
@@ -1148,36 +1132,6 @@ def _wrap(local, spec, requires_grad=None):
     return cls(local, spec, requires_grad=local.requires_grad if requires_grad is None else requires_grad)
 
 
-def _global_info(tensor, mesh, placements):
-    """from_local's inverse: the global shape and stride of a local tensor, global = local P / c_r on a RaggedShard,
-    local times the coordinates on a Shard."""
-    coordinate = mesh.get_coordinate()
-    shape, stride = list(tensor.size()), list(tensor.stride())
-    for i in reversed(range(len(placements))):
-        p = placements[i]
-        if isinstance(p, _StridedShard):
-            raise NotImplementedError('mesh: _StridedShard with a partitioned mesh dimension')
-        if not p.is_shard():
-            continue
-        d, local = p.dim, shape[p.dim]
-        if isinstance(p, RaggedShard):
-            o = p._operand(mesh.size(i))
-            if not o.capacity[coordinate[i]]:
-                raise ValueError('a zero-share local tensor needs declared shape= and stride= in from_local')
-            size, rest = divmod(local * o.units, o.capacity[coordinate[i]])
-        else:
-            size, rest = local * mesh.size(i), 0
-        for j in range(len(stride)):
-            if j != d and stride[j] >= stride[d] and local:
-                stride[j], left = divmod(stride[j] * size, local)
-                rest += left
-        if rest:
-            raise ValueError(f'mesh: a local extent {local} on mesh dimension {i} is no capacity block of {p!r}: '
-                             f'from_local takes shape= and stride=')
-        shape[d] = size
-    return torch.Size(shape), tuple(stride)
-
-
 class _FromLocal(torch.autograd.Function):
     """torch's _FromTorchTensor whose output is a RaggedTensor of the global shape given."""
 
@@ -1212,10 +1166,7 @@ class _ToLocal(torch.autograd.Function):
     def backward(ctx, grad):
         spec = ctx.spec
         placements = spec.placements if ctx.grad_placements is None else _placements(spec.mesh, ctx.grad_placements, grad.ndim, spec.placements)
-        # An empty local gradient cannot reconstruct the global stride. Its
-        # enclosing DTensor already retains that declared metadata.
-        stride = spec.tensor_meta.stride if not grad.numel() else _global_info(grad, spec.mesh, placements)[1]
-        meta = TensorMeta(spec.shape, stride, grad.dtype)
+        meta = TensorMeta(spec.shape, spec.tensor_meta.stride, grad.dtype)
         return _wrap(grad, DTensorSpec(spec.mesh, placements, tensor_meta=meta), grad.requires_grad), None
 
 
@@ -1241,7 +1192,7 @@ class _Redistribute(torch.autograd.Function):
 
 def distribute_tensor(tensor, device_mesh, placements, *, src_data_rank=0):
     """torch's distribute_tensor, a Shard on an attached mesh dimension its RaggedShard: each rank's capacity block,
-    zeros past its valid elements (scattered from src_data_rank, or this rank's own block where it is None)."""
+    scattered from src_data_rank, or this rank's own exact block where it is None."""
     placements = _placements(device_mesh, placements, tensor.ndim)
     if not _ragged(placements) or isinstance(tensor, DTensor):
         return _distribute_tensor(tensor, device_mesh, placements, src_data_rank=src_data_rank)
@@ -1264,13 +1215,17 @@ def distribute_tensor(tensor, device_mesh, placements, *, src_data_rank=0):
 
 
 def from_local(local_tensor, device_mesh, placements, *, run_check=False, shape=None, stride=None, grad_placements=None):
-    """torch's DTensor.from_local, a Shard on an attached mesh dimension its RaggedShard; without shape= and stride=
-    the local tensor is a capacity block (global = local P / c_r). A zero-share rank must retain the explicit global
-    shape and stride because its empty local shape cannot determine the distributed extent."""
+    """Bind a local page view to its declared global shape, stride and placement.
+
+    Ragged cuts cannot determine a global extent from one rank's local size.
+    The frontend supplies that metadata, including on empty ranks.
+    """
     placements = _placements(device_mesh, placements, local_tensor.ndim)
     if not _ragged(placements):
         return DTensor.from_local(local_tensor, device_mesh, placements, run_check=run_check, shape=shape, stride=stride,
                                   grad_placements=grad_placements)
+    if shape is None or stride is None:
+        raise ValueError('a ragged local operand requires its declared global shape and stride')
     if local_tensor.device.type != device_mesh.device_type and not local_tensor.is_meta:
         local_tensor = local_tensor.to(device_mesh.device_type)
     if run_check and device_mesh._is_current_rank_part_of_mesh():
@@ -1279,8 +1234,6 @@ def from_local(local_tensor, device_mesh, placements, *, run_check=False, shape=
                 if p.is_replicate():
                     local_tensor = local_tensor.contiguous()
                     mesh_broadcast(local_tensor, device_mesh, mesh_dim=i)
-    if shape is None or stride is None:
-        shape, stride = _global_info(local_tensor, device_mesh, placements)
     return _register(_FromLocal.apply(local_tensor, device_mesh, placements, torch.Size(shape), tuple(stride),
                                       None if grad_placements is None else tuple(grad_placements)))
 
@@ -1400,17 +1353,66 @@ def _keys(specs):
     return keys
 
 
+def _view_region(spec, coordinates):
+    """Canonical affine region of one shard, for a shape-only view relation."""
+    shape, stride = list(spec.shape), spec.tensor_meta.stride
+    origin = 0
+    for i, rank in enumerate(coordinates):
+        p = spec.placements[i]
+        if p.is_shard():
+            shape[p.dim], offset = p._local_shard_size_and_offset(shape[p.dim], spec.mesh.size(i), rank)
+            origin += offset * stride[p.dim]
+    if not math.prod(shape):
+        return None
+    axes = []
+    for step, count in sorted((s, n) for s, n in zip(stride, shape) if s and n > 1):
+        if axes and step == axes[-1][0] * axes[-1][1]:
+            axes[-1] = axes[-1][0], axes[-1][1] * count
+        else:
+            axes.append((step, count))
+    return origin, tuple(axes)
+
+
+def _reshape(op, args, kwargs):
+    """Compose declared view regions before applying a rank's local shape.
+
+    Ordinary Shard cannot express every mapped page selection. A changed
+    ownership relation remains an explicit collective in the declared graph.
+    """
+    x = args[0]
+    described = op(torch.empty_strided(x.shape, x.stride(), dtype=x.dtype, device='meta'), *args[1:], **kwargs)
+    meta = TensorMeta(described.shape, described.stride(), x.dtype)
+    placements = list(x.placements)
+    for i, p in enumerate(x.placements):
+        if not p.is_shard():
+            continue
+        for dim in range(described.ndim):
+            candidate = RaggedShard(dim, p.key) if isinstance(p, RaggedShard) else Shard(dim)
+            target = DTensorSpec(x.device_mesh, (*placements[:i], candidate, *placements[i + 1:]), tensor_meta=meta)
+            coordinates = itertools.product(*(range(x.device_mesh.size(axis)) for axis in range(i + 1)))
+            if all(_view_region(x._spec, rank) == _view_region(target, rank) for rank in coordinates):
+                placements[i] = candidate
+                break
+        else:
+            source = redistribute(x, [Replicate() if axis == i else p for axis, p in enumerate(x.placements)])
+            return op(source, *args[1:], **kwargs)
+    shape = list(described.shape)
+    for i, p in enumerate(placements):
+        if p.is_shard():
+            shape[p.dim] = p._local_shard_size_and_offset(shape[p.dim], x.device_mesh.size(i), x.device_mesh.get_local_rank(i))[0]
+    local = op(x._local_tensor, shape)
+    result = _wrap(local, DTensorSpec(x.device_mesh, tuple(placements), tensor_meta=meta), local.requires_grad)
+    return return_and_correct_aliasing(op, args, kwargs, result) if op._schema._is_view_op() else result
+
+
 def _unfit(specs, keys):
-    """The partitioned mesh dimensions the op's result cannot hold ragged: a Partial other than a sum, max or min
-    there, or a RaggedShard of an extent P does not divide."""
+    """Collective dimensions with a partial operation not yet lowered here."""
     dims = set()
     for s in specs:
         for i, p in enumerate(s.placements):
             if i not in keys:
                 continue
             if p.is_partial() and not (type(p) is Partial and p.reduce_op in _REMASKED):
-                dims.add(i)
-            elif isinstance(p, RaggedShard) and s.shape[p.dim] % _OPERANDS[p.key].units:
                 dims.add(i)
     return dims
 
@@ -1456,7 +1458,8 @@ def _propagated(op_call, args, kwargs):
         raise
     out = info.output_sharding
     spec = _map(lambda s: _retag(s, keys), out.output_spec)
-    whole = _unfit(_specs(spec), keys) | (set(keys) if op_call in sp.op_to_scalar_shape_adjuster else set())
+    whole = _unfit(_specs(spec), keys)
+    whole |= set(keys) if op_call in sp.op_to_scalar_shape_adjuster else set()
     if whole:
         return op_call(*_whole(args, whole), **_whole(kwargs, whole))
     flat, local = info.flat_args_schema, list(info.local_args)
@@ -1477,6 +1480,15 @@ def _propagated(op_call, args, kwargs):
         generator = info.local_kwargs.pop('generator', None)
         with _tracker(mesh)._distribute_region(args[0]._spec, generator):
             result = op(*local_args, **info.local_kwargs)
+    elif op in (aten.amax.default, aten.amin.default) and local_args[0].numel() == 0:
+        named = _named(op, local_args, info.local_kwargs)
+        x, dims = named['self'], named.get('dim')
+        dims = {d % x.ndim for d in dims} if dims else set(range(x.ndim))
+        shape = tuple(1 if axis in dims else size for axis, size in enumerate(x.shape)) if named.get('keepdim', False) else tuple(
+            size for axis, size in enumerate(x.shape) if axis not in dims)
+        low, high = ((-math.inf, math.inf) if x.is_floating_point() else
+                     (False, True) if x.dtype == torch.bool else (torch.iinfo(x.dtype).min, torch.iinfo(x.dtype).max))
+        result = x.new_full(shape, low if op is aten.amax.default else high)
     else:
         result = op(*local_args, **info.local_kwargs)
     if spec is None:
@@ -1544,7 +1556,7 @@ def _attention(op_call, args, kwargs):
             or named.get('enable_gqa', False)):
         raise NotImplementedError('mesh: ragged SDPA takes no attn_mask, dropout or enable_gqa')
     out, lse = _ring_attention(spec.mesh.get_group(ragged[0]), held.key, query._local_tensor, key._local_tensor,
-                               value._local_tensor, named.get('is_causal', False), named.get('scale'), 1, query.shape[2])
+                               value._local_tensor, named.get('is_causal', False), named.get('scale'), 1, sequence_length=query.shape[2])
     out = RaggedTensor(out, _spec_like(spec, query.shape[:-1] + value.shape[-1:], out.dtype), requires_grad=False)
     if op_call is aten._scaled_dot_product_attention_math_for_mps.default:
         return out, None
@@ -1559,6 +1571,7 @@ def _detached(op_call, args, kwargs):
 
 
 _HANDLERS = {aten.mean.default: _mean, aten.mean.dim: _mean,
+             aten.view.default: _reshape, aten.reshape.default: _reshape, aten._unsafe_view.default: _reshape,
              aten._scaled_dot_product_flash_attention_for_cpu.default: _attention,
              aten._scaled_dot_product_attention_math_for_mps.default: _attention, aten.detach.default: _detached}
 
@@ -1657,7 +1670,7 @@ class RowwiseParallel(_Rowwise):
     @staticmethod
     def _prepare_input_fn(input_layouts, desired_input_layouts, mod, inputs, device_mesh):
         x = inputs[0]
-        if (not isinstance(x, DTensor) and isinstance(mod, nn.Linear) and x.shape[-1] == 0
+        if (not isinstance(x, DTensor) and isinstance(mod, nn.Linear)
                 and any(p.is_shard() and p.dim % x.ndim == x.ndim - 1 for p in input_layouts)):
             shape = x.shape[:-1] + (mod.in_features,)
             x = from_local(x, device_mesh, input_layouts, shape=shape,
@@ -1681,106 +1694,91 @@ class SequenceParallel(_Sequence):
 
 
 # Context parallelism (torch/distributed/tensor/experimental/_context_parallel): each half at its capacity.
-def _halves(o, S, load_balance):
-    """Head-tail (2) where load_balance and 2P divides the sequence; else contiguous shares (1)."""
-    return 2 if load_balance and S % (2 * o.units) == 0 else 1
+def _halves(load_balance):
+    """The declared context placement, independent of sequence divisibility."""
+    return 2 if load_balance else 1
 
 
 def _positions(key, rank, S, halves, device):
-    """Rank `rank`'s block of a sequence of S split over the partition in `halves` (2: head-tail, rank r holding
-    positions [H_r, H_r + a_r) and their mirror [S - H_r - a_r, S - H_r), a_r = (S/2) p_r / P, H_r the heads of the
-    ranks before it; 1: contiguous shares): (the logical position of each element of its capacity block, 0 in padding;
-    which are valid).  Its causal work is a_r S, linear in its share."""
+    """Prepared logical positions, with no padding or invented valid lanes."""
     o = _OPERANDS[key]
 
     def build(p):
-        h = S // halves // o.units * o.capacity[rank]
         spans = _spans(o, rank, S, halves, p)
-        index = torch.cat([t for lo, hi in spans for t in (torch.arange(lo, hi), torch.zeros(h - hi + lo, dtype=torch.int64))])
-        valid = torch.cat([torch.arange(h) < hi - lo for lo, hi in spans])
-        return index.to(device), valid.to(device)
+        return torch.cat([torch.arange(lo, hi) for lo, hi in spans]).to(device)
     return o.cached(('positions', rank, S, halves, str(device)), build)
 
 
 def _spans(o, rank, S, halves, parts=None):
     """The logical positions [lo, hi) rank `rank` holds in each half of its block (_positions), from `parts` (the
     operand's own where None)."""
-    p = o.parts.tolist() if parts is None else parts
-    g = S // halves // o.units
-    H, a = g * sum(p[:rank]), g * p[rank]
-    return [(H, H + a)] if halves == 1 else [(H, H + a), (S - H - a, S - H)]
+    p = o.capacity if parts is None else parts
+    head = partition_bounds(p, S // halves)
+    spans = [(head[rank], head[rank + 1])]
+    if halves == 2:
+        tail = partition_bounds(p, S - S // halves)
+        spans.append((S - tail[rank + 1], S - tail[rank]))
+    return spans
+
+
+def _context_lengths(o, S, halves):
+    return [sum(hi - lo for lo, hi in _spans(o, rank, S, halves)) for rank in range(len(o.capacity))]
 
 
 def context_parallel_buffers(mesh, name, buffers, seq_dims, load_balance=True):
-    """torch's context_parallel's sharding of its buffers over partitioned mesh dimension `name`: each buffer's capacity
-    block of this rank, its valid positions (head-tail where load_balance and 2P divides the sequence), zeros past
-    them."""
+    """Select exact contiguous or head-tail spans from each declared buffer."""
     o, rank, shards = operand(mesh, name), mesh.get_local_rank(name), []
     for b, dim in zip(buffers, seq_dims):
         if not isinstance(b, torch.Tensor):
             raise NotImplementedError('mesh: a BlockMask buffer (flex attention) on a partitioned mesh dimension')
         S = b.size(dim)
-        _units(o, S)
-        index, valid = _positions(o.key, rank, S, _halves(o, S, load_balance), b.device)
-        shards.append(torch.where(_along(valid, dim, b.dim()), b.index_select(dim, index), 0))
+        index = _positions(o.key, rank, S, _halves(load_balance), b.device)
+        shards.append(b.index_select(dim, index))
     return shards
 
 
-def _sequence_extent(o, rank, local, sequence_length=None):
-    """Preserve declared logical extent even on a rank with no sequence tiles."""
-    if sequence_length is None:
-        if not o.capacity[rank]:
-            raise ValueError('a zero-share rank needs the declared sequence_length')
-        sequence_length, remainder = divmod(local * o.units, o.capacity[rank])
-        if remainder:
-            raise ValueError('local positions are not a capacity block of this partition')
-    if local != _units(o, sequence_length) * o.capacity[rank]:
-        raise ValueError('local positions do not match the declared sequence_length')
-    return sequence_length
-
-
 @torch.no_grad()
-def context_parallel_unshard(mesh, name, buffers, seq_dims, load_balance=True, *, sequence_length=None):
+def context_parallel_unshard(mesh, name, buffers, seq_dims, load_balance=True, *, sequence_length):
     """Gather context blocks through the common exact physical WRITE program.
 
     The ordinary contiguous sequence layout is the declared final destination.
     A head/tail partition gathers the same exact contributions, then permutes
     its two logical halves locally; no page-padded transport buffer is used.
     Original input strides bind the common indexed WRITE plan. Supply the
-    declared sequence_length on zero-share ranks, whose local extent is empty.
+    declared sequence_length on every rank; rounded local extents do not determine it.
     """
     o, rank, group = operand(mesh, name), mesh.get_local_rank(name), mesh.get_group(name)
-    local = buffers[0].shape[seq_dims[0]]
-    S = _sequence_extent(o, rank, local, sequence_length)
-    halves, lengths, joined = _halves(o, S, load_balance), _blocks(o, S)[0], []
+    S = sequence_length
+    halves = _halves(load_balance)
+    lengths, joined = _context_lengths(o, S, halves), []
     for b, dim in zip(buffers, seq_dims):
         dim %= b.ndim
-        shape = b.shape[:dim] + (S,) + b.shape[dim + 1:]
         gathered = allgatherv(b, dim, lengths, group.group_name)
         whole = gathered
         if halves != 1:
             pieces = []
-            for r, (at, size) in enumerate(zip(itertools.accumulate(lengths, initial=0), lengths)):
-                for half, (lo, hi) in enumerate(_spans(o, r, S, halves)):
-                    pieces.append((lo, gathered.narrow(dim, at + half * (size // halves), hi - lo)))
+            for r, at in enumerate(itertools.accumulate(lengths[:-1], initial=0)):
+                for lo, hi in _spans(o, r, S, halves):
+                    pieces.append((lo, gathered.narrow(dim, at, hi - lo)))
+                    at += hi - lo
             whole = torch.cat([value for _, value in sorted(pieces, key=lambda item: item[0])], dim)
         joined.append(whole)
     return joined
 
 
-def ring_attention(mesh, name, query, key, value, is_causal=False, scale=None, load_balance=True, *, sequence_length=None):
+def ring_attention(mesh, name, query, key, value, is_causal=False, scale=None, load_balance=True, *, sequence_length):
     """This rank's query block's attention over every rank's keys and values, the blocks along dimension 2 (the
     sequence) as context_parallel_buffers made them over partitioned mesh dimension `name`: (output, each query row's
-    logsumexp), padded query rows garbage that the unshard drops. sequence_length retains the AOT logical extent
-    on a zero-share rank; that rank supplies no partial input but remains in the physical communicator."""
+    logsumexp). sequence_length supplies the AOT logical extent on every rank. A zero-share rank supplies
+    no partial input but remains in the physical communicator."""
     o = operand(mesh, name)
-    S = _sequence_extent(o, mesh.get_local_rank(name), query.size(2), sequence_length)
-    return _ring_attention(mesh.get_group(name), o.key, query, key, value, is_causal, scale, _halves(o, S, load_balance), S)
+    return _ring_attention(mesh.get_group(name), o.key, query, key, value, is_causal, scale, _halves(load_balance),
+                           sequence_length=sequence_length)
 
 
 
 SCORES = 1 << 26
-def _block(query, key, value, scale=None, queries=None, keys=None, valid=None):
+def _block(query, key, value, scale=None, queries=None, keys=None):
     """Declare bounded score tiles and their [m,l,O] rows for the common compiler."""
     scale = query.shape[-1] ** -0.5 if scale is None else scale
     lead, rows, n = query.shape[:-2], query.shape[-2], key.shape[-2]
@@ -1793,8 +1791,6 @@ def _block(query, key, value, scale=None, queries=None, keys=None, valid=None):
         scores = (q @ key.transpose(-2, -1)).float() * scale
         if queries is not None:
             scores = scores.masked_fill(keys > queries[at:at + step, None], -math.inf)
-        if valid is not None:
-            scores = scores.masked_fill(~valid, -math.inf)
         top = scores.amax(-1, keepdim=True)
         top = torch.where(torch.isfinite(top), top, 0)
         probabilities = (scores - top).exp()
@@ -1803,7 +1799,7 @@ def _block(query, key, value, scale=None, queries=None, keys=None, valid=None):
     return torch.cat(parts, -2) if parts else query.new_empty((*lead, 0, value.shape[-1] + 2), dtype=torch.float32)
 
 
-def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=None, halves=1, sequence_length=None):
+def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=None, halves=1, *, sequence_length):
     """Declare query movement, split-KV work and the configured partial-row reduction.
 
     The whole function is traced before execution. Its tensor operations and
@@ -1812,24 +1808,26 @@ def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=N
     from .backend import merge_partials, attention
     o = _OPERANDS[key_name]
     rank = dist.get_rank(group)
-    S = _sequence_extent(o, rank, query.size(2), sequence_length)
-    lengths, lead = _blocks(o, S)[0], tuple(query.shape[:2])
+    S = sequence_length
+    lengths, lead = _context_lengths(o, S, halves), tuple(query.shape[:2])
     rows = [math.prod(lead) * length for length in lengths]
     gathered = allgatherv(query, 2, lengths, group.group_name)
     blocks = gathered.split(lengths, dim=2)
-    keys, valid = _positions(key_name, rank, S, halves, query.device)
-    mine, step = _spans(o, rank, S, halves), lengths[rank] // halves
+    keys = _positions(key_name, rank, S, halves, query.device)
+    mine = _spans(o, rank, S, halves)
+    key_offsets = list(itertools.accumulate((hi - lo for lo, hi in mine), initial=0))
     partials = []
     for owner, q in enumerate(blocks):
-        positions = _positions(key_name, owner, S, halves, query.device)[0]
-        height = lengths[owner] // halves
+        positions = _positions(key_name, owner, S, halves, query.device)
+        offset = 0
         local = []
-        for half, (_, hi) in enumerate(_spans(o, owner, S, halves)):
+        for lo, hi in _spans(o, owner, S, halves):
             seen = [b for b, (lo, _) in enumerate(mine) if not is_causal or lo < hi]
-            at = slice(half * height, (half + 1) * height)
-            first, end = (seen[0] * step, (seen[-1] + 1) * step) if seen else (0, 0)
+            at = slice(offset, offset + hi - lo)
+            offset += hi - lo
+            first, end = (key_offsets[seen[0]], key_offsets[seen[-1] + 1]) if seen else (0, 0)
             local.append(_block(q[:, :, at], key[:, :, first:end], value[:, :, first:end], scale,
-                                positions[at] if is_causal else None, keys[first:end], valid[first:end]))
+                                positions[at] if is_causal else None, keys[first:end]))
         block = torch.cat(local, 2)
         partials.append(block.transpose(1, 2).reshape(rows[owner], value.shape[-1] + 2))
     merged = merge_partials(torch.cat(partials, 0), -1, group.group_name, rows)

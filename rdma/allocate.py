@@ -1,7 +1,19 @@
 # design/whole-function.md
 import math
+import itertools
 
 RESOLUTION = 0.01  # Configuration-time memory-fit resolution.
+
+
+def partition_bounds(parts, extent):
+    """Exact adjacent cuts of a declared extent, weighted by rank shares.
+
+    Integer prefix rounding preserves coverage, including tails and empty
+    shares. Divisible extents retain the original capacity-block boundaries.
+    This relation is consumed during preparation, never by numerical replay.
+    """
+    total = sum(parts)
+    return tuple(extent * prefix // total for prefix in itertools.accumulate(parts, initial=0))
 
 
 def min_max(total, grain, low, high, times):

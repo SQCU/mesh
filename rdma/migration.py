@@ -16,8 +16,8 @@ same fact when one exists. Merely completing an unrelated incoming write is
 not such a proof.
 """
 from dataclasses import dataclass
-import itertools
 import math
+from allocate import partition_bounds
 
 
 @dataclass(frozen=True)
@@ -110,17 +110,12 @@ def _geometry(shape, dim, old_parts, new_parts, element_size):
         raise ValueError('invalid tensor shape, axis, or element size')
     if (not old_parts or len(old_parts) != len(new_parts) or
             any(not isinstance(n, int) or n < 0 for n in old_parts + new_parts) or
-            sum(old_parts) != sum(new_parts) or not sum(old_parts)):
-        raise ValueError('partitions must have equal positive total units and the same ranks')
+            not sum(old_parts) or not sum(new_parts)):
+        raise ValueError('partitions must have positive total weights and the same ranks')
     dim %= len(shape)
-    units = sum(old_parts)
-    if shape[dim] % units:
-        raise ValueError('partition units must divide the logical axis')
-    grain, prefix, row_bytes = shape[dim] // units, math.prod(shape[:dim]), math.prod(shape[dim + 1:]) * element_size
-    old = tuple(grain * n for n in old_parts)
-    new = tuple(grain * n for n in new_parts)
-    before = tuple(itertools.accumulate(old, initial=0))
-    after = tuple(itertools.accumulate(new, initial=0))
+    prefix, row_bytes = math.prod(shape[:dim]), math.prod(shape[dim + 1:]) * element_size
+    before, after = (partition_bounds(parts, shape[dim]) for parts in (old_parts, new_parts))
+    old, new = (tuple(b - a for a, b in zip(bounds, bounds[1:])) for bounds in (before, after))
     return shape, dim, old, new, before, after, prefix, row_bytes
 
 

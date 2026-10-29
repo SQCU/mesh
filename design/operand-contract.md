@@ -349,11 +349,45 @@ folding them into the existing scaled-partial merge is unfinished. Variance
 and the other whole-dimension rules in `partition.py` are also still present.
 Native fused row norms still need their distributed factor operands connected
 through the complete graph. These are remaining lowering and fusion tasks.
-The native model loader's 256/512 head-width filter, vector-width assumptions
-in its attention producers, and partition capacity-unit divisibility also
-remain. Removing those gates requires transducing their domains through the
-producers and partition maps; accepting the input alone would leave omitted
-lanes or incorrect ownership.
+The native model loader's 256/512 head-width filter and vector-width assumptions
+in its attention producers remain. Their domains still need to reach all
+producer loops; accepting the input alone would leave omitted lanes.
+
+### Exact partition boundaries
+
+`allocate.partition_bounds` now supplies the same integer prefix boundaries
+to tensor partitioning, migration writes and context position maps. A width
+need not be a multiple of the capacity units. Adjacent cuts cover the whole
+extent; divisible widths retain their existing cuts. Empty shares carry empty
+page operands and reduction identities. Context head/tail layouts divide each
+half by this relation, including odd lengths; their maps contain no padding.
+
+A local size cannot recover a rounded global extent. Ragged `from_local`
+therefore consumes the declared shape and stride. Gradients keep that metadata
+from their source specification. Row-parallel linear inputs take the declared
+input width from the module. The TP example keeps the distributed operand at
+module and residual boundaries instead of discarding and reconstructing it.
+Context consumers likewise require the declared sequence length.
+
+Shape-only views compare the actual affine regions assigned to each rank
+before choosing their output shard axis. This bypasses upstream's requirement
+that a flattened axis divide the number of ranks. Compatible cuts stay local.
+An incompatible cut still declares a gather: the current `RaggedShard` cannot
+describe every mapped output selection. Replacing that gather with the common
+page-selection relation remains unfinished; this change does not claim that
+all reshapes retain distributed ownership.
+
+Preparation on 2026-10-28 traced all four ranks at widths 3, 37 and 1,048,577,
+including empty local reductions, softmax, vector norms and their gradients.
+The crossings carried row summaries. A two-linear TP graph at widths
+5 → 37 → 13 retained its residual and gradients on each rank. Context unshard
+declarations covered zero, odd and short sequences. Migration descriptors
+used the same source and destination cuts, including zero-share destinations.
+Compatible views emitted no gather; an incompatible flatten exposed the
+remaining gather in its graph. These were metadata declarations and compiled
+maps, with no numerical replay or cluster performance measurement.
+The ordinary TP example also traced its full forward/backward graph on rank
+zero with the distributed operands retained across module boundaries.
 
 ### Partial-result merge capacity
 

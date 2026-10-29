@@ -62,16 +62,16 @@ class Block(nn.Module):
 def plan():
     if not SP:
         return {"attention.wq": ColwiseParallel(), "attention.wk": ColwiseParallel(), "attention.wv": ColwiseParallel(),
-                "attention.wo": RowwiseParallel(), "feed_forward.w1": ColwiseParallel(), "feed_forward.w3": ColwiseParallel(),
-                "feed_forward.w2": RowwiseParallel()}
+                "attention.wo": RowwiseParallel(use_local_output=False), "feed_forward.w1": ColwiseParallel(), "feed_forward.w3": ColwiseParallel(),
+                "feed_forward.w2": RowwiseParallel(use_local_output=False)}
     return {"attention_norm": SequenceParallel(),
             "attention": PrepareModuleInput(input_layouts=(Shard(1),), desired_input_layouts=(Replicate(),)),
             "attention.wq": ColwiseParallel(), "attention.wk": ColwiseParallel(), "attention.wv": ColwiseParallel(),
-            "attention.wo": RowwiseParallel(output_layouts=Shard(1)),
+            "attention.wo": RowwiseParallel(output_layouts=Shard(1), use_local_output=False),
             "ffn_norm": SequenceParallel(),
             "feed_forward": PrepareModuleInput(input_layouts=(Shard(1),), desired_input_layouts=(Replicate(),)),
             "feed_forward.w1": ColwiseParallel(), "feed_forward.w3": ColwiseParallel(),
-            "feed_forward.w2": RowwiseParallel(output_layouts=Shard(1))}
+            "feed_forward.w2": RowwiseParallel(output_layouts=Shard(1), use_local_output=False)}
 
 
 # docs/measurement.md#the-torch-parallel-runs
@@ -112,7 +112,7 @@ def main():
     held(model)
     x = drawn(partition.distribute_tensor(whole, mesh, [Shard(1) if SP else Replicate()], src_data_rank=None))
     from torch_mesh.declarations import Function, execution_sequence
-    function = Function(lambda: step(model, x.to_local()), parameters=model.parameters(),
+    function = Function(lambda: step(model, x), parameters=model.parameters(),
                         configuration=configuration['assignment']['operands'])
     program = execution_sequence([function] * STEPS)
     bind(configuration, lambda: function.declare(mesh.get_group('tp')), program.realize)
