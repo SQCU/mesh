@@ -68,6 +68,10 @@ MESH_METAL_VALUE(POINTWISE_THREADS, 256)
 // stream their page operands; this budget does not limit the head's width.
 MESH_METAL_VALUE(HEAD_THREADS, 128)
 MESH_METAL_VALUE(HEAD_REGISTER_PAIRS, 4)
+// Residual/normalization rows keep this many scalar or float4 values per lane.
+// Wider rows read their prepared page views again, without row-sized staging.
+MESH_METAL_VALUE(ROW_THREADS, 1024)
+MESH_METAL_VALUE(ROW_REGISTER_VALUES, 4)
 
 // Transport and prepared-command geometry, shared by both Metal command forms.
 MESH_METAL_VALUE(TRANSPORT_GROUP_THREADS, 1024)

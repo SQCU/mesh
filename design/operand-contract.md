@@ -254,9 +254,48 @@ This is still one local norm reduction per head. Collective placement must
 expose its partial sum before a head can span nodes. The model loader's
 256/512-only head filter also remains: the attention tile code still uses
 truncated `D/4` and `D/8` dimensions. Removing that filter requires masked
-channel-tail lowering, not just deleting the check. The separate
-`streamed_finish_norm_add` body also still stages a full logical row in
-threadgroup storage. These are remaining lowering tasks.
+channel-tail lowering, not just deleting the check.
+
+### Row reductions and gathered consumers
+
+`streamed_finish_norm_add` no longer stages a full row in shared memory.
+Its width and launch size are preparation operands. Each lane keeps a bounded
+set of values in registers; rows beyond that register budget reread their
+prepared partial or plain inputs. The shared `streamed_row_value` retains
+the existing scalar and vector partial-sum arithmetic. Shared storage holds
+one reduction scalar per SIMD group, including a final partial group.
+
+The finish writes the residual result to its assigned pages. Its normalized
+outputs use cached values or those pages. Its gathered consumers read those
+same pages through their prepared mappings. The dependency between the stores
+and the gather needs a device-memory barrier; there is no layout-staging copy.
+Slot controls still act on the stored result before these consumers read it.
+The launch uses this operation's width, rather than the model-wide hidden
+width. The bare kernel alias with an implicit width and launch is removed.
+Gathered outputs use the shared slab view and scale view. The finish no longer
+binds three separate destination/scale pairs or truncates work beyond them.
+Slab capacity gaps and mappings stay in the declared views.
+
+`streamed_row_gather` also reads its input pages directly. It sums squares when
+normalization is requested, or consumes the supplied factor when one already
+exists. Neither case stages the row. Its former workspace-width parameter is
+removed from both native and FX declarations; logical input width remains an
+explicit operand. Thus a storage budget cannot reject a large input row.
+
+Preparation on 2026-10-28 compiled mapped finishes and gathers with widths from
+1 to 1,048,576, including odd tails, partial SIMD groups, sparse gather indices
+and multiple typed destinations. Fused gathers with 5 and 23 slabs retained
+capacity gaps in their destination and scale views. At 1,024 threads the finish uses 128 bytes of
+static shared memory. A gather that consumes an existing factor uses none.
+Complete FX compressed-product graphs with multiple consumers also prepared
+through the revised gather interface. Native rank and Goal A built. No
+numerical commands or performance measurements were run.
+
+These reductions still finish one local row in a threadgroup. Splitting that
+row across nodes requires the graph to expose sums of squares of the finished
+logical values, their total count, and the resulting factor as page operands.
+Product partials must be summed before their values are squared. Removing
+row-sized staging does not by itself supply that distributed reduction.
 
 ### Partial-result merge capacity
 

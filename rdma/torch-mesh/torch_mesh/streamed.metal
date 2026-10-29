@@ -36,7 +36,7 @@
 //       tiles decoded into threadgroup memory in natural order, one operation a 256-wide panel
 //
 // and the products' sums reach their own consumers through streamed_value (a K split's or a member's partials summed,
-// the row's scale applied), whole rows through streamed_rows (partials, or plain values a crossing summed), and a
+// the row's scale applied), row values through streamed_row_value (partials, or plain values a crossing summed), and a
 // product's input is written through streamed_gather (a row's values at the column order, each column's scale
 // applied); streamed_alu and streamed_coop take a consumer of their partials as their last template argument E, an
 // epilogue run in the dispatch (streamed_plain: none). Include after <metal_stdlib>; the tensor-op kernels need Metal 4.
@@ -262,30 +262,18 @@ template <typename V, uint B, typename P> inline void streamed_store_four(mesh_o
 // composes that order with the stored partials and scales before this body runs.
 // V keeps vector loads where their views permit them. Plain rows use the same
 // logical positions after a collective has finished the reduction.
-template <uint V = 1, typename Plain = half, typename P, typename X, typename S>
-static inline void streamed_rows(P partials, X plain, S scale, uint n, uint first,
-                                 uint count, uint rows, uint shares, uint stride,
-                                 threadgroup float *vals, uint t, uint threads) {
+template <uint V, typename Plain, typename P, typename X, typename S>
+static inline auto streamed_row_value(P partials, X plain, S scale, uint n, uint column,
+                                      uint rows, uint shares, uint stride) {
+    const ulong at = ulong(n) * rows + column;
     if constexpr (V == 4) {
-        for (uint q = t; q < count / 4; q += threads) {
-            const ulong at = ulong(n) * rows + first + 4 * q;
-            float4 v;
-            if (shares == 0) v = float4(streamed_four<vec<Plain, 4>>(plain, at));
-            else {
-                v = 0.0f;
-                for (uint j = 0; j < shares; ++j) v += streamed_four<float4>(partials, at + ulong(j) * stride);
-                v *= streamed_four<float4>(scale, first + 4 * q);
-            }
-            ((threadgroup float4 *)vals)[q] = v;
-        }
+        if (shares == 0) return float4(streamed_four<vec<Plain, 4>>(plain, at));
+        float4 value = 0.0f;
+        for (uint j = 0; j < shares; ++j) value += streamed_four<float4>(partials, at + ulong(j) * stride);
+        return value * streamed_four<float4>(scale, column);
     } else {
-        for (uint i = t; i < count; i += threads) {
-            const uint r = first + i;
-            vals[i] = shares == 0 ? float(plain[ulong(n) * rows + r])
-                : streamed_value(partials, ulong(n) * rows + r, shares, stride, scale[r]);
-        }
+        return shares == 0 ? float(plain[at]) : streamed_value(partials, at, shares, stride, scale[column]);
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
 }
 
 // The rotary embedding of channel value x paired with y (channel i with i + dims / 2, `low` for the first half) at
@@ -798,7 +786,6 @@ static inline void streamed_gather(V values, float factor, F first, S scale,
         const ulong at = STRIDE ? (ulong(4 * q / max(STRIDE, 1u)) * rows + n) * STRIDE + 4 * q % max(STRIDE, 1u) : ulong(n) * columns + 4 * q;
         const bool4 active = Masked ? (o >= 0) : bool4(true);
         if constexpr (Slabs) {
-            #pragma unroll
             for (uint slab = 0; slab < Slabs; ++slab)
                 streamed_store_four(first, ulong(slab) * rows * columns + at,
                     select(vec<Output,4>(0), vec<Output,4>(float4(streamed_four<vec<Scale,4>>(scale, ulong(slab) * columns + 4*q)) * v), active));
@@ -827,12 +814,12 @@ static inline void streamed_gather(V values, float factor, F first, S scale,
 
 }
 
-// The coded inputs of up to three products sharing a column order (d.inputs of them) from plain rows x, a threadgroup a
-// row (metal-microbench docs/kernels.md#one-kernel-interface, typed rows): with Normed times the row's RMS norm's factor
-// (eps d.eps; a norm's gamma folded into the products' column scales: docs/kernels.md#stacked-products); the row staged
-// in threadgroup memory where WIDTH > 0 (d.columns at most WIDTH), else read in place (streamed_gather).
-// GivenFactor consumes the normalizer's per-row output; it needs no second reduction or staged row.
-template <bool Normed, uint WIDTH, uint STRIDE, bool Masked = false, uint InputColumns = 0, bool GivenFactor = false, typename Input = half, uint Slabs = 0, typename Output = half, typename Scale = float>
+// The coded inputs of products sharing a column order, in declared slabs or
+// separate destination bindings. Source rows are read through their page views.
+// Normed applies the row's RMS factor (eps d.eps; gamma is in the column scales).
+// Only reduction scalars use shared storage. GivenFactor consumes the existing
+// normalizer output. See metal-microbench docs/kernels.md#stacked-products.
+template <bool Normed, uint STRIDE, bool Masked, uint InputColumns, bool GivenFactor = false, typename Input = half, uint Slabs = 0, typename Output = half, typename Scale = float>
 kernel void streamed_row_gather(MESH_STREAMED_GATHER_PARAMETERS device const Input *x [[buffer(0)]], device Output *first [[buffer(1)]],
                                 device const Scale *scale [[buffer(3)]],
                                 device Output *second [[buffer(5)]], device Output *third [[buffer(6)]],
@@ -842,30 +829,21 @@ kernel void streamed_row_gather(MESH_STREAMED_GATHER_PARAMETERS device const Inp
                                 uint t [[thread_index_in_threadgroup]], uint lanes [[threads_per_threadgroup]]) {
     const streamed_dims d = dims_of(dims);
     const uint threads = lanes_of(lanes);
-    threadgroup float values[WIDTH > 0 ? WIDTH : 1];
-    threadgroup float partial[32];
-    const uint columns = d.columns, inputColumns = InputColumns ? InputColumns : columns;
-    if (WIDTH == 0) {
-        const float factor = GivenFactor ? factors[mesh_index<9>(n)] : 1.0f;
-        streamed_gather<STRIDE, Masked, 2, Slabs, Output, Scale>(mesh_view<0>(x, ulong(n) * inputColumns), factor,
-            mesh_view<1>(first), mesh_view<3>(scale), mesh_view<5>(second), mesh_view<7>(secondScale),
-            mesh_view<6>(third), mesh_view<8>(thirdScale), d.inputs, columns, d.rows, n, t, threads MESH_STREAMED_GATHER_ARGUMENTS);
-        return;
-    }
+    threadgroup float partial[(MESH_DEVICE_THREADGROUP_THREADS + MESH_SIMD_WIDTH - 1) / MESH_SIMD_WIDTH];
+    const uint columns = d.columns;
     float s = 0.0f;
-    for (uint q = t; q < inputColumns / 4; q += threads) {
-        const float4 v = float4(mesh_load4<0,vec<Input,4>,(InputColumns ? InputColumns : WIDTH) % 4 == 0>(x, ulong(n) * inputColumns + 4*q));
-        ((threadgroup float4 *)values)[q] = v;
-        if constexpr (!GivenFactor) s += dot(v, v);
+    if constexpr (Normed && !GivenFactor) {
+        for (uint q = t; q < InputColumns / 4; q += threads) {
+            const float4 v = float4(mesh_load4<0,vec<Input,4>,InputColumns % 4 == 0>(x, ulong(n) * InputColumns + 4*q));
+            s += dot(v, v);
+        }
+        for (uint q = InputColumns / 4 * 4 + t; q < InputColumns; q += threads) {
+            const float v = float(x[mesh_index<0>(ulong(n) * InputColumns + q)]);
+            s += v * v;
+        }
     }
-    for (uint q = inputColumns / 4 * 4 + t; q < inputColumns; q += threads) {
-        const float v = float(x[mesh_index<0>(ulong(n) * inputColumns + q)]);
-        values[q] = v;
-        if constexpr (!GivenFactor) s += v * v;
-    }
-    const float factor = GivenFactor ? factors[mesh_index<9>(n)] : Normed ? streamed_rms(s, inputColumns, d.eps, partial, t, threads) : 1.0f;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    streamed_gather<STRIDE, Masked, 2, Slabs, Output, Scale>((threadgroup const float *)values, factor,
+    const float factor = GivenFactor ? factors[mesh_index<9>(n)] : Normed ? streamed_rms<true>(s, InputColumns, d.eps, partial, t, threads) : 1.0f;
+    streamed_gather<STRIDE, Masked, 2, Slabs, Output, Scale>(mesh_view<0>(x, ulong(n) * InputColumns), factor,
         mesh_view<1>(first), mesh_view<3>(scale), mesh_view<5>(second), mesh_view<7>(secondScale),
         mesh_view<6>(third), mesh_view<8>(thirdScale), d.inputs, columns, d.rows, n, t, threads MESH_STREAMED_GATHER_ARGUMENTS);
 }

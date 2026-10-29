@@ -859,7 +859,7 @@ class Matrix(torch.Tensor):
             if logical >= 0:
                 selected[logical] = column
         output = torch.empty((n, len(selected)), dtype=values.dtype, device=values.device)
-        name, line = instance('streamed_row_gather', 0, 0, 0, 0, self.columns, 0, 'float', 0, _TYPES[values.dtype][1], 'char')
+        name, line = instance('streamed_row_gather', 0, 0, 0, self.columns, 0, 'float', 0, _TYPES[values.dtype][1], 'char')
         output, = _encode(name, [mixed, output, None, TensorView.of(self.signs).select(0, selected)],
             _dims(rows=n, columns=len(selected), inputs=1), n, 1, COMPUTE['GATHER_THREADS'], line,
             outputs=(1,), indexed=(0, 3), indices={2: selected})
@@ -927,7 +927,7 @@ class Matrix(torch.Tensor):
                     values.append(unscaled); factors.append(None)
                 tabled = False
                 if kind == 'gather':
-                    name, line = instance('streamed_row_gather', 0, 0, 0, int(-1 in positions), source.shape[1], 0, _TYPES[source.dtype][1])
+                    name, line = instance('streamed_row_gather', 0, 0, int(-1 in positions), source.shape[1], 0, _TYPES[source.dtype][1])
                     buffers = [source, outs[0], None, scales[0], None, outs[1], outs[2], scales[1], scales[2]]
                     dims, groups = _dims(rows=n, columns=self.columns, inputs=len(batch)), n
                     indexed, indices = (0, 3, 7, 8), {2: positions}
@@ -1053,7 +1053,7 @@ class Matrix(torch.Tensor):
             xt = self.coded_input(x16)[0][0]
             return self.apply(xt) if factor is None else self.finish(self.product(xt), factor=factor, dtype=dtype)
         xt = _half(n, self.rows)
-        name, line = instance('streamed_row_gather', 0, 0, 32, int(self.row_masked), self.logical_shape[0])
+        name, line = instance('streamed_row_gather', 0, 32, int(self.row_masked), self.logical_shape[0])
         xt, = _encode(name, [x16, xt, None, self.row_scale],
                 _dims(columns=self.rows, rows=n, inputs=1), n, 1, 256, line, outputs=(1,), indexed=(0, 3),
                 indices={2: self.metadata['row_order']})
