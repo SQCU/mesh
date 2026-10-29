@@ -174,7 +174,6 @@ struct metal_program *metal_begin4(struct metal_program *program, void *encoder,
   return program;
 }
 
-int metal_metal4(const struct metal_program *program) { return program->encoder4 != nil; }
 
 void metal_resident(struct metal_program *program, void *buffer) {
   if (!program->residency || !buffer || [program->residency containsAllocation:(id<MTLBuffer>)buffer]) return;

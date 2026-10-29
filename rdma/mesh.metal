@@ -40,13 +40,6 @@ __attribute__((always_inline)) static inline W mesh_wait_bounded(volatile cohere
     return mesh_wait_bounded(word, target, polls, nullptr);
 }
 
-// A landing's completion word (M07) once it holds 1 plus the invocation's cycle (M30; 0 in a one-pass program), or
-// UINT64_MAX once its link was cancelled (M12), or as it is after `polls` loads; the word returned tells the three apart.
-__attribute__((always_inline)) static inline ulong mesh_remote_wait_bounded(volatile coherent(system) device const ulong *completion, ulong cycle,
-                                                                             uint polls) {
-    return mesh_wait_bounded(completion, 1 + cycle, polls);
-}
-
 // A landed value (bytes the NIC wrote into a landing buffer), loaded through volatile coherent(system) in the widest words
 // that divide it.
 template <typename T>

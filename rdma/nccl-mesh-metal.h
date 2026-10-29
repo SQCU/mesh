@@ -126,7 +126,6 @@ struct metal_program *metal_begin(struct metal_program *, void *command_buffer, 
    metal_begin's (0: NCCL_MESH_POLLS).  NULL where memory runs out or the device's kernels cannot be
    made, *message then what failed. */
 struct metal_program *metal_begin4(struct metal_program *, void *encoder, void *table, void *residency, void *violation, uint32_t polls, const char **message);
-int metal_metal4(const struct metal_program *);
 /* A buffer of the program's made resident through its residency set (the Metal 4 form's, or a classic program's begun with
    one; a classic program without one needs none, its dispatches binding their buffers). */
 void metal_resident(struct metal_program *, void *buffer);
