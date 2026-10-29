@@ -17,6 +17,12 @@ def declare(comm, calls, *, order=None):
             if row.get(field) is not None:
                 arrays.append(mesh.ffi.new(f'{ctype}[]', row[field]))
                 row[field] = arrays[-1]
+        # the (send, receive) arrays the call is issued with, as the host path passes them: {NULL, address}
+        # (nccl.h ncclMeshCall bindings; design/eager-execution.md#what-follows)
+        if row.get('bindings') is not None:
+            arrays.append(mesh.ffi.new('ncclMeshBuffer[2]', [(mesh.ffi.NULL, 0 if a is None else a.ctypes.data)
+                                                             for a in row['bindings']]))
+            row['bindings'] = arrays[-1]
         row.setdefault('counts', mesh.ffi.NULL)
         made.append(row)
     sequence, previous = [], None

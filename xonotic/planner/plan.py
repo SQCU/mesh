@@ -64,8 +64,9 @@ def main():
     local = empty((args.bots + 1, args.width), np.float32)
     local[...] = 0
     total = empty(local.shape, local.dtype)
+    # issued as comm.Allreduce(local, total) every tick (design/eager-execution.md#what-follows)
     calls = [{'what': mesh.lib.MESH_ALLREDUCE, 'count': local.size, 'type': mesh.lib.ncclFloat32,
-              'op': mesh.lib.ncclSum}]
+              'op': mesh.lib.ncclSum, 'bindings': (local, total)}]
     declare(comm.comm, calls)
     decisions = assignment.domains(
         {'columns': {'parts': columns, 'grain': split['grain'], 'low': split['low']}},

@@ -245,7 +245,8 @@ class Comm:
         """Declare the complete function's native calls through the shared compiler.
 
         Calls are dictionaries of ncclMeshCall fields, with ordinary count lists
-        where required. This is configuration metadata, not a Python schedule or
+        where required and `bindings` the (send, receive) arrays a call is
+        issued with. This is configuration metadata, not a Python schedule or
         a collective decomposition. Every rank declares the same function.
         """
         from assignment import declare
