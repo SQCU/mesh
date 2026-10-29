@@ -31,16 +31,23 @@ Every record field is plain data except three kinds of object:
 
 ## Serialization: name the three kinds of object
 
-- **Pipelines** are named by (library source or metallib, function name, function-constant values). The compiled form
-  is an `MTLBinaryArchive`, which mesh already serializes for its own kernels (nccl-mesh-kernels.m:31–39) and
-  microbench already loads (common.swift:160–250). design/compile-once-2026-10-29.md makes layouts function constants,
-  so a pipeline is exactly (source, constants).
-- **Buffers** are named by operand: (operand k, byte offset, stride, instances, length). Rehydration binds operand k to
-  whatever lease the loader supplies. A lease's `gpuAddress` differs per process, so nothing stores an address.
-- **Barriers** are stored, so that rehydration skips the dependency compile. That compile cost cp 260 s per rank before
-  the frontier was bucketed (docs/facts.md, mb 170dba48), and it still runs at every preparation.
-- **ICB segments** are not stored. Metal owns their storage. Rehydration re-encodes them from the records, which costs
-  encoding only, with no compile and no dependency pass.
+- **Pipelines** are named by their declaration: (library, function name, function-constant values as [index,
+  MTLDataType, bytes], descriptor fields). `MetalPipelineMake` makes a pipeline from one and declares it. A frontend
+  that makes pipelines itself calls `MetalPipelineDeclare`. Metal does not expose an `MTLFunction`'s library or
+  constant values, so the name is taken where the pipeline is made. The library is written as itself
+  (`serializeToURL:error:`, which microbench's common.swift `keptLibrary` already relies on), so loading parses no
+  source. The pipelines are written as an `MTLBinaryArchive` for the writing device's architecture.
+- **Buffers** are named by operand, and an operand is a region lease (`ncclMeshMemBuffer`). Torch's buffer for a tensor
+  and the lease buffer of the same bytes (`MetalTensorPages`) are therefore one operand, and offsets are the lease's.
+  - The caller names the *bound* operands (inputs, outputs, weights to replace). Each bound operand records where its
+    buffer starts in its lease, and instantiation moves its offsets by the difference.
+  - Every other operand is *kept*: its bytes are stored, and instantiation leases them anew (`MetalLeaseBuffer`).
+  - Nothing stores an address, since a lease's `gpuAddress` differs per process.
+- **Barriers** are compiled again at instantiation (`MetalDataflow`, `MetalOrder`). Since the frontier was bucketed
+  (mesh a8856dd4), that pass is not where preparation's time goes. Storing its result would be a second record of
+  what the reaches already determine.
+- **ICB segments** are not stored. Metal owns their storage. Rehydration rebuilds them through the same
+  `MetalReplayBuild` a recording uses, which costs encoding only.
 - **Host operations** become named prepared operations: a kind, operand views and parameters (an SGEMM/BNNS binding,
   a CoreML model and its views). The header already says they are "prepared native operations, not callbacks into a
   frontend" (metal-recording.h:150). Naming them is the one interface change.
@@ -48,13 +55,26 @@ Every record field is plain data except three kinds of object:
   program is compiled identically at every member (C7), so it is rebuilt from the declarations at load and never
   stored. Its pipelines are libnccl-mesh.metallib's.
 
-Two costs leave preparation: pipeline compiles, which design/compile-once-2026-10-29.md names a candidate cause of
-ranks starting seconds behind their peers, and the dependency compile.
+The template is the function's building calls, not its encoded command buffer. `MetalScheduleCross` encodes a
+collective into the Metal 4 command buffer during preparation, so the finished buffer holds what cannot be written.
+A schedule keeps its calls as it is built (data, compute, append, host, cross), and instantiation makes the same calls
+on a new schedule. Pipeline compiles leave preparation; design/compile-once-2026-10-29.md names them a candidate cause
+of ranks starting seconds behind their peers.
 
 ## Templates: bindings by operand, not by buffer
 
-A template is the serialized form above: operations, operand-relative bindings and reaches, barriers, pipeline names
-and geometry. An instance is a template plus an operand table (operand k → lease) plus a device.
+A template is the serialized form above: its calls, operand-relative bindings and reaches, and pipeline declarations.
+An instance is a template plus an operand table (operand k → lease) plus a device.
+
+As landed (R1–R3):
+- `MetalScheduleTemplate(schedule, bound)` exports the calls.
+- `MetalTemplateWrite` and `MetalTemplateRead` write and read the directory: template.plist, library.<i>.metallib and
+  pipelines.<architecture>.metallib.
+- `MetalScheduleInstantiate(schedule, template, bound)` makes the calls on a new schedule.
+- torch_mesh exposes these as `_stream.Schedule.save(directory, bound)` and `_stream.Schedule.load(directory, bound)`.
+- A local check on the M5 Max ran one compute call and one replay (out = 4x + 3y over 2¹⁶ halves). Preparation took
+  68.6 ms recorded, with its compile, and 1.4 ms loaded in a second process with no compile. Both runs were correct
+  on their own data.
 
 ### Same architecture, different data
 
@@ -91,9 +111,9 @@ and geometry. An instance is a template plus an operand table (operand k → lea
 
 | Step | Scope | Interfaces touched |
 |---|---|---|
-| R1 | An accessor that exports a replay's records, reaches and barriers, keyed by operand | one new function beside `MetalReplayBuild` |
-| R2 | A template file: pipeline names, operand-relative records, reaches, barriers, geometry; writer and reader in a new file | none |
-| R3 | Rehydration of GPU-only replays: archive lookup, operand table, ICB re-encode or direct form | none |
+| R1 | Export: a schedule keeps its calls; pipelines are declared where made (landed) | `MetalPipelineMake`, `MetalPipelineDeclare`, `MetalScheduleTemplate` |
+| R2 | The template directory: plist, libraries, per-architecture pipeline archive (landed) | `MetalTemplateWrite`, `MetalTemplateRead` |
+| R3 | Instantiation of GPU-only functions: data, compute, append (landed) | `MetalScheduleInstantiate`; torch_mesh `Schedule.save`, `Schedule.load` |
 | R4 | Host operations named by kind; `MetalRecordHost` takes the name and its views | `MetalRecordHost`, `MetalScheduleHost` |
 | R5 | Crossings named by their collective call; the program recompiled at load | `MetalCrossing` |
 | R6 | Geometry as a function of device capabilities; per-family archives | the recording of grid and group |

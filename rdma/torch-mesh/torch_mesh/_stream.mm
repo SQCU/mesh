@@ -379,13 +379,11 @@ static int64_t pipeline(const std::string &source, const std::string &name) {
   made->done = dispatch_semaphore_create(0);
   const std::string function_name = name;
   [device newLibraryWithSource:@(source.c_str()) options:options completionHandler:^(id<MTLLibrary> library, NSError *error) {
-    id<MTLFunction> function = library ? [library newFunctionWithName:@(function_name.c_str())] : nil;
     NSError *failed = nil;
-    id<MTLComputePipelineState> state = function ? [device newComputePipelineStateWithFunction:function error:&failed] : nil;
+    // design/replay-templates-2026-10-29.md: made from its declaration, which a template names it by
+    id<MTLComputePipelineState> state = library ? MetalPipelineMake(library, @(function_name.c_str()), @[], nil, nil, &failed) : nil;
     if (!library) made->error = std::string("kernel source: ") + error.localizedDescription.UTF8String;
-    else if (!function) made->error = "kernel source: no function " + function_name;
-    else if (!state) made->error = std::string("kernel pipeline: ") + failed.localizedDescription.UTF8String;
-    [function release];
+    else if (!state) made->error = "kernel pipeline " + function_name + ": " + failed.localizedDescription.UTF8String;
     made->state = state;
     dispatch_semaphore_signal(made->done);
   }];
@@ -429,20 +427,18 @@ static void specialize(std::shared_ptr<Library> library, const std::string &name
         dispatch_semaphore_signal(library->done);   /* the library stays ready for every later specialization */
         if (!library->library) made->error = library->error;
         else {
-          MTLFunctionConstantValues *set = [[MTLFunctionConstantValues new] autorelease];
+          // design/replay-templates-2026-10-29.md: each constant [index, MTLDataType, bytes] in the pipeline's declaration
+          NSMutableArray *constants = [NSMutableArray array];
           static const MTLDataType types[4] = {MTLDataTypeBool, MTLDataTypeUInt, MTLDataTypeLong, MTLDataTypeULong};
           for (const auto &[index, type, value] : values) {
             const bool flag = value != 0; const uint32_t word = (uint32_t)value; const int64_t wide = value; const uint64_t unsigned_wide = (uint64_t)value;
             const void *at = type == 0 ? (const void *)&flag : type == 1 ? (const void *)&word : type == 2 ? (const void *)&wide : (const void *)&unsigned_wide;
-            [set setConstantValue:at type:types[type & 3] atIndex:(NSUInteger)index];
+            const size_t bytes = type == 0 ? sizeof flag : type == 1 ? sizeof word : sizeof wide;
+            [constants addObject:@[@(index), @(types[type & 3]), [NSData dataWithBytes:at length:bytes]]];
           }
           NSError *error = nil;
-          id<MTLFunction> function = [library->library newFunctionWithName:@(function_name.c_str()) constantValues:set error:&error];
-          id<MTLDevice> device = library->library.device;
-          id<MTLComputePipelineState> state = function ? [device newComputePipelineStateWithFunction:function error:&error] : nil;
-          if (!function) made->error = "kernel source: no function " + function_name + (error ? std::string(": ") + error.localizedDescription.UTF8String : "");
-          else if (!state) made->error = std::string("kernel pipeline: ") + error.localizedDescription.UTF8String;
-          [function release];
+          id<MTLComputePipelineState> state = MetalPipelineMake(library->library, @(function_name.c_str()), constants, nil, nil, &error);
+          if (!state) made->error = "kernel pipeline " + function_name + (error ? std::string(": ") + error.localizedDescription.UTF8String : "");
           made->state = state;
         }
       }
@@ -1640,6 +1636,36 @@ struct ScheduleBinding {
   void finish() { const auto held=operands; checked(MetalScheduleFinish(schedule.get(),^(NSError *){(void)held;})); }
   void enqueue() { MetalScheduleEnqueue(schedule.get()); }
   pybind11::capsule completion() { return schedule_completion(schedule); }
+
+  // design/replay-templates-2026-10-29.md: each bound tensor's storage, as the recorder names it
+  static NSArray *storages(const std::vector<at::Tensor> &bound) {
+    NSMutableArray *buffers=[NSMutableArray array];
+    for(const auto &t:bound) {
+      if(t.is_mps()){[buffers addObject:at::native::mps::getMTLBufferStorage(t)];continue;}
+      MetalTensorPages *pages=tensorPages(t);[buffers addObject:pages.buffer];[pages release];
+    }
+    return buffers;
+  }
+  // The function as a template in `directory`: `bound` (its inputs, outputs and the weights a later instance
+  // replaces) its operands in order, every other storage it names kept by value.
+  void save(const std::string &directory,const std::vector<at::Tensor> &bound) {
+    NSError *error=nil;
+    NSDictionary *made=MetalScheduleTemplate(schedule.get(),storages(bound),&error);
+    TORCH_CHECK(made,"template: ",error.localizedDescription.UTF8String);
+    error=MetalTemplateWrite(made,@(directory.c_str()));
+    TORCH_CHECK(!error,"template ",directory,": ",error.localizedDescription.UTF8String);
+  }
+  // The template in `directory` made on a new function after torch's inputs, `bound` its operands in order.
+  static std::unique_ptr<ScheduleBinding> load(const std::string &directory,const std::vector<at::Tensor> &bound) {
+    auto made=std::make_unique<ScheduleBinding>();
+    NSError *error=nil;
+    NSDictionary *read=MetalTemplateRead(at::mps::MPSDevice::getInstance()->device(),@(directory.c_str()),&error);
+    TORCH_CHECK(read,"template ",directory,": ",error.localizedDescription.UTF8String);
+    error=MetalScheduleInstantiate(made->schedule.get(),read,storages(bound));
+    TORCH_CHECK(!error,"template ",directory,": ",error.localizedDescription.UTF8String);
+    made->operands=bound;
+    return made;
+  }
 };
 
 // Invocation slots and results are operands. Runtime selects the next prepared
@@ -1944,6 +1970,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("fused_release", &fused_release, pybind11::call_guard<Drained>());
   pybind11::class_<ScheduleBinding>(module,"Schedule")
     .def(pybind11::init<>(), pybind11::call_guard<Drained>())
+    .def("save",&ScheduleBinding::save, pybind11::call_guard<Drained>())
+    .def_static("load",&ScheduleBinding::load, pybind11::call_guard<Drained>())
     .def("append",[](ScheduleBinding &s,Commands &commands){commands.append(s.schedule.get());
         s.operands.insert(s.operands.end(),commands.operands.begin(),commands.operands.end());}, pybind11::call_guard<Drained>())
     .def("compute",&ScheduleBinding::compute, pybind11::call_guard<Drained>())

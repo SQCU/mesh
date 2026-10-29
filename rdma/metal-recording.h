@@ -211,6 +211,28 @@ void MetalScheduleFree(struct MetalSchedule *);
 // A replay MetalRecord returned, destroyed and freed.
 void MetalReplayFree(struct MetalReplay *);
 
+// design/replay-templates-2026-10-29.md. A pipeline's declaration: the library it is specialized from, its function,
+// its function-constant values ([index, MTLDataType, bytes] each) and its descriptor's fields (label; threads, the most
+// threads a threadgroup holds; multiple, a threadgroup size a multiple of the execution width; indirect, support for
+// indirect commands). MetalPipelineMake makes the pipeline a declaration names, from `archives` where they hold it,
+// and declares it; the caller owns the result. A frontend that makes its pipelines otherwise declares each.
+id<MTLComputePipelineState> MetalPipelineMake(id<MTLLibrary> library, NSString *function, NSArray<NSArray *> *constants,
+    NSDictionary<NSString *, id> *descriptor, NSArray<id<MTLBinaryArchive>> *archives, NSError **error);
+void MetalPipelineDeclare(id<MTLComputePipelineState> pipeline, id<MTLLibrary> library, NSString *function,
+    NSArray<NSArray *> *constants, NSDictionary<NSString *, id> *descriptor);
+// A schedule's template: the calls that built it, `bound` its first operands in order, every other buffer it names
+// kept by value, its pipelines their declarations. Nil, with the reason, where a pipeline, host operation or crossing
+// has no declaration.
+NSDictionary *MetalScheduleTemplate(struct MetalSchedule *, NSArray<id<MTLBuffer>> *bound, NSError **error);
+// A template in `directory`: template.plist, each library as library.<i>.metallib and the pipelines of the device that
+// wrote it as pipelines.<architecture>.metallib.
+NSError *MetalTemplateWrite(NSDictionary *, NSString *directory);
+// A template read from `directory` for `device`: its libraries loaded, and its pipelines for this device's
+// architecture where they were written.
+NSDictionary *MetalTemplateRead(id<MTLDevice>, NSString *directory, NSError **error);
+// A template's calls made on `schedule`, `bound` its first operands; its kept operands are leased anew.
+NSError *MetalScheduleInstantiate(struct MetalSchedule *, NSDictionary *, NSArray<id<MTLBuffer>> *bound);
+
 #ifdef __cplusplus
 }
 #endif
