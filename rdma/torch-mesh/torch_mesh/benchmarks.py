@@ -4,6 +4,7 @@ Useful output bytes and whole-function completion time describe the work.
 Preparation occurs before submission; observations do not change execution.
 """
 import json
+import time
 from pathlib import Path
 import sys
 
@@ -54,6 +55,18 @@ def collective_operands(what, n, rank, size):
     raise ValueError(f'unknown collective measurement: {what}')
 
 
+def expected(what, rank, size, per):
+    """A collective's output on `rank` by its definition, over collective_operands' values (rank r holds r + 1)."""
+    import torch
+    if what in ('all_reduce_max', 'reduce_scatter_max'):
+        return torch.full((1,), float(size))
+    if what == 'broadcast':
+        return torch.full((1,), 1.0)
+    if what == 'all_gather':
+        return torch.arange(1, size + 1, dtype=torch.float32).repeat_interleave(per)
+    return torch.full((1,), float((rank - 1) % size + 1))
+
+
 def bandwidth(config):
     # design/whole-function.md#observations
     import torch
@@ -61,34 +74,66 @@ def bandwidth(config):
     import rollout
     from . import _stream
     from .backend import prepare_fragments
+    from .engines import host
     dist.init_process_group(backend='mesh', device_id=torch.device('mps', 0))
     rank, size = dist.get_rank(), dist.get_world_size()
     group = dist.distributed_c10d._get_default_group()._get_backend(torch.device('mps'))
-    cases = []
+    # design/replay-templates-2026-10-29.md: {'directory', 'phase'}: 'save' prepares the program and saves it as one
+    # template; 'load' makes it from that template on new operands, with no lowering or planning
+    template = config.get('template')
+    loading = template is not None and template['phase'] == 'load'
+    started, cases, bound = now(), [], []
     for requested in config['sizes']:
         n = requested // 2
         calls = min(config['most_calls'], max(config['least_calls'], config['bytes_per_size'] // requested))
         for what in ('all_reduce_max', 'broadcast', 'all_gather', 'reduce_scatter_max', 'exchange'):
             source, output, useful, declaration = collective_operands(what, n, rank, size)
-            binding, declarations = prepare_fragments([(declaration, source, output)], group)
-            cases.append((binding, useful, declarations, calls, what, requested))
-    group.plan([(declarations, calls) for _, _, declarations, calls, _, _ in cases])
-    prepared = []
-    for binding, useful, _, calls, what, requested in cases:
-        binding.realize(calls)
-        prepared.append((binding, useful, calls, what, requested))
+            bound += [source, output]
+            binding, declarations = (None, None) if loading else prepare_fragments([(declaration, source, output)], group)
+            cases.append((binding, useful, declarations, calls, what, requested, output, max(1, n // size)))
+    if loading:
+        functions = _stream.load(template['directory'], bound, communicators=[group.handle])
+        for function in functions:
+            function.finish()
+    else:
+        group.plan([(declarations, calls) for _, _, declarations, calls, _, _, _, _ in cases])
+        functions = []
+        for binding, _, _, calls, _, _, _, _ in cases:
+            function = _stream.Schedule()
+            binding.append(function, calls)
+            function.finish()
+            functions.append(function)
+    preparation = now() - started
+    if template is not None and not loading:
+        _stream.save(template['directory'], functions, bound)
+    implementation = 'loaded-program' if template is None else f"template-{template['phase']}"
     observer = rollout.start(dist.distributed_c10d._get_default_store(), 'mesh/bandwidth', rank, size,
                              'bandwidth')
     group._observers = [observer]
-    for index, (binding, useful, calls, what, requested) in enumerate(prepared):
+    completions = []
+    for index, (function, (_, useful, _, calls, what, requested, _, _)) in enumerate(zip(functions, cases)):
         started = now()
-        binding.enqueue()
-        completion = binding.completion()
+        function.enqueue()
+        completion = function.completion()
+        completions.append(completion)
         observer[0].put((completion, {'episode': str(index), 'parts': {}, 'graphs': {}, 'proposal': 0,
-            'workload': {'collective': what, 'bytes': requested, 'calls': calls}, 'implementation': 'loaded-program',
+            'workload': {'collective': what, 'bytes': requested, 'calls': calls}, 'implementation': implementation,
             'started': started, 'rank': rank, 'size': size, 'useful_work_bytes': useful * calls,
             'report': {'what': what, 'requested_bytes': requested, 'calls': calls,
-                       'useful_output_bytes_per_call_rank': useful}}))
+                       'useful_output_bytes_per_call_rank': useful, 'preparation_seconds': preparation}}))
+    if template is not None:
+        # the outputs as each collective defines them, on both sides of the template
+        while not _stream.completed(tuple(completions)):
+            time.sleep(0.001)
+        wrong = []
+        for _, _, _, _, what, requested, output, per in cases:
+            values, want = host(output).float().flatten(), expected(what, rank, size, per)
+            if not torch.equal(values, want if what == 'all_gather' else want.expand_as(values)):
+                wrong.append(f'{what} at {requested} bytes')
+        print(json.dumps({'template': template['phase'], 'rank': rank, 'functions': len(functions),
+                          'preparation_seconds': preparation, 'outputs_as_defined': not wrong, 'wrong': wrong}), flush=True)
+        if wrong:
+            raise RuntimeError(f"template {template['phase']}: outputs not as their collectives define them: {wrong}")
     dist.destroy_process_group()
 
 

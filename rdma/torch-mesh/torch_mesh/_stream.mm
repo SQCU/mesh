@@ -1727,25 +1727,34 @@ struct ScheduleBinding {
     *offsets=at;
     return buffers;
   }
-  // The function as a template in `directory`: `bound` (its inputs, outputs and the weights a later instance
-  // replaces) its operands in order, every other storage it names kept by value.
-  void save(const std::string &directory,const std::vector<at::Tensor> &bound) {
-    NSError *error=nil;NSArray *offsets=nil;
-    NSArray *buffers=storages(bound,&offsets);
-    NSDictionary *made=MetalScheduleTemplate(schedule.get(),buffers,offsets,&error);
-    TORCH_CHECK(made,"template: ",error.localizedDescription.UTF8String);
-    error=MetalTemplateWrite(made,@(directory.c_str()));
-    TORCH_CHECK(!error,"template ",directory,": ",error.localizedDescription.UTF8String);
+};
+
+// design/replay-templates-2026-10-29.md: a program's functions as one template in `directory`, `bound` (their inputs,
+// outputs and the weights a later instance replaces) their operands in order, every other storage they name kept by
+// value; the plan their crossings assume is declared once.
+static void save(const std::string &directory,const std::vector<ScheduleBinding *> &functions,const std::vector<at::Tensor> &bound) {
+  std::vector<MetalSchedule *> schedules;
+  for(auto *function:functions)schedules.push_back(function->schedule.get());
+  NSError *error=nil;NSArray *offsets=nil;
+  NSArray *buffers=ScheduleBinding::storages(bound,&offsets);
+  NSDictionary *made=MetalScheduleTemplate(schedules.data(),schedules.size(),buffers,offsets,&error);
+  TORCH_CHECK(made,"template: ",error.localizedDescription.UTF8String);
+  error=MetalTemplateWrite(made,@(directory.c_str()));
+  TORCH_CHECK(!error,"template ",directory,": ",error.localizedDescription.UTF8String);
+}
+
+// The template in `directory` made again: its functions, each a new function after torch's inputs, `bound` their
+// operands in order; `communicators` the instance's, in the order its crossings first named theirs; `host(kind, bytes)`
+// the native entry (run, context, retain, release) a host operation's declaration makes, its context the caller's to pass.
+static pybind11::list load(const std::string &directory,const std::vector<at::Tensor> &bound,
+    const std::vector<int64_t> &communicators,const std::optional<pybind11::function> &host) {
+  NSError *error=nil;
+  NSDictionary *read=MetalTemplateRead(at::mps::MPSDevice::getInstance()->device(),@(directory.c_str()),&error);
+  TORCH_CHECK(read,"template ",directory,": ",error.localizedDescription.UTF8String);
+  std::vector<std::unique_ptr<ScheduleBinding>> made;std::vector<MetalSchedule *> schedules;
+  for(NSUInteger f=0;f<[read[@"functions"] count];f++) {
+    made.push_back(std::make_unique<ScheduleBinding>());schedules.push_back(made.back()->schedule.get());
   }
-  // The template in `directory` made on a new function after torch's inputs, `bound` its operands in order.
-  // `communicators` the instance's, in the order the template's crossings first named theirs; `host(kind, bytes)` the
-  // native entry (run, context, retain, release) a host operation's declaration makes, its context the caller's to pass.
-  static std::unique_ptr<ScheduleBinding> load(const std::string &directory,const std::vector<at::Tensor> &bound,
-      const std::vector<int64_t> &communicators,const std::optional<pybind11::function> &host) {
-    auto made=std::make_unique<ScheduleBinding>();
-    NSError *error=nil;
-    NSDictionary *read=MetalTemplateRead(at::mps::MPSDevice::getInstance()->device(),@(directory.c_str()),&error);
-    TORCH_CHECK(read,"template ",directory,": ",error.localizedDescription.UTF8String);
     NSMutableArray *comms=[NSMutableArray array];
     for(auto comm:communicators)[comms addObject:[NSValue valueWithPointer:(void *)communicator(comm)]];
     const std::vector<at::Tensor> held=bound;
@@ -1783,16 +1792,16 @@ struct ScheduleBinding {
       };
       return [[crossing copy] autorelease];
     };
-    NSArray *offsets=nil;NSArray *buffers=storages(bound,&offsets);
-    error=MetalScheduleInstantiate(made->schedule.get(),read,buffers,offsets,comms,made_host,made_cross);
-    TORCH_CHECK(!error,"template ",directory,": ",error.localizedDescription.UTF8String);
-    // a device of an architecture the template has no pipelines for compiles them from its libraries, and keeps them
-    if((error=MetalTemplateArchive(read,@(directory.c_str()))))
-      TORCH_WARN("template ",directory,": this architecture's pipelines were not kept: ",error.localizedDescription.UTF8String);
-    made->operands=bound;
-    return made;
-  }
-};
+  NSArray *offsets=nil;NSArray *buffers=ScheduleBinding::storages(bound,&offsets);
+  error=MetalScheduleInstantiate(schedules.data(),schedules.size(),read,buffers,offsets,comms,made_host,made_cross);
+  TORCH_CHECK(!error,"template ",directory,": ",error.localizedDescription.UTF8String);
+  // a device of an architecture the template has no pipelines for compiles them from its libraries, and keeps them
+  if((error=MetalTemplateArchive(read,@(directory.c_str()))))
+    TORCH_WARN("template ",directory,": this architecture's pipelines were not kept: ",error.localizedDescription.UTF8String);
+  pybind11::list functions;
+  for(auto &function:made){function->operands=bound;functions.append(pybind11::cast(std::move(function)));}
+  return functions;
+}
 
 // Invocation slots and results are operands. Runtime selects the next prepared
 // native function; it does not enter the framework's encoding queue.
@@ -2096,10 +2105,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("fused_release", &fused_release, pybind11::call_guard<Drained>());
   pybind11::class_<ScheduleBinding>(module,"Schedule")
     .def(pybind11::init<>(), pybind11::call_guard<Drained>())
-    .def("save",&ScheduleBinding::save, pybind11::call_guard<Drained>())
-    .def_static("load",&ScheduleBinding::load, pybind11::arg("directory"), pybind11::arg("bound"),
-                pybind11::arg("communicators")=std::vector<int64_t>{}, pybind11::arg("host")=pybind11::none(),
-                pybind11::call_guard<Drained>())
     .def("append",[](ScheduleBinding &s,Commands &commands){commands.append(s.schedule.get());
         s.operands.insert(s.operands.end(),commands.operands.begin(),commands.operands.end());}, pybind11::call_guard<Drained>())
     .def("compute",&ScheduleBinding::compute, pybind11::call_guard<Drained>())
@@ -2122,10 +2127,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
          pybind11::arg("calls"),pybind11::arg("comm"),pybind11::arg("operands"),
          pybind11::arg("inputs")=std::vector<CommandRecord>{},pybind11::arg("outputs")=std::vector<CommandRecord>{}, pybind11::call_guard<Drained>())
     .def("realize", &Collectives::realize, pybind11::arg("repetitions")=1, pybind11::call_guard<Drained>())
-    .def("append",[](Collectives &c,ScheduleBinding &s){c.append(s.schedule.get());
-        s.operands.insert(s.operands.end(),c.operands.begin(),c.operands.end());}, pybind11::call_guard<Drained>())
+    .def("append",[](Collectives &c,ScheduleBinding &s,size_t repetitions){c.append(s.schedule.get(),repetitions);
+        s.operands.insert(s.operands.end(),c.operands.begin(),c.operands.end());}, pybind11::arg("schedule"),
+        pybind11::arg("repetitions")=1, pybind11::call_guard<Drained>())
     .def("completion", &Collectives::completion, pybind11::call_guard<Drained>())
     .def("enqueue", &Collectives::enqueue, pybind11::call_guard<Drained>());
+  module.def("save",&save,pybind11::arg("directory"),pybind11::arg("functions"),pybind11::arg("bound"),pybind11::call_guard<Drained>());
+  module.def("load",&load,pybind11::arg("directory"),pybind11::arg("bound"),
+             pybind11::arg("communicators")=std::vector<int64_t>{},pybind11::arg("host")=pybind11::none(),pybind11::call_guard<Drained>());
   pybind11::class_<Executions>(module,"Executions")
     .def(pybind11::init<pybind11::object>(), pybind11::call_guard<Drained>())
     .def("add",&Executions::add, pybind11::call_guard<Drained>())

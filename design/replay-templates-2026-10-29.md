@@ -71,7 +71,8 @@ As landed (R1–R3):
 - `MetalTemplateWrite` and `MetalTemplateRead` write and read the directory: template.plist, library.<i>.metallib and
   pipelines.<architecture>.metallib.
 - `MetalScheduleInstantiate(schedule, template, bound)` makes the calls on a new schedule.
-- torch_mesh exposes these as `_stream.Schedule.save(directory, bound)` and `_stream.Schedule.load(directory, bound)`.
+- torch_mesh exposes these as `_stream.save(directory, functions, bound)` and
+  `_stream.load(directory, bound, communicators, host)`. These are a program's functions, below.
 - A local check on the M5 Max ran one compute call and one replay (out = 4x + 3y over 2¹⁶ halves). Preparation took
   68.6 ms recorded, with its compile, and 1.4 ms loaded in a second process with no compile. Both runs were correct
   on their own data.
@@ -133,7 +134,7 @@ frontend's resolver makes the operation or crossing from the bytes with the nati
     with a plan is instantiated where that plan is not in use (a new process, or after the function it was made from
     is released).
   - WRITE plans (`ncclMeshWritePlan_t`) have no declaration yet, so a function with one makes no template.
-- **Local checks** (M5 Max, not committed):
+- **Local checks** (M5 Max), since replaced by examples/template-e2e.py:
   - A CPU product rebuilt in a second process was exact on new data.
   - A 1-rank all-reduce crossing was loaded with the second process's communicator, and that process planned
     nothing. Its template is [plan, cross]. It took 2.2 ms and produced y = x on new data.
@@ -161,11 +162,41 @@ stacked weight runs on any other layer's slice of the same shape.
   data words are recorded as numbers. They become functions of sizes only where the frontend lowers sizes
   symbolically, through the relations of design/lowering-closure-2026-10-29.md, which torch_mesh's lowering does not
   yet emit.
-- **Local checks** (M5 Max, not committed):
+- **Local checks** (M5 Max), since replaced by examples/template-e2e.py:
   - A two-stage function recorded on layer 0 of [4, 2¹⁶] stacks, loaded in new processes on layers 2 and 1, computed
     4x + 3y on those layers and left the others zero.
   - A load without this architecture's archive wrote one.
   - A template with altered compile facts failed, naming them.
+
+## A program's functions, and the end-to-end test
+
+A template holds a program: each of its functions' calls, over one shared table of operands, pipelines, libraries
+and communicators. A plan belongs to the program, since `ncclMeshCommPlan` declares a communicator's whole sequence.
+So a plan call is written where it differs from the last one written for its communicator, and every function's
+crossings run under that one plan.
+- **Why one function per template fails.** `bandwidth` plans its 45 cases in one call and realizes each as its own
+  function. A template per function would declare the plan 45 times, and each declaration would free the storage of
+  the functions loaded before it.
+
+examples/template-e2e.py is the test. It runs on a real program, the bandwidth workload, through that program's own
+interface.
+- **Recording run.** A first process prepares the program as it always does (lowering, one plan, each function
+  recorded), measures it and saves it.
+- **Loading run.** A second process, with its own communicator, makes the program from the template on newly
+  allocated operands, with no lowering and no planning, and measures it.
+- **Evidence.** Each run's rows are the program's own: (us, GB/s) for each collective and size, labelled
+  template-save or template-load, with its preparation seconds. Each run's outputs are checked against what each
+  collective defines (max over ranks, the root's value, the gathered segments, the predecessor's exchange). A run
+  whose outputs differ fails.
+- **In the hourly.** The case `bandwidth-template` reports the saving run's tuples and then the loading run's, in one
+  order.
+- **One rank on the M5 Max (2026-10-29).**
+  - 45 functions in each run, every output as defined.
+  - Preparation 0.116–0.119 s recorded and 0.107–0.120 s loaded. This program compiles no kernels, and its
+    preparation is the plan's compile, which a template declares again by design. So bandwidth gains no preparation
+    time from a template.
+  - The loaded run's rates were at or below the recorded run's in every shape, one sample each, so not evidence of
+    any difference.
 
 ## Steps
 

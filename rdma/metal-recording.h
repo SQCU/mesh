@@ -231,13 +231,15 @@ id<MTLComputePipelineState> MetalPipelineMake(id<MTLLibrary> library, NSString *
     NSDictionary<NSString *, id> *descriptor, NSArray<id<MTLBinaryArchive>> *archives, NSError **error);
 void MetalPipelineDeclare(id<MTLComputePipelineState> pipeline, id<MTLLibrary> library, NSString *function,
     NSArray<NSArray *> *constants, NSDictionary<NSString *, id> *descriptor);
-// A schedule's template: the calls that built it, `bound` its first operands in order, every other buffer it names
-// kept by value, its pipelines their declarations. A bound operand is a view: its buffer and the byte offset of the
+// A program's template: the calls that built each of its `count` functions (schedules), `bound` their first operands
+// in order, every other buffer they name kept by value, shared by them all; a plan the functions' crossings assume is
+// declared once where it is the same plan. A single function is a program of one. Pipelines are their declarations.
+// A bound operand is a view: its buffer and the byte offset of the
 // view in it (`offsets`, nil: 0), so an instance's view elsewhere moves every use of that operand's lease with it.
 // Its device's compile facts and each pipeline's thread limits are kept, since its libraries are compiled for them.
 // Nil, with the reason, where a pipeline, host operation or crossing has no declaration.
-NSDictionary *MetalScheduleTemplate(struct MetalSchedule *, NSArray<id<MTLBuffer>> *bound, NSArray<NSNumber *> *offsets,
-    NSError **error);
+NSDictionary *MetalScheduleTemplate(struct MetalSchedule *const *schedules, size_t count, NSArray<id<MTLBuffer>> *bound,
+    NSArray<NSNumber *> *offsets, NSError **error);
 // A template in `directory`: template.plist, each library as library.<i>.metallib and the pipelines of the device that
 // wrote it as pipelines.<architecture>.metallib.
 NSError *MetalTemplateWrite(NSDictionary *, NSString *directory);
@@ -256,8 +258,9 @@ typedef MetalHostOperation (^MetalTemplateHost)(NSString *kind, NSData *bytes, N
 typedef MetalCrossing (^MetalTemplateCross)(NSString *kind, NSData *bytes, struct MetalSchedule *schedule, NSError **error);
 // A template made where the device's compile facts differ, or where a dispatch's threadgroup holds more threads than
 // this device's pipeline takes, fails as a value naming them.
-NSError *MetalScheduleInstantiate(struct MetalSchedule *, NSDictionary *, NSArray<id<MTLBuffer>> *bound,
-    NSArray<NSNumber *> *offsets, NSArray<NSValue *> *communicators, MetalTemplateHost host, MetalTemplateCross cross);
+NSError *MetalScheduleInstantiate(struct MetalSchedule *const *schedules, size_t count, NSDictionary *,
+    NSArray<id<MTLBuffer>> *bound, NSArray<NSNumber *> *offsets, NSArray<NSValue *> *communicators, MetalTemplateHost host,
+    MetalTemplateCross cross);
 
 #ifdef __cplusplus
 }

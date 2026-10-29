@@ -2248,11 +2248,12 @@ static NSDictionary *MetalTemplateDevice(id<MTLDevice> device) {
     return @{@"threads":@(device.maxThreadsPerThreadgroup.width),@"bytes":@(device.maxThreadgroupMemoryLength)};
 }
 
-NSDictionary *MetalScheduleTemplate(struct MetalSchedule *root,NSArray<id<MTLBuffer>> *bound,NSArray<NSNumber *> *offsets,
-    NSError **error) {
-    root=root->root;
+NSDictionary *MetalScheduleTemplate(struct MetalSchedule *const *schedules,size_t count,NSArray<id<MTLBuffer>> *bound,
+    NSArray<NSNumber *> *offsets,NSError **error) {
+    if(!count){if(error)*error=MetalReplayFailure(EINVAL,@"a template of no function");return nil;}
+    struct MetalSchedule *root=schedules[0]->root;
     NSMutableArray *operands=[NSMutableArray array],*pipelines=[NSMutableArray array],*libraries=[NSMutableArray array],
-        *script=[NSMutableArray array];
+        *functions=[NSMutableArray array];
     NSMutableDictionary *operandAt=[NSMutableDictionary dictionary],*pipelineAt=[NSMutableDictionary dictionary],
         *libraryAt=[NSMutableDictionary dictionary],*dataAt=[NSMutableDictionary dictionary];
     // a bound operand's offsets are its lease's; where its buffer starts in the lease (delta) moves them to the buffer
@@ -2331,7 +2332,14 @@ NSDictionary *MetalScheduleTemplate(struct MetalSchedule *root,NSArray<id<MTLBuf
         }
         return @{@"kind":call[@"kind"],@"bytes":bytes,@"relocations":relocations};
     };
-    for(NSDictionary *call in root->script) {
+    // a plan is the program's: emitted where it differs from the last one emitted for its communicator
+    NSMutableDictionary *planned=[NSMutableDictionary dictionary];
+    for(size_t f=0;f<count&&!failure;f++) {
+    struct MetalSchedule *function=schedules[f]->root;
+    if(function->form!=root->form){failure=@"a template's functions are of one Metal form";break;}
+    NSMutableArray *script=[NSMutableArray array];
+    [functions addObject:script];[dataAt removeAllObjects];
+    for(NSDictionary *call in function->script) {
         NSString *kind=call[@"call"];
         if([kind isEqual:@"data"]) {
             dataAt[call[@"at"]]=@(dataAt.count);
@@ -2375,6 +2383,11 @@ NSDictionary *MetalScheduleTemplate(struct MetalSchedule *root,NSArray<id<MTLBuf
                 @"buffers":call[@"buffers"],@"memory":call[@"memory"],@"invocations":call[@"invocations"]}];
         } else if(call[@"kind"]&&([kind isEqual:@"host"]||[kind isEqual:@"cross"]||[kind isEqual:@"plan"])) {
             NSMutableDictionary *entry=[[declared(call) mutableCopy] autorelease];entry[@"call"]=kind;
+            if([kind isEqual:@"plan"]) {
+                NSNumber *comm=[entry[@"relocations"] firstObject][2]?:@(-1);
+                if([planned[comm] isEqual:entry])continue;
+                planned[comm]=entry;
+            }
             if([kind isEqual:@"host"]) {
                 NSData *views=call[@"accesses"];const struct MetalReach *source=views.bytes;const NSUInteger n=views.length/sizeof *source;
                 NSMutableData *made=[NSMutableData dataWithLength:n*sizeof(struct MetalTemplateReach)];
@@ -2386,9 +2399,11 @@ NSDictionary *MetalScheduleTemplate(struct MetalSchedule *root,NSArray<id<MTLBuf
         } else failure=[NSString stringWithFormat:@"a %@ call has no declaration",kind];
         if(failure)break;
     }
+    }
     if(failure){if(error)*error=MetalReplayFailure(EINVAL,failure);return nil;}
-    return @{@"format":@1,@"form":@(root->form),@"sizes":MetalTemplateSizes(),@"device":MetalTemplateDevice(root->device),
-        @"libraries":libraries,@"pipelines":pipelines,@"operands":operands,@"communicators":@(communicators.count),@"script":script};
+    return @{@"format":@2,@"form":@(root->form),@"sizes":MetalTemplateSizes(),@"device":MetalTemplateDevice(root->device),
+        @"libraries":libraries,@"pipelines":pipelines,@"operands":operands,@"communicators":@(communicators.count),
+        @"functions":functions};
 }
 
 // The pipelines of the device its libraries are on, as pipelines.<architecture>.metallib in `directory`
@@ -2434,7 +2449,7 @@ NSDictionary *MetalTemplateRead(id<MTLDevice> device,NSString *directory,NSError
     NSData *data=[NSData dataWithContentsOfFile:[directory stringByAppendingPathComponent:@"template.plist"] options:0 error:error];
     NSDictionary *listed=data?[NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:error]:nil;
     if(!listed)return nil;
-    if(![listed isKindOfClass:NSDictionary.class]||![listed[@"format"] isEqual:@1]||![listed[@"sizes"] isEqual:MetalTemplateSizes()]) {
+    if(![listed isKindOfClass:NSDictionary.class]||![listed[@"format"] isEqual:@2]||![listed[@"sizes"] isEqual:MetalTemplateSizes()]) {
         if(error)*error=MetalReplayFailure(EINVAL,[NSString stringWithFormat:@"%@ was not written by this recorder's build",directory]);
         return nil;
     }
@@ -2529,9 +2544,14 @@ static struct MetalReplay *MetalTemplateReplayMake(id<MTLDevice> device,NSDictio
     return replay;
 }
 
-NSError *MetalScheduleInstantiate(struct MetalSchedule *s,NSDictionary *made,NSArray<id<MTLBuffer>> *bound,
-    NSArray<NSNumber *> *offsets,NSArray<NSValue *> *communicators,MetalTemplateHost host,MetalTemplateCross cross) {
-    struct MetalSchedule *root=s->root;
+NSError *MetalScheduleInstantiate(struct MetalSchedule *const *schedules,size_t count,NSDictionary *made,
+    NSArray<id<MTLBuffer>> *bound,NSArray<NSNumber *> *offsets,NSArray<NSValue *> *communicators,MetalTemplateHost host,
+    MetalTemplateCross cross) {
+    NSArray *functions=made[@"functions"];
+    if(!count||functions.count!=count)
+        return MetalReplayFailure(EINVAL,[NSString stringWithFormat:@"the template holds %lu functions, %lu given",
+            (unsigned long)functions.count,(unsigned long)count]);
+    struct MetalSchedule *root=schedules[0]->root;
     @try {
         NSDictionary *facts=MetalTemplateDevice(root->device);
         if(![made[@"device"] isEqual:facts])
@@ -2540,7 +2560,7 @@ NSError *MetalScheduleInstantiate(struct MetalSchedule *s,NSDictionary *made,NSA
         if(communicators.count<[made[@"communicators"] unsignedIntegerValue])
             return MetalReplayFailure(EINVAL,[NSString stringWithFormat:@"the template names %@ communicators, %lu given",
                 made[@"communicators"],(unsigned long)communicators.count]);
-        if([made[@"form"] integerValue]!=(NSInteger)MetalScheduleTail(root)->form)
+        for(size_t f=0;f<count;f++)if([made[@"form"] integerValue]!=(NSInteger)MetalScheduleTail(schedules[f]->root)->form)
             return MetalReplayFailure(EINVAL,@"the template was made in another Metal form");
         NSArray *libraries=made[@"libraries"],*archives=made[@"archive"]?@[made[@"archive"]]:nil;
         NSMutableArray *pipelines=[NSMutableArray array];
@@ -2572,11 +2592,14 @@ NSError *MetalScheduleInstantiate(struct MetalSchedule *s,NSDictionary *made,NSA
                 NSData *contents=operand[@"contents"];
                 id<MTLBuffer> kept=MetalLeaseBuffer(root->device,contents.length);
                 memcpy(kept.contents,contents.bytes,contents.length);
-                [root->owners addObject:kept];[buffers addObject:kept];[kept release];
+                for(size_t f=0;f<count;f++)[schedules[f]->root->owners addObject:kept];
+                [buffers addObject:kept];[kept release];
             }
         }
+        for(size_t f=0;f<count;f++) {
+        struct MetalSchedule *s=schedules[f],*root=s->root;
         NSMutableArray *data=[NSMutableArray array];
-        for(NSDictionary *call in made[@"script"]) {
+        for(NSDictionary *call in functions[f]) {
             NSString *kind=call[@"call"];
             if([kind isEqual:@"data"]) {
                 NSData *bytes=call[@"bytes"];
@@ -2644,6 +2667,7 @@ NSError *MetalScheduleInstantiate(struct MetalSchedule *s,NSDictionary *made,NSA
                     if(failed)return MetalReplayFailure(failed,@"the template's crossing could not be encoded");
                 }
             } else return MetalReplayFailure(EINVAL,[NSString stringWithFormat:@"a template's %@ call",kind]);
+        }
         }
     } @catch(NSException *error) { return MetalReplayFailure(EINVAL,error.reason); }
     return nil;
