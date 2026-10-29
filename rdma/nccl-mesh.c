@@ -2096,10 +2096,10 @@ struct call {
 static _Thread_local int depth;
 static _Thread_local struct call *calls;
 static _Thread_local size_t call_count, call_capacity;
-/* a thread's calls' own parts at each call's place in its list: a V form's counts, an all-to-all's count matrix, its
-   buffer views; kept from group to group, each grown only where a call needs more, so a call allocates none once its
+/* a thread's calls' own parts at each call's place in its list: a V form's counts, its buffer views (an issue copies
+   both: struct bound); kept from group to group, each grown only where a call needs more, so a call allocates none once its
    place has room.  Only its group's launch reads them (ncclGroupEnd): no group in flight names one after */
-enum { ROOM_SEGMENTS, ROOM_MATRIX, ROOM_SEND_VIEWS, ROOM_RECEIVE_VIEWS, ROOMS };
+enum { ROOM_SEGMENTS, ROOM_SEND_VIEWS, ROOM_RECEIVE_VIEWS, ROOMS };
 struct room { void *part[ROOMS]; size_t bytes[ROOMS]; };
 static _Thread_local struct room *rooms;
 static _Thread_local size_t room_count;
@@ -6153,11 +6153,6 @@ static ncclResult_t routed(const void *sendbuff, void *recvbuff, const size_t *s
   if (root < -1 || root >= n) return fail(ncclInvalidArgument, "root %d of %d ranks", root, n);
   struct call c = {.what = WHAT_COUNTED, .send = sendbuff, .recv = recvbuff, .type = datatype, .op = ncclSum, .comm = comm, .stream = stream};
   if (!(c.segments = room_of(ROOM_SEGMENTS, 2 * (size_t)n * sizeof *c.segments))) return fail(ncclSystemError, "out of memory");
-  if (!sendcounts && !recvcounts) {
-    if (!(c.matrix = room_of(ROOM_MATRIX, (size_t)n * n * sizeof *c.matrix))) return fail(ncclSystemError, "out of memory");
-    for (int s = 0; s < n; s++) for (int d = 0; d < n; d++)
-      c.matrix[(size_t)s * n + d] = (from < 0 || from == s) && (to < 0 || to == d) ? count : 0;
-  }
   for (int q = 0; q < n; q++) {
     c.segments[q] = sendcounts ? sendcounts[q] : (from < 0 || from == me) && (to < 0 || to == q) ? count : 0;
     c.segments[n + q] = recvcounts ? recvcounts[q] : (from < 0 || from == q) && (to < 0 || to == me) ? count : 0;
