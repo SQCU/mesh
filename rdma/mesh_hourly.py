@@ -281,8 +281,12 @@ def run_workload(item, nodes, paths, record, ordinal, cluster):
         if not selected:
             raise RuntimeError(f'placement unmet: no live, installed member meets {item["place"]}')
         mesh.wait_paired(selected, None, end)  # a failed workload's ranks leave links re-pairing for a few seconds
-        if len(mesh.parts([node.number for node in selected], mesh.paired(selected))) > 1:
-            raise RuntimeError('placement unmet: its members are not linked by paired cables')
+        # the largest collective its paired cables link (the root's on a tie): a cable down narrows the case's members,
+        # it never stops the case
+        largest = max(mesh.parts([node.number for node in selected], mesh.paired(selected)),
+                      key=lambda part: (len(part), selected[0].number in part))
+        selected = [node for node in selected if node.number in largest]
+        result['nodes'] = [node.number for node in selected]
         history = record.get('history', {}).get(tag, [])[-64:]
         env = (f'PYTHONPATH={mesh.home_path(selected[0].source + "/rdma")}:{mesh.home_path(selected[0].source + "/rdma/torch-mesh")} '
                'PYTHONDONTWRITEBYTECODE=1 ')
