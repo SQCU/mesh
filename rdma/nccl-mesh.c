@@ -4366,7 +4366,9 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     pthread_mutex_unlock(&group_lock); parts_free(list, n);
     return fail(ncclSystemError, "%s", message);
   }
-  if (remote) touch(comm);
+  /* its program kept as comm's last (program_end), so a host group, whose command buffer the library made and commits,
+     returns once it ends whether or not it crosses (launch_host: gpu_finished) */
+  if (remote || !list[0].stream) touch(comm);
   for (uint32_t h = 0; remote && h < comm->count; h++) metal_resident(program, comm->channels[h].buffer);
   if (remote && comm->gate) metal_resident(program, comm->gate);
   const size_t r = (size_t)comm->rank;
