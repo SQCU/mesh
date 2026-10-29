@@ -60,6 +60,10 @@ MESH_METAL_VALUE(DRAW_COLUMNS_PER_BLOCK, 2048)
 MESH_METAL_VALUE(SELECTION_THREADS, 128)
 MESH_METAL_VALUE(SCAN_THREADS, 256)
 MESH_METAL_VALUE(POINTWISE_THREADS, 256)
+// Head reductions cache only this many value pairs per lane. Larger heads
+// stream their page operands; this budget does not limit the head's width.
+MESH_METAL_VALUE(HEAD_THREADS, 128)
+MESH_METAL_VALUE(HEAD_REGISTER_PAIRS, 4)
 
 // Transport and prepared-command geometry, shared by both Metal command forms.
 MESH_METAL_VALUE(TRANSPORT_GROUP_THREADS, 1024)

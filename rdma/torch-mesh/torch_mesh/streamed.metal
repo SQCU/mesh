@@ -228,7 +228,7 @@ static inline float streamed_sum(float s, threadgroup float *partial, uint t, ui
     if (t % MESH_SIMD_WIDTH == 0) partial[t / MESH_SIMD_WIDTH] = s;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float total = 0.0f;
-    for (uint i = 0; i < threads / MESH_SIMD_WIDTH; i++) total += partial[i];
+    for (uint i = 0; i < (threads + MESH_SIMD_WIDTH - 1) / MESH_SIMD_WIDTH; i++) total += partial[i];
     return total;
 }
 
@@ -298,26 +298,52 @@ static inline float mesh_rope(float x, float y, bool low, uint pair, uint dims, 
     return low ? x * c - y * sn : x * c + y * sn;
 }
 
-// One head of D channels of row n finished (metal-microbench docs/kernels.md#decode-attention, the heads): its values
-// from streamed_rows (a product's partials, or plain rows: shares 0, row stride `rows`, from channel `first`), their RMS
-// norm (streamed_rms, eps 1e-6), times gamma where given (staged in `gs` before the reductions), the rotary embedding over
-// its first `pairs` frequency pairs at `position`, stored to `out` and to `line` (a KV line), each where given.
-template <bool Precise, typename P, typename X, typename S, typename G, typename Y>
+// One paired selection from the row's declared partials or plain values.
+// The final unpaired value of an odd width occupies the low component only.
+template<uint Width, typename P, typename X, typename S>
+static inline float2 mesh_head_pair(P partials, X plain, S scale, uint n, uint first,
+                                    uint pair, uint rows, uint shares, uint stride) {
+    const uint low = pair < Width / 2 ? pair : Width - 1, high = pair + Width / 2;
+    const auto read = [&](uint i) {
+        const uint r = first + i;
+        return shares == 0 ? float(plain[ulong(n) * rows + r])
+            : streamed_value(partials, ulong(n) * rows + r, shares, stride, scale[r]);
+    };
+    return float2(read(low), pair < Width / 2 ? read(high) : 0.0f);
+}
+
+// Norm and paired rotation share one body at every width. Small rows retain
+// their pairs in registers. Wider rows reread their page operands after the
+// norm reduction. Only one scalar per SIMD group needs shared storage.
+template <bool Precise, uint Width, uint Threads, typename P, typename X, typename S, typename G, typename Y>
 static inline void mesh_head(P partials, X plain, S scale, uint n, uint first,
-                             uint D, uint rows, uint shares, uint stride, G gamma, uint pairs, uint position, float theta,
-                             Y out, device half *line, threadgroup float *vals, threadgroup float *gs, threadgroup float *partial,
-                             uint t, uint threads) {
-    for (uint i = t; i < D; i += threads) gs[i] = gamma.p ? float(gamma[i]) : 1.0f;
-    streamed_rows(partials, plain, scale, n, first, D, rows, shares, stride, vals, t, threads);
+                             uint rows, uint shares, uint stride, G gamma, uint pairs, uint position, float theta,
+                             Y out, device half *line, threadgroup float *partial, uint t) {
+    constexpr uint PairCount = (Width + 1) / 2, LanePairs = (PairCount + Threads - 1) / Threads;
+    constexpr bool Cached = LanePairs <= MESH_HEAD_REGISTER_PAIRS;
+    float2 values[Cached && LanePairs > 0 ? LanePairs : 1];
     float s = 0.0f;
-    for (uint i = t; i < D; i += threads) s += vals[i] * vals[i];
-    const float rms = streamed_rms(s, D, 1e-6f, partial, t, threads);
-    for (uint i = t; i < D; i += threads) {
-        const uint p = i < D / 2 ? i : i - D / 2, other = i < D / 2 ? i + D / 2 : i - D / 2;
-        const float x = vals[i] * rms * gs[i];
-        const half value = half(p < pairs ? mesh_rope<Precise>(x, vals[other] * rms * gs[other], i < D / 2, p, D, position, theta) : x);
-        if (out.p) mesh_publish(out, i, value);
-        if (line) ((volatile coherent(system) device half *)line)[i] = value;
+    for (uint p = t; p < PairCount; p += Threads) {
+        const float2 value = mesh_head_pair<Width>(partials, plain, scale, n, first, p, rows, shares, stride);
+        if constexpr (Cached) values[p / Threads] = value;
+        s += dot(value, value);
+    }
+    const float rms = streamed_rms(s, Width, 1e-6f, partial, t, Threads);
+    for (uint p = t; p < PairCount; p += Threads) {
+        float2 value;
+        if constexpr (Cached) value = values[p / Threads];
+        else value = mesh_head_pair<Width>(partials, plain, scale, n, first, p, rows, shares, stride);
+        const uint low = p < Width / 2 ? p : Width - 1, high = p + Width / 2;
+        value *= rms;
+        if (gamma.p) value *= float2(float(gamma[low]), p < Width / 2 ? float(gamma[high]) : 1.0f);
+        const half lo = half(p < pairs ? mesh_rope<Precise>(value.x, value.y, true, p, Width, position, theta) : value.x);
+        if (out.p) mesh_publish(out, low, lo);
+        if (line) ((volatile coherent(system) device half *)line)[low] = lo;
+        if (p < Width / 2) {
+            const half hi = half(p < pairs ? mesh_rope<Precise>(value.y, value.x, false, p, Width, position, theta) : value.y);
+            if (out.p) mesh_publish(out, high, hi);
+            if (line) ((volatile coherent(system) device half *)line)[high] = hi;
+        }
     }
 }
 

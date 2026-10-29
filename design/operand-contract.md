@@ -227,6 +227,37 @@ product, and it provides no new throughput or latency measurement.
 Further integration belongs at these shared lowering boundaries. Numerical
 bodies contribute their work and uses, rather than separate memory systems.
 
+### Head normalization storage
+
+The shared `mesh_head` body no longer reserves arrays for exactly 512 values
+and 512 weights. Width and launch size are compilation operands. Each lane
+reads paired values through the existing views, reduces their squared sum and
+writes the normalized, rotated result. An odd final channel remains in both
+the norm and output. Normalization weights are read where they are used.
+
+The register budget in `metal.def` decides whether pairs stay in registers
+across the norm. Wider heads reread their input pages after that reduction.
+This is a source specialization; execution neither chooses a storage method
+nor allocates one. Shared storage holds one scalar per SIMD group and the
+existing contributor word. Standalone and fused consumers use the same body.
+The shared sum includes a final partial SIMD group. The compiled width is no
+longer repeated as an independently bound runtime scalar.
+
+Preparation on 2026-10-28 compiled mapped standalone heads from width 1 through
+1,048,576 with 32 bytes of static threadgroup memory at 128 threads. Fused
+producer/consumer shaders compiled with widths 37, 512 and 32,768. Native rank
+and Goal A built. No numerical commands were submitted, and no performance
+result is established. Paired accumulation changes floating-point summation
+order; numerical execution remains to be measured after the structural pass.
+
+This is still one local norm reduction per head. Collective placement must
+expose its partial sum before a head can span nodes. The model loader's
+256/512-only head filter also remains: the attention tile code still uses
+truncated `D/4` and `D/8` dimensions. Removing that filter requires masked
+channel-tail lowering, not just deleting the check. The separate
+`streamed_finish_norm_add` body also still stages a full logical row in
+threadgroup storage. These are remaining lowering tasks.
+
 CPU contraction workspace is now part of that boundary. Preparation asks BNNS
 for its required byte count, assigns bridge pages and binds their address.
 The host record retains those pages and declares their writes alongside its
