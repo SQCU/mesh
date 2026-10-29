@@ -14,10 +14,6 @@ struct mesh_write_layout { size_t tile_bytes, instances, instance_stride, invoca
 #ifdef __cplusplus
 extern "C" {
 #endif
-/* `bytes` bytes, `repeats` times `stride` bytes apart: a WRITE moves bytes, whatever values they hold */
-ncclResult_t mesh_compile_write(const void* source_buffer, void* landing_buffer, size_t bytes,
-    int source, int destination, ncclComm_t comm, int metal, uint32_t repeats, size_t stride, size_t max_packet,
-    ncclMeshWritePlan_t* out);
 ncclResult_t mesh_compile_rows(const void* source_buffer, void* landing_buffer, size_t row_bytes, size_t rows,
     size_t pitch, int source, int destination, ncclComm_t comm, int metal, size_t max_packet, struct mesh_write_layout layout, ncclMeshWritePlan_t* out);
 /* A strided view's bytes in logical (C) element order, the transfer order every WRITE binds (nccl.h ncclMeshWriteLayoutPrepare):

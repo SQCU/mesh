@@ -1051,11 +1051,13 @@ ncclResult_t ncclMeshWritePagesPrepare(ncclMeshPageTable_t table, const ncclMesh
 /* A view of a page table's storage, in elements: each `element_bits` bits (sub-byte ones too: the innermost axis then
    packs whole bytes), `rank` axes of `shape` elements `strides` elements apart, its first element `offset` elements past
    the table's first byte; or, where `runs` (not NULL), a mapped view's `nruns` runs in logical order, each its first
-   element's offset past the table's first byte and its element count (runs[2k], runs[2k + 1]).  Abstract layout, never an
+   element's offset past the table's first byte and its element count (runs[2k], runs[2k + 1]).  `frames` (0 or 1: one)
+   equal frames of a contiguous view, `frame_stride` elements apart, are one train compiled once, each frame its own
+   publication (a ring of slots, a chain's steps); each rank's stride its own.  Abstract layout, never an
    address: preparation lowers it to the table's pages, affine rows where it is affine, else its spans in logical order
    (mesh-write-compiler.h mesh_view_layout). */
 typedef struct { ncclMeshPageTable_t storage; uint32_t element_bits, rank; const uint64_t* shape; const int64_t* strides;
-                 uint64_t offset; const uint64_t* runs; size_t nruns; } ncclMeshLayout;
+                 uint64_t offset; const uint64_t* runs; size_t nruns; uint32_t frames; int64_t frame_stride; } ncclMeshLayout;
 /* The WRITE whose local view is `local`: the source's values on `source`, the landing on `destination`, a relay's on any
    other rank; every rank's view holds the same logical bytes, in its own layout. */
 ncclResult_t ncclMeshWriteLayoutPrepare(const ncclMeshLayout* local, int source, int destination, size_t max_packet,

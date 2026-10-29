@@ -5657,7 +5657,14 @@ ncclResult_t ncclMeshWriteLayoutPrepare(const ncclMeshLayout *v, int source, int
   const size_t page = v->storage->page_bytes;
   const struct write_page_index start = {(size_t)first / page, (size_t)first % page};
   const struct mesh_write_layout local = {layout.tile_bytes, layout.instances, layout.instance_pages * page, layout.invocations};
-  if (!result) result = rows[1] ? write_prepare(v->storage, start, rows[0] * rows[1], source, destination, 1, rows[2], max_packet, rows[0],
+  /* a train of frames: one contiguous run each, `frame_stride` elements apart (the flat form's repeats) */
+  const uint32_t frames = v->frames > 1 ? v->frames : 1;
+  if (!result && frames > 1 && (v->runs || rows[1] > 1 || v->frame_stride <= 0 || (uint64_t)v->frame_stride * bits % 8))
+    result = fail(ncclInvalidArgument, "a write's frames are contiguous runs, a whole number of bytes apart");
+  if (!result && frames > 1)
+    result = write_prepare(v->storage, start, rows[0] * rows[1], source, destination, frames, (size_t)v->frame_stride * bits / 8,
+                           max_packet, 0, 0, NULL, 0, 0, local, out);
+  else if (!result) result = rows[1] ? write_prepare(v->storage, start, rows[0] * rows[1], source, destination, 1, rows[2], max_packet, rows[0],
                                                 rows[1], NULL, 0, 0, local, out)
                                 : write_prepare(v->storage, start, 0, source, destination, 1, 0, max_packet, 0, 0, spans,
                                                 (size_t)needed, 1, local, out);
@@ -5725,15 +5732,6 @@ ncclResult_t mesh_compile_rows(const void *source_buffer,void *landing_buffer,si
   ncclResult_t result=tensor_pages(comm->rank==source?source_buffer:landing_buffer,comm,metal,&table,&start);
   if(!result)result=write_prepare(table,start,rows*row_bytes,source,destination,1,pitch,max_packet,
                                  row_bytes,rows,NULL,0,0,layout,out);
-  ncclMeshPageTableDestroy(table);return result;
-}
-ncclResult_t mesh_compile_write(const void *source_buffer,void *landing_buffer,size_t bytes,
-    int source,int destination,ncclComm_t comm,int metal,uint32_t repeats,size_t stride,size_t max_packet,ncclMeshWritePlan_t *out) {
-  if(!comm)return fail(ncclInvalidArgument,"tensor write requires a communicator");
-  ncclMeshPageTable_t table=NULL;struct write_page_index start={0};
-  ncclResult_t result=tensor_pages(comm->rank==source?source_buffer:landing_buffer,comm,metal,&table,&start);
-  if(!result)result=write_prepare(table,start,bytes,source,destination,repeats,stride,max_packet,
-                                 0,0,NULL,0,0,(struct mesh_write_layout){.instances=1,.invocations=1},out);
   ncclMeshPageTableDestroy(table);return result;
 }
 ncclResult_t ncclMeshWriteSourceReady(ncclMeshWritePlan_t plan, const void *words, uint64_t value, ncclMeshTileLayout layout) {

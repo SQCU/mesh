@@ -1216,6 +1216,23 @@ static void fused_reconfigure(int64_t comm) {
 
 // Allocate and agree registration cuts without presenting a receive or
 // executing a producer. A fresh generation owns every source/landing/relay lease.
+// A tensor's WRITE from its abstract layout (nccl.h ncclMeshLayout): its storage's page table, its sizes, strides and
+// storage offset in elements and its element bits; no address or byte geometry (design/pointer-lowering-2026-10-28.md).
+// `frames` frames of `view`, `frame_stride` elements apart, are one train (nccl.h ncclMeshLayout frames).
+static void tensor_write(Group &g, const at::Tensor &view, int source, int destination, ncclComm_t comm, bool metal,
+                         ncclMeshWriteLayout layout, ncclMeshWritePlan_t *out, int64_t frames = 1, int64_t frame_stride = 0) {
+  const at::Tensor start = view.as_strided({view.storage().nbytes() ? 1 : 0}, {1}, 0);
+  ncclMeshPageTable_t table = nullptr;
+  checked(ncclMeshPageTableCreate(g.where(start), comm, metal, &table));
+  const std::vector<uint64_t> dims(view.sizes().begin(), view.sizes().end());
+  const std::vector<int64_t> steps(view.strides().begin(), view.strides().end());
+  const ncclMeshLayout local{table, (uint32_t)(8 * view.element_size()), (uint32_t)dims.size(), dims.data(), steps.data(),
+                             (uint64_t)view.storage_offset(), nullptr, 0, (uint32_t)frames, frame_stride};
+  const ncclResult_t made = ncclMeshWriteLayoutPrepare(&local, source, destination, 0, layout, out);
+  ncclMeshPageTableDestroy(table);
+  checked(made);
+}
+
 static void fused_allocate_ring(FusedForm &f, FusedForm::Ring &ring, const at::Tensor &xc, int64_t repeats) {
   TORCH_CHECK(repeats >= 1 && repeats <= (int64_t)UINT32_MAX && f.slot >= 0 &&
               f.slot <= INT64_MAX / repeats / (int64_t)xc.element_size(),
@@ -1248,11 +1265,9 @@ static void fused_allocate_ring(FusedForm &f, FusedForm::Ring &ring, const at::T
           landing_view = ring.relays[h].back().narrow(0, 0, f.counts[source]);
           local_stride = f.counts[source] * (int64_t)xc.element_size();
         }
-        const Operand out = g.moving(source_view), in = g.moving(landing_view);
         prepared->handles.push_back(nullptr);
-        checked(mesh_compile_write(out.at, (void *)in.at, out.bytes, (int)source, (int)destination,
-                                    communicator(f.comm), 1, (uint32_t)repeats, (size_t)local_stride, 0,
-                                    &prepared->handles.back()));
+        tensor_write(g, f.rank == source ? source_view : landing_view, (int)source, (int)destination, communicator(f.comm), true,
+                     ncclMeshWriteLayout{0, 1, 0, 1}, &prepared->handles.back(), repeats, local_stride / (int64_t)xc.element_size());
       }
     prepared->prepare(f.comm, f.polls, repeats, f.slot * (int64_t)xc.element_size());
     ring.plans[h] = std::move(prepared);
@@ -1380,10 +1395,10 @@ static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, c
         landing = chain->held.back().narrow(0, 0, source.numel());
         stride = source.nbytes();
       }
-      const Operand out = g.moving(source), in = g.moving(landing);
       prepared->handles.push_back(nullptr);
-      checked(mesh_compile_write(out.at, (void *)in.at, out.bytes, 0, (int)destination,
-                                  communicator(f.comm), 1, (uint32_t)count, stride, 0, &prepared->handles.back()));
+      TORCH_CHECK(stride % (size_t)source.element_size() == 0, "a chain's frame pitch is whole elements");
+      tensor_write(g, f.rank == 0 ? source : landing, 0, (int)destination, communicator(f.comm), true, ncclMeshWriteLayout{0, 1, 0, 1},
+                   &prepared->handles.back(), count, (int64_t)(stride / (size_t)source.element_size()));
     }
     prepared->prepare(f.comm, f.polls, count, input_pitch);
     chain->inputs.push_back(std::move(prepared));
@@ -1516,21 +1531,6 @@ static pybind11::capsule chain_completion(int64_t index) {
 
 // A declared set of routed writes. Bindings name physical channels, including
 // parallel cables; relay readiness stays in the compiled stream entries.
-// A tensor's WRITE from its abstract layout (nccl.h ncclMeshLayout): its storage's page table, its sizes, strides and
-// storage offset in elements and its element bits; no address or byte geometry (design/pointer-lowering-2026-10-28.md).
-static void tensor_write(Group &g, const at::Tensor &view, int source, int destination, ncclComm_t comm, bool metal,
-                         ncclMeshWriteLayout layout, ncclMeshWritePlan_t *out) {
-  const at::Tensor start = view.as_strided({view.storage().nbytes() ? 1 : 0}, {1}, 0);
-  ncclMeshPageTable_t table = nullptr;
-  checked(ncclMeshPageTableCreate(g.where(start), comm, metal, &table));
-  const std::vector<uint64_t> dims(view.sizes().begin(), view.sizes().end());
-  const std::vector<int64_t> steps(view.strides().begin(), view.strides().end());
-  const ncclMeshLayout local{table, (uint32_t)(8 * view.element_size()), (uint32_t)dims.size(), dims.data(), steps.data(),
-                             (uint64_t)view.storage_offset(), nullptr, 0};
-  const ncclResult_t made = ncclMeshWriteLayoutPrepare(&local, source, destination, 0, layout, out);
-  ncclMeshPageTableDestroy(table);
-  checked(made);
-}
 
 static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> fused_writes_impl(
     MetalSchedule *schedule, const at::Tensor &send, const std::vector<at::Tensor> &landings,
@@ -1587,8 +1587,11 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
                   "affine write bindings name the first row as a contiguous byte view");
       checked(mesh_compile_rows(out.at, (void *)in[i].at, (size_t)row_bytes, (size_t)rows, (size_t)stride,
                                       pairs[i][0], pairs[i][1], c, 1, 0, mesh_write_layout{.instances=1,.invocations=1}, &plans.handles[i]));
-    } else checked(mesh_compile_write(out.at, (void *)in[i].at, out.bytes, pairs[i][0], pairs[i][1], c, 1,
-                                      (uint32_t)repeats, (size_t)stride, 0, &plans.handles[i]));
+    } else {
+      TORCH_CHECK(stride % send.element_size() == 0, "fused writes: a frame stride is whole elements");
+      tensor_write(g, rank == pairs[i][0] ? send : landings[i], pairs[i][0], pairs[i][1], c, true, ncclMeshWriteLayout{0, 1, 0, 1},
+                   &plans.handles[i], repeats, stride / send.element_size());
+    }
     if (produced) checked(ncclMeshWriteSourceReady(plans.handles[i], produced->at, (uint64_t)ready_value,
         ncclMeshTileLayout{.columns=tiles,.tile_stride=sizeof(uint64_t),.instances=1}));
   }
