@@ -15,12 +15,12 @@
 
 /* a typed kernel's kind by its operation and its ncclDataType_t (int8 uint8 int32 uint32 int64 uint64 float16 float32
    float64 bfloat16 e4m3 e5m2, then the partials merge's rows, METAL_MERGE), KINDS where none is compiled: float64's,
-   truncdiv's but the integers', combine3's and premul's of the merge */
-enum { OP_LAND, OP_COMBINE3, OP_PREMUL, OP_TRUNCDIV, OPS };
+   truncdiv's but the integers', premul's of the merge */
+enum { OP_LAND, OP_PREMUL, OP_TRUNCDIV, OPS };
 #define INTEGERS(op) KIND_##op##_i8, KIND_##op##_u8, KIND_##op##_i32, KIND_##op##_u32, KIND_##op##_i64, KIND_##op##_u64
 #define FLOATS(op) KIND_##op##_f16, KIND_##op##_f32, KINDS, KIND_##op##_bf16, KIND_##op##_e4m3, KIND_##op##_e5m2
 static const uint8_t TYPED[OPS][METAL_MERGE + 1] = {
-  {INTEGERS(land), FLOATS(land), KIND_land_merge}, {INTEGERS(combine3), FLOATS(combine3), KINDS}, {INTEGERS(premul), FLOATS(premul), KINDS},
+  {INTEGERS(land), FLOATS(land), KIND_land_merge}, {INTEGERS(premul), FLOATS(premul), KINDS},
   {INTEGERS(truncdiv), KINDS, KINDS, KINDS, KINDS, KINDS, KINDS, KINDS}};
 /* a copy's kind by its width (0 words of 4 bytes, 1 bytes) and its loads (METAL_PLAIN, METAL_LAND) */
 static const uint8_t COPY[2][METAL_LAND + 1] = {{KIND_copy_plain_4, KIND_copy_land_4}, {KIND_copy_plain_1, KIND_copy_land_1}};
@@ -290,12 +290,6 @@ struct metal_result metal_copy(struct metal_program *program, int mode, void *ds
 /* operation `op`'s kernel of `type` (TYPED), KINDS where none is compiled */
 static uint32_t typed(int op, int type) { return (unsigned)type <= METAL_MERGE ? TYPED[op][type] : KINDS; }
 
-struct metal_result metal_combine3(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset,
-                                   void *with, size_t with_offset, size_t n) {
-  return dispatch(program, typed(OP_COMBINE3, type), dst, src, with, NULL,
-                  (struct args){.dst = dst_offset, .src = src_offset, .n = n, .op = (uint32_t)op, .aux = with_offset}, n, 0);
-}
-
 struct metal_result metal_premultiply(struct metal_program *program, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n,
                                       uint64_t scalar) {
   return dispatch(program, typed(OP_PREMUL, type), dst, src, NULL, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .scalar = scalar},
@@ -321,8 +315,11 @@ static struct args release_args(const struct metal_release *r, size_t dst_offset
   return (struct args){.dst = dst_offset, .scalar = pages_to_word(r->value), .aux = r->word, .stride = (uint32_t)pages_to_word(r->stride)};
 }
 
+static void record_uses(struct metal_program *, void *const *, size_t);
 void metal_uses(struct metal_program *program, void *const *buffers, size_t n, int write) {
-  if (!n || recording_on(program) || program->encoder4) return;
+  if (!n) return;
+  if (recording_on(program)) { record_uses(program, buffers, n); return; }
+  if (program->encoder4) { for (size_t k = 0; k < n; k++) metal_resident(program, buffers[k]); return; }
   @autoreleasepool {
     if (!program->encoder) program->encoder = [[program->buffer computeCommandEncoder] retain];
     const MTLResourceUsage usage = write ? (MTLResourceUsageRead | MTLResourceUsageWrite) : MTLResourceUsageRead;
@@ -376,14 +373,18 @@ struct metal_result metal_spin(struct metal_program *program, const struct metal
 }
 
 struct metal_result metal_land(struct metal_program *program, int type, int op, void *dst, size_t dst_offset,
+                               void *with, size_t with_offset,
                                size_t element_bytes, mesh_pages packets, const struct mesh_landing_run *runs, size_t count, const struct metal_wait *w) {
+  if (count) metal_uses(program, &with, 1, 0);
+  const uint32_t kind = type == METAL_MERGE && (with != dst || with_offset != dst_offset) ? KIND_land_merge_from : typed(OP_LAND, type);
   for (size_t k = 0; k < count; k++) {
     const struct mesh_landing_run run = runs[k];
     struct args p = wait_args(w, dst_offset + run.first * element_bytes, run.elements, op);
     p.src += run.first * element_bytes;
+    p.input = ((id<MTLBuffer>)with).gpuAddress + with_offset + run.first * element_bytes;
     p.scalar = pages_to_word(pages_sub(w->target, packets)) + run.packet;
     p.phase = run.phase; p.step = run.step; p.mask = run.shift;
-    const struct metal_result result = dispatch(program, typed(OP_LAND, type), dst, w->data, w->words, w->violation, p,
+    const struct metal_result result = dispatch(program, kind, dst, w->data, w->words, w->violation, p,
       type == METAL_MERGE ? run.elements : (run.elements + 3) / 4, 0);
     if (result.status) return result;
   }
@@ -414,6 +415,10 @@ struct recording { struct host_op *op; size_t ops, op_room; struct host_item *it
                    struct host_track *track; uint32_t tracks; uint32_t current; int on; NSMutableSet *named; };
 
 static int recording_on(const struct metal_program *program) { return program->recording && program->recording->on; }
+
+static void record_uses(struct metal_program *program, void *const *buffers, size_t n) {
+  for (size_t k = 0; k < n; k++) if (buffers[k]) [program->recording->named addObject:(id)buffers[k]];
+}
 
 static void *more(void *items, size_t *room, size_t count, size_t size) {
   if (count < *room) return items;

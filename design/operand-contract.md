@@ -87,9 +87,23 @@ Numerical landings use `mesh-landing.h`. Each scalar or structured row needs the
 packet containing its final byte. Equal page runs and their short final packet
 remain one arithmetic record; kernels do not walk packet lists. Structured
 merges can use their early rows before the whole message arrives. The former
-square-root packet threshold is removed. The separate first combine into an
-unwritten result still has its old whole-message dependency; its original-input
-binding must join the shared landing kernel.
+square-root packet threshold is removed. First combines use this same landing
+operation with the original input as an explicit operand. The separate
+`metal_combine3` interface, kernels and preceding whole-message wait are removed.
+The backend records that input's GPU address during preparation and retains its
+resource with the recorded work; execution has no extra mapping lookup.
+
+Structured merges share one numerical body for original-input and in-place
+bindings. Preparation selects the known alias relationship. The in-place form
+keeps its existing no-work case when the other partial is empty; the separate
+output form writes the retained input in that case. There is no runtime alias
+test. Both consume the same compiled packet-readiness relation.
+
+Preparation on 2026-10-29 checked emitted scalar and structured landing records
+with either input placement and with packet breaks inside numerical rows. Input
+addresses, retained resources and readiness constants agreed with the declared
+bindings. The Metal kernels compiled. No numerical dispatch ran, so this gives
+no new latency or useful-bandwidth result.
 
 Preparation on 2026-10-29 exercised the real route compiler and packet-cut
 preparation with three-rank relays, uneven all-to-all origins, scattered backing,

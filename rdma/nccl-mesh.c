@@ -3973,7 +3973,7 @@ static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm
 /* channel h's next AOT consumer entry (possibly a later physical landing), as its track's item (metal_record; rdma/NCCL.md "Per-channel progress") or,
    `base` METAL_NONE, as dispatches in the stream's order (complete_track): its first wait on the holding's `landed`
    past it; a combine's landed bytes combined
-   into its buffer (its first one, a call reading its send buffer in place, after a wait: with op landed), a COPY's
+   into its buffer (its first one reads the original input through the same landing operation), a COPY's
    wait alone (it landed in place), the fused crossing's landing recorded for its caller's kernel
    (metal_land_deferred: its first repeat's alone, as publish); a receive depends on every earlier overlapping receive
    (metal_depend), while disjoint ranges on separate cables can proceed independently */
@@ -3993,13 +3993,8 @@ static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm
   const struct metal_wait wait = {ch->buffer, comm->violation, m->data.buffer, ch->landed, m->data.offset, m->end, at, h, g->plans[h].each[1]};
   if (!result && step->op == MESH_STEP_REDUCE) {
     const struct where to = shifted(st->buffer[step->buffer], m->offset);
-    if (st->fresh && st->fresh[m->step]) {
-      const struct where with = shifted(st->read[m->step], m->offset);
-      result = gpu(metal_spin(program, &wait), "a wait");
-      if (!result)
-        result = gpu(metal_combine3(program, m->c->type, m->c->combine, to.buffer, to.offset, m->data.buffer, m->data.offset, with.buffer, with.offset,
-                                    m->bytes / SIZE[m->c->type]), "a first combine");
-    } else result = gpu(metal_land(program, ktype(m->c), kop(m->c), to.buffer, to.offset,
+    const struct where with = st->fresh && st->fresh[m->step] ? shifted(st->read[m->step], m->offset) : to;
+    result = gpu(metal_land(program, ktype(m->c), kop(m->c), to.buffer, to.offset, with.buffer, with.offset,
       SIZE[m->c->type] * unit_of(m->c), m->pages, m->landings, m->landing_count, &wait), "a landing");
   } else if (!result && g->fused && (at - g->start[h][1]) * g->repeats < g->end[h][1] - g->start[h][1]) {
     if (fusing.landed >= fusing.room[1])

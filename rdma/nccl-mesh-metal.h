@@ -141,8 +141,6 @@ struct metal_result metal_copy(struct metal_program *, int mode, void *dst, size
 /* dst = with op src, n elements of an ncclDataType_t: landed bytes (src, loaded system-coherent) combined with an
    operand read in place (`with`: a lease's send buffer, nccl.h ncclMeshMemBuffer), the first combine of a range no step
    wrote, after a wait (metal_spin) */
-struct metal_result metal_combine3(struct metal_program *, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset,
-                                   void *with, size_t with_offset, size_t n);
 struct metal_result metal_premultiply(struct metal_program *, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n,
                                       uint64_t scalar);
 struct metal_result metal_truncdiv(struct metal_program *, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n,
@@ -170,9 +168,12 @@ struct metal_result metal_open_gate(struct metal_program *, void *words, size_t 
 struct metal_result metal_spin(struct metal_program *, const struct metal_wait *);
 /* Encode the numerical groups as their last required packet arrives. The
    prepared span lengths lower to arithmetic readiness runs (mesh-landing.h),
-   including rows split across packets. No packet list is read by the kernel. */
+   including rows split across packets. `with` supplies the other operand,
+   whether it is the original input or the existing result. No packet list is
+   read by the kernel. */
 struct mesh_landing_run;
 struct metal_result metal_land(struct metal_program *, int type, int op, void *dst, size_t dst_offset,
+                               void *with, size_t with_offset,
                                size_t element_bytes, mesh_pages packets, const struct mesh_landing_run *, size_t runs, const struct metal_wait *);
 /* the same two steps run by the caller's kernel (nccl.h ncclMeshFused: the Metal 4 form, or a classic program begun with
    a residency set): each one's record written to the function's immutable argument pages as a Metal 4 dispatch's would be, the
