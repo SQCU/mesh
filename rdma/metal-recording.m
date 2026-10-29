@@ -689,6 +689,22 @@ static void MetalDataflow(MetalCapture *capture) {
 }
 @end
 
+// A shared buffer over a region lease of its own (ncclMemAlloc, nccl.h Memory), retained: no copy, the lease returned
+// (ncclMemFree) when the buffer is deallocated, after every command that bound it.
+static id<MTLBuffer> MetalLeaseBuffer(id<MTLDevice> device,NSUInteger length) {
+    const NSUInteger page=(NSUInteger)getpagesize(),bytes=(MAX(length,(NSUInteger)1)+page-1)/page*page;
+    void *memory=NULL;
+    if(ncclMemAlloc(&memory,bytes))
+        [NSException raise:NSMallocException format:@"a region lease of %lu bytes: %s",(unsigned long)bytes,ncclGetLastError(NULL)];
+    id<MTLBuffer> buffer=[device newBufferWithBytesNoCopy:memory length:bytes options:MTLResourceStorageModeShared
+        deallocator:^(void *pointer,NSUInteger leased){(void)leased;ncclMemFree(pointer);}];
+    if(!buffer) {
+        ncclMemFree(memory);
+        [NSException raise:NSMallocException format:@"a Metal buffer over a region lease of %lu bytes",(unsigned long)bytes];
+    }
+    return buffer;
+}
+
 @implementation MetalForwarder
 - (instancetype)initWithTarget:(id)object { target = [object retain]; return self; }
 - (void)dealloc { [target release]; [super dealloc]; }
@@ -763,7 +779,8 @@ static void MetalDataflow(MetalCapture *capture) {
     for (NSUInteger i = 0; i < range.length; ++i) [self setBuffer:buffers[i] offset:offsets[i] atIndex:range.location + i];
 }
 - (void)setBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index {
-    id<MTLBuffer> buffer = [[target device] newBufferWithBytes:bytes length:length options:MTLResourceStorageModeShared];
+    id<MTLBuffer> buffer = MetalLeaseBuffer([target device], length);
+    memcpy(buffer.contents, bytes, length);
     [self setBuffer:buffer offset:0 atIndex:index];
     state.lengths[index]=length;state.bounded|=UINT32_C(1)<<index;[buffer release];
 }
@@ -991,6 +1008,8 @@ static void MetalReplayBuild(MetalCapture *capture,id<MTLDevice> device,NSUInteg
     NSUInteger span = MAX((NSUInteger)1, ceiling / result->count);
     if (result->count > ceiling) [NSException raise:NSInvalidArgumentException format:@"%u commands exceed one indirect buffer's %lu", result->count, (unsigned long)ceiling];
     NSMutableArray *segments = [NSMutableArray array];
+    // Metal makes an indirect command buffer only from the device, in storage it allocates itself: no call places one
+    // over a region lease, so these segments are the replay's memory outside the region.
     for (NSUInteger first = 0; first < repetitions; first += span) {
         id<MTLIndirectCommandBuffer> segment = [device newIndirectCommandBufferWithDescriptor:descriptor
             maxCommandCount:result->count*MIN(span, repetitions-first) options:0];
@@ -1378,7 +1397,7 @@ struct MetalCommandBinding MetalScheduleData(struct MetalSchedule *s,const void 
     s=MetalScheduleTail(s);
     NSUInteger size=(bytes+MESH_COMMAND_DATA_ALIGNMENT-1)/MESH_COMMAND_DATA_ALIGNMENT*MESH_COMMAND_DATA_ALIGNMENT;
     if(!s->data || s->used+size>s->data.length) {
-        [s->data release];s->data=[s->device newBufferWithLength:MAX((NSUInteger)MESH_COMMAND_DATA_BYTES,size) options:MTLResourceStorageModeShared];
+        [s->data release];s->data=MetalLeaseBuffer(s->device,MAX((NSUInteger)MESH_COMMAND_DATA_BYTES,size));
         s->used=0;[s->owners addObject:s->data];[s->residency addAllocation:s->data];
     }
     struct MetalCommandBinding result={s->data,s->used,bytes,index,MetalReachRead};
