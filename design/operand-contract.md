@@ -61,10 +61,11 @@ numerical work; a layout change cannot stand in for it.
 ### Compact reshapes and aliases
 
 `shape` describes logical axes. `indexShape`, strides and maps describe the
-factors of its flat index domain. Both shapes have the same element count.
-A reshape changes the logical axes and retains the factors when they do not
-separate along the new axes. It adds no map entries or parent descriptor.
-Numerical indexing and dependency records consume those same factors.
+factors of its storage relation. `coordinates` maps a logical flat index to
+those factor digits. A reshape changes logical axes without changing the
+relation. A cut can select fewer values than the factor domain contains.
+Neither operation needs a parent descriptor. Numerical indexing and dependency
+records consume the same factors and coordinates.
 
 Adjacent affine axes form linear runs, including
 negative and zero strides. New axes split those runs. An axis map stays one
@@ -137,12 +138,38 @@ logical axis with an independent row factor retained four entries. Smaller
 compositions preserved exact indices, ordered transfers and dependency spans;
 the large declarations compiled as Metal source. No numerical work ran.
 
-A coupled domain can still become large for a nonrectangular interval across
-index factors, or when a permutation inserts an independent extent between
-coupled axes. Such compositions still materialize their coupled domain. General
-nonrectangular alias composition and the distributed ownership gap under exact
-partition boundaries also remain unfinished. An irreducible table supplied by a
-caller still occupies its own domain; reshaping it does not duplicate that table.
+Nonrectangular cuts and interleaved permutations now substitute integer
+coordinates into the existing factors. The preparation terms contain constants,
+the logical index, addition, integer scaling, floor division and remainder.
+Normalization removes terms and folds fixed residues before source emission.
+Shaders receive ordinary integer expressions and the existing map entries;
+there is no expression interpreter, parent view or extra lookup per transform.
+Computed page indices remain ordinary tensor values, not these compiler terms.
+
+Byte components, alias placement, saved FX declarations and native LiteRT
+`index_coordinates` carry this relation. A byte view scales the same factors;
+removing its component axis restores the typed view. A nonrectangular alias of
+a dense affine declaration uses its coordinate inverse. An alias retaining its
+producer's factor basis composes directly with the assigned placement. Ordered
+transfers follow prepared affine runs of the relation. Dependency spans use the
+same runs and the shared range union, including repeated and reversed reads.
+Preparation checks alignment and adjacent lanes algebraically; it emits vector
+accesses when that relation holds and adds no runtime alignment guard.
+When a selection leaves only an affine part of a map, normalization restores
+an ordinary strided binding. A strided consumer can then use it directly.
+
+Preparation on 2026-10-29 retained six map words for nonrectangular cuts and
+interleaved permutations of a 2,061,584,302,080-element domain. Their coordinate
+JSON occupied at most 148 bytes. Smaller compositions preserved ordered
+transfers, exact byte-access unions, byte-view round trips and saved declarations.
+The emitted Metal source compiled. These are layout-preparation results, not
+numerical execution or throughput measurements.
+
+Explicit arbitrary selections over coupled factors and non-affine alias
+inverses can still materialize their selected domain. The distributed ownership
+gap under exact partition boundaries also remains unfinished. An irreducible
+table supplied by a caller occupies its own domain; reshaping, slicing or
+permuting it no longer duplicates that table across surrounding dimensions.
 
 ## Place values for their consumers
 

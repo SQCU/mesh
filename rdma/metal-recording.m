@@ -285,17 +285,18 @@ NSString *MetalViewIndexValuesDeclaration(NSUInteger binding,const NSInteger *va
     return [NSString stringWithFormat:@"template<uint B> inline long mesh_position(ulong i);\n"
         "namespace mesh_positions_%lu {\n%@%@}\n"
         "template<> inline long mesh_position<%lu>(ulong i) { return mesh_positions_%lu::mesh_index<0>(i); }\n",
-        (unsigned long)binding,MetalViewIndexTemplates(),MetalViewMappedIndexDeclaration(0,&count,&stride,1,0,@{@0:map}),
+        (unsigned long)binding,MetalViewIndexTemplates(),MetalViewMappedIndexDeclaration(0,&count,&stride,1,0,@{@0:map},nil,0),
         (unsigned long)binding,(unsigned long)binding];
 }
 
 NSString *MetalViewMappedIndexDeclaration(NSUInteger binding,const NSUInteger *shape,const NSInteger *strides,
-    size_t rank,NSUInteger elementOffset,NSDictionary<NSNumber *,NSData *> *maps) {
-    if(!maps.count)return MetalViewIndexDeclaration(binding,shape,strides,rank,elementOffset);
+    size_t rank,NSUInteger elementOffset,NSDictionary<NSNumber *,NSData *> *maps,
+    NSArray<NSString *> *coordinates,NSUInteger vectorSpan) {
+    if(!coordinates&&!maps.count)return MetalViewIndexDeclaration(binding,shape,strides,rank,elementOffset);
     NSDictionary *normalized=MetalViewNormalizeAxes(strides,rank,maps);
     strides=(const NSInteger *)((NSData *)normalized[@"strides"]).bytes;maps=normalized[@"maps"];
     const NSInteger shift=[normalized[@"offset"] integerValue];
-    if(!maps.count)return MetalViewAffineIndexDeclaration(binding,shape,strides,rank,elementOffset,shift);
+    if(!coordinates&&!maps.count)return MetalViewAffineIndexDeclaration(binding,shape,strides,rank,elementOffset,shift);
     NSMutableString *source=[NSMutableString string];
     NSMutableArray *terms=[NSMutableArray array];
     if(shift)[terms addObject:[NSString stringWithFormat:@"%ldl",(long)shift]];
@@ -304,6 +305,7 @@ NSString *MetalViewMappedIndexDeclaration(NSUInteger binding,const NSUInteger *s
         if(!shape[d])return MetalViewIndexDeclaration(binding,shape,strides,rank,elementOffset);
         NSString *coordinate=divisor==1?@"long(i)":[NSString stringWithFormat:@"(long(i) / %lul)",(unsigned long)divisor];
         if(d)coordinate=[NSString stringWithFormat:@"(%@ %% %lul)",coordinate,(unsigned long)shape[d]];
+        if(coordinates)coordinate=coordinates[d];
         const NSInteger *values=(const NSInteger *)maps[@(d)].bytes;
         NSInteger base=values?values[0]:0,step=values&&shape[d]>1?values[1]-base:strides[d];
         NSUInteger period=0;
@@ -354,7 +356,7 @@ NSString *MetalViewMappedIndexDeclaration(NSUInteger binding,const NSUInteger *s
     }
     NSString *expression=terms.count?[terms componentsJoinedByString:@" + "]:@"0";
     [source appendFormat:@"template<> inline long mesh_index<%lu>(ulong i) { return %@; }\n",(unsigned long)binding,expression];
-    vector=MetalViewAlignment(vector,origin);
+    vector=coordinates?vectorSpan:MetalViewAlignment(vector,origin);
     if(vector)[source appendFormat:@"template<> constexpr ulong mesh_vector_span<%lu>() { return %lul; }\n",(unsigned long)binding,(unsigned long)vector];
     return source;
 }
@@ -368,6 +370,32 @@ static int MetalViewAxisOrder(const void *a,const void *b) {
 static int MetalViewSpanOrder(const void *a,const void *b) {
     const NSUInteger x=((const struct MetalViewSpan *)a)->offset,y=((const struct MetalViewSpan *)b)->offset;
     return (x>y)-(x<y);
+}
+static void MetalViewUnionSpans(NSMutableData *data) {
+    struct MetalViewSpan *out=data.mutableBytes;NSUInteger total=data.length/sizeof *out,used=0;
+    qsort(out,total,sizeof *out,MetalViewSpanOrder);
+    for(NSUInteger j=0;j<total;j++) {
+        if(!out[j].length)continue;
+        if(used&&out[j].offset<=out[used-1].offset+out[used-1].length)
+            out[used-1].length=MAX(out[used-1].length,out[j].offset+out[j].length-out[used-1].offset);
+        else out[used++]=out[j];
+    }
+    data.length=used*sizeof *out;
+}
+NSData *MetalTensorSpanReaches(id<MTLBuffer> buffer,NSUInteger base,NSData *spans,
+    NSUInteger elementBytes,uint32_t access,int32_t binding) {
+    const struct MetalTensorSpan *input=spans.bytes;NSUInteger count=spans.length/sizeof *input;
+    NSMutableData *bytes=[NSMutableData dataWithLength:count*sizeof(struct MetalViewSpan)];
+    struct MetalViewSpan *out=bytes.mutableBytes;
+    for(NSUInteger k=0;k<count;k++)out[k]=(struct MetalViewSpan){base+input[k].offset*elementBytes,input[k].count*elementBytes};
+    MetalViewUnionSpans(bytes);
+    NSMutableData *result=[NSMutableData data];const struct MetalViewSpan *values=bytes.bytes;
+    struct MetalReach reach={buffer,base,0,access|MetalReachBinding,binding};
+    for(NSUInteger k=0;k<bytes.length/sizeof *values;k++) {
+        reach.offset=values[k].offset;reach.length=values[k].length;[result appendBytes:&reach length:sizeof reach];
+    }
+    if(!result.length)[result appendBytes:&reach length:sizeof reach];
+    return result;
 }
 
 NSData *MetalViewReaches(id<MTLBuffer> buffer,NSUInteger offset,const NSUInteger *shape,
@@ -417,15 +445,7 @@ NSData *MetalViewMappedReaches(id<MTLBuffer> buffer,NSUInteger offset,const NSUI
             const NSUInteger at=axis[i].offsets?(NSUInteger)(axis[i].offsets[n]-axis[i].minimum):n*axis[i].stride;
             for(NSUInteger j=0;j<count;j++)out[n*count+j]=(struct MetalViewSpan){values[j].offset+at,values[j].length};
         }
-        const NSUInteger total=count*axis[i].count;
-        qsort(out,total,sizeof *out,MetalViewSpanOrder);
-        NSUInteger used=0;
-        for(NSUInteger j=0;j<total;j++) {
-            if(used&&out[j].offset<=out[used-1].offset+out[used-1].length)
-                out[used-1].length=MAX(out[used-1].length,out[j].offset+out[j].length-out[used-1].offset);
-            else out[used++]=out[j];
-        }
-        next.length=used*sizeof *out;spans=next;
+        MetalViewUnionSpans(next);spans=next;
     }
     NSMutableData *result=[NSMutableData data];
     const struct MetalViewSpan *values=spans.bytes;
@@ -1642,7 +1662,7 @@ NSString *MetalViewDependencyDeclaration(NSString *name,NSArray<NSIndexSet *> *d
         const NSUInteger count=data.length/sizeof *values;const NSInteger stride=0;
         NSMutableData *map=[NSMutableData dataWithLength:count*sizeof(NSInteger)];NSInteger *indices=map.mutableBytes;
         for(NSUInteger i=0;i<count;i++)indices[i]=values[i];
-        [source appendString:MetalViewMappedIndexDeclaration(binding,&count,&stride,1,0,@{@0:map})];
+        [source appendString:MetalViewMappedIndexDeclaration(binding,&count,&stride,1,0,@{@0:map},nil,0)];
     }
     [source appendFormat:@"}\nstruct %@ { uint producer;\n"
         "uint begin() const { return uint(%@_indices::mesh_index<0>(producer)); }\n"

@@ -535,15 +535,20 @@ struct TensorLayout {
   ~TensorLayout(){[value release];}
   static TensorLayout make(const std::vector<NSInteger> &shape,const std::vector<NSInteger> &strides,NSInteger offset,
       const std::map<NSUInteger,std::vector<NSInteger>> &axes,const std::optional<std::vector<NSInteger>> &indices,
-      const std::optional<std::vector<NSInteger>> &indexShape) {
+      const std::optional<std::vector<NSInteger>> &indexShape,const std::optional<std::string> &coordinates) {
     NSMutableDictionary *maps=[NSMutableDictionary dictionary];
     for(const auto &[axis,values]:axes)maps[@(axis)]=tensorWords(values);
     MetalTensorLayout *layout=[MetalTensorLayout shape:tensorNumbers(indexShape?*indexShape:shape)
         strides:tensorNumbers(strides) offset:offset maps:maps indices:indices?tensorWords(*indices):nil];
+    if(coordinates) {
+      NSData *data=[NSData dataWithBytes:coordinates->data() length:coordinates->size()];
+      NSArray *values=[NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+      return TensorLayout([layout shaped:tensorNumbers(shape) coordinates:values]);
+    }
     return TensorLayout([layout reshape:tensorNumbers(shape)]);
   }
   static TensorLayout tensor(const at::Tensor &t) {
-    return make({t.sizes().begin(),t.sizes().end()},{t.strides().begin(),t.strides().end()},t.storage_offset(),{},std::nullopt,std::nullopt);
+    return make({t.sizes().begin(),t.sizes().end()},{t.strides().begin(),t.strides().end()},t.storage_offset(),{},std::nullopt,std::nullopt,std::nullopt);
   }
 };
 struct TensorTraversal {
@@ -1683,7 +1688,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   pybind11::class_<TensorLayout>(module,"TensorLayout")
     .def(pybind11::init(&TensorLayout::make),pybind11::arg("shape"),pybind11::arg("strides"),pybind11::arg("offset")=0,
          pybind11::arg("maps")=std::map<NSUInteger,std::vector<NSInteger>>{},pybind11::arg("indices")=pybind11::none(),
-         pybind11::arg("index_shape")=pybind11::none())
+         pybind11::arg("index_shape")=pybind11::none(),pybind11::arg("index_coordinates")=pybind11::none())
     .def_property_readonly("shape",[](const TensorLayout &v){return tensorNumbers(v.value.shape);})
     .def_property_readonly("index_shape",[](const TensorLayout &v){return tensorNumbers(v.value.indexShape);})
     .def_property_readonly("strides",[](const TensorLayout &v){return tensorNumbers(v.value.strides);})
@@ -1693,7 +1698,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def_property_readonly("state",[](const TensorLayout &v){
       std::vector<std::vector<NSInteger>> maps(v.value.indexShape.count);
       for(NSNumber *axis in v.value.maps){NSData *data=v.value.maps[axis];const auto *p=(const NSInteger *)data.bytes;maps[axis.unsignedIntegerValue]={p,p+data.length/sizeof *p};}
-      return pybind11::make_tuple(tensorNumbers(v.value.shape),tensorNumbers(v.value.strides),v.value.offset,maps,tensorNumbers(v.value.indexShape));
+      NSData *data=[NSJSONSerialization dataWithJSONObject:v.value.coordinates options:0 error:nil];
+      return pybind11::make_tuple(tensorNumbers(v.value.shape),tensorNumbers(v.value.strides),v.value.offset,maps,
+          tensorNumbers(v.value.indexShape),std::string((const char *)data.bytes,data.length));
     })
     .def("index",[](const TensorLayout &v,NSUInteger i){return [v.value index:i];})
     .def("select",[](const TensorLayout &v,NSUInteger axis,const std::vector<NSInteger> &indices){return TensorLayout([v.value select:axis indices:tensorWords(indices)]);})

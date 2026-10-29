@@ -111,14 +111,20 @@ NSString *MetalViewIndexDeclaration(NSUInteger binding, const NSUInteger *shape,
 // Normalize affine maps into strides and a base offset before API binding.
 NSDictionary<NSString *, id> *MetalViewNormalizeAxes(const NSInteger *strides, size_t rank,
     NSDictionary<NSNumber *, NSData *> *maps);
+// Composed factor coordinates are emitted source expressions with a proved
+// vector span; nil coordinates use the ordinary mixed-radix digits of shape.
 NSString *MetalViewMappedIndexDeclaration(NSUInteger binding, const NSUInteger *shape, const NSInteger *strides,
-    size_t rank, NSUInteger elementOffset, NSDictionary<NSNumber *, NSData *> *maps);
+    size_t rank, NSUInteger elementOffset, NSDictionary<NSNumber *, NSData *> *maps,
+    NSArray<NSString *> *coordinates, NSUInteger vectorSpan);
 // Declared index relations, such as an encoding's row positions. These are
 // compiler metadata, never a substitute for a computed index tensor.
 NSString *MetalViewIndexValuesDeclaration(NSUInteger binding, const NSInteger *values, NSUInteger count);
 NSData *MetalViewMappedReaches(id<MTLBuffer> buffer, NSUInteger offset, const NSUInteger *shape,
     const NSInteger *strides, size_t rank, NSUInteger elementBytes, uint32_t access, int32_t binding,
     NSDictionary<NSNumber *, NSData *> *maps);
+// Union prepared element spans with the same byte-access representation.
+NSData *MetalTensorSpanReaches(id<MTLBuffer> buffer, NSUInteger base, NSData *spans,
+    NSUInteger elementBytes, uint32_t access, int32_t binding);
 // Preparation only: carry declared page accesses across encoders on the supplied
 // queue. Prepare and enqueue its functions in the same order. Disjoint ranges
 // add no dependency. Transport uses this declaration for its shared counters.

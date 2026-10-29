@@ -144,8 +144,8 @@ def ordered_runs(segments):
     return runs, cursor
 
 def restore(state):
-    shape, steps, offset, maps, index_shape = state
-    return _stream.TensorLayout(shape, steps, offset, {axis: values for axis, values in enumerate(maps) if values}, None, index_shape)
+    shape, steps, offset, maps, index_shape, coordinates = state
+    return _stream.TensorLayout(shape, steps, offset, {axis: values for axis, values in enumerate(maps) if values}, None, index_shape, coordinates)
 
 
 def bind(value, declaration):

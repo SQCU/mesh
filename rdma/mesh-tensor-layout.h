@@ -11,10 +11,12 @@ struct MetalTensorSpan { NSInteger offset; NSUInteger count; };
 // Offsets and maps use elements. Buffer binding supplies the element's byte type.
 @interface MetalTensorLayout : NSObject <NSCopying>
 @property(nonatomic, readonly) NSArray<NSNumber *> *shape;
-// Index factors cover the same linear domain as shape. A reshape may change
-// logical axes without changing these factors or the emitted address formula.
-// Strides and maps describe indexShape; affine layouts have shape == indexShape.
+// Bounds, strides and maps of the index factors. coordinates selects their
+// digits from a logical flat index using constant integer arithmetic. This
+// compiler data is emitted as source; no relation descriptor reaches execution.
 @property(nonatomic, readonly) NSArray<NSNumber *> *indexShape;
+@property(nonatomic, readonly) NSArray *coordinates;
+@property(nonatomic, readonly) BOOL factored;
 @property(nonatomic, readonly) NSArray<NSNumber *> *strides;
 @property(nonatomic, readonly) NSDictionary<NSNumber *, NSData *> *maps;
 @property(nonatomic, readonly) NSInteger offset;
@@ -22,6 +24,9 @@ struct MetalTensorSpan { NSInteger offset; NSUInteger count; };
 @property(nonatomic, readonly) BOOL affine;
 + (instancetype)shape:(NSArray<NSNumber *> *)shape strides:(NSArray<NSNumber *> *)strides
     offset:(NSInteger)offset maps:(NSDictionary<NSNumber *, NSData *> *)maps indices:(nullable NSData *)indices;
+// Restore/compose flat factor coordinates, retaining no parent view. Coordinate
+// expressions contain integer constants, "i", and [add|mul|div|mod, ...] nodes.
+- (MetalTensorLayout *)shaped:(NSArray<NSNumber *> *)shape coordinates:(NSArray *)coordinates;
 - (NSInteger)index:(NSUInteger)logical;
 // Compose transformations now; the result never retains a parent descriptor.
 - (MetalTensorLayout *)select:(NSUInteger)axis indices:(NSData *)indices;
