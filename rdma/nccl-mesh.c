@@ -452,9 +452,6 @@ static void comm_free(struct ncclComm *comm) {
   for (uint32_t h = 0; h < comm->count; h++) { metal_release(comm->channels[h].buffer); metal_release(comm->channels[h].lists); }
   ncclMemFree((void *)comm->words);
   metal_release(comm->command); metal_release(comm->queue);
-  pthread_mutex_lock(&group_lock);
-  while (comm->compiled_writes) write_definitions_drop(comm, comm->compiled_writes);
-  pthread_mutex_unlock(&group_lock);
   plan_free(comm, comm->plan);
   free(comm->cache);
   comm_leave(comm);
@@ -2958,9 +2955,12 @@ static void compiled_drop(struct ncclComm *comm, struct compiled *x) {
   calls_free(x->calls, x->n); schedules_free(comm, x->plans);
   *x = (struct compiled){0};
 }
+/* the undeclared groups' definitions dropped, and the WRITE plans' own (write_definitions), compiled on routes or a map
+   that changed or a communicator that ends */
 static void cache_drop(struct ncclComm *comm) {
   for (uint32_t k = 0; k < comm->cached; k++) compiled_drop(comm, comm->cache + k);
   comm->cached = 0;
+  while (comm->compiled_writes) write_definitions_drop(comm, comm->compiled_writes);
 }
 struct plan {
   ncclMeshPlan view;
@@ -5798,8 +5798,8 @@ static ncclResult_t write_prepare_spans(struct ncclMeshWritePlan *plan) {
    one found or compiled at its execution (signature); its issues are laid and placed at its first executions, a
    generation each (issue_bind).  A tiled WRITE's comes from its declaration (ncclMeshCommPlan); one that cannot be
    compiled yet (no paths) at its execution.  The definitions hold no reference to their plan: they are let go before
-   it (ncclMeshWritePlanDestroy), or with their communicator (comm_free), which keeps the plans that hold some
-   (`compiled_writes`).  Under group_lock */
+   it (ncclMeshWritePlanDestroy), or with the undeclared groups' (cache_drop: routes or a map that changed, the
+   communicator's end), which keeps the plans that hold some (`compiled_writes`).  Under group_lock */
 static void write_definitions(struct ncclMeshWritePlan *plan) {
   struct ncclComm *comm = plan->comm;
   if (plan->layout.tile_bytes || comm->nranks == 1) return;
