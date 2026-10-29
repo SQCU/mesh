@@ -374,19 +374,29 @@ static int program_copy(struct mesh_program *made, const struct mesh_program *fr
   return 0;
 }
 
+/* `what` at `root` along `trees` compiled into *out, its arrays its own (mesh_compile_room): every member's
+   (mesh_compile), or the declared `contributors` and `recipients` alone where either is given (mesh_compile_members);
+   0, or ENOMEM or EINVAL with nothing kept */
+static int program_compile(const struct mesh_trees *trees, uint32_t what, uint32_t root, int whole, const uint64_t *contributors,
+                           const uint64_t *recipients, struct mesh_program *out) {
+  uint32_t parts, moves;
+  mesh_compile_room(trees, &parts, &moves);
+  uint32_t *segment = calloc((size_t)parts + 1, sizeof *segment), *first = calloc((size_t)trees->nodes + 1, sizeof *first);
+  double *weight = calloc((size_t)parts + 1, sizeof *weight);
+  struct mesh_move *move = calloc((size_t)moves + 1, sizeof *move);
+  const int error = !segment || !first || !weight || !move ? ENOMEM
+    : (contributors || recipients ? mesh_compile_members(trees, what, root, whole, contributors, recipients, out, segment, weight, first, move)
+                                  : mesh_compile(trees, what, root, whole, NULL, out, segment, weight, first, move)) ? EINVAL : 0;
+  if (error) { free(segment); free(first); free(weight); free(move); }
+  return error;
+}
+
 /* `what` (at `root`) along `trees` (mesh-plan.h mesh_compile: each step's piece one entry, which the bridge cuts into
    SENDs), an all-reduce single-phase where `whole`, compiled into the table's next entry, for calls of fewer bytes than
    `below` (0: any size); 0, or EINVAL */
 static int compile_entry(struct ncclComm *comm, const struct mesh_trees *trees, uint32_t what, uint32_t root, int whole, uint64_t below) {
-  uint32_t parts, moves;
-  mesh_compile_room(trees, &parts, &moves);
-  uint32_t *segment = malloc((parts + 1) * sizeof *segment), *first = malloc((trees->nodes + 1) * sizeof *first);
-  double *weight = malloc((parts + 1) * sizeof *weight);
-  struct mesh_move *move = malloc((moves + 1) * sizeof *move);
   struct entry *e = comm->entries + comm->programs;
-  if (!segment || !first || !weight || !move || trees_copy(&e->trees, trees) ||
-      mesh_compile(trees, what, root, whole, NULL, &e->program, segment, weight, first, move)) {
-    free(segment); free(first); free(weight); free(move);
+  if (trees_copy(&e->trees, trees) || program_compile(trees, what, root, whole, NULL, NULL, &e->program)) {
     trees_free(&e->trees);
     return EINVAL;
   }
@@ -2409,17 +2419,10 @@ static ncclResult_t collective_steps(struct call *c, const struct entry *entry,
   const struct mesh_program *program = &entry->program;
   ncclResult_t result = ncclSuccess;
   if ((c->contributors || c->recipients) && entry->trees.count) {
-    uint32_t parts, moves;
-    mesh_compile_room(&entry->trees, &parts, &moves);
-    uint32_t *segment = calloc((size_t)parts + 1, sizeof *segment);
-    double *weight = calloc((size_t)parts + 1, sizeof *weight);
-    uint32_t *first = calloc((size_t)c->comm->nranks + 1, sizeof *first);
-    struct mesh_move *move = calloc((size_t)moves + 1, sizeof *move);
-    if (!segment || !weight || !first || !move) result = fail(ncclSystemError, "out of memory");
-    else if (mesh_compile_members(&entry->trees, (uint32_t)c->what, (uint32_t)c->root, entry->whole,
-                                  c->contributors, c->recipients, &subset, segment, weight, first, move))
-      result = fail(ncclInvalidArgument, "the declared contributors and recipients do not form %s", call_name(c));
-    if (result) { free(segment); free(weight); free(first); free(move); return result; }
+    const int error = program_compile(&entry->trees, (uint32_t)c->what, (uint32_t)c->root, entry->whole, c->contributors,
+                                      c->recipients, &subset);
+    if (error == ENOMEM) return fail(ncclSystemError, "out of memory");
+    if (error) return fail(ncclInvalidArgument, "the declared contributors and recipients do not form %s", call_name(c));
     program = &subset;
   }
   if (cut) {
