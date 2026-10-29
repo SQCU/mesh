@@ -56,12 +56,12 @@ template<uint B> constexpr bool mesh_vector4() { return mesh_vector_span<B>() % 
 #endif
 template<uint B, typename V, bool Aligned = true, typename T>
 inline V mesh_load4(device const T *p, ulong i) {
-    if constexpr (Aligned && mesh_vector4<B>()) return *(device const V *)(p + mesh_index<B>(i));
+    if (Aligned && mesh_vector4<B>()) return *(device const V *)(p + mesh_index<B>(i));
     else return V(p[mesh_index<B>(i)], p[mesh_index<B>(i+1)], p[mesh_index<B>(i+2)], p[mesh_index<B>(i+3)]);
 }
 template<uint B, typename T, typename V>
 inline void mesh_store4(device T *p, ulong i, V value) {
-    if constexpr (mesh_vector4<B>()) *(device V *)(p + mesh_index<B>(i)) = value;
+    if (mesh_vector4<B>()) *(device V *)(p + mesh_index<B>(i)) = value;
     else {
         p[mesh_index<B>(i)] = value.x; p[mesh_index<B>(i+1)] = value.y;
         p[mesh_index<B>(i+2)] = value.z; p[mesh_index<B>(i+3)] = value.w;
@@ -247,14 +247,14 @@ template <typename V, typename P> inline V streamed_four(P p, ulong i) {
     return *(typename streamed_vector_pointer<V, P>::type)(p + i);
 }
 template <typename V, uint B, typename P> inline V streamed_four(mesh_operand<B, P> p, ulong i) {
-    if constexpr (mesh_vector4<B>()) return streamed_four<V>(p.p, mesh_index<B>(p.first + long(i)));
+    if (mesh_vector4<B>()) return streamed_four<V>(p.p, mesh_index<B>(p.first + long(i)));
     else return V(p[i], p[i+1], p[i+2], p[i+3]);
 }
 template <typename V, typename P> inline void streamed_store_four(P p, ulong i, V value) {
     *(device V *)(p + i) = value;
 }
 template <typename V, uint B, typename P> inline void streamed_store_four(mesh_operand<B, P> p, ulong i, V value) {
-    if constexpr (mesh_vector4<B>()) streamed_store_four(p.p, mesh_index<B>(p.first + long(i)), value);
+    if (mesh_vector4<B>()) streamed_store_four(p.p, mesh_index<B>(p.first + long(i)), value);
     else { p[i] = value.x; p[i+1] = value.y; p[i+2] = value.z; p[i+3] = value.w; }
 }
 
