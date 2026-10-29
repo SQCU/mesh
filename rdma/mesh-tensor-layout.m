@@ -921,6 +921,58 @@ NSInteger MetalTensorConstant(id expression,NSArray *shape,NSDictionary *paramet
     isl_val_free(constant);isl_ctx_free(ctx);return result;
 }
 
+// A declared affine producer's axes by descending stride magnitude, and its lowest address (mesh fc6d8716).
+static NSArray *TensorInverseAxes(MetalTensorLayout *declared,NSInteger *origin) {
+    NSMutableArray *axes=[NSMutableArray array];NSInteger low=declared.offset;
+    for(NSUInteger d=0;d<declared.shape.count;d++) {
+        const NSInteger n=[declared.shape[d] integerValue],s=[declared.strides[d] integerValue];
+        if(n>1&&s){[axes addObject:@(d)];low+=MIN(0,(n-1)*s);}
+    }
+    [axes sortUsingComparator:^NSComparisonResult(NSNumber *a,NSNumber *b) {
+        NSInteger x=labs([declared.strides[a.unsignedIntegerValue] integerValue]),y=labs([declared.strides[b.unsignedIntegerValue] integerValue]);
+        return x>y?NSOrderedAscending:x<y?NSOrderedDescending:NSOrderedSame;
+    }];
+    *origin=low;return axes;
+}
+// The rebases whose composition is closed-form, as mesh fc6d8716 made them (the last commit cp passed at): the
+// placement differs from the declaration by its offset alone; the view is the declaration reshaped; the view shares
+// the declaration's factors; or both are affine and the declaration is a dense bijection onto its address range, so
+// each view address has one preimage. Each composes `placed` by index terms (TensorCompose), keeping its strides and
+// maps, so a mapped placement stays mapped. nil where none applies: the relation composition (rebase) is the general
+// case, whose index functions take the solver once per affine piece wherever they are read (TensorExpressionPiece).
+static MetalTensorLayout *TensorClosedRebase(MetalTensorLayout *view,MetalTensorLayout *declared,MetalTensorLayout *placed) {
+    if([[declared shift:-declared.offset] isEqual:[placed shift:-placed.offset]])return [view shift:placed.offset-declared.offset];
+    NSArray *shape=view.shape;
+    if(view.count==declared.count&&[[declared reshape:shape] isEqual:view])return [placed reshape:shape];
+    if(declared.factored&&view.offset==declared.offset&&[view.indexShape isEqual:declared.indexShape]&&
+        [view.strides isEqual:declared.strides]&&[view.maps isEqual:declared.maps]) {
+        NSArray *digits=view.coordinates,*steps=TensorStrides(view.indexShape);NSMutableArray *terms=[NSMutableArray array];
+        for(NSUInteger d=0;d<digits.count;d++)[terms addObject:TensorScale(digits[d],[steps[d] integerValue])];
+        return TensorCompose(placed,shape,TensorSum(terms));
+    }
+    if(!view.affine||!declared.affine)return nil;
+    NSInteger low;NSArray *axes=TensorInverseAxes(declared,&low);NSUInteger width=1;BOOL dense=YES;
+    for(NSNumber *axis in [axes reverseObjectEnumerator]) {
+        NSUInteger d=axis.unsignedIntegerValue;dense&=(NSUInteger)labs([declared.strides[d] integerValue])==width;
+        width*=[declared.shape[d] unsignedIntegerValue];
+    }
+    dense&=width==declared.count;NSInteger first=view.offset,last=view.offset;
+    NSArray *digits=TensorDigits(shape);NSMutableArray *terms=[NSMutableArray arrayWithObject:@(view.offset-low)];
+    for(NSUInteger d=0;d<shape.count;d++) {
+        NSInteger step=[view.strides[d] integerValue],span=([shape[d] integerValue]-1)*step;
+        first+=MIN(0,span);last+=MAX(0,span);[terms addObject:TensorScale(digits[d],step)];
+    }
+    if(!dense||first<low||last>=low+(NSInteger)width)return nil;
+    id address=TensorSum(terms);NSMutableArray *index=[NSMutableArray array];NSArray *steps=TensorStrides(declared.shape);
+    for(NSNumber *axis in axes) {
+        NSUInteger d=axis.unsignedIntegerValue;NSInteger step=[declared.strides[d] integerValue],n=[declared.shape[d] integerValue];
+        id coordinate=TensorQuotient(TensorQuotient(address,labs(step),NO),n,YES);
+        if(step<0)coordinate=TensorSum(@[@(n-1),TensorScale(coordinate,-1)]);
+        [index addObject:TensorScale(coordinate,[steps[d] integerValue])];
+    }
+    return TensorCompose(placed,shape,TensorSum(index));
+}
+
 @implementation MetalTensorLayout
 @synthesize coordinates=_coordinates;
 + (instancetype)shape:(NSArray<NSNumber *> *)shape index:(id)expression parameters:(NSDictionary<NSString *,id> *)parameters {
@@ -1186,6 +1238,7 @@ NSInteger MetalTensorConstant(id expression,NSArray *shape,NSDictionary *paramet
     NSParameterAssert([declared.shape isEqual:placed.shape]);
     if([self isEqual:declared])return placed;
     if(!self.count)return [MetalTensorLayout shape:_shape strides:TensorStrides(_shape) offset:0 maps:@{} indices:nil];
+    MetalTensorLayout *closed=TensorClosedRebase(self,declared,placed);if(closed)return closed;
     isl_ctx *ctx=isl_ctx_alloc();
     isl_pw_aff *view=MeshIndexFunction(ctx,self),*target=MeshIndexFunction(ctx,placed);
     isl_set *domain=isl_pw_aff_domain(isl_pw_aff_copy(view));
