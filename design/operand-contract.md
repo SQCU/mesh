@@ -265,16 +265,22 @@ This closes the partial-inverse gap. It does not supply a frontend's missing
 operand declarations or a backend's missing output-placement contract. Explicit
 selection tables still use the existing compact-factor composition. General
 ownership and API constraint integration remain the work described below.
-The source build currently uses isl's ordinary preparation allocations. A
-page-backed workspace can supply the same C objects from bridge pages without
-changing the relation algorithms. The pinned archive imports `malloc`,
-`calloc`, `realloc`, `free` and `strdup`. Coverage must include context creation,
-options, identifiers, parser and printer strings, and the bundled imath integer
-storage; changing only `isl_malloc_or_die` and its two companions is incomplete.
-The workspace must retain alignment and resize semantics, preserve independent
-solver contexts, and release its pages after the lowered output has been kept.
-This allocator extension is not implemented. It belongs to preparation; emitted
-commands acquire no allocator or solver lookup.
+The ISL build binds its five heap symbols to `mesh-isl-memory.c` through one
+forced compiler header, `mesh-isl-alloc.h`. This covers context creation,
+options, strings and the bundled imath integers together. Symbol binding keeps
+ISL's generated function names intact and also covers function addresses. The
+host library's allocation symbols are unchanged; no process-wide interposition
+or runtime patching is used.
+
+ISL's small objects share bridge-page leases through `ncclMemAlloc`. Freed
+slots can be used again during preparation. Headers live in those pages too;
+alignment, zero filling and resize semantics follow the C allocation calls.
+Independent contexts share this preparation storage, which returns all leases
+when its last object is freed. The minimum lease size is a build operand in
+`etc/compute/isl.mk`; larger requests grow to fit. There is no heap fallback.
+ISL's own pointers refer to these page contents; the relation algorithms are
+unchanged. A returned ISL string must be freed with `mesh_isl_free`. Emitted
+tensor commands acquire no allocator, lock or solver lookup.
 
 ## Place values for their consumers
 
