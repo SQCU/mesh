@@ -518,11 +518,13 @@ def node_guard(seconds, floor, workstation, *argv):
         time.sleep(0 if why else 0.1)
     print(json.dumps({'overlap': others()}), flush=True)
     last = time.monotonic() + 30
+    # EPERM from killpg is a group of zombies or of a member this user cannot signal (macOS), not a failure of the
+    # rank: each tracked pid is killed alone, and those still live after 30 s are named (exit 125)
     while (left := [pid for pid, start in known.items() if live(pid, start)]) and time.monotonic() < last:
-        with contextlib.suppress(ProcessLookupError):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(rank.pid, signal.SIGKILL)
         for pid in left:
-            with contextlib.suppress(ProcessLookupError):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.kill(pid, signal.SIGKILL)
         time.sleep(0.1)
     token = os.environ.get('MESH_RUN')
