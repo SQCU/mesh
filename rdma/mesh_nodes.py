@@ -37,6 +37,7 @@ class Member:
     fabric: str
     roles: frozenset = frozenset()
     memory_gib: float = 0
+    guard_headroom_gib: float = 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -71,7 +72,8 @@ def load(path=ROOT / 'etc/mesh-nodes.json'):
     raw = json.loads(Path(path).read_text())
     access = raw.get('access', {})
     members = {str(row['node']): Member(str(row['node']), row['name'], row['management'], row['fabric'],
-                                        frozenset(row.get('roles', ())), row.get('memory_gib', 0)) for row in raw['nodes'].values()}
+                                        frozenset(row.get('roles', ())), row.get('memory_gib', 0),
+                                        row.get('guard_headroom_gib', 0)) for row in raw['nodes'].values()}
     return Cluster(members, access.get('user') or getpass.getuser(),
                    str(Path(access['key']).expanduser()) if 'key' in access else None,
                    raw['run_seconds'], raw['python'], raw['checkouts'], raw['checkouts_kept'], raw['rank_port'])
@@ -198,7 +200,8 @@ class Node:
         self.cluster, self.number, self.addr, self.via, self.ula = cluster, number, addr, via, ula
         self.local, self.deadline = local, deadline
         member = cluster.members.get(number)
-        self.name = member.name if member else number
+        self.name, self.guard = ((member.name, f'{member.guard_headroom_gib} {int("workstation" in member.roles)}')
+                                 if member else (number, '0 0'))
         self.source = 'mesh'
         self.discovered_links = 0
         self.commands = []
@@ -350,7 +353,7 @@ def ranks(nodes, tag, folder, command, port, alarm=300, env='', input=None, stat
         state, node = states.setdefault(f'rank{k}', {}), nodes[k]
         invoke = (f'MESH_RUN={shlex.quote(run)} RANK={k} WORLD_SIZE={len(nodes)} MASTER_ADDR={shlex.quote(master)} '
                   f'MASTER_PORT={port} {env}'
-                  f'{node.cluster.python} {home_path(node.source + "/rdma/mesh_nodes.py")} node guard {alarm} '
+                  f'{node.cluster.python} {home_path(node.source + "/rdma/mesh_nodes.py")} node guard {alarm} {node.guard} '
                   f'{command}')
         try:
             code, output = node.run(f'cd {home_path(folder)} && {invoke}', input=(input or b'') + b'\n', hold=True,
@@ -464,14 +467,19 @@ def sweep(match, last):
     return left
 
 
-def node_guard(seconds, *argv):
-    """Run one rank in its own session, its operands the first line of stdin. End it at its deadline, when stdin closes, or on
-    SIGTERM or SIGHUP (no memory floor: a node's memory is the program's to page, never a reason to end it); then SIGKILL it and each
+def node_guard(seconds, floor, workstation, *argv):
+    """Run one rank in its own session, its operands the first line of stdin. End it at its deadline, when the node's
+    headroom falls below `floor` GiB (0: none), when stdin closes, or on SIGTERM or SIGHUP; then SIGKILL it and each
     descendant tracked by parent pid (sampled every 0.1 s) until none remains, and then every process still carrying
     this guard's MESH_RUN (carrying), each for at most 30 s (exit 125 naming survivors). Should this guard die, the
     rank's alarm ends it 10 s late. Still escaping: a descendant that leaves its parent between samples and runs a
     platform binary or with MESH_RUN scrubbed, and such a descendant of a dead guard."""
-    stop, end, zombie = [], time.monotonic() + float(seconds), 5
+    stop, end, floor, zombie = [], time.monotonic() + float(seconds), float(floor) * 2 ** 30, 5
+    # The headroom is memorystatus's numerator A, the pages neither wired nor compressed (free, speculative, pageable),
+    # read live by sysctl (host_statistics64 is rate-limited); on a workstation, A less the compressor's bytes in use.
+    reads = [(b'vm.page_free_count', page := os.sysconf('SC_PAGE_SIZE')), (b'vm.page_speculative_count', page),
+             (b'vm.page_pageable_internal_count', page), (b'vm.page_pageable_external_count', page),
+             *([(b'vm.compressor_bytes_used', -1)] if workstation == '1' else [])]
     for s in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(s, lambda signum, _: stop.append(signal.Signals(signum).name))
     while not (stop or time.monotonic() >= end or select.select([0], [], [], 0.1)[0]):
@@ -485,7 +493,7 @@ def node_guard(seconds, *argv):
     operands.seek(0)
     rank = subprocess.Popen(argv, stdin=operands, start_new_session=True,
                             preexec_fn=lambda: signal.alarm(math.ceil(float(seconds)) + 10))
-    known, why = {rank.pid: process(rank.pid)[0]}, None
+    known, why, value, size = {rank.pid: process(rank.pid)[0]}, None, ctypes.c_uint64(), ctypes.c_size_t()
     own = os.environ.get('MESH_RUN')
     others = lambda: sorted(set(carrying(lambda token: token != own).values()))
     print(json.dumps({'loaded': ROOT.name, 'overlap': others()}), flush=True)
@@ -497,7 +505,14 @@ def node_guard(seconds, *argv):
             for child in children[:max(0, count)]:
                 if child not in known and (seen := process(child)):
                     known[child] = seen[0]
-        why = (f'received {stop[0]}' if stop else f'deadline {seconds} s' if time.monotonic() >= end
+        headroom = 0
+        for name, scale in reads if floor else ():
+            value.value, size.value = 0, 8
+            if LIBC.sysctlbyname(name, ctypes.byref(value), ctypes.byref(size), None, 0):
+                why = f'GUARD: {name.decode()} unreadable: {os.strerror(ctypes.get_errno())}'
+            headroom += value.value * scale
+        why = why or (f'received {stop[0]}' if stop else f'deadline {seconds} s' if time.monotonic() >= end
+                      else f'GUARD: headroom {headroom / 2 ** 30:.2f} GiB below {floor / 2 ** 30:.2f}' if headroom < floor
                       else 'its caller closed stdin' if select.select([0], [], [], 0)[0] and not os.read(0, 1 << 16)
                       else None)
         time.sleep(0 if why else 0.1)

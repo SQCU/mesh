@@ -17,7 +17,8 @@
       "management": "100.102.120.16",
       "fabric": "fd6d:6573:68:b5d5:b9dc:d628:b4e3:3141",
       "memory_gib": 128,
-      "roles": ["launcher", "compute", "workstation"]
+      "roles": ["launcher", "compute", "workstation"],
+      "guard_headroom_gib": 5.5
     },
     "06594A7A-3279-5A27-9099-11169DE0D270": {
       "name": "Ms-Mac-mini",
@@ -27,7 +28,8 @@
       "management": "100.77.188.102",
       "fabric": "fd6d:6573:68:3af8:1a3c:9700:3034:715d",
       "memory_gib": 24,
-      "roles": ["compute", "headless"]
+      "roles": ["compute", "headless"],
+      "guard_headroom_gib": 1.25
     },
     "E8F9C574-257D-5425-8501-E5BF6981BEA6": {
       "name": "m5ult1",
@@ -37,7 +39,8 @@
       "management": "100.103.69.53",
       "fabric": "fd6d:6573:68:577f:d1f4:93fc:f466:51a6",
       "memory_gib": 96,
-      "roles": ["compute", "headless", "root"]
+      "roles": ["compute", "headless", "root"],
+      "guard_headroom_gib": 1.25
     },
     "519B8DC8-FF1D-551F-9FC8-0A3168B1ED6A": {
       "name": "m5ult2",
@@ -47,7 +50,8 @@
       "management": "100.86.148.87",
       "fabric": "fd6d:6573:68:91e1:fbe5:72df:9c0b:bf0b",
       "memory_gib": 96,
-      "roles": ["compute", "headless"]
+      "roles": ["compute", "headless"],
+      "guard_headroom_gib": 1.25
     },
     "FFA75B2F-E060-527E-9CB3-C5816237FD8A": {
       "name": "m5ult3",
@@ -57,7 +61,8 @@
       "management": "100.65.151.124",
       "fabric": "fd6d:6573:68:353a:d161:f544:3d5a:1df7",
       "memory_gib": 96,
-      "roles": ["compute", "headless"]
+      "roles": ["compute", "headless"],
+      "guard_headroom_gib": 1.25
     },
     "BC53501D-2E24-5389-96BB-46AFE7D55F1B": {
       "name": "m5ult4",
@@ -67,7 +72,8 @@
       "management": "100.107.135.46",
       "fabric": "fd6d:6573:68:5e3b:7204:7848:33de:3c6a",
       "memory_gib": 96,
-      "roles": ["compute", "headless"]
+      "roles": ["compute", "headless"],
+      "guard_headroom_gib": 1.25
     }
   }
 }
