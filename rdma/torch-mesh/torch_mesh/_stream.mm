@@ -262,6 +262,7 @@ struct Operand {
   const void *at = nullptr;
   size_t count = 0;
   ncclDataType_t type = ncclUint8;
+  size_t bytes = 0; /* what a WRITE moves: the tensor's bytes, whatever its values */
 };
 
 // A group's prepared fragments. The shared view lowerer resolves logical page
@@ -284,7 +285,8 @@ struct Group {
   Operand moving(const at::Tensor &tensor) {
     const at::Tensor &t = contiguous(tensor);
     const ncclDataType_t type = kind(t.scalar_type());
-    return type == ncclNumTypes ? Operand{where(t), (size_t)t.nbytes(), ncclUint8} : Operand{where(t), (size_t)t.numel(), type};
+    return type == ncclNumTypes ? Operand{where(t), (size_t)t.nbytes(), ncclUint8, (size_t)t.nbytes()}
+                                : Operand{where(t), (size_t)t.numel(), type, (size_t)t.nbytes()};
   }
   Operand reducing(const at::Tensor &tensor, int64_t &op) {
     const at::Tensor &t = contiguous(tensor);
@@ -1248,7 +1250,7 @@ static void fused_allocate_ring(FusedForm &f, FusedForm::Ring &ring, const at::T
         }
         const Operand out = g.moving(source_view), in = g.moving(landing_view);
         prepared->handles.push_back(nullptr);
-        checked(mesh_compile_write(out.at, (void *)in.at, out.count, out.type, (int)source, (int)destination,
+        checked(mesh_compile_write(out.at, (void *)in.at, out.bytes, (int)source, (int)destination,
                                     communicator(f.comm), 1, (uint32_t)repeats, (size_t)local_stride, 0,
                                     &prepared->handles.back()));
       }
@@ -1380,7 +1382,7 @@ static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, c
       }
       const Operand out = g.moving(source), in = g.moving(landing);
       prepared->handles.push_back(nullptr);
-      checked(mesh_compile_write(out.at, (void *)in.at, out.count, out.type, 0, (int)destination,
+      checked(mesh_compile_write(out.at, (void *)in.at, out.bytes, 0, (int)destination,
                                   communicator(f.comm), 1, (uint32_t)count, stride, 0, &prepared->handles.back()));
     }
     prepared->prepare(f.comm, f.polls, count, input_pitch);
@@ -1549,8 +1551,7 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
   for (const at::Tensor &landing : landings) {
     if (!rows) framed(landing);
     in.push_back(g.moving(landing));
-    TORCH_CHECK(in.back().count == out.count && in.back().type == out.type,
-                "fused writes: landing extent and dtype must match the source");
+    TORCH_CHECK(in.back().bytes == out.bytes, "fused writes: a landing holds the source's bytes (a WRITE moves bytes, not typed values)");
   }
   PreparedWrites plans;
   plans.prepare(comm, polls, repeats, rows ? 0 : stride);
@@ -1565,11 +1566,11 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
       if(rank==pairs[i][1])checked(ncclMeshWriteLandings(plans.handles[i],tile_landings.data(),(uint32_t)plans.land.size(),
           ncclMeshTileLayout{.columns=tiles,.tile_stride=record_words*sizeof(uint64_t),.instances=1}));
     } else if (rows) {
-      TORCH_CHECK(out.type == ncclUint8 && out.count == (size_t)row_bytes,
+      TORCH_CHECK(out.bytes == (size_t)row_bytes,
                   "affine write bindings name the first row as a contiguous byte view");
       checked(mesh_compile_rows(out.at, (void *)in[i].at, (size_t)row_bytes, (size_t)rows, (size_t)stride,
                                       pairs[i][0], pairs[i][1], c, 1, 0, mesh_write_layout{.instances=1,.invocations=1}, &plans.handles[i]));
-    } else checked(mesh_compile_write(out.at, (void *)in[i].at, out.count, out.type, pairs[i][0], pairs[i][1], c, 1,
+    } else checked(mesh_compile_write(out.at, (void *)in[i].at, out.bytes, pairs[i][0], pairs[i][1], c, 1,
                                       (uint32_t)repeats, (size_t)stride, 0, &plans.handles[i]));
     if (produced) checked(ncclMeshWriteSourceReady(plans.handles[i], produced->at, (uint64_t)ready_value,
         ncclMeshTileLayout{.columns=tiles,.tile_stride=sizeof(uint64_t),.instances=1}));

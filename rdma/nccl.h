@@ -1072,7 +1072,8 @@ ncclResult_t ncclMeshWritePlanDestroy(ncclMeshWritePlan_t plan);
    the first five the planner's mesh-plan.h MESH_*), its `peer` (a
    send's or a receive's, a reduce's or a broadcast's root), `count` as its call takes it (a reduce-scatter's
    recvcount, an all-gather's sendcount), `counts` (NULL: none; read for these alone) a V form's (ncclMeshAllGatherV's
-   and ncclMeshReduceScatterV's, a rank's count each; ncclMeshAlltoAllV's sendcounts then recvcounts), `type`, `op` (a
+   and ncclMeshReduceScatterV's, a rank's count each; ncclMeshAlltoAllV's sendcounts then recvcounts), `type` (a WRITE's
+   `count` of it is the WRITE's bytes, all a WRITE moves: its values' type is its producer's and consumer's), `op` (a
    reduction's), and `group`: consecutive calls of one number are one group (ncclGroupStart to ncclGroupEnd; a call
    outside one its own group). ncclMeshPlanRun supplies their invocation order. `fused` (not 0): the call is
    issued on a fused stream (ncclMeshStream fused). It uses the same physical striping and routed-write

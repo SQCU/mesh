@@ -266,11 +266,9 @@ class Comm:
         own = sendbuf if self.rank == source else landingbuf
         if not isinstance(own, np.ndarray) or own.dtype.hasobject:
             raise ValueError('a WRITE binding is a numpy array without Python objects')
-        pointer, (datatype, multiple) = at(own), kind(own.dtype)
-        made = ffi.new('ncclMeshWritePlan_t *')
+        pointer, made = at(own), ffi.new('ncclMeshWritePlan_t *')
         check(lib.mesh_compile_write(pointer if self.rank == source else ffi.NULL,
-            ffi.NULL if self.rank == source else pointer, own.size * multiple, datatype,
-            source, destination, self.comm, 0, 1, 0, max_packet, made))
+            ffi.NULL if self.rank == source else pointer, own.nbytes, source, destination, self.comm, 0, 1, 0, max_packet, made))
         return WritePlan(self, made[0], (own,))
 
     def Write_rows_prepare(self, sendbuf, landingbuf, source, destination, *, row_bytes, rows, max_packet=0):
