@@ -1203,6 +1203,33 @@ finished:
         return TensorSelect(part,local,indices);
     });
 }
+- (MetalTensorLayout *)select:(NSUInteger)axis runs:(NSArray<NSArray<NSNumber *> *> *)runs {
+    NSMutableArray *parts=[NSMutableArray array];NSUInteger count=0;
+    for(NSArray *run in runs)if([run[1] unsignedIntegerValue]&&[run[3] unsignedIntegerValue]) {
+        [parts addObject:run];count+=[run[1] unsignedIntegerValue]*[run[3] unsignedIntegerValue];
+    }
+    if(!count)return [self slice:axis first:0 count:0 step:1];
+    if(parts.count==1) {
+        NSArray *run=parts[0];const NSInteger first=[run[0] integerValue],step=[run[2] integerValue];
+        const NSUInteger width=[run[1] unsignedIntegerValue];
+        NSMutableArray *shape=[[_shape mutableCopy] autorelease];shape[axis]=@(count);
+        NSUInteger inner=1;for(NSUInteger d=axis+1;d<_shape.count;d++)inner*=[_shape[d] unsignedIntegerValue];
+        if(!TensorCount(shape))return [MetalTensorLayout shape:shape strides:TensorStrides(shape) offset:_offset maps:@{} indices:nil];
+        id digit=TensorQuotient(TensorQuotient(@"i",inner,NO),count,YES);
+        id selected=TensorSum(@[@(first),TensorScale(TensorQuotient(digit,width,NO),step),TensorQuotient(digit,width,YES)]);
+        id index=TensorSum(@[TensorScale(TensorQuotient(@"i",count*inner,NO),[_shape[axis] integerValue]*inner),
+                            TensorScale(selected,inner),TensorQuotient(@"i",inner,YES)]);
+        return TensorCompose(self,shape,index);
+    }
+    NSMutableData *data=[NSMutableData dataWithLength:count*sizeof(NSInteger)];NSInteger *indices=data.mutableBytes;
+    NSUInteger at=0;
+    for(NSArray *run in parts) {
+        const NSInteger first=[run[0] integerValue],step=[run[2] integerValue];
+        const NSUInteger width=[run[1] unsignedIntegerValue],repeats=[run[3] unsignedIntegerValue];
+        for(NSUInteger k=0;k<repeats;k++)for(NSUInteger j=0;j<width;j++)indices[at++]=first+(NSInteger)k*step+(NSInteger)j;
+    }
+    return [self select:axis indices:data];
+}
 - (MetalTensorLayout *)slice:(NSUInteger)axis first:(NSInteger)first count:(NSUInteger)count step:(NSInteger)step {
     if(first==0&&count==[_shape[axis] unsignedIntegerValue]&&step==1)return self;
     return TensorAxisTransform(self,axis,^MetalTensorLayout *(MetalTensorLayout *part,NSUInteger local) {

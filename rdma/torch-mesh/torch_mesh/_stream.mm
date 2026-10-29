@@ -1772,6 +1772,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     })
     .def("index",[](const TensorLayout &v,NSUInteger i){return [v.value index:i];})
     .def("select",[](const TensorLayout &v,NSUInteger axis,const std::vector<NSInteger> &indices){return TensorLayout([v.value select:axis indices:tensorWords(indices)]);})
+    .def("select_runs",[](const TensorLayout &v,NSUInteger axis,const std::vector<std::vector<NSInteger>> &runs){
+      NSMutableArray *parts=[NSMutableArray array];for(const auto &run:runs)[parts addObject:tensorNumbers(run)];
+      return TensorLayout([v.value select:axis runs:parts]);
+    })
     .def("slice",[](const TensorLayout &v,NSUInteger axis,NSInteger first,NSUInteger count,NSInteger step){return TensorLayout([v.value slice:axis first:first count:count step:step]);})
     .def("element",[](const TensorLayout &v,NSUInteger axis,NSUInteger i){return TensorLayout([v.value element:axis at:i]);})
     .def("permute",[](const TensorLayout &v,const std::vector<NSInteger> &axes){return TensorLayout([v.value permute:tensorNumbers(axes)]);})

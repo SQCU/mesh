@@ -1404,6 +1404,14 @@ axis. Reshape carries the digit by its flat span: a channel selection in
 Shape constants retain the whole selected dimension, including its repeats.
 The constant selector consumes one compact record for those stripes.
 
+The shared `MetalTensorLayout.select:runs:` consumes these same ordered records.
+A single repeated run composes into its integer coordinates without expanding
+its repetitions. Other ordered runs use the existing mapped-layout composition.
+The FX binding exposes the same operation as `select_runs`; both return the
+ordinary layout type with the same dependency methods. Preparation covered
+reversed and repeated selections, mapped inputs, empty domains and a single
+stripe selecting half a billion rows without a coordinate table.
+
 Preparation on 2026-10-28 preserved dense INT2/INT4 tails and fixed-width scalar
 bits across axes, odd extents and empty domains. Cut graphs serialized with
 uncut aliases intact; a composite's internal constant was sliced through the
@@ -1477,16 +1485,23 @@ LiteRT library built. No numerical commands ran. Reshape relations spanning
 several target axes and simultaneous graph cuts on several axes of one tensor
 remain open. The planner also still declares whole-head shares.
 
-Static review on 2026-10-29 found a separate external binding gap. The model
-export retains a cut tensor's shape, but its ordinary provider binding uses a
-name and offset zero. A consumer selecting columns from an earlier full result
-therefore loses the relation between its local columns and that result's pages.
-Serialization and graph-order checks do not establish correct numerical binding.
-The original-to-selected relation must reach the shared layout placement and
-provider requirement lowering. A required contiguous view must use direct
-placement where possible, or the shared prepared layout-copy operation where
-the provider's fixed layout requires it. Numerical execution remains deferred
-until that relation is carried through the boundary.
+Static review on 2026-10-29 found a separate external binding gap. Graph append
+formerly joined selected inputs to earlier full results by name alone. It now
+retains each tensor's scalar type, original domain and ordered selections.
+Matching selections reuse the same value. Different selections retain a source
+relation through append, extraction and stage export. A selected use of a local
+provider result exposes that result before the consumer. These are preparation
+boundaries; no numerical view operation or wait is added. The exported binding
+names its final producer directly, without a chain of view descriptors.
+
+The ordinary provider binder still uses a name and offset zero and does not yet
+consume those relations. Serialization and graph-order checks therefore do not
+establish correct numerical binding. The relation must reach shared layout
+placement and provider requirement lowering. A required contiguous view must
+use direct placement where possible, or the shared prepared layout-copy
+operation where the provider's fixed layout requires it. External input/output
+selections and returned views also need that same placement. Numerical execution
+remains deferred until the provider boundary is complete.
 
 ### Encoded numerical operands
 

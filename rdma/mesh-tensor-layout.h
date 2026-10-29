@@ -30,6 +30,9 @@ struct MetalTensorSpan { NSInteger offset; NSUInteger count; };
 - (NSInteger)index:(NSUInteger)logical;
 // Compose transformations now; the result never retains a parent descriptor.
 - (MetalTensorLayout *)select:(NSUInteger)axis indices:(NSData *)indices;
+// Ordered (first, width, step, count) runs. A repeated stripe is composed as
+// integer coordinates; its repetitions do not become an element-index table.
+- (MetalTensorLayout *)select:(NSUInteger)axis runs:(NSArray<NSArray<NSNumber *> *> *)runs;
 - (MetalTensorLayout *)slice:(NSUInteger)axis first:(NSInteger)first count:(NSUInteger)count step:(NSInteger)step;
 - (MetalTensorLayout *)element:(NSUInteger)axis at:(NSUInteger)index;
 - (MetalTensorLayout *)permute:(NSArray<NSNumber *> *)axes;
