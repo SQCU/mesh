@@ -1658,6 +1658,71 @@ static struct lease *lease_at(const void *ptr, struct attach **held) {
   return NULL;
 }
 
+/* the leases a prepared owner's entries read (a placed issue's, a prepared WRITE's), each a registration scope open
+   from its preparation to its end (owned_begin, owned_end), so no present registers its reads (mesh-lease-retire.h: an
+   open scope covers the uses not yet enumerated).  `uses`, a channel's sends and landings each, are fixed when it is
+   prepared but `end`, which present_group advances.  `kinds` per lease: OWNED_TABLE a descriptor table's (metadata),
+   OWNED_SENDS read by its sends alone (a source readiness table).  Under attach_lock */
+struct owned { const void **leases; unsigned char *kinds; size_t count; struct mesh_lease_retire_dep *uses; uint32_t channels; };
+enum { OWNED_TABLE = 1, OWNED_SENDS = 2 };
+/* `address`'s lease among those `o` holds, once, of kind `kind` (struct owned).  0, ENOMEM */
+static int owned_add(struct owned *o, const void *address, unsigned kind) {
+  for (size_t i = 0; i < o->count; i++) if (o->leases[i] == address) return 0;
+  const void **leases = realloc(o->leases, (o->count + 1) * sizeof *leases);
+  if (leases) o->leases = leases;
+  unsigned char *kinds = leases ? realloc(o->kinds, o->count + 1) : NULL;
+  if (!kinds) return ENOMEM;
+  o->kinds = kinds;
+  o->leases[o->count] = address; o->kinds[o->count++] = (unsigned char)kind;
+  return 0;
+}
+/* `o`'s uses, a channel's direction each, at the holdings `comm` has now.  0, ENOMEM.  Under attach_lock */
+static int owned_uses(struct ncclComm *comm, struct owned *o) {
+  if (!(o->uses = calloc(2 * (size_t)comm->count, sizeof *o->uses))) return ENOMEM;
+  o->channels = comm->count;
+  for (uint32_t h = 0; h < comm->count; h++) {
+    const struct channel *ch = comm->channels + h;
+    const struct hold *hold = comm->attach->holds + comm->endpoint[ch->cable];
+    for (unsigned d = 0; d < 2; d++)
+      o->uses[2 * h + d] = (struct mesh_lease_retire_dep){.stream = ch->stream, .wire = hold->wire, .holding = hold->generation, .direction = d};
+  }
+  return 0;
+}
+/* a scope opened on each of `o`'s leases from `from` on.  0, else EINVAL (an address no live lease of this
+   process's) or the ledger's error, the scopes this call opened closed and its leases no longer `o`'s.  Under
+   attach_lock */
+static int owned_begin(struct owned *o, size_t from) {
+  int error = 0;
+  size_t i = from;
+  for (; i < o->count && !error; i++) {
+    struct lease *l = lease_at(o->leases[i], NULL);
+    error = !l || l->returned ? EINVAL : mesh_lease_retire_begin(&l->reads);
+  }
+  if (error) {
+    for (size_t j = from; j + 1 < i; j++) { struct lease *l = lease_at(o->leases[j], NULL); if (l) mesh_lease_retire_end(&l->reads); }
+    o->count = from;
+  }
+  return error;
+}
+/* `o`'s leases let go: each scope ended after the uses its presents advanced are handed to it (`marks`), so a lease
+   is reused only once the reads of its entries complete (mesh_lease_retire_ready).  A use that cannot be recorded
+   leaves its scope open: the lease is never reused.  Under attach_lock */
+static void owned_end(struct owned *o, int marks) {
+  for (size_t i = 0; o->uses && i < o->count; i++) {
+    struct lease *l = lease_at(o->leases[i], NULL);
+    int error = l ? 0 : EINVAL;
+    for (uint32_t k = 0; !error && marks && k < 2 * o->channels; k++) {
+      const struct mesh_lease_retire_dep *d = o->uses + k;
+      if ((o->kinds[i] & OWNED_SENDS) && d->direction != MESH_LEASE_SEND) continue;
+      error = mesh_lease_retire_mark_use(&l->reads, d->stream, d->wire, d->holding, d->end, d->direction, o->kinds[i] & OWNED_TABLE);
+    }
+    if (!error) mesh_lease_retire_end(&l->reads);
+    else fail(ncclInternalError, "releasing a prepared owner's leases: %s", strerror(error));
+  }
+  free(o->leases); free(o->kinds); free(o->uses);
+  *o = (struct owned){0};
+}
+
 /* the lease holding `ptr` (any byte of it): the Metal buffer over the whole lease (made at its first use, kept until
    ncclMemFree) and ptr's offset in it; 0, ENOENT where no lease of this process holds ptr, ENOMEM */
 static int lease_buffer(const void *ptr, void **buffer, size_t *offset) {
@@ -1823,13 +1888,10 @@ struct ncclMeshWritePlan {
   size_t *span_first; /* step, binding occurrence -> immutable repeated descriptor train */
   mesh_pages *step_units; /* same step/occurrence index, one fused repetition */
   void *payload;
-  struct mesh_lease_retire_dep *uses; /* fixed channel/direction indices; only end advances */
-  uint32_t channels;
-  int retained;
+  struct owned owned; /* its payload's, span table's and source readiness table's leases; held where `uses` */
   struct where source, landing;
   struct where source_ready;
   uint64_t ready_value;
-  void *ready_owner;
   void *land_records;
   ncclMeshTileLayout ready_layout, land_layout;
   struct mesh_write_layout layout;
@@ -1898,30 +1960,13 @@ static uint64_t write_displacement(const struct ncclMeshWritePlan *p, uint64_t l
 }
 static void write_plan_drop(struct ncclMeshWritePlan *p) {
   if (p && atomic_fetch_sub_explicit(&p->refs, 1, memory_order_acq_rel) == 1) {
-    if (p->retained) {
-      /* Releasing a realized configuration transfers its final uses to the
-         allocator. No execution performs an ownership search or reuse query. */
-      pthread_mutex_lock(&attach_lock);
-      struct lease *payload = lease_at(p->payload, NULL), *metadata = lease_at(p->spans, NULL);
-      struct lease *ready = p->ready_owner ? lease_at(p->ready_owner, NULL) : NULL;
-      int error = !payload || !metadata ? EINVAL : 0;
-      for (uint32_t k = 0; !error && k < 2 * p->channels; k++) {
-        const struct mesh_lease_retire_dep *d = p->uses + k;
-        error = mesh_lease_retire_mark_use(&payload->reads, d->stream, d->wire, d->holding, d->end, d->direction, 0);
-        if (!error) error = mesh_lease_retire_mark_use(&metadata->reads, d->stream, d->wire, d->holding, d->end, d->direction, 1);
-        if (!error && ready && d->direction == MESH_LEASE_SEND)
-          error = mesh_lease_retire_mark_use(&ready->reads, d->stream, d->wire, d->holding, d->end, d->direction, 1);
-      }
-      if (!error) {
-        mesh_lease_retire_end(&payload->reads);
-        mesh_lease_retire_end(&metadata->reads);
-        if (ready) mesh_lease_retire_end(&ready->reads);
-      }
-      pthread_mutex_unlock(&attach_lock);
-      if (error) fail(ncclInternalError, "releasing prepared write ownership: %s", strerror(error));
-    }
+    /* Releasing a realized configuration transfers its final uses to the allocator. No execution performs an
+       ownership search or reuse query. */
+    pthread_mutex_lock(&attach_lock);
+    owned_end(&p->owned, 1);
+    pthread_mutex_unlock(&attach_lock);
     if (p->spans) ncclMemFree(p->spans);
-    write_packets_free(p); free(p->uses); free(p->span_first); free(p->step_units); free(p->view); free(p->view_first); free(p);
+    write_packets_free(p); free(p->span_first); free(p->step_units); free(p->view); free(p->view_first); free(p);
   }
 }
 /* First cut strictly after a logical byte offset. */
@@ -2768,10 +2813,7 @@ struct issue { struct schedule *plans; struct steps **steps; struct inflight *gr
                /* laid and placed (`laid`) for a binding (`bound`, `stride`), in
                   slot `slot` (its storage at `base`, its landing area at `area`), its span tables a lease (`tables`) */
                int laid; size_t stride; uint32_t slot; struct where base, area; struct bound *bound; void *tables;
-               /* the leases its entries read (`owned`, `metadata` a descriptor table's), held from its placement to its
-                  end as a prepared WRITE's are (owned_begin, owned_end): a channel's sends' and landings' uses
-                  (`uses`), each fixed at the placement but `end`, which present_group advances */
-               const void **owned; unsigned char *metadata; size_t owns; struct mesh_lease_retire_dep *uses; uint32_t channels; };
+               struct owned owned; /* the leases its entries read, held from its placement to the next or its end */ };
 struct compiled { struct call *calls; size_t n; uint64_t repeat; struct schedule *plans; uint32_t slot[GENERATIONS], uses;
                   struct issue *issue[GENERATIONS]; };
 /* a definition dropped: its slots back to the communicator's, for the next definition under the same guard, and its
@@ -3075,57 +3117,6 @@ static ncclResult_t bind_slot(struct ncclComm *comm, struct compiled *x, uint32_
 }
 
 
-/* `address`'s lease among those `u` holds, once (`metadata` its descriptor tables'), while it is placed.  0, ENOMEM */
-static int owned_add(struct issue *u, const void *address, unsigned metadata) {
-  for (size_t i = 0; i < u->owns; i++) if (u->owned[i] == address) return 0;
-  const void **owned = realloc(u->owned, (u->owns + 1) * sizeof *owned);
-  if (owned) u->owned = owned;
-  unsigned char *kinds = owned ? realloc(u->metadata, u->owns + 1) : NULL;
-  if (!kinds) return ENOMEM;
-  u->metadata = kinds;
-  u->owned[u->owns] = address; u->metadata[u->owns++] = (unsigned char)metadata;
-  return 0;
-}
-/* `u`'s leases let go, each scope owned_begin opened ended after the uses its presents advanced are handed to it
-   (`marks`), as a released prepared WRITE's are (write_plan_drop): a lease is reused only once the reads of its entries
-   complete (mesh_lease_retire_ready).  A use that cannot be recorded leaves its scope open: the lease is never reused.
-   Under attach_lock */
-static void owned_end(struct issue *u, int marks) {
-  for (size_t i = 0; u->uses && i < u->owns; i++) {
-    struct lease *l = lease_at(u->owned[i], NULL);
-    int error = l ? 0 : EINVAL;
-    for (uint32_t k = 0; !error && marks && k < 2 * u->channels; k++) {
-      const struct mesh_lease_retire_dep *d = u->uses + k;
-      error = mesh_lease_retire_mark_use(&l->reads, d->stream, d->wire, d->holding, d->end, d->direction, u->metadata[i]);
-    }
-    if (!error) mesh_lease_retire_end(&l->reads);
-    else fail(ncclInternalError, "releasing an issue's leases: %s", strerror(error));
-  }
-  free(u->owned); free(u->metadata); free(u->uses);
-  u->owned = NULL; u->metadata = NULL; u->uses = NULL; u->owns = 0; u->channels = 0;
-}
-/* `u`'s leases held as a prepared WRITE's are (ncclMeshWritePlan `uses`): a registration scope open on each, so no
-   present registers its reads (mesh-lease-retire.h: an open scope covers the uses not yet enumerated), and its uses a
-   channel's direction each.  0, EINVAL (an address no live lease of this process's), ENOMEM.  Under attach_lock */
-static int owned_begin(struct ncclComm *comm, struct issue *u) {
-  if (!(u->uses = calloc(2 * (size_t)comm->count, sizeof *u->uses))) return ENOMEM;
-  u->channels = comm->count;
-  for (uint32_t h = 0; h < comm->count; h++) {
-    const struct channel *ch = comm->channels + h;
-    const struct hold *hold = comm->attach->holds + comm->endpoint[ch->cable];
-    for (unsigned d = 0; d < 2; d++)
-      u->uses[2 * h + d] = (struct mesh_lease_retire_dep){.stream = ch->stream, .wire = hold->wire, .holding = hold->generation, .direction = d};
-  }
-  size_t begun = 0;
-  int error = 0;
-  for (; begun < u->owns && !error; begun++) {
-    struct lease *l = lease_at(u->owned[begun], NULL);
-    error = !l || l->returned ? EINVAL : mesh_lease_retire_begin(&l->reads);
-  }
-  if (error) { u->owns = begun - 1; owned_end(u, 0); }
-  return error;
-}
-
 /* where each entry's pages lie (struct message `data`): a SEND's in the buffer its step reads (the send buffer, where
    it reads that in place), a COPY's in its step's buffer, a combine's in the group's landing area (`area`: bind_slot,
    each entry from a page of it); each in a live lease, its span table, a span a page, in its issue's lease of them
@@ -3135,7 +3126,7 @@ static int owned_begin(struct ncclComm *comm, struct issue *u) {
    buffer is no lease, or a span crosses a registration extent; nothing is copied to move it), nothing presented */
 static ncclResult_t place_group(struct ncclComm *comm, struct issue *u, struct where area) {
   pthread_mutex_lock(&attach_lock);
-  owned_end(u, 1);
+  owned_end(&u->owned, 1);
   pthread_mutex_unlock(&attach_lock);
   const unsigned char *region = (const unsigned char *)comm->attach->context.M;
   struct schedule *plans = u->plans;
@@ -3180,7 +3171,7 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u, struct w
             pthread_mutex_unlock(&attach_lock);
             if (!valid) return fail(ncclInvalidUsage, "%s on %s: %zu bytes at byte %zu are outside a live local lease",
                                     call_name(x->c), comm->name, x->bytes, x->offset);
-            if (owned_add(u, owner, 0)) return fail(ncclSystemError, "out of memory");
+            if (owned_add(&u->owned, owner, 0)) return fail(ncclSystemError, "out of memory");
           }
           if (!x->pages.n) continue;
           if (x->pages.n > SIZE_MAX / 2 / sizeof *x->spans) return fail(ncclSystemError, "out of memory");
@@ -3197,9 +3188,10 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u, struct w
           x->table = (uint64_t)((unsigned char *)made - region);
         }
   }
-  int error = u->tables ? owned_add(u, u->tables, 1) : 0;
+  int error = u->tables ? owned_add(&u->owned, u->tables, OWNED_TABLE) : 0;
   pthread_mutex_lock(&attach_lock);
-  if (!error) error = owned_begin(comm, u);
+  if (!error) error = owned_uses(comm, &u->owned);
+  if (!error) error = owned_begin(&u->owned, 0);
   pthread_mutex_unlock(&attach_lock);
   if (error) return fail(ncclInvalidUsage, "holding a group's leases from its placement: %s", strerror(error));
   return ncclSuccess;
@@ -3339,7 +3331,7 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
       const struct message *items = send ? plans[h].out : plans[h].in;
       for (size_t k = 0; k < count; k++) {
         const struct message *m = items + k;
-        (m->c->write_plan ? m->c->write_plan->uses : owner->uses)[2 * h + !send].end = m->end.n;
+        (m->c->write_plan ? &m->c->write_plan->owned : &owner->owned)->uses[2 * h + !send].end = m->end.n;
       }
     }
   for (uint32_t h = 0; h < comm->count; h++) {
@@ -3724,7 +3716,7 @@ static void issue_free(struct ncclComm *comm, struct issue *u) {
   if (u->group) free(u->group->start);
   for (size_t i = 0; u->bound && i < u->n; i++) { free(u->bound[i].views[0]); free(u->bound[i].views[1]); free(u->bound[i].segments); }
   pthread_mutex_lock(&attach_lock);
-  owned_end(u, 1);
+  owned_end(&u->owned, 1);
   pthread_mutex_unlock(&attach_lock);
   if (u->tables) ncclMemFree(u->tables);
   free(u->steps); free(u->calls); free(u->bound); free(u->group); free(u);
@@ -5418,26 +5410,13 @@ static ncclResult_t write_prepare_spans(struct ncclMeshWritePlan *plan) {
   }
   free(transfers);
   if (!result && count) {
-    plan->uses = calloc(2 * comm->count, sizeof *plan->uses);
-    if (!plan->uses) return fail(ncclSystemError, "allocating prepared channel ownership");
     plan->payload = address_of(binding);
-    plan->channels = comm->count;
+    int error = owned_add(&plan->owned, plan->payload, 0);
+    if (!error) error = owned_add(&plan->owned, plan->spans, OWNED_TABLE);
     pthread_mutex_lock(&attach_lock);
-    struct lease *payload = lease_at(plan->payload, NULL), *metadata = lease_at(plan->spans, NULL);
-    int error = !payload || !metadata ? EINVAL : mesh_lease_retire_begin(&payload->reads);
-    if (!error) {
-      error = mesh_lease_retire_begin(&metadata->reads);
-      if (error) mesh_lease_retire_end(&payload->reads);
-    }
-    if (!error) {
-      plan->retained = 1;
-      for (uint32_t h = 0; h < comm->count; h++) {
-        const struct channel *ch = comm->channels + h;
-        const struct hold *hold = comm->attach->holds + comm->endpoint[ch->cable];
-        for (unsigned d = 0; d < 2; d++) plan->uses[2 * h + d] = (struct mesh_lease_retire_dep){
-          .stream = ch->stream, .wire = hold->wire, .holding = hold->generation, .direction = d};
-      }
-    }
+    if (!error) error = owned_uses(comm, &plan->owned);
+    if (!error) error = owned_begin(&plan->owned, 0);
+    if (error) owned_end(&plan->owned, 0);
     pthread_mutex_unlock(&attach_lock);
     if (error) result = fail(ncclInvalidUsage, "preparing write ownership: %s", strerror(error));
   }
@@ -5793,7 +5772,7 @@ long mesh_view_layout(const uint64_t *shape, const int64_t *strides, size_t rank
 ncclResult_t ncclMeshWriteSourceReady(ncclMeshWritePlan_t plan, const void *words, uint64_t value, ncclMeshTileLayout layout) {
   if (!plan || !value || value < (plan->layout.tile_bytes && plan->layout.tile_bytes < plan->bytes ? plan->layout.tile_bytes : plan->bytes) || plan->ready_value)
     return fail(ncclInvalidArgument, "source readiness needs a fresh plan and a value covering one logical tile");
-  if (plan->comm->rank == plan->from && plan->retained) {
+  if (plan->comm->rank == plan->from && plan->owned.uses) {
     size_t extent=0;
     if(tile_extent(layout,write_tiles(plan),sizeof(uint64_t),&extent))
       return fail(ncclInvalidArgument,"source readiness table geometry");
@@ -5805,11 +5784,13 @@ ncclResult_t ncclMeshWriteSourceReady(ncclMeshWritePlan_t plan, const void *word
     struct lease *owner = lease_at(address, &attachment);
     const size_t offset = owner ? (uintptr_t)address - (uintptr_t)owner->address : 0;
     int error = !owner || attachment != plan->comm->attach || owner->returned || offset > owner->bytes || owner->bytes - offset < extent ||
-      (uintptr_t)address % sizeof(uint64_t)
-      ? EINVAL : mesh_lease_retire_begin(&owner->reads);
+      (uintptr_t)address % sizeof(uint64_t) ? EINVAL : 0;
+    const size_t held = plan->owned.count;
+    if (!error) error = owned_add(&plan->owned, address, OWNED_TABLE | OWNED_SENDS);
+    if (!error && plan->owned.count > held) error = owned_begin(&plan->owned, held);
     pthread_mutex_unlock(&attach_lock);
     if (error) return fail(ncclInvalidArgument, "source readiness table is not an aligned live region operand");
-    plan->source_ready = ready; plan->ready_owner = address;
+    plan->source_ready = ready;
   }
   plan->ready_value = value; plan->ready_layout = layout;
   return ncclSuccess;
