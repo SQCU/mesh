@@ -1526,14 +1526,40 @@ reshaped values and outputs with live padded neighbors. A separate command
 capture retained the final page origins and invocation strides for two views
 of one backing. No command buffer was submitted and no numerical work ran.
 
-The boundary remains incomplete. Native declarations and collective stages
-still resolve some values by name alone. In particular, the collective head
-handoff forces `MetalBuffer` and assumes dense rows, which does not follow from
-that provider buffer class. These callers must consume the same typed page
-relations, with a shared conversion only where their declared encoding requires
-one. External input/output selections, returned views and changed selections
-across resized source domains also need complete placement. Numerical execution
-remains deferred until these edges are reconciled.
+Collective stages now consume these same relations. The graph's tensor operand
+exporter supplies provider-backed sums and whole-value transfers. A selected
+handoff adds its axis selection to that relation; it no longer invents physical
+rows or a pitch. The forced `MetalBuffer` choice and the LiteRT adapter's
+name-and-zero-offset collective path are removed.
+
+`MeshRankCrossDomains` supplies each member's contributor and recipient intervals
+from the common collective definition. Preparation composes them with the
+declared tensor view. Matching scalar encodings retain the source's physical
+indices, including PHWC4 padding and arbitrary selections. A different declared
+wire encoding uses the same tiled conversion as a fixed-layout provider. A
+broadcast root reuses its prepared wire value as its unchanged result. Command
+recording binds the already prepared views through `MeshRankCross`.
+
+Conversion sharing stops at each independently invoked or repeated graph region.
+An earlier prefill conversion cannot stand in for a decode input. The range
+dependency compiler still handles overlapping writes within each region. No
+runtime cache or reuse decision is added.
+
+Preparation on 2026-10-29 retained reversed, padded selections through broadcast
+roles and float/half conversion. Ragged gather and reduce-scatter domains kept
+their declared physical indices. The actual graph-stage exporter retained typed
+relations for internal sums and selected handoffs. The native libraries, rank
+and Goal A built; no communicator, page allocation or numerical work ran in
+these preparation checks.
+
+The boundary remains incomplete. General native declarations still need to
+publish their logical layouts and scalar encodings. A collective without its
+typed source/target relation now ends preparation; it has no implicit dense
+alternative. The built-in token array declares its uint32 pages to the common
+binder. Other native outputs, complete input/output placement for shape-changing
+collectives, external/signature selections and changed selections across resized
+source domains still need integration. Numerical execution remains deferred
+until these edges are reconciled.
 
 ### Encoded numerical operands
 
