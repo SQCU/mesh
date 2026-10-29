@@ -121,13 +121,22 @@ frontend's resolver makes the operation or crossing from the bytes with the nati
 - **Crossings.** A group of NCCL calls is declared as its issues. A crossing assumes its communicator's plan
   (`ncclMeshCommPlan`, made on every rank in one order, over the actual buffers), so in a new process the plan must be
   declared again before the crossing is encoded. Without that plan, a crossing fails as a value.
-  - A plan's buffers can be kept operands that only the recorder holds, so the plan is captured where it is made
-    (libnccl-mesh) and declared again by the recorder: the next step of R5.
+  - A plan's buffers can be kept operands that only the recorder holds, so the plan is captured where it is made.
+    `ncclMeshCommPlan` keeps the declaration it accepted, flat (`plan_declaration`: each array in the length
+    `declared()` reads, each binding's `ncclMeshBuffer` a place).
+  - `MetalScheduleCommunicator` records a plan call wherever the communicator's declaration differs from the last one
+    the function recorded. Instantiation declares it again (`ncclMeshCommPlanDeclared`) over the instance's operands
+    before the crossings that follow. Every rank instantiates its own template in its preparation order, as every
+    rank declares its plan in one order.
+  - A plan declares a communicator's whole sequence. Functions that share one communicator's plan carry it whole, and
+    the buffers they do not bind are kept by value. Declaring a plan again replaces the one in force, so a template
+    with a plan is instantiated where that plan is not in use (a new process, or after the function it was made from
+    is released).
   - WRITE plans (`ncclMeshWritePlan_t`) have no declaration yet, so a function with one makes no template.
 - **Local checks** (M5 Max, not committed):
   - A CPU product rebuilt in a second process was exact on new data.
-  - A 1-rank all-reduce crossing, loaded with the second process's communicator after it planned the same call,
-    took 2.3 ms and produced y = x on new data.
+  - A 1-rank all-reduce crossing was loaded with the second process's communicator, and that process planned
+    nothing. Its template is [plan, cross]. It took 2.2 ms and produced y = x on new data.
 
 ## Steps
 
@@ -137,7 +146,7 @@ frontend's resolver makes the operation or crossing from the bytes with the nati
 | R2 | The template directory: plist, libraries, per-architecture pipeline archive (landed) | `MetalTemplateWrite`, `MetalTemplateRead` |
 | R3 | Instantiation of GPU-only functions: data, compute, append (landed) | `MetalScheduleInstantiate`; torch_mesh `Schedule.save`, `Schedule.load` |
 | R4 | Host operations declared: (kind, bytes, places); the engine rebuilds them (landed: CPU programs, Core ML predictions) | `MetalDeclaration`, `MetalScheduleHost`; engines `rebuild` |
-| R5 | Crossings declared the same way, communicators a place (landed: NCCL-call groups). Next: the communicator's plan (`ncclMeshCommPlan`) captured and declared again at instantiation; WRITE plans | `MetalScheduleCross`; `MetalScheduleInstantiate` communicators |
+| R5 | Crossings declared the same way, communicators a place; the communicator's plan captured where it is made and declared again at instantiation (landed: NCCL-call groups). WRITE plans remain | `MetalScheduleCross`; `ncclMeshCommPlanDeclaration`, `ncclMeshCommPlanDeclared` |
 | R6 | Geometry as a function of device capabilities; per-family archives | the recording of grid and group |
 | R7 | Parametric sizes from the lowering relations | depends on design/lowering-closure-2026-10-29.md T1–T3 |
 

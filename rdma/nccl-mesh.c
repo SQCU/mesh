@@ -2893,6 +2893,9 @@ struct plan {
   ncclMeshPlanRun *order;
   uint64_t *ends, (*entries)[2];
   size_t runs;
+  /* the declaration it was made from, flat (plan_declaration), and its bindings' places in it */
+  char *declaration;
+  size_t declared, *places, place_count;
 };
 static struct compiled *group_at(const struct plan *plan, uint64_t holder) {
   const uint64_t at=(holder-plan->view.first)%plan->view.issues;
@@ -5118,7 +5121,7 @@ static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call
 /* a plan's own: its groups' calls and entries, their storage back to the communicator's (compiled_drop) */
 static void plan_free(struct ncclComm *comm, struct plan *plan) {
   for (uint32_t g = 0; plan && plan->group && g < plan->view.groups; g++) compiled_drop(comm, plan->group + g);
-  if (plan) { free(plan->group); free(plan->order); free(plan->ends); free(plan->entries); }
+  if (plan) { free(plan->group); free(plan->order); free(plan->ends); free(plan->entries); free(plan->declaration); free(plan->places); }
   free(plan);
 }
 
@@ -5255,6 +5258,58 @@ static ncclResult_t prepared(struct ncclComm *comm, struct compiled *x, int remo
 /* Compile group definitions, then bind the function's repeated-block order.
    Replacing a declaration takes effect at the next group; failure keeps the
    prior declaration. This work precedes numerical submission. */
+/* design/replay-templates-2026-10-29.md: a plan's declaration as ncclMeshCommPlan took it, flat, for a template: its
+   count and runs, its calls, its order, then each call's arrays in the lengths declared() reads (an array's pointer
+   kept as its offset in the bytes, 0 for none), each binding's ncclMeshBuffer a place */
+struct flat_plan { int count; size_t runs; };
+static size_t flat_at(size_t at) { return (at + 15) & ~(size_t)15; }
+static void flat_lengths(const ncclMeshCall *c, size_t n, size_t lengths[6]) {
+  const size_t v = !c->counts ? 0 : c->what == WHAT_COUNTED ? 2 * n : c->what == MESH_ALLGATHER || c->what == MESH_REDUCE_SCATTER ? n : 0;
+  const size_t bytes = c->production && (unsigned)c->type < ncclNumTypes ? c->count * SIZE[c->type] : 0;
+  lengths[0] = v * sizeof *c->counts;
+  lengths[1] = c->production ? (c->tile_bytes && bytes ? (bytes - 1) / c->tile_bytes + 1 : 1) * sizeof *c->production : 0;
+  lengths[2] = c->matrix && c->what == WHAT_COUNTED ? n * n * sizeof *c->matrix : 0;
+  lengths[3] = c->contributors ? (n + 63) / 64 * sizeof *c->contributors : 0;
+  lengths[4] = c->recipients ? (n + 63) / 64 * sizeof *c->recipients : 0;
+  lengths[5] = c->bindings && c->what != ncclMeshCallWrite ? 2 * sizeof *c->bindings : 0;
+}
+static ncclResult_t plan_declaration(ncclComm_t comm, const ncclMeshCall *calls, int count, const ncclMeshPlanRun *order,
+                                     size_t runs, struct plan *made) {
+  const size_t n = (size_t)comm->nranks, first = flat_at(sizeof(struct flat_plan)),
+               ordered = flat_at(first + (size_t)count * sizeof *calls);
+  size_t length = flat_at(ordered + runs * sizeof *order), places = 0, lengths[6];
+  for (int i = 0; i < count; i++) {
+    flat_lengths(calls + i, n, lengths);
+    for (int k = 0; k < 6; k++) if (lengths[k]) length = flat_at(length) + lengths[k];
+    places += lengths[5] ? 2 : 0;
+  }
+  if (!(made->declaration = calloc(1, length)) || (places && !(made->places = calloc(places, sizeof *made->places))))
+    return fail(ncclSystemError, "keeping a plan's declaration");
+  char *bytes = made->declaration;
+  const struct flat_plan head = {count, runs};
+  memcpy(bytes, &head, sizeof head);
+  memcpy(bytes + ordered, order, runs * sizeof *order);
+  size_t at = flat_at(ordered + runs * sizeof *order);
+  for (int i = 0; i < count; i++) {
+    ncclMeshCall *c = (ncclMeshCall *)(bytes + first) + i;
+    *c = calls[i];
+    flat_lengths(calls + i, n, lengths);
+    const void **fields[6] = {(const void **)&c->counts, (const void **)&c->production, (const void **)&c->matrix,
+                              (const void **)&c->contributors, (const void **)&c->recipients, (const void **)&c->bindings};
+    for (int k = 0; k < 6; k++) {
+      if (!lengths[k]) { *fields[k] = NULL; continue; }
+      at = flat_at(at);
+      memcpy(bytes + at, *fields[k], lengths[k]);
+      *fields[k] = (const void *)(uintptr_t)at;
+      if (k == 5) for (int j = 0; j < 2; j++)
+        made->places[made->place_count++] = at + (size_t)j * sizeof *c->bindings + offsetof(ncclMeshBufferSlots, buffer);
+      at += lengths[k];
+    }
+  }
+  made->declared = length;
+  return ncclSuccess;
+}
+
 ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int count,
     const ncclMeshPlanRun *order, size_t runs, const ncclMeshPlan **plan) {
   if (plan) *plan = NULL;
@@ -5306,6 +5361,7 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
       if (!(x->slot[k] = slot_take(comm, need))) result = fail(ncclSystemError, "a declared group's storage: %s", last.text);
     if (!result) result = prepared(comm, x, remote);
   }
+  if (!result && made) result = plan_declaration(comm, calls, count, order, runs, made);
   if (!result) {
     struct plan *was = comm->plan;
     if (made) { made->view.first = comm->groups + 1; made->view.entries = (const uint64_t (*)[2])made->entries; }
@@ -5316,6 +5372,54 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
   /* the plan replaced (or the one not made): its definitions' slots back to comm's, under the groups' lock */
   plan_free(comm, made);
   pthread_mutex_unlock(&group_lock);
+  return result;
+}
+
+/* nccl.h ncclMeshCommPlanDeclaration */
+ncclResult_t ncclMeshCommPlanDeclaration(ncclComm_t comm, void *bytes, size_t *length, size_t *places, size_t *count) {
+  if (!comm || !length || !count) return fail(ncclInvalidArgument, "ncclMeshCommPlanDeclaration's arguments");
+  pthread_mutex_lock(&group_lock);
+  const struct plan *p = comm->plan;
+  const size_t have = p ? p->declared : 0, many = p ? p->place_count : 0;
+  ncclResult_t result = ncclSuccess;
+  if ((bytes || places) && (*length < have || *count < many))
+    result = fail(ncclInvalidArgument, "ncclMeshCommPlanDeclaration: %zu bytes and %zu places", have, many);
+  else {
+    if (bytes && have) memcpy(bytes, p->declaration, have);
+    if (places && many) memcpy(places, p->places, many * sizeof *places);
+  }
+  *length = have; *count = many;
+  pthread_mutex_unlock(&group_lock);
+  return result;
+}
+
+/* nccl.h ncclMeshCommPlanDeclared */
+ncclResult_t ncclMeshCommPlanDeclared(ncclComm_t comm, const void *bytes, size_t length) {
+  struct flat_plan head;
+  if (!comm || !bytes || length < sizeof head) return fail(ncclInvalidArgument, "ncclMeshCommPlanDeclared's arguments");
+  memcpy(&head, bytes, sizeof head);
+  const size_t first = flat_at(sizeof head);
+  if (head.count < 0 || (size_t)head.count > (length - first) / sizeof(ncclMeshCall) ||
+      head.runs > (length - flat_at(first + (size_t)head.count * sizeof(ncclMeshCall))) / sizeof(ncclMeshPlanRun))
+    return fail(ncclInvalidArgument, "ncclMeshCommPlanDeclared: a declaration of %zu bytes", length);
+  char *copy = malloc(length);
+  if (!copy) return fail(ncclSystemError, "out of memory");
+  memcpy(copy, bytes, length);
+  ncclMeshCall *calls = (ncclMeshCall *)(copy + first);
+  ncclResult_t result = ncclSuccess;
+  for (int i = 0; i < head.count && !result; i++) {
+    const void **fields[6] = {(const void **)&calls[i].counts, (const void **)&calls[i].production, (const void **)&calls[i].matrix,
+                              (const void **)&calls[i].contributors, (const void **)&calls[i].recipients, (const void **)&calls[i].bindings};
+    for (int k = 0; k < 6 && !result; k++) {
+      const uintptr_t at = (uintptr_t)*fields[k];
+      if (!at) continue;
+      if (at >= length) result = fail(ncclInvalidArgument, "ncclMeshCommPlanDeclared: an array past the declaration");
+      else *fields[k] = copy + at;
+    }
+  }
+  if (!result) result = ncclMeshCommPlan(comm, calls, head.count,
+      (const ncclMeshPlanRun *)(copy + flat_at(first + (size_t)head.count * sizeof(ncclMeshCall))), head.runs, NULL);
+  free(copy);
   return result;
 }
 

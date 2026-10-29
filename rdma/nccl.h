@@ -1167,6 +1167,12 @@ typedef struct { uint32_t first, count; uint64_t repeat; } ncclMeshPlanRun;
    count=0 and runs=0 drop the declaration. Every rank supplies the same order. */
 ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall* calls, int count,
     const ncclMeshPlanRun* order, size_t runs, const ncclMeshPlan** plan);
+/* design/replay-templates-2026-10-29.md: the declaration comm's plan was made from, flat: `length` bytes, and the
+   `count` offsets in them of each binding's ncclMeshBuffer. With bytes and places NULL, only their sizes (0: no plan);
+   else each holds at least as many. */
+ncclResult_t ncclMeshCommPlanDeclaration(ncclComm_t comm, void* bytes, size_t* length, size_t* places, size_t* count);
+/* ncclMeshCommPlan from a declaration ncclMeshCommPlanDeclaration gave, its bindings the caller's. */
+ncclResult_t ncclMeshCommPlanDeclared(ncclComm_t comm, const void* bytes, size_t length);
 /* Compiler-derived useful directed bytes for one entire declared function.
    demand has nranks*nranks entries (source-major); group repeats are included.
    Relay amplification is excluded. Query after configuration, before execution;

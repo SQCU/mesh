@@ -1456,8 +1456,10 @@ struct MetalSchedule {
     void (^completed)(NSError *);
     id<MTLBuffer> data;
     NSUInteger used;
-    // design/replay-templates-2026-10-29.md: the calls that built the function, on its root (MetalScheduleTemplate)
+    // design/replay-templates-2026-10-29.md: the calls that built the function, on its root (MetalScheduleTemplate),
+    // and each communicator's plan declaration it last recorded
     NSMutableArray *script;
+    NSMutableDictionary *plans;
 };
 
 static void MetalScheduleCall(struct MetalSchedule *s,NSDictionary *call) {
@@ -1548,10 +1550,32 @@ void MetalScheduleAfter(struct MetalSchedule *s,id<MTLEvent> after,uint64_t valu
     if(s->form==MetalFormSerial&&after)[(id<MTLCommandBuffer>)s->command encodeWaitForEvent:after value:value];
 }
 
+// design/replay-templates-2026-10-29.md: the plan `comm`'s crossings assume (ncclMeshCommPlanDeclaration), as a call
+// where it differs from the last one this function recorded: its communicator a place, then its bytes, each binding
+// a place
+static void MetalSchedulePlan(struct MetalSchedule *root,struct ncclComm *comm) {
+    size_t length=0,count=0;
+    if(ncclMeshCommPlanDeclaration(comm,NULL,&length,NULL,&count)||!length)return;
+    NSMutableData *bytes=[NSMutableData dataWithLength:sizeof comm+length],*at=[NSMutableData dataWithLength:count*sizeof(size_t)];
+    if(ncclMeshCommPlanDeclaration(comm,(char *)bytes.mutableBytes+sizeof comm,&length,at.mutableBytes,&count))return;
+    NSData *plan=[bytes subdataWithRange:NSMakeRange(sizeof comm,length)];
+    NSValue *key=[NSValue valueWithPointer:comm];
+    if(!root->plans)root->plans=[NSMutableDictionary new];
+    if([root->plans[key] isEqualToData:plan])return;
+    root->plans[key]=plan;
+    memcpy(bytes.mutableBytes,&comm,sizeof comm);
+    NSMutableData *places=[NSMutableData dataWithLength:(count+1)*sizeof(struct MetalPlace)];
+    struct MetalPlace *into=places.mutableBytes;const size_t *offsets=at.bytes;
+    into[0]=(struct MetalPlace){0,MetalRelocationCommunicator};
+    for(size_t k=0;k<count;k++)into[k+1]=(struct MetalPlace){sizeof comm+offsets[k],MetalRelocationBuffer};
+    MetalScheduleCall(root,@{@"call":@"plan",@"kind":@"plan",@"bytes":bytes,@"places":places});
+}
+
 void MetalScheduleCommunicator(struct MetalSchedule *s,struct ncclComm *comm) {
     s=s->root;
     if(!s->communicators)s->communicators=[NSMutableOrderedSet new];
     [s->communicators addObject:[NSValue valueWithPointer:comm]];
+    MetalSchedulePlan(s,comm);
 }
 
 id<MTLResidencySet> MetalScheduleResources(struct MetalSchedule *s) { return MetalScheduleTail(s)->residency; }
@@ -2064,7 +2088,7 @@ void MetalScheduleFree(struct MetalSchedule *s) {
     [s->residency release];[s->owners release];[s->options release];[s->read release];[s->written release];
     [s->event release];[s->start release];[s->listener release];[s->work release];[s->hosts release];[s->waits release];[s->waited release];
     [s->completed release];[s->error release];[s->after release];[s->device release];[s->communicators release];
-    [s->script release];free(s);
+    [s->script release];[s->plans release];free(s);
 }
 
 id<MTLDevice> MetalRecordingDevice(id<MTLDevice> device,BOOL indirectPipelines) {
@@ -2342,7 +2366,7 @@ NSDictionary *MetalScheduleTemplate(struct MetalSchedule *root,NSArray<id<MTLBuf
             }
             [script addObject:@{@"call":kind,@"records":made,@"reaches":spans,@"form":held[2],@"repetitions":held[4],
                 @"buffers":call[@"buffers"],@"memory":call[@"memory"],@"invocations":call[@"invocations"]}];
-        } else if(call[@"kind"]&&([kind isEqual:@"host"]||[kind isEqual:@"cross"])) {
+        } else if(call[@"kind"]&&([kind isEqual:@"host"]||[kind isEqual:@"cross"]||[kind isEqual:@"plan"])) {
             NSMutableDictionary *entry=[[declared(call) mutableCopy] autorelease];entry[@"call"]=kind;
             if([kind isEqual:@"host"]) {
                 NSData *views=call[@"accesses"];const struct MetalReach *source=views.bytes;const NSUInteger n=views.length/sizeof *source;
@@ -2554,6 +2578,12 @@ NSError *MetalScheduleInstantiate(struct MetalSchedule *s,NSDictionary *made,NSA
                 NSArray *range=call[@"invocations"];
                 NSError *error=MetalScheduleAppend(s,held->replay,NSMakeRange([range[0] unsignedIntegerValue],[range[1] unsignedIntegerValue]),@[],nil);
                 if(error)return error;
+            } else if([kind isEqual:@"plan"]) {
+                // the communicator's plan declared again, its bindings the instance's: before the crossings that follow
+                NSData *bytes=MetalTemplatePlaced(call,buffers,shifts,communicators,[NSMutableData data]);
+                struct ncclComm *comm=NULL;memcpy(&comm,bytes.bytes,sizeof comm);
+                const ncclResult_t failed=ncclMeshCommPlanDeclared(comm,(const char *)bytes.bytes+sizeof comm,bytes.length-sizeof comm);
+                if(failed)return MetalReplayFailure(failed,[NSString stringWithFormat:@"the template's plan: %s",ncclGetLastError(comm)]);
             } else if([kind isEqual:@"host"]||[kind isEqual:@"cross"]) {
                 const BOOL hosted=[kind isEqual:@"host"];
                 if(hosted?!host:!cross)
