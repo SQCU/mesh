@@ -1494,14 +1494,46 @@ provider result exposes that result before the consumer. These are preparation
 boundaries; no numerical view operation or wait is added. The exported binding
 names its final producer directly, without a chain of view descriptors.
 
-The ordinary provider binder still uses a name and offset zero and does not yet
-consume those relations. Serialization and graph-order checks therefore do not
-establish correct numerical binding. The relation must reach shared layout
-placement and provider requirement lowering. A required contiguous view must
-use direct placement where possible, or the shared prepared layout-copy
-operation where the provider's fixed layout requires it. External input/output
-selections and returned views also need that same placement. Numerical execution
-remains deferred until the provider boundary is complete.
+The provider binder now resolves those relations through `MetalTensorLayout`.
+`configs/litert-storage.json` declares each provider buffer class's physical
+axis order, lane padding and scalar encoding; preparation exports that contract
+with the graph. In the current LiteRT Metal provider, ordinary `MetalBuffer`
+means PHWC4 storage, not dense logical rows. `MetalBufferFp16` also changes a
+logical float32 value's physical encoding. The provider reports concrete tensor
+shapes and buffer classes; neither a name nor an allocation size supplies a
+layout. These properties follow from LiteRT's `gpu_backend_metal_litert.mm` and
+`buffer_handler_utils.cc` in the locally built vendor source.
+
+A compatible selection binds directly to its source pages. Shared layout
+equivalence compares address expressions and their periods without expanding a
+repeated logical domain. During recording, `MetalBindingView` resolves the
+provider's distinct buffer handles to final page buffers, offsets, invocation
+strides and access ranges. Replay has no provider-handle lookup. This relocation
+covers direct Metal buffer arguments; the importer disables provider argument
+buffers whose embedded addresses would need their own declared relations.
+
+Where a provider needs another layout or encoding, preparation emits the shared
+`layout.metal` copy over bounded tiles. Output copies scatter only the selected
+values. A direct output is allowed only when its padded footprint does not
+overwrite other live values. Repeated consumers share a prepared conversion;
+the shared access-range dependency compiler invalidates it on overlapping
+writes. Disjoint writes keep it available. Named views continue to denote
+source pages, including after conversion, so they cannot retain stale temporary
+values. These are preparation decisions, not runtime reuse checks.
+
+Preparation compiled aligned and striped selections, scalar conversions,
+reshaped values and outputs with live padded neighbors. A separate command
+capture retained the final page origins and invocation strides for two views
+of one backing. No command buffer was submitted and no numerical work ran.
+
+The boundary remains incomplete. Native declarations and collective stages
+still resolve some values by name alone. In particular, the collective head
+handoff forces `MetalBuffer` and assumes dense rows, which does not follow from
+that provider buffer class. These callers must consume the same typed page
+relations, with a shared conversion only where their declared encoding requires
+one. External input/output selections, returned views and changed selections
+across resized source domains also need complete placement. Numerical execution
+remains deferred until these edges are reconciled.
 
 ### Encoded numerical operands
 

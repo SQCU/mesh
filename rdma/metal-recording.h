@@ -44,7 +44,13 @@ void MetalRecordingList(int on);
 // Every accessed binding needs a view or dispatch reach (setBytes declares its
 // own length). A missing view fails preparation; allocation/slot sizes are not
 // substitutes. Providers must expose internal tensor views as well as I/O.
-struct MetalBindingView { __unsafe_unretained id<MTLBuffer> buffer; NSUInteger offset, length; };
+// A provider may name a temporary buffer handle while its operand names a
+// different origin in the bridge's pages. Recording resolves that binding;
+// replay keeps only the final buffer, offset and dependency ranges.
+struct MetalBindingView {
+    __unsafe_unretained id<MTLBuffer> buffer; NSUInteger offset, length;
+    __unsafe_unretained id<MTLBuffer> pages; NSUInteger pageOffset;
+};
 void MetalRecordViews(const struct MetalBindingView *, size_t count, void (^encode)(void));
 // docs/kernels.md Any program
 enum { MetalReachRead = 1, MetalReachWritten = 2, MetalReachBinding = 4, MetalReachResident = 8 };

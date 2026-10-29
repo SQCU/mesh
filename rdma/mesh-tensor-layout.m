@@ -1128,8 +1128,8 @@ finished:
     for(id value in coordinates)[values addObject:TensorNormalize(value,count)];
     for(id value in TensorDigits(_indexShape))[standard addObject:TensorNormalize(value,count)];
     if(count==TensorCount(_indexShape)&&[values isEqual:standard]) {
-        MetalTensorLayout *result=[self withShape:shape offset:_offset];result->_count=count;
-        [result->_coordinates release];result->_coordinates=nil;return result;
+        MetalTensorLayout *result=[self withShape:_indexShape offset:_offset];result->_count=count;
+        [result->_coordinates release];result->_coordinates=nil;return [result reshape:shape];
     }
     // A selection may remove every irregular part of a map. Retain a direct
     // strided API binding when the resulting expression has that form; no
@@ -1163,6 +1163,27 @@ finished:
 }
 - (id)copyWithZone:(NSZone *)zone { return [self retain]; }
 - (BOOL)affine { return !_coordinates&&!_maps.count&&[_shape isEqual:_indexShape]; }
+- (BOOL)equivalent:(MetalTensorLayout *)other {
+    if(![_shape isEqual:other.shape])return NO;
+    if([self isEqual:other]||!_count)return YES;
+    NSArray *left=self.coordinates,*right=other.coordinates;NSUInteger count=_count;
+    struct TensorPeriod a=TensorLayoutPeriod(self,left),b=TensorLayoutPeriod(other,right);
+    if(a.period&&b.period) {
+        const NSUInteger factor=b.period/TensorGCD(a.period,b.period);
+        if(a.period<=count/factor) {
+            const NSUInteger period=a.period*factor;
+            if(period<count&&a.delta*(NSInteger)factor!=b.delta*(NSInteger)(period/b.period))return NO;
+            count=period;
+        }
+    }
+    for(NSUInteger at=0;at<count;) {
+        struct TensorPiece a=TensorLayoutPiece(self,left,at,count),b=TensorLayoutPiece(other,right,at,count);
+        NSUInteger end=MIN(a.end,b.end);
+        if(a.value!=b.value||(end>at+1&&a.step!=b.step))return NO;
+        at=end;
+    }
+    return YES;
+}
 - (BOOL)isEqual:(id)object {
     if(![object isKindOfClass:MetalTensorLayout.class])return NO;
     MetalTensorLayout *other=object;

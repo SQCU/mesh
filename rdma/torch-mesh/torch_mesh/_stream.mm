@@ -1771,6 +1771,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
           tensorNumbers(v.value.indexShape),std::string((const char *)data.bytes,data.length));
     })
     .def("index",[](const TensorLayout &v,NSUInteger i){return [v.value index:i];})
+    .def("equivalent",[](const TensorLayout &v,const TensorLayout &other){return bool([v.value equivalent:other.value]);})
     .def("select",[](const TensorLayout &v,NSUInteger axis,const std::vector<NSInteger> &indices){return TensorLayout([v.value select:axis indices:tensorWords(indices)]);})
     .def("select_runs",[](const TensorLayout &v,NSUInteger axis,const std::vector<std::vector<NSInteger>> &runs){
       NSMutableArray *parts=[NSMutableArray array];for(const auto &run:runs)[parts addObject:tensorNumbers(run)];

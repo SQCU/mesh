@@ -28,6 +28,9 @@ struct MetalTensorSpan { NSInteger offset; NSUInteger count; };
 // expressions contain integer constants, "i", and [add|mul|div|mod, ...] nodes.
 - (MetalTensorLayout *)shaped:(NSArray<NSNumber *> *)shape coordinates:(NSArray *)coordinates;
 - (NSInteger)index:(NSUInteger)logical;
+// Compare the selected element positions, even when their factorizations
+// differ. This preparation operation walks affine pieces and shared periods.
+- (BOOL)equivalent:(MetalTensorLayout *)other;
 // Compose transformations now; the result never retains a parent descriptor.
 - (MetalTensorLayout *)select:(NSUInteger)axis indices:(NSData *)indices;
 // Ordered (first, width, step, count) runs. A repeated stripe is composed as

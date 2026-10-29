@@ -997,6 +997,29 @@ static id<MTLBuffer> MetalLeaseBuffer(id<MTLDevice> device,NSUInteger length) {
         if(!(recorded.extents&bit))
             [NSException raise:NSInvalidArgumentException format:@"command %lu (%@): binding %lu has no prepared byte view",index,name,(unsigned long)j];
     }
+    NSMutableData *placed=nil;
+    for(size_t v=0;v<bindingViewCount;v++) {
+        const struct MetalBindingView *view=bindingViews+v;
+        if(!view->pages)continue;
+        for(NSUInteger j=0;j<MESH_BUFFER_BINDINGS;j++) {
+            if(recorded.buffers[j]!=view->buffer||recorded.offsets[j]<view->offset||
+               (view->length?recorded.offsets[j]>=view->offset+view->length:recorded.offsets[j]!=view->offset))continue;
+            recorded.offsets[j]=view->pageOffset+recorded.offsets[j]-view->offset;
+            recorded.buffers[j]=view->pages;
+            recorded.strides[j]=[objc_getAssociatedObject(view->pages,&operandStrideKey) unsignedIntegerValue];
+            if(!placed&&recorded.reaches)placed=[NSMutableData dataWithBytes:
+                (const struct MetalReach *)capture->reaches.bytes+recorded.reach length:recorded.reaches*sizeof(struct MetalReach)];
+            struct MetalReach *ranges=placed.mutableBytes;
+            for(NSUInteger k=0;k<recorded.reaches;k++)if(ranges[k].buffer==view->buffer&&ranges[k].binding==(int32_t)j) {
+                ranges[k].buffer=view->pages;ranges[k].offset=view->pageOffset+ranges[k].offset-view->offset;
+            }
+            [capture->resources addObject:view->pages];[capture->owners addObject:view->pages];
+        }
+    }
+    if(placed) {
+        recorded.reach=(uint32_t)(capture->reaches.length/sizeof(struct MetalReach));
+        [capture->reaches appendData:placed];
+    }
     for (NSUInteger i = 0; i < MESH_MEMORY_BINDINGS; i++)
         if (!(declared.unsignedLongLongValue & (UINT64_C(1) << (MESH_ACCESS_WRITE_SHIFT + i)))) recorded.memory[i] = 0;
     [capture->owners addObject:state.pipeline];
