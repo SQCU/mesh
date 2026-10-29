@@ -2856,7 +2856,9 @@ enum { GENERATIONS = 2 };
 struct inflight;
 /* each call's binding an issue is laid and placed for (issue_bind): its buffers, views and a write's instance, and
    what binding them made (its result, whether it reads its send buffer in place, its complement's ranges) */
-struct bound { struct where send, recv, sum, *views[2]; uint64_t occurrence, instance; uint32_t complements; int direct, fused; };
+/* (an issue owns its calls' counts, `segments`, and views, copied at each bind, so a call in flight names nothing of
+   the thread that issued it: room_of's storage is the thread's next call's) */
+struct bound { struct where send, recv, sum, *views[2]; uint64_t occurrence, instance, *segments; uint32_t complements; int direct, fused; };
 struct issue { struct schedule *plans; struct steps **steps; struct inflight *group; struct call *calls; size_t n; uint32_t repeats; int held, dropped;
                /* laid and placed (`laid`) for a binding (`bound`, `stride`, the Metal path's or the host's: `metal`), in
                   slot `slot` (its storage at `base`, its landing area at `area`), its span tables a lease (`tables`) */
@@ -2909,13 +2911,28 @@ static struct message repeat_of(const struct message *m, size_t n, size_t k, siz
 
 /* a declared call's fused stream's records (declared, plan_calls) */
 static ncclMeshFused fused_declared;
+/* the counts a call of its kind holds a rank each (an all-to-all's to each rank, then from each), where it holds any */
+static size_t call_segments(const struct call *c) {
+  const size_t n = (size_t)c->comm->nranks;
+  return counted(c) ? 2 * n : c->what == MESH_ALLGATHER || c->what == MESH_REDUCE_SCATTER ? n : 0;
+}
+/* whether issued call c is the call declared as d: its kind, type, operator, root, target and counts (a call that
+   holds none has equal ones, `count` each: enqueue_counts) */
+static int declared_as(const struct call *c, const struct call *d) {
+  if (c->what != d->what || c->type != d->type || c->op != d->op || c->root != d->root || c->target != d->target) return 0;
+  if (!counted(d) && c->count != d->count) return 0;
+  for (size_t k = 0, v = call_segments(d); k < v && (c->segments || d->segments); k++)
+    if ((c->segments ? c->segments[k] : c->count) != (d->segments ? d->segments[k] : d->count)) return 0;
+  return 1;
+}
 static ncclResult_t write_definitions(struct ncclMeshWritePlan *plan);
 
 /* the compiled form of the group numbered `holder` (*group): its plan's group (group_at), else, with no plan, a WRITE
    alone's plan's own (write_definitions, compiled again where routes or the map changed since), each call's roles its
-   declaration's (nothing planned at the call: nccl.h ncclMeshCommPlan).  A group that no declaration covers ends the
-   program with a warning (library_end): nothing compiles a group at its issue (design/eager-execution.md#what-follows).  A group of other than its
-   declaration's count of calls fails as a value, before any is bound.  Under group_lock */
+   declaration's (nothing planned at the call: nccl.h ncclMeshCommPlan).  A group that no declaration covers, or that
+   is not the group declared at its place (its calls' count, kinds, types, operators, roots and counts: declared_as),
+   ends the program with a warning (library_end): nothing compiles a group at its issue
+   (design/eager-execution.md#what-follows).  Under group_lock */
 static ncclResult_t definition_of(struct ncclComm *comm, struct call *list, size_t n, uint64_t holder, struct compiled **group) {
   struct compiled *x = comm->plan ? group_at(comm->plan, holder) : NULL;
   struct ncclMeshWritePlan *alone = n == 1 && !list[0].fused ? list[0].write_plan : NULL;
@@ -2927,8 +2944,22 @@ static ncclResult_t definition_of(struct ncclComm *comm, struct call *list, size
              "prepared WRITE alone)", n, comm->name);
     library_end(why);
   }
-  if (!result && n != x->n) result = fail(ncclInvalidUsage, "a group of %zu calls issued as its declaration of %zu", n, x->n);
-  for (size_t i = 0; !result && i < n; i++) call_bind_roles(list + i, x->calls + i);
+  if (!result && n != x->n) {
+    char why[MESH_DIAGNOSTIC_BYTES];
+    snprintf(why, sizeof why, "a group of %zu calls on communicator %s issued at the place of a declared group of %zu", n, comm->name, x->n);
+    library_end(why);
+  }
+  for (size_t i = 0; !result && i < n; i++) {
+    const struct call *c = list + i, *d = x->calls + i;
+    if (!declared_as(c, d)) {
+      char why[MESH_DIAGNOSTIC_BYTES];
+      snprintf(why, sizeof why, "call %zu of a group on communicator %s is not the call declared at its place (kind %d/%d, type %d/%d, "
+               "op %d/%d, root %d/%d, target %d/%d, count %zu/%zu, issued/declared, or their counts)", i, comm->name, c->what, d->what,
+               (int)c->type, (int)d->type, (int)c->op, (int)d->op, c->root, d->root, c->target, d->target, c->count, d->count);
+      library_end(why);
+    }
+    call_bind_roles(list + i, d);
+  }
   *group = x;
   return result;
 }
@@ -3595,6 +3626,12 @@ static ncclResult_t issue_bind(struct ncclComm *comm, struct call **calls, size_
   struct call *const list = *calls = memcpy(u->calls, *calls, n * sizeof *u->calls);
   for (size_t i = 0; i < x->n; i++)
     if ((list[i].bound = u->steps[i])) atomic_fetch_add_explicit(&u->steps[i]->references, 1, memory_order_relaxed);
+  for (size_t i = 0; i < n; i++) {
+    const size_t v = call_segments(list + i);
+    if (!list[i].segments || !v) continue;
+    if (!u->bound[i].segments && !(u->bound[i].segments = malloc(v * sizeof *list[i].segments))) return fail(ncclSystemError, "out of memory");
+    list[i].segments = memcpy(u->bound[i].segments, list[i].segments, v * sizeof *list[i].segments);
+  }
   *plans = u->plans; *issued = u;
   if (issue_same(comm, u, list, n, stride, metal, remote ? x->slot[k] : 0)) {
     for (size_t i = 0; i < n; i++) {
@@ -3602,6 +3639,8 @@ static ncclResult_t issue_bind(struct ncclComm *comm, struct call **calls, size_
       if (list[i].bound) steps_rebind(list[i].bound);
       list[i].sum = b->sum; list[i].direct = b->direct; list[i].complements = b->complements;
       list[i].complement = b->complements ? list[i].bound->complement : NULL;
+      if (list[i].send_views) list[i].send_views = b->views[0];
+      if (list[i].receive_views) list[i].receive_views = b->views[1];
     }
     *area = u->area; *slot = u->slot;
     return ncclSuccess;
@@ -3623,6 +3662,8 @@ static ncclResult_t issue_bind(struct ncclComm *comm, struct call **calls, size_
       else if (!b->views[j] && !(b->views[j] = malloc((size_t)comm->nranks * sizeof *v))) result = fail(ncclSystemError, "out of memory");
       else memcpy(b->views[j], v, (size_t)comm->nranks * sizeof *v);
     }
+    if (!result && c->send_views) list[i].send_views = b->views[0];
+    if (!result && c->receive_views) list[i].receive_views = b->views[1];
     b->send = c->send_at; b->recv = c->recv_at; b->sum = c->sum; b->direct = c->direct; b->complements = c->complements;
     b->fused = c->fused != NULL;
     b->occurrence = w ? c->invocation % w->occurrences : 0; b->instance = w ? c->invocation % w->layout.instances : 0;
@@ -3928,7 +3969,7 @@ static void issue_free(struct ncclComm *comm, struct issue *u) {
   schedules_free(comm, u->plans);
   for (size_t i = 0; u->steps && i < u->n; i++) steps_free(u->steps[i]);
   if (u->group) free(u->group->start);
-  for (size_t i = 0; u->bound && i < u->n; i++) { free(u->bound[i].views[0]); free(u->bound[i].views[1]); }
+  for (size_t i = 0; u->bound && i < u->n; i++) { free(u->bound[i].views[0]); free(u->bound[i].views[1]); free(u->bound[i].segments); }
   if (u->tables) ncclMemFree(u->tables);
   free(u->steps); free(u->calls); free(u->bound); free(u->group); free(u);
 }
