@@ -590,31 +590,61 @@ static void MetalViewAccesses(NSData *accesses,void (^each)(id,NSUInteger,NSUInt
 }
 
 struct MetalSpan { NSUInteger lo, hi, node; };
+// A key's frontier: a header {widest, 0, 0}, the widest span it has held (an upper bound), then its spans sorted by lo.
+// Every span meeting [lo, hi) starts in [lo - widest, hi), so a lookup or an erase binary-searches to that window and
+// touches only it: a segment of many tiles costs its count's logarithm an access, not a scan of every span (cp's
+// recording, 2026-10-29: all of a 10 s profile in MetalViewPrior's scan).
+static struct MetalSpan *MetalFrontier(NSMutableData *data,NSUInteger *count) {
+    *count=data.length?data.length/sizeof(struct MetalSpan)-1:0;
+    return data.length?(struct MetalSpan *)data.mutableBytes+1:NULL;
+}
+static NSUInteger MetalFrontierFirst(const struct MetalSpan *spans,NSUInteger count,NSUInteger lo) {
+    NSUInteger a=0,b=count;
+    while(a<b){const NSUInteger m=a+(b-a)/2;if(spans[m].lo<lo)a=m+1;else b=m;}
+    return a;
+}
 static void MetalSpanAdd(NSMutableDictionary *spans,id key,NSUInteger lo,NSUInteger hi,NSUInteger node) {
-    NSMutableData *held=spans[key]?:(spans[key]=[NSMutableData data]);
-    const struct MetalSpan span={lo,hi,node};[held appendBytes:&span length:sizeof span];
+    NSMutableData *held=spans[key];
+    if(!held){held=spans[key]=[NSMutableData data];const struct MetalSpan head={0,0,0};[held appendBytes:&head length:sizeof head];}
+    NSUInteger count;struct MetalSpan *at=MetalFrontier(held,&count);const NSUInteger place=MetalFrontierFirst(at,count,lo);
+    [held increaseLengthBy:sizeof(struct MetalSpan)];
+    struct MetalSpan *head=held.mutableBytes;at=head+1;
+    memmove(at+place+1,at+place,(count-place)*sizeof *at);at[place]=(struct MetalSpan){lo,hi,node};
+    if(hi-lo>head->lo)head->lo=hi-lo;
 }
 
 // A new writer replaces only the covered portion of the previous frontier.
 static void MetalSpanErase(NSMutableData *data,NSUInteger lo,NSUInteger hi) {
-    const NSUInteger count=data.length/sizeof(struct MetalSpan);if(!count)return;NSUInteger kept=0;
-    NSMutableData *tails=[NSMutableData data];struct MetalSpan *spans=data.mutableBytes;
-    for(NSUInteger i=0;i<count;i++) {
+    if(!data.length)return;
+    NSUInteger count;struct MetalSpan *spans=MetalFrontier(data,&count);
+    const NSUInteger widest=((struct MetalSpan *)data.mutableBytes)->lo;
+    const NSUInteger from=MetalFrontierFirst(spans,count,lo>widest?lo-widest:0),to=MetalFrontierFirst(spans,count,hi);
+    NSMutableData *scratch=[NSMutableData dataWithLength:2*(to-from+1)*sizeof(struct MetalSpan)];
+    struct MetalSpan *kept=scratch.mutableBytes,*tails=kept+(to-from+1);NSUInteger k=0,t=0;
+    for(NSUInteger i=from;i<to;i++) {
         struct MetalSpan span=spans[i];
-        if(span.lo>=hi||span.hi<=lo){spans[kept++]=span;continue;}
-        if(span.hi>hi){const struct MetalSpan tail={hi,span.hi,span.node};[tails appendBytes:&tail length:sizeof tail];}
-        if(span.lo<lo){span.hi=lo;spans[kept++]=span;}
+        if(span.hi<=lo){kept[k++]=span;continue;}
+        if(span.hi>hi)tails[t++]=(struct MetalSpan){hi,span.hi,span.node};
+        if(span.lo<lo){span.hi=lo;kept[k++]=span;}
     }
-    data.length=kept*sizeof *spans;[data appendData:tails];
+    /* the window becomes its kept spans (their lo unchanged, still sorted) then its tails (each from hi, before every
+       later span, whose lo is hi or more) */
+    const NSUInteger was=to-from,now=k+t;
+    if(now>was){[data increaseLengthBy:(now-was)*sizeof(struct MetalSpan)];spans=(struct MetalSpan *)data.mutableBytes+1;}
+    memmove(spans+from+now,spans+to,(count-to)*sizeof *spans);
+    memcpy(spans+from,kept,k*sizeof *spans);memcpy(spans+from+k,tails,t*sizeof *spans);
+    if(now<was)data.length=(count-was+now+1)*sizeof(struct MetalSpan);
 }
 
 static NSIndexSet *MetalViewPrior(NSMutableDictionary *read,NSMutableDictionary *written,NSData *views) {
     NSMutableIndexSet *prior=[NSMutableIndexSet indexSet];
     MetalViewAccesses(views,^(id key,NSUInteger lo,NSUInteger hi,uint32_t access){
         for(NSMutableDictionary *set in (access&MetalReachWritten?@[written,read]:@[written])) {
-            NSData *data=set[key];const struct MetalSpan *spans=data.bytes;const NSUInteger n=data.length/sizeof *spans;
-            for(NSUInteger i=0;i<n;i++)
-                if(spans[i].lo<hi&&lo<spans[i].hi)[prior addIndex:spans[i].node];
+            NSMutableData *data=set[key];if(!data.length)continue;
+            NSUInteger n;const struct MetalSpan *spans=MetalFrontier(data,&n);
+            const NSUInteger widest=((const struct MetalSpan *)data.bytes)->lo;
+            for(NSUInteger i=MetalFrontierFirst(spans,n,lo>widest?lo-widest:0);i<n&&spans[i].lo<hi;i++)
+                if(lo<spans[i].hi)[prior addIndex:spans[i].node];
         }
     });
     return prior;
