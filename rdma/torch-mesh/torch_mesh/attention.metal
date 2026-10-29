@@ -1,5 +1,5 @@
-// Decode attention as one algorithm over a KV type (metal-microbench docs/kernels.md#decode-attention; native_attention.metal
-// K7): a task of W lanes holds R query rows over a part of a KV range; chunk by chunk each lane scores its positions, the
+// Decode attention as one algorithm over a KV type (metal-microbench docs/kernels.md#decode-attention):
+// a task of W lanes holds R query rows over a part of a KV range; chunk by chunk each lane scores its positions, the
 // chunk's online softmax rescales the rows' maxima, sums and accumulators [Milakov & Gimelshein 2018], and each thread
 // accumulates the value product of its channel slice d over its position group g; the groups are summed into group 0,
 // and the parts of a range merge as the KV type says (Flash-Decoding [Dao et al. 2023]). The KV type A is the operand:

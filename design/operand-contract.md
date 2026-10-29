@@ -660,8 +660,14 @@ The shared `mesh_attention` computes each key chunk's scores and softmax once.
 All channel tiles consume those probabilities. A single tile keeps its sums in
 registers. Wider rows keep sums in their assigned partial-result pages between
 chunks. The existing completion word covers the whole row; channel batches do
-not create new completion counters or queue submissions. The int8 operand
-continues to use the same algorithm with one channel batch.
+not create new completion counters or queue submissions.
+
+The old `native.metal` int8-window and projection stages were orphaned: commit
+`19793ca2` in metal-microbench removed both planners on 2026-10-14, and no current
+importer or stage named either kernel. Their remaining source was removed on
+2026-10-28. The active LiteRT graph uses its imported model operations and the
+shared partial-row/merge adapters. There is no active one-batch native int8
+operand to extend or retain as an alternative executor.
 
 Both vector and tile producers now preserve logical row strides and mask tails
 on reads and writes. The ordinary model loader's 256/512 filter is removed.
@@ -1089,6 +1095,45 @@ float64 declarations still require lowering to a provider that supports that
 arithmetic; this native Metal boundary has no float64 lowering.
 
 ## Compressed projections
+
+### LiteRT dense constant cuts
+
+`configs/litert-storage.json` in metal-microbench declares scalar widths, the
+storage word type and the partition grain. `tools/litert_storage.py` consumes
+those operands during graph preparation. Its cut copies encoded bit ranges on
+any logical axis. A partial byte stays part of the selected value; the importer
+does not round a column boundary down to a byte. Byte-aligned cuts use ordinary
+array slices. Unaligned cuts compose storage words without unpacking the entire
+constant or producing an element-index table.
+
+Outer and decomposition graphs use the same `slice_graph` operation for constant
+data, logical shape and quantization fields. A changed constant gets its own
+buffer, and identical cuts share that buffer. Other aliases retain the original
+constant. Graph extraction and slicing share the same buffer collector, so
+unreferenced original constants do not remain in the exported model.
+The former higher-axis and decomposition-constant rejection paths are
+removed. The planner consumes the declared grain directly; it no longer adds
+an implicit 64-column alignment. These are preparation writes to the exported
+model, not copies added to numerical execution.
+
+`partition_axes` and `slice_axis` carry declared axes through projections,
+pointwise uses and composite graphs. FFN partitioning starts from the down
+projection's input axis and uses those same operations as head partitioning.
+The old search for every tensor dimension equal to the FFN width is removed.
+Equal batch, neuron and output extents do not make them one partition axis.
+Broadcast operands carry the relation on their own rank, and projected biases
+follow the output-channel relation.
+
+Preparation on 2026-10-28 preserved dense INT2/INT4 tails and fixed-width scalar
+bits across axes, odd extents and empty domains. Cut graphs serialized with
+uncut aliases intact; a composite's internal constant was sliced through the
+same operation. A square FFN retained its batch and final output extents while
+cutting its neuron axis and a broadcast scale. No model execution or performance
+measurement ran. This does
+not add sparse-encoding metadata lowering or partition a head's contracted
+channel axis; those remain separate graph-lowering work.
+
+### Encoded numerical operands
 
 Python and native FFNs retain each matrix's logical domain, encoded order and
 input basis. Native composition retains the product list before choosing any
