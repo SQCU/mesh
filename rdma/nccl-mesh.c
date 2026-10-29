@@ -1738,19 +1738,16 @@ static uint64_t lease_offset(const void *ptr) {
 /* the leases a prepared owner's entries read (a placed issue's, a prepared WRITE's), each a registration scope open
    from its preparation to its end (owned_begin, owned_end), so no present registers its reads (mesh-lease-retire.h: an
    open scope covers the uses not yet enumerated).  `uses`, a channel's sends and landings each, are fixed when it is
-   prepared but `end`, which present_group advances.  `kinds` per lease: OWNED_TABLE a descriptor table's (metadata),
+   prepared but `end`, which present_group advances.  Each lease's `kind`: OWNED_TABLE a descriptor table's (metadata),
    OWNED_SENDS read by its sends alone (a source readiness table).  Under attach_lock */
-struct owned { const void **leases; unsigned char *kinds; size_t count; struct mesh_lease_retire_dep *uses; uint32_t channels; };
+struct owned_lease { const void *address; unsigned char kind; };
+struct owned { struct owned_lease *leases; size_t count, room; struct mesh_lease_retire_dep *uses; uint32_t channels; };
 enum { OWNED_TABLE = 1, OWNED_SENDS = 2 };
 /* `address`'s lease among those `o` holds, once, of kind `kind` (struct owned).  0, ENOMEM */
 static int owned_add(struct owned *o, const void *address, unsigned kind) {
-  for (size_t i = 0; i < o->count; i++) if (o->leases[i] == address) return 0;
-  const void **leases = realloc(o->leases, (o->count + 1) * sizeof *leases);
-  if (leases) o->leases = leases;
-  unsigned char *kinds = leases ? realloc(o->kinds, o->count + 1) : NULL;
-  if (!kinds) return ENOMEM;
-  o->kinds = kinds;
-  o->leases[o->count] = address; o->kinds[o->count++] = (unsigned char)kind;
+  for (size_t i = 0; i < o->count; i++) if (o->leases[i].address == address) return 0;
+  if (grow(&o->leases, &o->room, o->count, sizeof *o->leases)) return ENOMEM;
+  o->leases[o->count++] = (struct owned_lease){address, (unsigned char)kind};
   return 0;
 }
 /* `o`'s uses, a channel's direction each, at the holdings `comm` has now.  0, ENOMEM.  Under attach_lock */
@@ -1772,11 +1769,11 @@ static int owned_begin(struct owned *o, size_t from) {
   int error = 0;
   size_t i = from;
   for (; i < o->count && !error; i++) {
-    struct lease *l = lease_at(o->leases[i], NULL);
+    struct lease *l = lease_at(o->leases[i].address, NULL);
     error = !l || l->returned ? EINVAL : mesh_lease_retire_begin(&l->reads);
   }
   if (error) {
-    for (size_t j = from; j + 1 < i; j++) { struct lease *l = lease_at(o->leases[j], NULL); if (l) mesh_lease_retire_end(&l->reads); }
+    for (size_t j = from; j + 1 < i; j++) { struct lease *l = lease_at(o->leases[j].address, NULL); if (l) mesh_lease_retire_end(&l->reads); }
     o->count = from;
   }
   return error;
@@ -1786,17 +1783,17 @@ static int owned_begin(struct owned *o, size_t from) {
    leaves its scope open: the lease is never reused.  Under attach_lock */
 static void owned_end(struct owned *o, int marks) {
   for (size_t i = 0; o->uses && i < o->count; i++) {
-    struct lease *l = lease_at(o->leases[i], NULL);
+    struct lease *l = lease_at(o->leases[i].address, NULL);
     int error = l ? 0 : EINVAL;
     for (uint32_t k = 0; !error && marks && k < 2 * o->channels; k++) {
       const struct mesh_lease_retire_dep *d = o->uses + k;
-      if ((o->kinds[i] & OWNED_SENDS) && d->direction != MESH_LEASE_SEND) continue;
-      error = mesh_lease_retire_mark_use(&l->reads, d->stream, d->wire, d->holding, d->end, d->direction, o->kinds[i] & OWNED_TABLE);
+      if ((o->leases[i].kind & OWNED_SENDS) && d->direction != MESH_LEASE_SEND) continue;
+      error = mesh_lease_retire_mark_use(&l->reads, d->stream, d->wire, d->holding, d->end, d->direction, o->leases[i].kind & OWNED_TABLE);
     }
     if (!error) mesh_lease_retire_end(&l->reads);
     else fail(ncclInternalError, "releasing a prepared owner's leases: %s", strerror(error));
   }
-  free(o->leases); free(o->kinds); free(o->uses);
+  free(o->leases); free(o->uses);
   *o = (struct owned){0};
 }
 
