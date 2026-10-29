@@ -456,10 +456,7 @@ static pybind11::capsule schedule_completion(const Schedule &schedule) {
   });
 }
 
-// torch's functional collectives (_c10d_functional, what DTensor and a compiled graph call) on MPS tensors: kernels
-// for the MPS dispatch key, as torch/csrc/distributed/c10d/Functional.cpp implements them for every device but
-// issuing their group directly, the group's communicator found by the group (attach) with no Python between.
-// A group the map does not hold (another backend's, or a mesh group since destroyed) takes torch's own kernel.
+// each mesh process group's communicator, found by its group (attach) with no Python between (fused_prepare)
 static std::unordered_map<const c10d::ProcessGroup *, std::pair<c10::weak_intrusive_ptr<c10d::ProcessGroup>, int64_t>> communicators_;
 
 static void attach(const c10::intrusive_ptr<c10d::ProcessGroup> &group, int64_t comm) {
@@ -475,88 +472,6 @@ static int64_t communicator_of(const c10::IValue &name) {
     return 0;
   }
   return found->second.second;
-}
-
-static int64_t reduction(const std::string &op) {
-  if (op == "sum") return ncclSum;
-  if (op == "avg") return ncclAvg;
-  if (op == "product") return ncclProd;
-  if (op == "max") return ncclMax;
-  if (op == "min") return ncclMin;
-  TORCH_CHECK(false, "the mesh backend reduces by sum, avg, product, max and min, not ", op);
-}
-
-static int group_argument(const std::string &name) {
-  if (name == "all_reduce" || name == "all_reduce_" || name == "broadcast" || name == "broadcast_" || name == "all_gather_into_tensor" ||
-      name == "all_gather_into_tensor_out")
-    return 2;
-  return 3;
-}
-
-// Issued and not completed (split) where the result is its own operand: torch's wait_tensor (its work registry) waits
-// for it.  A result made here is a region tensor (region_empty): the library sends from and lands in leases alone (nccl.h Memory).
-static void functional(const c10::OperatorHandle &op, torch::jit::Stack *stack) {
-  const std::string name = op.schema().name().substr(sizeof "_c10d_functional::" - 1) +
-                           (op.schema().overload_name().empty() || op.schema().overload_name() == "default" ? "" : "." + op.schema().overload_name());
-  const size_t count = op.schema().arguments().size();
-  auto arguments = torch::jit::last(*stack, count);
-  const at::Tensor input = arguments[0].toTensor();
-  const int64_t comm = communicator_of(arguments[group_argument(name)]);
-  if (!comm) {
-    op.redispatchBoxed(c10::DispatchKeySet(c10::DispatchKey::CPU), stack);
-    return;
-  }
-  int ranks = 0;
-  checked(ncclCommCount(communicator(comm), &ranks));
-  at::Tensor result;
-  Call call;
-  if (name.rfind("all_reduce", 0) == 0 || name.rfind("broadcast", 0) == 0) {
-    result = name.back() == '_' ? input : region_empty(input.sizes().vec(), input, true).copy_(input);
-    call = name[0] == 'a' ? Call{ALLREDUCE, {result}, {}, {}, reduction(arguments[1].toStringRef()), 0}
-                          : Call{BROADCAST, {result}, {}, {}, 0, arguments[1].toInt()};
-  } else if (name.rfind("all_gather_into_tensor", 0) == 0) {
-    std::vector<int64_t> shape = input.sizes().vec();
-    TORCH_CHECK(!shape.empty(), "all_gather_into_tensor of a 0-dim tensor");
-    shape[0] *= ranks;
-    result = name == "all_gather_into_tensor_out" ? arguments[3].toTensor() : region_empty(shape, input, true);
-    TORCH_CHECK(result.numel() == input.numel() * ranks, "all_gather_into_tensor_out: out holds ", result.numel(), " elements, not ",
-                input.numel() * ranks);
-    call = {ALLGATHER, {input}, {result}, std::vector<int64_t>(ranks, input.numel()), 0, 0};
-  } else if (name == "reduce_scatter_tensor") {
-    std::vector<int64_t> shape = input.sizes().vec();
-    TORCH_CHECK(!shape.empty() && shape[0] % ranks == 0, "reduce_scatter_tensor: dim 0 of ", input.sizes(), " is not divisible by ", ranks);
-    shape[0] /= ranks;
-    result = region_empty(shape, input, true);
-    call = {REDUCE_SCATTER, {input}, {result}, std::vector<int64_t>(ranks, result.numel()), reduction(arguments[1].toStringRef()), 0};
-  } else {
-    std::vector<int64_t> outs, ins, counts;
-    for (const auto &v : arguments[1].toListRef()) outs.push_back(v.toInt());
-    for (const auto &v : arguments[2].toListRef()) ins.push_back(v.toInt());
-    TORCH_CHECK(input.dim(), "all_to_all_single of a 0-dim tensor");
-    if (outs.empty()) outs.assign(ranks, input.size(0) / ranks);
-    if (ins.empty()) ins.assign(ranks, input.size(0) / ranks);
-    std::vector<int64_t> shape = input.sizes().vec();
-    int64_t width = 1;
-    for (int64_t d = 1; d < input.dim(); d++) width *= input.size(d);
-    shape[0] = 0;
-    for (auto r : ins) counts.push_back(r * width);
-    for (auto r : outs) {
-      counts.push_back(r * width);
-      shape[0] += r;
-    }
-    result = region_empty(shape, input, true);
-    call = {ALLTOALL, {input}, {result}, counts, 0, 0};
-  }
-  const uint64_t ticket = issue({call}, comm, true, false);
-  if (ticket) c10d::register_work(result, work_of(ticket, {result}, comm));
-  torch::jit::drop(*stack, count);
-  torch::jit::push(*stack, result);
-}
-
-TORCH_LIBRARY_IMPL(_c10d_functional, MPS, m) {
-  for (const char *name : {"all_reduce", "all_reduce_", "broadcast", "broadcast_", "all_gather_into_tensor", "all_gather_into_tensor_out",
-                           "reduce_scatter_tensor", "all_to_all_single"})
-    m.impl(name, torch::CppFunction::makeFromBoxedFunction<&functional>());
 }
 
 // The mesh library's own kernels on torch's stream (torch_mesh/sparse.py): a kernel compiled from its source at Metal
