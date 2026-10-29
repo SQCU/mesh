@@ -220,6 +220,12 @@ binds logical coordinates, extents and explicit API parameters before handing
 the expression to isl. Products and divisors can include bound constant
 expressions. The resulting layout retains only the ordinary emitted terms;
 neither the configuration nor its names reach numerical execution.
+Known index functions remain isl functions through composition and emission.
+Only inversion forms the relation needed to choose a preimage. The previous
+function-to-relation-to-function reconstruction was redundant and made small
+packed-cache views expensive to prepare. Both alias rebasing and storage-index
+emission now compose directly with isl's inverse function. Typed component
+grouping and configured storage use the same function representation.
 `storageSpan` uses the relation's image bounds to size a backing interval.
 LiteRT binding sizes and native strided allocations use that same query;
 neither enumerates dependency ranges merely to find an allocation's end.
@@ -1532,8 +1538,33 @@ provider's pages with its declared unsigned encoding. Existing provider,
 native and mask preparation still compiled. These are metadata and shader
 preparation results; no model or numerical commands ran.
 
-The boundary remains incomplete. Raw cache relocation and several state-update
-declarations still lack typed access relations. Placement across all future consumer constraints remains necessary:
+Cache relocation now consumes the actual phase operands, including their
+column selections, source bindings and configured physical storage. Axis roles
+come from the storage configuration. The compiler permutes and groups those
+axes into the copy's logical view, then composes it with the producer's pages.
+The old key/value address functions, inferred widths and untyped byte
+declarations are removed. A destination page declaration names its binding's
+source domain, even when the use has a distinct name or selection.
+
+The copy distributes column groups across its launch and uses the shared
+vector helpers where the prepared layout permits them. Tails retain scalar
+access to their selected values. Its cell record declares the full domain
+once; the mask selects its first two words. Existing position and sequence
+values select the copy's work; no layout lookup, allocator or solver enters
+execution.
+
+Preparation on 2026-10-29 retained the actual model's typed cache signatures
+and compiled global, ring and split-position relocations with integer, half
+and float storage, selected columns, mapped cells and distinct view names.
+The bindings shared their source pages without layout conversion. General
+inverse and component lowering retained large repeated and transposed domains
+as compact emitted arithmetic. Libraries and native callers built. No numerical
+commands ran.
+
+The boundary remains incomplete. Several state-update declarations still
+lack typed access relations. Provider padding footprints must also reach
+allocation sizing without rounding the logical slot extent in the caller.
+Placement across all future consumer constraints remains necessary:
 sequential preparation can still convert a flexible native output when a later
 fixed-layout provider could have guided its original placement. General
 shape-changing collective outputs, external/signature selections and changed

@@ -289,15 +289,15 @@ static MetalTensorLayout *TensorCompose(MetalTensorLayout *source,NSArray *shape
     return [source shaped:shape coordinates:coordinates];
 }
 
-// Reduce a composed relation to the ordinary emitted layout. The solver's
-// context ends here; the result keeps only index terms and declared constants.
-static MetalTensorLayout *TensorRelationLayout(isl_map *relation,NSArray *shape) {
+// Emit the composed index function without reconstructing it from a relation.
+// Relations are needed for the inverse, but known functions remain functions.
+// The solver's context ends here; the result keeps only index terms and
+// declared constants.
+static MetalTensorLayout *TensorFunctionLayout(isl_pw_aff *value,NSArray *shape) {
     if(!TensorCount(shape)) {
-        isl_map_free(relation);
+        isl_pw_aff_free(value);
         return [MetalTensorLayout shape:shape strides:TensorStrides(shape) offset:0 maps:@{} indices:nil];
     }
-    isl_pw_multi_aff *function=isl_pw_multi_aff_from_map(relation);
-    isl_pw_aff *value=isl_pw_multi_aff_get_pw_aff(function,0);isl_pw_multi_aff_free(function);
     isl_val *minimum=isl_pw_aff_min_val(isl_pw_aff_copy(value)),*maximum=isl_pw_aff_max_val(isl_pw_aff_copy(value));
     NSInteger low=isl_val_get_num_si(minimum),high=isl_val_get_num_si(maximum);isl_val_free(minimum);isl_val_free(maximum);
     id terms=MeshIndexTerms(value);
@@ -907,7 +907,7 @@ static id TensorBind(id expression,NSDictionary *values) {
     }
     isl_ctx *ctx=isl_ctx_alloc();
     isl_pw_aff *relation=MeshIndexExpression(ctx,TensorBind(expression,values),0,count);
-    MetalTensorLayout *result=TensorRelationLayout(isl_map_from_pw_aff(relation),shape);isl_ctx_free(ctx);return result;
+    MetalTensorLayout *result=TensorFunctionLayout(relation,shape);isl_ctx_free(ctx);return result;
 }
 + (instancetype)shape:(NSArray<NSNumber *> *)shape strides:(NSArray<NSNumber *> *)strides
     offset:(NSInteger)offset maps:(NSDictionary<NSNumber *,NSData *> *)maps indices:(NSData *)indices {
@@ -1146,12 +1146,10 @@ static id TensorBind(id expression,NSDictionary *values) {
     NSMutableArray *shape=[[_shape mutableCopy] autorelease];[shape removeLastObject];
     if(!_count)return [MetalTensorLayout shape:shape strides:TensorStrides(shape) offset:_offset/(NSInteger)count maps:@{} indices:nil];
     isl_ctx *ctx=isl_ctx_alloc();
-    isl_map *first=isl_map_from_pw_aff(MeshIndexExpression(ctx,@[@"mul",@"i",@(count)],0,_count/count));
-    isl_map *relation=isl_map_apply_range(first,MeshIndexRelation(ctx,self));
-    isl_pw_multi_aff *function=isl_pw_multi_aff_from_map(relation);
-    isl_pw_aff *value=isl_pw_multi_aff_get_pw_aff(function,0);isl_pw_multi_aff_free(function);
+    isl_pw_aff *first=MeshIndexExpression(ctx,@[@"mul",@"i",@(count)],0,_count/count);
+    isl_pw_aff *value=isl_pw_aff_pullback_pw_multi_aff(MeshIndexFunction(ctx,self),isl_pw_multi_aff_from_pw_aff(first));
     value=isl_pw_aff_floor(isl_pw_aff_scale_down_val(value,isl_val_int_from_ui(ctx,count)));
-    MetalTensorLayout *result=TensorRelationLayout(isl_map_from_pw_aff(value),shape);isl_ctx_free(ctx);
+    MetalTensorLayout *result=TensorFunctionLayout(value,shape);isl_ctx_free(ctx);
     if(![[result components:count] equivalent:self])
         [NSException raise:NSInvalidArgumentException format:@"typed element components are not adjacent and aligned in their declared storage"];
     return result;
@@ -1161,20 +1159,21 @@ static id TensorBind(id expression,NSDictionary *values) {
     if([self isEqual:declared])return placed;
     if(!self.count)return [MetalTensorLayout shape:_shape strides:TensorStrides(_shape) offset:0 maps:@{} indices:nil];
     isl_ctx *ctx=isl_ctx_alloc();
-    isl_map *view=MeshIndexRelation(ctx,self),*source=MeshIndexRelation(ctx,declared),*target=MeshIndexRelation(ctx,placed);
-    isl_set *domain=isl_map_domain(isl_map_copy(view));
+    isl_pw_aff *view=MeshIndexFunction(ctx,self),*target=MeshIndexFunction(ctx,placed);
+    isl_set *domain=isl_pw_aff_domain(isl_pw_aff_copy(view));
     // The inverse is a relation. Selecting its last preimage retains the
     // existing alias convention where several logical positions name a value.
     // Repeated consumer indices remain repeated in the composed result.
-    isl_map *inverse=isl_map_lexmax(isl_map_reverse(source));
-    isl_map *result=isl_map_apply_range(isl_map_apply_range(view,inverse),target);
-    isl_set *resolved=isl_map_domain(isl_map_copy(result));
+    isl_pw_multi_aff *inverse=isl_map_lexmax_pw_multi_aff(isl_map_reverse(MeshIndexRelation(ctx,declared)));
+    isl_pw_multi_aff *selected=isl_pw_multi_aff_pullback_pw_multi_aff(inverse,isl_pw_multi_aff_from_pw_aff(view));
+    isl_pw_aff *result=isl_pw_aff_pullback_pw_multi_aff(target,selected);
+    isl_set *resolved=isl_pw_aff_domain(isl_pw_aff_copy(result));
     isl_bool complete=isl_set_is_equal(domain,resolved);isl_set_free(domain);isl_set_free(resolved);
     if(complete!=isl_bool_true) {
-        isl_map_free(result);isl_ctx_free(ctx);
+        isl_pw_aff_free(result);isl_ctx_free(ctx);
         [NSException raise:NSInvalidArgumentException format:@"operand alias names storage outside its declared producer"];
     }
-    MetalTensorLayout *layout=TensorRelationLayout(result,_shape);isl_ctx_free(ctx);return layout;
+    MetalTensorLayout *layout=TensorFunctionLayout(result,_shape);isl_ctx_free(ctx);return layout;
 }
 - (BOOL)matches:(NSArray<NSNumber *> *)strides {
     if(!_count)return YES;
@@ -1233,10 +1232,8 @@ static id TensorBind(id expression,NSDictionary *values) {
     NSParameterAssert([source.shape isEqual:_shape]);
     if(!_count)return [[self declaration:binding] stringByAppendingFormat:@"inline long mesh_storage_%lu(long) { return 0; }\n",(unsigned long)binding];
     isl_ctx *ctx=isl_ctx_alloc();
-    isl_map *inverse=isl_map_lexmax(isl_map_reverse(MeshIndexRelation(ctx,source)));
-    isl_map *relation=isl_map_apply_range(inverse,MeshIndexRelation(ctx,self));
-    isl_pw_multi_aff *function=isl_pw_multi_aff_from_map(relation);
-    id terms=MeshIndexTerms(isl_pw_multi_aff_get_pw_aff(function,0));isl_pw_multi_aff_free(function);
+    isl_pw_multi_aff *inverse=isl_map_lexmax_pw_multi_aff(isl_map_reverse(MeshIndexRelation(ctx,source)));
+    id terms=MeshIndexTerms(isl_pw_aff_pullback_pw_multi_aff(MeshIndexFunction(ctx,self),inverse));
     // Storage indices can have gaps and can start below zero. The emitted
     // expression is valid on the declared source image; it adds no validity guard.
     struct MeshIndexBounds bounds=MeshIndexImageBounds(MeshIndexRelation(ctx,source));isl_ctx_free(ctx);

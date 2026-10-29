@@ -73,7 +73,7 @@ isl_pw_aff *MeshIndexRuns(isl_ctx *ctx,NSArray<NSArray<NSNumber *> *> *runs) {
     }
     return isl_pw_aff_coalesce(result);
 }
-isl_map *MeshIndexRelation(isl_ctx *ctx,MetalTensorLayout *layout) {
+isl_pw_aff *MeshIndexFunction(isl_ctx *ctx,MetalTensorLayout *layout) {
     isl_pw_aff *value=IndexLeaf(ctx,@(layout.offset),0,layout.count);
     NSArray *coordinates=layout.coordinates;
     for(NSUInteger d=0;d<coordinates.count;d++) {
@@ -83,7 +83,10 @@ isl_map *MeshIndexRelation(isl_ctx *ctx,MetalTensorLayout *layout) {
         else part=isl_pw_aff_scale_val(part,isl_val_int_from_si(ctx,[layout.strides[d] integerValue]));
         value=isl_pw_aff_add(value,part);
     }
-    return isl_map_coalesce(isl_map_from_pw_aff(value));
+    return isl_pw_aff_coalesce(value);
+}
+isl_map *MeshIndexRelation(isl_ctx *ctx,MetalTensorLayout *layout) {
+    return isl_map_from_pw_aff(MeshIndexFunction(ctx,layout));
 }
 
 static id IndexTerms(isl_ast_expr *expression) {
