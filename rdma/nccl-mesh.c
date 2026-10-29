@@ -2493,7 +2493,10 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
 struct message { struct call *c; uint32_t step; uint64_t entry; mesh_pages pages, end; uint64_t need; size_t offset, bytes;
                  struct where data; struct mesh_dma_span *spans; uint64_t table; double priority;
                  uint64_t listed; mesh_pages laid; /* its entry and end in its issue's own lists (issue_lay), schedule_laid's base */
-                 uint64_t needs; /* a landing's need past its channel's first send entry, 0 none (landing_needs) */ };
+                 uint64_t needs; /* a landing's need past its channel's first send entry, 0 none (landing_needs) */
+                 /* a SEND's landing it forwards: its channel (UINT32_MAX none) and its base past that channel's landing
+                    count before the group (send_dependencies) */
+                 uint32_t dep_h; mesh_pages dep_rel; };
 /* a group's entries on one channel, each list in its order from its first (`first`: [0] the send list's, [1] the
    landing list's), its landing entries' gate (`word` a region offset, 0 none; `base` the value it reaches: a page
    count of the holding's `ready`, or the number of a group at the communicator's gate word: gate_of), and each list's
@@ -3155,6 +3158,36 @@ static void landing_needs(struct ncclComm *comm, struct schedule *plans) {
     }
 }
 
+/* each SEND's dependency, fixed while the issue is laid and placed (its steps' priors, its lists' positions, a write's
+   occurrence's packet cuts): the landing it forwards, on channel `dep_h`, its entry's base `dep_rel` past that channel's
+   landing count before the group, which present_group adds.  Found once here, not at each issue's presentation */
+static void send_dependencies(struct ncclComm *comm, struct schedule *plans) {
+  for (uint32_t h = 0; h < comm->count; h++)
+    for (size_t k = 0; k < plans[h].ins; k++) {
+      const struct message *m = plans[h].in + k;
+      m->c->bound->channel[m->step] = h; m->c->bound->entry[m->step] = m->listed;
+    }
+  for (uint32_t h = 0; h < comm->count; h++)
+    for (size_t k = 0; k < plans[h].outs; k++) {
+      struct message *m = plans[h].out + k;
+      const struct steps *s = m->c->bound;
+      const int32_t dependency = m->c->target && comm->rank != m->c->root ? (int32_t)s->prior[s->prior_first[m->step]] : forwards(s, m->step, comm->page);
+      m->dep_h = UINT32_MAX;
+      if (dependency < 0) continue;
+      const uint32_t repeats = m->c->fused && m->c->fused->repeats ? m->c->fused->repeats : 1;
+      const size_t repeat = k / (plans[h].outs / repeats);
+      const uint32_t incoming = s->channel[dependency];
+      const struct schedule *received = plans + incoming;
+      const struct message *from = received->in + s->entry[dependency] - (repeats - 1 - repeat) * (received->ins / repeats);
+      const struct mesh_step *before = s->steps + dependency;
+      const uint64_t delta = m->offset - from->offset;
+      const mesh_pages units = m->c->write_plan ? (mesh_pages){span_units(write_packets(m->c->write_plan, m->c->invocation),
+        before->first * before->piece.element_bytes, delta)} : pages_of(delta, comm->page);
+      m->dep_h = incoming;
+      m->dep_rel = pages_add(pages_sub(from->laid, from->pages), units);
+    }
+}
+
 /* Bind only true overwrite hazards. Original-input bindings are disjoint from reduction results. A landing that writes
    bytes an earlier SEND of its call reads (a COPY landing in place, a combine into its buffer) takes the compiled proof
    that the SEND's bytes arrived first (mesh-routed.c: a causal witness of that arrival), else the call fails as a
@@ -3272,21 +3305,10 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
     for (size_t k = 0; k < p->outs; k++) {
       const struct message *m = p->out + k;
       struct mesh_entry entry = {m->table, pages_to_word(m->pages), 0, pages_to_word(pages_sub(m->end, m->pages))};
-      const struct steps *s = m->c->bound;
-      const int32_t dependency = m->c->target && comm->rank != m->c->root ? (int32_t)s->prior[s->prior_first[m->step]] : forwards(s, m->step, comm->page);
-      const uint32_t repeats = m->c->fused && m->c->fused->repeats ? m->c->fused->repeats : 1;
-      const size_t repeat = k / (p->outs / repeats);
-      if (dependency >= 0) {
-        const uint32_t incoming = s->channel[dependency];
-        const struct schedule *received = plans + incoming;
-        const struct message *from = received->in + s->entry[dependency] - received->first[1] -
-                                     (repeats - 1 - repeat) * (received->ins / repeats);
-        entry.word = (uint64_t)((char *)comm->channels[incoming].view.landed - (char *)context->M);
-        const struct mesh_step *before = s->steps + dependency;
-        const uint64_t delta = m->offset - from->offset;
-        const mesh_pages units = m->c->write_plan ? (mesh_pages){span_units(write_packets(m->c->write_plan,m->c->invocation),
-          before->first * before->piece.element_bytes, delta)} : pages_of(delta, comm->page);
-        entry.base = pages_to_word(pages_add(pages_sub(from->end, from->pages), units));
+      /* the landing it forwards (send_dependencies): that channel's landing count before the group, plus its base */
+      if (m->dep_h != UINT32_MAX) {
+        entry.word = (uint64_t)((char *)comm->channels[m->dep_h].view.landed - (char *)context->M);
+        entry.base = pages_to_word(pages_add(comm->channels[m->dep_h].in, m->dep_rel));
       } else if (m->c->write_plan && m->c->write_plan->ready_value) {
         const struct ncclMeshWritePlan *plan = m->c->write_plan;
         entry.word = (uint64_t)(address_of(plan->source_ready) + tile_offset(plan->ready_layout, write_tile(plan, m->offset), m->c->invocation) - (const unsigned char *)context->M);
@@ -3451,7 +3473,7 @@ static ncclResult_t issue_bind(struct ncclComm *comm, struct call **calls, size_
   if (!result) bind_calls(list, n);
   if (!result && remote) result = place_group(comm, u, *area);
   if (!result && remote) result = bind_retirements(comm, u->plans);
-  if (!result && remote) landing_needs(comm, u->plans);
+  if (!result && remote) { landing_needs(comm, u->plans); send_dependencies(comm, u->plans); }
   for (size_t i = 0; !result && i < n; i++) {
     const struct call *c = list + i;
     const struct ncclMeshWritePlan *w = c->write_plan;
