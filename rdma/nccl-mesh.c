@@ -1893,6 +1893,24 @@ static ncclResult_t comm_fail(struct ncclComm *comm, ncclResult_t result, const 
   return comm_told(comm);
 }
 
+/* every channel's counts, compactly: its peer node, the units landed from it, and this rank's units ready and sent toward
+   it ("" where the channels are not bound), so a failure names where each rank's stream stood */
+static void channel_counts(const struct ncclComm *comm, char *out, size_t room) {
+  size_t used = 0;
+  out[0] = 0;
+  for (uint32_t h = 0; h < comm->count && used + 1 < room; h++) {
+    const struct mesh_stream_view *w = &comm->channels[h].view;
+    if (!w->landed || !w->sent || !w->ready) continue;
+    const int n = snprintf(out + used, room - used, "%s%u landed %llu, ready %llu, sent %llu", used ? "; " : " (channels: ",
+                           comm->channels[h].node, (unsigned long long)atomic_load_explicit(w->landed, memory_order_acquire),
+                           (unsigned long long)atomic_load_explicit(w->ready, memory_order_acquire),
+                           (unsigned long long)atomic_load_explicit(w->sent, memory_order_acquire));
+    if (n < 0) break;
+    used += (size_t)n < room - used ? (size_t)n : room - used - 1;
+  }
+  if (used && used + 2 < room) { out[used] = ')'; out[used + 1] = 0; }
+}
+
 /* the communicator's failure: the one it kept; a revoke; a stream it holds no longer its own (a bridge's restart, or a
    pairing lost and made again, opens every stream new: mesh-call.h mesh_stream_held); one its GPU work recorded in its
    failure words (its link lost, or a wait's bound reached after a revoke: nccl-mesh-metal.h METAL_*; a wait past its
@@ -1904,10 +1922,13 @@ static ncclResult_t comm_failure(struct ncclComm *comm) {
     return comm_fail(comm, ncclInvalidUsage, "its communicator %s was revoked (ncclCommRevoke): no group runs on it before ncclCommDestroy", comm->name);
   struct attach *a = comm->attach;
   for (uint32_t k = 0; comm->held && k < MESH_STREAMS; k++)
-    if ((comm->held >> k & 1) && !mesh_stream_held(&a->context, a->holds[k].stream, a->holds[k].wire))
+    if ((comm->held >> k & 1) && !mesh_stream_held(&a->context, a->holds[k].stream, a->holds[k].wire)) {
+      char counts[320];
+      channel_counts(comm, counts, sizeof counts);
       return comm_fail(comm, ncclRemoteError, "the link to node %u was lost and paired again: communicator %s's stream there is no "
-                       "longer its own (design/transport.md section 14); it is made again (ncclCommDestroy, then an init)",
-                       a->holds[k].node, comm->name);
+                       "longer its own (design/transport.md section 14); it is made again (ncclCommDestroy, then an init)%s",
+                       a->holds[k].node, comm->name, counts);
+    }
   _Atomic uint64_t *v = comm->words;
   const uint64_t at = v ? atomic_load_explicit(v + 2, memory_order_acquire) : 0;
   if (at) {
