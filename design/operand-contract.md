@@ -1552,14 +1552,48 @@ relations for internal sums and selected handoffs. The native libraries, rank
 and Goal A built; no communicator, page allocation or numerical work ran in
 these preparation checks.
 
-The boundary remains incomplete. General native declarations still need to
-publish their logical layouts and scalar encodings. A collective without its
-typed source/target relation now ends preparation; it has no implicit dense
-alternative. The built-in token array declares its uint32 pages to the common
-binder. Other native outputs, complete input/output placement for shape-changing
-collectives, external/signature selections and changed selections across resized
-source domains still need integration. Numerical execution remains deferred
-until these edges are reconciled.
+Native declarations now use that same placement function. Each operand declares
+its scalar type, logical layout, access mode and any API layout requirements.
+`pages` can declare a full shared domain while `binding` selects the producer's
+part. The compiler derives its physical extent from that declared layout, not
+from an untyped byte count. Missing layout or scalar declarations end
+preparation; the former whole-buffer native path is removed.
+
+An indexed consumer uses the producer's prepared positions. A declared
+`type_parameter` also lets its kernel accept the producer's scalar encoding.
+Arguments sharing a parameter receive one encoding; mixed encodings use their
+declared common preference (`type_parameters` can supply it explicitly).
+Fixed scalar arguments retain their declared conversion. Source emission and
+dependency records consume the resulting same layouts, scalar widths and access
+modes. Recording binds the resolved operands directly, without another name
+lookup.
+
+The native draw, retention, partial-row producer and merge now index logical
+columns. Their repeated provider padding arithmetic is removed. Their preferred
+storage refers to the common configured layout rather than repeating its axis
+order. The merge writes its logical outputs only. The bridge clears newly
+allocated pages during preparation; the native operation adds no padding-fill
+command. An API that requires contiguous scratch declares that requirement.
+Read/write operands retain both their input and output conversion edges when
+such a requirement needs materialization. Those decisions occur before recording.
+
+Native shared-output declarations now reach the ordinary stage exporter. A
+producer's local rows and the gather's full domain are explicit relations over
+the same pages. Preparation on 2026-10-29 compiled a provider/native/gather/merge/
+provider sequence with reversed columns and odd widths without layout copies.
+Draw and retention consumed the provider's float32 pages through their declared
+type parameters. An explicit contiguous read/write requirement retained the
+input and writeback mappings. No numerical commands ran.
+
+The boundary remains incomplete. Raw cache relocation and several state-update
+declarations still lack typed access relations. Mask words also need an explicit
+bit view of the provider's byte-valued mask; a numerical scalar cast is not that
+relation. Placement across all future consumer constraints remains necessary:
+sequential preparation can still convert a flexible native output when a later
+fixed-layout provider could have guided its original placement. General
+shape-changing collective outputs, external/signature selections and changed
+selections across resized source domains still need integration. Numerical
+execution remains deferred until these edges are reconciled.
 
 ### Encoded numerical operands
 
