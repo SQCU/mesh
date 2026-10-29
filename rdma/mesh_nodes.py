@@ -390,8 +390,9 @@ def node_prepare():
             done = run(*argv, cwd=ROOT / where, env={**os.environ, 'MESH_RDMA': str(ROOT / 'rdma')})
             if done.returncode:
                 raise RuntimeError(f'{where}: {" ".join(map(str, argv[:3]))} failed: {(done.stderr or done.stdout)[-600:]}')
+    services = services_refresh(ROOT)
     if 'restarts the bridge' not in done.stdout:
-        print(json.dumps({'bridge': 'unchanged'}))
+        print(json.dumps({'bridge': 'unchanged', 'services': services}))
         return
     # standup (the operator, 2026-10-29): a machine whose bridge does not answer its restart signal, and that has no
     # kernel fault, is restarted; one with a fault is left as it is, its fault reported
@@ -400,7 +401,7 @@ def node_prepare():
         time.sleep(2)
         began = bridge_began()
     if began and began >= signalled:
-        print(json.dumps({'bridge': 'restarted'}))
+        print(json.dumps({'bridge': 'restarted', 'services': services}))
         return
     boot = int(re.search(r'\{ sec = (\d+)', run('sysctl', '-n', 'kern.boottime').stdout).group(1))
     faults = run('sudo', '-n', 'find', '/Library/Logs/DiagnosticReports', '-type', 'f', '-newermt',
@@ -414,6 +415,40 @@ def node_prepare():
 
 
 BRIDGE_RESTART_SECONDS = 180
+
+# the node's services that read it beside every run, each its launchd job and its files (the checkout's, the installed
+# one's under /usr/local/mesh, its mode), as install.sh installs them; the router and beacon, which carry the fabric's
+# routes, stay install.sh's
+SERVICES = (('io.mesh.telemetry', (('user/mesh-telemetry.py', 'bin/mesh-telemetry.py', '755'),
+                                   ('rdma/peers.py', 'bin/peers.py', '644'),
+                                   ('etc/mesh-capacity.json', 'etc/mesh-capacity.json', '644'))),
+            ('io.mesh.observer', (('viz/serve.py', 'viz/serve.py', '755'), ('viz/index.html', 'viz/index.html', '644'),
+                                  ('rdma/peers.py', 'bin/peers.py', '644'),
+                                  ('etc/mesh-capacity.json', 'etc/mesh-capacity.json', '644'),
+                                  ('etc/mesh-nodes.json', 'etc/mesh-nodes.json', '644'))))
+
+
+def services_refresh(checkout, installed=Path('/usr/local/mesh')):
+    """Each loaded service whose files differ from this commit's, installed as install.sh installs them and restarted on
+    them (launchctl kickstart -k): {label: 'restarted', 'unchanged' or the failure}."""
+    import filecmp
+    told = {}
+    for label, files in SERVICES:
+        if run('launchctl', 'print', f'system/{label}').returncode:
+            told[label] = 'not loaded'
+            continue
+        changed = [(source, target, mode) for source, target, mode in files
+                   if not (installed / target).is_file() or not filecmp.cmp(checkout / source, installed / target, shallow=False)]
+        if not changed:
+            told[label] = 'unchanged'
+            continue
+        failed = next((done.stderr.strip() or f'install {target} failed' for source, target, mode in changed
+                       if (done := run('sudo', '-n', 'install', '-m', mode, '-o', 'root', '-g', 'wheel', checkout / source,
+                                       installed / target)).returncode), None)
+        if not failed and (done := run('sudo', '-n', 'launchctl', 'kickstart', '-k', f'system/{label}')).returncode:
+            failed = done.stderr.strip() or 'kickstart -k failed'
+        told[label] = failed or 'restarted'
+    return told
 
 
 def bridge_began():
