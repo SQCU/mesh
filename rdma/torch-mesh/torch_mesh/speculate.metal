@@ -32,7 +32,7 @@
 #include <metal_stdlib>
 using namespace metal;
 
-constant constexpr uint MESH_SPEC_STATE = 8;
+constant constexpr uint MESH_SPEC_STATE = MESH_SPEC_STATE_WORDS;
 
 template <uint R, uint ORDER, uint T>
 __attribute__((always_inline)) static inline void mesh_spec_step(device uint *state, device uint *history, device const uint *selected,

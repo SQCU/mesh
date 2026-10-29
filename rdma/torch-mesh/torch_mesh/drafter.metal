@@ -34,7 +34,7 @@ kernel void mesh_draft_embed(device const half *table [[buffer(0)]], device cons
                              uint2 at [[thread_position_in_grid]]) {
     const uint c = at.x, k = at.y;
     if (c >= D / 4) return;
-    const uint anchor = state[8];
+    const uint anchor = state[MESH_SPEC_STATE_WORDS];
     ((device half4 *)x)[k * (D / 4) + c] = k == 0 ? half4(float4(((device const half4 *)table)[ulong(anchor) * (D / 4) + c]) * scale)
                                                   : ((device const half4 *)mask)[c];
 }
@@ -61,7 +61,7 @@ kernel void mesh_draft_anchor(device const half *table [[buffer(0)]], device con
                               device float *pa [[buffer(3)]], uint tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]],
                               uint sg [[simdgroup_index_in_threadgroup]]) {
     const uint j = tg * 8 + sg;
-    const ulong anchor = state[8];
+    const ulong anchor = state[MESH_SPEC_STATE_WORDS];
     float s = 0.0f;
     for (uint c = lane; c < D; c += 32) s += float(A[ulong(j) * D + c]) * float(table[anchor * D + c]);
     s = simd_sum(s);
@@ -88,7 +88,7 @@ kernel void mesh_draft_select(device const float *pa [[buffer(0)]], device const
     threadgroup float tv[T / 32];
     threadgroup uint tk[T / 32];
     threadgroup uint previous;
-    if (t == 0) drafts[0] = state[8];
+    if (t == 0) drafts[0] = state[MESH_SPEC_STATE_WORDS];
     for (uint k = 0; k < S; k++) {
         for (uint j = t; j < RK; j += T)
             p[j] = (k == 0 ? pa[j] : float(ae[ulong(previous) * RK + j])) * float(gate[k * gs + j]);
@@ -139,7 +139,7 @@ kernel void mesh_saguaro_keys(device const uint *state [[buffer(0)]], device con
         return;
     }
     const uint k = slots[i], f = ranks[i], p0 = state[1], walks = k + 1u < R;
-    const uint sent = walks ? state[8u + k + 1u] : 0xffffffffu;
+    const uint sent = walks ? state[MESH_SPEC_STATE_WORDS + k + 1u] : 0xffffffffu;
     float last = INFINITY;
     uint after = 0u, pick = 0xffffffffu;
     for (uint q = 0; q <= f; q++) {
@@ -163,7 +163,7 @@ kernel void mesh_saguaro_keys(device const uint *state [[buffer(0)]], device con
     device uint *own = states + ulong(i) * stride;
     for (uint w = 0; w < stride; w++) own[w] = 0u;
     own[1] = p0 + k + 1u;
-    own[8] = key == 0xffffffffu ? state[8] : key;
+    own[MESH_SPEC_STATE_WORDS] = key == 0xffffffffu ? state[MESH_SPEC_STATE_WORDS] : key;
 }
 
 // E2B's own trained MTP drafter (metal-microbench docs/kernels.md#the-drafter, E2B's MTP drafter: the LiteRT-LM export's
@@ -200,7 +200,7 @@ kernel void mesh_mtp_begin(device const uint *state [[buffer(0)]], device const 
         mtp[1] = max(at, 1u) - 1u;
         mtp[2] = state[7];
         mtp[3] = at;
-        drafts[0] = own[8];
+        drafts[0] = own[MESH_SPEC_STATE_WORDS];
     }
 }
 
@@ -263,7 +263,7 @@ kernel void mesh_spec_drafts(device uint *state [[buffer(0)]], device const uint
                              uint r [[thread_position_in_grid]]) {
     if (r == 0 || r >= R || (state[3] & 6u) != 0u || (hybrid > 0u && state[4] >= hybrid)) return;
     words[r * stride] = drafts[r];
-    state[8 + r] = drafts[r];
+    state[MESH_SPEC_STATE_WORDS + r] = drafts[r];
     record[3 + r] = drafts[r];
 }
 #ifdef MESH_SPEC_ROWS

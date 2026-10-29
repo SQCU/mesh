@@ -1584,8 +1584,18 @@ from actual padded writes across live values. Existing provider/native, mask
 and cache-view shaders still prepared. Native callers built; no numerical
 commands ran.
 
-The boundary remains incomplete. Several state-update declarations still
-lack typed access relations. The empty-owner one-slot placeholder remains an
+MTP state updates now compose the imported tensor signatures through
+`native_tensor_view`, the same relation used by cache relocation. Their
+positions, masks, parameters, embedding, hidden values and result buffers carry
+explicit types and page selections. Mask writes use the shared vector-store
+helper with scalar tails. The updating draw key declares both reads and writes.
+The state header extent comes from one compute manifest, consumed by the native
+and LiteRT hosts and shaders. Separately prepared native shader libraries receive
+that manifest too. Preparation compiled these stages with strided values, odd
+mask lengths and distinct scalar encodings; it submitted no numerical work.
+
+The boundary remains incomplete. The verify-step wrappers and host initializers
+still need the same typed access relations. The empty-owner one-slot placeholder remains an
 implicit API accommodation and needs constraint/empty-domain lowering.
 Placement across all future consumer constraints remains necessary:
 sequential preparation can still convert a flexible native output when a later
