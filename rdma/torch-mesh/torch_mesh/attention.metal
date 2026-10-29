@@ -99,10 +99,11 @@ __attribute__((always_inline)) static inline void mesh_attention(thread A &a) {
 // m_j, sum l_j and unnormalized accumulator o_j (P::m(j), P::l(j), P::o(j, d)), weighed e^(m_j - M) over the parts with
 // l_j > 0. Each bounded batch of weights is held across a SIMD group and shuffled, the sums and the total
 // sum_j w_j l_j taken in part order (the sequential merge's arithmetic, to the bit: a lane tree's total moves LiteRT's
-// int8 program, metal-microbench docs/kernels.md#decode-attention), one part-group; or with Shared computed by the first
-// simdgroup into `weights` (J floats; the total, a lane tree's, and M into `scalars`, read by the store) and read from
-// there after a barrier, the G part-groups (thread (d, g): channel slice d of DS) reading the accumulators 8 at a time and
-// summing through `red` ((G - 1) DS float4s); group 0 calls store(M, sum_j w_j l_j, sum_j w_j o_j). Scheduled Single (a
+// int8 program, metal-microbench docs/kernels.md#decode-attention), one part-group; or with SharedWeights computed by the
+// first simdgroup into `weights` (SharedWeights floats; the cumulative total and M into `scalars`, read by the store).
+// Each batch is published before its readers start and retired before those slots are reused. The G part-groups
+// (thread (d, g): channel slice d of DS) read the accumulators 8 at a time and
+// sum through `red` ((G - 1) DS float4s); group 0 calls store(M, sum_j w_j l_j, sum_j w_j o_j). Scheduled Single (a
 // threadgroup a row: mesh_merge_row and the hosts' kernels) or LastArrival (the last of a row's parts to arrive:
 // argmax.metal's mesh_last_arrival, the merge, then mesh_arrival_reset).
 template <typename F, typename F4, uint D>
@@ -127,33 +128,38 @@ struct mesh_split_parts {
 
 __attribute__((always_inline)) static inline float4 mesh_merged(float total, float4 sum) { return total > 0.0f ? sum / total : float4(0.0f); }
 
-template <uint DS, uint G, bool Shared = false, uint Threads = DS * G, typename P, typename Store>
+// SharedWeights is the caller's actual scratch capacity, not its contributor
+// count. Zero keeps each SIMD group's weights in bounded lane registers.
+template <uint DS, uint G, uint SharedWeights = 0, uint Threads = DS * G, typename P, typename Store>
 __attribute__((always_inline)) static inline void mesh_merge(P parts, uint J, uint d, uint g, uint lane, threadgroup float4 *red, Store store,
                                                             threadgroup float *weights = nullptr, threadgroup float *scalars = nullptr) {
     constexpr uint Cached = MESH_ATTENTION_MERGE_PARTS_PER_LANE;
+    constexpr bool Shared = SharedWeights != 0;
     const uint lanes = Threads % MESH_SIMD_WIDTH == 0 ? MESH_SIMD_WIDTH
         : min(uint(MESH_SIMD_WIDTH), Threads - ((g * DS + d) % Threads) / MESH_SIMD_WIDTH * MESH_SIMD_WIDTH);
-    const uint batch = Cached * lanes;
+    const uint batch = Shared ? SharedWeights : Cached * lanes;
     float top = -3.0e38f, total = 0.0f;
     if (!Shared || g * DS + d < MESH_SIMD_WIDTH) {
         for (uint p = lane; p < J; p += lanes) if (parts.l(p) > 0.0f) top = max(top, parts.m(p));
         top = simd_max(top);
-        if (Shared) {
-            for (uint p = lane; p < J; p += lanes) {
-                const float le = parts.l(p), we = le > 0.0f ? exp(parts.m(p) - top) : 0.0f;
-                weights[p] = we;
-                total += we * le;
-            }
-            total = simd_sum(total);
-            if (lane == 0) { scalars[0] = total; scalars[1] = top; }
-        }
     }
-    if (Shared) threadgroup_barrier(mem_flags::mem_threadgroup);
     float4 sum = float4(0.0f);
-    for (uint first = 0; first < J; first += Shared ? J : batch) {
-        const uint end = Shared ? J : min(J, first + batch);
+    // The empty shared batch also publishes its zero normalizer.
+    for (uint first = 0; first < (Shared ? max(J, 1u) : J); first += batch) {
+        const uint end = min(J, first + batch);
         float w[Cached];
-        if constexpr (!Shared) {
+        if constexpr (Shared) {
+            if (g * DS + d < MESH_SIMD_WIDTH) {
+                for (uint p = first + lane; p < end; p += lanes) {
+                    const float le = parts.l(p), we = le > 0.0f ? exp(parts.m(p) - top) : 0.0f;
+                    weights[p - first] = we;
+                    total += we * le;
+                }
+                const float normalizer = simd_sum(total);
+                if (lane == 0) { scalars[0] = normalizer; scalars[1] = top; }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        } else {
             for (uint k = 0; k < Cached; ++k) {
                 const uint p = first + lane + lanes * k;
                 w[k] = p < end && parts.l(p) > 0.0f ? exp(parts.m(p) - top) : 0.0f;
@@ -172,12 +178,15 @@ __attribute__((always_inline)) static inline void mesh_merge(P parts, uint J, ui
             for (uint u = 0; u < 8; ++u) y[u] = p + u * G < end ? parts.o(p + u * G, d) : float4(0.0f);
             for (uint u = 0; u < 8; ++u) {
                 const uint q = p + u * G;
-                const float wq = q < end ? (Shared ? weights[q]
+                const float wq = q < end ? (Shared ? weights[q - first]
                     : simd_shuffle(w[(q - first) / lanes], ushort((q - first) % lanes))) : 0.0f;
                 sum += wq * y[u];
                 if (!Shared && G == 1 && q < end) total += wq * parts.l(q);
             }
         }
+        // Every reader finishes this batch before the first SIMD group reuses
+        // its slots. A one-batch merge adds no reuse barrier.
+        if (Shared && end < J) threadgroup_barrier(mem_flags::mem_threadgroup);
     }
     if (G > 1) {
         if (g > 0) red[(g - 1) * DS + d] = sum;
@@ -222,7 +231,7 @@ __attribute__((always_inline)) static inline void mesh_merge_row(P parts, uint i
     ulong4 dst;
     float4 cs;
     mesh_gathered_places(ulong(i) * D + 4 * d, inverse, scale, columns, dst, cs, stride, count);
-    mesh_merge<(D + 3) / 4, 1, false, Threads>(parts, J, d, 0u, lane, nullptr, [&](float, float total, float4 sum) {
+    mesh_merge<(D + 3) / 4, 1, 0, Threads>(parts, J, d, 0u, lane, nullptr, [&](float, float total, float4 sum) {
         mesh_gathered_store(O, dst, cs, columns, mesh_merged(total, sum), count, D % 4 == 0);
     });
 }

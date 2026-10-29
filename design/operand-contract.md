@@ -458,6 +458,23 @@ batches, using the register budget in `metal.def`. Each batch continues the
 same accumulation over the row's parts. A final partial SIMD group uses its
 active lanes; channel groups may cross SIMD boundaries.
 
+The fused native producer also bounds its shared weight batch. Its declaration
+passes the scratch capacity to `mesh_merge`; the contributor count no longer
+serves as a scratch index. The first SIMD group fills one batch, all groups
+consume it, and a barrier orders the next overwrite of those same slots. A
+single-batch merge retains its existing publication barrier and adds no reuse
+barrier. The normalizer and value sums continue across batches. This removes
+the overflow when a producer has more contributors than its page-tile scratch.
+
+Native preparation now sizes partial-result pages from all of a network's
+declared row classes and layers. `AttentionStorage` is a tuple of prepared
+buffer bindings passed to command construction. It does not own execution.
+Successive calls use the prepared maxima, total, value and count pages; their
+access ranges still come from each call. The old global arrays and their
+`PARTIAL_HEADS` capacity are removed. An explicit part count is no longer
+rejected because those arrays were too small. The configured default part
+selection remains a planning input, separate from storage capacity.
+
 Logical width and launch width are separate compilation operands. Native and
 LiteRT preparation split wide outputs into channel tiles. Each tile merges
 the same partial-result records into its own output channels. A row can span
@@ -503,14 +520,23 @@ Sampled indices matched the provider's physical ordering. This establishes the
 adapter's lowering and source compilation, not support for those alternate
 types in the packaged delegate or numerical equivalence of a complete model.
 
+The fused-batch extension compiled shared capacities of 17 and 64 with up to
+1,025 contributors, including partial SIMD groups and an empty set. Actual
+native vector producers specialized for 64, 65 and 1,025 contributors kept the
+same static threadgroup memory at each fixed head/launch shape: 1,360 bytes at
+width 256 with one SIMD group per page, and 2,672 bytes at width 512 with two.
+Native rank and Goal A built after the page-sizing change. These are preparation
+results only; no numerical work or timing/throughput measurement was submitted.
+
 This removes limits from the merge of already-produced partial results. It
 does not yet make every producer width-independent: the native forward
-attention kernels still truncate channel dimensions, and their fused merge
-still needs shared weight storage sized for its contributor count. LiteRT's
-draw/kept adapters still use the old four-lane slice indexing. The delegate's
+attention kernels still truncate channel dimensions. Their query staging and
+output accumulator geometry must also be tiled before a head can have an
+arbitrary width. LiteRT's draw/kept adapters still use the old four-lane slice
+indexing. The delegate's
 internal tensor views also remain a separate integration requirement. Placing
-the partial numerical work across nodes remains
-part of the graph's reduction lowering, rather than a property of this merge.
+the partial numerical work across nodes remains part of the graph's reduction
+lowering, rather than a property of this merge.
 
 CPU contraction workspace is now part of that boundary. Preparation asks BNNS
 for its required byte count, assigns bridge pages and binds their address.
