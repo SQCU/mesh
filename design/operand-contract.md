@@ -119,9 +119,27 @@ Preparation covered negative and zero strides, repeated selections, singleton
 and empty axes, serialization and ordered/dependency spans. Shared libraries and
 Metal declarations compiled without numerical submission.
 
-A coupled domain can still become large when a reshape merges an independent
-extent into a mapped axis, or a permutation inserts that extent between coupled
-axes. Such compositions still materialize their coupled domain. General
+An independent index boundary can fall inside an unchanged logical axis after
+a reshape. Composition now splits that logical axis at the boundary, performs
+the selected cut in its own domain, then restores the declared logical shape.
+It does not repeat the selected map across the unchanged extent.
+
+Linear cuts also resolve against the index factors before building a table.
+When the selected interval is a rectangular range of those factors, preparation
+cuts their digits directly. A stride which divides a factor fixes its residue;
+a negative step reverses the selected digits. Repeating one value uses a zero
+stride. The result uses the same layout type, serialization and source emitter.
+No additional index relation is read during execution.
+
+Preparation on 2026-10-28 retained six entries for aligned cuts, full reversals
+and strided selections of a 2,061,584,302,080-element flat view. Cuts through a
+logical axis with an independent row factor retained four entries. Smaller
+compositions preserved exact indices, ordered transfers and dependency spans;
+the large declarations compiled as Metal source. No numerical work ran.
+
+A coupled domain can still become large for a nonrectangular interval across
+index factors, or when a permutation inserts an independent extent between
+coupled axes. Such compositions still materialize their coupled domain. General
 nonrectangular alias composition and the distributed ownership gap under exact
 partition boundaries also remain unfinished. An irreducible table supplied by a
 caller still occupies its own domain; reshaping it does not duplicate that table.
@@ -708,6 +726,17 @@ our requirement; it cannot make that provider promise. Before this path can clai
 a fixed output-page contract, the binding must use an API/model contract which
 actually guarantees the supplied storage. Internal provider work and dependencies
 also remain opaque. No new runtime recovery or copy path has been added.
+
+The native ANE share has another preparation constraint imposed by our code.
+`rates.engine_block` uses the stored model's channel block as the allocation
+grain; `engine_extent` excludes a share without a boundary on that block grid.
+`NeuralEngineManifest.Layer.models(in:)` can then select only complete stored
+models. This is a cached-model restriction, not a declared ANE hardware limit.
+The shared `neural_engine_model` builder already accepts row and channel tails,
+but the native manifest and assignment contracts do not expose arbitrary cuts
+to it. Relaxing the assignment alone would leave those cuts without a model.
+That contract still needs reconciliation with bounded model preparation and
+the output-page requirement above.
 
 ## Frontend attributes become page operands
 

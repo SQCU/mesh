@@ -160,9 +160,35 @@ static MetalTensorLayout *TensorProduct(NSArray<MetalTensorLayout *> *parts) {
     MetalTensorLayout *result=[MetalTensorLayout shape:basis strides:steps offset:origin maps:maps indices:nil];
     return [result reshape:shape];
 }
+// An unaffected logical axis may contain an independent index boundary. Expose
+// that boundary for composition, then restore the caller's logical shape. A
+// changed axis remains whole; its selected values define its new shape.
+static MetalTensorLayout *TensorRefineAxes(MetalTensorLayout *source,NSUInteger *selected) {
+    NSMutableArray *boundaries=[NSMutableArray array],*shape=[NSMutableArray array];
+    NSUInteger product=1,first=1,axis=*selected;
+    for(NSNumber *n in source.indexShape){product*=n.unsignedIntegerValue;[boundaries addObject:@(product)];}
+    for(NSUInteger d=0;d<source.shape.count;d++) {
+        const NSUInteger end=first*[source.shape[d] unsignedIntegerValue];
+        if(d==axis)*selected=shape.count;
+        else for(NSNumber *boundary in boundaries) {
+            const NSUInteger middle=boundary.unsignedIntegerValue;
+            if(middle>first&&middle<end&&middle%first==0&&end%middle==0) {
+                [shape addObject:@(middle/first)];first=middle;
+            }
+        }
+        [shape addObject:@(end/first)];first=end;
+    }
+    return [source reshape:shape];
+}
 static MetalTensorLayout *TensorAxisTransform(MetalTensorLayout *source,NSUInteger axis,
     MetalTensorLayout *(^transform)(MetalTensorLayout *,NSUInteger)) {
     if(!source.count||[source.shape isEqual:source.indexShape])return transform(source,axis);
+    NSUInteger refinedAxis=axis;MetalTensorLayout *refined=TensorRefineAxes(source,&refinedAxis);
+    if(![refined.shape isEqual:source.shape]) {
+        MetalTensorLayout *result=TensorAxisTransform(refined,refinedAxis,transform);
+        NSMutableArray *shape=[[source.shape mutableCopy] autorelease];shape[axis]=result.shape[refinedAxis];
+        return [result reshape:shape];
+    }
     NSData *storage=TensorSections(source);const struct TensorSection *sections=storage.bytes;
     NSMutableArray *parts=[NSMutableArray array];
     for(NSUInteger k=0;k<storage.length/sizeof *sections;k++) {
@@ -195,12 +221,68 @@ static MetalTensorLayout *TensorSelect(MetalTensorLayout *source,NSUInteger axis
     }
     return [MetalTensorLayout shape:shape strides:newSteps offset:0 maps:@{} indices:data];
 }
+// A linear interval can be a rectangular selection of the existing factors.
+// Resolve those digits before making a table: huge affine factors stay affine,
+// while a mapped factor needs at most its own selected entries. A negative step
+// reverses each selected digit; zero repeats one declared value.
+static MetalTensorLayout *TensorFactorSlice(MetalTensorLayout *source,NSInteger first,NSUInteger count,NSInteger step) {
+    if(!count)return [MetalTensorLayout shape:@[@0] strides:@[@1] offset:source.offset maps:@{} indices:nil];
+    if(!step||count==1)return [MetalTensorLayout shape:@[@(count)] strides:@[@0] offset:[source index:first] maps:@{} indices:nil];
+    const NSUInteger rank=source.indexShape.count;
+    NSMutableData *storage=[NSMutableData dataWithLength:rank*5*sizeof(NSUInteger)];
+    NSUInteger *sizes=storage.mutableBytes,*scales=sizes+rank,*residues=scales+rank,*low=residues+rank,*high=low+rank;
+    for(NSUInteger d=0;d<rank;d++){sizes[d]=[source.indexShape[d] unsignedIntegerValue];scales[d]=1;}
+    const BOOL reverse=step<0;
+    NSUInteger begin=(NSUInteger)(reverse?first+(NSInteger)(count-1)*step:first),stride=(NSUInteger)labs(step);
+    for(NSUInteger d=rank;d--;) {
+        const NSUInteger n=sizes[d];
+        if(stride>=n&&stride%n==0) {
+            residues[d]=begin%n;begin/=n;stride/=n;sizes[d]=1;scales[d]=0;
+        } else {
+            if(n%stride)return nil;
+            residues[d]=begin%stride;begin/=stride;sizes[d]=n/stride;scales[d]=stride;stride=1;break;
+        }
+    }
+    if(stride!=1)return nil;
+    NSUInteger end=begin+count-1;
+    for(NSUInteger d=rank;d--;) {low[d]=begin%sizes[d];high[d]=end%sizes[d];begin/=sizes[d];end/=sizes[d];}
+    BOOL different=NO;
+    for(NSUInteger d=0;d<rank;d++) {
+        if(different&&(low[d]||high[d]+1!=sizes[d]))return nil;
+        different|=low[d]!=high[d];
+    }
+    NSMutableArray *shape=[NSMutableArray array],*steps=[NSMutableArray array];
+    NSMutableDictionary *maps=[NSMutableDictionary dictionary];NSInteger origin=source.offset;
+    for(NSUInteger d=0;d<rank;d++) {
+        const NSUInteger n=high[d]-low[d]+1,at=residues[d]+scales[d]*(reverse?high[d]:low[d]);
+        const NSInteger delta=(reverse?-1:1)*(NSInteger)scales[d],physical=[source.strides[d] integerValue];
+        const NSInteger *values=((NSData *)source.maps[@(d)]).bytes;
+        [shape addObject:@(n)];[steps addObject:@(physical*delta)];
+        if(values) {
+            NSMutableData *data=[NSMutableData dataWithLength:n*sizeof(NSInteger)];NSInteger *out=data.mutableBytes;
+            for(NSUInteger i=0;i<n;i++)out[i]=values[(NSInteger)at+(NSInteger)i*delta];
+            maps[@(d)]=data;
+        } else origin+=(NSInteger)at*physical;
+    }
+    MetalTensorLayout *result=[MetalTensorLayout shape:shape strides:steps offset:origin maps:maps indices:nil];
+    return [result reshape:@[@(count)]];
+}
 static MetalTensorLayout *TensorSlice(MetalTensorLayout *source,NSUInteger axis,NSInteger first,NSUInteger count,NSInteger step) {
     if([source.shape isEqual:source.indexShape]&&!source.maps[@(axis)]) {
         NSMutableArray *shape=[[source.shape mutableCopy] autorelease],*strides=[[source.strides mutableCopy] autorelease];
         shape[axis]=@(count);strides[axis]=@(step*[source.strides[axis] integerValue]);
         return [MetalTensorLayout shape:shape strides:strides offset:source.offset+first*[source.strides[axis] integerValue]
             maps:source.maps indices:nil];
+    }
+    NSUInteger outer=1,inner=1;
+    for(NSUInteger d=0;d<axis;d++)outer*=[source.shape[d] unsignedIntegerValue];
+    for(NSUInteger d=axis+1;d<source.shape.count;d++)inner*=[source.shape[d] unsignedIntegerValue];
+    if(outer==1&&(inner==1||step==1)) {
+        MetalTensorLayout *result=TensorFactorSlice(source,first*(NSInteger)inner,count*inner,step);
+        if(result) {
+            NSMutableArray *shape=[[source.shape mutableCopy] autorelease];shape[axis]=@(count);
+            return [result reshape:shape];
+        }
     }
     NSMutableData *data=[NSMutableData dataWithLength:count*sizeof(NSInteger)];NSInteger *out=data.mutableBytes;
     for(NSUInteger i=0;i<count;i++)out[i]=first+(NSInteger)i*step;
