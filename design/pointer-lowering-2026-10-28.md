@@ -90,7 +90,13 @@ Open, in order:
    Its slots repeat at a byte stride per invocation (`CrossBinding.stride`). The layout entry takes that period from
    `ncclMeshWriteLayout.instance_pages`, in whole pages. The period is local, like frames, so it moves into
    `ncclMeshLayout` in elements. `ncclMeshWriteLayout` then keeps what every rank shares: tile bytes and invocations.
-5. **G6.** Collective issue pointers. Declared bindings become layouts too, and issue binds the declaration.
+5. **G6, reconsidered.** `ncclAllReduce(sendbuff, recvbuff, ...)` takes pointers because it is NCCL's API, and C1
+   (design/rubric-actionable.md) ranks higher the form that keeps NCCL's API and semantics as its interface. So an
+   issue's pointers stay. The no-eager rule asks that an issue be its declaration, which `declared_as` and
+   `issue_same` enforce; an issue whose buffers are not the declared bindings ends the program.
+   - What remains eager is the frontends' per-call paths that restate a declaration at every call
+     (design/duplication-review-2026-10-28.md, across-files 1).
+   - Declared bindings in `ncclMeshCall.bindings` can move to layouts once those paths are gone.
 
 ## Inventory
 
