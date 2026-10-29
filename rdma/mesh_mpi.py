@@ -255,61 +255,53 @@ class Comm:
                                            {'tile_bytes': tile_bytes, 'instances': instances, 'instance_pages': instance_pages, 'invocations': invocations}, made))
         return WritePlan(self, made[0], (table,))
 
-    def Write_prepare(self, sendbuf, landingbuf, source, destination, *, max_packet=0):
-        """Bind one exact contiguous native WRITE, without copying or routing in Python.
-
-        Only source's sendbuf and other ranks' landingbuf are used. All ranks
-        provide the same element count/type/endpoints; unused buffers may be
-        None. Every used array must belong to a bridge lease (empty or a view
-        thereof); native preparation validates actual registration and bounds.
-        """
-        own = sendbuf if self.rank == source else landingbuf
+    def _layout(self, own):
+        """`own`'s view of its lease as abstract layout (nccl.h ncclMeshLayout): its storage's page table, its shape and
+        strides in elements, its first element's offset in elements, its element bits.  numpy names no storage offset,
+        so this is where an array's position is read: its distance from the array over its whole lease (empty)."""
         if not isinstance(own, np.ndarray) or own.dtype.hasobject:
             raise ValueError('a WRITE binding is a numpy array without Python objects')
-        pointer, made = at(own), ffi.new('ncclMeshWritePlan_t *')
-        check(lib.mesh_compile_write(pointer if self.rank == source else ffi.NULL,
-            ffi.NULL if self.rank == source else pointer, own.nbytes, source, destination, self.comm, 0, 1, 0, max_packet, made))
-        return WritePlan(self, made[0], (own,))
+        root = own
+        while isinstance(root.base, np.ndarray):
+            root = root.base
+        size = own.dtype.itemsize
+        offset = own.__array_interface__['data'][0] - root.__array_interface__['data'][0]
+        if offset % size or any(stride % size for stride in own.strides):
+            raise ValueError("a WRITE binding's offset and strides are whole elements")
+        table = self.Pages(root)
+        shape, strides = ffi.new('uint64_t[]', list(own.shape) or [0]), ffi.new('int64_t[]', [x // size for x in own.strides] or [0])
+        return (table, shape, strides), ffi.new('ncclMeshLayout *', {'storage': table.handle, 'element_bits': 8 * size,
+                                                                    'rank': own.ndim, 'shape': shape, 'strides': strides,
+                                                                    'offset': offset // size})
+
+    def Write_view_prepare(self, sendbuf, landingbuf, source, destination, *, max_packet=0):
+        """Bind an ndarray view in logical row-major element order: the source's values on `source`, the landing on
+        `destination`, a relay's on any other rank (unused buffers may be None).  Its layout over its lease's pages
+        is lowered natively (nccl.h ncclMeshWriteLayoutPrepare): transposes, gaps, reversed strides and broadcast
+        source views, with no copy; every rank's view holds the same logical bytes, in its own layout."""
+        kept, layout = self._layout(sendbuf if self.rank == source else landingbuf)
+        made = ffi.new('ncclMeshWritePlan_t *')
+        check(lib.ncclMeshWriteLayoutPrepare(layout, source, destination, max_packet,
+                                             {'instances': 1, 'instance_pages': 0, 'invocations': 1}, made))
+        return WritePlan(self, made[0], (sendbuf if self.rank == source else landingbuf,))
+
+    def Write_prepare(self, sendbuf, landingbuf, source, destination, *, max_packet=0):
+        """One contiguous WRITE: Write_view_prepare of a C-contiguous array."""
+        if not (sendbuf if self.rank == source else landingbuf).flags.c_contiguous:
+            raise ValueError('Write_prepare binds a C-contiguous array; Write_view_prepare binds any view')
+        return self.Write_view_prepare(sendbuf, landingbuf, source, destination, max_packet=max_packet)
 
     def Write_rows_prepare(self, sendbuf, landingbuf, source, destination, *, row_bytes, rows, max_packet=0):
-        """Bind the same native WRITE as exact rows with local pitches.
-
-        Total logical bytes agree across ranks; row shapes and local pitches
-        may differ. The original NumPy view must describe exactly this
-        positive affine row map. No padding, staging allocation or per-row
-        execution call is introduced. General non-affine views need the shared
-        indexed native descriptor, not a private packing implementation here.
-        """
+        """The WRITE of a view that is exactly `rows` rows of `row_bytes` (local pitches may differ by rank): its rows
+        checked, then Write_view_prepare, whose layout lowering finds the same rows."""
         own = sendbuf if self.rank == source else landingbuf
         row_bytes, rows = int(row_bytes), int(rows)
-        if not isinstance(own, np.ndarray) or own.dtype.hasobject:
-            raise ValueError('a WRITE binding is a numpy array without Python objects')
         if row_bytes <= 0 or rows <= 0 or row_bytes * rows != own.nbytes or row_bytes % own.itemsize:
             raise ValueError('row_bytes * rows must cover exactly the array, in whole dtype elements')
         width, count, pitch = mesh.view_layout(own.shape, own.strides, own.itemsize)[1]
         if not (count and pitch == width) and (width, count) != (row_bytes, rows):
             raise ValueError('the requested rows are not the affine intervals of this view')
-        # rows over one contiguous run cut as that run does (one cut walker), so either form is the view's plan
         return self.Write_view_prepare(sendbuf, landingbuf, source, destination, max_packet=max_packet)
-
-    def Write_view_prepare(self, sendbuf, landingbuf, source, destination, *, max_packet=0):
-        """Bind an arbitrary ndarray view in logical row-major element order.
-
-        The shared metadata mapper handles transpose, gaps, reversed strides
-        and broadcast source views. The native plan rejects overlapping landing
-        views and spans outside one live lease. The original view retains its
-        storage; no contiguous temporary or numerical copy is constructed.
-        """
-        own = sendbuf if self.rank == source else landingbuf
-        if not isinstance(own, np.ndarray) or own.dtype.hasobject:
-            raise ValueError('a WRITE binding is a numpy array without Python objects')
-        shift, rows, spans = mesh.view_layout(own.shape, own.strides, own.dtype.itemsize)
-        metadata = ffi.new('ncclMeshSpan[]', spans) if spans else ffi.NULL
-        pointer, made = ffi.cast('void *', own.ctypes.data + shift), ffi.new('ncclMeshWritePlan_t *')
-        check(lib.mesh_compile_view(pointer if self.rank == source else ffi.NULL, ffi.NULL if self.rank == source else pointer,
-            list(rows), metadata, len(spans), source, destination, self.comm, 0, max_packet,
-            {'instances': 1, 'invocations': 1}, made))
-        return WritePlan(self, made[0], (own,))
 
     def Allreduce(self, sendbuf, recvbuf, op=SUM):
         send = recvbuf if sendbuf is IN_PLACE else sendbuf

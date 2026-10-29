@@ -5617,6 +5617,46 @@ ncclResult_t ncclMeshWritePagesPrepare(ncclMeshPageTable_t table,const ncclMeshP
     (struct mesh_write_layout){layout.tile_bytes,layout.instances,layout.instance_pages*table->page_bytes,layout.invocations},out);
 }
 
+/* nccl.h ncclMeshWriteLayoutPrepare: the view in bytes (whole-byte elements scaled; sub-byte ones packed along their
+   innermost axis, whose stride must be one element, every boundary on a byte), its rows or spans (mesh_view_layout)
+   from its lowest byte's page index in the table, and the common WRITE compiler (write_prepare) */
+ncclResult_t ncclMeshWriteLayoutPrepare(const ncclMeshLayout *v, int source, int destination, size_t max_packet,
+    ncclMeshWriteLayout layout, ncclMeshWritePlan_t *out) {
+  if (!v || !v->storage || !v->element_bits || v->rank > 64 || (v->rank && (!v->shape || !v->strides)) ||
+      layout.instance_pages > SIZE_MAX / v->storage->page_bytes)
+    return fail(ncclInvalidArgument, "a write's layout (nccl.h ncclMeshLayout)");
+  const uint64_t bits = v->element_bits, last = v->rank ? v->rank - 1 : 0;
+  uint64_t shape[64], itemsize = bits / 8;
+  int64_t strides[64];
+  const int packed = bits % 8 != 0;
+  if (packed && (!v->rank || v->strides[last] != 1 || v->shape[last] * bits % 8 || v->offset * bits % 8))
+    return fail(ncclInvalidArgument, "a sub-byte write's innermost axis must pack whole bytes, contiguously");
+  for (uint32_t i = 0; i < v->rank; i++) {
+    shape[i] = packed && i == last ? v->shape[i] * bits / 8 : v->shape[i];
+    if (packed && i != last && (uint64_t)llabs(v->strides[i]) * bits % 8)
+      return fail(ncclInvalidArgument, "a sub-byte write's strides must fall on bytes");
+    strides[i] = packed ? (i == last ? 1 : v->strides[i] * (int64_t)bits / 8) : v->strides[i] * (int64_t)itemsize;
+  }
+  if (packed) itemsize = 1;
+  int64_t shift = 0;
+  uint64_t rows[3];
+  const long needed = mesh_view_layout(shape, strides, v->rank, itemsize, &shift, rows, NULL, 0);
+  ncclMeshSpan *spans = needed > 0 ? calloc((size_t)needed, sizeof *spans) : NULL;
+  if (needed < 0 || (needed > 0 && !spans)) { free(spans); return fail(needed < 0 ? ncclInvalidArgument : ncclSystemError, "a write's layout spans"); }
+  if (needed > 0) mesh_view_layout(shape, strides, v->rank, itemsize, &shift, rows, spans, (size_t)needed);
+  const int64_t first = (int64_t)(v->offset * bits / 8) + shift;
+  ncclResult_t result = first < 0 ? fail(ncclInvalidArgument, "a write's view reaches before its storage") : ncclSuccess;
+  const size_t page = v->storage->page_bytes;
+  const struct write_page_index start = {(size_t)first / page, (size_t)first % page};
+  const struct mesh_write_layout local = {layout.tile_bytes, layout.instances, layout.instance_pages * page, layout.invocations};
+  if (!result) result = rows[1] ? write_prepare(v->storage, start, rows[0] * rows[1], source, destination, 1, rows[2], max_packet, rows[0],
+                                                rows[1], NULL, 0, 0, local, out)
+                                : write_prepare(v->storage, start, 0, source, destination, 1, 0, max_packet, 0, 0, spans,
+                                                (size_t)needed, 1, local, out);
+  free(spans);
+  return result;
+}
+
 /* Resolve the local tensor binding to a page index. The common compiler
    bounds the entire selection and all its instances in that page table.
    Affine expressions stay affine until final DMA descriptors are emitted. */
