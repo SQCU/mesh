@@ -48,12 +48,40 @@ prior compiler. A short tail of a petabyte-scale logical declaration resolved
 from one backing run without page expansion. Shared-library and native builds
 completed; no numerical execution ran.
 
+Ordinary collective declarations now carry the same backing runs. A fixed
+report holds a contiguous binding in full; scattered bindings send their extra
+runs in one further preparation exchange for the whole function. All-to-all
+retains each end's logical origin and joins both ends' cuts. Its former fixed
+64-entry cut array is removed. The shared step splitter allocates the actual
+split count, rather than space for every cut at every step. An absent required
+binding fails preparation.
+
+Both collective payload descriptors and WRITE readiness words resolve through
+the bridge rows during preparation. Submission reads the recorded readiness
+offset; it no longer derives it from a process address. Page-table construction
+and collective binding snapshots share the same backing reader.
+Readiness retains its own slot period. Preparation resolved three readiness
+slots over scattered pages alongside two payload slots; reusing a payload
+binding does not reuse the wrong readiness word.
+
+Preparation on 2026-10-29 carried three-rank all-to-all transactions of 32–93 GiB
+through the real physical route compiler without allocating their payloads.
+The complete logical ranges and both ends' routed byte totals agreed. Scattered
+scalar bindings retained their ranges through all-reduce, broadcast, reduce,
+unequal gather and reduce-scatter. Bridge-row snapshots and subrange splitting
+preserved selected locations. This was metadata preparation, not a cluster run.
+
 Scattered allocation is still unfinished. The allocator requires consecutive
-row slots and arena pages. Its host and Metal views, non-WRITE collectives,
-readiness words and descriptor-table bindings still rely on linear region
-addresses. Those bindings must be lowered before the allocator can supply
-scattered pages to all consumers. This WRITE change alone does not remove the
-large-allocation refusal recorded in metal-microbench's `docs/facts.md`.
+row slots and arena pages. Its host/Metal views, region-membership checks and
+descriptor-table bindings still rely on linear region addresses. Internal
+relay and reduction storage must join the backing calculation too. A backing
+break inside a structured numerical element also needs a byte-level packet
+cut while the numerical step keeps that whole element. The current collective
+step splitter projects backing cuts onto whole elements; the original byte
+relation remains in its backing operand. These remaining bindings must be
+lowered before the allocator can supply scattered pages to all consumers.
+The large-allocation refusal in metal-microbench's `docs/facts.md` is therefore
+not fully resolved by these changes.
 
 ## Known access structure, changing contents
 

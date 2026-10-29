@@ -34,17 +34,6 @@ static inline uint64_t mesh_span_inverse(uint64_t a, uint64_t modulus) {
   return t;
 }
 
-/* The elements x, lo < x < hi, of a buffer whose byte 0 lies `phase` bytes into a registration extent, at which an
-   extent's boundary falls on an element of z bytes (x * z + phase a multiple of MESH_DMA_EXTENT), ascending; at most
-   `room` written, their count. */
-static inline size_t mesh_span_extent_cuts(uint64_t phase, uint64_t z, uint64_t lo, uint64_t hi, uint64_t *out, size_t room) {
-  size_t n = 0;
-  uint64_t b = MESH_DMA_EXTENT - phase;
-  if (b <= lo * z) b += (lo * z - b) / MESH_DMA_EXTENT * MESH_DMA_EXTENT + MESH_DMA_EXTENT;
-  for (; n < room && b / z < hi; b += MESH_DMA_EXTENT)
-    if (!(b % z) && b / z > lo) out[n++] = b / z;
-  return n;
-}
 static inline int mesh_span_cut_compare(const void *a, const void *b) {
   const uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
   return (x > y) - (x < y);
@@ -89,6 +78,24 @@ static inline int mesh_page_run_add(struct mesh_page_runs *runs,uint64_t first,u
   }
   runs->at[runs->count++]=(struct mesh_page_run){first,first+bytes,offset};return 0;
 }
+/* Resolve the bridge's backing once during preparation, in lease coordinates.
+   Backend virtual addresses and registered DMA offsets need not coincide. */
+static inline uint64_t mesh_page_offset(struct hdr *m,uint32_t row,uint64_t logical) {
+  const uint64_t quantum=(uint64_t)m->block*m->pgsz;
+  return atomic_load_explicit(&mesh_page(m)[row+logical/quantum].address,memory_order_relaxed)+logical%quantum;
+}
+static inline int mesh_page_runs_read(struct hdr *m,uint32_t row,uint64_t first,uint64_t bytes,struct mesh_page_runs *out) {
+  const uint64_t quantum=(uint64_t)m->block*m->pgsz;
+  for(uint64_t at=0;at<bytes;) {
+    const uint64_t offset=first+at;
+    uint64_t length=quantum-offset%quantum;
+    if(length>bytes-at)length=bytes-at;
+    int error=mesh_page_run_add(out,at,length,mesh_page_offset(m,row,offset));
+    if(error)return error;
+    at+=length;
+  }
+  return 0;
+}
 static inline const struct mesh_page_run *mesh_page_run_at(const struct mesh_page_runs *runs,uint64_t logical) {
   size_t first=0,end=runs->count;
   while(first<end){size_t middle=first+(end-first)/2;if(runs->at[middle].end<=logical)first=middle+1;else end=middle;}
@@ -115,6 +122,43 @@ static inline int mesh_page_run_cuts(const struct mesh_page_runs *runs,uint64_t 
     *previous=offset+length;first+=length;logical+=length;bytes-=length;
   }
   return 0;
+}
+
+/* Project the backing relation onto whole numerical elements. The original
+   runs retain intra-element byte breaks for independent DMA packet lowering. */
+static inline int mesh_page_element_cuts(const struct mesh_page_runs *runs,uint64_t first,uint64_t elements,
+    uint64_t element_bytes,struct mesh_span_residues *cuts) {
+  if(!runs->count||!elements)return 0;
+  const size_t begin=cuts->count;
+  uint64_t previous=UINT64_MAX;
+  int error=mesh_page_run_cuts(runs,first*element_bytes,elements*element_bytes,0,0,MESH_DMA_EXTENT,&previous,cuts);
+  size_t kept=begin;
+  for(size_t k=begin;k<cuts->count;k++)
+    if(!(cuts->at[k]%element_bytes))cuts->at[kept++]=first+cuts->at[k]/element_bytes;
+  cuts->count=kept;
+  return error;
+}
+
+static inline size_t mesh_span_lower_bound(const uint64_t *cuts,size_t count,uint64_t value) {
+  size_t first=0;
+  while(first<count){size_t middle=first+(count-first)/2;if(cuts[middle]<value)first=middle+1;else count=middle;}
+  return first;
+}
+/* A numerical step split at its interior cuts, translated by origin. A null
+   output counts the exact storage needed; neither operation truncates a list. */
+static inline size_t mesh_step_cut(struct mesh_step step,const struct mesh_span_residues *cuts,uint64_t origin,struct mesh_step *out) {
+  const uint64_t first=step.first-origin,end=first+step.piece.elements;
+  const size_t begin=mesh_span_lower_bound(cuts->at,cuts->count,first+!!step.piece.elements),
+               stop=mesh_span_lower_bound(cuts->at,cuts->count,end);
+  if(out) {
+    uint64_t at=step.first;
+    for(size_t k=begin;k<stop;k++) {
+      out[k-begin]=step;out[k-begin].first=at;out[k-begin].piece.elements=origin+cuts->at[k]-at;
+      at=origin+cuts->at[k];
+    }
+    out[stop-begin]=step;out[stop-begin].first=at;out[stop-begin].piece.elements=step.first+step.piece.elements-at;
+  }
+  return stop-begin+1;
 }
 
 /* Keep only distinct registration-boundary residues that can occur inside

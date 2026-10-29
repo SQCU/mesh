@@ -1136,10 +1136,10 @@ typedef struct {
   /* Optional actual bindings, an extension (NULL: none, as before): [0] the send buffer and [1] the receive buffer
      the call will be issued with, as it passes them (on a stream the ncclMeshBuffer itself, on the host {NULL,
      address}; {NULL, 0} where this rank has none). Given on every rank or on none for a call, CommPlan exchanges each
-     rank's bindings' offsets within their registration extents once and cuts the call's pieces wherever some rank's
-     binding crosses an extent, so no DMA span crosses one for a lease of any size where the call is issued with
-     bindings at those offsets (others fail as values at placement). Collectives and all-to-alls; a WRITE has its
-     own cuts. A group whose every call declares its bindings is laid and placed for them at CommPlan, in each of its
+     rank's page-backing runs once and cuts numerical steps at whole-element backing and registration boundaries.
+     Both ends of an all-to-all transaction retain their own logical origin and share every cut, without a fixed
+     cut-list capacity. Descriptor offsets come from the bridge page table. A WRITE has its own byte-level cuts.
+     A group whose every call declares its bindings is laid and placed for them at CommPlan, in each of its
      generations, so its issues with those buffers bind only their entries. */
   const ncclMeshBuffer* bindings;
 } ncclMeshCall;
