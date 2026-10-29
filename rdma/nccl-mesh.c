@@ -3512,12 +3512,14 @@ static void uses_add(struct metal_program *program, struct uses *batch, void *bu
 }
 
 /* the group's laid and placed entries (issue_bind) bound on each channel from its last scheduled entry and page
-   (schedule_laid), its landings gated (gate_of, *gate whether its first dispatch stores the communicator's gate),
-   presented (present_group) and counted (commit_group); a failure
+   (schedule_laid), its landings gated (gate_of, *gate whether its first dispatch stores the communicator's gate) unless
+   its generations are immutable (a fused crossing's or an all-WRITE group's, mesh 84056c43), presented (present_group)
+   and counted (commit_group); a failure
    before any entry is presented is the call's alone, one after it the communicator's (its lists stand mid-group) */
-static ncclResult_t schedule(struct metal_program *program, struct ncclComm *comm, struct issue *owner, struct schedule *plans, int *gate) {
+static ncclResult_t schedule(struct metal_program *program, struct ncclComm *comm, struct issue *owner, struct schedule *plans, int *gate,
+                             int immutable) {
   schedule_laid(comm, plans);
-  gate_of(comm, plans, gate);
+  if (!immutable) gate_of(comm, plans, gate);
   ncclResult_t result = present_group(program, comm, owner, plans);
   if (result) return result;
   if (*gate) comm->gates++;
@@ -4451,21 +4453,20 @@ static ncclResult_t losses_through(uint64_t ticket) {
 /* The one place a reuse of storage is ordered: before a group writes a slot, the slot's last group's landings have
    landed, so its SENDs from it were read (witnessed: mesh-routed.c) and its consumers ran earlier in the
    stream; that group completed first where it is in flight, then `landed` awaited past the landings no work in the
-   stream awaited (a fused crossing's relay landings).  With no slot (0), before a fused crossing's caller
-   writes its operands, which any earlier group of the communicator may still be sending, whatever its definition (one
-   since evicted, one sharing the source): every group in flight completed, then every landing presented on each
-   channel.  No `sent`.  Under group_lock */
+   stream awaited.  A fused crossing takes none: its source and landing generations are its own (mesh 84056c43,
+   whose cases passed), and its sources' reuse is the lease ledger's (mesh-lease-retire.h; design/pages-and-functions.md,
+   Freeing 6-7).  No `sent`.  Under group_lock */
 static ncclResult_t guard(struct metal_program *program, struct ncclComm *comm, uint32_t slot, int *published) {
-  const struct slot *s = slot ? comm->slots + slot - 1 : NULL;
-  struct inflight *g = s ? inflight : inflight_last;
-  while (s && g && g->ticket != s->ticket) g = g->next_group;
+  const struct slot *s = comm->slots + slot - 1;
+  struct inflight *g = inflight;
+  while (g && g->ticket != s->ticket) g = g->next_group;
   ncclResult_t result = g ? walk(program, NULL, g, published) : ncclSuccess;
   if (g && !result) result = retire(program);
   for (uint32_t h = 0; !result && h < comm->count; h++) {
     struct channel *ch = comm->channels + h;
-    const uint64_t lands = s ? s->lands[h] : ch->lands;
+    const uint64_t lands = s->lands[h];
     if (ch->waited >= lands) continue;
-    const struct metal_wait wait = {ch->buffer, comm->violation, ch->buffer, ch->landed, ch->landed, s ? s->in[h] : ch->in, lands - 1, h, {0}};
+    const struct metal_wait wait = {ch->buffer, comm->violation, ch->buffer, ch->landed, ch->landed, s->in[h], lands - 1, h, {0}};
     result = gpu(metal_spin(program, &wait), "the last landings of a reused generation");
     ch->waited = lands;
   }
@@ -4549,14 +4550,13 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   int gate = 0, published = 0, scheduled = 0;
   struct where area = {NULL, 0};
   uint32_t slot = 0;
-  /* a fused crossing's caller writes its operands after this group is encoded: every earlier group of its communicator
-     first (guard); else the last group of the generation this one binds, so its issue is let go to bind again
-     (issue_bind), and once it is bound the last user of the slot it took where that is another */
+  /* the last group of the generation this one binds, so its issue is let go to bind again (issue_bind), and once it
+     is bound the last user of the slot it took where that is another; a fused crossing none (guard) */
   const uint32_t last = remote ? x->slot[x->uses % GENERATIONS] : 0;
-  if (remote && (fused || last)) result = guard(program, comm, fused ? 0 : last, &published);
+  if (remote && !fused && last) result = guard(program, comm, last, &published);
   if (!result) result = issue_bind(comm, &list, n, x, repeats, stride, remote, &plans, &u, &area, &slot);
   if (!result && slot) metal_resident(program, u->base.buffer);
-  if (!result && remote && !fused && slot != last) result = guard(program, comm, slot, &published);
+  if (!result && remote && !fused && slot && slot != last) result = guard(program, comm, slot, &published);
   /* the slot this generation let go, too small (bind_slot): its last group ran in the stream before this point (guard,
      above), so the stream stores that group's ticket in the slot's word, and the slot is then returnable (slot_take) */
   if (!result && remote && !fused && last && slot != last && comm->slots[last - 1].ticket && 8 + last <= (size_t)getpagesize() / 8)
@@ -4567,9 +4567,10 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     uint64_t (*const start)[2] = u->group->start;
     *(g = u->group) = (struct inflight){.comm = comm, .start = start, .end = start + comm->count, .repeats = repeats, .fused = fused_kind, .issue = u};
     for (uint32_t h = 0; h < comm->count; h++) { g->start[h][0] = comm->channels[h].sends; g->start[h][1] = comm->channels[h].lands; }
-    /* every landing, a write's and a fused crossing's too, is gated on the stream's reaching the group: its storage is
-       reused (guard), never a generation of its own; the issue let go with the group (inflight_free) */
-    if (!(result = schedule(program, comm, u, plans, &gate))) { g->plans = plans; plans = NULL; u = NULL; }
+    /* Indexed writes carry immutable source/landing generations. Their destinations need no local publication
+       handshake, whether the GPU producer is fused or was encoded before this call (mesh 84056c43); the issue let go
+       with the group (inflight_free) */
+    if (!(result = schedule(program, comm, u, plans, &gate, fused_kind != 0 || all_writes(list, n)))) { g->plans = plans; plans = NULL; u = NULL; }
     else g = NULL;
     if (!result) {
       for (uint32_t h = 0; h < comm->count; h++) { g->end[h][0] = comm->channels[h].sends; g->end[h][1] = comm->channels[h].lands; }
