@@ -157,12 +157,12 @@
    Memory.  The process is one client of its node's bridge: one attach of the node's region, made at its first
    ncclMemAlloc or communicator, whose slot owns the process's leases and holds the streams its communicators use; a
    communicator leases a page for its gate and one for its failure words, and, for each group definition (a declared
-   group, or an undeclared group's calls,
-   the 64 most recently used kept), two slots of what its groups send from and land in that are not the caller's (a
+   group, or a prepared WRITE's), two slots of what its groups send from and land in that are not the caller's (a
    reduce-scatter's partials of the others' segments, a non-receiving rank's operand, a tree's scratch, a relay's
    generations, a combine's landing area): a declared group's made at its declaration (ncclMeshCommPlan, which
-   fails as a value where the region cannot hold them), an undeclared one's at its first group, its groups taking turns
-   at them,
+   fails as a value where the region cannot hold them), a WRITE's at its first executions, its groups taking turns
+   at them.  A group that no declaration covers fails as a value: nothing compiles one at its issue
+   (design/eager-execution.md),
    ncclMemAlloc called again only where one must grow (to one of eight sizes an octave), a dropped definition's slots
    kept for the next, one too small returned once its last group is done (the host path's, or a Metal path's that the
    stream has run past: it stores that group's ticket where its generation let the slot go), all returned at

@@ -279,10 +279,8 @@ struct ncclComm {
   struct attach *attach;
   uint32_t held;
   struct channel *channels;
-  uint32_t slot_count, cached;
+  uint32_t slot_count;
   struct slot *slots;
-  struct compiled *cache;
-  uint64_t stamp;
   void *gate, *gate_word;
   uint64_t gate_at, gates;
   _Atomic uint64_t *words;
@@ -374,7 +372,7 @@ static void map_free(struct mesh_link_map *map) {
 }
 
 static void cache_drop(struct ncclComm *comm);
-/* the trees and the table compiled on the map, and the undeclared groups compiled on them (cache_drop); with `all`,
+/* the trees and the table compiled on the map, and the WRITE plans' definitions compiled on them (cache_drop); with `all`,
    the map, the caller's paths and programs too */
 static void routes_free(struct ncclComm *comm, int all) {
   cache_drop(comm);
@@ -433,7 +431,6 @@ static void comm_free(struct ncclComm *comm) {
   ncclMemFree((void *)comm->words);
   metal_release(comm->command); metal_release(comm->queue);
   plan_free(comm, comm->plan);
-  free(comm->cache);
   comm_leave(comm);
   free(comm->channels); free(comm->endpoint); free((void *)comm->fabric.cable);
   for (int p = 0; comm->writes && p < comm->nranks * comm->nranks; p++) paths_free(&comm->writes[p]);
@@ -2837,9 +2834,8 @@ static ncclResult_t compile_group(struct ncclComm *comm, struct call *list, size
 
 /* Group definitions and a compact sequence of repeated blocks. Geometry is
    compiled once per definition; invocation operands are bound separately.  A definition's invocations take turns
-   at GENERATIONS slots of storage (the plan's in-flight depth: bind_slot), `uses` of them bound so far; an undeclared
-   group's definition is kept by its calls (signature), `stamp` when it was last bound */
-enum { GENERATIONS = 2, SIGNATURES = 64 };
+   at GENERATIONS slots of storage (the plan's in-flight depth: bind_slot), `uses` of them bound so far */
+enum { GENERATIONS = 2 };
 /* what a group of a definition binds at its issue (issue_bind): its calls, its schedules laid `repeats` times, its
    calls' steps copies and its record in flight, made at its generation's first issue and laid and placed for that
    issue's binding, then taken again by each later issue that finds it let go (`held` 0: issue_let, as its group is
@@ -2853,7 +2849,7 @@ struct issue { struct schedule *plans; struct steps **steps; struct inflight *gr
                /* laid and placed (`laid`) for a binding (`bound`, `stride`, the Metal path's or the host's: `metal`), in
                   slot `slot` (its storage at `base`, its landing area at `area`), its span tables a lease (`tables`) */
                int laid, metal; size_t stride; uint32_t slot; struct where base, area; struct bound *bound; void *tables; };
-struct compiled { struct call *calls; size_t n; uint64_t repeat; struct schedule *plans; uint32_t slot[GENERATIONS], uses; uint64_t stamp;
+struct compiled { struct call *calls; size_t n; uint64_t repeat; struct schedule *plans; uint32_t slot[GENERATIONS], uses;
                   struct issue *issue[GENERATIONS]; };
 /* a definition dropped: its slots back to the communicator's, for the next definition under the same guard, and its
    issues freed (one held, once let go) */
@@ -2869,11 +2865,9 @@ static void compiled_drop(struct ncclComm *comm, struct compiled *x) {
   calls_free(x->calls, x->n); schedules_free(comm, x->plans);
   *x = (struct compiled){0};
 }
-/* the undeclared groups' definitions dropped, and the WRITE plans' own (write_definitions), compiled on routes or a map
-   that changed or a communicator that ends */
+/* the WRITE plans' own definitions (write_definitions) dropped, compiled on routes or a map that changed or a
+   communicator that ends; a plan compiles them again at its next execution (definition_of) */
 static void cache_drop(struct ncclComm *comm) {
-  for (uint32_t k = 0; k < comm->cached; k++) compiled_drop(comm, comm->cache + k);
-  comm->cached = 0;
   while (comm->compiled_writes) write_definitions_drop(comm, comm->compiled_writes);
 }
 struct plan {
@@ -2902,61 +2896,23 @@ static struct message repeat_of(const struct message *m, size_t n, size_t k, siz
   return x;
 }
 
-/* whether two calls compile alike: an undeclared group's key (signature) */
-static int same_call(const struct call *a, const struct call *b) {
-  const size_t v = a->segments ? (size_t)a->comm->nranks : 0;
-  return a->what == b->what && a->root == b->root && a->target == b->target && a->count == b->count && a->total == b->total &&
-         a->type == b->type && a->op == b->op && a->combine == b->combine && a->unit == b->unit && !a->fused == !b->fused && a->tile_bytes == b->tile_bytes && a->write_plan == b->write_plan &&
-         (!a->write_plan || a->invocation % a->write_plan->occurrences == b->invocation % b->write_plan->occurrences) &&
-         !a->segments == !b->segments && (!v || !memcmp(a->segments, b->segments, v * sizeof *a->segments));
-}
-/* an undeclared group's definition: the one kept for the same calls, else compiled now on their bufferless copies and
-   kept, past SIGNATURES the least recently bound dropped (compiled_drop).  Under group_lock */
+/* a declared call's fused stream's records (declared, plan_calls) */
 static ncclMeshFused fused_declared;
-static ncclResult_t signature(struct ncclComm *comm, const struct call *list, size_t n, struct compiled **out) {
-  for (uint32_t k = 0; k < comm->cached; k++) {
-    struct compiled *x = comm->cache + k;
-    int same = x->n == n;
-    for (size_t i = 0; same && i < n; i++) same = same_call(x->calls + i, list + i);
-    if (same) { x->stamp = ++comm->stamp; *out = x; return ncclSuccess; }
-  }
-  for (size_t i = 0; i < n; i++) if (list[i].tile_bytes)
-    return fail(ncclInvalidUsage, "tiled WRITEs require a complete declaration with producer records");
-  if (!comm->cache && !(comm->cache = calloc(SIGNATURES, sizeof *comm->cache))) return fail(ncclSystemError, "out of memory");
-  struct compiled made = {.calls = calloc(n, sizeof *made.calls), .repeat = 1, .stamp = ++comm->stamp};
-  ncclResult_t result = made.calls ? ncclSuccess : fail(ncclSystemError, "out of memory");
-  if (made.calls) made.n = n;
-  for (size_t i = 0; i < n && !result; i++) {
-    struct call c = list[i];
-    c.bound = NULL; c.send_views = c.receive_views = NULL; c.complement = NULL; c.complements = 0;
-    c.fused = c.fused ? &fused_declared : NULL; c.segments = NULL;
-    if (list[i].segments && !(c.segments = malloc((size_t)comm->nranks * sizeof *c.segments))) result = fail(ncclSystemError, "out of memory");
-    else if (c.segments) memcpy(c.segments, list[i].segments, (size_t)comm->nranks * sizeof *c.segments);
-    if (c.write_plan) atomic_fetch_add_explicit(&c.write_plan->refs, 1, memory_order_relaxed);
-    made.calls[i] = c;
-  }
-  if (!result) result = compile_group(comm, made.calls, n, &made.plans);
-  /* an all-to-all's count matrix stays the issued call's (calls_free frees it there): compile_group reads it alone */
-  for (size_t i = 0; i < made.n; i++) made.calls[i].matrix = NULL;
-  if (result) { compiled_drop(comm, &made); return result; }
-  uint32_t at = comm->cached;
-  if (at == SIGNATURES) {
-    for (uint32_t k = at = 0; k < SIGNATURES; k++) if (comm->cache[k].stamp < comm->cache[at].stamp) at = k;
-    compiled_drop(comm, comm->cache + at);
-  } else comm->cached++;
-  *out = comm->cache + at;
-  **out = made;
-  return ncclSuccess;
-}
+static ncclResult_t write_definitions(struct ncclMeshWritePlan *plan);
 
 /* the compiled form of the group numbered `holder` (*group): its plan's group (group_at), else, with no plan, a WRITE
-   alone's plan's own (write_definitions), else its calls' (signature), each call's roles its declaration's (nothing planned at the call: nccl.h ncclMeshCommPlan); a group of
-   other than its declaration's count of calls fails as a value, before any is bound.  Under group_lock */
+   alone's plan's own (write_definitions, compiled again where routes or the map changed since), each call's roles its
+   declaration's (nothing planned at the call: nccl.h ncclMeshCommPlan).  A group that no declaration covers fails as
+   a value: nothing compiles a group at its issue (design/eager-execution.md#what-follows).  A group of other than its
+   declaration's count of calls fails as a value, before any is bound.  Under group_lock */
 static ncclResult_t definition_of(struct ncclComm *comm, struct call *list, size_t n, uint64_t holder, struct compiled **group) {
   struct compiled *x = comm->plan && comm->plan->active ? group_at(comm->plan, holder) : NULL;
-  const struct ncclMeshWritePlan *alone = n == 1 && !list[0].fused ? list[0].write_plan : NULL;
+  struct ncclMeshWritePlan *alone = n == 1 && !list[0].fused ? list[0].write_plan : NULL;
+  ncclResult_t result = !x && alone && !alone->compiled ? write_definitions(alone) : ncclSuccess;
   if (!x && alone && alone->compiled) x = alone->compiled + list[0].invocation % alone->occurrences;
-  ncclResult_t result = x ? ncclSuccess : signature(comm, list, n, &x);
+  if (!result && !x)
+    result = fail(ncclInvalidUsage, "a group of %zu calls that no declaration covers: communicator %s has no active plan "
+                  "(ncclMeshCommPlan) and the group is no prepared WRITE alone (design/eager-execution.md)", n, comm->name);
   if (!result && n != x->n) result = fail(ncclInvalidUsage, "a group of %zu calls issued as its declaration of %zu", n, x->n);
   for (size_t i = 0; !result && i < n; i++) call_bind_roles(list + i, x->calls + i);
   *group = x;
@@ -3159,8 +3115,8 @@ static size_t slot_laid(const struct ncclComm *comm, const struct compiled *x, c
   return used;
 }
 /* group x's storage (slot_laid) for generation k in x's slot k (*slot, its storage at *base, the Metal path's buffer
-   where `metal`): taken at x's declaration (ncclMeshCommPlan) for each of GENERATIONS, or an undeclared group's at its
-   first groups, and again where it must grow.  Under group_lock */
+   where `metal`): taken at x's declaration (ncclMeshCommPlan) for each of GENERATIONS, or a WRITE plan's at its first
+   executions, and again where it must grow.  Under group_lock */
 static ncclResult_t bind_slot(struct ncclComm *comm, struct compiled *x, uint32_t k, struct call *list, size_t n, const struct schedule *plans,
                               int metal, struct where *base, struct where *area, uint32_t *slot) {
   const size_t need = slot_laid(comm, x, list, n, plans, NULL, NULL);
@@ -3923,7 +3879,7 @@ static void call_parts_free(struct call *c) {
   steps_free(c->bound);
 }
 static void parts_free(struct call *list, size_t n) { for (size_t i = 0; i < n; i++) call_parts_free(list + i); }
-/* a definition's calls (a declaration's, a cached group's): what each owns besides (its counts and matrix, its
+/* a definition's calls (a declaration's, a WRITE plan's): what each owns besides (its counts and matrix, its
    declared masks and production), then the list */
 static void calls_free(struct call *list, size_t n) {
   for (size_t i = 0; i < n; i++) {
@@ -5697,30 +5653,30 @@ static ncclResult_t write_prepare_spans(struct ncclMeshWritePlan *plan) {
 }
 
 /* a WRITE executed alone in its group (and not on a fused stream) binds a definition its plan holds, compiled as the
-   plan is prepared (compile_group on the call ncclMeshWriteExecute makes, one an occurrence of its packet cuts), not
-   one found or compiled at its execution (signature); its issues are laid and placed at its first executions, a
-   generation each (issue_bind).  A tiled WRITE's comes from its declaration (ncclMeshCommPlan); one that cannot be
-   compiled yet (no paths) at its execution.  The definitions hold no reference to their plan: they are let go before
-   it (ncclMeshWritePlanDestroy), or with the undeclared groups' (cache_drop: routes or a map that changed, the
-   communicator's end), which keeps the plans that hold some (`compiled_writes`).  Under group_lock */
-static void write_definitions(struct ncclMeshWritePlan *plan) {
+   plan is prepared (compile_group on the call ncclMeshWriteExecute makes, one an occurrence of its packet cuts); its
+   issues are laid and placed at its first executions, a generation each (issue_bind).  A tiled WRITE's comes from its
+   declaration (ncclMeshCommPlan); one that cannot be compiled yet (no paths), or whose routes or map changed since,
+   at its next execution (definition_of).  The definitions hold no reference to their plan: they are let go before
+   it (ncclMeshWritePlanDestroy), or with routes or a map that changed or the communicator's end (cache_drop), which
+   keeps the plans that hold some (`compiled_writes`).  0, or the compile's failure.  Under group_lock */
+static ncclResult_t write_definitions(struct ncclMeshWritePlan *plan) {
   struct ncclComm *comm = plan->comm;
-  if (plan->layout.tile_bytes || comm->nranks == 1) return;
+  if (plan->layout.tile_bytes || comm->nranks == 1) return ncclSuccess;
   struct compiled *made = calloc(plan->occurrences, sizeof *made);
-  int compiled = made != NULL;
-  for (size_t o = 0; compiled && o < plan->occurrences; o++) {
+  ncclResult_t result = made ? ncclSuccess : fail(ncclSystemError, "out of memory");
+  for (size_t o = 0; !result && o < plan->occurrences; o++) {
     struct compiled *x = made + o;
-    compiled = (x->calls = calloc(1, sizeof *x->calls)) != NULL;
-    if (!compiled) break;
+    if (!(x->calls = calloc(1, sizeof *x->calls))) { result = fail(ncclSystemError, "out of memory"); break; }
     x->n = 1; x->repeat = 1;
     x->calls[0] = (struct call){.what = MESH_BROADCAST, .root = plan->from, .target = plan->to + 1, .count = plan->count, .type = plan->type,
                                 .op = ncclSum, .comm = comm, .write_plan = plan, .invocation = o};
-    compiled = !compile_group(comm, x->calls, 1, &x->plans);
+    result = compile_group(comm, x->calls, 1, &x->plans);
     x->calls[0].write_plan = NULL;
   }
-  if (compiled) { plan->compiled = made; plan->next_compiled = comm->compiled_writes; comm->compiled_writes = plan; return; }
+  if (!result) { plan->compiled = made; plan->next_compiled = comm->compiled_writes; comm->compiled_writes = plan; return ncclSuccess; }
   for (size_t o = 0; made && o < plan->occurrences; o++) compiled_drop(comm, made + o);
   free(made);
+  return result;
 }
 static void write_definitions_drop(struct ncclComm *comm, struct ncclMeshWritePlan *plan) {
   for (struct ncclMeshWritePlan **at = &comm->compiled_writes; *at; at = &(*at)->next_compiled)
@@ -5867,7 +5823,7 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
   const ncclResult_t prepared = write_prepare_spans(plan);
   if (prepared) { write_plan_drop(plan); return prepared; }
   pthread_mutex_lock(&group_lock);
-  write_definitions(plan);
+  (void)write_definitions(plan); /* else compiled at its first execution (definition_of) */
   pthread_mutex_unlock(&group_lock);
   *out = plan;
   return ncclSuccess;
