@@ -1168,23 +1168,29 @@ static int bootstrap_open(struct ncclComm *comm, const char *id, struct report *
   return status;
 }
 
-/* a gather on comm's bootstrap sockets, within its phase (`until`): each other rank's report to the root (`sent`: there
-   already, as at the first gather's root, whose bootstrap_open read each), then the whole table to each; 0, or the
+/* rows (each rank's `bytes` at rows + rank * bytes, this rank's in place) made every rank's on comm's bootstrap sockets
+   within its phase (`until`): each other rank's row to the root (`heard`: the root holds them already, as the first
+   gather's root, whose bootstrap_open read each), then the whole table to each; `ranked`: a row leads with its int32
+   rank (struct report), checked before the table is sent.  NCCL's bootstrapAllGather; never a payload's.  0, or the
    errno (whole) */
-static int gather(struct ncclComm *comm, int nranks, int rank, struct report *reports, int sent) {
-  const int *peers = comm->peers;
-  const size_t table = (size_t)nranks * sizeof *reports;
+static int exchange(struct ncclComm *comm, void *rows, size_t bytes, int heard, int ranked) {
+  unsigned char *table = rows;
+  const int n = comm->nranks, *peers = comm->peers;
+  if (n == 1) return 0;
+  if (!peers) return ENOTCONN;
   int status = 0;
-  if (rank) {
-    const struct report kept = reports[rank];
-    if (!sent) status = whole(comm, peers[0], 0, reports + rank, sizeof *reports, 1);
-    if (!status) status = whole(comm, peers[0], 0, reports, table, 0);
-    reports[rank] = kept;
-    return status;
+  if (comm->rank) {
+    if (peers[0] < 0) return ENOTCONN;
+    status = whole(comm, peers[0], 0, table + (size_t)comm->rank * bytes, bytes, 1);
+    return status ? status : whole(comm, peers[0], 0, table, (size_t)n * bytes, 0);
   }
-  for (int r = 1; r < nranks && !status && !sent; r++)
-    if (!(status = whole(comm, peers[r], r, reports + r, sizeof *reports, 0)) && reports[r].rank != r) status = EPROTO;
-  for (int r = 1; r < nranks && !status; r++) status = whole(comm, peers[r], r, reports, table, 1);
+  for (int r = 1; r < n && !status && !heard; r++) {
+    int32_t rank = r;
+    status = peers[r] < 0 ? ENOTCONN : whole(comm, peers[r], r, table + (size_t)r * bytes, bytes, 0);
+    if (!status && ranked) memcpy(&rank, table + (size_t)r * bytes, sizeof rank);
+    if (!status && rank != r) status = EPROTO;
+  }
+  for (int r = 1; r < n && !status; r++) status = peers[r] < 0 ? ENOTCONN : whole(comm, peers[r], r, table, (size_t)n * bytes, 1);
   return status;
 }
 
@@ -1300,7 +1306,7 @@ static int fabric_realize(struct ncclComm *comm) {
    node fail every rank alike: comm_apart, a bound); each rank holding the stream toward each member's node it is
    joined to (fabric_acquire); a second gather carrying each rank's holding's status (NCCL's own init exchanges each peer's
    connection through its bootstrap: ncclTransportP2pSetup), then its channels (fabric_realize).  A rank that cannot go on, a stream held by another (EBUSY) or gone (ENOLINK), a peer silent past
-   its phase's end (bootstrap_open, gather: MESH_PREPARATION_NS) or a revoke fails the init as a value, made holding nothing of its
+   its phase's end (bootstrap_open, exchange: MESH_PREPARATION_NS) or a revoke fails the init as a value, made holding nothing of its
    bridge's (comm_leave) and its sockets closed; the next init reads the streams as they then stand.  Made, it keeps its
    sockets (closed at comm_free) */
 static ncclResult_t comm_init(struct ncclComm *made) {
@@ -1317,7 +1323,7 @@ static ncclResult_t comm_init(struct ncclComm *made) {
   const int making = status ? status : comm_attach(made, NULL);
   *mine = (struct report){.rank = rank, .status = making};
   if (!making) reach_read(made->attach, mine);
-  if (!status && nranks > 1) status = gather(made, nranks, rank, reports, !rank);
+  if (!status && nranks > 1) status = exchange(made, reports, sizeof *reports, !rank, 1);
   ncclResult_t result = status ? fail(ncclRemoteError, "the bootstrap at %s: %s", made->id, strerror(status)) : making ? comm_refused(making, made->name) : ncclSuccess;
   for (int r = 0; !result && r < nranks; r++)
     if (reports[r].status && r != rank)
@@ -1327,8 +1333,8 @@ static ncclResult_t comm_init(struct ncclComm *made) {
   if (!result && nranks > 1) {
     mine->status = fabric_discover(made, reports);
     if (!mine->status) mine->status = fabric_acquire(made);
-    made->until = mesh_deadline("libnccl-mesh: the init's second gather, after its holds (gather)", MESH_PREPARATION_NS);
-    if ((status = gather(made, nranks, rank, reports, 0))) result = fail(ncclRemoteError, "the bootstrap at %s: %s", made->id, strerror(status));
+    made->until = mesh_deadline("libnccl-mesh: the init's second gather, after its holds (exchange)", MESH_PREPARATION_NS);
+    if ((status = exchange(made, reports, sizeof *reports, 0, 1))) result = fail(ncclRemoteError, "the bootstrap at %s: %s", made->id, strerror(status));
     for (int r = 0; !result && r < nranks; r++)
       if (reports[r].status) result = hold_fail(made->name, r, reports[r].status);
     if (!result && (status = fabric_realize(made)))
@@ -4754,28 +4760,13 @@ static ncclResult_t enqueue(struct call c) {
   return ncclGroupEnd();
 }
 
-/* a declared call (nccl.h ncclMeshCall) as the call its function makes (collective, enqueue_counts, routed: a V form's
-   counts its own copy), admitted and its operator taken (admit, reduction), with no buffers; one declared `fused` names
-   `fused_declared` as its fused stream's records, so plan_calls compiles its steps as that stream's call's (no records
-   are written to it: a group's are its issued stream's) */
 /* Fixed-size configuration metadata, before any data program executes. Retained
    bootstrap sockets never carry acknowledgements or payload-dependent routing. */
 /* The caller holds prepare across both the fixed report and any indexed-view
    report. Concurrent preparations cannot interleave those two exchanges. */
 static int prepare_exchange_locked(ncclComm_t comm, const void *local, size_t bytes, void *reports) {
   memcpy((unsigned char *)reports + (size_t)comm->rank * bytes, local, bytes);
-  if (comm->nranks == 1) return 0;
-  int error = comm->peers ? 0 : ENOTCONN;
-  if (!error && comm->rank) {
-    if (comm->peers[0] < 0) error = ENOTCONN;
-    if (!error) error = whole(comm, comm->peers[0], 0, (void *)local, bytes, 1);
-    if (!error) error = whole(comm, comm->peers[0], 0, reports, (size_t)comm->nranks * bytes, 0);
-  } else if (!error) {
-    for (int r = 1; r < comm->nranks && !error; r++)
-      error = comm->peers[r] < 0 ? ENOTCONN : whole(comm, comm->peers[r], r, (unsigned char *)reports + (size_t)r * bytes, bytes, 0);
-    for (int r = 1; r < comm->nranks && !error; r++) error = whole(comm, comm->peers[r], r, reports, (size_t)comm->nranks * bytes, 1);
-  }
-  return error;
+  return exchange(comm, reports, bytes, 0, 0);
 }
 static ncclResult_t prepare_exchange(struct ncclComm *comm, const void *local, size_t bytes, void *reports) {
   pthread_mutex_lock(&comm->prepare);
@@ -4784,7 +4775,7 @@ static ncclResult_t prepare_exchange(struct ncclComm *comm, const void *local, s
   const int error = prepare_exchange_locked(comm, local, bytes, reports);
   atomic_fetch_sub(&comm->runs, 1);
   pthread_mutex_unlock(&comm->prepare);
-  return error ? fail(ncclRemoteError, "preparing the complete function declaration: %s", strerror(error)) : ncclSuccess;
+  return error ? fail(ncclRemoteError, "communicator %s: its configuration exchange: %s", comm->name, strerror(error)) : ncclSuccess;
 }
 
 ncclResult_t ncclMeshCommConfigGather(ncclComm_t comm, const void *local, void *reports, size_t bytes) {
@@ -4891,6 +4882,10 @@ static ncclResult_t declared_members(struct call *c, const ncclMeshCall *d) {
   return ncclSuccess;
 }
 
+/* a declared call (nccl.h ncclMeshCall) as the call its function makes (collective, enqueue_counts, routed: a V form's
+   counts its own copy), admitted and its operator taken (admit, reduction), with no buffers; one declared `fused` names
+   `fused_declared` as its fused stream's records, so plan_calls compiles its steps as that stream's call's (no records
+   are written to it: a group's are its issued stream's) */
 static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call *c) {
   const int n = comm->nranks, me = comm->rank,
             v = !d->counts ? 0 : d->what == WHAT_COUNTED ? 2 * n : d->what == MESH_ALLGATHER || d->what == MESH_REDUCE_SCATTER ? n : 0;
@@ -5923,13 +5918,13 @@ static ncclResult_t comm_sub(ncclComm_t comm, const int *ranks, int count, uint3
   return result;
 }
 
-/* ncclCommSplit: every rank's (color, key) and its report (reach_read; none for NCCL_SPLIT_NOCOLOR) all-gathered on comm
-   (in a lease, each rank's row from a page), the ranks of this color ordered by key, then rank (two of a color on one
+/* ncclCommSplit: every rank's (color, key) and its report (reach_read; none for NCCL_SPLIT_NOCOLOR) exchanged on comm's
+   configuration channel (prepare_exchange), the ranks of this color ordered by key, then rank (two of a color on one
    node refused alike: comm_apart), each rank's streams toward its color's nodes held (fabric_acquire: the streams its parent holds are not free, EBUSY where none is), and a
-   second all-gather on comm carrying each rank's holding's status, then the child's channels (fabric_realize): NCCL's bootstrapSplit (the child's exchange over its parent's), with the init's
+   second exchange on it carrying each rank's holding's status, then the child's channels (fabric_realize): NCCL's bootstrapSplit (the child's exchange over its parent's), with the init's
    two gathers.  A failure at any rank of a color fails that color's split on each of its ranks as a value, what it held
-   let go (comm_free).  Inside a group, its all-gathers run at once, the group's calls set aside until it returns
-   (aside) */
+   let go (comm_free).  Neither exchange is a collective: no group of comm's carries them, inside a group or not
+   (design/eager-execution.md: an undeclared collective ends the program) */
 static ncclResult_t split(ncclComm_t comm, int color, int key, ncclComm_t *newcomm) {
   const int n = comm->nranks;
   const uint32_t split = comm->splits++;
@@ -5937,18 +5932,10 @@ static ncclResult_t split(ncclComm_t comm, int color, int key, ncclComm_t *newco
   struct binding { int32_t status, padding; ncclUniqueId id; } bound = {0}, *binds = calloc((size_t)n, sizeof *binds);
   int *ranks = calloc((size_t)n, sizeof *ranks), count = 0;
   struct report *reports = calloc((size_t)n, sizeof *reports);
-  /* the all-gathers' rows: a lease, each rank's row from a page of it (an entry starts on a page), in place */
-  const uint64_t page = comm->page ? comm->page : 1;
-  const size_t stride = page_up(sizeof mine > sizeof bound ? sizeof mine : sizeof bound, page);
-  unsigned char *rows = NULL;
   *newcomm = NULL;
   if (color != NCCL_SPLIT_NOCOLOR) reach_read(comm->attach, &mine.report);
-  ncclResult_t result = !every || !binds || !ranks || !reports ? fail(ncclSystemError, "out of memory") : ncclMemAlloc((void **)&rows, (size_t)n * stride);
-  if (!result) {
-    memcpy(rows + (size_t)comm->rank * stride, &mine, sizeof mine);
-    result = ncclAllGather(rows + (size_t)comm->rank * stride, rows, stride, ncclUint8, comm, NULL);
-  }
-  for (int r = 0; !result && r < n; r++) memcpy(every + r, rows + (size_t)r * stride, sizeof *every);
+  ncclResult_t result = !every || !binds || !ranks || !reports ? fail(ncclSystemError, "out of memory")
+                                                               : prepare_exchange(comm, &mine, sizeof mine, every);
   const int gathered = !result;
   for (int r = 0; !result && color != NCCL_SPLIT_NOCOLOR && r < n; r++)
     if (every[r].color == color) ranks[count++] = r;
@@ -5968,9 +5955,7 @@ static ncclResult_t split(ncclComm_t comm, int color, int key, ncclComm_t *newco
   }
   else if (result && count) bound.status = ECANCELED;
   if (gathered) {
-    memcpy(rows + (size_t)comm->rank * stride, &bound, sizeof bound);
-    const ncclResult_t confirmed = ncclAllGather(rows + (size_t)comm->rank * stride, rows, stride, ncclUint8, comm, NULL);
-    for (int r = 0; !confirmed && r < n; r++) memcpy(binds + r, rows + (size_t)r * stride, sizeof *binds);
+    const ncclResult_t confirmed = prepare_exchange(comm, &bound, sizeof bound, binds);
     if (!result) result = confirmed;
   }
   for (int i = 0; !result && i < count; i++)
@@ -5980,42 +5965,21 @@ static ncclResult_t split(ncclComm_t comm, int color, int key, ncclComm_t *newco
     memcpy(child->id, binds[ranks[0]].id.internal, NCCL_UNIQUE_ID_BYTES);
     child->id[NCCL_UNIQUE_ID_BYTES] = 0;
     int error = bootstrap_open(child, child->id, reports);
-    if (!error) error = gather(child, count, child->rank, reports, !child->rank);
+    if (!error) error = exchange(child, reports, sizeof *reports, !child->rank, 1);
     if (error) result = fail(ncclSystemError, "split configuration bootstrap: %s", strerror(error));
   }
   int status = 0;
   if (!result && count > 1 && (status = fabric_realize(*newcomm)))
     result = fail(ncclSystemError, "communicator %s: its channels on the streams it held: %s", (*newcomm)->name, strerror(status));
   if (result && *newcomm) { comm_free(*newcomm); *newcomm = NULL; }
-  if (rows) ncclMemFree(rows);
   free(every); free(binds); free(ranks); free(reports);
   return result;
-}
-
-/* the calling thread's group set aside (`to` 1: its depth and calls kept, none open) or taken back (0), so a call that
-   runs its own collectives at once (ncclCommSplit, ncclCommGrow) runs them inside a group as it does outside one */
-static void aside(int to) {
-  static _Thread_local struct { int depth; struct call *calls; size_t count, capacity, room_count; struct room *rooms; } kept;
-  if (to) {
-    kept.depth = depth; kept.calls = calls; kept.count = call_count; kept.capacity = call_capacity;
-    kept.rooms = rooms; kept.room_count = room_count;
-    depth = 0; calls = NULL; call_count = call_capacity = 0; rooms = NULL; room_count = 0;
-    return;
-  }
-  free(calls);
-  for (size_t k = 0; k < room_count; k++) for (int j = 0; j < ROOMS; j++) free(rooms[k].part[j]);
-  free(rooms);
-  depth = kept.depth; calls = kept.calls; call_count = kept.count; call_capacity = kept.capacity;
-  rooms = kept.rooms; room_count = kept.room_count;
 }
 
 ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newcomm, ncclConfig_t *config) {
   (void)config;
   if (!comm || !newcomm) return fail(ncclInvalidArgument, "comm or newcomm is NULL");
-  aside(1);
-  const ncclResult_t result = split(comm, color, key, newcomm);
-  aside(0);
-  return result;
+  return split(comm, color, key, newcomm);
 }
 
 /* ncclCommShrink: comm's ranks but the excluded ones, in rank order, with no exchange among them (a departed member
@@ -6048,25 +6012,19 @@ ncclResult_t ncclCommGetUniqueId(ncclComm_t comm, ncclUniqueId *uniqueId) {
   return comm ? ncclGetUniqueId(uniqueId) : fail(ncclInvalidArgument, "comm is NULL");
 }
 
-/* ncclCommGrow: NCCL's bootstrap at the id of comm's root (ncclCommGetUniqueId), which the root broadcasts on comm to
-   comm's other ranks (from a lease: a crossing's bytes are a lease's); comm's ranks keep their ranks (the `rank` they
+/* ncclCommGrow: NCCL's bootstrap at the id of comm's root (ncclCommGetUniqueId), which comm's other ranks take from
+   the root's row of an exchange on comm's configuration channel (prepare_exchange: no collective); comm's ranks keep their ranks (the `rank` they
    pass, NCCL's -1, not read) and a new one (comm NULL) takes `rank`, every rank reporting its node and the nodes its
-   bridge reaches; the communicator, named by the id, holds its streams as every init does.  Inside a group, its
-   broadcast runs at once, the group's calls set aside until it returns (aside) */
+   bridge reaches; the communicator, named by the id, holds its streams as every init does */
 ncclResult_t ncclCommGrow(ncclComm_t comm, int nRanks, const ncclUniqueId *uniqueId, int rank, ncclComm_t *newcomm, ncclConfig_t *config) {
   (void)config;
   if (!newcomm || (comm ? nRanks < comm->nranks || (!comm->rank && !uniqueId) : !uniqueId))
     return fail(ncclInvalidArgument, "ncclCommGrow's arguments");
   if (!comm) return ncclCommInitRank(newcomm, nRanks, *uniqueId, rank);
-  ncclUniqueId *id = NULL, given;
-  aside(1);
-  ncclResult_t result = ncclMemAlloc((void **)&id, sizeof *id);
-  if (!result) {
-    *id = comm->rank ? (ncclUniqueId){{0}} : *uniqueId;
-    result = ncclBroadcast(id, id, sizeof *id, ncclUint8, 0, comm, NULL);
-    given = *id;
-    ncclMemFree(id);
-  }
-  aside(0);
+  ncclUniqueId *ids = calloc((size_t)comm->nranks, sizeof *ids);
+  const ncclUniqueId mine = comm->rank ? (ncclUniqueId){{0}} : *uniqueId;
+  ncclResult_t result = ids ? prepare_exchange(comm, &mine, sizeof mine, ids) : fail(ncclSystemError, "out of memory");
+  const ncclUniqueId given = ids && !result ? ids[0] : mine;
+  free(ids);
   return result ? result : ncclCommInitRank(newcomm, nRanks, given, comm->rank);
 }
