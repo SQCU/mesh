@@ -1035,7 +1035,11 @@ static void port_hello(struct port *port){
   setsockopt(hello,IPPROTO_IPV6,IPV6_MULTICAST_IF,&port->interface,sizeof port->interface);
   struct sockaddr_in6 to={.sin6_len=sizeof to,.sin6_family=AF_INET6,.sin6_port=htons((uint16_t)atoi(MESH_PORT)),.sin6_addr=everyone,.sin6_scope_id=port->interface};
   struct message said={.magic=XMAGIC,.version=MESH_VERSION,.kind=HELLO,.node=M->node,.boot=M->boot,.block=(uint32_t)page_bytes(),.port=port->index};
-  sendto(hello,&said,sizeof said,0,(struct sockaddr *)&to,sizeof to);
+  /* a hello the system refuses (EHOSTUNREACH under Local Network privacy) leaves the port unheard: logged once a change */
+  const int unheard=sendto(hello,&said,sizeof said,0,(struct sockaddr *)&to,sizeof to)<0?errno:0;
+  if(unheard!=port->unheard && unheard)
+    mesh_say("bridge","link %u (%s): hello not sent (%s): no peer on this link can hear it",port->index,port->name,strerror(unheard));
+  port->unheard=unheard;
 }
 /* design/transport.md: a node heard on a port: the lower node dials the higher's listener on the address
    it heard from, the higher answers its hello so the lower hears it at once; a port not open is opened (its open's job

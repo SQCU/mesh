@@ -239,7 +239,7 @@ struct port {
   uint32_t index,interface,peer,peer_port,greeted,parted,connecting,writing,open,opening,stuck,budget,refusals,family,unit;
   int64_t farewell;
   char name[IFNAMSIZ];
-  int control,job,result,refused,threads;
+  int control,job,result,refused,threads,unheard;
   _Atomic int done,closing;
   uint64_t next,bandwidth,job_at,retry_at;
   _Atomic uint64_t quiet_at;
