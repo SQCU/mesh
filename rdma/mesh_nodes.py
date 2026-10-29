@@ -390,7 +390,42 @@ def node_prepare():
             done = run(*argv, cwd=ROOT / where, env={**os.environ, 'MESH_RDMA': str(ROOT / 'rdma')})
             if done.returncode:
                 raise RuntimeError(f'{where}: {" ".join(map(str, argv[:3]))} failed: {(done.stderr or done.stdout)[-600:]}')
-    print(json.dumps({'bridge': 'restarted' if 'restarts the bridge' in done.stdout else 'unchanged'}))
+    if 'restarts the bridge' not in done.stdout:
+        print(json.dumps({'bridge': 'unchanged'}))
+        return
+    # standup (the operator, 2026-10-29): a machine whose bridge does not answer its restart signal, and that has no
+    # kernel fault, is restarted; one with a fault is left as it is, its fault reported
+    signalled, began = time.time(), None
+    while time.time() < signalled + BRIDGE_RESTART_SECONDS and not (began and began >= signalled):
+        time.sleep(2)
+        began = bridge_began()
+    if began and began >= signalled:
+        print(json.dumps({'bridge': 'restarted'}))
+        return
+    boot = int(re.search(r'\{ sec = (\d+)', run('sysctl', '-n', 'kern.boottime').stdout).group(1))
+    faults = run('sudo', '-n', 'find', '/Library/Logs/DiagnosticReports', '-type', 'f', '-newermt',
+                 time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(boot)), '-name', 'panic-full*').stdout.split()
+    if faults:
+        raise RuntimeError(f'the bridge did not restart within {BRIDGE_RESTART_SECONDS} s of its signal, and this boot '
+                           f'has a kernel fault, so the machine is left as it is: {faults}')
+    run('sudo', '-n', 'shutdown', '-r', 'now')
+    raise RuntimeError(f'the bridge did not restart within {BRIDGE_RESTART_SECONDS} s of its signal; no kernel fault '
+                       'this boot, so the machine is restarting')
+
+
+BRIDGE_RESTART_SECONDS = 180
+
+
+def bridge_began():
+    """The bridge's start (unix seconds): its first mesh-flow process, the one whose parent is no mesh-flow; None where
+    none runs."""
+    rows = [line.split(None, 2) for line in run('ps', '-axo', 'pid=,ppid=,comm=').stdout.splitlines()]
+    flows = {r[0]: r[1] for r in rows if len(r) == 3 and os.path.basename(r[2]) == 'mesh-flow'}
+    main = next((pid for pid, parent in flows.items() if parent not in flows), None)
+    if not main:
+        return None
+    started = run('ps', '-o', 'lstart=', '-p', main).stdout.strip()
+    return time.mktime(time.strptime(started, '%a %b %d %H:%M:%S %Y')) if started else None
 
 
 def node_resets(since):
