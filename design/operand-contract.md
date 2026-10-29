@@ -1594,8 +1594,20 @@ and LiteRT hosts and shaders. Separately prepared native shader libraries receiv
 that manifest too. Preparation compiled these stages with strided values, odd
 mask lengths and distinct scalar encodings; it submitted no numerical work.
 
-The boundary remains incomplete. The verify-step wrappers and host initializers
-still need the same typed access relations. The empty-owner one-slot placeholder remains an
+Verify acceptance, draft replacement and input updates now use the same typed
+command records. Their numerical bodies share the existing acceptance and draft
+functions; mapped page operands replace raw buffer assumptions. Preparation
+supplies fixed configuration values, so command recording no longer sends them
+through an undeclared dispatch path. Mask stores retain scalar tails and use
+vector stores only where both the prepared layout and row origins permit them.
+Host initialization uses declared scalar encodings and logical indices. Result
+inspection uses scalar locations resolved during preparation. Byte-size stride
+guesses, duplicate operand fields and per-record fill-name lookups are removed.
+Preparation compiled strided operands, odd mask widths and an empty teacher
+domain without layout conversions. Libraries and native callers built; no
+numerical commands ran.
+
+The boundary remains incomplete. The empty-owner one-slot placeholder remains an
 implicit API accommodation and needs constraint/empty-domain lowering.
 Placement across all future consumer constraints remains necessary:
 sequential preparation can still convert a flexible native output when a later

@@ -59,9 +59,9 @@ inline V mesh_load4(device const T *p, ulong i) {
     if (Aligned && mesh_vector4<B>()) return *(device const V *)(p + mesh_index<B>(i));
     else return V(p[mesh_index<B>(i)], p[mesh_index<B>(i+1)], p[mesh_index<B>(i+2)], p[mesh_index<B>(i+3)]);
 }
-template<uint B, typename T, typename V>
+template<uint B, bool Aligned = true, typename T, typename V>
 inline void mesh_store4(device T *p, ulong i, V value) {
-    if (mesh_vector4<B>()) *(device V *)(p + mesh_index<B>(i)) = value;
+    if (Aligned && mesh_vector4<B>()) *(device V *)(p + mesh_index<B>(i)) = value;
     else {
         p[mesh_index<B>(i)] = value.x; p[mesh_index<B>(i+1)] = value.y;
         p[mesh_index<B>(i+2)] = value.z; p[mesh_index<B>(i+3)] = value.w;

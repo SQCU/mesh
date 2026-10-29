@@ -34,10 +34,10 @@ using namespace metal;
 
 constant constexpr uint MESH_SPEC_STATE = MESH_SPEC_STATE_WORDS;
 
-template <uint R, uint ORDER, uint T>
-__attribute__((always_inline)) static inline void mesh_spec_step(device uint *state, device uint *history, device const uint *selected,
-                                                                 device const uint *teacher, uint taught, uint capacity, uint context,
-                                                                 device uint *words, uint stride, device uint *record,
+template <uint R, uint ORDER, uint T, typename State, typename History, typename Selected, typename Teacher, typename Words, typename Record>
+__attribute__((always_inline)) static inline void mesh_spec_step(State state, History history, Selected selected,
+                                                                 Teacher teacher, uint taught, uint capacity, uint context,
+                                                                 Words words, uint stride, Record record,
                                                                  threadgroup uint *shared, uint lane) {
     if (lane == 0) {
         uint step = state[0], p0 = state[1], length = state[2], flags = state[3] & ~4u, n = 0;
@@ -77,28 +77,28 @@ __attribute__((always_inline)) static inline void mesh_spec_step(device uint *st
             if (m > 0u) best = max(best, (m << 24) | p);
         }
         best = simd_max(best);
-        if (lane % 32u == 0u) shared[4u + lane / 32u] = best;
+        if (lane % MESH_SIMD_WIDTH == 0u) shared[4u + lane / MESH_SIMD_WIDTH] = best;
         threadgroup_barrier(mem_flags::mem_threadgroup);
         if (lane == 0) {
-            for (uint q = 1; q < T / 32u; q++) best = max(best, shared[4u + q]);
+            for (uint q = 1; q < T / MESH_SIMD_WIDTH; q++) best = max(best, shared[4u + q]);
             shared[4u] = best;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         best = shared[4u];
     }
-    if (lane < R) {
+    for (uint row = lane; row < R; row += T) {
         const uint last = history[t - 1u];
-        uint token = given ? history[p0 + lane] : last;
-        if (!given && lane > 0u && best != 0u) {
+        uint token = given ? history[p0 + row] : last;
+        if (!given && row > 0u && best != 0u) {
             const uint p = best & 0xffffffu, period = t - 1u - p;
-            token = history[p + 1u + (lane - 1u) % period];
+            token = history[p + 1u + (row - 1u) % period];
         }
-        words[lane * stride + 0u] = token;
-        words[lane * stride + 1u] = p0 + lane;
-        words[lane * stride + 2u] = state[7];
-        words[lane * stride + 3u] = 7u;
-        state[MESH_SPEC_STATE + lane] = token;
-        record[3u + lane] = token;
+        words[row * stride + 0u] = token;
+        words[row * stride + 1u] = p0 + row;
+        words[row * stride + 2u] = state[7];
+        words[row * stride + 3u] = 7u;
+        state[MESH_SPEC_STATE + row] = token;
+        record[3u + row] = token;
     }
     if (lane == 0) {
         record[0] = p0;
@@ -145,7 +145,7 @@ kernel void mesh_spec_steps(device uint *state [[buffer(0)]], device uint *histo
                             device const uint *teacher [[buffer(3)]], device uint *words [[buffer(4)]], device uint *record [[buffer(5)]],
                             constant uint &taught [[buffer(6)]], constant uint &capacity [[buffer(7)]], constant uint &context [[buffer(8)]],
                             constant uint &stride [[buffer(9)]], uint lane [[thread_index_in_threadgroup]]) {
-    threadgroup uint shared[4 + T / 32];
+    threadgroup uint shared[4 + T / MESH_SIMD_WIDTH];
     mesh_spec_step<R, ORDER, T>(state, history, selected, teacher, taught, capacity, context, words, stride, record, shared, lane);
 }
 #ifdef MESH_SPEC_ROWS

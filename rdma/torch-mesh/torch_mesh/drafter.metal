@@ -257,14 +257,18 @@ kernel void mesh_mtp_keep(device const uint2 *best [[buffer(0)]], device uint *d
 // Every member's step rows from the drafts (after their crossing): rows 1 .. R - 1 the proposals, unless the stream
 // stopped (spec_step's flags bit 1: its rows repeat their positions), given (bit 2: its rows replay the history) or, with
 // `hybrid` > 0, the prompt lookup's match this step (spec_step's state word 4) reached `hybrid` tokens: its rows stand.
-template <uint R>
-kernel void mesh_spec_drafts(device uint *state [[buffer(0)]], device const uint *drafts [[buffer(1)]], device uint *words [[buffer(2)]],
-                             device uint *record [[buffer(3)]], constant uint &stride [[buffer(4)]], constant uint &hybrid [[buffer(5)]],
-                             uint r [[thread_position_in_grid]]) {
+template <uint R, typename State, typename Drafts, typename Words, typename Record>
+inline void mesh_spec_draft_row(State state, Drafts drafts, Words words, Record record, uint stride, uint hybrid, uint r) {
     if (r == 0 || r >= R || (state[3] & 6u) != 0u || (hybrid > 0u && state[4] >= hybrid)) return;
     words[r * stride] = drafts[r];
     state[MESH_SPEC_STATE_WORDS + r] = drafts[r];
     record[3 + r] = drafts[r];
+}
+template <uint R>
+kernel void mesh_spec_drafts(device uint *state [[buffer(0)]], device const uint *drafts [[buffer(1)]], device uint *words [[buffer(2)]],
+                             device uint *record [[buffer(3)]], constant uint &stride [[buffer(4)]], constant uint &hybrid [[buffer(5)]],
+                             uint r [[thread_position_in_grid]]) {
+    mesh_spec_draft_row<R>(state, drafts, words, record, stride, hybrid, r);
 }
 #ifdef MESH_SPEC_ROWS
 template [[host_name("mesh_spec_drafts_rows")]] [[kernel]] decltype(mesh_spec_drafts<MESH_SPEC_ROWS>) mesh_spec_drafts<MESH_SPEC_ROWS>;
