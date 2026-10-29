@@ -4,12 +4,11 @@ from pathlib import Path
 import torch
 from . import _stream, fused
 from .compilation import operands, api_layouts
-from .operand import TensorView
 from .layout import bindings, pipeline as layout_pipeline
 
 
-_SOURCE = ''.join(Path(__file__).with_name(f).read_text() + '\n' for f in ('argmax.metal', 'matrix_operand.metal')) + \
-    Path(__file__).with_suffix('.metal').read_text()
+_OPERANDS = ''.join(Path(__file__).with_name(f).read_text() + '\n' for f in ('argmax.metal', 'matrix_operand.metal'))
+_SOURCE = _OPERANDS + Path(__file__).with_suffix('.metal').read_text()
 
 
 def pipeline(definitions, bindings):
@@ -24,7 +23,7 @@ def row_tiles(rows):
     return tuple((first, min(width, rows - first)) for first in range(0, rows, width))
 
 
-def product(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, ready=None, arrivals=None, layouts=None):
+def arguments(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, ready=None, arrivals=None):
     """Bind matrix views, including batch strides, without packing or execution."""
     kinds = {torch.float16: 'half', torch.float32: 'float', torch.bfloat16: 'bfloat'}
     if x.dtype not in kinds or w.dtype not in kinds or out.dtype not in kinds:
@@ -51,23 +50,19 @@ def product(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, ready=
         if (ready.dtype != torch.int64 or ready.numel() != tiles or
                 arrivals is None or arrivals.dtype != torch.int32 or arrivals.numel() != tiles):
             raise ValueError('tile publication needs one ready word and arrival count per batch row tile')
-    layouts = api_layouts('matrix') if layouts is None else layouts
-    inputs, before = bindings(dict(x=x, w=w, x1=x1, bias=bias),
-        dict(x=layouts['input'], w=layouts['weight'], x1=layouts['input'], bias=layouts['bias']))
-    outputs, after = bindings(dict(out=out), dict(out=layouts['output']), writing=True)
-    x, w, x1, bias = (None if value is None else TensorView.of(value) for value in inputs.values())
-    out = TensorView.of(outputs['out'])
-    def step(value, axis):
-        return value.stride(axis) if value is not None and value.layout.affine else 0
-    definitions = dict(INPUT=kinds[x.dtype], WEIGHT=kinds[w.dtype], OUTPUT=kinds[out.dtype], AM=step(x,-2), AK=step(x,-1),
-                       BK=step(w,-2), BN=step(w,-1), AFFINE_A=int(x.layout.affine), AFFINE_B=int(w.layout.affine),
+    def step(binding, value, axis):
+        return f'mesh_matrix_stride<{binding},{axis % value.ndim}>()' if value is not None else 0
+    def affine(binding, value):
+        return f'mesh_affine<{binding}>()' if value is not None else 0
+    definitions = dict(INPUT=kinds[x.dtype], WEIGHT=kinds[w.dtype], OUTPUT=kinds[out.dtype], AM=step(0,x,-2), AK=step(0,x,-1),
+                       BK=step(1,w,-2), BN=step(1,w,-1), AFFINE_A=affine(0,x), AFFINE_B=affine(1,w),
                        BATCH_A=int(x.ndim == 3 and x.shape[0] > 1), BATCH_B=int(w.ndim == 3 and w.shape[0] > 1),
                        BIAS_ROWS=bias.shape[0] if bias is not None and bias.ndim == 2 else 1,
                        BIAS_COLUMNS=bias.shape[-1] if bias is not None else 1,
                        ACTIVATE=int(act), BIAS=int(bias is not None), ALPHA=repr(float(alpha))+'f',
                        BETA=repr(float(beta))+'f', PRODUCED=int(ready is not None),
                        SEGMENTED=int(x1 is not None), K0=first, PRODUCT_ROWS=rows, PRODUCT_COLUMNS=columns, PRODUCT_INNER=inner,
-                       A1M=step(x1,-2), A1K=step(x1,-1), AFFINE_A1=int(x1 is not None and x1.layout.affine),
+                       A1M=step(6,x1,-2), A1K=step(6,x1,-1), AFFINE_A1=affine(6,x1),
                        BATCH_A1=int(x1 is not None and x1.ndim == 3 and x1.shape[0] > 1))
     geometry = operands()
     definitions.update((key, geometry['MATRIX_' + key])
@@ -75,10 +70,31 @@ def product(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, ready=
     row_tile = definitions['ROWS'] * definitions['ROW_GROUPS']
     column_tile = definitions['COLUMNS'] * definitions['COLUMN_GROUPS']
     threads = definitions['ROW_GROUPS'] * definitions['COLUMN_GROUPS'] * geometry['SIMD_WIDTH']
-    views = {0: x, 1: w, 2: out, **({5: bias} if bias is not None else {}), **({6: x1} if x1 is not None else {}),
-             **({3: arrivals, 7: ready} if ready is not None else {})}
-    record = (pipeline(tuple(definitions.items()), views), [x, w, out, arrivals, None, bias, x1, ready],
-            {}, (-(-rows // row_tile), -(-columns // column_tile), batches),
-            (threads, 1, 1), False, 3 | (32 if bias is not None else 0) | (64 if x1 is not None else 0)
-            | ((140 if ready is not None else 4) << _stream.compilation['ACCESS_WRITE_SHIFT']))
+    return (definitions, [x, w, out, arrivals, None, bias, x1, ready],
+            (-(-rows // row_tile), -(-columns // column_tile), batches), (threads, 1, 1))
+
+
+def product(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, ready=None, arrivals=None, layouts=None):
+    """Resolve declared layouts and emit the shared product command."""
+    layouts = api_layouts('matrix') if layouts is None else layouts
+    inputs, before = bindings(dict(x=x, w=w, x1=x1, bias=bias),
+        dict(x=layouts['input'], w=layouts['weight'], x1=layouts['input'], bias=layouts['bias']))
+    outputs, after = bindings(dict(out=out), dict(out=layouts['output']), writing=True)
+    definitions, buffers, grid, threads = arguments(**inputs, out=outputs['out'], act=act, alpha=alpha, beta=beta,
+                                                   ready=ready, arrivals=arrivals)
+    views = {i: value for i, value in enumerate(buffers) if value is not None}
+    record = (pipeline(tuple(definitions.items()), views), buffers, {}, grid, threads, False,
+              3 | (32 if bias is not None else 0) | (64 if x1 is not None else 0)
+              | ((140 if ready is not None else 4) << _stream.compilation['ACCESS_WRITE_SHIFT']))
     return [*before, record, *after]
+
+
+def declare(x, w, out):
+    """Carry the same product and API constraints through an FX declaration."""
+    from .kernel import declare as kernel
+    definitions, buffers, grid, threads = arguments(x, w, out)
+    layouts = api_layouts('matrix')
+    prefix = ''.join(f'#define {key} {value}\n' for key, value in definitions.items())
+    prefix += _OPERANDS
+    return kernel('matrix.metal', 'product', buffers, (2,), (), 0, grid, threads,
+                  indexed=(), requirements={0: layouts['input'], 1: layouts['weight'], 2: layouts['output']}, prefix=prefix)[0]

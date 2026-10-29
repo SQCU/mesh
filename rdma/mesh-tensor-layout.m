@@ -1413,6 +1413,8 @@ finished:
         coordinates,coordinates?TensorVectorSpan(self):0)];
     // APIs that require affine operands consume the strides of the placed
     // view, not strides captured before placement. These are shader constants.
+    [result appendFormat:@"template<> constexpr bool mesh_affine<%lu>() { return %s; }\n",
+        (unsigned long)binding,self.affine?"true":"false"];
     if(self.affine)for(NSUInteger axis=0;axis<_shape.count;axis++)
         [result appendFormat:@"template<> constexpr long mesh_stride<%lu, %lu>() { return %ldl; }\n",
             (unsigned long)binding,(unsigned long)axis,(long)[_strides[axis] integerValue]];

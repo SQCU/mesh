@@ -6,6 +6,13 @@
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 using namespace metal;
 
+template<uint Binding> constexpr bool mesh_affine();
+template<uint Binding, uint Axis> constexpr long mesh_stride();
+template<uint Binding, uint Axis> constexpr long mesh_matrix_stride() {
+    if constexpr (mesh_affine<Binding>()) return mesh_stride<Binding,Axis>();
+    else return 0;
+}
+
 template <bool Left, typename L, typename R, typename Operation>
 inline auto mesh_matrix_fragment(thread const Operation &operation) {
     if constexpr (Left) return operation.template get_left_input_cooperative_tensor<L,R,float>();

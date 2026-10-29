@@ -112,6 +112,7 @@ NSArray<NSArray<NSNumber *> *> *MetalViewIndexConstants(NSUInteger binding,const
 static NSString *MetalViewIndexTemplates(void) {
     return @"template<uint B> inline long mesh_index(ulong i) { return long(i); }\n"
         "template<uint B, uint A> constexpr long mesh_stride();\n"
+        "template<uint B> constexpr bool mesh_affine();\n"
         "template<uint B> constexpr ulong mesh_vector_span() { return 0; }\n"
         "template<uint B> constexpr bool mesh_vector4() { return mesh_vector_span<B>() % 4 == 0; }\n";
 }

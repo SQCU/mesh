@@ -681,18 +681,21 @@ class Matrix(torch.Tensor):
 
     @staticmethod
     def __new__(cls, fields, name='', transposed=False, dtype=torch.float16, widths=None, units=None,
-                logical_shape=None, metadata=None, input_domain=None):
-        rows, columns = fields['tiles'].shape[0] * 32, fields['tiles'].shape[1] * 32
+                logical_shape=None, metadata=None, input_domain=None, basis_columns=None, input_fan_in=1):
+        group = COMPUTE['WEIGHT_ROW_GROUP']
+        rows, columns = fields['tiles'].shape[0] * group, fields['tiles'].shape[1] * group
         logical_shape = tuple(logical_shape) if logical_shape is not None else (rows, columns)
         out = torch.Tensor._make_wrapper_subclass(cls, logical_shape[::-1] if transposed else logical_shape, dtype=dtype,
                                                   device=fields['codes'].device)
         for k in cls.FIELDS:
             setattr(out, k, fields.get(k))
-        out.label, out.transposed, out.rows, out.columns, out.tiles_ = name, transposed, rows, columns, columns // 32
+        out.label, out.transposed, out.rows, out.columns, out.tiles_ = name, transposed, rows, columns, columns // group
         out.logical_shape = logical_shape
         out.metadata = metadata if metadata is not None else {
             key: tuple(fields[key].detach().cpu().reshape(-1).tolist()) for key in cls.FIELDS[1:7]}
         out.input_domain = tuple(range(columns)) if input_domain is None else input_domain
+        out.input_fan_in = input_fan_in
+        out.basis_columns = tuple(range(logical_shape[1])) if basis_columns is None else basis_columns
         out.widths = widths if widths is not None else WIDTH_CLASS[max(((word >> 12) & 15 for word in out.metadata['tiles']), default=0)]
         out.units = units if units is not None else slice_units(out)
         return out
@@ -721,7 +724,7 @@ class Matrix(torch.Tensor):
             fields['mixing'] = tensors[f'{name}.hadamard'].float().to(device)
         return cls(fields, name)
 
-    def like(self, transposed=None, dtype=None, *, logical_shape=None, metadata=None, input_domain=None, **fields):
+    def like(self, transposed=None, dtype=None, *, logical_shape=None, metadata=None, input_domain=None, basis_columns=None, input_fan_in=None, **fields):
         if metadata is None:
             metadata = {**self.metadata, **{key: tuple(fields[key].detach().cpu().reshape(-1).tolist())
                         for key in self.metadata if key in fields}}
@@ -730,7 +733,9 @@ class Matrix(torch.Tensor):
                       self.units if 'tiles' not in fields else None,
                       self.logical_shape if logical_shape is None else logical_shape,
                       metadata,
-                      self.input_domain if input_domain is None else input_domain)
+                      self.input_domain if input_domain is None else input_domain,
+                      self.basis_columns if basis_columns is None else basis_columns,
+                      self.input_fan_in if input_fan_in is None else input_fan_in)
 
     @property
     def rotated(self):
@@ -742,7 +747,7 @@ class Matrix(torch.Tensor):
 
     def __tensor_flatten__(self):
         return [k for k in self.FIELDS if getattr(self, k) is not None], (
-            self.label, self.transposed, self.dtype, self.widths, self.units, self.logical_shape, self.metadata, self.input_domain)
+            self.label, self.transposed, self.dtype, self.widths, self.units, self.logical_shape, self.metadata, self.input_domain, self.basis_columns, self.input_fan_in)
 
     @staticmethod
     def __tensor_unflatten__(inner, context, outer_size, outer_stride):
@@ -763,20 +768,20 @@ class Matrix(torch.Tensor):
         return self.tiles.stride(0)
 
     def cut(self, rows=None, columns=None):
-        """Select logical axes and the encoded blocks/basis values they need.
+        return self.selected(range(*slice(*(rows or (None, None))).indices(self.logical_shape[0])),
+                             range(*slice(*(columns or (None, None))).indices(self.logical_shape[1])))
 
-        Cuts compose through the carried index maps. Only small immutable
-        metadata is gathered during preparation; codes are never repacked.
-        """
+    def selected(self, rows=None, columns=None):
+        """Compose logical selections with retained blocks and basis views."""
         from . import _stream
-        row_slice = slice(*(rows or (None, None))).indices(self.logical_shape[0])
-        col_slice = slice(*(columns or (None, None))).indices(self.logical_shape[1])
-        if row_slice == (0, self.logical_shape[0], 1) and col_slice == (0, self.logical_shape[1], 1):
+        rows = tuple(range(self.logical_shape[0]) if rows is None else rows)
+        columns = tuple(range(self.logical_shape[1]) if columns is None else columns)
+        if rows == tuple(range(self.logical_shape[0])) and columns == tuple(range(self.logical_shape[1])):
             return self.like()
         group = COMPUTE['WEIGHT_ROW_GROUP']
-        rb, row_order = _stream.view_block_slice(self.metadata['row_order'], *row_slice, group)
+        rb, row_order = _stream.view_block_gather(self.metadata['row_order'], rows, group)
         cb, col_order = (list(range(self.tiles_)), self.metadata['col_order']) if self.rotated else (
-            _stream.view_block_slice(self.metadata['col_order'], *col_slice, group))
+            _stream.view_block_gather(self.metadata['col_order'], columns, group))
         ri = [b * group + j for b in rb for j in range(group)]
         ci = [b * group + j for b in cb for j in range(group)]
         metadata = dict(tiles=tuple(self.metadata['tiles'][r * self.tiles_ + c] for r in rb for c in cb),
@@ -785,22 +790,28 @@ class Matrix(torch.Tensor):
                         col_scale=tuple(self.metadata['col_scale'][c] for c in ci), col_order=tuple(col_order))
         fields = {key: torch.tensor(values, dtype=getattr(self, key).dtype) for key, values in metadata.items()}
         fields['tiles'] = fields['tiles'].reshape(len(rb), len(cb))
-        input_domain = self.input_domain if self.rotated else tuple(range(len(ci)))
+        input_domain, fan_in = tuple(range(len(ci))), 1
         if self.rotated:
-            selection = slice(*col_slice)
-            if self.folded is not None:
-                fields['folded'] = self.folded[:, selection]
-            if self.rotation is not None:
-                fields['rotation'] = self.rotation[:, selection]
-            if self.signs is not None:
-                original = input_domain
-                _, input_domain = _stream.view_block_slice(original, *col_slice, len(original))
-                input_domain = tuple(input_domain) or (-1,) * self.columns
-        out = self.like(logical_shape=(len(range(*row_slice)), len(range(*col_slice))), metadata=metadata,
-                        input_domain=input_domain, **fields)
-        out.label = f'{self.label}[{row_slice}, {col_slice}]'
+            inverse = {}
+            for target, source in enumerate(columns):
+                inverse.setdefault(source, []).append(target)
+            groups = [tuple(target for source in self.input_domain[first:first + self.input_fan_in]
+                            for target in inverse.get(source, ()))
+                      for first in range(0, len(self.input_domain), self.input_fan_in)]
+            fan_in = max(1, max(map(len, groups), default=0))
+            input_domain = tuple(value for group in groups for value in (*group, *([-1] * (fan_in - len(group)))))
+        out = self.like(logical_shape=(len(rows), len(columns)), metadata=metadata,
+                        input_domain=input_domain, input_fan_in=fan_in,
+                        basis_columns=tuple(self.basis_columns[c] for c in columns), **fields)
+        row_runs = _stream.TensorLayout((self.logical_shape[0],), (1,)).select(0, rows).ordered_spans()
+        column_runs = _stream.TensorLayout((self.logical_shape[1],), (1,)).select(0, columns).ordered_spans()
+        out.label = f'{self.label}[{row_runs}, {column_runs}]'
         out.widths = WIDTH_CLASS[max((((word & 0xffffffff) >> 12) & 15 for word in metadata['tiles']), default=0)]
         return out
+
+    def basis(self, field):
+        from .operand import TensorView
+        return TensorView.of(getattr(self, field)).select(1, self.basis_columns)
 
     @property
     def row_masked(self):
@@ -844,7 +855,9 @@ class Matrix(torch.Tensor):
 
     def unrotate(self, values):
         if self.signs is None:
-            return torch.mm(values, self.folded)
+            from .matrix import declare
+            out = torch.empty((values.shape[0], self.logical_shape[1]), dtype=values.dtype, device=values.device)
+            return declare(values, self.basis('folded'), out)
         K, n = self.hadamard.shape[0], values.shape[0]
         inverse = [-1] * self.columns
         for at, column in enumerate(self.metadata['col_order']):
@@ -857,7 +870,7 @@ class Matrix(torch.Tensor):
         selected = [0] * self.logical_shape[1]
         for column, logical in enumerate(self.input_domain):
             if logical >= 0:
-                selected[logical] = column
+                selected[logical] = column // self.input_fan_in
         output = torch.empty((n, len(selected)), dtype=values.dtype, device=values.device)
         name, line = instance('streamed_row_gather', 0, 0, 0, self.columns, 0, 'float', 0, _TYPES[values.dtype][1], 'char')
         output, = _encode(name, [mixed, output, None, TensorView.of(self.signs).select(0, selected)],
@@ -875,6 +888,7 @@ class Matrix(torch.Tensor):
         def compatible(a, b):
             return (a.columns == b.columns and a.logical_shape[1] == b.logical_shape[1]
                     and a.metadata['col_order'] == b.metadata['col_order'] and a.input_domain == b.input_domain
+                    and a.input_fan_in == b.input_fan_in and a.basis_columns == b.basis_columns
                     and all(getattr(a, key) is getattr(b, key)
                             for key in ('rotation', 'rotation_scale', 'signs', 'hadamard', 'folded', 'mixing')))
 
@@ -904,11 +918,15 @@ class Matrix(torch.Tensor):
         transform = ('hadamard' if local_hadamard else 'gather' if self.signs is not None or not self.rotated
                      else 'rotate' if n <= max(POLICY['cooperative_rows']) else 'gather')
         # A folded matrix product is shared by every destination batch.
-        source = torch.mm(x, self.folded.T) if transform == 'gather' and self.folded is not None else x
+        source = x
+        if transform == 'gather' and self.folded is not None:
+            from .matrix import declare
+            source = declare(x, self.basis('folded').t(),
+                             torch.empty((n, self.columns), dtype=x.dtype, device=x.device))
         positions = tuple(range(self.columns)) if self.folded is not None else self.metadata['col_order']
         if self.signs is not None and not local_hadamard:
             K = self.hadamard.shape[0]
-            source = expand(x, self.signs, self.columns // K, domain=self.input_domain, normalization=self.columns)
+            source = expand(x, self.signs, self.columns // K, domain=self.input_domain, normalization=self.columns, fan_in=self.input_fan_in)
             source = torch.einsum('ab,rbn->ran', self.mixing, source.reshape(n, K, self.columns // K)).reshape(n, self.columns)
         def emit(kind, source, products, positions, tables=None, unscaled=None):
             bindings = tuple(POLICY['transform_outputs'][kind])
@@ -932,16 +950,17 @@ class Matrix(torch.Tensor):
                     dims, groups = _dims(rows=n, columns=self.columns, inputs=len(batch)), n
                     indexed, indices = (0, 3, 7, 8), {2: positions}
                 elif kind == 'hadamard':
-                    name, line = instance('streamed_hadamard', self.logical_shape[1], int(-1 in self.input_domain), 0, input_type)
+                    name, line = instance('streamed_hadamard', self.logical_shape[1], int(-1 in self.input_domain), 0, input_type, 0, self.input_fan_in)
                     buffers = [source, outs[0], outs[1], None, scales[0], scales[1], self.signs, self.hadamard]
                     dims, groups = _dims(rows=n, columns=self.columns, per=self.columns // self.hadamard.shape[0], inputs=len(batch)), n
                     indexed, indices = (0, 4, 5, 6, 7), {3: self.metadata['col_order'], 12: self.input_domain}
                 else:
-                    packed = self.rotation.shape[1] == self.columns and self.rotation.stride() == (self.columns, 1)
+                    rotation = self.basis('rotation')
+                    packed = rotation.shape[1] == self.columns and rotation.layout.matches((self.columns, 1))
                     name, line = (('streamed_rotate', '') if packed and input_type == 'half'
                                   else instance('streamed_rotate', 0 if packed else self.logical_shape[1], 0, input_type))
                     tabled = first == 0 and tables is not None
-                    buffers = [source, outs[0], outs[1], None, scales[0], scales[1], self.rotation, self.rotation_scale, tables if tabled else None]
+                    buffers = [source, outs[0], outs[1], None, scales[0], scales[1], rotation, self.rotation_scale, tables if tabled else None]
                     dims, groups = _dims(rows=n, columns=self.columns, inputs=len(batch), flags=int(tabled)), -(-self.columns // 32)
                     indexed, indices = (0, 4, 5, 6, 7), None
                 prefix = transform_stores(kind, extra, values, factors, buffers)
@@ -1738,11 +1757,16 @@ def slices(streamed, record=None, rank=None):
                                          (base + 'down_proj', down, dict(columns=span))):
                         add(name, m.cut(**cut), m)
         else:
-            for span in ((layer.get('engines') or {}).get('gpu'), (layer.get('prefill') or {}).get('columns')):
+            for span in ((layer.get('prefill') or {}).get('columns'),):
                 if span and span[1] > span[0] and base + 'gate_proj' in streamed.matrices:
                     for p in ('gate_proj', 'up_proj'):
                         add(base + p, streamed[base + p].cut(rows=tuple(span)))
                     add(base + 'down_proj', streamed[base + 'down_proj'].cut(columns=tuple(span)))
+        selected = [column for first, end in (layer.get('engines') or {}).get('gpu', ()) for column in range(first, end)]
+        if selected and base + 'gate_proj' in streamed.matrices:
+            for p in ('gate_proj', 'up_proj'):
+                add(base + p, streamed[base + p].selected(rows=selected))
+            add(base + 'down_proj', streamed[base + 'down_proj'].selected(columns=selected))
         base = f'model.language_model.layers.{L}.self_attn.'
         if 'head' in ragged and layer.get('heads') and base + 'q_proj' in streamed.matrices:
             q, o = streamed[base + 'q_proj'], streamed[base + 'o_proj']

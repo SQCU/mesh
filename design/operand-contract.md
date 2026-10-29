@@ -938,9 +938,19 @@ preparation path before the new assignment becomes executable. The program key
 includes the exact model ranges, so a ragged range change cannot select an older
 manifest. Only the assigned blocks are built. Compiled shares count toward the
 ordinary program cache budget; the former permanent-block exemption is removed.
-The allocator still describes one GPU interval and one ANE interval. General
-sets of backend assignments and the provider output-page contract above remain
-open; this change does not turn a model block into a hardware restriction.
+Backend assignments now carry lists of intervals. The existing allocator's
+configured side yields one interval per engine; explicit disjoint assignments
+pass through the same planner record, preparation identity and model manifest.
+The builder clips every assigned interval against its build blocks. Native FFN
+ownership retains an ordered column selection, and the GPU consumes one composed
+view of its gate, up and down matrices. The binder selects the ANE model blocks
+for that same assignment. Rate accounting sums the intervals' actual work.
+Goal A's independent 32-neuron alignment restriction has been removed.
+
+Preparation on 2026-10-29 carried disjoint assignments through member identities,
+clipped model blocks and the native manifest decoder. Native rank and Goal A
+built. No model prediction or numerical command ran. The provider output-page
+contract and placement control described above remain open.
 
 Preparation on 2026-10-29 carried off-grid intervals through allocation and
 member identity, including both start and end assignments. The shared model
@@ -1489,8 +1499,21 @@ Preparation on 2026-10-29 built rank and Goal A, composed reordered, repeated an
 empty input selections, and compiled the fused and factored shaders with both
 ordinary and repeated sources. FX fake forward/backward retained the declared
 shapes and relation. Scalar byte views retained the selected addresses. No
-numerical commands ran. The ANE allocator's range sets and the provider
-guarantees described above remain open.
+numerical commands ran. The provider guarantees described above remain open.
+
+Python compressed cuts and explicit selections now use the same block-gather
+relation. Repeated columns compose through each butterfly source group. Folded
+basis weights remain in their existing storage, with selected columns carried
+as views. The FX declaration and native matrix preparation share their product
+arguments and numerical kernel. Affine strides come from the placed operand,
+so a placement change cannot leave a captured stride in the numerical body.
+Mapped operands use that same matrix loader's cooperative fragment.
+
+Preparation compiled selected folded transforms at small and large row counts,
+and selected butterflies whose basis exceeds one local group's storage. FX
+retained the source groups and view relations; flattening preserved them too.
+Mapped and newly placed contiguous operands compiled from the same matrix
+declaration. No numerical work was submitted.
 
 The native fused finish uses that same declaration for its next input gather.
 Its output count is a template operand, so an absent gather adds no runtime
