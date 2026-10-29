@@ -42,7 +42,7 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   has up to four, subject to its endpoints' actual lane capacity; a required busy link refuses another communicator
   (EBUSY) until a stream becomes free
   ([NCCL.md](../NCCL.md#rules-a-program-keeps)).
-- Every wait carries a deadline set when it is made (design/data-model.md section 6): a work's `wait(timeout)` its
+- Every wait carries a deadline set when it is made (design/eager-execution.md, assumption A4): a work's `wait(timeout)` its
   timeout, 5 s where none is given; each turn of torch's queue and each command buffer `_stream.mm` waits for, 5 s;
   the library's own waits theirs ([NCCL.md](../NCCL.md#bounded-waits)). Past it the process ends, naming the wait and
   its deadline.

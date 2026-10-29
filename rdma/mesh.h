@@ -42,7 +42,7 @@ _Static_assert(!(MESH_STREAM_ENTRIES&(MESH_STREAM_ENTRIES-1)),"a ring a power of
 /* design/transport.md: the pause between a port's hellos and between the bridge's liveness turns */
 /* design/transport.md, the operator's deadline (2026-10-18): no DMA or network send/receive channel of the
    mesh is used longer than this without something happening on it or its scope concluding */
-/* design/data-model.md section 6: a wait's deadline, fixed when the wait is made, `ns` its caller's (0: none given,
+/* design/eager-execution.md, assumption A4: a wait's deadline, fixed when the wait is made, `ns` its caller's (0: none given,
    MESH_PLATFORM_NS) and `at` the monotonic clock's reading it ends at; `wait` names the wait */
 struct mesh_deadline { const char *wait; uint64_t ns,at; };
 static inline uint64_t mesh_clock_ns(void){ return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
@@ -53,7 +53,7 @@ static inline struct mesh_deadline mesh_deadline(const char *wait,uint64_t ns){
 /* the wait `wait` past its deadline of `ns`: the program ends at once, the wait and its deadline on stderr */
 __attribute__((noreturn)) static inline void mesh_expired(const char *wait,uint64_t ns){
   char text[MESH_DIAGNOSTIC_BYTES];
-  const int n=snprintf(text,sizeof text,"%s: past its deadline of %.3f s; the program ends (design/data-model.md section 6)\n",
+  const int n=snprintf(text,sizeof text,"%s: past its deadline of %.3f s; the program ends (design/eager-execution.md, assumption A4)\n",
                        wait,(double)ns/1e9);
   if(n>0)(void)!write(2,text,(size_t)n<sizeof text?(size_t)n:sizeof text-1);
   _exit(1);

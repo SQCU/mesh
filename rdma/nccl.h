@@ -56,7 +56,7 @@
    revokeFlags is not read; from any thread, under comm's own
    lock, never one a group holds while it waits.  ncclCommDestroy waits for the GPU work the library committed for comm
    until its command buffer's status is Completed or Error (none not committed), within MESH_PLATFORM_NS, past which the
-   program ends (design/data-model.md section 6), then gives its streams back
+   program ends (design/eager-execution.md, assumption A4), then gives its streams back
    and frees it (a holding given with units outstanding takes its
    stream out of its link's pairing: design/transport.md section 14); a lease a group of a revoked or failed comm named
    is the caller's to keep until then, since its bridge may still post receives into it for entries presented; work in a caller's encoder is the caller's to
@@ -84,10 +84,10 @@
    presented to the bridge as the group is issued (mesh-call.h
    mesh_stream_present).  A member that fails, is revoked or ends mid-group sends nothing more: its peers' host-path
    waits end at a revoke, the link's loss or their deadlines, and their GPU waits at their bounds (a deadline past
-   which the program ends: design/data-model.md section 6), and its holding's end with units outstanding takes its stream out of its link's pairing
+   which the program ends: design/eager-execution.md, assumption A4), and its holding's end with units outstanding takes its stream out of its link's pairing
    (design/transport.md section 14).  A publication
    raises the holding's `ready` past the entry; a landing is awaited on its `landed`.
-   The data program owns source/relay lifetimes; there are no `sent` waits (design/data-model.md section 6).  Nothing credits a publication: the hardware holds a SEND until its receive is posted.  No
+   The data program owns source/relay lifetimes; there are no `sent` waits (design/pages-and-functions.md, Freeing 6-7).  Nothing credits a publication: the hardware holds a SEND until its receive is posted.  No
    payload is checked, so calls that do not pair (unequal counts, different collectives or orders) are the caller's
    error and are not detected.  Uneven segments are their own calls
    (ncclMeshAllGatherV, ncclMeshReduceScatterV, below), whose count vector every rank passes alike.
@@ -120,7 +120,7 @@
    bridge takes its entries, a revoke or its holding's end.  A host-path group spins on
    its landings, never parks, and holds no lock another communicator's groups take; its waits end at their counts, a
    count's ~0, its holding's end or a revoke.  Each of these waits has a deadline, MESH_PLATFORM_NS from its start,
-   past which the program ends (design/data-model.md section 6).  A group whose entries lie on one channel completes as
+   past which the program ends (design/eager-execution.md, assumption A4).  A group whose entries lie on one channel completes as
    plain dispatches in the stream's order; a group on two or more, with each channel progressing on its own
    (rdma/NCCL.md "One track", "Per-channel progress").  A group's landings in a stream wait to be posted until the stream
    reaches the group (its first publication on the channel, or a gate store of its first dispatch), so no receive lands

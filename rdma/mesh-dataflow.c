@@ -78,7 +78,7 @@ int mesh_region(uint64_t *bytes,uint64_t *unleased){
 
 /* design/transport.md: the map's records as one serial left them, the seqlock's reader (mesh_map_whole): a
    copy in *out the caller frees and its count, or -errno (ESRCH: the bridge went while its write was open); the read
-   within its deadline, MESH_PLATFORM_NS from its start (design/data-model.md section 6) */
+   within its deadline, MESH_PLATFORM_NS from its start (design/eager-execution.md, assumption A4) */
 static int mesh_records_read(struct hdr *m,size_t length,struct mesh_record **out){
   const struct mesh_deadline deadline=mesh_deadline("libmesh: the map's records read (mesh_records_read)",0);
   for(;;){
@@ -202,7 +202,7 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
   /* the records under both serials: the map's (mesh_records_read) and the health's, which a health-only change moves
      (mesh-records.c health_put); a read that a health write overlapped is read again, and an odd serial (a write open)
      waited on as mesh_records_read waits on the map's, ESRCH where the bridge went while it was open; the read within
-     its deadline, MESH_PLATFORM_NS from its start (design/data-model.md section 6) */
+     its deadline, MESH_PLATFORM_NS from its start (design/eager-execution.md, assumption A4) */
   const struct mesh_deadline deadline=mesh_deadline("libmesh: the nodes' health read (mesh_nodes_health)",0);
   int count;
   for(;;){
@@ -236,7 +236,7 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
 /* design/transport.md C5 (8e716999's mesh.wait(serial), on this bound): the map's serial waited on until
    it differs from *serial or the bridge's exit (ESRCH: its pid in the region 0 or another, or its process gone, read at
    every wake and every MESH_PAUSE_NS re-look, as mesh_records_read reads it), within the deadline bound_ns (0 or
-   UINT64_MAX: none given, MESH_PLATFORM_NS), past which the program ends (design/data-model.md section 6) */
+   UINT64_MAX: none given, MESH_PLATFORM_NS), past which the program ends (design/eager-execution.md, assumption A4) */
 int mesh_map_wait(uint64_t *serial,uint64_t bound_ns){
   struct hdr *m;size_t length;
   int error=mesh_open(0,&m,&length,NULL);

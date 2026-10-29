@@ -474,7 +474,7 @@ static int port_threads(struct port *port){
    where started, has its word (`told`: the epoch it has seen, or the guard it holds at) at `value`, woken by the
    thread's tell (port_tell), its guard's waiters woken as it begins and at each waking, within its deadline,
    MESH_PLATFORM_NS from its start: a thread that has not told by then is in a call that has not returned, and the
-   port's child, the waiting process, ends at once naming the wait (design/data-model.md section 6), its exit the
+   port's child, the waiting process, ends at once naming the wait (design/eager-execution.md, assumption A4), its exit the
    kernel's release of its port's objects and its parent's loss of the port (child_reaped) */
 static void port_wait(struct port *port,_Atomic uint64_t *told,uint64_t value){
   const struct mesh_deadline deadline=mesh_deadline("mesh-flow child: its port's progress thread holding a settle or the guard (port_wait)",0);

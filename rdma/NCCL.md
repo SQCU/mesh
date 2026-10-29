@@ -92,7 +92,7 @@ torch-mesh's `_stream`), which compiles them in its own process. Only the librar
   are read again (design/rubrics.md M3, C5). A phase's deadline is `MESH_PLATFORM_NS` after it began: a non-root's
   connect, then its first gather; the root's accepts, every rank's report and its first gather under one deadline made
   as its accepts begin; the second gather has its own `MESH_PLATFORM_NS`. Past a deadline the program ends, the wait and its
-  deadline named on stderr (design/data-model.md section 6: the operator, 2026-10-23, "no wait may ever run longer than
+  deadline named on stderr (design/eager-execution.md, assumption A4: the operator, 2026-10-23, "no wait may ever run longer than
   a deadline operand presented at the time the wait was constructed"); nothing waits on a peer that never comes.
 - While the process holds a lease of a bridge that stopped, its next lease (`ncclRemoteError`), communicator
   (`ncclInvalidUsage`: the process's own leases, which only it can free) and `ncclCommRegister` are refused naming it,
@@ -267,7 +267,7 @@ See [transport.md](../design/transport.md) for registration and credit units.
     and establishes reuse through typed dependencies or asynchronous bridge-owned retirement. GPU readers must also
     have finished; `ncclMeshMemReusable` proves only the DMA-read side, including registered reads not yet posted.
     Destination consumers have separate lifetimes. No receipt collective or remote ACK is required for retirement
-    (data-model.md section 6).
+    (design/pages-and-functions.md, Freeing 6-7).
   - **Metal 4.** A stream whose `argumentTable` is set encodes into the caller's `MTL4ComputeCommandEncoder`
     (`commandEncoder`) between the commands before and after it, every binding through that argument table (at least
     six buffer bindings; each dispatch's arguments a record of the library's ring, never `setBytes`), on pipelines of
@@ -387,7 +387,7 @@ kernel like a dma or networking send/rcv channel for more than 5 seconds without
 `ncclMeshStream.polls` is the most loads of a count one wait of the group makes (`rdma/mesh.metal`
 `mesh_wait_bounded`): the caller's bound for the group's crossings, carried per crossing. 0, or more than
 `NCCL_MESH_POLLS` (nccl.h), is `NCCL_MESH_POLLS`, in either form: torch-mesh's waits and the engine's encoded crossings
-pass 0. The bound is the wait's deadline (design/data-model.md section 6; a kernel has no clock, so its deadline is a
+pass 0. The bound is the wait's deadline (design/eager-execution.md, assumption A4; a kernel has no clock, so its deadline is a
 count of loads). A wait that reaches its bound records its entry, its channel and the bound in its communicator's
 failure words, and the program ends where the host first reads them, after the command buffer
 (`ncclCommGetAsyncError`, or the communicator's next group), naming the wait and its bound on stderr; a bound reached
@@ -570,7 +570,7 @@ required endpoint is a configuration error.
 ## Failures
 
 Every wait of a group has a deadline, `MESH_PLATFORM_NS` from the wait's start, past which the program ends, the wait
-and its deadline named on stderr: no retry and no recovery (design/data-model.md section 6; the operator, 2026-10-23:
+and its deadline named on stderr: no retry and no recovery (design/eager-execution.md, assumption A4; the operator, 2026-10-23:
 "no wait may ever run longer than a deadline operand presented at the time the wait was constructed; the presumed
 default is 5 seconds"). A group whose entries do not find room in its bridge's
 lists (`MESH_STREAM_ENTRIES` presented and not taken) waits for the bridge's `taken` to advance; a host-path group

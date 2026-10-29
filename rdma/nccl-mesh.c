@@ -1141,7 +1141,7 @@ ncclResult_t ncclGetUniqueId(ncclUniqueId *id) {
 static int revoked(ncclComm_t comm) { return __atomic_load_n(&comm->revoked, __ATOMIC_SEQ_CST); }
 /* design/rubrics.md M3, C5: each wait of a bootstrap a slice of MESH_BOOTSTRAP_SLICE_MS (a poll's timeout, a placed socket's
    SO_RCVTIMEO and SO_SNDTIMEO), after which the revoke and the phase's deadline (`until`) are read again: no wait of an
-   init lasts past its phase's deadline, blocking or not, the program ending there (design/data-model.md section 6),
+   init lasts past its phase's deadline, blocking or not, the program ending there (design/eager-execution.md, assumption A4),
    and a revoke ends a non-blocking one within a slice */
 /* what is left of the phase's deadline (`until`, MESH_PREPARATION_NS from the phase's start: it covers the ranks'
    preparation skew, so a peer still preparing is waited for); past it the program ends (mesh_library_expired), naming
@@ -1845,7 +1845,7 @@ static ncclResult_t comm_fail(struct ncclComm *comm, ncclResult_t result, const 
 /* the communicator's failure: the one it kept; a revoke; a stream it holds no longer its own (a bridge's restart, or a
    pairing lost and made again, opens every stream new: mesh-call.h mesh_stream_held); one its GPU work recorded in its
    failure words (its link lost, or a wait's bound reached after a revoke: nccl-mesh-metal.h METAL_*; a wait past its
-   bound, its deadline, ends the program: bound_reached, design/data-model.md section 6), kept now (comm_fail), so
+   bound, its deadline, ends the program: bound_reached, design/eager-execution.md, assumption A4), kept now (comm_fail), so
    ncclCommGetAsyncError reads it before any group runs on it; ncclSuccess where none.  Under group_lock */
 static ncclResult_t comm_failure(struct ncclComm *comm) {
   if (comm->failed) return comm_told(comm);
@@ -3240,7 +3240,7 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u, struct w
 /* Bind only true overwrite hazards. Original-input bindings are disjoint from reduction results. A landing that writes
    bytes an earlier SEND of its call reads (a COPY landing in place, a combine into its buffer) takes the compiled proof
    that the SEND's bytes arrived first (mesh-routed.c: a causal witness of that arrival), else the call fails as a
-   value, nothing presented: no wait reads `sent` (design/data-model.md section 6) */
+   value, nothing presented: no wait reads `sent` (design/pages-and-functions.md, Freeing 6-7) */
 static ncclResult_t bind_retirements(struct ncclComm *comm, const struct schedule *plans) {
   for (uint32_t h = 0; h < comm->count; h++) for (size_t k = 0; k < plans[h].ins; k++) {
     const struct message *m = plans[h].in + k;
@@ -3334,7 +3334,7 @@ static ncclResult_t room_wait(struct ncclComm *comm, const struct channel *ch, i
    them: the bridge takes an entry as it reads it while fewer than that of the list are taken and not done), so a group
    is presented whole or not at all; a send entry's bytes ready once `ready` passes them (word 0), a landing entry gated
    as gate_of says.  The wait for room (room_wait) holds no lock and ends by its deadline (design/rubrics.md M3, 10-18:
-   every wait killable; design/data-model.md section 6).  0; ncclSystemError where a list's entries are more than the bridge ever takes, the wait's
+   every wait killable; design/eager-execution.md, assumption A4).  0; ncclSystemError where a list's entries are more than the bridge ever takes, the wait's
    failure (a revoke, the holding's end, comm's failure: nothing presented, the call's failure alone); a refused
    presentation fails comm (its lists stand mid-group).  Under group_lock */
 static ncclResult_t present_group(struct metal_program *program, struct ncclComm *comm, struct schedule *plans) {
@@ -3487,7 +3487,7 @@ static mesh_pages count_of(_Atomic uint64_t *word) { return pages_from_word(atom
    its step's receive before it consumed), a combine's landing combined into its buffer (its first one, a call reading
    its send buffer in place, writing send op landed), a COPY's consumed once landed (it landed in place). Source and
    relay buffers remain owned by the data program until their consumers finish; publishing does not retire a SEND.
-   No SEND-completion wait is added here (design/data-model.md section 6). Every landing wait ends at an event: its
+   No SEND-completion wait is added here (design/pages-and-functions.md, Freeing 6-7). Every landing wait ends at an event: its
    count, a count's ~0 (the link lost, the bridge stopped), the end of its holding with work left (its stream no
    longer the communicator's own, mesh_stream_held: a pairing lost and made again, a bridge restarted), or a revoke,
    each read at every look; the landings and publications have one deadline, MESH_PLATFORM_NS from the group's start, past
@@ -4500,7 +4500,7 @@ static ncclResult_t epilogue(struct metal_program *program, const struct call *l
 
 /* the groups in flight whose entries are all published and consumed, in issue order: on each channel where the group
    published and its landings consumed; their results are encoded and the groups retired. This does not retire
-   outgoing DMA: source and relay lease lifetimes are the data program's (design/data-model.md section 6) */
+   outgoing DMA: source and relay lease lifetimes are the data program's (design/pages-and-functions.md, Freeing 6-7) */
 static ncclResult_t retire(struct metal_program *program) {
   ncclResult_t result = ncclSuccess;
   while (inflight && !result) {
