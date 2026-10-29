@@ -304,7 +304,7 @@ LiteRT receives the shared recording device and queue. Pipelines retain their re
 `MetalRecordingAdopt` and its blanket serialization are deleted. The LiteRT binding stage supplies
 `MetalBindingView` records with each external tensor's buffer, offset and byte extent. `MetalRecordViews`
 applies those declarations during capture. Internal buffers use their binding extent; pointer reaches still
-require `MetalDispatchReaching` declarations. An unreflected pipeline fails preparation.
+require `MetalDispatchAccesses` declarations. An unreflected pipeline fails preparation.
 
 One access-order calculation serves individual records, repeated slots and the complete function. It uses
 byte overlap and the actual invocation's slot, including output offsets. It does not equate sharing an

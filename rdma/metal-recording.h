@@ -33,7 +33,7 @@ static inline NSUInteger MetalInvocationOffset(NSUInteger offset, NSUInteger str
 // A recording device over `device`, which the caller makes and passes in: the command queues and
 // compute pipelines made from it record the dispatches their compute encoders issue inside
 // MetalRecord's `encode` (each pipeline's reflection kept for the dataflow, with the reaches each
-// dispatch declares: MetalDispatchReaching), and run them otherwise.  Every other request is
+// dispatch declares: MetalDispatchAccesses), and run them otherwise.  Every other request is
 // `device`'s.  A pipeline it did not make (a library's, such as libnccl-mesh's collectives) is
 // refused inside `encode`: what it issues is not the program's.
 id<MTLDevice> MetalRecordingDevice(id<MTLDevice> device, BOOL indirectPipelines);
@@ -119,8 +119,8 @@ NSData *MetalViewMappedReaches(id<MTLBuffer> buffer, NSUInteger offset, const NS
 // add no dependency. Transport uses this declaration for its shared counters.
 void MetalEncoderReaches(id<MTL4ComputeCommandEncoder>, const struct MetalReach *, size_t count);
 // docs/kernels.md Any program
-void MetalDispatchReaching(id<MTLComputeCommandEncoder> encoder, MTLSize groups, MTLSize threads,
-    const struct MetalReach *reaches, size_t count);
+void MetalDispatchAccesses(id<MTLComputeCommandEncoder> encoder, MTLSize grid, MTLSize threads,
+    BOOL threadGrid, const struct MetalReach *reaches, size_t count);
 // Records the compute commands `encode` issues through the queues of `device` (a recording device)
 // as one invocation, and prepares `invocations` of them in `form`.  The replay, or NULL with the
 // reason on stderr.

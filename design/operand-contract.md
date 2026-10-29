@@ -466,10 +466,26 @@ body or copying the row to change its layout. Its last tile masks absent
 channels. Native row offsets and LiteRT slice offsets use full address width.
 
 The partial record still contains two scalars and exactly the logical number
-of values. LiteRT's provider uses four-lane slices, so its input and output
-bindings include physical tail padding; that padding does not enter the
-partial records. Both adapters call the shared merge. The importer no longer
-requires widths divisible by 128.
+of values. Provider bindings may include physical tail padding; that padding
+does not enter the partial records. Both adapters call the shared merge. The
+importer no longer requires widths divisible by 128.
+
+LiteRT partial rows now carry explicit storage operands from
+`configs/litert-reference-graph.json`: physical axis order, scalar type, scalar
+byte width and lanes per vector, separately for values, normalizers and merged
+results. Preparation binds symbolic extents and builds `MetalTensorLayout`.
+That same layout emits the shader index expression and the recorder's access
+ranges through `MetalDispatchAccesses`. A holder writes directly into its
+declared part of the shared record. Non-unit leading axes and batch extents on
+several axes no longer use the old flattened slice formula. Output padding is
+zeroed by the existing merge command. Zero-channel exports retain their two
+summary scalars; their empty merged value emits no command.
+
+Native stage extents use integers, named configuration operands and products
+of those operands. The old `per_sequence` and `batched` flags are gone. Their
+values, layouts and launch geometry are resolved before recording. An explicit
+threadgroup size is not silently reduced after compiling its tile arithmetic.
+Execution gains no descriptor parser, layout copy or launch selector.
 
 Preparation on 2026-10-28 compiled native merges from width 1 through 65,537,
 contributor counts through 1,025, and partial SIMD launches. The ordinary
@@ -479,13 +495,21 @@ prepared tiled row export and merge stages, including odd widths and width
 producers also compiled. Native rank and Goal A built. No numerical execution
 or throughput/latency result is established by this preparation.
 
+The provider-layout extension also prepared non-unit leading axes, symbolic
+batch extents on one and several axes, zero channels, odd widths and width
+65,537. The actual importer and native shader compiler consumed independently
+declared half, bfloat and float layouts with two-, four- and eight-lane storage.
+Sampled indices matched the provider's physical ordering. This establishes the
+adapter's lowering and source compilation, not support for those alternate
+types in the packaged delegate or numerical equivalence of a complete model.
+
 This removes limits from the merge of already-produced partial results. It
 does not yet make every producer width-independent: the native forward
 attention kernels still truncate channel dimensions, and their fused merge
-still needs shared weight storage sized for its contributor count. The
-LiteRT partial-row adapter also still assumes a leading axis of one. That
-provider layout must become an explicit lowering operand before this last
-filter can be removed. Placing the partial numerical work across nodes remains
+still needs shared weight storage sized for its contributor count. LiteRT's
+draw/kept adapters still use the old four-lane slice indexing. The delegate's
+internal tensor views also remain a separate integration requirement. Placing
+the partial numerical work across nodes remains
 part of the graph's reduction lowering, rather than a property of this merge.
 
 CPU contraction workspace is now part of that boundary. Preparation asks BNNS

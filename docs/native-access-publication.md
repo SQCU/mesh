@@ -273,13 +273,16 @@ lengths at this boundary, and reflection could restore a broader access mode.
 All view construction and missing-input errors occur during preparation. No view
 lookup, allocation, new wait or validation is added to numerical submission.
 
-The raw recorder requires views too. LiteRT native stages now supply the logical
-`MeshOperand.bytes` for each bound invocation. External delegate tensors already
+The raw recorder requires views too. LiteRT native stages supply the logical
+`MeshOperand.bytes` for each bound invocation. Partial-row export and merge
+stages carry explicit provider layouts; the shared `MetalTensorLayout` emits
+their shader indexing and access ranges, including the holder's output offset
+and the normalizer's skipped vector lanes. External delegate tensors already
 supply their typed storage views. The packaged LiteRT delegate does **not** yet
 export its internal views: `InferenceContext` places tensors at offsets in shared
 buffers, and `MetalArguments::Encode` passes only buffer and offset. Those
 internal bindings now fail preparation. The provider must carry its tensor
-extent/access metadata to `MetalDispatchReaching` or scoped `MetalRecordViews`;
+extent/access metadata to `MetalDispatchAccesses` or scoped `MetalRecordViews`;
 restoring a buffer-tail extent would recreate the defect. This is an outstanding
 backend integration requirement before numerical execution, not a completed
 LiteRT capability or a performance result.

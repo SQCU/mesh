@@ -423,10 +423,14 @@ composition types that remain are in microbench's
 | `MatrixStep` | `(MTLCommandBuffer) -> Void`, a bound numerical encoding function. |
 
 [metal_recording.h](../../../metal-microbench/metal_recording.h) provides `MetalRecordingDevice`,
-`MetalDispatchReaching`, `MetalRecord`, `MetalSchedule` and `MetalReplayFree`. LiteRT receives the recording
+`MetalDispatchAccesses`, `MetalRecord`, `MetalSchedule` and `MetalReplayFree`. LiteRT receives the recording
 device and queue, so its pipelines retain reflected read/write modes. `MetalBindingView` and `MetalRecordViews`
 carry its declared external tensor extents into capture. `MetalRecordMark` marks crossings. `MetalOperand`
 supplies slots, stride, instance count and output offset. `MetalReach` supplies subranges and access flags.
+LiteRT partial-row stages carry a `MetalTensorLayout` per binding. The layout
+supplies both shader indices and the ranges passed to `MetalDispatchAccesses`;
+its `threadGrid` operand distinguishes thread counts from group counts during
+preparation. The former groups-only `MetalDispatchReaching` wrapper is removed.
 `MetalReplay` retains commands and residency. `MetalForm` selects indirect, encoded or serial preparation;
 `MetalCrossing` binds a collective at a recorded mark during preparation.
 
