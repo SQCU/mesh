@@ -82,9 +82,10 @@ def main():
     ticks = steps + L - 1
     from torch_mesh.backend import prepare_fragments
     broadcast = Call(BROADCAST, X.numel(), X.dtype, root=0)
-    inputs, _ = prepare_fragments([(broadcast, X, X)], group)
+    # the broadcast's lowered fragments, each with the tensors it is issued with (design/eager-execution.md#what-follows)
+    inputs, declared = prepare_fragments([(broadcast, X, X)], group)
     program = execution_sequence([inputs, *ordered], O)
-    bind(configuration, [[broadcast], *groups], program.realize)
+    bind(configuration, [declared, *groups], program.realize)
     started = now()
     program.forward()
     completion = program.completion()
