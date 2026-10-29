@@ -673,6 +673,10 @@ struct attach {
   struct mesh_ctx context;
   struct lease *leases;
   size_t count, room;
+  /* each arena page's lease, its index + 1 (0: none), so finding a byte's lease is its page's load (lease_at); and the
+     leases returned and not yet given back (leases_reap) */
+  uint32_t *lease_of;
+  size_t returned;
   uint64_t comms;
   /* whether the library made a Metal buffer over the region (a lease's, lease_buffer; a holding's counts', channel_buffer):
      the caller's GPU work, and its residency set, may hold those pages after the buffer is released, so such an attach
@@ -758,7 +762,7 @@ static void attach_settle(void) {
   struct attach *a = attaches;
   if (!a || a->count || a->comms || atomic_load(&a->wrapped) || !attach_expired(a)) return;
   mesh_detach(&a->context);
-  free(a->leases);
+  free(a->leases); free(a->lease_of);
   free(a);
   attaches = NULL;
 }
@@ -840,6 +844,7 @@ static ncclResult_t comm_refused(int status, const char *name) {
    the bridge posts nothing more of the holding and frees the stream); under attach_lock */
 static int lease_read_sample(void *, uint32_t, struct mesh_lease_retire_sample *);
 static void leases_reap(struct attach *);
+static struct lease *lease_at(const void *ptr, struct attach **held);
 static void comm_let_go(struct ncclComm *comm) {
   if (!comm->binding) return;
   comm->binding = 0;
@@ -1577,15 +1582,35 @@ static int lease_detachable(void *context, const struct mesh_lease_retire_dep *d
 static int lease_returnable(struct attach *a, struct lease *l) {
   return mesh_lease_retire_detachable(&l->reads, lease_read_sample, lease_detachable, a);
 }
+/* the arena page `ptr` lies in, UINT32_MAX outside the arena */
+static uint32_t arena_page(const struct attach *a, const void *ptr) {
+  const struct hdr *m = a->context.M;
+  const uintptr_t data = (uintptr_t)m + m->data_off, at = (uintptr_t)ptr;
+  const uint64_t page = at < data ? UINT64_MAX : (at - data) / m->pgsz;
+  return page < mesh_arena_pages(m) ? (uint32_t)page : UINT32_MAX;
+}
+/* lease `i`'s pages named `value` in the page index (i + 1: its own; 0: none) */
+static void lease_mark(struct attach *a, size_t i, uint32_t value) {
+  const struct lease *l = a->leases + i;
+  const uint32_t first = arena_page(a, l->address), pages = (uint32_t)(l->bytes / a->context.M->pgsz);
+  for (uint32_t p = 0; first != UINT32_MAX && p < pages; p++) a->lease_of[first + p] = value;
+}
+/* returned lease `i` given back to the region where its reads are done (lease_returnable), the last lease moved to its
+   place: 1, else 0 (it stays, returned) */
+static int lease_give(struct attach *a, size_t i) {
+  struct lease *l = a->leases + i;
+  if (!l->returned || !lease_returnable(a, l) || mesh_lease_return(&a->context, l->row)) return 0;
+  if (l->buffer) metal_release(l->buffer);
+  mesh_lease_retire_destroy(&l->reads);
+  lease_mark(a, i, 0);
+  a->returned--;
+  *l = a->leases[--a->count];
+  if (i < a->count) lease_mark(a, i, (uint32_t)i + 1);
+  return 1;
+}
+/* every returned lease whose reads are done given back (a lease returned with reads outstanding waits here) */
 static void leases_reap(struct attach *a) {
-  for (size_t i = 0; i < a->count;) {
-    struct lease *l = a->leases + i;
-    if (!l->returned || !lease_returnable(a, l)) { i++; continue; }
-    if (mesh_lease_return(&a->context, l->row)) { i++; continue; }
-    if (l->buffer) metal_release(l->buffer);
-    mesh_lease_retire_destroy(&l->reads);
-    *l = a->leases[--a->count];
-  }
+  for (size_t i = 0; a->returned && i < a->count;) i += !lease_give(a, i);
 }
 
 /* a lease of the region: its whole pages covering `size` (one page for 0), already registered on every device of the
@@ -1601,7 +1626,8 @@ ncclResult_t ncclMemAlloc(void **ptr, size_t size) {
   if (!status) leases_reap(a);
   if (status)
     result = attach_fail(status, "ncclMemAlloc of %zu bytes", size);
-  else if (a->count == a->room && lease_room(a))
+  else if ((a->count == a->room && lease_room(a)) ||
+           (!a->lease_of && !(a->lease_of = calloc(mesh_arena_pages(a->context.M), sizeof *a->lease_of))))
     result = fail(ncclSystemError, "out of memory");
   else if ((status = mesh_section_create(&a->context, bytes, 1, &lease))) {
     const struct hdr *m = a->context.M;
@@ -1613,6 +1639,7 @@ ncclResult_t ncclMemAlloc(void **ptr, size_t size) {
   } else {
     *ptr = mesh_section_address(&a->context, lease, 0);
     a->leases[a->count++] = (struct lease){.address = *ptr, .row = lease.first, .bytes = (size_t)lease.pages * a->context.M->pgsz};
+    lease_mark(a, a->count - 1, (uint32_t)a->count);
   }
   pthread_mutex_unlock(&attach_lock);
   return result;
@@ -1633,13 +1660,10 @@ ncclResult_t ncclMeshRegionExpired(int *expired) {
 ncclResult_t ncclMemFree(void *ptr) {
   if (!ptr) return ncclSuccess;
   pthread_mutex_lock(&attach_lock);
-  int found = 0;
-  for (struct attach *a = attaches; a && !found; a = a->next)
-    for (size_t i = 0; i < a->count && !found; i++)
-      if (a->leases[i].address == ptr && !a->leases[i].returned) {
-        a->leases[i].returned = found = 1;
-        leases_reap(a);
-      }
+  struct attach *a = NULL;
+  struct lease *l = lease_at(ptr, &a);
+  const int found = l && l->address == ptr && !l->returned;
+  if (found) { l->returned = 1; a->returned++; lease_give(a, (size_t)(l - a->leases)); }
   attach_settle();
   pthread_mutex_unlock(&attach_lock);
   return found ? ncclSuccess : fail(ncclInvalidArgument, "ncclMemFree of %p: no live lease of this process", ptr);
@@ -1647,14 +1671,13 @@ ncclResult_t ncclMemFree(void *ptr) {
 
 /* the lease holding ptr and its attach (*held, where held is not NULL), under attach_lock (NULL: none) */
 static struct lease *lease_at(const void *ptr, struct attach **held) {
-  for (struct attach *a = attaches; a; a = a->next)
-    for (size_t i = 0; i < a->count; i++) {
-      const uintptr_t at = (uintptr_t)ptr, first = (uintptr_t)a->leases[i].address;
-      if (at >= first && at < first + a->leases[i].bytes) {
-        if (held) *held = a;
-        return a->leases + i;
-      }
+  for (struct attach *a = attaches; a; a = a->next) {
+    const uint32_t page = a->lease_of ? arena_page(a, ptr) : UINT32_MAX, k = page == UINT32_MAX ? 0 : a->lease_of[page];
+    if (k) {
+      if (held) *held = a;
+      return a->leases + k - 1;
     }
+  }
   return NULL;
 }
 
