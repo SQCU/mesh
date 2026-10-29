@@ -816,8 +816,9 @@ static int TensorPositionCompare(const void *left,const void *right) {
     return (a>b)-(a<b);
 }
 MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *> *uses,
-    NSArray<MetalTensorLayout *> *targets,NSArray<MetalTensorLayout *> *values,NSArray<NSNumber *> *widths) {
-    NSCParameterAssert(uses.count==targets.count&&values.count==widths.count);
+    NSArray<MetalTensorLayout *> *targets,NSArray<NSArray<NSNumber *> *> *footprints,
+    NSArray<MetalTensorLayout *> *values,NSArray<NSNumber *> *widths) {
+    NSCParameterAssert(uses.count==targets.count&&uses.count==footprints.count&&values.count==widths.count);
     struct TensorPosition *nodes=calloc(count?count:1,sizeof *nodes);
     struct TensorPlacementGroup *groups=calloc(count?count:1,sizeof *groups);
     MetalTensorLayout *result=nil;
@@ -853,6 +854,12 @@ MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *
         const NSUInteger root=TensorRoot(nodes,i);const NSInteger offset=nodes[i].delta;
         groups[root].low=MIN(groups[root].low,offset);groups[root].high=MAX(groups[root].high,offset);
     }
+    for(NSUInteger k=0;k<uses.count;k++)if(uses[k].count&&[footprints[k][1] unsignedIntegerValue]) {
+        const NSUInteger first=(NSUInteger)[uses[k] index:0],root=nodes[first].parent;
+        const NSInteger low=nodes[first].delta+[footprints[k][0] integerValue]-[targets[k] index:0];
+        groups[root].low=MIN(groups[root].low,low);
+        groups[root].high=MAX(groups[root].high,low+[footprints[k][1] integerValue]-1);
+    }
     for(NSUInteger k=0;k<values.count;k++) {
         MetalTensorLayout *value=values[k];const NSUInteger width=widths[k].unsignedIntegerValue;
         for(NSUInteger i=0;i<value.count;i+=width) {
@@ -871,6 +878,15 @@ MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *
         }
         NSMutableData *data=[NSMutableData dataWithLength:count*sizeof(NSInteger)];NSInteger *out=data.mutableBytes;
         for(NSUInteger i=0;i<count;i++)out[i]=nodes[i].delta+=groups[nodes[i].parent].base;
+        // A footprint may cover its own values and padding, but no other live
+        // value, including one connected by another overlapping constraint.
+        for(NSUInteger k=0;k<uses.count;k++)if(uses[k].count&&[footprints[k][1] unsignedIntegerValue]) {
+            MetalTensorLayout *use=uses[k];NSMutableIndexSet *selected=[NSMutableIndexSet indexSet];
+            for(NSUInteger i=0;i<use.count;i++)[selected addIndex:(NSUInteger)[use index:i]];
+            const NSInteger low=out[(NSUInteger)[use index:0]]-[targets[k] index:0]+[footprints[k][0] integerValue];
+            const NSInteger end=low+[footprints[k][1] integerValue];
+            for(NSUInteger i=0;i<count;i++)if(out[i]>=low&&out[i]<end&&![selected containsIndex:i])goto finished;
+        }
         // Distinct source values cannot occupy the same physical scalar slot.
         qsort(nodes,count,sizeof *nodes,TensorPositionCompare);
         for(NSUInteger i=1;i<count;i++)if(nodes[i-1].delta==nodes[i].delta)goto finished;

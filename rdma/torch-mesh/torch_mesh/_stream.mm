@@ -2029,12 +2029,14 @@ struct Drained {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   install_region_allocator();
   module.def("place_layout",[](NSUInteger count,const std::vector<TensorLayout> &uses,
-      const std::vector<TensorLayout> &targets,const std::vector<TensorLayout> &values,const std::vector<NSInteger> &widths)->pybind11::object {
+      const std::vector<TensorLayout> &targets,const std::vector<std::vector<NSInteger>> &footprints,
+      const std::vector<TensorLayout> &values,const std::vector<NSInteger> &widths)->pybind11::object {
     auto layouts=[](const std::vector<TensorLayout> &items) {
       NSMutableArray *result=[NSMutableArray array];for(const auto &item:items)[result addObject:item.value];return result;
     };
     @try {
-      MetalTensorLayout *placed=MetalTensorPlace(count,layouts(uses),layouts(targets),layouts(values),tensorNumbers(widths));
+      NSMutableArray *reserved=[NSMutableArray array];for(const auto &span:footprints)[reserved addObject:tensorNumbers(span)];
+      MetalTensorLayout *placed=MetalTensorPlace(count,layouts(uses),layouts(targets),reserved,layouts(values),tensorNumbers(widths));
       return placed?pybind11::cast(TensorLayout(placed)):pybind11::none();
     } @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
   }, pybind11::call_guard<Drained>());

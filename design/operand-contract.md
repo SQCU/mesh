@@ -1627,9 +1627,8 @@ numerical commands ran.
 
 The boundary remains incomplete. The empty-owner one-slot placeholder remains an
 implicit API accommodation and needs constraint/empty-domain lowering.
-Placement across all future consumer constraints remains necessary:
-sequential preparation can still convert a flexible native output when a later
-fixed-layout provider could have guided its original placement.
+The shared placement solver still uses per-value preparation metadata.
+Incompatible requirements also need cost-directed placement of conversion edges.
 Numerical execution remains deferred until these edges are reconciled.
 
 Selections now retain an ordered `steps` sequence of cuts, permutations and
@@ -1666,8 +1665,7 @@ Preparation retained reversed source columns and a destination reshape whose
 column identities vary by row. The composed indices matched those identities,
 and both operands shared their backing without conversion. The earlier repeated
 grouping also retained its indices. Libraries and native callers built; no
-numerical commands ran. Global producer placement and empty-domain API
-constraints are still separate work.
+numerical commands ran. Empty-domain API constraints remain separate work.
 
 Named provider, native and collective uses now retain their semantic selection
 beside their shared backing. A selected use composes with the actual producer's
@@ -1690,6 +1688,35 @@ earlier independent collective domains. Matching encodings shared their pages;
 configured scalar changes retained the shared conversion operation. The actual
 reference model's embedding signatures supplied decode and prefill output
 domains. Libraries and native callers built. No numerical commands ran.
+
+Provider declaration, global placement and command emission are now distinct
+preparation phases. Each provider compiles once and supplies its actual layout,
+encoding and footprint. Native declarations and collective domains establish
+the same named storage identities. All compatible consumer requirements then
+feed `MetalTensorPlace`, already used by FX. Native shaders and conversion
+commands are emitted only after that placement. Alias selections survive the
+root's change of storage; they do not become separate allocations.
+
+Native scalar parameters are resolved before placement. A producer's provisional
+output type is not an input to that choice. Explicit configuration takes
+precedence over an inherited encoding. A required scalar conversion remains an
+ordinary compiled data edge rather than a false storage equality.
+
+The common placement operand now includes each use's reserved write footprint.
+Provider padding reserves space beside its logical values; another live value
+cannot occupy those lanes. FX supplies empty additional footprints for its
+logical-only accesses. The provider binder still checks its prepared result
+against the same footprint before emitting a necessary conversion. No footprint
+check or layout matching is added to execution.
+
+Preparation placed flexible native outputs directly in future provider layouts.
+Disjoint three-value outputs each retained a fourth padding lane, so their
+provider writes needed no conversion. Named selections and inherited half
+encodings kept shared backing; an explicit float encoding retained its required
+conversion edges. The shared libraries, native callers and FX extension built.
+No numerical commands ran. Per-value placement metadata and cost-directed
+handling of incompatible requirements remain unfinished; this is feasibility
+integration, not evidence of optimal placement or measured performance.
 
 ### Encoded numerical operands
 

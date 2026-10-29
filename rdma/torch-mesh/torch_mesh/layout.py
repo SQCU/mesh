@@ -114,7 +114,7 @@ def place(graph, placements, fixed):
         # which that placement already satisfies.
         flexible = [i for i, (_, _, kind) in enumerate(group) if kind in ('strided', 'positive_strided')]
         exact = [i for i in range(len(group)) if i not in flexible]
-        placed = _stream.place_layout(count, [uses[i] for i in exact], [targets[i] for i in exact], typed, fields)
+        placed = _stream.place_layout(count, [uses[i] for i in exact], [targets[i] for i in exact], [(0, 0)] * len(exact), typed, fields)
         if placed is not None and flexible:
             scalar_domain = _stream.TensorLayout((count,), (1,))
             needs_layout = False
@@ -124,7 +124,7 @@ def place(graph, placements, fixed):
                 needs_layout |= view != target
                 targets[i] = target.components(widths[i])
             if needs_layout:
-                placed = _stream.place_layout(count, uses, targets, typed, fields)
+                placed = _stream.place_layout(count, uses, targets, [(0, 0)] * len(uses), typed, fields)
         if placed is None:
             continue
         width = domain.element_size() // unit
