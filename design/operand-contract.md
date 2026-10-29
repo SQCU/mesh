@@ -179,11 +179,37 @@ entries and 145 bytes of coordinate expressions, the same as its smaller
 and serialization agreed on smaller declarations. Metal source compiled without
 allocating tensor payload or submitting numerical work.
 
-A coupled selection with no extracted repetition can still materialize its
-selected domain. Non-affine alias inversion and the distributed ownership gap
-under exact partition boundaries also remain unfinished. An irreducible table
-supplied by a caller occupies its own domain; reshaping, slicing or permuting
-it no longer duplicates that table across surrounding dimensions.
+Alias placement now composes independent mapped factors through the same
+selection operation as affine factors. The declaration supplies the source
+relation and assigned pages. Preparation resolves the selected coordinates,
+then applies their cuts, reordering and repetition to the assigned relation.
+An affine outer extent does not repeat the inner map or acquire a table of its
+own. This also covers an affine cut through an irregular source axis.
+
+The general inverse no longer builds a dictionary over every producer element.
+It bounds intervals of the declared coordinate expressions and resolves affine
+runs directly. Range summaries cover only the supplied maps. Repeated address
+patterns restrict the search to their last period, preserving the existing
+representative for aliased values. Repeated selections likewise emit one period
+of output indices. All of this is preparation work; execution consumes the
+resulting flat layout. Poorly separated relations can still need many interval
+searches.
+
+Preparation on 2026-10-29 rebased an 824,633,720,688-element mapped cut with four
+map entries, including reordered columns, repeated columns and a reversed
+axis. A 687,194,767,360-element affine cut through a mapped source retained no
+map entries. A cut through two mapped axes covered 4,123,168,603,740 elements
+with seven map entries. Sparse aliases into a 2,061,584,302,080-element producer
+resolved without enumerating that producer; a trillion-element repeated alias
+needed fifteen output entries. Smaller declarations preserved exact ordered
+transfers, dependency spans, typed views and serialization. Their Metal index
+source compiled. No tensor payload was allocated or numerical work submitted.
+
+A coupled selection or alias with no compact composition can still materialize
+its selected domain. The distributed ownership gap under exact partition
+boundaries also remains unfinished. An irreducible table supplied by a caller
+occupies its own domain; reshaping, slicing or permuting it no longer duplicates
+that table across surrounding dimensions.
 
 ## Place values for their consumers
 

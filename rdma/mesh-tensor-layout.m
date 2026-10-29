@@ -171,20 +171,23 @@ static NSInteger TensorEvaluate(id expression,NSUInteger logical) {
     NSInteger q=TensorFloor(value,scale);return [op isEqual:@"div"]?q:value-q*scale;
 }
 struct TensorExpressionRange { NSInteger low,high; };
-static struct TensorExpressionRange TensorRange(id expression,NSUInteger count) {
+static struct TensorExpressionRange TensorRangeBetween(id expression,NSUInteger first,NSUInteger end) {
     if(TensorConstant(expression)){NSInteger v=[expression integerValue];return (struct TensorExpressionRange){v,v};}
-    if([expression isEqual:@"i"])return (struct TensorExpressionRange){0,(NSInteger)(count?count-1:0)};
+    if([expression isEqual:@"i"])return (struct TensorExpressionRange){(NSInteger)first,(NSInteger)(end?end-1:first)};
     NSString *op=expression[0];
     if([op isEqual:@"add"]) {
         struct TensorExpressionRange sum={0,0};
-        for(NSUInteger k=1;k<[expression count];k++){struct TensorExpressionRange v=TensorRange(expression[k],count);sum.low+=v.low;sum.high+=v.high;}
+        for(NSUInteger k=1;k<[expression count];k++){struct TensorExpressionRange v=TensorRangeBetween(expression[k],first,end);sum.low+=v.low;sum.high+=v.high;}
         return sum;
     }
-    struct TensorExpressionRange v=TensorRange(expression[1],count);NSInteger n=[expression[2] integerValue];
+    struct TensorExpressionRange v=TensorRangeBetween(expression[1],first,end);NSInteger n=[expression[2] integerValue];
     if([op isEqual:@"mul"])return (struct TensorExpressionRange){MIN(v.low*n,v.high*n),MAX(v.low*n,v.high*n)};
     NSInteger low=TensorFloor(v.low,n),high=TensorFloor(v.high,n);
     if([op isEqual:@"div"])return (struct TensorExpressionRange){low,high};
     return low==high?(struct TensorExpressionRange){v.low-low*n,v.high-low*n}:(struct TensorExpressionRange){0,n-1};
+}
+static struct TensorExpressionRange TensorRange(id expression,NSUInteger count) {
+    return TensorRangeBetween(expression,0,count);
 }
 static id TensorBound(id expression,NSUInteger count) {
     if(TensorConstant(expression))return expression;
@@ -255,8 +258,8 @@ static struct TensorPiece TensorExpressionPiece(id expression,NSUInteger at,NSUI
     NSUInteger run=value.step>0?(NSUInteger)((n-1-r)/value.step+1):(NSUInteger)(r/-value.step+1);
     return (struct TensorPiece){remainder?r:q,remainder?value.step:0,MIN(value.end,at+run)};
 }
-static struct TensorPiece TensorLayoutPiece(MetalTensorLayout *layout,NSUInteger at) {
-    struct TensorPiece result={layout.offset,0,layout.count};NSArray *coordinates=layout.coordinates;
+static struct TensorPiece TensorLayoutPiece(MetalTensorLayout *layout,NSArray *coordinates,NSUInteger at,NSUInteger end) {
+    struct TensorPiece result={layout.offset,0,end};
     for(NSUInteger d=0;d<coordinates.count;d++) {
         struct TensorPiece part=TensorExpressionPiece(coordinates[d],at,result.end);
         const NSInteger *map=((NSData *)layout.maps[@(d)]).bytes;
@@ -273,9 +276,9 @@ static struct TensorPiece TensorLayoutPiece(MetalTensorLayout *layout,NSUInteger
     return result;
 }
 static NSData *TensorExpressionSpans(MetalTensorLayout *layout,BOOL ordered) {
-    NSMutableData *result=[NSMutableData data];
+    NSMutableData *result=[NSMutableData data];NSArray *coordinates=layout.coordinates;
     for(NSUInteger at=0;at<layout.count;) {
-        struct TensorPiece piece=TensorLayoutPiece(layout,at);NSUInteger count=piece.end-at;
+        struct TensorPiece piece=TensorLayoutPiece(layout,coordinates,at,layout.count);NSUInteger count=piece.end-at;
         BOOL range=piece.step==1||(!ordered&&(piece.step==0||piece.step==-1));
         NSUInteger entries=range?1:count;
         for(NSUInteger k=0;k<entries;k++) {
@@ -288,6 +291,69 @@ static NSData *TensorExpressionSpans(MetalTensorLayout *layout,BOOL ordered) {
         at=piece.end;
     }
     return result;
+}
+// Alias inversion searches the declared relation, not a table over every
+// logical element. These range summaries cover only maps supplied by the
+// declaration; affine factors need no inverse storage. Neither the summaries
+// nor the search survives preparation.
+static struct TensorExpressionRange TensorRangeUnion(struct TensorExpressionRange a,struct TensorExpressionRange b) {
+    return (struct TensorExpressionRange){MIN(a.low,b.low),MAX(a.high,b.high)};
+}
+static NSArray *TensorMapRanges(MetalTensorLayout *layout) {
+    NSMutableArray *ranges=[NSMutableArray array];
+    for(NSUInteger d=0;d<layout.indexShape.count;d++) {
+        NSData *map=layout.maps[@(d)];
+        if(!map){[ranges addObject:NSNull.null];continue;}
+        NSUInteger count=map.length/sizeof(NSInteger),width=1;while(width<count)width*=2;
+        NSMutableData *data=[NSMutableData dataWithLength:2*width*sizeof(struct TensorExpressionRange)];
+        struct TensorExpressionRange *tree=data.mutableBytes;const NSInteger *values=map.bytes;
+        for(NSUInteger i=0;i<width;i++)tree[width+i]=i<count?(struct TensorExpressionRange){values[i],values[i]}:
+            (struct TensorExpressionRange){NSIntegerMax,NSIntegerMin};
+        for(NSUInteger i=width;i-->1;)tree[i]=TensorRangeUnion(tree[i*2],tree[i*2+1]);
+        [ranges addObject:data];
+    }
+    return ranges;
+}
+static struct TensorExpressionRange TensorMapRange(NSData *data,NSUInteger first,NSUInteger end) {
+    const struct TensorExpressionRange *tree=data.bytes;
+    NSUInteger width=data.length/(2*sizeof *tree),a=width+first,b=width+end;
+    struct TensorExpressionRange result={NSIntegerMax,NSIntegerMin};
+    for(;a<b;a/=2,b/=2) {
+        if(a&1)result=TensorRangeUnion(result,tree[a++]);
+        if(b&1)result=TensorRangeUnion(result,tree[--b]);
+    }
+    return result;
+}
+static BOOL TensorInverseIndex(MetalTensorLayout *layout,NSArray *coordinates,NSArray *maps,
+    NSUInteger first,NSUInteger end,NSInteger address,NSUInteger *index) {
+    if(first==end)return NO;
+    struct TensorExpressionRange bounds={layout.offset,layout.offset};
+    for(NSUInteger d=0;d<coordinates.count;d++) {
+        struct TensorExpressionRange range=TensorRangeBetween(coordinates[d],first,end);
+        if(maps[d]!=NSNull.null) {
+            range.low=MAX(0,range.low);range.high=MIN([layout.indexShape[d] integerValue]-1,range.high);
+            if(range.high<range.low)return NO;
+            range=TensorMapRange(maps[d],range.low,range.high+1);
+        } else {
+            NSInteger step=[layout.strides[d] integerValue];
+            range=(struct TensorExpressionRange){MIN(range.low*step,range.high*step),MAX(range.low*step,range.high*step)};
+        }
+        bounds.low+=range.low;bounds.high+=range.high;
+    }
+    if(address<bounds.low||address>bounds.high)return NO;
+    struct TensorPiece piece=TensorLayoutPiece(layout,coordinates,first,end);
+    if(piece.end==end) {
+        NSInteger difference=address-piece.value;
+        if(!piece.step){if(difference)return NO;*index=end-1;return YES;}
+        NSInteger at=difference/piece.step;
+        if(difference%piece.step||at<0||(NSUInteger)at>=end-first)return NO;
+        *index=first+(NSUInteger)at;return YES;
+    }
+    // Use the last logical representative when several producer positions
+    // name one value, preserving the alias convention of the former inverse.
+    NSUInteger middle=first+(end-first)/2;
+    return TensorInverseIndex(layout,coordinates,maps,middle,end,address,index)||
+        TensorInverseIndex(layout,coordinates,maps,first,middle,address,index);
 }
 // Prove aligned adjacent lanes with the same integer algebra used for source
 // emission. Unknown alignment yields scalar accesses, never a runtime check.
@@ -486,6 +552,23 @@ static struct TensorPeriod TensorExpressionPeriod(id expression,NSUInteger count
     if(value.period>count/factor)return (struct TensorPeriod){0,0};
     value.period*=factor;value.delta=[op isEqual:@"mod"]?0:value.delta*(NSInteger)factor/n;
     return value;
+}
+static struct TensorPeriod TensorLayoutPeriod(MetalTensorLayout *layout,NSArray *coordinates) {
+    NSMutableArray *linear=[NSMutableArray array];NSUInteger period=1;
+    for(NSUInteger d=0;d<coordinates.count;d++) {
+        if(!layout.maps[@(d)]){[linear addObject:TensorScale(coordinates[d],[layout.strides[d] integerValue])];continue;}
+        struct TensorPeriod part=TensorExpressionPeriod(coordinates[d],layout.count);
+        if(!part.period||part.delta)return (struct TensorPeriod){0,0};
+        NSUInteger factor=part.period/TensorGCD(period,part.period);
+        if(period>layout.count/factor)return (struct TensorPeriod){0,0};
+        period*=factor;
+    }
+    struct TensorPeriod part=TensorExpressionPeriod(TensorNormalize(TensorSum(linear),layout.count),layout.count);
+    if(!part.period)return part;
+    NSUInteger factor=part.period/TensorGCD(period,part.period);
+    if(period>layout.count/factor)return (struct TensorPeriod){0,0};
+    period*=factor;
+    return (struct TensorPeriod){period,part.delta*(NSInteger)(period/part.period)};
 }
 // Append one additive factor, folding its origin now. Maps hold final storage
 // indices: selecting a mapped view never emits a lookup into another lookup.
@@ -721,6 +804,32 @@ static BOOL TensorCoordinates(MetalTensorLayout *layout,NSArray *axes,NSInteger 
     return remainder==0;
 }
 
+// Apply independent logical selections to the assigned pages. Affine and
+// mapped source bases share this composition and the ordinary layout type.
+static MetalTensorLayout *TensorSelectedRebase(MetalTensorLayout *placed,NSArray *basis,NSArray *shape,
+    NSArray<MetalTensorLayout *> *selections,NSArray<NSNumber *> *variables) {
+    MetalTensorLayout *result=[placed reshape:basis];NSMutableArray *order=[NSMutableArray array];
+    NSMutableIndexSet *used=[NSMutableIndexSet indexSet];
+    for(NSUInteger a=0;a<basis.count;a++) {
+        MetalTensorLayout *selection=selections[a];NSInteger variable=[variables[a] integerValue];
+        if(selection.affine)result=[result slice:a first:selection.offset count:selection.count step:[selection.strides[0] integerValue]];
+        else {
+            NSMutableData *data=[NSMutableData dataWithLength:selection.count*sizeof(NSInteger)];NSInteger *indices=data.mutableBytes;
+            for(NSUInteger i=0;i<selection.count;i++)indices[i]=[selection index:i];
+            result=[result select:a indices:data];
+        }
+        if(variable>=0){[order addObject:@(variable)];[used addIndex:variable];}
+    }
+    for(NSUInteger a=basis.count;a--;)if([variables[a] integerValue]<0)result=[result element:a at:0];
+    NSMutableArray *broadcast=[NSMutableArray array],*zero=[NSMutableArray array],*positions=[NSMutableArray array],*permutation=[NSMutableArray array];
+    for(NSUInteger d=0;d<shape.count;d++)if(![used containsIndex:d]) {
+        [broadcast addObject:shape[d]];[zero addObject:@0];[positions addObject:@(d)];
+    }
+    [positions addObjectsFromArray:order];
+    for(NSUInteger d=0;d<shape.count;d++)[permutation addObject:@([positions indexOfObject:@(d)])];
+    MetalTensorLayout *repeated=[MetalTensorLayout shape:broadcast strides:zero offset:0 maps:@{} indices:nil];
+    return [TensorProduct(@[repeated,result]) permute:permutation];
+}
 static MetalTensorLayout *TensorCoordinateRebase(MetalTensorLayout *view,MetalTensorLayout *declared,MetalTensorLayout *placed) {
     if(!view.affine||!declared.affine)return nil;
     for(NSUInteger d=0;d<declared.shape.count;d++)
@@ -762,32 +871,93 @@ static MetalTensorLayout *TensorCoordinateRebase(MetalTensorLayout *view,MetalTe
     // A rectangular alias of an affine declaration selects the same logical
     // coordinates after mapped placement. Compose the ordinary view operations;
     // do not enumerate the producer's full storage domain to invert its map.
-    NSMutableDictionary *variables=[NSMutableDictionary dictionary];NSMutableIndexSet *used=[NSMutableIndexSet indexSet];
+    NSMutableDictionary *variables=[NSMutableDictionary dictionary];
     for(NSUInteger d=0;d<view.shape.count;d++) {
         NSInteger found=-1;const NSInteger *delta=base+(d+1)*dimensions;
         for(NSUInteger a=0;a<dimensions;a++)if(delta[a]) {
             if(found>=0||variables[@(a)])return nil;
             found=(NSInteger)a;
         }
-        if(found>=0){variables[@(found)]=@(d);[used addIndex:d];}
+        if(found>=0)variables[@(found)]=@(d);
     }
-    MetalTensorLayout *result=placed;NSMutableArray *order=[NSMutableArray array];
+    NSMutableArray *selections=[NSMutableArray array],*axesUsed=[NSMutableArray array];
     for(NSUInteger a=0;a<dimensions;a++) {
         NSNumber *variable=variables[@(a)];const NSUInteger d=variable.unsignedIntegerValue;
-        result=[result slice:a first:base[a] count:variable?[view.shape[d] unsignedIntegerValue]:1
-            step:variable?base[(d+1)*dimensions+a]:1];
-        if(variable)[order addObject:variable];
+        [selections addObject:[MetalTensorLayout shape:@[variable?view.shape[d]:@1]
+            strides:@[@(variable?base[(d+1)*dimensions+a]:1)] offset:base[a] maps:@{} indices:nil]];
+        [axesUsed addObject:variable?:@(-1)];
     }
-    for(NSUInteger a=dimensions;a--;)if(!variables[@(a)])result=[result element:a at:0];
-    NSMutableArray *broadcast=[NSMutableArray array],*zero=[NSMutableArray array],*permutation=[NSMutableArray array];
-    NSMutableArray *positions=[NSMutableArray array];
-    for(NSUInteger d=0;d<view.shape.count;d++)if(![used containsIndex:d]) {
-        [broadcast addObject:view.shape[d]];[zero addObject:@0];[positions addObject:@(d)];
+    return TensorSelectedRebase(placed,declared.shape,view.shape,selections,axesUsed);
+}
+static MetalTensorLayout *TensorFactorRebase(MetalTensorLayout *view,MetalTensorLayout *declared,MetalTensorLayout *placed) {
+    if(!view.count||!declared.count||!view.factored||!declared.factored)return nil;
+    // Distinct factors occupy disjoint ranges. This establishes a unique
+    // logical coordinate for each source value, even with gaps or reversed maps.
+    NSMutableArray *spacing=[NSMutableArray array];
+    for(NSUInteger d=0;d<declared.indexShape.count;d++) {
+        NSUInteger count=[declared.indexShape[d] unsignedIntegerValue];if(count<=1)continue;
+        NSData *map=declared.maps[@(d)];NSInteger gap=labs([declared.strides[d] integerValue]),span=(count-1)*gap;
+        if(map) {
+            const NSInteger *values=map.bytes;NSMutableArray *sorted=[NSMutableArray array];
+            for(NSUInteger i=0;i<count;i++)[sorted addObject:@(values[i])];
+            [sorted sortUsingSelector:@selector(compare:)];gap=NSIntegerMax;
+            for(NSUInteger i=1;i<count;i++)gap=MIN(gap,[sorted[i] integerValue]-[sorted[i-1] integerValue]);
+            span=[sorted.lastObject integerValue]-[sorted[0] integerValue];
+        }
+        [spacing addObject:@[@(gap),@(span)]];
     }
-    [positions addObjectsFromArray:order];
-    for(NSUInteger d=0;d<view.shape.count;d++)[permutation addObject:@([positions indexOfObject:@(d)])];
-    MetalTensorLayout *repeated=[MetalTensorLayout shape:broadcast strides:zero offset:0 maps:@{} indices:nil];
-    return [TensorProduct(@[repeated,result]) permute:permutation];
+    [spacing sortUsingComparator:^NSComparisonResult(NSArray *a,NSArray *b){return [a[0] compare:b[0]];}];
+    NSInteger reach=0;for(NSArray *part in spacing){if([part[0] integerValue]<=reach)return nil;reach+=[part[1] integerValue];}
+    NSArray *coordinates=declared.coordinates,*ranges=TensorMapRanges(declared),*steps=TensorStrides(declared.indexShape);
+    NSArray *viewSteps=TensorStrides(view.indexShape);NSUInteger base;
+    if(!TensorInverseIndex(declared,coordinates,ranges,0,declared.count,[view index:0],&base))return nil;
+    NSMutableArray *selections=[NSMutableArray array],*variables=[NSMutableArray array],*baseDigits=[NSMutableArray array];
+    for(NSUInteger a=0;a<steps.count;a++) {
+        NSInteger coordinate=(base/[steps[a] unsignedIntegerValue])%[declared.indexShape[a] unsignedIntegerValue];
+        [selections addObject:[MetalTensorLayout shape:@[@1] strides:@[@1] offset:coordinate maps:@{} indices:nil]];
+        [variables addObject:@(-1)];[baseDigits addObject:@(coordinate)];
+    }
+    for(NSUInteger d=0;d<view.indexShape.count;d++) {
+        NSUInteger count=[view.indexShape[d] unsignedIntegerValue];
+        if(count<=1||(!view.maps[@(d)]&&![view.strides[d] integerValue]))continue;
+        NSUInteger logical;
+        if(!TensorInverseIndex(declared,coordinates,ranges,0,declared.count,[view index:[viewSteps[d] unsignedIntegerValue]],&logical))return nil;
+        NSInteger axis=-1,delta=0;
+        for(NSUInteger a=0;a<steps.count;a++) {
+            NSInteger coordinate=(logical/[steps[a] unsignedIntegerValue])%[declared.indexShape[a] unsignedIntegerValue];
+            NSInteger difference=coordinate-[baseDigits[a] integerValue];
+            if(difference){if(axis>=0)return nil;axis=a;delta=difference;}
+        }
+        if(!view.maps[@(d)]&&axis>=0&&!declared.maps[@(axis)]) {
+            NSInteger first=[baseDigits[axis] integerValue],last=first+((NSInteger)count-1)*delta;
+            if(MIN(first,last)<0||MAX(first,last)>=[declared.indexShape[axis] integerValue]||[variables[axis] integerValue]>=0)return nil;
+            selections[axis]=[MetalTensorLayout shape:@[@(count)] strides:@[@(delta)] offset:first maps:@{} indices:nil];
+        } else {
+            // Only an explicit map's finite domain is enumerated. Affine outer
+            // factors never repeat these entries for their surrounding rows.
+            if(!view.maps[@(d)]&&(axis<0||count>[declared.indexShape[axis] unsignedIntegerValue]))return nil;
+            NSMutableData *data=[NSMutableData dataWithLength:count*sizeof(NSInteger)];NSInteger *indices=data.mutableBytes;
+            for(NSUInteger i=0;i<count;i++) {
+                if(!TensorInverseIndex(declared,coordinates,ranges,0,declared.count,[view index:i*[viewSteps[d] unsignedIntegerValue]],&logical))return nil;
+                NSInteger selected=-1;
+                for(NSUInteger a=0;a<steps.count;a++) {
+                    NSInteger coordinate=(logical/[steps[a] unsignedIntegerValue])%[declared.indexShape[a] unsignedIntegerValue];
+                    if(coordinate!=[baseDigits[a] integerValue]) {
+                        if(selected>=0||(axis>=0&&axis!=(NSInteger)a))return nil;
+                        selected=a;
+                    }
+                }
+                if(axis<0&&selected>=0)axis=selected;
+                indices[i]=logical;
+            }
+            if(axis<0)continue;
+            for(NSUInteger i=0;i<count;i++)indices[i]=(indices[i]/[steps[axis] integerValue])%[declared.indexShape[axis] integerValue];
+            if([variables[axis] integerValue]>=0)return nil;
+            selections[axis]=[MetalTensorLayout shape:@[@(count)] strides:@[@1] offset:0 maps:@{} indices:data];
+        }
+        variables[axis]=@(d);
+    }
+    return [TensorSelectedRebase(placed,declared.indexShape,view.indexShape,selections,variables) reshape:view.shape];
 }
 
 // Weighted union-find: position(b) - position(a) = distance. These equations
@@ -1147,6 +1317,7 @@ finished:
         for(NSUInteger d=0;d<digits.count;d++)[terms addObject:TensorScale(digits[d],[steps[d] integerValue])];
         return TensorCompose(placed,_shape,TensorSum(terms));
     }
+    rebased=TensorFactorRebase(self,declared,placed);if(rebased)return rebased;
     if(self.affine&&declared.affine) {
         NSInteger low;NSArray *axes=TensorInverseAxes(declared,&low);NSUInteger width=1;BOOL dense=YES;
         for(NSNumber *axis in [axes reverseObjectEnumerator]) {
@@ -1172,21 +1343,32 @@ finished:
     }
     NSArray *logical=TensorStrides(declared.shape);
     NSInteger low=0;NSArray *axes=declared.affine?TensorInverseAxes(declared,&low):@[];
-    NSMutableDictionary *inverse=nil;
+    NSArray *ranges=nil,*digits=declared.coordinates;NSUInteger inverseFirst=0;
+    struct TensorPeriod selected=TensorLayoutPeriod(self,self.coordinates);
+    NSUInteger count=selected.period&&!selected.delta?MIN(_count,selected.period):_count;
     NSMutableData *coordinates=[NSMutableData dataWithLength:MAX(1,declared.shape.count)*sizeof(NSInteger)];
     NSInteger *coordinate=coordinates.mutableBytes;
-    NSMutableData *data=[NSMutableData dataWithLength:_count*sizeof(NSInteger)];NSInteger *out=data.mutableBytes;
-    for(NSUInteger i=0;i<_count;i++) {
+    NSMutableData *data=[NSMutableData dataWithLength:count*sizeof(NSInteger)];NSInteger *out=data.mutableBytes;
+    for(NSUInteger i=0;i<count;i++) {
         const NSInteger address=[self index:i];NSUInteger at=0;
         const BOOL found=declared.affine&&TensorCoordinates(declared,axes,low,address,coordinate);
         if(found)for(NSUInteger d=0;d<declared.shape.count;d++)at+=coordinate[d]*[logical[d] unsignedIntegerValue];
         if(!found) {
-            if(!inverse){inverse=[NSMutableDictionary dictionary];for(NSUInteger j=0;j<declared.count;j++)inverse[@([declared index:j])]=@(j);}
-            NSNumber *index=inverse[@(address)];
-            if(!index)[NSException raise:NSInvalidArgumentException format:@"operand alias names storage outside its declared producer"];
-            at=index.unsignedIntegerValue;
+            if(!ranges) {
+                ranges=TensorMapRanges(declared);
+                struct TensorPeriod period=TensorLayoutPeriod(declared,digits);
+                // Every phase occurs in the last full period, including when
+                // the logical domain ends partway through a repeated pattern.
+                if(period.period&&!period.delta)inverseFirst=declared.count-MIN(declared.count,period.period);
+            }
+            if(!TensorInverseIndex(declared,digits,ranges,inverseFirst,declared.count,address,&at))
+                [NSException raise:NSInvalidArgumentException format:@"operand alias names storage outside its declared producer"];
         }
         out[i]=[placed index:at];
+    }
+    if(count<_count) {
+        MetalTensorLayout *period=[MetalTensorLayout shape:@[@(count)] strides:@[@1] offset:0 maps:@{} indices:data];
+        return [period shaped:_shape coordinates:period.coordinates];
     }
     return [MetalTensorLayout shape:_shape strides:TensorStrides(_shape) offset:0 maps:@{} indices:data];
 }
