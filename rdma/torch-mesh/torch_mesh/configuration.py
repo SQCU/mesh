@@ -45,6 +45,14 @@ def placement(mesh, name, workload, observations, *, parameters):
             if k in decisions and len(values) == len(decisions[k]['parts']) and sum(values) == sum(decisions[k]['parts']):
                 decisions[k]['parts'] = values
     operands = assignment.assign(decisions, records, step=step)
+    # One proposal on every member (rubric C7): the solve's floating point can round its parts differently on another
+    # node's hardware, and a split a row apart makes the members bind different bytes for one WRITE (hourly
+    # 2026-10-29T06:21Z, chain-n3 and lstm-n3: "rank 4's bytes 493568 is not rank 0's 495616"). Rank 0's parts and
+    # operands are taken, as its observations are.
+    if rank == 0:
+        store.set(key + '/proposal', json.dumps({'parts': {k: [int(v) for v in values] for k, values in operands['parts'].items()},
+                                                 'operands': {k: int(v) for k, v in operands['operands'].items()}}))
+    operands = {**operands, **json.loads(store.get(key + '/proposal'))}
     partition._attach(mesh, name, operands['parts'][name])
     return {'mesh': mesh, 'name': name, 'group': group, 'rank': rank, 'size': size,
             'store': store, 'key': key, 'history': history, 'workload': workload, 'records': records,
