@@ -1537,6 +1537,24 @@ Draw and retention consumed the provider's float32 pages through their declared
 type parameters. An explicit contiguous read/write requirement retained the
 input and writeback mappings. No numerical commands ran.
 
+LiteRT collective stages now declare separate `inputs` and `outputs`, as other
+stages do. Each operand carries its tensor selection and a `domain` relation
+which names its positions in the collective. A local gather input can therefore
+have fewer values than its result; a reduce-scatter result can have fewer than
+its input. Different names, shapes and physical layouts do not require a shared
+whole-value allocation. The same inverse and composition map contributor and
+recipient intervals to the declared pages. Empty contributions stay empty.
+
+The old single `view` field is removed from the exporter, selected handoffs,
+draft crossings and native binder. In-place graph operations emit the same
+operand on both sides. Broadcast preserves an unchanged root's original scalar
+precision when its wire encoding differs; a distinct result has its own binding.
+Preparation through the actual stage exporter and binder retained ragged gather
+and reduce-scatter domains, reversed and strided storage, and an empty sender
+without layout copies. Explicit scalar conversions still compiled through the
+shared copy operation. Libraries and native callers built; no communicator or
+numerical function ran.
+
 The prefill mask now writes the declared logical Boolean tensor through the
 shared `mesh_store4` helper and prepared indices. The old packed-word producer
 and its byte reinterpretation are removed. Compatible provider pages bind
@@ -1611,10 +1629,13 @@ The boundary remains incomplete. The empty-owner one-slot placeholder remains an
 implicit API accommodation and needs constraint/empty-domain lowering.
 Placement across all future consumer constraints remains necessary:
 sequential preparation can still convert a flexible native output when a later
-fixed-layout provider could have guided its original placement. General
-shape-changing collective outputs, external/signature selections and changed
+fixed-layout provider could have guided its original placement.
+External/signature selections and changed
 selections across resized source domains still need integration. Numerical
 execution remains deferred until these edges are reconciled.
+The exporter also retains only one permutation and reshape in a selection;
+`native_tensor_view` currently replaces them when adding a grouped view. That
+composition must retain the earlier transformations through the same algebra.
 
 ### Encoded numerical operands
 
