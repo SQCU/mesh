@@ -86,4 +86,11 @@ def lift_attributes(module, arguments):
             first = node.next
         graph.erase_node(node)
     lifted.recompile()
-    return lifted, [*arguments, *_stream.import_attributes(values)]
+    imported = _stream.import_attributes(values)
+    # Each import takes its attribute's place (the module's own tensor now names the region pages), so the foreign
+    # storage is freed, not held beside its region copy: one residency per attribute, aliases kept as views.
+    with torch.no_grad():
+        for value, made in zip(values, imported):
+            if made is not value:
+                value.data = made
+    return lifted, [*arguments, *imported]
