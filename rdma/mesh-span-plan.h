@@ -51,6 +51,14 @@ static inline int mesh_span_cut_compare(const void *a, const void *b) {
 }
 
 struct mesh_span_residues { uint64_t *at; size_t count, room; };
+static inline void mesh_span_residues_sort(struct mesh_span_residues *r) {
+  if (!r->count) return;
+  qsort(r->at, r->count, sizeof *r->at, mesh_span_cut_compare);
+  size_t n = 1;
+  for (size_t k = 1; k < r->count; k++)
+    if (r->at[k] != r->at[n - 1]) r->at[n++] = r->at[k];
+  r->count = n;
+}
 static inline int mesh_span_residue_add(struct mesh_span_residues *r, uint64_t at) {
   if (r->count == r->room) {
     if (r->room > SIZE_MAX / 2 / sizeof *r->at) return EOVERFLOW;
@@ -60,6 +68,52 @@ static inline int mesh_span_residue_add(struct mesh_span_residues *r, uint64_t a
     r->at = grown; r->room = room;
   }
   r->at[r->count++] = at;
+  return 0;
+}
+
+/* A storage page list, coalesced only where its backing addresses are adjacent.
+   Logical positions are bytes in the local operand; offsets name the bridge's
+   registered region. These runs exist during preparation, never during issue. */
+struct mesh_page_run { uint64_t first, end, offset; };
+struct mesh_page_runs { struct mesh_page_run *at; size_t count, room; };
+static inline int mesh_page_run_add(struct mesh_page_runs *runs,uint64_t first,uint64_t bytes,uint64_t offset) {
+  if(!bytes)return 0;
+  struct mesh_page_run *last=runs->count?runs->at+runs->count-1:NULL;
+  if(last&&last->end==first&&last->offset+last->end-last->first==offset){last->end+=bytes;return 0;}
+  if(runs->count==runs->room) {
+    if(runs->room>SIZE_MAX/2/sizeof *runs->at)return EOVERFLOW;
+    size_t room=runs->room?2*runs->room:1;
+    struct mesh_page_run *grown=realloc(runs->at,room*sizeof *grown);
+    if(!grown)return ENOMEM;
+    runs->at=grown;runs->room=room;
+  }
+  runs->at[runs->count++]=(struct mesh_page_run){first,first+bytes,offset};return 0;
+}
+static inline const struct mesh_page_run *mesh_page_run_at(const struct mesh_page_runs *runs,uint64_t logical) {
+  size_t first=0,end=runs->count;
+  while(first<end){size_t middle=first+(end-first)/2;if(runs->at[middle].end<=logical)first=middle+1;else end=middle;}
+  return runs->at+first;
+}
+static inline uint64_t mesh_page_run_offset(const struct mesh_page_runs *runs,uint64_t logical) {
+  const struct mesh_page_run *run=mesh_page_run_at(runs,logical);
+  return run->offset+logical-run->first;
+}
+/* Add the physical discontinuities and registration boundaries of one selected
+   interval. logical follows message order, including repeats; previous is the
+   prior interval's physical end. Adjacent selections introduce no extra cut. */
+static inline int mesh_page_run_cuts(const struct mesh_page_runs *runs,uint64_t first,uint64_t bytes,
+    uint64_t logical,uint64_t registration_origin,uint64_t extent,uint64_t *previous,struct mesh_span_residues *cuts) {
+  while(bytes) {
+    const struct mesh_page_run *run=mesh_page_run_at(runs,first);
+    uint64_t offset=run->offset+first-run->first,phase=(offset-registration_origin)%extent;
+    if(logical&&(offset!=*previous||!phase)) {
+      int error=mesh_span_residue_add(cuts,logical);if(error)return error;
+    }
+    uint64_t length=run->end-first;
+    if(length>bytes)length=bytes;
+    if(length>extent-phase)length=extent-phase;
+    *previous=offset+length;first+=length;logical+=length;bytes-=length;
+  }
   return 0;
 }
 
@@ -105,13 +159,7 @@ static inline int mesh_span_residues(const uint64_t *phases, const uint64_t *str
       }
     }
   }
-  if (result->count) {
-    qsort(result->at, result->count, sizeof *result->at, mesh_span_cut_compare);
-    size_t n = 1;
-    for (size_t k = 1; k < result->count; k++)
-      if (result->at[k] != result->at[n - 1]) result->at[n++] = result->at[k];
-    result->count = n;
-  }
+  mesh_span_residues_sort(result);
   return 0;
 }
 

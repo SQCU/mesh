@@ -4886,8 +4886,8 @@ static ncclResult_t enqueue(struct call c) {
 
 /* Fixed-size configuration metadata, before any data program executes. Retained
    bootstrap sockets never carry acknowledgements or payload-dependent routing. */
-/* The caller holds prepare across both the fixed report and any indexed-view
-   report. Concurrent preparations cannot interleave those two exchanges. */
+/* The caller holds prepare across the fixed report and its selection/backing
+   reports. Concurrent preparations cannot interleave those exchanges. */
 static int prepare_exchange_locked(ncclComm_t comm, const void *local, size_t bytes, void *reports) {
   memcpy((unsigned char *)reports + (size_t)comm->rank * bytes, local, bytes);
   return exchange(comm, reports, bytes, 0, 0);
@@ -5300,6 +5300,7 @@ ncclResult_t ncclBcast(void *buff, size_t count, ncclDataType_t datatype, int ro
 struct ncclMeshPageTable {
   ncclComm_t comm;
   struct where base;
+  struct mesh_page_runs storage;
   size_t pages, page_bytes;
   int metal;
 };
@@ -5310,11 +5311,11 @@ struct ncclMeshPageTable {
    no array of those identical affine expressions needs to be materialized. */
 struct write_page_index { size_t page, first; };
 
-/* Fixed-size configuration reports. Addresses are local arena phases; no
+/* Fixed-size configuration reports. Storage locations are arena phases; no
    process pointer crosses a socket. Metadata on the retained bootstrap is
    serialized separately from GPU execution and remains revocable/deadlined. */
 struct write_binding_report {
-  uint64_t phase, stride, bytes, packet, row_bytes, rows, views;
+  uint64_t phase, stride, bytes, packet, row_bytes, rows, views, runs, origin;
   struct mesh_write_layout layout;
   uint32_t repeats, source, destination, status, indexed;
 };
@@ -5374,6 +5375,27 @@ static int write_view_rows(const ncclMeshSpan *view, size_t count, uint64_t byte
   return 0;
 }
 
+/* The next contiguous interval of selected logical bytes, up to limit. Both
+   packet placement and physical backing composition consume this traversal. */
+struct write_view_cursor { size_t index; uint64_t begin; };
+static ncclMeshSpan write_view_interval(const struct write_binding_report *p, const ncclMeshSpan *view,
+    uint64_t at, uint64_t limit, struct write_view_cursor *cursor) {
+  uint64_t offset = at, left = p->bytes - at;
+  if (p->indexed) {
+    while (at - cursor->begin >= view[cursor->index].bytes) cursor->begin += view[cursor->index++].bytes;
+    const uint64_t into = at - cursor->begin;
+    offset = view[cursor->index].offset + into;
+    left = view[cursor->index].bytes - into;
+    for (size_t k = cursor->index + 1; limit > left && k < p->views &&
+        view[k - 1].offset + view[k - 1].bytes == view[k].offset; k++) left += view[k].bytes;
+  } else if (p->rows && p->stride != p->row_bytes) {
+    const uint64_t into = at % p->row_bytes;
+    offset = (at / p->row_bytes) * p->stride + into;
+    left = p->row_bytes - into;
+  }
+  return (ncclMeshSpan){offset, left < limit ? left : limit};
+}
+
 /* Common cuts for compact local selections. Each peer can use rows, indexed
    masks or a contiguous selection for the same logical bytes. Visit actual
    discontinuities and registration boundaries without expanding affine rows
@@ -5383,14 +5405,14 @@ static int write_view_rows(const ncclMeshSpan *view, size_t count, uint64_t byte
 static int write_view_packets(const struct write_binding_report *reports, const ncclMeshSpan *views, size_t stride,
     const uint64_t *phases, const uint64_t *strides, uint64_t repeats, uint32_t participants, uint32_t packet, struct mesh_span_plan *out) {
   const uint64_t bytes = reports[0].bytes, extent = MESH_DMA_EXTENT, tile = reports[0].layout.tile_bytes;
-  size_t *index = calloc(participants, sizeof *index);
-  uint64_t *begin = calloc(participants, sizeof *begin), *flat = calloc(2 * (size_t)participants + 1, sizeof *flat);
+  struct write_view_cursor *cursor = calloc(participants, sizeof *cursor);
+  uint64_t *flat = calloc(2 * (size_t)participants + 1, sizeof *flat);
   struct mesh_span_residues cuts = {0}, lattice = {0};
   uint32_t flats = 0;
-  int error = index && begin && flat ? mesh_span_residue_add(&cuts, 0) : ENOMEM;
+  int error = cursor && flat ? mesh_span_residue_add(&cuts, 0) : ENOMEM;
   /* an untiled payload's flat participants: every registration boundary any repeat meets (mesh_span_residues) */
   for (uint32_t r = 0; !error && !tile && r < participants; r++)
-    if (!reports[r].indexed && !(reports[r].rows > 1 && reports[r].stride != reports[r].row_bytes)) {
+    if (reports[r].runs == 1 && !reports[r].indexed && !(reports[r].rows > 1 && reports[r].stride != reports[r].row_bytes)) {
       flat[flats] = phases[r]; flat[participants + flats++] = strides[r];
     }
   if (!error && bytes && flats) error = mesh_span_residues(flat, flat + participants, flats, bytes, repeats, packet, &lattice);
@@ -5401,24 +5423,12 @@ static int write_view_packets(const struct write_binding_report *reports, const 
     if (length > bytes - at) length = bytes - at;
     for (uint32_t r = 0; r < participants; r++) {
       const struct write_binding_report *p = reports + r;
+      if (p->runs != 1) continue; /* no storage, or actual page-run cuts joined below */
       const int strided = p->rows > 1 && p->stride != p->row_bytes;
       if (!tile && !p->indexed && !strided) continue; /* the lattice's */
-      uint64_t offset = at, left = bytes - at;
-      if (p->indexed) {
-        const ncclMeshSpan *view = views + r * stride;
-        while (at - begin[r] >= view[index[r]].bytes) begin[r] += view[index[r]++].bytes;
-        const uint64_t into = at - begin[r];
-        offset = view[index[r]].offset + into;
-        left = view[index[r]].bytes - into;
-        for (size_t k = index[r] + 1; length > left && k < p->views &&
-            view[k - 1].offset + view[k - 1].bytes == view[k].offset; k++) left += view[k].bytes;
-      } else if (p->rows && p->stride != p->row_bytes) {
-        const uint64_t into = at % p->row_bytes;
-        offset = (at / p->row_bytes) * p->stride + into;
-        left = p->row_bytes - into;
-      }
-      if (length > left) length = left;
-      const uint64_t phase = (phases[r] + offset % extent) % extent;
+      const ncclMeshSpan selected = write_view_interval(p, p->indexed ? views + r * stride : NULL, at, length, cursor + r);
+      length = selected.bytes;
+      const uint64_t phase = (phases[r] + selected.offset % extent) % extent;
       if (length > extent - phase) length = extent - phase;
     }
     if (lattice.count) {
@@ -5431,17 +5441,50 @@ static int write_view_packets(const struct write_binding_report *reports, const 
     at += length;
     error = mesh_span_residue_add(&cuts, at);
   }
-  free(index); free(begin); free(flat); free(lattice.at);
+  free(cursor); free(flat); free(lattice.at);
   if (error) { free(cuts.at); return error; }
   *out = (struct mesh_span_plan){cuts.at, cuts.count};
   return 0;
+}
+
+/* Compose selected logical bytes with each peer's actual page backing. One
+   compact mapping exchange serves every occurrence. Registration phases alone
+   suffice for a single run; several runs also contribute their discontinuities.
+   The result is the same common packet table, independent of physical layout. */
+static int write_storage_packets(const struct write_binding_report *reports,
+    const struct mesh_page_run *storage, size_t storage_stride,
+    const ncclMeshSpan *views, size_t view_stride, uint32_t participants,
+    uint64_t occurrence, struct mesh_span_plan *packets) {
+  struct mesh_span_residues cuts = {packets->cuts, packets->count, packets->count};
+  int error = 0;
+  for (uint32_t r = 0; !error && r < participants; r++) {
+    const struct write_binding_report *p = reports + r;
+    if (p->runs <= 1 || !p->bytes) continue;
+    const struct mesh_page_runs runs = {(struct mesh_page_run *)storage + r * storage_stride, p->runs, p->runs};
+    const uint64_t first = p->origin + occurrence % p->layout.instances * p->layout.instance_stride;
+    const uint64_t repeats = p->stride ? p->repeats : 1;
+    for (uint64_t repeat = 0; !error && repeat < repeats; repeat++) {
+      uint64_t previous = UINT64_MAX;
+      struct write_view_cursor cursor = {0};
+      for (uint64_t logical = 0; !error && logical < p->bytes;) {
+        const ncclMeshSpan selected = write_view_interval(p, p->indexed ? views + r * view_stride : NULL,
+          logical, p->bytes - logical, &cursor);
+        error = mesh_page_run_cuts(&runs, first + repeat * p->stride + selected.offset, selected.bytes,
+          logical, 0, MESH_DMA_EXTENT, &previous, &cuts);
+        logical += selected.bytes;
+      }
+    }
+  }
+  mesh_span_residues_sort(&cuts);
+  *packets = (struct mesh_span_plan){cuts.at, cuts.count};
+  return error;
 }
 
 /* Physical bindings, paths and common cuts are all configuration operands.
    Materialize their local descriptor trains once, including every repetition.
    Execution indexes these immutable tables; the usual retirement ledger keeps
    them alive until the bridge has finished reading them after plan destruction. */
-static ncclResult_t write_prepare_spans(struct ncclMeshWritePlan *plan) {
+static ncclResult_t write_prepare_spans(struct ncclMeshWritePlan *plan,ncclMeshPageTable_t table,size_t origin) {
   const ncclComm_t comm = plan->comm;
   const struct mesh_paths *paths = comm->writes + plan->from * comm->nranks + plan->to;
   const struct mesh_operand operand = {(uint32_t)WRITE_UNIT + 1, 1, plan->bytes};
@@ -5471,7 +5514,6 @@ static ncclResult_t write_prepare_spans(struct ncclMeshWritePlan *plan) {
     result = ncclMemAlloc((void **)&plan->spans, plan->span_first[entries] * sizeof *plan->spans);
   const struct hdr *m = comm->attach->context.M;
   const struct where binding = comm->rank == plan->from ? plan->source : plan->landing;
-  const uint64_t origin = count ? (uint64_t)(address_of(binding) - (const unsigned char *)m) : 0;
   for (int k = 0; !result && k < count; k++) for(size_t instance=0;!result&&instance<plan->occurrences;instance++) {
     const struct mesh_step *s = &transfers[k].step;
     const uint64_t logical = s->first * s->piece.element_bytes, bytes = mesh_step_bytes(s);
@@ -5484,8 +5526,9 @@ static ncclResult_t write_prepare_spans(struct ncclMeshWritePlan *plan) {
       for (size_t unit = 0; unit < units; unit++) {
         uint64_t next = packets->cuts[cut++] - logical;
         if (next > bytes) next = bytes;
-        struct mesh_dma_span span = {origin + (instance % plan->layout.instances) * plan->layout.instance_stride +
-          write_displacement(plan, logical + at + repeat * plan->stride), next - at};
+        const uint64_t position=origin+(instance%plan->layout.instances)*plan->layout.instance_stride+
+          write_displacement(plan,logical+at+repeat*plan->stride);
+        struct mesh_dma_span span={mesh_page_run_offset(&table->storage,position),next-at};
         if (!mesh_dma_span_valid(m, span)) {
           result = fail(ncclInvalidUsage, "prepared write span crosses a registration extent"); break;
         }
@@ -5554,7 +5597,8 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
   const size_t packet = max_packet ? max_packet : comm->page;
   struct write_binding_report local = {.stride = stride, .bytes = bytes, .packet = packet, .repeats = repeats,
     .source = (uint32_t)source, .destination = (uint32_t)destination,
-    .row_bytes = row_bytes, .rows = rows, .views = views, .indexed = indexed != 0, .layout = layout};
+    .row_bytes = row_bytes, .rows = rows, .views = views, .indexed = indexed != 0,
+    .runs = table->storage.count, .layout = layout};
   if (source < 0 || source >= comm->nranks || destination < 0 ||
       destination >= comm->nranks || source == destination || !repeats || !packet || packet > UINT32_MAX ||
       (metal != 0 && metal != 1) || !layout.instances || !layout.invocations) local.status = EINVAL;
@@ -5589,6 +5633,7 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
   else origin = start.page * table->page_bytes + start.first;
   if (view_origin > table_bytes - origin) local.status = EINVAL;
   else origin += view_origin;
+  local.origin = origin;
   const struct where binding = shifted(table->base, origin);
   const unsigned char *address = address_of(binding);
   if (!local.status && local.bytes && !unbound) {
@@ -5600,7 +5645,7 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
     const struct lease *lease = !local.status && in_region(comm, binding, extent) ? lease_at(address, NULL) : NULL;
     if (!lease || lease->returned || extent > lease->bytes - (size_t)(address - (const unsigned char *)lease->address))
       local.status = EINVAL;
-    else local.phase = ((uint64_t)(address - (unsigned char *)comm->attach->context.M) - comm->attach->context.M->data_off) % MESH_DMA_EXTENT;
+    else local.phase = (mesh_page_run_offset(&table->storage,origin)-comm->attach->context.M->data_off)%MESH_DMA_EXTENT;
     pthread_mutex_unlock(&attach_lock);
   }
   struct write_binding_report *reports = calloc(comm->nranks, sizeof *reports);
@@ -5627,8 +5672,9 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
       if (a[f] != b[f]) { error = EPROTO; differs = f; differing = r; theirs = a[f]; ours = b[f]; }
     strides[r] = p->stride;
   }
-  size_t most = 0;
+  size_t most = 0, most_runs = 0;
   ncclMeshSpan *all_views = NULL, *local_views = NULL;
+  struct mesh_page_run *all_runs = NULL, *local_runs = NULL;
   if (!error) {
     for (int r = 0; r < comm->nranks; r++) if (reports[r].views > most) most = (size_t)reports[r].views;
     if (most > SIZE_MAX / (size_t)comm->nranks / sizeof *all_views || views > (SIZE_MAX / sizeof *plan->view_first) - 1)
@@ -5640,6 +5686,22 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
       else {
         if (views) memcpy(local_views, view, views * sizeof *view);
         error = prepare_exchange_locked(comm, local_views, most * sizeof *local_views, all_views);
+      }
+    }
+  }
+  if (!error) {
+    for (int r = 0; r < comm->nranks; r++) if (reports[r].runs > most_runs) most_runs = (size_t)reports[r].runs;
+    if (most_runs > SIZE_MAX / (size_t)comm->nranks / sizeof *all_runs) error = EOVERFLOW;
+    if (!error && most_runs > 1) {
+      local_runs = calloc(most_runs, sizeof *local_runs);
+      all_runs = calloc(most_runs * (size_t)comm->nranks, sizeof *all_runs);
+      if (!local_runs || !all_runs) error = ENOMEM;
+      else {
+        for (size_t k = 0; k < table->storage.count; k++) {
+          local_runs[k] = table->storage.at[k];
+          local_runs[k].offset -= comm->attach->context.M->data_off;
+        }
+        error = prepare_exchange_locked(comm, local_runs, most_runs * sizeof *local_runs, all_runs);
       }
     }
   }
@@ -5660,6 +5722,9 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
       phases[r]=(reports[r].phase+(uint64_t)((__uint128_t)(occurrence%reports[r].layout.instances)*
         reports[r].layout.instance_stride%MESH_DMA_EXTENT))%MESH_DMA_EXTENT;
     error=write_view_packets(reports,all_views,most,phases,strides,repeats,(uint32_t)comm->nranks,(uint32_t)packet,plan->packets+occurrence);
+    if (!error && most_runs > 1)
+      error = write_storage_packets(reports, all_runs, most_runs, all_views, most, (uint32_t)comm->nranks,
+        occurrence, plan->packets + occurrence);
   }
   if(!error && indexed && views) {
     plan->view=malloc(views*sizeof *plan->view);
@@ -5671,7 +5736,7 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
       plan->views=views;plan->view_extent=(size_t)view_extent;
     }
   }
-  free(reports); free(phases); free(strides); free(all_views); free(local_views);
+  free(reports); free(phases); free(strides); free(all_views); free(local_views); free(all_runs); free(local_runs);
   if (error) { write_packets_free(plan); free(plan->view); free(plan->view_first); free(plan);
     if (differs >= 0)
       return fail(ncclInvalidUsage, "preparing exact-byte write bindings: rank %d's %s %llu is not rank %d's %llu (every rank binds "
@@ -5685,7 +5750,7 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
   plan->stride = rows ? 0 : stride; plan->bytes = local.bytes; plan->repeats = repeats;
   plan->row_bytes = row_bytes; plan->rows = rows; plan->pitch = stride;
   plan->from = source; plan->to = destination; plan->metal = metal;
-  const ncclResult_t prepared = write_prepare_spans(plan);
+  const ncclResult_t prepared = write_prepare_spans(plan,table,origin);
   if (prepared) { write_plan_drop(plan); return prepared; }
   pthread_mutex_lock(&group_lock);
   (void)write_definitions(plan); /* else compiled at its first execution (definition_of) */
@@ -5717,6 +5782,13 @@ ncclResult_t ncclMeshPageTableCreate(const void *local, ncclComm_t comm, int met
       table->comm=comm;table->metal=metal;
       table->page_bytes=owner->context.M->pgsz;
       table->pages=lease->bytes/table->page_bytes;
+      const struct hdr *m=owner->context.M;
+      int error=0;
+      for(size_t page=0;!error&&page<table->pages;page+=m->block) {
+        const uint64_t offset=atomic_load_explicit(&mesh_page(owner->context.M)[lease->row+page/m->block].address,memory_order_relaxed);
+        error=mesh_page_run_add(&table->storage,page*table->page_bytes,(uint64_t)m->block*table->page_bytes,offset);
+      }
+      if(error){free(table->storage.at);free(table);table=NULL;}
     }
   }
   pthread_mutex_unlock(&attach_lock);
@@ -5731,7 +5803,10 @@ ncclResult_t ncclMeshPageTableBinding(ncclMeshPageTable_t table,ncclMeshBuffer *
   if(!table||!binding)return fail(ncclInvalidArgument,"page table binding operands");
   return ncclMeshMemBuffer(address_of(table->base),&binding->buffer,&binding->offset);
 }
-ncclResult_t ncclMeshPageTableDestroy(ncclMeshPageTable_t table) {free(table);return ncclSuccess;}
+ncclResult_t ncclMeshPageTableDestroy(ncclMeshPageTable_t table) {
+  if(table)free(table->storage.at);
+  free(table);return ncclSuccess;
+}
 
 /* Masks are validated once, then adjacent selections are coalesced. Page
    identity imposes no extra runtime packet, dispatch, or boundary wait. */

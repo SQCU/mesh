@@ -20,6 +20,41 @@ confined to that page. Selections retain logical order and repeated source
 reads. The union of accessed ranges serves dependency analysis; it cannot
 replace an ordered message.
 
+### Physical page backing
+
+The page table records the bridge rows' backing locations during preparation.
+Adjacent locations form one run. A logical selection composes with these runs
+before WRITE descriptors are emitted; a local pointer no longer supplies their
+physical offsets.
+
+Rows, flat ranges and indexed masks share one logical interval traversal. Both
+packet placement and backing composition consume it.
+
+Peers share the compact backing relation once while preparing a WRITE. The
+compiler joins physical breaks and registration boundaries with the existing
+packet and publication cuts. Each invocation keeps its own cuts when storage
+slots have different periods. Source selections may repeat or reverse pages.
+A rank with no storage contributes no physical cuts. Contiguous backing needs
+only its existing phase report and adds no mapping exchange.
+
+Execution consumes the same immutable DMA descriptors as before. It does not
+walk the backing runs, look up bridge rows or copy a payload to change layout.
+
+Preparation on 2026-10-29 checked scattered backing with rows, reversed and
+repeated source ranges, unequal slot periods, frame trains and tiled writes.
+Every emitted interval retained its selected bytes and stayed within one
+registration extent. Contiguous cases produced identical packet tables to the
+prior compiler. A short tail of a petabyte-scale logical declaration resolved
+from one backing run without page expansion. Shared-library and native builds
+completed; no numerical execution ran.
+
+Scattered allocation is still unfinished. The allocator requires consecutive
+row slots and arena pages. Its host and Metal views, non-WRITE collectives,
+readiness words and descriptor-table bindings still rely on linear region
+addresses. Those bindings must be lowered before the allocator can supply
+scattered pages to all consumers. This WRITE change alone does not remove the
+large-allocation refusal recorded in metal-microbench's `docs/facts.md`.
+
 ## Known access structure, changing contents
 
 A fixed shape does not make values constant. The same holds for a page index
