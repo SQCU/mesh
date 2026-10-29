@@ -1633,9 +1633,23 @@ fixed-layout provider could have guided its original placement.
 External/signature selections and changed
 selections across resized source domains still need integration. Numerical
 execution remains deferred until these edges are reconciled.
-The exporter also retains only one permutation and reshape in a selection;
-`native_tensor_view` currently replaces them when adding a grouped view. That
-composition must retain the earlier transformations through the same algebra.
+
+Selections now retain an ordered `steps` sequence of cuts, permutations and
+reshapes. `native_tensor_view` appends its grouping instead of replacing earlier
+transformations. The shape calculation consumes the same sequence, including
+repeated grouping; constant factors fold while configured dimensions remain
+operands. Symbol substitution visits tuple-backed cut records too. Provider,
+native and collective bindings compose the sequence through `MetalTensorLayout`
+and its integer relation algebra during preparation. No sequence or descriptor
+chain reaches execution. The former independent `axes`, `permutation` and
+`reshape` selection fields are removed; old prepared declarations must be rebuilt.
+
+Preparation compiled a view with interleaved transposes, reshapes, reversed
+cuts and two further groupings, plus the MTP state-update shaders. Independent
+collective domains retained their earlier mapped bindings. Libraries and native
+callers built; no numerical commands ran. Cache relocation's phase-column
+matching still reconstructs cuts by axis role; it needs a general relation join
+before arbitrary transformations across those roles are supported there.
 
 ### Encoded numerical operands
 
