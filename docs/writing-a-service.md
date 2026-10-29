@@ -98,10 +98,9 @@ place, with no copy. They also use memory the bridge already holds, so no second
 
 ## Memory outside the region
 
-A program builds its buffers from pages of the region. In C it leases them with `ncclMemAlloc`. In torch every MPS
-tensor leases the same pages, as torch-mesh makes torch's MPS allocator the region's when it loads
-([rdma/torch-mesh/README.md](../rdma/torch-mesh/README.md)), and `torch_mesh.empty` makes a region tensor on the CPU or
-the GPU. The bridge wired these pages for the devices once, when it came up. So a collective sends from the pages a
+A program builds its buffers from pages of the region. In C it leases them with `ncclMemAlloc`. In torch every tensor,
+CPU or MPS, leases the same pages, as torch-mesh makes torch's CPU and MPS allocators the region's when it loads
+([rdma/torch-mesh/README.md](../rdma/torch-mesh/README.md)); `torch_mesh.empty` is one such tensor of at least one byte. The bridge wired these pages for the devices once, when it came up. So a collective sends from the pages a
 tensor lies in and lands bytes in the pages they belong in.
 
 A program should not take large blocks of memory of its own outside the region. They gain it nothing. No peer can be

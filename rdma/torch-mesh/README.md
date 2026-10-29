@@ -55,6 +55,10 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   barrier's tensor and explicitly declared outputs) are leases of the node's
   bridge's region (`torch_mesh.empty`). A program's CPU tensor in the region is
   `torch_mesh.empty(shape, dtype=..., device="cpu")`.
+- Region CPU tensors: every CPU tensor's bytes are a lease's pages, `torch_mesh.empty(shape, dtype=..., device="cpu")`
+  and torch's own alike. `_stream` makes torch's CPU allocator the region's as it loads (`c10::SetCPUAllocator`, above
+  torch's default). A lease the region cannot meet is torch's out-of-memory error, and a tensor's release returns its
+  lease (`ncclMemFree`). Memory torch did not allocate stays where it is (`torch.from_numpy`'s, made before the load).
 - Region MPS tensors: every MPS tensor is a lease's Metal buffer (`ncclMeshMemBuffer`), `torch_mesh.empty(shape,
   dtype=..., device="mps")` and torch's own (its factories', eager temporaries', Inductor's, `.to("mps")`'s) alike:
   `_stream` makes torch's MPS allocator the region's as it loads (`torch_mesh/allocator.mm`), in place over the fixed

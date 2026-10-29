@@ -3,6 +3,7 @@
 // Metal schedule. Prepared calls resolve routes, pages and dispatch operands
 // before submission. The compatibility MPS stream is flushed at a whole
 // function boundary; it has no publication-driven buffering policy.
+#include <c10/core/CPUAllocator.h>
 #include <torch/extension.h>
 #include <torch/library.h>
 #include <ATen/detail/MPSHooksInterface.h>
@@ -853,28 +854,14 @@ TORCH_LIBRARY_FRAGMENT(torch_mesh, m) {
 // (allocator.mm), so every MPS tensor is a lease, returned once the command buffer open on torch's stream at its release
 // has completed; region_empty leases one even for no elements.  A CPU one is torch::from_blob over the lease, returned
 // at its release (a host-path call is complete when it returns).
-static std::mutex region_tensors_lock_;
-static std::map<uintptr_t, size_t> region_tensors_;
-
-static void returned(void *memory) {
-  ncclMemFree(memory);
-  std::lock_guard<std::mutex> guard(region_tensors_lock_);
-  region_tensors_.erase((uintptr_t)memory);
-}
-
+// A region tensor: torch's own allocators are the region's (allocator.mm), so this is a tensor of at least one byte
+// whose storage is a lease, on the CPU or the GPU.
 static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps) {
   const at::ScalarType dtype = like.scalar_type();
   const size_t bytes = std::max<size_t>(1, (size_t)c10::multiply_integers(sizes) * c10::elementSize(dtype));
-  const auto options = at::TensorOptions().dtype(dtype);
-  if (mps)
-    return at::empty({0}, options.device(at::kMPS)).set_(c10::Storage(c10::Storage::use_byte_size_t(), bytes, at::mps::GetMPSAllocator()), 0, sizes);
-  void *memory = nullptr;
-  checked(ncclMemAlloc(&memory, bytes));
-  {
-    std::lock_guard<std::mutex> guard(region_tensors_lock_);
-    region_tensors_[(uintptr_t)memory] = bytes;
-  }
-  return at::from_blob(memory, sizes, [memory](void *) { returned(memory); }, options.device(at::kCPU));
+  const auto options = at::TensorOptions().dtype(dtype).device(mps ? at::kMPS : at::kCPU);
+  c10::Allocator *allocator = mps ? at::mps::GetMPSAllocator() : c10::GetCPUAllocator();
+  return at::empty({0}, options).set_(c10::Storage(c10::Storage::use_byte_size_t(), bytes, allocator), 0, sizes);
 }
 
 // Where a tensor's bytes lie in the region (0: outside it): an MPS tensor's where its MTLBuffer is the Metal buffer of the
@@ -947,14 +934,6 @@ static std::vector<at::Tensor> import_attributes(const std::vector<at::Tensor> &
   // the copies complete before a prepared function, on its own queue, reads them (preparation only)
   if(mps)at::mps::synchronizeAllMPSStreams(at::mps::SyncType::COMMIT_AND_WAIT);
   return result;
-}
-
-// The region tensors' leases live now: each its address and bytes.
-static std::vector<std::pair<uint64_t, uint64_t>> records() {
-  std::vector<std::pair<uint64_t, uint64_t>> out = region_allocations();
-  std::lock_guard<std::mutex> guard(region_tensors_lock_);
-  for (auto &w : region_tensors_) out.emplace_back(w.first, w.second);
-  return out;
 }
 
 // Fused crossings share immutable exact-byte WritePrepare/Execute plans.
@@ -1814,7 +1793,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("publish_boundary", &publish_boundary);
   module.def("region_empty", &region_empty);
   module.def("address", &address);
-  module.def("records", &records);
+  module.def("records", &region_allocations);   // the region tensors' leases live now: each its address and bytes
   module.def("metal_prelude", &metal_prelude);
   module.def("fused_maker", &fused_maker);
   module.def("fused_release", &fused_release);

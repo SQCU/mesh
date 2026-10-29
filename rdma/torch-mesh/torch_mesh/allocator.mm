@@ -1,9 +1,11 @@
-// torch's MPS allocator over region leases (ncclMemAlloc): every MPS tensor is a lease, its DataPtr the lease's no-copy
-// MTLBuffer.  Torch 2.14 has no MPS allocator hook, so this one is constructed in place over the fixed instance
+// torch's allocators over region leases (ncclMemAlloc), so no tensor of a mesh process lies outside the region: every CPU
+// tensor is a lease, its DataPtr the lease's address, returned (ncclMemFree) when its storage is released; every MPS
+// tensor is a lease, its DataPtr the lease's no-copy MTLBuffer.  Torch 2.14 has no MPS allocator hook, so this one is constructed in place over the fixed instance
 // at::mps::getIMPSAllocator(), whose 16 bytes are kept as the delegate for pointers it did not make.  A block let go
 // returns its lease (ncclMemFree: the pages kept until every DMA read from them ends) when the command buffer open on
 // torch's stream completes, as torch's allocator returns a buffer in use, and commits it (torch's kernels never do).
 #include <ATen/mps/MPSAllocatorInterface.h>
+#include <c10/core/CPUAllocator.h>
 #include <ATen/mps/MPSEvent.h>
 #include <ATen/mps/MPSStream.h>
 #include <c10/core/Storage.h>
@@ -25,6 +27,7 @@ struct Lease { void *memory; size_t bytes; id_t id; std::vector<int64_t> shape; 
 
 std::mutex *lock_ = new std::mutex;
 auto *leases_ = new std::unordered_map<const void *, Lease>;
+auto *hosts_ = new std::unordered_map<const void *, size_t>;   // the CPU tensors' leases: each its bytes
 id_t made_ = 0;
 alignas(16) unsigned char torchs_[16];
 
@@ -88,6 +91,33 @@ c10::DataPtr lease(size_t bytes) {
   leases_->emplace(buffer, Lease{memory, bytes, ++made_, {}, nullptr});
   return {buffer, buffer, &release, at::Device(at::DeviceType::MPS, 0)};
 }
+
+void release_host(void *memory) {
+  if (!memory) return;
+  {
+    std::lock_guard<std::mutex> guard(*lock_);
+    hosts_->erase(memory);
+  }
+  ncclMemFree(memory);
+}
+
+// torch's CPU allocator: a CPU tensor's bytes are a lease's pages (page aligned, beyond torch's 64-byte alignment)
+struct RegionHostAllocator final : c10::Allocator {
+  c10::DataPtr allocate(size_t bytes) override {
+    const c10::Device cpu(c10::DeviceType::CPU);
+    if (!bytes) return {nullptr, nullptr, &release_host, cpu};
+    void *memory = nullptr;
+    TORCH_CHECK_WITH(OutOfMemoryError, !ncclMemAlloc(&memory, bytes), "CPU out of memory: a region lease of ", bytes,
+                     " bytes (torch_mesh allocator.mm): ", ncclGetLastError(nullptr));
+    {
+      std::lock_guard<std::mutex> guard(*lock_);
+      hosts_->emplace(memory, bytes);
+    }
+    return {memory, memory, &release_host, cpu};
+  }
+  c10::DeleterFnPtr raw_deleter() const override { return &release_host; }
+  void copy_data(void *dest, const void *src, std::size_t count) const override { std::memcpy(dest, src, count); }
+};
 
 struct RegionAllocator final : at::mps::IMPSAllocator {
   c10::DataPtr allocate(size_t bytes) override { return lease(bytes); }
@@ -178,8 +208,11 @@ static_assert(sizeof(RegionAllocator) == sizeof(at::mps::IMPSAllocator) && sizeo
 
 } // namespace
 
-// The region allocator in place of torch's instance, which must be of torch's class: the layout the delegate copies.
+// The region allocators: the CPU one by torch's own hook, above its default; the MPS one in place of torch's instance,
+// which must be of torch's class (the layout the delegate copies).
 void install_region_allocator() {
+  static RegionHostAllocator host;
+  c10::SetCPUAllocator(&host, 1);
   at::mps::IMPSAllocator *instance = at::mps::getIMPSAllocator();
   const char *type = typeid(*instance).name();
   TORCH_CHECK(!strcmp(type, "N2at3mps12MPSAllocatorE"), "torch_mesh: torch's MPS allocator instance (at::mps::getIMPSAllocator) "
@@ -188,10 +221,11 @@ void install_region_allocator() {
   new (instance) RegionAllocator();
 }
 
-// The region allocator's leases live now: each its address and the bytes asked of it.
+// The region allocators' leases live now: each its address and the bytes asked of it.
 std::vector<std::pair<uint64_t, uint64_t>> region_allocations() {
   std::lock_guard<std::mutex> guard(*lock_);
   std::vector<std::pair<uint64_t, uint64_t>> out;
   for (const auto &[buffer, lease] : *leases_) out.emplace_back((uint64_t)(uintptr_t)lease.memory, lease.bytes);
+  for (const auto &[memory, bytes] : *hosts_) out.emplace_back((uint64_t)(uintptr_t)memory, bytes);
   return out;
 }
