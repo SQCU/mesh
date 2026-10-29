@@ -1,5 +1,7 @@
-"""torch.distributed's "mesh" backend over ../libnccl-mesh.dylib (torch_mesh/backend.py).  The torch.backends
-entry point loads it when torch is imported, so a program only names it: init_process_group(backend="mesh").
+"""torch.distributed's "mesh" backend over ../libnccl-mesh.dylib (torch_mesh/backend.py).  Importing torch_mesh
+registers it, and so does the torch.backends entry point when torch is imported where this package is installed, so
+a program only names it: init_process_group(backend="mesh").  A run that brings its commit's torch_mesh by path
+has no installed entry point, so the import is what registers it there.
 
 declarations.Function compiles a complete PyTorch graph into the common native
 command records, with buffers and dispatches bound before execution.
@@ -232,3 +234,7 @@ def merge_partials(out, lse, group=None, root=-1):
     group = group or dist.distributed_c10d._get_default_group()
     attended, lse = backend.attention(torch.ops.torch_mesh.merge_partials(backend.partial(out, lse), root, group.group_name, []))
     return attended.to(out.dtype), lse
+
+
+# the backend registered by the import itself, not by install metadata (an entry point a by-path run does not have)
+_autoload()
