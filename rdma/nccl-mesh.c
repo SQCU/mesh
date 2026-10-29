@@ -2489,7 +2489,8 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
    channel reads waits to be published: that entry + 1, 0 none) */
 struct message { struct call *c; uint32_t step; uint64_t entry; mesh_pages pages, end; uint64_t need; size_t offset, bytes;
                  struct where data; struct mesh_dma_span *spans; uint64_t table; double priority;
-                 uint64_t listed; mesh_pages laid; /* its entry and end in its issue's own lists (issue_lay), schedule_laid's base */ };
+                 uint64_t listed; mesh_pages laid; /* its entry and end in its issue's own lists (issue_lay), schedule_laid's base */
+                 uint64_t needs; /* a landing's need past its channel's first send entry, 0 none (landing_needs) */ };
 /* a group's entries on one channel, each list in its order from its first (`first`: [0] the send list's, [1] the
    landing list's), its landing entries' gate (`word` a region offset, 0 none; `base` the value it reaches: a page
    count of the holding's `ready`, or the number of a group at the communicator's gate word: gate_of), and each list's
@@ -2903,22 +2904,12 @@ static void schedule_laid(struct ncclComm *comm, struct schedule *plans) {
         struct message *m = (send ? p->out : p->in) + k;
         m->entry = m->listed + p->first[!send];
         m->end = pages_add(send ? ch->out : ch->in, m->laid);
-        m->need = 0;
+        m->need = !send && m->needs ? p->first[0] + m->needs : 0;
         m->c->bound->channel[m->step] = h; m->c->bound->entry[m->step] = m->entry;
       }
     for (size_t k = 0; k < p->ins; k++) {
       const struct message *m = consumption_at(p, k);
       m->c->bound->consumption[m->step] = p->first[1] + k;
-    }
-    for (size_t k = 0; k < p->ins; k++) {
-      struct message *m = p->in + k;
-      const struct steps *st = m->c->bound;
-      if (st->steps[m->step].op != MESH_STEP_REDUCE) continue;
-      for (size_t j = 0; j < p->outs; j++) {
-        const struct message *o = p->out + j;
-        if (o->c != m->c || o->step >= m->step || (st->read && named(st->read[o->step])) || !meet(st->steps + o->step, st->steps + m->step)) continue;
-        if (o->entry + 1 > m->need) m->need = o->entry + 1;
-      }
     }
   }
 }
@@ -3140,6 +3131,25 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u, struct w
         }
   }
   return ncclSuccess;
+}
+
+/* each combine landing's need, past its channel's first send entry: the last earlier SEND of its call on that channel
+   whose piece it meets, but for one reading a named copy (0: none).  Fixed while the issue is laid and placed (its steps
+   and their `read` kept: steps_rebind), so found once there, not at each schedule (schedule_laid adds the channel's
+   first entry) */
+static void landing_needs(struct ncclComm *comm, struct schedule *plans) {
+  for (uint32_t h = 0; h < comm->count; h++)
+    for (size_t k = 0; k < plans[h].ins; k++) {
+      struct message *m = plans[h].in + k;
+      const struct steps *st = m->c->bound;
+      m->needs = 0;
+      if (st->steps[m->step].op != MESH_STEP_REDUCE) continue;
+      for (size_t j = 0; j < plans[h].outs; j++) {
+        const struct message *o = plans[h].out + j;
+        if (o->c == m->c && o->step < m->step && !(st->read && named(st->read[o->step])) &&
+            meet(st->steps + o->step, st->steps + m->step) && o->listed + 1 > m->needs) m->needs = o->listed + 1;
+      }
+    }
 }
 
 /* Bind only true overwrite hazards. Original-input bindings are disjoint from reduction results. A landing that writes
@@ -3438,6 +3448,7 @@ static ncclResult_t issue_bind(struct ncclComm *comm, struct call **calls, size_
   if (!result) bind_calls(list, n);
   if (!result && remote) result = place_group(comm, u, *area);
   if (!result && remote) result = bind_retirements(comm, u->plans);
+  if (!result && remote) landing_needs(comm, u->plans);
   for (size_t i = 0; !result && i < n; i++) {
     const struct call *c = list + i;
     const struct ncclMeshWritePlan *w = c->write_plan;
