@@ -18,9 +18,29 @@ LITERAL = r'-?(?:0x[0-9a-fA-F]+|\d+)[uUlL]*'
 FLOATING = r'-?\d+\.\d*(?:[eE][-+]?\d+)?'
 
 
+def definitions_dropped(text):
+    """The text without its static inline function definitions: cdef takes declarations, and no Python caller calls a
+    header's inline helper (mesh-plan.h mesh_step_bytes)."""
+    out, at = [], 0
+    for m in re.finditer(r'\bstatic\s+inline\b', text):
+        brace, semi = text.find('{', m.end()), text.find(';', m.end())
+        if m.start() < at or brace < 0 or 0 <= semi < brace:
+            continue
+        depth, k = 0, brace
+        while k < len(text):
+            depth += {'{': 1, '}': -1}.get(text[k], 0)
+            k += 1
+            if not depth:
+                break
+        out.append(text[at:m.start()])
+        at = k
+    return ''.join(out) + text[at:]
+
+
 def declarations(text):
     text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
     text = re.sub(r'//[^\n]*', '', text)
+    text = definitions_dropped(text)
     out, continued, skipping, depth = [], False, 0, 0
     for line in text.splitlines():
         s = line.strip()
