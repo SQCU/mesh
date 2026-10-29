@@ -5675,18 +5675,6 @@ ncclResult_t ncclMeshWriteLayoutPrepare(const ncclMeshLayout *v, int source, int
   return result;
 }
 
-/* Resolve the local tensor binding to a page index. The common compiler
-   bounds the entire selection and all its instances in that page table.
-   Affine expressions stay affine until final DMA descriptors are emitted. */
-static ncclResult_t tensor_pages(const void *local,ncclComm_t comm,int metal,
-                                  ncclMeshPageTable_t *table,struct write_page_index *start) {
-  ncclResult_t result=ncclMeshPageTableCreate(local,comm,metal,table);
-  if(result)return result;
-  const struct where binding=metal ? where_of(local) : (struct where){NULL,(size_t)local};
-  const size_t origin=(uintptr_t)address_of(binding)-(uintptr_t)address_of((*table)->base);
-  *start=(struct write_page_index){origin/(*table)->page_bytes,origin%(*table)->page_bytes};
-  return ncclSuccess;
-}
 
 /* mesh-write-compiler.h mesh_view_layout */
 long mesh_view_layout(const uint64_t *shape, const int64_t *strides, size_t rank, uint64_t itemsize,
@@ -5726,16 +5714,6 @@ long mesh_view_layout(const uint64_t *shape, const int64_t *strides, size_t rank
     for (size_t i = outer; i-- > 0;) { if (++index[i] < shape[i]) { more = 1; break; } index[i] = 0; }
   }
   return n;
-}
-ncclResult_t mesh_compile_rows(const void *source_buffer,void *landing_buffer,size_t row_bytes,size_t rows,
-    size_t pitch,int source,int destination,ncclComm_t comm,int metal,size_t max_packet,struct mesh_write_layout layout,ncclMeshWritePlan_t *out) {
-  if(!comm||!rows||!row_bytes||rows>SIZE_MAX/row_bytes)
-    return fail(ncclInvalidArgument,"invalid tensor row view");
-  ncclMeshPageTable_t table=NULL;struct write_page_index start={0};
-  ncclResult_t result=tensor_pages(comm->rank==source?source_buffer:landing_buffer,comm,metal,&table,&start);
-  if(!result)result=write_prepare(table,start,rows*row_bytes,source,destination,1,pitch,max_packet,
-                                 row_bytes,rows,NULL,0,0,layout,out);
-  ncclMeshPageTableDestroy(table);return result;
 }
 ncclResult_t ncclMeshWriteSourceReady(ncclMeshWritePlan_t plan, const void *words, uint64_t value, ncclMeshTileLayout layout) {
   if (!plan || !value || value < (plan->layout.tile_bytes && plan->layout.tile_bytes < plan->bytes ? plan->layout.tile_bytes : plan->bytes) || plan->ready_value)

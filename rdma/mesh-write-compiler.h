@@ -1,21 +1,17 @@
-/* Tensor frontend lowering, used only during preparation. Program-facing
-   communication operands are ncclMeshPageMask in nccl.h. These adapters resolve
-   local tensor views to that page domain before the common WRITE compiler.
-   Affine rows and repeated typed values remain compact operands. Indexed
-   views retain only their declared selections; none expand to per-page masks.
-   Peers may use different row/indexed forms of the same logical bytes. */
+/* The view-layout arithmetic every WRITE binding is lowered with, during preparation only. Program-facing operands
+   are nccl.h's: a page table and its masks (ncclMeshWritePagesPrepare), or a view's abstract layout over a page
+   table (ncclMeshLayout, ncclMeshWriteLayoutPrepare); no address is an operand. Peers may use different row or
+   span forms of the same logical bytes (design/pointer-lowering-2026-10-28.md). */
 #ifndef MESH_WRITE_COMPILER_H
 #define MESH_WRITE_COMPILER_H
 #include "nccl.h"
 typedef struct ncclMeshSpan { uint64_t offset, bytes; } ncclMeshSpan;
-/* Local tensor binding strides. Public page programs use ncclMeshWriteLayout's
-   page indices instead; no tensor address becomes a peer destination address. */
+/* A binding's local layout as the common WRITE compiler takes it, in bytes (ncclMeshWriteLayoutPrepare fills it from
+   ncclMeshLayout's elements; ncclMeshWritePagesPrepare from its pages). */
 struct mesh_write_layout { size_t tile_bytes, instances, instance_stride, invocations; };
 #ifdef __cplusplus
 extern "C" {
 #endif
-ncclResult_t mesh_compile_rows(const void* source_buffer, void* landing_buffer, size_t row_bytes, size_t rows,
-    size_t pitch, int source, int destination, ncclComm_t comm, int metal, size_t max_packet, struct mesh_write_layout layout, ncclMeshWritePlan_t* out);
 /* A strided view's bytes in logical (C) element order, the transfer order every WRITE binds (nccl.h ncclMeshWriteLayoutPrepare):
    an affine view's rows (rows[0] bytes each, rows[1] of them, rows[2] apart, ascending) and no
    span; else spans ({offset, bytes}, adjacent ones merged, a broadcast view's repeated bytes repeated) relative to its
