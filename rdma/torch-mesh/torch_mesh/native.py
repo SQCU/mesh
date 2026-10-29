@@ -165,6 +165,9 @@ def compile_graph(module, metadata, operands, *, destinations=None):
     class PageKernel(MetalKernel):
         # These objects exist during source emission only. The numerical body
         # receives page bindings and the resulting ordinary address expression.
+        max_threadgroup_size = min(compiler_operands()['ROW_THREADS'], _stream.device_facts()[1])
+        simd_group_size = compiler_operands()['SIMD_WIDTH']
+
         @contextmanager
         def access(self, name):
             previous = getattr(self, 'page_access', None)

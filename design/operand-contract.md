@@ -297,6 +297,43 @@ logical values, their total count, and the resulting factor as page operands.
 Product partials must be summed before their values are squared. Removing
 row-sized staging does not by itself supply that distributed reduction.
 
+### Distributed reduction declarations
+
+`algebra.py` now supplies softmax, log-softmax, their gradients and vector
+norms to both FX capture and the ragged tensor frontend. The latter consumes
+the same decomposition table before sharding propagation. Its separate
+linear-gradient adapter is removed. These are graph rewrites during
+preparation; replay receives their numerical records and page operands.
+
+Softmax exposes a maximum and a sum per retained row. Its gradients expose
+row sums. A vector norm exposes sum, maximum or minimum after transforming
+the local values, then applies its result operation. These ordinary reduction
+operators already declare collectives. They carry summaries across reduced
+mesh dimensions while the input values remain on their assigned nodes. Mean
+continues to divide by the logical count, rather than the local shard size.
+The algebra does not insert a contiguous copy or require the full row on one
+node. Empty softmax domains resolve during declaration without a reduction.
+
+The FX numerical emitter also takes its reduction launch limit from
+`ROW_THREADS` and the device capacity, and its SIMD width from the manifest.
+It no longer inherits those constants from upstream Metal code generation.
+
+Preparation on 2026-10-28 compiled complete forward/backward graphs with
+mapped half, bfloat and float inputs, including odd widths and 1,048,576
+channels. Different declared reduction launch limits reached source emission.
+FakeTensor tracing with metadata-only process groups described uneven shares
+over four ranks and over two mesh dimensions. The recorded collectives carry
+row summaries, with no input all-gather in those graphs. These groups did not
+communicate, and neither these declarations nor the native numerical graphs
+were executed. This is structural evidence, not a cluster or performance run.
+
+The multidimensional declaration still contains a separate all-reduce for
+each reduced mesh dimension. Softmax still declares maximum and sum separately;
+folding them into the existing scaled-partial merge is unfinished. Variance
+and the other whole-dimension rules in `partition.py` are also still present.
+Native fused row norms still need their distributed factor operands connected
+through the complete graph. These are remaining lowering and fusion tasks.
+
 ### Partial-result merge capacity
 
 The shared `mesh_merge` no longer limits a row to 64 contributors or requires

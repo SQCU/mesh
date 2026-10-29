@@ -22,10 +22,12 @@ holds the same one or none there (R6: a plain Shard or another partition raises 
 
 No block holds padding (each capacity is its part), so an op on a local shard runs as torch runs it, a contraction
 or reduction over a partitioned dimension giving the Partial its sharding gives, with nothing masked:
-- Count-dependent: mean over a partitioned dimension is the sum divided by its logical count.  An op whose sharding
-  gives any other Partial there (avg, the norms, embedding's mask), or a ragged output extent P does not divide (a
-  view), and convolution, argmax, argmin and equal, get the dimension whole first, by the gather below; softmax, var,
-  sort, top-k, scans and indexing need it whole by DTensor's own rules.
+- Count-dependent: mean over a partitioned dimension is the sum divided by its logical count. Vector norms,
+  softmax, log-softmax and their gradients use the shared algebra before sharding propagation. Their sum/max/min
+  summaries are reduced across the split dimensions; their input rows remain sharded. An op whose sharding gives
+  another Partial there (avg, embedding's mask), or a ragged output extent P does not divide (a view), and convolution,
+  argmax, argmin and equal still get the dimension whole first. Variance, sort, top-k, scans and indexing retain
+  DTensor's own whole-dimension rules until their lowering is extended.
 - Attention: SDPA on query, key and value split along the sequence by one RaggedShard (on any mesh dimension) is ring
   attention, each source's keys past its valid extents masked (score -inf); context parallelism's ring
   (ring_attention) masks the same way over head-tail halves.  The softmax over the split is the library's partials
@@ -1424,6 +1426,9 @@ def _whole(tree, dims):
 
 
 def _dispatch(op_call, args, kwargs):
+    from .algebra import decompositions
+    if op_call in decompositions:
+        return decompositions[op_call](*args, **kwargs)
     handler = _HANDLERS.get(op_call)
     if handler is not None:
         return handler(op_call, args, kwargs)
@@ -1514,12 +1519,6 @@ def _mean(op_call, args, kwargs):
     return torch.sum(x, dims, keepdim=keepdim, dtype=dtype) / math.prod(x.shape[d] for d in dims)
 
 
-def _linear_backward(op_call, args, kwargs):
-    """Use the same linear-gradient graph as ordinary FX tensors."""
-    from .algebra import linear_backward
-    return linear_backward(**_named(op_call, args, kwargs))
-
-
 def _spec_like(spec, shape, dtype):
     stride = torch.empty(shape, device='meta').stride()
     return DTensorSpec(spec.mesh, spec.placements, tensor_meta=TensorMeta(torch.Size(shape), stride, dtype))
@@ -1559,7 +1558,7 @@ def _detached(op_call, args, kwargs):
     return _register(out) if _registered(args[0]) else out
 
 
-_HANDLERS = {aten.mean.default: _mean, aten.mean.dim: _mean, aten.linear_backward.default: _linear_backward,
+_HANDLERS = {aten.mean.default: _mean, aten.mean.dim: _mean,
              aten._scaled_dot_product_flash_attention_for_cpu.default: _attention,
              aten._scaled_dot_product_attention_math_for_mps.default: _attention, aten.detach.default: _detached}
 
