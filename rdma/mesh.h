@@ -273,6 +273,12 @@ static inline int mesh_entry_valid(const struct hdr *m,struct mesh_entry e){
   return 1;
 }
 static inline struct mesh_page_entry *mesh_page(struct hdr *m){ return (struct mesh_page_entry*)((unsigned char*)m+m->page_off); }
+/* Preparation resolves logical page bytes to registered backing. A consumer's
+   local virtual view need not have the bridge's address order. */
+static inline uint64_t mesh_page_offset(struct hdr *m,uint32_t row,uint64_t logical){
+  const uint64_t quantum=(uint64_t)m->block*m->pgsz;
+  return atomic_load_explicit(&mesh_page(m)[row+logical/quantum].address,memory_order_relaxed)+logical%quantum;
+}
 /* design/algorithm-sources.md#programtensor */
 static inline struct mesh_buffer *mesh_buffers(struct hdr *m){ return (struct mesh_buffer *)((char *)m+m->buffer_off); }
 static inline unsigned char *mesh_at(struct hdr *m,uint32_t page){ return (unsigned char*)m+m->data_off+(size_t)page*m->pgsz; }

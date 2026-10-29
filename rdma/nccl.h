@@ -182,7 +182,12 @@
    after a natural downstream landing or the bridge's own DMA-read completion; nothing is sent back.  ncclMemAlloc is the lease,
    the call the operator's division of the work makes of the bridge ("the bridge is there to behave like a system
    call"): whole pages of the region covering size, which the bridge registered on every device when the device came up,
-   before any queue pair existed; a lease registers nothing.  The client sizes its leases ("ontologically it must be the
+   before any queue pair existed; a lease registers nothing. Preparation maps its selected bridge
+   pages into a fixed local virtual interval. Those pages may be scattered in the arena; CPU, Metal and CoreML views
+   share their contents without a copy. Execution does not change these mappings. Transport preparation resolves
+   their bridge offsets from page-table rows, never from subtraction of a local virtual address. A descriptor table
+   declares linear backing because the bridge reads it as one interval; tensor storage has no such requirement.
+   The client sizes its leases ("ontologically it must be the
    responsibility of client programs to know how much allocation they need"): a lease the region cannot meet is
    ncclSystemError naming the bytes asked and the pages free, one while every client slot is held ncclSystemError naming
    mesh.h MESH_CLIENTS, and one where the process attaches no region of a bridge that runs names the requirement, a
@@ -220,11 +225,10 @@
    inside its registered-memory extent. Prepared WRITE bindings jointly compile packet, registration, indexed-view
    and affine-row cuts during configuration; execution transmits only their declared payload, without a metadata
    exchange or a staging repair. Every crossing source and destination remains in this node's region.
-   Generic collective bindings must preserve those same physical constraints. A lease that fits one registration
-   extent lies within one (mesh-dataflow.c mesh_arena_alloc), so no span of one, a slot of the library's or a caller's
-   buffer, crosses an extent. Over a lease larger than an extent, their relative packet grid does not yet compile
-   registration cuts for every ragged placement: place_group reports an invalid span before presentation if one
-   crosses. That integration gap is not a page-alignment requirement on the data model.
+   Generic collective bindings preserve those same physical constraints. Preparation joins actual backing breaks,
+   registration cuts and fragment endpoints across the declared slots and relays in common byte coordinates.
+   Each emitted packet stays inside its backing run and registration extent, including a break within a numerical
+   row. Numerical readiness names the packet containing the row's final byte.
    A collective whose
    send buffer lies apart from its result reads it in place where its program allows (a SEND of a range no step of the
    rank wrote reads it, the first combine of such a range writes send op piece, the ranges of the result no step writes

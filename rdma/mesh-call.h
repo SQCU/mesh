@@ -5,7 +5,11 @@
    compare-exchange (mesh-dataflow.c mesh_claim): a slot `pages` arena pages on `stride` rows from row `first`; 0, or the
    refusal as a value (ENOMEM, ENOSPC) */
 struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride; };
-int mesh_section_create(struct mesh_ctx *,size_t bytes,uint32_t count,struct mesh_section *);
+/* Tensor storage may use any free bridge pages. A bridge descriptor table is
+   read as one region interval and declares that stricter backing requirement.
+   Both have the same contiguous local virtual view, prepared without a copy. */
+enum mesh_backing { MESH_BACKING_PAGES, MESH_BACKING_LINEAR };
+int mesh_section_create(struct mesh_ctx *,size_t bytes,uint32_t count,enum mesh_backing,struct mesh_section *);
 void *mesh_section_address(struct mesh_ctx *,struct mesh_section,uint32_t index);
 /* design/transport.md section 14: the nodes this node's bridge has a live stream toward, each with its stream's
    bandwidth (mesh-plan.h struct mesh_reach), at most `room`; their count */

@@ -6,7 +6,9 @@
 #include <libproc.h>
 #include <signal.h>
 /* design/transport.md */
-struct mesh_ctx { struct hdr *M; size_t len; uint64_t client; uint32_t row_cursor,arena_cursor; int fd; };
+/* `view` is this client's fixed virtual window, indexed by bridge row. Its
+   mappings are prepared once when pages are assigned; execution never remaps. */
+struct mesh_ctx { struct hdr *M; size_t len; uint64_t client; uint32_t row_cursor,arena_cursor; int fd; void *view; size_t view_bytes; };
 /* design/transport.md: a process's client slot of this node's one region, taken vacant by one compare-exchange
    (mesh_slot_take, which the bridge's own leases take too) and stamped with the process's identity (its pid and
    start): the owner of its leases of the region and of the streams it holds, and a holder of the region the heartbeat

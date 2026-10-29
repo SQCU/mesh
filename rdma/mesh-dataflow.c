@@ -309,7 +309,8 @@ int mesh_attach(struct mesh_ctx *c){
 int mesh_detach(struct mesh_ctx *c){
   if(!c->M) return 0;
   mesh_retire(c->M,c->client);
-  int error=(c->fd>=0 && munmap(c->M,c->len))?errno:0;
+  int error=(c->view && munmap(c->view,c->view_bytes))?errno:0;
+  if(c->fd>=0 && munmap(c->M,c->len) && !error)error=errno;
   if(c->fd>=0 && close(c->fd) && !error) error=errno;
   *c=(struct mesh_ctx){0};
   return error;
@@ -432,8 +433,9 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
    registration extent (MESH_DMA_EXTENT from the arena's first page) lies within one where one has room, so no DMA span
    of it crosses one (mesh.h mesh_dma_span_valid) and no compiled piece of it needs a cut there. Where no extent has
    room for it whole, it lies across a boundary, as a run larger than an extent always does: a page's span never
-   crosses one, and a compiled piece is cut there (nccl-mesh.c extent_cuts). The region's free pages are taken whatever
-   extents the leases before broke up (2026-10-29: a 1 GiB lease refused with 2,583,791 of 5,373,952 pages free). */
+   crosses one, and preparation cuts packets there. Tensor sections take individual page blocks with this allocator
+   and map their runs into one local virtual view (mesh_section_create); only consumers declaring linear backing
+   require one whole run. */
 uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
   if(!pages || !align){ errno=EINVAL; return MESH_ABSENT; }
   _Atomic uint64_t *bits=mesh_arena_bits(c->M);

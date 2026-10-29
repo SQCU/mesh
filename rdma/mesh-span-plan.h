@@ -78,12 +78,6 @@ static inline int mesh_page_run_add(struct mesh_page_runs *runs,uint64_t first,u
   }
   runs->at[runs->count++]=(struct mesh_page_run){first,first+bytes,offset};return 0;
 }
-/* Resolve the bridge's backing once during preparation, in lease coordinates.
-   Backend virtual addresses and registered DMA offsets need not coincide. */
-static inline uint64_t mesh_page_offset(struct hdr *m,uint32_t row,uint64_t logical) {
-  const uint64_t quantum=(uint64_t)m->block*m->pgsz;
-  return atomic_load_explicit(&mesh_page(m)[row+logical/quantum].address,memory_order_relaxed)+logical%quantum;
-}
 static inline int mesh_page_runs_read(struct hdr *m,uint32_t row,uint64_t first,uint64_t bytes,struct mesh_page_runs *out) {
   const uint64_t quantum=(uint64_t)m->block*m->pgsz;
   for(uint64_t at=0;at<bytes;) {

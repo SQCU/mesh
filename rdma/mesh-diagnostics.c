@@ -28,13 +28,13 @@ static int wait_for(const struct mesh_stream_view *v,uint64_t value,uint64_t thr
 static int present(struct mesh_ctx *c,uint32_t stream,uint32_t rounds,
                    struct mesh_section data,struct mesh_section table){
   struct mesh_dma_span *spans=mesh_section_address(c,table,0);
-  const uint64_t source=(char *)mesh_section_address(c,data,0)-(char *)c->M;
+  const uint64_t source=mesh_page_offset(c->M,data.first,0);
   for(uint32_t k=0;k<rounds;k++){
     spans[k]=(struct mesh_dma_span){.offset=source,.bytes=data.bytes};
     spans[rounds+k]=(struct mesh_dma_span){
-      .offset=(char *)mesh_section_address(c,data,k+1)-(char *)c->M,.bytes=data.bytes};
+      .offset=mesh_page_offset(c->M,data.first+(k+1)*data.stride,0),.bytes=data.bytes};
   }
-  const uint64_t metadata=(char *)spans-(char *)c->M;
+  const uint64_t metadata=mesh_page_offset(c->M,table.first,0);
   int error=mesh_stream_present(c,stream,1,(struct mesh_entry){
     .spans=metadata+rounds*sizeof *spans,.units=rounds,.word=0,.base=0});
   return error?error:mesh_stream_present(c,stream,0,(struct mesh_entry){
@@ -82,8 +82,8 @@ int mesh_diagnostic_quiet(int argc,char **argv){
   uint32_t stream=MESH_ABSENT;
   struct mesh_stream_view v;
   if(role<0 || role>1 || !rounds || !ngaps || rounds>=MESH_STREAM_ENTRIES ||
-     mesh_section_create(&c,page,rounds+1,&data) ||
-     mesh_section_create(&c,2*rounds*sizeof(struct mesh_dma_span),1,&table) ||
+     mesh_section_create(&c,page,rounds+1,MESH_BACKING_PAGES,&data) ||
+     mesh_section_create(&c,2*rounds*sizeof(struct mesh_dma_span),1,MESH_BACKING_LINEAR,&table) ||
      mesh_stream_take(&c,wire,&stream) || mesh_stream_view(&c,stream,&v)){
     fprintf(stderr,"quiet: no lease, no stream %llu, or rounds past %u\n",(unsigned long long)wire,MESH_STREAM_ENTRIES);
     release_probe(&c,stream,0,data,table);

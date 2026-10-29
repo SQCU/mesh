@@ -717,7 +717,7 @@ struct attach {
   struct mesh_ctx context;
   struct lease *leases;
   size_t count, room;
-  /* each arena page's lease, its index + 1 (0: none), so finding a byte's lease is its page's load (lease_at); and the
+  /* each local virtual row's lease, its index + 1 (0: none), so finding a byte's lease is its row's load (lease_at); and the
      leases returned and not yet given back (leases_reap) */
   uint32_t *lease_of;
   size_t returned;
@@ -889,6 +889,8 @@ static ncclResult_t comm_refused(int status, const char *name) {
 static int lease_read_sample(void *, uint32_t, struct mesh_lease_retire_sample *);
 static void leases_reap(struct attach *);
 static struct lease *lease_at(const void *ptr, struct attach **held);
+static uint64_t lease_offset(const void *ptr);
+static ncclResult_t mem_alloc(void **ptr, size_t size, enum mesh_backing backing);
 static void comm_let_go(struct ncclComm *comm) {
   if (!comm->binding) return;
   comm->binding = 0;
@@ -1341,7 +1343,7 @@ static int fabric_realize(struct ncclComm *comm) {
   if (!status && !(comm->channels = calloc(comm->fabric.cables + 1, sizeof *comm->channels))) status = ENOMEM;
   if (!status && comm->nranks > 1 && (ncclMemAlloc(&comm->gate_word, sizeof(uint64_t)) || lease_buffer(comm->gate_word, &comm->gate, &offset) || offset))
     status = ENOMEM;
-  if (!status && comm->gate_word) comm->gate_at = (uint64_t)((char *)comm->gate_word - (char *)m);
+  if (!status && comm->gate_word) comm->gate_at = lease_offset(comm->gate_word);
   for (uint32_t e = 0; !status && e < comm->fabric.cables; e++) {
     if (comm->endpoint[e] == UINT32_MAX) continue;
     const struct mesh_cable *c = comm->fabric.cable + e;
@@ -1573,10 +1575,12 @@ ncclResult_t ncclCommUserRank(const ncclComm_t comm, int *rank) {
 ncclResult_t ncclCommRegister(const ncclComm_t comm, void *buff, size_t size, void **handle) {
   if (!comm || !handle) return fail(ncclInvalidArgument, "comm or handle is NULL");
   pthread_mutex_lock(&attach_lock);
-  const struct hdr *m = attaches ? attaches->context.M : NULL;
-  const uintptr_t at = (uintptr_t)buff, first = m ? (uintptr_t)m + m->data_off : 0, end = m ? (uintptr_t)m + m->length : 0;
+  struct attach *owner = NULL;
+  const struct lease *lease = lease_at(buff, &owner);
+  const size_t offset = lease ? (uintptr_t)buff - (uintptr_t)lease->address : 0;
+  const int valid = lease && !lease->returned && owner == comm->attach && size <= lease->bytes - offset;
   pthread_mutex_unlock(&attach_lock);
-  if (!m || at < first || at > end || size > end - at)
+  if (!valid)
     return fail(ncclInvalidArgument, "ncclCommRegister of %zu bytes at %p: not in the region of this node's bridge; a buffer "
                 "collectives move is leased from the region (ncclMemAlloc)", size, buff);
   *handle = buff;
@@ -1626,18 +1630,18 @@ static int lease_detachable(void *context, const struct mesh_lease_retire_dep *d
 static int lease_returnable(struct attach *a, struct lease *l) {
   return mesh_lease_retire_detachable(&l->reads, lease_read_sample, lease_detachable, a);
 }
-/* the arena page `ptr` lies in, UINT32_MAX outside the arena */
-static uint32_t arena_page(const struct attach *a, const void *ptr) {
+/* The prepared local view's row, independent of its physical backing. */
+static uint32_t view_row(const struct attach *a, const void *ptr) {
   const struct hdr *m = a->context.M;
-  const uintptr_t data = (uintptr_t)m + m->data_off, at = (uintptr_t)ptr;
-  const uint64_t page = at < data ? UINT64_MAX : (at - data) / m->pgsz;
-  return page < mesh_arena_pages(m) ? (uint32_t)page : UINT32_MAX;
+  const uintptr_t data = (uintptr_t)a->context.view, at = (uintptr_t)ptr;
+  const uint64_t row = !data || at < data ? UINT64_MAX : (at - data) / ((size_t)m->block * m->pgsz);
+  return row < mesh_rows(m) ? (uint32_t)row : UINT32_MAX;
 }
 /* lease `i`'s pages named `value` in the page index (i + 1: its own; 0: none) */
 static void lease_mark(struct attach *a, size_t i, uint32_t value) {
   const struct lease *l = a->leases + i;
-  const uint32_t first = arena_page(a, l->address), pages = (uint32_t)(l->bytes / a->context.M->pgsz);
-  for (uint32_t p = 0; first != UINT32_MAX && p < pages; p++) a->lease_of[first + p] = value;
+  const uint32_t rows = (uint32_t)(l->bytes / ((size_t)a->context.M->block * a->context.M->pgsz));
+  for (uint32_t r = 0; r < rows; r++) a->lease_of[l->row + r] = value;
 }
 /* returned lease `i` given back to the region where its reads are done (lease_returnable), the last lease moved to its
    place: 1, else 0 (it stays, returned) */
@@ -1659,7 +1663,7 @@ static void leases_reap(struct attach *a) {
 
 /* a lease of the region: its whole pages covering `size` (one page for 0), already registered on every device of the
    node's bridge, owned by the process's client; never other memory */
-ncclResult_t ncclMemAlloc(void **ptr, size_t size) {
+static ncclResult_t mem_alloc(void **ptr, size_t size, enum mesh_backing backing) {
   if (!ptr) return fail(ncclInvalidArgument, "ptr is NULL");
   pthread_mutex_lock(&attach_lock);
   struct attach *a = NULL;
@@ -1671,9 +1675,9 @@ ncclResult_t ncclMemAlloc(void **ptr, size_t size) {
   if (status)
     result = attach_fail(status, "ncclMemAlloc of %zu bytes", size);
   else if ((a->count == a->room && lease_room(a)) ||
-           (!a->lease_of && !(a->lease_of = calloc(mesh_arena_pages(a->context.M), sizeof *a->lease_of))))
+           (!a->lease_of && !(a->lease_of = calloc(mesh_rows(a->context.M), sizeof *a->lease_of))))
     result = fail(ncclSystemError, "out of memory");
-  else if ((status = mesh_section_create(&a->context, bytes, 1, &lease))) {
+  else if ((status = mesh_section_create(&a->context, bytes, 1, backing, &lease))) {
     const struct hdr *m = a->context.M;
     const size_t quantum = (size_t)m->block * m->pgsz;
     result = fail(ncclSystemError, "ncclMemAlloc of %zu bytes (%zu pages of %u bytes): the region of this node's bridge has %u of "
@@ -1688,6 +1692,8 @@ ncclResult_t ncclMemAlloc(void **ptr, size_t size) {
   pthread_mutex_unlock(&attach_lock);
   return result;
 }
+
+ncclResult_t ncclMemAlloc(void **ptr, size_t size) { return mem_alloc(ptr, size, MESH_BACKING_PAGES); }
 
 /* nccl.h ncclMeshRegionExpired */
 ncclResult_t ncclMeshRegionExpired(int *expired) {
@@ -1716,13 +1722,24 @@ ncclResult_t ncclMemFree(void *ptr) {
 /* the lease holding ptr and its attach (*held, where held is not NULL), under attach_lock (NULL: none) */
 static struct lease *lease_at(const void *ptr, struct attach **held) {
   for (struct attach *a = attaches; a; a = a->next) {
-    const uint32_t page = a->lease_of ? arena_page(a, ptr) : UINT32_MAX, k = page == UINT32_MAX ? 0 : a->lease_of[page];
+    const uint32_t row = a->lease_of ? view_row(a, ptr) : UINT32_MAX, k = row == UINT32_MAX ? 0 : a->lease_of[row];
     if (k) {
       if (held) *held = a;
       return a->leases + k - 1;
     }
   }
   return NULL;
+}
+
+/* Preparation resolves a local view to its bridge page. A descriptor table
+   explicitly requests linear backing before adding any table-relative offset. */
+static uint64_t lease_offset(const void *ptr) {
+  pthread_mutex_lock(&attach_lock);
+  struct attach *a = NULL;
+  const struct lease *l = lease_at(ptr, &a);
+  const uint64_t offset = mesh_page_offset(a->context.M, l->row, (uintptr_t)ptr - (uintptr_t)l->address);
+  pthread_mutex_unlock(&attach_lock);
+  return offset;
 }
 
 /* the leases a prepared owner's entries read (a placed issue's, a prepared WRITE's), each a registration scope open
@@ -2241,9 +2258,9 @@ static int crosses(const struct call *c) {
 
 /* whether `bytes` at w lie in this node's region (comm's attach's), a lease's pages */
 static int in_region(const struct ncclComm *comm, struct where w, size_t bytes) {
-  const struct hdr *m = comm->attach->context.M;
-  const unsigned char *at = address_of(w), *first = (const unsigned char *)m + m->data_off, *end = (const unsigned char *)m + m->length;
-  return at && at >= first && at <= end && bytes <= (size_t)(end - at);
+  const struct mesh_ctx *c = &comm->attach->context;
+  const uintptr_t at = (uintptr_t)address_of(w), first = (uintptr_t)c->view;
+  return first && at >= first && at - first <= c->view_bytes && bytes <= c->view_bytes - (at - first);
 }
 /* the bytes a crossing call reads from its send buffer: all of them, a broadcast's at its root, an all-gather's own
    segment, an all-to-all's segments to every rank; none a receive's */
@@ -3220,7 +3237,6 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u) {
   pthread_mutex_lock(&attach_lock);
   owned_end(&u->owned, 1);
   pthread_mutex_unlock(&attach_lock);
-  const unsigned char *region = (const unsigned char *)comm->attach->context.M;
   struct schedule *plans = u->plans;
   size_t length = 0;
   const size_t align = MESH_RECORD_ALIGNMENT;
@@ -3228,7 +3244,7 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u) {
     if (pass) {
       if (u->tables) ncclMemFree(u->tables);
       u->tables = NULL;
-      if (length && ncclMemAlloc(&u->tables, length)) return fail(ncclSystemError, "a group's span tables: %s", last.text);
+      if (length && mem_alloc(&u->tables, length, MESH_BACKING_LINEAR)) return fail(ncclSystemError, "a group's span tables: %s", last.text);
       length = 0;
     }
     for (uint32_t h = 0; h < comm->count; h++)
@@ -3242,7 +3258,7 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u) {
             const uint64_t logical = step->first * step->piece.element_bytes;
             const size_t repeat = write->stride ? (x->offset - logical) / write->stride : 0;
             x->spans = write->spans + write->span_first[write_span_index(write,x->step,x->c->invocation)] + repeat * x->pages.n;
-            x->table = (uint64_t)((const unsigned char *)x->spans - region);
+            x->table = lease_offset(x->spans);
             continue;
           }
           const unsigned char *address = address_of(x->data);
@@ -3278,7 +3294,7 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u) {
               return fail(ncclInvalidUsage, "collective binding differs from its prepared page backing");
           }
           x->spans = made;
-          x->table = (uint64_t)((unsigned char *)made - region);
+          x->table = lease_offset(made);
         }
   }
   for (uint32_t h = 0; h < comm->count; h++) schedule_units(plans + h, u->repeats);
@@ -5612,7 +5628,7 @@ static ncclResult_t write_prepare_spans(struct ncclMeshWritePlan *plan,ncclMeshP
     else plan->span_first[index + 1] = plan->span_first[index] + (size_t)units * plan->repeats;
   }
   if (!result && plan->span_first[entries])
-    result = ncclMemAlloc((void **)&plan->spans, plan->span_first[entries] * sizeof *plan->spans);
+    result = mem_alloc((void **)&plan->spans, plan->span_first[entries] * sizeof *plan->spans, MESH_BACKING_LINEAR);
   const struct hdr *m = comm->attach->context.M;
   const struct where binding = comm->rank == plan->from ? plan->source : plan->landing;
   for (int k = 0; !result && k < count; k++) for(size_t instance=0;!result&&instance<plan->occurrences;instance++) {

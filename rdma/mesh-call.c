@@ -3,6 +3,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/mman.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 
 /* design/algorithm-sources.md#programtensor */
 static uint32_t mesh_section_row(struct mesh_section section,uint32_t index){return section.first+index*section.stride;}
@@ -104,13 +107,19 @@ int mesh_stream_present(struct mesh_ctx *context,uint32_t stream,int land,struct
 }
 
 /* design/algorithm-sources.md#programtensor: a lease's rows and arena pages, the pages anywhere the region has them */
-int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,struct mesh_section *section){
+int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,enum mesh_backing backing,struct mesh_section *section){
   struct hdr *m=context->M;
   if(!bytes || !count)return EINVAL;
   size_t quantum=(size_t)m->block*m->pgsz,capacity=mesh_arena_pages(m);
   if(bytes>capacity*(size_t)m->pgsz)return ENOMEM;
   size_t span=(bytes+quantum-1)/quantum*m->block;
   if(span>capacity/count)return ENOMEM;
+  if(!context->view){
+    const size_t length=(size_t)mesh_rows(m)*quantum;
+    void *view=mmap(NULL,length,PROT_NONE,MAP_PRIVATE|MAP_ANON,-1,0);
+    if(view==MAP_FAILED)return errno;
+    context->view=view;context->view_bytes=length;
+  }
   uint32_t stride=(uint32_t)span/m->block,rows=count*stride,first=mesh_rows_alloc(context,rows);
   if(first==MESH_ABSENT)return errno;
   for(uint32_t row=first;row<first+rows;row+=stride){
@@ -119,20 +128,41 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,str
     atomic_store_explicit(&buffer->owner,context->client,memory_order_release);
   }
   mesh_bits_set(mesh_plane(m,MESH_ROW_HOT),first,rows);
-  /* design/transport.md */
-  uint32_t page=mesh_arena_alloc(context,(uint32_t)span*count,m->block);
-  if(page==MESH_ABSENT){
-    int error=errno;
+  int error=0;
+  const uint32_t take=backing==MESH_BACKING_LINEAR?rows:1;
+  for(uint32_t r=0;r<rows;r+=take){
+    const uint32_t page=mesh_arena_alloc(context,take*m->block,m->block);
+    if(page==MESH_ABSENT){error=errno;break;}
+    for(uint32_t k=0;k<take;k++)
+      mesh_backing_bind(context,first+r+k,m->block,page+k*m->block,(r+k)/stride);
+  }
+  /* Coalesce adjacent backing rows into one OS mapping. The virtual window's
+     order is logical page order, independent of arena fragmentation. */
+  for(uint32_t r=0;!error && r<rows;){
+    const uint64_t offset=atomic_load_explicit(&mesh_page(m)[first+r].address,memory_order_relaxed);
+    uint32_t end=r+1;
+    while(end<rows && atomic_load_explicit(&mesh_page(m)[first+end].address,memory_order_relaxed)==offset+(end-r)*quantum)end++;
+    mach_vm_address_t at=(uintptr_t)context->view+(first+r)*quantum;
+    vm_prot_t current,maximum;
+    const kern_return_t mapped=mach_vm_remap(mach_task_self(),&at,(end-r)*quantum,0,VM_FLAGS_FIXED|VM_FLAGS_OVERWRITE,
+      mach_task_self(),(uintptr_t)m+offset,FALSE,&current,&maximum,VM_INHERIT_NONE);
+    if(mapped!=KERN_SUCCESS)error=mapped==KERN_NO_SPACE || mapped==KERN_RESOURCE_SHORTAGE?ENOMEM:EINVAL;
+    r=end;
+  }
+  if(error){
+    for(uint32_t r=0;r<rows;r++){
+      const uint32_t page=atomic_load_explicit(&mesh_page(m)[first+r].mapping,memory_order_relaxed);
+      if(page!=MESH_ABSENT)mesh_bits_clear(mesh_arena_bits(m),page,m->block);
+      mesh_buffers(m)[first+r].pages=0;
+      atomic_store_explicit(&mesh_buffers(m)[first+r].owner,0,memory_order_release);
+    }
     mesh_bits_clear(mesh_plane(m,MESH_ROW_HOT),first,rows);
-    for(uint32_t r=first;r<first+rows;r++){mesh_buffers(m)[r].pages=0;atomic_store_explicit(&mesh_buffers(m)[r].owner,0,memory_order_release);}
     mesh_rows_release(context,first,rows);return error;
   }
-  for(uint32_t slot=0;slot<count;slot++)
-    mesh_backing_bind(context,first+slot*stride,(uint32_t)span,page+slot*(uint32_t)span,slot);
   *section=(struct mesh_section){first,(uint32_t)span,bytes,count,stride};
   return 0;
 }
 
 /* design/algorithm-sources.md#programtensor */
-void *mesh_section_address(struct mesh_ctx *context,struct mesh_section section,uint32_t index){return (char *)context->M+atomic_load_explicit(&mesh_page(context->M)[mesh_section_row(section,index)].address,memory_order_relaxed);}
+void *mesh_section_address(struct mesh_ctx *context,struct mesh_section section,uint32_t index){return (char *)context->view+(size_t)mesh_section_row(section,index)*context->M->block*context->M->pgsz;}
 

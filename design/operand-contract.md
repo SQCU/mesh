@@ -101,12 +101,41 @@ no payload was allocated or sent. Shared libraries, header-derived Python
 bindings, the torch extension and native callers built. These checks do not
 provide a new throughput or latency measurement.
 
-Scattered allocation remains unfinished. The allocator still requires
-consecutive row slots and arena pages. Host/Metal views, region-membership
-checks and descriptor-table bindings still rely on linear region addresses.
-Those local bindings must be lowered before the allocator can supply scattered
-pages to every consumer. The large-allocation refusal recorded in
-metal-microbench's `docs/facts.md` is therefore not yet fully resolved.
+Tensor allocation now takes free bridge pages independently of their arena
+positions. Preparation maps adjacent backing runs into a fixed local virtual
+window in logical page order. CPU, Metal and CoreML operands see one interval
+over those same pages. No data is copied, and execution does not remap pages or
+walk the backing relation. Preparation shares the bridge's existing mapping
+with `mach_vm_remap` and its copy flag false; it does not allocate a second
+payload pool or reopen the backing object. Apple's implementation extracts the
+source mapping before replacing the target interval under the map lock
+([XNU `vm_map_remap`](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/vm/vm_map.c)).
+
+Local ownership lookup uses that window's row indices. Registration, page-table
+creation and transport preparation no longer require the local view to lie at
+the bridge's own address. Control words and descriptor bindings resolve to
+bridge offsets through the shared page-table operation during preparation.
+
+The bridge currently reads each descriptor table as one linear region
+interval. Those metadata allocations explicitly request linear backing through
+the same allocator. Tensor allocations have no such requirement. Both use the
+same local view and release rules; neither retries through a copying allocator.
+The shared bridge layout and recorded execution descriptors are unchanged.
+
+Preparation on 2026-10-29 used a small fragmented shared-memory region with
+different page-block widths. Large logical operands occupied separated holes;
+CPU metadata writes were visible through the corresponding bridge pages.
+Metal buffers and CoreML arrays retained the same addresses. Linear descriptor
+tables, partial-allocation cleanup and released-slot reuse also prepared under
+address and undefined-behavior sanitizers. No numerical commands or model
+predictions ran. A CoreML array over those pages does not establish that an
+ANE provider honors an output backing during prediction.
+
+Consecutive page-table row slots and linear descriptor-table backing remain
+allocation requirements. The tensor's payload no longer needs consecutive
+arena pages, so fragmentation of that arena alone no longer imposes its former
+whole-tensor limit. Distributed provider cuts and ANE output placement still
+need the integration described below.
 
 ## Known access structure, changing contents
 
