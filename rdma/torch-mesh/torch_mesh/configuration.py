@@ -66,7 +66,6 @@ def bind(configuration, groups, prepare):
     assignment.install(group.comm, operands, name)
     partition._replan(mesh, name)
     prepare()
-    group.plan_active(True)
     c.update(decisions=decisions, graphs={name: graph}, assignment={**c['assignment'], 'parts': operands})
     c['observer'] = rollout.start(c['store'], c['key'] + '/observations', c['rank'], c['size'], c['history'])
     group._observers = getattr(group, '_observers', []) + [c['observer']]

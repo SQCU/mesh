@@ -116,7 +116,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     def _held(self, rank, size, comm):
         self._rank, self._size, self._pending, self._operators = rank, size, None, {}
-        self._declaration, self._plan_enabled = ([], []), False
+        self._declaration = ([], [])
         self.comm = comm
         self.handle = int(ffi.cast('uintptr_t', self.comm))
         # Native realization installs default routes over every physical path.
@@ -206,7 +206,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
         """This group's collectives declared once, in their order (nccl.h ncclMeshCommPlan): `groups` the groups its
         calls issue, each a list of Calls (one torch collective is one group), or (that list, repeat) issued repeat
         times in a row, the order repeated from this group's next collective on.  Each is compiled now, so none is
-        planned where it is issued, and none is compared with its declaration.  [] drops the plan.  Returns each
+        planned where it is issued, and none is compared with its declaration.  Returns each
         declared group's (send entries, landing entries) on this rank's lists.
         An explicit order supplies ncclMeshPlanRun dictionaries to repeat whole
         blocks of group definitions without expanding their calls."""
@@ -265,7 +265,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
         view = ffi.new('ncclMeshPlan **')
         check(LIB.ncclMeshCommPlan(self.comm, ffi.new('ncclMeshCall[]', made or 1), len(made),
                                    ffi.new('ncclMeshPlanRun[]', order or 1), len(order), view))
-        self._declaration, self._plan_enabled = (groups, order), bool(groups)
+        self._declaration = (groups, order)
         return [] if view[0] == ffi.NULL else [tuple(view[0].entries[g]) for g in range(view[0].groups)]
 
     @contextlib.contextmanager
@@ -276,13 +276,12 @@ class ProcessGroupMesh(dist.ProcessGroup):
         metadata is compiled once for that configuration transition, never by
         each data-path invocation of a variable-count exchange.
         """
-        previous, enabled = self._declaration, self._plan_enabled
+        previous = self._declaration
         self.plan(groups)
         try:
             yield
         finally:
             self.plan(previous[0], order=previous[1])
-            self.plan_active(enabled)
 
     def plan_demands(self):
         """Compiler-derived useful deliveries for the entire declared graph.
@@ -301,10 +300,6 @@ class ProcessGroupMesh(dist.ProcessGroup):
         """Retire cached physical WRITE generations before route re-realization."""
         _stream.fused_reconfigure(self.handle)
 
-    def plan_active(self, active):
-        """Suspend the function declaration for feedback; resume at its first group."""
-        check(LIB.ncclMeshCommPlanActive(self.comm, bool(active)))
-        self._plan_enabled = bool(active)
 
     def prepare_writes(self, deliveries):
         """Bind exact logical tensor views once to the common physical WRITE plan.

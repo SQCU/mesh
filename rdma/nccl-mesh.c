@@ -306,7 +306,7 @@ static struct ncclComm *live;
    waits ended through their failure words' claim (nccl-mesh-kernels.h mesh_step_failed, read every 2^10 loads, the
    tracks' too) and its stop (words[6]), and then the library's GPU programs awaited within MESH_PLATFORM_NS; the wait
    named (mesh.h mesh_expired) */
-void mesh_library_expired(const char *wait, uint64_t ns) {
+static void library_stop(void) {
   pthread_mutex_lock(&live_lock);
   for (struct ncclComm *c = live; c; c = c->next_live) {
     atomic_store_explicit(c->words + 6, 1, memory_order_release);
@@ -316,7 +316,19 @@ void mesh_library_expired(const char *wait, uint64_t ns) {
   const uint64_t until = mesh_clock_ns() + MESH_PLATFORM_NS, last = __atomic_load_n(&issued, __ATOMIC_ACQUIRE);
   void *const event = __atomic_load_n(&finished, __ATOMIC_ACQUIRE);
   while (mesh_clock_ns() < until && event && metal_signaled(event) < last) usleep(1000);
+}
+void mesh_library_expired(const char *wait, uint64_t ns) {
+  library_stop();
   mesh_expired(wait, ns);
+}
+/* a call no declaration covers: a warning on stderr, and the program ends, its GPU work stopped first as at an expiry
+   (design/eager-execution.md#what-follows) */
+__attribute__((noreturn)) static void library_end(const char *why) {
+  library_stop();
+  char text[MESH_DIAGNOSTIC_BYTES];
+  const int n = snprintf(text, sizeof text, "libnccl-mesh: warning: %s; the program ends (design/eager-execution.md)\n", why);
+  if (n > 0) (void)!write(2, text, (size_t)n < sizeof text ? (size_t)n : sizeof text - 1);
+  _exit(1);
 }
 /* the nanoseconds left before d's deadline; past it, the library's expiry (mesh_library_expired) */
 static uint64_t deadline_left(const struct mesh_deadline *d) {
@@ -2876,7 +2888,6 @@ struct plan {
   ncclMeshPlanRun *order;
   uint64_t *ends, (*entries)[2];
   size_t runs;
-  int active;
 };
 static struct compiled *group_at(const struct plan *plan, uint64_t holder) {
   const uint64_t at=(holder-plan->view.first)%plan->view.issues;
@@ -2902,17 +2913,20 @@ static ncclResult_t write_definitions(struct ncclMeshWritePlan *plan);
 
 /* the compiled form of the group numbered `holder` (*group): its plan's group (group_at), else, with no plan, a WRITE
    alone's plan's own (write_definitions, compiled again where routes or the map changed since), each call's roles its
-   declaration's (nothing planned at the call: nccl.h ncclMeshCommPlan).  A group that no declaration covers fails as
-   a value: nothing compiles a group at its issue (design/eager-execution.md#what-follows).  A group of other than its
+   declaration's (nothing planned at the call: nccl.h ncclMeshCommPlan).  A group that no declaration covers ends the
+   program with a warning (library_end): nothing compiles a group at its issue (design/eager-execution.md#what-follows).  A group of other than its
    declaration's count of calls fails as a value, before any is bound.  Under group_lock */
 static ncclResult_t definition_of(struct ncclComm *comm, struct call *list, size_t n, uint64_t holder, struct compiled **group) {
-  struct compiled *x = comm->plan && comm->plan->active ? group_at(comm->plan, holder) : NULL;
+  struct compiled *x = comm->plan ? group_at(comm->plan, holder) : NULL;
   struct ncclMeshWritePlan *alone = n == 1 && !list[0].fused ? list[0].write_plan : NULL;
   ncclResult_t result = !x && alone && !alone->compiled ? write_definitions(alone) : ncclSuccess;
   if (!x && alone && alone->compiled) x = alone->compiled + list[0].invocation % alone->occurrences;
-  if (!result && !x)
-    result = fail(ncclInvalidUsage, "a group of %zu calls that no declaration covers: communicator %s has no active plan "
-                  "(ncclMeshCommPlan) and the group is no prepared WRITE alone (design/eager-execution.md)", n, comm->name);
+  if (!result && !x) {
+    char why[MESH_DIAGNOSTIC_BYTES];
+    snprintf(why, sizeof why, "a group of %zu calls on communicator %s that no declaration covers (ncclMeshCommPlan, or a "
+             "prepared WRITE alone)", n, comm->name);
+    library_end(why);
+  }
   if (!result && n != x->n) result = fail(ncclInvalidUsage, "a group of %zu calls issued as its declaration of %zu", n, x->n);
   for (size_t i = 0; !result && i < n; i++) call_bind_roles(list + i, x->calls + i);
   *group = x;
@@ -5326,7 +5340,7 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
   }
   if (!result) {
     struct plan *was = comm->plan;
-    if (made) { made->active = 1; made->view.first = comm->groups + 1; made->view.entries = (const uint64_t (*)[2])made->entries; }
+    if (made) { made->view.first = comm->groups + 1; made->view.entries = (const uint64_t (*)[2])made->entries; }
     comm->plan = made;
     made = was;
     if (plan) *plan = comm->plan ? &comm->plan->view : NULL;
@@ -5335,19 +5349,6 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
   plan_free(comm, made);
   pthread_mutex_unlock(&group_lock);
   return result;
-}
-
-/* Pause the function's declaration while realizing placement or collecting
-   feedback. Resuming starts a complete function at its first declared group. */
-ncclResult_t ncclMeshCommPlanActive(ncclComm_t comm, int active) {
-  if (!comm) return fail(ncclInvalidArgument, "ncclMeshCommPlanActive: comm is NULL");
-  pthread_mutex_lock(&group_lock);
-  if (comm->plan) {
-    if (active && !comm->plan->active) comm->plan->view.first = comm->groups + 1;
-    comm->plan->active = !!active;
-  }
-  pthread_mutex_unlock(&group_lock);
-  return ncclSuccess;
 }
 
 static ncclResult_t plan_routes(ncclComm_t comm, uint64_t *demand, size_t entries, int resolution) {

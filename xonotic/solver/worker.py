@@ -441,24 +441,18 @@ class CtxSolver:
         data['decisions'] = decisions
         assignment.install(self.world.native, proposal['parts'], 'world')
         assignment.declare(self.world.native, calls)
-        mesh.check(mesh.lib.ncclMeshCommPlanActive(self.world.native, 1))
         return proposal
 
     def solve(self, X):
         proposal = self.configure(min(len(X), self.T))
         started = time.monotonic()
-        try:
-            Xb = np.ascontiguousarray(X[:, :REQ_WIDTH], np.float32)
-            Xn = (Xb / (1.0 + np.abs(Xb))).astype(np.float32)
-            idx = self._insert(X, Xn)
-            G = self._solve(idx)
-            self.solves += 1
-            result = np.nan_to_num(G).astype(np.float32)
-            self.previous_function = {'proposal': proposal, 'seconds': time.monotonic() - started}
-        finally:
-            if proposal is not None:
-                import mesh
-                mesh.check(mesh.lib.ncclMeshCommPlanActive(self.world.native, 0))
+        Xb = np.ascontiguousarray(X[:, :REQ_WIDTH], np.float32)
+        Xn = (Xb / (1.0 + np.abs(Xb))).astype(np.float32)
+        idx = self._insert(X, Xn)
+        G = self._solve(idx)
+        self.solves += 1
+        result = np.nan_to_num(G).astype(np.float32)
+        self.previous_function = {'proposal': proposal, 'seconds': time.monotonic() - started}
         if self.pending_feedback is not None:
             previous, seconds = self.pending_feedback
             self.pending_feedback = None

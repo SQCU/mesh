@@ -348,7 +348,7 @@ its repetition count. This is different from the six-field execution tuple
 `ProcessGroupMesh.plan` translates declarations to `ncclMeshCall`. Its explicit `order` operand
 accepts `ncclMeshPlanRun` dictionaries (`first`, `count`, `repeat`) to repeat contiguous blocks
 of group definitions without duplicating calls. `configuration` temporarily installs a
-configuration plan; `plan_demands`, `reset_fused_configuration` and `plan_active` support preparation. The
+configuration plan; `plan_demands` and `reset_fused_configuration` support preparation. The
 process group implements PyTorch collectives, coalesced operations, variable-count gathering/scattering,
 attention partial merging, and group lifecycle (`shrink`, `grow`, `revoke`, `shutdown`). `partials_operator(width)`
 prepares the native reduction operator. Some generic list-buffer paths still use `packed` storage; do not
@@ -358,7 +358,7 @@ infer zero-copy behavior merely from their sharing the communicator.
 
 | Source | Types and entry points | Role |
 |---|---|---|
-| [nccl.h](../rdma/nccl.h) | `ncclMeshCall`, `ncclMeshPlanRun`, `ncclMeshPlan`; `ncclMeshCommPlan`, `PlanDemands`, `PlanRouteUnits`, `PlanActive` | Common ordered declaration, compiled publication/landing entries and routing demand. |
+| [nccl.h](../rdma/nccl.h) | `ncclMeshCall`, `ncclMeshPlanRun`, `ncclMeshPlan`; `ncclMeshCommPlan`, `PlanDemands`, `PlanRouteUnits` | Common ordered declaration, compiled publication/landing entries and routing demand. |
 | [nccl.h](../rdma/nccl.h) | `ncclMeshBuffer`, `ncclMeshIssue`, `ncclMeshFused`, `ncclMeshStream` | Local Metal buffer/offset, ticket/publication state, physical crossing bindings, and caller-owned encoding context. |
 | [nccl.h](../rdma/nccl.h) | `ncclMeshPageTable_t`, `ncclMeshPageMask`, `ncclMeshWriteLayout`, `ncclMeshWritePlan_t`; `ncclMeshWritePagesPrepare`, `WriteExecute`, `WritePlanDestroy` | Select bytes within local pages and execute the prepared one-sided WRITE. |
 | [mesh-write-compiler.h](../rdma/mesh-write-compiler.h) | `ncclMeshSpan`, `mesh_write_layout`; `mesh_compile_write`, `mesh_compile_rows`, `mesh_compile_spans` | Compiler-local tensor bindings into the same page domain; compact affine rows and typed repeats. |

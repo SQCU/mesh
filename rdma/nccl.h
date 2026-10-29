@@ -161,7 +161,7 @@
    reduce-scatter's partials of the others' segments, a non-receiving rank's operand, a tree's scratch, a relay's
    generations, a combine's landing area): a declared group's made at its declaration (ncclMeshCommPlan, which
    fails as a value where the region cannot hold them), a WRITE's at its first executions, its groups taking turns
-   at them.  A group that no declaration covers fails as a value: nothing compiles one at its issue
+   at them.  A group that no declaration covers ends the program with a warning: nothing compiles one at its issue
    (design/eager-execution.md),
    ncclMemAlloc called again only where one must grow (to one of eight sizes an octave), a dropped definition's slots
    kept for the next, one too small returned once its last group is done (the host path's, or a Metal path's that the
@@ -1147,9 +1147,6 @@ ncclResult_t ncclMeshCommPlanDemands(ncclComm_t comm, uint64_t* demand, size_t e
    increase this number. A weight change smaller than 1/units may compile to the
    identical schedule; this is probe resolution, never a minimum path share. */
 ncclResult_t ncclMeshCommPlanRouteUnits(ncclComm_t comm, uint64_t* units, size_t entries);
-/* Configuration boundary only: suspend the cached function order for feedback or
-   placement; resuming begins at its first group without dropping the plan. */
-ncclResult_t ncclMeshCommPlanActive(ncclComm_t comm, int active);
 /* Every issued group through `ticket` that is not complete, completed on `stream` (its commandBuffer and
    commandEncoder, or the Metal 4 form's, and its polls; issue not read); *published (may be NULL)
    whether a publication was encoded.  A ticket already complete encodes nothing; one whose communicator failed returns
