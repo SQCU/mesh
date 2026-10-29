@@ -156,21 +156,34 @@ None of them needs an eager call.
 
 ## What follows
 
+A call is eager when its buffers are named only as it runs. Its pages are then whatever the caller holds at that
+moment, and no compiler sees them across calls. The API calls themselves are not what is eager. A declared group is
+issued through the same NCCL calls, and the communicator's plan maps each issue to its declared group (`group_at`,
+rdma/nccl-mesh.c).
+
 - **Collectives are called inside a declaration.** NCCL's calls are the declaration's vocabulary there, the way CUDA
-  graph capture keeps them. They are not entry points that run eagerly.
-- **Eager entry points are removed, not guarded.** At 22228bb3 they are:
-  - the undeclared group's definition compiled at its first issue (`signature` and `same_call`, rdma/nccl-mesh.c);
-  - host groups compiled at their issue (`launch` and `launch_host`, rdma/nccl-mesh.c);
-  - the MPS kernels `functional` registers for `_c10d_functional`, which run each op as it is called
-    (rdma/torch-mesh/torch_mesh/_stream.mm). `declarations.Function` reads the same ops from its traced graph and
-    declares them;
-  - ProcessGroupMesh's eager methods (rdma/torch-mesh/torch_mesh/backend.py);
-  - mesh_mpi's eager methods, `Allreduce` through `Barrier` (rdma/mesh_mpi.py), whose declared form is `Plan` and
-    `Execute`.
+  graph capture keeps them.
+- **A call names its buffers at its declaration.**
+  - `ncclMeshCall.bindings` carries them to `ncclMeshCommPlan`, which lays and places each generation of the group
+    for them (`prepared`, rdma/nccl-mesh.c).
+  - A prepared function binds its buffers when it is prepared, and encodes its collectives then, once (`realize`,
+    rdma/torch-mesh/torch_mesh/_stream.mm).
+- **Declarations come first, then deletions.**
+  - At 9eaecc94 no caller passes `bindings`. torch-mesh's `plan`, mesh_mpi's `Plan` and rdma/assignment.py declare
+    kinds and counts alone, so the buffers are still named at the issue.
+  - Once callers declare their bindings, the run-time paths that serve a call with no declared binding are removed:
+    - a group's definition compiled when no plan covers its issue (`signature` and `same_call`, rdma/nccl-mesh.c);
+    - an issue laid and placed again for buffers other than its declaration's (`issue_bind` and `issue_same`);
+    - the callers that declare nothing: torch's `_c10d_functional` ops issued on an unplanned group (`functional`,
+      _stream.mm), ProcessGroupMesh's methods on one (backend.py), and mesh_mpi's methods without `Plan`
+      (rdma/mesh_mpi.py).
+  - Prepared functions reach `signature` too, while they are being prepared. Their calls are declared first, so the
+    compile serves no call at run time.
+- **The executors stay.** `launch`, `launch_host` and `launch_metal` run declared groups as well.
 - **A request for a new call** (`ncclSend` and `ncclRecv`, an undeclared AlltoAllV) is met as a declared call.
 - **Page reuse is answered by page assignment.** Receipts, credits, waits on `sent`, spare pools and reuse queries are
   never the answer. The answer is page assignment over the declared function (Freeing 7).
-- **A refusal check at run time is no remedy either** (rubrics.md C6: rejection filters). The entry point goes.
+- **A refusal check at run time is no remedy either** (rubrics.md C6: rejection filters). The run-time path goes.
 
 ## References
 
