@@ -1463,6 +1463,35 @@ buffer. Dense decoding likewise declares both axis relations, and padded
 activations declare which encoded lanes hold values. Masks retain their numerical
 meaning while the order-buffer loads and bindings disappear.
 
+Native compressed matrices now take explicit selections on both axes through
+`MetalViewBlockGather`. Interval cuts feed that same operation. Product lists
+and FFN views carry the selected coordinates into each constituent matrix;
+they no longer reduce an input selection to one interval. The encoded numerical
+blocks stay in their original pages. Preparation selects their metadata and
+declares the retained lanes and dependencies.
+
+Both the int8 rotation and its folded scalar weights retain `TensorView` through
+column selection. The folded product binds that view's byte components directly,
+including reordered and repeated columns. Converting it to a buffer plus row
+pitch no longer discards the mapping. There is no layout-only weight copy.
+
+A selected Hadamard input carries a relation from each retained basis position
+to its source values. Flat offsets and indices store this relation during
+preparation. Repeated selections sum their contributions before the butterfly;
+absent positions contribute zero. The fused schedule and shared factor kernel
+consume the same fixed-width source groups, emitted by the compiler. FX exposes
+that source width in the stage declaration and transposes the same relation in
+its backward graph. No runtime object traverses the preparation relation.
+The current emitter pads those groups to the largest source count in a domain;
+finer grouping for strongly uneven repeat counts remains lowering work.
+
+Preparation on 2026-10-29 built rank and Goal A, composed reordered, repeated and
+empty input selections, and compiled the fused and factored shaders with both
+ordinary and repeated sources. FX fake forward/backward retained the declared
+shapes and relation. Scalar byte views retained the selected addresses. No
+numerical commands ran. General stored-quantized column selections, the ANE
+allocator's range sets and the provider guarantees described above remain open.
+
 The native fused finish uses that same declaration for its next input gather.
 Its output count is a template operand, so an absent gather adds no runtime
 branch or unused encoding input. Each gather is prepared with its actual relation

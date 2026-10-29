@@ -46,17 +46,17 @@ fwht.register_autograd(_backward, setup_context=_context)
 
 
 @torch.library.custom_op('torch_mesh::fwht_stage', mutates_args=())
-def stage(x: torch.Tensor, signs: torch.Tensor, width: int, step: int, normalization: int, signed: bool, domain: list[int]) -> torch.Tensor:
+def stage(x: torch.Tensor, signs: torch.Tensor, width: int, step: int, normalization: int, signed: bool, domain: list[int], fan_in: int = 1) -> torch.Tensor:
     raise RuntimeError('butterfly stages require whole-function preparation')
 
 
 @stage.register_fake
-def _stage_shape(x, signs, width, step, normalization, signed, domain):
+def _stage_shape(x, signs, width, step, normalization, signed, domain, fan_in=1):
     return torch.empty((x.shape[0], signs.shape[0]), dtype=torch.float32, device=x.device)
 
 
 def _stage_context(ctx, inputs, output):
-    x, signs, ctx.width, ctx.step, ctx.normalization, ctx.signed, ctx.domain = inputs
+    x, signs, ctx.width, ctx.step, ctx.normalization, ctx.signed, ctx.domain, ctx.fan_in = inputs
     ctx.shape, ctx.dtype = x.shape, x.dtype
     ctx.save_for_backward(signs)
 
@@ -69,8 +69,8 @@ def _stage_backward(ctx, grad):
     if ctx.domain:
         kept = [i for i, column in enumerate(ctx.domain) if column >= 0]
         index = torch.tensor([ctx.domain[i] for i in kept], device=result.device)
-        result = torch.zeros(ctx.shape, dtype=result.dtype, device=result.device).index_add(1, index, result[:, kept])
-    return result.to(ctx.dtype), None, None, None, None, None, None
+        result = torch.zeros(ctx.shape, dtype=result.dtype, device=result.device).index_add(1, index, result[:, [i // ctx.fan_in for i in kept]])
+    return result.to(ctx.dtype), None, None, None, None, None, None, None
 
 
 stage.register_autograd(_stage_backward, setup_context=_stage_context)
@@ -90,12 +90,12 @@ def _validate(x, signs, width):
         raise ValueError('fwht blocks must be power-of-two factors of the row width')
 
 
-def expand(x, signs, width, *, domain=(), normalization=None, signed=True):
+def expand(x, signs, width, *, domain=(), normalization=None, signed=True, fan_in=1):
     """Expose local factors before graph partition and collective placement."""
     if not domain:
         _validate(x, signs, width)
     for local, step in plan(width):
-        x = stage(x, signs, local, step, (width if normalization is None else normalization) if local * step == width else 1, signed and step == 1, list(domain) if step == 1 else [])
+        x = stage(x, signs, local, step, (width if normalization is None else normalization) if local * step == width else 1, signed and step == 1, list(domain) if step == 1 else [], fan_in if step == 1 else 1)
     return x
 
 
@@ -117,7 +117,7 @@ def stage_views(value, width, step):
     return value.reshape((rows, columns // (width * step), width, step)).permute((0, 1, 3, 2))
 
 
-def prepare_stage(x, signs, width, step, normalization, signed, domain, *, out=None):
+def prepare_stage(x, signs, width, step, normalization, signed, domain, fan_in=1, *, out=None):
     from .placement import output
     from .operand import TensorView
     import math
@@ -140,16 +140,16 @@ def prepare_stage(x, signs, width, step, normalization, signed, domain, *, out=N
         reads, writes, signs_view = cut(source), cut(target), cut(sign, True)
         mask = None
         if domain:
-            positions = [domain[(origin[1] + outer) * width * step + lane * step + origin[2] + inner]
-                         for outer in range(size[1]) for inner in range(size[2]) for lane in range(width)]
+            positions = [domain[((origin[1] + outer) * width * step + lane * step + origin[2] + inner) * fan_in + source]
+                         for outer in range(size[1]) for inner in range(size[2]) for lane in range(width) for source in range(fan_in)]
             mask = {4: [int(column >= 0) for column in positions]} if -1 in positions else None
             valid = next((column for column in positions if column >= 0), None)
             # Masked lanes name an already needed page for address emission;
             # wholly padded pieces have no input read or input dependency.
             reads = (TensorView.of(x).slice(0, origin[0], size[0]).select(1,
-                     [column if column >= 0 else valid for column in positions]).reshape(size)) if valid is not None else None
+                     [column if column >= 0 else valid for column in positions]).reshape((*size, fan_in))) if valid is not None else None
         views = {1: writes, **({0: reads} if reads is not None else {}), **({2: signs_view} if signed else {})}
-        handle = _kernel(width, normalization, signed, kinds[x.dtype], kinds[signs.dtype], bool(mask), views, mask)
+        handle = _kernel(width, normalization, signed, kinds[x.dtype], kinds[signs.dtype], bool(mask), fan_in, views, mask)
         maximum, lanes, _ = _stream.pipeline_facts(handle)
         threads = min(maximum, max(lanes, width // 2))
         groups = math.prod(size) // width
@@ -160,9 +160,9 @@ def prepare_stage(x, signs, width, step, normalization, signed, domain, *, out=N
     return y, commands
 
 
-def _kernel(width, normalization, signed, input_type, sign_type, masked, bindings, indices):
+def _kernel(width, normalization, signed, input_type, sign_type, masked, fan_in, bindings, indices):
     from .layout import pipeline
-    instance = f'structured_butterfly<{width},{normalization},{str(signed).lower()},{input_type},{sign_type},{str(masked).lower()}>'
+    instance = f'structured_butterfly<{width},{normalization},{str(signed).lower()},{input_type},{sign_type},{str(masked).lower()},{fan_in}>'
     declaration = f'\ntemplate [[host_name("butterfly")]] [[kernel]] decltype({instance}) {instance};'
     return pipeline(_stream.metal_prelude(), bindings, SOURCE, 'butterfly', indices, declaration)
 

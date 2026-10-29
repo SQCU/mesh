@@ -953,7 +953,7 @@ template [[host_name("streamed_rotate")]] [[kernel]] decltype(streamed_rotate<0>
 // metal.def declares this fused schedule's register and storage geometry;
 // MetalHadamardLocal selects it. Other shapes use the shared butterfly factors
 // and matrix product instead of being rejected by the loader.
-template <uint InputColumns = 0, bool Masked = false, bool GivenFactor = false, typename Input = half, uint Slabs = 0>
+template <uint InputColumns = 0, bool Masked = false, bool GivenFactor = false, typename Input = half, uint Slabs = 0, uint Sources = 1>
 kernel void streamed_hadamard(MESH_STREAMED_HADAMARD_PARAMETERS device const Input *x [[buffer(0)]], device half *first [[buffer(1)]],
                               device half *second [[buffer(2)]],
                               device const float *scale [[buffer(4)]], device const float *secondScale [[buffer(5)]],
@@ -992,10 +992,15 @@ kernel void streamed_hadamard(MESH_STREAMED_HADAMARD_PARAMETERS device const Inp
         float r[V];
         for (uint u = 0; u < V; u++) if (u < W) {
             const uint i = (b << shift) + lane * W + u;
-            const int source = int(mesh_position<12>(i));
-            const float value = Masked && source < 0 ? 0.0f : float(row[source]);
-            if constexpr (!GivenFactor) { if (eps > 0.0f) squares += value * value; }
-            r[u] = (eps > 0.0f && source >= 0 ? value * float(gamma[mesh_index<11>(source)]) : value) * float(signs[mesh_index<6>(i)]);
+            float combined = 0.0f;
+            #pragma unroll
+            for (uint s = 0; s < Sources; ++s) {
+                const int source = int(mesh_position<12>(ulong(i) * Sources + s));
+                const float value = Masked && source < 0 ? 0.0f : float(row[source]);
+                if constexpr (!GivenFactor) { if (eps > 0.0f) squares += value * value; }
+                combined += eps > 0.0f && source >= 0 ? value * float(gamma[mesh_index<11>(source)]) : value;
+            }
+            r[u] = combined * float(signs[mesh_index<6>(i)]);
         }
         for (uint h = 1; h < V; h <<= 1) if (h < W)
             for (uint u = 0; u < V; u++) if (u < W && !(u & h)) { const float a0 = r[u], a1 = r[u + h]; r[u] = a0 + a1; r[u + h] = a0 - a1; }

@@ -4,17 +4,20 @@
 #include <metal_stdlib>
 using namespace metal;
 template<uint B> inline long mesh_position(ulong i);
-template <uint Width, ulong Normalize = 1, bool Signed = true, typename Input = float, typename Sign = float, bool Masked = false>
+template <uint Width, ulong Normalize = 1, bool Signed = true, typename Input = float, typename Sign = float, bool Masked = false, uint Sources = 1>
 kernel void structured_butterfly(device const Input *x [[buffer(0)]], device float *y [[buffer(1)]],
                                  device const Sign *sign [[buffer(2)]], constant uint &signGroups [[buffer(3)]],
                                  uint group [[threadgroup_position_in_grid]],
                                  uint t [[thread_position_in_threadgroup]], uint threads [[threads_per_threadgroup]]) {
     threadgroup float v[Width];
     for (uint i = t; i < Width; i += threads) {
-        float value;
-        if constexpr (Masked) value = mesh_position<4>(ulong(group % signGroups) * Width + i)
-            ? float(x[mesh_index<0>(ulong(group) * Width + i)]) : 0.0f;
-        else value = float(x[mesh_index<0>(ulong(group) * Width + i)]);
+        float value = 0.0f;
+        #pragma unroll
+        for (uint s = 0; s < Sources; ++s) {
+            if constexpr (Masked) value += mesh_position<4>((ulong(group % signGroups) * Width + i) * Sources + s)
+                ? float(x[mesh_index<0>((ulong(group) * Width + i) * Sources + s)]) : 0.0f;
+            else value += float(x[mesh_index<0>((ulong(group) * Width + i) * Sources + s)]);
+        }
         if constexpr (Signed) value *= float(sign[mesh_index<2>(ulong(group % signGroups) * Width + i)]);
         v[i] = value;
     }
