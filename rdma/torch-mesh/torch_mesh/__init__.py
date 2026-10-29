@@ -4,10 +4,10 @@ entry point loads it when torch is imported, so a program only names it: init_pr
 declarations.Function compiles a complete PyTorch graph into the common native
 command records, with buffers and dispatches bound before execution.
 
-empty() makes a region tensor, whose bytes are a lease of this node's bridge's region (an MPS one through torch's
-DLPack interop over the lease's Metal buffer: _stream.mm region_empty), which a collective reads and writes where it
-lies; records() is the region tensors' leases live now and address(t) where a tensor's bytes lie in the region (0:
-outside it); check_memory() warns where this process's MPS tensors outside it come to 1 GiB or more.
+empty() makes a region tensor, whose bytes are a lease of this node's bridge's region, which a collective reads and
+writes where it lies.  Every MPS tensor is one: torch's MPS allocator is the region's (allocator.mm, installed as
+_stream loads).  records() is the region tensors' leases live now and address(t) where a tensor's bytes lie in the
+region (0: outside it); check_memory() warns where this process's MPS tensors outside it come to 1 GiB or more.
 
 merge_partials() is the softmax over a split as the library's collective (the torch operator torch_mesh::merge_partials:
 an all-reduce or reduce by libnccl-mesh's partials operator, ncclMeshRedOpCreatePartials): each member's attention over
@@ -161,8 +161,9 @@ def _compile(gm, example_inputs, destinations):
 
 def empty(*size, dtype=None, device='mps'):
     """A tensor of region memory (rdma/NCCL.md "Memory"), uninitialized: collectives read and write it in place where
-    the library reads its operands in place.  An 'mps' one is an MPS tensor whose storage is the lease's Metal buffer
-    (ncclMeshMemBuffer), made through DLPack; it returns its lease once the GPU's work before its release is done."""
+    the library reads its operands in place.  An 'mps' one is torch's, whose allocator is the region's: its storage is
+    the lease's Metal buffer (ncclMeshMemBuffer), and it returns its lease once the GPU's work before its release is
+    done."""
     import torch
     from torch._guards import detect_fake_mode
 
@@ -191,9 +192,9 @@ def address(tensor):
 
 
 def check_memory():
-    """Bytes of this process's MPS tensors outside the region (torch.mps.current_allocated_memory: torch's allocator
-    makes no region tensor), with a warning where they come to 1 GiB or more
-    (docs/writing-a-service.md#memory-outside-the-region)."""
+    """Bytes of this process's MPS tensors outside the region (torch.mps.current_allocated_memory: torch's own heaps,
+    which hold only pinned CPU memory and what was made before the region allocator was installed), with a warning
+    where they come to 1 GiB or more (docs/writing-a-service.md#memory-outside-the-region)."""
     import warnings
 
     import torch

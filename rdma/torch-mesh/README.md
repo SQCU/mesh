@@ -55,9 +55,13 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   barrier's tensor and explicitly declared outputs) are leases of the node's
   bridge's region (`torch_mesh.empty`). A program's CPU tensor in the region is
   `torch_mesh.empty(shape, dtype=..., device="cpu")`.
-- Region MPS tensors: `torch_mesh.empty(shape, dtype=..., device="mps")` is an MPS tensor whose storage is a lease's
-  Metal buffer (`ncclMeshMemBuffer`), made through torch's DLPack interop (`at::fromDLPack` of a `kDLMetal` tensor, its
-  data the `MTLBuffer` and its byte offset, as torch's `toDLPack` writes an MPS tensor). Its release defers reuse until
+- Region MPS tensors: every MPS tensor is a lease's Metal buffer (`ncclMeshMemBuffer`), `torch_mesh.empty(shape,
+  dtype=..., device="mps")` and torch's own (its factories', eager temporaries', Inductor's, `.to("mps")`'s) alike:
+  `_stream` makes torch's MPS allocator the region's as it loads (`torch_mesh/allocator.mm`), in place over the fixed
+  instance torch 2.14's factories call (`at::mps::getIMPSAllocator`, no registered or pluggable allocator for MPS), and
+  its import fails where that instance is not of torch's class `at::mps::MPSAllocator`. A lease the region cannot meet
+  is torch's out-of-memory error. A tensor's release returns its lease once the command buffer open on torch's stream
+  at the release, which the release commits, has completed; `ncclMemFree` then defers reuse until
   both its local GPU users and all registered local DMA reads have completed, including reads the bridge has not yet
   posted (`ncclMeshMemReusable`). GPU completion alone does not establish source retirement, and no receipt collective
   is needed to establish local DMA-read completion. Every collective passes it as its `MTLBuffer` and offset, so the library reaches it where it lies wherever
@@ -66,12 +70,9 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   `torch_mesh.check_memory()` warns where the process's MPS tensors outside the region come to 1 GiB or more
   ([docs/writing-a-service.md](../../docs/writing-a-service.md#memory-outside-the-region)).
   Reproduction target (metal-microbench docs/measurement.md 2026-09-30, part A): a 16.8 MB all-reduce on region
-  tensors copies 0 bytes (16.78 MB otherwise); part B: tp 271.5-272.2 ms a step. Other MPS tensors are torch's MPS
-  allocator's, and a collective that sends from one, or lands in one, across a link fails as a value
-  (`ncclInvalidUsage`: the library copies nothing into the region). torch's MPS factories take their allocator from a
-  fixed instance (`at::mps::GetMPSAllocator`, no registered or pluggable allocator for MPS), so a program places a
-  tensor in the region by making it with `empty`, never by default. The tensors the backend makes itself (a
-  functional collective's result) are region tensors (`torch_mesh.empty`). Raw transport operands must satisfy their
+  tensors copies 0 bytes (16.78 MB otherwise); part B: tp 271.5-272.2 ms a step. Only torch's pinned CPU memory and MPS
+  tensors made before `_stream` loaded lie in torch's own heaps, and a collective that sends from one, or lands in one,
+  across a link fails as a value (`ncclInvalidUsage`: the library copies nothing into the region). Raw transport operands must satisfy their
   declared contiguous region layout. The generic fused gather separately supports strided source views by compiling
   their strides into its publisher, without making a contiguous input tensor; it still writes a collective segment
   and assembles the logical output.

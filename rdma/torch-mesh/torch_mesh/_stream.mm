@@ -5,7 +5,6 @@
 // function boundary; it has no publication-driven buffering policy.
 #include <torch/extension.h>
 #include <torch/library.h>
-#include <ATen/DLConvertor.h>
 #include <ATen/detail/MPSHooksInterface.h>
 #include <ATen/mps/MPSDevice.h>
 #include <ATen/mps/MPSEvent.h>
@@ -32,6 +31,10 @@
 #include "metal-recording.h"
 #include "nccl.h"
 #include "mesh-plan.h"
+
+// allocator.mm: torch's MPS allocator made the region's, and its leases live now (address, bytes)
+void install_region_allocator();
+std::vector<std::pair<uint64_t, uint64_t>> region_allocations();
 
 // Framework stream dependencies and compatibility-call storage. The shared
 // native schedule owns prepared execution; this state names MPS data events.
@@ -64,8 +67,8 @@ struct MeshStream {
   }
 
   // On the host: the workspace `held` of the group issued as `ticket` kept until the library retires it (0: a group
-  // complete in the stream's order once encoded, whose workspace's lease is held again here, where later work reuses
-  // it after the group's), and the workspace of every group retired by now released.
+  // complete in the stream's order once encoded, whose workspace is let go here, its leases returned once the stream's
+  // work on them completes), and the workspace of every group retired by now released.
   void retire(uint64_t ticket, std::vector<at::Tensor> held) {
     if (ticket) holders[ticket] = std::move(held);
     holders.erase(holders.begin(), holders.upper_bound(ncclMeshRetired()));
@@ -121,18 +124,15 @@ static void publish_boundary() {
   at::mps::dispatch_sync_with_rethrow(stream->queue(), ^{ s->signalled(false); });
 }
 
-// The library's workspace allocator: a region lease (region_empty, held: taken again by the next workspace of its size
-// once the stream is done with it), kept in the MeshStream's scratch (`context`) until the group is complete in the
-// stream's order (MeshStream::retire); NULL where the region refuses one, which fails the group as a value
-// (nccl-mesh.c: "out of GPU memory") instead of an exception thrown through the library.  Not torch's caching allocator:
-// on unified memory it serves a tensor of about 10 MiB or more from a 1 GiB heap the GPU wires whole (metal-microbench
-// docs/facts.md), and a partials reduce-scatter's workspace wired the Mini's last free GiB under cp.  It runs on torch's
-// queue, and takes nothing of torch's allocator there (rdma/torch-mesh/README.md, the stream's commit state).
-static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps, bool held);
+// The library's workspace allocator: a region lease (region_empty), kept in the MeshStream's scratch (`context`) until
+// the group is complete in the stream's order (MeshStream::retire); NULL where the region refuses one, which fails the
+// group as a value (nccl-mesh.c: "out of GPU memory") instead of an exception thrown through the library.  It runs on
+// torch's queue, where the region allocator (allocator.mm) leases with no dispatch onto it.
+static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps);
 static void *workspace(size_t bytes, void *context) {
   auto *s = static_cast<MeshStream *>(context);
   try {
-    s->scratch.push_back(region_empty({(int64_t)bytes}, at::empty({0}, at::TensorOptions().dtype(at::kByte)), true, true));
+    s->scratch.push_back(region_empty({(int64_t)bytes}, at::empty({0}, at::TensorOptions().dtype(at::kByte)), true));
   } catch (...) {
     return nullptr;
   }
@@ -244,7 +244,7 @@ static c10::intrusive_ptr<c10d::Work> work_of(uint64_t ticket, std::vector<at::T
 
 static ncclComm_t communicator(int64_t comm) { return (ncclComm_t)(uintptr_t)comm; }
 
-static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps, bool held = false);
+static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps);
 
 // One call of a group: its kind, its send and receive tensors (an all-to-all's none where it moves none that way; an
 // all-reduce's, reduce's or broadcast's sends alone where it is in place), its counts (a V call's segment a rank, an
@@ -494,8 +494,6 @@ static int group_argument(const std::string &name) {
 
 // Issued and not completed (split) where the result is its own operand: torch's wait_tensor (its work registry) waits
 // for it.  A result made here is a region tensor (region_empty): the library sends from and lands in leases alone (nccl.h Memory).
-// An all-reduce's or a broadcast's is a held lease, taken again by the next result of its size once the stream is done
-// with it, so a program's steady steps lease nothing.
 static void functional(const c10::OperatorHandle &op, torch::jit::Stack *stack) {
   const std::string name = op.schema().name().substr(sizeof "_c10d_functional::" - 1) +
                            (op.schema().overload_name().empty() || op.schema().overload_name() == "default" ? "" : "." + op.schema().overload_name());
@@ -512,7 +510,7 @@ static void functional(const c10::OperatorHandle &op, torch::jit::Stack *stack) 
   at::Tensor result;
   Call call;
   if (name.rfind("all_reduce", 0) == 0 || name.rfind("broadcast", 0) == 0) {
-    result = name.back() == '_' ? input : region_empty(input.sizes().vec(), input, true, true).copy_(input);
+    result = name.back() == '_' ? input : region_empty(input.sizes().vec(), input, true).copy_(input);
     call = name[0] == 'a' ? Call{ALLREDUCE, {result}, {}, {}, reduction(arguments[1].toStringRef()), 0}
                           : Call{BROADCAST, {result}, {}, {}, 0, arguments[1].toInt()};
   } else if (name.rfind("all_gather_into_tensor", 0) == 0) {
@@ -958,13 +956,10 @@ TORCH_LIBRARY_FRAGMENT(torch_mesh, m) {
 
 // Region tensors (torch_mesh.empty, records, address): a tensor whose bytes are a lease of this node's bridge's region
 // (ncclMemAlloc: pages registered on every device when it came up), so the library reaches it with no staging copy
-// where it reads or writes its operands in place.  An MPS one is made through torch's documented interop, DLPack
-// (at::fromDLPack of a kDLMetal tensor: its data an id<MTLBuffer>, its byte_offset the offset in it, as torch's own
-// toDLPack writes an MPS tensor), over the lease's Metal buffer (ncclMeshMemBuffer); its release is the rule torch's MPS
-// allocator keeps for a buffer in flight: the lease returned (ncclMemFree) once the stream's command buffer open at the
-// release has completed, so every command bound to it before then has run.  A CPU one is torch::from_blob over the
-// lease, returned at its release (a host-path call is complete when it returns).  No allocator of torch's is replaced:
-// tensors the program makes otherwise stay its MPS allocator's.
+// where it reads or writes its operands in place.  An MPS one is torch's: torch's MPS allocator is the region's
+// (allocator.mm), so every MPS tensor is a lease, returned once the command buffer open on torch's stream at its release
+// has completed; region_empty leases one even for no elements.  A CPU one is torch::from_blob over the lease, returned
+// at its release (a host-path call is complete when it returns).
 static std::mutex region_tensors_lock_;
 static std::map<uintptr_t, size_t> region_tensors_;
 
@@ -974,64 +969,19 @@ static void returned(void *memory) {
   region_tensors_.erase((uintptr_t)memory);
 }
 
-struct RegionShape {
-  std::vector<int64_t> sizes, strides;
-};
-
-// Held MPS leases (region_empty's `held`), by their bytes: each released once the stream's work on it had completed.
-static std::multimap<size_t, void *> held_;
-
-static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps, bool held) {
+static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps) {
   const at::ScalarType dtype = like.scalar_type();
   const size_t bytes = std::max<size_t>(1, (size_t)c10::multiply_integers(sizes) * c10::elementSize(dtype));
+  const auto options = at::TensorOptions().dtype(dtype);
+  if (mps)
+    return at::empty({0}, options.device(at::kMPS)).set_(c10::Storage(c10::Storage::use_byte_size_t(), bytes, at::mps::GetMPSAllocator()), 0, sizes);
   void *memory = nullptr;
+  checked(ncclMemAlloc(&memory, bytes));
   {
-    std::lock_guard<std::mutex> guard(region_tensors_lock_);
-    const auto found = held ? held_.find(bytes) : held_.end();
-    if (found != held_.end()) {
-      memory = found->second;
-      held_.erase(found);
-    }
-  }
-  if (!memory) {
-    checked(ncclMemAlloc(&memory, bytes));
     std::lock_guard<std::mutex> guard(region_tensors_lock_);
     region_tensors_[(uintptr_t)memory] = bytes;
   }
-  const auto options = at::TensorOptions().dtype(dtype);
-  if (!mps) return at::from_blob(memory, sizes, [memory](void *) { returned(memory); }, options.device(at::kCPU));
-  void *buffer = nullptr;
-  size_t offset = 0;
-  if (const ncclResult_t result = ncclMeshMemBuffer(memory, &buffer, &offset)) {
-    returned(memory);
-    checked(result);
-  }
-  auto *shape = new RegionShape{sizes, std::vector<int64_t>(std::max<size_t>(sizes.size(), 1), 1)};
-  for (int64_t d = (int64_t)sizes.size() - 2; d >= 0; d--) shape->strides[d] = shape->strides[d + 1] * std::max<int64_t>(sizes[d + 1], 1);
-  auto *managed = new DLManagedTensor{};
-  managed->dl_tensor.data = buffer;
-  managed->dl_tensor.device = {kDLMetal, 0};
-  managed->dl_tensor.ndim = (int32_t)sizes.size();
-  managed->dl_tensor.dtype = at::getDLDataType(at::empty({0}, options));
-  managed->dl_tensor.shape = shape->sizes.data();
-  managed->dl_tensor.strides = shape->strides.data();
-  managed->dl_tensor.byte_offset = offset;
-  managed->manager_ctx = shape;
-  managed->deleter = [](DLManagedTensor *self) {
-    delete (RegionShape *)self->manager_ctx;
-    delete self;
-  };
-  return at::fromDLPack(managed, [managed, memory, bytes, held](void *) {
-    managed->deleter(managed);
-    at::mps::getCurrentMPSStream()->addCompletedHandler(^(id<MTLCommandBuffer>) {
-      if (!held) {
-        returned(memory);
-        return;
-      }
-      std::lock_guard<std::mutex> guard(region_tensors_lock_);
-      held_.emplace(bytes, memory);
-    });
-  });
+  return at::from_blob(memory, sizes, [memory](void *) { returned(memory); }, options.device(at::kCPU));
 }
 
 // Where a tensor's bytes lie in the region (0: outside it): an MPS tensor's where its MTLBuffer is the Metal buffer of the
@@ -1105,8 +1055,8 @@ static std::vector<at::Tensor> import_attributes(const std::vector<at::Tensor> &
 
 // The region tensors' leases live now: each its address and bytes.
 static std::vector<std::pair<uint64_t, uint64_t>> records() {
+  std::vector<std::pair<uint64_t, uint64_t>> out = region_allocations();
   std::lock_guard<std::mutex> guard(region_tensors_lock_);
-  std::vector<std::pair<uint64_t, uint64_t>> out;
   for (auto &w : region_tensors_) out.emplace_back(w.first, w.second);
   return out;
 }
@@ -1813,6 +1763,7 @@ static bool completed(pybind11::object observation) {
 // The group's calls (torch_mesh/backend.py): `issue` a group of calls, issued and not completed where `split` (a
 // MeshWork to wait on, its outputs `outputs`), else None (complete).
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
+  install_region_allocator();
   module.def("place_layout",[](NSUInteger count,const std::vector<TensorLayout> &uses,
       const std::vector<TensorLayout> &targets,const std::vector<TensorLayout> &values,const std::vector<NSInteger> &widths)->pybind11::object {
     auto layouts=[](const std::vector<TensorLayout> &items) {
@@ -1956,8 +1907,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("attach", &attach);
   module.def("commit", &commit);
   module.def("publish_boundary", &publish_boundary);
-  module.def("region_empty", [](std::vector<int64_t> sizes, const at::Tensor &like, bool mps, bool held) { return region_empty(sizes, like, mps, held); },
-             pybind11::arg("sizes"), pybind11::arg("like"), pybind11::arg("mps"), pybind11::arg("held") = false);
+  module.def("region_empty", &region_empty);
   module.def("address", &address);
   module.def("records", &records);
   module.def("metal_prelude", &metal_prelude);
