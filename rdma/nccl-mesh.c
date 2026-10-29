@@ -3193,8 +3193,7 @@ static void gate_of(struct ncclComm *comm, struct schedule *plans, int *gate) {
 }
 
 /* the communicators a program touched, each once, until its end (program_end); a program holds group_lock from its
-   begin to its end but across a wait (room_wait), which sets its list aside, so the list is empty at every taking of
-   the lock */
+   begin to its end, so the list is empty at every taking of the lock */
 static struct ncclComm *touching;
 static void touch(struct ncclComm *comm) {
   if (comm->touched) return;
@@ -3202,46 +3201,12 @@ static void touch(struct ncclComm *comm) {
   comm->next_touched = touching;
   touching = comm;
 }
-/* whether channel ch's list (0 send, 1 landing) has room for `need` entries more: its entries presented and not taken
-   by the bridge, with them, at most MESH_STREAM_ENTRIES */
-static int room_for(const struct channel *ch, int list, uint64_t need) {
-  return atomic_load_explicit(ch->view.presented[list], memory_order_relaxed) - atomic_load_explicit(ch->view.taken[list], memory_order_acquire) +
-         need <= MESH_STREAM_ENTRIES;
-}
-/* the wait for room on channel ch's list with group_lock released, as a condition variable's wait releases its mutex
-   (design/rubrics.md M3, M4: other communicators' groups and revokes go on meanwhile): comm kept from its destroy
-   (`runs`), and the list of communicators the program being encoded touched set aside (it is comm alone where a group
-   presents, launch_metal), so a program another thread encodes meanwhile ends with its own; each look spins, ending at
-   the bridge's `taken` advancing, at a revoke or at the holding's end, and past its deadline, MESH_PLATFORM_NS from its
-   start, the program (design/eager-execution.md assumption A4); then the lock taken again, the
-   list restored and comm's failure read again (comm_failure: a group in flight of it may have failed meanwhile).
-   Under group_lock */
-static ncclResult_t room_wait(struct ncclComm *comm, const struct channel *ch, int list, uint64_t need) {
-  const int mine = touching == comm;
-  if (mine) { touching = comm->next_touched; comm->touched = 0; }
-  atomic_fetch_add(&comm->runs, 1);
-  pthread_mutex_unlock(&group_lock);
-  ncclResult_t result = ncclSuccess;
-  struct mesh_deadline deadline = mesh_deadline("libnccl-mesh: room on a stream's list for a group's entries (room_wait)", 0);
-  while (!result && !room_for(ch, list, need))
-    if (revoked(comm)) result = revoked_fail(comm);
-    else if (!mesh_stream_held(&comm->attach->context, ch->stream, *ch->wire))
-      result = fail(ncclRemoteError, "communicator %s: its holding of the stream toward node %u ended before the group's entries there were "
-                    "presented (design/transport.md section 14); none was presented", comm->name, ch->node);
-    else deadline_left(&deadline);
-  pthread_mutex_lock(&group_lock);
-  atomic_fetch_sub(&comm->runs, 1);
-  if (mine) touch(comm);
-  return result ? result : comm_failure(comm);
-}
-/* each channel's entries presented (mesh-call.h mesh_stream_present), its send list's and then its landing list's, once
-   the bridge has room for all of them (each list's entries presented and not taken fewer than MESH_STREAM_ENTRIES with
-   them: the bridge takes an entry as it reads it while fewer than that of the list are taken and not done), so a group
-   is presented whole or not at all; a send entry's bytes ready once `ready` passes them (word 0), a landing entry gated
-   as gate_of says.  The wait for room (room_wait) holds no lock and ends by its deadline (design/rubrics.md M3, 10-18:
-   every wait killable; design/eager-execution.md, assumption A4).  0; ncclSystemError where a list's entries are more than the bridge ever takes, the wait's
-   failure (a revoke, the holding's end, comm's failure: nothing presented, the call's failure alone); a refused
-   presentation fails comm (its lists stand mid-group).  Under group_lock */
+/* each channel's entries presented by the program (metal_present: the GPU's present, its send list's and then its
+   landing list's once the bridge has room for all of them, each list's entries presented and not taken fewer than
+   MESH_STREAM_ENTRIES with them), so a group is presented whole or not at all; a send entry's bytes ready once `ready`
+   passes them (word 0), a landing entry gated as gate_of says.  0; ncclSystemError where a list's entries are more than
+   the bridge ever takes (nothing presented, the call's failure alone); a refused presentation fails comm (its lists
+   stand mid-group).  Under group_lock */
 static ncclResult_t present_group(struct metal_program *program, struct ncclComm *comm, struct schedule *plans) {
   struct mesh_ctx *context = &comm->attach->context;
   for (uint32_t h = 0; h < comm->count; h++)
@@ -3252,10 +3217,6 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
         return fail(ncclSystemError, "communicator %s: the group lays %llu entries on its %s list toward node %u, and its bridge takes at most %u "
                     "not yet done (mesh.h MESH_STREAM_ENTRIES); none was presented", comm->name, (unsigned long long)need, list ? "landing" : "send",
                     ch->node, MESH_STREAM_ENTRIES);
-      if (!program && need && !room_for(ch, list, need)) {
-        const ncclResult_t result = room_wait(comm, ch, list, need);
-        if (result) return result;
-      }
     }
   /* Retain payload AND immutable descriptor tables for both directions before
      presenting anything. Metadata additionally needs local bridge CPU-reader
@@ -3291,11 +3252,11 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
     int status = 0;
     if (!p->outs && !p->ins) continue;
     struct metal_bytes compiled = {0};
-    if (program && metal_carve((p->outs + p->ins) * sizeof(struct mesh_entry), &compiled))
+    if (metal_carve((p->outs + p->ins) * sizeof(struct mesh_entry), &compiled))
       return fail(ncclSystemError, "communicator %s: the region cannot hold a group's entries for its present", comm->name);
     struct mesh_entry *records = compiled.contents;
 
-    for (size_t k = 0; !status && k < p->outs; k++) {
+    for (size_t k = 0; k < p->outs; k++) {
       const struct message *m = p->out + k;
       struct mesh_entry entry = {m->table, pages_to_word(m->pages), 0, pages_to_word(pages_sub(m->end, m->pages))};
       const struct steps *s = m->c->bound;
@@ -3317,30 +3278,24 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
         const struct ncclMeshWritePlan *plan = m->c->write_plan;
         entry.word = (uint64_t)(address_of(plan->source_ready) + tile_offset(plan->ready_layout, write_tile(plan, m->offset), m->c->invocation) - (const unsigned char *)context->M);
         entry.base = plan->ready_value - m->pages.n;
-        if (program) metal_resident(program, plan->source_ready.buffer);
+        metal_resident(program, plan->source_ready.buffer);
       }
-      if (program) records[k]=entry;
-      else status = mesh_stream_present(context, ch->stream, 0, entry);
+      records[k] = entry;
     }
-    for (size_t k = 0; !status && k < p->ins; k++) {
-      const struct mesh_entry entry={p->in[k].table,pages_to_word(p->in[k].pages),p->word,p->base};
-      if(program)records[p->outs+k]=entry;
-      else status=mesh_stream_present(context,ch->stream,1,entry);
-    }
-    if(program) {
-      if(!ch->lists)ch->lists=metal_wrap(ch->view.list[0],2*MESH_STREAM_ENTRIES*sizeof(struct mesh_entry));
-      if(!ch->lists)return fail(ncclSystemError,"binding bridge descriptor lists");
-      metal_resident(program,ch->lists);metal_resident(program,compiled.buffer);
-      /* the records done with once the GPU has presented them all: the landing list's count past the group's */
-      metal_done(ch->view.presented[p->ins ? 1 : 0], 1, p->first[p->ins ? 1 : 0] + (p->ins ? p->ins : p->outs));
-      const char *words=(const char *)ch->view.ready-ch->ready;
-      for(int list=0;list<2&&!status;list++) {
-        const size_t count=list?p->ins:p->outs;
-        struct metal_result placed=metal_present(program,ch->lists,list*MESH_STREAM_ENTRIES*sizeof(struct mesh_entry),
-          compiled.buffer,compiled.offset+(list?p->outs*sizeof(struct mesh_entry):0),count,p->first[list],ch->buffer,
-          (const char *)ch->view.taken[list]-words,(const char *)ch->view.presented[list]-words);
-        status=placed.status;
-      }
+    for (size_t k = 0; k < p->ins; k++)
+      records[p->outs + k] = (struct mesh_entry){p->in[k].table, pages_to_word(p->in[k].pages), p->word, p->base};
+    if (!ch->lists) ch->lists = metal_wrap(ch->view.list[0], 2 * MESH_STREAM_ENTRIES * sizeof(struct mesh_entry));
+    if (!ch->lists) return fail(ncclSystemError, "binding bridge descriptor lists");
+    metal_resident(program, ch->lists); metal_resident(program, compiled.buffer);
+    /* the records done with once the GPU has presented them all: the landing list's count past the group's */
+    metal_done(ch->view.presented[p->ins ? 1 : 0], 1, p->first[p->ins ? 1 : 0] + (p->ins ? p->ins : p->outs));
+    const char *words = (const char *)ch->view.ready - ch->ready;
+    for (int list = 0; list < 2 && !status; list++) {
+      const size_t count = list ? p->ins : p->outs;
+      struct metal_result placed = metal_present(program, ch->lists, list * MESH_STREAM_ENTRIES * sizeof(struct mesh_entry),
+        compiled.buffer, compiled.offset + (list ? p->outs * sizeof(struct mesh_entry) : 0), count, p->first[list], ch->buffer,
+        (const char *)ch->view.taken[list] - words, (const char *)ch->view.presented[list] - words);
+      status = placed.status;
     }
     if (status)
       return comm_fail(comm, status == ENOLINK || status == EPERM ? ncclRemoteError : ncclSystemError, "communicator %s: an entry toward node %u "
@@ -3359,12 +3314,12 @@ static void commit_group(struct ncclComm *comm, const struct schedule *plans) {
 }
 
 /* the group's laid and placed entries (issue_bind) bound on each channel from its last scheduled entry and page
-   (schedule_laid), its landings gated where the group is the Metal path's (`program` not NULL: gate_of, *gate whether
-   its first dispatch stores the communicator's gate), presented (present_group) and counted (commit_group); a failure
+   (schedule_laid), its landings gated (gate_of, *gate whether its first dispatch stores the communicator's gate),
+   presented (present_group) and counted (commit_group); a failure
    before any entry is presented is the call's alone, one after it the communicator's (its lists stand mid-group) */
 static ncclResult_t schedule(struct metal_program *program, struct ncclComm *comm, struct schedule *plans, int *gate) {
   schedule_laid(comm, plans);
-  if (program) gate_of(comm, plans, gate);
+  gate_of(comm, plans, gate);
   ncclResult_t result = present_group(program, comm, plans);
   if (result) return result;
   if (*gate) comm->gates++;
