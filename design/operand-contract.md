@@ -1630,9 +1630,7 @@ implicit API accommodation and needs constraint/empty-domain lowering.
 Placement across all future consumer constraints remains necessary:
 sequential preparation can still convert a flexible native output when a later
 fixed-layout provider could have guided its original placement.
-External/signature selections and changed
-selections across resized source domains still need integration. Numerical
-execution remains deferred until these edges are reconciled.
+Numerical execution remains deferred until these edges are reconciled.
 
 Selections now retain an ordered `steps` sequence of cuts, permutations and
 reshapes. `native_tensor_view` appends its grouping instead of replacing earlier
@@ -1668,8 +1666,30 @@ Preparation retained reversed source columns and a destination reshape whose
 column identities vary by row. The composed indices matched those identities,
 and both operands shared their backing without conversion. The earlier repeated
 grouping also retained its indices. Libraries and native callers built; no
-numerical commands ran. Global producer placement, empty-domain API constraints
-and the remaining external/signature bindings are still separate work.
+numerical commands ran. Global producer placement and empty-domain API
+constraints are still separate work.
+
+Named provider, native and collective uses now retain their semantic selection
+beside their shared backing. A selected use composes with the actual producer's
+relation, including cuts already applied to that producer. Signature aliases
+retain their views instead of collapsing every use to the root's order. Another
+explicit selection of that alias uses the shared domain, not the previous use's
+ordinal positions. A named use with no selection keeps its declared ordered
+elements. These are preparation rules; execution receives the resulting indices.
+
+Resized stages now carry explicit shapes for all inputs and semantic domains
+for all outputs. The exporter uses the destination signature's declaration.
+The runner's phase-dependent batch multiplication and fixed two-axis resize
+are removed. The provider still supplies its physical output layout; the binder
+composes that layout with the declared output domain even when their ranks
+differ. Prepared programs using the former resize pair must be rebuilt.
+
+Preparation retained selected aliases of reversed and compact producers, a
+resized two-axis semantic domain over a three-axis provider layout, and the
+earlier independent collective domains. Matching encodings shared their pages;
+configured scalar changes retained the shared conversion operation. The actual
+reference model's embedding signatures supplied decode and prefill output
+domains. Libraries and native callers built. No numerical commands ran.
 
 ### Encoded numerical operands
 
