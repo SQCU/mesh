@@ -354,12 +354,53 @@ static uint32_t mesh_scan(uint32_t count,uint32_t align,uint32_t extent,uint32_t
   return MESH_ABSENT;
 }
 
+/* the highest free run of `count` below `end` and from `begin`, `align`-aligned; one that fits an `extent` (0: none)
+   lies within one.  A run whose lowest occupied index is o moves to end at o (MESH_ABSENT: none fits). */
+static uint32_t mesh_scan_down(uint32_t count,uint32_t align,uint32_t extent,uint32_t begin,uint32_t end,
+                               _Atomic uint64_t *own,_Atomic uint64_t *hot){
+  if(count>end-begin)return MESH_ABSENT;
+  uint64_t first=(uint64_t)(end-count)/align*align;
+  while(first>=begin){
+    if(extent && count<=extent && first/extent!=(first+count-1)/extent){
+      const uint64_t boundary=(first+count-1)/extent*extent;
+      if(boundary<(uint64_t)begin+count)return MESH_ABSENT;
+      first=(boundary-count)/align*align;
+      continue;
+    }
+    uint64_t low=UINT64_MAX;
+    for(uint32_t w=(uint32_t)(first/64);w<=(uint32_t)((first+count-1)/64) && low==UINT64_MAX;w++){
+      const uint64_t occupied=(atomic_load_explicit(&own[w],memory_order_acquire)|atomic_load_explicit(&hot[w],memory_order_acquire))&
+                              mesh_word_mask((uint32_t)first,count,w);
+      if(occupied)low=(uint64_t)w*64+(uint64_t)__builtin_ctzll(occupied);
+    }
+    if(low==UINT64_MAX){
+      if(mesh_claim(own,hot,(uint32_t)first,count))return (uint32_t)first;
+      continue;   /* another client took part of it: scan it again */
+    }
+    if(low<(uint64_t)begin+count)return MESH_ABSENT;
+    first=(low-count)/align*align;
+  }
+  return MESH_ABSENT;
+}
+
+/* Two-ended placement: a run of MESH_LARGE_RUN or more is the highest that fits (mesh_scan_down), every smaller one
+   follows the cursor up from the bottom. Small leases, tensors' and temporaries', so stay below the large ones, models'
+   and relays', and one releasing leaves no hole between large runs: the region's free pages stay one gap a large lease
+   can take (2026-10-29: a 1 GiB lease refused with 2,583,791 of 5,373,952 pages free, every run alike). */
+#define MESH_LARGE_RUN 1024u
+
 /* design/algorithm-sources.md#programkernel_call */
 /* The cursor resumes where the last allocation ended, so preparing N operands over P pages costs
    O(P) in total rather than O(N*P); a full scan and then a reclaim still back it, so the result is
    the same page the unresumed scan would have returned whenever nothing has been released. */
 static uint32_t mesh_allocate(struct mesh_ctx *c,uint32_t count,uint32_t align,uint32_t extent,uint32_t begin,uint32_t end,
                               _Atomic uint64_t *own,_Atomic uint64_t *hot,uint32_t *cursor){
+  if(count>=MESH_LARGE_RUN){
+    uint32_t first=mesh_scan_down(count,align,extent,begin,end,own,hot);
+    if(first==MESH_ABSENT){ mesh_reclaim(c->M); first=mesh_scan_down(count,align,extent,begin,end,own,hot); }
+    if(first==MESH_ABSENT)errno=ENOMEM;
+    return first;
+  }
   uint32_t resume=*cursor<begin||*cursor>end?begin:*cursor;
   uint32_t first=mesh_scan(count,align,extent,resume,end,own,hot);
   if(first==MESH_ABSENT && resume!=begin)first=mesh_scan(count,align,extent,begin,end,own,hot);
