@@ -150,6 +150,7 @@ def compile_graph(module, metadata, operands, *, destinations=None):
     from torch._inductor.codegen.common import get_device_op_overrides
     from torch._inductor.codegen.mps import MetalScheduling, MetalKernel
     from torch._inductor.codegen.wrapper import PythonWrapperCodegen
+    from torch._inductor.choices import InductorChoices
     from torch._inductor.graph import GraphLowering
     from torch._inductor.scheduler import Scheduler
     from torch._inductor.virtualized import V
@@ -159,14 +160,26 @@ def compile_graph(module, metadata, operands, *, destinations=None):
     from torch.fx.node import map_arg
     from .placement import Placements, same_view
     from contextlib import contextmanager
+    from mesh_compute import hardware
 
     placements, bound_storage, views, storage_layouts = Placements(), {}, [], {}
+    configuration = compiler_operands()
+    reduction_groups = hardware()['gpu']['cores'] * configuration['REDUCTION_GROUPS_PER_CORE']
+
+    class NativeChoices(InductorChoices):
+        def reduction_split_factor(self, device, reduction_numel_hint, numel_hint, inner_reduction):
+            # Split the numerical IR, not execution. Both stages are ordinary
+            # page producers; the recorder retains their data dependencies.
+            tiles = (reduction_numel_hint + configuration['REDUCTION_TILE_ELEMENTS'] - 1) // configuration['REDUCTION_TILE_ELEMENTS']
+            rows = max(1, numel_hint)
+            groups = (reduction_groups + rows - 1) // rows
+            return max(1, min(tiles, groups))
 
     class PageKernel(MetalKernel):
         # These objects exist during source emission only. The numerical body
         # receives page bindings and the resulting ordinary address expression.
-        max_threadgroup_size = min(compiler_operands()['ROW_THREADS'], _stream.device_facts()[1])
-        simd_group_size = compiler_operands()['SIMD_WIDTH']
+        max_threadgroup_size = min(configuration['ROW_THREADS'], _stream.device_facts()[1])
+        simd_group_size = configuration['SIMD_WIDTH']
 
         @contextmanager
         def access(self, name):
@@ -374,10 +387,10 @@ def compile_graph(module, metadata, operands, *, destinations=None):
     mode = detect_fake_mode(metadata)
     if mode is None:
         raise ValueError('native lowering requires the declaration\'s fake tensor metadata')
-    with config.patch(size_asserts=False, alignment_asserts=False, scalar_asserts=False,
-                      max_fusion_unique_io_buffers=compiler_operands()['BUFFER_BINDINGS'], max_autotune=False,
+    with config.patch(size_asserts=False, alignment_asserts=False, scalar_asserts=False, split_reductions=True,
+                      max_fusion_unique_io_buffers=configuration['BUFFER_BINDINGS'], max_autotune=False,
                       max_autotune_gemm=False, assert_indirect_indexing=False), \
-            V.set_fake_mode(mode), DebugContext():
+            V.set_fake_mode(mode), V.set_choices_handler(NativeChoices()), DebugContext():
         graph = NativeGraph(module, metadata, shape_env=mode.shape_env, is_inference=True)
         with V.set_graph_handler(graph), V.set_extern_kernel_nodes([]), mode:
             graph.run(*metadata)

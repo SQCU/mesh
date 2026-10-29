@@ -318,6 +318,15 @@ The FX numerical emitter also takes its reduction launch limit from
 `ROW_THREADS` and the device capacity, and its SIMD width from the manifest.
 It no longer inherits those constants from upstream Metal code generation.
 
+Wide reductions with few output rows also split into partial reductions during
+IR lowering. `REDUCTION_TILE_ELEMENTS` controls the initial work per part;
+`REDUCTION_GROUPS_PER_CORE` and the discovered GPU core count set the target
+parallelism. Both choices are compiler operands with empirical parameter
+domains. They do not cap a tensor's width. Small rows remain one reduction;
+larger rows produce page-backed summaries and a merge. Half and bfloat
+intermediates retain the IR's float accumulation. The same prepared recorder
+consumes both stages and their dependencies, without a second executor.
+
 Preparation on 2026-10-28 compiled complete forward/backward graphs with
 mapped half, bfloat and float inputs, including odd widths and 1,048,576
 channels. Different declared reduction launch limits reached source emission.
@@ -327,12 +336,24 @@ row summaries, with no input all-gather in those graphs. These groups did not
 communicate, and neither these declarations nor the native numerical graphs
 were executed. This is structural evidence, not a cluster or performance run.
 
+Further preparation split two mapped rows of 1,048,577 values into 160
+threadgroups on the discovered 40-core GPU, followed by summary merges.
+Transposed views used the same decomposition. Changing the declared work
+targets changed the emitted splits; short rows kept one stage, and empty
+outputs emitted no numerical commands. Forward/backward softmax and norm
+graphs also compiled with this split policy. No numerical replay was run.
+
 The multidimensional declaration still contains a separate all-reduce for
 each reduced mesh dimension. Softmax still declares maximum and sum separately;
 folding them into the existing scaled-partial merge is unfinished. Variance
 and the other whole-dimension rules in `partition.py` are also still present.
 Native fused row norms still need their distributed factor operands connected
 through the complete graph. These are remaining lowering and fusion tasks.
+The native model loader's 256/512 head-width filter, vector-width assumptions
+in its attention producers, and partition capacity-unit divisibility also
+remain. Removing those gates requires transducing their domains through the
+producers and partition maps; accepting the input alone would leave omitted
+lanes or incorrect ownership.
 
 ### Partial-result merge capacity
 

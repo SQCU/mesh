@@ -72,6 +72,10 @@ MESH_METAL_VALUE(HEAD_REGISTER_PAIRS, 4)
 // Wider rows read their prepared page views again, without row-sized staging.
 MESH_METAL_VALUE(ROW_THREADS, 1024)
 MESH_METAL_VALUE(ROW_REGISTER_VALUES, 4)
+// FX reductions split wide, sparsely populated rows into page summaries.
+// These are initial work-share choices, not bounds on reduction width.
+MESH_METAL_VALUE(REDUCTION_TILE_ELEMENTS, 4096)
+MESH_METAL_VALUE(REDUCTION_GROUPS_PER_CORE, 4)
 
 // Transport and prepared-command geometry, shared by both Metal command forms.
 MESH_METAL_VALUE(TRANSPORT_GROUP_THREADS, 1024)
