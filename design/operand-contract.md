@@ -48,6 +48,9 @@ positions and quantization beside their stored pages. A scalar consumer requests
 ordinary tiled conversion work using the shared reader. An encoded result with
 no such consumer allocates no dense result. Absent sparse codes retain their
 encoding's meaning, including a nonzero quantization zero point.
+Constant views retain the source coordinates of their scale and zero-point
+pages through reshapes, transposes and cuts. Explicit conversion declarations
+distinguish decoded values from raw codes; both use the shared reader.
 
 Collective crossings declare their local page accesses. The recorder keeps one
 dependency frontier across preparation calls. It no longer waits for every
@@ -60,6 +63,11 @@ Existing allocations can be composed into one local page view without copying
 their contents. Physical page identity drives dependencies even when two local
 views have different addresses. Composition retains only the original allocations
 backing selected pages; nested views do not retain intermediate mappings.
+The same placement solve handles caller-owned pages and fresh storage. Complete
+fixed pages are reserved fields in that solve, so unrelated caller bytes remain
+intact. Consumer layouts determine the virtual page order before fresh pages
+are assigned. The resulting mapping takes an explicit base alignment. Only an
+incompatible set of declared layouts needs the ordinary compiled conversion.
 
 Evidence is source review, native and frontend builds, Swift type checking,
 graph preparation and ANE load/map/release. Actual LiteRT compilation, placement,
@@ -70,10 +78,14 @@ disjoint host work independent. These are preparation results, not latency or
 throughput measurements. Nested page-view preparation also checked owner release
 against the bridge's allocation metadata. Nonzero-zero-point sparse products
 compile retained codes and the offset through the shared reduction machinery.
-The remaining integration work is joint placement of fixed and fresh pages under
-consumer layout constraints, source-coordinate quantization through mixed-axis
-views, precise provider read domains, and scheduling independent work across
-collective preparation boundaries. Vendor ANE submission throttles are documented
+Preparation also placed existing and fresh pages in a contiguous consumer view
+with a base alignment of three OS pages. It preserved fixed-page bytes when an
+incompatible sub-page layout required separate storage.
+The remaining integration work is precise provider read domains and scheduling
+independent work across collective preparation boundaries. Mutable encoded
+producers still need their storage interpretation carried explicitly into the
+same operand contract; constant lowering does not establish that path.
+Vendor ANE submission throttles are documented
 separately in `ane-prepared-contract-2026-10-30.md`; a completion callback does not
 remove those framework instructions.
 

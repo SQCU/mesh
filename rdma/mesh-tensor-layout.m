@@ -309,8 +309,8 @@ static MetalTensorLayout *TensorFunctionLayout(isl_pw_aff *value,NSArray *shape)
         isl_pw_aff_free(value);
         return [MetalTensorLayout shape:shape strides:TensorStrides(shape) offset:0 maps:@{} indices:nil];
     }
-    isl_val *minimum=isl_pw_aff_min_val(isl_pw_aff_copy(value)),*maximum=isl_pw_aff_max_val(isl_pw_aff_copy(value));
-    NSInteger low=isl_val_get_num_si(minimum),high=isl_val_get_num_si(maximum);isl_val_free(minimum);isl_val_free(maximum);
+    const struct MeshIndexBounds bounds=MeshIndexImageBounds(isl_map_from_pw_aff(isl_pw_aff_copy(value)));
+    NSInteger low=bounds.low,high=bounds.high;
     id terms=MeshIndexTerms(value);
     MetalTensorLayout *storage=[MetalTensorLayout shape:@[@(high-low+1)] strides:@[@1] offset:low maps:@{} indices:nil];
     return [storage shaped:shape coordinates:@[TensorSum(@[terms,@(-low)])]];
@@ -806,24 +806,6 @@ static isl_map *TensorEquations(MetalTensorLayout *values,isl_pw_aff *group,isl_
     isl_map *inverse=isl_map_reverse(isl_map_copy(assigned));
     return isl_map_coalesce(isl_map_detect_equalities(isl_map_apply_range(assigned,inverse)));
 }
-// Both uses are finite graphs: weighted components over `count` values and
-// the ordered chain of their roots. An exact closure is sufficient; an
-// overapproximation is not. Repeated squaring includes every simple path and
-// cycle after at most ceil(log2(count)) compositions when acceleration is inexact.
-static isl_map *TensorClosure(isl_map *relation,NSUInteger count) {
-    isl_bool exact=isl_bool_false;
-    isl_map *closed=isl_map_transitive_closure(isl_map_copy(relation),&exact);
-    if(!closed||exact==isl_bool_true){isl_map_free(relation);return closed;}
-    isl_map_free(closed);
-    for(NSUInteger length=1;relation&&length<count;) {
-        closed=isl_map_coalesce(isl_map_detect_equalities(isl_map_union(isl_map_copy(relation),
-            isl_map_apply_range(isl_map_copy(relation),isl_map_copy(relation)))));
-        isl_bool same=isl_map_is_equal(relation,closed);isl_map_free(relation);relation=closed;
-        if(same!=isl_bool_false)break;
-        length=length>count/2?count:length*2;
-    }
-    return relation;
-}
 MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *> *uses,
     NSArray<MetalTensorLayout *> *targets,NSArray<NSArray<NSNumber *> *> *footprints,
     NSArray<MetalTensorLayout *> *values,NSArray<NSNumber *> *widths) {
@@ -858,7 +840,7 @@ MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *
         isl_bool covered=isl_set_is_equal(domain,ids);isl_set_free(domain);
         if(covered!=isl_bool_true)goto finished;
     }
-    equations=TensorClosure(equations,count);
+    equations=MeshIndexClosure(equations,count);
     {
         isl_map *conflicts=isl_map_intersect(isl_map_copy(equations),
             isl_map_read_from_str(ctx,"{ [i,p] -> [i,q] : p != q }"));
@@ -928,7 +910,7 @@ MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *
         // end. Propagating that range removes unreachable alignment phases.
         isl_set *domain=isl_set_union(isl_set_copy(states),isl_map_range(isl_map_copy(walk)));
         walk=isl_map_coalesce(isl_map_intersect_domain(walk,isl_set_copy(domain)));
-        walk=TensorClosure(isl_map_union(walk,isl_set_identity(domain)),count);
+        walk=MeshIndexClosure(isl_map_union(walk,isl_set_identity(domain)),count);
         states=isl_set_apply(states,isl_map_copy(walk));
         isl_map *bases=isl_map_project_out(isl_map_intersect_domain(isl_map_copy(base),isl_set_copy(states)),isl_dim_in,1,1);
         isl_map *which=isl_map_project_out(isl_map_copy(roots),isl_dim_out,1,1);
@@ -1632,34 +1614,35 @@ static id TensorSelectionIndex(NSInteger (^extent)(id),NSArray *shape,id express
     for(size_t i=0;i<count;i++)[parts addObject:@[@(runs[i].page),@(runs[i].count),@0,@1]];
     return [MetalTensorLayout runs:parts];
 }
-+ (instancetype)compose:(NSArray<MetalTensorPages *> *)sources placements:(NSArray<MetalTensorLayout *> **)placements {
++ (MetalTensorLayout *)domain:(NSArray<MetalTensorPages *> *)sources {
     NSMutableArray *domains=[NSMutableArray array],*parts=[NSMutableArray array];
     for(MetalTensorPages *source in sources)[domains addObject:[source backing]];
-    NSMutableData *selections=[NSMutableData data];
     for(NSDictionary *cell in MetalTensorCover(domains)) {
-        const NSUInteger source=[cell[@"members"][0] unsignedIntegerValue];
-        MetalTensorLayout *domain=cell[@"domain"],*original=domains[source];
-        MetalTensorLayout *ordinals=[MetalTensorLayout shape:original.shape strides:@[@1] offset:0 maps:@{} indices:nil];
-        NSData *selected=[[domain rebase:original onto:ordinals] orderedSpans],*physical=[domain orderedSpans];
-        const struct MetalTensorSpan *spans=selected.bytes,*pages=physical.bytes;
-        for(NSUInteger k=0;k<selected.length/sizeof *spans;k++) {
-            const ncclMeshPageSelection selection={sources[source].table,(uint64_t)spans[k].offset,spans[k].count};
-            [selections appendBytes:&selection length:sizeof selection];
-        }
+        NSData *physical=[cell[@"domain"] orderedSpans];const struct MetalTensorSpan *pages=physical.bytes;
         for(NSUInteger k=0;k<physical.length/sizeof *pages;k++)[parts addObject:@[@(pages[k].offset),@(pages[k].count),@0,@1]];
     }
-    ncclMeshPageTable_t table=NULL;
-    if(ncclMeshPageTableCompose(selections.bytes,selections.length/sizeof(ncclMeshPageSelection),NULL,0,&table))
-        [NSException raise:NSInvalidArgumentException format:@"page composition: %s",ncclGetLastError(NULL)];
-    MetalTensorPages *result=[self adopt:table];result->_owner=[sources copy];
-    MetalTensorLayout *physical=[MetalTensorLayout runs:parts];
-    MetalTensorLayout *ordinals=[MetalTensorLayout shape:physical.shape strides:@[@1] offset:0 maps:@{} indices:nil];
-    NSMutableArray *mapped=[NSMutableArray array];
-    for(MetalTensorLayout *domain in domains) {
-        MetalTensorLayout *pages=[domain rebase:physical onto:ordinals];
-        [mapped addObject:[[pages components:result.pageBytes] reshape:@[@(pages.count*result.pageBytes)]]];
+    return [MetalTensorLayout runs:parts];
+}
++ (instancetype)compose:(NSArray<MetalTensorPages *> *)sources order:(MetalTensorLayout *)order alignment:(NSUInteger)alignment {
+    NSMutableArray *parts=[NSMutableArray array],*local=[NSMutableArray array];
+    for(MetalTensorPages *source in sources) {
+        MetalTensorLayout *domain=[source backing];
+        [local addObject:[MetalTensorLayout shape:domain.shape strides:@[@1] offset:0 maps:@{} indices:nil]];
+        NSData *physical=[domain orderedSpans];const struct MetalTensorSpan *pages=physical.bytes;
+        for(NSUInteger k=0;k<physical.length/sizeof *pages;k++)[parts addObject:@[@(pages[k].offset),@(pages[k].count),@0,@1]];
     }
-    *placements=mapped;return result;
+    MetalTensorTraversal *traversal=[MetalTensorTraversal layouts:local domain:[MetalTensorLayout runs:parts] selection:order];
+    NSMutableData *selections=[NSMutableData data];NSArray<NSNumber *> *cuts=traversal.cuts;
+    for(NSUInteger k=1;k<cuts.count;k++) {
+        const struct MetalTensorFragment part=[traversal fragment:cuts[k-1].unsignedIntegerValue end:cuts[k].unsignedIntegerValue];
+        if(!part.count)continue;
+        const ncclMeshPageSelection selection={sources[part.part].table,(uint64_t)part.offset,part.count};
+        [selections appendBytes:&selection length:sizeof selection];
+    }
+    ncclMeshPageTable_t table=NULL;
+    if(ncclMeshPageTableCompose(selections.bytes,selections.length/sizeof(ncclMeshPageSelection),alignment,NULL,0,&table))
+        [NSException raise:NSInvalidArgumentException format:@"page composition: %s",ncclGetLastError(NULL)];
+    return [self adopt:table];
 }
 - (MetalTensorLayout *)physical:(MetalTensorLayout *)layout elementBytes:(NSUInteger)bytes {
     MetalTensorLayout *physical=[[[self backing] components:_pageBytes] reshape:@[@(_pageCount*_pageBytes)]];

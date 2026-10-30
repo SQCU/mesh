@@ -117,26 +117,57 @@ class Placements:
                 mapping, extent = solve_layout(domain.count, [(use(value, view), value.element_size(), kind, view, capacity, aligned)
                     for value, view, kind, capacity, aligned in demands],
                     [(use(value), value.element_size()) for value in values])
+                if mapping is None:
+                    mapping = _stream.TensorLayout((domain.count,), (1,))
                 placed = allocate(mapping, torch.uint8, members[0]['logical'].device.type, extent=extent, alignment=alignment)
                 self.owners.append(placed.storage)
             else:
-                uses, targets, actuals = [], [], []
-                for logical, actual in fixed:
-                    uses.append(use(logical))
-                    targets.append(_stream.physical_layout(actual))
-                    actuals.append(TensorView.of(actual))
-                covered, physical, missing = _stream.TensorLayout.assign(domain.count, uses, targets)
+                actuals = [TensorView.of(actual) for _, actual in fixed]
+                owners = [value.storage for value in actuals]
+                physical_pages, page = _stream.page_domain(owners)
+                alignment = math.lcm(alignment, page)
+                fixed_bytes = physical_pages.components(page).reshape((physical_pages.count * page,))
+                fixed_domain = _stream.TensorLayout(tuple(fixed_bytes.shape), (1,))
+                def assignments():
+                    return _stream.TensorLayout.assign(domain.count,
+                        [use(logical) for logical, _ in fixed],
+                        [_stream.physical_layout(actual) for actual in actuals])
+                covered, physical, _ = assignments()
+                unique = physical.intersection(physical)
+                representatives = physical.rebase(unique, unique.rebase(physical, covered))
+                if not representatives.equivalent(covered):
+                    changed, mapping = _stream.TensorLayout.identify(domain.count, covered, representatives)
+                    for member in members:
+                        member['mapping'] = member['mapping'].rebase(domain, mapping)
+                    domain = family['domain'] = changed
+                    covered, physical, _ = assignments()
+                # Include complete caller pages as ordinary typed fields. The
+                # unknown bytes remain reserved; no new value can overwrite them.
+                joint, original, pages = _stream.TensorLayout.unite(domain, fixed_domain,
+                    covered, physical.rebase(fixed_bytes, fixed_domain))
+                typed = [(use(value).rebase(domain, original), value.element_size()) for value in values]
+                typed.append((pages, page))
+                demanded = [(use(value, view).rebase(domain, original), value.element_size(), kind, view, capacity, aligned)
+                    for value, view, kind, capacity, aligned in demands]
+                mapping, extent = solve_layout(joint.count, demanded, typed)
+                if mapping is None:
+                    # An incompatible consumer gets the existing explicit AOT
+                    # conversion edge. Fixed pages still use the same solver.
+                    mapping, extent = solve_layout(joint.count, [], typed)
+                placed_pages = pages.rebase(joint, mapping).reshape((physical_pages.count, page)).elements(page)
+                first, length = mapping.storage_span()
+                count = -(-max(first + length, extent) // page)
+                known, locations, missing = _stream.TensorLayout.assign(count, [placed_pages], [physical_pages])
                 if missing.count:
-                    extra = allocate(_stream.TensorLayout((missing.count,), (1,)), torch.uint8,
-                                     actuals[0].device.type, alignment=alignment)
-                    uses.append(missing);actuals.append(extra)
-                storage, mappings = _stream.page_storage([value.storage for value in actuals])
-                targets = [descriptor(value).components(value.element_size()).rebase(
-                    _stream.TensorLayout(tuple(mapping.shape), (1,)), mapping)
-                    for value, mapping in zip(actuals, mappings, strict=True)]
-                covered, physical, missing = _stream.TensorLayout.assign(domain.count, uses, targets)
-                placed = TensorView(storage, domain.rebase(covered, physical))
-                self.owners.append(placed.storage)
+                    from . import empty
+                    extra = empty((missing.count * page,), dtype=torch.uint8, device=actuals[0].device.type)
+                    owners.append(extra)
+                    extra_pages = _stream.physical_layout(extra).reshape((missing.count, page)).elements(page)
+                    known, locations, missing = _stream.TensorLayout.assign(count, [known, missing], [locations, extra_pages])
+                order = _stream.TensorLayout((count,), (1,)).rebase(known, locations)
+                storage = _stream.page_storage(owners, order, alignment)
+                placed = TensorView(storage, original.rebase(joint, mapping))
+                self.owners.append(storage)
             for member in members:
                 mapping = member['mapping'].rebase(domain, placed.layout)
                 self.bindings.append((member['logical'], TensorView(placed.storage, mapping)))

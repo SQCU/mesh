@@ -260,6 +260,24 @@ NSArray<MetalTensorLayout *> *MetalTensorAssignments(NSUInteger count,NSArray<Me
     return result;
 }
 
+// Both uses are finite graphs: weighted components over `count` values and
+// the ordered chain of their roots. An exact closure is sufficient; an
+// overapproximation is not. Repeated squaring includes every simple path and
+// cycle after at most ceil(log2(count)) compositions when acceleration is inexact.
+isl_map *MeshIndexClosure(isl_map *relation,NSUInteger count) {
+    isl_bool exact=isl_bool_false;
+    isl_map *closed=isl_map_transitive_closure(isl_map_copy(relation),&exact);
+    if(!closed||exact==isl_bool_true){isl_map_free(relation);return closed;}
+    isl_map_free(closed);
+    for(NSUInteger length=1;relation&&length<count;) {
+        closed=isl_map_coalesce(isl_map_detect_equalities(isl_map_union(isl_map_copy(relation),
+            isl_map_apply_range(isl_map_copy(relation),isl_map_copy(relation)))));
+        isl_bool same=isl_map_is_equal(relation,closed);isl_map_free(relation);relation=closed;
+        if(same!=isl_bool_false)break;
+        length=length>count/2?count:length*2;
+    }
+    return relation;
+}
 NSArray<MetalTensorLayout *> *MetalTensorIdentify(NSUInteger count,MetalTensorLayout *source,MetalTensorLayout *target) {
     NSCParameterAssert([source.shape isEqual:target.shape]);
     isl_ctx *ctx=isl_ctx_alloc();isl_map *relation=NULL;isl_set *representatives=NULL;NSArray *result=nil;
@@ -267,15 +285,7 @@ NSArray<MetalTensorLayout *> *MetalTensorIdentify(NSUInteger count,MetalTensorLa
         MetalTensorLayout *domain=[MetalTensorLayout shape:@[@(count)] strides:@[@1] offset:0 maps:@{} indices:nil];
         isl_map *links=isl_map_apply_range(isl_map_reverse(MeshIndexRelation(ctx,source)),MeshIndexRelation(ctx,target));
         relation=isl_map_union(MeshIndexRelation(ctx,domain),isl_map_union(isl_map_copy(links),isl_map_reverse(links)));
-        // Exact finite equivalence closure. Squaring doubles the path length
-        // covered at each preparation step; no graph edges reach execution.
-        for(;;) {
-            isl_map *next=isl_map_coalesce(isl_map_union(isl_map_copy(relation),
-                isl_map_apply_range(isl_map_copy(relation),isl_map_copy(relation))));
-            isl_bool same=isl_map_is_equal(relation,next);isl_map_free(relation);relation=next;
-            if(same==isl_bool_error)[NSException raise:NSInvalidArgumentException format:@"page equality could not be resolved"];
-            if(same==isl_bool_true)break;
-        }
+        relation=MeshIndexClosure(relation,count);
         relation=isl_map_lexmin(relation);representatives=isl_map_range(isl_map_copy(relation));
         MetalTensorLayout *selected=MeshIndexSelection(representatives);
         MetalTensorLayout *compact=[MetalTensorLayout shape:selected.shape strides:@[@1] offset:0 maps:@{} indices:nil];

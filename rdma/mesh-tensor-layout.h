@@ -166,10 +166,9 @@ FOUNDATION_EXPORT MetalTensorLayout * _Nullable MetalTensorPlace(NSUInteger coun
 @property(nonatomic, readonly) NSUInteger pageBytes, pageCount, origin;
 + (instancetype)storage:(id<MTLBuffer>)buffer;
 + (instancetype)host:(const void *)address;
-// Deduplicate physical pages into one prepared local view. Placements retain
-// each source table's ordered byte selection, including repeated page reads.
-+ (instancetype)compose:(NSArray<MetalTensorPages *> *)sources
-    placements:(NSArray<MetalTensorLayout *> * _Nonnull * _Nonnull)placements;
+// Describe unique physical pages, or compose a declared order of those pages.
++ (MetalTensorLayout *)domain:(NSArray<MetalTensorPages *> *)sources;
++ (instancetype)compose:(NSArray<MetalTensorPages *> *)sources order:(MetalTensorLayout *)order alignment:(NSUInteger)alignment;
 - (MetalTensorLayout *)physical:(MetalTensorLayout *)layout elementBytes:(NSUInteger)bytes;
 - (MetalTensorLayout *)bind:(MetalTensorLayout *)layout elementBytes:(NSUInteger)bytes;
 @end

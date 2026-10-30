@@ -712,29 +712,29 @@ struct TensorOperand {
 // The canonical bridge backing is already allocated. This preparation handle
 // retains the contributing leases and exposes their one page table to ordinary
 // tensor views; execution receives the same root buffer and compiled indices.
-static std::pair<at::Tensor,std::vector<TensorLayout>> page_storage(const std::vector<at::Tensor> &owners) {
+static NSArray<MetalTensorPages *> *page_sources(const std::vector<at::Tensor> &owners) {
+  NSMutableArray *sources=[NSMutableArray array];
+  for(const auto &owner:owners){MetalTensorPages *pages=tensorPages(owner);[sources addObject:pages];[pages release];}
+  return sources;
+}
+static at::Tensor page_storage(const std::vector<at::Tensor> &owners,
+    const TensorLayout &order,NSUInteger alignment) {
   TORCH_CHECK(!owners.empty(),"a page backing requires its declared lease operands");
   struct Storage {
     MetalTensorPages *pages;
-    std::vector<at::Tensor> owners;
     ~Storage(){[pages release];}
   };
-  auto held=std::make_unique<Storage>();held->owners=owners;held->pages=nil;
-  NSMutableArray *sources=[NSMutableArray array];
-  for(const auto &owner:owners){MetalTensorPages *pages=tensorPages(owner);[sources addObject:pages];[pages release];}
-  NSArray<MetalTensorLayout *> *placed=nil;
-  @try {held->pages=[[MetalTensorPages compose:sources placements:&placed] retain];}
+  auto held=std::make_unique<Storage>();held->pages=nil;
+  NSArray<MetalTensorPages *> *sources=page_sources(owners);
+  @try {held->pages=[[MetalTensorPages compose:sources order:order.value alignment:alignment] retain];}
   @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
-  std::vector<TensorLayout> layouts;
-  for(size_t i=0;i<owners.size();i++)
-    layouts.emplace_back([placed[i] slice:0 first:((MetalTensorPages *)sources[i]).origin count:owners[i].storage().nbytes() step:1]);
   const bool metal=owners.front().is_mps();
   const auto device=owners.front().device();
   const size_t bytes=held->pages.buffer.length;
   void *pointer=metal?(__bridge void *)held->pages.buffer:held->pages.buffer.contents;
   c10::DataPtr data(pointer,held.release(),[](void *value){delete static_cast<Storage *>(value);},device);
   c10::Storage storage(c10::Storage::use_byte_size_t(),bytes,std::move(data),nullptr,false);
-  return {at::empty({0},at::TensorOptions().dtype(at::kByte).device(device)).set_(storage,0,{(int64_t)bytes}),std::move(layouts)};
+  return at::empty({0},at::TensorOptions().dtype(at::kByte).device(device)).set_(storage,0,{(int64_t)bytes});
 }
 
 // FX's output is the native recorder's input. This constructor only binds
@@ -2062,6 +2062,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
       operand.pages.buffer.length,(uint64_t)((operand.layout.value.count?[operand.layout.value index:0]:operand.layout.value.offset)*operand.storage.element_size())};
   }, pybind11::call_guard<Drained>());
   module.def("page_storage",&page_storage,pybind11::call_guard<Drained>());
+  module.def("page_domain",[](const std::vector<at::Tensor> &owners){
+    NSArray<MetalTensorPages *> *sources=page_sources(owners);
+    return std::make_pair(TensorLayout([MetalTensorPages domain:sources]),sources[0].pageBytes);
+  },pybind11::call_guard<Drained>());
   module.def("host_page_backing",[](uint64_t address) {
     @try {
       MetalTensorPages *pages=[MetalTensorPages host:(const void *)(uintptr_t)address];
@@ -2123,6 +2127,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def("index",[](const TensorLayout &v,NSUInteger i){return [v.value index:i];}, pybind11::call_guard<Drained>())
     .def("shift",[](const TensorLayout &v,NSInteger offset){return TensorLayout([v.value shift:offset]);}, pybind11::call_guard<Drained>())
     .def("equivalent",[](const TensorLayout &v,const TensorLayout &other){return bool([v.value equivalent:other.value]);}, pybind11::call_guard<Drained>())
+    .def("intersection",[](const TensorLayout &v,const TensorLayout &other){return TensorLayout([v.value intersection:other.value]);}, pybind11::call_guard<Drained>())
     .def("select",[](const TensorLayout &v,NSUInteger axis,const std::vector<NSInteger> &indices){return TensorLayout([v.value select:axis indices:tensorWords(indices)]);}, pybind11::call_guard<Drained>())
     .def("select_runs",[](const TensorLayout &v,NSUInteger axis,const std::vector<std::vector<NSInteger>> &runs){
       NSMutableArray *parts=[NSMutableArray array];for(const auto &run:runs)[parts addObject:tensorNumbers(run)];

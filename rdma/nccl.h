@@ -1034,9 +1034,10 @@ ncclResult_t ncclMeshPageTableShape(ncclMeshPageTable_t table, size_t* pages, si
 ncclResult_t ncclMeshPageTableBinding(ncclMeshPageTable_t table, ncclMeshBuffer* binding);
 /* Preparation-only page composition. The result maps the selected existing
    pages into one local view and retains their owners; no payload is copied.
-   Destroying the result releases the view, never its owners' arena pages. */
+   alignment is an explicit multiple of the source page size. Destroying the
+   result releases the view and its retained owners through ordinary retirement. */
 typedef struct { ncclMeshPageTable_t storage; uint64_t first, count; } ncclMeshPageSelection;
-ncclResult_t ncclMeshPageTableCompose(const ncclMeshPageSelection* selections, size_t count,
+ncclResult_t ncclMeshPageTableCompose(const ncclMeshPageSelection* selections, size_t count, size_t alignment,
     ncclComm_t comm, int metal, ncclMeshPageTable_t* out);
 /* Physical page identities, coalesced into runs. With runs NULL, return the
    required count; otherwise *count supplies capacity and receives the count.

@@ -2,6 +2,8 @@
 #import "mesh-tensor-layout.h"
 #include <isl/aff.h>
 #include <isl/map.h>
+// Exact closure for a finite relation over at most count participating values.
+isl_map *MeshIndexClosure(isl_map *relation, NSUInteger count);
 #include <isl/set.h>
 
 // Preparation only. The relation type and its closed operations are isl's;

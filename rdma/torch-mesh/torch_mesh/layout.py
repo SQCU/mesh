@@ -92,10 +92,8 @@ def solve_layout(count, demands, values):
             targets[i] = target.components(width)
         if changed:
             placed = _stream.place_layout(count, uses, targets, footprints, typed, widths)
-    # Incompatible API requirements retain the shared resolver's explicit
-    # conversion dependencies. The producer still has one complete placement.
     if placed is None:
-        return _stream.TensorLayout((count,), (1,)), 0
+        return None, 0
     domain = _stream.TensorLayout((count,), (1,))
     extent = max((uses[i].rebase(domain, placed).index(0) + capacity
                   for i, (_, _, _, _, capacity, _) in enumerate(demands) if uses[i].count and capacity), default=0)

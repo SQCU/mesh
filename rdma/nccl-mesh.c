@@ -5831,9 +5831,9 @@ ncclResult_t ncclMeshPageTableBacking(ncclMeshPageTable_t table,ncclMeshPageBack
   }
   return ncclSuccess;
 }
-ncclResult_t ncclMeshPageTableCompose(const ncclMeshPageSelection *selections,size_t count,
+ncclResult_t ncclMeshPageTableCompose(const ncclMeshPageSelection *selections,size_t count,size_t alignment,
     ncclComm_t comm,int metal,ncclMeshPageTable_t *out) {
-  if(!out||*out||!count||!selections||(metal!=0&&metal!=1))return fail(ncclInvalidArgument,"page composition requires selections, backend and an empty result");
+  if(!out||*out||!count||!selections||!alignment||(metal!=0&&metal!=1))return fail(ncclInvalidArgument,"page composition requires selections, alignment, backend and an empty result");
   struct attach *attachment=NULL;
   struct mesh_page_runs physical={0};
   const void **owners=NULL;size_t owner_count=0,owner_room=0,bytes=0,page=0;
@@ -5845,7 +5845,7 @@ ncclResult_t ncclMeshPageTableCompose(const ncclMeshPageSelection *selections,si
     if(!selection.count)continue;
     struct attach *held=NULL;struct lease *lease=lease_at(address_of(source->base),&held);
     if(!lease||lease->returned||(attachment&&attachment!=held)||(comm&&comm->attach!=held)||
-       (page&&page!=source->page_bytes)){error=EINVAL;break;}
+       (page&&page!=source->page_bytes)||alignment%source->page_bytes){error=EINVAL;break;}
     attachment=held;page=source->page_bytes;
     if(selection.count>(SIZE_MAX-bytes)/page){error=EOVERFLOW;break;}
     const size_t size=(size_t)selection.count*page,first=(size_t)selection.first*page;
@@ -5884,9 +5884,17 @@ ncclResult_t ncclMeshPageTableCompose(const ncclMeshPageSelection *selections,si
     free(selected.at);
   }
   if(!error&&!bytes)error=EINVAL;
+  if(!error&&bytes>SIZE_MAX-(alignment-page))error=EOVERFLOW;
   if(!error) {
-    view=mmap(NULL,bytes,PROT_NONE,MAP_PRIVATE|MAP_ANON,-1,0);
-    if(view==MAP_FAILED)error=errno;
+    const size_t reserved=bytes+alignment-page;
+    void *base=mmap(NULL,reserved,PROT_NONE,MAP_PRIVATE|MAP_ANON,-1,0);
+    if(base==MAP_FAILED)error=errno;
+    else {
+      const size_t prefix=(alignment-(uintptr_t)base%alignment)%alignment;
+      view=(char *)base+prefix;
+      if(prefix)munmap(base,prefix);
+      if(reserved-prefix>bytes)munmap((char *)view+bytes,reserved-prefix-bytes);
+    }
   }
   for(size_t k=0;!error&&k<physical.count;k++) {
     const struct mesh_page_run run=physical.at[k];
