@@ -92,11 +92,16 @@ the same signed displacement and instance relation. A result can advance to
 a later instance without moving a sibling that shares its storage. Linear
 collective bindings are lowered over the recording's finite invocation domain;
 cyclic bindings retain their phase through wraparound.
+Storage-period equality is checked over the union of actual shifted use domains.
+A compatible endpoint cannot change a sibling's slot sequence. Disjoint domains
+retain their holes, so equivalent uses still share pages directly.
 Fused consumer constants declare their embedded addresses too. Preparation
 fills those words in ordinary uniform pages for each invocation. The command
 reads the prepared pages; it does not repair addresses during execution.
 Replay templates retain the original constant data and symbolic page bindings,
 then use the same preparation step when bound to different pages.
+Saved constant pages clear each declared pointer word; live source pages and
+the other constant fields are preserved.
 The pinned ISL build includes the upstream
 [empty-map coefficient reduction correction](https://repo.or.cz/isl.mirror.git/commit/99a07a039237f11bccc1ef80a7b6cc76ae5f98c5).
 Mixed typed placement reached this bug while simplifying a preparation relation.

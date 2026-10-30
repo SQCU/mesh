@@ -2204,7 +2204,7 @@ NSDictionary *MetalScheduleTemplate(struct MetalSchedule *const *schedules,size_
         if(at)return at.intValue;
         if(!lease.contents){failure=@"a kept operand is not in shared storage";return -1;}
         operandAt[key]=at=@(operands.count);
-        [operands addObject:@{@"length":@(lease.length),@"contents":[NSData dataWithBytes:lease.contents length:lease.length]}];
+        [operands addObject:@{@"length":@(lease.length),@"contents":[NSMutableData dataWithBytes:lease.contents length:lease.length]}];
         return at.intValue;
     };
     uint32_t (^pipelineIndex)(id)=^uint32_t(id pipeline){
@@ -2314,6 +2314,20 @@ NSDictionary *MetalScheduleTemplate(struct MetalSchedule *const *schedules,size_
                     address.record.value.buffer=nil;address.record.value.origin+=delta;
                     address.uniform=operand(source->uniform,&delta);
                     address.record.uniform=nil;address.record.uniformOffset+=delta;
+                    // Only symbolic targets belong in a template. Clear the
+                    // declared pointer words in its saved constant pages,
+                    // preserving every scalar and the live source allocation.
+                    NSMutableData *contents=address.uniform<0?nil:operands[address.uniform][@"contents"];
+                    if(contents) {
+                        const NSUInteger repetitions=[held[4] unsignedIntegerValue];
+                        const NSUInteger slots=!source->uniformStride?1:source->uniformInstances?
+                            MIN(repetitions,source->uniformInstances):repetitions;
+                        for(NSUInteger t=0;t<slots;t++) {
+                            const NSUInteger at=MetalInvocationOffset(address.record.uniformOffset,source->uniformStride,
+                                source->uniformInstances,t,source->uniformInvocation)+source->value.offset;
+                            memset((char *)contents.mutableBytes+at,0,sizeof(uint64_t));
+                        }
+                    }
                     [addresses appendBytes:&address length:sizeof address];
                 }
                 for(NSUInteger j=0;j<MESH_BUFFER_BINDINGS;j++) {
