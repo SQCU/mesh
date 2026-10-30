@@ -5,8 +5,13 @@ use mesh's page allocator. No relation object is an execution operand.
 """
 import ctypes as C
 import json
+import math
 import os
 from pathlib import Path
+
+
+class _Cell(C.Structure):
+    _fields_ = [('domain', C.c_void_p), ('members', C.POINTER(C.c_size_t)), ('count', C.c_size_t)]
 
 
 def coordinates(shape, stem):
@@ -50,6 +55,9 @@ class Algebra:
         specs['map_reverse'] = C.c_void_p, (C.c_void_p,)
         specs['map_lexmin'] = C.c_void_p, (C.c_void_p,)
         specs['map_is_single_valued'] = C.c_int, (C.c_void_p,)
+        specs['pw_multi_aff_from_map'] = C.c_void_p, (C.c_void_p,)
+        specs['pw_multi_aff_pullback_pw_multi_aff'] = C.c_void_p, (C.c_void_p, C.c_void_p)
+        specs['map_from_pw_multi_aff'] = C.c_void_p, (C.c_void_p,)
         specs['map_dim'] = C.c_int, (C.c_void_p, C.c_int)
         specs['set_lexmin'] = C.c_void_p, (C.c_void_p,)
         specs['set_project_out'] = C.c_void_p, (C.c_void_p, C.c_int, C.c_uint, C.c_uint)
@@ -62,6 +70,8 @@ class Algebra:
         self.lib.mesh_isl_free.argtypes, self.lib.mesh_isl_free.restype = (C.c_void_p,), None
         self.lib.MeshIndexSetRuns.argtypes = C.c_void_p, C.POINTER(C.c_size_t)
         self.lib.MeshIndexSetRuns.restype = C.POINTER(C.c_int64)
+        self.lib.MeshIndexSetCover.argtypes = C.POINTER(C.c_void_p), C.c_size_t, C.POINTER(C.c_size_t)
+        self.lib.MeshIndexSetCover.restype = C.POINTER(_Cell)
         self.lib.MeshIndexSelectionDomain.argtypes = C.c_void_p, C.c_char_p, C.POINTER(C.c_void_p)
         self.lib.MeshIndexSelectionDomain.restype = C.c_void_p
         self.lib.MeshIndexSelectionRelation.argtypes = C.c_void_p, C.c_char_p, C.POINTER(C.c_size_t), C.POINTER(C.c_void_p)
@@ -104,6 +114,19 @@ class Algebra:
         text = '{ [' + ','.join(x) + '] -> [' + ','.join(y) + '] : ' + (' and '.join(conditions) or 'true') + ' }'
         return IndexRelation(self, self.map_read_from_str(self.ctx, text.encode()), source_shape)
 
+    def window(self, iteration_shape, source_shape, *, axes, strides, dilations,
+               padding, transposed, equations):
+        """design/compiler-followups-2026-10-30.md#window-relations"""
+        def accesses(x, y):
+            relations = list(equations(x, y))
+            for (source, position, tap), stride, dilation, pad in zip(
+                    axes, strides, dilations, padding, strict=True):
+                source, position, tap = y[source], x[position], x[tap]
+                left, right = (position, source) if transposed else (source, position)
+                relations.append(f'{left} + {int(pad)} = {right} * {int(stride)} + {tap} * {int(dilation)}')
+            return relations
+        return self.map(iteration_shape, source_shape, accesses)
+
     def selection(self, declaration):
         """The final page binder's selection domain, in logical flat positions."""
         message = C.c_void_p()
@@ -126,11 +149,52 @@ class Algebra:
                 self.lib.mesh_isl_free(message.value)
         return IndexRelation(self, result, (count.value,))
 
+    def exchanges(self, sources, destinations):
+        """design/compiler-followups-2026-10-30.md#selected-page-crossings"""
+        incoming = [self.selection_relation(value) for value in sources]
+        outgoing = [self.selection_relation(value) for value in destinations]
+        domains = [value.image(value.domain()) for value in incoming]
+        for at, domain in enumerate(domains):
+            if any(not domain.binary(previous, 'intersect').empty() for previous in domains[:at]):
+                raise ValueError('selection exchange requires declared disjoint source ownership')
+        for destination, requested in enumerate(outgoing):
+            missing = requested.domain()
+            for source, provided in enumerate(incoming):
+                matching = requested.then(provided.inverse((math.prod(sources[source]['shape']),))).lexmin()
+                selected = matching.domain()
+                if selected.empty():
+                    continue
+                positions = self.selection_relation({'shape': list(requested.shape),
+                    'steps': [['select', 0, selected.spans()]]})
+                yield source, destination, positions.then(matching), positions, provided.shape[0], requested.shape[0]
+                missing = missing.binary(selected, 'subtract')
+            if not missing.empty():
+                raise ValueError(f'selection exchange destination {destination} has no declared source for {missing}')
+
     def ownership(self, shape, axis, unit, extent):
         names = coordinates(shape, 'i')
         equation = f'p = floor({names[axis]} / {unit}) mod {extent}' if all(shape) else 'false'
         text = '{ [' + ','.join(names) + '] -> [p] : ' + ' and '.join([*bounds(shape, names), equation]) + ' }'
         return IndexRelation(self, self.map_read_from_str(self.ctx, text.encode()), shape)
+
+    def cover(self, domains):
+        """The native cover's disjoint domains and their contributor sets."""
+        domains = tuple(domains)
+        if not domains:
+            return ()
+        count = C.c_size_t()
+        cells = self.lib.MeshIndexSetCover((C.c_void_p * len(domains))(*(d.pointer for d in domains)),
+                                         len(domains), C.byref(count))
+        result = []
+        try:
+            for k in range(count.value):
+                cell = cells[k]
+                result.append((IndexSet(self, cell.domain, domains[0].rank),
+                               tuple(cell.members[i] for i in range(cell.count))))
+                self.lib.mesh_isl_free(cell.members)
+        finally:
+            self.lib.mesh_isl_free(cells)
+        return tuple(result)
 
     def unconstrained(self, shape, extent):
         """Every declared position may be used by every owner."""
@@ -275,7 +339,15 @@ class IndexRelation(_Object):
 
     def then(self, other):
         """Compose this relation's target coordinates with the next relation."""
-        return IndexRelation(self.algebra, self.algebra.map_apply_range(self.copy(), other.copy()), self.shape)
+        algebra = self.algebra
+        if self.single_valued() and other.single_valued():
+            source = algebra.pw_multi_aff_from_map(self.copy())
+            target = algebra.pw_multi_aff_from_map(other.copy())
+            composed = algebra.pw_multi_aff_pullback_pw_multi_aff(target, source)
+            result = algebra.map_from_pw_multi_aff(composed)
+        else:
+            result = algebra.map_apply_range(self.copy(), other.copy())
+        return IndexRelation(algebra, result, self.shape)
 
     def inverse(self, shape):
         """Reverse the relation with its new domain shape explicitly supplied."""
@@ -345,3 +417,50 @@ class IndexRelation(_Object):
         owners = self.algebra.set(f'{{ [p] : {int(first)} <= p < {int(first + count)} }}', 1)
         selected = self.algebra.map_intersect_range(self.copy(), owners.copy())
         return IndexSet(self.algebra, self.algebra.map_domain(selected), len(self.shape))
+
+
+def convolution_domain(algebra, input_shape, weight_shape, *, stride, padding, dilation,
+                       transposed, output_padding, groups, output_shape=None):
+    """Canonical N,C,spatial convolution as one grouped matrix access domain.
+
+    Frontends supply their declared axis permutations before this interface.
+    Normal weights are Cout,Cin/group,spatial; transposed weights are
+    Cin,Cout/group,spatial. All returned maps are preparation operands.
+    """
+    import math
+    input_shape, weight_shape = tuple(input_shape), tuple(weight_shape)
+    spatial, kernel = input_shape[2:], weight_shape[2:]
+    outputs = tuple((n - 1) * s - 2 * p + d * (k - 1) + o + 1 if transposed else
+                    (n + 2 * p - d * (k - 1) - 1) // s + 1
+                    for n, k, s, p, d, o in zip(spatial, kernel, stride, padding, dilation, output_padding, strict=True))
+    if output_shape is not None:
+        outputs = tuple(output_shape[2:])
+    batches, channels = input_shape[:2]
+    inner_channels, ranks = channels // groups, len(spatial)
+    columns = weight_shape[1] if transposed else weight_shape[0] // groups
+    iteration = (groups, batches, *outputs, inner_channels, *kernel)
+    reduction, rows = inner_channels * math.prod(kernel), batches * math.prod(outputs)
+    access = algebra.window(iteration, input_shape,
+        axes=[(2 + d, 2 + d, 3 + ranks + d) for d in range(ranks)],
+        strides=stride, dilations=dilation, padding=padding, transposed=transposed,
+        equations=lambda x, y: [f'{y[0]} = {x[1]}', f'{y[1]} = {x[0]} * {inner_channels} + {x[2 + ranks]}'])
+    source_count = math.prod(input_shape)
+    scalar = algebra.map(input_shape, (source_count + 1,), lambda x, y: [f'{y[0]} = {flat(input_shape, x)}'])
+    address = access.then(scalar)
+    absent = algebra.map(iteration, (source_count + 1,), lambda x, y: [f'{y[0]} = {source_count}']).subtract_domain(access.domain())
+    neutral = not absent.empty()
+    if neutral:
+        address = address.union(absent)
+    domain = algebra.map((math.prod(iteration),), iteration, lambda x, y: [f'{x[0]} = {flat(iteration, y)}'])
+    matrix_shapes = ((groups, rows, reduction), (groups, reduction, columns), (groups, rows, columns))
+    weight_steps = ([['reshape', [groups, inner_channels, columns, *kernel]],
+                     ['permute', [0, 1, *range(3, 3 + ranks), 2]]] if transposed else
+                    [['reshape', [groups, columns, inner_channels, *kernel]],
+                     ['permute', [0, *range(2, 3 + ranks), 1]]])
+    weight_steps.append(['reshape', list(matrix_shapes[1])])
+    output_shape = (batches, groups * columns, *outputs)
+    output_steps = [['reshape', [batches, groups, columns, *outputs]],
+                    ['permute', [1, 0, *range(3, 3 + ranks), 2]], ['reshape', list(matrix_shapes[2])]]
+    return dict(input_shape=input_shape, output_shape=output_shape, iteration_shape=iteration,
+                matrix_shapes=matrix_shapes, input_access=access, input_indices=domain.then(address).terms(),
+                input_neutral=neutral, weight_steps=weight_steps, output_steps=output_steps)

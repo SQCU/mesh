@@ -28,6 +28,10 @@ isl_pw_aff *MeshIndexRuns(isl_ctx *ctx, NSArray<NSArray<NSNumber *> *> *runs);
 // Sorted unique positions as compact (first,width,step,count) records. Borrow
 // the set; release the returned array with mesh_isl_free. NULL reports failure.
 int64_t *MeshIndexSetRuns(isl_set *set, size_t *count);
+struct MeshIndexCell { isl_set *domain; size_t *members; size_t count; };
+// Borrow input sets. The caller owns each returned domain and releases the
+// member arrays and cell array with mesh_isl_free after consuming them.
+struct MeshIndexCell *MeshIndexSetCover(isl_set *const *domains, size_t count, size_t *cells);
 MetalTensorLayout *MeshIndexSelection(isl_set *set); // borrows the set
 id MeshIndexTerms(isl_pw_aff *expression); // consumes the expression
 BOOL MeshIndexEqual(id left, id right, NSUInteger count);

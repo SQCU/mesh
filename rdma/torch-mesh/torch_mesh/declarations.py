@@ -5,9 +5,61 @@ chooses reduction trees, physical paths and packet cuts; this module contains
 no network topology or collective algorithm of its own.
 """
 import math
+import json
 
 import torch
 import torch.distributed as dist
+
+
+@torch.library.custom_op('torch_mesh::select_exchange', mutates_args=())
+def select_exchange(x: torch.Tensor, shape: list[int], selections: str, group_name: str) -> torch.Tensor:
+    """design/compiler-followups-2026-10-30.md#selected-page-crossings"""
+    raise RuntimeError('select_exchange must be bound to its declared pages before execution')
+
+
+@select_exchange.register_fake
+def _select_exchange_fake(x, shape, selections, group_name):
+    return x.new_empty(shape)
+
+
+def _exchange_plan(node, named):
+    """design/compiler-followups-2026-10-30.md#selected-page-crossings"""
+    if 'mesh_selection_exchanges' not in node.meta:
+        from mesh_relation import Algebra
+        from . import _stream
+        declaration, algebra = json.loads(named['selections']), Algebra()
+        plans = []
+        for source, destination, read, write, source_count, destination_count in algebra.exchanges(
+                declaration['sources'], declaration['destinations']):
+            layouts = [_stream.TensorLayout(relation.shape, (1,), index_shape=(count,),
+                index_coordinates=json.dumps([relation.terms()]))
+                for relation, count in ((read, source_count), (write, destination_count))]
+            plans.append((source, destination, *layouts))
+        node.meta['mesh_selection_exchanges'] = tuple(plans)
+    return node.meta['mesh_selection_exchanges']
+
+
+def _selected_layout(value, selection):
+    from . import _stream
+    from .operand import descriptor
+    logical = _stream.TensorLayout((value.numel(),), (1,))
+    return selection.rebase(logical, descriptor(value).reshape((value.numel(),)))
+
+
+def _bind_exchange(source, destination, plan, group):
+    from .operand import TensorView
+    deliveries = []
+    for a, b, read, write in plan:
+        if a == b:
+            continue
+        if group.rank() == a:
+            value = TensorView(TensorView.of(source).storage, _selected_layout(source, read))
+        elif group.rank() == b:
+            value = TensorView(TensorView.of(destination).storage, _selected_layout(destination, write))
+        else:
+            value = torch.empty(read.count, dtype=source.dtype, device='meta')
+        deliveries.append((value, a, b))
+    return group.prepare_writes(deliveries) if deliveries else None
 
 
 def effects(nodes):
@@ -118,7 +170,12 @@ def lower(graph, *, forms=None):
         n, calls = group.size(), []
         x = args.get('input', args.get('x', args.get('self', args.get('partials'))))
         reduction = args.get('reduce_op', args.get('op', 'sum'))
-        if namespace == 'torch_mesh' and name in ('allgatherv', 'allgatherv_out'):
+        if namespace == 'torch_mesh' and name == 'select_exchange':
+            calls = [backend.Call(backend.WRITE, read.count, x.dtype, root=source,
+                                  destination=destination, fused=True)
+                     for source, destination, read, _ in _exchange_plan(node, args)
+                     if source != destination]
+        elif namespace == 'torch_mesh' and name in ('allgatherv', 'allgatherv_out'):
             calls = partition.gathered(x, args['dim'], args['sizes'], group)
         elif namespace == 'torch_mesh' and name in ('all_reduce', 'linear_sum', 'fused_step', 'fused_step_out'):
             if name == 'all_reduce':
@@ -250,7 +307,7 @@ def execution_sequence(steps, output=None, pages=()):
     return Execution(steps, output, pages)
 
 
-_BOUND = {'all_to_all_single', 'merge_partials', 'reduce_scatterv', 'allgatherv', 'allgatherv_out',
+_BOUND = {'all_to_all_single', 'merge_partials', 'reduce_scatterv', 'allgatherv', 'allgatherv_out', 'select_exchange',
           'reduce_scatter_tensor', 'all_gather_into_tensor', 'all_gather_into_tensor_out',
           'broadcast', 'broadcast_', 'all_reduce_coalesced', 'all_gather_into_tensor_coalesced',
           'reduce_scatter_tensor_coalesced'}
@@ -371,6 +428,11 @@ class BoundGraph:
                 continue
             target, named = operation(node)
             native = dist.distributed_c10d._resolve_process_group(named['group_name'])
+            if target is torch.ops.torch_mesh.select_exchange.default:
+                for source, destination, read, write in _exchange_plan(node, named):
+                    if source == destination == native.rank():
+                        placements.equate(named['x'], _value(node),
+                            _selected_layout(named['x'], read), _selected_layout(_value(node), write))
             for source, described, dim, sizes in _gathers(target, named, _value(node), native) or ():
                 own = described.narrow(dim, sum(sizes[:native.rank()]), sizes[native.rank()])
                 placements.equate(source, own)
@@ -439,6 +501,15 @@ class BoundGraph:
                 source = named.get('input', named.get('x', named.get('self', named.get('partials'))))
                 native = dist.distributed_c10d._resolve_process_group(metadata['group_name'])
                 declarations = lower(module)
+                if target is torch.ops.torch_mesh.select_exchange.default:
+                    prepared = _bind_exchange(named['x'], tree_flatten(targets)[0][0],
+                                              _exchange_plan(crossing, metadata), native)
+                    if prepared is not None:
+                        self.steps.append(prepared)
+                    for name, calls in declarations.items():
+                        self.groups.setdefault(name, []).extend(calls)
+                    values.update(zip(exported, targets))
+                    continue
                 gathers = _gathers(target, named, targets, native)
                 if gathers is not None:
                     prepared = backend.bind_gather_views(gathers, native)

@@ -235,27 +235,14 @@ static struct TensorExpressionRange TensorRange(id expression,NSUInteger count) 
 static id TensorBound(id expression,NSUInteger count) {
     if(TensorConstant(expression))return expression;
     if([expression isEqual:@"i"])return count<=1?@0:expression;
-    NSString *op=expression[0];
-    if(TensorGeneral(expression)) {
-        struct TensorExpressionRange range=TensorRange(expression,count);
-        if(range.low==range.high)return @(range.low);
-        NSMutableArray *terms=[NSMutableArray arrayWithObject:op];
-        for(NSUInteger k=1;k<[expression count];k++)[terms addObject:TensorBound(expression[k],count)];
-        return terms;
-    }
-    if([op isEqual:@"add"]){NSMutableArray *terms=[NSMutableArray array];for(NSUInteger k=1;k<[expression count];k++)[terms addObject:TensorBound(expression[k],count)];return TensorSum(terms);}
-    id value=TensorBound(expression[1],count);NSInteger n=[expression[2] integerValue];
-    if([op isEqual:@"mul"])return TensorScale(value,n);
-    struct TensorExpressionRange bounds=TensorRange(value,count);NSInteger low=TensorFloor(bounds.low,n),high=TensorFloor(bounds.high,n);
-    if(low==high)return [op isEqual:@"div"]?@(low):TensorSum(@[value,@(-low*n)]);
-    return TensorQuotient(value,n,[op isEqual:@"mod"]);
+    if(!count)return @0;
+    isl_ctx *ctx=isl_ctx_alloc();id result=nil;
+    @try { result=MeshIndexTerms(MeshIndexExpression(ctx,expression,0,count)); }
+    @finally { isl_ctx_free(ctx); }
+    return result;
 }
 static id TensorNormalize(id expression,NSUInteger count) {
-    id value=TensorSubstitute(expression,@"i");
-    for(;;) {
-        id bounded=TensorBound(value,count);if([bounded isEqual:value])return bounded;
-        value=bounded;
-    }
+    return TensorBound(TensorSubstitute(expression,@"i"),count);
 }
 static NSArray *TensorDigits(NSArray<NSNumber *> *shape) {
     NSMutableArray *result=[NSMutableArray array];NSArray *steps=TensorStrides(shape);
@@ -798,8 +785,10 @@ static isl_map *TensorSplitRelation(isl_set *set,unsigned inputs) {
 }
 static isl_map *TensorEquations(MetalTensorLayout *values,isl_pw_aff *group,isl_pw_aff *position) {
     isl_ctx *ctx=isl_pw_aff_get_ctx(group);
-    isl_map *triples=isl_map_flat_range_product(isl_map_flat_range_product(
-        MeshIndexRelation(ctx,values),isl_map_from_pw_aff(group)),isl_map_from_pw_aff(position));
+    isl_pw_multi_aff *fields=isl_pw_multi_aff_flat_range_product(isl_pw_multi_aff_flat_range_product(
+        isl_pw_multi_aff_from_pw_aff(MeshIndexFunction(ctx,values)),isl_pw_multi_aff_from_pw_aff(group)),
+        isl_pw_multi_aff_from_pw_aff(position));
+    isl_map *triples=isl_map_from_pw_multi_aff(fields);
     // Resolve ordinal locals before the inverse join duplicates their constraints.
     isl_set *declared=isl_set_coalesce(isl_set_compute_divs(isl_map_range(triples)));
     isl_set *pairs=isl_set_apply(isl_set_detect_equalities(declared),isl_map_read_from_str(ctx,

@@ -160,10 +160,10 @@ static void IndexCell(NSMutableArray *cells,isl_set *set,NSArray *members) {
     if(isl_set_is_empty(set)==isl_bool_true){isl_set_free(set);return;}
     [cells addObject:@[[NSValue valueWithPointer:set],members]];
 }
-NSArray<NSDictionary *> *MetalTensorCover(NSArray<MetalTensorLayout *> *domains) {
-    isl_ctx *ctx=isl_ctx_alloc();NSMutableArray *cells=[NSMutableArray array];
-    for(NSUInteger k=0;k<domains.count;k++) {
-        isl_set *domain=isl_map_range(MeshIndexRelation(ctx,domains[k])),*remaining=isl_set_copy(domain);
+struct MeshIndexCell *MeshIndexSetCover(isl_set *const *domains,size_t count,size_t *length) { @autoreleasepool {
+    NSMutableArray *cells=[NSMutableArray array];
+    for(NSUInteger k=0;k<count;k++) {
+        isl_set *domain=isl_set_copy(domains[k]),*remaining=isl_set_copy(domain);
         NSMutableArray *next=[NSMutableArray array];
         for(NSArray *cell in cells) {
             isl_set *prior=[cell[0] pointerValue];
@@ -173,11 +173,28 @@ NSArray<NSDictionary *> *MetalTensorCover(NSArray<MetalTensorLayout *> *domains)
         }
         IndexCell(next,remaining,@[@(k)]);isl_set_free(domain);cells=next;
     }
-    NSMutableArray *result=[NSMutableArray array];
-    for(NSArray *cell in cells) {
-        isl_set *set=[cell[0] pointerValue];
-        [result addObject:@{@"members":cell[1],@"domain":MeshIndexSelection(set)}];isl_set_free(set);
+    *length=cells.count;struct MeshIndexCell *result=mesh_isl_calloc(cells.count,sizeof *result);
+    for(NSUInteger k=0;k<cells.count;k++) {
+        NSArray *cell=cells[k],*members=cell[1];
+        result[k].domain=[cell[0] pointerValue];result[k].count=members.count;
+        result[k].members=mesh_isl_malloc(members.count*sizeof *result[k].members);
+        for(NSUInteger m=0;m<members.count;m++)result[k].members[m]=[members[m] unsignedIntegerValue];
     }
+    return result;
+}}
+NSArray<NSDictionary *> *MetalTensorCover(NSArray<MetalTensorLayout *> *domains) {
+    isl_ctx *ctx=isl_ctx_alloc();isl_set *sets[domains.count];
+    for(NSUInteger k=0;k<domains.count;k++)sets[k]=isl_map_range(MeshIndexRelation(ctx,domains[k]));
+    size_t count=0;struct MeshIndexCell *cells=MeshIndexSetCover(sets,domains.count,&count);
+    for(NSUInteger k=0;k<domains.count;k++)isl_set_free(sets[k]);
+    NSMutableArray *result=[NSMutableArray array];
+    for(size_t k=0;k<count;k++) {
+        NSMutableArray *members=[NSMutableArray array];
+        for(size_t m=0;m<cells[k].count;m++)[members addObject:@(cells[k].members[m])];
+        [result addObject:@{@"members":members,@"domain":MeshIndexSelection(cells[k].domain)}];
+        isl_set_free(cells[k].domain);mesh_isl_free(cells[k].members);
+    }
+    mesh_isl_free(cells);
     isl_ctx_free(ctx);return result;
 }
 isl_pw_aff *MeshIndexFunction(isl_ctx *ctx,MetalTensorLayout *layout) {
