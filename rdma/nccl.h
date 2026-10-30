@@ -146,9 +146,9 @@
    group, or a prepared WRITE's), two slots of what its groups send from and land in that are not the caller's (a
    reduce-scatter's partials of the others' segments, a non-receiving rank's operand, a tree's scratch, a relay's
    generations, a combine's landing area): a declared group's made at its declaration (ncclMeshCommPlan, which
-   fails as a value where the region cannot hold them), a WRITE's at its first executions, its groups taking turns
-   at them.  A group that no declaration covers ends the program with a warning: nothing compiles one at its issue
-   (design/eager-execution.md),
+   fails as a value where the region cannot hold them), a WRITE's as its plan is prepared, its groups taking turns
+   at them.  A group that no declaration covers, or a group of collectives whose declaration binds no buffers, ends
+   the program with a warning: nothing compiles or binds one at its issue (design/eager-execution.md),
    ncclMemAlloc called again only where one must grow (to one of eight sizes an octave), a dropped definition's slots
    kept for the next, one too small returned once its last group is done (the host path's, or a Metal path's that the
    stream has run past: it stores that group's ticket where its generation let the slot go), all returned at
@@ -157,10 +157,11 @@
    Metal buffer made once, taken again once the GPU has done with all cut from it (the entries presented, the tracks
    ended, the residency set that holds argument records ended): no Metal buffer is made at a call.  A group's host
    bookkeeping (its schedules, its steps' state, its record in flight) and its entries' span tables (a lease of them)
-   are its definition's too, a generation's laid and placed at its first group for that group's buffers and taken
-   again by each later group of the generation with the same buffers, which binds only its entries on the channels; a
-   group with other buffers lays and places its generation again (its old tables let go once the bridge's reads of
-   them end).  A result is made in recvbuff (a reduce-scatter's own segment too: no compiled piece spans two
+   are its definition's too.  A group of collectives' are laid and placed at its declaration for its bindings, one for
+   each generation and each slot of them (ncclMeshBufferSlots), and a group binds only its entries on the channels:
+   the buffers its calls name are not read.  A prepared WRITE's alone are laid as its plan is prepared, an occurrence
+   each; a declared group of WRITEs' at each of its groups, for the plans its calls name (the old tables let go once
+   the bridge's reads of them end).  A result is made in recvbuff (a reduce-scatter's own segment too: no compiled piece spans two
    segments), and nothing is copied into a slot from a caller's buffer but the operand of a premultiplied,
    partials-merging or fused call where it is not the result, and an in-place single-phase all-reduce's original.  A
    group writes a slot only once the slot's last group has every landing awaited: the stream's order, and a landed
@@ -308,6 +309,9 @@ typedef struct {
   void *residencySet;
   uint32_t polls;
   ncclMeshFused *fused;
+  /* the group's invocation: each declared binding's slot invocation % instances (ncclMeshBufferSlots); a WRITE's is
+     its execution's (ncclMeshWriteExecute) */
+  size_t invocation;
 } ncclMeshStream;
 /* ncclCollConfig_t.launchCompletionEvent: not used; must be NULL. */
 typedef void *cudaEvent_t;
@@ -1117,7 +1121,8 @@ typedef struct { double seconds; uint64_t order; } ncclMeshProduction;
 ncclResult_t ncclMeshProductionTimes(ncclMeshProduction* records, size_t count, double seconds);
 /* A prepared operand's page-backed local view and its storage slots. Zero
    stride names one view. Nonzero stride requires the declared slot count;
-   invocation i binds buffer.offset + (i % instances) * stride bytes. */
+   invocation i (its stream's: ncclMeshStream invocation; 0 on the host path) binds buffer.offset + (i % instances) *
+   stride bytes. A group is laid and placed for every slot as it is declared, and its issue names none. */
 typedef struct { ncclMeshBuffer buffer; size_t stride, instances; } ncclMeshBufferSlots;
 typedef struct {
   int what, peer;
@@ -1260,15 +1265,6 @@ ncclResult_t ncclMeshRegionExpired(int* expired);
    segment that does not start on a page in its buffer fails the call as a value (Memory, above). */
 ncclResult_t ncclMeshAllGatherV(const void* sendbuff, void* recvbuff, const size_t* counts, ncclDataType_t datatype, ncclComm_t comm,
                                 cudaStream_t stream);
-/* Gather bindings in logical rank order. Each receive names its final contiguous
-   segment. The same collective graph routes directly into these bindings; no
-   packed receive buffer or copy-back operation is constructed. */
-ncclResult_t ncclMeshAllGatherBuffers(const void* sendbuff, void* const* recvbuffs, const size_t* counts,
-    ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
-ncclResult_t ncclMeshReduceScatterBuffers(void* const* sendbuffs, void* recvbuff, const size_t* counts,
-    ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream);
-ncclResult_t ncclMeshAlltoAllBuffers(void* const* sendbuffs, const size_t* sendcounts, void* const* recvbuffs,
-    const size_t* recvcounts, ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
 ncclResult_t ncclMeshReduceScatterV(const void* sendbuff, void* recvbuff, const size_t* counts, ncclDataType_t datatype, ncclRedOp_t op,
                                     ncclComm_t comm, cudaStream_t stream);
 /* MPI_Alltoallv with counts on the host: rank r sends sendcounts[q] elements to rank q, its segments packed in rank order

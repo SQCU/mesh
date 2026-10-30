@@ -213,7 +213,6 @@ struct Issue {
   int64_t kind, op, root;
   std::vector<Operand> sends, receives;
   std::vector<size_t> counts;
-  std::vector<void *> source_views, destination_views;
   ncclDataType_t type = ncclUint8;
 };
 
@@ -270,36 +269,25 @@ static Issue prepare(const Call &call, Group &g) {
       kind(t.scalar_type()) == ncclNumTypes ? t.element_size() : 1;
     i.sends.front().count = (size_t)counts[0] * per;
   }
-  for(const auto &view:i.sends)i.source_views.push_back((void *)view.at);
-  for(const auto &view:i.receives)i.destination_views.push_back((void *)view.at);
   return i;
 }
 
-// The group's calls on stream s (NULL: the host path), one NCCL group.
+// The group's calls on stream s (NULL: the host path), one NCCL group. A declared group's buffers are its
+// declaration's (nccl.h ncclMeshBufferSlots), so its calls name none.
 static ncclResult_t encoded(const std::vector<Issue> &issues, ncclComm_t comm, ncclMeshStream *s) {
   ncclResult_t result = ncclGroupStart();
   for (const Issue &i : issues) {
     const Operand &a = i.sends.empty() ? Operand{} : i.sends[0];
-    void *b = i.receives.empty() ? (void *)a.at : (void *)i.receives[0].at;
     const ncclRedOp_t op = (ncclRedOp_t)i.op;
     if (result) break;
     switch (i.kind) {
-    case ALLREDUCE: result = ncclAllReduce(a.at, b, a.count, a.type, op, comm, s); break;
-    case REDUCE: result = ncclReduce(a.at, b, a.count, a.type, op, (int)i.root, comm, s); break;
-    case BROADCAST: result = ncclBroadcast(a.at, b, a.count, a.type, (int)i.root, comm, s); break;
-    case ALLGATHER:
-      if (i.receives.size() == 1) result = ncclMeshAllGatherV(a.at, b, i.counts.data(), a.type, comm, s);
-      else result = ncclMeshAllGatherBuffers(a.at, i.destination_views.data(), i.counts.data(), a.type, comm, s);
-      break;
-    case REDUCE_SCATTER:
-      result = i.sends.size()==1 ? ncclMeshReduceScatterV(a.at,b,i.counts.data(),a.type,op,comm,s)
-        : ncclMeshReduceScatterBuffers(i.source_views.data(),b,i.counts.data(),a.type,op,comm,s);
-      break;
+    case ALLREDUCE: result = ncclAllReduce(nullptr, nullptr, a.count, a.type, op, comm, s); break;
+    case REDUCE: result = ncclReduce(nullptr, nullptr, a.count, a.type, op, (int)i.root, comm, s); break;
+    case BROADCAST: result = ncclBroadcast(nullptr, nullptr, a.count, a.type, (int)i.root, comm, s); break;
+    case ALLGATHER: result = ncclMeshAllGatherV(nullptr, nullptr, i.counts.data(), a.type, comm, s); break;
+    case REDUCE_SCATTER: result = ncclMeshReduceScatterV(nullptr, nullptr, i.counts.data(), a.type, op, comm, s); break;
     case ALLTOALL:
-      result = i.sends.size()==1 && i.receives.size()==1
-        ? ncclMeshAlltoAllV(a.at,i.counts.data(),b,i.counts.data()+i.counts.size()/2,i.type,comm,s)
-        : ncclMeshAlltoAllBuffers(i.source_views.data(),i.counts.data(),i.destination_views.data(),
-                                 i.counts.data()+i.counts.size()/2,i.type,comm,s);
+      result = ncclMeshAlltoAllV(nullptr, i.counts.data(), nullptr, i.counts.data() + i.counts.size() / 2, i.type, comm, s);
       break;
     }
   }
@@ -359,8 +347,6 @@ static std::shared_ptr<DeclaredCalls> declared_calls(NSData *bytes) {
       else o.at = e.at;
       list->push_back(o);
     }
-    for (const auto &view : i.sends) i.source_views.push_back((void *)view.at);
-    for (const auto &view : i.receives) i.destination_views.push_back((void *)view.at);
     made->issues.push_back(std::move(i));
   }
   return made;
