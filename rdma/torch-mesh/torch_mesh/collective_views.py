@@ -100,7 +100,10 @@ def lower(bindings, group):
                 value = exemplar.storage.as_strided((0,), (1,), 0)
             spans, traversal, commands = _binding(value, domain, unit, writing, layouts)
             (after if writing else before).extend(commands)
-            cuts.extend(cursor + end for end in traversal.cuts)
+            # a cut where this rank's storage breaks inside its domain, never at the domain's own ends: a
+            # contiguous binding is one call, its segments the library's (mesh_program_steps_cut), so every
+            # root's pieces interleave on every cable instead of one root's call after another's
+            cuts.extend(cursor + end for end in traversal.cuts if any(start < end < stop for start, stop in domain))
             values.append((spans, traversal))
         prepared.append((call, cursor, total, values))
         cursor += total

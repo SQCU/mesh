@@ -66,3 +66,30 @@ engines.py and memory-read.py.
 - **Configuration exchanges.** torch_mesh's configuration-time exchanges through the store (`backend.py`'s collective
   view gather, configuration.py's capacities and proposal) duplicate `ncclMeshCommConfigGather`, and should fold into it.
   Done in 9eb3f16d: `ProcessGroupMesh.exchange_configuration` gathers over it; the store keeps the `ncclUniqueId`.
+
+## Why collectives used about one cable's worth
+
+The fabric is 13 TB5 cables (metal-microbench docs/facts.md, 2026-10-30): 60, 60, 60, 50 and 30 GB/s into m5ult1,
+m5ult3, m5ult4, m5ult2 and the Mini. Each layer was traced on a 64 MiB all-gather and all-reduce over the five nodes.
+- **Spreads.** Packed trees for every root (nccl-mesh.c comm_routes, mesh_trees_pack), a hop's capacity the sum of
+  its parallel cables. Each tree edge's bytes are split over those cables by bandwidth (comm->composed,
+  mesh_write_compile). The bridge runs one child process and progress thread per port.
+- **Serialized.** cc1ece4b (10-28) cut torch_mesh's lowering (collective_views.lower) at every run's ends, the
+  binding's own domain ends included. A rank's source run is its own segment, so a contiguous all-gather became five
+  calls in one group, one per root. mesh_group_lay lays a group's calls in call order, and each cable is one FIFO
+  (mesh-link.c stream_send posts in list order). Every cable carried root 0's segment, then root 1's, and so on, and
+  a node received through one root's trees at a time. Before it (673f1399, 10-27), the cuts were only run ends inside
+  a binding, and a contiguous all-gather was one call, whose segments the library cuts and interleaves by depth on
+  every cable (mesh_program_steps_cut, mesh-routed.c dependency_order).
+- **Fixed.** lower cuts only where a rank's storage breaks inside its domain. MetalTensorTraversal fragment:end:
+  returns the part of a span its run holds, so an all-gather's source, its own segment, aliases the whole call.
+
+Still serialized, next:
+- **A combined SEND is published once its whole landing is consumed** (nccl-mesh.c complete's publications). A
+  reduction's forward should go block by block, as its landing chunks already land (TASK_PACED).
+- **Every group completes inside its own launch.** Call k + 1's entries and receives exist only after call k's last
+  landing, a bubble across the fabric at every call. 014471ee (10-30) deleted the issue-then-complete form. A declared
+  repeat's next call can present and open its gate before the previous call's tracks end: two generations of slots
+  and guard() already protect the storage.
+- **cc8a6f8e (10-17) removed chunked pipelining** with the cost model. The forms (ncclMeshCommForms) carry chunks
+  again only where a configuration names them.

@@ -60,8 +60,10 @@ static int TensorRunOrder(const void *a,const void *b) {
     const struct TensorRun *runs=_runs.bytes;NSUInteger left=0,right=_runs.length/sizeof *runs;
     while(left<right){NSUInteger middle=left+(right-left)/2;if(runs[middle].end<=first)left=middle+1;else right=middle;}
     if(left==_runs.length/sizeof *runs||runs[left].first>=end)return (struct MetalTensorFragment){0,0,0};
-    NSParameterAssert(first>=runs[left].first&&end<=runs[left].end);
-    return (struct MetalTensorFragment){runs[left].part,end-first,runs[left].offset+(NSInteger)(first-runs[left].first)};
+    /* the part of [first, end) the run it meets holds: a binding's domain may be less than the call's whole (an
+       all-gather's source its own segment), and a cut stands at every run end inside a domain, so no other run meets it */
+    const NSUInteger from=first>runs[left].first?first:runs[left].first,to=end<runs[left].end?end:runs[left].end;
+    return (struct MetalTensorFragment){runs[left].part,to-from,runs[left].offset+(NSInteger)(from-runs[left].first)};
 }
 @end
 
