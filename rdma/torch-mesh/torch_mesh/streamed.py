@@ -914,7 +914,10 @@ class Matrix(torch.Tensor):
         n, input_type = x.shape[0], _TYPES[x.dtype][1]
         from . import _stream
         from .structured import expand
-        local_hadamard = self.signs is not None and _stream.hadamard_local(self.columns, self.hadamard.shape[0])
+        # streamed_hadamard indexes its threadgroup's mixed columns by col_order (place[p]) and has no form for a masked
+        # column's -1; gather takes signs and masked positions alike
+        local_hadamard = (self.signs is not None and not self.column_masked and
+                          _stream.hadamard_local(self.columns, self.hadamard.shape[0]))
         transform = ('hadamard' if local_hadamard else 'gather' if self.signs is not None or not self.rotated
                      else 'rotate' if n <= max(POLICY['cooperative_rows']) else 'gather')
         # A folded matrix product is shared by every destination batch.
