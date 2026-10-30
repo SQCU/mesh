@@ -419,19 +419,18 @@ composition types that remain are in microbench's
 | `MatrixView` | Buffer, rows, columns, element strides, byte offset and element type. `byteOffset(row:column:)` resolves a local element address. |
 | `Reach` | Buffer, byte offset, length and access flags; `.declared` creates a `MetalReach`. |
 | `MetalDispatch` | Prepared pipeline, buffers, offsets, constants, grid, threadgroup memory, access reaches and optional collective crossing. |
-| `MetalProgram` | Ordered dispatch list. `append` composes it; `bind` prepares a `MatrixStep`, selecting direct or indirect encoding during binding. |
-| `MatrixStep` | `(MTLCommandBuffer) -> Void`, a bound numerical encoding function. |
+| `MetalProgram` | Ordered dispatch list. `append` composes it; `bind` prepares a `MatrixStep`, selecting direct or indirect encoding during binding; `described` hands a recording its command descriptions, host operations and crossings. |
+| `MatrixStep` | `(OpaquePointer) -> Void`, a bound numerical step appended to a Metal 4 schedule. |
 
-[metal_recording.h](../../../metal-microbench/metal_recording.h) provides `MetalRecordingDevice`,
-`MetalDispatchAccesses`, `MetalRecord`, `MetalSchedule` and `MetalReplayFree`. LiteRT receives the recording
-device and queue, so its pipelines retain reflected read/write modes. `MetalBindingView` and `MetalRecordViews`
-carry its declared external tensor extents into capture. `MetalRecordMark` marks crossings. `MetalOperand`
-supplies slots, stride, instance count and output offset. `MetalReach` supplies subranges and access flags.
-LiteRT partial-row stages carry a `MetalTensorLayout` per binding. The layout
-supplies both shader indices and the ranges passed to `MetalDispatchAccesses`;
+[metal-recording.h](../rdma/metal-recording.h) provides `MetalCommandDescription`, `MetalHostDescription`,
+`MetalReplayDescribed`, `MetalReplayCommands`, `MetalSchedule` and `MetalReplayFree`. A program's commands are
+described, never captured from an encoder; a crossing is a mark its describing caller places at a command index
+(`MeshRankCross`). `MetalOperand` supplies slots, stride, instance count and output offset. `MetalReach` supplies
+subranges and access flags. LiteRT partial-row stages carry a `MetalTensorLayout` per binding. The layout
+supplies both shader indices and the ranges in its command's description;
 its `threadGrid` operand distinguishes thread counts from group counts during
 preparation. The former groups-only `MetalDispatchReaching` wrapper is removed.
-`MetalReplay` retains commands and residency. `MetalForm` selects indirect, encoded or serial preparation;
+`MetalReplay` retains commands and residency. `MetalForm` selects indirect or encoded preparation;
 `MetalCrossing` binds a collective at a recorded mark during preparation.
 
 `MetalScheduleCreate`, `After`, `Append` and `Finish` prepare one function. `MetalScheduleEnqueue` commits it.

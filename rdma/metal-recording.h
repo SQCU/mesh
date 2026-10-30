@@ -18,40 +18,20 @@ _Static_assert(sizeof(struct MetalReplay) == MESH_REPLAY_BYTES, "prepared native
 _Static_assert(_Alignof(struct MetalReplay) == MESH_REPLAY_ALIGNMENT, "prepared native replay alignment");
 
 // docs/kernels.md E2, Any program
-enum MetalForm { MetalFormIndirect, MetalFormEncoded, MetalFormSerial };
+enum MetalForm { MetalFormIndirect, MetalFormEncoded };
 // Build operands from the selected Metal configuration, shared by frontends.
 MTLCompileOptions *MetalDeviceCompilerOptions(id<MTLDevice> device);
 
 // docs/kernels.md Any program.  A host program's operand whose storage holds `instances` slots of
 // `stride` bytes: invocation t binds slot t % instances (0 instances: slot t), its writes landing
-// `outputOffset` bytes past it (a stride: the next invocation's input).  Any buffer the block binds
-// that is not named is bound as recorded, at every invocation.
+// `outputOffset` bytes past it (a stride: the next invocation's input).  Any buffer the commands bind
+// that is not named is bound as described, at every invocation; a buffer named twice is its last naming's.
 struct MetalOperand { const char *name; __unsafe_unretained id<MTLBuffer> buffer; NSUInteger stride, instances, outputOffset; };
 static inline NSUInteger MetalInvocationOffset(NSUInteger offset, NSUInteger stride, NSUInteger instances, NSUInteger invocation) {
     return offset + (instances ? invocation % instances : invocation) * stride;
 }
-// A recording device over `device`, which the caller makes and passes in: the command queues and
-// compute pipelines made from it record the dispatches their compute encoders issue inside
-// MetalRecord's `encode` (each pipeline's reflection kept for the dataflow, with the reaches each
-// dispatch declares: MetalDispatchAccesses), and run them otherwise.  Every other request is
-// `device`'s.  A pipeline it did not make (a library's, such as libnccl-mesh's collectives) is
-// refused inside `encode`: what it issues is not the program's.
-id<MTLDevice> MetalRecordingDevice(id<MTLDevice> device, BOOL indirectPipelines);
-// tools/mesh/schedule.py
+// tools/mesh/schedule.py: whether MetalReplayDescribed lists its commands
 void MetalRecordingList(int on);
-// A prepared foreign stage supplies the byte views of its external tensors. Its pipelines
-// still supply read/write modes; these views define their bindings during command capture.
-// Every accessed binding needs a view or dispatch reach (setBytes declares its
-// own length). A missing view fails preparation; allocation/slot sizes are not
-// substitutes. Providers must expose internal tensor views as well as I/O.
-// A provider may name a temporary buffer handle while its operand names a
-// different origin in the bridge's pages. Recording resolves that binding;
-// replay keeps only the final buffer, offset and dependency ranges.
-struct MetalBindingView {
-    __unsafe_unretained id<MTLBuffer> buffer; NSUInteger offset, length;
-    __unsafe_unretained id<MTLBuffer> pages; NSUInteger pageOffset;
-};
-void MetalRecordViews(const struct MetalBindingView *, size_t count, void (^encode)(void));
 // docs/kernels.md Any program
 enum { MetalReachRead = 1, MetalReachWritten = 2, MetalReachBinding = 4, MetalReachResident = 8 };
 // Binding reaches name their actual argument index. Several disjoint ranges
@@ -144,23 +124,6 @@ NSData *MetalTensorSpanReaches(id<MTLBuffer> buffer, NSUInteger base, NSData *sp
 // queue. Prepare and enqueue its functions in the same order. Disjoint ranges
 // add no dependency. Transport uses this declaration for its shared counters.
 void MetalEncoderReaches(id<MTL4ComputeCommandEncoder>, const struct MetalReach *, size_t count);
-// docs/kernels.md Any program
-void MetalDispatchAccesses(id<MTLComputeCommandEncoder> encoder, MTLSize grid, MTLSize threads,
-    BOOL threadGrid, const struct MetalReach *reaches, size_t count);
-// Records the compute commands `encode` issues through the queues of `device` (a recording device)
-// as one invocation, and prepares `invocations` of them in `form`.  The replay, or NULL with the
-// reason on stderr.
-struct MetalReplay *MetalRecord(id<MTLDevice> device, void (^encode)(void), const struct MetalOperand *operands,
-    size_t count, NSUInteger invocations, enum MetalForm form);
-// docs/kernels.md#collectives
-NSUInteger MetalRecordMark(void);
-// Host operations declare the same read/write views as GPU commands. The
-// compiler orders their producers and consumers; there are no consume markers.
-// These are prepared native operations, not callbacks into a frontend. CPU-only
-// views use a nil buffer and their address as offset; Metal views use buffer-relative
-// offsets. The bound operation retains any CPU storage it uses. Capture holds Metal
-// buffers. Host views/operations stay bound to these operands across replay slots.
-void MetalRecordHost(const struct MetalReach *, size_t count, NSError *(^operation)(void));
 // docs/kernels.md#collectives
 typedef int (^MetalCrossing)(id<MTL4ComputeCommandEncoder> encoder, id<MTL4ArgumentTable> table, id<MTLResidencySet> residency,
     NSUInteger invocation, NSUInteger mark);
@@ -177,10 +140,7 @@ struct MetalPlace { size_t at; enum MetalRelocation relocation; };
 struct MetalDeclaration { const char *kind; const void *bytes; size_t length; const struct MetalPlace *places; size_t count; };
 // The execution context supplies its queue. Preparing invocation slots cannot
 // create more queues; the number of slots is not a hardware resource count.
-struct MetalSchedule *MetalScheduleCreateOn(id queue, enum MetalForm);
-// An already encoded command from an external frontend enters the same
-// submission and completion path. The command has not been committed.
-struct MetalSchedule *MetalScheduleCommand(id<MTLCommandBuffer>);
+struct MetalSchedule *MetalScheduleCreateOn(id<MTL4CommandQueue> queue, enum MetalForm);
 void MetalScheduleAfter(struct MetalSchedule *, id<MTLEvent>, uint64_t value);
 // Preparation records the function's collective result sources. Observers read
 // their existing failure state; this adds no command or transfer-time check.
@@ -190,7 +150,7 @@ void MetalScheduleHost(struct MetalSchedule *, const struct MetalReach *, size_t
     NSError *(^operation)(void));
 id<MTLResidencySet> MetalScheduleResources(struct MetalSchedule *);
 // Explicit bindings from a compiler which already has its pipelines. These
-// enter the same access ordering and encoding used by captured commands.
+// enter the same access ordering and encoding as described commands.
 struct MetalCommandBinding {
     __unsafe_unretained id<MTLBuffer> buffer;
     NSUInteger offset, length;
@@ -199,8 +159,8 @@ struct MetalCommandBinding {
 // length is the exact dense extent, including zero for an empty view. Binding
 // reaches replace it with a union of strided/masked regions. Neither form is an
 // instruction to access the remainder of a buffer.
-// Native frontends can supply the same records directly instead of capturing
-// encoder calls. Both routes use the common access-order and replay compiler.
+// Every frontend supplies its commands as these records, to the one access-order
+// and replay compiler (MetalReplayCommands, MetalReplayDescribed).
 struct MetalCommandDescription {
     __unsafe_unretained id<MTLComputePipelineState> pipeline;
     const struct MetalCommandBinding *bindings;
@@ -213,9 +173,28 @@ struct MetalCommandDescription {
     BOOL threadGrid;
 };
 struct MetalReplay *MetalReplayCommands(id<MTLDevice>, const struct MetalCommandDescription *, size_t count, enum MetalForm);
-void MetalReplayEncode(struct MetalReplay *, id<MTLCommandBuffer>, NSRange commands);
+// docs/kernels.md#collectives: a host operation of a described program, run in each invocation before its command `at`
+// (after those before it). Host operations declare the same read/write views as GPU commands. The
+// compiler orders their producers and consumers; there are no consume markers.
+// These are prepared native operations, not callbacks into a frontend. CPU-only
+// views use a nil buffer and their address as offset; Metal views use buffer-relative
+// offsets. The bound operation retains any CPU storage it uses. The replay holds Metal
+// buffers. Host views/operations stay bound to these operands across replay slots.
+struct MetalHostDescription {
+    NSUInteger at;
+    const struct MetalReach *reaches;
+    size_t count;
+    __unsafe_unretained NSError *(^operation)(void);
+};
+// docs/kernels.md Any program: a program's `count` commands as one invocation, each named operand bound by its slots,
+// and its host operations in command order, prepared as `invocations` of them in `form` (the indirect form's command
+// buffers optimized), with the program's census on stdout.  The replay, or NULL with the reason on stderr.
+// MetalReplayCommands is its single invocation with no operands or host operations, and no census.
+struct MetalReplay *MetalReplayDescribed(id<MTLDevice>, const struct MetalCommandDescription *, size_t count,
+    const struct MetalHostDescription *hosts, size_t hostCount, const struct MetalOperand *operands, size_t operandCount,
+    NSUInteger invocations, enum MetalForm);
 /* The bytes of the type a pipeline's kernel declares at buffer `index` (its reflection's bufferDataSize; 0 where its
-   pipeline was made without the recorder's reflection, or the kernel uses no buffer there), and its function's name */
+   pipeline was not made by MetalPipelineMake, or the kernel uses no buffer there), and its label */
 NSUInteger MetalPipelineDeclaredBytes(id<MTLComputePipelineState>, NSUInteger index);
 NSString *MetalPipelineName(id<MTLComputePipelineState>);
 struct MetalCommandBinding MetalScheduleData(struct MetalSchedule *, const void *, size_t bytes, uint32_t index);
@@ -223,7 +202,7 @@ void MetalScheduleCompute(struct MetalSchedule *, id<MTLComputePipelineState>,
     const struct MetalCommandBinding *, size_t count, MTLSize groups, MTLSize threads);
 // A crossing, encoded now; its declaration (NULL: none, and its function makes no template).
 int MetalScheduleCross(struct MetalSchedule *, const struct MetalDeclaration *, MetalCrossing);
-// A range of a prepared replay's commands (MetalReplayCommands, MetalRecord), its first invocation's, as the schedule's
+// A range of a prepared replay's commands (MetalReplayCommands, MetalReplayDescribed), its first invocation's, as the schedule's
 // next work, in the replay's form and ordered by its recorded reaches.
 void MetalScheduleReplay(struct MetalSchedule *, struct MetalReplay *, NSRange commands);
 // `bytes` from `source` at `from` into `destination` at `to`, the Metal 4 encoder's copy, ordered after and before the
@@ -239,7 +218,7 @@ void MetalScheduleEnqueue(struct MetalSchedule *);
 // Ordinary completion observation: 0 pending, 1 complete, -1 failed.
 int MetalScheduleStatus(const struct MetalSchedule *, NSError **error);
 void MetalScheduleFree(struct MetalSchedule *);
-// A replay MetalRecord returned, destroyed and freed.
+// A replay MetalReplayCommands or MetalReplayDescribed returned, destroyed and freed.
 void MetalReplayFree(struct MetalReplay *);
 
 // design/replay-templates-2026-10-29.md. A pipeline's declaration: the library it is specialized from, its function,

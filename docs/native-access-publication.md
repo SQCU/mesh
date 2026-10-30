@@ -281,8 +281,8 @@ and the normalizer's skipped vector lanes. External delegate tensors already
 supply their typed storage views. The packaged LiteRT delegate does **not** yet
 export its internal views: `InferenceContext` places tensors at offsets in shared
 buffers, and `MetalArguments::Encode` passes only buffer and offset. Those
-internal bindings now fail preparation. The provider must carry its tensor
-extent/access metadata to `MetalDispatchAccesses` or scoped `MetalRecordViews`;
+internal bindings now fail preparation. Since 2026-10-29 a provider stage is not
+recorded at all (its commands are LiteRT's own encoding, which no description holds);
 restoring a buffer-tail extent would recreate the defect. This is an outstanding
 backend integration requirement before numerical execution, not a completed
 LiteRT capability or a performance result.

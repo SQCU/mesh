@@ -28,7 +28,7 @@ Source and compiler checks cover this edit; no numerical or performance run was
 made.
 
 The next correction replaces the host start/consume tokens with input and output
-views in `MetalScheduleHost` and `MetalRecordHost`. FX binds native CPU/Core ML
+views in `MetalScheduleHost` and a described program's host operations (`MetalHostDescription`). FX binds native CPU/Core ML
 entry points and retains their operands in native storage. Swift declares its ANE
 input and output ranges through the same recorder. Neither caller supplies a
 Python runtime callback or a separate consumer marker.
@@ -204,7 +204,7 @@ arguments can alias one buffer without losing their separate invocation offsets.
 compiler carries these declarations through both thread-count and threadgroup-count launches, including
 when a prepared program is recorded into a larger program. Previously thread-count replay dropped them.
 The native streamed panel's direct output rows use the same range interface instead of their enclosing
-rectangle. LiteRT's contiguous external tensor views still enter through `MetalRecordViews`.
+rectangle. LiteRT's native stages describe their views directly; its provider stages are LiteRT's own encoding and are not recorded.
 
 This changes dependency metadata and prepared barriers, not the numerical kernels, tensor values or
 transport routes. The range lists are consumed during preparation. No range search, allocation or extra
