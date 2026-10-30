@@ -16,6 +16,18 @@ from .compilation import operands as compiler_operands
 from .operand import TensorView, descriptor, rebase_typed
 
 _records = ContextVar('mesh_native_commands')
+_ALLOC_ADAPTERS = {'torch.ops.torch_mesh.linear.default': 'linear',
+                   'torch.ops.torch_mesh.linears.default': 'linears',
+                   'torch.ops.aten.topk.default': 'topk',
+                   'torch.ops.aten.sort.default': 'sort',
+                   'torch.ops.aten.sort.stable': 'sort',
+                   'torch.ops.aten.cumsum.default': 'cumsum',
+                   'torch.ops.torch_mesh.draw.default': 'draw',
+                   'torch.ops.torch_mesh.retain.default': 'retain',
+                   'torch.ops.torch_mesh.fwht.default': 'fwht',
+                   'torch.ops.torch_mesh.fwht_stage.default': 'fwht_stage',
+                   'torch.ops.torch_mesh.native_kernel.default': 'kernel'}
+_OUT_ADAPTERS = {'extern_kernels.mm': 'mm', 'extern_kernels.bmm': 'mm', 'extern_kernels.addmm': 'addmm'}
 
 
 def empty_strided(shape, stride, dtype, device):
@@ -255,6 +267,78 @@ def prepare_graph(module, metadata, *, materializations=()):
 
     def ir_layout(layout):
         return _stream.TensorLayout(tuple(map(int, layout.size)), tuple(map(int, layout.stride)), int(layout.offset))
+
+    def external_domains(operation, algebra):
+        """Bind shared mathematical declarations to the retained IR's views."""
+        import json
+        import mesh_matrix
+        from .operand import binding_layout, layout_configuration
+
+        def operand(value):
+            if value is None:
+                return None
+            storage, layout = ir.as_storage_and_layout(value, freeze=False)
+            return dict(name=storage.get_name(), dtype=layout.dtype, storage_dtype=storage.get_dtype(), view=ir_layout(layout))
+
+        def product(values, parameters):
+            declared = {name: None if value is None else dict(shape=tuple(value['view'].shape), type=value['dtype'])
+                        for name, value in values.items()}
+            domains = mesh_matrix.product_domains(algebra, **declared)
+            def accesses(relations):
+                return {name: dict(values[name], relation=relation.then(
+                    algebra.layout(layout_configuration(values[name]['view']))))
+                        for name, relation in relations.items()}
+            finish = domains['finish']
+            return dict(work=domains['work'], reads=accesses(domains['reads']), writes=accesses(domains['writes']),
+                        reduction=domains['reduction'], parameters=parameters,
+                        finish=dict(work=finish['work'], reads=accesses(finish['reads']), writes=accesses(finish['writes'])))
+
+        if isinstance(operation, ir.ExternKernelOut):
+            adapter = _OUT_ADAPTERS.get(operation.get_kernel_name())
+            if adapter in ('mm', 'addmm'):
+                inputs = list(operation.inputs)
+                bias = operand(inputs.pop(0)) if adapter == 'addmm' else None
+                x, w = map(operand, inputs)
+                return (product(dict(x=x, w=w, out=operand(operation.output_view or operation), bias=bias),
+                                dict(alpha=operation.kwargs.get('alpha', 1), beta=operation.kwargs.get('beta', 1), act=False)),)
+        if not isinstance(operation, ir.FallbackKernel):
+            return ()
+        adapter = _ALLOC_ADAPTERS.get(operation.get_kernel_name())
+        if adapter not in ('linear', 'linears', 'kernel'):
+            return ()
+        args, keywords = operation.unflatten_args(operation.inputs, operation.constant_args)
+        named = {field.name: args[i] if i < len(args) else keywords.get(field.name, field.default_value)
+                 for i, field in enumerate(operation.op_overload._schema.arguments)}
+        outputs = tree_flatten(operation.codegen_outputs())[0]
+        if adapter in ('linear', 'linears'):
+            fields = ('x', 'w', 'bias', 'act', 'x1')
+            arguments = ([named[field]] for field in fields) if adapter == 'linear' else (named[field] for field in fields)
+            result = []
+            for x, w, bias, act, x1, out in zip(*arguments, outputs, strict=True):
+                weight = operand(w)
+                weight['view'] = weight['view'].permute((1, 0))
+                result.append(product(dict(x=operand(x), w=weight, out=operand(out), bias=operand(bias), x1=operand(x1)),
+                                      dict(alpha=1, beta=1, act=act)))
+            return tuple(result)
+        declarations = json.loads(named['operands'])
+        uses = {}
+        def use(slot, value):
+            selected = operand(value)
+            declaration = declarations[str(slot)]
+            selected['view'] = binding_layout(selected['view'], declaration)
+            uses[slot] = selected
+        for slot, value in zip(named['input_slots'], named['inputs'], strict=True):
+            use(slot, value)
+        for slots, value in zip(named['output_slots'], outputs, strict=True):
+            for slot in slots:
+                use(slot, value)
+        result = []
+        for declaration in declarations.get('domains', ()):
+            if declaration['kind'] != 'product':
+                raise ValueError(f"undeclared native mathematical domain {declaration['kind']}")
+            result.append(product({name: uses[slot] for name, slot in declaration['operands'].items()}, declaration['parameters']))
+        return tuple(result)
+
     from .layout import declare
     placeholders = [node for node in module.graph.nodes if node.op == 'placeholder']
     declare(module.graph, placements, [*(node.meta.get('val') for node in placeholders), *materializations])
@@ -290,17 +374,7 @@ def prepare_graph(module, metadata, *, materializations=()):
             return super().can_reuse(input_buffer, output_buffer)
 
         def _generate_extern_kernel_alloc_helper(self, node, args):
-            names = {'torch.ops.torch_mesh.linear.default': 'linear',
-                     'torch.ops.torch_mesh.linears.default': 'linears',
-                     'torch.ops.aten.topk.default': 'topk',
-                     'torch.ops.aten.sort.default': 'sort',
-                     'torch.ops.aten.sort.stable': 'sort',
-                     'torch.ops.aten.cumsum.default': 'cumsum',
-                     'torch.ops.torch_mesh.draw.default': 'draw',
-                     'torch.ops.torch_mesh.retain.default': 'retain',
-                     'torch.ops.torch_mesh.fwht.default': 'fwht',
-                     'torch.ops.torch_mesh.fwht_stage.default': 'fwht_stage',
-                     'torch.ops.torch_mesh.native_kernel.default': 'kernel'}
+            names = _ALLOC_ADAPTERS
             name = node.get_kernel_name()
             if name not in names:
                 raise NotImplementedError(f'no native preparation for {name}; a framework fallback is not an executor')
@@ -312,7 +386,7 @@ def prepare_graph(module, metadata, *, materializations=()):
             self.writeline(f'{node.get_name()} = mesh_native.{names[name]}({", ".join(args)}, {keyword}={destination})')
 
         def _generate_extern_kernel_out_helper(self, kernel, out, out_view, args, device, stack_traces=None):
-            names = {'extern_kernels.mm': 'mm', 'extern_kernels.bmm': 'mm', 'extern_kernels.addmm': 'addmm'}
+            names = _OUT_ADAPTERS
             if kernel not in names or device != 'mps':
                 raise NotImplementedError(f'no native preparation for {kernel} on {device}')
             self.writeline(f'mesh_native.{names[kernel]}({", ".join(args)}, out={out_view or out})')
@@ -419,14 +493,18 @@ def prepare_graph(module, metadata, *, materializations=()):
                     _records.reset(token)
             return Program(commands, output, placements.owners)
 
-        def effects(self):
+        def effects(self, algebra=None):
             """Logical operations with one shared iteration domain per body.
 
             MemoryDep indices retain the body's symbols even when a particular
             read omits an axis. Aggregate outputs retain their named field
             types; their StarDeps are not scalar address relations.
+            Declared external domains compose their logical uses with the same
+            selected storage views; each access carries its scalar type.
             """
             from torch.utils._pytree import tree_map
+            from mesh_relation import Algebra
+            algebra = Algebra() if algebra is None else algebra
 
             def value_type(name):
                 value = self.get_buffer(name)
@@ -455,6 +533,7 @@ def prepare_graph(module, metadata, *, materializations=()):
                         iterations=iterations, iteration_vars=iteration_vars,
                         reductions=reductions, reduction_vars=reduction_vars,
                         reduction_type=data.get_reduction_type() if data is not None else None,
+                        domains=external_domains(operation, algebra) if data is None else (),
                         origins=tuple(operation.get_origins())))
                 return tuple(records)
 

@@ -75,8 +75,10 @@ class Algebra:
         self.lib.MeshIndexNormalize.restype = C.c_void_p
         self.lib.MeshIndexSelectionDomain.argtypes = C.c_void_p, C.c_char_p, C.POINTER(C.c_void_p)
         self.lib.MeshIndexSelectionDomain.restype = C.c_void_p
-        self.lib.MeshIndexSelectionRelation.argtypes = C.c_void_p, C.c_char_p, C.POINTER(C.c_size_t), C.POINTER(C.c_void_p)
-        self.lib.MeshIndexSelectionRelation.restype = C.c_void_p
+        for name in ('MeshIndexSelectionRelation', 'MeshIndexLayoutRelation'):
+            function = getattr(self.lib, name)
+            function.argtypes = C.c_void_p, C.c_char_p, C.POINTER(C.c_size_t), C.POINTER(C.c_void_p)
+            function.restype = C.c_void_p
         self.lib.MeshIndexRelationTerms.argtypes = C.c_void_p, C.POINTER(C.c_void_p)
         self.lib.MeshIndexRelationTerms.restype = C.c_void_p
         self.ctx = self.ctx_alloc()
@@ -141,8 +143,15 @@ class Algebra:
 
     def selection_relation(self, declaration):
         """Ordered local positions mapped to semantic positions by the binder."""
+        return self._declared_relation(self.lib.MeshIndexSelectionRelation, declaration)
+
+    def layout(self, configuration):
+        """The shared layout's logical ordinals mapped to storage positions."""
+        return self._declared_relation(self.lib.MeshIndexLayoutRelation, configuration)
+
+    def _declared_relation(self, function, declaration):
         message, count = C.c_void_p(), C.c_size_t()
-        result = self.lib.MeshIndexSelectionRelation(self.ctx, json.dumps(declaration).encode(), C.byref(count), C.byref(message))
+        result = function(self.ctx, json.dumps(declaration).encode(), C.byref(count), C.byref(message))
         if message.value:
             try:
                 raise ValueError(C.string_at(message.value).decode())

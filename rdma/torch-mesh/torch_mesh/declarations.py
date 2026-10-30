@@ -9,6 +9,139 @@ import json
 
 import torch
 import torch.distributed as dist
+from torch.overrides import TorchFunctionMode
+
+
+class SourceCapture(TorchFunctionMode):
+    """Fake source values paired with their original typed page operands.
+
+    This mode exists only while FX records source. Captured parameters and
+    explicit arguments share the same identity table, including gradient leaves.
+    The generated graph contains ordinary operators and lifted state values.
+    """
+    def __init__(self, mode):
+        super().__init__()
+        self.mode, self.values, self.originals, self.local_sources = mode, {}, {}, {}
+        self.meshes = []
+
+    def value(self, value):
+        from torch.distributed.tensor import DTensor
+        from torch._subclasses.fake_tensor import FakeTensor
+        from torch.fx.experimental.proxy_tensor import disable_proxy_modes_tracing
+        if not isinstance(value, torch.Tensor):
+            return value
+        if id(value) in self.values:
+            return self.values[id(value)]
+        if isinstance(value, FakeTensor):
+            return value
+        with disable_proxy_modes_tracing(), self.mode:
+            if isinstance(value, DTensor):
+                made = torch.empty_strided(value.shape, value.stride(), dtype=value.dtype,
+                                           device=value.device, requires_grad=value.requires_grad)
+                self.local_sources[id(value._local_tensor)] = value
+                if value.device_mesh not in self.meshes:
+                    self.meshes.append(value.device_mesh)
+            else:
+                made = self.mode.from_tensor(value)
+        self.values[id(value)], self.originals[id(made)] = made, value
+        return made
+
+    def local(self, value):
+        """An explicit local view keeps its global source identity as metadata."""
+        from .partition import _rank_selection, _value_ownership
+        from torch.fx.experimental.proxy_tensor import get_proxy_mode, get_proxy_slot
+        made = self.value(value)
+        original = self.originals.get(id(made), value)
+        selection, _ = _rank_selection(original._spec, original.device_mesh.get_coordinate())
+        for _, axis, runs in selection['steps']:
+            first, count, _, _ = runs[0]
+            made = made.narrow(axis, first, count)
+        made = torch.ops.aten.alias.default(made)
+        declaration, _ = _value_ownership(original, original.device_mesh)
+        proxy = get_proxy_mode()
+        get_proxy_slot(made, proxy.tracer).proxy.node.meta['mesh_local_source'] = dict(
+            declaration, mesh=original.device_mesh, selection=selection)
+        return made
+
+    def __torch_function__(self, operation, types, args=(), kwargs=None):
+        from torch.utils._pytree import tree_map
+        return operation(*tree_map(self.value, args), **tree_map(self.value, kwargs or {}))
+
+    def __enter__(self):
+        from .partition import _SOURCE_CAPTURE
+        self.token = _SOURCE_CAPTURE.set(self)
+        return super().__enter__()
+
+    def __exit__(self, *error):
+        from .partition import _SOURCE_CAPTURE
+        try:
+            return super().__exit__(*error)
+        finally:
+            _SOURCE_CAPTURE.reset(self.token)
+
+    def bind_arguments(self, described, originals):
+        from torch.utils._pytree import tree_flatten
+        from torch.distributed.tensor import DTensor
+        from torch.fx.experimental.proxy_tensor import get_proxy_mode, get_proxy_slot, set_proxy_slot
+        from .partition import _value_ownership
+        proxy = get_proxy_mode()
+        for traced, original in zip(tree_flatten(described)[0], tree_flatten(originals)[0], strict=True):
+            if not isinstance(original, torch.Tensor):
+                continue
+            if isinstance(original, DTensor):
+                made = self.value(original)
+                self.values[id(traced)] = made
+                self.originals[id(traced._local_tensor)] = original._local_tensor
+                self.local_sources[id(original._local_tensor)] = original
+                self.local_sources[id(traced._local_tensor)] = original
+                slot = get_proxy_slot(traced, proxy.tracer)
+                set_proxy_slot(made, proxy.tracer, slot)
+                slot.proxy.node.meta['val'] = made
+                declaration, _ = _value_ownership(original, original.device_mesh)
+                slot.proxy.node.meta['mesh_ownership'] = dict(declaration, mesh=original.device_mesh)
+            else:
+                self.values[id(original)], self.originals[id(traced)] = traced, original
+
+    def restore(self, graph):
+        from .partition import _value_ownership
+        from torch.distributed.tensor import DTensor
+        for node in graph.graph.nodes:
+            if node.op != 'get_attr':
+                continue
+            owner = graph
+            names = node.target.split('.')
+            for name in names[:-1]:
+                owner = getattr(owner, name)
+            captured = getattr(owner, names[-1])
+            original = self.originals.get(id(captured))
+            if original is None:
+                continue
+            setattr(owner, names[-1], original)
+            if isinstance(original, DTensor):
+                declaration, _ = _value_ownership(original, original.device_mesh)
+                node.meta['mesh_ownership'] = dict(declaration, mesh=original.device_mesh)
+            local_source = self.local_sources.get(id(original))
+            if local_source is not None:
+                declaration, _ = _value_ownership(local_source, local_source.device_mesh)
+                node.meta['mesh_local_source'] = dict(declaration, mesh=local_source.device_mesh)
+        graph.meta['mesh_scopes'] = tuple(self.meshes)
+
+    def gradients(self, parameters):
+        from torch.distributed.tensor import DTensor
+        from torch.fx.experimental.proxy_tensor import get_proxy_mode, get_proxy_slot
+        from .partition import _value_ownership
+        proxy = get_proxy_mode()
+        for ordinal, parameter in enumerate(parameters):
+            gradient = self.value(parameter).grad
+            if gradient is None:
+                continue
+            node = get_proxy_slot(gradient, proxy.tracer).proxy.node
+            node.meta['mesh_gradient'] = ordinal
+            if isinstance(parameter, DTensor):
+                declaration, _ = _value_ownership(parameter, parameter.device_mesh)
+                node.meta['mesh_ownership'] = dict(declaration, mesh=parameter.device_mesh)
+
+
 
 
 @torch.library.custom_op('torch_mesh::select_exchange', mutates_args=())
@@ -347,7 +480,7 @@ def lower(graph, *, forms=None):
     return groups
 
 
-def trace(function, *arguments, parameters=(), decomposition_table=None):
+def trace(function, *arguments, parameters=()):
     """Trace one complete function, including its backward, using FakeTensor.
 
     Parameters' real gradient references are saved and restored; fake backward
@@ -356,14 +489,27 @@ def trace(function, *arguments, parameters=(), decomposition_table=None):
     configuration errors, never an excuse to run a hidden measurement or probe.
     """
     from torch.fx.experimental.proxy_tensor import make_fx
-    from .algebra import decompositions
+    from torch._guards import detect_fake_mode
+    from torch._subclasses.fake_tensor import FakeTensorMode
     parameters = tuple(parameters)
     gradients = [parameter.grad for parameter in parameters]
+    mode = detect_fake_mode(arguments) or FakeTensorMode(allow_non_fake_inputs=True)
+    source = SourceCapture(mode)
+
+    def recorded(*values):
+        source.bind_arguments(values, arguments)
+        with source:
+            output = function(*values)
+            source.gradients(parameters)
+            return output
+
     try:
-        for parameter in parameters:
-            parameter.grad = None
-        graph = make_fx(function, decomposition_table=decompositions if decomposition_table is None else decomposition_table,
-                        tracing_mode='fake', _allow_non_fake_inputs=True)(*arguments)
+        with mode:
+            for parameter in parameters:
+                source.value(parameter).grad = None
+            graph = make_fx(recorded, decomposition_table={}, tracing_mode='fake',
+                            _allow_non_fake_inputs=True)(*arguments)
+        source.restore(graph)
     finally:
         for parameter, gradient in zip(parameters, gradients):
             parameter.grad = gradient
@@ -683,7 +829,7 @@ class Function:
 
     def declare(self, group, *, destinations=None):
         from functools import partial
-        from torch.utils._pytree import tree_flatten, tree_map
+        from torch.utils._pytree import tree_flatten
         from torch.distributed.tensor import DTensor
         from .compilation import bind
 
@@ -695,30 +841,32 @@ class Function:
             return (*values, *gradients)
 
         with bind(self.configuration):
-            if self.ownership is None:
-                graph, declarations = trace(recorded, *self.arguments, parameters=self.parameters)
-            else:
-                from torch._subclasses.fake_tensor import FakeTensorMode
-                with FakeTensorMode(allow_non_fake_inputs=True) as mode:
-                    def global_value(value):
-                        if isinstance(value, DTensor):
-                            return torch.empty_strided(value.shape, value.stride(), dtype=value.dtype,
-                                                       device=value.device, requires_grad=value.requires_grad)
-                        return mode.from_tensor(value) if isinstance(value, torch.Tensor) else value
-                    arguments = tree_map(global_value, self.arguments)
-                    graph, declarations = trace(recorded, *arguments, parameters=self.parameters, decomposition_table={})
+            graph, declarations = trace(recorded, *self.arguments, parameters=self.parameters)
         return self.declare_graph(graph, group, declarations, destinations=destinations)
 
     def declare_graph(self, graph, group, declarations=None, *, destinations=None):
         """Lower an existing typed graph, retaining its source identities."""
         from functools import partial
-        arguments = self.arguments
-        if self.ownership is not None:
+        from torch.distributed.tensor import DTensor
+        from torch.utils._pytree import tree_leaves
+        from .compilation import lift_attributes
+        graph, arguments = lift_attributes(graph, self.arguments)
+        self.source_graph = graph
+        ownership = self.ownership
+        if ownership is None:
+            scopes = list(graph.meta.get('mesh_scopes', ()))
+            for value in tree_leaves(arguments):
+                if isinstance(value, DTensor) and value.device_mesh not in scopes:
+                    scopes.append(value.device_mesh)
+            if len(scopes) > 1:
+                raise ValueError('source values use multiple meshes; supply the enclosing ownership mesh and domains')
+            if scopes:
+                ownership = {'mesh': scopes[0], 'values': {}}
+        if ownership is not None:
             from .partition import lower_owned_graph
             from .compilation import bind
-            self.source_graph = graph
             with bind(self.configuration):
-                graph, arguments = lower_owned_graph(graph, arguments, self.ownership)
+                graph, arguments = lower_owned_graph(graph, arguments, ownership)
             declarations = None
         declarations = lower(graph) if declarations is None else declarations
         from . import host

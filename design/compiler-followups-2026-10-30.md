@@ -123,11 +123,23 @@ page/shader preparation. Correlated channel/spatial selections also compose
 through that graph without reducing them to one shard axis. Empty products
 declare the ordinary zero result.
 
-The default DTensor capture and captured parameters/gradients still need to
-consume that same source declaration. The explicit-ownership entry does not
-yet establish this for every `Function`. Existing DTensor output sharding and
-native IR read/write records are the intended common inputs for the remaining
-operator declarations; there must be no absent-rule-to-replication substitution.
+Ordinary and explicit-ownership functions now use one source capture. Captured
+parameters keep their original identities, global types and local page operands;
+fake gradients keep their parameter identity without replacing the real
+gradient. Attribute lifting preserves those records. Existing DTensor operator
+schemas supply output and required-input placements. `ownership.propagate`
+consumes the captured result types rather than deriving them again. Compound
+results retain their separate field types; ragged placements keep their
+configured shares. Partial results stay partial until a consumer requests their
+reduction. Required transitions are shared by source value and target spec.
+An absent operator declaration does not become replication.
+
+This does not establish every `Function`: declared factory outputs, arbitrary
+owner results and explicit local views still need the generic retained-IR
+projection. Existing partition decompositions must normalize source before
+ownership propagation while retaining source identities. Their math must be
+reused, including unequal-share reductions, rather than replaced by stock
+equal-share assumptions.
 
 Selected-copy backward declarations sum repeated contributions locally and use
 the existing REDUCE compiler for their contributor sets. LiteRT MAX, average
@@ -148,6 +160,15 @@ retain their positions and use the existing compiled byte copy. These are source
 and preparation results, without numerical execution or whole-function
 performance claims.
 
+Static strided slices and gathers now become the existing ordered page views.
+Slice masks, new and removed axes, repeated indices and batched gathers retain
+their source coordinates. Normalization rebinds already-declared stages through
+the shared operand relation. Explicitly empty outputs retain their type and
+identity without producers, source initializers or empty provider programs.
+Symbolic dimensions retain their index expressions when their placeholder shape
+contains zero. Constant indices supplied through earlier immutable views still
+need to consume the existing ordered initializer ranges.
+
 ## Retained logical IR
 
 `native.prepare_graph` lowers the source once and returns its logical IR before
@@ -167,10 +188,19 @@ building the logical graph again. This is data-kind source: on D2 and D4,
 `old ≺ new` because one lowered graph now supplies dependencies before binding
 and final command emission. Runtime execution is unchanged.
 
-Ownership still needs to consume these records throughout source lowering.
-Captured parameters and gradients must keep their source identities and global
-types beside their actual local page operands. Matrix and other external
-commands need their declared work relations connected to this same boundary.
+Shared matrix declarations now expose work, input reads, output writes, and a
+separate finish domain. Segmented inputs retain their own reduction intervals;
+an empty contraction still has its output/finish domain. Native matrix calls and
+explicitly declared product kernels compose these relations with their retained
+views. `Algebra.layout` calls the existing native layout parser and relation
+compiler, without expanding positions. The shared `binding_layout` supplies the
+same view composition to source dependencies and physical binding. Other opaque
+external commands still need their mathematical access declarations.
+
+Ownership still needs to consume the common IR records throughout source
+lowering. These are data-kind changes: D1 and D4 rank shared operator declarations
+and binding composition above repeated frontend implementations. No runtime
+executor or numerical algorithm was added.
 
 Dynamic updates expose this boundary. Unchanged base pages remain shared, and
 ordinary index expressions choose changed values from update pages. Compatible
@@ -178,3 +208,11 @@ consumers can fuse those reads; a consumer requiring materialized storage gets
 an explicit conversion edge. The attempted whole-base copy and the old
 same-shape ownership shortcut are removed. Distributed update declarations,
 including live index operands for external products, remain unfinished.
+
+The retained-IR checkpoint completed reduction and declared-intermediate page
+preparation. Earlier source capture and static-selection preparation also
+completed. The subsequent shared native library build succeeded, but the latest
+source/ownership and matrix-domain preparations stop at their first page
+allocation because this process cannot attach to a compatible local bridge
+region. Those latest connections have source and build evidence only; they have
+not completed numerical execution or established whole-function performance.

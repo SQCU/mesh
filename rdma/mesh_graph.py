@@ -189,6 +189,10 @@ def _frontiers(reads, writes, spans, roots, constants, accesses):
             for value in writes[i]:
                 _define(owners, stage, value, *accesses[value])
     for value in roots:
+        if accesses[value][1].empty():
+            if result:
+                result[-1][1].add(value)
+            continue
         for stage, written in _sources(owners, *accesses[value])[0]:
             result[stage][1].add(written)
     return result
@@ -202,6 +206,8 @@ def frontiers(reads, writes, spans, roots, constants=(), views=(), regions=()):
     consumer keeps its read ID; the producer exports its actual output ID.
     Disjoint writes share a root without becoming a whole-result join. Later
     writes replace only their own positions in the preceding definitions.
+    Empty result domains retain their declared identity on the final span and
+    require no producer or source operand.
     """
     roots, constants = tuple(roots), tuple(constants)
     return _frontiers(reads, writes, spans, roots, constants,

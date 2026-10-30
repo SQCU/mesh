@@ -94,6 +94,7 @@ Asynchronous rank-max evidence updates a proposed vector without blocking that s
 applies a subsequent generation's vector.
 A declared native graph supplies exact useful-delivery demands for the physical routing vectors."""
 import contextlib
+from contextvars import ContextVar
 import itertools
 import json
 import math
@@ -147,6 +148,7 @@ class _Operand:
 _OPERANDS = {}
 _NAMED = {}
 _KEYS = itertools.count()
+_SOURCE_CAPTURE = ContextVar('mesh_source_capture', default=None)
 
 
 def _blocks(o, N):
@@ -1075,6 +1077,10 @@ def _same(a, b):
                                     for p, q in zip(a, b))
 
 
+def _placement_key(placements):
+    return tuple((type(p), p, getattr(p, 'key', None)) for p in placements)
+
+
 def _local_redistribute(local, current, target, async_op=False):
     """torch's redistribute_local_tensor: its planner's steps (_gen_transform_infos_non_cached; its cache takes a
     RaggedShard for the Shard it equals, one partition's for another's), each the method of the placement torch calls
@@ -1119,8 +1125,7 @@ def _planned(current, target):
     """torch's planner's steps from `current` to `target` (_gen_transform_infos_non_cached), planned once for their
     placements, each told apart by its type and a RaggedShard's key as _same tells them, and their shape, which the
     program fixes when it is compiled (design/data-model.md section 9: no planning per call)."""
-    typed = lambda placements: tuple((type(p), p, getattr(p, 'key', None)) for p in placements)
-    key = (current.mesh, typed(current.placements), typed(target.placements), tuple(current.shape))
+    key = (current.mesh, _placement_key(current.placements), _placement_key(target.placements), tuple(current.shape))
     if key not in _PLANNED:
         _PLANNED[key] = _gen_transform_infos_non_cached(current, target)
     return _PLANNED[key]
@@ -1284,6 +1289,9 @@ class RaggedTensor(DTensor):
     from_local = staticmethod(from_local)
 
     def to_local(self, *, grad_placements=None):
+        source = _SOURCE_CAPTURE.get()
+        if source is not None:
+            return source.local(self)
         if not torch.is_grad_enabled():
             result = self._local_tensor
         else:
@@ -1480,19 +1488,11 @@ def _coordinates(mesh):
 
 def _value_ownership(value, mesh):
     """Normalize a frontend tensor type into the shared ordered page domains."""
+    from .ownership import from_spec
     tensor = value._local_tensor if isinstance(value, DTensor) else value
     meta = TensorMeta(torch.Size(value.shape), tuple(value.stride()), value.dtype)
-    reductions = ()
-    if isinstance(value, DTensor):
-        owners = {rank: dict(zip(('selection', 'shape'), _rank_selection(value._spec, rank)))
-                  for rank in _coordinates(mesh)}
-        dimensions = tuple(i for i, p in enumerate(value.placements) if p.is_shard())
-        reductions = tuple((i, p) for i, p in enumerate(value.placements) if p.is_partial())
-    else:
-        owners = {rank: {'selection': {'shape': list(value.shape), 'steps': []}, 'shape': tuple(value.shape)}
-                  for rank in _coordinates(mesh)}
-        dimensions = ()
-    return dict(type=meta, owners=owners, dimensions=dimensions, reductions=reductions), tensor
+    spec = value._spec if isinstance(value, DTensor) else DTensorSpec(mesh, (Replicate(),) * mesh.ndim, tensor_meta=meta)
+    return from_spec(spec), tensor
 
 
 def declare_result(graph, value, ownership, *, mesh):
@@ -1502,12 +1502,14 @@ def declare_result(graph, value, ownership, *, mesh):
     shapes. ``replicated_axes`` declares equivalent holders, when present.
     Stable graph identities survive the subsequent numerical decomposition.
     """
-    node = value if isinstance(value, torch.fx.Node) else next(n for n in graph.graph.nodes if n.name == value)
+    name = value.name if isinstance(value, torch.fx.Node) else value
+    node = next(n for n in graph.graph.nodes if n.name == name or n.meta.get('mesh_source') == name)
     described = node.meta['val']
     owners = ownership['owners'] if 'owners' in ownership else ownership
     replicated = ownership.get('replicated_axes', ()) if 'owners' in ownership else ()
     declaration = dict(type=TensorMeta(described.shape, described.stride(), described.dtype), owners=owners,
-                       dimensions=tuple(i for i in range(mesh.ndim) if i not in replicated))
+                       dimensions=tuple(i for i in range(mesh.ndim) if i not in replicated), reductions=(),
+                       mesh=mesh, spec=ownership.get('spec') if 'owners' in ownership else None)
     node.meta['mesh_ownership'] = declaration
     return declaration
 
@@ -1592,13 +1594,15 @@ def _owned_convolution(node, values, records, result, mesh):
 
 
 def lower_owned_graph(graph, arguments, configuration):
-    """Rewrite one typed source graph to ordinary page/native declarations.
+    """Lower captured types and owner declarations to ordinary page operands.
 
-    The metadata belongs to source graph values. It is consumed while rewriting
-    every use and remains attached to emitted results for subsequent passes.
-    No ownership object or interpreter is retained by the execution schedule.
+    Registered frontend schemas retain per-use redistribution requirements.
+    Their local numerical operators enter the same native IR as other source
+    operators. Explicit page-domain allocations use the shared access algebra.
     """
+    import operator
     from torch.fx.experimental.proxy_tensor import make_fx
+    from .ownership import from_spec, propagate
     mesh = configuration['mesh']
     nodes = list(graph.graph.nodes)
     placeholders = [node for node in nodes if node.op == 'placeholder']
@@ -1609,59 +1613,128 @@ def lower_owned_graph(graph, arguments, configuration):
     local_arguments = pytree.tree_map(lambda value: value._local_tensor if isinstance(value, DTensor) else value, arguments)
     records.update((node, node.meta['mesh_ownership']) for node in nodes if 'mesh_ownership' in node.meta)
     for name, declaration in configuration.get('values', {}).items():
-        node = name if isinstance(name, torch.fx.Node) else next(node for node in nodes if node.name == name)
+        name = name.name if isinstance(name, torch.fx.Node) else name
+        node = next(node for node in nodes if node.name == name or node.meta.get('mesh_source') == name)
         records[node] = declare_result(graph, node, declaration, mesh=mesh)
-    source_records = dict(records)
-    observed = []
+    declarations = dict(records)
+    observed, moved = [], {}
+    leaf = lambda value: isinstance(value, dict) and 'owners' in value
+
+    def record_map(function, value):
+        return pytree.tree_map(function, value, is_leaf=leaf)
+
+    def result_types(value):
+        return pytree.tree_map(lambda item: TensorMeta(item.shape, item.stride(), item.dtype)
+                               if isinstance(item, torch.Tensor) else None, value)
+
+    def relocate(value, source, target):
+        current, wanted = source['spec'], target['spec']
+        if current is not None and wanted is not None:
+            if _same(current.placements, wanted.placements):
+                return value
+            key = (id(value), _placement_key(current.placements), _placement_key(wanted.placements))
+            if key not in moved:
+                moved[key] = _local_redistribute(value, current, wanted)
+            return moved[key]
+        if source.get('reductions'):
+            target_spec = _with(current, [Replicate() if p.is_partial() else p for p in current.placements])
+            value, source = relocate(value, source, from_spec(target_spec)), from_spec(target_spec)
+        if _same_ownership(source, target):
+            return value
+        desired = lambda rank: (target['owners'][rank]['selection'], target['owners'][rank]['shape'])
+        return _page_tensor(_exchange_domains(value, desired, mesh, source))
 
     class Lowering(torch.fx.Interpreter):
-        def run_node(self, node):
-            if node.op in ('placeholder', 'output'):
-                value = super().run_node(node)
-                if node in records:
-                    for axis, placement in records[node].get('reductions', ()):
-                        value = placement._reduce_value(value, mesh, axis)
-                    records[node] = dict(records[node], reductions=())
-            elif node.op == 'get_attr':
-                value = super().run_node(node)
-                if isinstance(value, torch.Tensor) and node not in records:
-                    records[node], _ = _value_ownership(node.meta['val'], mesh)
+        def schemas(self, value):
+            if not isinstance(value, torch.fx.Node):
+                return value
+            if value not in records:
+                return self.env[value]
+            return record_map(lambda record: record['spec'] if leaf(record) else record, records[value])
+
+        def required(self, original, required, use_values):
+            if isinstance(original, torch.fx.Node):
+                actual = self.env[original]
+                source = records.get(original)
+                if source is None:
+                    return required if use_values else actual
+                def use(value, record, spec):
+                    return relocate(value, record, from_spec(spec)) if isinstance(spec, DTensorSpec) else value
+                return pytree.tree_map(use, actual, source, required, is_leaf=leaf)
+            if isinstance(original, (tuple, list)):
+                values = [self.required(value, required[i], use_values) for i, value in enumerate(original)]
+                if use_values:
+                    values.extend(required[len(original):])
+                return tuple(values) if isinstance(original, tuple) else values
+            if isinstance(original, dict):
+                return {key: self.required(value, required[key], use_values) for key, value in original.items()}
+            return required if use_values else original
+
+        def schema_operation(self, node):
+            args, kwargs = pytree.tree_map(self.schemas, (node.args, node.kwargs))
+            sharding = propagate(node.target, args, kwargs, mesh, result_types=result_types(node.meta['val']))
+            node.meta['mesh_sharding'] = sharding
+            required = sharding.redistribute_schema
+            if required is not None:
+                propagator = DTensor._op_dispatcher.sharding_propagator
+                output = sharding.output_spec
+                if (sharding.use_val_from_redistribute_schema and isinstance(output, DTensorSpec)
+                        and required.op in propagator.op_to_shape_and_stride_idx and _ragged(output.placements)):
+                    required = propagator._adjust_shape_and_stride_args(output.tensor_meta, required, output)
+                    sharding.redistribute_schema = required
+                local_args = self.required(node.args, required.args_schema, sharding.use_val_from_redistribute_schema)
+                local_kwargs = self.required(node.kwargs, required.kwargs_schema, sharding.use_val_from_redistribute_schema)
+                operation = required.op
             else:
-                tensors = {item: (self.env[item], records[item]) for item in node.all_input_nodes if item in records}
-                described = node.meta.get('val')
-                if not isinstance(described, torch.Tensor):
-                    if any(declaration['dimensions'] for _, declaration in tensors.values()):
-                        raise ValueError(f'{node.name}: its non-tensor or compound result requires a declared access relation')
-                    value = super().run_node(node)
+                local_args, local_kwargs = self.fetch_args_kwargs_from_env(node)
+                operation = node.target
+            records[node] = pytree.tree_map_only(DTensorSpec, from_spec, sharding.output_spec)
+            value = operation(*local_args, **local_kwargs)
+            requested = declarations.get(node)
+            if requested is not None:
+                value = pytree.tree_map(relocate, value, records[node], requested, is_leaf=leaf)
+                records[node] = requested
+            return value
+
+        def run_node(self, node):
+            if node.op in ('placeholder', 'get_attr', 'output'):
+                value = super().run_node(node)
+            elif node.target is operator.getitem and node.args[0] in records and not leaf(records[node.args[0]]):
+                value = super().run_node(node)
+                records[node] = records[node.args[0]][node.args[1]]
+            else:
+                tensors = {item: (self.env[item], records[item]) for item in node.all_input_nodes
+                           if item in records and leaf(records[item])}
+                result = declarations.get(node)
+                source_specs = [record.get('spec') for item in node.all_input_nodes if item in records
+                                for record in pytree.tree_leaves(records[item], is_leaf=leaf) if leaf(record)]
+                explicit = result is not None and leaf(result) and result['spec'] is None
+                if not explicit and source_specs and all(spec is not None for spec in source_specs):
+                    value = self.schema_operation(node)
                 else:
-                    result = records.get(node)
+                    described = node.meta.get('val')
+                    if result is None and torch.Tag.pointwise in getattr(node.target, 'tags', ()):
+                        active = [record for _, record in tensors.values() if record['dimensions']]
+                        same = [record for record in active if tuple(record['type'].shape) == tuple(described.shape)]
+                        if same and all(_same_ownership(item, same[0]) for item in same):
+                            result = dict(same[0], type=TensorMeta(described.shape, described.stride(), described.dtype))
                     if result is None:
-                        active = [declaration for _, declaration in tensors.values() if declaration['dimensions']]
-                        if not active:
-                            result, _ = _value_ownership(described, mesh)
-                        elif torch.Tag.pointwise in getattr(node.target, 'tags', ()):
-                            same = [declaration for declaration in active if tuple(declaration['type'].shape) == tuple(described.shape)]
-                            if same and all(_same_ownership(item, same[0]) for item in same):
-                                result = dict(same[0], type=TensorMeta(described.shape, described.stride(), described.dtype))
-                        if result is None:
-                            raise ValueError(f'{node.name}: distributed result requires an explicit ownership declaration')
-                        records[node] = result
+                        raise ValueError(f'{node.name}: source operation requires an ownership/access declaration')
+                    records[node] = result
                     if node.target is aten.convolution.default:
                         value = _owned_convolution(node, self.env, records, result, mesh)
                     elif torch.Tag.pointwise in getattr(node.target, 'tags', ()):
                         scalar = lambda item: self.env[item] if isinstance(item, torch.fx.Node) and item not in tensors else item
                         value = _owned_pointwise(node.target, pytree.tree_map(scalar, node.args),
                                                 pytree.tree_map(scalar, node.kwargs), tensors, result, mesh)
-                    elif not result['dimensions'] and all(not declaration['dimensions'] for _, declaration in tensors.values()):
-                        value = super().run_node(node)
                     else:
-                        raise ValueError(f'{node.name}: its operator has no declared owned access relation')
-            if node in records and isinstance(value, torch.Tensor):
+                        raise ValueError(f'{node.name}: explicit result pages require the operator access relation')
+            if node in records:
                 observed.append((node, value))
             return value
 
     def rewrite(*values):
-        observed.clear(); records.clear(); records.update(source_records)
+        observed.clear(); moved.clear(); records.clear(); records.update(declarations)
         output = Lowering(graph, garbage_collect_values=False).run(*values)
         return output, tuple(value for _, value in observed)
 
@@ -1669,8 +1742,14 @@ def lower_owned_graph(graph, arguments, configuration):
     output = next(node for node in lowered.graph.nodes if node.op == 'output')
     result, retained = output.args[0]
     for (original, _), emitted in zip(observed, retained, strict=True):
-        emitted.meta.setdefault('mesh_values', {})[original.name] = records[original]
+        paths, _ = pytree.tree_flatten_with_path(records[original], is_leaf=leaf)
+        values = pytree.tree_leaves(emitted)
+        for (path, declaration), value in zip(paths, values, strict=True):
+            if leaf(declaration):
+                identity = original.name if not path else (original.name, tuple(path))
+                value.meta.setdefault('mesh_values', {})[identity] = declaration
     output.args = (result,)
+    lowered.meta = graph.meta.copy()
     lowered.recompile()
     return lowered, local_arguments
 

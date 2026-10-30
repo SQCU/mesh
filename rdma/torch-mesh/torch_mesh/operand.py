@@ -148,11 +148,24 @@ def restore(state):
     return _stream.TensorLayout(shape, steps, offset, {axis: values for axis, values in enumerate(maps) if values}, None, index_shape, coordinates)
 
 
+def layout_configuration(layout):
+    """The shared native layout schema, without expanding selected positions."""
+    import json
+    shape, strides, offset, maps, index_shape, coordinates = layout.state
+    return dict(shape=shape, strides=strides, offset=offset, index_shape=index_shape,
+                maps={str(axis): values for axis, values in enumerate(maps) if values},
+                index_coordinates=json.loads(coordinates))
+
+
 def bind(value, declaration):
     """Compose the declared use with the producer's assigned pages once."""
     placed = TensorView.of(value)
-    view = restore(declaration['view']).rebase(restore(declaration['source']), placed.layout)
-    return TensorView(placed.storage, view)
+    return TensorView(placed.storage, binding_layout(placed.layout, declaration))
+
+
+def binding_layout(layout, declaration):
+    """The same declared-use relation for logical IR and assigned pages."""
+    return restore(declaration['view']).rebase(restore(declaration['source']), layout)
 
 def descriptor(value):
     return TensorView.of(value).layout
@@ -242,7 +255,7 @@ def graph_bindings(node):
     uses = {}
     for value, slot in bindings:
         declaration = declarations[str(slot)]
-        view = restore(declaration['view']).rebase(restore(declaration['source']), descriptor(value))
+        view = binding_layout(descriptor(value), declaration)
         uses[slot] = value, view, declaration['requirements']
     return args, uses
 

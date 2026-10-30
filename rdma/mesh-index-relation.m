@@ -18,13 +18,28 @@ isl_map *MeshIndexCompose(isl_map *source,isl_map *target) {
     return MeshIndexNormalize(isl_map_apply_range(source,target));
 }
 
+static NSDictionary *IndexDeclaration(const char *declaration) {
+    NSData *data=[NSData dataWithBytesNoCopy:(void *)declaration length:strlen(declaration) freeWhenDone:NO];
+    NSError *error=nil;NSDictionary *value=[NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+    if(error)[NSException raise:NSInvalidArgumentException format:@"index declaration: %@",error];
+    return value;
+}
+
 isl_map *MeshIndexSelectionRelation(isl_ctx *ctx,const char *declaration,size_t *count,char **message) { @autoreleasepool {
     *message=NULL;
     @try {
-        NSData *data=[NSData dataWithBytesNoCopy:(void *)declaration length:strlen(declaration) freeWhenDone:NO];
-        NSError *error=nil;NSDictionary *value=[NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
-        if(error)[NSException raise:NSInvalidArgumentException format:@"selection declaration: %@",error];
-        MetalTensorLayout *layout=[MetalTensorLayout selection:value extent:nil];*count=layout.count;
+        MetalTensorLayout *layout=[MetalTensorLayout selection:IndexDeclaration(declaration) extent:nil];*count=layout.count;
+        return MeshIndexRelation(ctx,layout);
+    } @catch(NSException *error) {
+        *message=mesh_isl_strdup(error.reason.UTF8String);
+        return NULL;
+    }
+}}
+
+isl_map *MeshIndexLayoutRelation(isl_ctx *ctx,const char *configuration,size_t *count,char **message) { @autoreleasepool {
+    *message=NULL;
+    @try {
+        MetalTensorLayout *layout=[MetalTensorLayout configuration:IndexDeclaration(configuration)];*count=layout.count;
         return MeshIndexRelation(ctx,layout);
     } @catch(NSException *error) {
         *message=mesh_isl_strdup(error.reason.UTF8String);

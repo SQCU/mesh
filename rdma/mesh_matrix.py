@@ -16,6 +16,51 @@ def row_tiles(rows, geometry):
     return tuple((first, min(width, rows - first)) for first in range(0, rows, width))
 
 
+def product_domains(algebra, x, w, out, *, x1=None, bias=None):
+    """The product's work, operand reads and result positions before placement.
+
+    Each relation maps the declared work coordinates to one operand's logical
+    ordinal. Physical views compose with these relations in the shared binder.
+    The finish domain has no reduction axis, including for an empty contraction.
+    """
+    from mesh_relation import bounds, flat
+    xs, ws, ys = (tuple(value['shape']) for value in (x, w, out))
+    first = xs[-1]
+    batches = ys[0] if len(ys) == 3 else 1
+    iterations = (batches, ys[-2], ys[-1])
+    work = (*iterations, ws[-2])
+
+    def access(domain, value, positions):
+        shape = tuple(value['shape'])
+        def equations(i, o):
+            coordinates = positions(i)
+            return [f'{o[0]} = {flat(shape, coordinates)}', *bounds(shape, coordinates)]
+        return algebra.map(domain, (prod(shape),), equations)
+
+    def matrix_positions(shape, i, row, column):
+        batch = [i[0] if shape[0] != 1 else '0'] if len(shape) == 3 else []
+        return [*batch, row, column]
+
+    reads = {
+        'x': access(work, x, lambda i: matrix_positions(xs, i, i[1], i[3])),
+        'w': access(work, w, lambda i: matrix_positions(ws, i, i[3], i[2])),
+    }
+    if x1 is not None:
+        shape = tuple(x1['shape'])
+        reads['x1'] = access(work, x1, lambda i: matrix_positions(shape, i, i[1], f'({i[3]} - {first})'))
+    output = lambda i: matrix_positions(ys, i, i[1], i[2])
+    finish_reads = {}
+    if bias is not None:
+        shape = tuple(bias['shape'])
+        finish_reads['bias'] = access(iterations, bias, lambda i:
+            ([i[1] if shape[0] != 1 else '0'] if len(shape) == 2 else []) +
+            [i[2] if shape[-1] != 1 else '0'])
+    return dict(work=work, reads=reads, writes={'out': access(work, out, output)},
+                reduction=dict(operation='sum', axes=(len(iterations),), identity=0),
+                finish=dict(work=iterations, reads=finish_reads,
+                            writes={'out': access(iterations, out, output)}))
+
+
 def product(x, w, out, geometry, *, x1=None, bias=None, act=False, alpha=1, beta=1,
             ready=None, arrivals=None):
     """Declare the shared product from ``{shape, type}`` scalar views.

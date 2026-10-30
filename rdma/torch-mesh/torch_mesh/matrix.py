@@ -57,4 +57,6 @@ def declare(x, w, out):
     prefix = ''.join(f'#define {key} {value}\n' for key, value in definitions.items())
     prefix += _OPERANDS
     return kernel('matrix.metal', 'product', buffers, (2,), (), 0, grid, threads,
-                  indexed=(), requirements={0: layouts['input'], 1: layouts['weight'], 2: layouts['output']}, prefix=prefix)[0]
+                  indexed=(), requirements={0: layouts['input'], 1: layouts['weight'], 2: layouts['output']}, prefix=prefix,
+                  domains=({'kind': 'product', 'operands': {'x': 0, 'w': 1, 'out': 2},
+                            'parameters': {'alpha': 1, 'beta': 1, 'act': False}},))[0]

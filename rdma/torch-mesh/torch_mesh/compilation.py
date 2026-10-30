@@ -64,6 +64,7 @@ def lift_attributes(module, arguments):
     graph = torch.fx.Graph()
     graph.output(graph.graph_copy(module.graph, {}))
     lifted = torch.fx.GraphModule(module, graph)
+    lifted.meta = module.meta.copy()
     values, bindings = [], {}
     first = next(node for node in graph.nodes if node.op != 'placeholder')
     for node in list(graph.nodes):
@@ -79,6 +80,7 @@ def lift_attributes(module, arguments):
             with graph.inserting_before(first):
                 operand = graph.placeholder(f'_mesh_attribute_{len(values)}')
             operand.meta = node.meta.copy()
+            operand.meta.setdefault('mesh_source', node.name)
             bindings[id(value)] = operand
             values.append(value)
         node.replace_all_uses_with(operand)
@@ -86,11 +88,13 @@ def lift_attributes(module, arguments):
             first = node.next
         graph.erase_node(node)
     lifted.recompile()
-    imported = _stream.import_attributes(values)
+    from torch.distributed.tensor import DTensor
+    sources = [value._local_tensor if isinstance(value, DTensor) else value for value in values]
+    imported = _stream.import_attributes(sources)
     # Each import takes its attribute's place (the module's own tensor now names the region pages), so the foreign
     # storage is freed, not held beside its region copy: one residency per attribute, aliases kept as views.
     with torch.no_grad():
-        for value, made in zip(values, imported):
+        for value, made in zip(sources, imported):
             if made is not value:
                 value.data = made
-    return lifted, [*arguments, *imported]
+    return lifted, [*arguments, *values]

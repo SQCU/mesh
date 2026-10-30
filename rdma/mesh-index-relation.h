@@ -23,6 +23,8 @@ isl_map *MeshIndexNormalize(isl_map *relation); // consumes the relation
 // On a declaration exception, error owns a message freed with mesh_isl_free.
 isl_set *MeshIndexSelectionDomain(isl_ctx *ctx, const char *declaration, char **error);
 isl_map *MeshIndexSelectionRelation(isl_ctx *ctx, const char *declaration, size_t *count, char **error);
+// The existing layout configuration, with its maps and coordinate expressions.
+isl_map *MeshIndexLayoutRelation(isl_ctx *ctx, const char *configuration, size_t *count, char **error);
 // A functional one-output relation as the shared scalar index term JSON.
 // Borrow the relation; release the result/error with mesh_isl_free.
 char *MeshIndexRelationTerms(isl_map *relation, char **error);

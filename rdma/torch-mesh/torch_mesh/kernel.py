@@ -31,7 +31,7 @@ def _word(value, k):
     return value & 0xffffffff
 
 
-def declare(source, name, buffers, outputs, words, constant_slot, grid, threads, instance='', *, indexed, requirements, indices=None, prefix=''):
+def declare(source, name, buffers, outputs, words, constant_slot, grid, threads, instance='', *, indexed, requirements, indices=None, prefix='', domains=()):
     """Carry each use's layout and requirement across FX's tensor schema.
 
     The serialized operand descriptions contain only compiler metadata. Values,
@@ -41,12 +41,14 @@ def declare(source, name, buffers, outputs, words, constant_slot, grid, threads,
     from .operand import signature
     uses = {i: ('indexed' if i in indexed else requirements[i],) for i, value in enumerate(buffers) if value is not None}
     operands = signature(buffers, outputs, uses)
-    if indices or prefix:
+    if indices or prefix or domains:
         declarations = json.loads(operands['operands'])
         if indices:
             declarations['indices'] = indices
         if prefix:
             declarations['prefix'] = prefix
+        if domains:
+            declarations['domains'] = domains
         operands['operands'] = json.dumps(declarations, separators=(',', ':'))
     return operation(**operands, source=source, name=name, instance=instance,
                      words=list(words), constant_slot=constant_slot, grid=list(grid), threads=list(threads))
