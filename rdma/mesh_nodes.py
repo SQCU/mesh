@@ -367,8 +367,14 @@ def node_prepare():
     # the bridge's restart is asked within the first step (bin/mesh-user.sh's SIGHUP), so a bridge started at or
     # after this time answered it, however long the later steps take
     asked = time.time()
-    for where, *argv in (('.', ROOT / 'bin/mesh-user.sh', (HOME / 'Library/Application Support/io.mesh.bridge/'
-                                                           'document').read_text().strip(), ROOT),
+    # the bridge's configuration document as bin/mesh-user.sh recorded it; one of a repository's (etc/bridge/<name>) is
+    # read from this checkout, the node's one, never from a second checkout nothing updates (every node's named
+    # ~/mesh's until 2026-10-29)
+    recorded = Path((HOME / 'Library/Application Support/io.mesh.bridge/document').read_text().strip())
+    document = ROOT / 'etc/bridge' / recorded.name
+    if recorded.parent.parts[-2:] != ('etc', 'bridge') or not document.is_file():
+        document = recorded
+    for where, *argv in (('.', ROOT / 'bin/mesh-user.sh', document, ROOT),
                          ('rdma', sys.executable, 'mesh_c_build.py'),
                          ('rdma/torch-mesh', sys.executable, 'setup.py', '-q', 'build_ext', '--inplace',
                           '--build-temp', '../.build/torch-mesh')):
