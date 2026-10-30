@@ -158,6 +158,19 @@ def descriptor(value):
     return TensorView.of(value).layout
 
 
+def relation_view(value, relation, shape):
+    """Bind prepared logical indices to the same operand's assigned pages."""
+    import json
+    value = TensorView.of(value)
+    if not all(shape):
+        from .layout import strides
+        return TensorView(value.storage, _stream.TensorLayout(tuple(shape), strides(shape)))
+    logical = _stream.TensorLayout((value.numel(),), (1,))
+    mapped = _stream.TensorLayout(tuple(shape), (1,), 0, {}, None,
+                                  (value.numel(),), json.dumps([relation.terms()]))
+    return TensorView(value.storage, mapped.rebase(logical, value.layout.reshape((value.numel(),))))
+
+
 def rebase_typed(view, width, declared, source_width, placed):
     """Compose in scalar units when possible; bytes only for a type view."""
     if width == source_width:

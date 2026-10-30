@@ -23,9 +23,12 @@ or reduction over a partitioned dimension giving the Partial its sharding gives,
 - Count-dependent: mean over a partitioned dimension is the sum divided by its logical count. Vector norms,
   softmax, log-softmax and their gradients use the shared algebra before sharding propagation. Their sum/max/min
   summaries are reduced across the split dimensions; their input rows remain sharded. An op whose sharding gives
-  another Partial there (avg, embedding's mask), a reshape that changes rank ownership, and convolution,
-  argmax, argmin and equal still get the dimension whole first. Variance, sort, top-k, scans and indexing retain
-  DTensor's own whole-dimension rules until their lowering is extended.
+  another Partial there (avg, embedding's mask), a reshape that changes rank ownership,
+  and equal still get the dimension whole first. Convolution consumes explicit result ownership
+  through Function's source graph declaration. Argmax/argmin reduce finite value/position summaries;
+  owner-split index_select combines integer representations so value bits are unchanged. Static window,
+  slice and select views move only their declared page intersections. Sort and scans retain DTensor's
+  own whole-dimension rules until their lowering is extended.
 - Attention: SDPA on query, key and value split along the sequence by one RaggedShard (on any mesh dimension) is ring
   attention, each source's keys past its valid extents masked (score -inf); context parallelism's ring
   (ring_attention) masks the same way over head-tail halves.  The softmax over the split is the library's partials
@@ -1308,8 +1311,7 @@ class RaggedTensor(DTensor):
 # The dispatch: DTensor's (sharding propagation, redistribution, the local op, the wrap), each Shard on a partitioned
 # mesh dimension its RaggedShard.
 _REMASKED = ('sum', 'max', 'min')
-_WHOLE = (aten.convolution.default, aten.convolution_backward.default, aten.argmax.default, aten.argmin.default,
-          aten.equal.default)
+_WHOLE = (aten.equal.default,)
 
 
 def _map(f, x):
@@ -1369,26 +1371,359 @@ def _keys(specs):
 
 
 def _view_region(spec, coordinates):
-    """Canonical affine region of one shard, for a shape-only view relation."""
-    shape, stride = list(spec.shape), spec.tensor_meta.stride
-    origin = 0
+    """The ordered page selection held by a rank, in the common layout algebra."""
+    from . import _stream
+    view = _stream.TensorLayout(tuple(spec.shape), tuple(spec.tensor_meta.stride))
     for i, rank in enumerate(coordinates):
         p = spec.placements[i]
         if p.is_shard():
-            shape[p.dim], offset = p._local_shard_size_and_offset(shape[p.dim], spec.mesh.size(i), rank)
-            origin += offset * stride[p.dim]
-    elements = math.prod(shape)
-    if not elements:
-        return None
-    axes = []
-    for step, count in sorted((s, n) for s, n in zip(stride, shape) if s and n > 1):
-        if axes and step == axes[-1][0] * axes[-1][1]:
-            axes[-1] = axes[-1][0], axes[-1][1] * count
+            count, first = p._local_shard_size_and_offset(view.shape[p.dim], spec.mesh.size(i), rank)
+            view = view.slice(p.dim, first, count, 1)
+    return view.reshape((view.count,))
+
+
+def _rank_selection(spec, coordinate, selection=None):
+    """One rank's ordered logical pages, retaining all preceding axis cuts."""
+    declaration = {'shape': list(spec.shape), 'steps': []} if selection is None else {
+        'shape': selection['shape'], 'steps': list(selection['steps'])}
+    shape = list(spec.shape)
+    for i, p in enumerate(spec.placements):
+        if p.is_shard():
+            count, first = p._local_shard_size_and_offset(shape[p.dim], spec.mesh.size(i), coordinate[i])
+            declaration['steps'].append(['select', p.dim, [[first, count, 0, 1]]])
+            shape[p.dim] = count
+    return declaration, tuple(shape)
+
+
+def _exchange_domains(x, desired, mesh, ownership=None):
+    """Materialize an ordered page declaration through the existing mesh axes.
+
+    Ownership is a relation operand. Shard syntax is normalized once here;
+    consumers supply their exact desired selection for every rank coordinate.
+    """
+    from mesh_relation import Algebra
+    from .declarations import select_exchange
+    from .operand import TensorView, relation_view
+    if isinstance(x, DTensor) and any(p.is_partial() for p in x.placements):
+        x = redistribute(x, [Replicate() if p.is_partial() else p for p in x.placements])
+    dimensions = (list(ownership['dimensions']) if ownership is not None else
+                  [i for i, p in enumerate(x.placements) if p.is_shard()] if isinstance(x, DTensor) else [])
+    algebra, coordinate = Algebra(), list(mesh.get_coordinate())
+    ranks = list(itertools.product(*(range(mesh.size(i)) for i in dimensions)))
+    def full(rank):
+        result = coordinate.copy()
+        for i, q in zip(dimensions, rank):
+            result[i] = q
+        return tuple(result)
+    sources = {rank: ownership['owners'][full(rank)]['selection'] if ownership is not None else
+               _rank_selection(x._spec, full(rank))[0] if isinstance(x, DTensor) else
+               {'shape': list(x.shape), 'steps': []} for rank in ranks}
+    semantic_shape = next(iter(sources.values()))['shape']
+    semantic_count = math.prod(semantic_shape)
+    wanted_selections = {rank: desired(full(rank)) for rank in ranks}
+    original = {rank: algebra.selection(value) for rank, value in sources.items()}
+    wanted = {rank: algebra.selection(value[0]) for rank, value in wanted_selections.items()}
+    local, current = x._local_tensor if isinstance(x, DTensor) else x, sources
+    local = _page_tensor(local)
+    held = tuple(coordinate[i] for i in dimensions)
+    if not dimensions:
+        selected, shape = wanted_selections[held]
+        source = algebra.selection_relation(sources[held])
+        access = algebra.selection_relation(selected).then(source.inverse((semantic_count,))).lexmin()
+        return relation_view(TensorView.of(local), access, shape)
+    def union(values):
+        result = algebra.set('{ [i] : false }', 1)
+        for value in values:
+            result = result.binary(value, 'union')
+        return result
+    for position, mesh_axis in enumerate(dimensions):
+        if position + 1 == len(dimensions):
+            following = {rank: value[0] for rank, value in wanted_selections.items()}
+            shape = wanted_selections[held][1]
         else:
-            axes.append((step, count))
-    # Broadcast axes repeat values without extending the address set. A local
-    # reshape must preserve those repetitions as well as the addresses.
-    return origin, elements, tuple(axes)
+            following = {}
+            for rank in ranks:
+                need = union(value for r, value in wanted.items() if r[:position + 1] == rank[:position + 1])
+                available = union(value for r, value in original.items() if r[position + 1:] == rank[position + 1:])
+                runs = need.binary(available, 'intersect').spans()
+                following[rank] = {'shape': list(semantic_shape), 'steps': [
+                    ['reshape', [semantic_count]], ['select', 0, runs]]}
+            shape = (algebra.selection_relation(following[held]).shape[0],)
+        peers = [(*held[:position], q, *held[position + 1:]) for q in range(mesh.size(mesh_axis))]
+        declarations = {'sources': [current[r] for r in peers], 'destinations': [following[r] for r in peers]}
+        local = select_exchange(local, list(shape), json.dumps(declarations, separators=(',', ':')),
+                                mesh.get_group(mesh_axis).group_name)
+        current = following
+    return TensorView.of(local)
+
+
+def _page_tensor(value):
+    """Expose a declared page view to tensor syntax without a numerical copy."""
+    from .operand import TensorView
+    if not isinstance(value, TensorView):
+        return value
+    if value.layout.affine:
+        return value.tensor()
+    from .host import assemble
+    target = torch.empty(value.shape, dtype=value.dtype, device=value.device)
+    return assemble([(value, TensorView.of(target))])
+
+
+def _exchange_view(x, target, selection):
+    selected = _exchange_domains(x, lambda coordinate: _rank_selection(target, coordinate, selection), x.device_mesh)
+    return _wrap(selected.tensor(), target, selected.storage.requires_grad)
+
+
+def _coordinates(mesh):
+    return tuple(itertools.product(*(range(mesh.size(i)) for i in range(mesh.ndim))))
+
+
+def _value_ownership(value, mesh):
+    """Normalize a frontend tensor type into the shared ordered page domains."""
+    tensor = value._local_tensor if isinstance(value, DTensor) else value
+    meta = TensorMeta(torch.Size(value.shape), tuple(value.stride()), value.dtype)
+    reductions = ()
+    if isinstance(value, DTensor):
+        owners = {rank: dict(zip(('selection', 'shape'), _rank_selection(value._spec, rank)))
+                  for rank in _coordinates(mesh)}
+        dimensions = tuple(i for i, p in enumerate(value.placements) if p.is_shard())
+        reductions = tuple((i, p) for i, p in enumerate(value.placements) if p.is_partial())
+    else:
+        owners = {rank: {'selection': {'shape': list(value.shape), 'steps': []}, 'shape': tuple(value.shape)}
+                  for rank in _coordinates(mesh)}
+        dimensions = ()
+    return dict(type=meta, owners=owners, dimensions=dimensions, reductions=reductions), tensor
+
+
+def declare_result(graph, value, ownership, *, mesh):
+    """Attach an explicit allocation operand to an existing typed graph value.
+
+    ``owners`` maps mesh coordinates to ordered page selections and local
+    shapes. ``replicated_axes`` declares equivalent holders, when present.
+    Stable graph identities survive the subsequent numerical decomposition.
+    """
+    node = value if isinstance(value, torch.fx.Node) else next(n for n in graph.graph.nodes if n.name == value)
+    described = node.meta['val']
+    owners = ownership['owners'] if 'owners' in ownership else ownership
+    replicated = ownership.get('replicated_axes', ()) if 'owners' in ownership else ()
+    declaration = dict(type=TensorMeta(described.shape, described.stride(), described.dtype), owners=owners,
+                       dimensions=tuple(i for i in range(mesh.ndim) if i not in replicated))
+    node.meta['mesh_ownership'] = declaration
+    return declaration
+
+
+def _same_ownership(left, right):
+    from mesh_relation import Algebra
+    algebra = Algebra()
+    return left['owners'].keys() == right['owners'].keys() and all(
+        tuple(owner['shape']) == tuple(right['owners'][rank]['shape']) and
+        algebra.selection_relation(owner['selection']).equal(
+            algebra.selection_relation(right['owners'][rank]['selection']))
+        for rank, owner in left['owners'].items())
+
+
+def _owned_pointwise(operation, arguments, keywords, records, result, mesh):
+    """Pointwise access is the declared broadcast relation over output owners."""
+    from mesh_relation import Algebra, flat
+    algebra, shape = Algebra(), tuple(result['type'].shape)
+    prepared = {}
+    for identity, (value, source) in records.items():
+        source_shape = tuple(source['type'].shape)
+        offset = len(shape) - len(source_shape)
+        access = algebra.map(shape, source_shape, lambda x, y: [
+            f'{y[d]} = 0' if n == 1 else f'{y[d]} = {x[d + offset]}' for d, n in enumerate(source_shape)])
+        output_coordinates = algebra.map((math.prod(shape),), shape,
+                                         lambda x, y: [f'{x[0]} = {flat(shape, y)}'])
+        source_position = algebra.map(source_shape, (math.prod(source_shape),),
+                                     lambda x, y: [f'{y[0]} = {flat(source_shape, x)}'])
+        relation = output_coordinates.then(access).then(source_position)
+        requests = {}
+        for rank, owner in result['owners'].items():
+            selected = algebra.selection_relation(owner['selection']).then(relation)
+            steps = ([['reindex', {'shape': list(owner['shape']), 'index': selected.terms()}]]
+                     if selected.shape[0] else [['reshape', [math.prod(source_shape)]], ['select', 0, []],
+                                               ['reshape', list(owner['shape'])]])
+            requests[rank] = ({'shape': list(source_shape), 'steps': steps}, tuple(owner['shape']))
+        prepared[identity] = _page_tensor(_exchange_domains(value, requests.__getitem__, mesh, source))
+    replace = lambda item: prepared[item] if isinstance(item, torch.fx.Node) and item in prepared else item
+    return operation(*pytree.tree_map(replace, arguments), **pytree.tree_map(replace, keywords))
+
+
+def _owned_convolution(node, values, records, result, mesh):
+    """Apply the shared window/product declaration to explicitly owned results."""
+    from mesh_relation import Algebra, convolution_domain, owned_domains
+    from .algebra import owned_product
+    named = _named(node.target, node.args, node.kwargs)
+    inputs = {name: named[name] for name in ('input', 'weight')}
+    source = {name: records[identity] for name, identity in inputs.items()}
+    algebra = Algebra()
+    domain = convolution_domain(algebra, source['input']['type'].shape, source['weight']['type'].shape,
+        **{name: named[name] for name in ('stride', 'padding', 'dilation', 'transposed', 'output_padding', 'groups')},
+        output_shape=result['type'].shape)
+    ranks = _coordinates(mesh)
+    owners = owned_domains(algebra, [result['owners'][rank]['selection'] for rank in ranks],
+        domain['product_accesses']['output'], {name: domain['product_accesses'][name] for name in inputs})
+    held, provided = {}, {}
+    coordinate = tuple(mesh.get_coordinate())
+    for name, identity in inputs.items():
+        shape = tuple(source[name]['type'].shape)
+        requests = {rank: {'shape': list(shape), 'steps': [['reshape', [math.prod(shape)]],
+                          ['select', 0, owned['reads'][name].spans()]]} for rank, owned in zip(ranks, owners, strict=True)}
+        demand = {rank: (selection, algebra.selection_relation(selection).shape) for rank, selection in requests.items()}
+        held[name] = _exchange_domains(values[identity], demand.__getitem__, mesh, source[name])
+        provided[name] = requests[coordinate]
+    local = owned_product(domain, owners[ranks.index(coordinate)], held, provided, result['owners'][coordinate]['shape'])
+    if named['bias'] is not None:
+        # Bias is the same pointwise broadcast access used by other operators.
+        bias = named['bias']
+        bias_record = records[bias]
+        shape = tuple(result['type'].shape)
+        broadcast = (1, shape[1], *([1] * (len(shape) - 2)))
+        transformed = dict(bias_record, type=TensorMeta(torch.Size(broadcast),
+            torch.empty(broadcast, device='meta').stride(), bias_record['type'].dtype), owners={})
+        for rank, owner in bias_record['owners'].items():
+            selection = {'shape': list(broadcast), 'steps': [['reshape', list(bias_record['type'].shape)],
+                        *owner['selection']['steps']]}
+            transformed['owners'][rank] = dict(owner, selection=selection)
+        # The original result is already on these pages; only bias needs an access declaration.
+        bias_values = _owned_pointwise(lambda value: value, (bias,), {}, {bias: (values[bias], transformed)}, result, mesh)
+        local = local + bias_values
+    return local
+
+
+def lower_owned_graph(graph, arguments, configuration):
+    """Rewrite one typed source graph to ordinary page/native declarations.
+
+    The metadata belongs to source graph values. It is consumed while rewriting
+    every use and remains attached to emitted results for subsequent passes.
+    No ownership object or interpreter is retained by the execution schedule.
+    """
+    from torch.fx.experimental.proxy_tensor import make_fx
+    mesh = configuration['mesh']
+    nodes = list(graph.graph.nodes)
+    placeholders = [node for node in nodes if node.op == 'placeholder']
+    records = {}
+    for node, value in zip(placeholders, graph.graph.process_inputs(*arguments), strict=True):
+        if isinstance(value, torch.Tensor):
+            records[node], _ = _value_ownership(value, mesh)
+    local_arguments = pytree.tree_map(lambda value: value._local_tensor if isinstance(value, DTensor) else value, arguments)
+    records.update((node, node.meta['mesh_ownership']) for node in nodes if 'mesh_ownership' in node.meta)
+    for name, declaration in configuration.get('values', {}).items():
+        node = name if isinstance(name, torch.fx.Node) else next(node for node in nodes if node.name == name)
+        records[node] = declare_result(graph, node, declaration, mesh=mesh)
+    source_records = dict(records)
+    observed = []
+
+    class Lowering(torch.fx.Interpreter):
+        def run_node(self, node):
+            if node.op in ('placeholder', 'output'):
+                value = super().run_node(node)
+                if node in records:
+                    for axis, placement in records[node].get('reductions', ()):
+                        value = placement._reduce_value(value, mesh, axis)
+                    records[node] = dict(records[node], reductions=())
+            elif node.op == 'get_attr':
+                value = super().run_node(node)
+                if isinstance(value, torch.Tensor) and node not in records:
+                    records[node], _ = _value_ownership(node.meta['val'], mesh)
+            else:
+                tensors = {item: (self.env[item], records[item]) for item in node.all_input_nodes if item in records}
+                described = node.meta.get('val')
+                if not isinstance(described, torch.Tensor):
+                    if any(declaration['dimensions'] for _, declaration in tensors.values()):
+                        raise ValueError(f'{node.name}: its non-tensor or compound result requires a declared access relation')
+                    value = super().run_node(node)
+                else:
+                    result = records.get(node)
+                    if result is None:
+                        active = [declaration for _, declaration in tensors.values() if declaration['dimensions']]
+                        if not active:
+                            result, _ = _value_ownership(described, mesh)
+                        elif torch.Tag.pointwise in getattr(node.target, 'tags', ()):
+                            same = [declaration for declaration in active if tuple(declaration['type'].shape) == tuple(described.shape)]
+                            if same and all(_same_ownership(item, same[0]) for item in same):
+                                result = dict(same[0], type=TensorMeta(described.shape, described.stride(), described.dtype))
+                        if result is None:
+                            raise ValueError(f'{node.name}: distributed result requires an explicit ownership declaration')
+                        records[node] = result
+                    if node.target is aten.convolution.default:
+                        value = _owned_convolution(node, self.env, records, result, mesh)
+                    elif torch.Tag.pointwise in getattr(node.target, 'tags', ()):
+                        scalar = lambda item: self.env[item] if isinstance(item, torch.fx.Node) and item not in tensors else item
+                        value = _owned_pointwise(node.target, pytree.tree_map(scalar, node.args),
+                                                pytree.tree_map(scalar, node.kwargs), tensors, result, mesh)
+                    elif not result['dimensions'] and all(not declaration['dimensions'] for _, declaration in tensors.values()):
+                        value = super().run_node(node)
+                    else:
+                        raise ValueError(f'{node.name}: its operator has no declared owned access relation')
+            if node in records and isinstance(value, torch.Tensor):
+                observed.append((node, value))
+            return value
+
+    def rewrite(*values):
+        observed.clear(); records.clear(); records.update(source_records)
+        output = Lowering(graph, garbage_collect_values=False).run(*values)
+        return output, tuple(value for _, value in observed)
+
+    lowered = make_fx(rewrite, tracing_mode='fake', _allow_non_fake_inputs=True)(*local_arguments)
+    output = next(node for node in lowered.graph.nodes if node.op == 'output')
+    result, retained = output.args[0]
+    for (original, _), emitted in zip(observed, retained, strict=True):
+        emitted.meta.setdefault('mesh_values', {})[original.name] = records[original]
+    output.args = (result,)
+    lowered.recompile()
+    return lowered, local_arguments
+
+
+def _unfold(op, args, kwargs):
+    """Declare the window's output ownership and exact input-page relation."""
+    from mesh_relation import Algebra, flat
+    x, dimension, size, step = args
+    dimension %= x.ndim
+    if not any(p.is_shard() and p.dim == dimension for p in x.placements):
+        return _propagated(op, args, kwargs)
+    shape = list(x.shape)
+    shape[dimension] = (shape[dimension] - size) // step + 1
+    shape.append(size)
+    described = op(torch.empty_strided(x.shape, x.stride(), dtype=x.dtype, device='meta'), dimension, size, step)
+    target = DTensorSpec(x.device_mesh, x.placements, tensor_meta=TensorMeta(described.shape, described.stride(), x.dtype))
+    algebra = Algebra()
+    access = algebra.window(shape, tuple(x.shape), axes=[(dimension, dimension, x.ndim)],
+        strides=[step], dilations=[1], padding=[0], transposed=False,
+        equations=lambda a, b: [f'{a[i]} = {b[i]}' for i in range(x.ndim) if i != dimension])
+    source = algebra.map(tuple(x.shape), (x.numel(),), lambda a, b: [f'{flat(x.shape, a)} = {b[0]}'])
+    order = algebra.map((math.prod(shape),), shape, lambda a, b: [f'{a[0]} = {flat(shape, b)}'])
+    selection = {'shape': list(x.shape), 'steps': [['reindex', {'shape': shape, 'index': order.then(access).then(source).terms()}]]}
+    return _exchange_view(x, target, selection)
+
+
+def _slice_view(op, args, kwargs):
+    """A static view cut uses the same selected-page crossing as a window."""
+    from mesh_relation import Algebra, flat
+    named = _named(op, args, kwargs)
+    x = named['self']
+    dim = named['dim'] % x.ndim
+    if not any(p.is_shard() and p.dim == dim for p in x.placements):
+        return _propagated(op, args, kwargs)
+    described = op(torch.empty_strided(x.shape, x.stride(), dtype=x.dtype, device='meta'), *args[1:], **kwargs)
+    selecting = op is aten.select.int
+    if selecting:
+        first = named['index'] % x.shape[dim]
+        placements = [Replicate() if p.is_shard() and p.dim == dim else
+                      RaggedShard(p.dim - int(p.dim > dim), p.key) if isinstance(p, RaggedShard) else
+                      Shard(p.dim - int(p.dim > dim)) if p.is_shard() else p for p in x.placements]
+        equations = lambda a, b: [f'{b[dim]} = {first}', *[f'{a[i - int(i > dim)]} = {b[i]}' for i in range(x.ndim) if i != dim]]
+    else:
+        first, _, step = slice(named.get('start'), named.get('end'), named.get('step', 1)).indices(x.shape[dim])
+        placements = x.placements
+        equations = lambda a, b: [f'{b[i]} = {first} + {a[i]} * {step}' if i == dim else f'{a[i]} = {b[i]}' for i in range(x.ndim)]
+    target = DTensorSpec(x.device_mesh, tuple(placements), tensor_meta=TensorMeta(described.shape, described.stride(), x.dtype))
+    algebra = Algebra()
+    access = algebra.map(tuple(described.shape), tuple(x.shape), equations)
+    source = algebra.map(tuple(x.shape), (x.numel(),), lambda a, b: [f'{flat(x.shape, a)} = {b[0]}'])
+    order = algebra.map((described.numel(),), tuple(described.shape), lambda a, b: [f'{a[0]} = {flat(described.shape, b)}'])
+    selection = {'shape': list(x.shape), 'steps': [['reindex', {'shape': list(described.shape), 'index': order.then(access).then(source).terms()}]]}
+    return _exchange_view(x, target, selection)
 
 
 def _reshape(op, args, kwargs):
@@ -1408,7 +1743,7 @@ def _reshape(op, args, kwargs):
             candidate = RaggedShard(dim, p.key) if isinstance(p, RaggedShard) else Shard(dim)
             target = DTensorSpec(x.device_mesh, (*placements[:i], candidate, *placements[i + 1:]), tensor_meta=meta)
             coordinates = itertools.product(*(range(x.device_mesh.size(axis)) for axis in range(i + 1)))
-            if all(_view_region(x._spec, rank) == _view_region(target, rank) for rank in coordinates):
+            if all(_view_region(x._spec, rank).equivalent(_view_region(target, rank)) for rank in coordinates):
                 placements[i] = candidate
                 break
         else:
@@ -1446,9 +1781,13 @@ def _whole(tree, dims):
 
 
 def _dispatch(op_call, args, kwargs):
-    from .algebra import decompositions
-    if op_call in decompositions:
-        return decompositions[op_call](*args, **kwargs)
+    if op_call in (aten.convolution.default, aten.convolution_backward.default):
+        raise ValueError('distributed convolution requires result ownership on the Function source graph')
+    if op_call is aten.index_select.default:
+        return _index_select(op_call, args, kwargs)
+    from .algebra import partition_decompositions
+    if op_call in partition_decompositions:
+        return partition_decompositions[op_call](*args, **kwargs)
     handler = _HANDLERS.get(op_call)
     if handler is not None:
         return handler(op_call, args, kwargs)
@@ -1536,7 +1875,8 @@ def _wrapped(result, spec):
 
 
 def _named(op_call, args, kwargs):
-    return dict(zip((a.name for a in op_call._schema.arguments), args), **kwargs)
+    return {a.name: args[i] if i < len(args) else kwargs.get(a.name, a.default_value)
+            for i, a in enumerate(op_call._schema.arguments)}
 
 
 def _mean(op_call, args, kwargs):
@@ -1547,6 +1887,114 @@ def _mean(op_call, args, kwargs):
     if not isinstance(x, DTensor) or not any(isinstance(p, RaggedShard) and p.dim in dims for p in x.placements):
         return _propagated(op_call, args, kwargs)
     return torch.sum(x, dims, keepdim=keepdim, dtype=dtype) / math.prod(x.shape[d] for d in dims)
+
+
+def _index_select(op_call, args, kwargs):
+    """Select owned values and combine their bytes, never their numeric values.
+
+    Exactly one owner supplies each selected value. Integer-byte SUM therefore
+    moves its representation unchanged, including signed zero and NaN payloads.
+    The index tensor remains ordinary runtime data; only its page relationships
+    and output width are fixed during preparation.
+    """
+    named = _named(op_call, args, kwargs)
+    x, dim, index = named['self'], named['dim'] % named['self'].ndim, named['index']
+    if not isinstance(x, DTensor) or not any(p.is_shard() and p.dim == dim for p in x.placements):
+        return _propagated(op_call, args, kwargs)
+    reduced = [i for i, p in enumerate(x.placements) if p.is_shard() and p.dim == dim]
+    requested = list(x.placements)
+    index_placements = list(index.placements) if isinstance(index, DTensor) else [Replicate()] * x.device_mesh.ndim
+    for i, p in enumerate(requested):
+        if i in reduced:
+            q = index_placements[i]
+            requested[i] = RaggedShard(dim, q.key) if isinstance(q, RaggedShard) else Shard(dim) if q.is_shard() else Replicate()
+        elif p.is_replicate() and index_placements[i].is_shard():
+            q = index_placements[i]
+            requested[i] = RaggedShard(dim, q.key) if isinstance(q, RaggedShard) else Shard(dim)
+    if isinstance(index, DTensor):
+        index = redistribute(index, [Replicate() if i in reduced or x.placements[i].is_shard() else p
+                                     for i, p in enumerate(index.placements)])._local_tensor
+    first, extent = 0, x.shape[dim]
+    for i, p in enumerate(x.placements):
+        if p.is_shard() and p.dim == dim:
+            extent, offset = p._local_shard_size_and_offset(extent, x.device_mesh.size(i), x.device_mesh.get_local_rank(i))
+            first += offset
+    shape = list(x.shape)
+    shape[dim] = named['index'].numel()
+    local_shape = list(x._local_tensor.shape)
+    local_shape[dim] = index.numel()
+    if extent:
+        selected = torch.index_select(x._local_tensor, dim, (index - first).clamp(0, extent - 1))
+        raw = selected.contiguous().view(torch.uint8).reshape((*local_shape, x.element_size()))
+        mask_shape = [1] * (x.ndim + 1)
+        mask_shape[dim] = index.numel()
+        owned = ((index >= first) & (index < first + extent)).reshape(mask_shape)
+        raw = torch.where(owned, raw, 0)
+    else:
+        raw = x._local_tensor.new_zeros((*local_shape, x.element_size()), dtype=torch.uint8)
+    for i in reduced:
+        raw = funcol.all_reduce(raw, 'sum', x.device_mesh.get_group(i))
+    local = raw.reshape((*local_shape[:-1], local_shape[-1] * x.element_size())).view(x.dtype).reshape(local_shape)
+    held = [Replicate() if i in reduced else p for i, p in enumerate(requested)]
+    result = _wrap(local, DTensorSpec(x.device_mesh, tuple(held),
+                   tensor_meta=TensorMeta(torch.Size(shape), torch.empty(shape, device='meta').stride(), x.dtype)))
+    return redistribute(result, requested)
+
+
+def _arg_extreme(op_call, args, kwargs):
+    """Reduce values and first global positions without moving the input pages."""
+    named = _named(op_call, args, kwargs)
+    x, dim, keep = named['self'], named.get('dim'), named.get('keepdim', False)
+    if dim is None:
+        result = _arg_extreme(op_call, (x.reshape(-1), 0, False), {})
+        return result.reshape((1,) * x.ndim) if keep else result
+    dim %= x.ndim
+    if not any(isinstance(p, RaggedShard) and p.dim == dim for p in x.placements):
+        return _propagated(op_call, args, kwargs)
+    x = redistribute(x, [Replicate() if p.is_partial() else p for p in x.placements])
+    reduced = [i for i, p in enumerate(x.placements) if p.is_shard() and p.dim == dim]
+    first, extent = 0, x.shape[dim]
+    for i in reduced:
+        extent, offset = x.placements[i]._local_shard_size_and_offset(extent, x.device_mesh.size(i), x.device_mesh.get_local_rank(i))
+        first += offset
+    maximum = op_call is aten.argmax.default
+    local = x._local_tensor
+    shape = list(local.shape)
+    shape[dim] = 1
+    neutral = (-math.inf if maximum else math.inf) if x.is_floating_point() else (
+        (False if maximum else True) if x.dtype == torch.bool else
+        (torch.iinfo(x.dtype).min if maximum else torch.iinfo(x.dtype).max))
+    nan = torch.isnan(local) if x.is_floating_point() else None
+    values = torch.where(nan, neutral, local) if nan is not None else local
+    best = (values.amax if maximum else values.amin)(dim, keepdim=True) if extent else local.new_full(shape, neutral)
+    def combine(value, operation):
+        for i in reduced:
+            value = funcol.all_reduce(value, operation, x.device_mesh.get_group(i))
+        return value
+    best = combine(best, 'max' if maximum else 'min')
+    matches = local == best
+    if nan is not None:
+        seen = nan.to(torch.uint8).amax(dim, keepdim=True) if extent else local.new_zeros(shape, dtype=torch.uint8)
+        matches = torch.where(combine(seen, 'max').bool(), nan, matches)
+    index_shape = [1] * local.ndim
+    index_shape[dim] = extent
+    positions = torch.arange(first, first + extent, dtype=torch.int64, device=local.device).reshape(index_shape)
+    candidate = torch.where(matches, positions, x.shape[dim]).amin(dim, keepdim=keep) if extent else torch.full(
+        shape if keep else shape[:dim] + shape[dim + 1:], x.shape[dim], dtype=torch.int64, device=local.device)
+    result = combine(candidate, 'min')
+    placements = []
+    for i, p in enumerate(x.placements):
+        if i in reduced:
+            p = Replicate()
+        elif p.is_shard() and not keep and p.dim > dim:
+            p = RaggedShard(p.dim - 1, p.key) if isinstance(p, RaggedShard) else Shard(p.dim - 1)
+        placements.append(p)
+    logical = list(x.shape)
+    logical[dim] = 1
+    if not keep:
+        logical.pop(dim)
+    return _wrap(result, DTensorSpec(x.device_mesh, tuple(placements), tensor_meta=TensorMeta(
+        torch.Size(logical), torch.empty(logical, device='meta').stride(), torch.int64)))
 
 
 def _spec_like(spec, shape, dtype):
@@ -1589,6 +2037,8 @@ def _detached(op_call, args, kwargs):
 
 
 _HANDLERS = {aten.mean.default: _mean, aten.mean.dim: _mean,
+             aten.argmax.default: _arg_extreme, aten.argmin.default: _arg_extreme,
+             aten.unfold.default: _unfold, aten.slice.Tensor: _slice_view, aten.select.int: _slice_view,
              aten.view.default: _reshape, aten.reshape.default: _reshape, aten._unsafe_view.default: _reshape,
              aten._scaled_dot_product_flash_attention_for_cpu.default: _attention,
              aten._scaled_dot_product_attention_math_for_mps.default: _attention, aten.detach.default: _detached}

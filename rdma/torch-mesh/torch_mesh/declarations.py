@@ -22,6 +22,96 @@ def _select_exchange_fake(x, shape, selections, group_name):
     return x.new_empty(shape)
 
 
+@torch.library.custom_op('torch_mesh::select_reduce', mutates_args=())
+def select_reduce(x: torch.Tensor, zero: torch.Tensor | None, shape: list[int], selections: str, group_name: str) -> torch.Tensor:
+    """The declared SUM adjoint of selected-page replication."""
+    raise RuntimeError('select_reduce must be bound to its declared pages before execution')
+
+
+@select_reduce.register_fake
+def _select_reduce_fake(x, zero, shape, selections, group_name):
+    return x.new_empty(shape)
+
+
+def _reduce_plan(node, named):
+    """Partition exact contributor sets with the shared native relation cover."""
+    if 'mesh_selection_reductions' not in node.meta:
+        from mesh_relation import Algebra
+        from . import _stream
+        declaration, algebra = json.loads(named['selections']), Algebra()
+        sources = [algebra.selection_relation(value) for value in declaration['sources']]
+        targets = [algebra.selection_relation(value) for value in declaration['destinations']]
+        sets = [relation.image(relation.domain()) for relation in [*sources, *targets]]
+        count = len(sources)
+        extent = math.prod(declaration['sources'][0]['shape'])
+        plans, missing = [], []
+        for domain, members in algebra.cover(sets):
+            owners = [rank - count for rank in members if rank >= count]
+            contributors = tuple(rank for rank in members if rank < count)
+            selected = algebra.selection_relation({'shape': [extent], 'steps': [['select', 0, domain.spans()]]})
+            def local(relation):
+                positions = selected.then(relation.inverse((extent,)))
+                return _stream.TensorLayout(positions.shape, (1,), index_shape=relation.shape,
+                    index_coordinates=json.dumps([positions.terms()]))
+            for rank in owners:
+                write = local(targets[rank])
+                if contributors:
+                    plans.append((rank, contributors, {source: local(sources[source]) for source in contributors}, write))
+                else:
+                    missing.append((rank, write))
+        node.meta['mesh_selection_reductions'] = tuple(plans), tuple(missing)
+    return node.meta['mesh_selection_reductions']
+
+
+def _bind_reduce(source, destination, plan, group):
+    from . import backend
+    from .operand import TensorView
+    bindings = []
+    source = TensorView.of(source)
+    for root, contributors, reads, write in plan:
+        if contributors == (root,):
+            continue  # The common placement already aliases this identity edge.
+        read = (TensorView(source.storage, _selected_layout(source, reads[group.rank()]))
+                if group.rank() in reads else source.reshape((source.numel(),)).slice(0, 0, 0))
+        output = TensorView(TensorView.of(destination).storage, _selected_layout(destination, write)) if root == group.rank() else None
+        call = backend.Call(backend.REDUCE, write.count, source.dtype, root=root,
+                            op=dist.ReduceOp.SUM, contributors=contributors)
+        bindings.append((call, read, output))
+    return backend.prepare_fragments(bindings, group) if bindings else (None, [])
+
+
+def _select_exchange_context(ctx, inputs, output):
+    x, shape, selections, group_name = inputs
+    ctx.shape, ctx.selections, ctx.group_name = list(x.shape), selections, group_name
+
+
+def _select_exchange_backward(ctx, gradient):
+    from mesh_relation import Algebra
+    from .algebra import index_values
+    algebra, declaration = Algebra(), json.loads(ctx.selections)
+    rank = dist.distributed_c10d._resolve_process_group(ctx.group_name).rank()
+    selected = [algebra.selection_relation(value) for value in declaration['destinations']]
+    domains = [relation.image(relation.domain()) for relation in selected]
+    extent = math.prod(declaration['sources'][0]['shape'])
+    compact = [{'shape': [extent], 'steps': [['select', 0, domain.spans()]]} for domain in domains]
+    placed = algebra.selection_relation(compact[rank])
+    indices = selected[rank].then(placed.inverse((extent,)))
+    local = torch.zeros(placed.shape, dtype=gradient.dtype, device=gradient.device)
+    if gradient.numel():
+        local = local.scatter_add(0, index_values(indices.terms(), gradient.numel(), gradient.device), gradient.reshape(-1))
+    covered = algebra.set('{ [i] : false }', 1)
+    for domain in domains:
+        covered = covered.binary(domain, 'union')
+    holes = any(not algebra.selection(value).binary(covered, 'subtract').empty() for value in declaration['sources'])
+    zero = gradient.new_zeros((1,)) if holes else None
+    result = select_reduce(local, zero, ctx.shape,
+        json.dumps({'sources': compact, 'destinations': declaration['sources']}, separators=(',', ':')), ctx.group_name)
+    return result, None, None, None
+
+
+select_exchange.register_autograd(_select_exchange_backward, setup_context=_select_exchange_context)
+
+
 def _exchange_plan(node, named):
     """design/compiler-followups-2026-10-30.md#selected-page-crossings"""
     if 'mesh_selection_exchanges' not in node.meta:
@@ -175,6 +265,10 @@ def lower(graph, *, forms=None):
                                   destination=destination, fused=True)
                      for source, destination, read, _ in _exchange_plan(node, args)
                      if source != destination]
+        elif namespace == 'torch_mesh' and name == 'select_reduce':
+            calls = [backend.Call(backend.REDUCE, write.count, x.dtype, root=root,
+                                  op=dist.ReduceOp.SUM, contributors=contributors)
+                     for root, contributors, _, write in _reduce_plan(node, args)[0] if contributors != (root,)]
         elif namespace == 'torch_mesh' and name in ('allgatherv', 'allgatherv_out'):
             calls = partition.gathered(x, args['dim'], args['sizes'], group)
         elif namespace == 'torch_mesh' and name in ('all_reduce', 'linear_sum', 'fused_step', 'fused_step_out'):
@@ -253,7 +347,7 @@ def lower(graph, *, forms=None):
     return groups
 
 
-def trace(function, *arguments, parameters=()):
+def trace(function, *arguments, parameters=(), decomposition_table=None):
     """Trace one complete function, including its backward, using FakeTensor.
 
     Parameters' real gradient references are saved and restored; fake backward
@@ -268,7 +362,7 @@ def trace(function, *arguments, parameters=()):
     try:
         for parameter in parameters:
             parameter.grad = None
-        graph = make_fx(function, decomposition_table=decompositions,
+        graph = make_fx(function, decomposition_table=decompositions if decomposition_table is None else decomposition_table,
                         tracing_mode='fake', _allow_non_fake_inputs=True)(*arguments)
     finally:
         for parameter, gradient in zip(parameters, gradients):
@@ -307,7 +401,7 @@ def execution_sequence(steps, output=None, pages=()):
     return Execution(steps, output, pages)
 
 
-_BOUND = {'all_to_all_single', 'merge_partials', 'reduce_scatterv', 'allgatherv', 'allgatherv_out', 'select_exchange',
+_BOUND = {'all_to_all_single', 'merge_partials', 'reduce_scatterv', 'allgatherv', 'allgatherv_out', 'select_exchange', 'select_reduce',
           'reduce_scatter_tensor', 'all_gather_into_tensor', 'all_gather_into_tensor_out',
           'broadcast', 'broadcast_', 'all_reduce_coalesced', 'all_gather_into_tensor_coalesced',
           'reduce_scatter_tensor_coalesced'}
@@ -433,6 +527,17 @@ class BoundGraph:
                     if source == destination == native.rank():
                         placements.equate(named['x'], _value(node),
                             _selected_layout(named['x'], read), _selected_layout(_value(node), write))
+            if target is torch.ops.torch_mesh.select_reduce.default:
+                from . import _stream
+                plans, missing = _reduce_plan(node, named)
+                for rank, write in missing:
+                    if rank == native.rank():
+                        placements.equate(named['zero'], _value(node),
+                            _stream.TensorLayout((write.count,), (0,)), _selected_layout(_value(node), write))
+                for root, contributors, reads, write in plans:
+                    if contributors == (root,) and root == native.rank():
+                        placements.equate(named['x'], _value(node),
+                            _selected_layout(named['x'], reads[root]), _selected_layout(_value(node), write))
             for source, described, dim, sizes in _gathers(target, named, _value(node), native) or ():
                 own = described.narrow(dim, sum(sizes[:native.rank()]), sizes[native.rank()])
                 placements.equate(source, own)
@@ -510,6 +615,15 @@ class BoundGraph:
                         self.groups.setdefault(name, []).extend(calls)
                     values.update(zip(exported, targets))
                     continue
+                if target is torch.ops.torch_mesh.select_reduce.default:
+                    prepared, calls = _bind_reduce(named['x'], tree_flatten(targets)[0][0],
+                                                   _reduce_plan(crossing, metadata)[0], native)
+                    if prepared is not None:
+                        self.steps.append(prepared)
+                    if calls:
+                        self.groups.setdefault(metadata['group_name'], []).append(calls)
+                    values.update(zip(exported, targets))
+                    continue
                 gathers = _gathers(target, named, targets, native)
                 if gathers is not None:
                     prepared = backend.bind_gather_views(gathers, native)
@@ -553,18 +667,25 @@ class Function:
     as outputs; a compiler cannot discard the backward as unused work. No payload
     function is executed to discover communication. Execution submits the
     bound native commands; compilation failures propagate to the caller.
+
+    ``ownership`` supplies a mesh and explicit source-value owner selections.
+    Its source graph is captured before numerical decomposition, then rewritten
+    into the same page operands and commands as the other declarations.
     """
-    def __init__(self, function, *arguments, parameters=(), configuration=None):
+    def __init__(self, function, *arguments, parameters=(), configuration=None, ownership=None):
         self.function, self.parameters = function, tuple(parameters)
         self.arguments = arguments
         self.configuration = configuration
+        self.ownership = ownership
+        self.source_graph = None
         self.graph, self.groups, self.run, self.output_spec = None, {}, None, None
         self.execution = None
 
     def declare(self, group, *, destinations=None):
         from functools import partial
-        from torch.utils._pytree import tree_flatten
+        from torch.utils._pytree import tree_flatten, tree_map
         from torch.distributed.tensor import DTensor
+        from .compilation import bind
 
         def recorded(*arguments):
             output = self.function(*arguments)
@@ -573,23 +694,43 @@ class Function:
                          for p in self.parameters]
             return (*values, *gradients)
 
-        graph, declarations = trace(recorded, *self.arguments, parameters=self.parameters)
+        with bind(self.configuration):
+            if self.ownership is None:
+                graph, declarations = trace(recorded, *self.arguments, parameters=self.parameters)
+            else:
+                from torch._subclasses.fake_tensor import FakeTensorMode
+                with FakeTensorMode(allow_non_fake_inputs=True) as mode:
+                    def global_value(value):
+                        if isinstance(value, DTensor):
+                            return torch.empty_strided(value.shape, value.stride(), dtype=value.dtype,
+                                                       device=value.device, requires_grad=value.requires_grad)
+                        return mode.from_tensor(value) if isinstance(value, torch.Tensor) else value
+                    arguments = tree_map(global_value, self.arguments)
+                    graph, declarations = trace(recorded, *arguments, parameters=self.parameters, decomposition_table={})
         return self.declare_graph(graph, group, declarations, destinations=destinations)
 
     def declare_graph(self, graph, group, declarations=None, *, destinations=None):
-        """Compile an existing complete graph without retracing its operators."""
+        """Lower an existing typed graph, retaining its source identities."""
         from functools import partial
+        arguments = self.arguments
+        if self.ownership is not None:
+            from .partition import lower_owned_graph
+            from .compilation import bind
+            self.source_graph = graph
+            with bind(self.configuration):
+                graph, arguments = lower_owned_graph(graph, arguments, self.ownership)
+            declarations = None
         declarations = lower(graph) if declarations is None else declarations
         from . import host
         if any(_bound(node) or host.bound(node) for node in graph.graph.nodes):
             from .compilation import bind
             with bind(self.configuration):
-                prepared = BoundGraph(graph, self.arguments, group, self.configuration, destinations)
+                prepared = BoundGraph(graph, arguments, group, self.configuration, destinations)
             self.graph, self.groups, self.execution = graph, prepared.groups, prepared.execution
         else:
             from . import compiler
             with torch.no_grad():
-                program = compiler(graph, list(self.arguments), configuration=self.configuration, destinations=destinations)
+                program = compiler(graph, list(arguments), configuration=self.configuration, destinations=destinations)
             self.graph, self.groups = graph, declarations
             self.execution = execution_sequence([program], program.output)
         self.run = self.execution.forward
