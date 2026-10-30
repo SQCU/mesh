@@ -1,6 +1,7 @@
 # design/whole-function.md#observations
 import json
 from concurrent.futures import Future
+from pathlib import Path
 import queue
 import threading
 from mesh_statistics import now, completed, emit
@@ -8,11 +9,23 @@ from mesh_statistics import now, completed, emit
 _history = {}
 
 
+def path(key):
+    """A program's observations file: a path as named, or a bare name's ~/.cache/mesh/observations/<name>.jsonl."""
+    key = str(key)
+    return Path(key).expanduser() if '/' in key else Path.home() / '.cache/mesh/observations' / f'{key}.jsonl'
+
+
 def observations(key):
-    return _history.setdefault(str(key), [])
+    """The observations this program's earlier runs kept (its file, read once, before any execution), with this
+    process's own after them."""
+    key = str(key)
+    if key not in _history:
+        kept = path(key)
+        _history[key] = [json.loads(line) for line in kept.read_text().splitlines() if line.strip()] if kept.is_file() else []
+    return _history[key]
 
 
-def start(store, key, rank, ranks, history):
+def start(store, key, rank, ranks, history, kept=None):
     outgoing, stopping = queue.SimpleQueue(), threading.Event()
     future = Future()
     def collect():
@@ -22,13 +35,22 @@ def start(store, key, rank, ranks, history):
             future.set_exception(error)
     worker = threading.Thread(target=collect, name='mesh-observations', daemon=True)
     worker.start()
-    return outgoing, stopping, worker, future
+    return outgoing, stopping, worker, future, kept
 
 
 def close(observer):
-    outgoing, stopping, worker, future = observer
+    """The run's observations: emitted, and appended to the program's observations file (`kept`, the key its placement
+    read) once execution has ended, so its next run starts from them."""
+    outgoing, stopping, worker, future, kept = observer
     stopping.set()
-    emit([{'observations': future.result()}])
+    records = future.result()
+    emit([{'observations': records}])
+    if kept is not None and records:
+        observations(kept).extend(records)
+        file = path(kept)
+        file.parent.mkdir(parents=True, exist_ok=True)
+        with file.open('a') as out:
+            out.write(''.join(json.dumps(record, separators=(',', ':')) + '\n' for record in records))
 
 
 def _collect(store, key, rank, ranks, history, outgoing, stopping):

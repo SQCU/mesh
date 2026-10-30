@@ -1,8 +1,6 @@
 # design/whole-function.md
 import itertools
 import json
-import os
-import sys
 import time
 from pathlib import Path
 
@@ -23,8 +21,7 @@ def placement(mesh, name, workload, observations, *, parameters):
     rank, size = group.rank(), group.size()
     store = dist.distributed_c10d._get_default_store()
     key = f'mesh/configuration/{group.group_name}/{name}/{next(_serial)}'
-    history = (json.load(sys.stdin) if os.environ.get('MESH_OBSERVATIONS_STDIN') else
-               observations if isinstance(observations, list) else rollout.observations(observations))
+    history = observations if isinstance(observations, list) else rollout.observations(observations)
     store.set(f'{key}/capacity/{rank}', str(node()[1]))
     capacities = [int(store.get(f'{key}/capacity/{p}')) for p in range(size)]
     if rank == 0:
@@ -59,6 +56,7 @@ def placement(mesh, name, workload, observations, *, parameters):
     emit({'phase': 'placed', 'unix': time.time()})   # every member leaves together: each waited for rank 0's proposal
     return {'mesh': mesh, 'name': name, 'group': group, 'rank': rank, 'size': size,
             'store': store, 'key': key, 'history': history, 'workload': workload, 'records': records,
+            'kept': None if isinstance(observations, list) else observations,
             'decisions': decisions, 'assignment': operands, 'graphs': graphs,
             'implementation': revision(Path(assignment.__file__).resolve().parents[1]), 'sequence': 0}
 
@@ -81,7 +79,7 @@ def bind(configuration, groups, prepare):
     prepare()
     emit({'phase': 'prepared', 'unix': time.time()})
     c.update(decisions=decisions, graphs={name: graph}, assignment={**c['assignment'], 'parts': operands})
-    c['observer'] = rollout.start(c['store'], c['key'] + '/observations', c['rank'], c['size'], c['history'])
+    c['observer'] = rollout.start(c['store'], c['key'] + '/observations', c['rank'], c['size'], c['history'], c['kept'])
     group._observers = getattr(group, '_observers', []) + [c['observer']]
 
 

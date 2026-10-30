@@ -310,7 +310,7 @@ def fabric_address(number, record, cluster):
     raise RuntimeError(f'node {number}: no beacon heard and no configured fabric address')
 
 
-def run_rank(item, me, record, ordinal, cluster, bench, known):
+def run_rank(item, me, record, ordinal, cluster, bench):
     """This node's rank of one workload, on the elected part as its paired cables link it at the workload's start."""
     import mesh_nodes as mesh
     tag = item['tag']
@@ -341,22 +341,19 @@ def run_rank(item, me, record, ordinal, cluster, bench, known):
         env = (f'PYTHONPATH={mesh.home_path(source + "/rdma")}:{mesh.home_path(source + "/rdma/torch-mesh")} '
                'PYTHONDONTWRITEBYTECODE=1 ')
         command = f'{cluster.python} {mesh.home_path(source + "/examples/" + item["program"] + ".py")}'
-        history = known.get(tag, [])[-64:]
+        # the program's own operands, as anyone runs it; it keeps its own observations (rollout.path)
+        operands = {}
         if item.get('configuration'):
             operands = json.loads((bench / item['configuration']).read_text())
             operands.update({key: item[key] for key in ('steps', 'rows') if key in item})
-            operands['observations'] = history
             command += ' -'
-        else:
-            operands = history
-            env += 'MESH_OBSERVATIONS_STDIN=1 '
         result['status'] = 'running'
         port = cluster.rank_port + zlib.crc32(record['run'].encode()) % 20 * 20 + ordinal
         output = mesh.rank(me, k, len(members), fabric_address(members[0], record, cluster), tag, '.', command, port,
                            alarm=max(1, int(end - time.time())), env=env, input=json.dumps(operands).encode(),
                            run=record['token'])
         rank = rank_results({f'rank{k}': output})[f'rank{k}']
-        known[tag] = (known.get(tag, []) + rank.pop('observations'))[-64:]
+        rank.pop('observations')
         result.update(result=rank, loaded=sorted({v['loaded'] for v in output['records'] if 'loaded' in v}),
                       overlapped=sorted({t for v in output['records'] for t in v.get('overlap', ())}),
                       status='completed' if rank['exit'] == 0 else 'failed')
@@ -421,14 +418,11 @@ def collective(record):
                 break
             time.sleep(5)
         items = workload_configuration(bench)
-        history = HOURLY / 'history.json'
-        known = json.loads(history.read_text()) if history.exists() else {}
         record.update(status='running', workloads=[])
         for ordinal, item in enumerate(items):
             stage = item['tag']
-            record['workloads'].append(run_rank(item, me, record, ordinal, cluster, bench, known))
+            record['workloads'].append(run_rank(item, me, record, ordinal, cluster, bench))
             write(record)
-        history.write_text(json.dumps(known))
         record['status'] = 'completed' if all(w['status'] == 'completed' for w in record['workloads']) else 'failed'
     except (Exception, Stopped) as error:
         quiet()
