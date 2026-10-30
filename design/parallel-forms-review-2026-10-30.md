@@ -15,8 +15,9 @@ lines in 5,516. The file is not copy-pasted: what it holds twice are whole alter
 |---|---|---|
 | `python/mesh/` (`__init__.py`, `_native.py`, `collective.py`) | ≈1,000 | Nothing imports it. The venv's only path file, `mesh.pth`, adds `rdma/`, so every `import mesh` gets rdma/mesh.py. pyproject sets `package = false` (verified). But design/algorithm-sources.md:25-89 calls it the Python surface "restored from mesh `57628982^:python/mesh/`" for the library-core deliverable (deliverables.md L5), and INDEX.md:67 indexes it: deleting it retires that deliverable's surface, the operator's decision. |
 | `mesh_mpi.Write_pages_prepare` | ≈25 py | No caller in either repo, xonotic included (verified). The library entry it wraps, `ncclMeshWritePagesPrepare`, stays: it is the page-mask half of nccl.h's page-table + page-mask WRITE contract, the integration's named interface, and it already lowers through the layout preparer's `write_prepare`. |
-| External `ncclMeshComplete`, `ncclMeshStream.issue` | (see B') | No frontend sets `issue` or calls `ncclMeshComplete` (verified). |
+| External `ncclMeshComplete`, `ncclMeshStream.issue` | (see B') | No frontend sets `issue` or calls `ncclMeshComplete` (verified). Deleted with B', 014471ee. |
 | rdma/mesh_simulate.py | 620 | Deleted, 17e3d812. |
+| `ncclMeshStream.workspace` and `.context`, torch_mesh's `workspace`, `scratch`, `holders`, `retire`, `ncclMeshRetired` | 36 | Nothing set the workspace; nothing called `retire`. Deleted, 8cf035d4. |
 
 ## The library's forms (rdma/nccl-mesh.c, nccl-mesh-metal.m)
 
@@ -94,6 +95,21 @@ immediately." Form C is resolved, and with it the recorder's capture:
 - Ignored: the standalone classic benchmarks and tools (c446ba94). LiteRT provider stages, which LiteRT's Metal
   accelerator encodes itself and which were captured only through the classic proxies, are refused at preparation
   until they are lowered to native stages (T8, LiteRT's operator tables).
+
+## Since: the relays, B' and two lifetimes (2026-10-30)
+
+- D6-D8, the relay half of the pair loop, is the library's (mesh 734a76e3, metal-microbench 63eccb19). On a rank
+  that ends neither side, ncclMeshWriteLayoutPrepare over an empty table leases the relay where a route crosses the
+  rank, and the plan holds it. torch_mesh's four relay leases, mb's columns_prepare relay, ncclMeshCommWriteForwards,
+  and partition.py's relay on every bystander, forwarding or not, are gone. D9, GroupStart, WriteExecute and GroupEnd
+  around a crossing's plans, is still a few lines at each site.
+- D16: MeshRankChannels is ncclMeshCommChannels (63eccb19).
+- B' is deleted (014471ee): ncclMeshIssue, ncclMeshComplete, the loss records, the several-communicator parts. A
+  group names one communicator and completes at once.
+- Two defects found on the way, both lifetimes. ScheduleBinding::writes destroyed its plans as soon as their crossing
+  was encoded, while the schedule's entries name the plans' span tables. The plans are now held with the schedule.
+  MeshRankDetach destroyed WRITE plans after ncclCommDestroy, and a plan's drop reads its communicator; the plans now
+  go first.
 
 ## Order
 
