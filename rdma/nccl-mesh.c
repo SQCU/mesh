@@ -321,10 +321,11 @@ static void map_free(struct mesh_link_map *map) {
 }
 
 static void cache_drop(struct ncclComm *comm);
-/* the trees and the table compiled on the map, and the WRITE plans' definitions compiled on them (cache_drop); with `all`,
-   the map, the caller's paths and programs too */
+/* the trees and the table compiled on the map; with `all` (the communicator's end), the map, the caller's paths and
+   programs and the WRITE plans' definitions too (cache_drop: a plan's are its own transfers', which no map, form or
+   route reaches) */
 static void routes_free(struct ncclComm *comm, int all) {
-  cache_drop(comm);
+  if (all) cache_drop(comm);
   trees_free(&comm->trees);
   comm->rooted = (struct mesh_trees){0};
   comm->compiled = 0;
@@ -650,7 +651,6 @@ ncclResult_t ncclMeshCommWriteRoutes(ncclComm_t comm, int source, int destinatio
   paths_free(to); *to = (struct mesh_paths){P, first, cable, weights};
   comm->write_overrides[source * comm->nranks + destination] = 1;
   plan_free(comm, comm->plan); comm->plan = NULL;
-  cache_drop(comm);
   mesh_write_routes_free(comm->composed, (uint32_t)comm->nranks);
   comm->composed = NULL;
   const int composed = mesh_write_routes_compose(&comm->fabric, comm->writes, comm->write_overrides, &comm->composed);
@@ -2972,8 +2972,7 @@ static void compiled_drop(struct ncclComm *comm, struct compiled *x) {
   calls_free(x->calls, x->n); schedules_free(comm, x->plans);
   *x = (struct compiled){0};
 }
-/* the WRITE plans' own definitions (write_definitions) dropped, compiled on routes or a map that changed or a
-   communicator that ends; a plan compiles them again at its next execution (definition_of) */
+/* the WRITE plans' own definitions (write_definitions) dropped, at the communicator's end (routes_free) */
 static void cache_drop(struct ncclComm *comm) {
   while (comm->compiled_writes) write_definitions_drop(comm, comm->compiled_writes);
 }
@@ -3023,7 +3022,7 @@ static int declared_as(const struct call *c, const struct call *d) {
 static ncclResult_t write_definitions(struct ncclMeshWritePlan *plan);
 
 /* the compiled form of the group numbered `holder` (*group): its plan's group (group_at), else, with no plan, a WRITE
-   alone's plan's own (write_definitions, compiled again where routes or the map changed since), each call's roles its
+   alone's plan's own (write_definitions, compiled as the plan was prepared), each call's roles its
    declaration's (nothing planned at the call: nccl.h ncclMeshCommPlan).  A group that no declaration covers, or that
    is not the group declared at its place (its calls' count, kinds, types, operators, roots and counts: declared_as),
    ends the program with a warning (library_end): nothing compiles a group at its issue
@@ -3031,7 +3030,7 @@ static ncclResult_t write_definitions(struct ncclMeshWritePlan *plan);
 static ncclResult_t definition_of(struct ncclComm *comm, struct call *list, size_t n, uint64_t holder, struct compiled **group) {
   struct compiled *x = comm->plan ? group_at(comm->plan, holder) : NULL;
   struct ncclMeshWritePlan *alone = n == 1 && !list[0].fused ? list[0].write_plan : NULL;
-  ncclResult_t result = !x && alone && !alone->compiled ? write_definitions(alone) : ncclSuccess;
+  ncclResult_t result = ncclSuccess;
   if (!x && alone && alone->compiled) x = alone->compiled + list[0].invocation % alone->occurrences;
   if (!result && !x) {
     char why[MESH_DIAGNOSTIC_BYTES];
@@ -5869,10 +5868,10 @@ static ncclResult_t write_prepare_spans(struct ncclMeshWritePlan *plan,ncclMeshP
 /* a WRITE executed alone in its group (and not on a fused stream) binds a definition its plan holds, compiled as the
    plan is prepared (compile_group on the call ncclMeshWriteExecute makes, one an occurrence of its packet cuts); its
    issues are laid and placed at its first executions, a generation each (issue_bind).  A tiled WRITE's comes from its
-   declaration (ncclMeshCommPlan); one that cannot be compiled yet (no paths), or whose routes or map changed since,
-   at its next execution (definition_of).  The definitions hold no reference to their plan: they are let go before
-   it (ncclMeshWritePlanDestroy), or with routes or a map that changed or the communicator's end (cache_drop), which
-   keeps the plans that hold some (`compiled_writes`).  0, or the compile's failure.  Under group_lock */
+   declaration (ncclMeshCommPlan).  The definitions are the plan's transfers' (call_transfers), which no later route,
+   map or form reaches, so they last as long as the plan; they hold no reference to it: they are let go before it
+   (ncclMeshWritePlanDestroy), or at the communicator's end (cache_drop), which keeps the plans that hold some
+   (`compiled_writes`).  0, or the compile's failure, which fails the plan's preparation.  Under group_lock */
 static ncclResult_t write_definitions(struct ncclMeshWritePlan *plan) {
   struct ncclComm *comm = plan->comm;
   if (plan->layout.tile_bytes || comm->nranks == 1) return ncclSuccess;
@@ -6067,8 +6066,9 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
   const ncclResult_t prepared = write_prepare_spans(plan,table,origin);
   if (prepared) { write_plan_drop(plan); return prepared; }
   pthread_mutex_lock(&group_lock);
-  (void)write_definitions(plan); /* else compiled at its first execution (definition_of) */
+  const ncclResult_t defined = write_definitions(plan);
   pthread_mutex_unlock(&group_lock);
+  if (defined) { write_plan_drop(plan); return defined; }
   *out = plan;
   return ncclSuccess;
 }
