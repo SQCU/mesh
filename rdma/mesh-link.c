@@ -167,7 +167,7 @@ static void metadata_pin(struct mesh_stream *x,const struct taken *entry){
 }
 /* design/fake-guards-2026-10-30.md: unit u of stream x's lane c one way (`way`: 0 a SEND, 1 a receive) told before
    it is posted, the lane's units posted past it: what a reclaim of a dead client's rows reads (mesh-dataflow.c
-   mesh_pinned: a live child's lane with units posted and not done keeps every row).  The holding is not asked again
+   mesh_interval_pinned: a live child's lane with units posted and not done keeps every row).  The holding is not asked again
    a unit: its owner was read where the walk entered the unit's entry (metadata_pin, holding_kept), and a lease the
    library returns has no unit outstanding (its compiled lifetime) */
 static void unit_told(struct mesh_stream *x,int way,uint32_t c,uint64_t u){
@@ -650,7 +650,7 @@ static int link_connect(struct port *port,const struct link_numbers *numbers){
    give, a compare-and-swap from its own client, then matches nothing, and its communicator reads its holding gone,
    mesh-call.h mesh_stream_held), its words 0 (its lists' counts, `ready`, `sent`, `landed`) and its lanes' units
    posted and completed each way 0 (`posts`: its lanes' units are 0 as their queue pairs are made, lane_reset), this
-   child its poster (`child`, `child_start`: its exit ends every unit it posted, mesh-dataflow.c mesh_pinned), its peer
+   child its poster (`child`, `child_start`: its exit ends every unit it posted, mesh-dataflow.c mesh_interval_pinned), its peer
    node, its share of the link's bandwidth and its identity told, then live.  None is
    kept for a holder of a lost pairing: no holder can, by letting go or by never letting go, keep a stream of the link
    from its next pairing (design/rubrics.md M4).  Nothing of the lost pairing is sent on it: that pairing's groups
@@ -1550,7 +1550,7 @@ static void child_turn(struct port *port){
    events that open any port, however often its children ended (the operator, 2026-10-23 01:03Z: "this is not a real feature.
    delete it and anything like it").  Its streams cancelled again,
    the region's closed leases looked at again (`unreleased`: the rows its units named are held no more, its queue
-   pairs gone with it, mesh-dataflow.c mesh_pinned), its link down with no lanes, and the port to be opened by its next
+   pairs gone with it, mesh-dataflow.c mesh_interval_pinned), its link down with no lanes, and the port to be opened by its next
    child */
 static void child_reaped(struct port *port){
   struct link *l=&port->link;

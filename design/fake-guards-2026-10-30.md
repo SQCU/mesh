@@ -85,3 +85,15 @@ Refuted (forced):
 - compiler: The two-phase all-reduce's trees are packed with each cable direction as its own capacity, but the all-reduce loads both directions of every tree edge (rdma/mesh-collective.c:830): Not forced; superseded. HEAD 8e5a631c routes the default all-reduce through mesh_solve, which already charges both directions of each tree edge, so the cited packer line no longer decides it.
 - compiler: The packed trees run up to 4 hops deep (full chains) on a fabric of diameter 2 (rdma/mesh-collective.c:852): Throughput: on this map, trees that reach the min cut use depth-4 chains. With per-unit forwarding, an extra hop costs about one unit per call, not a serialization.
 - host-schedule: The cross-function queue barrier comes from declaring every active channel's `presented` (written) and `taken` (read) words as data; in the bandwidth case the calls share one crossing, so the per-call separation is the encoder chain above, not a queue barrier (rdma/nccl-mesh.c:3067): List order and GPU forward progress across command buffers. Every crossing on a comm writes the `presented` counters the next one spins on, list positions are fixed in host order at encode, and the scheduler may otherwise reorder or overlap the parts, so a later pool or present could spin on, or starve, an earlier crossing that has not yet run.
+
+## State at 33274e73 (five nodes, the bandwidth case, every output checked correct)
+
+Slowest rank, ms a call at 64 MiB (packed trees at cd210504 / solver at 8e5a631c / bridge tells cut at 33274e73):
+all-reduce 6.8 / 8.5 / 8.1, broadcast 4.1 / 4.1 / 4.1, reduce-scatter 6.4 / 6.9 / 6.9, exchange 10.2 / 5.7 / 5.4.
+Desk link use (5 ms windows, members 33.6 lb): peak 17.5 to 17.9 computer-pounds, 14.2 to 14.4 mean over windows above 12.
+The bridge's per-unit costs were overhead on the relay but not where calls stall; what stalls is listed above.
+
+Open, measured: the 64 KiB reduce-scatter runs 1.4 to 2.4 ms a call since 8e5a631c (0.1 ms before; every other 64 KiB
+case about 0.1 ms): a stall the solver's trees expose, not bandwidth. The all-reduce's demand gives each rank an equal
+segment, which a solver over ragged capacity must not be handed (demands_of); one commodity whose root is chosen in the
+solve is the form. Routing is still solved inside planning; it is an operand, k-buffered in pages, solved apart.
