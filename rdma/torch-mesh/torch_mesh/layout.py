@@ -100,8 +100,8 @@ def solve_layout(count, demands, values):
     return placed, extent
 
 
-def place(graph, placements):
-    """Solve whole producer families from all declared page and API operands."""
+def declare(graph, placements, materializations=()):
+    """Retain logical producer families and API needs before page assignment."""
     from torch.utils._pytree import tree_flatten
     from . import host
     described = [v for n in graph.nodes for v in tree_flatten(n.meta.get('val'))[0]]
@@ -113,7 +113,13 @@ def place(graph, placements):
             kind, capacity, alignment = storage_requirement(required)
             if kind != 'indexed' or capacity or alignment != 1:
                 demands.append((value, view, kind, capacity, alignment))
-    placements.solve(described, demands)
+    placements.declare(described, demands, materializations)
+
+
+def place(graph, placements):
+    """Assign pages to the same declared producer families."""
+    declare(graph, placements)
+    placements.solve()
 
 
 @lru_cache(None)

@@ -148,20 +148,29 @@ retain their positions and use the existing compiled byte copy. These are source
 and preparation results, without numerical execution or whole-function
 performance claims.
 
-## Shared IR boundary still to connect
+## Retained logical IR
 
-The native compiler already has scalar and reduction read/write records in its
-logical IR. Ownership needs those records before physical binding. The next
-split must retain one IR object from source lowering through page assignment
-and final code generation. Captured parameters and gradients keep their source
-identities and global types beside their actual local page operands.
+`native.prepare_graph` lowers the source once and returns its logical IR before
+physical binding. `effects` exposes the existing operation objects, typed reads
+and writes, and their shared iteration and reduction variables. A broadcast
+read can omit an axis without losing its relation to the operation's work.
+Compound external results retain their named field types. Whole-buffer external
+dependencies do not yet supply a numerical work-to-access relation.
 
-Logical materialization requirements must be available before consumers lower:
-the current `NativeGraph.run_node` realizes values with declared destinations
-before a later consumer can inline them. Moving physical binding later must
-retain that dependency decision. The final binding can then compose the IR's
-indices with assigned pages through the existing `PageKernel` and preparation
-view emitter, without building the logical graph again.
+Logical materialization requirements enter before consumers lower, so a later
+consumer reads a declared intermediate instead of inlining its producer.
+`graph.bind` assigns physical pages and emits commands from that same IR through
+the existing `PageKernel` and preparation view emitter. The ordinary
+`compile_graph` entry calls those two stages. Preparation retained a reduction's
+common variables, a declared intermediate, and a strided destination without
+building the logical graph again. This is data-kind source: on D2 and D4,
+`old ≺ new` because one lowered graph now supplies dependencies before binding
+and final command emission. Runtime execution is unchanged.
+
+Ownership still needs to consume these records throughout source lowering.
+Captured parameters and gradients must keep their source identities and global
+types beside their actual local page operands. Matrix and other external
+commands need their declared work relations connected to this same boundary.
 
 Dynamic updates expose this boundary. Unchanged base pages remain shared, and
 ordinary index expressions choose changed values from update pages. Compatible

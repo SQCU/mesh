@@ -57,12 +57,9 @@ class Placements:
             raise ValueError('shared page uses require the same ordered value type')
         self.equalities.append((left, right, left_view, right_view))
 
-    def solve(self, described, requirements):
-        """Unite full domains, solve layout constraints, then bind actual pages."""
-        import math
+    def declare(self, described, requirements, materializations=()):
+        """Unite logical storage families before physical pages are assigned."""
         from . import _stream
-        from .layout import allocate, solve_layout
-        self.bindings, self.owners = [], []
         roots, families = [], []
 
         def root(value):
@@ -101,10 +98,27 @@ class Placements:
                     member['family'] = first
             first['members'].extend(second['members']);first['domain'] = domain
             families[:] = [family for family in families if family is not second]
-        for logical, _ in self.fixed:
-            root(logical)
+        for logical in (*materializations, *(logical for logical, _ in self.fixed)):
+            if isinstance(logical, torch.Tensor):
+                root(logical)
         for value, *_ in requirements:
             root(value)
+        self.declaration = (tuple(described), tuple(requirements), roots, families, use)
+
+    def materializes(self, value):
+        """Whether this value belongs to a declared materialization family."""
+        return isinstance(value, torch.Tensor) and any(
+            torch._C._is_alias_of(root['logical'], value) for root in self.declaration[2])
+
+    def solve(self, described=None, requirements=None):
+        """Solve the retained logical families, then bind their actual pages."""
+        import math
+        from . import _stream
+        from .layout import allocate, solve_layout
+        if described is not None:
+            self.declare(described, requirements)
+        described, requirements, roots, families, use = self.declaration
+        self.bindings, self.owners = [], []
         for family in families:
             members, domain = family['members'], family['domain']
             related = lambda value: any(torch._C._is_alias_of(member['logical'], value) for member in members)

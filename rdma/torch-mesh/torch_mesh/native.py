@@ -157,7 +157,13 @@ class Program:
         schedule.append(self.commands)
 
 
-def compile_graph(module, metadata, operands, *, destinations=None):
+def prepare_graph(module, metadata, *, materializations=()):
+    """Lower once to logical IR, before assigning physical page operands.
+
+    Materializations name values that later consumers must read from storage.
+    Declare those boundaries here; ``bind`` later chooses their actual pages
+    and emits commands from this same graph.
+    """
     from torch._guards import detect_fake_mode
     from torch._subclasses.fake_tensor import unset_fake_temporarily
     from torch._inductor import config
@@ -177,6 +183,7 @@ def compile_graph(module, metadata, operands, *, destinations=None):
     from mesh_compute import hardware
 
     placements, bound_storage, views, storage_layouts = Placements(), {}, [], {}
+    page_values = []
     configuration = compiler_operands()
     reduction_groups = hardware()['gpu']['cores'] * configuration['REDUCTION_GROUPS_PER_CORE']
 
@@ -248,22 +255,9 @@ def compile_graph(module, metadata, operands, *, destinations=None):
 
     def ir_layout(layout):
         return _stream.TensorLayout(tuple(map(int, layout.size)), tuple(map(int, layout.stride)), int(layout.offset))
-    output_nodes = next(n.args[0] for n in module.graph.nodes if n.op == 'output')
-    described_outputs = tree_flatten(map_arg(output_nodes, lambda n: n.meta['val']))[0]
-    if destinations is not None:
-        for described, destination in zip(described_outputs, destinations, strict=True):
-            if destination is not None:
-                placements.bind(described, destination)
-    input_storage = dict(zip((n.name for n in module.graph.nodes if n.op == 'placeholder'), operands, strict=True))
-    for node in module.graph.nodes:
-        if node.op == 'placeholder' and isinstance(node.meta.get('val'), torch.Tensor):
-            placements.bind(node.meta['val'], input_storage[node.name])
-    from .layout import place
-    place(module.graph, placements)
-    for node in module.graph.nodes:
-        if node.op == 'placeholder' and isinstance(node.meta.get('val'), torch.Tensor):
-            input_storage[node.name] = placements.get(node.meta['val'])
-    operands = [input_storage[node.name] for node in module.graph.nodes if node.op == 'placeholder']
+    from .layout import declare
+    placeholders = [node for node in module.graph.nodes if node.op == 'placeholder']
+    declare(module.graph, placements, [*(node.meta.get('val') for node in placeholders), *materializations])
 
     class Preparation(PythonWrapperCodegen):
         def codegen_reinterpret_view(self, data, size, stride, offset, writeline, dtype=None):
@@ -356,17 +350,15 @@ def compile_graph(module, metadata, operands, *, destinations=None):
     class NativeGraph(GraphLowering):
         def run_node(self, node):
             result = super().run_node(node)
-            if not placements.bindings or node.op == 'output' or 'val' not in node.meta:
+            if node.op == 'output' or 'val' not in node.meta:
                 return result
             leaves, spec = tree_flatten(result)
             described = tree_flatten(node.meta['val'])[0]
             for i, (value, logical) in enumerate(zip(leaves, described, strict=True)):
-                with unset_fake_temporarily():
-                    destination = placements.get(logical)
-                if destination is None:
+                if not placements.materializes(logical):
                     continue
-                # Realize the existing producer. realize_input(Buffer) in the
-                # upstream IR can create a copy, so it is not a placement API.
+                # This is a logical dependency boundary. Keep it before later
+                # consumers lower, independently of which pages will hold it.
                 if isinstance(value, (ir.TensorBox, ir.StorageBox, ir.BaseView)):
                     value.realize()
                 while isinstance(value, (ir.TensorBox, ir.StorageBox)):
@@ -374,35 +366,97 @@ def compile_graph(module, metadata, operands, *, destinations=None):
                 if isinstance(value, ir.BaseView) and not isinstance(value, ir.ReinterpretView):
                     value = ir.ExternKernel.convert_to_reinterpret_view(value)
                 storage, layout = ir.as_storage_and_layout(value)
-                buffer = storage.data
-                name = buffer.get_name()
-                if isinstance(buffer, ir.InputBuffer):
-                    actual = input_storage[node.name] if node.op == 'placeholder' else input_storage[buffer.get_name()]
-                    with unset_fake_temporarily():
-                        from .placement import alias
-                        # Inputs keep their supplied pages. Their aliases use
-                        # the same declaration-to-placement relation as outputs.
-                        original = next(n.meta['val'] for n in module.graph.nodes
-                                        if n.op == 'placeholder' and n.name == buffer.get_name())
-                        actual = alias(original, actual, logical)
-                        if not same_view(actual, destination):
-                            raise ValueError('a supplied graph input cannot be relocated by producer placement')
-                    physical = TensorView.of(input_storage[buffer.get_name()])
-                    storage_layouts[name] = (ir_layout(buffer.get_layout()), physical)
-                    leaves[i] = page_view(storage, layout, destination)
-                    continue
-                if name not in bound_storage:
-                    base = buffer.get_layout()
-                    source_layout, base_layout = ir_layout(layout), ir_layout(base)
-                    with unset_fake_temporarily():
-                        mapped = rebase_typed(base_layout, base.dtype.itemsize, source_layout, layout.dtype.itemsize, destination.layout)
-                        bound_storage[name] = TensorView(destination.storage_as(base.dtype), mapped)
-                    storage_layouts[name] = (base_layout, bound_storage[name])
-                    self.never_reuse_buffers.add(name)
-                # Logical IR remains unchanged. Emission and command binding
-                # use the producer's one physical page relation.
-                leaves[i] = page_view(storage, layout, destination)
+                view = page_view(storage, layout, None)
+                page_values.append((view.data, logical, storage.data, layout))
+                leaves[i] = view
             return tree_unflatten(leaves, spec)
+
+        def bind(self, operands, *, destinations=None):
+            """Bind the declared operands and materializations, then emit once."""
+            with environment(), V.set_graph_handler(self), V.set_extern_kernel_nodes([]), mode:
+                with unset_fake_temporarily():
+                    for node, actual in zip(placeholders, operands, strict=True):
+                        if isinstance(node.meta.get('val'), torch.Tensor):
+                            placements.bind(node.meta['val'], actual)
+                    if destinations is not None:
+                        output_nodes = next(n.args[0] for n in module.graph.nodes if n.op == 'output')
+                        described_outputs = tree_flatten(map_arg(output_nodes, lambda n: n.meta['val']))[0]
+                        for described, destination in zip(described_outputs, destinations, strict=True):
+                            if destination is not None:
+                                placements.bind(described, destination)
+                    placements.solve()
+                    input_storage = {node.name: placements.get(node.meta['val']) if isinstance(node.meta.get('val'), torch.Tensor) else actual
+                                     for node, actual in zip(placeholders, operands, strict=True)}
+                    actuals = [input_storage[node.name] for node in placeholders]
+                    for view, logical, buffer, layout in page_values:
+                        destination = placements.get(logical)
+                        name = buffer.get_name()
+                        if isinstance(buffer, ir.InputBuffer):
+                            from .placement import alias
+                            original = next(n.meta['val'] for n in placeholders if n.name == name)
+                            actual = alias(original, input_storage[name], logical)
+                            if not same_view(actual, destination):
+                                raise ValueError('a supplied graph input cannot be relocated by producer placement')
+                            storage_layouts[name] = (ir_layout(buffer.get_layout()), TensorView.of(input_storage[name]))
+                        elif name not in bound_storage:
+                            base = buffer.get_layout()
+                            source_layout, base_layout = ir_layout(layout), ir_layout(base)
+                            mapped = rebase_typed(base_layout, base.dtype.itemsize, source_layout, layout.dtype.itemsize, destination.layout)
+                            bound_storage[name] = TensorView(destination.storage_as(base.dtype), mapped)
+                            storage_layouts[name] = (base_layout, bound_storage[name])
+                            self.never_reuse_buffers.add(name)
+                        view.operand = destination
+                source, _ = self.codegen()
+                namespace = {'__name__': 'mesh_preparation', 'mesh_destinations': bound_storage, 'mesh_views': views}
+                records = []
+                token = _records.set(records)
+                try:
+                    with unset_fake_temporarily():
+                        exec(compile(source.value, '<mesh native preparation>', 'exec'), namespace)
+                        output = namespace['call'](actuals)
+                        commands = _stream.Commands(records)
+                finally:
+                    _records.reset(token)
+            return Program(commands, output, placements.owners)
+
+        def effects(self):
+            """Logical operations with one shared iteration domain per body.
+
+            MemoryDep indices retain the body's symbols even when a particular
+            read omits an axis. Aggregate outputs retain their named field
+            types; their StarDeps are not scalar address relations.
+            """
+            from torch.utils._pytree import tree_map
+
+            def value_type(name):
+                value = self.get_buffer(name)
+                if isinstance(value, ir.Buffer) and isinstance(value.layout, ir.MultiOutputLayout):
+                    return tree_map(lambda child: (child.get_name(), value_type(child.get_name()))
+                                    if isinstance(child, ir.IRNode) else child, value.codegen_outputs())
+                if isinstance(value, ir.Buffer) and isinstance(value.layout, ir.NoneLayout):
+                    return value.layout
+                return self.get_dtype(name)
+
+            with environment(), V.set_graph_handler(self), V.set_extern_kernel_nodes([]), mode:
+                records = []
+                for operation in self.operations:
+                    data = operation.data if isinstance(operation, ir.ComputedBuffer) else None
+                    iterations = tuple(data.get_pointwise_size()) if data is not None else ()
+                    reductions = tuple(data.get_reduction_size()) if data is not None else ()
+                    dependencies = operation.get_read_writes()
+                    if data is not None:
+                        variables = tuple(dependencies.range_vars)
+                        iteration_vars, reduction_vars = variables[:len(iterations)], variables[len(iterations):]
+                    else:
+                        iteration_vars = reduction_vars = None
+                    records.append(dict(operation=operation, dependencies=dependencies,
+                        reads=tuple((dep, value_type(dep.name)) for dep in dependencies.reads),
+                        writes=tuple((dep, value_type(dep.name)) for dep in dependencies.writes),
+                        iterations=iterations, iteration_vars=iteration_vars,
+                        reductions=reductions, reduction_vars=reduction_vars,
+                        reduction_type=data.get_reduction_type() if data is not None else None,
+                        origins=tuple(operation.get_origins())))
+                return tuple(records)
 
         def init_wrapper_code(self, *args, **kwargs):
             self.device_type = 'mps'
@@ -416,22 +470,28 @@ def compile_graph(module, metadata, operands, *, destinations=None):
     mode = detect_fake_mode((metadata, [node.meta.get('val') for node in module.graph.nodes]))
     if mode is None:
         raise ValueError('native lowering requires the declaration\'s fake tensor metadata')
-    with config.patch(size_asserts=False, alignment_asserts=False, scalar_asserts=False, split_reductions=True,
-                      max_fusion_unique_io_buffers=configuration['BUFFER_BINDINGS'], max_autotune=False,
-                      max_autotune_gemm=False, assert_indirect_indexing=False), \
-            V.set_fake_mode(mode), V.set_choices_handler(NativeChoices()), DebugContext():
+    @contextmanager
+    def environment():
+        with config.patch(size_asserts=False, alignment_asserts=False, scalar_asserts=False, split_reductions=True,
+                          max_fusion_unique_io_buffers=configuration['BUFFER_BINDINGS'], max_autotune=False,
+                          max_autotune_gemm=False, assert_indirect_indexing=False), \
+                V.set_fake_mode(mode), V.set_choices_handler(NativeChoices()), DebugContext():
+            yield
+
+    with environment():
         graph = NativeGraph(module, metadata, shape_env=mode.shape_env, is_inference=True)
         with V.set_graph_handler(graph), V.set_extern_kernel_nodes([]), mode:
             graph.run(*metadata)
-            source, _ = graph.codegen()
-        namespace = {'__name__': 'mesh_preparation', 'mesh_destinations': bound_storage, 'mesh_views': views}
-        records = []
-        token = _records.set(records)
-        try:
-            with unset_fake_temporarily():
-                exec(compile(source.value, '<mesh native preparation>', 'exec'), namespace)
-                output = namespace['call'](list(operands))
-                commands = _stream.Commands(records)
-        finally:
-            _records.reset(token)
-    return Program(commands, output, placements.owners)
+    return graph
+
+
+def compile_graph(module, metadata, operands, *, destinations=None):
+    """Build one logical IR, then assign its pages and emit native commands."""
+    from torch.fx.node import map_arg
+    from torch.utils._pytree import tree_flatten
+    materializations = []
+    if destinations is not None:
+        outputs = next(node.args[0] for node in module.graph.nodes if node.op == 'output')
+        described = tree_flatten(map_arg(outputs, lambda node: node.meta['val']))[0]
+        materializations = [value for value, destination in zip(described, destinations, strict=True) if destination is not None]
+    return prepare_graph(module, metadata, materializations=materializations).bind(operands, destinations=destinations)
