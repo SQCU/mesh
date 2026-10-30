@@ -1,5 +1,6 @@
 #import <Metal/Metal.h>
 #import <objc/runtime.h>
+#import <IOKit/IOKitLib.h>
 #include "nccl-mesh-metal.h"
 #include "nccl-mesh-kernels.h"
 #include "mesh_metal.h"
@@ -30,7 +31,10 @@ ARGS(args, uint64_t, uint32_t);
    their function's residency set, are never recycled while that function can execute, and are given back once that
    set ends. */
 #define RECORD MESH_METAL_ARGUMENT_BYTES
-struct kernels { id<MTLDevice> device; id<MTLComputePipelineState> pipelines[PIPELINES]; };
+/* a device's kernels, and its GPU's cores (IORegistry gpu-core-count, read once with them): the tracks pool's most
+   workers, one a core, so every worker is resident beside every other and beside the GPU's other clients
+   (metal_tracks) */
+struct kernels { id<MTLDevice> device; id<MTLComputePipelineState> pipelines[PIPELINES]; uint32_t cores; };
 @interface MeshArgumentPages : NSObject {
 @public
   struct metal_bytes page;
@@ -93,8 +97,16 @@ static struct kernels *kernels_of(id<MTLDevice> device, const char **message) {
                      error ? error.localizedDescription.UTF8String : "absent");
       return NULL;
     }
+    long long cores = 0;
+    io_service_t gpu = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AGXAccelerator"));
+    CFTypeRef counted = gpu ? IORegistryEntryCreateCFProperty(gpu, CFSTR("gpu-core-count"), kCFAllocatorDefault, 0) : NULL;
+    if (counted && CFGetTypeID(counted) == CFNumberGetTypeID()) CFNumberGetValue(counted, kCFNumberLongLongType, &cores);
+    if (counted) CFRelease(counted);
+    if (gpu) IOObjectRelease(gpu);
+    if (cores <= 0 || cores > UINT32_MAX) { *message = "IORegistry's AGXAccelerator states no gpu-core-count"; return NULL; }
     struct kernels *made = calloc(1, sizeof *made);
     if (!made) { *message = "out of memory"; return NULL; }
+    made->cores = (uint32_t)cores;
     MTLComputePipelineDescriptor *described = [[MTLComputePipelineDescriptor new] autorelease];
     described.binaryArchives = @[archive];
     for (uint32_t kind = 0; kind < PIPELINES; kind++) {
@@ -565,7 +577,11 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
                                                                                                : MESH_TRANSPORT_ELEMENT_THREADS;
     const uint64_t T = tracks, C = 2 * T, widest = MESH_TRANSPORT_GRID_THREADS / width;
     /* the tasks: each item's runs of joined steps (one for an item of none, which raises its count alone), and every
-       chunk they hold, the workers' most (at most a grid of `widest` threadgroups, a dispatch's most) */
+       chunk they hold; a step's chunks are its dispatch's threadgroups (at most `widest`, a dispatch's most), and the
+       workers at most one a GPU core.  Workers spin while no task is ready, so a pool past the cores that can hold them
+       at once only adds spinners: sized by its chunks (up to 4096), it ran the five-node all-reduce of 256 KiB in
+       25 ms where the one-threadgroup-a-track form it replaced (e576a6f1) took 0.29 ms, and its 64 MiB in 92 ms against
+       5.6 (design/measurement-regressions-2026-10-30.md) */
     uint64_t tasks = 0, chunks = 0;
     for (uint32_t t = 0; t < r->tracks; t++)
       for (int c = 0; c < 2; c++)
@@ -577,7 +593,7 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
             chunks += op_chunks(r->op + it->first_op + o, width, widest);
           }
         }
-    const uint64_t workers = chunks < widest ? chunks : widest;
+    const uint64_t workers = chunks < k->cores ? chunks : k->cores;
     const uint64_t at_cursors = up(sizeof(struct track_head)), at_tasks = up(at_cursors + C * sizeof(struct track_cursor));
     const uint64_t at_items = up(at_tasks + tasks * sizeof(struct track_task)), at_ops = up(at_items + r->items * sizeof(struct track_item));
     const uint64_t at_deps = up(at_ops + r->ops * sizeof(struct track_op)), at_count = up(at_deps + r->deps * sizeof(struct track_dep));
