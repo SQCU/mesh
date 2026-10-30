@@ -48,12 +48,6 @@ struct MeshStream {
   id<MTL4CommandQueue> const prepared;
   // the buffers this stream committed, the k-th signalling k on progress as the GPU reaches its end
   uint64_t committed = 0;
-  // whether a group was issued on this stream since the host path last waited for it
-  bool streamed = false;
-  // the workspace of the group being encoded (the library's workspace allocator's context is the MeshStream, which
-  // outlives every call), then each issued group's, by ticket, until the library has retired it (ncclMeshRetired)
-  std::vector<at::Tensor> scratch;
-  std::map<uint64_t, std::vector<at::Tensor>> holders;
 
   explicit MeshStream(at::mps::MPSStream *stream) : mps(stream), progress([stream->device() newSharedEvent]),
       prepared([stream->device() newMTL4CommandQueue]) {
@@ -79,14 +73,6 @@ struct MeshStream {
       (void)ended;
     });
     mps->synchronize(wait ? at::mps::SyncType::COMMIT_AND_WAIT : at::mps::SyncType::COMMIT);
-  }
-
-  // On the host: the workspace `held` of the group issued as `ticket` kept until the library retires it (0: a group
-  // complete in the stream's order once encoded, whose workspace is let go here, its leases returned once the stream's
-  // work on them completes), and the workspace of every group retired by now released.
-  void retire(uint64_t ticket, std::vector<at::Tensor> held) {
-    if (ticket) holders[ticket] = std::move(held);
-    holders.erase(holders.begin(), holders.upper_bound(ncclMeshRetired()));
   }
 };
 
@@ -137,21 +123,6 @@ static void publish_boundary() {
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
   MeshStream *s = &stream_of(stream);
   at::mps::dispatch_sync_with_rethrow(stream->queue(), ^{ s->signalled(false); });
-}
-
-// The library's workspace allocator: a region lease (region_empty), kept in the MeshStream's scratch (`context`) until
-// the group is complete in the stream's order (MeshStream::retire); NULL where the region refuses one, which fails the
-// group as a value (nccl-mesh.c: "out of GPU memory") instead of an exception thrown through the library.  It runs on
-// torch's queue, where the region allocator (allocator.mm) leases with no dispatch onto it.
-static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps);
-static void *workspace(size_t bytes, void *context) {
-  auto *s = static_cast<MeshStream *>(context);
-  try {
-    s->scratch.push_back(region_empty({(int64_t)bytes}, at::empty({0}, at::TensorOptions().dtype(at::kByte)), true));
-  } catch (...) {
-    return nullptr;
-  }
-  return (__bridge void *)at::native::mps::getMTLBufferStorage(s->scratch.back());
 }
 
 

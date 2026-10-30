@@ -101,7 +101,7 @@
    ncclMeshBuffer (an id<MTLBuffer> and a byte offset into it: an MPS tensor's storage and offset) of any type, a
    crossing's over a lease (Memory, below); float64 moves as its bytes, and a float64 reduction there fails as a value
    (Apple GPUs have no float64 arithmetic).  The kernels go into its open compute encoder, left open with nothing
-   signalled at the group's end; workspace is not read (a call that crosses no link makes its result
+   signalled at the group's end; the library asks for no workspace (a call that crosses no link makes its result
    in recvbuff, and what a crossing sends from or lands in that is not the caller's is the communicator's: Memory),
    and the caller orders any later host-path group after the stream's work.  The calls of one group name one encoder
    (the group's dispatches are one program); their bound is the greatest of their polls.  A
@@ -313,8 +313,6 @@ typedef uint64_t ncclMeshBinding[6];
 typedef struct { ncclMeshBinding *publish, *land; uint32_t publishes, lands, repeats; size_t stride; } ncclMeshFused;
 typedef struct {
   void *commandEncoder;
-  void *(*workspace)(size_t bytes, void *context);
-  void *context;
   ncclMeshIssue *issue;
   void *argumentTable;
   void *residencySet;
@@ -1197,8 +1195,6 @@ ncclResult_t ncclMeshCommPlanRouteUnits(ncclComm_t comm, uint64_t* units, size_t
    whether a publication was encoded.  A ticket already complete encodes nothing; one whose communicator failed returns
    the failure. */
 ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream* stream, int* published);
-/* The highest ticket through which every issued group is complete (or lost with a failed communicator). */
-uint64_t ncclMeshRetired(void);
 /* Fused execution uses the same physical fragment compiler and channel bindings
    as ordinary compiled writes. A peer may have any number of parallel channels,
    and a logical transfer may contain multiple fragments and relay hops. There is

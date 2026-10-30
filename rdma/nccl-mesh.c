@@ -4792,8 +4792,6 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int
   return result ? result : loss;
 }
 
-uint64_t ncclMeshRetired(void) { return atomic_load(&retired); }
-
 const char *ncclMeshMetalPrelude(void) { return metal_prelude(); }
 
 ncclResult_t ncclGroupStart(void) { depth++; return ncclSuccess; }
