@@ -1,6 +1,16 @@
-"""Run committed mesh/microbench Git checkouts fetched from each repository's origin."""
+"""The hourly, run by the collective itself (design/workstation-and-collective-2026-10-29.md, "What a run on the
+collective needs"). Every node's launchd job (bin/mesh-hourly-agent.sh) starts `node` at the configured minute; no
+machine launches, holds or records another's run.
+- `node` takes the run's minute and both repositories' main commits, moves this node's mesh checkout to the mesh
+  commit, and runs the committed `collective`.
+- `collective` holds the election, a top-1 (the operator, 2026-10-29). Each linked part's representative, its smallest
+  node number (every member reads it from the same bridge map), announces the part's capacity over mDNS. Every node
+  takes the largest capacity it heard, ties to the smaller representative. Only the winning part's members prepare
+  and run, each its own rank, each keeping its own record (~/.cache/mesh/hourly). A node that hears no other node by
+  any means closes the run with a warning.
+- `read` is any reader's: it gathers the members' records into one ledger. It prepares, starts and restarts nothing."""
 import argparse
-import contextlib
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,43 +23,23 @@ import time
 import traceback
 import zlib
 
-from mesh_source import checkout, git, upstream, verify
+from mesh_source import checkout, git
 
-REQUIRED = ('rdma/mesh_hourly.py', 'rdma/mesh_nodes.py', 'rdma/mesh_source.py', 'bin/mesh-user.sh')
-FIGURES = ('steady_step_microseconds', 'step_microseconds', 'crossing_microseconds',
-           'steady_tick_microseconds', 'tick_microseconds', 'aggregate_rows_per_second',
-           'steady_aggregate_rows_per_second', 'per_stream_steps_per_second')
+HOURLY = Path.home() / '.cache/mesh/hourly'
+# seconds after the run's minute: a node that starts later than LATE cannot hear this hour's election; every node
+# browses until BROWSE_UNTIL, and a representative announces until ANNOUNCE_UNTIL, so a node starting as late as LATE
+# still hears every announcement
+LATE, BROWSE_UNTIL, ANNOUNCE_UNTIL = 30, 40, 50
+PAIRING_SECONDS = 30
 
 
 def workload_configuration(microbench_root):
-    """The hourly's workloads (schema 3): each an end-to-end program the whole live fabric runs, on the largest set of
-    nodes its paired cables link (run_workload). None names, counts or selects nodes."""
+    """The hourly's workloads (schema 3): each an end-to-end program the elected part runs, on the part its paired
+    cables link at the workload's start (run_rank). None names, counts or selects nodes."""
     raw = json.loads((Path(microbench_root) / 'tools/mesh/hourly/workloads.json').read_text())
     if raw.get('schema') != 3 or not raw.get('workloads'):
         raise ValueError(f'tools/mesh/hourly/workloads.json is schema {raw.get("schema")}; mesh reads schema 3 `workloads`')
     return raw['workloads']
-
-
-def measurement_values(record, tag):
-    """Read both historical ledger rows and current structured workload results."""
-    if 'result' in record:
-        record = json.loads(Path(record['result']).read_text())
-    if record.get('schema') == 3:
-        item = record['us,GB/s'].get(tag)
-        if not item or len(item) != 1 or item[0] is None:
-            return {}
-        us, rate, *rows = item[0]
-        return {'function_seconds': [us / 1e6, None],
-                'useful_gigabytes_per_second': [rate, None],
-                **({'aggregate_rows_per_second': [rows[0], None]} if rows else {})}
-    if tag in record:
-        return record[tag]
-    workload = next((item for item in record.get('workloads', []) if item['tag'] == tag), {})
-    ranks = workload.get('ranks', {})
-    figures = {}
-    for row in ranks.get('rank0', {}).get('measurements', []):
-        figures.update({key: [row[key], None] for key in FIGURES if key in row})
-    return dict(figures, ranks={name: f'exit {value["exit"]}' for name, value in ranks.items()})
 
 
 def compact(record):
@@ -110,131 +100,6 @@ def stop(signum, _):
     raise Stopped('the run reached run_seconds' if signum == signal.SIGALRM else f'stopped by {signal.Signals(signum).name}')
 
 
-def ledger(output_root, tag, result):
-    """The run's result.json and its one line in log.jsonl."""
-    out = Path(output_root).resolve() / tag
-    out.mkdir(parents=True, exist_ok=True)
-    (out / 'result.json').write_text(json.dumps(result, separators=(',', ':')) + '\n')
-    with (out.parent / 'log.jsonl').open('a') as log:
-        log.write(json.dumps({'result': str(out / 'result.json')}, separators=(',', ':')) + '\n')
-
-
-def launcher(mesh_root, microbench_root, output_root):
-    """Every hourly leaves one ledger line, a run that cannot start too."""
-    from mesh_nodes import load
-    began, code = time.time(), None
-    try:
-        code = _launch(mesh_root, microbench_root, output_root, load())
-    except Exception as error:
-        ledger(output_root, time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(began)) + '-launch',
-               {'schema': 3, 'commits': {}, 'unix': int(began), 'nodes': [], 'us,GB/s': {}, 'errors': [['launch', str(error)]]})
-    return 1 if code is None else code
-
-
-def _launch(mesh_root, microbench_root, output_root, cluster):
-    """Select main commits and launch the driver from its upstream Git checkout."""
-    from mesh_nodes import started
-    output_root = Path(output_root).resolve()
-    began = time.time()
-    tag = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(began)) + f'-{time.time_ns() % 1000000000:09d}'
-    out = output_root / tag
-    out.mkdir(parents=True)
-    for s in (signal.SIGALRM, signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
-        signal.signal(s, stop)
-    signal.alarm(cluster.run_seconds)
-    phase = 'checkout'
-    record = {'schema': 2, 'run': tag, 'started_unix': began, 'deadline_unix': began + cluster.run_seconds - 60,
-              'token': f'{tag}:{socket.gethostname()}:{os.getpid()}:{started(os.getpid())}', 'commits': {}, 'checkouts': {},
-              'status': 'failed', 'errors': [], 'nodes': {}, 'workloads': [],
-              'launcher': {'file': str(Path(__file__).resolve()),
-                           'role': 'select commits; target helpers execute from upstream Git checkouts'}}
-    try:
-        roots = {'mesh': Path(mesh_root).resolve(), 'metal-microbench': Path(microbench_root).resolve()}
-        # Resolve both pushed main commits before fetching either: the nodes fetch from origin, so a local commit
-        # not yet pushed is not committed code they can run.
-        record['upstreams'] = {name: upstream(root) for name, root in roots.items()}
-        record['commits'] = {name: git(root, 'ls-remote', record['upstreams'][name], 'refs/heads/main').split()[0].decode()
-                             for name, root in roots.items()}
-        for name, root in roots.items():
-            # each repository's one checkout here, moved to the commit
-            target = Path.home() / cluster.checkouts / name / 'current'
-            checkout(record['upstreams'][name], record['commits'][name], target, max(1, record['deadline_unix'] - time.time()))
-            record['checkouts'][name] = {'path': str(target)}
-        committed_mesh = Path(record['checkouts']['mesh']['path'])
-        committed_bench = Path(record['checkouts']['metal-microbench']['path'])
-        absent = [name for name in REQUIRED if not (committed_mesh / name).is_file()]
-        if absent:
-            raise RuntimeError(f'pinned mesh commit lacks shared hourly prerequisites: {absent}')
-        config = committed_bench / 'tools/mesh/hourly/workloads.json'
-        record['configuration'] = {'path': str(config.relative_to(committed_bench))}
-        history = output_root / 'history.json'
-        record['history'] = known = json.loads(history.read_text()) if history.exists() else {}
-        phase = 'build'
-        subprocess.run(['make', '-s', '-C', str(committed_mesh / 'rdma'), 'statistics'],
-                       check=True, stdout=subprocess.DEVNULL)
-        phase = 'driver'
-        child = subprocess.Popen([sys.executable, str(committed_mesh / 'rdma/mesh_hourly.py'), 'execute'], cwd=committed_mesh,
-                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, start_new_session=True)
-        stopped = None
-        try:
-            stdout = child.communicate(json.dumps(record))[0]
-        except Stopped as error:
-            # The driver ends its ranks, each guard confirming, and returns its record; past a minute its session ends.
-            stopped = error
-            os.kill(child.pid, signal.SIGTERM)
-            try:
-                stdout = child.communicate(timeout=60)[0]
-            except subprocess.TimeoutExpired:
-                os.killpg(child.pid, signal.SIGKILL)
-                stdout = child.communicate()[0]
-        if stdout:
-            record = json.loads(stdout)
-        if stopped:
-            raise stopped
-        record.pop('history', None)
-        record['driver_exit'] = child.returncode
-        if child.returncode:
-            record['status'] = 'failed'
-            if not record['errors'] and not any(item['status'] != 'completed' for item in record['workloads']):
-                record['errors'].append({'stage': 'committed-driver', 'exit': child.returncode})
-        quiet()
-    except Exception as error:
-        quiet()
-        record['errors'].append({'stage': phase, 'error': str(error), 'traceback': traceback.format_exc()})
-    record['finished_unix'] = time.time()
-    if record['workloads']:
-        for item in record['workloads']:
-            known[item['tag']] = (known.get(item['tag'], []) + item.get('observations', []))[-64:]
-        history.write_text(json.dumps(known))
-    ledger(output_root, tag, compact(record))
-    return 0 if record['status'] == 'completed' else 1
-
-
-def prepare_node(node, record):
-    """The node's one mesh checkout, `current` (its bridge's and its ranks', which load it by path), moved to this
-    commit and built there (node prepare)."""
-    from mesh_nodes import home_path
-    from mesh_source import checkout_command
-    cluster, commit = node.cluster, record['commits']['mesh']
-    node.source = f'{cluster.checkouts}/mesh/current'
-    result = {'number': node.number, 'status': 'installing', 'commit': commit, 'commands': node.commands}
-    record['nodes'][f'{node.number}@{node.addr}'] = result
-    began = time.time()
-    try:
-        code, output = node.run('\n'.join((
-            f'export MESH_RUN={shlex.quote(record["token"])}',
-            checkout_command(record['upstreams']['mesh'], commit, '~/' + node.source),
-            f'PYTHONPATH={home_path(node.source + "/rdma")} {cluster.python} -m mesh_nodes node prepare')))
-        result['install_exit'] = code
-        if code:
-            raise RuntimeError(f'preparation failed ({code}): {output}')
-        told = next((json.loads(line) for line in output.splitlines() if line.startswith('{"bridge"')), {})
-        result.update(status='installed', bridge=told.get('bridge'), services=told.get('services'),
-                      seconds={'whole': round(time.time() - began, 1), **(told.get('seconds') or {})})
-    except Exception as error:
-        result.update(status='failed', error=str(error))
-    return result
-
 
 def rank_results(outputs):
     result = {}
@@ -265,124 +130,328 @@ def rank_results(outputs):
 
 
 
-PAIRING_SECONDS = 30
+
+def write(record):
+    """This node's record of the run, replaced whole as it grows; its line in log.jsonl once."""
+    out = HOURLY / record['run']
+    out.mkdir(parents=True, exist_ok=True)
+    first = not (out / 'result.json').exists()
+    (out / 'result.json.new').write_text(json.dumps(record, separators=(',', ':')) + '\n')
+    os.replace(out / 'result.json.new', out / 'result.json')
+    if first:
+        with (HOURLY / 'log.jsonl').open('a') as log:
+            log.write(json.dumps({'run': record['run'], 'node': record['node']}, separators=(',', ':')) + '\n')
 
 
-def run_workload(item, nodes, paths, record, ordinal, cluster):
+def node():
+    """launchd's start (bin/mesh-hourly-agent.sh): the run's minute, both repositories' main commits as this node reads
+    them then, and this node's mesh checkout moved to the mesh commit; then the committed code's `collective`."""
+    from mesh_nodes import load
+    cluster = load()
+    minute = int(time.time()) // 60 * 60
+    record = {'schema': 4, 'run': time.strftime('%Y%m%dT%H%MZ', time.gmtime(minute)), 'minute': minute,
+              'node': socket.gethostname(), 'commits': {}, 'status': 'starting', 'errors': []}
+    try:
+        record['commits'] = {name: git(Path.home(), 'ls-remote', url, 'refs/heads/main').split()[0].decode()
+                             for name, url in cluster.upstreams.items()}
+        mesh = Path.home() / cluster.checkouts / 'mesh/current'
+        checkout(cluster.upstreams['mesh'], record['commits']['mesh'], mesh, 60)
+    except Exception as error:
+        record.update(status='failed', errors=[{'stage': 'checkout', 'error': str(error)}])
+        write(record)
+        return 1
+    os.execv(sys.executable, [sys.executable, str(mesh / 'rdma/mesh_hourly.py'), 'collective', json.dumps(record)])
+
+
+def part_of(report, own):
+    """This node's linked part in its bridge's map, by node number, and its capacity: the members' region bytes, from
+    the bridge's own records of them."""
+    from mesh_nodes import parts
+    cables = {tuple(sorted(map(str, link[:2]))) for link in report['map']['links']}
+    part = next(p for p in parts({str(x) for x in report['map']['nodes']} | {own}, cables) if own in p)
+    regions = {str(row['node']): int(row.get('region', 0)) for row in report.get('nodes', [])}
+    return sorted(part, key=int), sum(regions.get(number, 0) for number in part)
+
+
+def browse(kind, until):
+    """Every TXT record of the mDNS service `kind` heard on any network until `until` (unix seconds), by instance
+    (dns-sd -Z's zone lines)."""
+    p = subprocess.Popen(['dns-sd', '-Z', kind, 'local'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                         start_new_session=True)
+    try:
+        output = p.communicate(timeout=max(0.0, until - time.time()))[0]
+    except subprocess.TimeoutExpired:
+        os.killpg(p.pid, signal.SIGTERM)
+        output = p.communicate()[0]
+    heard = {}
+    for line in output.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) == 3 and fields[1] == 'TXT':
+            heard[fields[0].split('.')[0]] = dict(item.split('=', 1) for item in shlex.split(fields[2]) if '=' in item)
+    return heard
+
+
+def elect(record, report, own):
+    """The top-1 (module docstring). Records what this node heard and returns whether its part won."""
+    from mesh_nodes import parallel
+    part, capacity = part_of(report, own)
+    start = record['minute']
+    speaker = None
+    if own == part[0]:
+        speaker = subprocess.Popen(['dns-sd', '-R', own, '_meshpart._tcp', 'local', '9', f'run={record["run"]}',
+                                    f'capacity={capacity}', f'members={len(part)}'],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        parts, beacons = parallel([lambda: browse('_meshpart._tcp', start + BROWSE_UNTIL),
+                                   lambda: browse('_meshnode._tcp', start + BROWSE_UNTIL)])
+        if speaker:
+            time.sleep(max(0.0, start + ANNOUNCE_UNTIL - time.time()))
+    finally:
+        if speaker:
+            os.killpg(speaker.pid, signal.SIGTERM)
+            speaker.wait()
+    heard = {rep: {'capacity': int(t['capacity']), 'members': int(t['members'])} for rep, t in parts.items()
+             if t.get('run') == record['run'] and t.get('capacity', '').isdigit() and t.get('members', '').isdigit()}
+    heard[part[0]] = {'capacity': capacity, 'members': len(part)}
+    record['beacons'] = {t['node']: t.get('node_id', '') for t in beacons.values() if t.get('node')}
+    winner = max(heard, key=lambda rep: (heard[rep]['capacity'], -int(rep)))
+    record['election'] = {'part': part, 'capacity': capacity, 'heard': heard, 'winner': winner}
+    if len(part) == 1 and not set(record['beacons']) - {own}:
+        record['status'] = 'unknown'
+        record['warning'] = ("heard no other node by any means: its bridge's map holds only itself and no beacon "
+                             "answered, so it does not know what is going on")
+        return False
+    if winner != part[0]:
+        record['status'] = 'not elected'
+        record['warning'] = (f'the part of {winner} ({heard[winner]["members"]} nodes, {heard[winner]["capacity"]} bytes) '
+                             f'won over its own ({len(part)} nodes, {capacity} bytes)')
+        return False
+    # nodes whose beacons answered but whose parts announced nothing (their jobs did not start, or started late) could
+    # make a part larger than this one; a part outnumbered by them does not know it won
+    unaccounted = len(set(record['beacons']) | set(part)) - sum(v['members'] for v in heard.values())
+    if unaccounted >= len(part):
+        record['status'] = 'unknown'
+        record['warning'] = (f'{unaccounted} nodes answered by beacon but no part announced them, as many as its own '
+                             f'part\'s {len(part)}, so it does not know what is going on')
+        return False
+    return True
+
+
+def fabric_address(number, record, cluster):
+    """A node's fabric address: bin/mesh-router-init.sh's from the host UUID its beacon announced, else its configured
+    one."""
+    uuid = record.get('beacons', {}).get(number)
+    if uuid:
+        h = hashlib.sha256(uuid.encode()).hexdigest()[:20]
+        return 'fd6d:6573:68:' + ':'.join(f'{int(h[i:i + 4], 16) | 0x1000:x}' for i in range(0, 20, 4))
+    if number in cluster.members:
+        return cluster.members[number].fabric
+    raise RuntimeError(f'node {number}: no beacon heard and no configured fabric address')
+
+
+def run_rank(item, me, record, ordinal, cluster, bench, known):
+    """This node's rank of one workload, on the elected part as its paired cables link it at the workload's start."""
     import mesh_nodes as mesh
-    from mesh_statistics import aggregate
     tag = item['tag']
     end = min(time.time() + item.get('timeout', 300), record['deadline_unix'])
-    # every live, installed node, by bridge node number; then the largest set of them their paired cables link
-    selected = sorted(nodes, key=lambda node: int(node.number))
-    result = {'tag': tag, 'configuration': item, 'nodes': [node.number for node in selected], 'status': 'preparing',
-              'metrics': []}
-    record['workloads'].append(result)
+    result = {'tag': tag, 'status': 'preparing'}
     try:
-        if not selected:
-            raise RuntimeError('no live, installed node')
-        # a failed workload's ranks leave links re-pairing for a few seconds; a node gone (unreachable, restarting) never
-        # pairs, so the wait is that long and no longer, and the case runs on the largest set linked by then
-        mesh.wait_paired(selected, None, min(end, time.time() + PAIRING_SECONDS))
-        largest = max(mesh.parts([node.number for node in selected], mesh.paired(selected)), key=len)
-        selected = [node for node in selected if node.number in largest]
-        result['nodes'] = [node.number for node in selected]
-        history = record.get('history', {}).get(tag, [])[-64:]
-        env = (f'PYTHONPATH={mesh.home_path(selected[0].source + "/rdma")}:{mesh.home_path(selected[0].source + "/rdma/torch-mesh")} '
+        # a failed workload's ranks leave links re-pairing for a few seconds; a node gone never pairs, so the wait is
+        # that long and no longer, and the case runs on the part linked by then
+        mesh.wait_paired([me], None, min(end, time.time() + PAIRING_SECONDS))
+        part, _ = part_of(me.stat()[1], me.number)
+        members = [number for number in part if number in record['election']['part']]
+        k = members.index(me.number)
+        result.update(members=members, rank=k)
+        source = me.source
+        env = (f'PYTHONPATH={mesh.home_path(source + "/rdma")}:{mesh.home_path(source + "/rdma/torch-mesh")} '
                'PYTHONDONTWRITEBYTECODE=1 ')
-        command = f'{cluster.python} {mesh.home_path(selected[0].source + "/examples/" + item["program"] + ".py")}'
+        command = f'{cluster.python} {mesh.home_path(source + "/examples/" + item["program"] + ".py")}'
+        history = known.get(tag, [])[-64:]
         if item.get('configuration'):
-            operands = json.loads((paths['metal-microbench'] / item['configuration']).read_text())
+            operands = json.loads((bench / item['configuration']).read_text())
             operands.update({key: item[key] for key in ('steps', 'rows') if key in item})
             operands['observations'] = history
             command += ' -'
         else:
             operands = history
             env += 'MESH_OBSERVATIONS_STDIN=1 '
-        result.update(status='running', ranks={f'rank{k}': {} for k in range(len(selected))})
+        result['status'] = 'running'
         port = cluster.rank_port + zlib.crc32(record['run'].encode()) % 20 * 20 + ordinal
-        outputs = mesh.ranks(selected, tag, '.', command, port, env=env,
-                             alarm=max(1, int(end - time.time())), input=json.dumps(operands).encode(), states=result['ranks'],
-                             run=record['token'])
-        result['loaded'] = sorted({v['loaded'] for row in outputs.values() for v in row['records'] if 'loaded' in v})
-        result['overlapped'] = sorted({t for row in outputs.values() for v in row['records'] for t in v.get('overlap', ())})
-        result['ranks'] = rank_results(outputs)
-        result['observations'] = [row for rank in result['ranks'].values() for row in rank.pop('observations')]
-        if len(result['ranks']) != len(selected) or any(v['exit'] != 0 for v in result['ranks'].values()):
-            failures = list(dict.fromkeys(value['error'] for value in result['ranks'].values() if value['exit']))
-            raise RuntimeError('; '.join(failures) or 'missing rank completion')
-        result['status'] = 'completed'
+        output = mesh.rank(me, k, len(members), fabric_address(members[0], record, cluster), tag, '.', command, port,
+                           alarm=max(1, int(end - time.time())), env=env, input=json.dumps(operands).encode(),
+                           run=record['token'])
+        rank = rank_results({f'rank{k}': output})[f'rank{k}']
+        known[tag] = (known.get(tag, []) + rank.pop('observations'))[-64:]
+        result.update(result=rank, loaded=sorted({v['loaded'] for v in output['records'] if 'loaded' in v}),
+                      overlapped=sorted({t for v in output['records'] for t in v.get('overlap', ())}),
+                      status='completed' if rank['exit'] == 0 else 'failed')
+        if rank['exit']:
+            result['error'] = rank['error']
     except Exception as error:
-        result['status'] = 'failed'
-        result['error'] = str(error)
+        result.update(status='failed', error=str(error))
         print(f'{tag}: {result["error"]}', file=sys.stderr, flush=True)
-    # A later fault does not erase earlier completed observations. Only rows
-    # present for every participating rank can form an aggregate interval.
-    result['metrics'] = aggregate({k: v for k, v in result.get('ranks', {}).items() if 'measurements' in v})
     return result
 
 
-def _execute_locked(record):
+def collective(record):
+    """The committed code's run on this node (module docstring): the election, then, in the winning part, this node's
+    preparation and its rank of every workload. Its record is written as it grows."""
     import mesh_nodes as mesh
-    record.update(status='running', stage='configuration')
+    cluster = mesh.load()
+    for s in (signal.SIGALRM, signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(s, stop)
+    record['deadline_unix'] = record['minute'] + cluster.run_seconds - 60
+    signal.alarm(max(1, int(record['minute'] + cluster.run_seconds - time.time())))
+    stage = 'election'
     try:
-        paths = {name: Path(value['path']) for name, value in record['checkouts'].items()}
-        for name, root in paths.items():
-            if verify(root) != record['commits'][name]:
-                raise ValueError(f'{name}: checkout differs from the selected commit')
-        cluster = mesh.load()
-        items = workload_configuration(paths['metal-microbench'])
-        record.update(stage='discovery', discovery={})
-        found, record['absent'] = mesh.discover(cluster, state=record['discovery'], deadline=record['deadline_unix'])
-        record['stage'] = 'installation'
-        installs = mesh.parallel([lambda n=n: prepare_node(n, record)
-                                  for n in found])
-        record['nodes'] = {f'{node.number}@{node.addr}': result for node, result in zip(found, installs)}
-        ready = [node for node, result in zip(found, installs)
-                 if result['status'] == 'installed' and node.number not in record['absent']]
-        record['stage'] = 'pairing'
-        if ready and not mesh.wait_paired(ready, None, record['deadline_unix']):
-            record['errors'].append({'stage': 'pairing', 'error': 'not all links paired; each workload needs its own members paired'})
+        local = mesh.Node(cluster, '-', 'localhost', local=True, deadline=record['deadline_unix'])
+        local.source = f'{cluster.checkouts}/mesh/current'
+        _, report = local.stat()
+        if not report.get('up'):
+            raise RuntimeError(f'its bridge is not up: {report}')
+        own = str(report['node'])
+        me = mesh.Node(cluster, own, 'localhost', local=True, deadline=record['deadline_unix'])
+        me.source = local.source
+        record.update(node=own, token=f'{record["run"]}:{own}:{os.getpid()}:{mesh.started(os.getpid())}')
+        if time.time() > record['minute'] + LATE:
+            record.update(status='late', warning=f'started {int(time.time() - record["minute"])} s after its minute, '
+                                                  f'past the election ({LATE} s)')
+            return 0
+        if not elect(record, report, own):
+            return 0
+        write(record)
+        stage = 'preparation'
+        record['status'] = 'preparing'
+        bench = Path.home() / cluster.checkouts / 'metal-microbench/current'
+        # only the hourly's own directory: its workloads and their configurations
+        checkout(cluster.upstreams['metal-microbench'], record['commits']['metal-microbench'], bench,
+                 max(1, record['deadline_unix'] - time.time()), paths=('tools/mesh/hourly',))
+        began = time.time()
+        code, output = me.py('prepare', timeout=max(1, record['deadline_unix'] - time.time()))
+        if code:
+            raise RuntimeError(f'preparation failed ({code}): {output[-600:]}')
+        record['prepared'] = next((json.loads(line) for line in output.splitlines() if line.startswith('{"bridge"')), {})
+        record['prepared']['seconds'] = {'whole': round(time.time() - began, 1), **record['prepared'].get('seconds', {})}
+        # a preparation that restarted this node's bridge, or a peer's, leaves links pairing again: each node waits for
+        # its own (at most 300 s, wait_paired), so the members' maps agree when the first workload reads them
+        record['paired'] = mesh.wait_paired([me], None, record['deadline_unix'])
+        items = workload_configuration(bench)
+        history = HOURLY / 'history.json'
+        known = json.loads(history.read_text()) if history.exists() else {}
+        record.update(status='running', workloads=[])
         for ordinal, item in enumerate(items):
-            record['stage'] = item['tag']
-            run_workload(item, ready, paths, record, ordinal, cluster)
-        record['status'] = 'completed' if (ready and not record['errors'] and
-            all(value['status'] == 'completed' for value in record['workloads'])) else 'failed'
+            stage = item['tag']
+            record['workloads'].append(run_rank(item, me, record, ordinal, cluster, bench, known))
+            write(record)
+        history.write_text(json.dumps(known))
+        record['status'] = 'completed' if all(w['status'] == 'completed' for w in record['workloads']) else 'failed'
     except Exception as error:
+        quiet()
+        mesh.release()
         record['status'] = 'failed'
-        record['errors'].append({'stage': record['stage'], 'error': str(error), 'traceback': traceback.format_exc()})
-    record.pop('history', None)
-    record['stage'] = 'finished'
-    return record
+        record['errors'].append({'stage': stage, 'error': str(error), 'traceback': traceback.format_exc()})
+    finally:
+        quiet()
+        record['finished_unix'] = time.time()
+        write(record)
+    return 0 if record['status'] in ('completed', 'not elected') else 1
+
+
+def merged(records, cluster):
+    """One run's ledger row (compact) from its nodes' own records: the elected part's members, each workload's ranks
+    gathered across them, and every other configured node's reason for being absent."""
+    from mesh_statistics import aggregate
+    # the parts that ran, by representative: one, unless two parts heard each other differently; then the top-1 of
+    # them is the run and the other part's nodes are named as having run apart
+    groups = {}
+    for n, r in records.items():
+        if 'election' in r and r.get('status') not in ('unknown', 'late', 'not elected'):
+            groups.setdefault(r['election']['part'][0], {})[n] = r
+    chosen = max(groups, key=lambda rep: (next(iter(groups[rep].values()))['election']['capacity'], -int(rep)), default=None)
+    ran = groups.get(chosen, {})
+    first = next(iter(ran.values()), next(iter(records.values())))
+    absent = {n: r.get('warning') or (f'ran apart, in the part of {r["election"]["part"][0]}: it did not hear the part '
+                                      f'of {chosen}' if r.get('election') and r.get('status') not in ('unknown', 'late', 'not elected')
+                                      else f'{r.get("status")}: ' + '; '.join(e.get('error', '')[-160:] for e in r.get('errors', [])))
+              for n, r in records.items() if n not in ran}
+    absent.update({n: 'no record of this run (unreachable, or its job did not start)'
+                   for n in cluster.members if n not in records})
+    nodes = {n: {'number': n, 'status': 'installed' if r.get('prepared') else 'failed', 'seconds': r.get('prepared', {}).get('seconds'),
+                 'error': '; '.join(e.get('error', '') for e in r.get('errors', []))[-160:] or 'preparation incomplete'}
+             for n, r in ran.items()}
+    workloads = []
+    for item in first.get('workloads', []):
+        rows = [w for r in ran.values() for w in r.get('workloads', []) if w['tag'] == item['tag']]
+        ranks = {f'rank{w["rank"]}': w['result'] for w in rows if 'result' in w}
+        members = {m for w in rows for m in w.get('members', [])}
+        done = {m for r in ran.values() for w in r.get('workloads', []) if w['tag'] == item['tag'] and w['status'] == 'completed'
+                for m in [r['node']]}
+        status = 'completed' if members and members <= done else 'failed'
+        workloads.append({'tag': item['tag'], 'status': status, 'ranks': ranks,
+                          'metrics': aggregate({k: v for k, v in ranks.items() if 'measurements' in v}),
+                          'loaded': sorted({c for w in rows for c in w.get('loaded', ())}),
+                          'overlapped': sorted({t for w in rows for t in w.get('overlapped', ())}),
+                          'error': next((w['error'] for w in rows if w.get('error')), 'incomplete')})
+    errors = [{'stage': f'{n}/{e.get("stage")}', 'error': e.get('error', '')} for n, r in ran.items() for e in r.get('errors', [])]
+    status = 'completed' if ran and not errors and all(w['status'] == 'completed' for w in workloads) else 'failed'
+    return compact({'commits': first.get('commits', {}), 'started_unix': first['minute'], 'status': status, 'errors': errors,
+                    'nodes': nodes, 'workloads': workloads, 'absent': absent})
+
+
+def read(output_root):
+    """Any reader's (read only): every reachable configured node's kept records, each beside its run's ledger row
+    (output_root/<run>/nodes/<number>.json), the row (output_root/<run>/result.json) and its line in log.jsonl."""
+    import mesh_nodes as mesh
+    cluster = mesh.load()
+    output_root = Path(output_root).resolve()
+    here = None
+    try:
+        local = mesh.Node(cluster, '-', 'localhost', local=True)
+        local.source = f'{cluster.checkouts}/mesh/current'
+        here = str(local.stat()[1].get('node'))
+    except Exception:
+        pass
+    listing = ('cd ~/.cache/mesh/hourly 2>/dev/null || exit 0; for f in $(ls -dt */result.json | head -48); '
+               'do printf "%s\\t" "${f%/result.json}"; cat "$f"; done')
+
+    def fetch(member):
+        node = mesh.Node(cluster, member.number, 'localhost' if member.number == here else member.management,
+                         local=member.number == here, deadline=time.time() + 60)
+        try:
+            return member.number, node.run(listing, timeout=60)[1]
+        except Exception as error:
+            print(f'{member.name}: {error}', file=sys.stderr)
+            return member.number, ''
+    runs = {}
+    for number, text in mesh.parallel([lambda m=m: fetch(m) for m in cluster.members.values()]):
+        for line in text.splitlines():
+            run, _, body = line.partition('\t')
+            if body.startswith('{'):
+                runs.setdefault(run, {})[number] = json.loads(body)
+    logged = (output_root / 'log.jsonl').read_text() if (output_root / 'log.jsonl').exists() else ''
+    for run, records in sorted(runs.items()):
+        out = output_root / run
+        (out / 'nodes').mkdir(parents=True, exist_ok=True)
+        for number, record in records.items():
+            (out / 'nodes' / f'{number}.json').write_text(json.dumps(record, separators=(',', ':')) + '\n')
+        (out / 'result.json').write_text(json.dumps(merged(records, cluster), separators=(',', ':')) + '\n')
+        if str(out / 'result.json') not in logged:
+            with (output_root / 'log.jsonl').open('a') as log:
+                log.write(json.dumps({'result': str(out / 'result.json')}, separators=(',', ':')) + '\n')
+    return 0
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=('run', 'execute'))
-    parser.add_argument('paths', nargs='*')
+    parser.add_argument('action', choices=('node', 'collective', 'read'))
+    parser.add_argument('operand', nargs='?')
     args = parser.parse_args(argv)
-    if args.action == 'execute':
-        import mesh_nodes
-        from mesh_statistics import serving
-
-        def halt(signum, _):
-            mesh_nodes.release()
-            raise Stopped(f'the driver received {signal.Signals(signum).name}')
-        for s in (signal.SIGTERM, signal.SIGHUP):
-            signal.signal(s, halt)
-        record = json.load(sys.stdin)
-        host, port = json.loads((Path(__file__).resolve().parents[1] / 'etc/statistics.json').read_text())['listen']
-        for port in range(port, port + 10):  # another run's driver may serve the first
-            with contextlib.suppress(OSError), serving(record, (host, port)):
-                record['statistics'] = {'listen': [host, port], 'pid': os.getpid()}
-                print(f'Live state: http://{host}:{port}/STATS', file=sys.stderr, flush=True)
-                record = _execute_locked(record)
-                break
-        else:
-            raise OSError(f'no statistics port free from {port - 9}')
-        print(json.dumps(record, separators=(',', ':')))
-        return 0 if record['status'] == 'completed' else 1
-    return launcher(*args.paths)
+    if args.action == 'node':
+        return node()
+    if args.action == 'collective':
+        return collective(json.loads(args.operand))
+    return read(args.operand)
 
 
 if __name__ == '__main__':

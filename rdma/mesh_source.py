@@ -28,8 +28,9 @@ def verify(root):
     return revision(root)
 
 
-def checkout_command(origin, commit, destination):
-    """The node fetches Git objects from origin; the caller supplies only operands."""
+def checkout_command(origin, commit, destination, paths=()):
+    """The node fetches Git objects from origin; the caller supplies only operands. With `paths`, only those
+    directories are checked out, and only their files' contents fetched (a blobless clone, a sparse checkout)."""
     def path(value):
         value = str(value)
         return '"$HOME"/' + shlex.quote(value[2:]) if value.startswith('~/') else shlex.quote(value)
@@ -40,7 +41,8 @@ def checkout_command(origin, commit, destination):
         f'repository={path(repository)}',
         f'destination={path(destination)}',
         'if [ ! -d "$repository" ]; then',
-        f'  git clone --quiet --bare --single-branch --branch main {shlex.quote(origin)} "$repository"',
+        f'  git clone --quiet --bare --single-branch --branch main {"--filter=blob:none " if paths else ""}'
+        f'{shlex.quote(origin)} "$repository"',
         'fi',
         f'[ "$(git --git-dir="$repository" config --get remote.origin.url)" = {shlex.quote(origin)} ]',
         'if ! git --git-dir="$repository" merge-base --is-ancestor ' + shlex.quote(commit) + ' refs/remotes/origin/main 2>/dev/null; then',
@@ -49,15 +51,19 @@ def checkout_command(origin, commit, destination):
         'fi',
         f'git --git-dir="$repository" merge-base --is-ancestor {shlex.quote(commit)} refs/remotes/origin/main',
         'if [ ! -e "$destination" ]; then',
-        f'  git --git-dir="$repository" worktree add --quiet --detach "$destination" {shlex.quote(commit)}',
+        f'  git --git-dir="$repository" worktree add --quiet --detach {"--no-checkout " if paths else ""}"$destination" '
+        f'{shlex.quote(commit)}',
+        # a worktree made without its files: the sparse paths set, then its index and files read from its commit
+        *([f'  git -C "$destination" sparse-checkout set --cone {" ".join(map(shlex.quote, paths))}',
+           '  git -C "$destination" reset --quiet --hard'] if paths else []),
         'fi',
         '[ -z "$(git -C "$destination" status --porcelain)" ]',
         f'git -C "$destination" checkout --quiet --detach {shlex.quote(commit)}',
     ))
 
 
-def checkout(origin, commit, destination, timeout=None):
-    result = subprocess.run(['/bin/sh', '-c', checkout_command(origin, commit, destination)],
+def checkout(origin, commit, destination, timeout=None, paths=()):
+    result = subprocess.run(['/bin/sh', '-c', checkout_command(origin, commit, destination, paths)],
                             capture_output=True, text=True, timeout=timeout)
     if result.returncode:
         raise RuntimeError(f'Git checkout {commit} from {origin} failed ({result.returncode}): {result.stderr.strip()}')

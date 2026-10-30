@@ -43,7 +43,8 @@ class Member:
 class Cluster:
     """etc/mesh-nodes.json with the environment: members by bridge node number, the administrator's user and key, a
     run's bound in seconds, the nodes' Python, the directory under home of each repository's one checkout
-    (`<repository>/current`), and the first rank port."""
+    (`<repository>/current`), the first rank port, and each repository's origin (`upstreams`, which the hourly's every
+    node reads main from)."""
     members: dict
     user: str
     key: 'str | None'
@@ -51,6 +52,7 @@ class Cluster:
     python: str
     checkouts: str
     rank_port: int
+    upstreams: dict
 
     @property
     def ssh(self):
@@ -65,7 +67,7 @@ def load(path=ROOT / 'etc/mesh-nodes.json'):
                                         frozenset(row.get('roles', ())), row.get('guard_headroom_gib', 0)) for row in raw['nodes'].values()}
     return Cluster(members, access.get('user') or getpass.getuser(),
                    str(Path(access['key']).expanduser()) if 'key' in access else None,
-                   raw['run_seconds'], raw['python'], raw['checkouts'], raw['rank_port'])
+                   raw['run_seconds'], raw['python'], raw['checkouts'], raw['rank_port'], raw['upstreams'])
 
 
 def home_path(relative):
@@ -332,31 +334,25 @@ def wait_paired(nodes, log, end=math.inf):
     return ok
 
 
-def ranks(nodes, tag, folder, command, port, alarm=300, env='', input=None, states=None, run=''):
-    """One rank a node under `node guard` with the run's token (MESH_RUN), its operands the first line of a stdin held
-    open until it ends: closing that stdin (release) has its guard end it."""
-    master = nodes[0].ula
-    states = {} if states is None else states
-
-    def rank(k):
-        state, node = states.setdefault(f'rank{k}', {}), nodes[k]
-        invoke = (f'MESH_RUN={shlex.quote(run)} RANK={k} WORLD_SIZE={len(nodes)} MASTER_ADDR={shlex.quote(master)} '
-                  f'MASTER_PORT={port} {env}'
-                  f'{node.cluster.python} {home_path(node.source + "/rdma/mesh_nodes.py")} node guard {alarm} {node.guard} '
-                  f'{command}')
-        try:
-            code, output = node.run(f'cd {home_path(folder)} && {invoke}', input=(input or b'') + b'\n', hold=True,
-                                    timeout=alarm + 30, state=state)
-        except subprocess.TimeoutExpired as error:
-            code = 124
-            reason = 'remote process did not exit after its deadline'
-            state['diagnostics'].append(reason)
-            output = (error.output or b'').decode(errors='replace') + '\n' + reason + '\n'
-        if code:
-            print(f'{tag} rank{k} (exit {code}):\n' + '\n'.join(state['diagnostics']), file=sys.stderr, flush=True)
-        return {'exit': code, 'output': output, 'records': state['records'], 'diagnostics': state['diagnostics']}
-
-    return {f'rank{k}': row for k, row in enumerate(parallel([lambda k=k: rank(k) for k in range(len(nodes))]))}
+def rank(node, k, size, master, tag, folder, command, port, alarm=300, env='', input=None, run=''):
+    """Rank k of `size` on `node` under `node guard` with the run's token (MESH_RUN), its operands the first line of a
+    stdin held open until it ends: closing that stdin (release) has its guard end it."""
+    state = {}
+    invoke = (f'MESH_RUN={shlex.quote(run)} RANK={k} WORLD_SIZE={size} MASTER_ADDR={shlex.quote(master)} '
+              f'MASTER_PORT={port} {env}'
+              f'{node.cluster.python} {home_path(node.source + "/rdma/mesh_nodes.py")} node guard {alarm} {node.guard} '
+              f'{command}')
+    try:
+        code, output = node.run(f'cd {home_path(folder)} && {invoke}', input=(input or b'') + b'\n', hold=True,
+                                timeout=alarm + 30, state=state)
+    except subprocess.TimeoutExpired as error:
+        code = 124
+        reason = 'remote process did not exit after its deadline'
+        state['diagnostics'].append(reason)
+        output = (error.output or b'').decode(errors='replace') + '\n' + reason + '\n'
+    if code:
+        print(f'{tag} rank{k} (exit {code}):\n' + '\n'.join(state['diagnostics']), file=sys.stderr, flush=True)
+    return {'exit': code, 'output': output, 'records': state['records'], 'diagnostics': state['diagnostics']}
 
 
 def started(pid):
@@ -395,40 +391,34 @@ def node_prepare():
             installed = installed or done
     services = services_refresh(ROOT)
     told = {'services': services, 'seconds': seconds}
-    # standup (the operator, 2026-10-29): a machine whose bridge does not answer its restart signal, or whose running
-    # heartbeat is not this checkout's installed one (a loaded job takes a new definition only at its next load, a
-    # boot: bin/mesh-user.sh), is restarted where this boot has no kernel fault; one with a fault is left as it is, named
+    # No machine is restarted here (the operator, 2026-10-29: the administrative process kills no machine, by a fault
+    # or by a restart that did not need to happen). A new bridge or heartbeat image takes effect by the heartbeat's own
+    # re-exec on mesh-user.sh's SIGHUP; a bridge that does not stop, or a heartbeat not running the installed image, is
+    # a defect this record names, with any process stuck in the kernel.
     if 'restarts the bridge' in installed.stdout:
         deadline, began = time.time() + BRIDGE_RESTART_SECONDS, bridge_began()
         while not (began and began >= int(asked)) and time.time() < deadline:
             time.sleep(2)
             began = bridge_began()
-        if not (began and began >= int(asked)):
-            restart_unless_faulted(f'the bridge did not restart within {BRIDGE_RESTART_SECONDS} s of its signal')
-        told['bridge'] = 'restarted'
+        faults = kernel_faults()
+        told['bridge'] = ('restarted' if began and began >= int(asked) else
+                          f'not restarted within {BRIDGE_RESTART_SECONDS} s of its signal' + (f'; {faults}' if faults else ''))
     else:
         told['bridge'] = 'unchanged'
     stale = heartbeat_stale(ROOT)
     if stale:
-        restart_unless_faulted(stale)
+        told['heartbeat'] = stale
     print(json.dumps({'bridge': told.pop('bridge'), **told}))
 
 
 def kernel_faults():
     """This boot's kernel faults: a bridge or heartbeat process in an uninterruptible kernel wait (ps state U, as in a
-    driver call that never returns), each named. A running machine has had no panic this boot (a panic reboots it):
-    a panic report is written at the boot after its panic and describes the boot before (node resets reports those)."""
+    driver call that never returns), each named for the record. A running machine has had no panic this boot (a panic
+    reboots it): a panic report is written at the boot after its panic and describes the boot before (node resets
+    reports those)."""
     rows = [line.split(None, 2) for line in run('ps', '-axo', 'pid=,stat=,comm=').stdout.splitlines()]
     return [f'{os.path.basename(r[2])} {r[0]} in state {r[1]}' for r in rows
             if len(r) == 3 and os.path.basename(r[2]) in ('mesh-flow', 'mesh-heartbeat') and 'U' in r[1]]
-
-
-def restart_unless_faulted(why):
-    faults = kernel_faults()
-    if faults:
-        raise RuntimeError(f'{why}, and this boot has a kernel fault, so the machine is left as it is: {faults}')
-    run('sudo', '-n', 'shutdown', '-r', 'now')
-    raise RuntimeError(f'{why}; no kernel fault this boot, so the machine is restarting')
 
 
 def heartbeat_stale(root):

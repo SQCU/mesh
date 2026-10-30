@@ -3,7 +3,7 @@ the right solutions for them, assuming an average degree of 1.5 and a k sampled 
 
 Each sample is k nodes, k uniform in [2, 128], with round(0.75 k) random links (average degree 1.5), at bandwidths
 drawn from the Thunderbolt rates. The solver runs on the largest set of them the links join, as the hourly does
-(mesh_hourly.run_workload). libmesh solves it as libnccl-mesh does:
+(mesh_hourly.run_rank). libmesh solves it as libnccl-mesh does:
 - mesh_routes, then mesh_trees_pack with no roots, eps 0 and most n (nccl-mesh.c comm_routes), then mesh_trees_check;
 - mesh_compile for every collective, at sampled roots, then mesh_program_check_members;
 - each rank's steps cut (mesh_program_steps_cut), and each channel's lists laid (mesh_lay).

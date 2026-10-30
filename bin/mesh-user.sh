@@ -48,4 +48,6 @@ out=$("$source/bin/mesh-launchd-agent.sh" "$launchd_agents/io.mesh.bridge.plist.
 { [ -z "$loaded" ] || { [ -z "$renew" ] && [ -z "$images_changed" ]; }; } \
   || { launchctl kill SIGHUP "user/$(id -u)/io.mesh.bridge" 2>/dev/null; \
        echo "io.mesh.bridge: its new binaries or configuration are installed; its heartbeat restarts the bridge on them (SIGHUP), the region kept"; }
+out=$("$source/bin/mesh-hourly-agent.sh" "$source") || { printf '%s\n' "$out"; exit 1; }
+[ -z "$out" ] || printf '%s\n' "$out"
 printf 'revision=%s\n' "$(python3 "$source/rdma/mesh_source.py" revision "$source")" > "$state/facts/io.mesh.bridge"
