@@ -258,6 +258,7 @@ static uint64_t deadline_left(const struct mesh_deadline *d) {
   return d->at - now;
 }
 static void channel_counts(const struct ncclComm *comm, char *out, size_t room, int lists);
+static void tracks_report(const char *name);
 /* the GPU wait whose bound a communicator's failure words record (METAL_BOUND, nccl-mesh-kernels.h mesh_step_check),
    named into `wait`; its deadline, 0 where they record none.  Every channel's counts, its lists' too, a line of their
    own on stderr: which ring of which channel stood still, past the one the wait was on */
@@ -812,13 +813,15 @@ static void watch_turn(void *unused) {
   char wait[MESH_DIAGNOSTIC_BYTES];
   uint64_t idle = 0, now = mesh_clock_ns();
   pthread_mutex_lock(&live_lock);
+  const char *bounded = NULL;
   for (struct ncclComm *c = live; c && !idle; c = c->next_live) {
     int held = !__atomic_load_n(&c->revoked, __ATOMIC_ACQUIRE);
     for (uint32_t h = 0; held && h < c->count; h++)
       if (!(held = mesh_stream_held(&c->attach->context, c->channels[h].stream, *c->channels[h].wire))) comm_lost(c, h);
-    idle = bound_reached(c, wait, sizeof wait);
+    if ((idle = bound_reached(c, wait, sizeof wait))) bounded = c->name;
   }
   pthread_mutex_unlock(&live_lock);
+  if (bounded && !pthread_mutex_trylock(&group_lock)) { tracks_report(bounded); pthread_mutex_unlock(&group_lock); }
   if (!idle && !pthread_mutex_trylock(&group_lock)) {
     const uint64_t signaled = finished ? metal_signaled(finished) : 0;
     const struct ncclComm *pending = NULL;
@@ -2046,8 +2049,13 @@ static ncclResult_t comm_failure(struct ncclComm *comm) {
   struct attach *a = comm->attach;
   for (uint32_t k = 0; comm->held && k < MESH_STREAMS; k++)
     if ((comm->held >> k & 1) && !mesh_stream_held(&a->context, a->holds[k].stream, a->holds[k].wire)) {
-      char counts[320];
+      char counts[320], every[2048], line[2304];
       channel_counts(comm, counts, sizeof counts, 0);
+      channel_counts(comm, every, sizeof every, 1);
+      const int n = every[0] ? snprintf(line, sizeof line, "libnccl-mesh: communicator %s as its link to node %u was lost%s\n", comm->name,
+                                        a->holds[k].node, every) : 0;
+      if (n > 0) (void)!write(2, line, (size_t)n < sizeof line ? (size_t)n : sizeof line - 1);
+      tracks_report(comm->name);
       return comm_fail(comm, ncclRemoteError, "the link to node %u was lost and paired again: communicator %s's stream there is no "
                        "longer its own (design/transport.md section 14); it is made again (ncclCommDestroy, then an init)%s",
                        a->holds[k].node, comm->name, counts);
@@ -2055,6 +2063,7 @@ static ncclResult_t comm_failure(struct ncclComm *comm) {
   _Atomic uint64_t *v = comm->words;
   const uint64_t at = v ? atomic_load_explicit(v + 2, memory_order_acquire) : 0;
   if (at) {
+    tracks_report(comm->name);
     const uint64_t cause = atomic_load_explicit(v, memory_order_relaxed), h = atomic_load_explicit(v + 3, memory_order_relaxed);
     const uint32_t node = h < comm->count ? comm->channels[h].node : UINT32_MAX;
     if (cause == METAL_LOST)
@@ -3199,7 +3208,7 @@ static int grow(void *items, size_t *room, size_t count, size_t size) {
    `value`: the presented count past its entries, its tracks' ends) and none holds it whole (`held`: an argument
    records' piece, held until its residency set ends: metal_piece_give); a new one is leased only where none free is
    large enough.  Under group_lock (a give, from any thread, stores `held` alone) */
-struct use { const _Atomic uint64_t *words; uint32_t n; uint64_t value; };
+struct use { const _Atomic uint64_t *words; uint32_t n; uint64_t value; const void *at; };
 struct piece { void *address, *buffer; size_t bytes, used, uses, room; _Atomic int held; struct use *done; };
 static struct piece **pieces, *carving;
 static size_t piece_count, piece_room;
@@ -3233,12 +3242,34 @@ int metal_carve(size_t bytes, struct metal_bytes *made) {
   bytes = (bytes + 255) & ~(size_t)255;
   if ((!carving || carving->used + bytes > carving->bytes) && !(carving = piece_take(bytes))) return ENOMEM;
   if (grow(&carving->done, &carving->room, carving->uses, sizeof *carving->done)) return ENOMEM;
-  carving->done[carving->uses++] = (struct use){NULL, 1, 0};
+  carving->done[carving->uses++] = (struct use){NULL, 1, 0, (char *)carving->address + carving->used};
   *made = (struct metal_bytes){carving->buffer, carving->used, (char *)carving->address + carving->used};
   carving->used += bytes;
   return 0;
 }
-void metal_done(const _Atomic uint64_t *words, uint32_t n, uint64_t value) { carving->done[carving->uses - 1] = (struct use){words, n, value}; }
+void metal_done(const _Atomic uint64_t *words, uint32_t n, uint64_t value) {
+  struct use *u = carving->done + carving->uses - 1;
+  u->words = words; u->n = n; u->value = value;
+}
+/* on a failure only: every tracks pool whose workers have not all ended, its open cursors as they stand (nccl-mesh-metal.m
+   metal_tracks_open: a use whose end words lie in its own records), a line each on stderr, so a stall names the
+   task, dependency and count it stands at on the rank where it began.  Reads alone; under group_lock */
+static void tracks_report(const char *name) {
+  char line[4096];
+  for (size_t k = 0; k < piece_count; k++)
+    for (size_t u = 0; u < pieces[k]->uses; u++) {
+      const struct use *x = pieces[k]->done + u;
+      if (!x->words || !x->at) continue;
+      const int n = snprintf(line, sizeof line, "libnccl-mesh: communicator %s's ", name);
+      const size_t told = n > 0 ? (size_t)n : 0;
+      size_t used = metal_tracks_open(x->at, (const void *)x->words, x->n, line + told, sizeof line - told - 1);
+      if (!used) continue;
+      used += told;
+      if (used > sizeof line - 2) used = sizeof line - 2;
+      line[used++] = '\n';
+      (void)!write(2, line, used);
+    }
+}
 void *metal_piece_hold(struct metal_bytes *made, size_t *bytes) {
   struct piece *p = piece_take(MESH_COMMAND_DATA_BYTES);
   if (!p) return NULL;

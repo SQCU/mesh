@@ -194,6 +194,12 @@ enum { METAL_PUBLISH, METAL_CONSUME };
 struct metal_result metal_record(struct metal_program *, uint32_t track, int cursor, uint64_t position, uint64_t need);
 struct metal_result metal_depend(struct metal_program *, uint32_t other, uint64_t count);
 struct metal_result metal_tracks(struct metal_program *, uint32_t tracks, const uint64_t *consumed);
+/* a tracks pool's records as metal_tracks laid them (`records`, its workers' end words at `ended`, `workers` of them),
+   read on a failure alone: where some worker has not ended, each open cursor's track and kind, its task, that task's
+   chunks claimed and done, its item's position, need and dependencies (each count awaited and the count now) and its
+   step's kind and awaited count, into `out`; the characters written, 0 where every worker has ended or the words are
+   not that pool's */
+size_t metal_tracks_open(const void *records, const void *ended, uint32_t workers, char *out, size_t room);
 /* rdma/mesh.metal as this library was built with it, then the steps' Metal text: the argument record, a deferred step's
    bindings as one record (mesh_step_binding) and mesh_step_*; what a caller's kernel compiles after */
 const char *metal_prelude(void);

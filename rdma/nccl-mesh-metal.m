@@ -645,6 +645,47 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
   return METAL_DONE;
 }
 
+size_t metal_tracks_open(const void *records, const void *ended, uint32_t workers, char *out, size_t room) {
+  const unsigned char *base = records;
+  const struct track_head *h = records;
+  if (!room || (uintptr_t)ended != (uintptr_t)base + h->ended_off) return 0;
+  const _Atomic uint64_t *end = ended;
+  uint32_t live = 0;
+  for (uint32_t w = 0; w < workers; w++) live += !atomic_load_explicit(end + w, memory_order_acquire);
+  if (!live) return 0;
+  const struct track_cursor *cursor = (const struct track_cursor *)(base + h->cursors_off);
+  const struct track_task *task = (const struct track_task *)(base + h->tasks_off);
+  const struct track_item *item = (const struct track_item *)(base + h->items_off);
+  const struct track_op *op = (const struct track_op *)(base + h->ops_off);
+  const struct track_dep *dep = (const struct track_dep *)(base + h->deps_off);
+  const _Atomic uint64_t *count = (const _Atomic uint64_t *)(base + h->count_off);
+  const _Atomic uint32_t *state = (const _Atomic uint32_t *)(base + h->state_off), *claim = (const _Atomic uint32_t *)(base + h->claim_off),
+                         *done = (const _Atomic uint32_t *)(base + h->done_off);
+  size_t used = 0;
+#define TOLD(...) do { if (used + 1 < room) { const int n_ = snprintf(out + used, room - used, __VA_ARGS__); \
+                         if (n_ > 0) used += (size_t)n_ < room - used ? (size_t)n_ : room - used - 1; } } while (0)
+  TOLD("tracks pool with %u of %u workers not ended, its tracks' counts", live, workers);
+  for (uint32_t t = 0; t < h->cursors / 2; t++) TOLD("%s%llu", t ? ", " : " ", (unsigned long long)atomic_load_explicit(count + t, memory_order_acquire));
+  for (uint32_t cu = 0; cu < h->cursors; cu++) {
+    const uint32_t j = atomic_load_explicit(state + cu, memory_order_acquire);
+    if (j >= cursor[cu].end) continue;
+    const struct track_task *x = task + j;
+    const struct track_item *it = item + x->item;
+    TOLD("; track %u's %s at task %u of [%u, %u): position %llu, need %llu, %u of %u chunks claimed and %u done",
+         cursor[cu].track, cursor[cu].kind ? "consumptions" : "publications", j, cursor[cu].first, cursor[cu].end,
+         (unsigned long long)it->position, (unsigned long long)it->need, atomic_load_explicit(claim + j, memory_order_acquire), x->chunks,
+         atomic_load_explicit(done + j, memory_order_acquire));
+    for (uint32_t k = 0; k < it->deps; k++)
+      TOLD(", awaiting track %u's count %llu (now %llu)", dep[it->first_dep + k].other, (unsigned long long)dep[it->first_dep + k].count,
+           (unsigned long long)atomic_load_explicit(count + dep[it->first_dep + k].other, memory_order_acquire));
+    if (x->ops && op[x->first_op].kind < KINDS)
+      TOLD(", its %s step's count %llu%s", NAME[op[x->first_op].kind], (unsigned long long)op[x->first_op].p.scalar,
+           op[x->first_op].word ? " awaited" : "");
+  }
+#undef TOLD
+  return used;
+}
+
 void *metal_contents(void *buffer) { return buffer ? ((id<MTLBuffer>)buffer).contents : NULL; }
 
 /* mesh.metal's text as this library was built (.build/mesh_metal.h, xxd of it), then STEPS: made once, kept */
