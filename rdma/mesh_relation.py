@@ -4,6 +4,7 @@ This binds the same ISL archive as MetalTensorLayout. Its objects and integers
 use mesh's page allocator. No relation object is an execution operand.
 """
 import ctypes as C
+import json
 import os
 from pathlib import Path
 
@@ -55,6 +56,8 @@ class Algebra:
         self.lib.mesh_isl_free.argtypes, self.lib.mesh_isl_free.restype = (C.c_void_p,), None
         self.lib.MeshIndexSetRuns.argtypes = C.c_void_p, C.POINTER(C.c_size_t)
         self.lib.MeshIndexSetRuns.restype = C.POINTER(C.c_int64)
+        self.lib.MeshIndexSelectionDomain.argtypes = C.c_void_p, C.c_char_p, C.POINTER(C.c_void_p)
+        self.lib.MeshIndexSelectionDomain.restype = C.c_void_p
         self.ctx = self.ctx_alloc()
         self.references = 1
 
@@ -83,6 +86,17 @@ class Algebra:
 
     def set(self, text, rank):
         return IndexSet(self, self.set_read_from_str(self.ctx, text.encode()), rank)
+
+    def selection(self, declaration):
+        """The final page binder's selection domain, in logical flat positions."""
+        message = C.c_void_p()
+        result = self.lib.MeshIndexSelectionDomain(self.ctx, json.dumps(declaration).encode(), C.byref(message))
+        if message.value:
+            try:
+                raise ValueError(C.string_at(message.value).decode())
+            finally:
+                self.lib.mesh_isl_free(message.value)
+        return IndexSet(self, result, 1)
 
     def ownership(self, shape, axis, unit, extent):
         names = coordinates(shape, 'i')

@@ -874,12 +874,22 @@ devices outside the declaration stop preparation. Reusing a loaded model still
 applies the requesting caller's device constraint. Older manifests and replay
 records must be prepared again; missing configuration has no default.
 
-The loader retains one placement report with `preferred` device counts and
-`unresolved` operator counts. The latter are operations for which Core ML gives
-no device-use information. Reading this report does not reload a compute plan.
+The loader retains one placement report with `preferred` and `supported` device
+counts, `allowed_devices` from compute units, and `unresolved` operator counts.
+Its operation tree retains outputs and nested blocks. Unknown device usage is
+null, distinct from an empty support set. Reading this report does not reload a compute plan.
 The former Python-only inspection has been removed. This report describes
 anticipated placement; neither it nor the allowed-device declaration guarantees
 actual execution placement or caller-owned output storage.
+
+Every model input and output must now have an explicit view at preparation,
+including optional inputs. Omission cannot request a provider default or leave
+an output for eager allocation. Int8 joins the shared model scalar types; its
+SDK availability is resolved when binding. Python export and native operands
+carry that same type, and Swift uses the C enum values. Preparation bound full
+models and Int8 bridge-page operands, diagnosed missing features, and retained
+the configured preferred-device restriction. No prediction ran. The public
+output-backing limitation above remains unresolved.
 
 Preparation on 2026-10-29 converted and compiled the shared model builder's row
 and channel tails with both `main` and an explicitly named entry function. A
@@ -1539,7 +1549,32 @@ expansion. A join of cut and unconstrained inputs retained both domains. FX
 dependency pruning and stage extraction also prepared through `mesh_graph`.
 No numerical execution or performance measurement ran.
 
-The provider binder now resolves those relations through `MetalTensorLayout`.
+The graph slicer and provider binder now consume the same ordered selection
+parser in `MetalTensorLayout`. `Algebra.selection` exposes its exact logical
+position set to Python preparation. Region declarations distinguish each
+value's storage root from the positions it reads or writes. Backward slicing
+subtracts only the positions a writer defines; stage frontiers expose the
+actual writers a consumer intersects. Disjoint output pieces do not become a
+whole-result dependency. The shared `binding_cuts` derives provider boundaries
+from those same relations. No region object reaches execution.
+
+Sparse constants no longer retain every original axis as a grouping limit.
+`reshape_constant` rewrites stored coordinates, preserves encoded scalar bits,
+and retains compatible dense tails as runs. Grouping and later cuts share the
+existing CSR and bit-run helpers. Preparation carried float32 and packed int4
+constants through the graph slicer and retained only the selected stored values.
+A billion-row domain retained three stored runs. This does not establish a
+sparse numerical provider: ML Drift's `PreCheckTensorToTensor` still rejects
+sparsity. Connecting a suitable compiled consumer remains required.
+
+Preparation also serialized disjoint output views, whole-result readers and
+subset readers through the member-stage builder. The subset reader pruned the
+unrelated output producer. Nested selections and a billion-position stripe used
+the final binder's parser without expanding points. Shared and native libraries
+built; no numerical execution ran. Automatic tiling across required operation
+axes and the stronger Core ML output contract remain open.
+
+The provider binder resolves those relations through `MetalTensorLayout`.
 `configs/litert-storage.json` declares each provider buffer class's integer
 storage relation and scalar encoding; preparation exports that contract with
 the graph. Ordinary `MetalBuffer` tensors use PHWC4 storage. `MetalBufferFp16`

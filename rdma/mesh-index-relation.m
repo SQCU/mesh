@@ -4,6 +4,20 @@
 #include <isl/ilp.h>
 #include <isl/val.h>
 #include "mesh-isl-memory.h"
+#include <string.h>
+
+isl_set *MeshIndexSelectionDomain(isl_ctx *ctx,const char *declaration,char **message) { @autoreleasepool {
+    *message=NULL;
+    @try {
+        NSData *data=[NSData dataWithBytesNoCopy:(void *)declaration length:strlen(declaration) freeWhenDone:NO];
+        NSError *error=nil;NSDictionary *value=[NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+        if(error)[NSException raise:NSInvalidArgumentException format:@"selection declaration: %@",error];
+        return isl_map_range(MeshIndexRelation(ctx,[MetalTensorLayout selection:value extent:nil]));
+    } @catch(NSException *error) {
+        *message=mesh_isl_strdup(error.reason.UTF8String);
+        return NULL;
+    }
+}}
 
 static isl_set *IndexDomain(isl_ctx *ctx, NSUInteger first, NSUInteger end) {
     return isl_set_read_from_str(ctx, [[NSString stringWithFormat:@"{ [i] : %lu <= i < %lu }",

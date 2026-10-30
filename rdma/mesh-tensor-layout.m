@@ -1063,7 +1063,62 @@ static MetalTensorLayout *TensorClosedElements(MetalTensorLayout *layout,NSUInte
     return [result shaped:shape coordinates:coordinates];
 }
 
+static NSInteger TensorSelectionExtent(id value) {
+  if([value isKindOfClass:NSArray.class]) {
+    NSInteger product=1;for(id factor in value)product*=TensorSelectionExtent(factor);return product;
+  }
+  if(![value isKindOfClass:NSNumber.class])
+    [NSException raise:NSInvalidArgumentException format:@"unbound selection extent %@",value];
+  return [value longLongValue];
+}
+static id TensorSelectionIndex(NSInteger (^extent)(id),NSArray *shape,id expression,NSMutableDictionary *parameters,NSMutableDictionary *lookups) {
+  if(![expression isKindOfClass:NSArray.class])return expression;
+  NSString *op=expression[0];
+  if([op isEqual:@"extent"])return @(extent(expression[1]));
+  if([op isEqual:@"lookup"]) {
+    if(lookups[expression])return lookups[expression];
+    MetalTensorLayout *source=[MetalTensorLayout selection:expression[1] extent:extent];
+    id term=TensorSelectionIndex(extent,shape,expression[2],parameters,lookups);
+    MetalTensorLayout *indices=[MetalTensorLayout shape:shape index:term parameters:parameters];
+    NSString *name=[NSString stringWithFormat:@"selection.%lu",(unsigned long)parameters.count];
+    parameters[name]=[indices rebase:[MetalTensorLayout shape:source.shape strides:TensorStrides(source.shape) offset:0 maps:@{} indices:nil] onto:source];
+    lookups[expression]=name;
+    return name;
+  }
+  NSMutableArray *terms=[NSMutableArray arrayWithObject:op];
+  for(NSUInteger k=1;k<[expression count];k++)[terms addObject:TensorSelectionIndex(extent,shape,expression[k],parameters,lookups)];
+  return terms;
+}
+
 @implementation MetalTensorLayout
++ (instancetype)selection:(NSDictionary *)declaration extent:(NSInteger (^)(id))extent {
+  if(!extent)extent=^NSInteger(id value){return TensorSelectionExtent(value);};
+  NSMutableArray *shape=[NSMutableArray array];for(id n in declaration[@"shape"])[shape addObject:@(extent(n))];
+  MetalTensorLayout *layout=[self shape:shape strides:TensorStrides(shape) offset:0 maps:@{} indices:nil];
+  if(!declaration[@"steps"])
+    [NSException raise:NSInvalidArgumentException format:@"selection requires ordered transformations; prepare the program again"];
+  for(NSArray *step in declaration[@"steps"]) {
+    if([step[0] isEqual:@"select"]) {
+      NSMutableArray *runs=[NSMutableArray array];
+      for(NSArray *run in step[2]) {
+        NSMutableArray *values=[NSMutableArray array];for(id n in run)[values addObject:@(extent(n))];
+        [runs addObject:values];
+      }
+      layout=[layout select:[step[1] unsignedIntegerValue] runs:runs];
+    } else if([step[0] isEqual:@"permute"])layout=[layout permute:step[1]];
+    else if([step[0] isEqual:@"reshape"]) {
+      NSMutableArray *shape=[NSMutableArray array];for(id n in step[1])[shape addObject:@(extent(n))];
+      layout=[layout reshape:shape];
+    } else if([step[0] isEqual:@"reindex"]) {
+      NSMutableArray *shape=[NSMutableArray array];for(id n in step[1][@"shape"])[shape addObject:@(extent(n))];
+      NSMutableDictionary *parameters=[NSMutableDictionary dictionary];
+      id term=TensorSelectionIndex(extent,shape,step[1][@"index"],parameters,[NSMutableDictionary dictionary]);
+      MetalTensorLayout *indices=[MetalTensorLayout shape:shape index:term parameters:parameters];
+      layout=[indices rebase:[self shape:layout.shape strides:TensorStrides(layout.shape) offset:0 maps:@{} indices:nil] onto:layout];
+    } else [NSException raise:NSInvalidArgumentException format:@"unknown selection transformation %@",step[0]];
+  }
+  return layout;
+}
 + (instancetype)configuration:(NSDictionary *)value {
     NSMutableDictionary *maps=[NSMutableDictionary dictionary];
     for(NSString *axis in value[@"maps"])maps[@(axis.integerValue)]=TensorWords(value[@"maps"][axis]);

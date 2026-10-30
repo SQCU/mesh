@@ -10,6 +10,10 @@
 isl_pw_aff *MeshIndexExpression(isl_ctx *ctx, id expression, NSUInteger first, NSUInteger end);
 isl_pw_aff *MeshIndexFunction(isl_ctx *ctx, MetalTensorLayout *layout);
 isl_map *MeshIndexRelation(isl_ctx *ctx, MetalTensorLayout *layout);
+// A resolved selection declaration's exact logical position set. JSON is only
+// a preparation-language boundary; no serialized descriptor reaches execution.
+// On a declaration exception, error owns a message freed with mesh_isl_free.
+isl_set *MeshIndexSelectionDomain(isl_ctx *ctx, const char *declaration, char **error);
 isl_pw_aff *MeshIndexRuns(isl_ctx *ctx, NSArray<NSArray<NSNumber *> *> *runs);
 // Sorted unique positions as compact (first,width,step,count) records. Borrow
 // the set; release the returned array with mesh_isl_free. NULL reports failure.
