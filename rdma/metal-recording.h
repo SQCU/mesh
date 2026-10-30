@@ -202,8 +202,12 @@ NSString *MetalPipelineName(id<MTLComputePipelineState>);
 struct MetalCommandBinding MetalScheduleData(struct MetalSchedule *, const void *, size_t bytes, uint32_t index);
 void MetalScheduleCompute(struct MetalSchedule *, id<MTLComputePipelineState>,
     const struct MetalCommandBinding *, size_t count, MTLSize groups, MTLSize threads);
-// A crossing, encoded now; its declaration (NULL: none, and its function makes no template).
-int MetalScheduleCross(struct MetalSchedule *, const struct MetalDeclaration *, MetalCrossing);
+// A crossing's actual local accesses, compiled with the same dependency frontier
+// as numerical work. Encoding still completes during preparation: callers may
+// consume the publication records it produces. A fused descriptor publication
+// names residency here; its producer/consumer commands declare payload accesses.
+int MetalScheduleCross(struct MetalSchedule *, const struct MetalReach *, size_t count,
+    const struct MetalDeclaration *, MetalCrossing);
 // A range of a prepared replay's commands (MetalReplayCommands, MetalReplayDescribed), its first invocation's, as the schedule's
 // next work, in the replay's form and ordered by its recorded reaches.
 void MetalScheduleReplay(struct MetalSchedule *, struct MetalReplay *, NSRange commands);
@@ -211,8 +215,9 @@ void MetalScheduleReplay(struct MetalSchedule *, struct MetalReplay *, NSRange c
 // schedule's other work.
 void MetalScheduleCopy(struct MetalSchedule *, id<MTLBuffer> source, NSUInteger from, id<MTLBuffer> destination, NSUInteger to,
     NSUInteger bytes);
+typedef NSData *(^MetalCrossingViews)(NSUInteger invocation, NSUInteger mark);
 NSError *MetalScheduleAppend(struct MetalSchedule *, struct MetalReplay *, NSRange invocations,
-    NSArray<NSNumber *> *marks, MetalCrossing);
+    NSArray<NSNumber *> *marks, MetalCrossingViews, MetalCrossing);
 // Finish all local parts and exchange their compiled list ends with peers.
 // Returns the collective preparation error, or zero. Enqueue does no exchange.
 int MetalScheduleFinish(struct MetalSchedule *, void (^completed)(NSError *error));

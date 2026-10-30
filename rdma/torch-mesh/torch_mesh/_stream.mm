@@ -201,10 +201,10 @@ struct Group {
     if (t.scalar_type() == at::kBool) op = op == ncclSum ? ncclMax : op == ncclProd ? ncclMin : op;
     if (t.is_complex()) {
       TORCH_CHECK(op == ncclSum || op == ncclAvg, "a complex tensor reduces by sum and average alone");
-      return {where(t), (size_t)t.numel() * 2, kind(at::toRealValueType(t.scalar_type()))};
+      return {where(t), (size_t)t.numel() * 2, kind(at::toRealValueType(t.scalar_type())), (size_t)t.nbytes()};
     }
     TORCH_CHECK(kind(t.scalar_type()) != ncclNumTypes, "the mesh backend reduces no ", t.scalar_type());
-    return {where(t), (size_t)t.numel(), kind(t.scalar_type())};
+    return {where(t), (size_t)t.numel(), kind(t.scalar_type()), (size_t)t.nbytes()};
   }
 };
 
@@ -267,9 +267,45 @@ static Issue prepare(const Call &call, Group &g) {
     const auto &t = tensor(sends,0);
     const size_t per = what != BROADCAST && t.is_complex() ? 2 :
       kind(t.scalar_type()) == ncclNumTypes ? t.element_size() : 1;
-    i.sends.front().count = (size_t)counts[0] * per;
+    Operand &operand=i.sends.front();
+    const size_t width=operand.count?operand.bytes/operand.count:0;
+    operand.count=(size_t)counts[0]*per;operand.bytes=operand.count*width;
   }
   return i;
+}
+
+// Local byte domains of the prepared collective. Role selection is compiler
+// input; no runtime call re-derives a rank's reads or writes.
+static std::vector<MetalReach> collective_views(const std::vector<Issue> &issues,ncclComm_t comm) {
+  int rank=0;checked(ncclCommUserRank(comm,&rank));
+  std::vector<MetalReach> views;
+  auto add=[&](const Operand &operand,size_t bytes,uint32_t access) {
+    if(!operand.at||!bytes)return;
+    const auto &binding=*static_cast<const ncclMeshBuffer *>(operand.at);
+    views.push_back({(__bridge id<MTLBuffer>)binding.buffer,binding.offset,bytes,access,-1});
+  };
+  for(const Issue &issue:issues) {
+    if(issue.kind==ALLREDUCE||issue.kind==REDUCE||issue.kind==BROADCAST) {
+      const Operand &source=issue.sends.front();
+      if(issue.kind!=BROADCAST||rank==issue.root)add(source,source.bytes,MetalReachRead);
+      if(issue.kind!=REDUCE||rank==issue.root)
+        add(issue.receives.empty()?source:issue.receives.front(),source.bytes,MetalReachWritten);
+      continue;
+    }
+    const size_t peers=issue.kind==ALLTOALL?issue.counts.size()/2:issue.counts.size();
+    for(size_t side=0;side<2;side++) {
+      const auto &operands=side?issue.receives:issue.sends;
+      const size_t start=issue.kind==ALLTOALL?side*peers:0;
+      for(size_t k=0;k<operands.size();k++) {
+        const Operand &operand=operands[k];size_t count=0;
+        if((issue.kind==ALLGATHER&&!side)||(issue.kind==REDUCE_SCATTER&&side))count=issue.counts[rank];
+        else if(operands.size()==1)count=std::accumulate(issue.counts.begin()+start,issue.counts.begin()+start+peers,size_t(0));
+        else count=issue.counts[start+k];
+        add(operand,operand.count?count*(operand.bytes/operand.count):0,side?MetalReachWritten:MetalReachRead);
+      }
+    }
+  }
+  return views;
 }
 
 // The group's calls on stream s (NULL: the host path), one NCCL group. A declared group's buffers are its
@@ -746,7 +782,7 @@ struct Commands {
   ~Commands(){MetalReplayFree(replay);}
   void append(MetalSchedule *schedule) {
     if(!replay)return;
-    NSError *error=MetalScheduleAppend(schedule,replay,NSMakeRange(0,1),@[],nil);
+    NSError *error=MetalScheduleAppend(schedule,replay,NSMakeRange(0,1),@[],nil,nil);
     TORCH_CHECK(!error,error?error.localizedDescription.UTF8String:"");
   }
 };
@@ -776,9 +812,10 @@ struct Collectives {
     std::vector<uint8_t> declared;std::vector<MetalPlace> places;
     declare_group(*list,handle,repeat,group.metal,declared,places);
     const MetalDeclaration declaration{"collectives",declared.data(),declared.size(),places.data(),places.size()};
+    const auto views=collective_views(*list,handle);
     for(size_t k=0;k<batches;k++) {
       before.append(schedule);
-      checked(MetalScheduleCross(schedule,&declaration,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
+      checked(MetalScheduleCross(schedule,views.data(),views.size(),&declaration,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
         id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
       ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
         .residencySet=(__bridge void *)residency};
@@ -1166,8 +1203,16 @@ static void prepare_fused_writes(MetalSchedule *schedule,PreparedWrites &plans) 
   PreparedWrites *p=&plans;
   std::vector<uint8_t> declared;std::vector<MetalPlace> places;
   const bool whole=declare_writes(plans.handles,plans.comm,plans.polls,plans.records.repeats,plans.records.stride,0,declared,places);
+  TORCH_CHECK(whole,"prepared WRITE plans require their page declaration");
   const MetalDeclaration declaration{"writes",declared.data(),declared.size(),places.data(),places.size()};
-  checked(MetalScheduleCross(schedule,whole?&declaration:nullptr,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
+  // Fused setup publishes descriptors, not payload values. Its page storage
+  // stays resident; the declared publishing/landing kernels own data edges.
+  std::vector<MetalReach> views;
+  for(const MetalPlace &place:places)if(place.relocation==MetalRelocationBuffer) {
+    id<MTLBuffer> buffer=nil;memcpy(&buffer,declared.data()+place.at,sizeof buffer);
+    if(buffer)views.push_back({buffer,0,buffer.length,MetalReachResident,-1});
+  }
+  checked(MetalScheduleCross(schedule,views.data(),views.size(),&declaration,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
       id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
     ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
       .residencySet=(__bridge void *)residency,.polls=p->polls,.fused=&p->records};
@@ -1860,6 +1905,7 @@ struct ViewWrites {
   std::vector<ViewBinding> bindings;
   PreparedWrites plans;
   std::vector<at::Tensor> leases;
+  std::vector<MetalReach> views;
   // A meta storage is a relay's: its shape and type alone over an empty page table, the library's relay (nccl.h
   // ncclMeshWriteLayoutPrepare).
   ViewWrites(const std::vector<ViewBinding> &given, int64_t handle) : comm(handle), metal(true), bindings(given) {
@@ -1870,6 +1916,7 @@ struct ViewWrites {
   void prepare() {
     if(!plans.handles.empty())return;
     Group g{metal};
+    int rank=0;checked(ncclCommUserRank(communicator(comm),&rank));
     for (const auto &[storage, bits, shape, strides, offset, mapped, runs, source, destination] : bindings) {
       ncclMeshPageTable_t table = nullptr;
       TORCH_CHECK(storage.is_meta() || storage.is_mps() == metal, "view writes require one local device");
@@ -1880,8 +1927,26 @@ struct ViewWrites {
       plans.handles.push_back(nullptr);
       const ncclResult_t made = ncclMeshWriteLayoutPrepare(&layout, source, destination, 0, ncclMeshWriteLayout{0, 1, 0, 1},
                                                            &plans.handles.back());
+      ncclMeshBuffer pageBinding{};
+      if(!storage.is_meta())checked(ncclMeshPageTableBinding(table,&pageBinding));
       ncclMeshPageTableDestroy(table);
       checked(made);
+      if(!storage.is_meta()) {
+        MetalTensorLayout *selected;
+        if(mapped) {
+          NSMutableArray *parts=[NSMutableArray array];
+          for(size_t k=0;k<runs.size();k+=2)[parts addObject:@[@(runs[k]),@(runs[k+1]),@0,@1]];
+          selected=[MetalTensorLayout runs:parts];
+        } else selected=[MetalTensorLayout shape:tensorNumbers(std::vector<NSInteger>(shape.begin(),shape.end()))
+            strides:tensorNumbers(std::vector<NSInteger>(strides.begin(),strides.end())) offset:offset maps:@{} indices:nil];
+        MetalTensorLayout *bitView=[selected components:(NSUInteger)bits];
+        MetalTensorLayout *bytes=[MetalTensorLayout shape:bitView.shape index:@[@"div",@"bit",@8]
+            parameters:@{@"bit":bitView}];
+        const uint32_t access=rank==source?MetalReachRead:rank==destination?MetalReachWritten:MetalReachRead|MetalReachWritten;
+        NSData *reaches=[bytes reaches:(__bridge id<MTLBuffer>)pageBinding.buffer base:pageBinding.offset
+            elementBytes:1 access:access binding:-1];
+        const auto *spans=(const MetalReach *)reaches.bytes;views.insert(views.end(),spans,spans+reaches.length/sizeof *spans);
+      }
     }
   }
   // Each encoded execution is the plan's next invocation, cycling the plan's instances: NFE k+1 writes other pages
@@ -1903,8 +1968,9 @@ struct ViewWrites {
     const size_t invocation=invocations++;
     std::vector<uint8_t> declared;std::vector<MetalPlace> places;
     const bool whole=declare_writes(plans.handles,communicator(comm),0,0,0,invocation,declared,places);
+    TORCH_CHECK(whole,"prepared WRITE plans require their page declaration");
     const MetalDeclaration declaration{"views",declared.data(),declared.size(),places.data(),places.size()};
-    checked(MetalScheduleCross(schedule,whole?&declaration:nullptr,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
+    checked(MetalScheduleCross(schedule,views.data(),views.size(),&declaration,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
         id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
       ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
         .residencySet=(__bridge void *)residency};

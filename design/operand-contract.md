@@ -3,12 +3,13 @@
 Established 2026-10-27. This records the shared lowering contract and remaining
 integration work. It does not change the data-model document.
 
-## Integration checkpoint: 2026-10-29, 22:51 PDT
+## Integration checkpoint: 2026-10-30
 
-Contractions now carry separate work, read and write relations. A repeated
+Contractions and reductions carry separate work, read and write relations. A repeated
 operand can have a different role in each input slot. Required remote reads
 become explicit partition boundaries. Ordinary broadcasts place each owner's
-selected values in the receiver's pages; sums retain the shared product finish.
+selected values in the receiver's pages. Reductions retain their declared
+combine operation, accumulator type and finish, including empty domains.
 Expanding receipt storage does not expand the producer's numerical work.
 
 Correlated product cuts use exact output/reduction fibers. Empty products use
@@ -25,13 +26,29 @@ direct ANE adapter binds an IOSurface over bridge pages and prepares its request
 once. Public Core ML output backings remain advisory. Raw provider-owned state
 still needs export functionalization into named input/output pages.
 
+LiteRT and its Metal provider now build from matching pinned sources. During
+preparation the provider exports its actual tensor types, physical layouts,
+accesses and command descriptions. Its allocator uses bridge pages. Final
+bindings enter the same placement pass and recorder as native commands; the
+provider supplies no runtime executor or command queue. Named dimensions bind
+model fields and page selections before compilation. Integers in those
+selections remain literal.
+
+Collective crossings declare their local page accesses. The recorder keeps one
+dependency frontier across preparation calls. It no longer waits for every
+earlier host operation at each crossing or makes later hosts depend on the
+whole crossing. Fused descriptor setup retains residency declarations; the
+existing producer and landing commands carry the payload dependencies.
+
 Evidence is source review, native and frontend builds, Swift type checking,
-graph preparation and ANE load/map/release. No numerical execution or performance
-measurement is claimed. General non-contraction reduction partitioning and
-standalone packed/sparse constant result export remain unfinished. The concurrent
-Metal 4 migration removed provider command capture: LiteRT numerical provider
-stages now require a command-description exporter. Vendor ANE submission waits
-and the full-function integration review also remain open.
+graph preparation and ANE load/map/release. Actual LiteRT compilation, placement,
+binding and command export succeeded with changed row counts, named dimensions
+and a nonzero output origin, without boundary copies or numerical invocation.
+Dependency preparation retained the needed producer across crossings and left
+disjoint host work independent. These are preparation results, not latency or
+throughput measurements. Standalone packed/sparse constant results, legacy model
+constant/attribute substitution, vendor ANE submission waits and the full-function
+integration review remain open.
 
 ## Pages hold the data
 

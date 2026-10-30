@@ -1149,9 +1149,9 @@ struct MetalSchedule {
     uint64_t value;
     id<MTLSharedEvent> event, start;
     MTLSharedEventListener *listener;
-    NSMutableArray *work, *hosts, *waits;
+    NSMutableArray *work, *hosts, *waits, *history;
+    NSMutableDictionary *frontierRead, *frontierWritten;
     NSMutableSet *waited;
-    struct MetalSchedule *boundary;
     NSUInteger commands, ordinal;
     _Atomic int status;
     _Atomic unsigned references;
@@ -1208,6 +1208,7 @@ struct MetalSchedule *MetalScheduleCreateOn(id<MTL4CommandQueue> queue, enum Met
     s->device=[device retain];s->form=form;s->queue=[queue retain];
     s->owners=[NSMutableSet new];s->read=[NSMutableDictionary new];s->written=[NSMutableDictionary new];
     s->work=[NSMutableArray new];s->hosts=[NSMutableArray new];s->waits=[NSMutableArray new];s->waited=[NSMutableSet new];
+    s->history=[NSMutableArray new];s->frontierRead=[NSMutableDictionary new];s->frontierWritten=[NSMutableDictionary new];
     MTLResidencySetDescriptor *resident=[MTLResidencySetDescriptor new];
     s->residency=[device newResidencySetWithDescriptor:resident error:nil];[resident release];
     s->allocator=[device newCommandAllocator];
@@ -1329,16 +1330,17 @@ void MetalScheduleCompute(struct MetalSchedule *root,id<MTLComputePipelineState>
 }
 }
 
-static int MetalScheduleCrossNow(struct MetalSchedule *root,MetalCrossing cross) {
+static int MetalScheduleCrossWork(struct MetalSchedule *root,NSData *accesses,MetalCrossing cross) {
+    __block int error=0;
+    MetalScheduleWork(root,accesses,^(struct MetalSchedule *now){
+        struct MetalSchedule *s=MetalScheduleWritable(now);
+        s->commands++;
+        error=cross(s->encoder,s->table,s->residency,0,0);
+        [s->read removeAllObjects];[s->written removeAllObjects];
+    },nil);
+    // Realization produces publication operands used by subsequent compilation.
+    // The persistent frontier keeps those calls' data edges across this flush.
     MetalScheduleFlush(root);
-    // Collective marks preserve the declared transport order. All preceding
-    // host outputs are available before this opaque transport declaration.
-    for(MetalWork *host in root->hosts)MetalScheduleWait(root,host->event);
-    struct MetalSchedule *s=MetalScheduleWritable(root);
-    s->commands++;
-    int error=cross(s->encoder,s->table,s->residency,0,0);
-    [s->read removeAllObjects];[s->written removeAllObjects];
-    root->boundary=s;
     return error;
 }
 
@@ -1352,9 +1354,12 @@ static NSMutableDictionary *MetalScheduleDeclared(NSString *call,const struct Me
     return entry;
 }
 
-int MetalScheduleCross(struct MetalSchedule *root,const struct MetalDeclaration *declared,MetalCrossing cross) {
-    MetalScheduleCall(root,MetalScheduleDeclared(@"cross",declared));
-    return MetalScheduleCrossNow(root,cross);
+int MetalScheduleCross(struct MetalSchedule *root,const struct MetalReach *views,size_t count,
+    const struct MetalDeclaration *declared,MetalCrossing cross) {
+    NSData *accesses=[NSData dataWithBytes:views length:count*sizeof *views];
+    NSMutableDictionary *entry=MetalScheduleDeclared(@"cross",declared);entry[@"accesses"]=accesses;
+    MetalScheduleCall(root,entry);
+    return MetalScheduleCrossWork(root,accesses,cross);
 }
 
 static void MetalScheduleHostWork(struct MetalSchedule *root,NSData *views,NSError *(^operation)(void)) {
@@ -1506,14 +1511,19 @@ NSString *MetalViewDependencyDeclaration(NSString *name,NSArray<NSIndexSet *> *d
     return source;
 }
 
-static void MetalWorkDependencies(NSArray *work) {
-    NSMutableArray *accesses=[NSMutableArray arrayWithCapacity:work.count];
-    for(MetalWork *w in work)[accesses addObject:w->accesses];
-    NSArray *dependencies=MetalViewDependencies(accesses);
+static NSUInteger MetalWorkDependencies(struct MetalSchedule *root,NSArray *work) {
+    const NSUInteger first=root->history.count;
     for(NSUInteger i=0;i<work.count;i++) {
-        MetalWork *w=work[i];[w->dependencies addIndexes:dependencies[i]];
-        [w->dependencies enumerateIndexesUsingBlock:^(NSUInteger p,BOOL *stop){(void)stop;[((MetalWork *)work[p])->successors addIndex:i];}];
+        MetalWork *w=work[i];
+        [w->dependencies addIndexes:MetalViewPrior(root->frontierRead,root->frontierWritten,w->accesses)];
+        MetalViewDefine(root->frontierRead,root->frontierWritten,w->accesses,first+i);
+        [root->history addObject:w];
+        [w->dependencies enumerateIndexesUsingBlock:^(NSUInteger p,BOOL *stop){
+            (void)stop;if(p>=first)[((MetalWork *)root->history[p])->successors addIndex:i];
+        }];
+        [w->accesses release];w->accesses=nil;
     }
+    return first;
 }
 
 static id<MTLSharedEvent> MetalSchedulePublication(struct MetalSchedule *s) {
@@ -1532,7 +1542,7 @@ static void MetalScheduleBindHost(struct MetalSchedule *root,MetalWork *work,NSA
         NSValue *key=[NSValue valueWithPointer:event];
         events[key]=@[event,@(MAX(value,[events[key][1] unsignedLongLongValue]))];
     };
-    __block struct MetalSchedule *latest=root->boundary;
+    __block struct MetalSchedule *latest=NULL;
     [work->dependencies enumerateIndexesUsingBlock:^(NSUInteger p,BOOL *stop){
         (void)stop;MetalWork *producer=nodes[p];
         if(producer->operation)add(producer->event,1);
@@ -1583,16 +1593,31 @@ static void MetalScheduleEmit(struct MetalSchedule *root,NSArray *batch) {
             }
             MetalScheduleRangeNow(root,&replay,work->invocation,work->first,end);
         } else work->encode(root);
-        for(;i<j;i++)((MetalWork *)batch[i])->part=MetalScheduleTail(root);
+        for(;i<j;i++) {
+            MetalWork *emitted=batch[i];emitted->part=MetalScheduleTail(root);
+            [emitted->encode release];emitted->encode=nil;
+        }
     }
 }
 
 static void MetalScheduleFlush(struct MetalSchedule *root) { @autoreleasepool {
     NSArray *nodes=[[root->work copy] autorelease];[root->work removeAllObjects];
+    if(!nodes.count)return;
     BOOL hosts=NO;for(MetalWork *work in nodes)hosts|=work->operation!=nil;
-    if(!hosts){MetalScheduleEmit(root,nodes);return;}
-    nodes=MetalScheduleExpand(root,nodes);
-    if(!root->listener) {
+    // Keep GPU-only replay ranges compact. Their accesses still enter the same
+    // frontier, since a later preparation call can add a host consumer.
+    if(hosts||root->hosts.count)nodes=MetalScheduleExpand(root,nodes);
+    else for(MetalWork *work in nodes)if(work->end) {
+        struct MetalReplay replay;memcpy(&replay,work->replay,sizeof replay);
+        NSArray *held=objc_getAssociatedObject(replay.owner,&replayRecordsKey);
+        const struct MetalRecordedDispatch *records=[held[0] bytes];const struct MetalReach *reaches=[held[3] bytes];
+        NSMutableData *views=[NSMutableData data];
+        for(NSUInteger c=work->first;c<work->end;c++)[views appendData:MetalCommandReaches(records+c,reaches,work->invocation)];
+        work->accesses=[views copy];
+    }
+    const NSUInteger first=MetalWorkDependencies(root,nodes);
+    if(!hosts&&!root->hosts.count){MetalScheduleEmit(root,nodes);return;}
+    if(hosts&&!root->listener) {
         root->listener=[[MTLSharedEventListener alloc] initWithDispatchQueue:dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0)];
         if(!root->listener)[NSException raise:NSMallocException format:@"preparing native host data events"];
     }
@@ -1601,10 +1626,12 @@ static void MetalScheduleFlush(struct MetalSchedule *root) { @autoreleasepool {
         if(!work->event)[NSException raise:NSMallocException format:@"preparing host output event"];
         atomic_init(&work->status,0);[root->hosts addObject:work];atomic_fetch_add(&root->pending,1);
     }
-    MetalWorkDependencies(nodes);
     NSMutableData *counts=[NSMutableData dataWithLength:nodes.count*sizeof(NSUInteger)];NSUInteger *left=counts.mutableBytes;
     NSMutableIndexSet *ready=[NSMutableIndexSet indexSet];
-    for(NSUInteger i=0;i<nodes.count;i++){left[i]=((MetalWork *)nodes[i])->dependencies.count;if(!left[i])[ready addIndex:i];}
+    for(NSUInteger i=0;i<nodes.count;i++) {
+        left[i]=[((MetalWork *)nodes[i])->dependencies countOfIndexesInRange:NSMakeRange(first,nodes.count)];
+        if(!left[i])[ready addIndex:i];
+    }
     NSMutableArray *batch=[NSMutableArray array];
     while(ready.count) {
         __block NSUInteger selected=NSNotFound;
@@ -1613,7 +1640,7 @@ static void MetalScheduleFlush(struct MetalSchedule *root) { @autoreleasepool {
             if(work->operation){selected=i;*stop=YES;return;}
             __block BOOL available=YES;
             [work->dependencies enumerateIndexesUsingBlock:^(NSUInteger p,BOOL *unused){
-                (void)unused;MetalWork *producer=nodes[p];
+                (void)unused;MetalWork *producer=root->history[p];
                 if(producer->operation&&![root->waited containsObject:producer->event])available=NO;
             }];
             if(available&&selected==NSNotFound)selected=i;
@@ -1622,10 +1649,10 @@ static void MetalScheduleFlush(struct MetalSchedule *root) { @autoreleasepool {
         [ready removeIndex:selected];MetalWork *work=nodes[selected];
         if(work->operation) {
             MetalScheduleEmit(root,batch);[batch removeAllObjects];
-            MetalScheduleBindHost(root,work,nodes);
+            MetalScheduleBindHost(root,work,root->history);
         } else {
             [work->dependencies enumerateIndexesUsingBlock:^(NSUInteger p,BOOL *stop){
-                (void)stop;MetalWork *producer=nodes[p];
+                (void)stop;MetalWork *producer=root->history[p];
                 if(producer->operation&&![root->waited containsObject:producer->event]) {
                     MetalScheduleEmit(root,batch);[batch removeAllObjects];
                     MetalScheduleWait(root,producer->event);
@@ -1640,8 +1667,9 @@ static void MetalScheduleFlush(struct MetalSchedule *root) { @autoreleasepool {
 }
 
 NSError *MetalScheduleAppend(struct MetalSchedule *root,struct MetalReplay *replay,NSRange invocations,
-    NSArray<NSNumber *> *marks,MetalCrossing cross) {
+    NSArray<NSNumber *> *marks,MetalCrossingViews views,MetalCrossing cross) {
     struct MetalSchedule *s=MetalScheduleTail(root);
+    if(marks.count&&(!views||!cross))return MetalReplayFailure(EINVAL,@"crossing marks require their page accesses and encoder");
     NSArray *held=replay?objc_getAssociatedObject(replay->owner,&replayRecordsKey):nil;
     if(replay&&[held[2] unsignedIntegerValue]!=s->form)return MetalReplayFailure(EINVAL,@"mixed replay forms in one function");
     if(replay&&NSMaxRange(invocations)>[held[4] unsignedIntegerValue])return MetalReplayFailure(EINVAL,@"invocations exceed the recorded slots");
@@ -1662,7 +1690,7 @@ NSError *MetalScheduleAppend(struct MetalSchedule *root,struct MetalReplay *repl
             }
             while(k<marks.count&&marks[k].unsignedIntegerValue==at) {
                 const NSUInteger mark=k++;
-                int failed=MetalScheduleCrossNow(root,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
+                int failed=MetalScheduleCrossWork(root,views(t,mark),^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
                     id<MTLResidencySet> residency,NSUInteger unused,NSUInteger ignored){
                     (void)unused;(void)ignored;return cross(encoder,table,residency,t,mark);
                 });
@@ -1782,6 +1810,7 @@ void MetalScheduleFree(struct MetalSchedule *s) {
     [s->encoder release];[s->command release];[s->queue release];[s->allocator release];[s->table release];[s->data release];
     [s->residency release];[s->owners release];[s->options release];[s->read release];[s->written release];
     [s->event release];[s->start release];[s->listener release];[s->work release];[s->hosts release];[s->waits release];[s->waited release];
+    [s->history release];[s->frontierRead release];[s->frontierWritten release];
     [s->completed release];[s->error release];[s->after release];[s->device release];[s->communicators release];
     [s->script release];[s->plans release];free(s);
 }
@@ -2000,7 +2029,7 @@ NSDictionary *MetalScheduleTemplate(struct MetalSchedule *const *schedules,size_
                 if([planned[comm] isEqual:entry])continue;
                 planned[comm]=entry;
             }
-            if([kind isEqual:@"host"]) {
+            if([kind isEqual:@"host"]||[kind isEqual:@"cross"]) {
                 NSData *views=call[@"accesses"];const struct MetalReach *source=views.bytes;const NSUInteger n=views.length/sizeof *source;
                 NSMutableData *made=[NSMutableData dataWithLength:n*sizeof(struct MetalTemplateReach)];
                 struct MetalTemplateReach *into=made.mutableBytes;
@@ -2238,7 +2267,7 @@ NSError *MetalScheduleInstantiate(struct MetalSchedule *const *schedules,size_t 
                 held->replay=MetalTemplateReplayMake(root->device,call,pipelines,buffers,shifts);
                 [root->owners addObject:held];
                 NSArray *range=call[@"invocations"];
-                NSError *error=MetalScheduleAppend(s,held->replay,NSMakeRange([range[0] unsignedIntegerValue],[range[1] unsignedIntegerValue]),@[],nil);
+                NSError *error=MetalScheduleAppend(s,held->replay,NSMakeRange([range[0] unsignedIntegerValue],[range[1] unsignedIntegerValue]),@[],nil,nil);
                 if(error)return error;
             } else if([kind isEqual:@"plan"]) {
                 // the communicator's plan declared again, its bindings the instance's: before the crossings that follow
@@ -2255,20 +2284,21 @@ NSError *MetalScheduleInstantiate(struct MetalSchedule *const *schedules,size_t 
                 const struct MetalDeclaration again={[call[@"kind"] UTF8String],bytes.bytes,bytes.length,places.bytes,
                     places.length/sizeof(struct MetalPlace)};
                 NSError *error=nil;
+                NSData *views=call[@"accesses"];
+                if(!views)return MetalReplayFailure(EINVAL,@"a prepared call has no declared accesses");
+                const struct MetalTemplateReach *source=views.bytes;const NSUInteger n=views.length/sizeof *source;
+                NSMutableData *resolved=[NSMutableData dataWithLength:n*sizeof(struct MetalReach)];
+                struct MetalReach *into=resolved.mutableBytes;
+                for(NSUInteger k=0;k<n;k++)into[k]=MetalTemplateReachOf(source[k],buffers,shifts);
                 if(hosted) {
                     MetalHostOperation operation=host(call[@"kind"],bytes,&error);
                     if(!operation)return error?:MetalReplayFailure(EINVAL,@"the frontend made no host operation");
-                    NSData *views=call[@"accesses"];
-                    const struct MetalTemplateReach *source=views.bytes;const NSUInteger n=views.length/sizeof *source;
-                    NSMutableData *resolved=[NSMutableData dataWithLength:n*sizeof(struct MetalReach)];
-                    struct MetalReach *into=resolved.mutableBytes;
-                    for(NSUInteger k=0;k<n;k++)into[k]=MetalTemplateReachOf(source[k],buffers,shifts);
                     MetalScheduleHost(s,into,n,&again,operation);
                 } else {
                     MetalCrossing crossing=cross(call[@"kind"],bytes,s,&error);
                     if(!crossing)return error?:MetalReplayFailure(EINVAL,@"the frontend made no crossing");
                     [root->owners addObject:crossing];
-                    const int failed=MetalScheduleCross(s,&again,crossing);
+                    const int failed=MetalScheduleCross(s,into,n,&again,crossing);
                     if(failed)return MetalReplayFailure(failed,@"the template's crossing could not be encoded");
                 }
             } else return MetalReplayFailure(EINVAL,[NSString stringWithFormat:@"a template's %@ call",kind]);
