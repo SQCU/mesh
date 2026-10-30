@@ -114,13 +114,29 @@ immediately." Form C is resolved, and with it the recorder's capture:
   nothing declared. definition_of ends the program on any group but a lone unfused WRITE. Both now declare their
   groups for the transition, as _scatter_spans does (70b5666e). write_definitions still serves a lone unfused WRITE on
   a communicator with no plan.
-- Not done, and why. E would add a tracks dispatch to every single-channel group, a GPU program change to be
-  measured, not argued. I flattens two different records (declared calls, a WRITE's prepare), a format design. D10-D11
-  lie in mesh-tensor-layout and collective_views.py, other sessions' files. `ncclMeshCommForms` had no caller, though
+- Not done, and why. E stays. Per-channel progress replaced "one serial order of the whole group" (NCCL.md,
+  Per-channel progress, 10-20). `complete_track` is that rule where every group lies on one channel, and there the
+  serial order is the channel's order. It encodes it as the stream's own dispatches, with no tracks dispatch and no
+  thread-0 pick. Folding it into tracks with T = 1 would add that indirection to every single-channel completion.
+  I stays: the two flatteners share no code. One flattens `ncclMeshCall`s with their arrays as offsets, the other a
+  WRITE plan's prepare arguments (`struct write_declared`). One record for both is a format that metal-recording.m and
+  `_stream.mm` read, and it saves no work at execution. D10-D11: cover and traversal are shared already (mesh-tensor-layout's
+  `MetalTensorCover` and `MetalTensorTraversal`, which collective_views.py reaches through `_stream`, cc1ece4b). What is
+  left twice is each collective kind's roles as intervals, about 20 lines each (collective_views.py `_domains`,
+  mesh_rank.m `cross_domains`). `ncclMeshCommForms` had no caller, though
   440ac872 restored it as the configuration's way to name collective forms (rubric C3: the form an operand). It is
   wired now: a configuration's `forms` reach it in torch_mesh's `configuration.bind` and mb's `install_forms`
   (rdma/NCCL.md, Forms as configuration). Calling that the operator's call was wrong; nccl.h already said the
   configuration document decides a form.
+
+## Since: F, and what the frontends still hold (2026-10-30)
+
+- F (mesh f48ded9b). `definition_prepare` builds both a declared group's definition and a WRITE plan's own:
+  `compile_group`, a slot each generation where the group crosses, then `prepared`.
+- D, what is left. D6-D8 and D16 are done (above). D9 is each site's `ncclGroupStart`, `ncclMeshWriteExecute` and
+  `ncclGroupEnd`, three lines. A helper over the page table, `ncclMeshLayout` and `ncclMeshWriteLayoutPrepare` would
+  only wrap that call. D1, D2-D5, D12-D15 and D17 are each frontend's own binding of the NCCL API in its own language
+  (C1 keeps NCCL's API as the interface). D10-D11: above.
 
 ## Since: A and G (2026-10-30)
 
