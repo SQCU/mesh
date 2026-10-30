@@ -1,4 +1,7 @@
 #include "mesh-plan.h"
+#include <CoreFoundation/CoreFoundation.h>
+#include <IOKit/IOKitLib.h>
+#include <stdatomic.h>
 #include <errno.h>
 #include <limits.h>
 #include <math.h>
@@ -349,4 +352,22 @@ int mesh_write_routes_compose(const struct mesh_fabric *f,
   }
   if (status) mesh_write_routes_free(made, f->nodes); else *out = made;
   return status;
+}
+
+/* the node's GPU cores (IORegistry AGXAccelerator gpu-core-count), read once a process: the one reading, which the
+   tracks pool's workers (nccl-mesh-metal.m), the node's facts mesh-stat publishes and torch_mesh's compute capability
+   (mesh_compute.py) all take; 0 where the registry states none */
+uint32_t mesh_gpu_cores(void) {
+  static _Atomic uint32_t read;
+  uint32_t cores = atomic_load_explicit(&read, memory_order_relaxed);
+  if (cores) return cores;
+  io_service_t gpu = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AGXAccelerator"));
+  CFTypeRef counted = gpu ? IORegistryEntryCreateCFProperty(gpu, CFSTR("gpu-core-count"), kCFAllocatorDefault, 0) : NULL;
+  long long value = 0;
+  if (counted && CFGetTypeID(counted) == CFNumberGetTypeID()) CFNumberGetValue(counted, kCFNumberLongLongType, &value);
+  if (counted) CFRelease(counted);
+  if (gpu) IOObjectRelease(gpu);
+  cores = value > 0 && value <= UINT32_MAX ? (uint32_t)value : 0;
+  atomic_store_explicit(&read, cores, memory_order_relaxed);
+  return cores;
 }

@@ -1,6 +1,5 @@
 #import <Metal/Metal.h>
 #import <objc/runtime.h>
-#import <IOKit/IOKitLib.h>
 #include "nccl-mesh-metal.h"
 #include "nccl-mesh-kernels.h"
 #include "mesh_metal.h"
@@ -8,6 +7,7 @@
 #include "nccl.h"
 #include "metal-recording.h"
 #include "mesh-landing.h"
+#include "mesh-fabric.h"
 #include <dlfcn.h>
 #include <errno.h>
 #include <stdarg.h>
@@ -31,7 +31,7 @@ ARGS(args, uint64_t, uint32_t);
    their function's residency set, are never recycled while that function can execute, and are given back once that
    set ends. */
 #define RECORD MESH_METAL_ARGUMENT_BYTES
-/* a device's kernels, and its GPU's cores (IORegistry gpu-core-count, read once with them): the tracks pool's most
+/* a device's kernels, and its GPU's cores (mesh-fabric.c mesh_gpu_cores): the tracks pool's most
    workers, one a core, so every worker is resident beside every other and beside the GPU's other clients
    (metal_tracks) */
 struct kernels { id<MTLDevice> device; id<MTLComputePipelineState> pipelines[PIPELINES]; uint32_t cores; };
@@ -97,16 +97,11 @@ static struct kernels *kernels_of(id<MTLDevice> device, const char **message) {
                      error ? error.localizedDescription.UTF8String : "absent");
       return NULL;
     }
-    long long cores = 0;
-    io_service_t gpu = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AGXAccelerator"));
-    CFTypeRef counted = gpu ? IORegistryEntryCreateCFProperty(gpu, CFSTR("gpu-core-count"), kCFAllocatorDefault, 0) : NULL;
-    if (counted && CFGetTypeID(counted) == CFNumberGetTypeID()) CFNumberGetValue(counted, kCFNumberLongLongType, &cores);
-    if (counted) CFRelease(counted);
-    if (gpu) IOObjectRelease(gpu);
-    if (cores <= 0 || cores > UINT32_MAX) { *message = "IORegistry's AGXAccelerator states no gpu-core-count"; return NULL; }
+    const uint32_t cores = mesh_gpu_cores();
+    if (!cores) { *message = "IORegistry's AGXAccelerator states no gpu-core-count (mesh_gpu_cores)"; return NULL; }
     struct kernels *made = calloc(1, sizeof *made);
     if (!made) { *message = "out of memory"; return NULL; }
-    made->cores = (uint32_t)cores;
+    made->cores = cores;
     MTLComputePipelineDescriptor *described = [[MTLComputePipelineDescriptor new] autorelease];
     described.binaryArchives = @[archive];
     for (uint32_t kind = 0; kind < PIPELINES; kind++) {

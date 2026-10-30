@@ -117,7 +117,8 @@ int main(int argc,char **argv){
   uint64_t region=0,unleased=0,busy=0,idle_since=0;
   if(mesh_region(&region,&unleased))region=unleased=0;
   const int carrying=mesh_busy(&busy,&idle_since);
-  printf("{\"up\":true,\"node\":%u,\"region\":%llu,\"unleased\":%llu,",node,(unsigned long long)region,(unsigned long long)unleased);
+  printf("{\"up\":true,\"node\":%u,\"gpu_cores\":%u,\"region\":%llu,\"unleased\":%llu,",node,mesh_gpu_cores(),(unsigned long long)region,
+         (unsigned long long)unleased);
   if(!carrying)printf("\"idle\":%s,\"idle_since\":%llu,",busy?"false":"true",(unsigned long long)(idle_since/1000000000u));
   printf("\"peers\":[");
   static const char *const phase_name[]={[MESH_UNKNOWN]="UNKNOWN",[MESH_PAIRING]="PAIRING",[MESH_PAIRED]="PAIRED",[MESH_STOPPED]="STOPPED"};

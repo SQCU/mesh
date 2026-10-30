@@ -8,4 +8,6 @@
 struct mesh_cable { uint64_t wire,bandwidth; uint32_t node[2]; };
 struct mesh_fabric { uint32_t nodes,cables; const struct mesh_cable *cable; };
 struct mesh_paths { uint32_t count; const uint32_t *first,*cable; const uint64_t *weight; };
+/* the node's GPU cores, read once a process (mesh-fabric.c): every reader's one source; 0 where none is stated */
+uint32_t mesh_gpu_cores(void);
 #endif

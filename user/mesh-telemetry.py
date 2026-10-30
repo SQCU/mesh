@@ -470,7 +470,7 @@ def host_facts():
     model = output(["/usr/sbin/sysctl", "-n", "hw.model"])
     memory = output(["/usr/sbin/sysctl", "-n", "hw.memsize"])
     chip = output(["/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"])
-    cores = number(output(["/usr/sbin/ioreg", "-r", "-c", "AGXAccelerator", "-d", "1"]), r'"gpu-core-count" = (\d+)')
+    cores = bridge().get("gpu_cores")   # the bridge's one reading (mesh-stat: libmesh mesh_gpu_cores)
     own = peers.host()
     name = peers.label(own["node"], peers.table(os.environ.get("MESH_NODES", ""), os.path.join(ROOT, "etc", "mesh-nodes.json"), "/usr/local/mesh/etc/mesh-nodes.json"))
     capacity_doc, capacity_path = document([

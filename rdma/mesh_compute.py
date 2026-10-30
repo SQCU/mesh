@@ -69,15 +69,15 @@ def hardware():
         raise RuntimeError('compute capability: missing CPU performance levels')
     if sum(level['physical_cores'] for level in levels) != physical or sum(level['logical_cores'] for level in levels) != logical:
         raise RuntimeError('compute capability: CPU performance levels do not cover the reported cores')
-    devices = plistlib.loads(_read('ioreg', '-a', '-r', '-c', 'AGXAccelerator', '-d', '1'))
-    counts = {device['gpu-core-count'] for device in devices if 'gpu-core-count' in device}
-    if len(counts) != 1 or next(iter(counts)) <= 0:
-        raise RuntimeError(f'compute capability: expected one positive gpu-core-count, got {sorted(counts)}')
+    import mesh
+    cores = mesh.lib.mesh_gpu_cores()   # libmesh's one reading of the GPU's cores (mesh-fabric.c)
+    if not cores:
+        raise RuntimeError('compute capability: the GPU states no gpu-core-count (mesh_gpu_cores)')
     system = plistlib.loads(Path('/System/Library/CoreServices/SystemVersion.plist').read_bytes())   # what sw_vers prints
     return {'model': _sysctl('hw.model', True), 'chip': _sysctl('machdep.cpu.brand_string', True),
             'os': {'version': system['ProductVersion'], 'build': system['ProductBuildVersion']},
             'cpu': {'physical_cores': physical, 'logical_cores': logical, 'levels': levels},
-            'gpu': {'cores': counts.pop()}}
+            'gpu': {'cores': cores}}
 
 
 if __name__ == '__main__':
