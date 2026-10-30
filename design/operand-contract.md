@@ -42,6 +42,16 @@ model fields and page selections before compilation. Shapes, constant fields and
 composite attributes use the same typed initializer. Magic-number substitution
 and the separate post-compile input-resize path are removed. Integers remain
 literal unless the exporter declares a named expression.
+Both provider graph representations carry source-operation identities through
+rewrites, decomposition and fusion. Each command receives the declared reads
+of its own source operations, composed with its actual physical layout and
+load width. Shared tensor identity no longer merges unrelated commands' read
+ranges. A provider split retains the source operation's declared domain unless
+it supplies a finer relation. Opaque internal storage retains its declared
+footprint. The configured buffer-storage capability reaches both selectors.
+The ordinary rank recorder retains residency-only envelopes without treating
+them as data reads. Precise command reads keep their own ranges after operand
+binding, including nonzero output origins and invocation strides.
 
 Standalone encoded results retain their logical type, stored support, packed
 positions and quantization beside their stored pages. A scalar consumer requests
@@ -51,6 +61,45 @@ encoding's meaning, including a nonzero quantization zero point.
 Constant views retain the source coordinates of their scale and zero-point
 pages through reshapes, transposes and cuts. Explicit conversion declarations
 distinguish decoded values from raw codes; both use the shared reader.
+Mutable producers write ordinary stored-code, scale and zero-point operands.
+The logical encoding is a view of those pages, using the same declaration as
+constant data. Liveness retains these leaf producers. Prepared conversion reuse
+follows their read dependencies, including writes through physical page aliases.
+A logical encoded view does not implicitly add an output encoder.
+An assembled logical value retains each piece's declared storage type and its
+map into that value. Packed support and quantization keep their source
+coordinates. Nested pieces use the same relations. Constant pieces retain
+their payload objects across buffer-table compaction and export through the
+ordinary initializer schema before stages capture their operands.
+Public coordinates, the relation to a storage owner, and the owner's final
+layout remain distinct preparation operands. Replacing or moving an owner
+does not reinterpret a public view in the new owner's coordinates.
+Partial instance declarations split those same pieces by selected domain.
+A static sibling keeps its pages while a host-filled piece advances through
+its declared instances. Initializers retain their original source positions.
+Encoded readers compose code, scale and zero-point pieces through the same
+relations and emit the existing conversion commands.
+External consumers declare their scalar type, layout, access, instance period
+and use sites before placement. Those constraints join the same relations;
+they do not overwrite a producer's instance period. The prepared query returns
+the existing typed layout and storage binding. Native and LiteRT tap consumers
+use the shared tensor-copy compiler. State and context consumers retain their
+declared offsets. Native conversions also use the shared pipeline builder, with
+the selected recording form supplied explicitly.
+Invocation displacement belongs to each use of a value. Numerical bindings,
+copy inputs and outputs, collective bindings and their dependency ranges use
+the same signed displacement and instance relation. A result can advance to
+a later instance without moving a sibling that shares its storage. Linear
+collective bindings are lowered over the recording's finite invocation domain;
+cyclic bindings retain their phase through wraparound.
+Fused consumer constants declare their embedded addresses too. Preparation
+fills those words in ordinary uniform pages for each invocation. The command
+reads the prepared pages; it does not repair addresses during execution.
+Replay templates retain the original constant data and symbolic page bindings,
+then use the same preparation step when bound to different pages.
+The pinned ISL build includes the upstream
+[empty-map coefficient reduction correction](https://repo.or.cz/isl.mirror.git/commit/99a07a039237f11bccc1ef80a7b6cc76ae5f98c5).
+Mixed typed placement reached this bug while simplifying a preparation relation.
 
 Collective crossings declare their local page accesses. The recorder keeps one
 dependency frontier across preparation calls. It no longer waits for every
@@ -62,6 +111,10 @@ GPU predecessors, resource capacities and declared external events determine
 the prepared command parts. Independent parts precede unrelated host waits.
 Transport counter accesses join the same dependency graph and visibility
 mechanism. Equal-scope replay ranges remain batched.
+The existing compiled group now declares active channel counters before the
+crossing is encoded. This query consumes no issue or ring prefix. It uses the
+same definition selection as encoding and is regenerated after template
+relocation. Unused channel directions create no dependencies.
 
 Placement joins complete logical storage domains through declared equalities.
 Existing allocations can be composed into one local page view without copying
@@ -89,12 +142,18 @@ incompatible sub-page layout required separate storage.
 The direct ANE adapter also loaded and bound a composed view of four reversed
 physical pages, with the original allocation released. Its prepared requests
 mapped and released that storage without submitting numerical work.
-The remaining integration work is precise provider read domains and explicit
-storage interpretation for mutable encoded producers. Constant lowering does
-not establish the latter path. Transport counter accesses first revealed during
-encoding still constrain that already encoded part; their earlier declaration
-is under review. Scheduler inspection checked commit order and event scopes
-without creating a GPU queue or executing numerical work.
+Provider preparation kept two disjoint slice branches as separate eight-byte
+reads at offsets zero and 120 of one 128-byte input, through both graph
+representations and with no boundary copies. Mutable encoded preparation kept
+raw writes direct and invalidated conversions after scale and zero-point writes.
+Scheduler inspection checked commit order and event scopes, including crossings
+sharing transport counters, without creating a GPU queue or executing numerical
+work. Endpoint preparation preserved mixed source periods zero and three under
+a consumer period of five, and kept indexed sources with nonzero origins
+direct. Embedded-address preparation retained each target's exact dependency
+ranges and cyclic phase after exporting and rebinding a replay template to
+different buffers. These preparation results do not establish numerical or
+end-to-end performance results.
 Vendor ANE submission throttles are documented
 separately in `ane-prepared-contract-2026-10-30.md`; a completion callback does not
 remove those framework instructions.
@@ -1985,7 +2044,9 @@ No numerical commands ran. Cost-directed handling of incompatible requirements
 remains unfinished; this is feasibility integration, not evidence of optimal
 placement or measured performance.
 
-Placement now composes each use's group/position relation with its inverse.
+Placement joins each use to its group's symbolic least member and includes
+the reverse relation. This carries the same equalities without forming every
+pair of group members.
 Typed fields, aliases, alignment and write footprints all constrain the same
 source domain. Connected groups pack in source-root order at the first aligned
 origin after the preceding group. The solver emits ordinary layout arithmetic;
@@ -1993,10 +2054,17 @@ it keeps no per-value union-find, sorted collision array or output-index array.
 FX allocation sizing uses the same image bounds as native callers instead of
 enumerating ordered spans.
 
-Closure must be exact. ISL's accelerated closure is used only when ISL certifies
-it; otherwise bounded relation composition covers all simple paths and cycles
-in the finite declared domain. Packing propagates predecessor end positions
-before closure, removing unreachable alignment phases. This is preparation
+Closure must be exact. The value, group and displacement image resolves its
+existential locals before the representative join. The construction supplies
+its direction and forbidden relations as operands. Symmetric relations use bounded
+composition. Directed recurrences use ISL's accelerated closure only when ISL
+certifies it; otherwise bounded composition covers all simple paths and cycles
+in the finite declared domain. Each composition resolves its locals again.
+Each new relation is checked against those declared exclusions before it expands
+again. Distinct byte identities cannot occupy the same position, and one byte
+cannot have two positions. A witnessed conflict ends that placement's feasibility
+solve. Packing propagates predecessor end positions before closure, removing
+unreachable alignment phases. This is preparation
 algebra, with no added runtime lookup, allocator or control operation. See the
 [ISL closure contract](https://libisl.sourceforge.io/user.html#Unary-Operations).
 

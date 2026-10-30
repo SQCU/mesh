@@ -309,7 +309,7 @@ typedef struct {
   void *residencySet;
   uint32_t polls;
   ncclMeshFused *fused;
-  /* the group's invocation: each declared binding's slot invocation % instances (ncclMeshBufferSlots); a WRITE's is
+  /* the group's invocation: each declared binding's slot (invocation + displacement) % instances (ncclMeshBufferSlots); a WRITE's is
      its execution's (ncclMeshWriteExecute) */
   size_t invocation;
 } ncclMeshStream;
@@ -1154,11 +1154,24 @@ typedef struct { double seconds; uint64_t order; } ncclMeshProduction;
 /* Preparation only. Map an explicit producer traversal onto the fitted duration
    of this group. Predictions order physical descriptors; they add no wait. */
 ncclResult_t ncclMeshProductionTimes(ncclMeshProduction* records, size_t count, double seconds);
+/* Preparation arithmetic shared by numerical and collective bindings. A
+   positive instance count names cyclic storage; zero names linear storage.
+   Displacement belongs to a use of the pages, independently of its byte origin. */
+static inline size_t ncclMeshInvocationIndex(uint64_t invocation, int64_t displacement, size_t instances) {
+  __int128 index = (__int128)invocation + displacement;
+  if (instances) {
+    index %= instances;
+    if (index < 0) index += instances;
+  }
+  return (size_t)index;
+}
 /* A prepared operand's page-backed local view and its storage slots. Zero
    stride names one view. Nonzero stride requires the declared slot count;
-   invocation i (its stream's: ncclMeshStream invocation; 0 on the host path) binds buffer.offset + (i % instances) *
-   stride bytes. A group is laid and placed for every slot as it is declared, and its issue names none. */
-typedef struct { ncclMeshBuffer buffer; size_t stride, instances; } ncclMeshBufferSlots;
+   invocation i (its stream's: ncclMeshStream invocation; 0 on the host path) binds
+   buffer.offset + ((i + invocation) mod instances) * stride bytes. The signed
+   displacement is independent of buffer.offset. A group is laid and placed for
+   every slot as it is declared, and its issue names none. */
+typedef struct { ncclMeshBuffer buffer; size_t stride, instances; int64_t invocation; } ncclMeshBufferSlots;
 typedef struct {
   int what, peer;
   size_t count;

@@ -786,7 +786,7 @@ struct Commands {
         const TensorOperand operand(buffers[j]);const auto &t=operand.storage;const auto &layout=operand.layout;
         id<MTLBuffer> buffer=operand.pages.buffer;
         const uint32_t mode=((access>>j)&1?MetalReachRead:0)|((access>>(MESH_ACCESS_WRITE_SHIFT+j))&1?MetalReachWritten:0);
-        bound.push_back({buffer,(NSUInteger)layout.value.offset*t.element_size(),layout.value.count*t.element_size(),(uint32_t)j,mode});
+        bound.push_back({buffer,(NSUInteger)layout.value.offset*t.element_size(),layout.value.count*t.element_size(),(uint32_t)j,mode,0});
         if(mode) {
           NSData *data=[layout.value reaches:buffer base:0 elementBytes:t.element_size() access:mode binding:(int32_t)j];
           const auto *spans=(const MetalReach *)data.bytes;
@@ -795,11 +795,11 @@ struct Commands {
         operands.push_back(t);
       }
       for(const auto &constant:constants[k])
-        bound.push_back({constantBuffer,constantOffset+constant[1],constant[2],(uint32_t)constant[0],MetalReachRead});
+        bound.push_back({constantBuffer,constantOffset+constant[1],constant[2],(uint32_t)constant[0],MetalReachRead,0});
       // every binding the type its kernel declares (fits_binding): constants records, tensors arrays
       const id<MTLComputePipelineState> state=state_of(handle,"commands");
       for(const auto &b:bound)fits_binding(state,b.index,b.length,b.buffer==constantBuffer&&constantBuffer);
-      descriptions.push_back({state,bound.data(),bound.size(),nullptr,0,ranges.data(),ranges.size(),
+      descriptions.push_back({state,bound.data(),bound.size(),nullptr,0,ranges.data(),ranges.size(),nullptr,0,
         MTLSizeMake(grid[0],grid[1],grid[2]),MTLSizeMake(group[0],group[1],group[2]),(BOOL)threadGrid});
     }
     replay=MetalReplayCommands(device,descriptions.data(),descriptions.size(),MetalFormEncoded);
@@ -880,7 +880,7 @@ static void prepare_dispatch(MetalSchedule *schedule,const Dispatch &d,uint64_t 
   std::vector<MetalCommandBinding> bindings;
   for(size_t j=0;j<d.bound.size();j++)if(d.bound[j])
     bindings.push_back({d.bound[j],d.offsets[j],d.lengths[j],(uint32_t)j,
-      (uint32_t)(((access>>j)&1?MetalReachRead:0)|((access>>(MESH_ACCESS_WRITE_SHIFT+j))&1?MetalReachWritten:0))});
+      (uint32_t)(((access>>j)&1?MetalReachRead:0)|((access>>(MESH_ACCESS_WRITE_SHIFT+j))&1?MetalReachWritten:0)),0});
   bindings.push_back(MetalScheduleData(schedule,d.words.data(),d.words.size()*sizeof(uint32_t),(uint32_t)d.at));
   MetalScheduleCompute(schedule,d.state,bindings.data(),bindings.size(),d.grid,d.group);
 

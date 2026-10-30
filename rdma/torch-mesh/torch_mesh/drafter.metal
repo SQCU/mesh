@@ -15,18 +15,6 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// A tap: the target's hidden rows after one of its tap layers into slot `slot` of each row's taps (TAPS a row). The rows
-// lie row after row (`interleaved` 0), or four channels of every row a slice, slice after slice over `interleaved` rows
-// (a LiteRT delegate's tensor: metal-microbench tools/prepare_e2b.py prefill_mask).
-template <uint D, uint TAPS>
-kernel void mesh_draft_tap(device const half *hidden [[buffer(0)]], device half *taps [[buffer(1)]], constant uint &slot [[buffer(2)]],
-                           constant uint &interleaved [[buffer(3)]], uint2 at [[thread_position_in_grid]]) {
-    const uint c = at.x, r = at.y;
-    if (c >= D / 4) return;
-    ((device half4 *)taps)[(r * TAPS + slot) * (D / 4) + c] =
-        ((device const half4 *)hidden)[interleaved == 0u ? r * (D / 4) + c : c * interleaved + r];
-}
-
 // The block's input rows: the anchor's embedding row times scale (the target's table), then the mask row.
 template <uint D>
 kernel void mesh_draft_embed(device const half *table [[buffer(0)]], device const uint *state [[buffer(1)]],

@@ -5129,8 +5129,8 @@ static ncclResult_t prepared(struct ncclComm *comm, struct compiled *x, int remo
       c->bound = u->steps[i];
       if (write) { c->write_plan = write; c->send_at = write->source; c->recv_at = write->landing; }
       else {
-        c->send_at = shifted(c->send_at, s % c->bindings[0].instances * c->bindings[0].stride);
-        c->recv_at = shifted(c->recv_at, s % c->bindings[1].instances * c->bindings[1].stride);
+        c->send_at = shifted(c->send_at, ncclMeshInvocationIndex(s, c->bindings[0].invocation, c->bindings[0].instances) * c->bindings[0].stride);
+        c->recv_at = shifted(c->recv_at, ncclMeshInvocationIndex(s, c->bindings[1].invocation, c->bindings[1].instances) * c->bindings[1].stride);
       }
       result = as_metal(&c->send_at);
       if (!result) result = as_metal(&c->recv_at);

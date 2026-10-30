@@ -472,3 +472,51 @@ Native route output is quantized through the common Q40 path-weight function.
 [The publication document](../docs/native-access-publication.md#assignment-feedback--2026-10-27) records the source
 scope and inference limits. Compilation and parse checks passed. No numerical execution was started; the data-model
 document is unchanged. Structural items 8 and 9 remain.
+
+
+## Declared external operands and shared tap copies — 2026-10-30T19:59:04Z
+
+Removed the raw-buffer form of `LiteRtProgramOperand` in
+`metal-microbench/litert_program.h` and `.m`. External consumers now supply their
+source name, scalar type, layout requirement, access, instance relation and
+hook sites before placement. The preparation query returns the existing
+`MetalOperand`, `MetalTensorLayout` and scalar encoding. `rank.swift` retains
+those prepared bindings. Its speculative records and retained outputs no longer
+look up raw `MeshOperand` addresses by name after placement. A consumer's
+instance period remains separate from its producer's period; the common
+placement relation decides whether their pages can be shared.
+
+Removed `mesh_draft_tap` from `rdma/torch-mesh/torch_mesh/drafter.metal` and its
+pipeline registration from `metal-microbench/drafter.swift`. Both the engine
+and LiteRT tap callers use `tensorCopyCommands` with a `TensorOperand` and the
+actual destination view. The old contiguous/interleaved tap choice is gone.
+Indexed source positions and scalar conversion use the shared copy compiler.
+Context positions carry their existing `StreamedSpan` offset. The MTP chain's
+state input now carries that same span type, including its offset in state and
+follow-token reads.
+
+The native library and Swift rank built successfully. Preparation inspections
+preserved mixed source periods 0/3 with consumer period 5, kept source period 3
+separate from consumer period 0, retained indexed nonzero origins without a copy,
+and placed read/write copies only at declared sites. No numerical execution was
+performed. The separate removal of buffer-wide `MetalOperand.outputOffset` is
+still being integrated; these entries do not claim that change is complete.
+
+
+Update — 2026-10-30T20:18:00Z: the endpoint query now returns spatial layout and
+invocation phase separately. `TensorView`, `StreamedSpan`, exact access records
+and `MetalDispatch` carry that phase into the shared command binding. View cuts
+and reshapes preserve it. Host result readers keep their declared record count
+separate from backing capacity. Speculative records are captured at the end of
+the step and at closing, after their writers.
+
+Fused streamed consumers keep their existing numerical entry point. Their
+pointer-valued uniform fields are now explicit `MetalCommandAddress` operands,
+with exact target accesses. The shared recorder prepares each invocation's
+address values before execution. The old conversion of those fields to hidden,
+fixed addresses in `ConsumerArguments.encoded` is removed. The uniform's declared
+byte count is its actual payload, rather than the page allocation's full length.
+
+Matching source builds of the native libraries, `rank` and `goal-a` passed with
+this ABI. These are preparation and build results, not throughput or latency
+measurements. No numerical program was run and no artifacts were installed.

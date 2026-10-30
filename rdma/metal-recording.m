@@ -473,11 +473,21 @@ NSData *MetalViewMappedReaches(id<MTLBuffer> buffer,NSUInteger offset,const NSUI
     return result;
 }
 
+struct MetalRecordedAddress {
+    struct MetalCommandAddress value;
+    NSUInteger stride, instances;
+    id<MTLBuffer> uniform;
+    NSUInteger uniformOffset, uniformLength, uniformStride, uniformInstances;
+    NSInteger uniformInvocation;
+};
 struct MetalRecordedDispatch {
     id<MTLComputePipelineState> pipeline;
     id<MTLBuffer> buffers[MESH_BUFFER_BINDINGS];
     NSUInteger offsets[MESH_BUFFER_BINDINGS], memory[MESH_MEMORY_BINDINGS],
         strides[MESH_BUFFER_BINDINGS], instances[MESH_BUFFER_BINDINGS], lengths[MESH_BUFFER_BINDINGS];
+    NSInteger invocations[MESH_BUFFER_BINDINGS];
+    const struct MetalRecordedAddress *addresses;
+    NSUInteger addressCount;
     MTLSize grid, group;
     BOOL threads, barrier;
     uint64_t access;
@@ -490,13 +500,13 @@ struct MetalRecordedDispatch {
 @public
     NSMutableData *dispatches, *reaches;
     NSMutableSet *owners, *resources;
-    NSMutableArray *hosts;
+    NSMutableArray *hosts,*addressRecords;
     NSUInteger buffers, memory;
 }
 @end
 
 static char pipelineSizesKey;
-static char replaySegmentsKey,replayRecordsKey,replayHostsKey;
+static char replaySegmentsKey,replayRecordsKey,replayHostsKey,replayAddressRecordsKey;
 
 static void MetalReplayDestroy(struct MetalReplay *replay) {
     [replay->commands release]; [replay->residency release]; [replay->owner release];
@@ -545,15 +555,18 @@ static void MetalAccesses(const struct MetalRecordedDispatch *command, const str
         id<MTLBuffer> buffer=command->buffers[j];
         const BOOL load=(command->access>>j)&1,store=(command->access>>(MESH_ACCESS_WRITE_SHIFT+j))&1;
         if(!buffer||(!load&&!store)||((command->extents>>j)&1))continue;
-        const NSUInteger offset=MetalInvocationOffset(command->offsets[j],command->strides[j],command->instances[j],invocation);
+        const NSUInteger offset=MetalInvocationOffset(command->offsets[j],command->strides[j],command->instances[j],invocation,command->invocations[j]);
         if(command->lengths[j])each(buffer,offset,command->lengths[j],load,store);
     }
     for(uint32_t k=0;k<command->reaches;k++) {
         const struct MetalReach *reach=reaches+command->reach+k;
         if(!reach->length)continue;
         NSUInteger offset=reach->offset;
-        if(reach->access&MetalReachBinding)
-            offset=MetalInvocationOffset(offset,command->strides[reach->binding],command->instances[reach->binding],invocation);
+        if(reach->access&MetalReachAddress) {
+            const struct MetalRecordedAddress *address=command->addresses+reach->binding;
+            offset=MetalInvocationOffset(offset,address->stride,address->instances,invocation,address->value.invocation);
+        } else if(reach->access&MetalReachBinding)
+            offset=MetalInvocationOffset(offset,command->strides[reach->binding],command->instances[reach->binding],invocation,command->invocations[reach->binding]);
         each(reach->buffer,offset,reach->length,(reach->access&MetalReachRead)!=0,(reach->access&MetalReachWritten)!=0);
     }
 }
@@ -786,11 +799,11 @@ static void MetalDataflow(MetalCapture *capture) {
     reaches = [NSMutableData new];
     owners = [NSMutableSet new];
     resources = [NSMutableSet new];
-    hosts = [NSMutableArray new];
+    hosts = [NSMutableArray new];addressRecords=[NSMutableArray new];
     return self;
 }
 - (void)dealloc {
-    [dispatches release]; [reaches release]; [owners release]; [resources release]; [hosts release]; [super dealloc];
+    [dispatches release]; [reaches release]; [owners release]; [resources release]; [hosts release]; [addressRecords release]; [super dealloc];
 }
 @end
 
@@ -810,6 +823,45 @@ id<MTLBuffer> MetalLeaseBuffer(id<MTLDevice> device,NSUInteger length) {
     return buffer;
 }
 
+// Embedded addresses are data in ordinary prepared uniform pages. Their exact
+// target views retain their own invocation relation for dependency ordering.
+static void MetalCaptureAddresses(MetalCapture *capture,id<MTLDevice> device,NSUInteger repetitions) {
+    struct MetalRecordedDispatch *commands=capture->dispatches.mutableBytes;
+    struct MetalReach *reaches=capture->reaches.mutableBytes;
+    for(NSUInteger c=0;c<capture->dispatches.length/sizeof *commands;c++) {
+        struct MetalRecordedDispatch *command=commands+c;
+        for(NSUInteger slot=0;slot<MESH_BUFFER_BINDINGS;slot++) {
+            const struct MetalRecordedAddress *uniform=NULL;
+            for(NSUInteger a=0;a<command->addressCount;a++)if(command->addresses[a].value.binding==slot) {uniform=command->addresses+a;break;}
+            if(!uniform)continue;
+            const NSUInteger alignment=_Alignof(uint64_t),stride=(uniform->uniformLength+alignment-1)/alignment*alignment;
+            id<MTLBuffer> table=MetalLeaseBuffer(device,stride*repetitions);
+            for(NSUInteger t=0;t<repetitions;t++) {
+                char *destination=(char *)table.contents+t*stride;
+                const NSUInteger from=MetalInvocationOffset(uniform->uniformOffset,uniform->uniformStride,uniform->uniformInstances,t,uniform->uniformInvocation);
+                memcpy(destination,(const char *)uniform->uniform.contents+from,uniform->uniformLength);
+                for(NSUInteger a=0;a<command->addressCount;a++) {
+                    const struct MetalRecordedAddress *address=command->addresses+a;
+                    if(address->value.binding!=slot)continue;
+                    const uint64_t pointer=address->value.buffer.gpuAddress+
+                        MetalInvocationOffset(address->value.origin,address->stride,address->instances,t,address->value.invocation);
+                    memcpy(destination+address->value.offset,&pointer,sizeof pointer);
+                }
+            }
+            // The same declared ranges now refer to their prepared table slot.
+            for(NSUInteger r=0;r<command->reaches;r++) {
+                struct MetalReach *reach=reaches+command->reach+r;
+                if((reach->access&MetalReachBinding)&&!(reach->access&MetalReachAddress)&&reach->binding==(int32_t)slot) {
+                    reach->buffer=table;reach->offset-=command->offsets[slot];
+                }
+            }
+            command->buffers[slot]=table;command->offsets[slot]=0;command->lengths[slot]=uniform->uniformLength;
+            command->strides[slot]=stride;command->instances[slot]=repetitions;command->invocations[slot]=0;
+            [capture->resources addObject:table];[table release];
+        }
+    }
+}
+
 // ../dox/mesh/design/prepared-machine.md#M06
 // A recording's replay: its indirect command buffers holding every repetition's commands (the
 // one modulus), their barriers, and the residency set.
@@ -817,6 +869,7 @@ static void MetalReplayBuild(MetalCapture *capture,id<MTLDevice> device,NSUInteg
     struct MetalReplay *result) {
     result->count = (uint32_t)(capture->dispatches.length / sizeof(struct MetalRecordedDispatch));
     if (!result->count) [NSException raise:NSInvalidArgumentException format:@"No compute commands recorded"];
+    MetalCaptureAddresses(capture,device,repetitions);
     [capture->owners unionSet:capture->resources];
     result->buffers = (uint16_t)capture->buffers; result->memory = (uint16_t)capture->memory;
     const struct MetalRecordedDispatch *commands = capture->dispatches.bytes;
@@ -828,6 +881,7 @@ static void MetalReplayBuild(MetalCapture *capture,id<MTLDevice> device,NSUInteg
         for(NSUInteger i=0;i<result->count;i++)ordered[t*result->count+i]=MetalOrder(read,written,&phase,commands+i,capture->reaches.bytes,t);
     }
     result->owner = [capture->owners retain];
+    objc_setAssociatedObject(result->owner,&replayAddressRecordsKey,[NSArray arrayWithArray:capture->addressRecords],OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(result->owner,&replayHostsKey,[NSArray arrayWithArray:capture->hosts],OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     // docs/kernels.md E2: the records a direct replay encodes (MetalReplayDispatch4)
     objc_setAssociatedObject(result->owner, &replayRecordsKey, @[[NSData dataWithBytes:commands length:capture->dispatches.length],barriers,@(form),[NSData dataWithData:capture->reaches],@(repetitions)],
@@ -876,7 +930,7 @@ static void MetalReplayBuild(MetalCapture *capture,id<MTLDevice> device,NSUInteg
         for (NSUInteger j = 0; j < capture->buffers; ++j)
             if (((source->access | (source->access >> MESH_ACCESS_WRITE_SHIFT)) >> j) & 1) {
                 [command setKernelBuffer:source->buffers[j]
-                    offset:MetalInvocationOffset(source->offsets[j],source->strides[j],source->instances[j],t) atIndex:j];
+                    offset:MetalInvocationOffset(source->offsets[j],source->strides[j],source->instances[j],t,source->invocations[j]) atIndex:j];
             }
         for (NSUInteger j = 0; j < capture->memory; ++j)
             if (source->memory[j]) [command setThreadgroupMemoryLength:source->memory[j] atIndex:j];
@@ -931,7 +985,7 @@ static void MetalReplayDispatch4(id<MTL4ComputeCommandEncoder> encoder,id<MTL4Ar
     struct MetalReplay *replay,const struct MetalRecordedDispatch *source,NSUInteger t) {
     [encoder setArgumentTable:table];[encoder setComputePipelineState:source->pipeline];
     for(NSUInteger j=0;j<replay->buffers;j++)if(((source->access|(source->access>> MESH_ACCESS_WRITE_SHIFT))>>j)&1) {
-        [table setAddress:source->buffers[j].gpuAddress+MetalInvocationOffset(source->offsets[j],source->strides[j],source->instances[j],t) atIndex:j];
+        [table setAddress:source->buffers[j].gpuAddress+MetalInvocationOffset(source->offsets[j],source->strides[j],source->instances[j],t,source->invocations[j]) atIndex:j];
     }
     for(NSUInteger j=0;j<replay->memory;j++)if(source->memory[j])[encoder setThreadgroupMemoryLength:source->memory[j] atIndex:j];
     if(source->threads)[encoder dispatchThreads:source->grid threadsPerThreadgroup:source->group];
@@ -951,11 +1005,24 @@ static MetalCapture *MetalCaptureDescribed(const struct MetalCommandDescription 
             const struct MetalCommandBinding binding=description->bindings[k];
             if(binding.index>=MESH_BUFFER_BINDINGS)[NSException raise:NSInvalidArgumentException format:@"binding index exceeds Metal capacity"];
             const uint32_t at=binding.index;
-            command.buffers[at]=binding.buffer;command.offsets[at]=binding.offset;command.lengths[at]=binding.length;
+            command.buffers[at]=binding.buffer;command.offsets[at]=binding.offset;command.lengths[at]=binding.length;command.invocations[at]=binding.invocation;
             command.access|=(uint64_t)(binding.access&MetalReachRead?1:0)<<at;
             command.access|=(uint64_t)(binding.access&MetalReachWritten?1:0)<<(MESH_ACCESS_WRITE_SHIFT+at);
             capture->buffers=MAX(capture->buffers,at+1);
             [capture->resources addObject:binding.buffer];
+        }
+        if(description->addressCount) {
+            NSMutableData *addresses=[NSMutableData dataWithLength:description->addressCount*sizeof(struct MetalRecordedAddress)];
+            struct MetalRecordedAddress *records=addresses.mutableBytes;
+            for(NSUInteger a=0;a<description->addressCount;a++) {
+                records[a].value=description->addresses[a];
+                const NSUInteger slot=records[a].value.binding;
+                records[a].uniform=command.buffers[slot];records[a].uniformOffset=command.offsets[slot];
+                records[a].uniformLength=command.lengths[slot];
+                [capture->resources addObject:records[a].value.buffer];[capture->owners addObject:records[a].uniform];
+            }
+            command.addresses=addresses.bytes;command.addressCount=description->addressCount;
+            [capture->addressRecords addObject:addresses];
         }
         if(description->memoryCount>MESH_MEMORY_BINDINGS)[NSException raise:NSInvalidArgumentException format:@"threadgroup-memory index exceeds Metal capacity"];
         for(size_t k=0;k<description->memoryCount;k++)command.memory[k]=description->memory[k];
@@ -964,7 +1031,10 @@ static MetalCapture *MetalCaptureDescribed(const struct MetalCommandDescription 
         for(size_t k=0;k<description->reachCount;k++) {
             const struct MetalReach reach=description->reaches[k];
             [capture->resources addObject:reach.buffer];
-            if(reach.access&MetalReachBinding) {
+            if(reach.access&MetalReachAddress) {
+                if(reach.binding<0||(NSUInteger)reach.binding>=command.addressCount||command.addresses[reach.binding].value.buffer!=reach.buffer)
+                    [NSException raise:NSInvalidArgumentException format:@"command reach names no matching address operand"];
+            } else if(reach.access&MetalReachBinding) {
                 if(reach.binding<0||reach.binding>=MESH_BUFFER_BINDINGS||command.buffers[reach.binding]!=reach.buffer)
                     [NSException raise:NSInvalidArgumentException format:@"command reach names no matching buffer binding"];
                 command.extents|=UINT32_C(1)<<reach.binding;
@@ -982,7 +1052,7 @@ static const struct MetalOperand *MetalOperandOf(const struct MetalOperand *oper
 }
 
 // ../dox/mesh/design/prepared-machine.md#M13: the operands bound in the capture's commands. A binding of an operand takes
-// its stride and slots, a written one its output offset past them; a binding's mode is its reaches' where it has any. A
+// its stride and slots; every binding keeps its compiler-supplied origin. Its mode is its reaches' where it has any. A
 // reach with neither access nor residency, past its buffer or, not a binding's, into an operand's slots (which an address cannot follow), and a
 // binding's extent past its buffer, are refused.
 static void MetalCaptureOperands(MetalCapture *capture,const struct MetalOperand *operands,size_t count) {
@@ -992,17 +1062,25 @@ static void MetalCaptureOperands(MetalCapture *capture,const struct MetalOperand
         struct MetalRecordedDispatch *command=commands+i;
         NSString *name=MetalPipelineName(command->pipeline)?:@"unnamed";
         uint64_t access=command->access;uint32_t moded=0;
+        struct MetalRecordedAddress *addresses=(struct MetalRecordedAddress *)command->addresses;
+        for(NSUInteger a=0;a<command->addressCount;a++) {
+            const struct MetalOperand *operand=MetalOperandOf(operands,count,addresses[a].value.buffer);
+            addresses[a].stride=operand?operand->stride:0;addresses[a].instances=operand?operand->instances:0;
+            const struct MetalOperand *uniform=MetalOperandOf(operands,count,addresses[a].uniform);
+            addresses[a].uniformStride=uniform?uniform->stride:0;addresses[a].uniformInstances=uniform?uniform->instances:0;
+            addresses[a].uniformInvocation=command->invocations[addresses[a].value.binding];
+        }
         for(uint32_t k=0;k<command->reaches;k++) {
             const struct MetalReach *reach=reaches+command->reach+k;
             const struct MetalOperand *operand=MetalOperandOf(operands,count,reach->buffer);
             const NSUInteger slots=operand?operand->instances:0,stride=operand?operand->stride:0;
             if(!(reach->access&(MetalReachRead|MetalReachWritten|MetalReachResident))||reach->offset+reach->length>reach->buffer.length||
-               (stride&&slots!=1&&!(reach->access&MetalReachBinding)))
+               (stride&&slots!=1&&!(reach->access&(MetalReachBinding|MetalReachAddress))))
                 [NSException raise:NSInvalidArgumentException format:@"command %lu (%@): reach %u (%@, %lu bytes at %lu of %lu, access %u) is "
                     "no access or residency, past its buffer, or into an operand's slots (%lu), which an address cannot follow (docs/kernels.md Any program)",
                     (unsigned long)i,name,k,reach->buffer.label?:@"unnamed",(unsigned long)reach->length,(unsigned long)reach->offset,
                     (unsigned long)reach->buffer.length,reach->access,(unsigned long)slots];
-            if(!(reach->access&MetalReachBinding))continue;
+            if((reach->access&MetalReachAddress)||!(reach->access&MetalReachBinding))continue;
             const uint32_t bit=UINT32_C(1)<<reach->binding;
             if(!(moded&bit))access&=~((UINT64_C(1)<<reach->binding)|(UINT64_C(1)<<(MESH_ACCESS_WRITE_SHIFT+reach->binding)));
             if(reach->access&MetalReachRead)access|=UINT64_C(1)<<reach->binding;
@@ -1019,12 +1097,6 @@ static void MetalCaptureOperands(MetalCapture *capture,const struct MetalOperand
                     (unsigned long)command->offsets[j],(unsigned long)buffer.length];
             const struct MetalOperand *operand=MetalOperandOf(operands,count,buffer);
             command->strides[j]=operand?operand->stride:0;command->instances[j]=operand?operand->instances:0;
-            if(!operand||!((access>>(MESH_ACCESS_WRITE_SHIFT+j))&1))continue;
-            for(uint32_t k=0;k<command->reaches;k++) {
-                struct MetalReach *reach=reaches+command->reach+k;
-                if((reach->access&MetalReachBinding)&&reach->binding==(int32_t)j)reach->offset+=operand->outputOffset;
-            }
-            command->offsets[j]+=operand->outputOffset;
         }
     }
 }
@@ -1337,7 +1409,7 @@ struct MetalCommandBinding MetalScheduleData(struct MetalSchedule *s,const void 
         [s->data release];s->data=MetalLeaseBuffer(s->device,MAX((NSUInteger)MESH_COMMAND_DATA_BYTES,size));
         s->used=0;[s->owners addObject:s->data];[s->residency addAllocation:s->data];
     }
-    struct MetalCommandBinding result={s->data,s->used,bytes,index,MetalReachRead};
+    struct MetalCommandBinding result={s->data,s->used,bytes,index,MetalReachRead,0};
     memcpy((char *)s->data.contents+s->used,data,bytes);s->used+=size;
     MetalScheduleCall(s,@{@"call":@"data",@"bytes":[NSData dataWithBytes:data length:bytes],@"index":@(index),
         @"at":[NSString stringWithFormat:@"%p+%lu",(void *)result.buffer,(unsigned long)result.offset]});
@@ -1353,7 +1425,7 @@ static void MetalScheduleComputeNow(struct MetalSchedule *s,id<MTLComputePipelin
     for(size_t k=0;k<count;k++) {
         const struct MetalCommandBinding b=bindings[k];
         if(b.index>=MESH_BUFFER_BINDINGS)[NSException raise:NSInvalidArgumentException format:@"binding index exceeds Metal capacity"];
-        command.buffers[b.index]=b.buffer;command.offsets[b.index]=b.offset;command.lengths[b.index]=b.length;
+        command.buffers[b.index]=b.buffer;command.offsets[b.index]=b.offset;command.lengths[b.index]=b.length;command.invocations[b.index]=b.invocation;
         command.access|=(uint64_t)(b.access&MetalReachRead?1:0)<<b.index;
         command.access|=(uint64_t)(b.access&MetalReachWritten?1:0)<<(MESH_ACCESS_WRITE_SHIFT+b.index);
         view.buffers=MAX(view.buffers,b.index+1);
@@ -2085,11 +2157,13 @@ id<MTLComputePipelineState> MetalPipelineMake(id<MTLLibrary> library,NSString *f
 // A template names operands by index: a binding or reach its operand (or, for a binding, the command data a data call
 // made), each beside its recorded form with the pointers cleared; -1 where it names none.
 struct MetalTemplateBinding { int32_t operand, data; struct MetalCommandBinding binding; };
-struct MetalTemplateDispatch { uint32_t pipeline; int32_t operands[MESH_BUFFER_BINDINGS]; struct MetalRecordedDispatch record; };
+struct MetalTemplateDispatch { uint32_t pipeline; int32_t operands[MESH_BUFFER_BINDINGS]; NSUInteger address; struct MetalRecordedDispatch record; };
 struct MetalTemplateReach { int32_t operand, address; struct MetalReach reach; };
+struct MetalTemplateAddress { int32_t operand, uniform; struct MetalRecordedAddress record; };
 
 static NSArray *MetalTemplateSizes(void) {
-    return @[@(sizeof(struct MetalTemplateDispatch)),@(sizeof(struct MetalTemplateReach)),@(sizeof(struct MetalTemplateBinding))];
+    return @[@(sizeof(struct MetalTemplateDispatch)),@(sizeof(struct MetalTemplateReach)),@(sizeof(struct MetalTemplateBinding)),
+        @(sizeof(struct MetalTemplateAddress))];
 }
 
 // A buffer's operand is its region lease (ncclMeshMemBuffer), so buffers over one lease's bytes are one operand;
@@ -2223,20 +2297,48 @@ NSDictionary *MetalScheduleTemplate(struct MetalSchedule *const *schedules,size_
             const struct MetalRecordedDispatch *commands=records.bytes;const NSUInteger n=records.length/sizeof *commands;
             NSMutableData *made=[NSMutableData dataWithLength:n*sizeof(struct MetalTemplateDispatch)];
             struct MetalTemplateDispatch *target=made.mutableBytes;
+            NSMutableData *addresses=[NSMutableData data];
             NSUInteger deltas[MESH_BUFFER_BINDINGS];
             const struct MetalReach *views=reaches.bytes;
             NSMutableData *spans=[NSMutableData dataWithLength:reaches.length/sizeof *views*sizeof(struct MetalTemplateReach)];
             struct MetalTemplateReach *into=spans.mutableBytes;
             for(NSUInteger i=0;i<n;i++) {
                 target[i].record=commands[i];target[i].record.pipeline=nil;
+                target[i].record.addresses=NULL;target[i].address=addresses.length/sizeof(struct MetalTemplateAddress);
                 target[i].pipeline=pipelineIndex(commands[i].pipeline);
+                for(NSUInteger a=0;a<commands[i].addressCount;a++) {
+                    const struct MetalRecordedAddress *source=commands[i].addresses+a;
+                    struct MetalTemplateAddress address={.record=*source};
+                    NSUInteger delta=0;
+                    address.operand=operand(source->value.buffer,&delta);
+                    address.record.value.buffer=nil;address.record.value.origin+=delta;
+                    address.uniform=operand(source->uniform,&delta);
+                    address.record.uniform=nil;address.record.uniformOffset+=delta;
+                    [addresses appendBytes:&address length:sizeof address];
+                }
                 for(NSUInteger j=0;j<MESH_BUFFER_BINDINGS;j++) {
-                    target[i].operands[j]=operand(commands[i].buffers[j],deltas+j);
+                    id<MTLBuffer> buffer=commands[i].buffers[j];
+                    for(NSUInteger a=0;a<commands[i].addressCount;a++)if(commands[i].addresses[a].value.binding==j) {
+                        const struct MetalRecordedAddress *address=commands[i].addresses+a;
+                        buffer=address->uniform;target[i].record.offsets[j]=address->uniformOffset;
+                        target[i].record.lengths[j]=address->uniformLength;target[i].record.strides[j]=address->uniformStride;
+                        target[i].record.instances[j]=address->uniformInstances;target[i].record.invocations[j]=address->uniformInvocation;
+                        break;
+                    }
+                    target[i].operands[j]=operand(buffer,deltas+j);
                     target[i].record.buffers[j]=nil;target[i].record.offsets[j]+=deltas[j];
                 }
-                for(uint32_t k=0;k<commands[i].reaches;k++)into[commands[i].reach+k]=placed(views[commands[i].reach+k]);
+                for(uint32_t k=0;k<commands[i].reaches;k++) {
+                    struct MetalReach reach=views[commands[i].reach+k];
+                    if((reach.access&MetalReachBinding)&&!(reach.access&MetalReachAddress))for(NSUInteger a=0;a<commands[i].addressCount;a++)
+                        if((int32_t)commands[i].addresses[a].value.binding==reach.binding) {
+                            reach.buffer=commands[i].addresses[a].uniform;
+                            reach.offset+=commands[i].addresses[a].uniformOffset;break;
+                        }
+                    into[commands[i].reach+k]=placed(reach);
+                }
             }
-            [script addObject:@{@"call":kind,@"records":made,@"reaches":spans,@"form":held[2],@"repetitions":held[4],
+            [script addObject:@{@"call":kind,@"records":made,@"reaches":spans,@"addresses":addresses,@"form":held[2],@"repetitions":held[4],
                 @"buffers":call[@"buffers"],@"memory":call[@"memory"],@"invocations":call[@"invocations"]}];
         } else if(call[@"kind"]&&([kind isEqual:@"host"]||[kind isEqual:@"cross"]||[kind isEqual:@"plan"])) {
             NSMutableDictionary *entry=[[declared(call) mutableCopy] autorelease];entry[@"call"]=kind;
@@ -2374,9 +2476,22 @@ static struct MetalReplay *MetalTemplateReplayMake(id<MTLDevice> device,NSDictio
     const NSInteger *shifts) {
     MetalCapture *capture=[[MetalCapture new] autorelease];
     NSData *records=call[@"records"],*reaches=call[@"reaches"];
+    NSData *addresses=call[@"addresses"];
+    const struct MetalTemplateAddress *listed=addresses.bytes;
+    NSMutableData *addressData=[NSMutableData dataWithLength:addresses.length/sizeof *listed*sizeof(struct MetalRecordedAddress)];
+    struct MetalRecordedAddress *boundAddresses=addressData.mutableBytes;
+    for(NSUInteger a=0;a<addresses.length/sizeof *listed;a++) {
+        struct MetalRecordedAddress address=listed[a].record;
+        address.value.buffer=buffers[listed[a].operand];address.value.origin+=shifts[listed[a].operand];
+        address.uniform=buffers[listed[a].uniform];address.uniformOffset+=shifts[listed[a].uniform];
+        boundAddresses[a]=address;
+        [capture->resources addObject:address.value.buffer];[capture->owners addObject:address.uniform];
+    }
+    if(addressData.length)[capture->addressRecords addObject:addressData];
     const struct MetalTemplateDispatch *source=records.bytes;
     for(NSUInteger i=0;i<records.length/sizeof *source;i++) {
         struct MetalRecordedDispatch command=source[i].record;
+        command.addresses=command.addressCount?boundAddresses+source[i].address:NULL;
         command.pipeline=pipelines[source[i].pipeline];[capture->owners addObject:command.pipeline];
         for(NSUInteger j=0;j<MESH_BUFFER_BINDINGS;j++)if(source[i].operands[j]>=0) {
             const NSUInteger at=(NSUInteger)source[i].operands[j];

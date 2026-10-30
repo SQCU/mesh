@@ -2,6 +2,7 @@
 #import <Metal/Metal.h>
 #include "metal-capabilities.h"
 #include "mesh-host.h"
+#include "nccl.h"
 #import "mesh-tensor-layout.h"
 
 #ifdef __cplusplus
@@ -24,21 +25,22 @@ enum MetalForm { MetalFormIndirect, MetalFormEncoded };
 MTLCompileOptions *MetalDeviceCompilerOptions(id<MTLDevice> device);
 
 // docs/kernels.md Any program.  A host program's operand whose storage holds `instances` slots of
-// `stride` bytes: invocation t binds slot t % instances (0 instances: slot t), its writes landing
-// `outputOffset` bytes past it (a stride: the next invocation's input).  Any buffer the commands bind
-// that is not named is bound as described, at every invocation; a buffer named twice is its last naming's.
-struct MetalOperand { const char *name; __unsafe_unretained id<MTLBuffer> buffer; NSUInteger stride, instances, outputOffset; };
+// `stride` bytes: invocation t binds slot t % instances (0 instances: slot t).
+// Each command already supplies its selected input/output binding offsets;
+// storage naming never relocates writes to other values sharing that buffer.
+struct MetalOperand { const char *name; __unsafe_unretained id<MTLBuffer> buffer; NSUInteger stride, instances; };
 // Preparation storage from the shared bridge region. The caller owns the buffer.
 id<MTLBuffer> MetalLeaseBuffer(id<MTLDevice>, NSUInteger bytes) NS_RETURNS_RETAINED;
-static inline NSUInteger MetalInvocationOffset(NSUInteger offset, NSUInteger stride, NSUInteger instances, NSUInteger invocation) {
-    return offset + (instances ? invocation % instances : invocation) * stride;
+static inline NSUInteger MetalInvocationOffset(NSUInteger offset, NSUInteger stride, NSUInteger instances, NSUInteger invocation, NSInteger displacement) {
+    return offset + ncclMeshInvocationIndex(invocation, displacement, instances) * stride;
 }
 // tools/mesh/schedule.py: whether MetalReplayDescribed lists its commands
 void MetalRecordingList(int on);
 // docs/kernels.md Any program
-enum { MetalReachRead = 1, MetalReachWritten = 2, MetalReachBinding = 4, MetalReachResident = 8 };
+enum { MetalReachRead = 1, MetalReachWritten = 2, MetalReachBinding = 4, MetalReachResident = 8, MetalReachAddress = 16 };
 // Binding reaches name their actual argument index. Several disjoint ranges
 // can describe one view; all follow that argument's prepared invocation slot.
+// Address reaches use binding = the command address-record ordinal.
 // A non-binding reach uses binding = -1 (memory addressed through an operand).
 // Resident-only reaches retain storage without declaring a data dependency.
 struct MetalReach {
@@ -163,10 +165,22 @@ struct MetalCommandBinding {
     __unsafe_unretained id<MTLBuffer> buffer;
     NSUInteger offset, length;
     uint32_t index, access;
+    NSInteger invocation; // Signed phase of this value: slot (t + invocation) modulo instances.
 };
 // length is the exact dense extent, including zero for an empty view. Binding
 // reaches replace it with a union of strided/masked regions. Neither form is an
 // instruction to access the remainder of a buffer.
+// A pointer word inside one uniform argument. Preparation writes its target
+// address for each invocation; the numerical command reads only prepared pages.
+// Other uniform bytes are preparation constants. Runtime-produced values and
+// page indices remain ordinary page operands, not bytes captured in this table.
+struct MetalCommandAddress {
+    uint32_t binding;
+    NSUInteger offset;
+    __unsafe_unretained id<MTLBuffer> buffer;
+    NSUInteger origin;
+    NSInteger invocation;
+};
 // Every frontend supplies its commands as these records, to the one access-order
 // and replay compiler (MetalReplayCommands, MetalReplayDescribed).
 struct MetalCommandDescription {
@@ -177,6 +191,8 @@ struct MetalCommandDescription {
     size_t memoryCount;
     const struct MetalReach *reaches;
     size_t reachCount;
+    const struct MetalCommandAddress *addresses;
+    size_t addressCount;
     MTLSize groups, threads;
     BOOL threadGrid;
 };
