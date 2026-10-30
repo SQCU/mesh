@@ -242,8 +242,17 @@ class ProcessGroupMesh(dist.ProcessGroup):
         view = ffi.new('ncclMeshPlan **')
         check(LIB.ncclMeshCommPlan(self.comm, ffi.new('ncclMeshCall[]', made or 1), len(made),
                                    ffi.new('ncclMeshPlanRun[]', order or 1), len(order), view))
-        self._declaration = (groups, order)
+        self._declaration, self._plan = (groups, order), view[0]
         return [] if view[0] == ffi.NULL else [tuple(view[0].entries[g]) for g in range(view[0].groups)]
+
+    def count_matrices(self, calls):
+        """Each all-to-all of `calls`, declared with this rank's counts alone, its complete source-major count matrix
+        as the library makes it from every rank's (nccl.h ncclMeshCommPlan's count exchange, ncclMeshPlan matrices),
+        in the call's elements: the calls declared for this as a configuration (configuration), each its own group."""
+        n = self._size
+        with self.configuration([[call] for call in calls]):
+            return [[value // typed(call.dtype, False)[1] for value in ffi.unpack(self._plan.matrices[k], n * n)]
+                    for k, call in enumerate(calls)]
 
     @contextlib.contextmanager
     def configuration(self, groups):

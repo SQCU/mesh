@@ -212,7 +212,7 @@ infer zero-copy behavior merely from their sharing the communicator.
 
 `ncclMeshCall` carries operation, peer, count/counts, dtype, reduction, group, repetition, destination, fused
 flag, all-to-all matrix, contributors and recipients. `ncclMeshPlan` provides group count, issue count, first
-issue and publication/landing entry counts. `ncclMeshFused` stores arrays of six-word publication and landing
+issue, publication/landing entry counts and each declared all-to-all's complete count matrix. `ncclMeshFused` stores arrays of six-word publication and landing
 records, their counts, repeat count and local frame stride. These arrays are sized by physical channels,
 not by peer count.
 

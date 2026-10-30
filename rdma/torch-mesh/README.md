@@ -35,9 +35,10 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 - A group is made by NCCL's init (`ncclCommInitRank`, its unique id passed through the group's store): the ranks
   exchange their nodes and the nodes their bridges reach, and the group keeps the map its init made of them. That id
   is the store's one use. What the ranks agree before a function runs crosses the communicator's configuration
-  channel: each one's capacity, a declaration's view cuts and all-to-all counts its gather, `ncclMeshCommConfigGather`
+  channel: each one's capacity and a declaration's view cuts its gather, `ncclMeshCommConfigGather`
   (`ProcessGroupMesh.exchange_configuration`), and rank 0's placement proposal its broadcast,
-  `ncclMeshCommConfigBroadcast` (`broadcast_configuration`).
+  `ncclMeshCommConfigBroadcast` (`broadcast_configuration`). An all-to-all's count matrix is the library's own, made
+  from every rank's counts as the call is declared (`ncclMeshCommPlan`; `count_matrices` reads `ncclMeshPlan`'s).
 - A bidirectional exchange with one peer goes in one batch: `dist.batch_isend_irecv`, or a coalescing manager.
   Separate `isend`/`irecv` calls in the same order on both sides do not pair, and the library does not detect it
   ([NCCL.md](../NCCL.md#rules-a-program-keeps)).

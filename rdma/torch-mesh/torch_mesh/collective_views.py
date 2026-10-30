@@ -75,16 +75,12 @@ def lower(bindings, group):
     from .compilation import api_layouts
     bindings = list(bindings)
     rank, size = group.rank(), group.size()
-    # The graph supplies per-peer counts. Exchange this configuration once to
-    # complete an all-to-all's matrix, before physical routing is compiled.
+    # The graph supplies this rank's counts. The library completes an all-to-all's
+    # matrix from every rank's, and pairs them, before physical routing is compiled.
     missing = [i for i, (c, _, _) in enumerate(bindings) if c.kind == ALLTOALL and c.matrix is None]
     if missing:
-        rows = group.exchange_configuration([bindings[i][0].counts for i in missing])
-        for k, i in enumerate(missing):
+        for i, matrix in zip(missing, group.count_matrices([bindings[i][0] for i in missing])):
             call, source, destination = bindings[i]
-            matrix = [rows[r][k][q] for r in range(size) for q in range(size)]
-            if any(rows[r][k][size + q] != matrix[q * size + r] for r in range(size) for q in range(size)):
-                raise ValueError('all-to-all declarations must pair send and receive counts')
             bindings[i] = call._replace(matrix=matrix), source, destination
     cuts, cursor, prepared, before, after = [0], 0, [], [], []
     layouts = api_layouts('reduction')

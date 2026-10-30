@@ -934,8 +934,9 @@ bytes for gathers. Torch has ALLTOALL; native has holders and scatter.
 **Single form.** In two steps.
 - (a) Low risk. Torch's union and matrix exchange go through `ncclMeshCommConfigGather`, exposed as
   `mesh.config_gather`, and the matrix comes from `prepare_counted`'s exchange. The c10d-store side channel goes.
-  The exchange half is done: `ProcessGroupMesh.exchange_configuration` is the gather, with no `mesh.config_gather`,
-  and configuration.py's capacities and proposal use it too. The matrix still comes from torch's gathered counts.
+  Done: `ProcessGroupMesh.exchange_configuration` is the gather, with no `mesh.config_gather`; configuration.py's
+  proposal is `ncclMeshCommConfigBroadcast`; and the matrix is `prepare_counted`'s, read from the plan's `matrices`
+  (`count_matrices`), its pairing check the library's.
 - (b) In nccl.h, preparation only:
   ```c
   ncclResult_t ncclMeshCallDomains(ncclComm_t, const ncclMeshCall *, int rank, uint64_t (*send)[2], size_t *sends,

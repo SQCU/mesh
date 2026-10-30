@@ -2986,6 +2986,7 @@ struct plan {
   struct compiled *group;
   ncclMeshPlanRun *order;
   uint64_t *ends, (*entries)[2];
+  const uint64_t **matrices; /* each declared call's count matrix, its call's own (view.matrices) */
   size_t runs;
   /* the declaration it was made from, flat (plan_declaration), and its bindings' places in it */
   char *declaration;
@@ -4984,7 +4985,7 @@ static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call
 /* a plan's own: its groups' calls and entries, their storage back to the communicator's (compiled_drop) */
 static void plan_free(struct ncclComm *comm, struct plan *plan) {
   for (uint32_t g = 0; plan && plan->group && g < plan->view.groups; g++) compiled_drop(comm, plan->group + g);
-  if (plan) { free(plan->group); free(plan->order); free(plan->ends); free(plan->entries); free(plan->declaration); free(plan->places); }
+  if (plan) { free(plan->group); free(plan->order); free(plan->ends); free(plan->entries); free(plan->matrices); free(plan->declaration); free(plan->places); }
   free(plan);
 }
 
@@ -5186,7 +5187,8 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
   uint32_t groups = 0;
   for (int i = 0; i < count; i++) groups += !i || calls[i].group != calls[i - 1].group;
   struct plan *made = groups ? calloc(1, sizeof *made) : NULL;
-  ncclResult_t result = !groups || (made && (made->group = calloc(groups, sizeof *made->group)) && (made->entries = calloc(groups, sizeof *made->entries)))
+  ncclResult_t result = !groups || (made && (made->group = calloc(groups, sizeof *made->group)) && (made->entries = calloc(groups, sizeof *made->entries))
+                                    && (made->matrices = calloc((size_t)count, sizeof *made->matrices)))
                         ? ncclSuccess : fail(ncclSystemError, "out of memory");
   if (made) made->view.groups = groups;
   for (int i = 0, g = -1; i < count && !result; i++) {
@@ -5198,6 +5200,7 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
     }
     struct compiled *x = made->group + g;
     result = declared(comm, calls + i, x->calls + x->n++);
+    made->matrices[i] = x->calls[x->n - 1].matrix;
   }
   if (made && !result) {
     if(runs>SIZE_MAX/sizeof *made->order || runs>SIZE_MAX/sizeof *made->ends ||
@@ -5228,7 +5231,8 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
   if (!result && made) result = plan_declaration(comm, calls, count, order, runs, made);
   if (!result) {
     struct plan *was = comm->plan;
-    if (made) { made->view.first = comm->groups + 1; made->view.entries = (const uint64_t (*)[2])made->entries; }
+    if (made) { made->view.first = comm->groups + 1; made->view.entries = (const uint64_t (*)[2])made->entries;
+                made->view.matrices = made->matrices; }
     comm->plan = made;
     made = was;
     if (plan) *plan = comm->plan ? &comm->plan->view : NULL;
