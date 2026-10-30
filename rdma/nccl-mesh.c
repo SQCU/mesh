@@ -2894,11 +2894,11 @@ enum { GENERATIONS = 2 };
 /* what a group of a definition issues with (issue_bind): its calls, its schedules laid `repeats` times, its calls'
    steps copies and its record in flight.  A group of collectives has one for each generation and each slot of its
    bindings' period, laid and placed as it is declared (prepared); a group of WRITEs one for each generation, laid and
-   placed at each issue for the plans it names.  Each is taken again by the next issue that finds it let go (`held` 0:
-   issue_let, as its group is done); a group of WRITEs whose generation's is still held makes one of its own, as does
-   one of a dropped definition's still held (`dropped`), freed when let go */
+   placed at each issue for the plans it names.  A group completes within its launch (complete, retire), or is lost
+   there with its communicator (walk_failed: inflight_lose), under the group_lock its issue is bound in: the next
+   issue of its generation, and a definition's drop, find nothing in flight that names the issue */
 struct inflight;
-struct issue { struct schedule *plans; struct steps **steps; struct inflight *group; struct call *calls; size_t n; uint32_t repeats; int held, dropped;
+struct issue { struct schedule *plans; struct steps **steps; struct inflight *group; struct call *calls; size_t n; uint32_t repeats;
                /* in slot `slot` (its storage at `base`, its landing area at `area`), its span tables a lease (`tables`) */
                uint32_t slot; struct where base, area; void *tables;
                struct mesh_landing_run *landings;
@@ -2908,20 +2908,15 @@ struct issue { struct schedule *plans; struct steps **steps; struct inflight *gr
 struct compiled { struct call *calls; size_t n; uint64_t repeat; struct schedule *plans; uint32_t slot[GENERATIONS], uses, period;
                   struct issue *issue[GENERATIONS], **prepared; };
 /* a definition dropped: its slots back to the communicator's, for the next definition under the same guard, and its
-   issues freed (one held, once let go) */
+   issues freed */
 static void calls_free(struct call *list, size_t n);
 static void issue_free(struct ncclComm *comm, struct issue *u);
-static void issue_let(struct ncclComm *comm, struct issue *u);
-static void issue_drop(struct ncclComm *comm, struct issue *u) {
-  if (u && u->held) u->dropped = 1;
-  else issue_free(comm, u);
-}
 static void compiled_drop(struct ncclComm *comm, struct compiled *x) {
   for (uint32_t g = 0; g < GENERATIONS; g++) {
     if (x->slot[g] && comm->slots) comm->slots[x->slot[g] - 1].held = 0;
-    issue_drop(comm, x->issue[g]);
+    issue_free(comm, x->issue[g]);
   }
-  for (size_t j = 0; x->prepared && j < (size_t)GENERATIONS * x->period; j++) issue_drop(comm, x->prepared[j]);
+  for (size_t j = 0; x->prepared && j < (size_t)GENERATIONS * x->period; j++) issue_free(comm, x->prepared[j]);
   free(x->prepared);
   calls_free(x->calls, x->n); schedules_free(comm, x->plans);
   *x = (struct compiled){0};
@@ -3643,37 +3638,31 @@ static ncclResult_t issue_place(struct ncclComm *comm, struct issue *u) {
 /* group x's `n` calls (*calls) bound in an issue of its next generation (*issued; struct issue), *calls then the issue's
    copy of them (what they own moved there), *plans its entries, *slot and *area its slot and landing area.  A group of
    collectives takes the issue prepared for that generation at slot `invocation % period` of its bindings (prepared:
-   nccl.h ncclMeshBufferSlots), its calls as they were laid (their buffers, counts, results and complements: none its
-   issue names) with what an issue gives (its stream's encoder, table, residency set, submission, polls and fused
-   records, a WRITE's plan, its invocation, a premultiplier read as it is encoded), its steps' progress made again
-   (steps_reset, their binding kept).  Every group completes at its launch (retire), so that issue is let go.  A group
-   of WRITEs is laid and placed for the plans its calls name (issue_layout, issue_place), `repeats` times `stride` bytes
-   apart.  Under group_lock */
+   nccl.h ncclMeshBufferSlots), its calls as they were laid (their buffers, counts, results and complements, a WRITE
+   alone its plan: none its issue names) with what an issue gives (its stream's encoder, table, residency set,
+   submission, polls and fused records, its invocation, a premultiplier read as it is encoded), its steps' progress made
+   again (steps_reset, their binding kept).  A group of WRITEs is laid and placed in its generation's issue (one of
+   another repeat count made again) for the plans its calls name (issue_layout, issue_place), `repeats` times `stride`
+   bytes apart.  Under group_lock */
 static ncclResult_t issue_bind(struct ncclComm *comm, struct call **calls, size_t n, struct compiled *x, uint32_t repeats, size_t stride,
                                int remote, struct schedule **plans, struct issue **issued, struct where *area, uint32_t *slot) {
   const uint32_t k = x->uses++ % GENERATIONS;
   if (x->period) {
     struct issue *u = x->prepared[(size_t)k * x->period + (*calls)[0].invocation % x->period];
-    u->held = 1;
     for (size_t i = 0; i < n; i++) {
       struct call *c = u->calls + i;
       const struct call *from = *calls + i;
       c->stream = from->stream; c->encoder = from->encoder; c->table = from->table; c->residency = from->residency;
-      c->submission = from->submission; c->polls = from->polls; c->fused = from->fused; c->write_plan = from->write_plan;
-      c->invocation = from->invocation; memcpy(c->pre, from->pre, sizeof c->pre);
+      c->submission = from->submission; c->polls = from->polls; c->fused = from->fused; c->invocation = from->invocation;
+      memcpy(c->pre, from->pre, sizeof c->pre);
       if ((c->bound = u->steps[i])) { atomic_fetch_add_explicit(&c->bound->references, 1, memory_order_relaxed); steps_reset(c->bound, 1); }
     }
     *calls = u->calls; *plans = u->plans; *issued = u; *area = u->area; *slot = u->slot;
     return ncclSuccess;
   }
   struct issue **at = x->issue + k, *u = *at;
-  if (u && !u->held && u->repeats != repeats) { issue_free(comm, u); *at = u = NULL; }
-  if (!u || u->held) {
-    if (!(u = issue_make(comm, x, repeats))) return fail(ncclSystemError, "out of memory");
-    if (*at) u->dropped = 1;
-    else *at = u;
-  }
-  u->held = 1;
+  if (u && u->repeats != repeats) { issue_free(comm, u); *at = u = NULL; }
+  if (!u && !(u = *at = issue_make(comm, x, repeats))) return fail(ncclSystemError, "out of memory");
   struct call *const list = *calls = memcpy(u->calls, *calls, n * sizeof *u->calls);
   for (size_t i = 0; i < n; i++)
     if ((list[i].bound = u->steps[i])) atomic_fetch_add_explicit(&u->steps[i]->references, 1, memory_order_relaxed);
@@ -3795,7 +3784,6 @@ struct inflight {
   uint32_t lone, repeats;
   int fused;
   struct inflight *next_group;
-  struct issue *issue; /* the issue it is of (issue_bind), let go as it is done */
 };
 
 /* the channel all of a group's entries lie on (struct inflight `lone`): a function of its schedule alone, the entries
@@ -3859,19 +3847,8 @@ static void issue_free(struct ncclComm *comm, struct issue *u) {
   if (u->tables) ncclMemFree(u->tables);
   free(u->steps); free(u->calls); free(u->group); free(u->landings); free(u);
 }
-/* an issue's group done with: it is bound again by its definition's next group of its generation, or freed where it is
-   no definition's (dropped).  Under group_lock */
-static void issue_let(struct ncclComm *comm, struct issue *u) {
-  if (!u) return;
-  u->held = 0;
-  if (u->dropped) issue_free(comm, u);
-}
-
-/* a group done with: what its calls own (the list is its issue's), and its issue let go */
-static void inflight_free(struct inflight *g) {
-  parts_free(g->list, g->n);
-  issue_let(g->comm, g->issue);
-}
+/* a group done with: what its calls own (the list is its issue's) */
+static void inflight_free(struct inflight *g) { parts_free(g->list, g->n); }
 
 /* every group in flight on comm let go (its failure, or its destroy): every earlier group is complete or let go */
 static void inflight_lose(struct ncclComm *comm) {
@@ -4479,8 +4456,8 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   int gate = 0, published = 0, scheduled = 0;
   struct where area = {NULL, 0};
   uint32_t slot = 0;
-  /* the last group of the generation this one binds, so its issue is let go to bind again (issue_bind), and once it
-     is bound the last user of the slot it took where that is another; a fused crossing none (guard) */
+  /* the last group of the generation this one binds, and once it is bound the last user of the slot it took where that
+     is another; a fused crossing none (guard) */
   const uint32_t last = remote ? x->slot[x->uses % GENERATIONS] : 0;
   if (remote && !fused && last) result = guard(program, comm, last, &published);
   if (!result) result = issue_bind(comm, &list, n, x, repeats, stride, remote, &plans, &u, &area, &slot);
@@ -4494,12 +4471,11 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   uint64_t ticket = 0;
   if (!result && remote) {
     uint64_t (*const start)[2] = u->group->start;
-    *(g = u->group) = (struct inflight){.comm = comm, .start = start, .end = start + comm->count, .repeats = repeats, .fused = fused_kind, .issue = u};
+    *(g = u->group) = (struct inflight){.comm = comm, .start = start, .end = start + comm->count, .repeats = repeats, .fused = fused_kind};
     for (uint32_t h = 0; h < comm->count; h++) { g->start[h][0] = comm->channels[h].sends; g->start[h][1] = comm->channels[h].lands; }
     /* Indexed writes carry immutable source/landing generations. Their destinations need no local publication
-       handshake, whether the GPU producer is fused or was encoded before this call (mesh 84056c43); the issue let go
-       with the group (inflight_free) */
-    if (!(result = schedule(program, comm, u, plans, &gate, fused_kind != 0 || all_writes(list, n)))) { g->plans = plans; plans = NULL; u = NULL; }
+       handshake, whether the GPU producer is fused or was encoded before this call (mesh 84056c43) */
+    if (!(result = schedule(program, comm, u, plans, &gate, fused_kind != 0 || all_writes(list, n)))) { g->plans = plans; plans = NULL; }
     else g = NULL;
     if (!result) {
       for (uint32_t h = 0; h < comm->count; h++) { g->end[h][0] = comm->channels[h].sends; g->end[h][1] = comm->channels[h].lands; }
@@ -4585,7 +4561,6 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   program_end(program, result);
   if (result && scheduled) walk_failed(comm, ticket, result);
   if (!scheduled) parts_free(list, n);
-  issue_let(comm, u);
   pthread_mutex_unlock(&group_lock);
   if (result) comm->async = result;
   return result;
