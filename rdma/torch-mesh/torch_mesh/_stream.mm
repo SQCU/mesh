@@ -841,7 +841,8 @@ struct Collectives {
     const auto views=collective_views(*list,handle);
     for(size_t k=0;k<batches;k++) {
       before.append(schedule);
-      checked(MetalScheduleCross(schedule,views.data(),views.size(),&declaration,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
+      const ncclMeshGroup publication{handle,nullptr,0,issues.empty()?0:repeat};
+      checked(MetalScheduleCross(schedule,views.data(),views.size(),&publication,&declaration,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
         id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
       ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
         .residencySet=(__bridge void *)residency};
@@ -1238,7 +1239,8 @@ static void prepare_fused_writes(MetalSchedule *schedule,PreparedWrites &plans) 
     id<MTLBuffer> buffer=nil;memcpy(&buffer,declared.data()+place.at,sizeof buffer);
     if(buffer)views.push_back({buffer,0,buffer.length,MetalReachResident,-1});
   }
-  checked(MetalScheduleCross(schedule,views.data(),views.size(),&declaration,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
+  const ncclMeshGroup publication{plans.comm,nullptr,0,1};
+  checked(MetalScheduleCross(schedule,views.data(),views.size(),&publication,&declaration,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
       id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
     ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
       .residencySet=(__bridge void *)residency,.polls=p->polls,.fused=&p->records};
@@ -1848,7 +1850,7 @@ static pybind11::list load(const std::string &directory,const std::vector<at::Te
         return (MetalHostOperation)nil;
       }
     };
-    MetalTemplateCross made_cross=^MetalCrossing(NSString *kind,NSData *bytes,MetalSchedule *schedule,NSError **failed){
+    MetalTemplateCross made_cross=^MetalCrossing(NSString *kind,NSData *bytes,MetalSchedule *schedule,ncclMeshGroup *publication,NSError **failed){
       if([kind isEqualToString:@"writes"]||[kind isEqualToString:@"views"]) {
         std::shared_ptr<DeclaredPlans> plans;
         try { plans=declared_plans(bytes); } catch(const std::exception &e) {
@@ -1864,6 +1866,8 @@ static pybind11::list load(const std::string &directory,const std::vector<at::Te
           fused->records.publishes=fused->publish.size();fused->records.lands=fused->land.size();
         }
         const size_t invocation=plans->head.invocation;
+        *publication=ncclMeshGroup{plans->head.comm,views&&plans->handles.size()==1?plans->handles[0]:nullptr,
+            views?invocation:0,plans->handles.empty()?0u:1u};
         MetalCrossing crossing=^int(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,id<MTLResidencySet> residency,
             NSUInteger,NSUInteger) {
           ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
@@ -1885,6 +1889,7 @@ static pybind11::list load(const std::string &directory,const std::vector<at::Te
         return (MetalCrossing)nil;
       }
       MetalScheduleCommunicator(schedule,calls->comm);
+      *publication=ncclMeshGroup{calls->comm,nullptr,0,calls->issues.empty()?0:calls->repeat};
       MetalCrossing crossing=^int(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,id<MTLResidencySet> residency,
           NSUInteger,NSUInteger) {
         ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
@@ -1996,7 +2001,9 @@ struct ViewWrites {
     const bool whole=declare_writes(plans.handles,communicator(comm),0,0,0,invocation,declared,places);
     TORCH_CHECK(whole,"prepared WRITE plans require their page declaration");
     const MetalDeclaration declaration{"views",declared.data(),declared.size(),places.data(),places.size()};
-    checked(MetalScheduleCross(schedule,views.data(),views.size(),&declaration,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
+    const ncclMeshGroup publication{communicator(comm),plans.handles.size()==1?plans.handles[0]:nullptr,invocation,
+        plans.handles.empty()?0u:1u};
+    checked(MetalScheduleCross(schedule,views.data(),views.size(),&publication,&declaration,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
         id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
       ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
         .residencySet=(__bridge void *)residency};

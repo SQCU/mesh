@@ -1047,6 +1047,22 @@ ncclResult_t ncclMeshPageTableBacking(ncclMeshPageTable_t table, ncclMeshPageBac
 /* Local base of the prepared page view; creates no backend resource. */
 ncclResult_t ncclMeshPageTableAddress(ncclMeshPageTable_t table, const void** address);
 ncclResult_t ncclMeshPageTableDestroy(ncclMeshPageTable_t table);
+/* Preparation-only accesses of the next compiled group(s). A standalone WRITE
+   supplies its already prepared plan; otherwise the communicator's declared
+   order selects each definition. Querying consumes no issue or channel prefix.
+   groups counts actual group calls; a fused group's repetitions are one call.
+   Only active channel/list directions appear. Their progress words order the
+   same physical descriptor lists whose exact spans are bound when encoded. */
+typedef struct ncclMeshGroup {
+  ncclComm_t comm;
+  ncclMeshWritePlan_t write;
+  size_t invocation;
+  uint64_t groups;
+} ncclMeshGroup;
+enum { ncclMeshAccessRead = 1, ncclMeshAccessWritten = 2 };
+typedef struct { ncclMeshBuffer storage; size_t bytes; uint32_t access; } ncclMeshAccess;
+/* With accesses NULL return required count; otherwise *count is capacity. */
+ncclResult_t ncclMeshGroupAccesses(const ncclMeshGroup* group, ncclMeshAccess* accesses, size_t* count);
 /* A repeated local binding. Instance selection happens while compiling commands;
    execution reads the resulting page lists. Each rank supplies its own period
    and page stride in its local table. tile_bytes is common logical publication geometry, 0 for a

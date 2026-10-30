@@ -1395,7 +1395,20 @@ void MetalScheduleCompute(struct MetalSchedule *root,id<MTLComputePipelineState>
 }
 }
 
-static int MetalScheduleCrossWork(struct MetalSchedule *root,NSData *accesses,MetalCrossing cross) {
+static int MetalScheduleCrossWork(struct MetalSchedule *root,NSData *accesses,const ncclMeshGroup *group,MetalCrossing cross) {
+    size_t count=0;
+    int failed=(int)ncclMeshGroupAccesses(group,NULL,&count);if(failed)return failed;
+    NSMutableData *records=[NSMutableData dataWithLength:count*sizeof(ncclMeshAccess)];
+    failed=(int)ncclMeshGroupAccesses(group,records.mutableBytes,&count);if(failed)return failed;
+    NSMutableData *declared=[[accesses mutableCopy] autorelease];
+    const ncclMeshAccess *source=records.bytes;
+    for(size_t k=0;k<count;k++) {
+        const uint32_t access=(source[k].access&ncclMeshAccessRead?MetalReachRead:0)|
+            (source[k].access&ncclMeshAccessWritten?MetalReachWritten:0);
+        const struct MetalReach view={(id)source[k].storage.buffer,source[k].storage.offset,source[k].bytes,access,-1};
+        [declared appendBytes:&view length:sizeof view];
+    }
+    accesses=declared;
     __block int error=0;
     MetalScheduleWork(root,accesses,^(struct MetalSchedule *now){
         struct MetalSchedule *s=MetalScheduleWritable(now);
@@ -1421,11 +1434,11 @@ static NSMutableDictionary *MetalScheduleDeclared(NSString *call,const struct Me
 }
 
 int MetalScheduleCross(struct MetalSchedule *root,const struct MetalReach *views,size_t count,
-    const struct MetalDeclaration *declared,MetalCrossing cross) {
+    const ncclMeshGroup *group,const struct MetalDeclaration *declared,MetalCrossing cross) {
     NSData *accesses=[NSData dataWithBytes:views length:count*sizeof *views];
     NSMutableDictionary *entry=MetalScheduleDeclared(@"cross",declared);entry[@"accesses"]=accesses;
     MetalScheduleCall(root,entry);
-    return MetalScheduleCrossWork(root,accesses,cross);
+    return MetalScheduleCrossWork(root,accesses,group,cross);
 }
 
 static void MetalScheduleHostWork(struct MetalSchedule *root,NSData *views,MetalHostOperation operation) {
@@ -1839,7 +1852,8 @@ NSError *MetalScheduleAppend(struct MetalSchedule *root,struct MetalReplay *repl
             }
             while(k<marks.count&&marks[k].unsignedIntegerValue==at) {
                 const NSUInteger mark=k++;
-                int failed=MetalScheduleCrossWork(root,views(t,mark),^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
+                ncclMeshGroup group={0};NSData *accesses=views(t,mark,&group);
+                int failed=MetalScheduleCrossWork(root,accesses,&group,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
                     id<MTLResidencySet> residency,NSUInteger unused,NSUInteger ignored){
                     (void)unused;(void)ignored;return cross(encoder,table,residency,t,mark);
                 });
@@ -2497,10 +2511,11 @@ NSError *MetalScheduleInstantiate(struct MetalSchedule *const *schedules,size_t 
                     if(!operation)return error?:MetalReplayFailure(EINVAL,@"the frontend made no host operation");
                     MetalScheduleHost(s,into,n,&again,operation);
                 } else {
-                    MetalCrossing crossing=cross(call[@"kind"],bytes,s,&error);
+                    ncclMeshGroup group={0};
+                    MetalCrossing crossing=cross(call[@"kind"],bytes,s,&group,&error);
                     if(!crossing)return error?:MetalReplayFailure(EINVAL,@"the frontend made no crossing");
                     [root->owners addObject:crossing];
-                    const int failed=MetalScheduleCross(s,into,n,&again,crossing);
+                    const int failed=MetalScheduleCross(s,into,n,&group,&again,crossing);
                     if(failed)return MetalReplayFailure(failed,@"the template's crossing could not be encoded");
                 }
             } else return MetalReplayFailure(EINVAL,[NSString stringWithFormat:@"a template's %@ call",kind]);

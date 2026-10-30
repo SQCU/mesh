@@ -3013,6 +3013,54 @@ static int declared_as(const struct call *c, const struct call *d) {
 }
 static ncclResult_t write_definitions(struct ncclMeshWritePlan *plan);
 
+/* The same prepared definition is used by the access declaration and encoding.
+   Nothing in this selection advances the function's issue order. */
+static struct compiled *definition_at(struct ncclComm *comm, uint64_t holder,
+                                      const struct ncclMeshWritePlan *write, size_t invocation) {
+  struct compiled *x = comm->plan ? group_at(comm->plan, holder) : NULL;
+  if (!x && write && write->compiled) x = write->compiled + invocation % write->occurrences;
+  return x;
+}
+
+static struct where channel_word(const struct channel *ch, const void *word) {
+  const char *base = (const char *)ch->view.ready - ch->ready;
+  return (struct where){ch->buffer, (size_t)((const char *)word - base)};
+}
+
+ncclResult_t ncclMeshGroupAccesses(const ncclMeshGroup *group, ncclMeshAccess *accesses, size_t *count) {
+  if (!group || !count || (group->groups && !group->comm))
+    return fail(ncclInvalidArgument, "compiled group access operands");
+  if (!group->groups) { *count = 0; return ncclSuccess; }
+  struct ncclComm *comm = group->comm;
+  pthread_mutex_lock(&group_lock);
+  unsigned char active[comm->count ? comm->count : 1];
+  memset(active, 0, sizeof active);
+  ncclResult_t result = ncclSuccess;
+  for (uint64_t g = 0; g < group->groups && !result; g++) {
+    const struct compiled *x = definition_at(comm, comm->groups + g + 1, group->write, group->invocation);
+    if (!x) { result = fail(ncclInvalidUsage, "group accesses need the compiled declaration"); break; }
+    for (uint32_t h = 0; h < comm->count; h++)
+      active[h] |= (x->plans[h].outs ? 1 : 0) | (x->plans[h].ins ? 2 : 0);
+  }
+  size_t needed = 0;
+  for (uint32_t h = 0; h < comm->count; h++)for (unsigned list = 0; list < 2; list++)
+    if (active[h] & (1u << list)) needed += 2;
+  if (!result && accesses && *count < needed)result = fail(ncclInvalidArgument, "compiled group accesses need %zu records", needed);
+  if (!result && accesses) {
+    size_t at = 0;
+    for (uint32_t h = 0; h < comm->count; h++)for (unsigned list = 0; list < 2; list++)if (active[h] & (1u << list)) {
+      const struct channel *ch = comm->channels + h;
+      const struct where taken = channel_word(ch, (const void *)ch->view.taken[list]);
+      const struct where presented = channel_word(ch, (const void *)ch->view.presented[list]);
+      accesses[at++] = (ncclMeshAccess){{taken.buffer, taken.offset}, sizeof(uint64_t), ncclMeshAccessRead};
+      accesses[at++] = (ncclMeshAccess){{presented.buffer, presented.offset}, sizeof(uint64_t), ncclMeshAccessWritten};
+    }
+  }
+  *count = needed;
+  pthread_mutex_unlock(&group_lock);
+  return result;
+}
+
 /* the compiled form of the group numbered `holder` (*group): its plan's group (group_at), else, with no plan, a WRITE
    alone's plan's own (write_definitions, compiled as the plan was prepared), each call's roles its
    declaration's (nothing planned at the call: nccl.h ncclMeshCommPlan).  A group that no declaration covers (a group
@@ -3021,10 +3069,9 @@ static ncclResult_t write_definitions(struct ncclMeshWritePlan *plan);
    ends the program with a warning (library_end): nothing compiles a group at its issue
    (design/eager-execution.md#what-follows).  Under group_lock */
 static ncclResult_t definition_of(struct ncclComm *comm, struct call *list, size_t n, uint64_t holder, struct compiled **group) {
-  struct compiled *x = comm->plan ? group_at(comm->plan, holder) : NULL;
   struct ncclMeshWritePlan *alone = n == 1 && !list[0].fused ? list[0].write_plan : NULL;
+  struct compiled *x = definition_at(comm, holder, alone, list[0].invocation);
   ncclResult_t result = ncclSuccess;
-  if (!x && alone && alone->compiled) x = alone->compiled + list[0].invocation % alone->occurrences;
   /* a declared group of collectives is issued as it was prepared, for its bindings: one that declares none covers no issue */
   if (!result && (!x || (!x->period && !x->calls[0].target))) {
     char why[MESH_DIAGNOSTIC_BYTES];
@@ -3566,12 +3613,13 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
     metal_resident(program, ch->lists); metal_resident(program, compiled.buffer);
     /* the records done with once the GPU has presented them all: the landing list's count past the group's */
     metal_done(ch->view.presented[p->ins ? 1 : 0], 1, p->first[p->ins ? 1 : 0] + (p->ins ? p->ins : p->outs));
-    const char *words = (const char *)ch->view.ready - ch->ready;
     for (int list = 0; list < 2 && !status; list++) {
       const size_t count = list ? p->ins : p->outs;
+      const struct where taken = channel_word(ch, (const void *)ch->view.taken[list]);
+      const struct where presented = channel_word(ch, (const void *)ch->view.presented[list]);
       struct metal_result placed = metal_present(program, ch->lists, list * MESH_STREAM_ENTRIES * sizeof(struct mesh_entry),
         compiled.buffer, compiled.offset + (list ? p->outs * sizeof(struct mesh_entry) : 0), count, p->first[list], ch->buffer,
-        (const char *)ch->view.taken[list] - words, (const char *)ch->view.presented[list] - words);
+        taken.offset, presented.offset);
       status = placed.status;
     }
     if (status)

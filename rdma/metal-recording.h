@@ -133,6 +133,7 @@ typedef int (^MetalCrossing)(id<MTL4ComputeCommandEncoder> encoder, id<MTL4Argum
 // docs/kernels.md#collectives
 struct MetalSchedule;
 struct ncclComm;
+struct ncclMeshGroup;
 // design/replay-templates-2026-10-29.md: what a frontend makes a host operation or a crossing from again, for a
 // template: its kind, its bytes, and the places in them that name a region lease's memory or a communicator. An
 // address place holds a host pointer; a buffer place holds an id<MTLBuffer> and, after it, its byte offset (an
@@ -210,8 +211,10 @@ void MetalScheduleCompute(struct MetalSchedule *, id<MTLComputePipelineState>,
 // as numerical work. Encoding still completes during preparation: callers may
 // consume the publication records it produces. A fused descriptor publication
 // names residency here; its producer/consumer commands declare payload accesses.
+// The group supplies active transport progress words before dependency ordering.
+// Templates rebuild that operand after relocation; they never store its raw words.
 int MetalScheduleCross(struct MetalSchedule *, const struct MetalReach *, size_t count,
-    const struct MetalDeclaration *, MetalCrossing);
+    const struct ncclMeshGroup *, const struct MetalDeclaration *, MetalCrossing);
 // A range of a prepared replay's commands (MetalReplayCommands, MetalReplayDescribed), its first invocation's, as the schedule's
 // next work, in the replay's form and ordered by its recorded reaches.
 void MetalScheduleReplay(struct MetalSchedule *, struct MetalReplay *, NSRange commands);
@@ -219,7 +222,7 @@ void MetalScheduleReplay(struct MetalSchedule *, struct MetalReplay *, NSRange c
 // schedule's other work.
 void MetalScheduleCopy(struct MetalSchedule *, id<MTLBuffer> source, NSUInteger from, id<MTLBuffer> destination, NSUInteger to,
     NSUInteger bytes);
-typedef NSData *(^MetalCrossingViews)(NSUInteger invocation, NSUInteger mark);
+typedef NSData *(^MetalCrossingViews)(NSUInteger invocation, NSUInteger mark, struct ncclMeshGroup *group);
 NSError *MetalScheduleAppend(struct MetalSchedule *, struct MetalReplay *, NSRange invocations,
     NSArray<NSNumber *> *marks, MetalCrossingViews, MetalCrossing);
 // Finish all local parts and exchange their compiled list ends with peers.
@@ -264,7 +267,7 @@ NSError *MetalTemplateArchive(NSDictionary *, NSString *directory);
 // frontend's `host` or `cross` (nil, with the reason, where it cannot be), which returns an autoreleased block that
 // lives as long as `schedule`.
 typedef MetalHostOperation (^MetalTemplateHost)(NSString *kind, NSData *bytes, NSError **error);
-typedef MetalCrossing (^MetalTemplateCross)(NSString *kind, NSData *bytes, struct MetalSchedule *schedule, NSError **error);
+typedef MetalCrossing (^MetalTemplateCross)(NSString *kind, NSData *bytes, struct MetalSchedule *schedule, struct ncclMeshGroup *group, NSError **error);
 // A template made where the device's compile facts differ, or where a dispatch's threadgroup holds more threads than
 // this device's pipeline takes, fails as a value naming them.
 NSError *MetalScheduleInstantiate(struct MetalSchedule *const *schedules, size_t count, NSDictionary *,
