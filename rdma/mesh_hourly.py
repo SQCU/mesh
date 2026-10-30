@@ -34,6 +34,9 @@ HOURLY = Path.home() / '.cache/mesh/hourly'
 LATE, BROWSE_UNTIL, LISTEN_UNTIL, LIST_UNTIL = 30, 40, 55, 60
 SPEAKERS = []
 PAIRING_SECONDS = 30
+# how long a workload's start waits for a member whose links a failed workload's ranks took down (2026-10-29 21:28: the
+# Mini's three links were down about a minute after bandwidth-template's ranks ended mid-transfer)
+REJOIN_SECONDS = 120
 
 
 def workload_configuration(microbench_root):
@@ -317,14 +320,23 @@ def run_rank(item, me, record, ordinal, cluster, bench, known):
         # a failed workload's ranks leave links re-pairing for a few seconds; a node gone never pairs, so the wait is
         # that long and no longer, and the case runs on the part linked by then
         mesh.wait_paired([me], None, min(end, time.time() + PAIRING_SECONDS))
-        part, _ = part_of(me.stat()[1], me.number)
-        members = record['members']
+        # the run's members this node's bridge links: all of them, or, once a member has not come back in REJOIN_SECONDS,
+        # those linked if they are more than half of the members (the largest linked collective; a half or less, as the
+        # other side of a split sees it, records the case unrun, so no two sides both run it)
+        rejoin = min(end, time.time() + REJOIN_SECONDS)
+        while True:
+            part, _ = part_of(me.stat()[1], me.number)
+            members = [number for number in record['members'] if number in part]
+            if len(members) == len(record['members']) or time.time() >= rejoin:
+                break
+            time.sleep(5)
+        unlinked = [number for number in record['members'] if number not in members]
+        result['unlinked'] = unlinked
+        if 2 * len(members) <= len(record['members']):
+            raise RuntimeError(f'only {len(members)} of the run\'s {len(record["members"])} members linked at the '
+                               f'workload\'s start ({unlinked} not): not run on this side')
         k = members.index(me.number)
         result.update(members=members, rank=k)
-        unlinked = [number for number in members if number not in part]
-        if unlinked:
-            # every member's map shows the same loss, so every member records this case unrun
-            raise RuntimeError(f'members {unlinked} not linked at the workload\'s start; not run')
         source = me.source
         env = (f'PYTHONPATH={mesh.home_path(source + "/rdma")}:{mesh.home_path(source + "/rdma/torch-mesh")} '
                'PYTHONDONTWRITEBYTECODE=1 ')
