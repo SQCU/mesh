@@ -130,12 +130,21 @@ class IndexSet(_Object):
         return IndexSet(self.algebra, getattr(self.algebra, 'set_' + operation)(self.copy(), other.copy()),
                         self.rank if rank is None else rank)
 
-    def project(self, axis):
+    def project(self, axis, count=1):
         # isl_dim_set is the public enum's output/set dimension (3).
         result = self.copy()
-        for first, count in ((axis + 1, self.rank - axis - 1), (0, axis)):
-            result = self.algebra.set_project_out(result, 3, first, count)
-        return IndexSet(self.algebra, result, 1)
+        for first, removed in ((axis + count, self.rank - axis - count), (0, axis)):
+            result = self.algebra.set_project_out(result, 3, first, removed)
+        return IndexSet(self.algebra, result, count)
+
+    def separates(self, axis):
+        """Whether prefix and suffix coordinates vary independently.
+
+        The surviving boundaries give the finest contiguous axis grouping whose
+        selected domain is a product. This uses set algebra, not point traversal.
+        """
+        left, right = self.project(0, axis), self.project(axis, self.rank - axis)
+        return left.binary(right, 'flat_product', self.rank).equal(self)
 
     def edge(self, maximum=False):
         value = self.algebra.checked((self.algebra.set_dim_max_val if maximum else self.algebra.set_dim_min_val)(self.copy(), 0))

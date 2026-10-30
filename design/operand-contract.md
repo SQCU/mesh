@@ -1486,10 +1486,32 @@ these are no longer taken from the last peer's compact shape. A billion-position
 index domain emitted one repeated run. No numerical commands were submitted.
 
 Sparse partial-sum domains now reach the native collective compiler through
-the shared domain interface described above. Correlated operation domains and
-general shared requirements between different owner assignments remain open.
-The planner still declares whole-head shares. These require operation and
-ownership lowering, rather than another partial reshape inverse.
+the shared domain interface described above.
+
+Provider shape realization now asks which adjacent logical axes must stay
+separate. `IndexSet.separates` compares a selected set with the product of its
+prefix and suffix projections. A dependent boundary must disappear from a
+compact product shape. Shared pointwise operands retain the same boundaries;
+broadcasts keep the transition between varying and constant coordinates.
+Matrix row/column axes, reduction axes and per-channel encodings keep their
+declared meanings. This finds the finest permitted contiguous grouping without
+enumerating values or searching tensor sizes.
+
+The resulting shapes and selections enter the existing provider graph. Dense
+constants use the same encoded selection routine. Reshape and reduction-axis
+operands are updated where their declared dimensions change. No numerical
+operator, layout copy or runtime lookup is added. A cut from column 4 through
+11 in a `[2,4,6]` intermediate now prepares as `[2,8]`, while retaining its
+original logical positions. Preparation also serialized correlated batch cuts
+for matrix products, softmax and reductions with either `keepDims` setting.
+Previously prepared rectangular declarations retained their shapes, constants,
+partial outputs and serialized lengths. No numerical execution ran.
+
+Correlations crossing retained operator or encoding axes still need indexed or
+tiled operation lowering; they are not replaced with bounding boxes. Shared
+requirements between different owner assignments remain open, and the planner
+still declares whole-head shares. These need operation and ownership lowering,
+rather than another partial reshape inverse.
 
 Static review on 2026-10-29 found a separate external binding gap. Graph append
 formerly joined selected inputs to earlier full results by name alone. It now
