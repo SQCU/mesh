@@ -1028,7 +1028,8 @@ class Matrix(torch.Tensor):
         return outputs, tables
 
     def product(self, xt, op='product', tables=None, decomposition=None):
-        """The product of coded inputs xt [n, columns]: partials [shares, n, rows] in coded row order, unscaled (past 16
+        """The product of coded inputs xt [n, columns] (an input slab's n rows, `inputs`: a band of slab s, a stacked matrix's
+        part, reads rows s * n on, streamed.metal streamed_slab): partials [shares, n, rows] in coded row order, unscaled (past 16
         rows one share, the panel's, or the `decomposition`'s: dispatch); `tables` (coded_input's) where the instance reads
         1-bit tiles by tables."""
         n = xt.shape[0]
@@ -1038,7 +1039,7 @@ class Matrix(torch.Tensor):
         assert (tables is not None) == bool(spec.get('LUT')), f'{name}: tables where it reads them'
         partials = torch.empty(shares, n, self.rows, dtype=torch.float32, device='mps')
         buffers = self._code() + [tables, xt, partials] + ([None] * 5 + [xt, None, self.row_scale] if spec['kernel'] == 'panel' else [])
-        partials, = _encode(name, buffers, _dims(tiles=self.tiles_, outputs=self.rows, rows=n, per=-(-self.tiles_ // COMPUTE['STREAMED_PANEL_TILES']), split=n * self.rows,
+        partials, = _encode(name, buffers, _dims(tiles=self.tiles_, outputs=self.rows, rows=n, per=-(-self.tiles_ // COMPUTE['STREAMED_PANEL_TILES']), split=n * self.rows, inputs=n,
                                      pitch=self.pitch), gx, gy, threads, line, outputs=(5,), pitched=(1,),
                 indices={12: self.metadata['row_order']})
         return partials
@@ -1094,7 +1095,7 @@ class Matrix(torch.Tensor):
         _, name, line, gx, gy, threads, _ = self.dispatch(n, decomposition=decomposition)
         y = _half(n, self.logical_shape[0])
         y, = _encode(name, self._code() + [None, xt, None, None, None, None, None, None, y, None, self.row_scale],
-                _dims(tiles=self.tiles_, outputs=self.rows, rows=n, per=-(-self.tiles_ // COMPUTE['STREAMED_PANEL_TILES']), stride=self.logical_shape[0], finish=1,
+                _dims(tiles=self.tiles_, outputs=self.rows, rows=n, per=-(-self.tiles_ // COMPUTE['STREAMED_PANEL_TILES']), stride=self.logical_shape[0], finish=1, inputs=n,
                       pitch=self.pitch), gx, gy, threads, line, outputs=(11,), indexed=(13,), pitched=(1,),
                 indices={12: self.metadata['row_order']})
         return y
