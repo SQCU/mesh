@@ -106,19 +106,35 @@ Full partial-output convolution binding is still under preparation review.
 Shared product declarations now supply FX and LiteRT with the same shader
 bindings and dispatch geometry. Window adapters retain exact work, source-read
 and result relations. Output ownership is an explicit input to `owned_domains`;
-the result gives each owner's work and required source pages. Connecting this
-operand through complete FX graphs remains in progress.
+the result gives each owner's work and required source pages. `Function` accepts
+source-value ownership declarations and retains each value's global type and
+all ranks' ordered selections through decomposition. A composed pair of
+convolutions with an intervening pointwise operation completes ordinary
+page/shader preparation. Correlated channel/spatial selections also compose
+through that graph without reducing them to one shard axis. Empty products
+declare the ordinary zero result.
+
+The default DTensor capture and captured parameters/gradients still need to
+consume that same source declaration. The explicit-ownership entry does not
+yet establish this for every `Function`. Existing DTensor output sharding and
+native IR read/write records are the intended common inputs for the remaining
+operator declarations; there must be no absent-rule-to-replication substitution.
 
 Selected-copy backward declarations sum repeated contributions locally and use
 the existing REDUCE compiler for their contributor sets. LiteRT MAX, average
 and L2 pooling lower through window relations and ordinary reductions. Normal,
 SAME-padding and depthwise product bindings reached native pipeline preparation
-without conversion copies. Transposed products reached graph serialization;
-coalescing their compatible small product domains remains open.
+without conversion copies. Compatible product domains now share a batch using
+typed page pieces and the same product declaration. Batched SAME-padding and
+transposed products reach native pipeline preparation without conversion copies.
 
 Dynamic selections preserve scalar payload bits through declared byte operands.
-Packed code, scale and zero-point selections are being connected to that same
-path. Arbitrary byte-piece unions must reach placement before scalar grouping
-is materialized; the existing contiguous-payload preparation does not establish
-that broader case. These are source and preparation results, without numerical
-execution or whole-function performance claims.
+Packed code, scale and zero-point selections use that same path. Packed 2/4-bit,
+immutable and sparse inputs reach native preparation with their selected
+quantization operands. A scalar consumer uses the existing decoder.
+Byte-piece unions now reach placement before scalar grouping is materialized.
+Fresh nonadjacent bytes and explicitly bit-interpreted heterogeneous pieces
+co-place without commands. Fixed external bytes with an incompatible layout
+retain their positions and use the existing compiled byte copy. These are source
+and preparation results, without numerical execution or whole-function
+performance claims.
