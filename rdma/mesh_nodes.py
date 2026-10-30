@@ -389,8 +389,7 @@ def node_prepare():
             if done.returncode:
                 raise RuntimeError(f'{where}: {" ".join(map(str, argv[:3]))} failed: {(done.stderr or done.stdout)[-600:]}')
             installed = installed or done
-    services = services_refresh(ROOT)
-    told = {'services': services, 'seconds': seconds}
+    told = {'seconds': seconds}
     # No machine is restarted here (the operator, 2026-10-29: the administrative process kills no machine, by a fault
     # or by a restart that did not need to happen). A new bridge or heartbeat image takes effect by the heartbeat's own
     # re-exec on mesh-user.sh's SIGHUP; a bridge that does not stop, or a heartbeat not running the installed image, is
@@ -441,41 +440,6 @@ def heartbeat_stale(root):
 
 
 BRIDGE_RESTART_SECONDS = 180
-
-# the node's services that read it beside every run, each its launchd job and its files (the checkout's, the installed
-# one's under /usr/local/mesh, its mode), as install.sh installs them; the router and beacon, which carry the fabric's
-# routes, stay install.sh's
-SERVICES = (('io.mesh.telemetry', (('user/mesh-telemetry.py', 'bin/mesh-telemetry.py', '755'),
-                                   ('rdma/peers.py', 'bin/peers.py', '644'),
-                                   ('etc/mesh-capacity.json', 'etc/mesh-capacity.json', '644'))),
-            ('io.mesh.observer', (('viz/serve.py', 'viz/serve.py', '755'), ('viz/index.html', 'viz/index.html', '644'),
-                                  ('rdma/peers.py', 'bin/peers.py', '644'),
-                                  ('etc/mesh-capacity.json', 'etc/mesh-capacity.json', '644'),
-                                  ('etc/mesh-nodes.json', 'etc/mesh-nodes.json', '644'))))
-
-
-def services_refresh(checkout, installed=Path('/usr/local/mesh')):
-    """Each loaded service whose files differ from this commit's, installed as install.sh installs them and restarted on
-    them (launchctl kickstart -k): {label: 'restarted', 'unchanged' or the failure}."""
-    import filecmp
-    told = {}
-    for label, files in SERVICES:
-        if run('launchctl', 'print', f'system/{label}').returncode:
-            told[label] = 'not loaded'
-            continue
-        changed = [(source, target, mode) for source, target, mode in files
-                   if not (installed / target).is_file() or not filecmp.cmp(checkout / source, installed / target, shallow=False)]
-        if not changed:
-            told[label] = 'unchanged'
-            continue
-        failed = next((done.stderr.strip() or f'install {target} failed' for source, target, mode in changed
-                       if (done := run('sudo', '-n', 'install', '-m', mode, '-o', 'root', '-g', 'wheel', checkout / source,
-                                       installed / target)).returncode), None)
-        if not failed and (done := run('sudo', '-n', 'launchctl', 'kickstart', '-k', f'system/{label}')).returncode:
-            failed = done.stderr.strip() or 'kickstart -k failed'
-        told[label] = failed or 'restarted'
-    return told
-
 
 def bridge_began():
     """The bridge's start (unix seconds): its first mesh-flow process, the one whose parent is no mesh-flow; None where

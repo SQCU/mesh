@@ -1,5 +1,5 @@
 #!/usr/bin/env mesh-python
-import argparse, collections, concurrent.futures, curses, html, json, os, sys, time, urllib.request
+import argparse, collections, concurrent.futures, curses, html, json, os, signal, subprocess, sys, time, urllib.request
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path[:0] = [HERE, os.path.join(HERE, "..", "rdma")]
@@ -8,7 +8,7 @@ TABLE = peers.table(os.path.join(HERE, "..", "etc", "mesh-nodes.json"), "/usr/lo
 
 TELEMETRY_PORT = int(os.environ.get("MESH_TELEMETRY_PORT", "8788"))
 LATEST = "/v1/latest?measures=scalars"
-RESIDENT = ("beacon", "bridge", "router", "telemetry", "observer")
+RESIDENT = ("beacon", "bridge", "router")
 SPARK = " ▁▂▃▄▅▆▇█"
 USAGE = "mesh-top [-n SECONDS] [--window SECONDS] [--nodes A,B] [--once | --html FILE]   keys: q quit, j/k scroll"
 
@@ -17,6 +17,29 @@ class Node:
         self.name, self.number, self.me = name, number, me
         self.sample, self.record, self.error, self.rtt = None, {}, None, None
         self.sequence, self.previous, self.asked = None, None, None
+
+def answering():
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{TELEMETRY_PORT}{LATEST}", timeout=1).close()
+        return True
+    except (OSError, ValueError):
+        return False
+
+def sampler():
+    """This node's telemetry for mesh-top's own lifetime: one already answering, else one started here (in its own
+    process group, ended with mesh-top). No sampler runs in the background."""
+    if answering():
+        return None
+    program = next((p for p in (os.path.join(HERE, "..", "user", "mesh-telemetry.py"), os.path.join(HERE, "mesh-telemetry.py"),
+                                "/usr/local/mesh/bin/mesh-telemetry.py") if os.path.isfile(p)), None)
+    if not program:
+        return None
+    child = subprocess.Popen([sys.executable, program], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+                             env={**os.environ, "MESH_TELEMETRY_PORT": str(TELEMETRY_PORT)})
+    for _ in range(50):
+        if answering(): break
+        time.sleep(0.1)
+    return child
 
 def fetch(node):
     """This node's telemetry over loopback, read once; another node's stays on that node, the map giving its facts."""
@@ -274,17 +297,24 @@ def main():
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--html")
     args = parser.parse_args()
-    top = Top(args)
-    if args.once or args.html:
-        top.refresh(True)
-        for _ in range(max(2, int(args.window / args.interval) + 1)):
-            time.sleep(args.interval)
+    child = sampler()
+    try:
+        top = Top(args)
+        if args.once or args.html:
             top.refresh(True)
-        lines = top.frame()
-        if args.html: mesh_disk.write(args.html, page(lines), f"mesh-top's page {args.html}")
-        if args.once or not args.html: print(ansi(lines, sys.stdout.isatty()))
-        return
-    curses.wrapper(interactive, top)
+            for _ in range(max(2, int(args.window / args.interval) + 1)):
+                time.sleep(args.interval)
+                top.refresh(True)
+            lines = top.frame()
+            if args.html: mesh_disk.write(args.html, page(lines), f"mesh-top's page {args.html}")
+            if args.once or not args.html: print(ansi(lines, sys.stdout.isatty()))
+            return
+        curses.wrapper(interactive, top)
+    finally:
+        if child:
+            os.killpg(child.pid, signal.SIGTERM)
+            try: child.wait(timeout=5)
+            except subprocess.TimeoutExpired: os.killpg(child.pid, signal.SIGKILL)
 
 if __name__ == "__main__":
     main()

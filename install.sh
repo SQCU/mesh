@@ -31,8 +31,6 @@ mkdir -p "$MESH_ROOT"/{bin,etc,jobs,log,viz} /usr/local/bin
 kick=
 launchctl print system/io.mesh.beacon >/dev/null 2>&1 && ! cmp -s "$REPO/bin/mesh-beacon.sh" "$MESH_ROOT/bin/mesh-beacon.sh" && kick=io.mesh.beacon
 launchctl print system/io.mesh.router >/dev/null 2>&1 && ! { cmp -s "$REPO/bin/mesh-router-init.sh" "$MESH_ROOT/bin/mesh-router-init.sh" && cmp -s "$REPO/vendor/babeld-arm64" "$MESH_ROOT/bin/babeld"; } && kick="$kick io.mesh.router"
-launchctl print system/io.mesh.telemetry >/dev/null 2>&1 && ! { cmp -s "$REPO/user/mesh-telemetry.py" "$MESH_ROOT/bin/mesh-telemetry.py" && cmp -s "$REPO/etc/mesh-capacity.json" "$MESH_ROOT/etc/mesh-capacity.json"; } && kick="$kick io.mesh.telemetry"
-launchctl print system/io.mesh.observer >/dev/null 2>&1 && ! { cmp -s "$REPO/viz/serve.py" "$MESH_ROOT/viz/serve.py" && cmp -s "$REPO/etc/mesh-capacity.json" "$MESH_ROOT/etc/mesh-capacity.json" && cmp -s "$REPO/etc/mesh-nodes.json" "$MESH_ROOT/etc/mesh-nodes.json"; } && kick="$kick io.mesh.observer"
 install -C -m 755 -o root -g wheel "$REPO"/bin/*.sh "$MESH_ROOT/bin/"
 try "UV runtime realized" "$MESH_ROOT/bin/mesh-runtime-install.sh" "$MESH_ROOT" "$REPO"
 install -m 755 -o root -g wheel "$REPO"/bin/mesh-observe.py "$MESH_ROOT/bin/mesh-observe.py"
@@ -47,10 +45,14 @@ install -C -m 755 -o root -g wheel "$REPO"/user/mesh-telemetry.py "$MESH_ROOT/bi
 install -C -m 644 -o root -g wheel "$REPO"/etc/mesh-capacity.json "$MESH_ROOT/etc/mesh-capacity.json"
 install -C -m 644 -o root -g wheel "$REPO"/etc/mesh-nodes.json "$MESH_ROOT/etc/"
 [ -f "$MESH_ROOT/etc/observer.json" ] || install -m 644 -o root -g wheel "$REPO"/etc/observer.json "$MESH_ROOT/etc/observer.json"
-install -m 644 -o root -g wheel "$REPO"/etc/io.mesh.telemetry.plist "$MESH_ROOT/jobs/io.mesh.telemetry.plist.new"
 install -m 644 -o root -g wheel "$REPO"/keys/authorized_keys "$MESH_ROOT/etc/authorized_keys"
 install -C -m 755 -o root -g wheel "$REPO"/viz/serve.py "$MESH_ROOT/viz/serve.py"
 install -C -m 644 -o root -g wheel "$REPO"/viz/index.html "$MESH_ROOT/viz/index.html"
+# telemetry and the observer run only when someone runs them (mesh-top starts its own sampler): a resident sampler on
+# every node spawned processes several times a second for a dashboard nothing else read (2026-10-29)
+for L in io.mesh.telemetry io.mesh.observer; do launchctl bootout "system/$L" >/dev/null 2>&1; [ -z "${ADMIN_USER:-}" ] || launchctl bootout "gui/$(id -u "$ADMIN_USER")/$L" >/dev/null 2>&1; done
+rm -f /Library/LaunchDaemons/io.mesh.{telemetry,observer}.plist
+[ -z "${ADMIN_USER:-}" ] || rm -f "$(eval echo "~$ADMIN_USER")"/Library/LaunchAgents/io.mesh.{telemetry,observer}.plist
 rm -f /Library/LaunchDaemons/io.mesh.{bridge,update,keeper,cartlane.learner,cartlane.viewer}.plist "$MESH_ROOT"/bin/{mesh-flow,mesh-update.sh,mesh-keeper.sh,mesh_restart.py} "$MESH_ROOT"/policy{,.default}; rm -rf "$MESH_ROOT/rdma"
 for L in io.mesh.keeper io.mesh.cartlane.learner io.mesh.cartlane.viewer; do launchctl bootout "system/$L" >/dev/null 2>&1; done
 try "memory bandwidth sampler built" xcrun clang -fobjc-arc -framework Foundation -lIOReport "$REPO/user/mesh-bandwidth.m" -o "$REPO/user/mesh-bandwidth"
@@ -169,8 +171,6 @@ PL
 launchctl bootout system/io.mesh.caffeinate >/dev/null 2>&1; rm -f /Library/LaunchDaemons/io.mesh.caffeinate.plist
 mkplist io.mesh.beacon "<string>$MESH_ROOT/bin/mesh-beacon.sh</string>"
 mkplist io.mesh.fabric "<string>$MESH_ROOT/bin/mesh-fabric-init.sh</string>"
-sed -e "s|__MESH_USER__|$ADMIN_USER|g" -e "s|__MESH_HOME__|$H|g" "$REPO/etc/io.mesh.observer.plist" > "$J/io.mesh.observer.plist.new"
-chmod 644 "$J/io.mesh.observer.plist.new"
 mkplist io.mesh.router "<string>$MESH_ROOT/bin/mesh-router-init.sh</string>" \
   "  <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>1</integer>"
@@ -184,23 +184,10 @@ mkplist io.mesh.bridge-boot "<string>/bin/launchctl</string><string>bootstrap</s
 # the hourly's agent (bin/mesh-hourly-agent.sh) loaded at boot the same way, so a headless node that restarts keeps
 # its hourly with no login
 mkplist io.mesh.hourly-boot "<string>/bin/launchctl</string><string>bootstrap</string><string>user/$ADMIN_UID</string><string>$H/Library/LaunchAgents/io.mesh.hourly.plist</string>"
-for L in io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.telemetry io.mesh.observer io.mesh.rdma-init io.mesh.bridge-boot io.mesh.hourly-boot $TSJ; do
-  port=
-  case "$L" in io.mesh.telemetry) port=8788 ;; io.mesh.observer) port=8787 ;; esac
-  upid=$(launchctl print "gui/$ADMIN_UID/$L" 2>/dev/null | awk '/^[[:space:]]*pid = /{print $3; exit}')
-  if [ -n "$port" ] && [ -n "$upid" ] && lsof -nP -a -p "$upid" -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
-    mv -f "$J/$L.plist.new" "/Library/LaunchDaemons/$L.plist"
-    retained=$((retained+1)); ok "$L listening on :$port (pid $upid); userspace provider retained"
-    continue
-  fi
+for L in io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.rdma-init io.mesh.bridge-boot io.mesh.hourly-boot $TSJ; do
   if out=$("$REPO/bin/mesh-launchd-agent.sh" "$J/$L.plist.new" system "/Library/LaunchDaemons/$L.plist"); then
     [ -n "$out" ] && { replaced=$((replaced+1)); ok "$out"; } || { retained=$((retained+1)); ok "$L loaded"; }
   else bad "$L NOT LOADED: $out"; fi
-done
-for label in io.mesh.telemetry io.mesh.observer; do
-  launchctl print "system/$label" >/dev/null 2>&1 || launchctl print "gui/$ADMIN_UID/$label" >/dev/null 2>&1 || {
-    launchctl bootstrap "gui/$ADMIN_UID" "$H/Library/LaunchAgents/$label.plist" >/dev/null 2>&1 \
-      && ok "$label userspace provider loaded" || bad "$label has no provider loaded"; }
 done
 for P in /Library/LaunchDaemons/io.mesh.*.plist; do
   L=$(basename "$P" .plist)
@@ -212,7 +199,7 @@ for P in "$H/Library/LaunchAgents/"*.plist; do
   if out=$("$REPO/bin/mesh-launchd-agent.sh" "$P" "user/$ADMIN_UID"); then [ -z "$out" ] || ok "$out"; else bad "$out"; fi
 done
 for L in $kick; do launchctl kickstart -k "system/$L" >/dev/null 2>&1 && ok "$L restarted on its new program (kickstart -k)" || bad "$L not restarted"; done
-for L in io.mesh.beacon io.mesh.telemetry io.mesh.observer; do launchctl kickstart "system/$L" >/dev/null 2>&1; done
+launchctl kickstart system/io.mesh.beacon >/dev/null 2>&1
 "$MESH_ROOT/bin/mesh-tailscale-init.sh"
 
 sec "9. Status"
