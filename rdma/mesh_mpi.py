@@ -244,17 +244,6 @@ class Comm:
         check(lib.ncclMeshPageTableCreate(at(array), self.comm, 0, made))
         return PageTable(self, made[0], array)
 
-    def Write_pages_prepare(self, table, masks, source, destination, *, max_packet=0, tile_bytes=0, instances=1, instance_pages=0, invocations=1):
-        """Declare an ordered list of (page, first byte, byte count) page masks."""
-        if table.comm is not self:
-            raise ValueError('the page table must belong to this communicator')
-        masks = list(masks)
-        made = ffi.new('ncclMeshWritePlan_t *')
-        check(lib.ncclMeshWritePagesPrepare(table.handle, ffi.new('ncclMeshPageMask[]', masks) if masks else ffi.NULL,
-                                           len(masks), source, destination, max_packet,
-                                           {'tile_bytes': tile_bytes, 'instances': instances, 'instance_pages': instance_pages, 'invocations': invocations}, made))
-        return WritePlan(self, made[0], (table,))
-
     def _layout(self, own):
         """`own`'s view of its lease as abstract layout (nccl.h ncclMeshLayout): its storage's page table, its shape and
         strides in elements, its first element's offset in elements, its element bits.  numpy names no storage offset,

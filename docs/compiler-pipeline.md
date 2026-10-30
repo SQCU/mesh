@@ -386,7 +386,7 @@ layout absent from that domain is not magically searched.
 `ncclMeshWritePagesPrepare` consumes ordered `(page, first, count)` masks. Each mask
 stays in one local page; each peer uses its own table and page size. Their logical
 byte totals agree. No remote pointer or cross-page extent appears in this public
-declaration. The NumPy frontend exposes `Pages` and `Write_pages_prepare`.
+declaration. The NumPy frontend's `Pages` makes a table for its layout writes; it has no page-mask call.
 
 The raw `ncclMeshWritePrepare`, `ncclMeshWriteRowsPrepare` and
 `ncclMeshWriteSpansPrepare` public interfaces are removed. Local tensor adapters
