@@ -122,31 +122,39 @@ NSString *MetalViewIndexPrelude(void) {
         stringByAppendingFormat:@"%@#endif\n",MetalViewIndexTemplates()];
 }
 
-static NSDictionary<NSString *,NSData *> *MetalViewBlockSelection(const int32_t *order,size_t count,
-    NSUInteger block,NSUInteger copies,int32_t (^select)(int32_t,NSUInteger)) {
-    NSMutableData *blocks=[NSMutableData data],*mapped=[NSMutableData data];
-    int32_t *lanes=malloc(block*sizeof *lanes);
-    for(size_t start=0;start<count;start+=block)for(NSUInteger copy=0;copy<copies;copy++) {
-        BOOL used=NO;
-        for(NSUInteger i=0;i<block;i++) {
-            const int32_t value=start+i<count?order[start+i]:-1;
-            lanes[i]=value>=0?select(value,copy):-1;used|=lanes[i]>=0;
-        }
-        if(used) {
+// Each block of `block` stored lanes, `copies` times, keeps the present lanes `select` maps to an output; a block
+// (or copy) with none is not retained.
+static NSDictionary<NSString *,NSData *> *MetalViewBlockSelection(const int32_t *present,const int32_t *order,size_t count,
+    size_t stored,NSUInteger block,NSUInteger copies,BOOL (^select)(int32_t,NSUInteger,int32_t *)) {
+    NSMutableData *blocks=[NSMutableData data],*positions=[NSMutableData data],*mapped=[NSMutableData data];
+    int32_t retained=0;
+    for(size_t start=0,at=0;start<stored;start+=block) {
+        const size_t first=at;
+        while(at<count&&(size_t)present[at]<start+block)at++;
+        for(NSUInteger copy=0;copy<copies;copy++) {
+            BOOL used=NO;
+            for(size_t k=first;k<at;k++) {
+                int32_t output;
+                if(!select(order[k],copy,&output))continue;
+                const int32_t position=retained*(int32_t)block+present[k]-(int32_t)start;
+                [positions appendBytes:&position length:sizeof position];
+                [mapped appendBytes:&output length:sizeof output];used=YES;
+            }
+            if(!used)break;
             const int32_t index=(int32_t)(start/block);
-            [blocks appendBytes:&index length:sizeof index];
-            [mapped appendBytes:lanes length:block*sizeof *lanes];
-        } else break;
+            [blocks appendBytes:&index length:sizeof index];retained++;
+        }
     }
-    free(lanes);return @{@"blocks":blocks,@"order":mapped};
+    return @{@"blocks":blocks,@"present":positions,@"order":mapped};
 }
 
-NSDictionary<NSString *,NSData *> *MetalViewBlockSlice(const int32_t *order,size_t count,
-    NSInteger first,NSInteger end,NSInteger step,NSUInteger block) {
-    return MetalViewBlockSelection(order,count,block,1,^int32_t(int32_t value,NSUInteger copy) {
+NSDictionary<NSString *,NSData *> *MetalViewBlockSlice(const int32_t *present,const int32_t *order,size_t count,
+    size_t stored,NSInteger first,NSInteger end,NSInteger step,NSUInteger block) {
+    return MetalViewBlockSelection(present,order,count,stored,block,1,^BOOL(int32_t value,NSUInteger copy,int32_t *output) {
         (void)copy;
         const NSInteger delta=value-first;
-        return (step>0?(value>=first&&value<end):(value<=first&&value>end))&&delta%step==0?(int32_t)(delta/step):-1;
+        if(!((step>0?(value>=first&&value<end):(value<=first&&value>end))&&delta%step==0))return NO;
+        *output=(int32_t)(delta/step);return YES;
     });
 }
 
@@ -156,13 +164,13 @@ static int MetalViewSelectionCompare(const void *a,const void *b) {
     if(x->value!=y->value)return x->value<y->value?-1:1;
     return x->output<y->output?-1:x->output>y->output;
 }
-NSDictionary<NSString *,NSData *> *MetalViewBlockGather(const int32_t *order,size_t count,
-    const int32_t *selected,size_t selectedCount,NSUInteger block) {
+NSDictionary<NSString *,NSData *> *MetalViewBlockGather(const int32_t *present,const int32_t *order,size_t count,
+    size_t stored,const int32_t *selected,size_t selectedCount,NSUInteger block) {
     if(selectedCount) {
         const NSInteger step=selectedCount>1?(NSInteger)selected[1]-selected[0]:1;
         BOOL affine=step!=0;
         for(size_t i=1;affine&&i<selectedCount;i++)affine=selected[i]==(NSInteger)selected[0]+(NSInteger)i*step;
-        if(affine)return MetalViewBlockSlice(order,count,selected[0],(NSInteger)selected[selectedCount-1]+step,step,block);
+        if(affine)return MetalViewBlockSlice(present,order,count,stored,selected[0],(NSInteger)selected[selectedCount-1]+step,step,block);
     }
     MetalViewSelection *entries=malloc(selectedCount*sizeof *entries);
     for(size_t i=0;i<selectedCount;i++)entries[i]=(MetalViewSelection){selected[i],(int32_t)i};
@@ -172,11 +180,12 @@ NSDictionary<NSString *,NSData *> *MetalViewBlockGather(const int32_t *order,siz
         size_t end=first+1;while(end<selectedCount&&entries[end].value==entries[first].value)end++;
         copies=MAX(copies,end-first);first=end;
     }
-    NSDictionary *result=MetalViewBlockSelection(order,count,block,copies,^int32_t(int32_t value,NSUInteger copy) {
+    NSDictionary *result=MetalViewBlockSelection(present,order,count,stored,block,copies,^BOOL(int32_t value,NSUInteger copy,int32_t *output) {
         size_t lo=0,hi=selectedCount;
         while(lo<hi){size_t mid=lo+(hi-lo)/2;if(entries[mid].value<value)lo=mid+1;else hi=mid;}
         const size_t at=lo+copy;
-        return at<selectedCount&&entries[at].value==value?entries[at].output:-1;
+        if(!(at<selectedCount&&entries[at].value==value))return NO;
+        *output=entries[at].output;return YES;
     });
     free(entries);return result;
 }
@@ -289,12 +298,15 @@ NSString *MetalViewIndexValuesDeclaration(NSUInteger binding,const NSInteger *va
     NSData *map=[NSData dataWithBytes:values length:count*sizeof *values];
     return [NSString stringWithFormat:@"template<uint B> inline long mesh_position(ulong i);\n"
         "template<uint B> constexpr ulong mesh_position_span();\n"
+        "template<uint B> constexpr ulong mesh_position_count();\n"
         "namespace mesh_positions_%lu {\n%@%@}\n"
         "template<> inline long mesh_position<%lu>(ulong i) { return mesh_positions_%lu::mesh_index<0>(i); }\n"
-        "template<> constexpr ulong mesh_position_span<%lu>() { return %luul; }\n",
+        "template<> constexpr ulong mesh_position_span<%lu>() { return %luul; }\n"
+        "template<> constexpr ulong mesh_position_count<%lu>() { return %luul; }\n",
         (unsigned long)binding,MetalViewIndexTemplates(),MetalViewMappedIndexDeclaration(0,&count,&stride,1,0,@{@0:map},nil,0),
         (unsigned long)binding,(unsigned long)binding,
-        (unsigned long)binding,(unsigned long)span];
+        (unsigned long)binding,(unsigned long)span,
+        (unsigned long)binding,(unsigned long)count];
 }
 
 NSString *MetalViewMappedIndexDeclaration(NSUInteger binding,const NSUInteger *shape,const NSInteger *strides,

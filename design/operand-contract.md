@@ -1837,9 +1837,20 @@ Computed index tensors remain ordinary page operands.
 The Hadamard input domain holds its source positions as preparation metadata.
 Cuts compose that domain with the selected logical columns. Identity and cut
 domains use the same relation emitter; neither allocates a separate source-order
-buffer. Dense decoding likewise declares both axis relations, and padded
-activations declare which encoded lanes hold values. Masks retain their numerical
-meaning while the order-buffer loads and bindings disappear.
+buffer. Masks are view domains, not values in a relation: no relation or table
+holds a −1 for an absent position, and no kernel tests one. An encoded axis has
+a domain, its present positions and each one's logical index, and a retained
+block's other lanes are outside it. A relation is defined on its domain alone;
+the emitter compiles its extent with it (`mesh_position_count`). Each kernel
+iterates the domain it is given:
+- A gather writes its present coded columns from their sources and the columns
+  outside the domain as zero, two compiled domains of one placement.
+- A product finishes in its dispatch only where every coded row is in the
+  domain; otherwise its partials finish through the domain's selection views.
+- The activation writes down's present columns through one view and the columns
+  outside its domain as zero through another.
+- Dense decoding writes coded order; the logical matrix is copied from it through
+  both axes' selections.
 
 Native compressed matrices now take explicit selections on both axes through
 `MetalViewBlockGather`. Interval cuts feed that same operation. Product lists
@@ -1863,6 +1874,17 @@ FX carries the relation's sources and starts in the stage declaration and
 transposes the same relation in its backward graph. No runtime object traverses
 the preparation relation. A factor with no domain declares the identity relation,
 which keeps the function-constant form.
+
+On 2026-10-29 on the laptop, cut, selected and whole coded matrices ran through
+whole prepared functions before and after this change: products, the panel,
+the transposed product, the gather with fused stores, the Hadamard and factored
+transforms, the inverse rotation, both FFN forms and dense decoding. Every
+output was bit-identical except two cut decodes. Those now equal the uncut
+decode exactly; the earlier masked instantiation differed by up to two units in
+the last place. Single-factor and gather dispatches matched bit for bit too,
+with and without slabs and block strides. The rotated cases ran with the mixing
+einsum written elementwise on both sides: its lowering reads storage it never
+wrote, before and after, so a case run alone returns NaN.
 
 Preparation on 2026-10-29 built rank and Goal A, composed reordered, repeated and
 empty input selections, and compiled the fused and factored shaders with both

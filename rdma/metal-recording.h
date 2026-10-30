@@ -91,17 +91,21 @@ struct MetalButterflyStage { NSUInteger width, step; };
 NSData *MetalButterflyPlan(NSUInteger width, NSUInteger localElements);
 // Eligibility of the configured fused schedule, never a limit on the graph.
 BOOL MetalHadamardLocal(NSUInteger columns, NSUInteger mix, NSUInteger threads, NSUInteger memory);
-// A logical slice of an encoded axis. `order` maps stored entries to logical
-// indices (-1 for unused entries). Bounds/step are the normalized slice;
-// block is the format's indivisible stored group. Returns int32 block indices
-// and a compacted int32 order, with -1 for unused lanes of retained blocks.
+// A logical slice of an encoded axis of `stored` entries. The axis's domain is
+// its `count` present entries, `present` (ascending stored positions), and
+// `order` maps each to its logical index; no entry outside the domain is named.
+// Bounds/step are the normalized slice; block is the format's indivisible
+// stored group. Returns int32 retained block indices ("blocks"), and the
+// result's own domain: its present positions in the retained blocks
+// ("present", ascending) and each one's logical index ("order"). A retained
+// block's other lanes are outside that domain.
 // Only immutable index metadata is read. Encoded numerical values stay in place.
-NSDictionary<NSString *, NSData *> *MetalViewBlockSlice(const int32_t *order, size_t count,
-    NSInteger first, NSInteger end, NSInteger step, NSUInteger block);
+NSDictionary<NSString *, NSData *> *MetalViewBlockSlice(const int32_t *present, const int32_t *order, size_t count,
+    size_t stored, NSInteger first, NSInteger end, NSInteger step, NSUInteger block);
 // Explicit logical selections, including reordered or repeated indices. A
 // stored block can be named more than once when it supplies repeated outputs.
-NSDictionary<NSString *, NSData *> *MetalViewBlockGather(const int32_t *order, size_t count,
-    const int32_t *selected, size_t selectedCount, NSUInteger block);
+NSDictionary<NSString *, NSData *> *MetalViewBlockGather(const int32_t *present, const int32_t *order, size_t count,
+    size_t stored, const int32_t *selected, size_t selectedCount, NSUInteger block);
 // One dependency compiler for recorded commands and fused producer/consumer
 // tiles. Each entry contains MetalReach records in execution order. The result
 // names prior writers/readers of overlapping ranges; shared aliases share keys.
@@ -123,7 +127,9 @@ NSString *MetalViewMappedIndexDeclaration(NSUInteger binding, const NSUInteger *
     size_t rank, NSUInteger elementOffset, NSDictionary<NSNumber *, NSData *> *maps,
     NSArray<NSString *> *coordinates, NSUInteger vectorSpan);
 // Declared index relations, such as an encoding's row positions. These are
-// compiler metadata, never a substitute for a computed index tensor.
+// compiler metadata, never a substitute for a computed index tensor. The
+// relation is defined on its `count` values alone: mesh_position<B>(i) for
+// i < mesh_position_count<B>(), a compiled constant.
 NSString *MetalViewIndexValuesDeclaration(NSUInteger binding, const NSInteger *values, NSUInteger count);
 NSData *MetalViewMappedReaches(id<MTLBuffer> buffer, NSUInteger offset, const NSUInteger *shape,
     const NSInteger *strides, size_t rank, NSUInteger elementBytes, uint32_t access, int32_t binding,

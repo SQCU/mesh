@@ -2167,13 +2167,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
       if(data.length)memcpy(words.data(),data.bytes,data.length);
       return words;
     };
-    return std::make_pair(values(result[@"blocks"]),values(result[@"order"]));
+    return std::make_tuple(values(result[@"blocks"]),values(result[@"present"]),values(result[@"order"]));
   };
-  module.def("view_block_slice", [viewSelection](const std::vector<int32_t> &order,NSInteger first,NSInteger end,NSInteger step,NSUInteger block) {
-    return viewSelection(MetalViewBlockSlice(order.data(),order.size(),first,end,step,block));
+  // an axis's domain (present stored positions and each one's logical index) of `stored` entries, selected: the
+  // retained blocks and the selection's own domain (metal-recording.h MetalViewBlockSlice)
+  module.def("view_block_slice", [viewSelection](const std::vector<int32_t> &present,const std::vector<int32_t> &order,NSUInteger stored,
+                                                 NSInteger first,NSInteger end,NSInteger step,NSUInteger block) {
+    TORCH_CHECK(present.size()==order.size(),"a domain gives each present position its logical index");
+    return viewSelection(MetalViewBlockSlice(present.data(),order.data(),order.size(),stored,first,end,step,block));
   }, pybind11::call_guard<Drained>());
-  module.def("view_block_gather", [viewSelection](const std::vector<int32_t> &order,const std::vector<int32_t> &selected,NSUInteger block) {
-    return viewSelection(MetalViewBlockGather(order.data(),order.size(),selected.data(),selected.size(),block));
+  module.def("view_block_gather", [viewSelection](const std::vector<int32_t> &present,const std::vector<int32_t> &order,NSUInteger stored,
+                                                  const std::vector<int32_t> &selected,NSUInteger block) {
+    TORCH_CHECK(present.size()==order.size(),"a domain gives each present position its logical index");
+    return viewSelection(MetalViewBlockGather(present.data(),order.data(),order.size(),stored,selected.data(),selected.size(),block));
   }, pybind11::call_guard<Drained>());
   module.def("view_tiles", [](const std::vector<NSUInteger> &shape,NSUInteger elements) {
     using Tile=std::pair<std::vector<NSUInteger>,std::vector<NSUInteger>>;
