@@ -336,29 +336,11 @@ output_data/transport-buffers-20261021/LIBRARY.md ranks the changes of 2026-10-2
   count of polls, since a GPU spin with no end halts the node.
 - **The data function**: its own buffers and their order.
 
-### One track
-
-A completion whose groups all lie on one physical channel of one communicator is plain dispatches in the GPU command stream, and the stream's own order is the dependency
-(`nccl-mesh.c` `complete_track`). Whether a group lies on one channel is read from its schedule where the group is
-planned (`struct inflight` `lone`), the entries both ends lay alike; nothing at run time chooses the form. A fused
-group ([Fused crossings](#two-paths)) on any number of channels completes each of them this way in turn, in the
-stream's order, its steps records the caller's kernels run and no dispatch (`nccl-mesh.c` `complete`).
-
-- The next send entries are published as soon as their steps' receives before them are consumed: a run of them is one
-  `publish` dispatch, one store of `ready` past the last.
-- Each consumption is its own dispatch after that. A combine is one wide `land_*`: every threadgroup's thread 0 waits on
-  `landed`, then the threadgroup combines its share. A COPY is one `spin`. A first combine of a call reading its send
-  buffer in place is a `spin`, then `combine3_*`.
-- The in-place form reads the operand it combines into. Publication alone does not
-  establish that a downstream reader has finished. Buffer ownership belongs to the
-  data program; the executor does not insert `sent` waits to repair an aliasing schedule.
-- No track is recorded, no thread picks and no `tracks` dispatch runs: on one track the stream's order is the one
-  serial order every rank builds alike, and a wait on it holds no other channel.
-
 ### Per-channel progress
 
-A completion on two or more tracks runs every channel on its own (`nccl-mesh-metal.h` `metal_record`, `metal_tracks`).
-This is NCCL's per-peer progress, chosen by the operator on 2026-10-20 in place of one serial order of the whole group.
+Every completion runs each of its channels on its own, however many its groups lie on (`nccl-mesh-metal.h`
+`metal_record`, `metal_tracks`). This is NCCL's per-peer progress, chosen by the operator on 2026-10-20 in place of one
+serial order of the whole group.
 
 - **Tracks.** Each channel's remaining entries are a track with two cursors: its publications (send entries) and its
   consumptions (landing entries), each in list order.
@@ -368,16 +350,46 @@ This is NCCL's per-peer progress, chosen by the operator on 2026-10-20 in place 
   - A step depends on every earlier receive whose buffer range overlaps its range.
     Disjoint receives on different cables need no dependency edge.
   - Neither cursor waits on the other beyond these.
-- **On the GPU.** The tracks are one dispatch, one thread group per track. Thread 0 picks the next item whose
-  conditions hold, every thread runs it through the same kernel bodies the single dispatches use, and a consumption
-  raises its track's count. A group that can pick nothing for `polls` passes records its blocked items' failures, as
-  a wait does, and ends; a track reads no other track's failure.
+- **Workers, not a thread group a track.** The tracks are one dispatch of workers that no track owns
+  (`nccl-mesh-kernels.h` `TRACK_KERNEL`): thread groups of `MESH_TRANSPORT_ELEMENT_THREADS`, as many as the completion
+  has chunks, at most a dispatch's grid. A worker's thread 0 scans the cursors, publications first, for a task whose
+  conditions hold, and claims one chunk of it with an atomic count. Every thread then runs that chunk as one thread
+  group of its step's own grid, through the kernel body a dispatch of that grid runs. The worker that finishes a task's
+  last chunk moves its cursor on, and where the task ends a consumption it raises its track's count.
+  - A chunk is a thread group of its step's dispatch. A landing's is one block: 1,024 elements of a combine, or 256
+    rows of a merge. A task is the steps of an item that may run at once: a landing's runs, which are disjoint ranges.
+  - A landing chunk is claimed only once its own pages have landed (a compare-and-exchange on the claim count; its pages
+    are its body's own count, `track_want`). No worker waits inside a step, so no worker holds work another channel
+    needs, and a landing is combined block by block as it lands, on every core.
+  - On one channel every worker takes that channel's chunks: a single dispatch's width, without the device barrier a
+    dispatch takes after each step. On many, the workers share them as they become ready.
+- **Literature.** The workers are persistent thread groups taking work from a shared atomic pool (Aila & Laine,
+  "Understanding the efficiency of ray traversal on GPUs", HPG 2009; Gupta, Stuart & Owens, "A study of persistent
+  threads style GPU programming for GPGPU workloads", InPar 2012), as GPU task schedulers run them (Steinberger et al.,
+  Softshell, SIGGRAPH Asia 2012; Whippletree, SIGGRAPH Asia 2014). The pool is chunks claimed from a counter (Kruskal &
+  Weiss, "Allocating independent subtasks on parallel processors", IEEE TSE 1985; Polychronopoulos & Kuck, "Guided
+  self-scheduling", IEEE TC 1987). A chunk fires when its operands are present, as an I-structure's reader does
+  (Arvind, Nikhil & Pingali, TOPLAS 1989). The nearest GPU form is Stream-K (Osama, Merrill, Cecka, Garland & Owens,
+  PPoPP 2023): a fixed grid of workers splitting all the work, fast with one tile or many. No worker idles while a chunk
+  is ready, so the schedule is greedy: within 2 − 1/P of optimal (Graham, "Bounds on multiprocessing timing anomalies",
+  SIAM J. Appl. Math. 1969), and T_P ≤ T₁/P + T∞ (Brent, JACM 1974). The scheduling cost falls on the claims, never on
+  a step's work, which is the body a dispatch runs (the work-first principle: Frigo, Leiserson & Randall, "The
+  implementation of the Cilk-5 multithreaded language", PLDI 1998).
+- **Bounds.** A worker that claims nothing for `polls` readiness checks (each a load of an awaited word or count) since
+  any chunk last finished records each blocked task's failure, as a wait does, and ends that cursor. A cursor whose
+  failure claim is taken (a wait that failed, or the host's stop) ends within 2^10 checks. A track reads no other
+  track's failure.
 - **What ranks share.** No rank orders anything another rank must share. The two ends of each list agree on its
   entries (`mesh_group_lay`) and nothing else, so groups of any calls among any number of ranks complete wherever
   their steps' dependencies do.
 - **Not completion.** Issuing a group (`issue`) encodes no wait and is unchanged.
-- **Residency.** Thread groups of one dispatch wait on each other only through a step's receive before it. Metal does
-  not promise they are all resident; a wait on one that is not reaches its bound and fails as a value.
+- **Residency.** No worker waits on another: a claim is a count, not a thread group. A worker that Metal does not make
+  resident claims nothing, and the resident ones finish the work.
+- **In place.** The in-place form reads the operand it combines into. Publication alone does not establish that a
+  downstream reader has finished. Buffer ownership belongs to the data program; the executor does not insert `sent`
+  waits to repair an aliasing schedule.
+- **Fused crossings.** A fused group ([Fused crossings](#two-paths)) records no track: its steps are records the
+  caller's kernels run, completed channel by channel in the stream's order (`nccl-mesh.c` `complete`).
 
 ### Bounded waits
 

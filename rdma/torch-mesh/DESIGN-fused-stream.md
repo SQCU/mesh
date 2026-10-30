@@ -181,8 +181,8 @@ bytes; the sections below on the branch keep that history.)
   SHA-256 in vendor/libnccl-mesh.sha256 changes.
 
 On main, a fused group encodes no dispatch on any number of ranks. The groups in flight before it are completed first,
-and then each of its channels is completed in the stream's order, one after another (nccl-mesh.c `complete`,
-`complete_track`). The tracks dispatch never runs for a fused group.
+and then each of its channels is completed in the stream's order, one after another (nccl-mesh.c `complete`).
+The tracks dispatch never runs for a fused group.
 
 **torch-mesh.** `torch_mesh/fused.py`, and a section of `_stream.mm` of its own (`fused_residency`, `metal_prelude`,
 `fused_exchange`, `fused_published`):

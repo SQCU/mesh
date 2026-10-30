@@ -295,13 +295,15 @@ static struct metal_result dispatch4(struct metal_program *program, id<MTLComput
    program's failure words: metal_gate) and the arguments p (2, its polls the program's where v is such words), the
    progress word (5): a GROUP kernel (`group`: publish,
    spin) as one threadgroup of the configured width, any other over `units` threads */
-static struct metal_result record_step(struct metal_program *program, uint32_t kind, void *d, void *s, void *a, void *v, struct args p);
+static struct metal_result record_step(struct metal_program *program, uint32_t kind, void *d, void *s, void *a, void *v, struct args p,
+                                       uint64_t units, int group);
 static int recording_on(const struct metal_program *program);
+static void recording_join(struct metal_program *program, int join);
 static struct metal_result dispatch(struct metal_program *program, uint32_t kind, void *d, void *s, void *a, void *v, struct args p,
                                     uint64_t units, int group) {
   if (kind >= KINDS) return (struct metal_result){EINVAL, "no kernel of this operation and data type (nccl-mesh-metal.m TYPED)"};
   if (!units) return METAL_DONE;
-  if (recording_on(program)) return record_step(program, kind, d, s, a, v, p);
+  if (recording_on(program)) return record_step(program, kind, d, s, a, v, p, units, group);
   const char *message = NULL;
   struct kernels *k = program_kernels(program, &message);
   if (!k) return (struct metal_result){EINVAL, message};
@@ -415,10 +417,12 @@ struct metal_result metal_land(struct metal_program *program, int type, int op, 
     p.input = ((id<MTLBuffer>)with).gpuAddress + with_offset + run.first * element_bytes;
     p.scalar = pages_to_word(pages_sub(w->target, packets)) + run.packet;
     p.phase = run.phase; p.step = run.step; p.mask = run.shift;
+    recording_join(program, k > 0);
     const struct metal_result result = dispatch(program, kind, dst, w->data, w->words, w->violation, p,
       type == METAL_MERGE ? run.elements : (run.elements + 3) / 4, 0);
-    if (result.status) return result;
+    if (result.status) { recording_join(program, 0); return result; }
   }
+  recording_join(program, 0);
   return METAL_DONE;
 }
 
@@ -432,18 +436,20 @@ struct metal_result metal_land_deferred(struct metal_program *program, void *lan
                  wait_args(w, offset, 0, 0), bound);
 }
 
-/* the tracks being recorded (nccl-mesh-metal.h metal_record): each step's kernel and bindings as its dispatch would bind
-   them (`v` its failure words, else the program's; its polls the program's where it has such words), each item's
-   position, `need`, steps, dependencies and the landing a consumption awaits (its first wait on `landed`: spin's word
-   in d, a landing's in a), each track's items by cursor; the buffers named, made resident at metal_tracks */
-struct host_op { void *d, *s, *a, *v; struct args p; uint32_t kind; };
-struct host_item { uint64_t position, need, target; void *word_buffer, *v; size_t word; uint32_t first_op, ops, first_dep, deps, wait_op, cursor; };
+/* the tracks being recorded (nccl-mesh-metal.h metal_record): each step as its dispatch would bind it (`v` its failure
+   words, else the program's; its polls the program's where it has such words), its dispatch's threads (`units`) and
+   whether it is a group kernel, and whether it runs beside the step before it (`joined`: a landing's runs, disjoint
+   ranges each awaiting its own pages, metal_land); each item's position, `need`, steps, dependencies and failure
+   words; each track's items by cursor; the buffers named, made resident at metal_tracks */
+struct host_op { void *d, *s, *a, *v; struct args p; uint64_t units; uint32_t kind; int group, joined; };
+struct host_item { uint64_t position, need; void *v; uint32_t first_op, ops, first_dep, deps; };
 struct host_dep { uint64_t count; uint32_t other; };
 struct host_track { uint32_t *item[2]; size_t count[2], room[2]; };
 struct recording { struct host_op *op; size_t ops, op_room; struct host_item *item; size_t items, item_room; struct host_dep *dep; size_t deps, dep_room;
-                   struct host_track *track; uint32_t tracks; uint32_t current; int on; NSMutableSet *named; };
+                   struct host_track *track; uint32_t tracks; uint32_t current; int on, join; NSMutableSet *named; };
 
 static int recording_on(const struct metal_program *program) { return program->recording && program->recording->on; }
+static void recording_join(struct metal_program *program, int join) { if (program->recording) program->recording->join = join; }
 
 static void record_uses(struct metal_program *program, void *const *buffers, size_t n) {
   for (size_t k = 0; k < n; k++) if (buffers[k]) [program->recording->named addObject:(id)buffers[k]];
@@ -465,27 +471,21 @@ static void recording_free(struct recording *r) {
   free(r);
 }
 
-/* a step of kind `kind` recorded onto the item being recorded: a consumption's first step that awaits a word (WORD) its
-   item's wait */
-static struct metal_result record_step(struct metal_program *program, uint32_t kind, void *d, void *s, void *a, void *v, struct args p) {
+/* a step of kind `kind` over `units` threads (a group kernel's one threadgroup) recorded onto the item being recorded */
+static struct metal_result record_step(struct metal_program *program, uint32_t kind, void *d, void *s, void *a, void *v, struct args p,
+                                       uint64_t units, int group) {
   struct recording *r = program->recording;
   if (!v) v = (void *)program->violation;
   p.polls = v && v != d ? program->polls : 0;
   struct host_op *ops = more(r->op, &r->op_room, r->ops, sizeof *ops);
   if (!ops) return metal_failed(ENOMEM);
   r->op = ops;
-  const struct host_op made = {d, s ? s : d, a ? a : d, v ? v : d, p, kind};
+  struct host_item *it = r->item + r->current;
+  const struct host_op made = {d, s ? s : d, a ? a : d, v ? v : d, p, units, kind, group, r->join && it->ops};
   r->op[r->ops++] = made;
   const id named[4] = {(id)made.d, (id)made.s, (id)made.a, (id)made.v};
   for (int k = 0; k < 4; k++) [r->named addObject:named[k]];
-  struct host_item *it = r->item + r->current;
   it->ops++;
-  if (it->cursor == METAL_CONSUME && it->wait_op == UINT32_MAX && WORD[kind] && p.scalar) {
-    it->wait_op = (uint32_t)(r->ops - 1);
-    it->word_buffer = WORD[kind] == WORD_D ? made.d : made.a;
-    it->word = p.aux;
-    it->target = p.scalar;
-  }
   if (!it->v && p.polls) it->v = made.v;
   return METAL_DONE;
 }
@@ -509,8 +509,7 @@ struct metal_result metal_record(struct metal_program *program, uint32_t track, 
   if (listed) t->item[cursor] = listed;
   if (!items) return metal_failed(ENOMEM);
   r->item = items;
-  r->item[r->items] = (struct host_item){.position = position, .need = need, .first_op = (uint32_t)r->ops, .first_dep = (uint32_t)r->deps,
-                                         .wait_op = UINT32_MAX, .cursor = (uint32_t)cursor};
+  r->item[r->items] = (struct host_item){.position = position, .need = need, .first_op = (uint32_t)r->ops, .first_dep = (uint32_t)r->deps};
   t->item[cursor][t->count[cursor]++] = (uint32_t)r->items;
   r->current = (uint32_t)r->items++;
   r->on = 1;
@@ -528,16 +527,30 @@ struct metal_result metal_depend(struct metal_program *program, uint32_t other, 
   return METAL_DONE;
 }
 
-/* the records as the track kernel reads them (TRACKS: track_head, track, track_item, track_op, track_dep) */
-struct track_head { uint64_t tracks_off, items_off, ops_off, deps_off, count_off, done_off; uint32_t tracks, polls; };
-struct track_rec { uint32_t first[2], count[2]; };
-struct track_item { uint64_t position, need, target, word, v; uint32_t first_op, ops, first_dep, deps, wait_op, cursor; };
-struct track_op { uint64_t d, s, a, v; struct args p; uint32_t kind, pad; };
+/* the records as the track kernel reads them (nccl-mesh-kernels.h TRACKS: track_head, track_cursor, track_task,
+   track_item, track_op, track_dep), then the state its workers share: each track's consumption count, each cursor's
+   task, each task's chunks claimed and finished, the count of tasks finished and each worker's end */
+struct track_head { uint64_t cursors_off, tasks_off, items_off, ops_off, deps_off, count_off, state_off, claim_off, done_off, progress_off,
+                    ended_off; uint32_t cursors, polls; };
+struct track_cursor { uint32_t first, end, track, kind; };
+struct track_task { uint32_t first_op, ops, chunks, item, cursor, flags, pad[2]; };
+struct track_item { uint64_t position, need, v; uint32_t first_dep, deps; };
+struct track_op { uint64_t d, s, a, v; struct args p; uint64_t word, block; uint32_t kind, chunks; };
 struct track_dep { uint64_t count; uint32_t other, pad; };
-_Static_assert(sizeof(struct track_head) == 56 && sizeof(struct track_rec) == 16 && sizeof(struct track_item) == 64 &&
-               sizeof(struct track_op) == sizeof(struct args) + 5 * sizeof(uint64_t) && sizeof(struct track_dep) == 16, "the track records");
+_Static_assert(sizeof(struct track_head) == 96 && sizeof(struct track_cursor) == 16 && sizeof(struct track_task) == 32 &&
+               sizeof(struct track_item) == 32 && sizeof(struct track_op) == sizeof(struct args) + 7 * sizeof(uint64_t) &&
+               sizeof(struct track_dep) == 16, "the track records");
+/* a task's first and last runs of its item, and whether its chunks' pages decide which may be claimed (TRACK_KERNEL) */
+enum { TASK_FIRST = 1, TASK_LAST = 2, TASK_PACED = 4 };
 
 static uint64_t up(uint64_t x) { return (x + 255) & ~(uint64_t)255; }
+
+/* a step's chunks at `width` threads a worker: a group kernel's one; a landing's a block each, so each awaits its own
+   pages; any other step's its dispatch's threadgroups, at most `widest`, as that dispatch's grid is */
+static uint32_t op_chunks(const struct host_op *o, uint64_t width, uint64_t widest) {
+  const uint64_t groups = (o->units + width - 1) / width;
+  return o->group ? 1 : (uint32_t)(LANES[o->kind] || groups < widest ? groups : widest);
+}
 
 struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks, const uint64_t *consumed) {
   struct recording *r = program->recording;
@@ -548,46 +561,76 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
     struct kernels *k = program_kernels(program, &message);
     if (!k) { recording_free(r); return (struct metal_result){EINVAL, message}; }
     id<MTLComputePipelineState> state = k->pipelines[KIND_tracks];
-    const uint64_t T = r->tracks, at_tracks = up(sizeof(struct track_head)), at_items = up(at_tracks + T * sizeof(struct track_rec));
-    /* a dependency names a track of these T: the kernel reads count[other] (nccl-mesh-kernels.h), an index of its table */
-    for (size_t x = 0; x < r->deps; x++)
-      if (r->dep[x].other >= T) { recording_free(r); return (struct metal_result){EINVAL, "a track depends on a track it does not have"}; }
-    const uint64_t at_ops = up(at_items + r->items * sizeof(struct track_item)), at_deps = up(at_ops + r->ops * sizeof(struct track_op));
-    const uint64_t at_count = up(at_deps + r->deps * sizeof(struct track_dep)), at_done = up(at_count + T * sizeof(uint64_t));
-    const uint64_t bytes = up(at_done + T * sizeof(uint64_t));
-    /* the records, a carved piece of the region, done with once every track has ended (each stores its done word) */
+    const uint64_t width = state.maxTotalThreadsPerThreadgroup < MESH_TRANSPORT_ELEMENT_THREADS ? state.maxTotalThreadsPerThreadgroup
+                                                                                               : MESH_TRANSPORT_ELEMENT_THREADS;
+    const uint64_t T = tracks, C = 2 * T, widest = MESH_TRANSPORT_GRID_THREADS / width;
+    /* the tasks: each item's runs of joined steps (one for an item of none, which raises its count alone), and every
+       chunk they hold, the workers' most (at most a grid of `widest` threadgroups, a dispatch's most) */
+    uint64_t tasks = 0, chunks = 0;
+    for (uint32_t t = 0; t < r->tracks; t++)
+      for (int c = 0; c < 2; c++)
+        for (size_t x = 0; x < r->track[t].count[c]; x++) {
+          const struct host_item *it = r->item + r->track[t].item[c][x];
+          tasks += !it->ops; chunks += !it->ops;
+          for (uint32_t o = 0; o < it->ops; o++) {
+            tasks += !r->op[it->first_op + o].joined;
+            chunks += op_chunks(r->op + it->first_op + o, width, widest);
+          }
+        }
+    const uint64_t workers = chunks < widest ? chunks : widest;
+    const uint64_t at_cursors = up(sizeof(struct track_head)), at_tasks = up(at_cursors + C * sizeof(struct track_cursor));
+    const uint64_t at_items = up(at_tasks + tasks * sizeof(struct track_task)), at_ops = up(at_items + r->items * sizeof(struct track_item));
+    const uint64_t at_deps = up(at_ops + r->ops * sizeof(struct track_op)), at_count = up(at_deps + r->deps * sizeof(struct track_dep));
+    const uint64_t at_state = up(at_count + T * sizeof(uint64_t)), at_claim = up(at_state + C * sizeof(uint32_t));
+    const uint64_t at_done = up(at_claim + tasks * sizeof(uint32_t)), at_progress = up(at_done + tasks * sizeof(uint32_t));
+    const uint64_t at_ended = up(at_progress + sizeof(uint32_t)), bytes = up(at_ended + workers * sizeof(uint64_t));
+    /* the records, a carved piece of the region, done with once every worker has ended (each stores its end word) */
     struct metal_bytes records;
     if (metal_carve(bytes, &records)) { recording_free(r); return metal_failed(ENOMEM); }
     unsigned char *base = records.contents;
-    memset(base + at_done, 0, T * sizeof(uint64_t));
-    metal_done((const _Atomic uint64_t *)(base + at_done), (uint32_t)T, 1);
+    memset(base + at_state, 0, bytes - at_state);
+    metal_done((const _Atomic uint64_t *)(base + at_ended), (uint32_t)workers, 1);
     const uint64_t address = ((id<MTLBuffer>)records.buffer).gpuAddress + records.offset;
-    *(struct track_head *)base = (struct track_head){at_tracks, at_items, at_ops, at_deps, at_count, at_done, (uint32_t)T, program->polls};
-    struct track_rec *rec = (struct track_rec *)(base + at_tracks);
+    *(struct track_head *)base = (struct track_head){at_cursors, at_tasks, at_items, at_ops, at_deps, at_count, at_state, at_claim, at_done,
+                                                     at_progress, at_ended, (uint32_t)C, program->polls};
+    struct track_cursor *cursor = (struct track_cursor *)(base + at_cursors);
+    struct track_task *task = (struct track_task *)(base + at_tasks);
     struct track_item *item = (struct track_item *)(base + at_items);
-    uint32_t placed = 0;
+    uint32_t *current = (uint32_t *)(base + at_state), placed = 0, laid = 0;
     for (uint32_t t = 0; t < T; t++)
-      for (int c = 0; c < 2; c++) {
-        rec[t].first[c] = placed; rec[t].count[c] = (uint32_t)r->track[t].count[c];
-        for (size_t x = 0; x < r->track[t].count[c]; x++) {
+      for (uint32_t c = 0; c < 2; c++) {
+        const uint32_t cu = 2 * t + c;
+        cursor[cu] = (struct track_cursor){laid, laid, t, c};
+        current[cu] = laid;
+        for (size_t x = 0; t < r->tracks && x < r->track[t].count[c]; x++, placed++) {
           const struct host_item *it = r->item + r->track[t].item[c][x];
-          item[placed++] = (struct track_item){it->position, it->need, it->target,
-                                               it->word_buffer ? ((id<MTLBuffer>)it->word_buffer).gpuAddress + it->word : 0,
-                                               it->v ? ((id<MTLBuffer>)it->v).gpuAddress : 0, it->first_op, it->ops, it->first_dep, it->deps, it->wait_op,
-                                               it->cursor};
+          item[placed] = (struct track_item){it->position, it->need, it->v ? ((id<MTLBuffer>)it->v).gpuAddress : 0, it->first_dep, it->deps};
+          if (!it->ops) task[laid++] = (struct track_task){.chunks = 1, .item = placed, .cursor = cu, .flags = TASK_FIRST | TASK_LAST};
+          for (uint32_t o = 0; o < it->ops;) {
+            struct track_task *made = task + laid++;
+            *made = (struct track_task){.first_op = it->first_op + o, .item = placed, .cursor = cu, .flags = o ? 0 : TASK_FIRST};
+            do {
+              const struct host_op *op = r->op + it->first_op + o;
+              made->ops++; made->chunks += op_chunks(op, width, widest);
+              if (LANES[op->kind]) made->flags |= TASK_PACED;
+            } while (++o < it->ops && r->op[it->first_op + o].joined);
+            if (o == it->ops) made->flags |= TASK_LAST;
+          }
         }
+        cursor[cu].end = laid;
       }
     struct track_op *op = (struct track_op *)(base + at_ops);
     for (size_t x = 0; x < r->ops; x++) {
       const struct host_op *o = r->op + x;
+      void *const word = WORD[o->kind] == WORD_A ? o->a : WORD[o->kind] == WORD_D && o->p.scalar ? o->d : NULL;
       op[x] = (struct track_op){((id<MTLBuffer>)o->d).gpuAddress, ((id<MTLBuffer>)o->s).gpuAddress, ((id<MTLBuffer>)o->a).gpuAddress,
-                                ((id<MTLBuffer>)o->v).gpuAddress, o->p, o->kind, 0};
+                                ((id<MTLBuffer>)o->v).gpuAddress, o->p, word ? ((id<MTLBuffer>)word).gpuAddress + o->p.aux : 0,
+                                LANES[o->kind] * width, o->kind, op_chunks(o, width, widest)};
     }
     struct track_dep *dep = (struct track_dep *)(base + at_deps);
     for (size_t x = 0; x < r->deps; x++) dep[x] = (struct track_dep){r->dep[x].count, r->dep[x].other, 0};
     uint64_t *count = (uint64_t *)(base + at_count);
-    for (uint32_t t = 0; t < T; t++) count[t] = t < tracks ? consumed[t] : 0;
-    const NSUInteger width = state.maxTotalThreadsPerThreadgroup < MESH_TRANSPORT_GROUP_THREADS ? state.maxTotalThreadsPerThreadgroup : MESH_TRANSPORT_GROUP_THREADS;
+    for (uint32_t t = 0; t < T; t++) count[t] = consumed[t];
     metal_resident(program, records.buffer);
     for (id b in r->named) metal_resident(program, (void *)b);
     [program->table setAddress:address atIndex:0];
@@ -595,7 +638,7 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
     id<MTL4ComputeCommandEncoder> encoder = program->encoder;
     [encoder setComputePipelineState:state];
     [encoder setArgumentTable:program->table];
-    [encoder dispatchThreadgroups:MTLSizeMake(T, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+    [encoder dispatchThreadgroups:MTLSizeMake(workers, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
     [encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
   }
   recording_free(r);

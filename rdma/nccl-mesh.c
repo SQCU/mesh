@@ -2155,7 +2155,6 @@ struct steps {
   struct mesh_packet_view *views;
   struct mesh_span_residues *packets;
   uint32_t domains;
-  unsigned char *done;
   /* the buffers the steps name: 0 the operand, made in place; b >= 1 the rank's scratch b (`buffers` of them) */
   uint32_t buffers, initialized;
   struct where *buffer;
@@ -2338,7 +2337,7 @@ static ncclResult_t binding_backing(struct ncclComm *comm, struct where binding,
 static void steps_free(struct steps *s) {
   if (!s) return;
   if (atomic_fetch_sub_explicit(&s->references, 1, memory_order_acq_rel) != 1) return;
-  free(s->buffer); free(s->done); free(s->channel); free(s->entry); free(s->read); free(s->fresh);
+  free(s->buffer); free(s->channel); free(s->entry); free(s->read); free(s->fresh);
   free(s->consumption); free(s->complement);
   if (s->source) steps_free(s->source);
   else {
@@ -2364,22 +2363,19 @@ static struct steps *steps_copy(struct steps *from) {
       .views = from->views, .packets = from->packets, .domains = from->domains};
     atomic_fetch_add_explicit(&from->references, 1, memory_order_relaxed);
   }
-  if (!s || !(s->done = malloc(most)) ||
-      !(s->channel = calloc(most, sizeof *s->channel)) || !(s->entry = calloc(most, sizeof *s->entry)) ||
+  if (!s || !(s->channel = calloc(most, sizeof *s->channel)) || !(s->entry = calloc(most, sizeof *s->entry)) ||
       !(s->buffer = calloc(s->buffers, sizeof *s->buffer)) ||
       !(s->consumption = calloc(most, sizeof *s->consumption))) {
     steps_free(s);
     return NULL;
   }
-  memcpy(s->done, from->done, from->count);
   return s;
 }
-/* a copy's progress made again as steps_copy makes it, its arrays kept (issue_bind): done its source's, no channel,
-   entry or consumption.  `binding` 1 keeps its buffers and in-place reads (buffer, read, fresh: its issue's same
+/* a copy's progress made again as steps_copy makes it, its arrays kept (issue_bind): no channel, entry or
+   consumption.  `binding` 1 keeps its buffers and in-place reads (buffer, read, fresh: its issue's same
    binding again); 0 makes them none as well (an issue laid again: read and fresh all zero, as NULL reads) */
 static void steps_reset(struct steps *s, int binding) {
   const size_t most = s->count + 1;
-  memcpy(s->done, s->source->done, s->count);
   memset(s->channel, 0, most * sizeof *s->channel); memset(s->entry, 0, most * sizeof *s->entry);
   memset(s->consumption, 0, most * sizeof *s->consumption);
   if (binding) return;
@@ -2391,7 +2387,7 @@ static void steps_reset(struct steps *s, int binding) {
 static struct steps *steps_make(size_t room, struct steps initial) {
   struct steps *s = calloc(1, sizeof *s);
   if (s) *s = initial;
-  if (s && (s->steps = calloc(room, sizeof *s->steps)) && (s->done = calloc(room, 1)) && (s->channel = calloc(room, sizeof *s->channel)) &&
+  if (s && (s->steps = calloc(room, sizeof *s->steps)) && (s->channel = calloc(room, sizeof *s->channel)) &&
       (s->entry = calloc(room, sizeof *s->entry)) && (s->cable = calloc(room, sizeof *s->cable)) &&
       (s->consumption = calloc(room, sizeof *s->consumption)) && (s->prior_first = calloc(room, sizeof *s->prior_first))) return s;
   steps_free(s);
@@ -2754,8 +2750,6 @@ static ncclResult_t schedule_group(struct ncclComm *comm, struct call *list, siz
           if (st->steps[j].op != MESH_STEP_SEND && meet(st->steps + j, st->steps + k)) st->prior[at++] = j;
       }
     }
-    for (uint32_t k = 0; st && !result && k < st->count; k++)
-      if (st->steps[k].op != MESH_STEP_SEND && !mesh_step_bytes(st->steps + k)) st->done[k] = 1;
   }
   free(steps); free(counts); free(group_calls); free(made); free(scratch);
   return result;
@@ -3574,11 +3568,6 @@ static void slot_used(struct ncclComm *comm, uint32_t slot, uint64_t ticket) {
   for (uint32_t h = 0; h < comm->count; h++) { s->lands[h] = comm->channels[h].lands; s->in[h] = comm->channels[h].in; }
 }
 
-/* design/whole-function.md#fabric: only overlapping earlier receives create data dependencies. */
-static int ready(const struct steps *s, uint32_t k) {
-  for (uint32_t at = s->prior_first[k]; at < s->prior_first[k + 1]; at++) if (!s->done[s->prior[at]]) return 0;
-  return 1;
-}
 
 
 /* where a call's operand holds byte `at`: its result (c->sum: result_of), a reduce-scatter's partial of another's
@@ -3770,10 +3759,8 @@ static ncclResult_t gpu(struct metal_result step, const char *what) {
 }
 
 /* a group issued and not complete: its communicator, its calls, its schedule, its entries [start, end) of each list on
-   each of its communicator's channels ([h][0] the send list's, [h][1] the landing list's), the one channel they lie on
-   (`lone`: lone_of, read where the group is planned; comm->count where it has none, METAL_NONE where they lie on two
-   or more), whether it is a fused crossing, and
-   its repeats; the groups in flight are in issue order, a communicator's holding consecutive entries on every list */
+   each of its communicator's channels ([h][0] the send list's, [h][1] the landing list's), whether it is a fused
+   crossing, and its repeats; the groups in flight are in issue order, a communicator's holding consecutive entries on every list */
 struct inflight {
   uint64_t ticket;
   struct ncclComm *comm;
@@ -3781,22 +3768,11 @@ struct inflight {
   size_t n;
   struct schedule *plans;
   uint64_t (*start)[2], (*end)[2];
-  uint32_t lone, repeats;
+  uint32_t repeats;
   int fused;
   struct inflight *next_group;
 };
 
-/* the channel all of a group's entries lie on (struct inflight `lone`): a function of its schedule alone, the entries
-   both ends of each channel lay alike (schedule_group, mesh-plan.h mesh_group_lay) */
-static uint32_t lone_of(const struct inflight *g) {
-  uint32_t lone = g->comm->count;
-  for (uint32_t h = 0; h < g->comm->count; h++)
-    if (g->end[h][0] > g->start[h][0] || g->end[h][1] > g->start[h][1]) {
-      if (lone != g->comm->count) return METAL_NONE;
-      lone = h;
-    }
-  return lone;
-}
 static struct inflight *inflight, *inflight_last;
 static uint64_t tickets;
 
@@ -3888,12 +3864,6 @@ static ncclResult_t outside_groups(struct ncclComm *comm, uint32_t h, int list, 
               (unsigned long long)ch->waited, *spans ? spans : " none");
 }
 
-/* whether channel h's send entry `at`, of group g (NULL: none in flight), may be published: its step's receive before
-   it consumed */
-static int publishable(struct inflight *g, uint32_t h, uint64_t at) {
-  const struct message *m = g ? out_at(g, h, at) : NULL;
-  return m && ((m->c->write_plan && m->c->write_plan->ready_value) || ready(m->c->bound, m->step));
-}
 
 /* the fused crossing of the group being encoded (nccl.h ncclMeshFused): its records' lists, the room the
    caller gave each (`room`: publications, landings), and the publications and landings written in place of their
@@ -3942,7 +3912,7 @@ static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm
 }
 
 /* channel h's next AOT consumer entry (possibly a later physical landing), as its track's item (metal_record; rdma/NCCL.md "Per-channel progress") or,
-   `base` METAL_NONE, as dispatches in the stream's order (complete_track): its first wait on the holding's `landed`
+   `base` METAL_NONE, a fused crossing's, in the stream's order (complete): its first wait on the holding's `landed`
    past it; a combine's landed bytes combined
    into its buffer (its first one reads the original input through the same landing operation), a COPY's
    wait alone (it landed in place), the fused crossing's landing recorded for its caller's kernel
@@ -3975,67 +3945,17 @@ static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm
     fusing.landed += !result;
   } else if (!result && !g->fused) result = gpu(metal_spin(program, &wait), "a wait");
   if (result) return result;
-  st->done[m->step] = 1;
   ch->consumed = at + 1;
   if (ch->waited < at + 1) ch->waited = at + 1;
   return ncclSuccess;
 }
 
-/* the channel every group in flight through `through` lies on alone, all of one communicator (each group's `lone`,
-   read where it was planned: launch_metal), or METAL_NONE where they lie on two or more channels or are of two
-   communicators; a group with no entry lies on none and joins any */
-static uint32_t one_track(const struct inflight *through) {
-  uint32_t h = METAL_NONE;
-  for (const struct inflight *g = inflight; g; g = g == through ? NULL : g->next_group) {
-    if (g->comm != inflight->comm || g->lone == METAL_NONE) return METAL_NONE;
-    if (g->lone == g->comm->count) continue;
-    if (h != METAL_NONE && h != g->lone) return METAL_NONE;
-    h = g->lone;
-  }
-  return h;
-}
-
-/* every group in flight through `through` completed where all of them lie on channel h of one communicator
-   (one_track): the GPU command stream's own order is the dependency (rdma/NCCL.md "One track").  Plain dispatches in
-   one serial order every rank builds alike: the next send entries published as soon as their steps' receives before
-   them are consumed (a run of them one release; the fused crossing's alone), else the next landing consumed (its
-   step's receive before it consumed, and a combine into bytes an earlier SEND of its call reads only once that SEND is
-   published); a program whose SEND waits on a receive that waits on that SEND
-   fails here.  No track is recorded, no thread picks, and no tracks dispatch runs: no wait on one track can hold
-   another channel's */
-static ncclResult_t complete_track(struct metal_program *program, struct inflight *through, uint32_t h, int *published) {
-  struct ncclComm *const comm = through->comm;
-  struct channel *ch = comm->channels + h;
-  const uint64_t out = through->end[h][0], in = through->end[h][1];
-  ncclResult_t result = ncclSuccess;
-  touch(comm);
-  metal_gate(program, comm->violation);
-  while (!result && (ch->published < out || ch->consumed < in)) {
-    uint64_t upto = ch->published;
-    struct inflight *holder = NULL;
-    while (upto < out && publishable(holder = inflight_from(holder, comm, h, 0, upto), h, upto)) {
-      const int fused = holder->fused;
-      if (fused && upto > ch->published) break;
-      upto++;
-      if (fused) break;
-    }
-    if (upto > ch->published) { result = publish(program, comm, h, upto, published); continue; }
-    struct inflight *x = ch->consumed < in ? inflight_at(comm, h, 1, ch->consumed) : NULL;
-    const struct message *r = x ? in_at(x, h, ch->consumed) : NULL;
-    if (r && ready(r->c->bound, r->step) && ch->published >= r->need) result = consume(program, comm, h, METAL_NONE, x);
-    else
-      result = fail(ncclInternalError, "channel %u's entries admit no order on one track (published %llu of %llu, consumed %llu of %llu)", h,
-                    (unsigned long long)ch->published, (unsigned long long)out, (unsigned long long)ch->consumed, (unsigned long long)in);
-  }
-  return result;
-}
-
-/* every group in flight through `through` completed, on one track as plain dispatches (complete_track), else each
-   channel progressing on its own (nccl-mesh-metal.h metal_record; rdma/NCCL.md "Per-channel progress"): channel h of
+/* every group in flight through `through` completed, each channel progressing on its own however many there are
+   (nccl-mesh-metal.h metal_record; rdma/NCCL.md "Per-channel progress"): channel h of
    the k-th communicator met is track base[k] + h, its publications to its communicator's last group through `through`
    each an item of its own (nothing credits it; a SEND's step after the consumption of the receive before it), then its
    consumptions (a combine into bytes an earlier SEND of its channel reads after that publication: its `need`); the
-   tracks run as one (metal_tracks).  No rank orders anything another rank must share */
+   tracks run by one pool of workers (metal_tracks).  No rank orders anything another rank must share */
 /* Only values addressed to this rank are inputs to its fused consumer. Relay
    arrivals have their own landed-word dependencies in the transport program;
    their immutable leases live through the enclosing data function. */
@@ -4124,8 +4044,6 @@ static ncclResult_t complete(struct metal_program *program, struct inflight *thr
     }
     return result;
   }
-  const uint32_t lone = one_track(through);
-  if (lone != METAL_NONE) return complete_track(program, through, lone, published);
   size_t comms = 0;
   struct ncclComm **comm = NULL;
   uint32_t *base = NULL, tracks = 0;
@@ -4479,7 +4397,6 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     else g = NULL;
     if (!result) {
       for (uint32_t h = 0; h < comm->count; h++) { g->end[h][0] = comm->channels[h].sends; g->end[h][1] = comm->channels[h].lands; }
-      g->lone = lone_of(g);
       g->list = list; g->n = n; g->ticket = ticket = ++tickets;
       slot_used(comm, slot, ticket);
       before = inflight_last;

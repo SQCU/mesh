@@ -32,7 +32,7 @@
    is classic and takes them as bytes (setBytes), its argument table's six where it is Metal 4.  Each guards nothing
    the caller owns: under NCCL's contract the caller touches no buffer of a collective in flight and issues the same
    collectives in the same order on every rank, so the order of a program's reads and writes is known from the programs
-   both ranks compiled and is encoded in the stream's order (rdma/NCCL.md "One track"); the host issues no group on a
+   both ranks compiled and is encoded in its tracks' order (rdma/NCCL.md "Per-channel progress"); the host issues no group on a
    communicator whose failure it has read (nccl-mesh.c comm_failure), a group already encoded runs as encoded, and each
    wait on a peer that never publishes ends at its own bound, or sooner once any wait on the same failure words has
    failed (mesh_step_failed).  mesh_step_enter: a kernel whose record is the argument
@@ -137,7 +137,7 @@ static NSString *const STEPS =
    awaiting the count of the block's last page first where the count it last read is short of it (LANDS: the sum page
    by page as they land), and ends its waits at once after any has failed
    (mesh_step_failed). A merge uses the same arrival relation for each group of
-   complete rows. A track runs its body in one threadgroup (l its thread there). */
+   complete rows. A track's worker runs a body as one threadgroup of its step's grid, its chunk (TRACK_KERNEL). */
 static NSString *const KERNELS =
   @"\n"
   "#define PARAMS device uchar *d, device uchar *s, constant mesh_args &p, device uchar *a, device uchar *vb, device ulong *progress, uint i, uint g, uint l, uint t, threadgroup ulong *tg\n"
@@ -227,95 +227,138 @@ static NSString *const KERNELS =
    a device's pipelines' index: nccl-mesh-metal.m kernels_of) and of the track kernel's switch (TRACKS' enum and TRACK_KERNEL's cases, made
    from this list by the preprocessor, so neither names a kind the other lacks); each kernel's name, which the Metal
    library's lookup takes, once a process (nccl-mesh-metal.m kernels_of) and once an install (nccl-mesh-kernels.m)
-   (newFunctionWithName, an interface the library does not implement: design/rubrics.md, Strings are messages) and whose body the switch calls, and the word a consumption's item awaits in it (record_step:
-   WORD_D a spin's, in its d; WORD_A a landing's first complete element, in its a; 0 none) */
+   (newFunctionWithName, an interface the library does not implement: design/rubrics.md, Strings are messages) and whose body the switch calls; the word
+   its step awaits (metal_tracks: WORD_D a spin's count, in its d; WORD_A a landing's pages, in its a; 0 none); and a
+   landing's elements a thread of its block (LANES: 4 a combine's, 1 a merge's rows; 0 a step that awaits no pages), so
+   a landing's chunk is one block and the scheduler reads the pages that block awaits (TRACKS track_want) */
 enum { WORD_D = 1, WORD_A };
 #define KINDS_OF(X) \
-  X(copy_plain_4, 0) X(copy_land_4, 0) X(copy_plain_1, 0) X(copy_land_1, 0) \
-  X(land_i8, WORD_A) X(premul_i8, 0) X(truncdiv_i8, 0) \
-  X(land_u8, WORD_A) X(premul_u8, 0) X(truncdiv_u8, 0) \
-  X(land_i32, WORD_A) X(premul_i32, 0) X(truncdiv_i32, 0) \
-  X(land_u32, WORD_A) X(premul_u32, 0) X(truncdiv_u32, 0) \
-  X(land_i64, WORD_A) X(premul_i64, 0) X(truncdiv_i64, 0) \
-  X(land_u64, WORD_A) X(premul_u64, 0) X(truncdiv_u64, 0) \
-  X(land_f16, WORD_A) X(premul_f16, 0) X(land_f32, WORD_A) X(premul_f32, 0) \
-  X(land_bf16, WORD_A) X(premul_bf16, 0) X(land_e4m3, WORD_A) X(premul_e4m3, 0) \
-  X(land_e5m2, WORD_A) X(premul_e5m2, 0) \
-  X(publish, 0) X(spin, WORD_D) X(land_merge, WORD_A) X(land_merge_from, WORD_A) X(present, 0)
-#define KIND_ENUM(name, word) KIND_##name,
-#define KIND_NAME(name, word) #name,
-#define KIND_WORD(name, word) word,
-#define KIND_CASE(name, word) case KIND_##name: body_##name(o.d, o.s, o.p, o.a, o.v, progress, i, g, i, g, tg); break;
+  X(copy_plain_4, 0, 0) X(copy_land_4, 0, 0) X(copy_plain_1, 0, 0) X(copy_land_1, 0, 0) \
+  X(land_i8, WORD_A, 4) X(premul_i8, 0, 0) X(truncdiv_i8, 0, 0) \
+  X(land_u8, WORD_A, 4) X(premul_u8, 0, 0) X(truncdiv_u8, 0, 0) \
+  X(land_i32, WORD_A, 4) X(premul_i32, 0, 0) X(truncdiv_i32, 0, 0) \
+  X(land_u32, WORD_A, 4) X(premul_u32, 0, 0) X(truncdiv_u32, 0, 0) \
+  X(land_i64, WORD_A, 4) X(premul_i64, 0, 0) X(truncdiv_i64, 0, 0) \
+  X(land_u64, WORD_A, 4) X(premul_u64, 0, 0) X(truncdiv_u64, 0, 0) \
+  X(land_f16, WORD_A, 4) X(premul_f16, 0, 0) X(land_f32, WORD_A, 4) X(premul_f32, 0, 0) \
+  X(land_bf16, WORD_A, 4) X(premul_bf16, 0, 0) X(land_e4m3, WORD_A, 4) X(premul_e4m3, 0, 0) \
+  X(land_e5m2, WORD_A, 4) X(premul_e5m2, 0, 0) \
+  X(publish, 0, 0) X(spin, WORD_D, 0) X(land_merge, WORD_A, 1) X(land_merge_from, WORD_A, 1) X(present, 0, 0)
+#define KIND_ENUM(name, word, lanes) KIND_##name,
+#define KIND_NAME(name, word, lanes) #name,
+#define KIND_WORD(name, word, lanes) word,
+#define KIND_LANES(name, word, lanes) lanes,
+#define KIND_CASE(name, word, lanes) case KIND_##name: body_##name(o.d, o.s, o.p, o.a, o.v, progress, i, g, l, t, tg); break;
 /* the kinds, then the track kernel's own pipeline (KIND_tracks: no track records it) */
 enum { KINDS_OF(KIND_ENUM) KINDS, KIND_tracks = KINDS, PIPELINES };
 static const char *const NAME[PIPELINES] = {KINDS_OF(KIND_NAME) "tracks"};
 static const uint8_t WORD[KINDS] = {KINDS_OF(KIND_WORD)};
+static const uint8_t LANES[KINDS] = {KINDS_OF(KIND_LANES)};
 
-/* the track kernel (nccl-mesh-metal.h metal_tracks; rdma/NCCL.md "Per-channel progress"), after KERNELS, for a
-   completion on two or more tracks (a group on one track is plain dispatches: nccl-mesh.c complete_track): one thread
-   group a track, its thread 0 choosing the next item of either cursor whose own conditions hold (a consumption first):
-   a publication's dependencies (nothing credits it); a consumption's dependencies, its landing and, where it combines
-   into bytes a SEND of its channel reads (`need` that send entry + 1; 0 none), that publication run (the publication
-   cursor past it), its own wait; every thread running the item's steps by their bodies,
-   and a consumption's end raising the track's count (system scope, release).  A group that chooses nothing for the
-   program's polls of passes records its blocked items' failures (mesh_step_check for a landing, else the bound at its
-   position, by its claimant: mesh_step_claim) and ends once nothing more can run; a track ends at its own bound, as a
-   wait does, or, read every 2^10 idle passes, once its blocked item's failure claim is taken: by a wait that failed, or
-   by the host's stop, which bounds it in time (nccl-mesh.c mesh_library_expired); it reads no other track's failure.  The records' layouts are struct track_head, track, track_item,
-   track_op and track_dep below, the host's alike; struct track_op's kind one of KINDS_OF's, the enum the host's */
+/* the track kernel (nccl-mesh-metal.h metal_tracks; rdma/NCCL.md "Per-channel progress"): every completion's work, on
+   any number of tracks, run by a pool of workers that no track owns.  A worker is a threadgroup; its thread 0 scans the
+   cursors (each track's publications, then its consumptions, from a track that differs worker by worker) for the
+   current task of one whose conditions hold, and claims a chunk of it: an atomic count of the task's chunks claimed,
+   compared and exchanged where the chunk's own pages decide (a landing's, TASK_PACED: no worker claims a chunk whose
+   pages have not landed, so none ever waits inside a step for data), else added to.  Every thread then runs the
+   chunk as threadgroup c of its step's own grid (i = c t + l, g = the step's chunks x t: the body a dispatch of that
+   grid runs, unchanged), and the chunk's end is added to the task's finished count; the worker that finishes its last
+   chunk raises its track's count where it ends a consumption and moves the cursor to its next task.  A task is a run
+   of an item's steps that may run at once (a landing's runs), its first a consumption's or publication's conditions:
+   its dependencies (another track's count), a consumption's `need` (its track's publications past that send entry),
+   and every chunk's awaited word (a spin's count; a landing chunk's pages, track_want).  A worker that claims nothing
+   for the program's polls of readiness checks (each a load of an awaited word or count, as a wait's bound counts its
+   loads) since any chunk last finished records each blocked task's failure (mesh_step_check
+   for its awaited word, else the bound at its position, by its claimant: mesh_step_claim) and ends that cursor, as a
+   wait ends at its bound; read every 2^10 idle passes, a cursor whose item's failure claim is taken (a wait that
+   failed, or the host's stop: nccl-mesh.c mesh_library_expired) ends then, its task's claimed count raised past every
+   chunk (2^31) so no worker claims one.  A worker ends once every cursor has.  The
+   records' layouts are struct track_head, track_cursor, track_task, track_item, track_op and track_dep below, the
+   host's alike; struct track_op's kind one of KINDS_OF's, the enum the host's */
 static NSString *const TRACKS =
   @"\n"
   "enum { " XSTR(KINDS_OF(KIND_ENUM)) " };\n"
-  "struct track_op { device uchar *d; device uchar *s; device uchar *a; device uchar *v; mesh_args p; uint kind; uint pad; };\n"
-  "struct track_item { ulong position, need, target; device ulong *word; device uchar *v; uint first_op, ops, first_dep, deps, wait_op, cursor; };\n"
+  "struct track_op { device uchar *d; device uchar *s; device uchar *a; device uchar *v; mesh_args p; device ulong *word; ulong block; uint kind, chunks; };\n"
+  "struct track_task { uint first_op, ops, chunks, item, cursor, flags, pad0, pad1; };\n"
+  "struct track_item { ulong position, need; device uchar *v; uint first_dep, deps; };\n"
   "struct track_dep { ulong count; uint other, pad; };\n"
-  "struct track { uint first[2], count[2]; };\n"
-  "struct track_head { ulong tracks_off, items_off, ops_off, deps_off, count_off, done_off; uint tracks, polls; };\n"
-  "static inline bool track_ready(constant track_item &it, constant track_dep *deps, volatile coherent(system) device ulong *count) { "
+  "struct track_cursor { uint first, end, track, kind; };\n"
+  "struct track_head { ulong cursors_off, tasks_off, items_off, ops_off, deps_off, count_off, state_off, claim_off, done_off, progress_off, ended_off; uint cursors, polls; };\n"
+  "static inline uint track_op_of(constant track_task &x, constant track_op *ops, thread uint &c) { "
+  "uint k = x.first_op; while (c >= ops[k].chunks) { c -= ops[k].chunks; k++; } return k; }\n"
+  "static inline ulong track_want(constant track_op &o, uint c) { "
+  "return o.p.scalar + (o.block ? ((o.p.phase + (min(ulong(c + 1) * o.block, o.p.n) - 1) * o.p.step) >> o.p.mask) : 0UL); }\n"
+  "static inline bool track_ready(constant track_task &x, uint c, constant track_cursor *cursors, constant track_task *tasks, "
+  "constant track_item *items, constant track_op *ops, constant track_dep *deps, volatile coherent(system) device ulong *count, "
+  "device atomic_uint *state) { "
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); "
-    "for (uint k = 0; k < it.deps; k++) if (count[deps[it.first_dep + k].other] < deps[it.first_dep + k].count) return false; "
-  "if (it.cursor != 1 || it.wait_op == ~0u) return true; "
-  "return *(volatile coherent(system) device const ulong *)it.word >= it.target; }\n"
-  "static inline void track_expired(constant track_item &it, constant track_op *ops, uint polls) { "
-  "if (it.wait_op != ~0u) { constant track_op &w = ops[it.wait_op]; mesh_step_check(w.p, *(volatile coherent(system) device const ulong *)it.word, it.target, w.v); return; } "
+  "if (x.flags & 1u) { constant track_item &it = items[x.item]; "
+  "for (uint k = 0; k < it.deps; k++) if (count[deps[it.first_dep + k].other] < deps[it.first_dep + k].count) return false; "
+  "if (cursors[x.cursor].kind == 1u) { const uint q = x.cursor - 1, j = atomic_load_explicit(state + q, memory_order_relaxed); "
+  "if (j < cursors[q].end && items[tasks[j].item].position < it.need) return false; } } "
+  "if (!x.ops) return true; "
+  "constant track_op &o = ops[track_op_of(x, ops, c)]; "
+  "return !o.word || *(volatile coherent(system) device const ulong *)o.word >= track_want(o, c); }\n"
+  "static inline void track_expired(constant track_task &x, uint c, constant track_item &it, constant track_op *ops, uint polls) { "
+  "if (x.ops) { constant track_op &o = ops[track_op_of(x, ops, c)]; "
+  "if (o.word) mesh_step_check(o.p, *(volatile coherent(system) device const ulong *)o.word, track_want(o, c), o.v); } "
   "volatile coherent(system) device ulong *v = (volatile coherent(system) device ulong *)it.v; "
   "if (!v || !mesh_step_claim(it.v)) return; "
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); "
-  "v[0] = " XSTR(METAL_BOUND) "UL; v[4] = ulong(polls); mesh_publish(v + 2, it.position + 1); }\n"
-  "static inline bool track_stopped(constant track_item &it) { "
-  "return it.v && atomic_load_explicit((device atomic_uint *)(it.v + 8), memory_order_relaxed) != 0u; }\n";
+  "v[0] = " XSTR(METAL_BOUND) "UL; v[4] = ulong(polls); mesh_publish(v + 2, it.position + 1); }\n";
 static NSString *const TRACK_KERNEL =
-  @"kernel void tracks(constant uchar *base [[buffer(0)]], device uchar *ring [[buffer(1)]], uint t [[threadgroup_position_in_grid]], "
-  "uint i [[thread_position_in_threadgroup]], uint g [[threads_per_threadgroup]]) { "
+  @"kernel void tracks(constant uchar *base [[buffer(0)]], device uchar *ring [[buffer(1)]], uint w [[threadgroup_position_in_grid]], "
+  "uint l [[thread_position_in_threadgroup]], uint t [[threads_per_threadgroup]]) { "
   "constant track_head &h = *(constant track_head *)base; "
-  "if (t >= h.tracks) return; "
-  "constant track &tr = ((constant track *)(base + h.tracks_off))[t]; "
+  "constant track_cursor *cursors = (constant track_cursor *)(base + h.cursors_off); "
+  "constant track_task *tasks = (constant track_task *)(base + h.tasks_off); "
   "constant track_item *items = (constant track_item *)(base + h.items_off); "
   "constant track_op *ops = (constant track_op *)(base + h.ops_off); "
   "constant track_dep *deps = (constant track_dep *)(base + h.deps_off); "
   "volatile coherent(system) device ulong *count = (volatile coherent(system) device ulong *)(ring + h.count_off); "
-  "threadgroup ulong tg[4]; threadgroup uint pick[2]; "
-  "uint next0 = 0, next1 = 0; ulong looks = 0; bool expired = false; "
+  "device atomic_uint *state = (device atomic_uint *)(ring + h.state_off), *claim = (device atomic_uint *)(ring + h.claim_off), "
+  "*done = (device atomic_uint *)(ring + h.done_off), *advanced = (device atomic_uint *)(ring + h.progress_off); "
+  "threadgroup ulong tg[4]; threadgroup uint pick[3]; "
+  "const uint tracks = h.cursors / 2; ulong looks = 0; uint seen = 0; "
   "for (;;) { "
-  "if (i == 0) { uint chosen = ~0u, left = 0; "
-  "if (next1 < tr.count[1]) { left = 1; constant track_item &c = items[tr.first[1] + next1]; "
-  "if ((next0 >= tr.count[0] || items[tr.first[0] + next0].position >= c.need) && track_ready(c, deps, count)) { chosen = tr.first[1] + next1; next1++; } } "
-  "if (chosen == ~0u && next0 < tr.count[0]) { left = 1; if (track_ready(items[tr.first[0] + next0], deps, count)) { chosen = tr.first[0] + next0; next0++; } } "
-  "if (chosen != ~0u) { looks = 0; expired = false; } "
-  "else if (left && expired) left = 0; "
-  "else if (left && (++looks >= h.polls || (looks % MESH_STOP_POLL_PERIOD == 0u && "
-  "track_stopped(items[next1 < tr.count[1] ? tr.first[1] + next1 : tr.first[0] + next0])))) { "
-  "if (next1 < tr.count[1]) track_expired(items[tr.first[1] + next1], ops, h.polls); "
-  "if (next0 < tr.count[0]) track_expired(items[tr.first[0] + next0], ops, h.polls); expired = true; } "
-  "pick[0] = chosen; pick[1] = left; } "
+  "if (l == 0) { uint chosen = ~0u, chunk = 0, open = 0, checked = 0; "
+  "for (uint kind = 0; kind < 2 && chosen == ~0u; kind++) for (uint k = 0; k < tracks && chosen == ~0u; k++) { "
+  "const uint cu = 2 * ((k + w) % tracks) + kind, j = atomic_load_explicit(state + cu, memory_order_relaxed); "
+  "if (j >= cursors[cu].end) continue; "
+  "open = 1; checked++; constant track_task &x = tasks[j]; uint c = atomic_load_explicit(claim + j, memory_order_relaxed); "
+  "if (c >= x.chunks || !track_ready(x, c, cursors, tasks, items, ops, deps, count, state)) continue; "
+  "if ((x.flags & 4u) ? atomic_compare_exchange_weak_explicit(claim + j, &c, c + 1, memory_order_relaxed, memory_order_relaxed) "
+  ": (c = atomic_fetch_add_explicit(claim + j, 1u, memory_order_relaxed)) < x.chunks) { chosen = j; chunk = c; } } "
+  "if (chosen != ~0u) looks = 0; "
+  "else if (open) { const uint now = atomic_load_explicit(advanced, memory_order_relaxed); "
+  "if (now != seen) { seen = now; looks = 0; } "
+  "const ulong before = looks; looks += checked; "
+  "const bool bound = looks >= h.polls, stop = before / MESH_STOP_POLL_PERIOD != looks / MESH_STOP_POLL_PERIOD; "
+  "for (uint cu = 0; (bound || stop) && cu < h.cursors; cu++) { "
+  "const uint j = atomic_load_explicit(state + cu, memory_order_relaxed); "
+  "if (j >= cursors[cu].end || atomic_load_explicit(claim + j, memory_order_relaxed) >= tasks[j].chunks) continue; "
+  "constant track_task &x = tasks[j]; constant track_item &it = items[x.item]; "
+  "if (!bound && !(it.v && atomic_load_explicit((device atomic_uint *)(it.v + 8), memory_order_relaxed) != 0u)) continue; "
+  "const uint c = atomic_fetch_add_explicit(claim + j, 0x80000000u, memory_order_relaxed); "
+  "if (c >= x.chunks) continue; "
+  "track_expired(x, c, it, ops, h.polls); atomic_store_explicit(state + cu, cursors[cu].end, memory_order_relaxed); } } "
+  "pick[0] = chosen; pick[1] = chunk; pick[2] = open; } "
   "threadgroup_barrier(mem_flags::mem_threadgroup); "
-  "const uint chosen = pick[0]; "
-  "if (!pick[1]) { if (i == 0) mesh_publish((volatile coherent(system) device ulong *)(ring + h.done_off) + t, 1); return; } "
-  "if (chosen != ~0u) { constant track_item &it = items[chosen]; "
-  "for (uint k = 0; k < it.ops; k++) { constant track_op &o = ops[it.first_op + k]; device ulong *progress = (device ulong *)o.d; "
-  "switch (o.kind) { " XSTR(KINDS_OF(KIND_CASE)) " default: break; } "
-  "threadgroup_barrier(mem_flags::mem_device); } "
-  "if (it.cursor == 1 && i == 0) mesh_publish(count + t, it.position + 1); } "
+  "const uint j = pick[0]; uint c = pick[1]; "
+  "if (j == ~0u) { if (!pick[2]) { if (l == 0) mesh_publish((volatile coherent(system) device ulong *)(ring + h.ended_off) + w, 1); return; } "
+  "threadgroup_barrier(mem_flags::mem_threadgroup); continue; } "
+  "constant track_task &x = tasks[j]; "
+  "if (x.ops) { constant track_op &o = ops[track_op_of(x, ops, c)]; device ulong *progress = (device ulong *)o.d; "
+  "const uint i = c * t + l, g = o.chunks * t; "
+  "switch (o.kind) { " XSTR(KINDS_OF(KIND_CASE)) " default: break; } } "
+  "threadgroup_barrier(mem_flags::mem_device); "
+  "if (l == 0) { atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); "
+  "atomic_fetch_add_explicit(advanced, 1u, memory_order_relaxed); "
+  "if (atomic_fetch_add_explicit(done + j, 1u, memory_order_relaxed) + 1u == x.chunks) { "
+  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); "
+  "constant track_cursor &cr = cursors[x.cursor]; "
+  "if ((x.flags & 2u) && cr.kind == 1u) mesh_publish(count + cr.track, items[x.item].position + 1); "
+  "atomic_store_explicit(state + x.cursor, j + 1, memory_order_relaxed); } } "
   "threadgroup_barrier(mem_flags::mem_threadgroup); } }\n";
 
 #endif

@@ -175,19 +175,20 @@ struct metal_result metal_send_deferred(struct metal_program *, void *operand, s
 struct metal_result metal_land_deferred(struct metal_program *, void *landing, size_t offset, const struct metal_wait *, uint64_t bound[6]);
 /* metal_contents: a shared buffer's host address (NULL: none, a private buffer's) */
 void *metal_contents(void *buffer);
-/* Tracks (rdma/NCCL.md "Per-channel progress"): a completion's work on two or more channels, recorded and then run with
-   every channel progressing on its own, one thread group a track on the GPU and one cooperative loop on the host.
+/* Tracks (rdma/NCCL.md "Per-channel progress"): a completion's work on its channels, recorded and then run by one
+   pool of workers, each channel progressing on its own.
    metal_record(program, track, cursor, position, need): the steps encoded after it (metal_copy .. metal_land) become
    item `position` of cursor `cursor` (METAL_PUBLISH, its send entries, or METAL_CONSUME, its landing entries) of track
    `track`, in place of their dispatches, until the next metal_record; track METAL_NONE ends the recording, and the
    steps after it are dispatched as ever.  An item runs once every metal_depend of it holds (track `other` has consumed
    `count`), and a consumption's once its track's publications have passed send entry `need` - 1 (0: none; a combine
-   into bytes a SEND of its channel reads, nccl-mesh.c schedule_laid, unordered with the NIC's read of it) and the landing its first wait awaits came (or its
-   bound passed: the link's ~0 is a count too); a consumption's end raises its track's count to `position` + 1.  A
-   publication's `need` is 0: nothing credits it.  Each cursor runs its items in order, and neither waits on the other
-   but by `need`.  metal_tracks: the tracks recorded since the last, track t's count from consumed[t], encoded (one
-   dispatch) or run; its result (struct metal_result).  The deferred steps (metal_send_deferred, metal_land_deferred)
-   are never recorded. */
+   into bytes a SEND of its channel reads, nccl-mesh.c schedule_laid, unordered with the NIC's read of it); each step's
+   chunks once the word it awaits has come (a spin's count; each landing chunk's own pages; the link's ~0 is a count
+   too); a consumption's end raises its track's count to `position` + 1.  A publication's `need` is 0: nothing credits
+   it.  Each cursor runs its items in order, and neither waits on the other but by `need`.  metal_tracks: the tracks
+   recorded since the last, `tracks` of them, track t's count from consumed[t], encoded as one dispatch of workers;
+   its result (struct metal_result).  The deferred steps (metal_send_deferred, metal_land_deferred) are never
+   recorded. */
 #define METAL_NONE UINT32_MAX
 enum { METAL_PUBLISH, METAL_CONSUME };
 struct metal_result metal_record(struct metal_program *, uint32_t track, int cursor, uint64_t position, uint64_t need);

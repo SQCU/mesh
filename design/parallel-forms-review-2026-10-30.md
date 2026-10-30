@@ -114,13 +114,16 @@ immediately." Form C is resolved, and with it the recorder's capture:
   nothing declared. definition_of ends the program on any group but a lone unfused WRITE. Both now declare their
   groups for the transition, as _scatter_spans does (70b5666e). write_definitions still serves a lone unfused WRITE on
   a communicator with no plan.
-- Not done, and why. E stays. Per-channel progress replaced "one serial order of the whole group" (NCCL.md,
-  Per-channel progress, 10-20). `complete_track` is that rule where every group lies on one channel, and there the
-  serial order is the channel's order. It encodes it as the stream's own dispatches, with no tracks dispatch and no
-  thread-0 pick. Folding it into tracks with T = 1 would add that indirection to every single-channel completion.
-  I stays: the two flatteners share no code. One flattens `ncclMeshCall`s with their arrays as offsets, the other a
-  WRITE plan's prepare arguments (`struct write_declared`). One record for both is a format that metal-recording.m and
-  `_stream.mm` read, and it saves no work at execution. D10-D11: cover and traversal are shared already (mesh-tensor-layout's
+- E is done (2026-10-30). The tracks' cost was their width, not their pick. One thread group a track ran every step
+  of that channel on one GPU core, where a dispatch of the same step spreads over the whole grid. The tracks are now
+  one pool of workers that claim chunks of any track's ready task (rdma/NCCL.md, Per-channel progress): one form for
+  any number of channels, a single channel at a dispatch's width with no device barrier between its steps, and no
+  worker waiting inside a step. `complete_track`, `one_track`, `lone_of`, `publishable`, the steps' `ready` and their
+  `done` flags are deleted. Keeping E, as an earlier version of this entry did, ranked the slow form above the fast one.
+- I is two of four flatten-and-parse pairs of one shape: `plan_declaration` and `ncclMeshCommPlanDeclared`, the WRITE
+  plan's `write_declare` and `ncclMeshWritePlanDeclared`, and `_stream.mm`'s `declared_calls` and `declared_plans` with
+  their writers. Each is a head, arrays at aligned offsets and typed places for the recorder to relocate. One record
+  codec, a field table a kind, replaces them. D10-D11: cover and traversal are shared already (mesh-tensor-layout's
   `MetalTensorCover` and `MetalTensorTraversal`, which collective_views.py reaches through `_stream`, cc1ece4b). What is
   left twice is each collective kind's roles as intervals, about 20 lines each (collective_views.py `_domains`,
   mesh_rank.m `cross_domains`). `ncclMeshCommForms` had no caller, though
