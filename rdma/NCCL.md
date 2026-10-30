@@ -312,8 +312,8 @@ See [transport.md](../design/transport.md) for registration and credit units.
       repeat j by `mesh_step_release` and `mesh_step_await` at j, and the host issues one call for them all.
     - Either form: a Metal 4 kernel binds them through its argument table; a classic one takes them as one
       `mesh_step_binding` record, and its stream names a `residencySet`, which the library fills with the buffers the
-      bindings name and the caller makes resident for its queue (torch-mesh's `torch_mesh/fused.py` on torch's
-      stream).
+      bindings name and the caller makes resident for its queue. Every frontend's fused crossing is a Metal 4 one today
+      (torch-mesh's `torch_mesh/fused.py` through `_stream.mm`, and metal-microbench's mesh_rank.m).
   - A wait polls a holding's count and nothing else: each poll one `volatile coherent(system)` load after a system-scope
     fence (`mesh.metal` `mesh_wait_bounded`; without it a running kernel saw the host's store milliseconds late:
     metal-microbench tools/poll_probe.m, 2026-10-21), and one more fence after the observed count before the landed

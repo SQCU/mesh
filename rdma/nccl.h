@@ -1097,9 +1097,9 @@ ncclResult_t ncclMeshWriteSourceReady(ncclMeshWritePlan_t plan, const void* word
    Plans in one group may share records for tiles consumed together; compilation
    then takes the last incoming prefix across those contributors on each cable. */
 ncclResult_t ncclMeshWriteLandings(ncclMeshWritePlan_t plan, void* records, uint32_t capacity, ncclMeshTileLayout layout);
-/* Execution binds what preparation made: a WRITE alone in its group (not on a fused stream) the definition its plan
-   compiled as it was prepared (an untiled plan's; a tiled one's is its declaration's), its issues laid and placed once
-   a generation; WRITEs grouped together their group's declared or first-compiled definition. */
+/* Execution binds what preparation made: a WRITE alone in its group (not on a fused stream), where the communicator has
+   no declaration (ncclMeshCommPlan), the definition its plan compiled as it was prepared (an untiled plan's), its issues
+   laid and placed once a generation; otherwise, and for WRITEs grouped together, its group's declared definition. */
 ncclResult_t ncclMeshWriteExecute(ncclMeshWritePlan_t plan, size_t invocation, cudaStream_t stream);
 ncclResult_t ncclMeshWritePlanDestroy(ncclMeshWritePlan_t plan);
 /* design/replay-templates-2026-10-29.md: the calls `plan` was made by (its page table's storage, its prepare, and the

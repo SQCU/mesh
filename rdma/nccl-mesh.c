@@ -4744,8 +4744,8 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       lands += g->fused ? own_landing(g, h) > g->start[h][1] : (uint32_t)((g->end[h][1] - g->start[h][1]) / repeats);
     }
     /* a fused group is completed at once, issued or not: its steps are records its caller's kernels run, and the
-       library encodes no wait of it; the groups in flight before it are completed first, so it completes alone on its
-       one channel's track (complete_track: the caller's kernels keep that stream's order) */
+       library encodes no wait of it; the groups in flight before it are completed first, so it completes alone, in
+       complete's fused form (each channel released once, its last landing to this rank its consumer's) */
     const int issuing = issue && !g->fused;
     if (g->fused && before) {
       result = complete(program, before, &published);
@@ -5159,7 +5159,7 @@ static ncclResult_t declared_members(struct call *c, const ncclMeshCall *d) {
 
 /* a declared call (nccl.h ncclMeshCall) as the call its function makes (collective, enqueue_counts, routed: a V form's
    counts its own copy), admitted and its operator taken (admit, reduction), with no buffers; one declared `fused` names
-   `fused_declared` as its fused stream's records, so plan_calls compiles its steps as that stream's call's (no records
+   `fused_declared` as its fused stream's records, so the group compiles and is declared as that stream's (no records
    are written to it: a group's are its issued stream's) */
 static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call *c) {
   const int n = comm->nranks, me = comm->rank,
