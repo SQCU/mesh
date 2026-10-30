@@ -1,8 +1,10 @@
 # Ownership integration tickets
 
-Recorded 2026-10-30 23:14 UTC. Source checkpoints: mesh `50c452ab` and
-metal-microbench `8a4454f2`. This divides item 1 of
-[Compiler followups](compiler-followups-2026-10-30.md) among concurrent
+Recorded 2026-10-30 23:14 UTC; handoffs updated 23:50 UTC. Committed checkpoints:
+mesh `64477c9f` (source), `0e15c86c` (rubrics), and metal-microbench `8a4454f2`.
+The ticket status below also names prepared, **uncommitted** integration work.
+It must not be read as functionality available from those commits. This divides
+item 1 of [Compiler followups](compiler-followups-2026-10-30.md) among concurrent
 integrators. It records implementation work, not a new runtime interface or a
 replacement for the [data model](data-model.md).
 
@@ -25,40 +27,34 @@ compiler and recorder provide the mechanisms. Reuse those definitions. This
 work removes repeated inference and operation-specific ownership implementations;
 it does not add an executor, submission queue, allocator or runtime policy.
 
-## Current starting point
+## Starting point and status
 
-- `native.prepare_graph` retains source values and their actual IR objects.
-  `effects` exposes work/read/write records, reduction and finish domains,
-  cached body nodes, masks and changing-index producers. The scheduler and
-  wrapper survive physical binding.
-- `compilation.normalize_source` applies existing tensor equations before
-  ownership propagation. `ownership.propagate` consumes captured result types.
-- `ownership.partial_expression` captures an existing partial reduction once,
-  including state, its collective boundary and postprocessing. This helper is
-  not yet connected to selected-domain compilation.
-- `partition.lower_owned_graph` still constructs a local FX graph and has
-  separate explicit pointwise and convolution ownership implementations. It
-  does not yet use retained IR for arbitrary output owners and local views.
-- `declarations.BoundGraph` binds ordinary numerical and collective sections,
-  but its numerical sections still enter the compiler as source graphs.
-  `torch_mesh.prepare_source` now exposes the ordinary compiler's existing
-  functionalization, tensor equations and numerical rewrites for shared use.
-  `declarations.normalize_edges` supplies the existing collective-result alias
-  normalization and returns the source aliases to its preparation callers.
-- LiteRT static indexed views now share topological page-view lowering and
-  ordered initializer ranges. Live index dependencies still need to reach its
-  ownership and product declarations through the shared access contract.
+The committed source already retains numerical IR, scalar bodies, source-value
+identities, typed access records and reduction/finish domains. `prepare_source`
+shares functionalization, tensor equations and numerical rewrites with the
+ordinary compiler. Source identities survive those rewrites and state lifting.
+LiteRT's immutable indexed views use the shared relation algebra, ordered typed
+initializers and existing encoded-value reader.
 
-After bridge alignment, actual immutable-view preparation retained reordered and
-repeated indices and named parameter expressions with no copy commands. Encoded
-gather preparation retained exact code/scale/zero selections and used the
-existing decoder. O5's immutable-view connection is prepared; its live-index
-connection remains open.
+The current integration changes select actual scalar/product work, project
+ownership through retained sections, and bind compact page storage. They have
+preparation evidence, but their ordinary distributed caller is not joined yet.
+In particular, `lower_owned_graph` now returns an ownership record while
+`Function.declare_graph` still unpacks its former `(graph, arguments)` result.
+That consumer change belongs to O4; this worktree is not a runnable completion
+of the owned-function path.
 
-The checkpoint has source, build and preparation evidence, with limits recorded
-in the followups document. The local bridge was subsequently installed through
-`bin/mesh-user.sh`; its shared region now reports layout 155, matching source.
-No numerical or whole-function performance result follows from that alignment.
+| Ticket | State at this handoff | Next connection |
+|---|---|---|
+| O1 | Selected scalar/product domains and compact native binding prepared; uncommitted | Missing external access declarations and declared domains for changing indices |
+| O2 | Retained ownership record replaces local graph reconstruction; uncommitted | Local-view scope normalization and all-rank demand propagation |
+| O3 | Numerical sections and collective projections prepared; uncommitted | Complete placement-transition expressions and their shared state edges |
+| O4 | Selected placement and ordinary retained-section binding prepared; uncommitted | Consume O2's record in `Function` and bind selected numerical/collective sections |
+| O5 | Immutable views committed; live source adapter prepared but unconnected | Feed selected ownership/access facts into existing native/provider stage emission |
+| O6 | Open | Join ordinary entry points, remove superseded paths, then build and inspect preparation |
+
+None of O1–O6 is closed by a helper alone. The later whole-function measurements
+remain part of followup 6.
 
 ## Shared handoff
 
@@ -77,13 +73,64 @@ A scheduling dependency is not a mathematical access relation. A typed value is
 not its raw encoded dependency leaves. A reduction's name is not its full source
 expression. These distinctions matter when two tickets meet.
 
+### Concrete preparation operands
+
+These names describe the current source handoff. Extend the shared record and
+its consumers together when a field is missing; do not reconstruct it in each
+frontend.
+
+| Existing producer | Record passed to its consumer |
+|---|---|
+| `partition.lower_owned_graph` | `graph`; actual local `arguments`; global captured `metadata`; `mesh`; `values` and `uses`; per-rank `requests`; `expression` and `prepared`; per-rank `projections`; `crossings`, `deliveries`, `pending`, `external`, `result` |
+| `ownership.prepare_expression` | Original expression, shared algebra and aliases, ordered sections. A numerical section retains its source/result bindings, numerical IR and access effects. |
+| `ownership.project_expression` | Ordered `output_selections`, required inputs, and section projections. Numerical projections contain `storage_bytes`, selected work/read/write records, separate `finish` work and unresolved declarations. |
+| `declarations.boundary_projection` | Local and peer input requests, collective records and unresolved declarations. Other ranks' output requests enter explicitly through `peer_outputs`. |
+| `placement.selected` | `storage`, ordered `results`, owning `pages`, and resolved consumer `uses`, passed to the retained graph's `bind`. |
+
+Source fields are keyed by `(original FX node, result-field path)`. Owner records
+retain the declared global type and every rank's ordered selection. A delivery
+names its source field, provided owner, type, section, and destination selection
+on **every** rank, including explicit empty selections. A crossing separately
+names the required placement/value transition and its before-use or after-result
+site. A delivery alone does not perform a pending reduction.
+
+Global metadata describes numerical lowering; local arguments supply actual
+pages. They must not replace one another. Logical result selections retain scalar
+units and order. `storage_bytes` and compact storage source layouts use bytes;
+`source_dtype` makes that unit explicit. Repeated result positions share values
+without losing their order.
+
+The expression's `materializations` and before/after source-identity cuts enter
+`sections(..., requested_outputs=...)` before numerical fusion. This preserves
+explicitly requested intermediate results. Retained preparation belongs to its
+exact compiler operands in `prepared['configuration']`; changed operands replace
+the cached preparation.
+
+For selected binding, call the retained graph's `select_domains(records)`, obtain
+its `consumer_uses()`, and pass those requirements to
+`placement.selected(projection, algebra=..., device=..., results=..., fixed=..., requirements=...)`.
+The algebra and device are explicit operands.
+Results supply `binding`, `selection` or `relation`, and `shape`; fixed operands
+also supply their actual page `operand`. Each consumer use supplies its key,
+binding, relation, shape, layout requirements and read/write role. Placement
+returns per-storage `{source, source_dtype, operand}` and per-use conversion
+commands attached to that consumer. The same graph's `bind(actuals, **plan)`
+emits the existing numerical program.
+Use keys are stable consumer identities; their resolved records keep the access
+role and `before`/`after` conversion commands.
+
+An unresolved declaration is preparation work still to do. Resolve it before
+binding an executable. Changing index contents remain page data; resolving their
+declared access structure never requires guessing or freezing those contents.
+
 ## Claiming and handing off work
 
 Choose a ticket and name the files and definitions you will change in the active
-agent conversation. The assignments below are the current claims, not permanent
-owners. Read other files freely. Arrange a handoff before editing a file another
-active integrator has claimed; two tickets can share a file without two agents
-editing it at once.
+agent conversation. The contacts below supplied the current work; they are not
+permanent owners or locks. At this handoff their source changes are released for
+integration. Read other files freely. Arrange a handoff before editing a file
+another active integrator has claimed; two tickets can share a file without two
+agents editing it at once.
 
 Send the adjacent owner the actual operand schema and consumer call site before
 building against a new interface. When releasing work, report its commit or
@@ -96,12 +143,12 @@ into a commit, revert their work, or run installation from uncommitted source.
 This document and agent messages are enough coordination; no lock service,
 generated inventory, linter or execution-time bookkeeping is needed.
 
-| Ticket | Current claim | Files principally edited | Depends on |
+| Ticket | Handoff contact | Files principally edited | Depends on |
 |---|---|---|---|
-| O1 — Retained access and selected numerical work | `ane_constraints` | `torch_mesh/native.py`, `torch_mesh/operand.py` | Existing retained-IR checkpoint |
-| O2 — Whole-graph owner propagation | Root integrator | `torch_mesh/partition.py` | O1 records; O3 expression handoff |
+| O1 — Retained access and selected numerical work | `ane_constraints` | `torch_mesh/native.py`, `torch_mesh/operand.py`, shared index emission in `algebra.py`, `rdma/mesh_matrix.py` | Existing retained-IR checkpoint |
+| O2 — Whole-graph owner propagation | `sparse_reshape` | `torch_mesh/partition.py`, ownership records in `ownership.py` | O1 records; O3 expression handoff |
 | O3 — Source and partial-expression sections | `sparse_reshape` | `torch_mesh/ownership.py`, `torch_mesh/compilation.py` | O1 projection; existing `declarations.sections` |
-| O4 — Bind the retained graph once | Root integrator | `torch_mesh/declarations.py`, `torch_mesh/__init__.py` | O1–O3 |
+| O4 — Bind the retained graph once | Root integrator; `output_domains` for selected placement | `torch_mesh/declarations.py`, `torch_mesh/__init__.py`; `torch_mesh/placement.py` | O1–O3 |
 | O5 — LiteRT access adapter | `output_domains` | microbench `tools/prepare_e2b.py` | Shared relation/access contract; O1 coordination |
 | O6 — Joined preparation and removal of superseded paths | Root integrator with ticket owners | Connected call sites and this document | O1–O5 |
 
@@ -109,7 +156,25 @@ Here `torch_mesh/` means `rdma/torch-mesh/torch_mesh/` in mesh. Changes to
 `rdma/mesh_relation.py`, `mesh-index-relation.[hm]`, `mesh_matrix.py` or native
 headers need a named handoff because both frontends consume them.
 
+O1's declarations, O4's placement and O5's source adapter can advance in parallel
+once their operand fields agree. O2 and O3 share `ownership.py`; keep one editor
+there or hand off named definitions. O4 owns the final `Function`/`BoundGraph`
+consumer changes, so O2/O3 do not independently rewrite those callers. O6 follows
+the joined interfaces. The new ownership return value and its ordinary caller
+must land together as a usable source change.
+
+The current shared-file edits are specific: O1 owns index-expression emission in
+`algebra.py`; O2 removes its obsolete `owned_product`; O4's placement work changes
+only `TensorView.storage_as` in O1's `operand.py`. Review those hunks with their
+respective owners. A ticket is not permission to collect every dirty file.
+
 ## O1 — Retained access and selected numerical work
+
+**Resume here:** complete missing mathematical declarations for external commands
+and declared access domains for changing-index consumers. Pending records name
+those gaps. Preserve the selected scalar/product implementation already prepared.
+Ordinary reduction unrolling is deferred until ownership selection; pool-local
+unrolling overrides still need reconciliation with that pass order.
 
 **Implement:** expose exact typed storage coordinates from the retained body and
 value bindings. Compose output demand with writes to select work, then compose
@@ -128,10 +193,16 @@ receives the retained graph ready for physical binding and emission.
 
 **Completion evidence:** actual preparation shows selected work in emitted
 dispatches and source bindings; typed aliases, masked accesses, changing index
-dependencies and empty reduction finishes retain their declared meaning. Graph
-and body identities show that projection did not rebuild the numerical program.
+dependencies and empty reduction finishes retain their declared meaning. Retain
+the IR, scheduler and cached scalar graphs. Index substitution may create ordinary
+`LoopBody` wrappers; empty finishes derive their declared identity body. Neither
+requires another source capture or full numerical lowering.
 
 ## O2 — Whole-graph owner propagation
+
+**Resume here:** normalize declared local-view scopes into global source
+relations, and join every rank's requests across collective boundaries. Keep the
+new record return value; coordinate its caller change with O4.
 
 **Implement:** use source value/result identities to carry explicit owners and
 schema-derived ownership through the retained graph. Propagate requests backward
@@ -139,10 +210,11 @@ through read/write relations. Factories, returned inputs, local views, correlate
 cuts and compound outputs use the same mechanism. An operation without tensor
 inputs still has its declared result domain.
 
-Replace `_owned_pointwise` and `_owned_convolution` ownership reconstruction when
-their shared consumer is connected. Retain their existing numerical equations
-and product kernels. Preserve pending reductions on ordinary local operands;
-their meaning cannot depend on retaining a DTensor wrapper.
+The worktree removes `_owned_pointwise`, `_owned_convolution`, the local FX
+retrace and obsolete `algebra.owned_product`. Complete their shared caller using
+the retained numerical equations and product kernels. Preserve pending
+reductions on ordinary local operands; their meaning cannot depend on retaining
+a DTensor wrapper.
 
 **Handoff:** O3 supplies full partial expressions; O1 supplies access projection;
 O4 consumes the resulting numerical work, source pages and crossings. Ownership
@@ -154,6 +226,12 @@ selections. Input requests and produced domains follow the retained relations;
 no implicit replication or whole-result computation fills a missing connection.
 
 ## O3 — Source and partial-expression sections
+
+**Resume here:** join the whole declared placement transition, including state
+produced by one part and consumed by a later part. The current partial-expression
+helper and collective projection are not yet that complete connection. Source
+capture has exposed the exact producing node for shared mask state; retaining
+that edge through the common functionalization is still implementation work.
 
 **Implement:** prepare numerical sections of an existing source expression once,
 split at its declared collective or provider boundaries, and retain original
@@ -176,6 +254,12 @@ per declaration, original state identities survive, and selected collective
 configuration matches the expression's contributor and normalization semantics.
 
 ## O4 — Bind the retained graph once
+
+**Resume here:** update `Function.declare_graph` to consume O2's ownership record
+and feed each rank's selected sections into placement/binding. Keep actual local
+`arguments` distinct from the global metadata in `prepared['expression']`.
+`BoundGraph` currently replaces its arguments with that metadata when given
+`prepared`; fix that handoff while joining compact owned storage.
 
 **Implement:** make ordinary `Function`/`BoundGraph` preparation consume O1–O3's
 retained numerical sections. Share the existing compiler's functionalization,
@@ -200,6 +284,24 @@ page bindings agree at numerical/collective boundaries.
 
 ## O5 — LiteRT access adapter
 
+**Resume here:** connect `prepare_e2b.indexed_source` to selected ownership/access
+lowering and the existing native/provider stage emitter. Its source adapter is
+prepared but has no live importer-stage consumer yet. Resolve the common logical
+scalar-emission handoff with O1/O4 before changing individual operators.
+
+The adapter returns a source graph and explicit operands. Placeholder metadata
+`mesh_litert_operand`, source-node metadata `mesh_litert_origin`, and module
+metadata `mesh_litert_outputs` retain the importer bindings. Use those edges
+through shared preparation. The artifact consumer remains the existing native
+stage/Metal recorder or declared provider; source capture adds no PyTorch
+execution dependency to the imported program.
+
+Immutable encoded **data** views already retain their typed reader. Evaluating
+encoded integer **index values** during preparation is still open:
+`constant_integers` currently folds ordinary immutable scalar views. Until that
+shared reader connection exists, encoded indices retain their typed graph
+operands; their storage bytes are not interpreted as ordinary integer indices.
+
 **Implement:** with immutable indexed-view preparation completed against the
 shared algebra, carry live index operands and their dependencies into existing
 operation/product declarations. Keep ordered typed pieces and their scalar
@@ -216,6 +318,10 @@ commands receive selected page operands and precise dependencies. Encoded values
 use the shared reader; their raw storage is never silently treated as a scalar.
 
 ## O6 — Joined preparation and removal of superseded paths
+
+**Resume here:** after the producer/consumer handoffs are joined, inspect the
+ordinary entry points against the finish line above. O6 closes the shared path;
+it does not add another wrapper that hides an incomplete O1–O5 connection.
 
 **Implement:** connect the tickets through ordinary entry points and remove the
 replaced ownership reconstruction and duplicate preparation paths. Reconcile
@@ -247,3 +353,33 @@ implementation without editing the tensor ownership solver. The crossing is the
 existing collective API with declared calls and page operands. Shared header or
 layout changes require the same explicit handoff and normal committed-source
 installation as other changes.
+
+## Preparation evidence at this handoff
+
+- O1 prepared unequal reduction fibers, small reductions whose axes survive
+  ownership, segmented products, and empty selected fibers with their declared
+  finish outputs. Selection changes the emitted work, not just the output view.
+- O2/O3 retained the global SUM and matrix graphs while selecting unequal K
+  contributions. Matrix output followed by ReLU retained two sections with an
+  explicit unresolved partial-to-replicated transition before ReLU. That record
+  identifies unfinished integration, not a runnable substitute.
+- O3's collective projection retained typed gather/scatter offsets, local
+  identities, untouched output-view regions and the original AVG divisor. The
+  source also represents indivisible reducer elements; this handoff does not
+  include preparation evidence for multi-scalar elements. Peer requests still
+  need O2's graph-wide connection.
+- O4 prepared compact selected products through `select_domains`,
+  `consumer_uses`, `placement.selected` and native `bind`. Byte aliases, mixed
+  scalar widths, repeated/strided results, empty outputs and required per-use
+  layout conversions kept their declared page relations. Ordinary numerical
+  sections emitted `Program` directly, without recursive `Function` compilation.
+- O5 prepared live indexed source expressions through shared source lowering
+  and native access extraction. This did not connect the importer stage emitter.
+
+A requested partial contraction retains its reduction axis until ownership is
+applied. `finish.work` assigns finishing work from the source semantics: an
+explicit partial bias share may run per contributor, while a noncommuting finish
+follows the complete reduction. A partial K size alone determines neither choice.
+Unrolling that erases the axis before placement is a pass-order error.
+These observations establish preparation behavior only. No numerical or
+whole-function latency/throughput result is attributed to this integration.
