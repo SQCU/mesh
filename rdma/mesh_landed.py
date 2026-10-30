@@ -31,8 +31,9 @@ def watch(path):
 
 
 def use(points, width):
-    """each window's bytes landed, by window from the first landing"""
-    first, windows = points[0][0], {}
+    """each window's bytes landed, by window from the first landing after the watch began (the first pair is the ports'
+    state as the watch began, stamped with whatever landed last before it)"""
+    first, windows = points[1][0], {}
     for (_, before), (at, after) in zip(points, points[1:]):
         windows[(at - first) // width] = windows.get((at - first) // width, 0) + after - before
     return windows
