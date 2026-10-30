@@ -1886,6 +1886,30 @@ to typed element views uses the same layout algebra, preserving mappings.
 The shared index emitter retains grouped layouts as arithmetic when a cut starts
 inside a group; it does not introduce a lookup table for that phase.
 
+File import now accepts ordered input, output and expert selections. Its one
+preparation record names the distinct source rows and encoded blocks, and the
+logical row and lane order over that storage. File imports and resident cuts
+share the block-selection operation. Repeated uses retain one stored block;
+disjoint cuts do not import intervening blocks. A requested sub-selection of a
+stored shard maps through its declared coordinates before import.
+
+BF16 and parameter-override matrices retain their declared scalar encoding.
+The existing numerical loaders consume it directly. The matrix-only conversion
+to FP16 is removed. Goal A, native FFNs and streamed matrices now carry ordered
+interval lists through this same importer and the existing ANE manifest binding;
+the former single-interval interface and unused ANE column envelope are removed.
+Table gathers consume `StoredMatrix` through the shared scalar and quantized
+readers too. The half-only table argument, scalar-only view accessor and FP16-only
+collective embedding filter are removed. The type reaches the numerical reader
+without a conversion command or runtime format choice.
+
+Preparation on 2026-10-29 inspected encoded imports with reordered and repeated
+rows, columns and experts, partial blocks, different row groups and empty
+selections. The emitted lane relation retained the original block bytes. Native
+rank and Goal A built, and table-gather shaders compiled for the supported scalar
+and quantized readers with mapped block views. No numerical command ran. LiteRT's multi-axis graph cuts
+and the provider contracts described above remain open.
+
 The numerical byte view composes each selected column with its encoded block
 during preparation. The decoder reads that address directly. It does not use a
 column-table result to index another block table. Its lane relation supplies the
