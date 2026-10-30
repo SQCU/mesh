@@ -40,10 +40,10 @@ def placement(mesh, name, workload, chosen=None, *, parameters, forms=()):
     # One proposal on every member (rubric C7): the solve's floating point can round its parts differently on another
     # node's hardware, and a split a row apart makes the members bind different bytes for one WRITE (hourly
     # 2026-10-29T06:21Z, chain-n3 and lstm-n3: "rank 4's bytes 493568 is not rank 0's 495616"). Rank 0's parts and
-    # operands are taken: its report of the configuration gather, on every member.
+    # operands are taken, broadcast on the configuration channel.
     proposal = ({'parts': {k: [int(v) for v in values] for k, values in operands['parts'].items()},
                  'operands': {k: int(v) for k, v in operands['operands'].items()}} if rank == 0 else None)
-    operands = {**operands, **group.exchange_configuration(proposal)[0]}
+    operands = {**operands, **group.broadcast_configuration(proposal)}
     partition._attach(mesh, name, operands['parts'][name])
     # every member leaves together, each having waited for rank 0's proposal; the fit is named, to be passed again
     emit({'phase': 'placed', 'unix': time.time(), 'placement': {'parts': operands['parts'], 'operands': operands['operands']}})

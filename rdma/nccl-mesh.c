@@ -1308,6 +1308,19 @@ static int exchange(struct ncclComm *comm, void *rows, size_t bytes, int heard, 
   for (int r = 1; r < n && !status; r++) status = peers[r] < 0 ? ENOTCONN : whole(comm, peers[r], r, table, (size_t)n * bytes, 1);
   return status;
 }
+/* `bytes` at `data` made the root's on every rank, on comm's bootstrap sockets within its phase (`until`): a root
+   other than rank 0 sends them to rank 0, which sends them to each other rank.  NCCL's bootstrapBroadcast; never a
+   payload's.  0, or the errno (whole) */
+static int broadcast(struct ncclComm *comm, int root, void *data, size_t bytes) {
+  const int n = comm->nranks, *peers = comm->peers;
+  if (n == 1) return 0;
+  if (!peers) return ENOTCONN;
+  if (comm->rank) return peers[0] < 0 ? ENOTCONN : whole(comm, peers[0], 0, data, bytes, comm->rank == root);
+  int status = !root ? 0 : peers[root] < 0 ? ENOTCONN : whole(comm, peers[root], root, data, bytes, 0);
+  for (int r = 1; r < n && !status; r++)
+    if (r != root) status = peers[r] < 0 ? ENOTCONN : whole(comm, peers[r], r, data, bytes, 1);
+  return status;
+}
 
 /* this rank's report of its bridge's node, the nodes it reaches (mesh-call.h mesh_nodes_reached) and the streams free to
    take (mesh_streams_free) */
@@ -4777,20 +4790,31 @@ static int prepare_exchange_locked(ncclComm_t comm, const void *local, size_t by
   memcpy((unsigned char *)reports + (size_t)comm->rank * bytes, local, bytes);
   return exchange(comm, reports, bytes, 0, 0);
 }
-static ncclResult_t prepare_exchange(struct ncclComm *comm, const void *local, size_t bytes, void *reports) {
+/* one configuration phase under prepare, within MESH_PREPARATION_NS: every rank's `bytes` gathered into `data` from
+   `local` (`root` -1), or the root's `bytes` at `data` on every rank */
+static ncclResult_t prepare_phase(struct ncclComm *comm, int root, const void *local, size_t bytes, void *data) {
   pthread_mutex_lock(&comm->prepare);
   atomic_fetch_add(&comm->runs, 1);
   comm->until = mesh_deadline("libnccl-mesh: fixed function configuration metadata", MESH_PREPARATION_NS);
-  const int error = prepare_exchange_locked(comm, local, bytes, reports);
+  const int error = root < 0 ? prepare_exchange_locked(comm, local, bytes, data) : broadcast(comm, root, data, bytes);
   atomic_fetch_sub(&comm->runs, 1);
   pthread_mutex_unlock(&comm->prepare);
   return error ? fail(ncclRemoteError, "communicator %s: its configuration exchange: %s", comm->name, strerror(error)) : ncclSuccess;
+}
+static ncclResult_t prepare_exchange(struct ncclComm *comm, const void *local, size_t bytes, void *reports) {
+  return prepare_phase(comm, -1, local, bytes, reports);
 }
 
 ncclResult_t ncclMeshCommConfigGather(ncclComm_t comm, const void *local, void *reports, size_t bytes) {
   if (!comm || (bytes && (!local || !reports)) || bytes > SIZE_MAX / (size_t)comm->nranks)
     return fail(ncclInvalidArgument, "configuration metadata requires equal, representable rank extents");
   return bytes ? prepare_exchange(comm, local, bytes, reports) : ncclSuccess;
+}
+
+ncclResult_t ncclMeshCommConfigBroadcast(ncclComm_t comm, int root, void *data, size_t bytes) {
+  if (!comm || root < 0 || root >= comm->nranks || (bytes && !data))
+    return fail(ncclInvalidArgument, "a configuration broadcast requires a member root and its bytes");
+  return bytes ? prepare_phase(comm, root, NULL, bytes, data) : ncclSuccess;
 }
 
 ncclResult_t ncclMeshCommRealized(ncclComm_t comm) {

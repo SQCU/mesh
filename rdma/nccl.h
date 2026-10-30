@@ -1011,6 +1011,11 @@ ncclResult_t ncclMeshCommWriteEntries(ncclComm_t comm, int root, const int* dest
    bytes gathered into rank-major reports. Uses the retained configuration
    channel, with the communicator's deadline; never a payload receipt. */
 ncclResult_t ncclMeshCommConfigGather(ncclComm_t comm, const void* local, void* reports, size_t bytes);
+/* Realization metadata only, before function execution: the root's fixed
+   bytes at `data` on every rank, no other rank sending any. Uses the retained
+   configuration channel, with the communicator's deadline; every rank passes
+   the same root and bytes. */
+ncclResult_t ncclMeshCommConfigBroadcast(ncclComm_t comm, int root, void* data, size_t bytes);
 /* Finish realization after encoding the complete function. Peers exchange the
    compiled send/landing list ends on every cable and match both directions.
    This is a compiler operation, before submission; no runtime invocation calls it. */

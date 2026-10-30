@@ -296,7 +296,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
         """Every rank's `value` (JSON), in rank order, before the function runs: the communicator's configuration
         channel (nccl.h ncclMeshCommConfigGather), whose ranks each give the same extent, so each rank's encoded
         length is gathered first and then each encoding padded to the longest (mesh_rank.m MeshRankPlan's two
-        gathers). Every rank calls it at the same point; a broadcast is this gather read at its root's report."""
+        gathers). Every rank calls it at the same point."""
         import json
         local, n = json.dumps(value).encode(), self._size
         lengths = ffi.new('uint64_t[]', n)
@@ -306,6 +306,18 @@ class ProcessGroupMesh(dist.ProcessGroup):
         reports = ffi.new('char[]', n * room)
         check(LIB.ncclMeshCommConfigGather(self.comm, ffi.from_buffer(local.ljust(room, b'\0')), reports, room))
         return [json.loads(ffi.unpack(reports + r * room, lengths[r])) for r in range(n)]
+
+    def broadcast_configuration(self, value, root=0):
+        """Rank `root`'s `value` (JSON) on every rank, before the function runs (nccl.h ncclMeshCommConfigBroadcast):
+        its encoded length, then its encoding, each the root's bytes alone; another rank's `value` is not read. Every
+        rank calls it at the same point."""
+        import json
+        local = json.dumps(value).encode() if self._rank == root else b''
+        length = ffi.new('uint64_t *', len(local))
+        check(LIB.ncclMeshCommConfigBroadcast(self.comm, root, length, ffi.sizeof('uint64_t')))
+        data = ffi.new('char[]', local if self._rank == root else length[0])
+        check(LIB.ncclMeshCommConfigBroadcast(self.comm, root, data, length[0]))
+        return json.loads(ffi.unpack(data, length[0]))
 
     def union_cuts(self, cuts):
         """Agree view boundaries during configuration, before the function runs."""
