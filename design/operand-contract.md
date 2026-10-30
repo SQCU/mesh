@@ -1522,6 +1522,23 @@ provider result exposes that result before the consumer. These are preparation
 boundaries; no numerical view operation or wait is added. The exported binding
 names its final producer directly, without a chain of view descriptors.
 
+Read-view sources now enter `mesh_graph` dependency selection and stage
+frontiers. Pruning keeps their producers; a view of an internal result does not
+become an external input. Extraction, append and partial/finish splitting retain
+that source, including when the finish changes the producer's identity.
+Each occurrence in a concatenation can select different positions from one
+producer. These uses share the existing page-binding compiler. Constant uses
+share the encoded selector, including sparse and per-channel metadata.
+Composites containing such uses expose their existing decomposition to the
+same stage cutter.
+
+Preparation on 2026-10-29 serialized a cut across two occurrences of one input,
+retaining columns 4–5 for the first use and 0–1 for the second. The same views
+survived a local producer, partial/finish splitting, append and composite
+expansion. A join of cut and unconstrained inputs retained both domains. FX
+dependency pruning and stage extraction also prepared through `mesh_graph`.
+No numerical execution or performance measurement ran.
+
 The provider binder now resolves those relations through `MetalTensorLayout`.
 `configs/litert-storage.json` declares each provider buffer class's integer
 storage relation and scalar encoding; preparation exports that contract with

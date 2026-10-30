@@ -90,6 +90,13 @@ class Algebra:
         text = '{ [' + ','.join(names) + '] -> [p] : ' + ' and '.join([*bounds(shape, names), equation]) + ' }'
         return IndexRelation(self, self.map_read_from_str(self.ctx, text.encode()), shape)
 
+    def unconstrained(self, shape, extent):
+        """Every declared position may be used by every owner."""
+        names = coordinates(shape, 'i')
+        text = '{ [' + ','.join(names) + '] -> [p] : ' + ' and '.join([
+            *bounds(shape, names), f'0 <= p < {int(extent)}']) + ' }'
+        return IndexRelation(self, self.map_read_from_str(self.ctx, text.encode()), shape)
+
 
 class _Object:
     def __init__(self, algebra, pointer):
@@ -197,11 +204,8 @@ class IndexRelation(_Object):
 
     def complete(self, extent):
         """An operation imposes no owner constraint outside the values it uses."""
-        names = coordinates(self.shape, 'i')
-        text = '{ [' + ','.join(names) + '] -> [p] : ' + ' and '.join([
-            *bounds(self.shape, names), f'0 <= p < {int(extent)}']) + ' }'
-        universe = self.algebra.checked(self.algebra.map_read_from_str(self.algebra.ctx, text.encode()))
-        outside = self.algebra.map_subtract_domain(universe, self.algebra.map_domain(self.copy()))
+        universe = self.algebra.unconstrained(self.shape, extent)
+        outside = self.algebra.map_subtract_domain(universe.copy(), self.algebra.map_domain(self.copy()))
         return IndexRelation(self.algebra, self.algebra.map_union(outside, self.copy()), self.shape)
 
     def axes(self, shape, pairs):
