@@ -93,13 +93,19 @@ would lose contributions from repeated reads.
 
 Placement retains a function from each byte to its component representative and
 displacement. New field equations join those representatives before the result
-is composed back onto the bytes. This preserves the equations without expanding
-every pair of bytes in components that are already resolved. Larger declared
-fields enter first; this changes preparation work, not the requested layouts.
+is composed back onto the bytes. Each representative moves toward a smaller
+neighbor; function composition compresses the resulting paths. The original
+field edges remain available to check consistency after relabeling. This
+preserves the equations without expanding every pair of bytes in a component.
+Larger declared fields enter first; this changes preparation work, not the
+requested layouts.
 The captured attention and partial-output convolution placement operands now
 complete. Preparation also retains consumer footprints, non-power-of-two base
 alignment and fixed caller pages when a conflicting layout needs a conversion.
-Full partial-output convolution binding is still under preparation review.
+Full partial-output convolution now completes page assembly, native binding and
+shader preparation. Consistent offset cycles retain their displacements;
+contradictory offsets and distinct-byte collisions remain infeasible. A
+trillion-byte contiguous declaration stays symbolic in this same solve.
 
 ## Remaining operator connections
 

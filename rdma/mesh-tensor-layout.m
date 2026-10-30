@@ -785,6 +785,9 @@ static isl_map *TensorSplitRelation(isl_set *set,unsigned inputs) {
 }
 static isl_map *TensorEquations(MetalTensorLayout *values,isl_pw_aff *group,isl_pw_aff *position) {
     isl_ctx *ctx=isl_pw_aff_get_ctx(group);
+    // A changed logical shape can expose affine axes in an existing index
+    // expression. Use the shared exact normalization before joining fields.
+    values=[values shaped:values.shape coordinates:values.coordinates];
     isl_pw_multi_aff *groups=isl_pw_multi_aff_from_pw_aff(group);
     isl_pw_multi_aff *first=isl_pw_multi_aff_from_map(isl_map_lexmin(isl_map_reverse(
         isl_map_from_pw_multi_aff(isl_pw_multi_aff_copy(groups)))));
@@ -800,16 +803,35 @@ static isl_map *TensorEquations(MetalTensorLayout *values,isl_pw_aff *group,isl_
     return MeshIndexNormalize(isl_map_union(isl_map_copy(edges),isl_map_reverse(edges)));
 }
 static isl_map *TensorJoinEquations(isl_map *roots,isl_map *fields,NSUInteger count,isl_map *forbidden) {
-    // Existing components are functions from each byte to its representative
-    // and displacement. New fields connect those representatives; they do not
-    // require all pairs of bytes in each already resolved component.
-    fields=MeshIndexNormalize(isl_map_apply_range(isl_map_apply_range(
-        isl_map_reverse(isl_map_copy(roots)),fields),isl_map_copy(roots)));
-    if(isl_map_is_identity(fields)==isl_bool_true){isl_map_free(fields);return roots;}
-    fields=isl_map_union(fields,isl_set_identity(isl_map_range(isl_map_copy(roots))));
-    fields=MeshIndexClosure(fields,count,MeshIndexSymmetricClosure,forbidden);
-    if(!fields){isl_map_free(roots);return NULL;}
-    return MeshIndexNormalize(MeshIndexCompose(roots,isl_map_lexmin(fields)));
+    // Each root is a function from a byte and displacement to its component.
+    // Relabel the original field edges, hook to a smaller neighbor, and
+    // compress that function. There is no need to construct every byte pair.
+    while(roots) {
+        isl_map *links=MeshIndexNormalize(isl_map_apply_range(isl_map_apply_range(
+            isl_map_reverse(isl_map_copy(roots)),isl_map_copy(fields)),isl_map_copy(roots)));
+        if(!links||isl_map_is_disjoint(links,forbidden)!=isl_bool_true) {
+            isl_map_free(links);isl_map_free(roots);roots=NULL;break;
+        }
+        if(isl_map_is_identity(links)==isl_bool_true){isl_map_free(links);break;}
+        links=isl_map_union(links,isl_set_identity(isl_map_range(isl_map_copy(roots))));
+        isl_map *hook=isl_map_lexmin(links);
+        // Root identities decrease along every nontrivial edge. A finite
+        // component has no longer simple path than its declared byte count.
+        for(NSUInteger length=1;hook&&length<count;) {
+            isl_map *next=MeshIndexCompose(isl_map_copy(hook),isl_map_copy(hook));
+            isl_bool same=isl_map_is_equal(next,hook);isl_map_free(hook);hook=next;
+            if(same==isl_bool_error){isl_map_free(hook);hook=NULL;break;}
+            if(same==isl_bool_true)break;
+            length=length>count/2?count:length*2;
+        }
+        roots=MeshIndexNormalize(MeshIndexCompose(roots,hook));
+        // Distinct bytes must retain distinct positions within a component.
+        // Check the zero-displacement slice, rather than all translated pairs.
+        isl_map *positions=isl_map_fix_si(isl_map_copy(roots),isl_dim_in,1,0);
+        isl_bool distinct=isl_map_is_injective(positions);isl_map_free(positions);
+        if(distinct!=isl_bool_true){isl_map_free(roots);roots=NULL;}
+    }
+    isl_map_free(fields);return roots;
 }
 MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *> *uses,
     NSArray<MetalTensorLayout *> *targets,NSArray<NSArray<NSNumber *> *> *footprints,
@@ -836,6 +858,7 @@ MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *
         NSUInteger k=item.unsignedIntegerValue;
         MetalTensorLayout *value=values[k];NSUInteger width=widths[k].unsignedIntegerValue;
         NSCParameterAssert(width&&value.count%width==0);
+        if(width==1)continue; // A one-unit field adds no relative-position equation.
         isl_map *fields=TensorEquations(value,
             MeshIndexExpression(ctx,@[@"div",@"i",@(width)],0,value.count),
             MeshIndexExpression(ctx,@[@"mod",@"i",@(width)],0,value.count));
@@ -875,6 +898,7 @@ MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *
     allowed=isl_map_intersect_domain(isl_map_read_from_str(ctx,"{ [r] -> [b] }"),isl_set_copy(rootIds));
     for(NSUInteger k=0;k<values.count;k++) {
         NSUInteger width=widths[k].unsignedIntegerValue;
+        if(width==1)continue; // Every integer position has unit alignment.
         isl_set *starts=isl_set_read_from_str(ctx,[[NSString stringWithFormat:@"{ [i] : i mod %lu = 0 }",(unsigned long)width] UTF8String]);
         starts=isl_map_range(isl_map_intersect_domain(MeshIndexRelation(ctx,values[k]),starts));
         starts=isl_set_apply(starts,isl_map_copy(roots));
