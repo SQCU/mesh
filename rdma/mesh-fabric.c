@@ -17,48 +17,6 @@ int mesh_fabric_check(const struct mesh_fabric *f){
   return 0;
 }
 
-int mesh_fabric_stripe(const struct mesh_fabric *f,uint32_t rank,const struct mesh_step *step,uint64_t page,
-                       const uint64_t *weights,struct mesh_transfer *out,uint32_t room){
-  if(mesh_fabric_check(f) || !step || rank>=f->nodes || step->peer>=f->nodes || rank==step->peer ||
-     step->op>MESH_STEP_COPY || !step->piece.element_bytes)return -EINVAL;
-  if(step->piece.elements>UINT64_MAX-step->first)return -EOVERFLOW;
-  if(!step->piece.elements)return 0;
-  uint32_t n=0;
-  for(uint32_t e=0;e<f->cables;e++){
-    const struct mesh_cable *c=f->cable+e;
-    if(!((c->node[0]==rank && c->node[1]==step->peer) || (c->node[1]==rank && c->node[0]==step->peer)))continue;
-    const uint64_t w=weights? weights[e]:(c->bandwidth? c->bandwidth:1);
-    (void)w;
-    n++;
-  }
-  if(!n)return -ENOLINK;
-  uint32_t *first=calloc((size_t)n+1,sizeof *first),*cable=calloc(n,sizeof *cable);
-  uint64_t *logs=calloc(n,sizeof *logs);
-  if(!first || !cable || !logs){free(first);free(cable);free(logs);return -ENOMEM;}
-  /* A logical collective edge supplies a direct-path configuration to the
-     same compiler as an explicitly routed WRITE. There is no second flow
-     allocator, compulsory per-cable page, or first-cable selection here.
-     Relay participation is declared by the enclosing logical dataflow; the
-     WRITE interface also admits relay paths inside an individual transaction. */
-  for(uint32_t e=0,k=0;e<f->cables;e++){
-    const struct mesh_cable *c=f->cable+e;
-    if(!((c->node[0]==rank && c->node[1]==step->peer) || (c->node[1]==rank && c->node[0]==step->peer)))continue;
-    const uint64_t w=weights? weights[e]:(c->bandwidth? c->bandwidth:1);
-    first[k]=k;cable[k]=e;logs[k]=w;k++;
-  }
-  first[n]=n;
-  const struct mesh_paths paths={n,first,cable,logs};
-  const uint32_t source=step->op==MESH_STEP_SEND?rank:step->peer;
-  const uint32_t destination=step->op==MESH_STEP_SEND?step->peer:rank;
-  const int written=mesh_write_compile(f,rank,source,destination,&paths,step->piece,page?page:1,0,out,room);
-  for(int k=0;out && k<written;k++){
-    const uint64_t offset=out[k].step.first,elements=out[k].step.piece.elements;
-    out[k].step=*step;out[k].step.first+=offset;out[k].step.piece.elements=elements;
-  }
-  free(first);free(cable);free(logs);
-  return written;
-}
-
 static int mesh_cut_order(const void *a,const void *b){
   const uint64_t x=*(const uint64_t *)a,y=*(const uint64_t *)b;
   return (x>y)-(x<y);

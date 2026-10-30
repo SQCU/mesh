@@ -13,9 +13,7 @@ the same ordered cable table. Local endpoint bindings index this table.
 
 `mesh_routed_compile` lowers the complete typed collective graph through
 `mesh_write_compile` into `mesh_transfer` records, each with an explicit cable
-index and buffer interval. Parallel capacities add. `mesh_fabric_stripe` is a
-direct-edge adapter to that same write allocator, not a second collective
-transport or an application routing interface.
+index and buffer interval. Parallel capacities add.
 The compiler apportions payload using the selected path weights and preserves
 the total exactly. It does not reserve a mandatory page or quantum for every
 cable: a forced floor changes the solver's vector and can introduce unnecessary

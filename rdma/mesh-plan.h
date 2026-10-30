@@ -164,12 +164,6 @@ static inline uint64_t mesh_segment_first(const uint64_t *segment,uint32_t q){ u
 /* design/whole-function.md#fabric */
 struct mesh_transfer { struct mesh_step step; uint32_t cable,padding; };
 int mesh_fabric_check(const struct mesh_fabric *);
-/* Logical-edge adapter to mesh_write_compile with all directly joining cables
-   supplied as its path configuration. Copies/reductions retain their typed
-   logical operation, buffer, round and offset. No independent allocation
-   algorithm or first-cable transport implementation lives in this adapter. */
-int mesh_fabric_stripe(const struct mesh_fabric *,uint32_t rank,const struct mesh_step *,uint64_t page,
-                       const uint64_t *weights,struct mesh_transfer *,uint32_t room);
 /* Refine physical SENDs where their latest preceding receive changes: a COPY's
    interval is an identity source; REDUCE or no receive is not. Only receives in
    the same buffer with the same element size participate. Adjacent pieces with
