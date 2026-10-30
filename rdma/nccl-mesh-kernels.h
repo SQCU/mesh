@@ -256,9 +256,11 @@ static const uint8_t WORD[KINDS] = {KINDS_OF(KIND_WORD)};
 static const uint8_t LANES[KINDS] = {KINDS_OF(KIND_LANES)};
 
 /* the track kernel (nccl-mesh-metal.h metal_tracks; rdma/NCCL.md "Per-channel progress"): every completion's work, on
-   any number of tracks, run by a pool of workers that no track owns.  A worker is a threadgroup; its thread 0 scans the
-   cursors (each track's publications, then its consumptions, from a track that differs worker by worker) for the
-   current task of one whose conditions hold, and claims a chunk of it: an atomic count of the task's chunks claimed,
+   any number of tracks, run by a pool of workers that no track owns, at most one a GPU core (metal_tracks).  A worker
+   is a threadgroup; its thread 0, after one system-scope fence a pass (so the pass's loads see the NIC's and the other
+   workers' stores), first looks at the task it last ran (the next task of its cursor where it moved that cursor), and
+   else scans the cursors (each track's publications, then its consumptions, from a track that differs worker by
+   worker) for the current task of one whose conditions hold, and claims a chunk of it: an atomic count of the task's chunks claimed,
    compared and exchanged where the chunk's own pages decide (a landing's, TASK_PACED: no worker claims a chunk whose
    pages have not landed, so none ever waits inside a step for data), else added to.  Every thread then runs the
    chunk as threadgroup c of its step's own grid (i = c t + l, g = the step's chunks x t: the body a dispatch of that
@@ -295,7 +297,6 @@ static NSString *const TRACKS =
   "static inline bool track_ready(constant track_task &x, uint c, constant track_cursor *cursors, constant track_task *tasks, "
   "constant track_item *items, constant track_op *ops, constant track_dep *deps, volatile coherent(system) device ulong *count, "
   "device atomic_uint *state) { "
-  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); "
   "if (x.flags & 1u) { constant track_item &it = items[x.item]; "
   "for (uint k = 0; k < it.deps; k++) if (count[deps[it.first_dep + k].other] < deps[it.first_dep + k].count) return false; "
   "if (cursors[x.cursor].kind == 1u) { const uint q = x.cursor - 1, j = atomic_load_explicit(state + q, memory_order_relaxed); "
@@ -323,9 +324,14 @@ static NSString *const TRACK_KERNEL =
   "device atomic_uint *state = (device atomic_uint *)(ring + h.state_off), *claim = (device atomic_uint *)(ring + h.claim_off), "
   "*done = (device atomic_uint *)(ring + h.done_off), *advanced = (device atomic_uint *)(ring + h.progress_off); "
   "threadgroup ulong tg[4]; threadgroup uint pick[3]; "
-  "const uint tracks = h.cursors / 2; ulong looks = 0; uint seen = 0; "
+  "const uint tracks = h.cursors / 2; ulong looks = 0; uint seen = 0, last = ~0u; "
   "for (;;) { "
   "if (l == 0) { uint chosen = ~0u, chunk = 0, open = 0, checked = 0; "
+  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); "
+  "if (last != ~0u) { constant track_task &x = tasks[last]; uint c = atomic_load_explicit(claim + last, memory_order_relaxed); "
+  "if (c < x.chunks && track_ready(x, c, cursors, tasks, items, ops, deps, count, state) && ((x.flags & 4u) "
+  "? atomic_compare_exchange_weak_explicit(claim + last, &c, c + 1, memory_order_relaxed, memory_order_relaxed) "
+  ": (c = atomic_fetch_add_explicit(claim + last, 1u, memory_order_relaxed)) < x.chunks)) { chosen = last; chunk = c; open = 1; } } "
   "for (uint kind = 0; kind < 2 && chosen == ~0u; kind++) for (uint k = 0; k < tracks && chosen == ~0u; k++) { "
   "const uint cu = 2 * ((k + w) % tracks) + kind, j = atomic_load_explicit(state + cu, memory_order_relaxed); "
   "if (j >= cursors[cu].end) continue; "
@@ -356,14 +362,14 @@ static NSString *const TRACK_KERNEL =
   "const uint i = c * t + l, g = o.chunks * t; "
   "switch (o.kind) { " XSTR(KINDS_OF(KIND_CASE)) " default: break; } } "
   "threadgroup_barrier(mem_flags::mem_device); "
-  "if (l == 0) { atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); "
+  "if (l == 0) { last = j; atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); "
   "atomic_fetch_add_explicit(advanced, 1u, memory_order_relaxed); "
   "if (atomic_fetch_add_explicit(done + j, 1u, memory_order_relaxed) + 1u == x.chunks) { "
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); "
   "constant track_cursor &cr = cursors[x.cursor]; "
   "if ((x.flags & 2u) && cr.kind == 1u) { mesh_publish(count + cr.track, items[x.item].position + 1); "
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); } "
-  "atomic_store_explicit(state + x.cursor, j + 1, memory_order_relaxed); } } "
+  "atomic_store_explicit(state + x.cursor, j + 1, memory_order_relaxed); last = j + 1 < cr.end ? j + 1 : ~0u; } } "
   "threadgroup_barrier(mem_flags::mem_threadgroup); } }\n";
 
 #endif
