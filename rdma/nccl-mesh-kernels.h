@@ -105,13 +105,15 @@ static NSString *const STEPS =
   "static inline void mesh_source_release(device ulong *words, uint slot, ulong value, uint i) { "
   "threadgroup_barrier(mem_flags::mem_device); "
   "if (i == 0) mesh_publish((volatile coherent(system) device ulong *)(words + slot), value); }\n"
-  "static inline void mesh_landing_counts(device const ulong *table, uint tile) { "
-  "device const ulong *record = table + 1 + ulong(tile) * table[0]; "
+  /* one tile's landing record as ncclMeshWriteLandings lays it (nccl.h: { uint64_t count; ncclMeshBinding
+     bindings[capacity]; }), at the address the caller's own ncclMeshTileLayout gives that tile: the record's one
+     statement is nccl.h's, so this reads no stride or header of its own */
+  "static inline void mesh_landing_counts(device const ulong *record) { "
   "device const mesh_step_binding *land = (device const mesh_step_binding *)(record + 1); "
   "for (uint k = 0; k < record[0]; k++) { auto b = land[k]; "
   "mesh_step_enter(*b.p, b.v, b.progress, true); mesh_step_counts(*b.p, b.a, b.v); } }\n"
-  "static inline void mesh_landing_await(device const ulong *table, uint tile, uint i) { "
-  "if (!table) return; if (i == 0) mesh_landing_counts(table, tile); "
+  "static inline void mesh_landing_await(device const ulong *record, uint i) { "
+  "if (!record) return; if (i == 0) mesh_landing_counts(record); "
   "threadgroup_barrier(mem_flags::mem_device); "
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); }\n"
   "template <typename T> static inline void mesh_step_write(device uchar *operand, ulong k, T value) { "
