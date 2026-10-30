@@ -2422,23 +2422,17 @@ static struct steps *steps_copy(struct steps *from) {
   memcpy(s->done, from->done, from->count);
   return s;
 }
-/* a copy made again as steps_copy makes it, its arrays kept (an issue laid again: issue_bind): an in-place read none (read and
-   fresh all zero, as NULL reads) */
-static void steps_reset(struct steps *s) {
-  const size_t most = s->count + 1;
-  memcpy(s->done, s->source->done, s->count);
-  memset(s->channel, 0, most * sizeof *s->channel); memset(s->entry, 0, most * sizeof *s->entry);
-  memset(s->consumption, 0, most * sizeof *s->consumption); memset(s->buffer, 0, s->buffers * sizeof *s->buffer);
-  if (s->read) { memset(s->read, 0, s->count * sizeof *s->read); memset(s->fresh, 0, s->count); }
-}
-
-/* a copy bound again for its issue's same binding (issue_bind): its progress made again, its buffers and in-place
-   reads (buffer, read, fresh) kept */
-static void steps_rebind(struct steps *s) {
+/* a copy's progress made again as steps_copy makes it, its arrays kept (issue_bind): done its source's, no channel,
+   entry or consumption.  `binding` 1 keeps its buffers and in-place reads (buffer, read, fresh: its issue's same
+   binding again); 0 makes them none as well (an issue laid again: read and fresh all zero, as NULL reads) */
+static void steps_reset(struct steps *s, int binding) {
   const size_t most = s->count + 1;
   memcpy(s->done, s->source->done, s->count);
   memset(s->channel, 0, most * sizeof *s->channel); memset(s->entry, 0, most * sizeof *s->entry);
   memset(s->consumption, 0, most * sizeof *s->consumption);
+  if (binding) return;
+  memset(s->buffer, 0, s->buffers * sizeof *s->buffer);
+  if (s->read) { memset(s->read, 0, s->count * sizeof *s->read); memset(s->fresh, 0, s->count); }
 }
 
 /* a call's steps, `initial` with each per-step array made for `room` steps; NULL where memory runs out */
@@ -3407,7 +3401,7 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u) {
 
 /* each combine landing's need, past its channel's first send entry: the last earlier SEND of its call on that channel
    whose piece it meets, but for one reading a named copy (0: none).  Fixed while the issue is laid and placed (its steps
-   and their `read` kept: steps_rebind), so found once there, not at each schedule (schedule_laid adds the channel's
+   and their `read` kept: steps_reset with its binding), so found once there, not at each schedule (schedule_laid adds the channel's
    first entry) */
 static void landing_needs(struct ncclComm *comm, struct schedule *plans) {
   for (uint32_t h = 0; h < comm->count; h++)
@@ -3690,7 +3684,7 @@ static int issue_same(const struct ncclComm *comm, const struct issue *u, const 
    descriptor emission. The compiler's generation storage has already been reserved. */
 static ncclResult_t issue_layout(struct ncclComm *comm, struct compiled *x, struct issue *u, struct call *list,
     size_t n, uint32_t generation, uint32_t repeats, size_t stride, int remote, struct where *area, uint32_t *slot) {
-  for (size_t i = 0; i < n; i++) if (list[i].bound) steps_reset(list[i].bound);
+  for (size_t i = 0; i < n; i++) if (list[i].bound) steps_reset(list[i].bound, 0);
   issue_lay(comm, x, u, list, repeats, stride);
   ncclResult_t result = remote ? bind_slot(comm, x, generation, list, n, u->plans, &u->base, area, slot) : ncclSuccess;
   if (!result) bind_calls(list, n);
@@ -3710,7 +3704,7 @@ static int binding_contains(const ncclMeshBufferSlots *b, struct where value) {
 
 /* group x's `n` calls (*calls) bound in its next generation's issue (*issued; struct issue), *calls then the issue's copy
    of them (what they own moved there) and *plans its entries: an issue laid and placed for the same binding (issue_same)
-   takes it again, its steps' progress made again (steps_rebind) and its calls' bound results restored, and its slot and
+   takes it again, its steps' progress made again (steps_reset, its binding kept) and its calls' bound results restored, and its slot and
    landing area are the ones it was placed in; else it is laid for them (issue_lay, each call's steps that generation's
    copy made again), its storage bound (bind_slot, where it crosses: `remote`), its calls' buffers (bind_calls), its
    entries' bytes placed (place_group) and their overwrites proved (bind_retirements), and its binding kept.  Under
@@ -3739,7 +3733,7 @@ static ncclResult_t issue_bind(struct ncclComm *comm, struct call **calls, size_
   if (issue_same(comm, u, list, n, stride, remote ? x->slot[k] : 0)) {
     for (size_t i = 0; i < n; i++) {
       const struct bound *b = u->bound + i;
-      if (list[i].bound) steps_rebind(list[i].bound);
+      if (list[i].bound) steps_reset(list[i].bound, 1);
       list[i].sum = b->sum; list[i].direct = b->direct; list[i].complements = b->complements;
       list[i].complement = b->complements ? list[i].bound->complement : NULL;
       if (list[i].send_views) list[i].send_views = b->views[0];
