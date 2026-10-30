@@ -6,6 +6,18 @@
 #include "mesh-isl-memory.h"
 #include <string.h>
 
+isl_map *MeshIndexNormalize(isl_map *relation) {
+    return isl_map_coalesce(isl_map_detect_equalities(isl_map_compute_divs(relation)));
+}
+
+isl_map *MeshIndexCompose(isl_map *source,isl_map *target) {
+    if(isl_map_is_single_valued(source)==isl_bool_true&&isl_map_is_single_valued(target)==isl_bool_true) {
+        isl_pw_multi_aff *first=isl_pw_multi_aff_from_map(source),*second=isl_pw_multi_aff_from_map(target);
+        return isl_map_from_pw_multi_aff(isl_pw_multi_aff_pullback_pw_multi_aff(second,first));
+    }
+    return MeshIndexNormalize(isl_map_apply_range(source,target));
+}
+
 isl_map *MeshIndexSelectionRelation(isl_ctx *ctx,const char *declaration,size_t *count,char **message) { @autoreleasepool {
     *message=NULL;
     @try {

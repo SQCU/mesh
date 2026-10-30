@@ -785,20 +785,31 @@ static isl_map *TensorSplitRelation(isl_set *set,unsigned inputs) {
 }
 static isl_map *TensorEquations(MetalTensorLayout *values,isl_pw_aff *group,isl_pw_aff *position) {
     isl_ctx *ctx=isl_pw_aff_get_ctx(group);
-    isl_pw_multi_aff *fields=isl_pw_multi_aff_flat_range_product(isl_pw_multi_aff_flat_range_product(
-        isl_pw_multi_aff_from_pw_aff(MeshIndexFunction(ctx,values)),isl_pw_multi_aff_from_pw_aff(group)),
-        isl_pw_multi_aff_from_pw_aff(position));
-    isl_map *triples=isl_map_from_pw_multi_aff(fields);
-    // Resolve ordinal locals before the inverse join duplicates their constraints.
-    isl_set *declared=isl_set_coalesce(isl_set_compute_divs(isl_map_range(triples)));
-    isl_set *pairs=isl_set_apply(isl_set_detect_equalities(declared),isl_map_read_from_str(ctx,
-        "{ [v,g,d] -> [v,p,g,q] : q = p - d }"));
-    isl_map *assigned=isl_map_detect_equalities(TensorSplitRelation(pairs,2));
-    // A group's least member carries the same displacement equations without
-    // forming every pair. Selection and inversion remain symbolic relations.
-    isl_map *representative=isl_map_lexmin(isl_map_reverse(isl_map_copy(assigned)));
-    isl_map *edges=isl_map_apply_range(assigned,representative);
-    return isl_map_coalesce(isl_map_detect_equalities(isl_map_union(isl_map_copy(edges),isl_map_reverse(edges))));
+    isl_pw_multi_aff *groups=isl_pw_multi_aff_from_pw_aff(group);
+    isl_pw_multi_aff *first=isl_pw_multi_aff_from_map(isl_map_lexmin(isl_map_reverse(
+        isl_map_from_pw_multi_aff(isl_pw_multi_aff_copy(groups)))));
+    first=isl_pw_multi_aff_pullback_pw_multi_aff(first,groups);
+    isl_pw_aff *anchor=isl_pw_aff_pullback_pw_multi_aff(MeshIndexFunction(ctx,values),isl_pw_multi_aff_copy(first));
+    isl_pw_aff *delta=isl_pw_aff_sub(isl_pw_aff_pullback_pw_multi_aff(isl_pw_aff_copy(position),first),position);
+    isl_pw_multi_aff *relative=isl_pw_multi_aff_flat_range_product(
+        isl_pw_multi_aff_from_pw_aff(MeshIndexFunction(ctx,values)),
+        isl_pw_multi_aff_flat_range_product(isl_pw_multi_aff_from_pw_aff(anchor),isl_pw_multi_aff_from_pw_aff(delta)));
+    isl_set *pairs=isl_set_insert_dims(isl_map_range(isl_map_from_pw_multi_aff(relative)),isl_dim_set,1,1);
+    pairs=isl_set_apply(pairs,isl_map_read_from_str(ctx,"{ [v,p,b,d] -> [v,p,b,p+d] }"));
+    isl_map *edges=TensorSplitRelation(pairs,2);
+    return MeshIndexNormalize(isl_map_union(isl_map_copy(edges),isl_map_reverse(edges)));
+}
+static isl_map *TensorJoinEquations(isl_map *roots,isl_map *fields,NSUInteger count,isl_map *forbidden) {
+    // Existing components are functions from each byte to its representative
+    // and displacement. New fields connect those representatives; they do not
+    // require all pairs of bytes in each already resolved component.
+    fields=MeshIndexNormalize(isl_map_apply_range(isl_map_apply_range(
+        isl_map_reverse(isl_map_copy(roots)),fields),isl_map_copy(roots)));
+    if(isl_map_is_identity(fields)==isl_bool_true){isl_map_free(fields);return roots;}
+    fields=isl_map_union(fields,isl_set_identity(isl_map_range(isl_map_copy(roots))));
+    fields=MeshIndexClosure(fields,count,MeshIndexSymmetricClosure,forbidden);
+    if(!fields){isl_map_free(roots);return NULL;}
+    return MeshIndexNormalize(MeshIndexCompose(roots,isl_map_lexmin(fields)));
 }
 MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *> *uses,
     NSArray<MetalTensorLayout *> *targets,NSArray<NSArray<NSNumber *> *> *footprints,
@@ -807,6 +818,8 @@ MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *
     if(!count)return [MetalTensorLayout shape:@[@0] strides:@[@1] offset:0 maps:@{} indices:nil];
     isl_ctx *ctx=isl_ctx_alloc();MetalTensorLayout *result=nil;
     isl_map *equations=NULL,*roots=NULL,*extents=NULL,*allowed=NULL,*base=NULL,*walk=NULL,*placed=NULL;
+    isl_map *forbidden=isl_map_read_from_str(ctx,
+        "{ [i,p] -> [j,q] : (i = j and p != q) or (i != j and p = q) }");
     isl_set *ids=isl_set_read_from_str(ctx,[[NSString stringWithFormat:@"{ [i] : 0 <= i < %lu }",(unsigned long)count] UTF8String]);
     isl_set *rootIds=NULL,*states=NULL;
     isl_pw_aff *low=NULL,*high=NULL;
@@ -814,34 +827,33 @@ MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *
         @"{ [i,p] -> [i,p] : 0 <= i < %lu }",(unsigned long)count] UTF8String]);
     // The typed field relation supplies adjacency and alignment for every
     // element, including fields reached through differently typed aliases.
-    for(NSUInteger k=0;k<values.count;k++) {
+    NSMutableArray *order=[NSMutableArray array];
+    for(NSUInteger k=0;k<values.count;k++)[order addObject:@(k)];
+    [order sortUsingComparator:^NSComparisonResult(NSNumber *a,NSNumber *b) {
+        return [widths[b.unsignedIntegerValue] compare:widths[a.unsignedIntegerValue]];
+    }];
+    for(NSNumber *item in order) {
+        NSUInteger k=item.unsignedIntegerValue;
         MetalTensorLayout *value=values[k];NSUInteger width=widths[k].unsignedIntegerValue;
         NSCParameterAssert(width&&value.count%width==0);
         isl_map *fields=TensorEquations(value,
             MeshIndexExpression(ctx,@[@"div",@"i",@(width)],0,value.count),
             MeshIndexExpression(ctx,@[@"mod",@"i",@(width)],0,value.count));
-        equations=isl_map_union(equations,fields);
+        equations=TensorJoinEquations(equations,fields,count,forbidden);
+        if(!equations)goto finished;
     }
     for(NSUInteger k=0;k<uses.count;k++) {
         MetalTensorLayout *use=uses[k],*target=targets[k];NSCParameterAssert(use.count==target.count);
         if(!use.count)continue;
-        equations=isl_map_union(equations,TensorEquations(use,
-            MeshIndexExpression(ctx,@0,0,use.count),MeshIndexFunction(ctx,target)));
+        equations=TensorJoinEquations(equations,TensorEquations(use,
+            MeshIndexExpression(ctx,@0,0,use.count),MeshIndexFunction(ctx,target)),count,forbidden);
+        if(!equations)goto finished;
     }
     equations=isl_map_detect_equalities(isl_map_coalesce(equations));
     {
         isl_set *domain=isl_set_project_out(isl_map_domain(isl_map_copy(equations)),isl_dim_set,1,1);
         isl_bool covered=isl_set_is_equal(domain,ids);isl_set_free(domain);
         if(covered!=isl_bool_true)goto finished;
-    }
-    // Distinct logical bytes require distinct positions; one byte has one
-    // position. An equation contradicting either condition ends feasibility
-    // before the solver expands any further paths.
-    {
-        isl_map *forbidden=isl_map_read_from_str(ctx,
-            "{ [i,p] -> [j,q] : (i = j and p != q) or (i != j and p = q) }");
-        equations=MeshIndexClosure(equations,count,MeshIndexSymmetricClosure,forbidden);
-        isl_map_free(forbidden);if(!equations)goto finished;
     }
     // Each value names its least root and its displacement from that root.
     roots=isl_map_project_out(isl_map_fix_si(isl_map_copy(equations),isl_dim_in,1,0),isl_dim_in,1,1);
@@ -929,7 +941,7 @@ MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *
     result=TensorFunctionLayout(isl_map_dim_min(isl_map_copy(placed),0),@[@(count)]);
 finished:;
     NSString *error=isl_ctx_last_error(ctx)==isl_error_none?nil:@(isl_ctx_last_error_msg(ctx));
-    isl_map_free(equations);isl_map_free(roots);isl_map_free(extents);isl_map_free(allowed);
+    isl_map_free(equations);isl_map_free(roots);isl_map_free(extents);isl_map_free(allowed);isl_map_free(forbidden);
     isl_map_free(base);isl_map_free(walk);isl_map_free(placed);
     isl_set_free(ids);isl_set_free(rootIds);isl_set_free(states);isl_pw_aff_free(low);isl_pw_aff_free(high);isl_ctx_free(ctx);
     if(error)[NSException raise:NSInvalidArgumentException format:@"storage placement: %@",error];

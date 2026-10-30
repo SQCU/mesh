@@ -82,8 +82,8 @@ convolution relation now emits index terms through this path.
 Native expression normalization also uses one ISL function pass. The former
 recursive simplifier solved the range of many subexpressions, then repeated
 until its own expression syntax stopped changing. That extra procedure is
-removed. The shared native build passes; complete convolution page binding
-is still under preparation review.
+removed. Ordinary convolution now completes native page binding and matrix
+shader preparation through page assembly and the existing product kernel.
 
 `Algebra.cover` exposes the existing native cover operation. Its disjoint cells
 retain the contributing input domains. Objective-C and Python now consume one
@@ -91,6 +91,34 @@ implementation. The selected-copy adjoint can use those cells to declare the
 necessary local sums and collective reductions; reversing its WRITEs alone
 would lose contributions from repeated reads.
 
-The captured attention placement still stalls while resolving field equations.
-Its preparation operands are recorded for the next correction. The function
-composition change does not establish that placement issue is resolved.
+Placement retains a function from each byte to its component representative and
+displacement. New field equations join those representatives before the result
+is composed back onto the bytes. This preserves the equations without expanding
+every pair of bytes in components that are already resolved. Larger declared
+fields enter first; this changes preparation work, not the requested layouts.
+The captured attention and partial-output convolution placement operands now
+complete. Preparation also retains consumer footprints, non-power-of-two base
+alignment and fixed caller pages when a conflicting layout needs a conversion.
+Full partial-output convolution binding is still under preparation review.
+
+## Remaining operator connections
+
+Shared product declarations now supply FX and LiteRT with the same shader
+bindings and dispatch geometry. Window adapters retain exact work, source-read
+and result relations. Output ownership is an explicit input to `owned_domains`;
+the result gives each owner's work and required source pages. Connecting this
+operand through complete FX graphs remains in progress.
+
+Selected-copy backward declarations sum repeated contributions locally and use
+the existing REDUCE compiler for their contributor sets. LiteRT MAX, average
+and L2 pooling lower through window relations and ordinary reductions. Normal,
+SAME-padding and depthwise product bindings reached native pipeline preparation
+without conversion copies. Transposed products reached graph serialization;
+coalescing their compatible small product domains remains open.
+
+Dynamic selections preserve scalar payload bits through declared byte operands.
+Packed code, scale and zero-point selections are being connected to that same
+path. Arbitrary byte-piece unions must reach placement before scalar grouping
+is materialized; the existing contiguous-payload preparation does not establish
+that broader case. These are source and preparation results, without numerical
+execution or whole-function performance claims.

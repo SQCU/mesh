@@ -16,6 +16,8 @@ isl_map *MeshIndexClosure(isl_map *relation, NSUInteger count, enum MeshIndexClo
 isl_pw_aff *MeshIndexExpression(isl_ctx *ctx, id expression, NSUInteger first, NSUInteger end);
 isl_pw_aff *MeshIndexFunction(isl_ctx *ctx, MetalTensorLayout *layout);
 isl_map *MeshIndexRelation(isl_ctx *ctx, MetalTensorLayout *layout);
+isl_map *MeshIndexCompose(isl_map *source, isl_map *target); // consumes both
+isl_map *MeshIndexNormalize(isl_map *relation); // consumes the relation
 // A resolved selection declaration's exact logical position set. JSON is only
 // a preparation-language boundary; no serialized descriptor reaches execution.
 // On a declaration exception, error owns a message freed with mesh_isl_free.
