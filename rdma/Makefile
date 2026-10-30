@@ -136,10 +136,10 @@ $(IMAGES:%=.build/%) .build/nccl-mesh-kernels .build/libnccl-mesh.binarchive: .b
 	  -Wl,-install_name,@rpath/libnccl-mesh.dylib -Wl,-rpath,@loader_path \
 	  $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ nccl-mesh.c mesh-statistics.c nccl-mesh-metal.m metal-recording.m mesh-tensor-layout.m mesh-index-relation.m mesh-isl-memory.c mesh-sparse.c $(ISL_ARCHIVE) -L.build -lmesh \
 	  -framework Metal -framework Foundation
-.build/libmesh-coreml.dylib: mesh-coreml.m mesh-coreml.h Makefile
+.build/libmesh-coreml.dylib: mesh-coreml.m mesh-coreml.h mesh-tensor-layout.h .build/libnccl-mesh.dylib Makefile
 	mkdir -p .build
 	cc -fobjc-arc -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh-coreml.dylib -o $@ mesh-coreml.m \
-	  -framework CoreML -framework Foundation -framework Accelerate
+	  -Wl,-rpath,@loader_path -L.build -lnccl-mesh -framework CoreML -framework Foundation -framework Accelerate -framework IOSurface
 .build/libmesh-statistics.dylib: mesh-statistics.c mesh-statistics.h Makefile
 	mkdir -p .build
 	cc -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh-statistics.dylib -o $@ mesh-statistics.c

@@ -892,6 +892,18 @@ MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *
             @"{ [r,d] -> [r,b] : (b + d) mod %lu != 0 }",(unsigned long)width] UTF8String]);
         allowed=isl_map_subtract(allowed,TensorSplitRelation(isl_set_apply(starts,unaligned),1));
     }
+    // Each API constrains the first address of its declared footprint. This is independent
+    // of both element alignment and the extent of any padding it may access.
+    for(NSUInteger k=0;k<uses.count;k++)if(uses[k].count) {
+        NSUInteger alignment=[footprints[k][2] unsignedIntegerValue];
+        NSCParameterAssert(alignment);
+        isl_set *anchor=isl_map_range(isl_map_fix_val(isl_map_copy(roots),isl_dim_in,0,
+            isl_val_int_from_si(ctx,[uses[k] index:0])));
+        isl_map *unaligned=isl_map_read_from_str(ctx,[[NSString stringWithFormat:
+            @"{ [r,d] -> [r,b] : (b + d - %ld) mod %lu != 0 }",
+            (long)([targets[k] index:0]-[footprints[k][0] integerValue]),(unsigned long)alignment] UTF8String]);
+        allowed=isl_map_subtract(allowed,TensorSplitRelation(isl_set_apply(anchor,unaligned),1));
+    }
     {
         isl_set *domain=isl_map_domain(isl_map_copy(allowed));
         isl_bool covered=isl_set_is_equal(domain,rootIds);isl_set_free(domain);
@@ -1115,6 +1127,17 @@ static id TensorSelectionIndex(NSInteger (^extent)(id),NSArray *shape,id express
       id term=TensorSelectionIndex(extent,shape,step[1][@"index"],parameters,[NSMutableDictionary dictionary]);
       MetalTensorLayout *indices=[MetalTensorLayout shape:shape index:term parameters:parameters];
       layout=[indices rebase:[self shape:layout.shape strides:TensorStrides(layout.shape) offset:0 maps:@{} indices:nil] onto:layout];
+    } else if([step[0] isEqual:@"rebase"]) {
+      layout=[layout rebase:[self selection:step[1][@"source"] extent:extent]
+          onto:[self selection:step[1][@"target"] extent:extent]];
+    } else if([step[0] isEqual:@"union"]) {
+      NSDictionary *recipe=step[1],*member=recipe[@"member"];
+      BOOL hasMember=member!=(id)NSNull.null;
+      layout=MeshIndexUnion([self selection:recipe[@"source_root"] extent:extent],
+          [self selection:recipe[@"target_root"] extent:extent],
+          [self selection:recipe[@"source"] extent:extent],[self selection:recipe[@"target"] extent:extent],
+          hasMember?[self selection:member[@"selection"] extent:extent]:nil,
+          hasMember&&[member[@"side"] isEqual:@"source"]);
     } else [NSException raise:NSInvalidArgumentException format:@"unknown selection transformation %@",step[0]];
   }
   return layout;
@@ -1460,10 +1483,16 @@ static id TensorSelectionIndex(NSInteger (^extent)(id),NSArray *shape,id express
     return [MetalTensorLayout shape:_shape strides:required offset:offset maps:@{} indices:nil];
 }
 - (MetalTensorLayout *)requirements:(NSArray<NSDictionary *> *)requirements {
+    MetalTensorLayout *(^required)(MetalTensorLayout *,NSDictionary *)=^MetalTensorLayout *(MetalTensorLayout *value,NSDictionary *r) {
+        MetalTensorLayout *exact=r[@"layout"];
+        if(!exact)return [value required:r[@"kind"] strides:r[@"strides"]];
+        exact=[exact reshape:value.shape];
+        return exact.count?[exact shift:[value index:0]-[exact index:0]]:exact;
+    };
     MetalTensorLayout *result=self;
-    for(NSDictionary *r in requirements)result=[result required:r[@"kind"] strides:r[@"strides"]];
+    for(NSDictionary *r in requirements)result=required(result,r);
     for(NSDictionary *r in requirements)
-        if(![[result required:r[@"kind"] strides:r[@"strides"]] isEqual:result])
+        if(![required(result,r) equivalent:result])
             [NSException raise:NSInvalidArgumentException format:@"conflicting operand layout requirements: %@",requirements];
     return result;
 }

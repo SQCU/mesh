@@ -2044,6 +2044,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     } @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
   }, pybind11::call_guard<Drained>());
   module.def("import_attributes",&import_attributes, pybind11::call_guard<Drained>());
+  module.def("page_backing",[](const pybind11::object &value) {
+    TensorOperand operand(value);
+    return std::array<uint64_t,3>{(uint64_t)(uintptr_t)operand.pages.buffer.contents,
+      operand.pages.buffer.length,(uint64_t)((operand.layout.value.count?[operand.layout.value index:0]:operand.layout.value.offset)*operand.storage.element_size())};
+  }, pybind11::call_guard<Drained>());
+  module.def("host_page_backing",[](uint64_t address) {
+    @try {
+      MetalTensorPages *pages=[MetalTensorPages host:(const void *)(uintptr_t)address];
+      return std::array<uint64_t,3>{(uint64_t)(uintptr_t)pages.buffer.contents,pages.buffer.length,pages.origin};
+    } @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
+  }, pybind11::call_guard<Drained>());
   module.def("completed", &completed, pybind11::call_guard<Drained>());
   module.def("pipeline", &pipeline, pybind11::call_guard<Drained>());
   module.def("pipeline_specialized", &pipeline_specialized, pybind11::call_guard<Drained>());
@@ -2077,6 +2088,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
           tensorNumbers(v.value.indexShape),std::string((const char *)data.bytes,data.length));
     })
     .def("index",[](const TensorLayout &v,NSUInteger i){return [v.value index:i];}, pybind11::call_guard<Drained>())
+    .def("shift",[](const TensorLayout &v,NSInteger offset){return TensorLayout([v.value shift:offset]);}, pybind11::call_guard<Drained>())
     .def("equivalent",[](const TensorLayout &v,const TensorLayout &other){return bool([v.value equivalent:other.value]);}, pybind11::call_guard<Drained>())
     .def("select",[](const TensorLayout &v,NSUInteger axis,const std::vector<NSInteger> &indices){return TensorLayout([v.value select:axis indices:tensorWords(indices)]);}, pybind11::call_guard<Drained>())
     .def("select_runs",[](const TensorLayout &v,NSUInteger axis,const std::vector<std::vector<NSInteger>> &runs){
@@ -2096,9 +2108,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     }, pybind11::call_guard<Drained>())
     .def("matches",[](const TensorLayout &v,const std::vector<NSInteger> &steps){return bool([v.value matches:tensorNumbers(steps)]);}, pybind11::call_guard<Drained>())
     .def("required",[](const TensorLayout &v,const std::string &kind,const std::vector<NSInteger> &steps){return TensorLayout([v.value required:@(kind.c_str()) strides:tensorNumbers(steps)]);},pybind11::arg("kind"),pybind11::arg("strides")=std::vector<NSInteger>{}, pybind11::call_guard<Drained>())
-    .def("requirements",[](const TensorLayout &v,const std::vector<std::pair<std::string,std::vector<NSInteger>>> &requirements){
+    .def("requirements",[](const TensorLayout &v,const pybind11::list &requirements){
       NSMutableArray *values=[NSMutableArray array];
-      for(const auto &[kind,steps]:requirements)[values addObject:@{@"kind":@(kind.c_str()),@"strides":tensorNumbers(steps)}];
+      for(const auto &requirement:requirements) {
+        if(pybind11::isinstance<TensorLayout>(requirement)) {
+          [values addObject:@{@"layout":requirement.cast<TensorLayout>().value}];continue;
+        }
+        const auto [kind,steps]=requirement.cast<std::pair<std::string,std::vector<NSInteger>>>();
+        [values addObject:@{@"kind":@(kind.c_str()),@"strides":tensorNumbers(steps)}];
+      }
       @try { return TensorLayout([v.value requirements:values]); }
       @catch(NSException *error){TORCH_CHECK(false,error.reason.UTF8String);}
     }, pybind11::call_guard<Drained>())

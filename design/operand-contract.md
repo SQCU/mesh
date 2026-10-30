@@ -3,6 +3,36 @@
 Established 2026-10-27. This records the shared lowering contract and remaining
 integration work. It does not change the data-model document.
 
+## Integration checkpoint: 2026-10-29, 22:51 PDT
+
+Contractions now carry separate work, read and write relations. A repeated
+operand can have a different role in each input slot. Required remote reads
+become explicit partition boundaries. Ordinary broadcasts place each owner's
+selected values in the receiver's pages; sums retain the shared product finish.
+Expanding receipt storage does not expand the producer's numerical work.
+
+Correlated product cuts use exact output/reduction fibers. Empty products use
+the same bias, activation and output encoding as nonempty products. Nested
+sparse constants reach the shared sparse reader. Reshape and transpose views
+retain their page relations; constant views transform stored bytes during
+preparation. Page-domain unions and rebases resolve through the shared native
+relation parser after actual sizes are supplied. Existing native uses and
+collective domains retain their own order through these rewrites.
+
+Provider requirements now include exact physical layouts, reserved bytes and
+address alignment. Python and Swift consume that same contract. The configured
+direct ANE adapter binds an IOSurface over bridge pages and prepares its request
+once. Public Core ML output backings remain advisory. Raw provider-owned state
+still needs export functionalization into named input/output pages.
+
+Evidence is source review, native and frontend builds, Swift type checking,
+graph preparation and ANE load/map/release. No numerical execution or performance
+measurement is claimed. General non-contraction reduction partitioning and
+standalone packed/sparse constant result export remain unfinished. The concurrent
+Metal 4 migration removed provider command capture: LiteRT numerical provider
+stages now require a command-description exporter. Vendor ANE submission waits
+and the full-function integration review also remain open.
+
 ## Pages hold the data
 
 The bridge supplies the pages. Inputs, outputs, temporary values, weights and

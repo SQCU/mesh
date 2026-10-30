@@ -75,14 +75,16 @@ def declarations(text):
     return re.sub(r'(enum\s*\w*\s*\{)([^}]*)(\})', enum, text, flags=re.S)
 
 
-def build():
+def build(output_directory=None, library_directory=None):
+    output_directory = output_directory or RDMA
+    library_directory = library_directory or RDMA
     ffi = cffi.FFI()
     for header in HEADERS:
         with open(os.path.join(RDMA, header)) as file:
             ffi.cdef(declarations(file.read()))
-    ffi.set_source('_mesh_c', ''.join(f'#include "{h}"\n' for h in HEADERS), include_dirs=[RDMA], library_dirs=[RDMA],
-                   libraries=['nccl-mesh', 'mesh'], extra_link_args=[f'-Wl,-rpath,{RDMA}'])
-    return ffi.compile(tmpdir=RDMA, verbose=False)
+    ffi.set_source('_mesh_c', ''.join(f'#include "{h}"\n' for h in HEADERS), include_dirs=[RDMA], library_dirs=[library_directory],
+                   libraries=['nccl-mesh', 'mesh'], extra_link_args=[f'-Wl,-rpath,{library_directory}'])
+    return ffi.compile(tmpdir=output_directory, verbose=False)
 
 
 if __name__ == '__main__':

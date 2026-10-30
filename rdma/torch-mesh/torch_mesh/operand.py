@@ -167,13 +167,29 @@ def rebase_typed(view, width, declared, source_width, placed):
 
 def requirement(value, declared):
     """Resolve an explicit API requirement without allocating or copying values."""
-    return descriptor(value).required(declared if isinstance(declared, str) else 'fixed',
-                                      [] if isinstance(declared, str) else tuple(declared))
+    return required_layout(descriptor(value), storage_requirement(declared)[0])
+
+
+def storage_requirement(declared):
+    """One consumer's layout, byte footprint and argument-address alignment."""
+    if isinstance(declared, dict):
+        return declared['layout'], int(declared['capacity']), int(declared['alignment'])
+    return declared, 0, 1
 
 
 def requirements(value, declarations):
+    declarations = [storage_requirement(item)[0] for item in declarations]
     return descriptor(value).requirements([
+        restore(item['view']) if isinstance(item, dict) else
         (item, ()) if isinstance(item, str) else ('fixed', tuple(item)) for item in declarations])
+
+
+def required_layout(view, declared):
+    """Resolve an exact page relation or an API's accepted layout family."""
+    if isinstance(declared, dict):
+        return view.requirements([restore(declared['view'])])
+    return view.required(declared if isinstance(declared, str) else 'fixed',
+                         [] if isinstance(declared, str) else tuple(declared))
 
 
 def signature(buffers, outputs, requirements):

@@ -42,10 +42,16 @@ class Algebra:
                           f'{kind}_is_equal': (C.c_int, (C.c_void_p, C.c_void_p)),
                           f'{kind}_is_empty': (C.c_int, (C.c_void_p,)),
                           f'{kind}_union': (C.c_void_p, (C.c_void_p, C.c_void_p))})
-        for name in ('map_apply_range', 'map_intersect_range', 'map_intersect', 'map_subtract_domain',
+        for name in ('map_apply_range', 'map_intersect_range', 'map_intersect_domain', 'map_intersect', 'map_subtract_domain',
                      'set_intersect', 'set_subtract', 'set_flat_product'):
             specs[name] = C.c_void_p, (C.c_void_p, C.c_void_p)
         specs['map_domain'] = C.c_void_p, (C.c_void_p,)
+        specs['map_range'] = C.c_void_p, (C.c_void_p,)
+        specs['map_reverse'] = C.c_void_p, (C.c_void_p,)
+        specs['map_lexmin'] = C.c_void_p, (C.c_void_p,)
+        specs['map_is_single_valued'] = C.c_int, (C.c_void_p,)
+        specs['map_dim'] = C.c_int, (C.c_void_p, C.c_int)
+        specs['set_lexmin'] = C.c_void_p, (C.c_void_p,)
         specs['set_project_out'] = C.c_void_p, (C.c_void_p, C.c_int, C.c_uint, C.c_uint)
         for name in ('set_dim_min_val', 'set_dim_max_val'):
             specs[name] = C.c_void_p, (C.c_void_p, C.c_int)
@@ -58,6 +64,10 @@ class Algebra:
         self.lib.MeshIndexSetRuns.restype = C.POINTER(C.c_int64)
         self.lib.MeshIndexSelectionDomain.argtypes = C.c_void_p, C.c_char_p, C.POINTER(C.c_void_p)
         self.lib.MeshIndexSelectionDomain.restype = C.c_void_p
+        self.lib.MeshIndexSelectionRelation.argtypes = C.c_void_p, C.c_char_p, C.POINTER(C.c_size_t), C.POINTER(C.c_void_p)
+        self.lib.MeshIndexSelectionRelation.restype = C.c_void_p
+        self.lib.MeshIndexRelationTerms.argtypes = C.c_void_p, C.POINTER(C.c_void_p)
+        self.lib.MeshIndexRelationTerms.restype = C.c_void_p
         self.ctx = self.ctx_alloc()
         self.references = 1
 
@@ -87,6 +97,13 @@ class Algebra:
     def set(self, text, rank):
         return IndexSet(self, self.set_read_from_str(self.ctx, text.encode()), rank)
 
+    def map(self, source_shape, target_shape, equations):
+        """A declared coordinate relation between two finite tensor domains."""
+        x, y = coordinates(source_shape, 'x'), coordinates(target_shape, 'y')
+        conditions = [*bounds(source_shape, x), *bounds(target_shape, y), *equations(x, y)]
+        text = '{ [' + ','.join(x) + '] -> [' + ','.join(y) + '] : ' + (' and '.join(conditions) or 'true') + ' }'
+        return IndexRelation(self, self.map_read_from_str(self.ctx, text.encode()), source_shape)
+
     def selection(self, declaration):
         """The final page binder's selection domain, in logical flat positions."""
         message = C.c_void_p()
@@ -97,6 +114,17 @@ class Algebra:
             finally:
                 self.lib.mesh_isl_free(message.value)
         return IndexSet(self, result, 1)
+
+    def selection_relation(self, declaration):
+        """Ordered local positions mapped to semantic positions by the binder."""
+        message, count = C.c_void_p(), C.c_size_t()
+        result = self.lib.MeshIndexSelectionRelation(self.ctx, json.dumps(declaration).encode(), C.byref(count), C.byref(message))
+        if message.value:
+            try:
+                raise ValueError(C.string_at(message.value).decode())
+            finally:
+                self.lib.mesh_isl_free(message.value)
+        return IndexRelation(self, result, (count.value,))
 
     def ownership(self, shape, axis, unit, extent):
         names = coordinates(shape, 'i')
@@ -125,6 +153,12 @@ class _Object:
 
     def copy(self):
         return getattr(self.algebra, self.kind + '_copy')(self.pointer)
+
+    def __deepcopy__(self, memo):
+        # Every consuming ISL operation receives copy(); graph copies share the
+        # immutable relation and keep its native context alive through this object.
+        memo[id(self)] = self
+        return self
 
     def __str__(self):
         text = self.algebra.checked(getattr(self.algebra, self.kind + '_to_str')(self.pointer))
@@ -191,6 +225,42 @@ class IndexSet(_Object):
             product = product.binary(axis, 'flat_product', product.rank + 1)
         return [axis.spans() for axis in axes] if product.equal(self) else None
 
+    def products(self, boundaries=None):
+        """Disjoint products across the declared coordinate boundaries.
+
+        Prefixes sharing the same suffix set form one factor, even when those
+        prefixes are repeated stripes. ISL compares whole fibers; no tensor
+        positions are expanded. With no argument every axis is a factor. An
+        explicit empty boundary list keeps the original nonempty domain.
+
+        These are position sets. Repeated occurrences and their ordering remain
+        in the caller's page selection, not in this set decomposition.
+        """
+        boundaries = tuple(range(1, self.rank) if boundaries is None else sorted(set(boundaries)))
+        if self.empty():
+            return ()
+        if not boundaries:
+            return (self,)
+        axis, *tail = boundaries
+        tail = tuple(boundary - axis for boundary in tail)
+        remaining, pieces = self, []
+        while not remaining.empty():
+            left = remaining.project(0, axis)
+            right = remaining.project(axis, self.rank - axis)
+            rectangle = left.binary(right, 'flat_product', self.rank)
+            if not rectangle.equal(remaining):
+                seed = IndexSet(self.algebra, self.algebra.set_lexmin(left.copy()), axis)
+                fiber = remaining.binary(seed.binary(right, 'flat_product', self.rank), 'intersect')
+                right = fiber.project(axis, self.rank - axis)
+                rectangle = left.binary(right, 'flat_product', self.rank)
+                different = remaining.binary(rectangle, 'subtract').binary(
+                    rectangle.binary(remaining, 'subtract'), 'union')
+                left = left.binary(different.project(0, axis), 'subtract')
+                rectangle = left.binary(right, 'flat_product', self.rank)
+            pieces.extend(left.binary(piece, 'flat_product', self.rank) for piece in right.products(tail))
+            remaining = remaining.binary(rectangle, 'subtract')
+        return tuple(pieces)
+
 
 class IndexRelation(_Object):
     kind = 'map'
@@ -201,11 +271,53 @@ class IndexRelation(_Object):
 
     def pullback(self, shape, equations):
         """Compose target coordinates -> source coordinates -> owner labels."""
-        x, y = coordinates(shape, 'x'), coordinates(self.shape, 'y')
-        conditions = [*bounds(shape, x), *bounds(self.shape, y), *equations(x, y)]
-        text = '{ [' + ','.join(x) + '] -> [' + ','.join(y) + '] : ' + (' and '.join(conditions) or 'true') + ' }'
-        mapping = self.algebra.checked(self.algebra.map_read_from_str(self.algebra.ctx, text.encode()))
-        return IndexRelation(self.algebra, self.algebra.map_apply_range(mapping, self.copy()), shape)
+        return self.algebra.map(shape, self.shape, equations).then(self)
+
+    def then(self, other):
+        """Compose this relation's target coordinates with the next relation."""
+        return IndexRelation(self.algebra, self.algebra.map_apply_range(self.copy(), other.copy()), self.shape)
+
+    def inverse(self, shape):
+        """Reverse the relation with its new domain shape explicitly supplied."""
+        return IndexRelation(self.algebra, self.algebra.map_reverse(self.copy()), shape)
+
+    def single_valued(self):
+        return self.algebra.boolean(self.algebra.map_is_single_valued(self.pointer))
+
+    def lexmin(self):
+        """Choose one target for each source, preserving every source coordinate."""
+        return IndexRelation(self.algebra, self.algebra.map_lexmin(self.copy()), self.shape)
+
+    def image(self, domain):
+        """Positions accessed by the selected source coordinates."""
+        selected = self.algebra.map_intersect_domain(self.copy(), domain.copy())
+        rank = self.algebra.map_dim(self.pointer, 3)  # isl_dim_out
+        return IndexSet(self.algebra, self.algebra.map_range(selected), rank)
+
+    def preimage(self, positions):
+        """Source coordinates that access the selected target positions."""
+        selected = self.algebra.map_intersect_range(self.copy(), positions.copy())
+        return IndexSet(self.algebra, self.algebra.map_domain(selected), len(self.shape))
+
+    def domain(self):
+        return IndexSet(self.algebra, self.algebra.map_domain(self.copy()), len(self.shape))
+
+    def subtract_domain(self, positions):
+        return IndexRelation(self.algebra, self.algebra.map_subtract_domain(self.copy(), positions.copy()), self.shape)
+
+    def terms(self):
+        """Emit the common index expression from this functional relation."""
+        message = C.c_void_p()
+        result = self.algebra.lib.MeshIndexRelationTerms(self.pointer, C.byref(message))
+        if message.value:
+            try:
+                raise ValueError(C.string_at(message.value).decode())
+            finally:
+                self.algebra.lib.mesh_isl_free(message.value)
+        try:
+            return json.loads(C.string_at(self.algebra.checked(result)))
+        finally:
+            self.algebra.lib.mesh_isl_free(result)
 
     def reshape(self, shape):
         return self.pullback(shape, lambda x, y: [f'{flat(shape, x)} = {flat(self.shape, y)}'])

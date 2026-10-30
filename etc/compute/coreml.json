@@ -1,15 +1,15 @@
 {
   "model": {
-    "binding_layout": "strided",
+    "binding_layout": "indexed",
     "input": {
       "name": "input",
       "dtype": "float16",
-      "layout": "contiguous"
+      "layout": "indexed"
     },
     "output": {
       "name": "output",
       "dtype": "float16",
-      "layout": "contiguous"
+      "layout": "indexed"
     },
     "weight_dtype": "float16",
     "sum_dtype": "float32",
@@ -19,6 +19,59 @@
     "devices": [
       "ane"
     ],
-    "function": "main"
+    "function": "main",
+    "backend": "ane",
+    "ane": {
+      "model_key": "net",
+      "model_type": "kANEFModelMILValue",
+      "qos": 25,
+      "cache_mapping": true,
+      "options": {},
+      "symbols": {
+        "inputs": {
+          "input": "input"
+        },
+        "outputs": {
+          "output": "output@output"
+        }
+      },
+      "capabilities": {
+        "alignment_bytes": 16384,
+        "types": {
+          "Float16": 0,
+          "Float32": 1,
+          "Int32": 2,
+          "Float64": 3,
+          "Int8": 4
+        },
+        "layout": {
+          "Interleave": 1
+        },
+        "abi": {
+          "_ANEModel": {
+            "modelAtURL:key:": "@32@0:8@16@24",
+            "modelAttributes": "@16@0:8",
+            "inputSymbolIndicesForProcedureIndex:": "@20@0:8I16",
+            "outputSymbolIndicesForProcedureIndex:": "@20@0:8I16"
+          },
+          "_ANEClient": {
+            "sharedConnection": "@16@0:8",
+            "compileModel:options:qos:error:": "B44@0:8@16@24I32^@36",
+            "loadModel:options:qos:error:": "B44@0:8@16@24I32^@36",
+            "unloadModel:options:qos:error:": "B44@0:8@16@24I32^@36",
+            "mapIOSurfacesWithModel:request:cacheInference:error:": "B44@0:8@16@24B32^@36",
+            "unmapIOSurfacesWithModel:request:": "v32@0:8@16@24",
+            "evaluateWithModel:options:request:qos:error:": "B52@0:8@16@24@32I40^@44"
+          },
+          "_ANEIOSurfaceObject": {
+            "objectWithIOSurface:startOffset:": "@32@0:8^{__IOSurface=}16@24"
+          },
+          "_ANERequest": {
+            "requestWithInputs:inputIndices:outputs:outputIndices:procedureIndex:": "@56@0:8@16@24@32@40@48"
+          }
+        }
+      }
+    },
+    "state_pairs": {}
   }
 }

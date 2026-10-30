@@ -9,7 +9,7 @@ from pathlib import Path
 
 from . import _stream
 from .compilation import operands
-from .operand import TensorView, descriptor, requirements, graph_uses
+from .operand import TensorView, descriptor, requirements, required_layout, storage_requirement, graph_uses
 
 
 def strides(shape):
@@ -75,23 +75,23 @@ def place(graph, placements, fixed):
     Caller-owned storage stays fixed. Uses with mutually inconsistent physical
     requirements retain the shared resolver's explicit conversion edges.
     """
-    from . import empty
     from torch.utils._pytree import tree_flatten
     described = [v for n in graph.nodes for v in tree_flatten(n.meta.get('val'))[0]]
     groups = []
     for node in graph.nodes:
         for value, view, required in graph_uses(node):
-            if required == 'indexed':
+            required, capacity, alignment = storage_requirement(required)
+            if required == 'indexed' and not capacity and alignment == 1:
                 continue
             group = next((g for g in groups if torch_alias(g[0][0], value)), None)
             if group is None:
                 group = []; groups.append(group)
-            group.append((value, view, required if isinstance(required, str) else tuple(required)))
+            group.append((value, view, required, capacity, alignment))
     for group in groups:
         anchor = group[0][0]
-        required = lambda view, kind: view.required(kind if isinstance(kind, str) else 'fixed',
-                                                  () if isinstance(kind, str) else kind)
-        if all(view == required(view, kind) for _, view, kind in group):
+        required = required_layout
+        if all(view == required(view, kind) and not capacity and alignment == 1
+               for _, view, kind, capacity, alignment in group):
             continue
         if any(torch_alias(anchor, v) for v in fixed) or any(torch_alias(anchor, v) for v, _ in placements.bindings):
             continue
@@ -100,21 +100,25 @@ def place(graph, placements, fixed):
         domain = anchor.as_strided((anchor.untyped_storage().nbytes() // anchor.element_size(),), (1,), 0)
         values = list({(value.element_size(), descriptor(value)): value
                        for value in [domain, *(v for v in described if torch_alias(anchor, v))]}.values())
-        group = list({(value.element_size(), view, kind): (value, view, kind)
-                      for value, view, kind in group}.values())
+        group = list({(value.element_size(), view, required(view, kind), capacity, alignment): (value, view, kind, capacity, alignment)
+                      for value, view, kind, capacity, alignment in group}.values())
         unit = math.gcd(*(value.element_size() for value in values))
         fields = [value.element_size() // unit for value in values]
-        widths = [value.element_size() // unit for value, _, _ in group]
-        uses = [view.components(width) for (_, view, _), width in zip(group, widths)]
-        targets = [required(view, kind).components(width) for (_, view, kind), width in zip(group, widths)]
+        widths = [value.element_size() // unit for value, *_ in group]
+        uses = [view.components(width) for (_, view, *_), width in zip(group, widths)]
+        targets = [required(view, kind).components(width) for (_, view, kind, _, _), width in zip(group, widths)]
+        footprints = [(target.index(0) if target.count else 0, -(-capacity // unit), math.lcm(alignment, unit) // unit)
+                      for target, (_, _, _, capacity, alignment) in zip(targets, group)]
         typed = [descriptor(value).components(width) for value, width in zip(values, fields)]
         count = anchor.untyped_storage().nbytes() // unit
         # Strided APIs accept a family of layouts, not the source's current
         # distances. First solve exact demands, then retain each flexible use
         # which that placement already satisfies.
-        flexible = [i for i, (_, _, kind) in enumerate(group) if kind in ('strided', 'positive_strided')]
+        flexible = [i for i, (_, _, kind, capacity, alignment) in enumerate(group)
+                    if kind in ('strided', 'positive_strided') and not capacity and alignment == 1]
         exact = [i for i in range(len(group)) if i not in flexible]
-        placed = _stream.place_layout(count, [uses[i] for i in exact], [targets[i] for i in exact], [(0, 0)] * len(exact), typed, fields)
+        placed = _stream.place_layout(count, [uses[i] for i in exact], [targets[i] for i in exact],
+                                      [footprints[i] for i in exact], typed, fields)
         if placed is not None and flexible:
             scalar_domain = _stream.TensorLayout((count,), (1,))
             needs_layout = False
@@ -124,17 +128,17 @@ def place(graph, placements, fixed):
                 needs_layout |= view != target
                 targets[i] = target.components(widths[i])
             if needs_layout:
-                placed = _stream.place_layout(count, uses, targets, [(0, 0)] * len(uses), typed, fields)
+                placed = _stream.place_layout(count, uses, targets, footprints, typed, fields)
         if placed is None:
             continue
+        scalar_domain = _stream.TensorLayout((count,), (1,))
+        end = max((uses[i].rebase(scalar_domain, placed).index(0) * unit + capacity
+                   for i, (_, _, _, capacity, _) in enumerate(group) if uses[i].count and capacity), default=0)
         width = domain.element_size() // unit
         placed = placed.reshape((*domain.shape, width)).elements(width)
-        first, length = placed.storage_span()
-        extent = first + length if length else 0
-        alignment = math.lcm(*(value.element_size() for value in values)) // domain.element_size()
-        extent = -(-extent // alignment) * alignment
-        storage = empty((extent,), dtype=domain.dtype, device=domain.device.type)
-        placements.bind(domain, TensorView(storage, placed))
+        alignment = math.lcm(*(value.element_size() for value in values), *(entry[4] for entry in group))
+        placements.bind(domain, allocate(placed, domain.dtype, domain.device.type,
+                                        extent=end, alignment=alignment))
 
 
 def torch_alias(left, right):
@@ -175,6 +179,20 @@ def copies(source, destination):
     return commands
 
 
+def allocate(layout, dtype, device, *, extent=0, alignment=1):
+    """Assign the declared layout and byte footprint to aligned bridge pages."""
+    from . import empty
+    width = dtype.itemsize
+    first, length = layout.storage_span()
+    origin = -min(0, first)
+    alignment = math.lcm(alignment, width)
+    count = -(-max((first + length + origin) * width, extent + origin * width) // width)
+    storage = empty((count + alignment // width - 1,), dtype=dtype, device=device)
+    base, _, offset = _stream.page_backing(storage)
+    padding = (-(base + offset + origin * width)) % alignment
+    return TensorView(storage, layout.shift(origin + padding // width))
+
+
 def resolve(value, declarations, *, writing=False, device=None):
     """Realize an explicit API requirement before recording the function.
 
@@ -182,17 +200,20 @@ def resolve(value, declarations, *, writing=False, device=None):
     and ordinary copy edges. Direction comes from the declared input/output role.
     """
     layout = requirements(value, declarations)
+    contracts = [storage_requirement(declared) for declared in declarations]
+    capacity = max((item[1] for item in contracts), default=0)
+    alignment = math.lcm(*(item[2] for item in contracts))
     device = value.device.type if device is None else device
-    if descriptor(value) == layout and value.device.type == device:
+    base, available, at = _stream.page_backing(value)
+    storage = TensorView.of(value).storage
+    first = descriptor(value).index(0) if descriptor(value).count else 0
+    fits = ((base + at) % alignment == 0 and at + capacity <= available
+            and first * value.element_size() + capacity <= storage.untyped_storage().nbytes())
+    if descriptor(value) == layout and value.device.type == device and fits:
         return TensorView(TensorView.of(value).storage, layout), []
-    from . import empty
-    allocation = layout if layout.affine else layout.required('contiguous')
-    steps = tuple(allocation.strides)
-    reach = [(n - 1) * step for n, step in zip(value.shape, steps)]
-    origin = -sum(min(0, step) for step in reach) if value.numel() else 0
-    extent = 1 + sum(abs(step) for step in reach) if value.numel() else 0
-    placed = TensorView(empty((extent,), dtype=value.dtype, device=device),
-                        _stream.TensorLayout(tuple(value.shape), steps, origin))
+    allocation = layout.shift(-(layout.index(0) if layout.count else 0))
+    extent = (allocation.index(0) * value.element_size() if allocation.count else 0) + capacity
+    placed = allocate(allocation, value.dtype, device, extent=extent, alignment=alignment)
     return placed, copies(placed, value) if writing else copies(value, placed)
 
 

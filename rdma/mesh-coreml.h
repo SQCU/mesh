@@ -4,9 +4,10 @@
 
 /* Compiler operands for the Core ML API. Shapes and strides are in elements.
    Names, storage and types are bound during preparation, never inferred by run. */
+typedef struct { void *base; size_t bytes, offset; } MeshModelPages;
 typedef struct {
   const char *name;
-  void *data;
+  MeshModelPages pages;
   const int64_t *shape, *strides;
   int rank, dtype;
 } MeshModelView;
@@ -20,14 +21,17 @@ enum MeshModelUnits { MeshModelCPUAndANE, MeshModelAll, MeshModelCPU, MeshModelC
 extern "C" {
 #endif
 
-/* Configuration JSON declares units, function and accepted preferred devices
-   (cpu/gpu/ane). The SDK's units control runtime device eligibility. Loading
-   inspects that function's complete compute plan during preparation. */
+/* Configuration JSON selects the backend, function, units, devices and explicit
+   state input/output pairs. Core ML units set device eligibility; its plan
+   reports preferred placement. The direct ANE backend requires its own declared
+   capabilities and symbols, and returns the compiled operand contract. */
 long mesh_coreml_load(const char *compiled, const char *configuration);
 void mesh_coreml_release(long model);
 /* Every model input and output must have a view, including optional inputs.
    Binding does not request provider defaults or leave outputs unbound. The
-   public Core ML output-backing API remains advisory for supplied views. */
+   direct ANE backend maps retained bridge-page roots and their declared offsets.
+   Public Core ML output backings remain advisory for that explicit backend.
+   Keep all page roots alive until the binding is released. */
 void *mesh_coreml_bind(long model, const MeshModelView *inputs, size_t inputCount,
                       const MeshModelView *outputs, size_t outputCount);
 const char *mesh_coreml_run(void *binding);
@@ -41,6 +45,12 @@ int mesh_coreml_compile(const char *package, const char *compiled);
    Unknown device usage is null, distinct from an empty support set. The plan
    reports anticipated placement, not actual execution or output-page guarantees. */
 const char *mesh_coreml_placement(long model);
+/* Prepared provider operand contracts, indexed by the declared feature name.
+   Direct ANE contracts include the procedure, symbol, physical shape/strides,
+   scalar type, storage footprint and address alignment from its compiled model.
+   The caller resolves these requirements through the shared layout compiler
+   before allocation. The returned JSON lives until model release. */
+const char *mesh_coreml_contract(long model);
 
 /* CPU numerical operands and workspace are bound during preparation. */
 typedef struct MeshCpuCommand {

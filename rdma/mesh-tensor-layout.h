@@ -85,6 +85,8 @@ FOUNDATION_EXPORT NSInteger MetalTensorConstant(id expression, NSArray<NSNumber 
 - (MetalTensorLayout *)required:(NSString *)kind strides:(NSArray<NSNumber *> *)strides;
 // Intersect explicit use/API requirements. No requirement is discarded by a
 // later lowering. Conflicts are preparation errors, before any numerical work.
+// A requirement's `layout` can supply an exact physical relation, including
+// a provider's padded axes reshaped onto the operand's logical axes.
 - (MetalTensorLayout *)requirements:(NSArray<NSDictionary *> *)requirements;
 // Address expressions and, for affine views, per-axis stride constants for
 // numerical APIs. Both describe the assigned operand, after page placement.
@@ -125,8 +127,9 @@ FOUNDATION_EXPORT NSArray<NSDictionary *> *MetalTensorCover(NSArray<MetalTensorL
 // Place one storage domain from declared use layouts. All indices and widths
 // use the caller's common scalar unit. `values` preserves typed element fields
 // and alignment; `uses`/`targets` impose relative positions for consumers.
-// Each footprint is [first, count] in target coordinates. It reserves API
-// writes beyond logical values; [0, 0] adds no such reservation.
+// Each footprint is [first, count, alignment] in target coordinates. It reserves
+// API writes beyond logical values and aligns the footprint's first address;
+// [0, 0, 1] adds neither padding nor an alignment constraint.
 // Relations retain value domains without per-value arrays. Connected groups
 // pack in source-root order at their first aligned, nonoverlapping origins.
 // A nil result means no common zero-copy placement exists. No data moves.

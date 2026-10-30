@@ -6,16 +6,37 @@
 #include "mesh-isl-memory.h"
 #include <string.h>
 
-isl_set *MeshIndexSelectionDomain(isl_ctx *ctx,const char *declaration,char **message) { @autoreleasepool {
+isl_map *MeshIndexSelectionRelation(isl_ctx *ctx,const char *declaration,size_t *count,char **message) { @autoreleasepool {
     *message=NULL;
     @try {
         NSData *data=[NSData dataWithBytesNoCopy:(void *)declaration length:strlen(declaration) freeWhenDone:NO];
         NSError *error=nil;NSDictionary *value=[NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
         if(error)[NSException raise:NSInvalidArgumentException format:@"selection declaration: %@",error];
-        return isl_map_range(MeshIndexRelation(ctx,[MetalTensorLayout selection:value extent:nil]));
+        MetalTensorLayout *layout=[MetalTensorLayout selection:value extent:nil];*count=layout.count;
+        return MeshIndexRelation(ctx,layout);
     } @catch(NSException *error) {
         *message=mesh_isl_strdup(error.reason.UTF8String);
         return NULL;
+    }
+}}
+
+isl_set *MeshIndexSelectionDomain(isl_ctx *ctx,const char *declaration,char **message) {
+    size_t count=0;isl_map *relation=MeshIndexSelectionRelation(ctx,declaration,&count,message);
+    return relation?isl_map_range(relation):NULL;
+}
+
+char *MeshIndexRelationTerms(isl_map *relation,char **message) { @autoreleasepool {
+    *message=NULL;
+    @try {
+        isl_pw_multi_aff *function=isl_pw_multi_aff_from_map(isl_map_copy(relation));
+        isl_pw_aff *scalar=isl_pw_multi_aff_get_pw_aff(function,0);isl_pw_multi_aff_free(function);
+        id terms=MeshIndexTerms(scalar);NSError *error=nil;
+        NSData *data=[NSJSONSerialization dataWithJSONObject:terms options:NSJSONWritingFragmentsAllowed error:&error];
+        if(error)[NSException raise:NSInvalidArgumentException format:@"index terms: %@",error];
+        NSString *text=[[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
+        return mesh_isl_strdup(text.UTF8String);
+    } @catch(NSException *error) {
+        *message=mesh_isl_strdup(error.reason.UTF8String);return NULL;
     }
 }}
 
@@ -173,6 +194,43 @@ isl_pw_aff *MeshIndexFunction(isl_ctx *ctx,MetalTensorLayout *layout) {
 }
 isl_map *MeshIndexRelation(isl_ctx *ctx,MetalTensorLayout *layout) {
     return isl_map_from_pw_aff(MeshIndexFunction(ctx,layout));
+}
+
+MetalTensorLayout *MeshIndexUnion(MetalTensorLayout *sourceRoot,MetalTensorLayout *targetRoot,
+    MetalTensorLayout *source,MetalTensorLayout *target,MetalTensorLayout *member,BOOL sourceMember) {
+    isl_ctx *ctx=isl_ctx_alloc();
+    isl_map *sourceInverse=NULL,*targetInverse=NULL,*targetMap=NULL,*relation=NULL;
+    isl_set *remaining=NULL;MetalTensorLayout *result=nil;
+    @try {
+        sourceInverse=isl_map_reverse(MeshIndexRelation(ctx,sourceRoot));
+        targetInverse=isl_map_reverse(MeshIndexRelation(ctx,targetRoot));
+        isl_map *read=isl_map_apply_range(MeshIndexRelation(ctx,source),isl_map_copy(sourceInverse));
+        isl_map *write=isl_map_apply_range(MeshIndexRelation(ctx,target),isl_map_copy(targetInverse));
+        targetMap=isl_map_apply_range(isl_map_reverse(write),read);
+        remaining=isl_set_subtract(IndexDomain(ctx,0,targetRoot.count),isl_map_domain(isl_map_copy(targetMap)));
+        MetalTensorLayout *extra=MeshIndexSelection(remaining);
+        const NSUInteger total=sourceRoot.count+extra.count;
+        if(!member)result=[MetalTensorLayout shape:@[@(total)] strides:@[@1] offset:0 maps:@{} indices:nil];
+        else if(!member.count)result=[MetalTensorLayout shape:member.shape index:@0 parameters:@{}];
+        else {
+            if(!sourceMember) {
+                isl_map *append=isl_map_from_pw_aff(MeshIndexExpression(ctx,@[@"add",@"i",@(sourceRoot.count)],0,extra.count));
+                append=isl_map_apply_range(isl_map_reverse(MeshIndexRelation(ctx,extra)),append);
+                targetMap=isl_map_coalesce(isl_map_union(targetMap,append));
+            }
+            relation=isl_map_apply_range(MeshIndexRelation(ctx,member),isl_map_copy(sourceMember?sourceInverse:targetInverse));
+            if(!sourceMember)relation=isl_map_apply_range(relation,isl_map_copy(targetMap));
+            isl_pw_multi_aff *function=isl_pw_multi_aff_from_map(relation);relation=NULL;
+            isl_pw_aff *index=isl_pw_multi_aff_get_pw_aff(function,0);isl_pw_multi_aff_free(function);
+            result=[MetalTensorLayout shape:member.shape index:MeshIndexTerms(index) parameters:@{}];
+        }
+        if(isl_ctx_last_error(ctx)!=isl_error_none)
+            [NSException raise:NSInvalidArgumentException format:@"view union: %s",isl_ctx_last_error_msg(ctx)];
+    } @finally {
+        isl_map_free(sourceInverse);isl_map_free(targetInverse);isl_map_free(targetMap);isl_map_free(relation);
+        isl_set_free(remaining);isl_ctx_free(ctx);
+    }
+    return result;
 }
 
 static id IndexTerms(isl_ast_expr *expression) {

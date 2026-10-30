@@ -14,11 +14,21 @@ isl_map *MeshIndexRelation(isl_ctx *ctx, MetalTensorLayout *layout);
 // a preparation-language boundary; no serialized descriptor reaches execution.
 // On a declaration exception, error owns a message freed with mesh_isl_free.
 isl_set *MeshIndexSelectionDomain(isl_ctx *ctx, const char *declaration, char **error);
+isl_map *MeshIndexSelectionRelation(isl_ctx *ctx, const char *declaration, size_t *count, char **error);
+// A functional one-output relation as the shared scalar index term JSON.
+// Borrow the relation; release the result/error with mesh_isl_free.
+char *MeshIndexRelationTerms(isl_map *relation, char **error);
 isl_pw_aff *MeshIndexRuns(isl_ctx *ctx, NSArray<NSArray<NSNumber *> *> *runs);
 // Sorted unique positions as compact (first,width,step,count) records. Borrow
 // the set; release the returned array with mesh_isl_free. NULL reports failure.
 int64_t *MeshIndexSetRuns(isl_set *set, size_t *count);
 MetalTensorLayout *MeshIndexSelection(isl_set *set); // borrows the set
+// Unite a declared view equality in source-root order. Unmatched target
+// positions follow it. A member keeps its ordered shape and repeated reads;
+// nil member returns the combined root domain. All operands are resolved once
+// the frontend has bound symbolic extents, before allocation or execution.
+MetalTensorLayout *MeshIndexUnion(MetalTensorLayout *sourceRoot, MetalTensorLayout *targetRoot,
+    MetalTensorLayout *source, MetalTensorLayout *target, MetalTensorLayout *member, BOOL sourceMember);
 id MeshIndexTerms(isl_pw_aff *expression); // consumes the expression
 BOOL MeshIndexEqual(id left, id right, NSUInteger count);
 struct MeshIndexBounds { NSInteger low, high; };

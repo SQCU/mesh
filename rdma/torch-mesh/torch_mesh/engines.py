@@ -50,10 +50,9 @@ def host(t):
 
 def _host_address(value):
     """Bind the shared allocation and its declared offset once at preparation."""
-    from .operand import TensorView
-    view = TensorView.of(value)
-    storage = host(view.storage)
-    return storage.data_ptr() + (view.layout.offset - view.storage.storage_offset()) * view.element_size()
+    from . import _stream
+    base, _, offset = _stream.page_backing(value)
+    return base + offset
 
 
 def _host_bindings(source, target, input_layouts, output_layouts, binding_layout):
@@ -79,7 +78,7 @@ def _coreml():
     if _CORE_ML is None:
         from mesh import RDMA
         try:
-            lib = ctypes.CDLL(os.path.join(RDMA, 'libmesh-coreml.dylib'))
+            lib = ctypes.CDLL(os.path.join(os.environ.get('MESH_LIBDIR', RDMA), 'libmesh-coreml.dylib'))
             lib.mesh_coreml_load.restype = ctypes.c_long
             lib.mesh_coreml_load.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
             lib.mesh_coreml_release.argtypes = [ctypes.c_long]
@@ -92,6 +91,8 @@ def _coreml():
             lib.mesh_coreml_error.restype = ctypes.c_char_p
             lib.mesh_coreml_placement.restype = ctypes.c_char_p
             lib.mesh_coreml_placement.argtypes = [ctypes.c_long]
+            lib.mesh_coreml_contract.restype = ctypes.c_char_p
+            lib.mesh_coreml_contract.argtypes = [ctypes.c_long]
             lib.mesh_coreml_compile.restype = ctypes.c_int
             lib.mesh_coreml_compile.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
             lib.mesh_cpu_program_create.argtypes = [ctypes.POINTER(CpuCommand), ctypes.c_size_t]
@@ -213,7 +214,8 @@ class Cpu(Engine):
         weights = {f'weight{i}': w for i, w in enumerate(weights)}
         return dict(definition=dict(provider='cpu', operation=op.kind, weights=list(weights)), weights=weights,
                     input_layouts=dict(input=layouts['input'], **{name: layouts['weight'] for name in weights}),
-                    output_layouts={'output': layouts['output']}, binding_layout='indexed')
+                    output_layouts={'output': layouts['output']}, binding_layout='indexed',
+                    input_dtype=torch.float32, output_dtype=torch.float32)
 
     def bind(self, op, shard, x, out, *, input_layouts, output_layouts, binding_layout):
         weights = (shard,) if op.kind == 'linear' else shard
@@ -410,24 +412,59 @@ class Ane(Engine):
         return _Compiled('ffn', (numpy(op.gate[start:end]), numpy(op.up[start:end]), numpy(op.down[:, start:end])))
 
     def declaration(self, op, shard, rows):
-        compiled, _, _ = neural_engine_share(shard.kind, shard.arrays, rows, self.tile, self.block, self.model)
+        compiled, _, placement = neural_engine_share(shard.kind, shard.arrays, rows, self.tile, self.block, self.model)
+        contract = placement['contract']
         source, target = self.model['input'], self.model['output']
-        return dict(definition=dict(provider='coreml', compiled=str(compiled), configuration=self.model), weights={},
-                    input_layouts={source['name']: source['layout']}, output_layouts={target['name']: target['layout']},
-                    binding_layout=self.model['binding_layout'])
+        columns = shard.arrays[0].shape[0] if shard.kind == 'linear' else shard.arrays[2].shape[0]
+        return dict(definition=dict(provider='coreml', compiled=str(compiled), configuration=self.model, contract=contract), weights={},
+                    input_layouts=model_requirements(contract['inputs'], {source['name']: (rows, shard.arrays[0].shape[1])}),
+                    output_layouts=model_requirements(contract['outputs'], {target['name']: (rows, columns)}),
+                    binding_layout=self.model['binding_layout'],
+                    input_dtype=_MODEL_TYPES[contract['inputs'][source['name']]['dtype']],
+                    output_dtype=_MODEL_TYPES[contract['outputs'][target['name']]['dtype']])
+
+
+class ModelPages(ctypes.Structure):
+    _fields_ = [('base', ctypes.c_void_p), ('bytes', ctypes.c_size_t), ('offset', ctypes.c_size_t)]
 
 
 class ModelView(ctypes.Structure):
-    _fields_ = [('name', ctypes.c_char_p), ('data', ctypes.c_void_p), ('shape', ctypes.POINTER(ctypes.c_int64)),
+    _fields_ = [('name', ctypes.c_char_p), ('pages', ModelPages), ('shape', ctypes.POINTER(ctypes.c_int64)),
                 ('strides', ctypes.POINTER(ctypes.c_int64)), ('rank', ctypes.c_int), ('dtype', ctypes.c_int)]
 
 
 _MODEL_TYPES = (torch.float16, torch.float32, torch.int32, torch.float64, torch.int8)
 
 
+def model_requirements(features, shapes):
+    """Provider layouts and storage extents before producer page placement."""
+    from . import _stream
+    result = {}
+    for name, shape in shapes.items():
+        feature = features[name]
+        layout = 'strided' if feature['strides'] is None else {
+            'view': _stream.TensorLayout(feature['shape'], feature['strides']).reshape(tuple(shape)).state}
+        result[name] = dict(layout=layout, capacity=feature['bytes'] or 0, alignment=feature['alignment'])
+    return result
+
+
+def model_operand(feature, shape, *, device='cpu'):
+    """Allocate a provider's named logical view from its prepared contract."""
+    from . import _stream, layout
+    from .operand import required_layout
+    requirement = model_requirements({'value': feature}, {'value': shape})['value']
+    selected = required_layout(_stream.TensorLayout(shape, layout.strides(shape)), requirement['layout'])
+    dtype = _MODEL_TYPES[feature['dtype']]
+    first = selected.index(0) if selected.count else 0
+    return layout.allocate(selected.shift(-first), dtype, device, extent=requirement['capacity'],
+                           alignment=requirement['alignment'])
+
+
 def _model_views(specs, addresses):
-    """Core ML views (name, shape, strides, type index) at their addresses, as mesh_coreml_bind takes them."""
-    return [ModelView(name.encode(), address, (ctypes.c_int64 * len(shape))(*shape), (ctypes.c_int64 * len(shape))(*strides),
+    """Resolve each relocated logical address to its actual bridge-page owner."""
+    from . import _stream
+    return [ModelView(name.encode(), ModelPages(*_stream.host_page_backing(address)),
+                      (ctypes.c_int64 * len(shape))(*shape), (ctypes.c_int64 * len(shape))(*strides),
                       len(shape), dtype) for (name, shape, strides, dtype), address in zip(specs, addresses)]
 
 
@@ -438,24 +475,29 @@ def _coreml_addresses(length):
 
 class Prediction:
     """One Core ML invocation's views, bound before the numerical function."""
-    def __init__(self, native, model, source, target, *, compiled, configuration, input_layouts, output_layouts, binding_layout):
+    def __init__(self, native, model, source, target, *, compiled, configuration, contract):
         from . import _stream
         from .operand import TensorView
         self.native = native
         self.placement = json.loads(native.mesh_coreml_placement(model))
-        source, target, before, after = _host_bindings(source, target, input_layouts, output_layouts, binding_layout)
+        input_layouts = model_requirements(contract['inputs'], {name: value.shape for name, value in source.items()})
+        output_layouts = model_requirements(contract['outputs'], {name: value.shape for name, value in target.items()})
+        source, target, before, after = _host_bindings(source, target, input_layouts, output_layouts, configuration['binding_layout'])
         self.before, self.after = _stream.Commands(before), _stream.Commands(after)
         self.inputs, self.outputs = tuple(source.values()), tuple(target.values())
-        def specs(values):
+        def specs(values, features):
             made = []
             for name, original in values.items():
                 operand = TensorView.of(original)
-                if operand.dtype not in _MODEL_TYPES:
-                    raise ValueError('Core ML views require a declared supported scalar type')
-                made.append(((name, list(operand.shape), list(operand.layout.strides), _MODEL_TYPES.index(operand.dtype)),
+                feature = features[name]
+                if operand.dtype != _MODEL_TYPES[feature['dtype']]:
+                    raise ValueError(f'{name}: operand type differs from its prepared provider contract')
+                shape, strides = ((list(operand.shape), list(operand.layout.strides)) if feature['strides'] is None else
+                                  (feature['shape'], feature['strides']))
+                made.append(((name, shape, strides, feature['dtype']),
                              _host_address(operand)))
             return made
-        given, made = specs(source), specs(target)
+        given, made = specs(source, contract['inputs']), specs(target, contract['outputs'])
         inputs = (ModelView * len(given))(*_model_views([v for v, _ in given], [a for _, a in given]))
         outputs = (ModelView * len(made))(*_model_views([v for v, _ in made], [a for _, a in made]))
         self.binding = native.mesh_coreml_bind(model, inputs, len(inputs), outputs, len(outputs))
@@ -488,31 +530,38 @@ def _load_coreml(native, compiled, configuration):
     return handle
 
 
-def coreml_graph(compiled, inputs, outputs, *, configuration, input_layouts, output_layouts, binding_layout):
+def coreml_contract(compiled, configuration):
+    """Read the compiled provider contract before allocating its operands."""
+    native = _coreml()
+    handle = _load_coreml(native, compiled, configuration)
+    try:
+        return json.loads(native.mesh_coreml_contract(handle))
+    finally:
+        native.mesh_coreml_release(handle)
+
+
+def coreml_graph(compiled, inputs, outputs, *, configuration, contract):
     """Bind any compiled Core ML graph to named shared views at preparation.
 
-    ``configuration`` supplies compute units, function name and allowed devices.
+    ``configuration`` supplies backend, compute units, function and devices.
     The shared loader inspects the provider's preferred placement before binding.
     Graph conversion belongs to preparation; no operation-kind dispatch or
     model loading occurs in the returned host record. The common schedule
-    derives dependencies from the declared input and output views. Per-name
-    ``input_layouts`` and ``output_layouts`` declare strided, contiguous, or
-    exact element strides. ``binding_layout`` supplies the API representation
-    requirement from the backend configuration; it is intersected with each
-    use requirement. Necessary copies are recorded at preparation.
+    derives dependencies from the declared input and output views. ``contract``
+    supplies the provider's types, layouts, footprints and address alignment,
+    which the caller has already consumed when assigning producer storage.
     """
     native = _coreml()
     if native is None:
         raise RuntimeError('Core ML graph requires the native shared-memory binding')
     handle = _load_coreml(native, compiled, configuration)
     try:
-        return Prediction(native, handle, inputs, outputs, compiled=compiled, configuration=configuration, input_layouts=input_layouts,
-                          output_layouts=output_layouts, binding_layout=binding_layout)
+        return Prediction(native, handle, inputs, outputs, compiled=compiled, configuration=configuration, contract=contract)
     finally:
         native.mesh_coreml_release(handle)
 
 
-def export_coreml_graph(program, inputs, outputs, *, directory, configuration, input_layouts, output_layouts, binding_layout):
+def export_coreml_graph(program, inputs, outputs, *, directory, configuration):
     """Lower an exported tensor graph once, then bind the common host record.
 
     ``program`` is a torch.export.ExportedProgram (its graph and constants).
@@ -537,7 +586,7 @@ def export_coreml_graph(program, inputs, outputs, *, directory, configuration, i
             raise RuntimeError(native.mesh_coreml_error().decode())
     finally:
         shutil.rmtree(package)
-    return coreml_graph(compiled, inputs, outputs, configuration=configuration, input_layouts=input_layouts, output_layouts=output_layouts, binding_layout=binding_layout)
+    return coreml_graph(compiled, inputs, outputs, configuration=configuration, contract=coreml_contract(compiled, configuration))
 
 
 def coreml_units(units):
@@ -631,7 +680,8 @@ def neural_engine_share(kind, arrays, rows, tile, block, configuration):
             raise RuntimeError(f'Neural Engine share: {native.mesh_coreml_error().decode()}')
     handle = _load_coreml(native, compiled, configuration)
     try:
-        return compiled, block, json.loads(native.mesh_coreml_placement(handle))
+        return compiled, block, dict(json.loads(native.mesh_coreml_placement(handle)),
+                                     contract=json.loads(native.mesh_coreml_contract(handle)))
     finally:
         native.mesh_coreml_release(handle)
 
@@ -737,12 +787,12 @@ class Prepared:
         def function(value):
             sources, pieces = {dtype: value}, []
             for engine, shard, first, end, declaration in shares:
-                needed = engine.input_dtype(dtype)
+                needed = engine.input_dtype(dtype) if declaration is None else declaration['input_dtype']
                 if needed not in sources:
                     sources[needed] = value.to(dtype=needed, device=output_device)
                 source = sources[needed]
                 shape = (rows, end - first if op.combine == 'concat' else op.width)
-                out = torch.empty(shape, dtype=engine.out_dtype(dtype), device=output_device)
+                out = torch.empty(shape, dtype=engine.out_dtype(dtype) if declaration is None else declaration['output_dtype'], device=output_device)
                 if declaration is None:
                     engine.run(op, shard, source, out)
                 else:
