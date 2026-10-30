@@ -78,6 +78,12 @@ def vector_norm(self, ord=2, dim=None, keepdim=False, *, dtype=None):
     return values.pow(ord).sum(dim, keepdim=keepdim).pow(1.0 / ord).to(result_type)
 
 
+def mean(self, dim=None, keepdim=False, *, dtype=None):
+    """The sum and its count share the declared global reduction domain."""
+    dims = types.reduction_dims(self.shape, dim or None)
+    return torch.sum(self, dims, keepdim=keepdim, dtype=dtype) / math.prod(self.shape[d] for d in dims)
+
+
 def moments(self, dim=None, unbiased=None, keepdim=False, *, correction=None, root=False, mean=False):
     """Centered moments as sums over the declared global reduction domain.
 
@@ -226,6 +232,8 @@ def owned_product(domain, owned, inputs, supplied, output_shape):
 # table. Lowering to scalar prims before partitioning would erase the tensor
 # operations whose ownership relations the distributed frontend consumes.
 partition_decompositions = {
+    torch.ops.aten.mean.default: mean,
+    torch.ops.aten.mean.dim: mean,
     torch.ops.aten.linear_backward.default: linear_backward,
     torch.ops.torch_mesh.fwht.default: butterfly,
     torch.ops.aten._softmax.default: softmax,

@@ -157,6 +157,88 @@ def layout_configuration(layout):
                 index_coordinates=json.loads(coordinates))
 
 
+class _IndexTerms:
+    """Emit the shared integer grammar through Torch's expression interpreter."""
+    _operators = dict(add='add', mul='mul', floordiv='div', mod='mod', python_mod='mod',
+                      minimum='min', maximum='max', eq='eq', le='le', lt='lt', ge='ge', gt='gt',
+                      and_='and', or_='or', where='select')
+
+    def __getattr__(self, name):
+        operation = self._operators[name]
+        return lambda *values: [operation, *values]
+
+    @staticmethod
+    def constant(value, dtype):
+        if value in (True, False):
+            return int(bool(value))
+        if value.is_Integer:
+            return int(value)
+        raise TypeError(f'index term contains non-integer literal {value}')
+
+    @staticmethod
+    def sym_sum(values):
+        return ['add', *values] if len(values) > 1 else values[0] if values else 0
+
+    @staticmethod
+    def modular_indexing(value, divisor, modulus):
+        return ['mod', ['div', value, divisor], modulus]
+
+    @staticmethod
+    def not_(value):
+        return ['eq', value, 0]
+
+    @staticmethod
+    def ne(left, right):
+        return ['eq', ['eq', left, right], 0]
+
+    @staticmethod
+    def identity(value):
+        return value
+
+    @staticmethod
+    def abs(value):
+        return ['max', value, ['mul', -1, value]]
+
+    @staticmethod
+    def pow_by_natural(value, exponent):
+        result = 1
+        while exponent:
+            if exponent % 2:
+                result = ['mul', result, value]
+            value, exponent = ['mul', value, value], exponent // 2
+        return result
+
+    @staticmethod
+    def expr_cond_pair(value, condition):
+        return value, condition
+
+    @staticmethod
+    def piecewise(*branches):
+        result, condition = branches[-1]
+        if condition != 1:
+            raise ValueError('an index expression must declare its complete domain')
+        for value, condition in reversed(branches[:-1]):
+            result = ['select', condition, value, result]
+        return result
+
+
+def index_terms(expression, variables):
+    """Serialize existing scalar index IR; the shared algebra performs solving."""
+    from torch.utils._sympy.interp import sympy_interp
+    return sympy_interp(_IndexTerms(), variables, expression)
+
+
+def index_relation(algebra, expression, variables, shape):
+    """An IR address expression over its declared common iteration domain."""
+    import math
+    from .layout import strides
+    shape = tuple(map(int, shape))
+    coordinates = layout_configuration(_stream.TensorLayout(shape, strides(shape)))['index_coordinates']
+    terms = index_terms(expression, {var: value for var, value in zip(variables, coordinates, strict=True) if var != 0})
+    return algebra.layout(dict(shape=shape, index_shape=[math.prod(shape)], strides=[1], offset=0,
+                               maps={}, index_coordinates=[terms])).reshape(shape)
+
+
 def bind(value, declaration):
     """Compose the declared use with the producer's assigned pages once."""
     placed = TensorView.of(value)

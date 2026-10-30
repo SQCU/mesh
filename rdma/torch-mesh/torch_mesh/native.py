@@ -169,6 +169,51 @@ class Program:
         schedule.append(self.commands)
 
 
+def body_accesses(body):
+    """Read the scheduler's existing scalar graph, including guarded blocks.
+
+    Nodes and indirect producers are retained by identity. This describes the
+    captured scalar program; it neither interprets it nor captures it again.
+    """
+    import sympy
+    from torch._inductor.loop_body import LoopBody
+
+    reads, writes, producers = [], [], {}
+
+    def index(value):
+        return (body.indexing_exprs[value.args[0]] if isinstance(value, torch.fx.Node)
+                else sympy.Integer(value))
+
+    def visit(block, predicates):
+        for node in block.graph.nodes:
+            if node.op == 'call_module':
+                if node.target in body.subblocks:
+                    visit(body.subblocks[node.target], (*predicates, node.args[0]))
+                clone = getattr(body.submodules[node.target], 'clone', None)
+                if clone is not None and clone.func is LoopBody.bind_set_indirect_shim:
+                    declaration = dict(clone.keywords)
+                    symbol = declaration.pop('var')
+                    producers[symbol] = dict(declaration, node=node, value=node.args[0], predicates=predicates)
+            elif node.op == 'call_method':
+                if node.target in ('load', 'load_seed', 'store', 'store_reduction'):
+                    item = dict(name=node.args[1], index=index(node.args[2]), node=node,
+                                predicates=predicates, index_producers=producers, body=body)
+                    (reads if node.target in ('load', 'load_seed') else writes).append(item)
+                elif node.target == 'bucketize':
+                    # This scalar primitive performs dependent search reads.
+                    # Retain its declared address bounds and exact IR operands;
+                    # a buffer-wide StarDep is not its executed read relation.
+                    boundaries = node.args[2]
+                    sorter = node.args[6] if len(node.args) > 6 else node.kwargs.get('sorter')
+                    for argument in (boundaries, sorter):
+                        if argument is not None:
+                            reads.append(dict(name=argument[0], index=None, bounds=tuple(map(index, argument[1:])),
+                                              node=node, predicates=predicates, index_producers=producers, body=body))
+
+    visit(body.root_block, ())
+    return dict(body=body, reads=tuple(reads), writes=tuple(writes), index_producers=producers)
+
+
 def prepare_graph(module, metadata, *, materializations=()):
     """Lower once to logical IR, before assigning physical page operands.
 
@@ -184,7 +229,7 @@ def prepare_graph(module, metadata, *, materializations=()):
     from torch._inductor.codegen.wrapper import PythonWrapperCodegen
     from torch._inductor.choices import InductorChoices
     from torch._inductor.graph import GraphLowering
-    from torch._inductor.scheduler import Scheduler
+    from torch._inductor.scheduler import Scheduler, BaseSchedulerNode, SchedulerNode
     from torch._inductor.virtualized import V
     from torch._inductor.debug import DebugContext
     from torch._inductor import ir
@@ -268,17 +313,19 @@ def prepare_graph(module, metadata, *, materializations=()):
     def ir_layout(layout):
         return _stream.TensorLayout(tuple(map(int, layout.size)), tuple(map(int, layout.stride)), int(layout.offset))
 
+    def ir_operand(value):
+        if value is None:
+            return None
+        storage, layout = ir.as_storage_and_layout(value, freeze=False)
+        return dict(name=storage.get_name(), dtype=layout.dtype, storage_dtype=storage.get_dtype(), view=ir_layout(layout))
+
     def external_domains(operation, algebra):
         """Bind shared mathematical declarations to the retained IR's views."""
         import json
         import mesh_matrix
         from .operand import binding_layout, layout_configuration
 
-        def operand(value):
-            if value is None:
-                return None
-            storage, layout = ir.as_storage_and_layout(value, freeze=False)
-            return dict(name=storage.get_name(), dtype=layout.dtype, storage_dtype=storage.get_dtype(), view=ir_layout(layout))
+        operand = ir_operand
 
         def product(values, parameters):
             declared = {name: None if value is None else dict(shape=tuple(value['view'].shape), type=value['dtype'])
@@ -339,6 +386,41 @@ def prepare_graph(module, metadata, *, materializations=()):
             result.append(product({name: uses[slot] for name, slot in declaration['operands'].items()}, declaration['parameters']))
         return tuple(result)
 
+    def computed_domains(operation, body, algebra):
+        """Address relations and scalar operands from the same prepared body."""
+        from .operand import index_relation
+        data = operation.data
+        iterations, reductions = map(tuple, body.sizes)
+        variables = (*body.iter_vars, *body.reduce_vars)
+        work = (*iterations, *reductions)
+        declared = body_accesses(body)
+
+        def accesses(items, shape, axes):
+            known = set(axes) - {0}
+            result = {}
+            for slot, item in enumerate(items):
+                index = item['index']
+                relation = (index_relation(algebra, index, axes, shape)
+                            if index is not None and index.free_symbols <= known else None)
+                dtype = V.graph.get_dtype(item['name'])
+                result[slot] = dict(item, dtype=dtype, storage_dtype=dtype, variables=axes,
+                                    operation=operation, relation=relation)
+            return result
+
+        reduction = None
+        if isinstance(data, ir.Reduction):
+            kind = data.get_reduction_type()
+            reduction = dict(operation=kind, axes=tuple(range(len(iterations), len(work))),
+                             identity=data.default_value(kind, data.get_dtype()),
+                             dtype=data.get_dtype(), source_dtype=data.src_dtype)
+        finish_shape = iterations if reduction is not None else work
+        finish_axes = variables[:len(iterations)] if reduction is not None else variables
+        return (dict(work=work, variables=variables, body=body, index_producers=declared['index_producers'],
+                     reads=accesses(declared['reads'], work, variables),
+                     writes=accesses(declared['writes'], work, variables), reduction=reduction,
+                     finish=dict(work=finish_shape, variables=finish_axes, reads={},
+                                 writes=accesses(declared['writes'], finish_shape, finish_axes))),)
+
     from .layout import declare
     placeholders = [node for node in module.graph.nodes if node.op == 'placeholder']
     declare(module.graph, placements, [*(node.meta.get('val') for node in placeholders), *materializations])
@@ -368,8 +450,10 @@ def prepare_graph(module, metadata, *, materializations=()):
             return made
 
         def can_reuse(self, input_buffer, output_buffer=None):
-            # Caller-owned landing storage is fixed, not a scratch pool slot.
-            if input_buffer.get_name() in bound_storage or (output_buffer is not None and output_buffer.get_name() in bound_storage):
+            # Logical landing declarations constrain reuse before pages exist.
+            outputs = (output_buffer.get_buffer_names() if isinstance(output_buffer, BaseSchedulerNode)
+                       else () if output_buffer is None else (output_buffer.get_name(),))
+            if any(name in V.graph.never_reuse_buffers for name in outputs):
                 return False
             return super().can_reuse(input_buffer, output_buffer)
 
@@ -425,6 +509,7 @@ def prepare_graph(module, metadata, *, materializations=()):
         def run_node(self, node):
             result = super().run_node(node)
             if node.op == 'output' or 'val' not in node.meta:
+                self.source_values[node] = self.graph_outputs if node.op == 'output' else result
                 return result
             leaves, spec = tree_flatten(result)
             described = tree_flatten(node.meta['val'])[0]
@@ -443,7 +528,21 @@ def prepare_graph(module, metadata, *, materializations=()):
                 view = page_view(storage, layout, None)
                 page_values.append((view.data, logical, storage.data, layout))
                 leaves[i] = view
-            return tree_unflatten(leaves, spec)
+            result = tree_unflatten(leaves, spec)
+            self.source_values[node] = result
+            return result
+
+        def value_binding(self, value, algebra):
+            """A realized source IR value's exact view; never realize it here."""
+            from .operand import layout_configuration
+            with environment(), V.set_graph_handler(self), mode:
+                binding = ir_operand(value)
+                return dict(binding, value=value, relation=algebra.layout(layout_configuration(binding['view'])))
+
+        def loop_body(self, operation):
+            """The scheduler's current cached body, without retracing or freezing."""
+            scheduled = self.scheduler.name_to_node[operation.get_operation_name()]
+            return scheduled._body if isinstance(scheduled, SchedulerNode) else None
 
         def bind(self, operands, *, destinations=None):
             """Bind the declared operands and materializations, then emit once."""
@@ -478,7 +577,6 @@ def prepare_graph(module, metadata, *, materializations=()):
                             mapped = rebase_typed(base_layout, base.dtype.itemsize, source_layout, layout.dtype.itemsize, destination.layout)
                             bound_storage[name] = TensorView(destination.storage_as(base.dtype), mapped)
                             storage_layouts[name] = (base_layout, bound_storage[name])
-                            self.never_reuse_buffers.add(name)
                         view.operand = destination
                 source, _ = self.codegen()
                 namespace = {'__name__': 'mesh_preparation', 'mesh_destinations': bound_storage, 'mesh_views': views}
@@ -496,9 +594,9 @@ def prepare_graph(module, metadata, *, materializations=()):
         def effects(self, algebra=None):
             """Logical operations with one shared iteration domain per body.
 
-            MemoryDep indices retain the body's symbols even when a particular
-            read omits an axis. Aggregate outputs retain their named field
-            types; their StarDeps are not scalar address relations.
+            Domains retain the cached body's symbols, guards and scalar nodes.
+            Scheduler dependencies retain their existing scheduling role.
+            Aggregate StarDeps are not scalar address relations.
             Declared external domains compose their logical uses with the same
             selected storage views; each access carries its scalar type.
             """
@@ -519,32 +617,27 @@ def prepare_graph(module, metadata, *, materializations=()):
                 records = []
                 for operation in self.operations:
                     data = operation.data if isinstance(operation, ir.ComputedBuffer) else None
-                    iterations = tuple(data.get_pointwise_size()) if data is not None else ()
-                    reductions = tuple(data.get_reduction_size()) if data is not None else ()
-                    dependencies = operation.get_read_writes()
-                    if data is not None:
-                        variables = tuple(dependencies.range_vars)
-                        iteration_vars, reduction_vars = variables[:len(iterations)], variables[len(iterations):]
-                    else:
-                        iteration_vars = reduction_vars = None
-                    records.append(dict(operation=operation, dependencies=dependencies,
-                        reads=tuple((dep, value_type(dep.name)) for dep in dependencies.reads),
-                        writes=tuple((dep, value_type(dep.name)) for dep in dependencies.writes),
-                        iterations=iterations, iteration_vars=iteration_vars,
-                        reductions=reductions, reduction_vars=reduction_vars,
-                        reduction_type=data.get_reduction_type() if data is not None else None,
-                        domains=external_domains(operation, algebra) if data is None else (),
+                    body = self.loop_body(operation)
+                    dependencies = self.scheduler.name_to_node[operation.get_operation_name()].read_writes
+                    records.append(dict(operation=operation, body=body, scheduling_dependencies=dependencies,
+                        scheduling_reads=tuple((dep, value_type(dep.name)) for dep in dependencies.reads),
+                        scheduling_writes=tuple((dep, value_type(dep.name)) for dep in dependencies.writes),
+                        domains=(external_domains(operation, algebra) if data is None
+                                 else computed_domains(operation, body, algebra) if body is not None else ()),
                         origins=tuple(operation.get_origins())))
                 return tuple(records)
 
         def init_wrapper_code(self, *args, **kwargs):
+            if self.wrapper_code is not None:
+                return
             self.device_type = 'mps'
             self.device_ops = get_device_op_overrides('mps')
             self.wrapper_code = Preparation()
             self.wrapper_code.header.writeline('from torch_mesh import native as mesh_native')
 
         def _update_scheduler(self):
-            self.scheduler = NativeScheduler(self.operations)
+            if self.scheduler is None:
+                self.scheduler = NativeScheduler(self.operations)
 
     mode = detect_fake_mode((metadata, [node.meta.get('val') for node in module.graph.nodes]))
     if mode is None:
@@ -553,14 +646,22 @@ def prepare_graph(module, metadata, *, materializations=()):
     def environment():
         with config.patch(size_asserts=False, alignment_asserts=False, scalar_asserts=False, split_reductions=True,
                           max_fusion_unique_io_buffers=configuration['BUFFER_BINDINGS'], max_autotune=False,
-                          max_autotune_gemm=False, assert_indirect_indexing=False), \
+                          max_autotune_gemm=False, distributed_max_autotune_gemm=False,
+                          benchmark_fusion=False, benchmark_combo_kernel=False, assert_indirect_indexing=False), \
                 V.set_fake_mode(mode), V.set_choices_handler(NativeChoices()), DebugContext():
             yield
 
     with environment():
         graph = NativeGraph(module, metadata, shape_env=mode.shape_env, is_inference=True)
+        graph.source_values = {}
         with V.set_graph_handler(graph), V.set_extern_kernel_nodes([]), mode:
             graph.run(*metadata)
+            graph.never_reuse_buffers.update(buffer.get_name() for _, _, buffer, _ in page_values)
+            # This is the scheduler's normal body/layout preparation. Ownership
+            # and placement inspect these same cached bodies; codegen retains
+            # this wrapper and scheduler after physical page bindings arrive.
+            graph.init_wrapper_code()
+            graph._update_scheduler()
     return graph
 
 

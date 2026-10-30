@@ -136,10 +136,18 @@ An absent operator declaration does not become replication.
 
 This does not establish every `Function`: declared factory outputs, arbitrary
 owner results and explicit local views still need the generic retained-IR
-projection. Existing partition decompositions must normalize source before
-ownership propagation while retaining source identities. Their math must be
-reused, including unequal-share reductions, rather than replaced by stock
-equal-share assumptions.
+projection. Source normalization now uses the existing decomposition interpreter
+and shared tensor equations before ownership propagation. Only the final results
+inherit the source's ownership and gradient identities; intermediate expressions
+retain their source provenance. Means use the declared global count, including
+unequal shares.
+
+Pending partial values now have a source-expression declaration. It captures the
+existing reduction function once, including tensor state, masks, collective
+boundaries and postprocessing. State becomes ordinary operands and mutations
+become value expressions. Projecting this complete expression onto requested
+output domains remains unfinished. A reduction name alone cannot replace it:
+an average retains its original divisor, and a masked partial retains its mask.
 
 Selected-copy backward declarations sum repeated contributions locally and use
 the existing REDUCE compiler for their contributor sets. LiteRT MAX, average
@@ -166,8 +174,11 @@ their source coordinates. Normalization rebinds already-declared stages through
 the shared operand relation. Explicitly empty outputs retain their type and
 identity without producers, source initializers or empty provider programs.
 Symbolic dimensions retain their index expressions when their placeholder shape
-contains zero. Constant indices supplied through earlier immutable views still
-need to consume the existing ordered initializer ranges.
+contains zero. Static indexed operations now join the same topological page-view
+pass as reshape and transpose. Immutable index values follow earlier views and
+typed pieces through the existing ordered initializer ranges. This preparation
+folds declared scalar values; encoded storage dependencies are not logical index
+values and remain with the existing numerical reader.
 
 ## Retained logical IR
 
@@ -197,7 +208,15 @@ compiler, without expanding positions. The shared `binding_layout` supplies the
 same view composition to source dependencies and physical binding. Other opaque
 external commands still need their mathematical access declarations.
 
-Ownership still needs to consume the common IR records throughout source
+The existing native scheduler and wrapper now prepare once before page placement
+and survive through code generation. Access records retain the scheduler's
+actual scalar-body nodes, enclosing masks, and changing-index producers. Source
+FX values retain their original IR objects and views. Scheduling dependencies
+keep their scheduling role; they are not substituted for mathematical accesses.
+The shared index-term adapter uses the framework's expression interpreter and
+the existing relation compiler.
+
+Ownership still needs to consume these common IR records throughout source
 lowering. These are data-kind changes: D1 and D4 rank shared operator declarations
 and binding composition above repeated frontend implementations. No runtime
 executor or numerical algorithm was added.
@@ -213,6 +232,8 @@ The retained-IR checkpoint completed reduction and declared-intermediate page
 preparation. Earlier source capture and static-selection preparation also
 completed. The subsequent shared native library build succeeded, but the latest
 source/ownership and matrix-domain preparations stop at their first page
-allocation because this process cannot attach to a compatible local bridge
-region. Those latest connections have source and build evidence only; they have
-not completed numerical execution or established whole-function performance.
+allocation: the local bridge region reports layout 154 while current source
+requires 155. Metadata-only preparation retained source identities, partial
+expression state, body masks, and changing-index producers. Algebra-backed
+binding of these latest connections awaits the ordinary bridge installation.
+These results do not establish numerical or whole-function performance.

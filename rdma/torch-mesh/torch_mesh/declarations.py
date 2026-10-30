@@ -156,13 +156,14 @@ def _select_exchange_fake(x, shape, selections, group_name):
 
 
 @torch.library.custom_op('torch_mesh::select_reduce', mutates_args=())
-def select_reduce(x: torch.Tensor, zero: torch.Tensor | None, shape: list[int], selections: str, group_name: str) -> torch.Tensor:
-    """The declared SUM adjoint of selected-page replication."""
+def select_reduce(x: torch.Tensor, zero: torch.Tensor | None, shape: list[int], selections: str,
+                  reduce_op: str, group_name: str) -> torch.Tensor:
+    """Combine the declared contributors directly into selected output pages."""
     raise RuntimeError('select_reduce must be bound to its declared pages before execution')
 
 
 @select_reduce.register_fake
-def _select_reduce_fake(x, zero, shape, selections, group_name):
+def _select_reduce_fake(x, zero, shape, selections, reduce_op, group_name):
     return x.new_empty(shape)
 
 
@@ -196,7 +197,7 @@ def _reduce_plan(node, named):
     return node.meta['mesh_selection_reductions']
 
 
-def _bind_reduce(source, destination, plan, group):
+def _bind_reduce(source, destination, plan, group, reduction):
     from . import backend
     from .operand import TensorView
     bindings = []
@@ -208,7 +209,7 @@ def _bind_reduce(source, destination, plan, group):
                 if group.rank() in reads else source.reshape((source.numel(),)).slice(0, 0, 0))
         output = TensorView(TensorView.of(destination).storage, _selected_layout(destination, write)) if root == group.rank() else None
         call = backend.Call(backend.REDUCE, write.count, source.dtype, root=root,
-                            op=dist.ReduceOp.SUM, contributors=contributors)
+                            op=_operation(reduction), contributors=contributors)
         bindings.append((call, read, output))
     return backend.prepare_fragments(bindings, group) if bindings else (None, [])
 
@@ -238,7 +239,7 @@ def _select_exchange_backward(ctx, gradient):
     holes = any(not algebra.selection(value).binary(covered, 'subtract').empty() for value in declaration['sources'])
     zero = gradient.new_zeros((1,)) if holes else None
     result = select_reduce(local, zero, ctx.shape,
-        json.dumps({'sources': compact, 'destinations': declaration['sources']}, separators=(',', ':')), ctx.group_name)
+        json.dumps({'sources': compact, 'destinations': declaration['sources']}, separators=(',', ':')), 'sum', ctx.group_name)
     return result, None, None, None
 
 
@@ -400,7 +401,7 @@ def lower(graph, *, forms=None):
                      if source != destination]
         elif namespace == 'torch_mesh' and name == 'select_reduce':
             calls = [backend.Call(backend.REDUCE, write.count, x.dtype, root=root,
-                                  op=dist.ReduceOp.SUM, contributors=contributors)
+                                  op=_operation(reduction), contributors=contributors)
                      for root, contributors, _, write in _reduce_plan(node, args)[0] if contributors != (root,)]
         elif namespace == 'torch_mesh' and name in ('allgatherv', 'allgatherv_out'):
             calls = partition.gathered(x, args['dim'], args['sizes'], group)
@@ -763,7 +764,7 @@ class BoundGraph:
                     continue
                 if target is torch.ops.torch_mesh.select_reduce.default:
                     prepared, calls = _bind_reduce(named['x'], tree_flatten(targets)[0][0],
-                                                   _reduce_plan(crossing, metadata)[0], native)
+                                                   _reduce_plan(crossing, metadata)[0], native, metadata['reduce_op'])
                     if prepared is not None:
                         self.steps.append(prepared)
                     if calls:

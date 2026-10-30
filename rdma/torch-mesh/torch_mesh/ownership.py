@@ -26,6 +26,30 @@ def from_spec(spec):
                 mesh=mesh, spec=spec)
 
 
+def partial_expression(source, value, placement, mesh, axis):
+    """Declare a pending reduction, including its existing numerical meaning.
+
+    A placement can consume preparation state while describing its value. Its
+    complete expression is therefore captured once per source and placement,
+    before output domains are split among uses. State tensor identities become
+    ordinary operands; the placement object never enters the runtime graph.
+    """
+    from .compilation import source_expression
+    from .declarations import _bound
+    held = source.meta.setdefault('mesh_partial_expressions', {})
+    key = (id(value), id(placement), id(mesh), axis)
+    if key not in held:
+        module, operands = source_expression(lambda tensor: placement._reduce_value(tensor, mesh, axis), value)
+        origins = source.meta.get('mesh_source_nodes', (source,))
+        for node in module.graph.nodes:
+            node.meta.setdefault('mesh_source_nodes', origins)
+        result = next(node for node in module.graph.nodes if node.op == 'output').args[0]
+        held[key] = dict(graph=module, operands=tuple(operands), result=result,
+                         boundaries=tuple(node for node in module.graph.nodes if _bound(node)),
+                         placement=placement, mesh=mesh, axis=axis)
+    return held[key]
+
+
 class _DeclaredTypes(ShardingPropagator):
     """Use the captured result types with the existing sharding registries."""
     def __init__(self, source, result_types):

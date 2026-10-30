@@ -1446,23 +1446,28 @@ def _exchange_domains(x, desired, mesh, ownership=None):
         return result
     for position, mesh_axis in enumerate(dimensions):
         if position + 1 == len(dimensions):
-            following = {rank: value[0] for rank, value in wanted_selections.items()}
-            shape = wanted_selections[held][1]
+            selected = wanted
         else:
-            following = {}
+            selected = {}
             for rank in ranks:
                 need = union(value for r, value in wanted.items() if r[:position + 1] == rank[:position + 1])
                 available = union(value for r, value in original.items() if r[position + 1:] == rank[position + 1:])
-                runs = need.binary(available, 'intersect').spans()
-                following[rank] = {'shape': list(semantic_shape), 'steps': [
-                    ['reshape', [semantic_count]], ['select', 0, runs]]}
-            shape = (algebra.selection_relation(following[held]).shape[0],)
+                selected[rank] = need.binary(available, 'intersect')
+        # Transfer each needed value once. Repeated or permuted consumer uses
+        # are page aliases composed below, not additional deliveries.
+        following = {rank: {'shape': list(semantic_shape), 'steps': [
+            ['reshape', [semantic_count]], ['select', 0, domain.spans()]]} for rank, domain in selected.items()}
+        shape = algebra.selection_relation(following[held]).shape
         peers = [(*held[:position], q, *held[position + 1:]) for q in range(mesh.size(mesh_axis))]
         declarations = {'sources': [current[r] for r in peers], 'destinations': [following[r] for r in peers]}
-        local = select_exchange(local, list(shape), json.dumps(declarations, separators=(',', ':')),
-                                mesh.get_group(mesh_axis).group_name)
+        declaration = json.dumps(declarations, separators=(',', ':'))
+        group = mesh.get_group(mesh_axis).group_name
+        local = select_exchange(local, list(shape), declaration, group)
         current = following
-    return TensorView.of(local)
+    selection, shape = wanted_selections[held]
+    requested = algebra.selection_relation(selection)
+    held_positions = algebra.selection_relation(current[held])
+    return relation_view(TensorView.of(local), requested.then(held_positions.inverse((semantic_count,))), shape)
 
 
 def _page_tensor(value):
@@ -1601,9 +1606,15 @@ def lower_owned_graph(graph, arguments, configuration):
     operators. Explicit page-domain allocations use the shared access algebra.
     """
     import operator
+    import torch.fx.traceback as traceback
     from torch.fx.experimental.proxy_tensor import make_fx
     from .ownership import from_spec, propagate
+    from .compilation import normalize_source
+    from .algebra import partition_decompositions
     mesh = configuration['mesh']
+    for name, declaration in configuration.get('values', {}).items():
+        declare_result(graph, name, declaration, mesh=mesh)
+    graph = normalize_source(graph, partition_decompositions)
     nodes = list(graph.graph.nodes)
     placeholders = [node for node in nodes if node.op == 'placeholder']
     records = {}
@@ -1612,10 +1623,6 @@ def lower_owned_graph(graph, arguments, configuration):
             records[node], _ = _value_ownership(value, mesh)
     local_arguments = pytree.tree_map(lambda value: value._local_tensor if isinstance(value, DTensor) else value, arguments)
     records.update((node, node.meta['mesh_ownership']) for node in nodes if 'mesh_ownership' in node.meta)
-    for name, declaration in configuration.get('values', {}).items():
-        name = name.name if isinstance(name, torch.fx.Node) else name
-        node = next(node for node in nodes if node.name == name or node.meta.get('mesh_source') == name)
-        records[node] = declare_result(graph, node, declaration, mesh=mesh)
     declarations = dict(records)
     observed, moved = [], {}
     leaf = lambda value: isinstance(value, dict) and 'owners' in value
@@ -1697,6 +1704,10 @@ def lower_owned_graph(graph, arguments, configuration):
             return value
 
         def run_node(self, node):
+            with traceback.set_current_meta(node, 'mesh ownership'):
+                return self.lower_node(node)
+
+        def lower_node(self, node):
             if node.op in ('placeholder', 'get_attr', 'output'):
                 value = super().run_node(node)
             elif node.target is operator.getitem and node.args[0] in records and not leaf(records[node.args[0]]):
@@ -1738,7 +1749,8 @@ def lower_owned_graph(graph, arguments, configuration):
         output = Lowering(graph, garbage_collect_values=False).run(*values)
         return output, tuple(value for _, value in observed)
 
-    lowered = make_fx(rewrite, tracing_mode='fake', _allow_non_fake_inputs=True)(*local_arguments)
+    with traceback.preserve_node_meta():
+        lowered = make_fx(rewrite, tracing_mode='fake', _allow_non_fake_inputs=True)(*local_arguments)
     output = next(node for node in lowered.graph.nodes if node.op == 'output')
     result, retained = output.args[0]
     for (original, _), emitted in zip(observed, retained, strict=True):
@@ -1746,8 +1758,12 @@ def lower_owned_graph(graph, arguments, configuration):
         values = pytree.tree_leaves(emitted)
         for (path, declaration), value in zip(paths, values, strict=True):
             if leaf(declaration):
-                identity = original.name if not path else (original.name, tuple(path))
+                name = original.meta.get('mesh_source', original.name)
+                identity = name if not path else (name, tuple(path))
                 value.meta.setdefault('mesh_values', {})[identity] = declaration
+                origins = value.meta.setdefault('mesh_source_nodes', ())
+                value.meta['mesh_source_nodes'] = tuple(dict.fromkeys(
+                    (*origins, *original.meta.get('mesh_source_nodes', (original,)))))
     output.args = (result,)
     lowered.meta = graph.meta.copy()
     lowered.recompile()
@@ -1958,16 +1974,6 @@ def _named(op_call, args, kwargs):
             for i, a in enumerate(op_call._schema.arguments)}
 
 
-def _mean(op_call, args, kwargs):
-    """mean over a partitioned dimension: the masked sum over the logical count."""
-    named = _named(op_call, args, kwargs)
-    x, dims, keepdim, dtype = named['self'], named.get('dim'), named.get('keepdim', False), named.get('dtype')
-    dims = sorted({d % x.ndim for d in dims} if dims else range(x.ndim))
-    if not isinstance(x, DTensor) or not any(isinstance(p, RaggedShard) and p.dim in dims for p in x.placements):
-        return _propagated(op_call, args, kwargs)
-    return torch.sum(x, dims, keepdim=keepdim, dtype=dtype) / math.prod(x.shape[d] for d in dims)
-
-
 def _index_select(op_call, args, kwargs):
     """Select owned values and combine their bytes, never their numeric values.
 
@@ -2115,8 +2121,7 @@ def _detached(op_call, args, kwargs):
     return _register(out) if _registered(args[0]) else out
 
 
-_HANDLERS = {aten.mean.default: _mean, aten.mean.dim: _mean,
-             aten.argmax.default: _arg_extreme, aten.argmin.default: _arg_extreme,
+_HANDLERS = {aten.argmax.default: _arg_extreme, aten.argmin.default: _arg_extreme,
              aten.unfold.default: _unfold, aten.slice.Tensor: _slice_view, aten.select.int: _slice_view,
              aten.view.default: _reshape, aten.reshape.default: _reshape, aten._unsafe_view.default: _reshape,
              aten._scaled_dot_product_flash_attention_for_cpu.default: _attention,

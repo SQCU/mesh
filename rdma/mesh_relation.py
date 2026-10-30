@@ -47,7 +47,7 @@ class Algebra:
                           f'{kind}_is_equal': (C.c_int, (C.c_void_p, C.c_void_p)),
                           f'{kind}_is_empty': (C.c_int, (C.c_void_p,)),
                           f'{kind}_union': (C.c_void_p, (C.c_void_p, C.c_void_p))})
-        for name in ('map_apply_range', 'map_intersect_range', 'map_intersect_domain', 'map_intersect', 'map_subtract_domain',
+        for name in ('map_apply_range', 'map_intersect_range', 'map_intersect_domain', 'map_intersect', 'map_subtract_domain', 'map_subtract_range',
                      'set_intersect', 'set_subtract', 'set_flat_product'):
             specs[name] = C.c_void_p, (C.c_void_p, C.c_void_p)
         specs['map_domain'] = C.c_void_p, (C.c_void_p,)
@@ -75,6 +75,8 @@ class Algebra:
         self.lib.MeshIndexNormalize.restype = C.c_void_p
         self.lib.MeshIndexSelectionDomain.argtypes = C.c_void_p, C.c_char_p, C.POINTER(C.c_void_p)
         self.lib.MeshIndexSelectionDomain.restype = C.c_void_p
+        self.lib.MeshIndexSelectionSpans.argtypes = C.c_char_p, C.POINTER(C.c_size_t), C.POINTER(C.c_void_p)
+        self.lib.MeshIndexSelectionSpans.restype = C.POINTER(C.c_int64)
         for name in ('MeshIndexSelectionRelation', 'MeshIndexLayoutRelation'):
             function = getattr(self.lib, name)
             function.argtypes = C.c_void_p, C.c_char_p, C.POINTER(C.c_size_t), C.POINTER(C.c_void_p)
@@ -144,6 +146,21 @@ class Algebra:
     def selection_relation(self, declaration):
         """Ordered local positions mapped to semantic positions by the binder."""
         return self._declared_relation(self.lib.MeshIndexSelectionRelation, declaration)
+
+    def selection_spans(self, declaration):
+        """The shared initializer's ordered spans, with repetitions preserved."""
+        message, count = C.c_void_p(), C.c_size_t()
+        spans = self.lib.MeshIndexSelectionSpans(json.dumps(declaration).encode(), C.byref(count), C.byref(message))
+        if message.value:
+            try:
+                raise ValueError(C.string_at(message.value).decode())
+            finally:
+                self.lib.mesh_isl_free(message.value)
+        try:
+            self.checked(spans)
+            return tuple((spans[i * 2], spans[i * 2 + 1]) for i in range(count.value))
+        finally:
+            self.lib.mesh_isl_free(spans)
 
     def layout(self, configuration):
         """The shared layout's logical ordinals mapped to storage positions."""
@@ -378,6 +395,10 @@ class IndexRelation(_Object):
 
     def subtract_domain(self, positions):
         return IndexRelation(self.algebra, self.algebra.map_subtract_domain(self.copy(), positions.copy()), self.shape)
+
+    def subtract_range(self, positions):
+        """Remove reached positions without dropping other reads of a use."""
+        return IndexRelation(self.algebra, self.algebra.map_subtract_range(self.copy(), positions.copy()), self.shape)
 
     def terms(self):
         """Emit the common index expression from this functional relation."""

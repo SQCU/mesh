@@ -36,6 +36,19 @@ isl_map *MeshIndexSelectionRelation(isl_ctx *ctx,const char *declaration,size_t 
     }
 }}
 
+int64_t *MeshIndexSelectionSpans(const char *declaration,size_t *count,char **message) { @autoreleasepool {
+    *count=0;*message=NULL;
+    @try {
+        NSData *ordered=[MetalTensorLayout selection:IndexDeclaration(declaration) extent:nil].orderedSpans;
+        const struct MetalTensorSpan *spans=ordered.bytes;*count=ordered.length/sizeof *spans;
+        int64_t *result=mesh_isl_malloc(*count*2*sizeof(int64_t));if(!result)return NULL;
+        for(size_t i=0;i<*count;i++){result[i*2]=spans[i].offset;result[i*2+1]=spans[i].count;}
+        return result;
+    } @catch(NSException *error) {
+        *message=mesh_isl_strdup(error.reason.UTF8String);return NULL;
+    }
+}}
+
 isl_map *MeshIndexLayoutRelation(isl_ctx *ctx,const char *configuration,size_t *count,char **message) { @autoreleasepool {
     *message=NULL;
     @try {
