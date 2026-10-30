@@ -14,7 +14,7 @@ lines in 5,516. The file is not copy-pasted: what it holds twice are whole alter
 | What | Lines | Evidence |
 |---|---|---|
 | `python/mesh/` (`__init__.py`, `_native.py`, `collective.py`) | ≈1,000 | Nothing imports it. The venv's only path file, `mesh.pth`, adds `rdma/`, so every `import mesh` gets rdma/mesh.py. pyproject sets `package = false` (verified). But design/algorithm-sources.md:25-89 calls it the Python surface "restored from mesh `57628982^:python/mesh/`" for the library-core deliverable (deliverables.md L5), and INDEX.md:67 indexes it: deleting it retires that deliverable's surface, the operator's decision. |
-| `mesh_mpi.Write_pages_prepare`, `ncclMeshWritePagesPrepare` → `write_pages_declared` → `write_pages_prepare` → `page_spans` | ≈25 py + ≈48 C | The method has no caller in either repo, xonotic included (verified). `ncclMeshWriteLayoutPrepare` covers it with `runs`. |
+| `mesh_mpi.Write_pages_prepare` | ≈25 py | No caller in either repo, xonotic included (verified). The library entry it wraps, `ncclMeshWritePagesPrepare`, stays: it is the page-mask half of nccl.h's page-table + page-mask WRITE contract, the integration's named interface, and it already lowers through the layout preparer's `write_prepare`. |
 | External `ncclMeshComplete`, `ncclMeshStream.issue` | (see B') | No frontend sets `issue` or calls `ncclMeshComplete` (verified). |
 | rdma/mesh_simulate.py | 620 | Deleted, 17e3d812. |
 
@@ -28,13 +28,13 @@ lines in 5,516. The file is not copy-pasted: what it holds twice are whole alter
 | C | Classic Metal vs Metal 4 program | 4617 `metal4 = list[0].table != NULL`; .m `encoder4` | ≈60 classic (`metal_begin`, `close_encoder`, classic `dispatch`, `metal_uses`, classic tracks) | B's command buffers and B''s `on` stream only: every frontend's ncclMeshStream has an argument table (verified) | Neither (nccl.h 144-155 and NCCL.md:271-282 describe both) | B moved to a library Metal 4 queue; command-buffer status and event signal (`metal_ended`, ncclCommDestroy 1577) rebuilt on Metal 4 commit feedback |
 | D | Fused crossings vs separate publish and consume | 4637 `fused_kind` | ≈175 fused | fused: `_stream.mm` 1200/1851, mesh_rank.m 912/999, dnn.py, partition.py, chain.py; non-fused: every combine (`metal_land`) | Both (whole-function.md:130-131) | Neither can go: only non-fused combines; fused carries every caller-kernel crossing |
 | E | One-track serial completion vs tracks | 4268-4269 `one_track`, `lone` 4684 | ≈62 one-track (`lone_of`, `one_track`, `complete_track`); ≈300 tracks | schedules | Tracks: the operator's 10-20 choice of per-channel progress (NCCL.md:360) | One-track folds into tracks with T = 1; the stream-order fallback and its cycle failure (4167-4169) go |
-| F | WRITE preparers and definition builders | Layout 6321 vs Pages 6314 (dead, above); `ncclMeshCommPlan` 5456-5468 vs `write_definitions` 5880-5912 | ≈48 (`write_definitions`, `cache_drop`) | `group_at` returns a group whenever a plan is installed (verified), so a plan's own definitions serve only a communicator with no plan | One lowering, pointer-lowering-2026-10-28.md:52-62; duplication-review #14 | One `definition_prepare` for both builders |
+| F | WRITE preparers and definition builders | Layout 6321 and Pages 6314 (nccl.h's two contract forms; one `write_prepare` beneath); `ncclMeshCommPlan` 5456-5468 vs `write_definitions` 5880-5912 | ≈48 (`write_definitions`, `cache_drop`) | `group_at` returns a group whenever a plan is installed (verified), so a plan's own definitions serve only a communicator with no plan | One lowering, pointer-lowering-2026-10-28.md:52-62; duplication-review #14 | One `definition_prepare` for both builders |
 | G | Per-rank view calls (`*Buffers`, `send_views`/`receive_views`) vs contiguous calls | `views != NULL` | ≈80 | `_stream.mm`, one call each | — | Eager by construction: ncclMeshCall has no views field; goes with A |
 | H | Read in place (`plan_direct`, `complement_copy`) vs operand copy or premultiply | 4401 | ≈110 in place | both documented (nccl.h 232-236) | Both | Neither: copy is required for premultiplied, merge, fused and view calls |
 | I | Two template flatteners: `plan_declaration` and `CommPlanDeclaration`/`Declared` vs the WRITE plan's | — | ≈100 + ≈105 | `_stream.mm`, metal-recording.m | replay-templates-2026-10-29.md R5 names both | One flattener over one declared-call record |
 
 What the library can lose by form: A + G ≈ 240 (with a prepared-generation index), B + B' + C ≈ 260 (with a library
-Metal 4 queue for mesh_mpi), E's one-track ≈ 62, F ≈ 48, the pages preparer ≈ 48, I ≈ 100. That is about 760 of
+Metal 4 queue for mesh_mpi), E's one-track ≈ 62, F ≈ 48, I ≈ 100. That is about 710 of
 nccl-mesh.c's 6,710 lines (11%). D and H are not alternatives: each side does work the other cannot.
 
 ### Classic Metal and Metal 4
@@ -90,6 +90,6 @@ Objective-C unit both link.
 4. A and G: prepared generations for every slot instance and WRITE, then issue-time re-binding goes.
 5. E's one-track form into tracks; F's and I's single builders.
 
-Steps 1-5 remove roughly 2,500 to 3,000 lines across the two repositories: about 1,070 without callers, 760 of the
+Steps 1-5 remove roughly 2,500 to 3,000 lines across the two repositories: about 1,025 without callers (most of it python/mesh, the operator's decision), 710 of the
 library's alternative forms, and the frontends' second copy of one lowering. That is the reduction this evidence
 supports.
