@@ -1688,24 +1688,18 @@ static int lease_read_sample(void *context, uint32_t stream, struct mesh_lease_r
   return ENOENT;
 }
 
-/* Returning a dead tensor can hand outstanding posted reads to bridge-owned
-   pins once every holding that could post FUTURE reads has been given back.
-   This is not a proof allowing the application to overwrite the allocation. */
+/* design/reclamation-2026-10-30.md: a lease's dependency on a holding is done with once no hold of this attach still
+   uses that holding and the bridge holds none of this client's pages on its stream: the holding acknowledged (its
+   owner word moved: the bridge reads none of its tables) and, where it ended unfinished, its units done or its port
+   child reaped (mesh-dataflow.c mesh_holding_retained) */
 static int lease_detachable(void *context, const struct mesh_lease_retire_dep *d) {
   struct attach *a = context;
   for (uint32_t k = 0; k < MESH_STREAMS; k++) {
     const struct hold *h = a->holds + k;
     if (h->users && h->stream == d->stream && h->generation == d->holding) return EBUSY;
   }
-  if (d->metadata) {
-    if (d->stream >= MESH_STREAMS) return EINVAL;
-    const uint64_t owner = atomic_load_explicit(&mesh_stream_at(a->context.M, d->stream)->owner, memory_order_acquire);
-    /* client|GIVEN prevents new DMA posts, but the progress thread can still
-       be reading a descriptor before unit_told notices the give. Only its
-       subsequent owner transition proves those local CPU reads have ended. */
-    if (owner != 0 && owner != MESH_STREAM_GIVEN) return EBUSY;
-  }
-  return 0;
+  if (d->stream >= MESH_STREAMS) return EINVAL;
+  return mesh_holding_retained(a->context.M, d->stream, a->context.client) ? EBUSY : 0;
 }
 static int lease_returnable(struct attach *a, struct lease *l) {
   return mesh_lease_retire_detachable(&l->reads, lease_read_sample, lease_detachable, a);

@@ -56,4 +56,7 @@ int mesh_lease_return(struct mesh_ctx *,uint32_t row);
 void mesh_backing_bind(struct mesh_ctx *,uint32_t first,uint32_t pages,uint32_t page,uint32_t index);
 void mesh_rows_release(struct mesh_ctx *,uint32_t first,uint32_t count);
 uint32_t mesh_retired_release(struct hdr *);
+/* design/reclamation-2026-10-30.md: whether a client's pages are still held on a stream (MESH_STREAMS any): its holding
+   not yet acknowledged by the bridge, or ended unfinished with units outstanding, while the port child lives */
+int mesh_holding_retained(struct hdr *m,uint32_t stream,uint64_t client);
 #endif

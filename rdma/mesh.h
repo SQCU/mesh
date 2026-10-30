@@ -88,10 +88,6 @@ _Static_assert(sizeof(struct mesh_page_entry)==MESH_SIZEOF_MESH_PAGE_ENTRY && _A
    payload lengths in equal unit order; the bridge never pads or copies data. */
 struct mesh_dma_span { uint64_t offset,bytes; };
 struct mesh_entry { uint64_t spans,units,word,base; };
-/* One progress-thread CPU read scope, independently of outstanding DMA. The
-   sequence never resets with a holding; odd or changed snapshots retain storage.
-   A zero byte count/word is quiescent. Fits previously unused stream padding. */
-struct mesh_cpu_pin { _Atomic uint64_t sequence,offset,bytes,word; };
 _Static_assert(sizeof(struct mesh_dma_span)==MESH_SIZEOF_MESH_DMA_SPAN,"mesh_dma_span ABI");
 _Static_assert(sizeof(struct mesh_entry)==MESH_SIZEOF_MESH_ENTRY,"mesh_entry ABI");
 /* A SEND's unit i is available at word >= base+i+1 (word 0: stream ready).
@@ -126,26 +122,6 @@ static inline void mesh_pages_store(_Atomic uint64_t *word,struct mesh_pages p){
    precede posted and the final holding check (mesh-link.c unit_told). */
 struct mesh_posts { _Alignas(MESH_RECORD_ALIGNMENT) _Atomic uint64_t posted[2]; _Atomic uint64_t done[2]; };
 _Static_assert(!(MESH_LANE_UNITS&(MESH_LANE_UNITS-1)),"a ring a power of two");
-struct mesh_dma_pin { _Atomic uint64_t sequence,offset,bytes; };
-static inline struct mesh_dma_pin *mesh_unit_pin(void *m,uint64_t pins,int way,int lane,uint64_t u){
-  return (struct mesh_dma_pin *)((char *)m+pins)+((uint64_t)(2*way+lane)*MESH_LANE_UNITS+u%MESH_LANE_UNITS);
-}
-/* Sequential consistency also makes the multiword snapshot sound during ring
-   reuse: observing a new field places the final sequence read after its writer's
-   odd sequence. No allocator may accept a mixture from two slot generations. */
-static inline void mesh_pin_store(struct mesh_dma_pin *pin,uint64_t unit,struct mesh_dma_span span){
-  atomic_store_explicit(&pin->sequence,2*unit+1,memory_order_seq_cst);
-  atomic_store_explicit(&pin->offset,span.offset,memory_order_seq_cst);
-  atomic_store_explicit(&pin->bytes,span.bytes,memory_order_seq_cst);
-  atomic_store_explicit(&pin->sequence,2*unit+2,memory_order_seq_cst);
-}
-static inline int mesh_pin_load(const struct mesh_dma_pin *pin,uint64_t unit,struct mesh_dma_span *span){
-  if(unit>=(UINT64_MAX-1)/2)return 0;
-  const uint64_t sequence=atomic_load_explicit(&pin->sequence,memory_order_seq_cst);
-  if(sequence!=2*unit+2)return 0;
-  *span=(struct mesh_dma_span){atomic_load_explicit(&pin->offset,memory_order_seq_cst),atomic_load_explicit(&pin->bytes,memory_order_seq_cst)};
-  return atomic_load_explicit(&pin->sequence,memory_order_seq_cst)==sequence;
-}
 static inline int mesh_span_overlaps(struct mesh_dma_span a,struct mesh_dma_span b){
   return a.bytes && b.bytes && (a.offset<=b.offset?b.offset-a.offset<a.bytes:a.offset-b.offset<b.bytes);
 }
@@ -181,7 +157,11 @@ struct mesh_stream {
   _Atomic uint64_t bandwidth,wire;
   _Alignas(MESH_RECORD_ALIGNMENT) _Atomic uint64_t owner;
   _Atomic uint64_t sends,lands;
-  struct mesh_cpu_pin metadata;
+  /* design/reclamation-2026-10-30.md: the owner word of the holding that ended with units outstanding (0 none), with
+     each lane's posted and done counts in `posts` from then (stream_end); a reclaim of that client's pages waits for
+     those units or the port child's reaping (`child` 0), mesh-dataflow.c mesh_holding_retained */
+  _Atomic uint64_t unfinished;
+  uint64_t unfinished_room[3];
   _Alignas(MESH_RECORD_ALIGNMENT) _Atomic uint64_t ready;
   _Alignas(MESH_RECORD_ALIGNMENT) _Atomic uint64_t sent;
   _Atomic uint64_t landed,taken[2];
@@ -190,8 +170,8 @@ struct mesh_stream {
   struct mesh_posts posts[2];
 };
 _Static_assert(sizeof(struct mesh_stream)==MESH_SIZEOF_MESH_STREAM,"mesh_stream");
-_Static_assert(offsetof(struct mesh_stream,metadata)==MESH_OFFSET_MESH_STREAM_METADATA && offsetof(struct mesh_stream,ready)==MESH_OFFSET_MESH_STREAM_READY,
-               "CPU metadata pin consumes padding without moving stream ABI fields");
+_Static_assert(offsetof(struct mesh_stream,unfinished)==MESH_OFFSET_MESH_STREAM_UNFINISHED && offsetof(struct mesh_stream,ready)==MESH_OFFSET_MESH_STREAM_READY,
+               "the unfinished holding consumes padding without moving stream ABI fields");
 /* design/transport.md: a node's record, the newest of which every bridge floods to the mesh: its node and boot, the
    record's sequence in that boot, the bytes of its bridge's region its clients may hold (the region's arena less what the
    bridge holds itself: the map, the streams' pages and rings, the duds' block), the node's memory in bytes and hardware
