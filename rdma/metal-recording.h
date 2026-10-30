@@ -223,6 +223,13 @@ void MetalScheduleCompute(struct MetalSchedule *, id<MTLComputePipelineState>,
     const struct MetalCommandBinding *, size_t count, MTLSize groups, MTLSize threads);
 // A crossing, encoded now; its declaration (NULL: none, and its function makes no template).
 int MetalScheduleCross(struct MetalSchedule *, const struct MetalDeclaration *, MetalCrossing);
+// A range of a prepared replay's commands (MetalReplayCommands, MetalRecord), its first invocation's, as the schedule's
+// next work, in the replay's form and ordered by its recorded reaches.
+void MetalScheduleReplay(struct MetalSchedule *, struct MetalReplay *, NSRange commands);
+// `bytes` from `source` at `from` into `destination` at `to`, the Metal 4 encoder's copy, ordered after and before the
+// schedule's other work.
+void MetalScheduleCopy(struct MetalSchedule *, id<MTLBuffer> source, NSUInteger from, id<MTLBuffer> destination, NSUInteger to,
+    NSUInteger bytes);
 NSError *MetalScheduleAppend(struct MetalSchedule *, struct MetalReplay *, NSRange invocations,
     NSArray<NSNumber *> *marks, MetalCrossing);
 // Finish all local parts and exchange their compiled list ends with peers.

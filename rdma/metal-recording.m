@@ -1766,6 +1766,38 @@ static void MetalScheduleRange(struct MetalSchedule *root,struct MetalReplay *re
     memcpy(work->replay,replay,sizeof *replay);work->invocation=t;work->first=from;work->end=to;
 }
 
+// metal-recording.h MetalScheduleReplay: commands `commands` of a replay's first invocation, a range of the schedule's work
+void MetalScheduleReplay(struct MetalSchedule *root,struct MetalReplay *replay,NSRange commands) {
+    MetalScheduleRange(root,replay,0,commands.location,NSMaxRange(commands));
+}
+
+static void MetalScheduleCopyNow(struct MetalSchedule *root,id<MTLBuffer> source,NSUInteger from,id<MTLBuffer> destination,NSUInteger to,
+    NSUInteger bytes) {
+    struct MetalSchedule *s=MetalScheduleWritable(root);
+    s->commands++;
+    [s->owners addObject:source];[s->owners addObject:destination];
+    [s->residency addAllocation:source];[s->residency addAllocation:destination];
+    id<MTL4ComputeCommandEncoder> encoder=s->encoder;
+    // ordered after and before every other command, as a crossing is: its reaches are bytes no recorded access names
+    [encoder barrierAfterEncoderStages:MTLStageDispatch|MTLStageBlit beforeEncoderStages:MTLStageDispatch|MTLStageBlit
+        visibilityOptions:MTL4VisibilityOptionDevice];
+    [encoder copyFromBuffer:source sourceOffset:from toBuffer:destination destinationOffset:to size:bytes];
+    [encoder barrierAfterEncoderStages:MTLStageDispatch|MTLStageBlit beforeEncoderStages:MTLStageDispatch|MTLStageBlit
+        visibilityOptions:MTL4VisibilityOptionDevice];
+    [s->read removeAllObjects];[s->written removeAllObjects];
+}
+
+// metal-recording.h MetalScheduleCopy
+void MetalScheduleCopy(struct MetalSchedule *root,id<MTLBuffer> source,NSUInteger from,id<MTLBuffer> destination,NSUInteger to,
+    NSUInteger bytes) { @autoreleasepool {
+    if(!bytes)return;
+    const struct MetalReach reaches[2]={{source,from,bytes,MetalReachRead,-1},{destination,to,bytes,MetalReachWritten,-1}};
+    MetalScheduleWork(root,[NSData dataWithBytes:reaches length:sizeof reaches],^(struct MetalSchedule *now){
+        MetalScheduleCopyNow(now,source,from,destination,to,bytes);
+    },nil);
+}
+}
+
 // Only mixed host/GPU spans need per-command dependency nodes. GPU-only
 // functions keep the original compact replay ranges throughout preparation.
 static NSArray *MetalScheduleExpand(struct MetalSchedule *root,NSArray *ranges) {
