@@ -3735,10 +3735,13 @@ static ncclResult_t bind_retirements(struct ncclComm *comm, const struct schedul
    page of the group's first send entry there where that entry's step waits on no receive (published at the group's
    start, issue_group; one system fence before it), else the communicator's gate word at the group's value of it, which
    the group's first dispatch stores (*gate) */
-static void gate_of(struct ncclComm *comm, struct schedule *plans, int *gate) {
+static void gate_of(struct ncclComm *comm, struct schedule *plans, int *gate, uint32_t copies) {
   for (uint32_t h = 0; h < comm->count; h++) {
     struct schedule *p = plans + h;
     if (!p->ins) continue;
+    /* a group that makes no operand in place: its present already follows the stream's earlier work (metal_begin's
+       barrier), so its receives are posted as presented, ungated (design/fake-guards-2026-10-30.md, the review's P2) */
+    if (!copies) { p->word = 0; p->base = 0; continue; }
     const struct message *first = p->outs ? p->out : NULL;
     if (first && first->c->bound->prior_first[first->step] == first->c->bound->prior_first[first->step + 1] && needs_publication(first)) {
       p->word = comm->channels[h].ready_at;
@@ -3862,9 +3865,9 @@ static void uses_add(struct metal_program *program, struct uses *batch, void *bu
    and counted (commit_group); a failure
    before any entry is presented is the call's alone, one after it the communicator's (its lists stand mid-group) */
 static ncclResult_t schedule(struct metal_program *program, struct ncclComm *comm, struct issue *owner, struct schedule *plans, int *gate,
-                             int immutable) {
+                             int immutable, uint32_t copies) {
   schedule_laid(comm, plans);
-  if (!immutable) gate_of(comm, plans, gate);
+  if (!immutable) gate_of(comm, plans, gate, copies);
   ncclResult_t result = present_group(program, comm, owner, plans);
   if (result) return result;
   if (*gate) comm->gates++;
@@ -4687,6 +4690,52 @@ static ncclResult_t guard(struct metal_program *program, struct ncclComm *comm, 
   return result;
 }
 
+/* the operands a group makes in place, after its entries are presented and before its gate opens or anything is
+   published: a premultiply, or a copy within the region, where a call reads no send buffer in place; a scratch's copy;
+   an all-to-all's own segment.  Encoded into `program`, or, with none, only counted into *copies: a group that makes
+   none needs no gate on its landings (gate_of) */
+#define COPIED(step, what) (program ? gpu(step, what) : ((*copies)++, ncclSuccess))
+static ncclResult_t operand_copies(struct metal_program *program, struct ncclComm *comm, struct call *list, size_t n, uint32_t *copies) {
+  const size_t r = (size_t)comm->rank;
+  ncclResult_t result = ncclSuccess;
+  for (size_t i = 0; i < n && !result; i++) {
+    struct call *c = list + i;
+    struct steps *st = c->bound;
+    const size_t z = SIZE[c->type], bytes = elements(c) * z, all = elements(c);
+    const struct where send = c->send_at, own = c->sum;
+    if (c->target) continue;
+    if (counted(c)) {
+      size_t sent, landed, part = own_segment(c, &sent, &landed);
+      const struct where source=view_at(c,1,sent),destination=view_at(c,0,landed);
+      if (part && !same(source,destination))
+        result = COPIED(metal_copy(program,METAL_PLAIN,destination.buffer,destination.offset,source.buffer,source.offset,part), "an all-to-all's own segment");
+      continue;
+    }
+    if (!call_contributes(c) || !bytes) continue;
+    size_t length = c->count;
+    const size_t before = c->what == MESH_ALLGATHER ? segment_at(c, (int)r, &length) : 0;
+    const struct where segment = view_at(c, 0, before * z);
+    if (!c->direct && reducing(c->what)) {
+      const int each = st && st->partial;
+      size_t at = 0;
+      for (int rank = 0; rank < (each ? comm->nranks : 1) && !result; rank++) {
+        const size_t count = !each ? all : c->segments ? c->segments[rank] : c->count;
+        const struct where source = shifted(send, at), to = operand_at(c, at);
+        if (count && c->premultiplied)
+          result = COPIED(metal_premultiply(program, c->type, to.buffer, to.offset, source.buffer, source.offset, count, scalar_bits(c)), "the operand");
+        else if (count && !same(to, source))
+          result = COPIED(metal_copy(program, METAL_PLAIN, to.buffer, to.offset, source.buffer, source.offset, count * z), "the operand");
+        at += count * z;
+      }
+    } else if (!c->direct && ((c->what == MESH_BROADCAST && c->root == comm->rank) || c->what == MESH_ALLGATHER) && !same(segment, send))
+      result = COPIED(metal_copy(program, METAL_PLAIN, segment.buffer, segment.offset, send.buffer, send.offset, length * z), "the operand");
+    for (uint32_t b = 1; st && b < st->initialized && !result && !c->direct; b++)
+      result = COPIED(metal_copy(program, METAL_PLAIN, st->buffer[b].buffer, st->buffer[b].offset, own.buffer, own.offset, bytes), "a scratch copy");
+  }
+  return result;
+}
+#undef COPIED
+
 /* one group on the stream's Metal 4 encoder (nccl-mesh-metal.h metal_begin),
    taking its calls: their buffers, results and storage its definition's issue's (issue_bind: a group of collectives'
    prepared, its storage its generation's slot), once that slot's last group has landed
@@ -4750,7 +4799,6 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   if (remote || !list[0].stream) touch(comm);
   for (uint32_t h = 0; remote && h < comm->count; h++) metal_resident(program, comm->channels[h].buffer);
   if (remote && comm->gate) metal_resident(program, comm->gate);
-  const size_t r = (size_t)comm->rank;
   int gate = 0, published = 0, scheduled = 0;
   struct where area = {NULL, 0};
   uint32_t slot = 0;
@@ -4773,7 +4821,9 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     for (uint32_t h = 0; h < comm->count; h++) { g->start[h][0] = comm->channels[h].sends; g->start[h][1] = comm->channels[h].lands; }
     /* Indexed writes carry immutable source/landing generations. Their destinations need no local publication
        handshake, whether the GPU producer is fused or was encoded before this call (mesh 84056c43) */
-    if (!(result = schedule(program, comm, u, plans, &gate, fused_kind != 0 || all_writes(list, n)))) { g->plans = plans; plans = NULL; }
+    uint32_t copies = 0;
+    operand_copies(NULL, comm, list, n, &copies);
+    if (!(result = schedule(program, comm, u, plans, &gate, fused_kind != 0 || all_writes(list, n), copies))) { g->plans = plans; plans = NULL; }
     else g = NULL;
     if (!result) {
       for (uint32_t h = 0; h < comm->count; h++) { g->end[h][0] = comm->channels[h].sends; g->end[h][1] = comm->channels[h].lands; }
@@ -4785,44 +4835,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       scheduled = 1;
     }
   }
-  /* the operands made in place, after the group's entries are presented and before its gate opens or anything is
-     published: a premultiply, or a copy within the region, where a call reads no send buffer in place; a scratch's
-     copy; an all-to-all's own segment */
-  for (size_t i = 0; i < n && !result; i++) {
-    struct call *c = list + i;
-    struct steps *st = c->bound;
-    const size_t z = SIZE[c->type], bytes = elements(c) * z, all = elements(c);
-    const struct where send = c->send_at, own = c->sum;
-    if (c->target) continue;
-    if (counted(c)) {
-      size_t sent, landed, part = own_segment(c, &sent, &landed);
-      const struct where source=view_at(c,1,sent),destination=view_at(c,0,landed);
-      if (part && !same(source,destination))
-        result = gpu(metal_copy(program,METAL_PLAIN,destination.buffer,destination.offset,source.buffer,source.offset,part),
-                     "an all-to-all's own segment");
-      continue;
-    }
-    if (!call_contributes(c) || !bytes) continue;
-    size_t length = c->count;
-    const size_t before = c->what == MESH_ALLGATHER ? segment_at(c, (int)r, &length) : 0;
-    const struct where segment = view_at(c, 0, before * z);
-    if (!c->direct && reducing(c->what)) {
-      const int each = st && st->partial;
-      size_t at = 0;
-      for (int rank = 0; rank < (each ? comm->nranks : 1) && !result; rank++) {
-        const size_t count = !each ? all : c->segments ? c->segments[rank] : c->count;
-        const struct where source = shifted(send, at), to = operand_at(c, at);
-        if (count && c->premultiplied)
-          result = gpu(metal_premultiply(program, c->type, to.buffer, to.offset, source.buffer, source.offset, count, scalar_bits(c)), "the operand");
-        else if (count && !same(to, source))
-          result = gpu(metal_copy(program, METAL_PLAIN, to.buffer, to.offset, source.buffer, source.offset, count * z), "the operand");
-        at += count * z;
-      }
-    } else if (!c->direct && ((c->what == MESH_BROADCAST && c->root == comm->rank) || c->what == MESH_ALLGATHER) && !same(segment, send))
-      result = gpu(metal_copy(program, METAL_PLAIN, segment.buffer, segment.offset, send.buffer, send.offset, length * z), "the operand");
-    for (uint32_t b = 1; st && b < st->initialized && !result && !c->direct; b++)
-      result = gpu(metal_copy(program, METAL_PLAIN, st->buffer[b].buffer, st->buffer[b].offset, own.buffer, own.offset, bytes), "a scratch copy");
-  }
+  if (!result) result = operand_copies(program, comm, list, n, NULL);
   for (uint32_t h = 0; !result && gate && g && h < comm->count; h++) {
     struct uses batch = {0};
     for (size_t k = 0; k < g->plans[h].ins; k++) uses_add(program, &batch, g->plans[h].in[k].data.buffer);
