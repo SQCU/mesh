@@ -4002,11 +4002,16 @@ static void inflight_lose(struct ncclComm *comm) {
   atomic_store(&retired, inflight ? inflight->ticket - 1 : tickets);
 }
 
-/* the group in flight on comm whose entries of list `list` on channel h hold `at` */
-static struct inflight *inflight_at(struct ncclComm *comm, uint32_t h, int list, uint64_t at) {
-  for (struct inflight *g = inflight; g; g = g->next_group)
+/* the group in flight on comm whose entries of list `list` on channel h hold `at`, sought from group `from` (NULL: the
+   first in flight).  The groups in flight are in issue order, a communicator's holding consecutive entries on every
+   list, so a walk in increasing `at` that passes each lookup the group of its last (a cursor) visits each group once */
+static struct inflight *inflight_from(struct inflight *from, const struct ncclComm *comm, uint32_t h, int list, uint64_t at) {
+  for (struct inflight *g = from ? from : inflight; g; g = g->next_group)
     if (g->comm == comm && at < g->end[h][list]) return at >= g->start[h][list] ? g : NULL;
   return NULL;
+}
+static struct inflight *inflight_at(struct ncclComm *comm, uint32_t h, int list, uint64_t at) {
+  return inflight_from(NULL, comm, h, list, at);
 }
 static struct message *out_at(struct inflight *g, uint32_t h, uint64_t at) { return g->plans[h].out + (at - g->start[h][0]); }
 static struct message *in_at(struct inflight *g, uint32_t h, uint64_t at) { return consumption_at(g->plans + h, at - g->start[h][1]); }
@@ -4024,9 +4029,9 @@ static ncclResult_t outside_groups(struct ncclComm *comm, uint32_t h, int list, 
               (unsigned long long)ch->waited, *spans ? spans : " none");
 }
 
-/* whether channel h's send entry `at` may be published: its step's receive before it consumed */
-static int publishable(struct ncclComm *comm, uint32_t h, uint64_t at) {
-  struct inflight *g = inflight_at(comm, h, 0, at);
+/* whether channel h's send entry `at`, of group g (NULL: none in flight), may be published: its step's receive before
+   it consumed */
+static int publishable(struct inflight *g, uint32_t h, uint64_t at) {
   const struct message *m = g ? out_at(g, h, at) : NULL;
   return m && ((m->c->write_plan && m->c->write_plan->ready_value) || ready(m->c->bound, m->step));
 }
@@ -4039,11 +4044,13 @@ static struct { ncclMeshFused *out; uint32_t room[2], published, landed; } fusin
 /* Explicit producer words and relay landing words already name readiness.  The last entry of [first, end)
    on channel h that needs a publication (needs_publication), NULL none */
 static const struct message *channel_publication(struct inflight *g, uint32_t h, uint64_t first, uint64_t end) {
-  for (uint64_t at = end; at > first; at--) {
-    const struct message *m = out_at(inflight_at(g->comm, h, 0, at - 1), h, at - 1);
-    if (needs_publication(m)) return m;
+  const struct message *last = NULL;
+  struct inflight *x = NULL;
+  for (uint64_t at = first; at < end; at++) {
+    const struct message *m = out_at(x = inflight_from(x, g->comm, h, 0, at), h, at);
+    if (needs_publication(m)) last = m;
   }
-  return NULL;
+  return last;
 }
 
 /* channel h's send entries [published, upto) published, their steps' bytes written by the stream's work before:
@@ -4066,7 +4073,8 @@ static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm
     fusing.published += !result;
   } else if (!g->fused) {
     struct uses batch = {0};
-    for (uint64_t at = ch->published; at < upto; at++) uses_add(program, &batch, out_at(inflight_at(comm, h, 0, at), h, at)->data.buffer, 0);
+    struct inflight *x = NULL;
+    for (uint64_t at = ch->published; at < upto; at++) uses_add(program, &batch, out_at(x = inflight_from(x, comm, h, 0, at), h, at)->data.buffer, 0);
     metal_uses(program, batch.buffers, batch.n, 0);
     result = gpu(metal_publish(program, &release), "a publication");
   }
@@ -4081,10 +4089,11 @@ static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm
    wait alone (it landed in place), the fused crossing's landing recorded for its caller's kernel
    (metal_land_deferred: its first repeat's alone, as publish); a receive depends on every earlier overlapping receive
    (metal_depend), while disjoint ranges on separate cables can proceed independently */
-static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm, uint32_t h, uint32_t base) {
+static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm, uint32_t h, uint32_t base, struct inflight *held) {
   struct channel *ch = comm->channels + h;
   const uint64_t at = ch->consumed;
-  struct inflight *g = inflight_at(comm, h, 1, at);
+  /* `held`: the group its caller found holding the entry, else NULL */
+  struct inflight *g = held ? held : inflight_at(comm, h, 1, at);
   if (!g) return outside_groups(comm, h, 1, at);
   const struct message *m = in_at(g, h, at);
   struct steps *st = m->c->bound;
@@ -4144,8 +4153,9 @@ static ncclResult_t complete_track(struct metal_program *program, struct infligh
   metal_gate(program, comm->violation);
   while (!result && (ch->published < out || ch->consumed < in)) {
     uint64_t upto = ch->published;
-    while (upto < out && publishable(comm, h, upto)) {
-      const int fused = inflight_at(comm, h, 0, upto)->fused;
+    struct inflight *holder = NULL;
+    while (upto < out && publishable(holder = inflight_from(holder, comm, h, 0, upto), h, upto)) {
+      const int fused = holder->fused;
       if (fused && upto > ch->published) break;
       upto++;
       if (fused) break;
@@ -4153,7 +4163,7 @@ static ncclResult_t complete_track(struct metal_program *program, struct infligh
     if (upto > ch->published) { result = publish(program, comm, h, upto, published); continue; }
     struct inflight *x = ch->consumed < in ? inflight_at(comm, h, 1, ch->consumed) : NULL;
     const struct message *r = x ? in_at(x, h, ch->consumed) : NULL;
-    if (r && ready(r->c->bound, r->step) && ch->published >= r->need) result = consume(program, comm, h, METAL_NONE);
+    if (r && ready(r->c->bound, r->step) && ch->published >= r->need) result = consume(program, comm, h, METAL_NONE, x);
     else
       result = fail(ncclInternalError, "channel %u's entries admit no order on one track (published %llu of %llu, consumed %llu of %llu)", h,
                     (unsigned long long)ch->published, (unsigned long long)out, (unsigned long long)ch->consumed, (unsigned long long)in);
@@ -4249,7 +4259,7 @@ static ncclResult_t complete(struct metal_program *program, struct inflight *thr
       const uint64_t own = own_landing(through, h);
       if (!result && ch->consumed < own) {
         ch->consumed = own - 1;
-        result = consume(program, comm, h, METAL_NONE);
+        result = consume(program, comm, h, METAL_NONE, NULL);
       }
       if (!result) ch->consumed = through->end[h][1];
     }
@@ -4283,9 +4293,10 @@ static ncclResult_t complete(struct metal_program *program, struct inflight *thr
       struct channel *ch = c->channels + h;
       const uint32_t track = base[k] + h;
       consumed[track] = ch->consumed;
+      struct inflight *g = NULL;
       while (!result && ch->published < end[h][0]) {
         const uint64_t at = ch->published;
-        struct inflight *g = inflight_at(c, h, 0, at);
+        g = inflight_from(g, c, h, 0, at);
         if (!g || g->fused) { result = g ? fail(ncclInternalError, "a fused crossing's publication on two tracks") : outside_groups(c, h, 0, at); break; }
         const struct message *m = out_at(g, h, at);
         if (!needs_publication(m)) { ch->published++; continue; }
@@ -4297,12 +4308,13 @@ static ncclResult_t complete(struct metal_program *program, struct inflight *thr
         }
         if (!result) result = publish(program, c, h, at + 1, published);
       }
+      g = NULL;
       while (!result && ch->consumed < end[h][1]) {
         const uint64_t at = ch->consumed;
-        struct inflight *g = inflight_at(c, h, 1, at);
+        g = inflight_from(g, c, h, 1, at);
         if (!g || g->fused) { result = g ? fail(ncclInternalError, "a fused crossing's landing on two tracks") : outside_groups(c, h, 1, at); break; }
         result = gpu(metal_record(program, track, METAL_CONSUME, at, in_at(g, h, at)->need), "a consumption's record");
-        if (!result) result = consume(program, c, h, base[k]);
+        if (!result) result = consume(program, c, h, base[k], g);
       }
     }
   }
@@ -4323,7 +4335,7 @@ static ncclResult_t issue_group(struct metal_program *program, struct inflight *
     const struct channel *ch = comm->channels + h;
     if (ch->published < g->start[h][0] || ch->published >= g->end[h][0]) continue;
     uint64_t upto = ch->published;
-    while (upto < g->end[h][0] && publishable(comm, h, upto)) upto++;
+    while (upto < g->end[h][0] && publishable(g, h, upto)) upto++;
     if (upto > ch->published) result = publish(program, comm, h, upto, published);
   }
   return result;
