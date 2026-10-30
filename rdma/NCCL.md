@@ -253,7 +253,6 @@ See [transport.md](../design/transport.md) for registration and credit units.
   by that block. A COPY lands in place, so its consumer needs readiness and no
   transport staging copy.
   - torch-mesh runs MPS region tensors here.
-  - A group can be issued and completed later (`issue`, `ncclMeshComplete`).
   - **Gates and first-write ownership.** Ordinary NCCL calls with in-place aliases retain receive gates so an incoming
     write cannot overwrite pages used by earlier stream work. Such an entry names the holding's `ready` past the
     group's first independent publication, or the communicator's gate word stored by its first dispatch; the bridge
@@ -274,16 +273,12 @@ See [transport.md](../design/transport.md) for registration and credit units.
     the caller's device, the library's buffers (its holdings' counts, its pool's leases) added to the caller's
     `residencySet`; nothing is committed or signalled. Every collective and group takes the stream. Its waits are
     bounded by the stream's `polls`, 0, or more than `NCCL_MESH_POLLS`, being
-    `NCCL_MESH_POLLS`, the waits a group encodes at its call bounded by the greatest of its calls', those
-    `ncclMeshComplete` encodes by its stream's ([Bounded waits](#bounded-waits)). A recorded program's
-    replay calls it at each crossing it marks (metal-microbench docs/kernels.md#any-program).
-  - The calls of one group name one encoder: the group's dispatches are one program. A stream with no `workspace`
-    takes the communicator's scratch for a call that crosses no link, reused in the encoder's order.
-  - A group on several communicators is a group of each communicator's calls, in the order the group first names them,
-    progressing together: each is issued, and where the stream asks no issue all are completed through the greatest
-    ticket on the last one's stream, their channels interleaved as tracks (a stream that asks issue gets that ticket);
-    on the host path each runs on a thread of its own.
-    Every one is launched whatever another's result; the first failure is returned.
+    `NCCL_MESH_POLLS`, the waits a group encodes bounded by the greatest of its calls'
+    ([Bounded waits](#bounded-waits)). A recorded program's replay calls it at each crossing it marks
+    (metal-microbench docs/kernels.md#any-program).
+  - The calls of one group name one encoder (the group's dispatches are one program) and one communicator; a group
+    completes at once. A call that crosses no link makes its result in recvbuff; what a crossing sends from or lands
+    in that is not the caller's is the communicator's (nccl.h, Memory).
   - **Fused crossings.** Immutable explicit WRITE, point calls, and supported in-place broadcast/all-gather forms
     lower to the same physical SEND/COPY fragments as ordinary compiled writes. Parallel cables, multiple fragments
     per channel, and multihop relay paths remain available. Arithmetic that combines operands belongs in the
@@ -396,7 +391,6 @@ failure claim). So a dispatch's waits hold the GPU about one bound in all, whate
 threadgroups run in waves where the grid passes the GPU's co-residency, and each wave's threadgroups wait on their own.
 The bound is a count of polls and nothing else: it exists because a GPU spin with no end halts the node (the Mini's
 watchdog reset, 2026-10-21), not to guard any buffer.
-`ncclMeshComplete` bounds the completion's waits by the stream it is given.
 
 The caller derives the bound from its plan: the lag it expects at the crossing (the record's wait there, times the
 margin its plan names) over the period of one load on the node's GPU. That period, read on the idle Mini (M4 Pro,

@@ -104,17 +104,9 @@
    signalled at the group's end; the library asks for no workspace (a call that crosses no link makes its result
    in recvbuff, and what a crossing sends from or lands in that is not the caller's is the communicator's: Memory),
    and the caller orders any later host-path group after the stream's work.  The calls of one group name one encoder
-   (the group's dispatches are one program); their bound is the greatest of their polls.  A
-   group on several communicators is one group of each communicator's calls, in the order the group first names them,
-   progressing together: on the Metal path each is issued and, where the stream asked no issue, all are completed
-   through the greatest ticket on the last one's stream, their channels interleaved as tracks; on the host path each
-   runs on a thread of its own; every one is launched whatever another's result, and the first failure is returned.  With issue, the group is issued and not completed (NCCL's work on its own stream, waited for later):
-   its operands made in place and every publication that needs no wait encoded, with no wait for a peer; issue->ticket names it (0: it completed at once),
-   issue->published says whether anything was published (the caller then commits, so the peers' waits progress), and the
-   issue pointer stays valid until ncclGroupEnd returns.  ncclMeshComplete completes it, with every group issued before
-   it, on a later stream of the same queue; its operands are not touched until then.  A group without issue completes at
-   once, with every group before it; a host-path group fails while its own communicator's groups are issued and not
-   complete, and waits only for its own communicator's GPU work, until its command buffer completes (an error status,
+   (the group's dispatches are one program); their bound is the greatest of their polls.  The calls of one group name
+   one communicator (ncclInvalidUsage otherwise).  A group completes at once; a host-path group waits only for its own
+   communicator's GPU work, until its command buffer completes (an error status,
    which the platform's watchdog gives a command buffer that overruns, fails the group, and one not yet committed fails
    it at once, ncclInvalidUsage), a revoke or a holding's end.  A group waits for room in its bridge's lists until the
    bridge takes its entries, a revoke or its holding's end.  A host-path group spins on
@@ -134,8 +126,8 @@
    lost; every wait is bounded: the stream's `polls` is the most loads of a count a wait makes,
    the caller's bound for the group's crossings, which it derives from its plan (the lag it expects at them, over the
    period of one load on the node's GPU: rdma/NCCL.md "Bounded waits"); 0, or more than NCCL_MESH_POLLS, is
-   NCCL_MESH_POLLS (design/transport.md); the waits a group encodes at its call take its calls' greatest, and those
-   ncclMeshComplete encodes its stream's.  A wait that reaches its bound or reads a lost link records its
+   NCCL_MESH_POLLS (design/transport.md); the waits a group encodes take its calls' greatest.  A wait that reaches its
+   bound or reads a lost link records its
    cause, entry and channel in its communicator's failure words, on which no kernel halts (every later dispatch runs as
    encoded, a later wait on those words ending at once, one under way within 2^10 loads: nccl-mesh-kernels.h
    mesh_step_failed), read by the host after its command buffer (ncclCommGetAsyncError, or the communicator's next
@@ -168,7 +160,7 @@
    are its definition's too, a generation's laid and placed at its first group for that group's buffers and taken
    again by each later group of the generation with the same buffers, which binds only its entries on the channels; a
    group with other buffers lays and places its generation again (its old tables let go once the bridge's reads of
-   them end).  A group on several communicators keeps its parts in its thread's lists.  A result is made in recvbuff (a reduce-scatter's own segment too: no compiled piece spans two
+   them end).  A result is made in recvbuff (a reduce-scatter's own segment too: no compiled piece spans two
    segments), and nothing is copied into a slot from a caller's buffer but the operand of a premultiplied,
    partials-merging or fused call where it is not the result, and an in-place single-phase all-reduce's original.  A
    group writes a slot only once the slot's last group has every landing awaited: the stream's order, and a landed
@@ -289,7 +281,6 @@ struct mesh_trees;
 /* The stream: NULL (the host path) or an ncclMeshStream (the Metal path, above). */
 typedef void *cudaStream_t;
 typedef struct { void *buffer; size_t offset; } ncclMeshBuffer;
-typedef struct { uint64_t ticket; int published; } ncclMeshIssue;
 /* Fused publication and landing bindings, in physical channel order. Each
    record contains six GPU addresses: d, s, argument record, a, v, progress
    (ncclMeshMetalPrelude's mesh_step_binding). The caller supplies room using
@@ -313,7 +304,6 @@ typedef uint64_t ncclMeshBinding[6];
 typedef struct { ncclMeshBinding *publish, *land; uint32_t publishes, lands, repeats; size_t stride; } ncclMeshFused;
 typedef struct {
   void *commandEncoder;
-  ncclMeshIssue *issue;
   void *argumentTable;
   void *residencySet;
   uint32_t polls;
@@ -1190,11 +1180,6 @@ ncclResult_t ncclMeshCommPlanDemands(ncclComm_t comm, uint64_t* demand, size_t e
    increase this number. A weight change smaller than 1/units may compile to the
    identical schedule; this is probe resolution, never a minimum path share. */
 ncclResult_t ncclMeshCommPlanRouteUnits(ncclComm_t comm, uint64_t* units, size_t entries);
-/* Every issued group through `ticket` that is not complete, completed on `stream` (its Metal 4 encoder, argument table
-   and residency set, and its polls; issue not read); *published (may be NULL)
-   whether a publication was encoded.  A ticket already complete encodes nothing; one whose communicator failed returns
-   the failure. */
-ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream* stream, int* published);
 /* Fused execution uses the same physical fragment compiler and channel bindings
    as ordinary compiled writes. A peer may have any number of parallel channels,
    and a logical transfer may contain multiple fragments and relay hops. There is

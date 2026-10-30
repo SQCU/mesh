@@ -2219,7 +2219,6 @@ struct call {
   void *encoder, *table, *residency;
   struct metal_submission *submission;
   uint32_t polls;
-  ncclMeshIssue *issue;
   ncclMeshFused *fused;
   struct where send_at, recv_at, sum;
   struct where *send_views, *receive_views; /* original/final segments, in rank order */
@@ -3904,11 +3903,6 @@ static uint32_t lone_of(const struct inflight *g) {
 }
 static struct inflight *inflight, *inflight_last;
 static uint64_t tickets;
-static _Atomic uint64_t retired;
-/* the groups lost with their communicators, each with its communicator's failure, until a completion through it
-   reports it */
-static struct loss { uint64_t ticket; ncclResult_t result; char reason[256]; } *losses;
-static size_t lost;
 
 /* what an issued call owns: its write plan's reference and its steps copy's (its counts, matrix and views are its
    thread's: room_of) */
@@ -3972,29 +3966,15 @@ static void inflight_free(struct inflight *g) {
   issue_let(g->comm, g->issue);
 }
 
-static int comm_issued(const struct ncclComm *comm) {
-  for (const struct inflight *g = inflight; g; g = g->next_group)
-    if (g->comm == comm) return 1;
-  return 0;
-}
-
-/* every group in flight on comm lost: a later completion through one returns comm's failure (or its destroy); every
-   earlier group is complete or lost */
+/* every group in flight on comm let go (its failure, or its destroy): every earlier group is complete or let go */
 static void inflight_lose(struct ncclComm *comm) {
   inflight_last = NULL;
   for (struct inflight **at = &inflight; *at;) {
     struct inflight *g = *at;
     if (g->comm != comm) { inflight_last = g; at = &g->next_group; continue; }
-    struct loss *grown = realloc(losses, (lost + 1) * sizeof *grown);
-    if (grown) {
-      losses = grown;
-      losses[lost] = (struct loss){g->ticket, comm->failed ? comm->failed : ncclRemoteError, {0}};
-      snprintf(losses[lost++].reason, sizeof grown->reason, "%s", comm->failed ? comm->failure.text : "its communicator was destroyed");
-    }
     *at = g->next_group;
     inflight_free(g);
   }
-  atomic_store(&retired, inflight ? inflight->ticket - 1 : tickets);
 }
 
 /* the group in flight on comm whose entries of list `list` on channel h hold `at`, sought from group `from` (NULL: the
@@ -4319,34 +4299,6 @@ static ncclResult_t complete(struct metal_program *program, struct inflight *thr
   return result;
 }
 
-/* a group's publications that need no wait, each channel's in order, a run of them one release: its earlier entries
-   published, its steps' receives before them consumed */
-static ncclResult_t issue_group(struct metal_program *program, struct inflight *g, int *published) {
-  struct ncclComm *comm = g->comm;
-  ncclResult_t result = ncclSuccess;
-  touch(comm);
-  metal_gate(program, comm->violation);
-  for (uint32_t h = 0; h < comm->count && !result; h++) {
-    const struct channel *ch = comm->channels + h;
-    if (ch->published < g->start[h][0] || ch->published >= g->end[h][0]) continue;
-    uint64_t upto = ch->published;
-    while (upto < g->end[h][0] && publishable(g, h, upto)) upto++;
-    if (upto > ch->published) result = publish(program, comm, h, upto, published);
-  }
-  return result;
-}
-
-/* the groups in flight: completing through a group, every group up to it completed (complete), then any later group's
-   publications that need no wait; issuing a group, its publications that need no wait, so a group issued encodes no
-   wait at all; each group's dispatches recording a failed wait in its own communicator's failure words (metal_gate) */
-static ncclResult_t walk(struct metal_program *program, struct inflight *issuing, struct inflight *through, int *published) {
-  ncclResult_t result = ncclSuccess;
-  struct inflight *g = issuing;
-  if (through) { result = complete(program, through, published); g = through->next_group; }
-  for (; g && !result; g = g->next_group) result = issue_group(program, g, published);
-  return result;
-}
-
 static int on_gpu(ncclDataType_t t) { return t != ncclFloat64; }
 static struct where where_of(const void *argument) {
   const ncclMeshBuffer *b = argument;
@@ -4502,7 +4454,6 @@ static ncclResult_t retire(struct metal_program *program) {
     if (!result) result = epilogue(program, g->list, g->n);
     inflight = g->next_group;
     if (!inflight) inflight_last = NULL;
-    atomic_store(&retired, g->ticket);
     inflight_free(g);
   }
   return result;
@@ -4537,21 +4488,6 @@ static void walk_failed(struct ncclComm *comm, uint64_t ticket, ncclResult_t res
   fail(result, "%s", why);
 }
 
-/* the groups through `ticket` whose communicators failed lost; the first loss through it, now reported, and every loss
-   through it forgotten */
-static ncclResult_t losses_through(uint64_t ticket) {
-  for (struct inflight *g = inflight; g && g->ticket <= ticket;)
-    if (comm_failure(g->comm)) g = inflight;
-    else g = g->next_group;
-  ncclResult_t result = ncclSuccess;
-  size_t kept = 0;
-  for (size_t i = 0; i < lost; i++)
-    if (losses[i].ticket > ticket) losses[kept++] = losses[i];
-    else if (!result) result = fail(losses[i].result, "the group was lost with its communicator: %s", losses[i].reason);
-  lost = kept;
-  return result;
-}
-
 /* The one place a reuse of storage is ordered: before a group writes a slot, the slot's last group's landings have
    landed, so its SENDs from it were read (witnessed: mesh-routed.c) and its consumers ran earlier in the
    stream; that group completed first where it is in flight, then `landed` awaited past the landings no work in the
@@ -4562,7 +4498,7 @@ static ncclResult_t guard(struct metal_program *program, struct ncclComm *comm, 
   const struct slot *s = comm->slots + slot - 1;
   struct inflight *g = inflight;
   while (g && g->ticket != s->ticket) g = g->next_group;
-  ncclResult_t result = g ? walk(program, NULL, g, published) : ncclSuccess;
+  ncclResult_t result = g ? complete(program, g, published) : ncclSuccess;
   if (g && !result) result = retire(program);
   for (uint32_t h = 0; !result && h < comm->count; h++) {
     struct channel *ch = comm->channels + h;
@@ -4580,19 +4516,17 @@ static ncclResult_t guard(struct metal_program *program, struct ncclComm *comm, 
    storage that is not the caller's its definition's next slot (bind_slot) once that slot's last group has landed
    (guard), the send buffer read in place where it may (plan_direct); then the group scheduled and its entries presented (schedule: a piece off a page or
    outside the region fails the call as a value, nothing presented), its operands made in place, its gate stored where
-   its landings wait on the communicator's (gate_of), in flight after the others, issued (with issue; a fused one is
-   completed at once, its steps the caller's kernels') or completed with every group before it, its waits bounded by
-   its calls' greatest polls; its results into recvbuff as it completes; the program's end signals `finished` where the
+   its landings wait on the communicator's (gate_of), in flight after the others, and completed with every group
+   before it (a fused one's steps the caller's kernels), its waits bounded by its calls' greatest polls; its results
+   into recvbuff as it completes; the program's end signals `finished` where the
    library made its encoder.  Its channels' counts, its slot and the buffers its deferred steps' bindings name are made
    resident through the stream's residency set, for its dispatches and the caller's kernels alike. */
 static ncclResult_t launch_metal(struct call *list, size_t n) {
   const ncclComm_t comm = list[0].comm;
-  ncclMeshIssue *const issue = list[0].issue;
   ncclResult_t result = ncclSuccess;
   int remote = 0;
   /* the group's waits' bound: its calls' greatest (0, the most: nccl.h NCCL_MESH_POLLS, any 0 among them) */
   uint32_t polls = list[0].polls;
-  if (issue) *issue = (ncclMeshIssue){0, 0};
   for (size_t i = 0; i < n && !result; i++) {
     polls = !polls || !list[i].polls ? 0 : polls > list[i].polls ? polls : list[i].polls;
     /* a group's dispatches are one program in one command buffer or encoder: a call encoded into another would be
@@ -4731,10 +4665,9 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       publishes += g->fused ? channel_publication(g, h, g->start[h][0], g->end[h][0]) != NULL : (uint32_t)((g->end[h][0] - g->start[h][0]) / repeats);
       lands += g->fused ? own_landing(g, h) > g->start[h][1] : (uint32_t)((g->end[h][1] - g->start[h][1]) / repeats);
     }
-    /* a fused group is completed at once, issued or not: its steps are records its caller's kernels run, and the
-       library encodes no wait of it; the groups in flight before it are completed first, so it completes alone, in
-       complete's fused form (each channel released once, its last landing to this rank its consumer's) */
-    const int issuing = issue && !g->fused;
+    /* a fused group's steps are records its caller's kernels run, and the library encodes no wait of it; the groups in
+       flight before it are completed first, so it completes alone, in complete's fused form (each channel released
+       once, its last landing to this rank its consumer's) */
     if (g->fused && before) {
       result = complete(program, before, &published);
       if (!result) result = retire(program);
@@ -4743,7 +4676,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       fusing.out = fused; fusing.room[0] = fusing.out->publishes; fusing.room[1] = fusing.out->lands;
       fusing.published = fusing.landed = 0;
     }
-    if (!result) result = walk(program, issuing ? g : NULL, issuing ? NULL : g, &published);
+    if (!result) result = complete(program, g, &published);
     if (!result && g->fused && (fusing.published != publishes || fusing.landed != lands))
       result = fail(ncclInvalidUsage, "a fused crossing whose program is not this rank's publications and landings of its whole operands");
     if (g->fused) { fusing.out->publishes = fusing.published; fusing.out->lands = fusing.landed; }
@@ -4753,43 +4686,12 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     if (!result) result = retire(program);
   } else if (!result) result = epilogue(program, list, n);
   program_end(program, result);
-  if (result && scheduled) walk_failed(comm, issue && !fused ? 0 : ticket, result);
-  if (issue && !result) { issue->ticket = ticket > atomic_load(&retired) ? ticket : 0; issue->published = published; }
+  if (result && scheduled) walk_failed(comm, ticket, result);
   if (!scheduled) parts_free(list, n);
   issue_let(comm, u);
   pthread_mutex_unlock(&group_lock);
   if (result) comm->async = result;
   return result;
-}
-
-ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int *published) {
-  int any = 0;
-  if (published) *published = 0;
-  if (!stream || !stream->argumentTable || !stream->commandEncoder || !stream->residencySet)
-    return fail(ncclInvalidArgument, "ncclMeshComplete without its Metal 4 encoder, argument table and residency set");
-  pthread_mutex_lock(&group_lock);
-  const ncclResult_t loss = losses_through(ticket);
-  ncclResult_t result = ncclSuccess;
-  if (inflight && ticket >= inflight->ticket) {
-    struct inflight *through = inflight;
-    while (through->next_group && through->next_group->ticket <= ticket) through = through->next_group;
-      const char *message = NULL;
-    struct metal_program operands;
-    struct metal_program *program = metal_begin(&operands, stream->commandEncoder, stream->argumentTable, stream->residencySet,
-                                                inflight->comm->violation, stream->polls, NULL, &message);
-    if (!program) result = fail(ncclSystemError, "%s", message);
-    else {
-      for (struct inflight *g = inflight; g; g = g == through ? NULL : g->next_group)
-        for (uint32_t h = 0; h < g->comm->count; h++) metal_resident(program, g->comm->channels[h].buffer);
-      result = walk(program, NULL, through, &any);
-      if (!result) result = retire(program);
-      program_end(program, result);
-      if (result) walk_failed(NULL, ticket, result);
-    }
-  }
-  pthread_mutex_unlock(&group_lock);
-  if (published) *published = any;
-  return result ? result : loss;
 }
 
 const char *ncclMeshMetalPrelude(void) { return metal_prelude(); }
@@ -4815,8 +4717,6 @@ static ncclResult_t host_commit(struct call *list, size_t n, struct metal_submis
   *made = NULL;
   pthread_mutex_lock(&group_lock);
   ncclResult_t result = revoked(comm) ? revoked_fail(comm) : comm_failure(comm);
-  if (!result && comm_issued(comm))
-    result = fail(ncclInvalidUsage, "a host-path group while this communicator's GPU groups are issued and not complete (ncclMeshComplete)");
   if (!result && finished && comm->last) result = gpu_finished(comm);
   if (!result && !comm->queue && !(comm->queue = metal_queue())) result = fail(ncclSystemError, "a command queue for communicator %s", comm->name);
   void *encoder = NULL, *table = NULL, *residency = NULL;
@@ -4849,8 +4749,8 @@ static ncclResult_t host_finish(ncclComm_t comm, struct metal_submission *submis
 }
 
 /* one communicator's calls of a group, launched as its own group on the Metal path: on their stream (launch_metal) or
-   on its own queue, committed and awaited (host_commit, host_finish), each taking what the calls own (freed, or moved to the group's issue); the list stays
-   its caller's */
+   on its own queue, committed and awaited (host_commit, host_finish), each taking what the calls own (freed, or moved
+   to the group's issue); the list stays its caller's */
 static ncclResult_t launch_one(struct call *list, size_t n) {
   const ncclComm_t comm = list[0].comm;
   if (list[0].stream) return launch_metal(list, n);
@@ -4861,28 +4761,8 @@ static ncclResult_t launch_one(struct call *list, size_t n) {
   return result;
 }
 
-/* a group's calls of one communicator (ncclGroupEnd), launched as a group of their own (launch_one; a host part
-   committed with the others before any is awaited: host_commit, `command`), its result and its message */
-struct part { struct call *list; size_t n; ncclResult_t result; struct said said; ncclComm_t comm; struct metal_submission *submission; int metal; };
-/* a thread's parts of its last group on several communicators, and their calls, each part's a run of them: kept for its
-   next such group (grow), so none is allocated once they have its size */
-static _Thread_local struct part *parts_kept;
-static _Thread_local struct call *sorted;
-static _Thread_local size_t parts_room, sorted_room;
-static int part_crosses(const struct part *p) {
-  int any = 0;
-  for (size_t i = 0; i < p->n; i++) any |= crosses(p->list + i);
-  return any;
-}
-
-/* the group ended: a fused crossing's records zeroed (filled by its steps: ncclMeshFused), then each communicator's
-   calls, in their order, a group of its own, the communicators in the order the group first names them, every one
-   launched whatever another's result, the first failure (in that order) returned, as NCCL's group on several
-   communicators has every one progress together: the Metal path's each issued (its stream's issue record, else one of
-   the library's) and, where the stream asked no issue, all completed through the greatest ticket on the last one's
-   stream (ncclMeshComplete: its walk interleaves their channels as tracks; a stream that asked issue gets that ticket
-   and `published` any's); the host path's each on a thread of its own, joined; two that cross a link and name one
-   fused record, which holds one crossing, the later failing as a value */
+/* the group ended: a fused crossing's records zeroed (filled by its steps: ncclMeshFused), then its calls launched as
+   one group (launch_one); a group whose calls name two communicators fails as a value (nccl.h: a group names one) */
 ncclResult_t ncclGroupEnd(void) {
   if (depth <= 0) return fail(ncclInvalidUsage, "ncclGroupEnd without ncclGroupStart");
   if (--depth) return ncclSuccess;
@@ -4901,82 +4781,12 @@ ncclResult_t ncclGroupEnd(void) {
     if (f->publishes) memset(f->publish, 0, f->publishes * sizeof *f->publish);
     if (f->lands) memset(f->land, 0, f->lands * sizeof *f->land);
   }
-  int several = 0;
-  for (size_t i = 1; i < n; i++) several |= list[i].comm != list[0].comm;
-  if (!several) return launch_one(list, n);
-  if (grow(&parts_kept, &parts_room, n, sizeof *parts_kept) || grow(&sorted, &sorted_room, n, sizeof *sorted)) {
-    parts_free(list, n);
-    return fail(ncclSystemError, "out of memory");
-  }
-  /* each communicator's calls a run of `sorted`, in their order, the communicators in the order the group names them */
-  struct part *part = parts_kept;
-  size_t parts = 0, placed = 0;
-  for (size_t i = 0; i < n; i++) {
-    size_t k = 0;
-    while (k < parts && part[k].list[0].comm != list[i].comm) k++;
-    if (k < parts) continue;
-    part[parts++] = (struct part){.list = sorted + placed, .metal = list[i].stream != NULL};
-    for (size_t j = i; j < n; j++) if (list[j].comm == list[i].comm) part[k].list[part[k].n++] = list[j];
-    placed += part[k].n;
-  }
-  for (size_t b = 1; b < parts; b++)
-    for (size_t a = 0; a < b && part[b].list; a++)
-      if (part[a].list && part[b].list[0].fused && part[a].list[0].fused == part[b].list[0].fused && part_crosses(part + a) && part_crosses(part + b)) {
-        part[b].result = fail(ncclInvalidUsage, "a fused crossing on several communicators: one ncclMeshFused holds one crossing's records");
-        part[b].said = last;
-        parts_free(part[b].list, part[b].n);
-        part[b].list = NULL;
-      }
-  /* the caller's issue record, and the stream the Metal parts complete on where it asked none: the last Metal part's,
-     made from its calls' fields (the caller's ncclMeshStream need not outlive its calls) */
-  ncclMeshIssue *issue = NULL, internal = {0, 0};
-  ncclMeshStream on = {0};
-  int metals = 0;
-  for (size_t k = 0; k < parts; k++) {
-    const struct call *c = part[k].list;
-    if (!c || !part[k].metal) continue;
-    if (!metals++) issue = c->issue;
-    uint32_t polls = c->polls;
-    for (size_t i = 1; i < part[k].n; i++) polls = !polls || !c[i].polls ? 0 : polls > c[i].polls ? polls : c[i].polls;
-    on = (ncclMeshStream){.commandEncoder = c->encoder, .argumentTable = c->table, .residencySet = c->residency, .polls = polls};
-  }
-  uint64_t ticket = 0;
-  int published = 0;
-  for (size_t k = 0; k < parts; k++) {
-    struct part *p = part + k;
-    if (!p->list || !p->metal) continue;
-    ncclMeshIssue *const used = issue ? issue : &internal;
-    for (size_t i = 0; i < p->n; i++) p->list[i].issue = used;
-    p->result = launch_one(p->list, p->n);
-    p->said = last;
-    p->list = NULL;
-    if (!p->result) { published |= used->published; ticket = used->ticket > ticket ? used->ticket : ticket; }
-  }
-  ncclResult_t completed = ncclSuccess;
-  struct said completing = {0, ""};
-  if (!issue && ticket) {
-    int any = 0;
-    if ((completed = ncclMeshComplete(ticket, &on, &any))) completing = last;
-  }
-  /* every host part committed before any is awaited, so their programs run together (R17: no wait per part) */
-  for (size_t k = 0; k < parts; k++) {
-    struct part *p = part + k;
-    if (!p->list || p->metal) continue;
-    p->comm = p->list[0].comm;
-    if ((p->result = host_commit(p->list, p->n, &p->submission))) { p->said = last; p->comm->async = p->result; }
-  }
-  for (size_t k = 0; k < parts; k++) {
-    struct part *p = part + k;
-    if (p->submission && (p->result = host_finish(p->comm, p->submission))) { p->said = last; p->comm->async = p->result; }
-  }
-  ncclResult_t result = ncclSuccess;
-  struct said first = {0, ""};
-  for (size_t k = 0; k < parts && !result; k++)
-    if (part[k].result) { result = part[k].result; first = part[k].said; }
-  if (completed && !result) { result = completed; first = completing; }
-  if (issue) *issue = (ncclMeshIssue){ticket, published};
-  if (result) last = first;
-  return result;
+  for (size_t i = 1; i < n; i++)
+    if (list[i].comm != list[0].comm) {
+      parts_free(list, n);
+      return fail(ncclInvalidUsage, "a group whose calls name two communicators (nccl.h: a group names one)");
+    }
+  return launch_one(list, n);
 }
 
 /* a call refused before it joins its group: its arguments, the stream's form taken into it */
@@ -4986,7 +4796,7 @@ static ncclResult_t admit(struct call *made) {
   if (c.stream) {
     const ncclMeshStream *stream = c.stream;
     c.encoder = stream->commandEncoder;
-    c.issue = stream->issue; c.table = stream->argumentTable; c.residency = stream->residencySet; c.polls = stream->polls;
+    c.table = stream->argumentTable; c.residency = stream->residencySet; c.polls = stream->polls;
     c.fused = stream->fused;
     c.send_at = where_of(c.send); c.recv_at = where_of(c.recv);
   } else {
