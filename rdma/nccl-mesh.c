@@ -3251,23 +3251,24 @@ void metal_done(const _Atomic uint64_t *words, uint32_t n, uint64_t value) {
   struct use *u = carving->done + carving->uses - 1;
   u->words = words; u->n = n; u->value = value;
 }
-/* on a failure only: every tracks pool whose workers have not all ended, its open cursors as they stand (nccl-mesh-metal.m
-   metal_tracks_open: a use whose end words lie in its own records), a line each on stderr, so a stall names the
-   task, dependency and count it stands at on the rank where it began.  Reads alone; under group_lock */
+/* on a failure only: every tracks pool begun whose workers have not all ended (at most 8), its open cursors as they stand
+   (nccl-mesh-metal.m metal_tracks_open: a use whose end words lie in its own records), a line each on stderr, so a
+   stall names the task, dependency and count it stands at on the rank where it began.  Reads alone; under group_lock */
 static void tracks_report(const char *name) {
   char line[4096];
-  for (size_t k = 0; k < piece_count; k++)
-    for (size_t u = 0; u < pieces[k]->uses; u++) {
+  for (size_t k = 0, told = 0; k < piece_count && told < 8; k++)
+    for (size_t u = 0; u < pieces[k]->uses && told < 8; u++) {
       const struct use *x = pieces[k]->done + u;
       if (!x->words || !x->at) continue;
       const int n = snprintf(line, sizeof line, "libnccl-mesh: communicator %s's ", name);
-      const size_t told = n > 0 ? (size_t)n : 0;
-      size_t used = metal_tracks_open(x->at, (const void *)x->words, x->n, line + told, sizeof line - told - 1);
+      const size_t head = n > 0 ? (size_t)n : 0;
+      size_t used = metal_tracks_open(x->at, (const void *)x->words, x->n, line + head, sizeof line - head - 1);
       if (!used) continue;
-      used += told;
+      used += head;
       if (used > sizeof line - 2) used = sizeof line - 2;
       line[used++] = '\n';
       (void)!write(2, line, used);
+      told++;
     }
 }
 void *metal_piece_hold(struct metal_bytes *made, size_t *bytes) {

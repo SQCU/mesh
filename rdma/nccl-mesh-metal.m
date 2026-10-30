@@ -661,6 +661,14 @@ size_t metal_tracks_open(const void *records, const void *ended, uint32_t worker
   const _Atomic uint64_t *count = (const _Atomic uint64_t *)(base + h->count_off);
   const _Atomic uint32_t *state = (const _Atomic uint32_t *)(base + h->state_off), *claim = (const _Atomic uint32_t *)(base + h->claim_off),
                          *done = (const _Atomic uint32_t *)(base + h->done_off);
+  /* a pool no worker has begun (every cursor at its first task, none of it claimed) names nothing: the pools of the
+     work encoded after a stall are all such */
+  int begun = live < workers;
+  for (uint32_t cu = 0; !begun && cu < h->cursors; cu++) {
+    const uint32_t j = atomic_load_explicit(state + cu, memory_order_acquire);
+    begun = j != cursor[cu].first || (j < cursor[cu].end && atomic_load_explicit(claim + j, memory_order_acquire));
+  }
+  if (!begun) return 0;
   size_t used = 0;
 #define TOLD(...) do { if (used + 1 < room) { const int n_ = snprintf(out + used, room - used, __VA_ARGS__); \
                          if (n_ > 0) used += (size_t)n_ < room - used ? (size_t)n_ : room - used - 1; } } while (0)
