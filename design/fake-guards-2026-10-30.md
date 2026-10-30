@@ -97,3 +97,8 @@ Open, measured: the 64 KiB reduce-scatter runs 1.4 to 2.4 ms a call since 8e5a63
 case about 0.1 ms): a stall the solver's trees expose, not bandwidth. The all-reduce's demand gives each rank an equal
 segment, which a solver over ragged capacity must not be handed (demands_of); one commodity whose root is chosen in the
 solve is the form. Routing is still solved inside planning; it is an operand, k-buffered in pages, solved apart.
+
+9014ccd3, the presents' barriers cut (slowest rank, us a call, before / after, every output checked): 64 KiB all-reduce
+103 / 77, broadcast 62 / 44, all-gather 76 / 44, exchange 116 / 55; 1 MiB all-reduce 275 / 220, broadcast 129 / 89,
+all-gather 140 / 98, exchange 187 / 123; 16 MiB 7 to 14% faster; 64 MiB unchanged. A self-imposed wait removed is a
+latency gain at every size short enough for the call boundary to matter.
