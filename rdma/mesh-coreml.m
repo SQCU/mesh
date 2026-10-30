@@ -507,21 +507,27 @@ static void *coreml_bind(long handle, const MeshModelView *inputs, size_t ni, co
   }
 }
 
-@interface MeshPredictionTask : NSObject
+typedef void (*MeshPredictionSubmit)(id,SEL,id,id,id);
+@interface MeshPredictionTask : NSObject { @public
+  id model, features, options;
+  MeshPredictionSubmit submit;
+  void (^completed)(id<MLFeatureProvider>,NSError *);
+}
 @property MeshPrediction *source;
-@property(copy) void (^complete)(id<MLFeatureProvider>,NSError *);
 @end
 @implementation MeshPredictionTask
 @end
 static void model_task_release(void *context) { CFRelease(context); }
 static void coreml_submit(void *context) API_AVAILABLE(macos(14.0));
 static void coreml_submit(void *context) {
-  MeshPredictionTask *task=(__bridge MeshPredictionTask *)context;MeshPrediction *p=task.source;
-  [p.model predictionFromFeatures:p.features options:p.options completionHandler:task.complete];
+  MeshPredictionTask *task=(__bridge MeshPredictionTask *)context;
+  task->submit(task->model,@selector(predictionFromFeatures:options:completionHandler:),task->features,task->options,task->completed);
 }
 static const char *coreml_prepare(id object,MeshHostCompletion complete,void *context,MeshHostTask *result) {
   MeshPrediction *p=object;MeshPredictionTask *task=[MeshPredictionTask new];task.source=p;
-  task.complete=^(id<MLFeatureProvider> value,NSError *error) {
+  task->model=p.model;task->features=p.features;task->options=p.options;
+  task->submit=(MeshPredictionSubmit)[p.model methodForSelector:@selector(predictionFromFeatures:options:completionHandler:)];
+  task->completed=^(id<MLFeatureProvider> value,NSError *error) {
     if(!value){complete(context,error.localizedDescription.UTF8String?:"Core ML prediction failed");return;}
     for(NSString *name in p.outputs)if([value featureValueForName:name].multiArrayValue.dataPointer!=p.outputs[name].dataPointer) {
       complete(context,"Core ML did not use the configured output backing");return;
@@ -541,23 +547,25 @@ static const char *coreml_prepare(id object,MeshHostCompletion complete,void *co
 - (void)dealloc { mesh_coreml_release(_handle); }
 @end
 @interface MeshANETask : NSObject { @public
+  id client, model, options, request;
+  MeshANEEvaluate evaluate;
+  unsigned qos;
   MeshHostCompletion complete;
   void *context;
   MeshHostResource resource;
 }
 @property MeshANEInvocation *source;
-@property id request;
 @property BOOL mapped;
 @end
 @implementation MeshANETask
 - (void)dealloc {
-  MeshANEModel *model=_source.prepared;
-  if(_mapped)model.unmap(model.client,@selector(unmapIOSurfacesWithModel:request:),model.model,_request);
+  MeshANEModel *prepared=_source.prepared;
+  if(_mapped)prepared.unmap(prepared.client,@selector(unmapIOSurfacesWithModel:request:),prepared.model,request);
 }
 @end
 static void ane_submit(void *context) {
-  MeshANETask *task=(__bridge MeshANETask *)context;MeshANEModel *p=task.source.prepared;NSError *error=nil;
-  if(!p.evaluate(p.client,@selector(evaluateWithModel:options:request:qos:error:),p.model,p.options,task.request,p.qos,&error)) {
+  MeshANETask *task=(__bridge MeshANETask *)context;NSError *error=nil;
+  if(!task->evaluate(task->client,@selector(evaluateWithModel:options:request:qos:error:),task->model,task->options,task->request,task->qos,&error)) {
     task->complete(task->context,error.localizedDescription.UTF8String?:"direct ANE submission failed");
   }
 }
@@ -565,16 +573,17 @@ static const char *ane_prepare(id object,MeshHostCompletion complete,void *conte
   MeshANEInvocation *source=object;MeshANEModel *model=source.prepared;
   Class requestClass=NSClassFromString(@"_ANERequest");
   MeshANETask *task=[MeshANETask new];task.source=source;task->complete=complete;task->context=context;
+  task->client=model.client;task->model=model.model;task->options=model.options;task->evaluate=model.evaluate;task->qos=model.qos;
   task->resource=(MeshHostResource){(__bridge const void *)model.requestResource,model.capacity};
-  task.request=((id(*)(id,SEL,id,id,id,id,id))objc_msgSend)(requestClass,@selector(requestWithInputs:inputIndices:outputs:outputIndices:procedureIndex:),
+  task->request=((id(*)(id,SEL,id,id,id,id,id))objc_msgSend)(requestClass,@selector(requestWithInputs:inputIndices:outputs:outputIndices:procedureIndex:),
     source.inputs,source.inputIndices,source.outputs,source.outputIndices,model.contract[@"procedure"]);
-  if(!task.request)return "direct ANE request construction failed";
-  if(!ane_methods(task.request,@[@"setCompletionHandler:"],model.capabilities[@"abi"]))return error_;
+  if(!task->request)return "direct ANE request construction failed";
+  if(!ane_methods(task->request,@[@"setCompletionHandler:"],model.capabilities[@"abi"]))return error_;
   void (^completed)(BOOL,NSError *)=^(BOOL success,NSError *error) {
     complete(context,success?NULL:(error.localizedDescription.UTF8String?:"direct ANE execution failed"));
   };
-  ((void(*)(id,SEL,id))objc_msgSend)(task.request,@selector(setCompletionHandler:),completed);
-  NSError *error=nil;task.mapped=model.map(model.client,@selector(mapIOSurfacesWithModel:request:cacheInference:error:),model.model,task.request,model.cacheMapping,&error);
+  ((void(*)(id,SEL,id))objc_msgSend)(task->request,@selector(setCompletionHandler:),completed);
+  NSError *error=nil;task.mapped=model.map(model.client,@selector(mapIOSurfacesWithModel:request:cacheInference:error:),model.model,task->request,model.cacheMapping,&error);
   if(!task.mapped){snprintf(error_,sizeof error_,"direct ANE page mapping: %s",error.localizedDescription.UTF8String);return error_;}
   *result=(MeshHostTask){(__bridge_retained void *)task,ane_submit,model_task_release,&task->resource,1};return NULL;
 }

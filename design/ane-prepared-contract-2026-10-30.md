@@ -32,6 +32,14 @@ functionalized from its operand layout report alone. Such an artifact still
 needs its original graph transformed before compilation. This is a source
 contract boundary, not a claim that ANE hardware cannot calculate stateful work.
 
+One source alias case remains open: an effect result may be the existing input
+placeholder itself. Distinct configured input/output names must then describe
+an alias of those pages. The current signature pass instead overwrites the input
+name when naming the output. The next change must expose the alias before
+allocation and carry it through shared producer placement and export. An
+identity operation or a copied result would hide that missing contract. This
+checkpoint does not claim that case is handled.
+
 ## Output pages are already bound
 
 The direct adapter in `rdma/mesh-coreml.m` prepares IOSurfaces over retained
