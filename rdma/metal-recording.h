@@ -205,6 +205,10 @@ struct MetalCommandDescription {
 };
 struct MetalReplay *MetalReplayCommands(id<MTLDevice>, const struct MetalCommandDescription *, size_t count, enum MetalForm);
 void MetalReplayEncode(struct MetalReplay *, id<MTLCommandBuffer>, NSRange commands);
+/* The bytes of the type a pipeline's kernel declares at buffer `index` (its reflection's bufferDataSize; 0 where its
+   pipeline was made without the recorder's reflection, or the kernel uses no buffer there), and its function's name */
+NSUInteger MetalPipelineDeclaredBytes(id<MTLComputePipelineState>, NSUInteger index);
+NSString *MetalPipelineName(id<MTLComputePipelineState>);
 struct MetalCommandBinding MetalScheduleData(struct MetalSchedule *, const void *, size_t bytes, uint32_t index);
 void MetalScheduleCompute(struct MetalSchedule *, id<MTLComputePipelineState>,
     const struct MetalCommandBinding *, size_t count, MTLSize groups, MTLSize threads);

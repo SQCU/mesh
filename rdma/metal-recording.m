@@ -496,6 +496,7 @@ void MetalRecordViews(const struct MetalBindingView *views,size_t count,void (^e
     @try { encode(); } @finally { bindingViews=previous;bindingViewCount=before; }
 }
 
+static char pipelineSizesKey;
 static char replaySegmentsKey,replayRecordsKey,replayResourcesKey,replayHostsKey,pipelineAccessKey,pipelineDescriptorKey,pipelineBindingsKey,
     pipelineAddressesKey,operandStrideKey,operandInstancesKey,operandOutputOffsetKey;
 
@@ -516,6 +517,16 @@ static BOOL MetalStructAddresses(MTLStructType *structure) {
         if (type == MTLDataTypePointer || (type == MTLDataTypeStruct && MetalStructAddresses(inner))) return YES;
     }
     return NO;
+}
+
+// The bytes of the type each buffer binding of a pipeline's kernel declares, from its reflection, kept with it
+// (MetalPipelineDeclaredBytes): the one statement of what each binding must hold.
+static void MetalPipelineSizes(id<MTLComputePipelineState> pipeline,MTLComputePipelineReflection *reflection) {
+    uint32_t sizes[MESH_BUFFER_BINDINGS] = {0};
+    for (id<MTLBinding> binding in reflection.bindings)
+        if (binding.type==MTLBindingTypeBuffer && binding.isUsed && binding.index<MESH_BUFFER_BINDINGS)
+            sizes[binding.index]=(uint32_t)((id<MTLBufferBinding>)binding).bufferDataSize;
+    objc_setAssociatedObject(pipeline,&pipelineSizesKey,[NSData dataWithBytes:sizes length:sizeof sizes],OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 // ../dox/mesh/design/prepared-machine.md#M06
@@ -547,8 +558,21 @@ static id<MTLComputePipelineState> MetalCreatePipeline(id<MTLDevice> device,
     objc_setAssociatedObject(result, &pipelineAccessKey, @(access), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (addresses) objc_setAssociatedObject(result, &pipelineAddressesKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(result, &pipelineBindingsKey, @(declared), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    MetalPipelineSizes(result, bindings);
     objc_setAssociatedObject(result, &pipelineDescriptorKey, descriptor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [descriptor release]; return result;
+}
+
+// The bytes of the type a pipeline's kernel declares at buffer `index` (its reflection's bufferDataSize: a `constant T&`
+// record's sizeof(T), a `device T*` array's element), and its function's name: 0 and nil where its pipeline was not made
+// with the recorder's reflection, or the kernel uses no buffer there.
+NSUInteger MetalPipelineDeclaredBytes(id<MTLComputePipelineState> pipeline,NSUInteger index) {
+    NSData *sizes=objc_getAssociatedObject(pipeline,&pipelineSizesKey);
+    return sizes && index<sizes.length/sizeof(uint32_t)?((const uint32_t *)sizes.bytes)[index]:0;
+}
+NSString *MetalPipelineName(id<MTLComputePipelineState> pipeline) {
+    MTLComputePipelineDescriptor *descriptor=objc_getAssociatedObject(pipeline,&pipelineDescriptorKey);
+    return pipeline.label?:descriptor.computeFunction.name;
 }
 
 // docs/kernels.md Any program: the dataflow's identity of a buffer, its allocation.  A heap's
@@ -2219,9 +2243,11 @@ id<MTLComputePipelineState> MetalPipelineMake(id<MTLLibrary> library,NSString *f
     MTLComputePipelineDescriptor *descriptor=MetalPipelineDescriptor(library,function,constants,fields,error);
     if(!descriptor)return nil;
     if(archives.count)descriptor.binaryArchives=archives;
+    if(!descriptor.label)descriptor.label=function;   // the kernel a refusal names (MetalPipelineName)
+    MTLComputePipelineReflection *reflection=nil;
     id<MTLComputePipelineState> pipeline=[library.device newComputePipelineStateWithDescriptor:descriptor
-        options:MTLPipelineOptionNone reflection:nil error:error];
-    if(pipeline)MetalPipelineDeclare(pipeline,library,function,constants,fields);
+        options:MTLPipelineOptionBindingInfo|MTLPipelineOptionBufferTypeInfo reflection:&reflection error:error];
+    if(pipeline){MetalPipelineDeclare(pipeline,library,function,constants,fields);MetalPipelineSizes(pipeline,reflection);}
     return pipeline;
 }
 

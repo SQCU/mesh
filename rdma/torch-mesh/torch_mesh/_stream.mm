@@ -614,10 +614,19 @@ struct Dispatch {
   NSUInteger at;
   MTLSize grid, group;
 };
+// A word a kernel reads as uint (or, two's complement, int): a stride, offset, count or bound past 32 bits does not
+// narrow silently into another value.
+static uint32_t word_of(int64_t value, size_t k) {
+  TORCH_CHECK(value >= INT32_MIN && value <= (int64_t)UINT32_MAX, "a kernel's word ", k, " is ", value,
+              ", which no 32-bit word holds: an offset, stride or bound past it would address another element");
+  return (uint32_t)value;
+}
 static Dispatch encoded(int64_t handle, const std::vector<std::optional<at::Tensor>> &buffers, const std::vector<int64_t> &constants,
                         int64_t at, int64_t gx, int64_t gy, int64_t threads) {
+  std::vector<uint32_t> words(constants.size());
+  for (size_t k = 0; k < constants.size(); k++) words[k] = word_of(constants[k], k);
   Dispatch d{state_of(handle, "encode"), std::vector<id<MTLBuffer>>(buffers.size(), nil), std::vector<NSUInteger>(buffers.size(), 0), std::vector<NSUInteger>(buffers.size(), 0),
-             std::vector<uint32_t>(constants.begin(), constants.end()), (NSUInteger)at, MTLSizeMake((NSUInteger)gx, (NSUInteger)gy, 1),
+             words, (NSUInteger)at, MTLSizeMake((NSUInteger)gx, (NSUInteger)gy, 1),
              MTLSizeMake((NSUInteger)threads, 1, 1)};
   for (size_t i = 0; i < buffers.size(); i++)
     if (buffers[i]) {
@@ -813,6 +822,24 @@ struct Collectives {
 
 };
 
+// Every binding of a dispatch holds the type its kernel declares there (the pipeline's reflection, the one statement of
+// it): a record of words shorter than the kernel's struct, or a buffer shorter than one of its elements, is refused,
+// since the kernel would read its next fields or elements from whatever follows (60b84953: linear_dims' ten words bound
+// as eight, its strides read from the next record and every step's output written tens of MB past y).
+static void fits(const Dispatch &d) {
+  const auto refuse = [&](NSUInteger index, NSUInteger declared, NSUInteger bound, const char *what) {
+    NSString *name = MetalPipelineName(d.state);
+    TORCH_CHECK(false, "kernel ", name ? name.UTF8String : "(unnamed)", " declares ", declared, " bytes at buffer ", index,
+                ", and its dispatch binds ", bound, " bytes of ", what);
+  };
+  const NSUInteger record = MetalPipelineDeclaredBytes(d.state, d.at);
+  if (record > d.words.size() * sizeof(uint32_t)) refuse(d.at, record, d.words.size() * sizeof(uint32_t), "words");
+  for (size_t i = 0; i < d.bound.size(); i++) {
+    const NSUInteger declared = d.bound[i] ? MetalPipelineDeclaredBytes(d.state, i) : 0;
+    // an array of none is a ragged share of nothing (a rank given no columns); a part of one element is not
+    if (d.lengths[i] && declared > d.lengths[i]) refuse(i, declared, d.lengths[i], "buffer");
+  }
+}
 static void encode_in(id<MTLComputeCommandEncoder> encoder, const Dispatch &d) {
   [encoder setComputePipelineState:d.state];
   for (size_t i = 0; i < d.bound.size(); i++)
@@ -823,6 +850,7 @@ static void encode_in(id<MTLComputeCommandEncoder> encoder, const Dispatch &d) {
 // Configuration binds kernels from the Torch frontend into the native recorder.
 // Access modes are explicit operands; the recorder orders the declared byte views.
 static void prepare_dispatch(MetalSchedule *schedule,const Dispatch &d,uint64_t access) {
+  fits(d);
   std::vector<MetalCommandBinding> bindings;
   for(size_t j=0;j<d.bound.size();j++)if(d.bound[j])
     bindings.push_back({d.bound[j],d.offsets[j],d.lengths[j],(uint32_t)j,
@@ -835,6 +863,7 @@ static void prepare_dispatch(MetalSchedule *schedule,const Dispatch &d,uint64_t 
 static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> &buffers, const std::vector<int64_t> &constants,
                    int64_t at, int64_t gx, int64_t gy, int64_t threads) {
   const Dispatch d = encoded(handle, buffers, constants, at, gx, gy, threads);
+  fits(d);   // before the stream's queue: a refusal raised in its block would end the process, not the call
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
   dispatch_sync(stream->queue(), ^{
     id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
