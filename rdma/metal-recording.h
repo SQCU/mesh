@@ -131,6 +131,9 @@ NSString *MetalViewMappedIndexDeclaration(NSUInteger binding, const NSUInteger *
 // relation is defined on its `count` values alone: mesh_position<B>(i) for
 // i < mesh_position_count<B>(), a compiled constant.
 NSString *MetalViewIndexValuesDeclaration(NSUInteger binding, const NSInteger *values, NSUInteger count);
+// Adapt an already emitted mesh_index<0> declaration to the position ABI.
+// Layout relations and explicit value arrays share this source emitter.
+NSString *MetalViewPositionDeclaration(NSUInteger binding, NSString *indices, NSUInteger count, NSUInteger span);
 NSData *MetalViewMappedReaches(id<MTLBuffer> buffer, NSUInteger offset, const NSUInteger *shape,
     const NSInteger *strides, size_t rank, NSUInteger elementBytes, uint32_t access, int32_t binding,
     NSDictionary<NSNumber *, NSData *> *maps);

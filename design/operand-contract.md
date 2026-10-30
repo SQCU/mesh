@@ -1563,9 +1563,39 @@ Sparse constants no longer retain every original axis as a grouping limit.
 and retains compatible dense tails as runs. Grouping and later cuts share the
 existing CSR and bit-run helpers. Preparation carried float32 and packed int4
 constants through the graph slicer and retained only the selected stored values.
-A billion-row domain retained three stored runs. This does not establish a
-sparse numerical provider: ML Drift's `PreCheckTensorToTensor` still rejects
-sparsity. Connecting a suitable compiled consumer remains required.
+A billion-row domain retained three stored runs. ML Drift's
+`PreCheckTensorToTensor` rejects sparsity. Imported sparse fully connected
+operators now lower to the shared matrix consumer before provider partitioning.
+Equal retained inner ranges form a product over compact input and weight views.
+The output views name the original result pages. Missing columns use that same
+product with an empty reduction, and bias, activation and output encoding use
+the existing contraction finish. Each product declares those selected reads and
+writes to the shared regional slicer. Producers of unused input columns are
+removed before the provider stages are compiled.
+
+`mesh-sparse.h` supplies one preparation compiler to FX and native callers.
+Its operands are output domains, retained inner intervals and configured tile
+geometry. Its results are tile records, reduction pieces and dispatch size.
+Native preparation resolves batch operands before compiling these records.
+Execution reads their page bindings; it does not walk CSR metadata. Scalar and
+INT2/INT4/INT8 weights use the same arithmetic body. Packed bytes, bit lanes,
+scales and zero points have separate declared relations over one logical matrix.
+
+Native constants are initialized in their final page placements before command
+recording. File artifacts are mapped once during preparation. Generated schedule
+payloads use the same initializer, and preparation releases both kinds before
+execution. Argument order and template instantiation are explicit compiler
+operands. Recursive stage groups flatten before any command records are made.
+
+Preparation on 2026-10-29 compiled scalar and packed mapped products with odd
+tails, per-tensor and per-axis scales, and empty reductions. The actual importer
+output prepared against bridge pages for two bound batch sizes; its groups
+shared the result root and retained their distinct page selections. Static
+inspection also covered FC flattening, BF16 declarations and output views whose
+consumer requests the shared root. Native rank and Goal A built. No numerical
+execution or performance measurement ran. Sparse encodings used by other
+operator families still need a numerical consumer where their provider does not
+accept them.
 
 Preparation also serialized disjoint output views, whole-result readers and
 subset readers through the member-stage builder. The subset reader pruned the

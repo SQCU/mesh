@@ -1488,6 +1488,26 @@ static id TensorSelectionIndex(NSInteger (^extent)(id),NSArray *shape,id express
     NSData *shape=TensorWords(_indexShape),*steps=TensorWords(_strides);
     return MetalViewIndexConstants(binding,shape.bytes,steps.bytes,_indexShape.count,(NSUInteger)_offset);
 }
+- (NSString *)positionDeclaration:(NSUInteger)binding {
+    isl_ctx *ctx=isl_ctx_alloc();isl_pw_aff *relation=MeshIndexFunction(ctx,self);
+    NSUInteger span=0;
+    if(_count>1) {
+        // Every break lies in one residue class. Its gcd gives the aligned
+        // run width without walking the relation's logical elements.
+        NSString *shift=[NSString stringWithFormat:@"{ [i] -> [i - 1] : 1 <= i < %lu }",(unsigned long)_count];
+        isl_pw_aff *previous=isl_pw_aff_pullback_pw_multi_aff(isl_pw_aff_copy(relation),
+            isl_pw_multi_aff_from_map(isl_map_read_from_str(ctx,shift.UTF8String)));
+        isl_set *breaks=isl_pw_aff_ne_set(isl_pw_aff_copy(relation),isl_pw_aff_add_constant_val(previous,isl_val_one(ctx)));
+        if(isl_set_is_empty(breaks)!=isl_bool_true) {
+            isl_val *modulo=NULL,*residue=NULL;isl_set_dim_residue_class_val(breaks,0,&modulo,&residue);
+            isl_val *divisor=isl_val_gcd(modulo,residue);NSUInteger value=(NSUInteger)isl_val_get_num_si(divisor);
+            span=value&(~value+1);isl_val_free(divisor);
+        }
+        isl_set_free(breaks);
+    }
+    isl_pw_aff_free(relation);isl_ctx_free(ctx);
+    return MetalViewPositionDeclaration(binding,[self declaration:0],_count,span);
+}
 - (NSString *)declaration:(NSUInteger)binding fromStorage:(MetalTensorLayout *)source {
     NSParameterAssert([source.shape isEqual:_shape]);
     if(!_count)return [[self declaration:binding] stringByAppendingFormat:@"inline long mesh_storage_%lu(long) { return 0; }\n",(unsigned long)binding];

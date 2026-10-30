@@ -89,6 +89,10 @@ FOUNDATION_EXPORT NSInteger MetalTensorConstant(id expression, NSArray<NSNumber 
 // Address expressions and, for affine views, per-axis stride constants for
 // numerical APIs. Both describe the assigned operand, after page placement.
 - (NSString *)declaration:(NSUInteger)binding;
+// Emit a declared index-valued relation as mesh_position<B>, with its logical
+// count and consecutive-run alignment. The relation stays compiler data;
+// arithmetic source is emitted without expanding a per-element index array.
+- (NSString *)positionDeclaration:(NSUInteger)binding;
 // The binding's layout as the constants form's function-constant values (metal-recording.h MetalViewIndexConstants), nil
 // where the view is mapped or does not fit it.
 - (NSArray<NSArray<NSNumber *> *> *)constants:(NSUInteger)binding;

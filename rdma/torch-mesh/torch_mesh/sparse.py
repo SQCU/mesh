@@ -8,10 +8,15 @@ bitmap. Layout requirements and output placement use the common kernel interface
 """
 from functools import lru_cache
 import math
+from pathlib import Path
 
 import torch
+from mesh_sparse import product_schedule
 
 from .compilation import operands, api_layouts
+
+
+_OPERANDS = Path(__file__).with_name('matrix_operand.metal').read_text()
 
 
 class Closure:
@@ -63,50 +68,19 @@ def named(spec, tile):
     return Closure(predicate, tile, name=spec)
 
 
-@lru_cache(None)
-def _schedule(m, k, n, support, tile, weight, geometry):
-    """Resolve output domains and reduction intervals; all coordinates are AOT.
-
-    Products mask columns versus inner intervals. Weight gradients mask the
-    output domain instead. Equal reduction lists share the same immutable range.
-    Empty ranges write zeros in the same product, without a separate clearing op.
-    """
-    rm, cn, inner, groups = geometry
-    pieces, records, ranges = [], [], {}
-    def reduction(intervals):
-        merged = []
-        for first, end in intervals:
-            if merged and merged[-1][1] == first:
-                merged[-1] = (merged[-1][0], end)
-            elif first < end:
-                merged.append((first, end))
-        key = tuple(merged)
-        if key not in ranges:
-            first = len(pieces)
-            for start, end in key:
-                pieces.extend((at, min(inner, end - at)) for at in range(start, end, inner))
-            ranges[key] = (first, len(pieces))
-        return ranges[key]
-    def axis(length, block, boundary):
-        for start in range(0, length, boundary):
-            for at in range(start, min(start + boundary, length), block):
-                yield at, min(block, length - at, start + boundary - at)
-    for row, height in axis(m, rm, tile if weight else max(1, m)):
-        for col, width in axis(n, cn, tile):
-            if weight:
-                intervals = ((0, k),) if support[row // tile][col // tile] else ()
-            else:
-                intervals = tuple((i * tile, min((i + 1) * tile, k))
-                                  for i, kept in enumerate(support[col // tile]) if kept)
-            first, end = reduction(intervals)
-            records.extend(((row, col, height, width), (first, end, 0, 0)))
-    count = len(records) // 2
-    for _ in range(-count % groups):
-        records.extend(((0, 0, 0, 0), (0, 0, 0, 0)))
-    return tuple(records), tuple(pieces), -(-count // groups)
+def _domains(m, k, n, support, tile, weight=False):
+    """A closure's tile support as ordinary rectangular contraction domains."""
+    if weight:
+        return tuple((row, min(tile, m - row), column, min(tile, n - column),
+                      ((0, k),) if support[row // tile][column // tile] else ())
+                     for row in range(0, m, tile) for column in range(0, n, tile))
+    return tuple((0, m, column, min(tile, n - column),
+                  tuple((i * tile, min(tile, k - i * tile))
+                        for i, kept in enumerate(support[column // tile]) if kept))
+                 for column in range(0, n, tile))
 
 
-def _product(a, b, support, tile, out, *, weight=False):
+def _product(a, b, domains, out):
     from .kernel import declare
     from torch._subclasses.fake_tensor import unset_fake_temporarily
     from torch.fx.experimental.proxy_tensor import disable_proxy_modes_tracing
@@ -118,7 +92,7 @@ def _product(a, b, support, tile, out, *, weight=False):
     configuration = operands()
     geometry = tuple(configuration['MATRIX_' + key] for key in ('ROWS', 'COLUMNS', 'INNER')) + (
         configuration['MATRIX_ROW_GROUPS'] * configuration['MATRIX_COLUMN_GROUPS'],)
-    records, pieces, groups = _schedule(m, k, n, support, tile, weight, geometry)
+    records, pieces, groups = product_schedule(domains, geometry)
     # Schedule construction is preparation. Capture the completed values as
     # attributes; tracing torch.tensor itself would add per-call CPU copies.
     with disable_proxy_modes_tracing(), unset_fake_temporarily():
@@ -126,7 +100,8 @@ def _product(a, b, support, tile, out, *, weight=False):
         spans = torch.tensor(pieces, dtype=torch.int32).reshape(-1, 2)
     result = torch.empty((m, n), dtype=out, device=a.device)
     rm, cn, inner, _ = geometry
-    full = (int(m % rm == 0 and (not weight or tile % rm == 0)), int(n % cn == 0 and tile % cn == 0),
+    output_tiles = [tile for tile in records[::2] if tile[2] and tile[3]]
+    full = (int(all(tile[2] == rm for tile in output_tiles)), int(all(tile[3] == cn for tile in output_tiles)),
             int(all(length == inner for _, length in pieces)))
     args = ', '.join(map(str, (types[a.dtype], types[b.dtype], types[out], *geometry, *full)))
     instance = f'template [[host_name("sparse_product_bound")]] [[kernel]] decltype(sparse_product<{args}>) sparse_product<{args}>;'
@@ -136,7 +111,7 @@ def _product(a, b, support, tile, out, *, weight=False):
                     3: tiles.stride(), 4: spans.stride()}
     result, = declare('sparse.metal', 'sparse_product_bound', buffers, (2,), (m, k, n), 5,
                       (groups, 1, 1), (geometry[-1] * configuration['SIMD_WIDTH'], 1, 1), instance,
-                      indexed=(), requirements=requirements)
+                      indexed=(), requirements=requirements, prefix=_OPERANDS)
     return result
 
 
@@ -147,7 +122,8 @@ def _rows(x):
 def linear(x, w, closure, out=torch.float16):
     """x @ masked(w).T, with output placement supplied by graph preparation."""
     n, k = w.shape
-    result = _product(_rows(x), w.T, closure.support(n, k), closure.tile, out)
+    rows = _rows(x)
+    result = _product(rows, w.T, _domains(rows.shape[0], k, n, closure.support(n, k), closure.tile), out)
     return result.reshape(*x.shape[:-1], n)
 
 
@@ -155,12 +131,14 @@ def input_grad(dy, w, closure, out=torch.float16):
     n, k = w.shape
     support = closure.support(n, k)
     transposed = tuple(tuple(support[r][c] for r in range(len(support))) for c in range(-(-k // closure.tile)))
-    result = _product(_rows(dy), w, transposed, closure.tile, out)
+    rows = _rows(dy)
+    result = _product(rows, w, _domains(rows.shape[0], n, k, transposed, closure.tile), out)
     return result.reshape(*dy.shape[:-1], k)
 
 
 def weight_grad(x, dy, closure, n, k, out=torch.float32):
-    return _product(_rows(dy).T, _rows(x), closure.support(n, k), closure.tile, out, weight=True)
+    x, dy = _rows(x), _rows(dy)
+    return _product(dy.T, x, _domains(n, x.shape[0], k, closure.support(n, k), closure.tile, weight=True), out)
 
 
 class LinearFunction(torch.autograd.Function):
