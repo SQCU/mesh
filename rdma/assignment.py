@@ -62,25 +62,10 @@ def route_resolution(comm, nodes):
 
 
 def domains(decisions, graphs, parameters=None):
-    from routing import Fabric
+    """A configuration's decisions and the compiler's own. Routes are the library's, mesh_solve over each group's
+    traffic (design/measurement-regressions-2026-10-30.md); none is solved or installed here."""
     result = {k: dict(v) for k, v in decisions.items()}
     result.update(compiler_domains(parameters or {}))
-    for name, graph in sorted(graphs.items()):
-        fabric = Fabric(graph['nodes'], graph['cables'])
-        demands = {(a, b): n for a, b, n in graph['demands'] if n > 0}
-        routes = fabric.allocate(demands)[0] if demands else {}
-        quanta = {(a, b): n for a, b, n in graph['route_units']}
-        for key, value in routes.items():
-            _, source, destination = key.split(':')
-            units = quanta[int(source), int(destination)]
-            if units <= 0:
-                raise ValueError(f'{name}/{key}: missing physical route resolution')
-            value['quantum'] = 1 / units
-            if key in graph.get('weights', {}):
-                weights = graph['weights'][key]
-                total = sum(value['parts'])
-                value['parts'] = [total * w / sum(weights) for w in weights]
-            result[f'flow:{name}/{key}'] = value
     return result
 
 
@@ -89,17 +74,6 @@ def graph(comm):
     return {'nodes': fabric.nodes, 'cables': fabric.cables,
             'demands': [[a, b, n] for (a, b), n in demands.items()],
             'route_units': [[a, b, n] for (a, b), n in route_resolution(comm, fabric.nodes).items()]}
-
-
-def routes(parts, name):
-    from routing import weight_ticks
-    prefix = f'flow:{name}/'
-    return {k[len(prefix):]: weight_ticks(v) for k, v in parts.items() if k.startswith(prefix)}
-
-
-def install(comm, parts, name):
-    from routing import Fabric
-    Fabric.of(comm).install(comm, routes(parts, name))
 
 
 def window(observations):

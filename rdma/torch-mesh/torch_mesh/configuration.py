@@ -66,7 +66,6 @@ def bind(configuration, groups, prepare):
     previous = c['assignment']['parts']
     operands = {k: previous.get(k, value['parts']) for k, value in decisions.items()}
     group.reset_fused_configuration()
-    assignment.install(group.comm, operands, name)
     partition._replan(mesh, name)
     emit({'phase': 'installed', 'unix': time.time()})   # the parts installed and planned again; then the recording
     prepare()
