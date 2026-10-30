@@ -42,6 +42,9 @@ FOUNDATION_EXPORT NSInteger MetalTensorConstant(id expression, NSArray<NSNumber 
 + (instancetype)runs:(NSArray<NSArray<NSNumber *> *> *)runs;
 // Set intersection of logical positions, in ascending order, for preparation.
 - (MetalTensorLayout *)intersection:(MetalTensorLayout *)other;
+// Ordinal positions whose selected value belongs to `values`. Repeated reads
+// keep all of their distinct ordinals. This relation is resolved at preparation.
+- (MetalTensorLayout *)preimage:(MetalTensorLayout *)values;
 @property(nonatomic, readonly) NSDictionary *configuration;
 + (instancetype)configuration:(NSDictionary *)configuration;
 // Ordered logical selections shared by graph dependency analysis and final

@@ -1173,6 +1173,13 @@ static id TensorSelectionIndex(NSInteger (^extent)(id),NSArray *shape,id express
     isl_set *common=isl_set_intersect(a,b);MetalTensorLayout *result=MeshIndexSelection(common);
     isl_set_free(common);isl_ctx_free(ctx);return result;
 }
+- (MetalTensorLayout *)preimage:(MetalTensorLayout *)values {
+    isl_ctx *ctx=isl_ctx_alloc();
+    isl_set *image=isl_map_range(MeshIndexRelation(ctx,values));
+    isl_set *positions=isl_map_domain(isl_map_intersect_range(MeshIndexRelation(ctx,self),image));
+    MetalTensorLayout *result=MeshIndexSelection(positions);
+    isl_set_free(positions);isl_ctx_free(ctx);return result;
+}
 @synthesize coordinates=_coordinates;
 + (instancetype)shape:(NSArray<NSNumber *> *)shape index:(id)expression parameters:(NSDictionary<NSString *,id> *)parameters {
     const NSUInteger count=TensorCount(shape);

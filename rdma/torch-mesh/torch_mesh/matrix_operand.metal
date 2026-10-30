@@ -44,6 +44,23 @@ struct mesh_matrix_read {
     }
 };
 
+// The scalar decode is shared by matrix readers and required layout conversions.
+template <uint Bits, bool Signed = true>
+inline int mesh_matrix_code(uint raw) {
+    constexpr uint sign = Signed ? 1u << (Bits - 1) : 0u;
+    return int(raw ^ sign) - int(sign);
+}
+template <uint Binding, uint Bits>
+inline int mesh_matrix_packed_read(device const uchar *values, ulong logical) {
+    const uint raw = (uint(values[mesh_index<Binding>(logical)]) >> uint(mesh_position<Binding>(logical)))
+                     & ((1u << Bits) - 1u);
+    return mesh_matrix_code<Bits>(raw);
+}
+template<typename Scalar, typename Code>
+inline Scalar mesh_matrix_scaled(Code code, float scale, long zero) {
+    return Scalar((float(code) - float(zero)) * scale);
+}
+
 // Byte positions, bit lanes and quantization positions are independent compiled
 // relations over the same logical matrix. Stored sparse coordinates have
 // already been composed into them; no encoding descriptor is read here.
@@ -56,12 +73,8 @@ struct mesh_matrix_quantized_read {
     uint columns;
     Scalar operator()(int2 at) const {
         const ulong logical = base + ulong(at.y) * columns + at.x;
-        const uint raw = (uint(values[mesh_index<Binding>(logical)]) >> uint(mesh_position<Binding>(logical)))
-                         & ((1u << Bits) - 1u);
-        constexpr uint sign = 1u << (Bits - 1);
-        const int code = int(raw ^ sign) - int(sign);
-        return Scalar((float(code) - float(zeros[mesh_index<ZeroBinding>(logical)]))
-                      * scales[mesh_index<ScaleBinding>(logical)]);
+        return mesh_matrix_scaled<Scalar>(mesh_matrix_packed_read<Binding,Bits>(values,logical),
+            scales[mesh_index<ScaleBinding>(logical)], zeros[mesh_index<ZeroBinding>(logical)]);
     }
 };
 
