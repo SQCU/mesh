@@ -9,5 +9,6 @@
   "probe_radius": 0.125,
   "observation_window": 64,
   "unknown_capacity": 1.0,
-  "observation_relative_noise": 0.03125
+  "observation_relative_noise": 0.03125,
+  "route_function_tolerance": 1e-12
 }
