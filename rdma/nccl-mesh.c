@@ -4102,10 +4102,31 @@ static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm
   struct steps *st = m->c->bound;
   const struct mesh_step *step = st->steps + m->step;
   ncclResult_t result = ncclSuccess;
-  for (uint32_t at = st->prior_first[m->step]; !result && base != METAL_NONE && at < st->prior_first[m->step + 1]; at++) {
+  /* a combine whose last earlier overlapping receive is a combine of the same elements in the same runs, both a track
+     pool's (as `summed` below): its chunk c follows that one's chunk c (metal_after), not that one's whole consumption,
+     and every other earlier receive, each meeting that one's piece too, is that one's own dependency already; partials
+     combine block by block as they land, child after child, rather than one child's whole landing after another's
+     (d3869552 made every receive wait for each earlier overlapping receive's whole consumption) */
+  int32_t after = -1;
+  if (base != METAL_NONE && step->op == MESH_STEP_REDUCE && !g->fused && !m->c->write_plan && ktype(m->c) != METAL_MERGE &&
+      st->prior_first[m->step] < st->prior_first[m->step + 1]) {
+    const uint32_t j = st->prior[st->prior_first[m->step + 1] - 1];
+    const struct mesh_step *a = st->steps + j;
+    const uint32_t q = st->channel[j];
+    const struct message *earlier = a->op == MESH_STEP_REDUCE && a->buffer == step->buffer && a->first == step->first &&
+                                    a->piece.elements == step->piece.elements && st->consumption[j] >= g->start[q][1] &&
+                                    st->consumption[j] < g->end[q][1] ? in_at(g, q, st->consumption[j]) : NULL;
+    int same = earlier && earlier->c == m->c && earlier->step == j && earlier->landing_count == m->landing_count;
+    for (size_t r = 0; same && r < m->landing_count; r++)
+      same = earlier->landings[r].first == m->landings[r].first && earlier->landings[r].elements == m->landings[r].elements;
+    if (same) after = (int32_t)j;
+  }
+  for (uint32_t at = st->prior_first[m->step]; !result && base != METAL_NONE && after < 0 && at < st->prior_first[m->step + 1]; at++) {
     const uint32_t j = st->prior[at];
     result = gpu(metal_depend(program, base + st->channel[j], st->consumption[j] + 1), "a receive's dependency");
   }
+  if (!result && after >= 0)
+    result = gpu(metal_after(program, base + st->channel[after], st->consumption[after]), "a combine's chunks after an earlier combine's");
   const struct metal_wait wait = {ch->buffer, comm->violation, m->data.buffer, ch->landed, m->data.offset, m->end, at, h, g->plans[h].each[1]};
   if (!result && step->op == MESH_STEP_REDUCE) {
     const struct where to = shifted(st->buffer[step->buffer], m->offset);

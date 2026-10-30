@@ -196,6 +196,10 @@ void *metal_contents(void *buffer);
 enum { METAL_PUBLISH, METAL_CONSUME };
 struct metal_result metal_record(struct metal_program *, uint32_t track, int cursor, uint64_t position, uint64_t need);
 struct metal_result metal_depend(struct metal_program *, uint32_t other, uint64_t count);
+/* the item being recorded, a combine's consumption, follows track `other`'s consumption at `position` chunk by chunk:
+   its chunk c once that one has finished its first c + 1 (the two the same elements in the same runs), in place of a
+   count of that consumption whole (metal_depend) */
+struct metal_result metal_after(struct metal_program *, uint32_t other, uint64_t position);
 struct metal_result metal_tracks(struct metal_program *, uint32_t tracks, const uint64_t *consumed);
 /* a tracks pool's records as metal_tracks laid them (`records`, its workers' end words at `ended`, `workers` of them),
    read on a failure alone: where some worker has not ended, each open cursor's track and kind, its task, that task's

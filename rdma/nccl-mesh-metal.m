@@ -458,7 +458,7 @@ struct metal_result metal_land_deferred(struct metal_program *program, void *lan
    ranges each awaiting its own pages, metal_land); each item's position, `need`, steps, dependencies and failure
    words; each track's items by cursor; the buffers named, made resident at metal_tracks */
 struct host_op { void *d, *s, *a, *v; struct args p; uint64_t units; uint32_t kind; int group, joined; void *summed; size_t summed_offset; };
-struct host_item { uint64_t position, need; void *v; uint32_t first_op, ops, first_dep, deps; };
+struct host_item { uint64_t position, need; void *v; uint32_t first_op, ops, first_dep, deps; uint32_t after_track; uint64_t after_position; int after; };
 struct host_dep { uint64_t count; uint32_t other; };
 struct host_track { uint32_t *item[2]; size_t count[2], room[2]; };
 struct recording { struct host_op *op; size_t ops, op_room; struct host_item *item; size_t items, item_room; struct host_dep *dep; size_t deps, dep_room;
@@ -538,6 +538,14 @@ struct metal_result metal_record(struct metal_program *program, uint32_t track, 
   return METAL_DONE;
 }
 
+struct metal_result metal_after(struct metal_program *program, uint32_t other, uint64_t position) {
+  struct recording *r = program->recording;
+  if (!r || !r->on) return metal_failed(EINVAL);
+  struct host_item *it = r->item + r->current;
+  it->after = 1; it->after_track = other; it->after_position = position;
+  return METAL_DONE;
+}
+
 struct metal_result metal_depend(struct metal_program *program, uint32_t other, uint64_t count) {
   struct recording *r = program->recording;
   if (!r || !r->on) return metal_failed(EINVAL);
@@ -558,7 +566,7 @@ struct metal_result metal_depend(struct metal_program *program, uint32_t other, 
 struct track_head { uint64_t cursors_off, tasks_off, items_off, ops_off, deps_off, count_off, state_off, claim_off, done_off, progress_off,
                     ended_off, marks_off, prefix_off; uint32_t cursors, polls; };
 struct track_cursor { uint32_t first, end, track, kind; };
-struct track_task { uint32_t first_op, ops, chunks, item, cursor, flags, marks, pad; };
+struct track_task { uint32_t first_op, ops, chunks, item, cursor, flags, marks, after; };
 struct track_item { uint64_t position, need, v; uint32_t first_dep, deps; };
 struct track_op { uint64_t d, s, a, v; struct args p; uint64_t word, block; uint32_t kind, chunks; uint64_t summed; };
 struct track_dep { uint64_t count; uint32_t other, pad; };
@@ -630,6 +638,10 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
     struct track_task *task = (struct track_task *)(base + at_tasks);
     struct track_item *item = (struct track_item *)(base + at_items);
     uint32_t *current = (uint32_t *)(base + at_state), placed = 0, laid = 0, marked = 0;
+    /* each placed item's track, cursor, position and first task, for the items whose chunks follow another's (after) */
+    struct placed_item { uint32_t track, cursor, task; uint64_t position; const struct host_item *it; };
+    struct placed_item *placing = calloc(r->items + 1, sizeof *placing);
+    if (!placing) { recording_free(r); return metal_failed(ENOMEM); }
     for (uint32_t t = 0; t < T; t++)
       for (uint32_t c = 0; c < 2; c++) {
         const uint32_t cu = 2 * t + c;
@@ -638,10 +650,13 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
         for (size_t x = 0; t < r->tracks && x < r->track[t].count[c]; x++, placed++) {
           const struct host_item *it = r->item + r->track[t].item[c][x];
           item[placed] = (struct track_item){it->position, it->need, it->v ? ((id<MTLBuffer>)it->v).gpuAddress : 0, it->first_dep, it->deps};
-          if (!it->ops) task[laid++] = (struct track_task){.chunks = 1, .item = placed, .cursor = cu, .flags = TASK_FIRST | TASK_LAST, .marks = marked++};
+          placing[placed] = (struct placed_item){t, c, laid, it->position, it};
+          if (!it->ops) task[laid++] = (struct track_task){.chunks = 1, .item = placed, .cursor = cu, .flags = TASK_FIRST | TASK_LAST, .marks = marked++,
+                                                            .after = ~0u};
           for (uint32_t o = 0; o < it->ops;) {
             struct track_task *made = task + laid++;
-            *made = (struct track_task){.first_op = it->first_op + o, .item = placed, .cursor = cu, .flags = o ? 0 : TASK_FIRST, .marks = marked};
+            *made = (struct track_task){.first_op = it->first_op + o, .item = placed, .cursor = cu, .flags = o ? 0 : TASK_FIRST, .marks = marked,
+                                        .after = ~0u};
             do {
               const struct host_op *op = r->op + it->first_op + o;
               made->ops++; made->chunks += op_chunks(op, width, widest);
@@ -653,6 +668,22 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
         }
         cursor[cu].end = laid;
       }
+    /* a consumption whose chunks follow another's (metal_after): its first task's chunk c is claimed once that one's
+       first task has finished its first c + 1 chunks (TRACK_KERNEL's prefix), the two the same elements in the same
+       runs (nccl-mesh.c consume); one whose earlier consumption is not in this pool fails as a value */
+    for (uint32_t x = 0; x < placed; x++) {
+      if (!placing[x].it->after) continue;
+      uint32_t found = ~0u;
+      for (uint32_t y = 0; y < placed && found == ~0u; y++)
+        if (placing[y].cursor == 1 && placing[y].track == placing[x].it->after_track && placing[y].position == placing[x].it->after_position)
+          found = placing[y].task;
+      if (found == ~0u || task[found].chunks != task[placing[x].task].chunks) {
+        free(placing); recording_free(r);
+        return (struct metal_result){EINVAL, "a combine follows an earlier one chunk by chunk that its tracks pool does not hold alike"};
+      }
+      task[placing[x].task].after = found;
+    }
+    free(placing);
     struct track_op *op = (struct track_op *)(base + at_ops);
     for (size_t x = 0; x < r->ops; x++) {
       const struct host_op *o = r->op + x;
