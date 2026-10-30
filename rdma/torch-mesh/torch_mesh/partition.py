@@ -744,7 +744,7 @@ def _follow_bytes(placement, local, logical_shape, logical_stride, key, rank, gr
              (incoming[0].rows == 1 or incoming[0].source_stride == incoming[0].row_bytes))
     result = (original.narrow(0, incoming[0].source_offset // size, extent).view(program.destination_shapes[rank])
               if alias else _empty(program.destination_shapes[rank], local, group))
-    channels = len(group.fabric.adjacent[rank])
+    channels = _stream.channels(group.group_name)
     jobs = []
     # Allocate leases and compile kernels before any plan can present receives.
     for run in program.runs:

@@ -521,6 +521,9 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
     if (!k) { recording_free(r); return (struct metal_result){EINVAL, message}; }
     id<MTLComputePipelineState> state = k->pipelines[KIND_tracks];
     const uint64_t T = r->tracks, at_tracks = up(sizeof(struct track_head)), at_items = up(at_tracks + T * sizeof(struct track_rec));
+    /* a dependency names a track of these T: the kernel reads count[other] (nccl-mesh-kernels.h), an index of its table */
+    for (size_t x = 0; x < r->deps; x++)
+      if (r->dep[x].other >= T) { recording_free(r); return (struct metal_result){EINVAL, "a track depends on a track it does not have"}; }
     const uint64_t at_ops = up(at_items + r->items * sizeof(struct track_item)), at_deps = up(at_ops + r->ops * sizeof(struct track_op));
     const uint64_t at_count = up(at_deps + r->deps * sizeof(struct track_dep)), at_done = up(at_count + T * sizeof(uint64_t));
     const uint64_t bytes = up(at_done + T * sizeof(uint64_t));

@@ -22,6 +22,15 @@ def _shape(inputs, input_slots, output_slots, output_strides, shapes, dtypes, de
     return fake_outputs(shapes, output_strides, dtypes, devices)
 
 
+def _word(value, k):
+    """A word a kernel reads as uint (or, two's complement, int): one past 32 bits is refused, as _stream's word_of
+    refuses it, rather than narrowed into another offset, stride or bound."""
+    value = int(value)
+    if not -2**31 <= value < 2**32:
+        raise ValueError(f"a kernel's word {k} is {value}, which no 32-bit word holds")
+    return value & 0xffffffff
+
+
 def declare(source, name, buffers, outputs, words, constant_slot, grid, threads, instance='', *, indexed, requirements, indices=None, prefix=''):
     """Carry each use's layout and requirement across FX's tensor schema.
 
@@ -81,7 +90,7 @@ def prepare(inputs, input_slots, output_slots, output_strides, shapes, dtypes, d
         for index in slots:
             prepare_binding(index, value, True)
             write |= 1 << index
-    constants = {constant_slot: struct.pack(f'{len(words)}I', *(v & 0xffffffff for v in words))} if words else {}
+    constants = {constant_slot: struct.pack(f'{len(words)}I', *(_word(v, k) for k, v in enumerate(words)))} if words else {}
     handle = layout.pipeline(_stream.metal_prelude(), addresses, declarations.get('prefix', '') + _text(source) + '\n', name,
                              declarations.get('indices'), instance)
     commands.append((handle, buffers, constants, tuple(grid), tuple(threads), False,

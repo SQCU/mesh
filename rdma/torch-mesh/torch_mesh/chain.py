@@ -110,7 +110,7 @@ def operands(a, b, inputs, outputs, group, batch, resident_tiles, input_frames, 
         result.copy_(padded.reshape(shape[0] // tile, tile, shape[1] // tile, tile).permute(2, 0, 1, 3))
         return result
 
-    channels = sum(group.rank() in cable['nodes'] for cable in group.fabric.cables)
+    channels = _stream.channels(group.group_name)
     kernel, ready, products, linear, workers, threads, words = _form(K, S, R, group.size(), channels, resident_tiles, capabilities)
     if linear:
         At, Bt = weight_pages(a, (S, K), False), weight_pages(b.T, (K, S), False)

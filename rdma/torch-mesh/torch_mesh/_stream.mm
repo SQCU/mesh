@@ -715,6 +715,15 @@ using CommandRecord = std::tuple<int64_t, std::vector<pybind11::object>,
 static std::vector<pybind11::object> commandOperands(const std::vector<std::optional<at::Tensor>> &tensors) {
   std::vector<pybind11::object> result;for(const auto &t:tensors)result.push_back(t?pybind11::cast(*t):pybind11::none());return result;
 }
+// A record (words, constants) is refused short of its declared type; a buffer, holding part of one declared element: an
+// array of none is a ragged share of nothing (a rank given no columns).
+static void fits_binding(id<MTLComputePipelineState> state, NSUInteger index, NSUInteger bound, bool record) {
+  const NSUInteger declared = MetalPipelineDeclaredBytes(state, index);
+  if (declared <= bound || (!record && !bound)) return;
+  NSString *name = MetalPipelineName(state);
+  TORCH_CHECK(false, "kernel ", name ? name.UTF8String : "(unnamed)", " declares ", declared, " bytes at buffer ", index,
+              ", and its dispatch binds ", bound, " bytes of ", record ? "its record" : "a buffer");
+}
 struct Commands {
   MetalReplay *replay=nullptr;
   std::vector<at::Tensor> operands;
@@ -758,7 +767,10 @@ struct Commands {
       }
       for(const auto &constant:constants[k])
         bound.push_back({constantBuffer,constantOffset+constant[1],constant[2],(uint32_t)constant[0],MetalReachRead});
-      descriptions.push_back({state_of(handle,"commands"),bound.data(),bound.size(),nullptr,0,ranges.data(),ranges.size(),
+      // every binding the type its kernel declares (fits_binding): constants records, tensors arrays
+      const id<MTLComputePipelineState> state=state_of(handle,"commands");
+      for(const auto &b:bound)fits_binding(state,b.index,b.length,b.buffer==constantBuffer&&constantBuffer);
+      descriptions.push_back({state,bound.data(),bound.size(),nullptr,0,ranges.data(),ranges.size(),
         MTLSizeMake(grid[0],grid[1],grid[2]),MTLSizeMake(group[0],group[1],group[2]),(BOOL)threadGrid});
     }
     replay=MetalReplayCommands(device,descriptions.data(),descriptions.size(),MetalFormEncoded);
@@ -827,18 +839,8 @@ struct Collectives {
 // since the kernel would read its next fields or elements from whatever follows (60b84953: linear_dims' ten words bound
 // as eight, its strides read from the next record and every step's output written tens of MB past y).
 static void fits(const Dispatch &d) {
-  const auto refuse = [&](NSUInteger index, NSUInteger declared, NSUInteger bound, const char *what) {
-    NSString *name = MetalPipelineName(d.state);
-    TORCH_CHECK(false, "kernel ", name ? name.UTF8String : "(unnamed)", " declares ", declared, " bytes at buffer ", index,
-                ", and its dispatch binds ", bound, " bytes of ", what);
-  };
-  const NSUInteger record = MetalPipelineDeclaredBytes(d.state, d.at);
-  if (record > d.words.size() * sizeof(uint32_t)) refuse(d.at, record, d.words.size() * sizeof(uint32_t), "words");
-  for (size_t i = 0; i < d.bound.size(); i++) {
-    const NSUInteger declared = d.bound[i] ? MetalPipelineDeclaredBytes(d.state, i) : 0;
-    // an array of none is a ragged share of nothing (a rank given no columns); a part of one element is not
-    if (d.lengths[i] && declared > d.lengths[i]) refuse(i, declared, d.lengths[i], "buffer");
-  }
+  fits_binding(d.state, d.at, d.words.size() * sizeof(uint32_t), true);
+  for (size_t i = 0; i < d.bound.size(); i++) if (d.bound[i]) fits_binding(d.state, i, d.lengths[i], false);
 }
 static void encode_in(id<MTLComputeCommandEncoder> encoder, const Dispatch &d) {
   [encoder setComputePipelineState:d.state];
@@ -2261,6 +2263,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def("run",&Executions::run, pybind11::call_guard<Drained>())
     .def("completion",&Executions::completion, pybind11::call_guard<Drained>());
   module.def("fused_reconfigure", &fused_reconfigure, pybind11::call_guard<Drained>());
+  // the physical channels this rank's lists lay (a cable each that ends here): the one count of them, which a
+  // kernel's CHANNELS and the host's record layout both take
+  module.def("channels", [](const std::string &group) {
+    const int64_t handle = communicator_of(c10::IValue(group));
+    TORCH_CHECK(handle, "torch_mesh.channels: ", group, " is no live mesh group of this process");
+    return physical_channels(communicator(handle));
+  }, pybind11::call_guard<Drained>());
   module.def("write_entries", &write_entries, pybind11::call_guard<Drained>());
   module.attr("STREAM_ENTRIES") = (int64_t)MESH_STREAM_ENTRIES;
   module.def("chain_slot", &chain_slot, pybind11::call_guard<Drained>());

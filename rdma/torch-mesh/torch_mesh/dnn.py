@@ -11,7 +11,7 @@ class DNN:
 
     def __init__(self, args, group, fabric):
         self.args, self.group = args, group
-        self.channels = len(fabric.adjacent[group.rank()])
+        self.channels = _stream.channels(group.group_name)
         B, H, K, L = args.rows, args.width, args.expansion, args.layers
         self.input = torch_mesh.empty(B, H)
         rng = np.random.default_rng(1729)
