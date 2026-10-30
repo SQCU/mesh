@@ -84,6 +84,9 @@ recursive simplifier solved the range of many subexpressions, then repeated
 until its own expression syntax stopped changing. That extra procedure is
 removed. Ordinary convolution now completes native page binding and matrix
 shader preparation through page assembly and the existing product kernel.
+Conditional index expressions compile each arm on the positions selected by
+its condition. Unreachable arms add no relation work. This uses the same term
+language and changes no numerical command or runtime branch.
 
 `Algebra.cover` exposes the existing native cover operation. Its disjoint cells
 retain the contributing input domains. Objective-C and Python now consume one

@@ -61,23 +61,34 @@ static isl_pw_aff *IndexLeaf(isl_ctx *ctx, id value, NSUInteger first, NSUIntege
         value, (unsigned long)first, (unsigned long)end];
     return isl_pw_aff_read_from_str(ctx,text.UTF8String);
 }
-isl_pw_aff *MeshIndexExpression(isl_ctx *ctx,id expression,NSUInteger first,NSUInteger end) {
-    if([expression isKindOfClass:NSNumber.class]||[expression isEqual:@"i"])
-        return IndexLeaf(ctx,expression,first,end);
+// Compile each branch on the positions where its condition holds. Index
+// terms are pure values; constructing an unreachable arm cannot add meaning,
+// and rebuilding every arm over the full domain duplicates relation work.
+static isl_pw_aff *IndexExpression(isl_ctx *ctx,id expression,isl_set *domain) {
+    if([expression isKindOfClass:NSNumber.class]||[expression isEqual:@"i"]) {
+        NSString *text=[NSString stringWithFormat:@"{ [i] -> [(%@)] }",expression];
+        return isl_pw_aff_intersect_domain(isl_pw_aff_read_from_str(ctx,text.UTF8String),isl_set_copy(domain));
+    }
     NSString *op=expression[0];
-    isl_pw_aff *a=MeshIndexExpression(ctx,expression[1],first,end);
+    isl_pw_aff *a=IndexExpression(ctx,expression[1],domain);
     if([op isEqual:@"mul"]||[op isEqual:@"div"]||[op isEqual:@"mod"]) {
-        isl_pw_aff *b=MeshIndexExpression(ctx,expression[2],first,end);
+        isl_pw_aff *b=IndexExpression(ctx,expression[2],domain);
         if([op isEqual:@"mul"])return isl_pw_aff_mul(a,b);
         if([op isEqual:@"div"])return isl_pw_aff_floor(isl_pw_aff_div(a,b));
         isl_pw_aff *q=isl_pw_aff_floor(isl_pw_aff_div(isl_pw_aff_copy(a),isl_pw_aff_copy(b)));
         return isl_pw_aff_sub(a,isl_pw_aff_mul(q,b));
     }
-    if([op isEqual:@"select"])
-        return isl_pw_aff_cond(a,MeshIndexExpression(ctx,expression[2],first,end),
-            MeshIndexExpression(ctx,expression[3],first,end));
+    if([op isEqual:@"select"]) {
+        isl_set *yes=isl_pw_aff_non_zero_set(a),*no=isl_set_subtract(isl_set_copy(domain),isl_set_copy(yes));
+        isl_pw_aff *left=isl_set_is_empty(yes)==isl_bool_true?
+            isl_pw_aff_val_on_domain(isl_set_copy(yes),isl_val_zero(ctx)):IndexExpression(ctx,expression[2],yes);
+        isl_pw_aff *right=isl_set_is_empty(no)==isl_bool_true?
+            isl_pw_aff_val_on_domain(isl_set_copy(no),isl_val_zero(ctx)):IndexExpression(ctx,expression[3],no);
+        isl_set_free(yes);isl_set_free(no);
+        return isl_pw_aff_union_add(left,right);
+    }
     for(NSUInteger k=2;k<[expression count];k++) {
-        isl_pw_aff *b=MeshIndexExpression(ctx,expression[k],first,end);
+        isl_pw_aff *b=IndexExpression(ctx,expression[k],domain);
         if([op isEqual:@"add"])a=isl_pw_aff_add(a,b);
         else if([op isEqual:@"min"])a=isl_pw_aff_min(a,b);
         else if([op isEqual:@"max"])a=isl_pw_aff_max(a,b);
@@ -91,10 +102,14 @@ isl_pw_aff *MeshIndexExpression(isl_ctx *ctx,id expression,NSUInteger first,NSUI
             else if([op isEqual:@"and"])condition=isl_set_intersect(isl_pw_aff_non_zero_set(a),isl_pw_aff_non_zero_set(b));
             else if([op isEqual:@"or"])condition=isl_set_union(isl_pw_aff_non_zero_set(a),isl_pw_aff_non_zero_set(b));
             else [NSException raise:NSInvalidArgumentException format:@"unknown index term %@",op];
-            a=isl_pw_aff_intersect_domain(isl_set_indicator_function(condition),IndexDomain(ctx,first,end));
+            a=isl_pw_aff_intersect_domain(isl_set_indicator_function(condition),isl_set_copy(domain));
         }
     }
     return a;
+}
+isl_pw_aff *MeshIndexExpression(isl_ctx *ctx,id expression,NSUInteger first,NSUInteger end) {
+    isl_set *domain=IndexDomain(ctx,first,end);
+    isl_pw_aff *value=IndexExpression(ctx,expression,domain);isl_set_free(domain);return value;
 }
 
 // A finite map is a union of its affine runs. Its surrounding tensor axes do
