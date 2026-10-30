@@ -131,3 +131,23 @@ windows over 12, the 16 and 64 MiB cases. The Mini's 30 GB/s is the bound: an al
 so with the Mini's cables full the Studios' are about half full, 17.6 computer-pounds. The 64 MiB all-gather is at 63%
 of the Mini's bound (1.79 ms), the all-reduce at about 35% of its own (2.3 ms): the serializations above, a combined
 SEND published once its whole landing is summed and every call completed in its own launch, are what remains.
+
+## What a call's cables do (a 100 us watch, cd210504)
+
+`mesh-stat landed 100` beside the bandwidth case gives each cable's bytes in 0.5 ms bins (the ports' payload peaks at
+8.6 to 8.9 GB/s a cable, docs/facts.md's 8.7, not the stated 10).
+- **The all-to-all (9.4 ms a call).** The Mini's three cables each ran at 8.6 GB/s for about 4 ms, then the m5ult2 cable
+  alone for 4.5 ms. The library's own routes weight every simple path alike, so more of them cross m5ult2 than the
+  Mini's other neighbours, and the desk landed 961 MB a call for 335 MB of useful bytes. A configured program solves its
+  routes (assignment.domains); the benchmark never did. 3b976aef routes it as bind does (configuration.routes).
+- **The reduce-scatter (6.4 ms, the all-gather's bytes a node in 1.9).** Each call a 2.5 ms burst (m5ult1 up to
+  45 GB/s), a 2.5 ms trickle of 1 to 6 GB/s, then about 1 ms with nothing landing anywhere. No node near its cables.
+  - **Whole-consumption priors.** d3869552 (10-23) made every receive and every SEND wait for the whole consumption of
+    every earlier receive overlapping it, where the form before it named one earlier step. A reduce's children combine
+    one whole landing after another. f1a821ab: a combine that follows a combine of the same elements in the same runs
+    follows it chunk by chunk (metal_after, the task's prefix of finished chunks).
+  - **The sum sent on whole.** 63a3fe3d sent a combining relay's sum on page by page; bd83c006 reverted it for a count the
+    bridge could not see (a device atomic), and b6883e1f's fix never came back. 657f68f8, cd210504: each landing
+    channel's count of units summed, stored system-coherent, named by the SEND as a relay names `landed`.
+  - **The bubble.** Every call is its own schedule behind a queue barrier (20afa368, 8fa0b005), and its present and
+    gate run only after the previous call's pool has ended: about 1 ms a call with no cable carrying anything.
