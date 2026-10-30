@@ -40,11 +40,9 @@ enum { METAL_PLAIN, METAL_LAND };
 #endif
 struct recording;
 struct kernels;
+struct metal_submission;
 struct metal_program {
-  METAL_HANDLE(id<MTLCommandBuffer>) buffer;
-  METAL_HANDLE(id<MTLComputeCommandEncoder>) encoder;
-  int borrowed;
-  METAL_HANDLE(id<MTL4ComputeCommandEncoder>) encoder4;
+  METAL_HANDLE(id<MTL4ComputeCommandEncoder>) encoder;
   METAL_HANDLE(id<MTL4ArgumentTable>) table;
   METAL_HANDLE(id<MTLResidencySet>) residency;
   METAL_HANDLE(id<MTLBuffer>) violation;
@@ -52,6 +50,9 @@ struct metal_program {
   uint32_t polls;
   struct recording *recording;
   struct kernels *kernels;
+  /* the library's own submission the program is encoded into (metal_submission_make: a host-path group's), committed
+     at metal_end; NULL where the encoder is its caller's */
+  struct metal_submission *own;
 };
 #undef METAL_HANDLE
 /* A step's result and its message beside it (design/rubrics.md, Strings are messages): `status` 0, or an errno, and
@@ -79,15 +80,17 @@ uint64_t metal_signaled(void *event);
 int metal_wait(void *event, uint64_t value, uint64_t ns);
 void metal_release(void *object);
 void *metal_retain(void *object);
-/* the command buffer a program is encoded into, retained (NULL where it has none: a Metal 4 encoder's) */
-void *metal_command(const struct metal_program *);
-/* a command queue of the library's own, retained; a command buffer of it, retained (NULL: none made); its commit */
+/* The library's own GPU work (a host-path group's, the poll period's): an id<MTL4CommandQueue> of its own, retained;
+   on it a submission, a command buffer begun on its own allocator with its compute encoder, argument table and
+   residency set (given in *encoder, *table and *residency for metal_begin; NULL where one cannot be made, *message then
+   what failed), committed once (metal_end, with an event: the queue signals `event` to `value` after it), else let go
+   uncommitted; its end as its commit feedback tells it (metal_submission_ended: 1 completed, -1 ended in an error, the
+   platform's watchdog's for one that overruns, 0 not yet) and its GPU seconds; counted references */
 void *metal_queue(void);
-void *metal_queue_command(void *queue);
-void metal_commit(void *command);
-/* a command buffer's end as its status tells it: 1 completed, -1 ended in an error (the platform's watchdog ends one
-   that overruns so), 0 committed and not ended, 2 not committed (nothing runs it until its committer commits it) */
-int metal_ended(void *command);
+struct metal_submission *metal_submission_make(void *queue, void **encoder, void **table, void **residency, const char **message);
+int metal_submission_ended(const struct metal_submission *);
+struct metal_submission *metal_submission_retain(struct metal_submission *);
+void metal_submission_release(struct metal_submission *);
 
 /* A program's waits bounded by `polls` wherever a dispatch has failure words to record in (the program's, `violation`
    or metal_gate's, or those a wait names): at most `polls` loads of a count (rdma/mesh.metal mesh_wait_bounded), past
@@ -109,25 +112,17 @@ int metal_ended(void *command);
 #define METAL_BOUND 1
 #define METAL_LOST 2
 #define METAL_REVOKED 4
-/* The classic form: the kernels encoded into the caller's id<MTLCommandBuffer>, in its compute encoder (`encoder`, left
-   open) or one made here, each dispatch's arguments its setBytes.  With `residency` (an id<MTLResidencySet>; NULL: none),
-   a fused group's: its deferred steps' records are the function's immutable pages, as the Metal 4 form's are, and the
-   ring and every buffer their bindings name are made resident through it (added, and the set committed, where they
-   were not: nccl.h ncclMeshStream residencySet), since the caller's kernels reach them by address.  NULL where it cannot
-   be made (memory, or that device's kernels), *message then what failed (struct metal_result's
-   message) */
-struct metal_program *metal_begin(struct metal_program *, void *command_buffer, void *encoder, void *residency, void *violation, uint32_t polls, const char **message);
-/* The Metal 4 form: the kernels encoded into the caller's id<MTL4ComputeCommandEncoder> (left open, nothing committed,
-   nothing signalled), on pipelines of the residency set's device, every binding through the caller's id<MTL4ArgumentTable>
-   (each dispatch's arguments a record of the function's immutable argument pages, never setBytes), each dispatch after the one
-   before it (an intra-encoder barrier, and one before the first and after the last, so the caller's commands on either
-   side are ordered with them), and every buffer of the library's the program touches made resident through the
-   caller's id<MTLResidencySet> (added, and the set committed, where it was not).  Its waits bounded by `polls` as
-   metal_begin's (0: NCCL_MESH_POLLS).  NULL where memory runs out or the device's kernels cannot be
-   made, *message then what failed. */
-struct metal_program *metal_begin4(struct metal_program *, void *encoder, void *table, void *residency, void *violation, uint32_t polls, const char **message);
-/* A buffer of the program's made resident through its residency set (the Metal 4 form's, or a classic program's begun with
-   one; a classic program without one needs none, its dispatches binding their buffers). */
+/* The kernels encoded into an id<MTL4ComputeCommandEncoder> (left open: its caller's, or `own`'s, the library's
+   submission, which metal_end commits), on pipelines of the residency set's device, every binding through the
+   id<MTL4ArgumentTable> (each dispatch's arguments a record of the function's immutable argument pages), each dispatch
+   after the one before it (an intra-encoder barrier, and one before the first and after the last, so the caller's
+   commands on either side are ordered with them), and every buffer of the library's the program touches made resident
+   through the id<MTLResidencySet> (added, and the set committed, where it was not).  Its waits bounded by `polls`
+   (0: NCCL_MESH_POLLS).  NULL where memory runs out or the device's kernels cannot be made, *message then what
+   failed. */
+struct metal_program *metal_begin(struct metal_program *, void *encoder, void *table, void *residency, void *violation, uint32_t polls,
+                                  struct metal_submission *own, const char **message);
+/* A buffer of the program's made resident through its residency set. */
 void metal_resident(struct metal_program *, void *buffer);
 /* The program's failure words from here on, `violation` (made resident): those of the communicator whose group is
    encoded next, in which every dispatch naming none of its own records a failed wait (nccl-mesh.c complete,
@@ -155,12 +150,8 @@ struct metal_wait { void *words, *violation, *data; size_t word, data_offset; me
 struct metal_release { void *words; size_t word; mesh_pages value, stride; };
 struct metal_result metal_publish(struct metal_program *, const struct metal_release *);
 /* Buffers a dispatch reaches through no binding of its own (a publication's operands, a landing's or a gate's landing
-   buffers), declared on the classic form's encoder before it, with write use where `write`: Metal orders a pass after
-   the passes that write (or, for a write, read) a tracked buffer only where both name it, and the library's counts
-   dispatches otherwise name the counts page alone (a publish could run before its operand's bytes were written, or a
-   caller's kernel that stores `ready` by address after a later publish).  The Metal 4 form orders its passes by its
-   barriers; a recorded program by its replay. */
-void metal_uses(struct metal_program *, void *const *buffers, size_t n, int write);
+   buffers) made resident (recorded, in a track's recording); the program's barriers order its passes. */
+void metal_uses(struct metal_program *, void *const *buffers, size_t n);
 /* A communicator's gate word (at `word` in `words`) stored `value` after one system fence, as metal_publish stores: the
    number of the group whose landings it opens (nccl-mesh.c gate_of), a count of groups and no holding's. */
 struct metal_result metal_open_gate(struct metal_program *, void *words, size_t word, uint64_t value);
@@ -175,10 +166,9 @@ struct mesh_landing_run;
 struct metal_result metal_land(struct metal_program *, int type, int op, void *dst, size_t dst_offset,
                                void *with, size_t with_offset,
                                size_t element_bytes, mesh_pages packets, const struct mesh_landing_run *, size_t runs, const struct metal_wait *);
-/* the same two steps run by the caller's kernel (nccl.h ncclMeshFused: the Metal 4 form, or a classic program begun with
-   a residency set): each one's record written to the function's immutable argument pages as a Metal 4 dispatch's would be, the
+/* the same two steps run by the caller's kernel (nccl.h ncclMeshFused): each one's record written to the function's immutable argument pages as a Metal 4 dispatch's would be, the
    buffers it names made resident, and its six bindings' addresses given in `bound` (0 d, 1 s, 2 the record, 3 a, 4 v,
-   5 progress), nothing dispatched; EINVAL on a program with no ring.  The publication: d its operand (at dst), a the
+   5 progress), nothing dispatched.  The publication: d its operand (at dst), a the
    holding's counts (mesh_step_release stores `ready`).  The landing: d and s its landing
    buffer (at dst), a the holding's counts (mesh_step_await), v the communicator's failure words. */
 struct metal_result metal_send_deferred(struct metal_program *, void *operand, size_t offset, const struct metal_release *, uint64_t bound[6]);
@@ -211,6 +201,8 @@ const char *metal_prelude(void);
 struct metal_result metal_present(struct metal_program *, void *lists, size_t list_offset,
     void *records, size_t record_offset, size_t count, uint64_t first,
     void *words, size_t taken, size_t presented);
+/* The program's end: its residency set committed where the program made a buffer resident, and its own submission
+   (`own`) committed with `event` signalled to `value` after it (NULL: none committed, a failed group's) */
 void metal_end(struct metal_program *, void *event, uint64_t value);
 /* design/transport.md section 5: an expiry's end of the program, its GPU work released first and awaited within
    MESH_PLATFORM_NS (nccl-mesh.c); and the process's watch, every MESH_PLATFORM_NS / 20, for GPU work that makes no progress, which

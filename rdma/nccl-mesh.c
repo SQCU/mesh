@@ -201,7 +201,10 @@ struct ncclComm {
   _Atomic uint64_t *words;
   void *violation;
   uint64_t last, groups;
-  void *command, *queue; /* the last GPU program's command buffer; the queue of its host groups' (host_commit) */
+  /* the library's last submission of its GPU programs (a host-path group's: metal_submission_make), its end as its commit
+     feedback tells it; the id<MTL4CommandQueue> its host groups are committed on (host_commit) */
+  struct metal_submission *submission;
+  void *queue;
   struct ncclMeshWritePlan *compiled_writes; /* the plans holding definitions of it (write_definitions) */
   struct ncclComm *next_touched, *next_live;
   struct plan *plan;
@@ -379,7 +382,7 @@ static void comm_free(struct ncclComm *comm) {
   routes_free(comm, 1);
   for (uint32_t h = 0; h < comm->count; h++) { metal_release(comm->channels[h].buffer); metal_release(comm->channels[h].lists); }
   ncclMemFree((void *)comm->words);
-  metal_release(comm->command); metal_release(comm->queue);
+  metal_submission_release(comm->submission); metal_release(comm->queue);
   plan_free(comm, comm->plan);
   comm_leave(comm);
   free(comm->channels); free(comm->endpoint); free((void *)comm->fabric.cable);
@@ -821,7 +824,7 @@ static void watch_turn(void *unused) {
     now = mesh_clock_ns();
     pthread_mutex_lock(&live_lock);
     for (const struct ncclComm *c = live; c && !pending; c = c->next_live)
-      if (c->last > signaled && c->command && !metal_ended(c->command)) pending = c;
+      if (c->last > signaled && c->submission && !metal_submission_ended(c->submission)) pending = c;
     if (!pending || signaled != seen || !since) { seen = signaled; since = pending ? now : 0; }
     else if (now - since > 2 * MESH_PLATFORM_NS) {
       idle = now - since;
@@ -2220,7 +2223,9 @@ struct call {
   int premultiplied, direct;
   struct steps *bound;
   cudaStream_t stream;
-  void *command, *encoder, *table, *residency;
+  /* its stream's Metal 4 encoder, argument table and residency set; a host-path call's the library's submission's */
+  void *encoder, *table, *residency;
+  struct metal_submission *submission;
   uint32_t polls;
   ncclMeshIssue *issue;
   ncclMeshFused *fused;
@@ -3596,9 +3601,9 @@ static void commit_group(struct ncclComm *comm, const struct schedule *plans) {
 /* a batch of the buffers a group's entries use (metal_uses), consecutive repeats dropped: a group's entries name a
    few buffers (slot, send, receive), so its uses are a call per batch of distinct buffers, not one per entry */
 struct uses { void *buffers[64]; size_t n; };
-static void uses_add(struct metal_program *program, struct uses *batch, void *buffer, int write) {
+static void uses_add(struct metal_program *program, struct uses *batch, void *buffer) {
   if (batch->n && batch->buffers[batch->n - 1] == buffer) return;
-  if (batch->n == sizeof batch->buffers / sizeof *batch->buffers) { metal_uses(program, batch->buffers, batch->n, write); batch->n = 0; }
+  if (batch->n == sizeof batch->buffers / sizeof *batch->buffers) { metal_uses(program, batch->buffers, batch->n); batch->n = 0; }
   batch->buffers[batch->n++] = buffer;
 }
 
@@ -3817,15 +3822,15 @@ static size_t own_segment(const struct call *c, size_t *sent, size_t *landed) {
   return (out < in ? out : in) * SIZE[c->type];
 }
 
-/* what a wait for a communicator's GPU work (gpu_wait) ended at: its last program's end (GPU_ENDED), its command buffer's
-   error status (GPU_ERROR), that buffer not committed (GPU_UNCOMMITTED: nothing runs it while its committer waits), a
-   revoke (GPU_REVOKED) or a holding's end (GPU_HOLDING) */
-enum { GPU_ENDED, GPU_ERROR, GPU_UNCOMMITTED, GPU_REVOKED, GPU_HOLDING };
-/* design/transport.md section 5: the wait for comm's last GPU program (its count `last` on `finished`, signalled at the
-   end of its command buffer, `command`) with group_lock released for it, as a condition variable's wait releases its
-   mutex (design/rubrics.md M3, M4: other communicators' groups and revokes go on meanwhile): the count and the buffer
-   read under the lock; the wait in MESH_PAUSE_NS slices, ending at the signal or at the buffer's end as its status tells
-   it (Completed, or Error, which the platform's watchdog gives a buffer that overruns: nccl-mesh-metal.m metal_ended),
+/* what a wait for a communicator's GPU work (gpu_wait) ended at: its last program's end (GPU_ENDED), its submission's
+   error (GPU_ERROR: its commit feedback's), a revoke (GPU_REVOKED) or a holding's end (GPU_HOLDING) */
+enum { GPU_ENDED, GPU_ERROR, GPU_REVOKED, GPU_HOLDING };
+/* design/transport.md section 5: the wait for comm's last GPU program (its count `last` on `finished`, which its queue
+   signals after its submission, `submission`) with group_lock released for it, as a condition variable's wait releases
+   its mutex (design/rubrics.md M3, M4: other communicators' groups and revokes go on meanwhile): the count and the
+   submission read under the lock; the wait in MESH_PAUSE_NS slices, ending at the signal or at the submission's end as
+   its commit feedback tells it (completed, or an error, which the platform's watchdog gives a buffer that overruns:
+   nccl-mesh-metal.h metal_submission_ended),
    and for a group (`group`: comm kept from its destroy meanwhile by `runs`) at a revoke or a holding's end too, and
    past its deadline, MESH_PLATFORM_NS from its start, the program (design/eager-execution.md assumption A4); then the lock taken again, and a later program that
    touched comm meanwhile awaited too, under the same bound.  Under group_lock */
@@ -3834,12 +3839,12 @@ static int gpu_wait(struct ncclComm *comm, int group) {
   struct mesh_deadline deadline = mesh_deadline("libnccl-mesh: a communicator's GPU programs' end (gpu_wait)", 0);
   while (ended == GPU_ENDED && finished && comm->last && metal_signaled(finished) < comm->last) {
     const uint64_t last = comm->last;
-    void *command = metal_retain(comm->command);
+    struct metal_submission *made = metal_submission_retain(comm->submission);
     if (group) atomic_fetch_add(&comm->runs, 1);
     pthread_mutex_unlock(&group_lock);
     while (metal_signaled(finished) < last) {
-      const int status = metal_ended(command);
-      if (status) { ended = status < 0 ? GPU_ERROR : status == 2 ? GPU_UNCOMMITTED : GPU_ENDED; break; }
+      const int status = made ? metal_submission_ended(made) : 0;
+      if (status) { ended = status < 0 ? GPU_ERROR : GPU_ENDED; break; }
       if (group && revoked(comm)) { ended = GPU_REVOKED; break; }
       for (uint32_t h = 0; group && h < comm->count && ended == GPU_ENDED; h++)
         if (!mesh_stream_held(&comm->attach->context, comm->channels[h].stream, *comm->channels[h].wire)) ended = GPU_HOLDING;
@@ -3847,7 +3852,7 @@ static int gpu_wait(struct ncclComm *comm, int group) {
       const uint64_t left = deadline_left(&deadline);
       metal_wait(finished, last, left < MESH_PAUSE_NS ? left : MESH_PAUSE_NS);
     }
-    metal_release(command);
+    metal_submission_release(made);
     pthread_mutex_lock(&group_lock);
     if (group) atomic_fetch_sub(&comm->runs, 1);
     if (comm->last == last) break;
@@ -3861,8 +3866,6 @@ static ncclResult_t gpu_finished(struct ncclComm *comm) {
   switch (gpu_wait(comm, 1)) {
   case GPU_ERROR:
     return fail(ncclSystemError, "communicator %s's last GPU program's command buffer ended in an error before its host-path group", comm->name);
-  case GPU_UNCOMMITTED:
-    return fail(ncclInvalidUsage, "a host-path group on communicator %s before the command buffer of its last GPU program is committed", comm->name);
   case GPU_REVOKED: return revoked_fail(comm);
   case GPU_HOLDING:
     return fail(ncclRemoteError, "communicator %s: a holding of its streams ended before its host-path group (design/transport.md section 14)",
@@ -4074,8 +4077,8 @@ static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm
   } else if (!g->fused) {
     struct uses batch = {0};
     struct inflight *x = NULL;
-    for (uint64_t at = ch->published; at < upto; at++) uses_add(program, &batch, out_at(x = inflight_from(x, comm, h, 0, at), h, at)->data.buffer, 0);
-    metal_uses(program, batch.buffers, batch.n, 0);
+    for (uint64_t at = ch->published; at < upto; at++) uses_add(program, &batch, out_at(x = inflight_from(x, comm, h, 0, at), h, at)->data.buffer);
+    metal_uses(program, batch.buffers, batch.n);
     result = gpu(metal_publish(program, &release), "a publication");
   }
   if (!result) { ch->published = upto; *published = 1; }
@@ -4518,18 +4521,18 @@ static ncclResult_t retire(struct metal_program *program) {
    touched keeping that count as its `last` and the command buffer as its `command` (gpu_finished); a borrowed
    encoder's, or a failed group's, signals nothing, so no wait of the
    library's is on a command buffer the caller may never commit.  Under group_lock */
-static void program_end(struct metal_program *program, int borrowed, ncclResult_t result) {
-  const uint64_t count = borrowed || result ? 0 : ++issued;
-  void *command = count ? metal_command(program) : NULL;
+static void program_end(struct metal_program *program, ncclResult_t result) {
+  const uint64_t count = !program->own || result ? 0 : ++issued;
+  struct metal_submission *made = count ? metal_submission_retain(program->own) : NULL;
   metal_end(program, count ? (finished ? finished : (finished = metal_event())) : NULL, count);
   for (struct ncclComm *comm = touching; comm; comm = comm->next_touched) {
     comm->touched = 0;
     if (!count) continue;
     comm->last = count;
-    metal_release(comm->command);
-    comm->command = metal_retain(command);
+    metal_submission_release(comm->submission);
+    comm->submission = metal_submission_retain(made);
   }
-  metal_release(command);
+  metal_submission_release(made);
   touching = NULL;
 }
 
@@ -4580,7 +4583,7 @@ static ncclResult_t guard(struct metal_program *program, struct ncclComm *comm, 
   return result;
 }
 
-/* one group on the stream's command buffer (or, the Metal 4 form, its Metal 4 encoder: nccl-mesh-metal.h metal_begin4),
+/* one group on the stream's Metal 4 encoder (nccl-mesh-metal.h metal_begin),
    taking its calls: each crossing call's send buffer a lease (operands_check), its result in recvbuff (result_of), its
    storage that is not the caller's its definition's next slot (bind_slot) once that slot's last group has landed
    (guard), the send buffer read in place where it may (plan_direct); then the group scheduled and its entries presented (schedule: a piece off a page or
@@ -4588,9 +4591,8 @@ static ncclResult_t guard(struct metal_program *program, struct ncclComm *comm, 
    its landings wait on the communicator's (gate_of), in flight after the others, issued (with issue; a fused one is
    completed at once, its steps the caller's kernels') or completed with every group before it, its waits bounded by
    its calls' greatest polls; its results into recvbuff as it completes; the program's end signals `finished` where the
-   library made its encoder.  The Metal 4 form makes its channels' counts and its slot resident through the stream's
-   residency set.  A fused group on the classic form takes the stream's residency set too (metal_begin),
-   through which the buffers its deferred steps' bindings name are made resident for the caller's kernels. */
+   library made its encoder.  Its channels' counts, its slot and the buffers its deferred steps' bindings name are made
+   resident through the stream's residency set, for its dispatches and the caller's kernels alike. */
 static ncclResult_t launch_metal(struct call *list, size_t n) {
   const ncclComm_t comm = list[0].comm;
   ncclMeshIssue *const issue = list[0].issue;
@@ -4603,8 +4605,8 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     polls = !polls || !list[i].polls ? 0 : polls > list[i].polls ? polls : list[i].polls;
     /* a group's dispatches are one program in one command buffer or encoder: a call encoded into another would be
        ordered by neither */
-    if (list[i].command != list[0].command || list[i].encoder != list[0].encoder)
-      result = fail(ncclInvalidUsage, "a group on several command buffers or encoders");
+    if (list[i].encoder != list[0].encoder)
+      result = fail(ncclInvalidUsage, "a group on several encoders");
     /* Metal's shading language has no 64-bit floating type on Apple GPUs: a float64 combine has no kernel (a float64
        call that combines nothing moves its bytes) */
     else if (reducing(list[i].what) && !on_gpu(list[i].type))
@@ -4614,13 +4616,8 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     if (!result && list[i].scalar_at) memcpy(list[i].pre, list[i].scalar_at, SIZE[list[i].type]);
     remote |= crosses(list + i);
   }
-  const int metal4 = list[0].table != NULL;
-  if (!result && metal4 && (!list[0].encoder || !list[0].residency))
-    result = fail(ncclInvalidArgument, "a Metal 4 ncclMeshStream (argumentTable) without its encoder or residency set");
-  else if (!result && !metal4 && !list[0].command) result = fail(ncclInvalidArgument, "an ncclMeshStream without a command buffer");
-  else if (!result && !metal4 && list[0].fused && !list[0].residency)
-    result = fail(ncclInvalidArgument, "a fused crossing on a classic ncclMeshStream without its residency set (the caller's kernels reach "
-                                       "the library's buffers by address)");
+  if (!result && (!list[0].encoder || !list[0].table || !list[0].residency))
+    result = fail(ncclInvalidArgument, "an ncclMeshStream without its Metal 4 encoder, argument table and residency set");
   if (!result && revoked(comm)) result = revoked_fail(comm);
   const uint32_t repeats = list[0].fused && list[0].fused->repeats ? list[0].fused->repeats : 1;
   const size_t stride = list[0].fused ? list[0].fused->stride : 0;
@@ -4641,9 +4638,8 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   void *const violation = remote ? comm->violation : NULL;
   const char *message = NULL;
   struct metal_program operands;
-  struct metal_program *program = metal4 ? metal_begin4(&operands, list[0].encoder, list[0].table, list[0].residency, violation, polls, &message)
-                                         : metal_begin(&operands, list[0].command, list[0].encoder, fused ? list[0].residency : NULL, violation,
-                                                       polls, &message);
+  struct metal_program *program = metal_begin(&operands, list[0].encoder, list[0].table, list[0].residency, violation, polls,
+                                               list[0].submission, &message);
   if (!program) {
     pthread_mutex_unlock(&group_lock); parts_free(list, n);
     return fail(ncclSystemError, "%s", message);
@@ -4733,8 +4729,8 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   }
   for (uint32_t h = 0; !result && gate && g && h < comm->count; h++) {
     struct uses batch = {0};
-    for (size_t k = 0; k < g->plans[h].ins; k++) uses_add(program, &batch, g->plans[h].in[k].data.buffer, 1);
-    metal_uses(program, batch.buffers, batch.n, 1);
+    for (size_t k = 0; k < g->plans[h].ins; k++) uses_add(program, &batch, g->plans[h].in[k].data.buffer);
+    metal_uses(program, batch.buffers, batch.n);
   }
   if (!result && gate) result = gpu(metal_open_gate(program, comm->gate, 0, comm->gates), "the group's gate");
   if (!result && g) {
@@ -4764,7 +4760,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     for (size_t i = 0; i < n && !result; i++) result = complement_copy(program, list + i);
     if (!result) result = retire(program);
   } else if (!result) result = epilogue(program, list, n);
-  program_end(program, list[0].encoder != NULL, result);
+  program_end(program, result);
   if (result && scheduled) walk_failed(comm, issue && !fused ? 0 : ticket, result);
   if (issue && !result) { issue->ticket = ticket > atomic_load(&retired) ? ticket : 0; issue->published = published; }
   if (!scheduled) parts_free(list, n);
@@ -4777,8 +4773,8 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
 ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int *published) {
   int any = 0;
   if (published) *published = 0;
-  if (!stream || (!stream->commandBuffer && !(stream->argumentTable && stream->commandEncoder && stream->residencySet)))
-    return fail(ncclInvalidArgument, "ncclMeshComplete without a command buffer or a Metal 4 encoder, argument table and residency set");
+  if (!stream || !stream->argumentTable || !stream->commandEncoder || !stream->residencySet)
+    return fail(ncclInvalidArgument, "ncclMeshComplete without its Metal 4 encoder, argument table and residency set");
   pthread_mutex_lock(&group_lock);
   const ncclResult_t loss = losses_through(ticket);
   ncclResult_t result = ncclSuccess;
@@ -4787,16 +4783,15 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int
     while (through->next_group && through->next_group->ticket <= ticket) through = through->next_group;
       const char *message = NULL;
     struct metal_program operands;
-    struct metal_program *program = stream->argumentTable
-      ? metal_begin4(&operands, stream->commandEncoder, stream->argumentTable, stream->residencySet, inflight->comm->violation, stream->polls, &message)
-      : metal_begin(&operands, stream->commandBuffer, stream->commandEncoder, NULL, inflight->comm->violation, stream->polls, &message);
+    struct metal_program *program = metal_begin(&operands, stream->commandEncoder, stream->argumentTable, stream->residencySet,
+                                                inflight->comm->violation, stream->polls, NULL, &message);
     if (!program) result = fail(ncclSystemError, "%s", message);
     else {
       for (struct inflight *g = inflight; g; g = g == through ? NULL : g->next_group)
         for (uint32_t h = 0; h < g->comm->count; h++) metal_resident(program, g->comm->channels[h].buffer);
       result = walk(program, NULL, through, &any);
       if (!result) result = retire(program);
-      program_end(program, stream->commandEncoder != NULL, result);
+      program_end(program, result);
       if (result) walk_failed(NULL, ticket, result);
     }
   }
@@ -4822,9 +4817,10 @@ static ncclResult_t as_metal(struct where *w) {
   *w = (struct where){buffer, offset};
   return ncclSuccess;
 }
-/* a host group (no stream) encoded as the Metal path's on its communicator's own queue, its bindings as their leases'
-   Metal buffers, and committed: *made its command buffer, for host_finish; its calls taken (launch_metal) */
-static ncclResult_t host_commit(struct call *list, size_t n, void **made) {
+/* a host group (no stream) encoded as the Metal path's into a submission of the library's on its communicator's own
+   Metal 4 queue (metal_submission_make), its bindings as their leases' Metal buffers, and committed as its program ends
+   (program_end): *made the submission, for host_finish; its calls taken (launch_metal) */
+static ncclResult_t host_commit(struct call *list, size_t n, struct metal_submission **made) {
   const ncclComm_t comm = list[0].comm;
   *made = NULL;
   pthread_mutex_lock(&group_lock);
@@ -4833,31 +4829,32 @@ static ncclResult_t host_commit(struct call *list, size_t n, void **made) {
     result = fail(ncclInvalidUsage, "a host-path group while this communicator's GPU groups are issued and not complete (ncclMeshComplete)");
   if (!result && finished && comm->last) result = gpu_finished(comm);
   if (!result && !comm->queue && !(comm->queue = metal_queue())) result = fail(ncclSystemError, "a command queue for communicator %s", comm->name);
-  void *command = result ? NULL : metal_queue_command(comm->queue);
+  void *encoder = NULL, *table = NULL, *residency = NULL;
+  const char *message = NULL;
+  struct metal_submission *submission = result ? NULL : metal_submission_make(comm->queue, &encoder, &table, &residency, &message);
   pthread_mutex_unlock(&group_lock);
-  if (!result && !command) result = fail(ncclSystemError, "a command buffer for communicator %s", comm->name);
+  if (!result && !submission) result = fail(ncclSystemError, "communicator %s: %s", comm->name, message);
   for (size_t i = 0; i < n && !result; i++) {
     struct call *c = list + i;
-    c->command = command;
+    c->submission = submission; c->encoder = encoder; c->table = table; c->residency = residency;
     result = as_metal(&c->send_at);
     if (!result) result = as_metal(&c->recv_at);
     for (int j = 0; j < 2 && !result; j++)
       for (int r = 0; (j ? c->receive_views : c->send_views) && r < comm->nranks && !result; r++)
         result = as_metal((j ? c->receive_views : c->send_views) + r);
   }
-  if (result) { parts_free(list, n); metal_release(command); return result; }
+  if (result) { parts_free(list, n); metal_submission_release(submission); return result; }
   result = launch_metal(list, n);
-  if (result) { metal_release(command); return result; }
-  metal_commit(command);
-  *made = command;
+  if (result) { metal_submission_release(submission); return result; }
+  *made = submission;
   return ncclSuccess;
 }
-/* a committed host group's end awaited (gpu_finished: its program is comm's last), its command buffer let go */
-static ncclResult_t host_finish(ncclComm_t comm, void *command) {
+/* a committed host group's end awaited (gpu_finished: its program is comm's last), its submission let go */
+static ncclResult_t host_finish(ncclComm_t comm, struct metal_submission *submission) {
   pthread_mutex_lock(&group_lock);
   const ncclResult_t result = gpu_finished(comm);
   pthread_mutex_unlock(&group_lock);
-  metal_release(command);
+  metal_submission_release(submission);
   return result;
 }
 
@@ -4867,16 +4864,16 @@ static ncclResult_t host_finish(ncclComm_t comm, void *command) {
 static ncclResult_t launch_one(struct call *list, size_t n) {
   const ncclComm_t comm = list[0].comm;
   if (list[0].stream) return launch_metal(list, n);
-  void *command = NULL;
-  ncclResult_t result = host_commit(list, n, &command);
-  if (!result) result = host_finish(comm, command);
+  struct metal_submission *submission = NULL;
+  ncclResult_t result = host_commit(list, n, &submission);
+  if (!result) result = host_finish(comm, submission);
   if (result) comm->async = result;
   return result;
 }
 
 /* a group's calls of one communicator (ncclGroupEnd), launched as a group of their own (launch_one; a host part
    committed with the others before any is awaited: host_commit, `command`), its result and its message */
-struct part { struct call *list; size_t n; ncclResult_t result; struct said said; ncclComm_t comm; void *command; int metal; };
+struct part { struct call *list; size_t n; ncclResult_t result; struct said said; ncclComm_t comm; struct metal_submission *submission; int metal; };
 /* a thread's parts of its last group on several communicators, and their calls, each part's a run of them: kept for its
    next such group (grow), so none is allocated once they have its size */
 static _Thread_local struct part *parts_kept;
@@ -4951,7 +4948,7 @@ ncclResult_t ncclGroupEnd(void) {
     if (!metals++) issue = c->issue;
     uint32_t polls = c->polls;
     for (size_t i = 1; i < part[k].n; i++) polls = !polls || !c[i].polls ? 0 : polls > c[i].polls ? polls : c[i].polls;
-    on = (ncclMeshStream){c->command, c->encoder, NULL, NULL, NULL, c->table, c->residency, polls, NULL};
+    on = (ncclMeshStream){.commandEncoder = c->encoder, .argumentTable = c->table, .residencySet = c->residency, .polls = polls};
   }
   uint64_t ticket = 0;
   int published = 0;
@@ -4976,11 +4973,11 @@ ncclResult_t ncclGroupEnd(void) {
     struct part *p = part + k;
     if (!p->list || p->metal) continue;
     p->comm = p->list[0].comm;
-    if ((p->result = host_commit(p->list, p->n, &p->command))) { p->said = last; p->comm->async = p->result; }
+    if ((p->result = host_commit(p->list, p->n, &p->submission))) { p->said = last; p->comm->async = p->result; }
   }
   for (size_t k = 0; k < parts; k++) {
     struct part *p = part + k;
-    if (p->command && (p->result = host_finish(p->comm, p->command))) { p->said = last; p->comm->async = p->result; }
+    if (p->submission && (p->result = host_finish(p->comm, p->submission))) { p->said = last; p->comm->async = p->result; }
   }
   ncclResult_t result = ncclSuccess;
   struct said first = {0, ""};
@@ -4998,7 +4995,7 @@ static ncclResult_t admit(struct call *made) {
   if (!c.comm) return fail(ncclInvalidArgument, "comm is NULL");
   if (c.stream) {
     const ncclMeshStream *stream = c.stream;
-    c.command = stream->commandBuffer; c.encoder = stream->commandEncoder;
+    c.encoder = stream->commandEncoder;
     c.issue = stream->issue; c.table = stream->argumentTable; c.residency = stream->residencySet; c.polls = stream->polls;
     c.fused = stream->fused;
     c.send_at = where_of(c.send); c.recv_at = where_of(c.recv);

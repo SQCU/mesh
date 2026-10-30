@@ -268,18 +268,17 @@ See [transport.md](../design/transport.md) for registration and credit units.
     have finished; `ncclMeshMemReusable` proves only the DMA-read side, including registered reads not yet posted.
     Destination consumers have separate lifetimes. No receipt collective or remote ACK is required for retirement
     (design/pages-and-functions.md, Freeing 6-7).
-  - **Metal 4.** A stream whose `argumentTable` is set encodes into the caller's `MTL4ComputeCommandEncoder`
+  - **Metal 4, the only form.** A stream (its `commandEncoder`, `argumentTable` and `residencySet` all required) encodes into the caller's `MTL4ComputeCommandEncoder`
     (`commandEncoder`) between the commands before and after it, every binding through that argument table (at least
     six buffer bindings; each dispatch's arguments a record of the library's ring, never `setBytes`), on pipelines of
     the caller's device, the library's buffers (its holdings' counts, its pool's leases) added to the caller's
     `residencySet`; nothing is committed or signalled. Every collective and group takes the stream. Its waits are
-    bounded by the stream's `polls` as the classic form's are, 0, or more than `NCCL_MESH_POLLS`, being
+    bounded by the stream's `polls`, 0, or more than `NCCL_MESH_POLLS`, being
     `NCCL_MESH_POLLS`, the waits a group encodes at its call bounded by the greatest of its calls', those
     `ncclMeshComplete` encodes by its stream's ([Bounded waits](#bounded-waits)). A recorded program's
     replay calls it at each crossing it marks (metal-microbench docs/kernels.md#any-program).
-  - The calls of one group name one command buffer or encoder: the group's dispatches are one program. A classic
-    stream with an encoder and no `workspace` takes the communicator's scratch for a call that crosses no link, reused
-    in the encoder's order, as the Metal 4 form does.
+  - The calls of one group name one encoder: the group's dispatches are one program. A stream with no `workspace`
+    takes the communicator's scratch for a call that crosses no link, reused in the encoder's order.
   - A group on several communicators is a group of each communicator's calls, in the order the group first names them,
     progressing together: each is issued, and where the stream asks no issue all are completed through the greatest
     ticket on the last one's stream, their channels interleaved as tracks (a stream that asks issue gets that ticket);
@@ -310,10 +309,9 @@ See [transport.md](../design/transport.md) for registration and credit units.
       sums on a group): the group's entries laid that many times, repeat j's buffers j strides on, as that many of the
       communicator's groups; one record each, its count's stride the DMA units a repeat adds, so the caller's kernels run
       repeat j by `mesh_step_release` and `mesh_step_await` at j, and the host issues one call for them all.
-    - Either form: a Metal 4 kernel binds them through its argument table; a classic one takes them as one
-      `mesh_step_binding` record, and its stream names a `residencySet`, which the library fills with the buffers the
-      bindings name and the caller makes resident for its queue. Every frontend's fused crossing is a Metal 4 one today
-      (torch-mesh's `torch_mesh/fused.py` through `_stream.mm`, and metal-microbench's mesh_rank.m).
+    - The caller's Metal 4 kernel binds them through its argument table, and the library adds the buffers the
+      bindings name to the stream's `residencySet` (torch-mesh's `torch_mesh/fused.py` through `_stream.mm`, and
+      metal-microbench's mesh_rank.m).
   - A wait polls a holding's count and nothing else: each poll one `volatile coherent(system)` load after a system-scope
     fence (`mesh.metal` `mesh_wait_bounded`; without it a running kernel saw the host's store milliseconds late:
     metal-microbench tools/poll_probe.m, 2026-10-21), and one more fence after the observed count before the landed

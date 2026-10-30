@@ -93,18 +93,18 @@
    (ncclMeshAllGatherV, ncclMeshReduceScatterV, below), whose count vector every rank passes alike.
 
    Host path: a NULL stream.  Buffers are host pointers into this node's region (a lease's: Memory, below), sent from
-   and landed in in place; a group runs as the Metal path's group in a command buffer of its communicator's own queue,
-   its buffers as their leases' Metal buffers, committed and awaited before its call returns (a float64 reduction fails
+   and landed in in place; a group runs as the Metal path's group in a Metal 4 command buffer of its communicator's own
+   queue, its buffers as their leases' Metal buffers, committed and awaited before its call returns (a float64 reduction fails
    as it does there); every call returns once its publications
    and required landings have run; outgoing buffer lifetimes remain the caller's.  Metal path: a stream that
-   is an ncclMeshStream.  The group is encoded into its commandBuffer (the caller commits it), every buffer argument an
+   is an ncclMeshStream.  The group is encoded into its Metal 4 encoder (the caller commits it), every buffer argument an
    ncclMeshBuffer (an id<MTLBuffer> and a byte offset into it: an MPS tensor's storage and offset) of any type, a
    crossing's over a lease (Memory, below); float64 moves as its bytes, and a float64 reduction there fails as a value
-   (Apple GPUs have no float64 arithmetic).  With commandEncoder, the kernels go into that open compute encoder, left
-   open with nothing signalled at the group's end; workspace is not read (a call that crosses no link makes its result
+   (Apple GPUs have no float64 arithmetic).  The kernels go into its open compute encoder, left open with nothing
+   signalled at the group's end; workspace is not read (a call that crosses no link makes its result
    in recvbuff, and what a crossing sends from or lands in that is not the caller's is the communicator's: Memory),
-   and the caller orders any later host-path group after the stream's work.  The calls of one group name one
-   command buffer or encoder (the group's dispatches are one program); their bound is the greatest of their polls.  A
+   and the caller orders any later host-path group after the stream's work.  The calls of one group name one encoder
+   (the group's dispatches are one program); their bound is the greatest of their polls.  A
    group on several communicators is one group of each communicator's calls, in the order the group first names them,
    progressing together: on the Metal path each is issued and, where the stream asked no issue, all are completed
    through the greatest ticket on the last one's stream, their channels interleaved as tracks; on the host path each
@@ -141,18 +141,12 @@
    mesh_step_failed), read by the host after its command buffer (ncclCommGetAsyncError, or the communicator's next
    group): the bound is the wait's deadline, and a wait past it ends the program there (design/data-model.md section
    6); a lost link, or a bound reached after a revoke, fails the group as a value.
-   The Metal 4 form: a stream whose argumentTable (an id<MTL4ArgumentTable>) is set, commandEncoder then an
-   id<MTL4ComputeCommandEncoder> and residencySet an id<MTLResidencySet> (commandBuffer not read), its polls as the
-   classic form's.  The group is encoded as compute dispatches between the encoder's commands before and after it, bound
-   through the caller's argument table (at least 6 buffer bindings; no setBytes, each dispatch's arguments a record of
-   the library's ring), on pipelines of the residency set's device, every buffer of the library's it touches added to
-   the caller's residency set (committed where one was added); nothing is committed or signalled.  The classic form
-   reads residencySet only for a fused crossing (below), whose steps the caller's kernels run by their bindings' GPU
-   addresses:
-   an id<MTLResidencySet> of the command buffer's device, to which the library adds every buffer those bindings name
-   (committed where one was added), and which the caller makes resident for the command buffers its kernels are encoded
-   into (its queue's addResidencySet:, or each command buffer's useResidencySet:), since a classic encoder makes resident
-   only the buffers bound to it.
+   The stream is Metal 4's alone: commandEncoder an id<MTL4ComputeCommandEncoder>, argumentTable an
+   id<MTL4ArgumentTable> and residencySet an id<MTLResidencySet>, all three required.  The group is encoded as compute
+   dispatches between the encoder's commands before and after it, bound through the caller's argument table (at least 6
+   buffer bindings; each dispatch's arguments a record of the library's ring), on pipelines of the residency set's
+   device, every buffer of the library's it touches added to the caller's residency set (committed where one was
+   added), which the caller's command buffer uses; nothing is committed or signalled.
 
    Memory.  The process is one client of its node's bridge: one attach of the node's region, made at its first
    ncclMemAlloc or communicator, whose slot owns the process's leases and holds the streams its communicators use; a
@@ -318,7 +312,6 @@ typedef struct { uint64_t ticket; int published; } ncclMeshIssue;
 typedef uint64_t ncclMeshBinding[6];
 typedef struct { ncclMeshBinding *publish, *land; uint32_t publishes, lands, repeats; size_t stride; } ncclMeshFused;
 typedef struct {
-  void *commandBuffer;
   void *commandEncoder;
   void *(*workspace)(size_t bytes, void *context);
   void *context;
@@ -1199,8 +1192,8 @@ ncclResult_t ncclMeshCommPlanDemands(ncclComm_t comm, uint64_t* demand, size_t e
    increase this number. A weight change smaller than 1/units may compile to the
    identical schedule; this is probe resolution, never a minimum path share. */
 ncclResult_t ncclMeshCommPlanRouteUnits(ncclComm_t comm, uint64_t* units, size_t entries);
-/* Every issued group through `ticket` that is not complete, completed on `stream` (its commandBuffer and
-   commandEncoder, or the Metal 4 form's, and its polls; issue not read); *published (may be NULL)
+/* Every issued group through `ticket` that is not complete, completed on `stream` (its Metal 4 encoder, argument table
+   and residency set, and its polls; issue not read); *published (may be NULL)
    whether a publication was encoded.  A ticket already complete encodes nothing; one whose communicator failed returns
    the failure. */
 ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream* stream, int* published);
@@ -1245,8 +1238,7 @@ uint64_t ncclMeshRetired(void);
    a fused crossing's kernels run: the whole of what a caller's kernel is compiled after, from the library the process
    loaded, so it never reads a file that may be another build's (a checkout's mesh.metal newer or older than the
    installed library), and needs no path to one.  The steps' text is the argument record (struct mesh_args), a fused
-   step's six bindings as one record (struct mesh_step_binding: ncclMeshFused's order, a classic kernel's form of
-   them) and mesh_step_enter, mesh_step_wait, mesh_step_claim, mesh_step_failed,
+   step's six bindings as one record (struct mesh_step_binding: ncclMeshFused's order) and mesh_step_enter, mesh_step_wait, mesh_step_claim, mesh_step_failed,
    mesh_step_check, mesh_step_counts, mesh_step_await, mesh_step_write, mesh_step_release and mesh_step_read (any element type: a landed
    element, loaded system-coherent from the caller's own landing buffer), on a holding's counts (`ready` to store,
    `landed` to await); the library's own, so the caller compiles them with its kernels and keeps no copy.

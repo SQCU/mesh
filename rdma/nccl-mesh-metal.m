@@ -119,7 +119,7 @@ static struct kernels *kernels_of(id<MTLDevice> device, const char **message) {
 /* the program's device's kernels (kernels_of), found at its first step and kept with it */
 static struct kernels *program_kernels(struct metal_program *program, const char **message) {
   if (!program->kernels)
-    program->kernels = kernels_of(program->encoder4 ? program->residency.device : (id<MTLDevice>)metal_device(), message);
+    program->kernels = kernels_of(program->residency.device, message);
   return program->kernels;
 }
 
@@ -132,46 +132,98 @@ uint64_t metal_signaled(void *event) { return ((id<MTLSharedEvent>)event).signal
 int metal_wait(void *event, uint64_t value, uint64_t ns) { return [(id<MTLSharedEvent>)event waitUntilSignaledValue:value timeoutMS:ns / 1000000]; }
 void metal_release(void *object) { [(id)object release]; }
 void *metal_retain(void *object) { return [(id)object retain]; }
-void *metal_command(const struct metal_program *program) { return [program->buffer retain]; }
-/* a command queue of the library's own, retained; a command buffer of it, retained; a command buffer's commit */
-void *metal_queue(void) { return [(id<MTLDevice>)metal_device() newCommandQueue]; }
-void *metal_queue_command(void *queue) { @autoreleasepool { return [[(id<MTLCommandQueue>)queue commandBuffer] retain]; } }
-void metal_commit(void *command) { [(id<MTLCommandBuffer>)command commit]; }
-int metal_ended(void *command) {
-  const MTLCommandBufferStatus status = ((id<MTLCommandBuffer>)command).status;
-  return status == MTLCommandBufferStatusError ? -1 : status == MTLCommandBufferStatusCompleted ? 1 : status < MTLCommandBufferStatusCommitted ? 2 : 0;
+/* nccl-mesh-metal.h metal_queue, metal_submission_make: the library's own Metal 4 work */
+struct metal_submission {
+  id<MTL4CommandQueue> queue;
+  id<MTL4CommandAllocator> allocator;
+  id<MTL4CommandBuffer> buffer;
+  id<MTL4ComputeCommandEncoder> encoder;
+  id<MTL4ArgumentTable> table;
+  id<MTLResidencySet> residency;
+  _Atomic uint32_t references;
+  _Atomic int ended;
+  int committed;
+  double seconds;
+};
+void *metal_queue(void) { return [(id<MTLDevice>)metal_device() newMTL4CommandQueue]; }
+struct metal_submission *metal_submission_retain(struct metal_submission *s) {
+  if (s) atomic_fetch_add_explicit(&s->references, 1, memory_order_relaxed);
+  return s;
+}
+void metal_submission_release(struct metal_submission *s) {
+  if (!s || atomic_fetch_sub_explicit(&s->references, 1, memory_order_acq_rel) != 1) return;
+  if (!s->committed && s->encoder) { [s->encoder endEncoding]; [s->buffer endCommandBuffer]; }
+  [s->encoder release]; [s->table release]; [s->residency release]; [s->buffer release]; [s->allocator release]; [s->queue release];
+  free(s);
+}
+int metal_submission_ended(const struct metal_submission *s) {
+  return atomic_load_explicit(&((struct metal_submission *)s)->ended, memory_order_acquire);
+}
+struct metal_submission *metal_submission_make(void *queue, void **encoder, void **table, void **residency, const char **message) {
+  @autoreleasepool {
+    id<MTLDevice> device = (id<MTLDevice>)metal_device();
+    struct metal_submission *s = calloc(1, sizeof *s);
+    if (!s) { *message = "out of memory"; return NULL; }
+    atomic_init(&s->references, 1);
+    s->queue = [(id<MTL4CommandQueue>)queue retain];
+    s->allocator = [device newCommandAllocator];
+    s->buffer = [device newCommandBuffer];
+    MTL4ArgumentTableDescriptor *bindings = [[MTL4ArgumentTableDescriptor new] autorelease];
+    bindings.maxBufferBindCount = 6;   /* d, s, the record, a, v, progress: the kernels' six (record4) */
+    NSError *error = nil;
+    s->table = [device newArgumentTableWithDescriptor:bindings error:&error];
+    if (s->table) s->residency = [device newResidencySetWithDescriptor:[[MTLResidencySetDescriptor new] autorelease] error:&error];
+    if (s->queue && s->allocator && s->buffer && s->residency) {
+      [s->buffer beginCommandBufferWithAllocator:s->allocator];
+      s->encoder = [[s->buffer computeCommandEncoder] retain];
+    }
+    if (!s->encoder) {
+      *message = say("the library's Metal 4 submission (its queue, allocator, command buffer, argument table, residency set and encoder): %s",
+                     error ? error.localizedDescription.UTF8String : "one was not made");
+      metal_submission_release(s);
+      return NULL;
+    }
+    *encoder = s->encoder; *table = s->table; *residency = s->residency;
+    return s;
+  }
+}
+/* the submission committed on its queue, `event` (nil: none) signalled to `value` after it, its end and GPU seconds
+   taken from its commit feedback */
+static void submission_commit(struct metal_submission *s, id<MTLEvent> event, uint64_t value) {
+  @autoreleasepool {
+    [s->encoder endEncoding];
+    [s->buffer useResidencySet:s->residency];
+    [s->buffer endCommandBuffer];
+    s->committed = 1;
+    MTL4CommitOptions *options = [[MTL4CommitOptions new] autorelease];
+    metal_submission_retain(s);
+    [options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+      s->seconds = feedback.GPUEndTime - feedback.GPUStartTime;
+      atomic_store_explicit(&s->ended, feedback.error ? -1 : 1, memory_order_release);
+      metal_submission_release(s);
+    }];
+    const id<MTL4CommandBuffer> buffers[1] = {s->buffer};
+    [s->queue commit:buffers count:1 options:options];
+    if (event) [s->queue signalEvent:event value:value];
+  }
 }
 
 /* a stream's polls as a program's bound: 0, or more than NCCL_MESH_POLLS, is NCCL_MESH_POLLS
    (design/transport.md) */
 static uint32_t bound_of(uint32_t polls) { return polls && polls < NCCL_MESH_POLLS ? polls : NCCL_MESH_POLLS; }
 
-struct metal_program *metal_begin(struct metal_program *program, void *command_buffer, void *encoder, void *residency, void *violation, uint32_t polls, const char **message) {
-  if (residency && !kernels_of(((id<MTLResidencySet>)residency).device, message)) return NULL;
-  *program = (struct metal_program){0};
-  program->buffer = [(id<MTLCommandBuffer>)command_buffer retain];
-  if (encoder) { program->encoder = [(id<MTLComputeCommandEncoder>)encoder retain]; program->borrowed = 1; }
-  program->violation = [(id<MTLBuffer>)violation retain];
-  program->polls = bound_of(polls);
-  /* Deferred records and the payloads they name belong to this residency set. */
-  if (residency) {
-    program->residency = [(id<MTLResidencySet>)residency retain];
-    metal_resident(program, violation);
-  }
-  return program;
-}
-
-struct metal_program *metal_begin4(struct metal_program *program, void *encoder, void *table, void *residency, void *violation, uint32_t polls, const char **message) {
+struct metal_program *metal_begin(struct metal_program *program, void *encoder, void *table, void *residency, void *violation, uint32_t polls,
+                                  struct metal_submission *own, const char **message) {
   if (!kernels_of(((id<MTLResidencySet>)residency).device, message)) return NULL;
   *program = (struct metal_program){0};
-  program->encoder4 = [(id<MTL4ComputeCommandEncoder>)encoder retain];
+  program->own = own;
+  program->encoder = [(id<MTL4ComputeCommandEncoder>)encoder retain];
   program->table = [(id<MTL4ArgumentTable>)table retain];
   program->residency = [(id<MTLResidencySet>)residency retain];
   program->violation = [(id<MTLBuffer>)violation retain];
   program->polls = bound_of(polls);
-  program->borrowed = 1;
   metal_resident(program, violation);
-  [program->encoder4 barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+  [program->encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
   return program;
 }
 
@@ -188,13 +240,6 @@ void metal_gate(struct metal_program *program, void *violation) {
   [program->violation release];
   program->violation = (id<MTLBuffer>)violation;
   metal_resident(program, violation);
-}
-
-static void close_encoder(struct metal_program *program) {
-  if (!program->encoder) return;
-  if (!program->borrowed) [program->encoder endEncoding];
-  [program->encoder release];
-  program->encoder = nil;
 }
 
 /* Immutable argument records in pages owned by this function's residency set.
@@ -236,7 +281,7 @@ static struct metal_result dispatch4(struct metal_program *program, id<MTLComput
   const struct metal_result recorded = record4(program, d, s, a, words, p, bound);
   if (recorded.status) return recorded;
   for (NSUInteger k = 0; k < 6; k++) [program->table setAddress:bound[k] atIndex:k];
-  id<MTL4ComputeCommandEncoder> encoder = program->encoder4;
+  id<MTL4ComputeCommandEncoder> encoder = program->encoder;
   [encoder setComputePipelineState:state];
   [encoder setArgumentTable:program->table];
   const NSUInteger most = group ? MESH_TRANSPORT_GROUP_THREADS : MESH_TRANSPORT_ELEMENT_THREADS, width = state.maxTotalThreadsPerThreadgroup < most ? state.maxTotalThreadsPerThreadgroup : most;
@@ -248,7 +293,7 @@ static struct metal_result dispatch4(struct metal_program *program, id<MTLComput
 
 /* kernel `kind` (KINDS_OF) on buffers d, s, a and v (0, 1, 3 and 4; an absent one d, and v, where none is given, the
    program's failure words: metal_gate) and the arguments p (2, its polls the program's where v is such words), the
-   progress word (5; the classic form binds d there, which no kernel then writes): a GROUP kernel (`group`: publish,
+   progress word (5): a GROUP kernel (`group`: publish,
    spin) as one threadgroup of the configured width, any other over `units` threads */
 static struct metal_result record_step(struct metal_program *program, uint32_t kind, void *d, void *s, void *a, void *v, struct args p);
 static int recording_on(const struct metal_program *program);
@@ -262,23 +307,8 @@ static struct metal_result dispatch(struct metal_program *program, uint32_t kind
   if (!k) return (struct metal_result){EINVAL, message};
   id<MTLComputePipelineState> state = k->pipelines[kind];
   @autoreleasepool {
-    if (program->encoder4) return dispatch4(program, state, (id<MTLBuffer>)d, (id<MTLBuffer>)s, (id<MTLBuffer>)a, (id<MTLBuffer>)v, p, units, group);
-    if (!program->encoder) program->encoder = [[program->buffer computeCommandEncoder] retain];
-    id<MTLComputeCommandEncoder> encoder = program->encoder;
-    if (!v) v = (void *)program->violation;
-    p.polls = v && v != d ? program->polls : 0;
-    [encoder setComputePipelineState:state];
-    [encoder setBuffer:(id<MTLBuffer>)d offset:0 atIndex:0];
-    [encoder setBuffer:(id<MTLBuffer>)(s ? s : d) offset:0 atIndex:1];
-    [encoder setBytes:&p length:sizeof p atIndex:2];
-    [encoder setBuffer:(id<MTLBuffer>)(a ? a : d) offset:0 atIndex:3];
-    [encoder setBuffer:(id<MTLBuffer>)(v ? v : d) offset:0 atIndex:4];
-    [encoder setBuffer:(id<MTLBuffer>)d offset:0 atIndex:5];
-    const NSUInteger most = group ? MESH_TRANSPORT_GROUP_THREADS : MESH_TRANSPORT_ELEMENT_THREADS, width = state.maxTotalThreadsPerThreadgroup < most ? state.maxTotalThreadsPerThreadgroup : most;
-    if (group) [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
-    else [encoder dispatchThreads:MTLSizeMake(units < MESH_TRANSPORT_GRID_THREADS ? (NSUInteger)units : MESH_TRANSPORT_GRID_THREADS, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+    return dispatch4(program, state, (id<MTLBuffer>)d, (id<MTLBuffer>)s, (id<MTLBuffer>)a, (id<MTLBuffer>)v, p, units, group);
   }
-  return METAL_DONE;
 }
 
 struct metal_result metal_copy(struct metal_program *program, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t bytes) {
@@ -317,16 +347,9 @@ static struct args release_args(const struct metal_release *r, size_t dst_offset
 }
 
 static void record_uses(struct metal_program *, void *const *, size_t);
-void metal_uses(struct metal_program *program, void *const *buffers, size_t n, int write) {
-  if (!n) return;
+void metal_uses(struct metal_program *program, void *const *buffers, size_t n) {
   if (recording_on(program)) { record_uses(program, buffers, n); return; }
-  if (program->encoder4) { for (size_t k = 0; k < n; k++) metal_resident(program, buffers[k]); return; }
-  @autoreleasepool {
-    if (!program->encoder) program->encoder = [[program->buffer computeCommandEncoder] retain];
-    const MTLResourceUsage usage = write ? (MTLResourceUsageRead | MTLResourceUsageWrite) : MTLResourceUsageRead;
-    for (size_t k = 0; k < n; k++)
-      if (buffers[k]) [program->encoder useResource:(id<MTLBuffer>)buffers[k] usage:usage];
-  }
+  for (size_t k = 0; k < n; k++) metal_resident(program, buffers[k]);
 }
 
 struct metal_result metal_publish(struct metal_program *program, const struct metal_release *r) {
@@ -346,22 +369,29 @@ double metal_poll_seconds(void *device) {
   dispatch_once(&once, ^{ @autoreleasepool {
     const char *message = NULL;
     struct kernels *k = kernels_of((id<MTLDevice>)device, &message);
-    id<MTLCommandQueue> queue = k ? [(id<MTLDevice>)device newCommandQueue] : nil;
-    id<MTLBuffer> words = [(id<MTLDevice>)device newBufferWithLength:128 options:MTLResourceStorageModeShared];
+    id<MTL4CommandQueue> queue = k ? [(id<MTLDevice>)device newMTL4CommandQueue] : nil;
+    /* the counts at 0, the failure words at 64, the argument record at 128, the progress word at 256 */
+    id<MTLBuffer> words = [(id<MTLDevice>)device newBufferWithLength:384 options:MTLResourceStorageModeShared];
     const struct args p = {.scalar = 1, .polls = 1u << 16};
+    _Static_assert(sizeof p <= 128, "the argument record fits between the failure words and the progress word");
     for (int pass = 0; queue && words && pass < 2; pass++) {
-      memset(words.contents, 0, 128);
-      id<MTLCommandBuffer> command = [queue commandBuffer];
-      id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-      [encoder setComputePipelineState:k->pipelines[KIND_spin]];
-      for (NSUInteger i = 0; i < 6; i++) [encoder setBuffer:words offset:i == 4 ? 64 : 0 atIndex:i];
-      [encoder setBytes:&p length:sizeof p atIndex:2];
-      [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
-      [encoder endEncoding];
-      [command commit];
+      memset(words.contents, 0, 384);
+      memcpy((char *)words.contents + 128, &p, sizeof p);
+      void *encoder = NULL, *table = NULL, *residency = NULL;
+      struct metal_submission *made = metal_submission_make(queue, &encoder, &table, &residency, &message);
+      if (!made) break;
+      [(id<MTLResidencySet>)residency addAllocation:words];
+      [(id<MTLResidencySet>)residency commit];
+      const uint64_t at = words.gpuAddress, bound[6] = {at, at, at + 128, at, at + 64, at + 256};
+      for (NSUInteger i = 0; i < 6; i++) [(id<MTL4ArgumentTable>)table setAddress:bound[i] atIndex:i];
+      [(id<MTL4ComputeCommandEncoder>)encoder setComputePipelineState:k->pipelines[KIND_spin]];
+      [(id<MTL4ComputeCommandEncoder>)encoder setArgumentTable:(id<MTL4ArgumentTable>)table];
+      [(id<MTL4ComputeCommandEncoder>)encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+      submission_commit(made, nil, 0);
       const uint64_t until = mesh_clock_ns() + MESH_PLATFORM_NS;
-      while (command.status < MTLCommandBufferStatusCompleted && mesh_clock_ns() < until) usleep(100);
-      period = command.status == MTLCommandBufferStatusCompleted ? (command.GPUEndTime - command.GPUStartTime) / p.polls : 0;
+      while (!metal_submission_ended(made) && mesh_clock_ns() < until) usleep(100);
+      period = metal_submission_ended(made) == 1 ? made->seconds / p.polls : 0;
+      metal_submission_release(made);
     }
     [queue release]; [words release];
   }});
@@ -369,14 +399,14 @@ double metal_poll_seconds(void *device) {
 }
 
 struct metal_result metal_spin(struct metal_program *program, const struct metal_wait *w) {
-  metal_uses(program, &w->data, w->data != NULL, 1);
+  metal_uses(program, &w->data, w->data != NULL);
   return dispatch(program, KIND_spin, w->words, w->words, NULL, w->violation, wait_args(w, 0, 1, 0), 1, 1);
 }
 
 struct metal_result metal_land(struct metal_program *program, int type, int op, void *dst, size_t dst_offset,
                                void *with, size_t with_offset,
                                size_t element_bytes, mesh_pages packets, const struct mesh_landing_run *runs, size_t count, const struct metal_wait *w) {
-  if (count) metal_uses(program, &with, 1, 0);
+  if (count) metal_uses(program, &with, 1);
   const uint32_t kind = type == METAL_MERGE && (with != dst || with_offset != dst_offset) ? KIND_land_merge_from : typed(OP_LAND, type);
   for (size_t k = 0; k < count; k++) {
     const struct mesh_landing_run run = runs[k];
@@ -394,12 +424,10 @@ struct metal_result metal_land(struct metal_program *program, int type, int op, 
 
 /* Deferred steps retain their compiled records through the function's residency set. */
 struct metal_result metal_send_deferred(struct metal_program *program, void *operand, size_t offset, const struct metal_release *r, uint64_t bound[6]) {
-  if (!program->residency) return (struct metal_result){EINVAL, "a step run by its caller's kernel is the Metal 4 form's, or a classic stream's with its residency set"};
   return record4(program, (id<MTLBuffer>)operand, nil, (id<MTLBuffer>)r->words, nil, release_args(r, offset), bound);
 }
 
 struct metal_result metal_land_deferred(struct metal_program *program, void *landing, size_t offset, const struct metal_wait *w, uint64_t bound[6]) {
-  if (!program->residency) return (struct metal_result){EINVAL, "a step run by its caller's kernel is the Metal 4 form's, or a classic stream's with its residency set"};
   return record4(program, (id<MTLBuffer>)landing, (id<MTLBuffer>)landing, (id<MTLBuffer>)w->words, (id<MTLBuffer>)w->violation,
                  wait_args(w, offset, 0, 0), bound);
 }
@@ -560,25 +588,15 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
     uint64_t *count = (uint64_t *)(base + at_count);
     for (uint32_t t = 0; t < T; t++) count[t] = t < tracks ? consumed[t] : 0;
     const NSUInteger width = state.maxTotalThreadsPerThreadgroup < MESH_TRANSPORT_GROUP_THREADS ? state.maxTotalThreadsPerThreadgroup : MESH_TRANSPORT_GROUP_THREADS;
-    if (program->encoder4) {
-      metal_resident(program, records.buffer);
-      for (id b in r->named) metal_resident(program, (void *)b);
-      [program->table setAddress:address atIndex:0];
-      [program->table setAddress:address atIndex:1];
-      id<MTL4ComputeCommandEncoder> encoder = program->encoder4;
-      [encoder setComputePipelineState:state];
-      [encoder setArgumentTable:program->table];
-      [encoder dispatchThreadgroups:MTLSizeMake(T, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
-      [encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
-    } else {
-      if (!program->encoder) program->encoder = [[program->buffer computeCommandEncoder] retain];
-      id<MTLComputeCommandEncoder> encoder = program->encoder;
-      for (id b in r->named) [encoder useResource:(id<MTLBuffer>)b usage:MTLResourceUsageRead | MTLResourceUsageWrite];
-      [encoder setComputePipelineState:state];
-      [encoder setBuffer:(id<MTLBuffer>)records.buffer offset:records.offset atIndex:0];
-      [encoder setBuffer:(id<MTLBuffer>)records.buffer offset:records.offset atIndex:1];
-      [encoder dispatchThreadgroups:MTLSizeMake(T, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
-    }
+    metal_resident(program, records.buffer);
+    for (id b in r->named) metal_resident(program, (void *)b);
+    [program->table setAddress:address atIndex:0];
+    [program->table setAddress:address atIndex:1];
+    id<MTL4ComputeCommandEncoder> encoder = program->encoder;
+    [encoder setComputePipelineState:state];
+    [encoder setArgumentTable:program->table];
+    [encoder dispatchThreadgroups:MTLSizeMake(T, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+    [encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
   }
   recording_free(r);
   return METAL_DONE;
@@ -600,7 +618,7 @@ const char *metal_prelude(void) {
 
 struct metal_result metal_present(struct metal_program *program,void *lists,size_t list_offset,
     void *records,size_t record_offset,size_t count,uint64_t first,void *words,size_t taken,size_t presented) {
-  if(program->encoder4&&count) {
+  if(count) {
     // The bridge consumes this list in order. The kernel stores the group's end only once the list's count has
     // reached its first entry (its predecessor's end), so a later group's count never passes an earlier group's
     // unwritten entries, in whatever command buffer each runs; here the count is read as well as written.
@@ -611,23 +629,18 @@ struct metal_result metal_present(struct metal_program *program,void *lists,size
       {(id)lists,list_offset,(count-head)*sizeof(struct mesh_entry),MetalReachWritten,-1},
       {(id)words,taken,sizeof(uint64_t),MetalReachRead,-1},
       {(id)words,presented,sizeof(uint64_t),MetalReachWritten,-1}};
-    MetalEncoderReaches(program->encoder4,reaches,sizeof reaches/sizeof *reaches);
+    MetalEncoderReaches(program->encoder,reaches,sizeof reaches/sizeof *reaches);
   }
   return dispatch(program,KIND_present,lists,records,words,NULL,
     (struct args){.dst=list_offset,.src=record_offset,.n=count,.scalar=first,.aux=taken,
                   .at=presented,.count=MESH_STREAM_ENTRIES},count,1);
 }
 
-/* the program's end signals `event` to `value`; one with no event (a failed group's, nccl-mesh.c program_end) signals
-   nothing; the residency set (the Metal 4 form's, a fused classic
-   program's) committed where the program made a buffer resident */
 void metal_end(struct metal_program *program, void *event, uint64_t value) {
   recording_free(program->recording);
   program->recording = NULL;
-  close_encoder(program);
-  if (event) [program->buffer encodeSignalEvent:(id<MTLEvent>)event value:value];
   if (program->added) [program->residency commit];
-  [program->buffer release];
-  [program->encoder4 release]; [program->table release]; [program->residency release]; [program->violation release];
+  if (program->own && event) submission_commit(program->own, (id<MTLEvent>)event, value);
+  [program->encoder release]; [program->table release]; [program->residency release]; [program->violation release];
 }
 
