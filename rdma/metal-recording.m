@@ -983,7 +983,7 @@ static const struct MetalOperand *MetalOperandOf(const struct MetalOperand *oper
 
 // ../dox/mesh/design/prepared-machine.md#M13: the operands bound in the capture's commands. A binding of an operand takes
 // its stride and slots, a written one its output offset past them; a binding's mode is its reaches' where it has any. A
-// reach of no access, past its buffer or, not a binding's, into an operand's slots (which an address cannot follow), and a
+// reach with neither access nor residency, past its buffer or, not a binding's, into an operand's slots (which an address cannot follow), and a
 // binding's extent past its buffer, are refused.
 static void MetalCaptureOperands(MetalCapture *capture,const struct MetalOperand *operands,size_t count) {
     struct MetalRecordedDispatch *commands=capture->dispatches.mutableBytes;
@@ -996,10 +996,10 @@ static void MetalCaptureOperands(MetalCapture *capture,const struct MetalOperand
             const struct MetalReach *reach=reaches+command->reach+k;
             const struct MetalOperand *operand=MetalOperandOf(operands,count,reach->buffer);
             const NSUInteger slots=operand?operand->instances:0,stride=operand?operand->stride:0;
-            if(!(reach->access&(MetalReachRead|MetalReachWritten))||reach->offset+reach->length>reach->buffer.length||
+            if(!(reach->access&(MetalReachRead|MetalReachWritten|MetalReachResident))||reach->offset+reach->length>reach->buffer.length||
                (stride&&slots!=1&&!(reach->access&MetalReachBinding)))
                 [NSException raise:NSInvalidArgumentException format:@"command %lu (%@): reach %u (%@, %lu bytes at %lu of %lu, access %u) is "
-                    "no access, past its buffer, or into an operand's slots (%lu), which an address cannot follow (docs/kernels.md Any program)",
+                    "no access or residency, past its buffer, or into an operand's slots (%lu), which an address cannot follow (docs/kernels.md Any program)",
                     (unsigned long)i,name,k,reach->buffer.label?:@"unnamed",(unsigned long)reach->length,(unsigned long)reach->offset,
                     (unsigned long)reach->buffer.length,reach->access,(unsigned long)slots];
             if(!(reach->access&MetalReachBinding))continue;

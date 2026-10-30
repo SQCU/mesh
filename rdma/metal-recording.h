@@ -40,6 +40,7 @@ enum { MetalReachRead = 1, MetalReachWritten = 2, MetalReachBinding = 4, MetalRe
 // Binding reaches name their actual argument index. Several disjoint ranges
 // can describe one view; all follow that argument's prepared invocation slot.
 // A non-binding reach uses binding = -1 (memory addressed through an operand).
+// Resident-only reaches retain storage without declaring a data dependency.
 struct MetalReach {
     __unsafe_unretained id<MTLBuffer> buffer;
     NSUInteger offset, length;
