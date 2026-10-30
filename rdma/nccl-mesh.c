@@ -172,6 +172,11 @@ struct ncclComm {
   uint32_t *endpoint;
   struct mesh_paths *writes;
   unsigned char *write_overrides;
+  /* `writes` composed with the cables (mesh_write_routes_compose): a pair no route was installed for that a cable
+     joins takes its cables, any other pair its `writes` paths. Made at realization and at each installation
+     (ncclMeshCommWriteRoutes), the only times either changes; the tree collectives' lowering reads it
+     (bind_routed_steps) */
+  struct mesh_paths *composed;
   uint64_t page;
   struct mesh_trees paths, trees, rooted;
   struct entry *entries, *given;
@@ -379,6 +384,7 @@ static void comm_free(struct ncclComm *comm) {
   free(comm->channels); free(comm->endpoint); free((void *)comm->fabric.cable);
   for (int p = 0; comm->writes && p < comm->nranks * comm->nranks; p++) paths_free(&comm->writes[p]);
   free(comm->writes); free(comm->write_overrides);
+  mesh_write_routes_free(comm->composed, (uint32_t)comm->nranks);
   free(comm->ops);
   pthread_mutex_destroy(&comm->guard);
   pthread_mutex_destroy(&comm->prepare);
@@ -645,8 +651,11 @@ ncclResult_t ncclMeshCommWriteRoutes(ncclComm_t comm, int source, int destinatio
   comm->write_overrides[source * comm->nranks + destination] = 1;
   plan_free(comm, comm->plan); comm->plan = NULL;
   cache_drop(comm);
+  mesh_write_routes_free(comm->composed, (uint32_t)comm->nranks);
+  comm->composed = NULL;
+  const int composed = mesh_write_routes_compose(&comm->fabric, comm->writes, comm->write_overrides, &comm->composed);
   pthread_mutex_unlock(&group_lock);
-  return ncclSuccess;
+  return composed ? fail(ncclSystemError, "composing the installed write routes: %s", strerror(composed)) : ncclSuccess;
 }
 
 /* whether this rank forwards a WRITE from `source` to `destination`: an endpoint of a cable of an installed path of
@@ -989,6 +998,7 @@ static int fabric_discover(struct ncclComm *comm, const struct report *reports) 
   if (!checked) checked = mesh_link_map_joined(map, NULL);
   if (!checked) checked = mesh_write_routes_default(&comm->fabric, &comm->writes);
   if (!checked && !(comm->write_overrides = calloc((size_t)n * n, 1))) checked = ENOMEM;
+  if (!checked) checked = mesh_write_routes_compose(&comm->fabric, comm->writes, comm->write_overrides, &comm->composed);
   return checked;
 }
 
@@ -2438,19 +2448,18 @@ static int generation_buffer(const struct call *c, uint32_t r, uint32_t b) {
   return b || c->what == MESH_REDUCE_SCATTER || !(c->what == MESH_REDUCE ? (int)r == c->root : rank_member(c->recipients, r));
 }
 
-/* Every rank derives the complete transaction graph before selecting its own
-   physical steps. Ordinary collectives use exactly the same path table and
-   fragment allocator as explicit WRITEs, including paths through ranks that
-   neither send nor receive that logical transaction. */
+/* Every rank derives the complete transaction graph before selecting its own physical steps, with the fragment
+   allocator explicit WRITEs use (mesh_write_compile), over one of the communicator's two route tables:
+   - `tree` (a tree collective's program: each transaction a tree edge, which a cable joins): the composed table, so
+     an edge keeps to its cables unless a route was installed for its pair;
+   - else (an all-to-all's transactions, between any pair, like a WRITE's): the installed paths, relays included,
+     which the solver weighs (ncclMeshCommWriteRoutes). */
 static ncclResult_t bind_routed_steps(struct call *c, const uint32_t *first, const struct mesh_step *logical,
-                                       const uint32_t *initialized, int routed) {
+                                       const uint32_t *initialized, int tree) {
   struct ncclComm *comm = c->comm;
   struct mesh_routed_program physical = {0};
-  struct mesh_paths *composed = NULL;
-  int status = routed ? mesh_write_routes_compose(&comm->fabric, comm->writes, comm->write_overrides, &composed) : 0;
-  if (!status) status = mesh_routed_compile(&comm->fabric, composed ? composed : comm->writes,
+  const int status = mesh_routed_compile(&comm->fabric, tree ? comm->composed : comm->writes,
                                            first, logical, initialized, comm->page, counted(c) ? MESH_PACKET_TRANSACTIONS : MESH_PACKET_OPERAND, &physical);
-  mesh_write_routes_free(composed, comm->fabric.nodes);
   ncclResult_t result = status ? fail(ncclInvalidUsage, "physical collective lowering for %s: %s", comm->name, strerror(status)) : ncclSuccess;
   if (!result) {
     struct mesh_routed_rank *rank = physical.rank + comm->rank;
