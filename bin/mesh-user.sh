@@ -41,8 +41,10 @@ cat > "$launchd_agents/io.mesh.bridge.plist.new" <<PL
 <key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>ThrottleInterval</key><integer>60</integer><key>ExitTimeOut</key><integer>60</integer>
 <key>StandardErrorPath</key><string>$HOME/Library/Logs/io.mesh.bridge.log</string></dict></plist>
 PL
+# the loaded bridge is this checkout's only when its job runs this checkout's heartbeat: another checkout's images did
+# not change here, so its bridge is not signalled (its job takes this definition at its next load)
 loaded=
-launchctl print "user/$(id -u)/io.mesh.bridge" >/dev/null 2>&1 && loaded=1
+[ "$(launchctl print "user/$(id -u)/io.mesh.bridge" 2>/dev/null | awk '/^[[:space:]]*program = /{print $3; exit}')" = "$source/rdma/mesh-heartbeat" ] && loaded=1
 out=$("$source/bin/mesh-launchd-agent.sh" "$launchd_agents/io.mesh.bridge.plist.new") || { printf '%s\n' "$out"; exit 1; }
 [ -z "$out" ] || printf '%s\n' "$out"
 { [ -z "$loaded" ] || { [ -z "$renew" ] && [ -z "$images_changed" ]; }; } \

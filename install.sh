@@ -50,9 +50,12 @@ install -C -m 755 -o root -g wheel "$REPO"/viz/serve.py "$MESH_ROOT/viz/serve.py
 install -C -m 644 -o root -g wheel "$REPO"/viz/index.html "$MESH_ROOT/viz/index.html"
 # telemetry and the observer run only when someone runs them (mesh-top starts its own sampler): a resident sampler on
 # every node spawned processes several times a second for a dashboard nothing else read (2026-10-29)
-for L in io.mesh.telemetry io.mesh.observer; do launchctl bootout "system/$L" >/dev/null 2>&1; [ -z "${ADMIN_USER:-}" ] || launchctl bootout "gui/$(id -u "$ADMIN_USER")/$L" >/dev/null 2>&1; done
-rm -f /Library/LaunchDaemons/io.mesh.{telemetry,observer}.plist
-[ -z "${ADMIN_USER:-}" ] || rm -f "$(eval echo "~$ADMIN_USER")"/Library/LaunchAgents/io.mesh.{telemetry,observer}.plist
+# jobs whose sources are gone, each left loaded where it once ran: io.mesh.nodeinfo (gone since 3b85c586), and the
+# hourly's user agent and its boot loader (an hour on 2026-10-29, before io.mesh.hourly became a system job)
+for L in io.mesh.telemetry io.mesh.observer io.mesh.nodeinfo io.mesh.hourly-boot; do launchctl bootout "system/$L" >/dev/null 2>&1; [ -z "${ADMIN_USER:-}" ] || launchctl bootout "gui/$(id -u "$ADMIN_USER")/$L" >/dev/null 2>&1; done
+[ -z "${ADMIN_USER:-}" ] || launchctl bootout "user/$(id -u "$ADMIN_USER")/io.mesh.hourly" >/dev/null 2>&1
+rm -f /Library/LaunchDaemons/io.mesh.{telemetry,observer,nodeinfo,hourly-boot}.plist "$MESH_ROOT/bin/mesh-nodeinfod.py"
+[ -z "${ADMIN_USER:-}" ] || rm -f "$(eval echo "~$ADMIN_USER")"/Library/LaunchAgents/io.mesh.{telemetry,observer,hourly}.plist
 rm -f /Library/LaunchDaemons/io.mesh.{bridge,update,keeper,cartlane.learner,cartlane.viewer}.plist "$MESH_ROOT"/bin/{mesh-flow,mesh-update.sh,mesh-keeper.sh,mesh_restart.py} "$MESH_ROOT"/policy{,.default}; rm -rf "$MESH_ROOT/rdma"
 for L in io.mesh.keeper io.mesh.cartlane.learner io.mesh.cartlane.viewer; do launchctl bootout "system/$L" >/dev/null 2>&1; done
 try "memory bandwidth sampler built" xcrun clang -fobjc-arc -framework Foundation -lIOReport "$REPO/user/mesh-bandwidth.m" -o "$REPO/user/mesh-bandwidth"
@@ -185,11 +188,6 @@ for L in io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.rdma-init io.mesh.
   if out=$("$REPO/bin/mesh-launchd-agent.sh" "$J/$L.plist.new" system "/Library/LaunchDaemons/$L.plist"); then
     [ -n "$out" ] && { replaced=$((replaced+1)); ok "$out"; } || { retained=$((retained+1)); ok "$L loaded"; }
   else bad "$L NOT LOADED: $out"; fi
-done
-for P in /Library/LaunchDaemons/io.mesh.*.plist; do
-  L=$(basename "$P" .plist)
-  launchctl print "gui/$ADMIN_UID/$L" 2>/dev/null | grep -q '^[[:space:]]*pid = ' && continue
-  if out=$("$REPO/bin/mesh-launchd-agent.sh" "$P" system); then [ -z "$out" ] || ok "$out"; else bad "$L NOT LOADED: $out"; fi
 done
 for P in "$H/Library/LaunchAgents/"*.plist; do
   [ "$(plutil -extract LimitLoadToSessionType raw "$P" 2>/dev/null)" = Background ] || continue

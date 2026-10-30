@@ -149,6 +149,9 @@ def node():
     from mesh_nodes import load
     cluster = load()
     minute = int(time.time()) // 60 * 60
+    # bounded from the start: a fetch that stalls ends this run (SIGALRM's default) rather than holding the job, which
+    # launchd never starts twice; the alarm survives the exec, where collective sets its own
+    signal.alarm(cluster.run_seconds)
     record = {'schema': 4, 'run': time.strftime('%Y%m%dT%H%MZ', time.gmtime(minute)), 'minute': minute,
               'node': socket.gethostname(), 'commits': {}, 'status': 'starting', 'errors': []}
     try:
@@ -407,7 +410,7 @@ def read(output_root):
     output_root = Path(output_root).resolve()
     here = None
     try:
-        local = mesh.Node(cluster, '-', 'localhost', local=True)
+        local = mesh.Node(cluster, '-', 'localhost', local=True, deadline=time.time() + 30)
         local.source = f'{cluster.checkouts}/mesh/current'
         here = str(local.stat()[1].get('node'))
     except Exception:
@@ -430,10 +433,14 @@ def read(output_root):
             if body.startswith('{'):
                 runs.setdefault(run, {})[number] = json.loads(body)
     logged = (output_root / 'log.jsonl').read_text() if (output_root / 'log.jsonl').exists() else ''
-    for run, records in sorted(runs.items()):
+    for run, fetched in sorted(runs.items()):
         out = output_root / run
         (out / 'nodes').mkdir(parents=True, exist_ok=True)
-        for number, record in records.items():
+        # a node that does not answer this time keeps the record an earlier read kept of it, so its run is not
+        # re-merged without it
+        records = {path.stem: json.loads(path.read_text()) for path in (out / 'nodes').glob('*.json')}
+        records.update(fetched)
+        for number, record in fetched.items():
             (out / 'nodes' / f'{number}.json').write_text(json.dumps(record, separators=(',', ':')) + '\n')
         (out / 'result.json').write_text(json.dumps(merged(records, cluster), separators=(',', ':')) + '\n')
         if str(out / 'result.json') not in logged:

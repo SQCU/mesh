@@ -8,32 +8,10 @@ ok(){ printf '  \033[32mOK  \033[0m %s\n' "$*"; }
 failures=0; retained=0; replaced=0
 bad(){ failures=$((failures+1)); printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
 try(){ d="$1"; shift; "$@" >/dev/null 2>&1 && ok "$d" || bad "$d"; }
-load(){
-  label=$1
-  if out=$("$R/bin/mesh-launchd-agent.sh" "$A/$label.plist.new" "gui/$UID"); then
-    if [ -n "$out" ]; then replaced=$((replaced+1)); ok "$out"; else retained=$((retained+1)); ok "$label current"; fi
-  else bad "$label: $out"; fi
-}
-system_owns(){
-  label=$1; port=$2
-  pid=$(launchctl print "system/$label" 2>/dev/null | awk '/^[[:space:]]*pid = /{print $3; exit}')
-  [ -n "$pid" ] && /usr/sbin/lsof -nP -a -p "$pid" -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
-}
-provide_http(){
-  label=$1; port=$2
-  if system_owns "$label" "$port"; then
-    rm -f "$A/$label.plist.new" "$A/$label.plist"
-    launchctl bootout "gui/$UID/$label" >/dev/null 2>&1
-    retained=$((retained+1))
-    ok "$label provided by system domain on :$port (no user copy, which launchd would load at login and which could never bind)"
-  else
-    load "$label"
-  fi
-}
 mkdir -p "$D/bin" "$D/etc" "$D/log" "$D/viz" "$A" "$HOME/.local/bin"
-kick=
-launchctl print "gui/$UID/io.mesh.telemetry" >/dev/null 2>&1 && ! { cmp -s "$R/user/mesh-telemetry.py" "$D/bin/mesh-telemetry.py" && cmp -s "$R/etc/mesh-capacity.json" "$D/etc/mesh-capacity.json"; } && kick=io.mesh.telemetry
-launchctl print "gui/$UID/io.mesh.observer" >/dev/null 2>&1 && ! { cmp -s "$R/viz/serve.py" "$D/viz/serve.py" && cmp -s "$R/etc/mesh-capacity.json" "$D/etc/mesh-capacity.json" && cmp -s "$R/etc/mesh-nodes.json" "$D/etc/mesh-nodes.json"; } && kick="$kick io.mesh.observer"
+# telemetry and the observer run only when someone runs them (mesh-top starts its own sampler); copies loaded before
+# 2026-10-29 are booted out and removed
+for L in io.mesh.telemetry io.mesh.observer; do launchctl bootout "gui/$UID/$L" >/dev/null 2>&1; rm -f "$A/$L.plist" "$A/$L.plist.new"; done
 install -C -m 755 "$R/bin/mesh-nodeinfo.sh" "$D/bin/mesh-nodeinfo.sh"
 install -C -m 755 "$R/user/mesh-telemetry.py" "$D/bin/mesh-telemetry.py"
 install -C -m 755 "$R/bin/mesh-peers.sh" "$R/bin/mesh-rdma.sh" "$D/bin/"
@@ -55,38 +33,6 @@ ln -sf "$D/bin/mesh-python" "$HOME/.local/bin/mesh-python"
 ln -sf "$D/bin/mesh-observe.py" "$HOME/.local/bin/mesh-observe"
 ln -sf "$D/bin/mesh-top.py" "$HOME/.local/bin/mesh-top"
 ok "$D/bin populated"
-PY=$D/bin/mesh-python
-cat > "$A/io.mesh.telemetry.plist.new" <<PL
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>io.mesh.telemetry</string>
-  <key>ProgramArguments</key><array><string>$PY</string><string>$D/bin/mesh-telemetry.py</string></array>
-  <key>EnvironmentVariables</key><dict>
-    <key>MESH_BANDWIDTH</key><string>$D/bin/mesh-bandwidth</string>
-    <key>MESH_STAT</key><string>$D/bin/mesh-stat</string>
-  </dict>
-  <key>RunAtLoad</key><true/>
-  <key>StandardOutPath</key><string>$D/log/io.mesh.telemetry.out.log</string>
-  <key>StandardErrorPath</key><string>$D/log/io.mesh.telemetry.err.log</string>
-</dict></plist>
-PL
-cat > "$A/io.mesh.observer.plist.new" <<PL
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>io.mesh.observer</string>
-  <key>ProgramArguments</key><array><string>$PY</string><string>$D/viz/serve.py</string><string>$D/etc/observer.json</string></array>
-  <key>WorkingDirectory</key><string>$D</string>
-  <key>RunAtLoad</key><true/>
-  <key>StandardOutPath</key><string>$D/log/io.mesh.observer.out.log</string>
-  <key>StandardErrorPath</key><string>$D/log/io.mesh.observer.err.log</string>
-</dict></plist>
-PL
-provide_http io.mesh.telemetry 8788
-provide_http io.mesh.observer 8787
-for L in $kick; do launchctl kickstart -k "gui/$UID/$L" >/dev/null 2>&1 && ok "$L restarted on its new program (kickstart -k)" || bad "$L not restarted"; done
-for L in io.mesh.telemetry io.mesh.observer; do launchctl kickstart "gui/$UID/$L" >/dev/null 2>&1; done
 ok "mesh-peers: $D/bin/mesh-peers.sh"
 printf '%s %s\n' "${MESH_BRANCH:-main}" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$D/revision"
 printf 'reported_failures=%s retained_jobs=%s replaced_jobs=%s\n' "$failures" "$retained" "$replaced" > "$D/install-status"
