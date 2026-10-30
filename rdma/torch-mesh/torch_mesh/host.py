@@ -55,7 +55,7 @@ def prepare(inputs, input_slots, output_slots, output_strides, shapes, dtypes, d
                           input_layouts=definition['input_layouts'], output_layouts=definition['output_layouts'],
                           binding_layout=definition['binding_layout'])
     if definition['provider'] == 'coreml':
-        return coreml_graph(definition['compiled'], source, target, units=definition['units'],
+        return coreml_graph(definition['compiled'], source, target, configuration=definition['configuration'],
                             input_layouts=definition['input_layouts'], output_layouts=definition['output_layouts'],
                             binding_layout=definition['binding_layout'])
     raise ValueError(f"unknown declared host provider {definition['provider']}")

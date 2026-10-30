@@ -14,8 +14,7 @@
 
 static NSMutableArray *models_;
 static NSMutableDictionary *loaded_;
-static NSMutableArray *compiled_;
-static NSMutableArray *units_;
+static NSMutableArray *placements_, *placement_text_;
 static NSMutableArray *references_, *keys_;
 static _Thread_local char error_[2048];
 
@@ -126,23 +125,80 @@ const char *mesh_cpu_program_run(void *program) {
 
 const char *mesh_coreml_error(void) { return error_; }
 
-long mesh_coreml_load(const char *package, int units) {
+// Walk nested blocks as well as the selected function's outer operations.
+// This is the provider's anticipated placement; no prediction is submitted.
+static void placement_block(MLComputePlan *plan,MLModelStructureProgramBlock *block,NSMutableDictionary *counts,NSMutableDictionary *unresolved)
+    API_AVAILABLE(macos(14.4)) {
+  for(MLModelStructureProgramOperation *op in block.operations) {
+    MLComputePlanDeviceUsage *usage=[plan computeDeviceUsageForMLProgramOperation:op];
+    if(usage) {
+      id<MLComputeDeviceProtocol> device=usage.preferredComputeDevice;
+      NSString *name=[device isKindOfClass:MLNeuralEngineComputeDevice.class]?@"ane":
+        [device isKindOfClass:MLGPUComputeDevice.class]?@"gpu":[device isKindOfClass:MLCPUComputeDevice.class]?@"cpu":@"unknown";
+      counts[name]=@([counts[name] unsignedLongValue]+1);
+    } else unresolved[op.operatorName]=@([unresolved[op.operatorName] unsignedLongValue]+1);
+    for(MLModelStructureProgramBlock *child in op.blocks)placement_block(plan,child,counts,unresolved);
+  }
+}
+static NSDictionary *model_placement(NSURL *compiled,MLModelConfiguration *configuration) {
+  if(@available(macOS 15.0,*)) {
+    dispatch_semaphore_t done=dispatch_semaphore_create(0);
+    __block MLComputePlan *plan=nil;__block NSError *failure=nil;
+    [MLComputePlan loadContentsOfURL:compiled configuration:configuration completionHandler:^(MLComputePlan *loaded,NSError *error) {
+      plan=loaded;failure=error;dispatch_semaphore_signal(done);
+    }];
+    if(dispatch_semaphore_wait(done,dispatch_time(DISPATCH_TIME_NOW,(int64_t)MESH_PREPARATION_NS))) {
+      snprintf(error_,sizeof error_,"compute plan: preparation deadline of %.0f s",(double)MESH_PREPARATION_NS/1e9);return nil;
+    }
+    if(!plan){snprintf(error_,sizeof error_,"compute plan: %s",failure.localizedDescription.UTF8String);return nil;}
+    MLModelStructureProgramFunction *function=plan.modelStructure.program.functions[configuration.functionName];
+    if(!function){snprintf(error_,sizeof error_,"compute plan has no function %s",configuration.functionName.UTF8String);return nil;}
+    NSMutableDictionary *counts=[NSMutableDictionary dictionary],*unresolved=[NSMutableDictionary dictionary];
+    placement_block(plan,function.block,counts,unresolved);
+    return @{@"preferred":counts,@"unresolved":unresolved};
+  }
+  snprintf(error_,sizeof error_,"named Core ML compute plans require macOS 15");return nil;
+}
+static BOOL placement_allowed(NSDictionary *placement,NSArray *devices) {
+  NSDictionary *preferred=placement[@"preferred"];
+  NSMutableSet *outside=[NSMutableSet setWithArray:preferred.allKeys];[outside minusSet:[NSSet setWithArray:devices]];
+  if(!outside.count)return YES;
+  snprintf(error_,sizeof error_,"Core ML preferred devices %s exceed declared devices %s",preferred.description.UTF8String,devices.description.UTF8String);
+  return NO;
+}
+long mesh_coreml_load(const char *package,const char *configuration_json) {
   @autoreleasepool {
+   NSDictionary *given=configuration_json?[NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:configuration_json length:strlen(configuration_json)] options:0 error:nil]:nil;
+   if(![given isKindOfClass:NSDictionary.class]||![given[@"units"] isKindOfClass:NSNumber.class]||
+      ![given[@"function"] isKindOfClass:NSString.class]||![given[@"devices"] isKindOfClass:NSArray.class]||![given[@"devices"] count]) {
+     snprintf(error_,sizeof error_,"Core ML requires units, function and allowed devices");return -1;
+   }
+   NSArray *devices=given[@"devices"];NSString *function=given[@"function"];int units=[given[@"units"] intValue];
+   for(id device in devices)if(![@[@"cpu",@"gpu",@"ane"] containsObject:device]) {
+     snprintf(error_,sizeof error_,"unknown declared Core ML device %s",[device description].UTF8String);return -1;
+   }
+   const MLComputeUnits choices[]={MLComputeUnitsCPUAndNeuralEngine,MLComputeUnitsAll,MLComputeUnitsCPUOnly,MLComputeUnitsCPUAndGPU};
+   if((unsigned)units>=sizeof choices/sizeof *choices){snprintf(error_,sizeof error_,"invalid compute units");return -1;}
    @synchronized([MLModel class]) {
-    if (!models_) { models_ = [NSMutableArray new]; loaded_ = [NSMutableDictionary new]; compiled_ = [NSMutableArray new]; units_ = [NSMutableArray new]; references_=[NSMutableArray new];keys_=[NSMutableArray new]; }
-    const MLComputeUnits choices[]={MLComputeUnitsCPUAndNeuralEngine,MLComputeUnitsAll,MLComputeUnitsCPUOnly,MLComputeUnitsCPUAndGPU};
-    if((unsigned)units>=sizeof choices/sizeof *choices){snprintf(error_,sizeof error_,"missing or invalid compute units");return -1;}
-    NSString *key=[NSString stringWithFormat:@"%d:%s",units,package];
-    NSNumber *held=loaded_[key];if(held){long h=held.longValue;references_[h]=@([references_[h] unsignedLongValue]+1);return h;}
-    NSError *error = nil;
-    NSURL *compiled = [NSURL fileURLWithPath:@(package)];
-    MLModelConfiguration *configuration = [MLModelConfiguration new];
-    configuration.computeUnits = choices[units];
-    MLModel *model = [MLModel modelWithContentsOfURL:compiled configuration:configuration error:&error];
-    if (!model) { snprintf(error_, sizeof error_, "load: %s", error.localizedDescription.UTF8String); return -1; }
-    NSUInteger handle=[models_ indexOfObject:[NSNull null]];
-    if(handle==NSNotFound){handle=models_.count;[models_ addObject:model];[compiled_ addObject:compiled];[units_ addObject:@(configuration.computeUnits)];[references_ addObject:@1];[keys_ addObject:key];}
-    else{models_[handle]=model;compiled_[handle]=compiled;units_[handle]=@(configuration.computeUnits);references_[handle]=@1;keys_[handle]=key;}
+    if (!models_) { models_=[NSMutableArray new];loaded_=[NSMutableDictionary new];placements_=[NSMutableArray new];placement_text_=[NSMutableArray new];references_=[NSMutableArray new];keys_=[NSMutableArray new]; }
+    NSArray *key=@[@(units),function,@(package)];
+    NSNumber *held=loaded_[key];
+    if(held) {
+      long h=held.longValue;if(!placement_allowed(placements_[h],devices))return -1;
+      references_[h]=@([references_[h] unsignedLongValue]+1);return h;
+    }
+    NSError *error=nil;NSURL *compiled=[NSURL fileURLWithPath:@(package)];
+    MLModelConfiguration *configuration=[MLModelConfiguration new];configuration.computeUnits=choices[units];
+    if(@available(macOS 15.0,*))configuration.functionName=function;
+    else {snprintf(error_,sizeof error_,"named Core ML functions require macOS 15");return -1;}
+    NSDictionary *placement=model_placement(compiled,configuration);
+    if(!placement||!placement_allowed(placement,devices))return -1;
+    MLModel *model=[MLModel modelWithContentsOfURL:compiled configuration:configuration error:&error];
+    if(!model){snprintf(error_,sizeof error_,"load: %s",error.localizedDescription.UTF8String);return -1;}
+    NSString *text=[[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:placement options:NSJSONWritingSortedKeys error:nil] encoding:NSUTF8StringEncoding];
+    NSUInteger handle=[models_ indexOfObject:NSNull.null];
+    if(handle==NSNotFound){handle=models_.count;[models_ addObject:model];[placements_ addObject:placement];[placement_text_ addObject:text];[references_ addObject:@1];[keys_ addObject:key];}
+    else{models_[handle]=model;placements_[handle]=placement;placement_text_[handle]=text;references_[handle]=@1;keys_[handle]=key;}
     loaded_[key]=@(handle);return (long)handle;
    }
   }
@@ -151,7 +207,7 @@ long mesh_coreml_load(const char *package, int units) {
 void mesh_coreml_release(long handle) {
   @synchronized([MLModel class]) {
     NSUInteger left=[references_[handle] unsignedLongValue]-1;references_[handle]=@(left);
-    if(!left){[loaded_ removeObjectForKey:keys_[handle]];models_[handle]=[NSNull null];compiled_[handle]=[NSNull null];units_[handle]=[NSNull null];keys_[handle]=[NSNull null];}
+    if(!left){[loaded_ removeObjectForKey:keys_[handle]];models_[handle]=[NSNull null];placements_[handle]=[NSNull null];placement_text_[handle]=[NSNull null];keys_[handle]=[NSNull null];}
   }
 }
 
@@ -228,50 +284,10 @@ const char *mesh_coreml_run(void *binding) {
 void mesh_coreml_retain(void *binding) { CFRetain(binding); }
 void mesh_coreml_unbind(void *binding) { CFRelease(binding); }
 
-/* Where Core ML places each operation of a loaded model (MLComputePlan): "operator=device" a line, the device cpu, gpu,
-   ane or unknown, written to `out` (at most `size` bytes); the operations' count, or -1.  Placement is Core ML's own
-   choice within the compute units the model was loaded on: an operation on the CPU shares the performance cores with
-   anything else running there.  The plan's load is awaited within MESH_PREPARATION_NS, past which this fails (-1). */
-long mesh_coreml_placement(long handle, char *out, size_t size) {
-  @autoreleasepool {
-    NSURL *compiled; MLComputeUnits units;
-    @synchronized([MLModel class]) {
-      if (handle < 0 || handle >= (long)models_.count || models_[handle]==[NSNull null]) {
-        snprintf(error_,sizeof error_,"no model %ld",handle);return -1;
-      }
-      compiled=compiled_[handle];units=(MLComputeUnits)[units_[handle] integerValue];
-    }
-    if (@available(macOS 14.4, *)) {
-      MLModelConfiguration *configuration = [MLModelConfiguration new];
-      configuration.computeUnits = units;
-      dispatch_semaphore_t done = dispatch_semaphore_create(0);
-      __block MLComputePlan *plan = nil;
-      __block NSError *failure = nil;
-      [MLComputePlan loadContentsOfURL:compiled configuration:configuration
-                     completionHandler:^(MLComputePlan *loaded, NSError *error) { plan = loaded; failure = error; dispatch_semaphore_signal(done); }];
-      if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)MESH_PREPARATION_NS))) {
-        snprintf(error_, sizeof error_, "compute plan: not loaded within its deadline of %.0f s (MESH_PREPARATION_NS)",
-                 (double)MESH_PREPARATION_NS / 1e9);
-        return -1;
-      }
-      if (!plan) { snprintf(error_, sizeof error_, "compute plan: %s", failure.localizedDescription.UTF8String); return -1; }
-      MLModelStructureProgramFunction *main = plan.modelStructure.program.functions[@"main"];
-      NSMutableString *text = [NSMutableString string];
-      long count = 0;
-      for (MLModelStructureProgramOperation *op in main.block.operations) {
-        id<MLComputeDeviceProtocol> device = [plan computeDeviceUsageForMLProgramOperation:op].preferredComputeDevice;
-        NSString *where = [device isKindOfClass:[MLNeuralEngineComputeDevice class]] ? @"ane"
-                        : [device isKindOfClass:[MLGPUComputeDevice class]] ? @"gpu"
-                        : [device isKindOfClass:[MLCPUComputeDevice class]] ? @"cpu" : @"unknown";
-        [text appendFormat:@"%@=%@\n", op.operatorName, where];
-        count++;
-      }
-      snprintf(out, size, "%s", text.UTF8String);
-      return count;
-    }
-    snprintf(error_, sizeof error_, "MLComputePlan needs macOS 14.4");
-    return -1;
-  }
+/* Placement is a property of the prepared model. Reading it never reloads a
+   compute plan or waits for a provider callback. The handle owns the string. */
+const char *mesh_coreml_placement(long handle) {
+  @synchronized([MLModel class]) { return [placement_text_[handle] UTF8String]; }
 }
 
 /* A model package compiled (MLModel compileModelAtURL) into `destination` (a .mlmodelc, replaced where present), so a

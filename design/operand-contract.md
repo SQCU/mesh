@@ -865,6 +865,28 @@ a fixed output-page contract, the binding must use an API/model contract which
 actually guarantees the supplied storage. Internal provider work and dependencies
 also remain opaque. No new runtime recovery or copy path has been added.
 
+Core ML preparation now takes the same explicit model configuration from native
+callers, FX declarations and replay records: compute units, function name and
+allowed devices. The shared loader inspects the selected function, including
+nested blocks, with the configuration used to load the model. Known preferred
+devices outside the declaration stop preparation. Reusing a loaded model still
+applies the requesting caller's device constraint. Older manifests and replay
+records must be prepared again; missing configuration has no default.
+
+The loader retains one placement report with `preferred` device counts and
+`unresolved` operator counts. The latter are operations for which Core ML gives
+no device-use information. Reading this report does not reload a compute plan.
+The former Python-only inspection has been removed. This report describes
+anticipated placement; neither it nor the allowed-device declaration guarantees
+actual execution placement or caller-owned output storage.
+
+Preparation on 2026-10-29 converted and compiled the shared model builder's row
+and channel tails with both `main` and an explicitly named entry function. A
+cached CPU model retained the device constraint when requested with an ANE-only
+declaration. A conditional graph retained unknown placement information from
+its nested blocks. The shared library and native callers built. No prediction
+or numerical command ran, and temporary model artifacts were removed.
+
 The native ANE allocator now uses its declared allocation grain independently
 of the model build block. It can assign intervals within one block, and ranges
 whose ends are both off that grid. Preparation clips each block to the exact

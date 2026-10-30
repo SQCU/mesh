@@ -18,6 +18,7 @@
     "units": 0,
     "devices": [
       "ane"
-    ]
+    ],
+    "function": "main"
   }
 }

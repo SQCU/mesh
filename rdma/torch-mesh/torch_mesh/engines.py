@@ -81,7 +81,7 @@ def _coreml():
         try:
             lib = ctypes.CDLL(os.path.join(RDMA, 'libmesh-coreml.dylib'))
             lib.mesh_coreml_load.restype = ctypes.c_long
-            lib.mesh_coreml_load.argtypes = [ctypes.c_char_p, ctypes.c_int]
+            lib.mesh_coreml_load.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
             lib.mesh_coreml_release.argtypes = [ctypes.c_long]
             lib.mesh_coreml_bind.restype = ctypes.c_void_p
             lib.mesh_coreml_bind.argtypes = [ctypes.c_long, ctypes.POINTER(ModelView), ctypes.c_size_t,
@@ -90,8 +90,8 @@ def _coreml():
             lib.mesh_coreml_retain.argtypes = [ctypes.c_void_p]
             lib.mesh_coreml_unbind.argtypes = [ctypes.c_void_p]
             lib.mesh_coreml_error.restype = ctypes.c_char_p
-            lib.mesh_coreml_placement.restype = ctypes.c_long
-            lib.mesh_coreml_placement.argtypes = [ctypes.c_long, ctypes.c_char_p, ctypes.c_size_t]
+            lib.mesh_coreml_placement.restype = ctypes.c_char_p
+            lib.mesh_coreml_placement.argtypes = [ctypes.c_long]
             lib.mesh_coreml_compile.restype = ctypes.c_int
             lib.mesh_coreml_compile.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
             lib.mesh_cpu_program_create.argtypes = [ctypes.POINTER(CpuCommand), ctypes.c_size_t]
@@ -332,9 +332,7 @@ def rebuild(kind, data):
         length, = struct.unpack_from('<Q', data)
         header = json.loads(data[8:8 + length])
         addresses = struct.unpack_from(f'<{len(header["inputs"]) + len(header["outputs"])}Q', data, _coreml_addresses(length))
-        handle = native.mesh_coreml_load(os.fsencode(header['compiled']), header['units'])
-        if handle < 0:
-            raise RuntimeError(native.mesh_coreml_error().decode())
+        handle = _load_coreml(native, header['compiled'], header['configuration'])
         try:
             views = _model_views(header['inputs'] + header['outputs'], addresses)
             inputs, outputs = views[:len(header['inputs'])], views[len(header['inputs']):]
@@ -414,7 +412,7 @@ class Ane(Engine):
     def declaration(self, op, shard, rows):
         compiled, _, _ = neural_engine_share(shard.kind, shard.arrays, rows, self.tile, self.block, self.model)
         source, target = self.model['input'], self.model['output']
-        return dict(definition=dict(provider='coreml', compiled=str(compiled), units=self.model['units']), weights={},
+        return dict(definition=dict(provider='coreml', compiled=str(compiled), configuration=self.model), weights={},
                     input_layouts={source['name']: source['layout']}, output_layouts={target['name']: target['layout']},
                     binding_layout=self.model['binding_layout'])
 
@@ -440,10 +438,11 @@ def _coreml_addresses(length):
 
 class Prediction:
     """One Core ML invocation's views, bound before the numerical function."""
-    def __init__(self, native, model, source, target, *, compiled, units, input_layouts, output_layouts, binding_layout):
+    def __init__(self, native, model, source, target, *, compiled, configuration, input_layouts, output_layouts, binding_layout):
         from . import _stream
         from .operand import TensorView
         self.native = native
+        self.placement = json.loads(native.mesh_coreml_placement(model))
         source, target, before, after = _host_bindings(source, target, input_layouts, output_layouts, binding_layout)
         self.before, self.after = _stream.Commands(before), _stream.Commands(after)
         self.inputs, self.outputs = tuple(source.values()), tuple(target.values())
@@ -462,8 +461,8 @@ class Prediction:
         self.binding = native.mesh_coreml_bind(model, inputs, len(inputs), outputs, len(outputs))
         if not self.binding:
             raise RuntimeError(native.mesh_coreml_error().decode())
-        # design/replay-templates-2026-10-29.md: the compiled model, its units and its views, each address a place
-        header = json.dumps({'compiled': str(compiled), 'units': units, 'inputs': [v for v, _ in given],
+        # The compiled model, all load constraints and its views survive replay preparation.
+        header = json.dumps({'compiled': str(compiled), 'configuration': configuration, 'inputs': [v for v, _ in given],
                              'outputs': [v for v, _ in made]}).encode()
         at = _coreml_addresses(len(header))
         addresses = [a for _, a in given + made]
@@ -482,10 +481,18 @@ class Prediction:
         schedule.append(self.after)
 
 
-def coreml_graph(compiled, inputs, outputs, *, units, input_layouts, output_layouts, binding_layout):
+def _load_coreml(native, compiled, configuration):
+    handle = native.mesh_coreml_load(os.fsencode(compiled), json.dumps(configuration).encode())
+    if handle < 0:
+        raise RuntimeError(native.mesh_coreml_error().decode())
+    return handle
+
+
+def coreml_graph(compiled, inputs, outputs, *, configuration, input_layouts, output_layouts, binding_layout):
     """Bind any compiled Core ML graph to named shared views at preparation.
 
-    ``units`` is the caller's backend operand (0 CPU/ANE, 1 all, 2 CPU, 3 CPU/GPU).
+    ``configuration`` supplies compute units, function name and allowed devices.
+    The shared loader inspects the provider's preferred placement before binding.
     Graph conversion belongs to preparation; no operation-kind dispatch or
     model loading occurs in the returned host record. The common schedule
     derives dependencies from the declared input and output views. Per-name
@@ -497,17 +504,15 @@ def coreml_graph(compiled, inputs, outputs, *, units, input_layouts, output_layo
     native = _coreml()
     if native is None:
         raise RuntimeError('Core ML graph requires the native shared-memory binding')
-    handle = native.mesh_coreml_load(os.fsencode(compiled), units)
-    if handle < 0:
-        raise RuntimeError(native.mesh_coreml_error().decode())
+    handle = _load_coreml(native, compiled, configuration)
     try:
-        return Prediction(native, handle, inputs, outputs, compiled=compiled, units=units, input_layouts=input_layouts,
+        return Prediction(native, handle, inputs, outputs, compiled=compiled, configuration=configuration, input_layouts=input_layouts,
                           output_layouts=output_layouts, binding_layout=binding_layout)
     finally:
         native.mesh_coreml_release(handle)
 
 
-def export_coreml_graph(program, inputs, outputs, *, directory, units, deployment, precision, input_layouts, output_layouts, binding_layout):
+def export_coreml_graph(program, inputs, outputs, *, directory, configuration, input_layouts, output_layouts, binding_layout):
     """Lower an exported tensor graph once, then bind the common host record.
 
     ``program`` is a torch.export.ExportedProgram (its graph and constants).
@@ -519,10 +524,10 @@ def export_coreml_graph(program, inputs, outputs, *, directory, units, deploymen
     native = _coreml()
     if native is None:
         raise RuntimeError('Core ML graph requires the native shared-memory binding')
-    compute = coreml_units(units)
+    compute = coreml_units(configuration['units'])
     model = ct.convert(program, convert_to='mlprogram', compute_units=compute,
-                       minimum_deployment_target=getattr(ct.target, deployment),
-                       compute_precision=getattr(ct.precision, precision), skip_model_load=True)
+                       minimum_deployment_target=getattr(ct.target, configuration['deployment']),
+                       compute_precision=getattr(ct.precision, configuration['precision']), skip_model_load=True)
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     package, compiled = directory / 'graph.mlpackage', directory / 'graph.mlmodelc'
@@ -532,7 +537,7 @@ def export_coreml_graph(program, inputs, outputs, *, directory, units, deploymen
             raise RuntimeError(native.mesh_coreml_error().decode())
     finally:
         shutil.rmtree(package)
-    return coreml_graph(compiled, inputs, outputs, units=units, input_layouts=input_layouts, output_layouts=output_layouts, binding_layout=binding_layout)
+    return coreml_graph(compiled, inputs, outputs, configuration=configuration, input_layouts=input_layouts, output_layouts=output_layouts, binding_layout=binding_layout)
 
 
 def coreml_units(units):
@@ -594,7 +599,9 @@ def neural_engine_model(kind, arrays, rows, tile, block, configuration):
         y = mb.transpose(x=mb.reshape(x=y, shape=[n, rows]), perm=[1, 0])
         y = mb.cast(x=y, dtype=casts[target['dtype']], name=target['name']) if configuration['weight_dtype'] != target['dtype'] else mb.identity(x=y, name=target['name'])
         function.set_outputs([y])
-    program.add_function('main', function)
+    program.add_function(configuration['function'], function)
+    program.default_function_name = configuration['function']
+    program.export_as_multifunction = True
     return ct.convert(program, convert_to='mlprogram', compute_units=coreml_units(configuration['units']),
                       compute_precision=getattr(ct.precision, configuration['precision']),
                       minimum_deployment_target=getattr(ct.target, configuration['deployment']), skip_model_load=True)
@@ -607,10 +614,7 @@ def neural_engine_share(kind, arrays, rows, tile, block, configuration):
     devices are compiler operands. Artifacts are reused by those operands and
     constants. Provider placement is checked during preparation, before binding.
     """
-    import collections
-    import coremltools as ct
     import numpy as np
-    from coremltools.models.compute_plan import MLComputePlan
     cache = Path(os.path.expanduser('~/.cache/mesh-engines'))
     cache.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha1(b''.join(np.ascontiguousarray(a).tobytes() for a in arrays) + json.dumps([kind, rows, tile, block, configuration], sort_keys=True).encode()).hexdigest()
@@ -625,17 +629,12 @@ def neural_engine_share(kind, arrays, rows, tile, block, configuration):
         shutil.rmtree(package, ignore_errors=True)
         if failed:
             raise RuntimeError(f'Neural Engine share: {native.mesh_coreml_error().decode()}')
-    plan = MLComputePlan.load_from_path(path=str(compiled), compute_units=coreml_units(configuration['units']))
-    devices = collections.Counter()
-    for op in plan.model_structure.program.functions['main'].block.operations:
-        usage = plan.get_compute_device_usage_for_mlprogram_operation(op)
-        if usage is not None:
-            name = type(usage.preferred_compute_device).__name__
-            devices['ane' if 'NeuralEngine' in name else 'gpu' if 'GPU' in name else 'cpu' if 'CPU' in name else 'unknown'] += 1
-    outside = set(devices) - set(configuration['devices'])
-    if outside:
-        raise ValueError(f"model placement {dict(devices)} exceeds declared devices {configuration['devices']}")
-    return compiled, block, dict(devices)
+    handle = _load_coreml(native, compiled, configuration)
+    try:
+        return compiled, block, json.loads(native.mesh_coreml_placement(handle))
+    finally:
+        native.mesh_coreml_release(handle)
+
 
 
 ENGINES = {e.name: e for e in (Mps, Cpu, Ane)}

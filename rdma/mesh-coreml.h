@@ -18,7 +18,9 @@ enum MeshModelUnits { MeshModelCPUAndANE, MeshModelAll, MeshModelCPU, MeshModelC
 extern "C" {
 #endif
 
-long mesh_coreml_load(const char *compiled, int units);
+/* Configuration JSON declares units, function and allowed devices (cpu/gpu/ane).
+   Loading inspects that function's complete compute plan during preparation. */
+long mesh_coreml_load(const char *compiled, const char *configuration);
 void mesh_coreml_release(long model);
 void *mesh_coreml_bind(long model, const MeshModelView *inputs, size_t inputCount,
                       const MeshModelView *outputs, size_t outputCount);
@@ -27,7 +29,9 @@ void mesh_coreml_retain(void *binding);
 void mesh_coreml_unbind(void *binding);
 const char *mesh_coreml_error(void);
 int mesh_coreml_compile(const char *package, const char *compiled);
-long mesh_coreml_placement(long model, char *output, size_t size);
+/* Borrowed JSON from the prepared plan, held until model release: preferred
+   device counts and unresolved operator counts. Not an execution guarantee. */
+const char *mesh_coreml_placement(long model);
 
 /* CPU numerical operands and workspace are bound during preparation. */
 typedef struct MeshCpuCommand {
