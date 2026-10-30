@@ -1,0 +1,42 @@
+From: Sven Verdoolaege <sven.verdoolaege@gmail.com>
+Date: Sun, 1 Feb 2026 20:14:12 +0000 (+0100)
+Subject: isl_basic_map_reduce_coefficients: do not reduce again on empty result
+X-Git-Url: http://repo.or.cz/isl.mirror.git/commitdiff_plain/99a07a039237f11bccc1ef80a7b6cc76ae5f98c5
+
+isl_basic_map_reduce_coefficients: do not reduce again on empty result
+
+The call to isl_basic_map_detect_inequality_pairs may discover
+a conflicting pair of inequality constraints, or it may discover
+an implicit equality constraint that conflict with other
+equality constraints, causing either isl_basic_map_detect_inequality_pairs
+itself of isl_basic_map_gauss to return a canonical empty basic map.
+Such a canonical empty set does not have any local variables,
+causing reduce_coefficients to fail if the original basic map
+did involve local variables.
+Detect this condition and refrain from calling reduce_coefficients
+in that case.
+
+Reported-by: Michael Kruse <MichaelKruse@meinersbur.de>
+Signed-off-by: Sven Verdoolaege <sven.verdoolaege@gmail.com>
+---
+
+diff --git a/isl_map_simplify.c b/isl_map_simplify.c
+index 27b46a41..869a2086 100644
+--- a/isl_map_simplify.c
++++ b/isl_map_simplify.c
+@@ -6470,8 +6470,14 @@ __isl_give isl_basic_map *isl_basic_map_reduce_coefficients(
+ 		ISL_F_CLR(bmap, ISL_BASIC_MAP_NO_REDUNDANT);
+ 		bmap = isl_basic_map_detect_inequality_pairs(bmap, &progress);
+ 		if (progress) {
++			isl_bool empty;
++
+ 			bmap = isl_basic_map_gauss(bmap, NULL);
+-			bmap = reduce_coefficients(bmap, &data);
++			empty = isl_basic_map_plain_is_empty(bmap);
++			if (empty < 0)
++				goto error;
++			if (!empty)
++				bmap = reduce_coefficients(bmap, &data);
+ 			bmap = eliminate_divs_eq(bmap, &progress);
+ 		}
+ 	}
