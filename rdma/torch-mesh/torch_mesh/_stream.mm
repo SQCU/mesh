@@ -1095,50 +1095,23 @@ static std::string metal_prelude() { return ncclMeshMetalPrelude(); }
 // reductions and the public indexed/affine write API. No collective-specific
 // transport planner is selected by a generic data function.
 static int physical_channels(ncclComm_t comm) {
-  const mesh_fabric *fabric = nullptr;
-  int rank = 0, channels = 0;
-  checked(ncclCommUserRank(comm, &rank));
-  checked(ncclMeshCommFabric(comm, &fabric));
-  for (uint32_t k = 0; k < fabric->cables; k++)
-    channels += fabric->cable[k].node[0] == (uint32_t)rank || fabric->cable[k].node[1] == (uint32_t)rank;
+  int channels = 0;
+  checked(ncclMeshCommChannels(comm, &channels));
   return channels;
 }
 
 // The most entries one repeat of a group of WRITEs, `root` to each of `destinations` with `count` elements of
-// `element_bytes`, lays on any directed cable: every rank's transfers compiled as libnccl-mesh's write_steps compiles
-// them (mesh_write_compile over the communicator's fabric, installed paths and page), its SENDs counted a cable (a
-// cable's send list at one end and its landing list at the other hold the same entries). A group of R repeats lays R
-// times this on that list, and a list holds MESH_STREAM_ENTRIES (write_window).
+// `element_bytes`, lays on any directed cable (libnccl-mesh's ncclMeshCommWriteEntries, over the compile its WRITE steps
+// take). A group of R repeats lays R times this on that list, and a list holds MESH_STREAM_ENTRIES (write_window).
 static int64_t write_entries(const std::string &group, int64_t root, const std::vector<int64_t> &destinations,
                              int64_t count, int64_t element_bytes) {
   const int64_t handle = communicator_of(c10::IValue(group));
   TORCH_CHECK(handle, "torch_mesh.write_entries: ", group, " is no live mesh group of this process");
-  ncclComm_t comm = communicator(handle);
-  const mesh_fabric *fabric = nullptr;
-  size_t page = 0;
-  int ranks = 0;
-  checked(ncclMeshCommFabric(comm, &fabric));
-  checked(ncclMeshCommPage(comm, &page));
-  checked(ncclCommCount(comm, &ranks));
-  std::map<std::pair<uint32_t, uint32_t>, int64_t> laid;
-  const mesh_operand operand{1, (uint32_t)element_bytes, (uint64_t)count};
-  for (const int64_t destination : destinations) {
-    const mesh_paths *paths = nullptr;
-    checked(ncclMeshCommWritePaths(comm, (int)root, (int)destination, &paths));
-    for (int r = 0; r < ranks; r++) {
-      const int needed = mesh_write_compile(fabric, (uint32_t)r, (uint32_t)root, (uint32_t)destination, paths, operand, page, 0,
-                                            nullptr, 0);
-      TORCH_CHECK(needed >= 0, "torch_mesh.write_entries: mesh_write_compile ", root, " to ", destination, ": ", strerror(-needed));
-      std::vector<mesh_transfer> made((size_t)needed + 1);
-      const int got = mesh_write_compile(fabric, (uint32_t)r, (uint32_t)root, (uint32_t)destination, paths, operand, page, 0,
-                                         made.data(), (uint32_t)made.size());
-      for (int k = 0; k < got; k++)
-        if (made[(size_t)k].step.op == MESH_STEP_SEND) laid[{made[(size_t)k].cable, (uint32_t)r}]++;
-    }
-  }
-  int64_t most = 0;
-  for (const auto &entry : laid) most = std::max(most, entry.second);
-  return most;
+  const std::vector<int> to(destinations.begin(), destinations.end());
+  uint64_t most = 0;
+  checked(ncclMeshCommWriteEntries(communicator(handle), (int)root, to.data(), (int)to.size(), (size_t)count, (size_t)element_bytes,
+                                   &most));
+  return (int64_t)most;
 }
 
 struct PreparedWrites {

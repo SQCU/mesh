@@ -1019,6 +1019,14 @@ ncclResult_t ncclMeshCommWritePaths(ncclComm_t comm, int source, int destination
    binds its WRITE with an empty page table, ncclMeshPageTableCreate(NULL, comm, metal, &table), and its layout's other
    fields as any rank's. */
 ncclResult_t ncclMeshCommWriteForwards(ncclComm_t comm, int source, int destination, int* forwards);
+/* The channels this rank's lists lay, a cable each that ends here: the count every kernel's per-channel records hold. */
+ncclResult_t ncclMeshCommChannels(ncclComm_t comm, int* channels);
+/* The most entries one repeat of a group of WRITEs, `root` to each of the n `destinations` with `count` elements of
+   `element_bytes`, lays on any directed cable: every rank's transfers as the library compiles a WRITE's steps (its
+   fabric, installed paths and page), each SEND an entry on its cable's send list at one end and its landing list at the
+   other. A group of R repeats lays R times this on that list (configuration time only). */
+ncclResult_t ncclMeshCommWriteEntries(ncclComm_t comm, int root, const int* destinations, int n, size_t count,
+                                      size_t element_bytes, uint64_t* most);
 /* Realization metadata only, before function execution: each rank's fixed
    bytes gathered into rank-major reports. Uses the retained configuration
    channel, with the communicator's deadline; never a payload receipt. */

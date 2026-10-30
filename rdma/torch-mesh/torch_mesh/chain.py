@@ -121,7 +121,7 @@ def operands(a, b, inputs, outputs, group, batch, resident_tiles, input_frames, 
     counts = []
     # a window's frames: two windows' entries fit each cable's list at once, since the next is issued before the
     # current one's consumers (_stream.mm compile_chain); a frame's entries on its busiest cable are the solver's own
-    # (_stream.write_entries: every rank's mesh_write_compile over the communicator's fabric and paths)
+    # (_stream.write_entries: libnccl-mesh's ncclMeshCommWriteEntries, over the compile its WRITE steps take)
     per_frame = _stream.write_entries(group.group_name, 0, list(range(1, group.size())), rows * width, inputs.element_size())
     input_frames = max(1, min(input_frames, _stream.STREAM_ENTRIES // 2 // max(1, per_frame)))
     input_calls = [Call(WRITE, rows * width, inputs.dtype, root=0, destination=rank, fused=True)

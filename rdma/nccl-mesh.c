@@ -692,6 +692,45 @@ ncclResult_t ncclMeshCommWritePaths(ncclComm_t comm, int source, int destination
   return *paths ? ncclSuccess : fail(ncclInvalidUsage, "the communicator has no realized physical routes");
 }
 
+static int write_transfers(const struct ncclComm *comm, uint32_t rank, uint32_t root, uint32_t destination,
+                           struct mesh_operand operand, uint64_t tile, struct mesh_transfer **out, uint32_t *count);
+/* nccl.h ncclMeshCommChannels */
+ncclResult_t ncclMeshCommChannels(ncclComm_t comm, int *channels) {
+  if (!comm || !channels) return fail(ncclInvalidArgument, "ncclMeshCommChannels: a NULL argument");
+  *channels = (int)comm->count;
+  return ncclSuccess;
+}
+/* nccl.h ncclMeshCommWriteEntries: every rank's transfers of each WRITE (write_transfers, the compile its steps take),
+   their SENDs counted on each directed cable (2e + whether the sender is cable e's node[1]) */
+ncclResult_t ncclMeshCommWriteEntries(ncclComm_t comm, int root, const int *destinations, int n, size_t count,
+                                      size_t element_bytes, uint64_t *most) {
+  if (!comm || !most || n < 0 || (n && !destinations) || root < 0 || root >= comm->nranks || !element_bytes || element_bytes > UINT32_MAX)
+    return fail(ncclInvalidArgument, "ncclMeshCommWriteEntries's arguments");
+  for (int i = 0; i < n; i++)
+    if (destinations[i] < 0 || destinations[i] >= comm->nranks || destinations[i] == root)
+      return fail(ncclInvalidArgument, "ncclMeshCommWriteEntries: destination %d of a write from rank %d", destinations[i], root);
+  uint64_t *laid = calloc(2 * (size_t)comm->fabric.cables + 1, sizeof *laid);
+  if (!laid) return fail(ncclSystemError, "out of memory");
+  const struct mesh_operand operand = {(uint32_t)WRITE_UNIT + 1, (uint32_t)element_bytes, count};
+  int error = 0;
+  pthread_mutex_lock(&group_lock);
+  for (int i = 0; !error && i < n; i++) for (int r = 0; !error && r < comm->nranks; r++) {
+    struct mesh_transfer *transfers = NULL;
+    uint32_t made = 0;
+    error = write_transfers(comm, (uint32_t)r, (uint32_t)root, (uint32_t)destinations[i], operand, 0, &transfers, &made);
+    for (uint32_t k = 0; !error && k < made; k++)
+      if (transfers[k].step.op == MESH_STEP_SEND)
+        laid[2 * (size_t)transfers[k].cable + ((uint32_t)r == comm->fabric.cable[transfers[k].cable].node[1])]++;
+    free(transfers);
+  }
+  pthread_mutex_unlock(&group_lock);
+  *most = 0;
+  for (size_t e = 0; e < 2 * (size_t)comm->fabric.cables; e++) if (laid[e] > *most) *most = laid[e];
+  free(laid);
+  return error ? fail(error == ENOMEM ? ncclSystemError : ncclInvalidUsage, "ncclMeshCommWriteEntries from rank %d: %s", root,
+                      strerror(error)) : ncclSuccess;
+}
+
 /* the program a call of `bytes` runs: its communicator's table's first entry of its collective (and root, a rooted
    one's) whose bound it is below (a configured form's, else the default's); NULL where none is (mesh 2bf5a50d^
    program_of; cc8a6f8e^'s by size class, the classes now the forms' bounds) */
