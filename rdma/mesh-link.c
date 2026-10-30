@@ -93,6 +93,7 @@ static inline struct ibv_sge dma_span(const struct port *port,struct mesh_dma_sp
     .lkey=port->device.extent_mrs[at/MESH_EXTENT]->lkey};
 }
 static void link_failed(struct port *,int64_t);
+static void table_owners(const struct port *,uint32_t,const struct mesh_stream *,uint64_t);
 /* the word at region offset `offset`, NULL where the region has none there (0, past its end, or off a word) */
 static inline const _Atomic uint64_t *region_word(uint64_t offset){
   return offset && offset<=M->length-8 && !(offset%8)?stream_words(offset):NULL;
@@ -114,6 +115,7 @@ static int walk_take(struct port *port,uint32_t s,struct walk *w,struct mesh_str
                port->peer,land?"landing":"send",(unsigned long long)t,(unsigned long long)n,(unsigned long long)e.spans,
                (unsigned long long)e.units,(unsigned long long)e.base,(unsigned long long)e.word,(unsigned long long)M->data_off,
                (unsigned long long)M->length,(unsigned long long)w->units.n);
+      table_owners(port,s,x,e.spans);
       return 0;
     }
     k->spans=(const struct mesh_dma_span *)((const char *)M+e.spans);
@@ -217,6 +219,34 @@ static void stream_end(struct port *port,uint32_t t){
   atomic_fetch_or_explicit(&l->broken,l->plan>>MESH_LANE_FIRST<<MESH_LANE_FIRST,memory_order_release);
   wake();
 }
+/* rubric M10: a refused entry's table at region offset `table`, its holder and the stream's counts, and every live row
+   whose page holds that offset (owner nonzero, mapped; mesh.h struct mesh_buffer, struct mesh_page_entry): two leases
+   naming one page show as two rows of different owners or leases.  At most 8 rows are named; the count is all of them */
+static void table_owners(const struct port *port,uint32_t s,const struct mesh_stream *x,uint64_t table){
+  const uint64_t quantum=page_bytes();
+  char rows[640];size_t used=0;uint32_t found=0;
+  rows[0]=0;
+  for(uint32_t r=0;r<mesh_rows(M);r++){
+    const uint64_t owner=atomic_load_explicit(&mesh_buffers(M)[r].owner,memory_order_relaxed);
+    const uint64_t mapping=owner?atomic_load_explicit(&mesh_page(M)[r].mapping,memory_order_relaxed):MESH_ABSENT;
+    if((uint32_t)mapping==MESH_ABSENT)continue;
+    const uint64_t at=atomic_load_explicit(&mesh_page(M)[r].address,memory_order_relaxed);
+    if(table<at||table-at>=quantum)continue;
+    if(found++<8&&used<sizeof rows){
+      const int n=snprintf(rows+used,sizeof rows-used,"%s row %u (owner %#llx, element %u, pages %u: a lease's first row's count, 0 on its others)",found>1?";":"",
+                           r,(unsigned long long)owner,(uint32_t)(mapping>>32),mesh_buffers(M)[r].pages);
+      if(n>0)used+=(size_t)n<sizeof rows-used?(size_t)n:sizeof rows-used-1;
+    }
+  }
+  mesh_say("bridge","link %u (%s): stream %u toward node %u: the refused entry's table at region offset %llu (arena page %llu), "
+           "holder %#llx, sends %llu presented and %llu taken, landings %llu presented and %llu taken; %u live row%s map its page:%s",
+           port->index,port->name,s,port->peer,(unsigned long long)table,
+           (unsigned long long)(table>=M->data_off?(table-M->data_off)/M->pgsz:UINT64_MAX),
+           (unsigned long long)atomic_load_explicit(&x->owner,memory_order_relaxed),
+           (unsigned long long)atomic_load_explicit(&x->sends,memory_order_relaxed),(unsigned long long)atomic_load_explicit(&x->taken[0],memory_order_relaxed),
+           (unsigned long long)atomic_load_explicit(&x->lands,memory_order_relaxed),(unsigned long long)atomic_load_explicit(&x->taken[1],memory_order_relaxed),
+           found,found==1?"":"s",found?rows:" none");
+}
 /* a taken entry's unit the bridge refuses to post (rubric M10: the loss named by its cause and owner): stream s's
    `way` (0 a SEND, 1 a receive) entry e, the walk's place, its unit `unit`, and why; then the link fails (EINVAL) */
 static void unit_refused(struct port *port,uint32_t s,int way,const struct walk *w,const struct taken *e,uint64_t unit,const char *why){
@@ -225,6 +255,7 @@ static void unit_refused(struct port *port,uint32_t s,int way,const struct walk 
            "refused: %s (span %llu, %llu bytes; word %s)",port->index,port->name,s,port->peer,way?"landing":"send",
            (unsigned long long)w->at,(unsigned long long)e->units.n,(unsigned long long)e->unit.n,(unsigned long long)unit,why,
            (unsigned long long)span.offset,(unsigned long long)span.bytes,e->word?"in the region":e->whole?"none":"outside the region");
+  table_owners(port,s,stream_of(port,s),(uint64_t)((const char *)e->spans-(const char *)M));
   link_failed(port,EINVAL);
 }
 /* design/transport.md section 14: stream t's holding at its port's progress thread, each pass.  An owner word holding
