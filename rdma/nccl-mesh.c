@@ -2265,6 +2265,11 @@ static uint32_t unit_of(const struct call *c) { return c->combine == COMBINE_MER
 static int ktype(const struct call *c) { return c->combine == COMBINE_MERGE ? METAL_MERGE : (int)c->type; }
 static int kop(const struct call *c) { return c->combine == COMBINE_MERGE ? (int)c->unit : c->combine; }
 static int counted(const struct call *c) { return c->what == WHAT_COUNTED; }
+/* whether a kind's operand is the ranks' segments, each rank's its own (an all-gather's send, a reduce-scatter's receive) */
+static int partitioned(int what) { return what == MESH_REDUCE_SCATTER || what == MESH_ALLGATHER; }
+/* the counts a call of kind `what` holds on n ranks where it holds any: an all-to-all's to each rank, then from each;
+   a partitioned kind's a rank each; else none (struct call segments, ncclMeshCall counts) */
+static size_t segments_of(int what, size_t n) { return what == WHAT_COUNTED ? 2 * n : partitioned(what) ? n : 0; }
 static int call_contributes(const struct call *c) {
   if (c->target) return c->comm->rank == c->root;
   if (c->what == MESH_BROADCAST) return c->comm->rank == c->root;
@@ -2286,7 +2291,7 @@ static void call_bind_roles(struct call *c, const struct call *from) {
 static size_t elements(const struct call *c) {
   if (counted(c)) return c->count;
   if (c->segments) return c->total;
-  return c->count * ((c->what == MESH_REDUCE_SCATTER || c->what == MESH_ALLGATHER) ? (size_t)c->comm->nranks : 1);
+  return c->count * (partitioned(c->what) ? (size_t)c->comm->nranks : 1);
 }
 /* rank r's segment of a reduce-scatter's or all-gather's operand: the elements before it, and *length its own (r x
    count and count; an uneven call's, its counts') */
@@ -2657,12 +2662,12 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
     if (compiled) return compiled;
     const struct entry *entry = program_of(comm, c->what, c->root, elements(c) * SIZE[c->type]);
     if (!entry) return fail(ncclInvalidUsage, "the communicator has no program for collective %d at root %d", c->what, c->root);
-    const int partitioned = c->what == MESH_REDUCE_SCATTER || c->what == MESH_ALLGATHER;
+    const int segmented = partitioned(c->what);
     const uint32_t u = unit_of(c);
     const struct mesh_operand operand = {(uint32_t)c->type + 1, (uint32_t)(SIZE[c->type] * u), elements(c) / u};
-    uint64_t cut[partitioned ? comm->nranks : 1];
-    for (int r = 0; partitioned && r < comm->nranks; r++) cut[r] = (c->segments ? c->segments[r] : c->count) / u;
-    ncclResult_t result = collective_steps(c, entry, operand, partitioned ? cut : NULL);
+    uint64_t cut[segmented ? comm->nranks : 1];
+    for (int r = 0; segmented && r < comm->nranks; r++) cut[r] = (c->segments ? c->segments[r] : c->count) / u;
+    ncclResult_t result = collective_steps(c, entry, operand, segmented ? cut : NULL);
     if (!result && c->what == MESH_REDUCE_SCATTER) result = partial_split(c);
     if (result) return result;
   }
@@ -3009,10 +3014,7 @@ static struct message repeat_of(const struct message *m, size_t n, size_t k, siz
 /* a declared call's fused stream's records (declared, plan_calls) */
 static ncclMeshFused fused_declared;
 /* the counts a call of its kind holds a rank each (an all-to-all's to each rank, then from each), where it holds any */
-static size_t call_segments(const struct call *c) {
-  const size_t n = (size_t)c->comm->nranks;
-  return counted(c) ? 2 * n : c->what == MESH_ALLGATHER || c->what == MESH_REDUCE_SCATTER ? n : 0;
-}
+static size_t call_segments(const struct call *c) { return segments_of(c->what, (size_t)c->comm->nranks); }
 /* whether issued call c is the call declared as d: its kind, type, operator, root, target and counts (a call that
    holds none has equal ones, `count` each: enqueue_counts); a WRITE's, its bytes (WRITE_UNIT) */
 static int declared_as(const struct call *c, const struct call *d) {
@@ -5122,7 +5124,7 @@ static ncclResult_t declared_members(struct call *c, const ncclMeshCall *d) {
     return fail(ncclInvalidArgument, "a reduction must declare at least one contributor");
   if (c->what == MESH_BROADCAST && !rank_member(c->contributors, (uint32_t)c->root))
     return fail(ncclInvalidArgument, "a broadcast's root must contribute its input");
-  if (c->what == MESH_ALLGATHER || c->what == MESH_REDUCE_SCATTER) {
+  if (partitioned(c->what)) {
     const uint64_t *owners = c->what == MESH_ALLGATHER ? c->contributors : c->recipients;
     if (!c->segments) {
       c->segments = calloc(n, sizeof *c->segments);
@@ -5149,7 +5151,7 @@ static ncclResult_t declared_members(struct call *c, const ncclMeshCall *d) {
    are written to it: a group's are its issued stream's) */
 static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call *c) {
   const int n = comm->nranks, me = comm->rank,
-            v = !d->counts ? 0 : d->what == WHAT_COUNTED ? 2 * n : d->what == MESH_ALLGATHER || d->what == MESH_REDUCE_SCATTER ? n : 0;
+            v = d->counts ? (int)segments_of(d->what, (size_t)n) : 0;
   *c = (struct call){.what = d->what, .root = d->peer, .count = d->count, .type = d->type, .op = d->op, .comm = comm,
                      .fused = d->fused ? &fused_declared : NULL, .tile_bytes = d->tile_bytes};
   if (d->what == ncclMeshCallWrite && (d->destination < 0 || d->destination >= n))
@@ -5355,7 +5357,7 @@ static ncclResult_t prepared(struct ncclComm *comm, struct compiled *x, int remo
 struct flat_plan { int count; size_t runs; };
 static size_t flat_at(size_t at) { return (at + 15) & ~(size_t)15; }
 static void flat_lengths(const ncclMeshCall *c, size_t n, size_t lengths[6]) {
-  const size_t v = !c->counts ? 0 : c->what == WHAT_COUNTED ? 2 * n : c->what == MESH_ALLGATHER || c->what == MESH_REDUCE_SCATTER ? n : 0;
+  const size_t v = c->counts ? segments_of(c->what, n) : 0;
   const size_t bytes = c->production && (unsigned)c->type < ncclNumTypes ? c->count * SIZE[c->type] : 0;
   lengths[0] = v * sizeof *c->counts;
   lengths[1] = c->production ? (c->tile_bytes && bytes ? (bytes - 1) / c->tile_bytes + 1 : 1) * sizeof *c->production : 0;
