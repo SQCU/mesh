@@ -390,8 +390,9 @@ caller explicitly chooses a different basis block. The local tile setting no
 longer changes that mathematical basis or inflates its dense mixing matrix.
 
 The view compiler resolves those coordinates to assigned pages. Tile records
-carry their reads and writes. Masked lanes do not add unrelated source-page
-dependencies; an entirely padded tile has no input read. Intermediates are
+carry their reads and writes. A factor's read view holds only its domain's
+sources, so lanes outside the domain add no source-page dependencies; a tile
+whose elements have no sources has no input read. Intermediates are
 ordinary float page operands. No descriptor interpreter or additional runtime
 submission interface is involved.
 
@@ -1856,11 +1857,12 @@ A selected Hadamard input carries a relation from each retained basis position
 to its source values. Flat offsets and indices store this relation during
 preparation. Repeated selections sum their contributions before the butterfly;
 absent positions contribute zero. The fused schedule and shared factor kernel
-consume the same fixed-width source groups, emitted by the compiler. FX exposes
-that source width in the stage declaration and transposes the same relation in
-its backward graph. No runtime object traverses the preparation relation.
-The current emitter pads those groups to the largest source count in a domain;
-finer grouping for strongly uneven repeat counts remains lowering work.
+consume the same ragged relation: each position's group is its own extent, its
+sources from a start to the next, compiled by the emitter; no group is padded.
+FX carries the relation's sources and starts in the stage declaration and
+transposes the same relation in its backward graph. No runtime object traverses
+the preparation relation. A factor with no domain declares the identity relation,
+which keeps the function-constant form.
 
 Preparation on 2026-10-29 built rank and Goal A, composed reordered, repeated and
 empty input selections, and compiled the fused and factored shaders with both
