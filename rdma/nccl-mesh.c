@@ -3266,18 +3266,8 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u) {
           const struct ncclMeshWritePlan *write = x->c->write_plan;
           if (write) {
             const uint64_t logical = step->first * step->piece.element_bytes;
-            const size_t index = write_span_index(write, x->step, x->c->invocation);
-            const size_t repeat = write->stride && x->offset >= logical ? (x->offset - logical) / write->stride : 0;
-            /* the message's span table lies wholly in its entry's spans (span_first[index] .. span_first[index + 1]), as
-               any pointer within its allocation: past it, the bridge would read a neighbouring lease as this entry's
-               spans */
-            const size_t at = write->span_first[index] + repeat * x->pages.n;
-            if (x->offset < logical || at + x->pages.n > write->span_first[index + 1])
-              return fail(ncclInternalError, "%s on %s: step %u repeat %zu's %llu span(s) at %zu lie outside its plan's "
-                          "%zu..%zu (offset %zu, step at %llu)", call_name(x->c), comm->name, x->step, repeat,
-                          (unsigned long long)x->pages.n, at, write->span_first[index], write->span_first[index + 1],
-                          (size_t)x->offset, (unsigned long long)logical);
-            x->spans = write->spans + at;
+            const size_t repeat = write->stride ? (x->offset - logical) / write->stride : 0;
+            x->spans = write->spans + write->span_first[write_span_index(write,x->step,x->c->invocation)] + repeat * x->pages.n;
             x->table = lease_offset(x->spans);
             continue;
           }
