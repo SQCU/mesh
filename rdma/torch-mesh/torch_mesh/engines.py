@@ -422,7 +422,7 @@ class ModelView(ctypes.Structure):
                 ('strides', ctypes.POINTER(ctypes.c_int64)), ('rank', ctypes.c_int), ('dtype', ctypes.c_int)]
 
 
-_MODEL_TYPES = (torch.float16, torch.float32, torch.int32, torch.float64)
+_MODEL_TYPES = (torch.float16, torch.float32, torch.int32, torch.float64, torch.int8)
 
 
 def _model_views(specs, addresses):
@@ -451,7 +451,7 @@ class Prediction:
             for name, original in values.items():
                 operand = TensorView.of(original)
                 if operand.dtype not in _MODEL_TYPES:
-                    raise ValueError('Core ML views require shared fp16, fp32, int32 or fp64 storage')
+                    raise ValueError('Core ML views require a declared supported scalar type')
                 made.append(((name, list(operand.shape), list(operand.layout.strides), _MODEL_TYPES.index(operand.dtype)),
                              _host_address(operand)))
             return made
@@ -563,8 +563,8 @@ def neural_engine_model(kind, arrays, rows, tile, block, configuration):
     conv = lambda array: mb.const(val=np.ascontiguousarray(array, dtype=configuration['weight_dtype']).reshape(array.shape[0], array.shape[1], 1, 1))
 
     source, target = configuration['input'], configuration['output']
-    kinds = {'float16': types.fp16, 'float32': types.fp32, 'int32': types.int32, 'float64': types.fp64}
-    casts = {'float16': 'fp16', 'float32': 'fp32', 'int32': 'int32', 'float64': 'fp64'}
+    kinds = {'float16': types.fp16, 'float32': types.fp32, 'int32': types.int32, 'float64': types.fp64, 'int8': types.int8}
+    casts = {'float16': 'fp16', 'float32': 'fp32', 'int32': 'int32', 'float64': 'fp64', 'int8': 'int8'}
     program = Program()
     with Function({source['name']: mb.TensorSpec(shape=(rows, width), dtype=kinds[source['dtype']])},
                   opset_version=getattr(ct.target, configuration['deployment'])) as function:

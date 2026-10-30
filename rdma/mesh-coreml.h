@@ -11,17 +11,23 @@ typedef struct {
   int rank, dtype;
 } MeshModelView;
 
-enum MeshModelType { MeshModelFloat16, MeshModelFloat32, MeshModelInt32, MeshModelFloat64 };
+/* Int8 is an SDK capability checked during binding (macOS 26 and later). */
+enum MeshModelType { MeshModelFloat16, MeshModelFloat32, MeshModelInt32, MeshModelFloat64,
+                     MeshModelInt8, MeshModelTypeCount };
 enum MeshModelUnits { MeshModelCPUAndANE, MeshModelAll, MeshModelCPU, MeshModelCPUAndGPU };
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Configuration JSON declares units, function and allowed devices (cpu/gpu/ane).
-   Loading inspects that function's complete compute plan during preparation. */
+/* Configuration JSON declares units, function and accepted preferred devices
+   (cpu/gpu/ane). The SDK's units control runtime device eligibility. Loading
+   inspects that function's complete compute plan during preparation. */
 long mesh_coreml_load(const char *compiled, const char *configuration);
 void mesh_coreml_release(long model);
+/* Every model input and output must have a view, including optional inputs.
+   Binding does not request provider defaults or leave outputs unbound. The
+   public Core ML output-backing API remains advisory for supplied views. */
 void *mesh_coreml_bind(long model, const MeshModelView *inputs, size_t inputCount,
                       const MeshModelView *outputs, size_t outputCount);
 const char *mesh_coreml_run(void *binding);
@@ -29,8 +35,11 @@ void mesh_coreml_retain(void *binding);
 void mesh_coreml_unbind(void *binding);
 const char *mesh_coreml_error(void);
 int mesh_coreml_compile(const char *package, const char *compiled);
-/* Borrowed JSON from the prepared plan, held until model release: preferred
-   device counts and unresolved operator counts. Not an execution guarantee. */
+/* Borrowed JSON held until model release: allowed_devices from compute units,
+   preferred/supported device counts, unresolved counts and the operation tree
+   with each operation's outputs, preferred/supported devices and nested blocks.
+   Unknown device usage is null, distinct from an empty support set. The plan
+   reports anticipated placement, not actual execution or output-page guarantees. */
 const char *mesh_coreml_placement(long model);
 
 /* CPU numerical operands and workspace are bound during preparation. */

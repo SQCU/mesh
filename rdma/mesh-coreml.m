@@ -127,20 +127,36 @@ const char *mesh_coreml_error(void) { return error_; }
 
 // Walk nested blocks as well as the selected function's outer operations.
 // This is the provider's anticipated placement; no prediction is submitted.
-static void placement_block(MLComputePlan *plan,MLModelStructureProgramBlock *block,NSMutableDictionary *counts,NSMutableDictionary *unresolved)
+static NSString *device_name(id<MLComputeDeviceProtocol> device) API_AVAILABLE(macos(14.0)) {
+  return [device isKindOfClass:MLNeuralEngineComputeDevice.class]?@"ane":
+    [device isKindOfClass:MLGPUComputeDevice.class]?@"gpu":[device isKindOfClass:MLCPUComputeDevice.class]?@"cpu":@"unknown";
+}
+static NSArray *placement_block(MLComputePlan *plan,MLModelStructureProgramBlock *block,
+    NSMutableDictionary *preferred,NSMutableDictionary *supported,NSMutableDictionary *unresolved)
     API_AVAILABLE(macos(14.4)) {
+  NSMutableArray *operations=[NSMutableArray array];
   for(MLModelStructureProgramOperation *op in block.operations) {
     MLComputePlanDeviceUsage *usage=[plan computeDeviceUsageForMLProgramOperation:op];
+    NSMutableArray *eligible=[NSMutableArray array],*outputs=[NSMutableArray array],*blocks=[NSMutableArray array];
+    NSString *name=nil;
     if(usage) {
-      id<MLComputeDeviceProtocol> device=usage.preferredComputeDevice;
-      NSString *name=[device isKindOfClass:MLNeuralEngineComputeDevice.class]?@"ane":
-        [device isKindOfClass:MLGPUComputeDevice.class]?@"gpu":[device isKindOfClass:MLCPUComputeDevice.class]?@"cpu":@"unknown";
-      counts[name]=@([counts[name] unsignedLongValue]+1);
+      name=device_name(usage.preferredComputeDevice);
+      preferred[name]=@([preferred[name] unsignedLongValue]+1);
+      for(id<MLComputeDeviceProtocol> device in usage.supportedComputeDevices) {
+        NSString *kind=device_name(device);
+        if(![eligible containsObject:kind])[eligible addObject:kind];
+      }
+      for(NSString *kind in eligible)supported[kind]=@([supported[kind] unsignedLongValue]+1);
     } else unresolved[op.operatorName]=@([unresolved[op.operatorName] unsignedLongValue]+1);
-    for(MLModelStructureProgramBlock *child in op.blocks)placement_block(plan,child,counts,unresolved);
+    for(MLModelStructureProgramNamedValueType *output in op.outputs)[outputs addObject:output.name];
+    for(MLModelStructureProgramBlock *child in op.blocks)
+      [blocks addObject:placement_block(plan,child,preferred,supported,unresolved)];
+    [operations addObject:@{@"operator":op.operatorName,@"outputs":outputs,@"preferred":name?:NSNull.null,
+      @"supported":usage?eligible:NSNull.null,@"blocks":blocks}];
   }
+  return operations;
 }
-static NSDictionary *model_placement(NSURL *compiled,MLModelConfiguration *configuration) {
+static NSDictionary *model_placement(NSURL *compiled,MLModelConfiguration *configuration,NSArray *execution_devices) {
   if(@available(macOS 15.0,*)) {
     dispatch_semaphore_t done=dispatch_semaphore_create(0);
     __block MLComputePlan *plan=nil;__block NSError *failure=nil;
@@ -153,9 +169,11 @@ static NSDictionary *model_placement(NSURL *compiled,MLModelConfiguration *confi
     if(!plan){snprintf(error_,sizeof error_,"compute plan: %s",failure.localizedDescription.UTF8String);return nil;}
     MLModelStructureProgramFunction *function=plan.modelStructure.program.functions[configuration.functionName];
     if(!function){snprintf(error_,sizeof error_,"compute plan has no function %s",configuration.functionName.UTF8String);return nil;}
-    NSMutableDictionary *counts=[NSMutableDictionary dictionary],*unresolved=[NSMutableDictionary dictionary];
-    placement_block(plan,function.block,counts,unresolved);
-    return @{@"preferred":counts,@"unresolved":unresolved};
+    NSMutableDictionary *preferred=[NSMutableDictionary dictionary],*supported=[NSMutableDictionary dictionary],
+      *unresolved=[NSMutableDictionary dictionary];
+    NSArray *operations=placement_block(plan,function.block,preferred,supported,unresolved);
+    return @{@"allowed_devices":execution_devices,@"preferred":preferred,@"supported":supported,
+      @"unresolved":unresolved,@"operations":operations};
   }
   snprintf(error_,sizeof error_,"named Core ML compute plans require macOS 15");return nil;
 }
@@ -178,6 +196,7 @@ long mesh_coreml_load(const char *package,const char *configuration_json) {
      snprintf(error_,sizeof error_,"unknown declared Core ML device %s",[device description].UTF8String);return -1;
    }
    const MLComputeUnits choices[]={MLComputeUnitsCPUAndNeuralEngine,MLComputeUnitsAll,MLComputeUnitsCPUOnly,MLComputeUnitsCPUAndGPU};
+   NSArray *execution_devices=@[@[@"cpu",@"ane"],@[@"cpu",@"gpu",@"ane"],@[@"cpu"],@[@"cpu",@"gpu"]];
    if((unsigned)units>=sizeof choices/sizeof *choices){snprintf(error_,sizeof error_,"invalid compute units");return -1;}
    @synchronized([MLModel class]) {
     if (!models_) { models_=[NSMutableArray new];loaded_=[NSMutableDictionary new];placements_=[NSMutableArray new];placement_text_=[NSMutableArray new];references_=[NSMutableArray new];keys_=[NSMutableArray new]; }
@@ -191,7 +210,7 @@ long mesh_coreml_load(const char *package,const char *configuration_json) {
     MLModelConfiguration *configuration=[MLModelConfiguration new];configuration.computeUnits=choices[units];
     if(@available(macOS 15.0,*))configuration.functionName=function;
     else {snprintf(error_,sizeof error_,"named Core ML functions require macOS 15");return -1;}
-    NSDictionary *placement=model_placement(compiled,configuration);
+    NSDictionary *placement=model_placement(compiled,configuration,execution_devices[units]);
     if(!placement||!placement_allowed(placement,devices))return -1;
     MLModel *model=[MLModel modelWithContentsOfURL:compiled configuration:configuration error:&error];
     if(!model){snprintf(error_,sizeof error_,"load: %s",error.localizedDescription.UTF8String);return -1;}
@@ -214,10 +233,18 @@ void mesh_coreml_release(long handle) {
 static MLMultiArray *wrap(const MeshModelView *view, NSError **error) {
   const MLMultiArrayDataType types[]={MLMultiArrayDataTypeFloat16,MLMultiArrayDataTypeFloat32,
                                       MLMultiArrayDataTypeInt32,MLMultiArrayDataTypeDouble};
+  MLMultiArrayDataType type;
+  if(view->dtype==MeshModelInt8) {
+    if(@available(macOS 26.0,*))type=MLMultiArrayDataTypeInt8;
+    else {
+      *error=[NSError errorWithDomain:@"mesh.coreml" code:0 userInfo:@{NSLocalizedDescriptionKey:@"Int8 Core ML views require macOS 26"}];
+      return nil;
+    }
+  } else type=types[view->dtype];
   NSMutableArray *dims = [NSMutableArray array], *strides = [NSMutableArray array];
   for (int i = 0; i < view->rank; i++) { [dims addObject:@(view->shape[i])]; [strides addObject:@(view->strides[i])]; }
   return [[MLMultiArray alloc] initWithDataPointer:view->data shape:dims
-                                       dataType:types[view->dtype] strides:strides
+                                       dataType:type strides:strides
                                        deallocator:nil error:error];
 }
 
@@ -245,7 +272,7 @@ void *mesh_coreml_bind(long handle, const MeshModelView *inputs, size_t ni, cons
     NSMutableDictionary *features=[NSMutableDictionary new], *backings=[NSMutableDictionary new];
     for (size_t i=0;i<ni+no;i++) {
       const MeshModelView *view=i<ni ? inputs+i : outputs+i-ni;
-      if ((unsigned)view->dtype >= 4) { snprintf(error_,sizeof error_,"unsupported view dtype");return NULL; }
+      if ((unsigned)view->dtype >= MeshModelTypeCount) { snprintf(error_,sizeof error_,"unsupported view dtype");return NULL; }
       if(!view->name||!view->name[0]){snprintf(error_,sizeof error_,"each model view requires its declared feature name");return NULL;}
       NSString *name=@(view->name);
       NSDictionary *descriptions=i<ni ? model.modelDescription.inputDescriptionsByName : model.modelDescription.outputDescriptionsByName;
@@ -256,6 +283,18 @@ void *mesh_coreml_bind(long handle, const MeshModelView *inputs, size_t ni, cons
         snprintf(error_,sizeof error_,"view %s does not match its model feature declaration",view->name);return NULL;
       }
       if(i<ni)features[name]=[MLFeatureValue featureValueWithMultiArray:array];else backings[name]=array;
+    }
+    // Every feature is an operand of the recorded call. Omitted outputs make
+    // Core ML allocate them; omitted optional inputs invoke provider defaults.
+    // Resolve both against the actual model schema before recording.
+    for(NSArray *side in @[@[features,model.modelDescription.inputDescriptionsByName,@"input"],
+                           @[backings,model.modelDescription.outputDescriptionsByName,@"output"]]) {
+      NSMutableSet *missing=[NSMutableSet setWithArray:[side[1] allKeys]];
+      [missing minusSet:[NSSet setWithArray:[side[0] allKeys]]];
+      if(missing.count) {
+        NSString *names=[[missing.allObjects sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@", "];
+        snprintf(error_,sizeof error_,"unbound model %s features: %s",[side[2] UTF8String],names.UTF8String);return NULL;
+      }
     }
     MeshPrediction *p=[MeshPrediction new];p.handle=handle;
     @synchronized([MLModel class]) { references_[handle]=@([references_[handle] unsignedLongValue]+1); }
