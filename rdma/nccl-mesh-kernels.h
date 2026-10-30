@@ -211,7 +211,12 @@ static NSString *const KERNELS =
   "HEAD(land_merge_from) { land_merge_body<false>(d, s, p, a, vb, progress, i, g, l, t, tg); }\n"
   "GROUP(present) { ENTER_G const ulong end = p.scalar + p.n; "
   "if (i == 0) { const ulong need = end > p.count ? end - p.count : 0; "
-  "const ulong got = mesh_step_wait(p, a + p.aux, need, vb); mesh_step_check(p, got, need, vb); tg[0] = got >= need; } "
+  "const ulong got = mesh_step_wait(p, a + p.aux, need, vb); mesh_step_check(p, got, need, vb); "
+  /* the list's count at this group's first entry, its predecessor's end, before this group's end is stored: the list
+     presented in issue order, as the host's mesh_stream_present presented it at the count it read (whatever encoder or
+     command buffer each group's present runs in) */
+  "const ulong prior = got >= need ? mesh_step_wait(p, a + p.at, p.scalar, vb) : got; mesh_step_check(p, prior, p.scalar, vb); "
+  "tg[0] = got >= need && prior >= p.scalar; } "
   "threadgroup_barrier(mem_flags::mem_threadgroup); if (!tg[0]) return; "
   "volatile coherent(system) device ulong *dst = (volatile coherent(system) device ulong *)(d + p.dst); "
   "device const ulong *src = (device const ulong *)(s + p.src); "

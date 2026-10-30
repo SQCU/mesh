@@ -601,8 +601,9 @@ const char *metal_prelude(void) {
 struct metal_result metal_present(struct metal_program *program,void *lists,size_t list_offset,
     void *records,size_t record_offset,size_t count,uint64_t first,void *words,size_t taken,size_t presented) {
   if(program->encoder4&&count) {
-    // The bridge consumes this list in order. A later prepared function must
-    // not replace its publication count before an earlier encoder uses it.
+    // The bridge consumes this list in order. The kernel stores the group's end only once the list's count has
+    // reached its first entry (its predecessor's end), so a later group's count never passes an earlier group's
+    // unwritten entries, in whatever command buffer each runs; here the count is read as well as written.
     const size_t slot=first%MESH_STREAM_ENTRIES;
     const size_t head=count<MESH_STREAM_ENTRIES-slot?count:MESH_STREAM_ENTRIES-slot;
     const struct MetalReach reaches[]={
