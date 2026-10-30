@@ -561,6 +561,94 @@ def coreml_graph(compiled, inputs, outputs, *, configuration, contract):
         native.mesh_coreml_release(handle)
 
 
+def page_state_program(program, pairs):
+    """Keep exported state effects as named tensor arguments and results.
+
+    Export already represents each mutation as an SSA result. Changing its
+    signature keeps Core ML from turning that result back into private state.
+    The pair keys name exported buffer targets or mutated user-input names;
+    each pair supplies the input and output feature names used by the caller.
+    When the same value is also returned to the user, the pair's output name
+    names that one result. Its input is never duplicated or privately retained.
+    """
+    import copy
+    from dataclasses import replace
+    from torch.export import ExportedProgram
+    from torch.export.exported_program import ModuleCallEntry, ModuleCallSignature
+    from torch.export.graph_signature import ExportGraphSignature, InputKind, OutputKind
+    from torch.utils._pytree import tree_structure
+
+    signature = copy.deepcopy(program.graph_signature)
+    effects = {spec.target: spec for spec in signature.output_specs
+               if spec.kind in (OutputKind.BUFFER_MUTATION, OutputKind.USER_INPUT_MUTATION)}
+    if not effects:
+        return program
+    missing = effects.keys() - pairs.keys()
+    if missing:
+        raise ValueError(f'exported state effects need named page pairs: {sorted(missing)}')
+    graph = copy.deepcopy(program.graph)
+    nodes = {node.name: node for node in graph.nodes}
+    renames, lifted, given = {}, set(), []
+    for spec in signature.input_specs:
+        effect = spec.target if spec.kind == InputKind.BUFFER else spec.arg.name
+        if effect in effects:
+            renames[spec.arg.name] = pairs[effect]['input']
+            if spec.kind == InputKind.BUFFER:
+                lifted.add(spec.target)
+                spec = replace(spec, kind=InputKind.USER_INPUT, target=None, persistent=None)
+        given.append(spec)
+    # Export's flat convention puts captured constants before user operands.
+    # Promoted buffers move with their placeholders, leaving every use intact.
+    given = ([spec for spec in given if spec.kind != InputKind.USER_INPUT] +
+             [spec for spec in given if spec.kind == InputKind.USER_INPUT])
+    first = next(node for node in graph.nodes if node.op != 'placeholder')
+    for spec in given:
+        first.prepend(nodes[spec.arg.name])
+    for effect, spec in effects.items():
+        renames[spec.arg.name] = pairs[effect]['output']
+    # Rename existing nodes, not tensor values. This creates no operation or
+    # storage and changes every use of an effect result together.
+    for old, name in renames.items():
+        nodes[old].name = name
+        if nodes[old].op == 'placeholder':
+            nodes[old].target = name
+    for spec in given + signature.output_specs:
+        if spec.arg.name in renames:
+            spec.arg.name = renames[spec.arg.name]
+    made, values = [], []
+    returned = next(node for node in graph.nodes if node.op == 'output')
+    for spec, value in zip(signature.output_specs, returned.args[0], strict=True):
+        if spec.kind in (OutputKind.BUFFER_MUTATION, OutputKind.USER_INPUT_MUTATION):
+            spec = replace(spec, kind=OutputKind.USER_OUTPUT, target=None)
+        # A state result may also be an ordinary result. One named feature and
+        # one page operand express that same SSA value, without an identity copy.
+        if value not in values:
+            made.append(spec)
+            values.append(value)
+    returned.args = (tuple(values),)
+    signature = ExportGraphSignature(given, made)
+    user_inputs = [spec.arg for spec in given if spec.kind == InputKind.USER_INPUT]
+    user_outputs = [spec.arg for spec in made if spec.kind == OutputKind.USER_OUTPUT]
+    calls = copy.deepcopy(program.module_call_graph)
+    for call in calls:
+        if call.signature:
+            for arg in call.signature.inputs + call.signature.outputs:
+                if arg.name in renames:
+                    arg.name = renames[arg.name]
+    flat = ModuleCallSignature(user_inputs, user_outputs,
+        tree_structure((tuple(None for _ in user_inputs), {})),
+        tree_structure(tuple(None for _ in user_outputs)))
+    if calls:
+        calls[0] = ModuleCallEntry('', flat)
+    else:
+        calls = [ModuleCallEntry('', flat)]
+    return ExportedProgram(program.graph_module, graph, signature,
+        {name: value for name, value in program.state_dict.items() if name not in lifted},
+        copy.deepcopy(program.range_constraints), calls,
+        constants={name: value for name, value in program.constants.items() if name not in lifted},
+        verifiers=program.verifiers)
+
+
 def export_coreml_graph(program, inputs, outputs, *, directory, configuration):
     """Lower an exported tensor graph once, then bind the common host record.
 
@@ -570,11 +658,20 @@ def export_coreml_graph(program, inputs, outputs, *, directory, configuration):
     invoke the numerical graph, and the returned record does no file access.
     """
     import coremltools as ct
+    from coremltools.converters.mil.frontend.torch.utils import TORCH_DTYPE_TO_MIL_DTYPE
+    from torch.export.graph_signature import InputKind, OutputKind
     native = _coreml()
     if native is None:
         raise RuntimeError('Core ML graph requires the native shared-memory binding')
+    program = page_state_program(program, configuration['state_pairs'])
+    nodes = {node.name: node for node in program.graph.nodes}
+    def feature(spec):
+        return ct.TensorType(name=spec.arg.name,
+                             dtype=TORCH_DTYPE_TO_MIL_DTYPE[nodes[spec.arg.name].meta['val'].dtype])
+    input_types = [feature(spec) for spec in program.graph_signature.input_specs if spec.kind == InputKind.USER_INPUT]
+    output_types = [feature(spec) for spec in program.graph_signature.output_specs if spec.kind == OutputKind.USER_OUTPUT]
     compute = coreml_units(configuration['units'])
-    model = ct.convert(program, convert_to='mlprogram', compute_units=compute,
+    model = ct.convert(program, inputs=input_types, outputs=output_types, convert_to='mlprogram', compute_units=compute,
                        minimum_deployment_target=getattr(ct.target, configuration['deployment']),
                        compute_precision=getattr(ct.precision, configuration['precision']), skip_model_load=True)
     directory = Path(directory)
