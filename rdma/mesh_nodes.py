@@ -53,6 +53,7 @@ class Cluster:
     checkouts: str
     rank_port: int
     upstreams: dict
+    hourly_minute: int
 
     @property
     def ssh(self):
@@ -67,7 +68,7 @@ def load(path=ROOT / 'etc/mesh-nodes.json'):
                                         frozenset(row.get('roles', ())), row.get('guard_headroom_gib', 0)) for row in raw['nodes'].values()}
     return Cluster(members, access.get('user') or getpass.getuser(),
                    str(Path(access['key']).expanduser()) if 'key' in access else None,
-                   raw['run_seconds'], raw['python'], raw['checkouts'], raw['rank_port'], raw['upstreams'])
+                   raw['run_seconds'], raw['python'], raw['checkouts'], raw['rank_port'], raw['upstreams'], raw['hourly_minute'])
 
 
 def home_path(relative):
@@ -369,26 +370,23 @@ def node_prepare():
     """Build the node's one checkout, `current` (the bridge's and the ranks', moved to this commit before this runs),
     as nothing but make's and ninja's staleness decide: bin/mesh-user.sh's `make all install` (in parallel), the one
     build of the libraries and the bridge, which restarts the bridge (SIGHUP, its region kept) only where its images
-    changed; then _mesh_c and torch_mesh's extension in place. A node's preparations take turns."""
-    import fcntl
+    changed; then _mesh_c and torch_mesh's extension in place."""
     jobs = {**os.environ, 'MESH_RDMA': str(ROOT / 'rdma'), 'MAKEFLAGS': f'-j{os.cpu_count() or 1}'}
-    with open(ROOT.parent / 'prepare.lock', 'a') as turn:
-        fcntl.flock(turn, fcntl.LOCK_EX)
-        installed, seconds = None, {}
-        # the bridge's restart is asked within the first step (bin/mesh-user.sh's SIGHUP), so a bridge started at or
-        # after this time answered it, however long the later steps take
-        asked = time.time()
-        for where, *argv in (('.', ROOT / 'bin/mesh-user.sh', (HOME / 'Library/Application Support/io.mesh.bridge/'
-                                                               'document').read_text().strip(), ROOT),
-                             ('rdma', sys.executable, 'mesh_c_build.py'),
-                             ('rdma/torch-mesh', sys.executable, 'setup.py', '-q', 'build_ext', '--inplace',
-                              '--build-temp', '../.build/torch-mesh')):
-            began = time.time()
-            done = run(*argv, cwd=ROOT / where, env=jobs)
-            seconds[os.path.basename(str(argv[1] if argv[0] == sys.executable else argv[0]))] = round(time.time() - began, 2)
-            if done.returncode:
-                raise RuntimeError(f'{where}: {" ".join(map(str, argv[:3]))} failed: {(done.stderr or done.stdout)[-600:]}')
-            installed = installed or done
+    installed, seconds = None, {}
+    # the bridge's restart is asked within the first step (bin/mesh-user.sh's SIGHUP), so a bridge started at or
+    # after this time answered it, however long the later steps take
+    asked = time.time()
+    for where, *argv in (('.', ROOT / 'bin/mesh-user.sh', (HOME / 'Library/Application Support/io.mesh.bridge/'
+                                                           'document').read_text().strip(), ROOT),
+                         ('rdma', sys.executable, 'mesh_c_build.py'),
+                         ('rdma/torch-mesh', sys.executable, 'setup.py', '-q', 'build_ext', '--inplace',
+                          '--build-temp', '../.build/torch-mesh')):
+        began = time.time()
+        done = run(*argv, cwd=ROOT / where, env=jobs)
+        seconds[os.path.basename(str(argv[1] if argv[0] == sys.executable else argv[0]))] = round(time.time() - began, 2)
+        if done.returncode:
+            raise RuntimeError(f'{where}: {" ".join(map(str, argv[:3]))} failed: {(done.stderr or done.stdout)[-600:]}')
+        installed = installed or done
     told = {'seconds': seconds}
     # No machine is restarted here (the operator, 2026-10-29: the administrative process kills no machine, by a fault
     # or by a restart that did not need to happen). A new bridge or heartbeat image takes effect by the heartbeat's own

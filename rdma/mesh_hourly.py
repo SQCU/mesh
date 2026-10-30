@@ -26,10 +26,13 @@ import zlib
 from mesh_source import checkout, git
 
 HOURLY = Path.home() / '.cache/mesh/hourly'
-# seconds after the run's minute: a node that starts later than LATE cannot hear this hour's election; every node
-# browses until BROWSE_UNTIL, and a representative announces until ANNOUNCE_UNTIL, so a node starting as late as LATE
-# still hears every announcement
-LATE, BROWSE_UNTIL, ANNOUNCE_UNTIL = 30, 40, 50
+# seconds after the run's minute: a node that starts later than LATE cannot hear this hour's election. Until
+# BROWSE_UNTIL every node announces itself (_meshrank) and each part's representative its part (_meshpart), and every
+# node listens; from then until LIST_UNTIL the winning part's representative announces the run's members and commits
+# (_meshrun), which its part's members hear until LISTEN_UNTIL. dns-sd writes what it heard to a pipe only as it
+# exits, so each phase is a fixed window.
+LATE, BROWSE_UNTIL, LISTEN_UNTIL, LIST_UNTIL = 30, 40, 55, 60
+SPEAKERS = []
 PAIRING_SECONDS = 30
 
 
@@ -45,12 +48,14 @@ def workload_configuration(microbench_root):
 def compact(record):
     """Completion time and useful rate, in the committed configuration's shape order."""
     def rounded(value):
+        if value is None:
+            return None
         number = float(format(value, '.3g'))
         return int(number) if number.is_integer() else number
     rows, incomplete, errors = {}, {}, []
     for item in record['workloads']:
         values = [
-            [rounded(m.get('function_seconds', m.get('amortized_seconds_per_call')) * 1e6),
+            [rounded(None if (t := m.get('function_seconds', m.get('amortized_seconds_per_call'))) is None else t * 1e6),
              rounded(m['useful_gigabytes_per_second']),
              *([round(m['aggregate_rows_per_second'])] if 'aggregate_rows_per_second' in m else [])]
             for m in item['metrics']]
@@ -84,7 +89,7 @@ def compact(record):
     return result
 
 
-class Stopped(Exception):
+class Stopped(BaseException):
     """The run's bound (SIGALRM, etc/mesh-nodes.json run_seconds) or a stop: SIGTERM, SIGHUP or SIGINT."""
 
 
@@ -148,7 +153,8 @@ def node():
     them then, and this node's mesh checkout moved to the mesh commit; then the committed code's `collective`."""
     from mesh_nodes import load
     cluster = load()
-    minute = int(time.time()) // 60 * 60
+    now = int(time.time())
+    minute = now - (now - 60 * cluster.hourly_minute) % 3600
     # bounded from the start: a fetch that stalls ends this run (SIGALRM's default) rather than holding the job, which
     # launchd never starts twice; the alarm survives the exec, where collective sets its own
     signal.alarm(cluster.run_seconds)
@@ -176,6 +182,30 @@ def part_of(report, own):
     return sorted(part, key=int), sum(regions.get(number, 0) for number in part)
 
 
+def speak(instance, kind, until, **txt):
+    """An mDNS announcement of `kind` until `until` (unix seconds), ended by a timer or at this run's end (silence)."""
+    import threading
+    p = subprocess.Popen(['dns-sd', '-R', instance, kind, 'local', '9', *(f'{k}={v}' for k, v in txt.items())],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    SPEAKERS.append(p)
+    timer = threading.Timer(max(0.0, until - time.time()), lambda: silence([p]))
+    timer.daemon = True
+    timer.start()
+    return p
+
+
+def silence(speakers=None):
+    for p in list(SPEAKERS if speakers is None else speakers):
+        if p.poll() is None:
+            try:
+                os.killpg(p.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        p.wait()
+        if p in SPEAKERS:
+            SPEAKERS.remove(p)
+
+
 def browse(kind, until):
     """Every TXT record of the mDNS service `kind` heard on any network until `until` (unix seconds), by instance
     (dns-sd -Z's zone lines)."""
@@ -195,30 +225,28 @@ def browse(kind, until):
 
 
 def elect(record, report, own):
-    """The top-1 (module docstring). Records what this node heard and returns whether its part won."""
+    """The top-1 (module docstring), then the winning part's members and commits from its representative. Records what
+    this node heard and returns whether it is one of the run's members."""
     from mesh_nodes import parallel
     part, capacity = part_of(report, own)
-    start = record['minute']
-    speaker = None
+    start, run = record['minute'], record['run']
+    commits = record['commits']
+    speak(own, '_meshrank._tcp', start + BROWSE_UNTIL, run=run, part=part[0], mesh=commits['mesh'],
+          bench=commits['metal-microbench'])
     if own == part[0]:
-        speaker = subprocess.Popen(['dns-sd', '-R', own, '_meshpart._tcp', 'local', '9', f'run={record["run"]}',
-                                    f'capacity={capacity}', f'members={len(part)}'],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-    try:
-        parts, beacons = parallel([lambda: browse('_meshpart._tcp', start + BROWSE_UNTIL),
-                                   lambda: browse('_meshnode._tcp', start + BROWSE_UNTIL)])
-        if speaker:
-            time.sleep(max(0.0, start + ANNOUNCE_UNTIL - time.time()))
-    finally:
-        if speaker:
-            os.killpg(speaker.pid, signal.SIGTERM)
-            speaker.wait()
+        speak(own, '_meshpart._tcp', start + BROWSE_UNTIL, run=run, capacity=capacity, members=len(part))
+    parts, beacons, ranks = parallel([lambda: browse('_meshpart._tcp', start + BROWSE_UNTIL),
+                                      lambda: browse('_meshnode._tcp', start + BROWSE_UNTIL),
+                                      lambda: browse('_meshrank._tcp', start + BROWSE_UNTIL)])
+    silence()
     heard = {rep: {'capacity': int(t['capacity']), 'members': int(t['members'])} for rep, t in parts.items()
-             if t.get('run') == record['run'] and t.get('capacity', '').isdigit() and t.get('members', '').isdigit()}
+             if t.get('run') == run and t.get('capacity', '').isdigit() and t.get('members', '').isdigit()}
     heard[part[0]] = {'capacity': capacity, 'members': len(part)}
     record['beacons'] = {t['node']: t.get('node_id', '') for t in beacons.values() if t.get('node')}
+    taking_part = {n: t for n, t in ranks.items() if t.get('run') == run}
     winner = max(heard, key=lambda rep: (heard[rep]['capacity'], -int(rep)))
-    record['election'] = {'part': part, 'capacity': capacity, 'heard': heard, 'winner': winner}
+    record['election'] = {'part': part, 'capacity': capacity, 'heard': heard, 'winner': winner,
+                          'taking_part': sorted(taking_part, key=int)}
     if len(part) == 1 and not set(record['beacons']) - {own}:
         record['status'] = 'unknown'
         record['warning'] = ("heard no other node by any means: its bridge's map holds only itself and no beacon "
@@ -236,6 +264,33 @@ def elect(record, report, own):
         record['status'] = 'unknown'
         record['warning'] = (f'{unaccounted} nodes answered by beacon but no part announced them, as many as its own '
                              f'part\'s {len(part)}, so it does not know what is going on')
+        return False
+    if own == part[0]:
+        # the run's members: the part's nodes heard taking part in this run (a node late, without a checkout or without
+        # its job never announced itself), and the representative's commits, the same for every member
+        from mesh_nodes import parts
+        present = {n for n, t in taking_part.items() if t.get('part') == own and n in part} | {own}
+        # of those, the largest set the cables still link without the absent ones (ties to the one holding this node)
+        cables = {tuple(sorted(map(str, link[:2]))) for link in report['map']['links']}
+        members = sorted(max(parts(present, cables), key=lambda g: (len(g), own in g)), key=int)
+        chunks = [','.join(members[i:i + 20]) for i in range(0, len(members), 20)]
+        speak(run, '_meshrun._tcp', start + LIST_UNTIL, run=run, rep=own, mesh=commits['mesh'],
+              bench=commits['metal-microbench'], **{f'm{i}': chunk for i, chunk in enumerate(chunks)})
+        if own not in members:
+            time.sleep(max(0.0, start + LIST_UNTIL - time.time()))  # the members hear the list before it is silenced
+    else:
+        listed = next((t for t in browse('_meshrun._tcp', start + LISTEN_UNTIL).values()
+                       if t.get('run') == run and t.get('rep') == part[0]), None)
+        if not listed:
+            record['status'] = 'failed'
+            record['warning'] = f'its part\'s representative {part[0]} announced no members for this run'
+            return False
+        members = [n for i in range(len(listed)) if f'm{i}' in listed for n in listed[f'm{i}'].split(',') if n]
+        record['commits'] = {'mesh': listed.get('mesh', ''), 'metal-microbench': listed.get('bench', '')}
+    record['members'] = members
+    if own not in members:
+        record['status'] = 'not a member'
+        record['warning'] = f'its part\'s representative {part[0]} did not hear it take part'
         return False
     return True
 
@@ -263,9 +318,13 @@ def run_rank(item, me, record, ordinal, cluster, bench, known):
         # that long and no longer, and the case runs on the part linked by then
         mesh.wait_paired([me], None, min(end, time.time() + PAIRING_SECONDS))
         part, _ = part_of(me.stat()[1], me.number)
-        members = [number for number in part if number in record['election']['part']]
+        members = record['members']
         k = members.index(me.number)
         result.update(members=members, rank=k)
+        unlinked = [number for number in members if number not in part]
+        if unlinked:
+            # every member's map shows the same loss, so every member records this case unrun
+            raise RuntimeError(f'members {unlinked} not linked at the workload\'s start; not run')
         source = me.source
         env = (f'PYTHONPATH={mesh.home_path(source + "/rdma")}:{mesh.home_path(source + "/rdma/torch-mesh")} '
                'PYTHONDONTWRITEBYTECODE=1 ')
@@ -317,12 +376,20 @@ def collective(record):
         me = mesh.Node(cluster, own, 'localhost', local=True, deadline=record['deadline_unix'])
         me.source = local.source
         record.update(node=own, token=f'{record["run"]}:{own}:{os.getpid()}:{mesh.started(os.getpid())}')
-        if time.time() > record['minute'] + LATE:
-            record.update(status='late', warning=f'started {int(time.time() - record["minute"])} s after its minute, '
-                                                  f'past the election ({LATE} s)')
-            return 0
-        if not elect(record, report, own):
-            return 0
+        if 'members' not in record:
+            if time.time() > record['minute'] + LATE:
+                record.update(status='late', warning=f'started {int(time.time() - record["minute"])} s after its '
+                                                      f'minute, past the election ({LATE} s)')
+                return 0
+            mesh_commit = record['commits']['mesh']
+            if not elect(record, report, own):
+                return 0
+            if record['commits']['mesh'] != mesh_commit:
+                # the representative read another mesh commit: this node runs it, by its committed code
+                checkout(cluster.upstreams['mesh'], record['commits']['mesh'], Path.home() / me.source, 120)
+                silence()
+                os.execv(sys.executable, [sys.executable, str(Path.home() / me.source / 'rdma/mesh_hourly.py'),
+                                          'collective', json.dumps(record)])
         write(record)
         stage = 'preparation'
         record['status'] = 'preparing'
@@ -339,6 +406,11 @@ def collective(record):
         # a preparation that restarted this node's bridge, or a peer's, leaves links pairing again: each node waits for
         # its own (at most 300 s, wait_paired), so the members' maps agree when the first workload reads them
         record['paired'] = mesh.wait_paired([me], None, record['deadline_unix'])
+        # and until its bridge's map links every member (at most 300 s), so no workload starts on a part still forming
+        for _ in range(60):
+            if set(record['members']) <= set(part_of(me.stat()[1], own)[0]):
+                break
+            time.sleep(5)
         items = workload_configuration(bench)
         history = HOURLY / 'history.json'
         known = json.loads(history.read_text()) if history.exists() else {}
@@ -349,13 +421,14 @@ def collective(record):
             write(record)
         history.write_text(json.dumps(known))
         record['status'] = 'completed' if all(w['status'] == 'completed' for w in record['workloads']) else 'failed'
-    except Exception as error:
+    except (Exception, Stopped) as error:
         quiet()
         mesh.release()
-        record['status'] = 'failed'
+        record['status'] = 'stopped' if isinstance(error, Stopped) else 'failed'
         record['errors'].append({'stage': stage, 'error': str(error), 'traceback': traceback.format_exc()})
     finally:
         quiet()
+        silence()
         record['finished_unix'] = time.time()
         write(record)
     return 0 if record['status'] in ('completed', 'not elected') else 1
@@ -369,13 +442,13 @@ def merged(records, cluster):
     # them is the run and the other part's nodes are named as having run apart
     groups = {}
     for n, r in records.items():
-        if 'election' in r and r.get('status') not in ('unknown', 'late', 'not elected'):
+        if 'election' in r and r.get('status') not in ('unknown', 'late', 'not elected', 'not a member'):
             groups.setdefault(r['election']['part'][0], {})[n] = r
     chosen = max(groups, key=lambda rep: (next(iter(groups[rep].values()))['election']['capacity'], -int(rep)), default=None)
     ran = groups.get(chosen, {})
     first = next(iter(ran.values()), next(iter(records.values())))
     absent = {n: r.get('warning') or (f'ran apart, in the part of {r["election"]["part"][0]}: it did not hear the part '
-                                      f'of {chosen}' if r.get('election') and r.get('status') not in ('unknown', 'late', 'not elected')
+                                      f'of {chosen}' if r.get('election') and r.get('status') not in ('unknown', 'late', 'not elected', 'not a member')
                                       else f'{r.get("status")}: ' + '; '.join(e.get('error', '')[-160:] for e in r.get('errors', [])))
               for n, r in records.items() if n not in ran}
     absent.update({n: 'no record of this run (unreachable, or its job did not start)'
@@ -384,7 +457,9 @@ def merged(records, cluster):
                  'error': '; '.join(e.get('error', '') for e in r.get('errors', []))[-160:] or 'preparation incomplete'}
              for n, r in ran.items()}
     workloads = []
-    for item in first.get('workloads', []):
+    tags = list(dict.fromkeys(w['tag'] for r in ran.values() for w in r.get('workloads', [])))
+    for tag in tags:
+        item = {'tag': tag}
         rows = [w for r in ran.values() for w in r.get('workloads', []) if w['tag'] == item['tag']]
         ranks = {f'rank{w["rank"]}': w['result'] for w in rows if 'result' in w}
         members = {m for w in rows for m in w.get('members', [])}
