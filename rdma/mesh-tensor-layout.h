@@ -106,6 +106,8 @@ struct MetalTensorFragment { NSUInteger part, count; NSInteger offset; };
 // and alignment; `uses`/`targets` impose relative positions for consumers.
 // Each footprint is [first, count] in target coordinates. It reserves API
 // writes beyond logical values; [0, 0] adds no such reservation.
+// Relations retain value domains without per-value arrays. Connected groups
+// pack in source-root order at their first aligned, nonoverlapping origins.
 // A nil result means no common zero-copy placement exists. No data moves.
 FOUNDATION_EXPORT MetalTensorLayout * _Nullable MetalTensorPlace(NSUInteger count,
     NSArray<MetalTensorLayout *> *uses, NSArray<MetalTensorLayout *> *targets,

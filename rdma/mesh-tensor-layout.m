@@ -777,123 +777,162 @@ static MetalTensorLayout *TensorPermute(MetalTensorLayout *source,NSArray<NSNumb
     return TensorCompose(source,shape,TensorSum(terms));
 }
 
-// Weighted union-find: position(b) - position(a) = distance. These equations
-// exist only during placement; the result is the ordinary shared layout.
-struct TensorPosition { NSUInteger parent, size; NSInteger delta; };
-static NSUInteger TensorRoot(struct TensorPosition *nodes,NSUInteger i) {
-    if(nodes[i].parent!=i) {
-        const NSUInteger p=nodes[i].parent;
-        nodes[i].parent=TensorRoot(nodes,p);nodes[i].delta+=nodes[p].delta;
+// Placement stays in the same relation algebra as selection and inversion.
+// [a, p] -> [b, q] means position(b) - position(a) = q - p.
+static isl_map *TensorSplitRelation(isl_set *set,unsigned inputs) {
+    unsigned outputs=isl_set_dim(set,isl_dim_set)-inputs;
+    return isl_map_move_dims(isl_map_from_domain(set),isl_dim_out,0,isl_dim_in,inputs,outputs);
+}
+static isl_map *TensorEquations(MetalTensorLayout *values,isl_pw_aff *group,isl_pw_aff *position) {
+    isl_ctx *ctx=isl_pw_aff_get_ctx(group);
+    isl_map *triples=isl_map_flat_range_product(isl_map_flat_range_product(
+        MeshIndexRelation(ctx,values),isl_map_from_pw_aff(group)),isl_map_from_pw_aff(position));
+    isl_set *pairs=isl_set_apply(isl_set_detect_equalities(isl_map_range(triples)),isl_map_read_from_str(ctx,
+        "{ [v,g,d] -> [v,p,g,q] : q = p - d }"));
+    isl_map *assigned=isl_map_detect_equalities(TensorSplitRelation(pairs,2));
+    // Equal group origins equate every pair's displacement directly. This is
+    // the declared relation composed with its inverse, not a list of star edges.
+    isl_map *inverse=isl_map_reverse(isl_map_copy(assigned));
+    return isl_map_coalesce(isl_map_detect_equalities(isl_map_apply_range(assigned,inverse)));
+}
+// Both uses are finite graphs: weighted components over `count` values and
+// the ordered chain of their roots. An exact closure is sufficient; an
+// overapproximation is not. Repeated squaring includes every simple path and
+// cycle after at most ceil(log2(count)) compositions when acceleration is inexact.
+static isl_map *TensorClosure(isl_map *relation,NSUInteger count) {
+    isl_bool exact=isl_bool_false;
+    isl_map *closed=isl_map_transitive_closure(isl_map_copy(relation),&exact);
+    if(!closed||exact==isl_bool_true){isl_map_free(relation);return closed;}
+    isl_map_free(closed);
+    for(NSUInteger length=1;relation&&length<count;) {
+        closed=isl_map_coalesce(isl_map_detect_equalities(isl_map_union(isl_map_copy(relation),
+            isl_map_apply_range(isl_map_copy(relation),isl_map_copy(relation)))));
+        isl_bool same=isl_map_is_equal(relation,closed);isl_map_free(relation);relation=closed;
+        if(same!=isl_bool_false)break;
+        length=length>count/2?count:length*2;
     }
-    return nodes[i].parent;
-}
-static BOOL TensorJoin(struct TensorPosition *nodes,NSUInteger a,NSUInteger b,NSInteger distance) {
-    const NSUInteger x=TensorRoot(nodes,a),y=TensorRoot(nodes,b);
-    const NSInteger shift=distance+nodes[a].delta-nodes[b].delta;
-    if(x==y)return shift==0;
-    if(nodes[x].size>=nodes[y].size) {
-        nodes[y].parent=x;nodes[y].delta=shift;nodes[x].size+=nodes[y].size;
-    } else { nodes[x].parent=y;nodes[x].delta=-shift;nodes[y].size+=nodes[x].size; }
-    return YES;
-}
-static NSInteger TensorMod(NSInteger value,NSInteger modulus) {
-    const NSInteger remainder=value%modulus;return remainder<0?remainder+modulus:remainder;
-}
-struct TensorPlacementGroup { NSInteger low, high, phase, modulus, base; };
-static BOOL TensorAlign(struct TensorPlacementGroup *group,NSInteger phase,NSInteger modulus) {
-    // Combine two alignment congruences, including widths with different factors.
-    NSInteger a=group->modulus,b=modulus,x=1,y=0;
-    while(b){const NSInteger q=a/b,t=a%b;a=b;b=t;const NSInteger next=x-q*y;x=y;y=next;}
-    const NSInteger difference=phase-group->phase;
-    if(difference%a)return NO;
-    const NSInteger factor=modulus/a;
-    const NSInteger step=factor==1?0:TensorMod((difference/a)*x,factor);
-    group->phase+=group->modulus*step;group->modulus*=factor;
-    group->phase=TensorMod(group->phase,group->modulus);return YES;
-}
-static int TensorPositionCompare(const void *left,const void *right) {
-    const NSInteger a=((const struct TensorPosition *)left)->delta,b=((const struct TensorPosition *)right)->delta;
-    return (a>b)-(a<b);
+    return relation;
 }
 MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *> *uses,
     NSArray<MetalTensorLayout *> *targets,NSArray<NSArray<NSNumber *> *> *footprints,
     NSArray<MetalTensorLayout *> *values,NSArray<NSNumber *> *widths) {
     NSCParameterAssert(uses.count==targets.count&&uses.count==footprints.count&&values.count==widths.count);
-    struct TensorPosition *nodes=calloc(count?count:1,sizeof *nodes);
-    struct TensorPlacementGroup *groups=calloc(count?count:1,sizeof *groups);
-    MetalTensorLayout *result=nil;
-    if(!nodes||!groups){free(nodes);free(groups);[NSException raise:NSMallocException format:@"tensor placement metadata"];}
-    for(NSUInteger i=0;i<count;i++) {
-        nodes[i]=(struct TensorPosition){i,1,0};
-        groups[i]=(struct TensorPlacementGroup){NSIntegerMax,NSIntegerMin,0,1,0};
-    }
-    // A typed scalar's components stay adjacent even when no API constrains
-    // that part of the allocation. Differently typed aliases contribute here too.
+    if(!count)return [MetalTensorLayout shape:@[@0] strides:@[@1] offset:0 maps:@{} indices:nil];
+    isl_ctx *ctx=isl_ctx_alloc();MetalTensorLayout *result=nil;
+    isl_map *equations=NULL,*roots=NULL,*extents=NULL,*allowed=NULL,*base=NULL,*walk=NULL,*placed=NULL;
+    isl_set *ids=isl_set_read_from_str(ctx,[[NSString stringWithFormat:@"{ [i] : 0 <= i < %lu }",(unsigned long)count] UTF8String]);
+    isl_set *rootIds=NULL,*states=NULL;
+    isl_pw_aff *low=NULL,*high=NULL;
+    equations=isl_map_read_from_str(ctx,[[NSString stringWithFormat:
+        @"{ [i,p] -> [i,p] : 0 <= i < %lu }",(unsigned long)count] UTF8String]);
+    // The typed field relation supplies adjacency and alignment for every
+    // element, including fields reached through differently typed aliases.
     for(NSUInteger k=0;k<values.count;k++) {
-        MetalTensorLayout *value=values[k];const NSUInteger width=widths[k].unsignedIntegerValue;
+        MetalTensorLayout *value=values[k];NSUInteger width=widths[k].unsignedIntegerValue;
         NSCParameterAssert(width&&value.count%width==0);
-        for(NSUInteger i=0;i<value.count;i+=width) {
-            const NSUInteger first=(NSUInteger)[value index:i];NSCParameterAssert(first<count);
-            for(NSUInteger j=1;j<width;j++) {
-                const NSUInteger next=(NSUInteger)[value index:i+j];NSCParameterAssert(next<count);
-                if(!TensorJoin(nodes,first,next,(NSInteger)j))goto finished;
-            }
-        }
+        isl_map *fields=TensorEquations(value,
+            MeshIndexExpression(ctx,@[@"div",@"i",@(width)],0,value.count),
+            MeshIndexExpression(ctx,@[@"mod",@"i",@(width)],0,value.count));
+        equations=isl_map_union(equations,fields);
     }
     for(NSUInteger k=0;k<uses.count;k++) {
         MetalTensorLayout *use=uses[k],*target=targets[k];NSCParameterAssert(use.count==target.count);
         if(!use.count)continue;
-        const NSUInteger first=(NSUInteger)[use index:0];const NSInteger origin=[target index:0];
-        NSCParameterAssert(first<count);
-        for(NSUInteger i=1;i<use.count;i++) {
-            const NSUInteger next=(NSUInteger)[use index:i];NSCParameterAssert(next<count);
-            if(!TensorJoin(nodes,first,next,[target index:i]-origin))goto finished;
-        }
+        equations=isl_map_union(equations,TensorEquations(use,
+            MeshIndexExpression(ctx,@0,0,use.count),MeshIndexFunction(ctx,target)));
     }
-    for(NSUInteger i=0;i<count;i++) {
-        const NSUInteger root=TensorRoot(nodes,i);const NSInteger offset=nodes[i].delta;
-        groups[root].low=MIN(groups[root].low,offset);groups[root].high=MAX(groups[root].high,offset);
+    equations=isl_map_detect_equalities(isl_map_coalesce(equations));
+    {
+        isl_set *domain=isl_set_project_out(isl_map_domain(isl_map_copy(equations)),isl_dim_set,1,1);
+        isl_bool covered=isl_set_is_equal(domain,ids);isl_set_free(domain);
+        if(covered!=isl_bool_true)goto finished;
     }
+    equations=TensorClosure(equations,count);
+    {
+        isl_map *conflicts=isl_map_intersect(isl_map_copy(equations),
+            isl_map_read_from_str(ctx,"{ [i,p] -> [i,q] : p != q }"));
+        isl_bool empty=isl_map_is_empty(conflicts);isl_map_free(conflicts);
+        if(empty!=isl_bool_true)goto finished;
+    }
+    // Each value names its least root and its displacement from that root.
+    roots=isl_map_project_out(isl_map_fix_si(isl_map_copy(equations),isl_dim_in,1,0),isl_dim_in,1,1);
+    roots=isl_map_apply_range(isl_map_lexmin(roots),isl_map_read_from_str(ctx,"{ [r,d] -> [r,-d] }"));
+    roots=isl_map_coalesce(roots);
+    extents=TensorSplitRelation(isl_map_range(isl_map_copy(roots)),1);
+    rootIds=isl_map_domain(isl_map_copy(extents));
+    // API write footprints reserve their padding even where no logical field
+    // names that storage. They enlarge the same component's physical extent.
     for(NSUInteger k=0;k<uses.count;k++)if(uses[k].count&&[footprints[k][1] unsignedIntegerValue]) {
-        const NSUInteger first=(NSUInteger)[uses[k] index:0],root=nodes[first].parent;
-        const NSInteger low=nodes[first].delta+[footprints[k][0] integerValue]-[targets[k] index:0];
-        groups[root].low=MIN(groups[root].low,low);
-        groups[root].high=MAX(groups[root].high,low+[footprints[k][1] integerValue]-1);
+        NSInteger shift=[footprints[k][0] integerValue]-[targets[k] index:0],extent=[footprints[k][1] integerValue];
+        isl_set *anchor=isl_map_range(isl_map_fix_val(isl_map_copy(roots),isl_dim_in,0,
+            isl_val_int_from_si(ctx,[uses[k] index:0])));
+        isl_map *reserve=isl_map_read_from_str(ctx,[[NSString stringWithFormat:
+            @"{ [r,d] -> [r,x] : d + %ld <= x < d + %ld + %ld }",(long)shift,(long)shift,(long)extent] UTF8String]);
+        extents=isl_map_union(extents,TensorSplitRelation(isl_set_apply(anchor,reserve),1));
     }
+    low=isl_map_dim_min(isl_map_copy(extents),0);high=isl_map_dim_max(isl_map_copy(extents),0);
+    allowed=isl_map_intersect_domain(isl_map_read_from_str(ctx,"{ [r] -> [b] }"),isl_set_copy(rootIds));
     for(NSUInteger k=0;k<values.count;k++) {
-        MetalTensorLayout *value=values[k];const NSUInteger width=widths[k].unsignedIntegerValue;
-        for(NSUInteger i=0;i<value.count;i+=width) {
-            const NSUInteger first=(NSUInteger)[value index:i],root=nodes[first].parent;
-            if(!TensorAlign(groups+root,-nodes[first].delta,(NSInteger)width))goto finished;
-        }
+        NSUInteger width=widths[k].unsignedIntegerValue;
+        isl_set *starts=isl_set_read_from_str(ctx,[[NSString stringWithFormat:@"{ [i] : i mod %lu = 0 }",(unsigned long)width] UTF8String]);
+        starts=isl_map_range(isl_map_intersect_domain(MeshIndexRelation(ctx,values[k]),starts));
+        starts=isl_set_apply(starts,isl_map_copy(roots));
+        isl_map *unaligned=isl_map_read_from_str(ctx,[[NSString stringWithFormat:
+            @"{ [r,d] -> [r,b] : (b + d) mod %lu != 0 }",(unsigned long)width] UTF8String]);
+        allowed=isl_map_subtract(allowed,TensorSplitRelation(isl_set_apply(starts,unaligned),1));
     }
     {
-        NSInteger cursor=0;
-        // Lay disjoint equation components beside one another. Their internal
-        // positions are already fixed; unconstrained values retain distinct slots.
-        for(NSUInteger i=0;i<count;i++)if(nodes[i].parent==i) {
-            struct TensorPlacementGroup *g=groups+i;
-            g->base=cursor-g->low;g->base+=TensorMod(g->phase-g->base,g->modulus);
-            cursor=g->base+g->high+1;
-        }
-        NSMutableData *data=[NSMutableData dataWithLength:count*sizeof(NSInteger)];NSInteger *out=data.mutableBytes;
-        for(NSUInteger i=0;i<count;i++)out[i]=nodes[i].delta+=groups[nodes[i].parent].base;
-        // A footprint may cover its own values and padding, but no other live
-        // value, including one connected by another overlapping constraint.
-        for(NSUInteger k=0;k<uses.count;k++)if(uses[k].count&&[footprints[k][1] unsignedIntegerValue]) {
-            MetalTensorLayout *use=uses[k];NSMutableIndexSet *selected=[NSMutableIndexSet indexSet];
-            for(NSUInteger i=0;i<use.count;i++)[selected addIndex:(NSUInteger)[use index:i]];
-            const NSInteger low=out[(NSUInteger)[use index:0]]-[targets[k] index:0]+[footprints[k][0] integerValue];
-            const NSInteger end=low+[footprints[k][1] integerValue];
-            for(NSUInteger i=0;i<count;i++)if(out[i]>=low&&out[i]<end&&![selected containsIndex:i])goto finished;
-        }
-        // Distinct source values cannot occupy the same physical scalar slot.
-        qsort(nodes,count,sizeof *nodes,TensorPositionCompare);
-        for(NSUInteger i=1;i<count;i++)if(nodes[i-1].delta==nodes[i].delta)goto finished;
-        result=[MetalTensorLayout shape:@[@(count)] strides:@[@1] offset:0 maps:@{} indices:data];
+        isl_set *domain=isl_map_domain(isl_map_copy(allowed));
+        isl_bool covered=isl_set_is_equal(domain,rootIds);isl_set_free(domain);
+        if(covered!=isl_bool_true)goto finished;
     }
-finished:
-    free(nodes);free(groups);return result;
+    // Given the preceding end c, choose the first aligned base whose lowest
+    // occupied slot is at least c. Consecutive roots share that same recurrence;
+    // no global stride or per-component padding allowance wastes tensor storage.
+    {
+        isl_pw_aff *bound=isl_pw_aff_sub(isl_pw_aff_read_from_str(ctx,"{ [r,c] -> [c] }"),
+            isl_pw_aff_insert_dims(isl_pw_aff_copy(low),isl_dim_in,1,1));
+        base=isl_map_apply_range(isl_map_from_pw_aff(bound),isl_map_read_from_str(ctx,"{ [a] -> [b] : b >= a }"));
+        base=isl_map_lexmin(isl_map_intersect(base,isl_map_insert_dims(isl_map_copy(allowed),isl_dim_in,1,1)));
+        isl_pw_aff *end=isl_pw_aff_add(isl_map_dim_min(isl_map_copy(base),0),
+            isl_pw_aff_insert_dims(isl_pw_aff_copy(high),isl_dim_in,1,1));
+        end=isl_pw_aff_add_constant_val(end,isl_val_one(ctx));
+        isl_map *next=isl_map_from_domain_and_range(isl_set_copy(rootIds),isl_set_copy(rootIds));
+        next=isl_map_lexmin(isl_map_intersect(next,isl_map_read_from_str(ctx,"{ [r] -> [s] : s > r }")));
+        walk=isl_map_flat_range_product(isl_map_insert_dims(next,isl_dim_in,1,1),isl_map_from_pw_aff(end));
+        states=isl_set_apply(isl_set_lexmin(isl_set_copy(rootIds)),isl_map_read_from_str(ctx,"{ [r] -> [r,0] }"));
+        // Every visited cursor is either the initial zero or a predecessor's
+        // end. Propagating that range removes unreachable alignment phases.
+        isl_set *domain=isl_set_union(isl_set_copy(states),isl_map_range(isl_map_copy(walk)));
+        walk=isl_map_coalesce(isl_map_intersect_domain(walk,isl_set_copy(domain)));
+        walk=TensorClosure(isl_map_union(walk,isl_set_identity(domain)),count);
+        states=isl_set_apply(states,isl_map_copy(walk));
+        isl_map *bases=isl_map_project_out(isl_map_intersect_domain(isl_map_copy(base),isl_set_copy(states)),isl_dim_in,1,1);
+        isl_map *which=isl_map_project_out(isl_map_copy(roots),isl_dim_out,1,1);
+        isl_pw_aff *position=isl_map_dim_min(isl_map_apply_range(which,bases),0);
+        position=isl_pw_aff_add(position,isl_map_dim_min(isl_map_copy(roots),1));
+        placed=isl_map_coalesce(isl_map_from_pw_aff(position));
+    }
+    if(isl_map_is_injective(placed)!=isl_bool_true)goto finished;
+    for(NSUInteger k=0;k<uses.count;k++)if(uses[k].count&&[footprints[k][1] unsignedIntegerValue]) {
+        isl_set *foreign=isl_set_subtract(isl_set_copy(ids),isl_map_range(MeshIndexRelation(ctx,uses[k])));
+        foreign=isl_set_apply(foreign,isl_map_copy(placed));
+        isl_set *anchor=isl_map_range(isl_map_fix_val(isl_map_copy(placed),isl_dim_in,0,
+            isl_val_int_from_si(ctx,[uses[k] index:0])));
+        NSInteger shift=[footprints[k][0] integerValue]-[targets[k] index:0],extent=[footprints[k][1] integerValue];
+        isl_set *reserve=isl_set_apply(anchor,isl_map_read_from_str(ctx,[[NSString stringWithFormat:
+            @"{ [p] -> [q] : p + %ld <= q < p + %ld + %ld }",(long)shift,(long)shift,(long)extent] UTF8String]));
+        isl_bool disjoint=isl_set_is_disjoint(foreign,reserve);isl_set_free(foreign);isl_set_free(reserve);
+        if(disjoint!=isl_bool_true)goto finished;
+    }
+    result=TensorFunctionLayout(isl_map_dim_min(isl_map_copy(placed),0),@[@(count)]);
+finished:;
+    NSString *error=isl_ctx_last_error(ctx)==isl_error_none?nil:@(isl_ctx_last_error_msg(ctx));
+    isl_map_free(equations);isl_map_free(roots);isl_map_free(extents);isl_map_free(allowed);
+    isl_map_free(base);isl_map_free(walk);isl_map_free(placed);
+    isl_set_free(ids);isl_set_free(rootIds);isl_set_free(states);isl_pw_aff_free(low);isl_pw_aff_free(high);isl_ctx_free(ctx);
+    if(error)[NSException raise:NSInvalidArgumentException format:@"storage placement: %@",error];
+    return result;
 }
 
 // Bind configured names into the existing integer term type. The result goes

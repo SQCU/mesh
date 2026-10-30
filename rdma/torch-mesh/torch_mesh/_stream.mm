@@ -2105,6 +2105,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
       return out;}, pybind11::call_guard<Drained>())
     .def("storage_declaration",[](const TensorLayout &v,NSUInteger binding,const TensorLayout &source){
       return std::string([v.value declaration:binding fromStorage:source.value].UTF8String);}, pybind11::call_guard<Drained>())
+    .def("storage_span",[](const TensorLayout &v){
+      const MetalTensorSpan span=v.value.storageSpan;return std::make_pair(span.offset,span.count);
+    }, pybind11::call_guard<Drained>())
     .def("ordered_spans",[](const TensorLayout &v){
       NSData *data=[v.value orderedSpans];const auto *spans=(const MetalTensorSpan *)data.bytes;
       std::vector<std::pair<NSInteger,NSUInteger>> result;

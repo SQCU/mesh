@@ -1627,7 +1627,7 @@ numerical commands ran.
 
 The boundary remains incomplete. The empty-owner one-slot placeholder remains an
 implicit API accommodation and needs constraint/empty-domain lowering.
-The shared placement solver still uses per-value preparation metadata.
+The shared placement solver uses integer relations for its preparation metadata.
 Incompatible requirements also need cost-directed placement of conversion edges.
 Numerical execution remains deferred until these edges are reconciled.
 
@@ -1714,9 +1714,31 @@ Disjoint three-value outputs each retained a fourth padding lane, so their
 provider writes needed no conversion. Named selections and inherited half
 encodings kept shared backing; an explicit float encoding retained its required
 conversion edges. The shared libraries, native callers and FX extension built.
-No numerical commands ran. Per-value placement metadata and cost-directed
-handling of incompatible requirements remain unfinished; this is feasibility
-integration, not evidence of optimal placement or measured performance.
+No numerical commands ran. Cost-directed handling of incompatible requirements
+remains unfinished; this is feasibility integration, not evidence of optimal
+placement or measured performance.
+
+Placement now composes each use's group/position relation with its inverse.
+Typed fields, aliases, alignment and write footprints all constrain the same
+source domain. Connected groups pack in source-root order at the first aligned
+origin after the preceding group. The solver emits ordinary layout arithmetic;
+it keeps no per-value union-find, sorted collision array or output-index array.
+FX allocation sizing uses the same image bounds as native callers instead of
+enumerating ordered spans.
+
+Closure must be exact. ISL's accelerated closure is used only when ISL certifies
+it; otherwise bounded relation composition covers all simple paths and cycles
+in the finite declared domain. Packing propagates predecessor end positions
+before closure, removing unreachable alignment phases. This is preparation
+algebra, with no added runtime lookup, allocator or control operation. See the
+[ISL closure contract](https://libisl.sourceforge.io/user.html#Unary-Operations).
+
+Preparation on 2026-10-29 retained compact arithmetic for trillion-element typed
+fields and padded domains and a billion-element sparse selection. Mixed-width
+aliases retained alignment; inconsistent positions and writes into another live
+value's padding had no common placement. Existing native/provider declarations
+retained their placements and required scalar conversions. No tensor payload
+or numerical commands were used for these large-domain declarations.
 
 ### Encoded numerical operands
 

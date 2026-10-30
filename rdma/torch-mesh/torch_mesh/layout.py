@@ -129,7 +129,8 @@ def place(graph, placements, fixed):
             continue
         width = domain.element_size() // unit
         placed = placed.reshape((*domain.shape, width)).elements(width)
-        extent = max((offset + count for offset, count in placed.ordered_spans()), default=0)
+        first, length = placed.storage_span()
+        extent = first + length if length else 0
         alignment = math.lcm(*(value.element_size() for value in values)) // domain.element_size()
         extent = -(-extent // alignment) * alignment
         storage = empty((extent,), dtype=domain.dtype, device=domain.device.type)
