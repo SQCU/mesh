@@ -3010,9 +3010,11 @@ static ncclMeshFused fused_declared;
 /* the counts a call of its kind holds a rank each (an all-to-all's to each rank, then from each), where it holds any */
 static size_t call_segments(const struct call *c) { return segments_of(c->what, (size_t)c->comm->nranks); }
 /* whether issued call c is the call declared as d: its kind, type, operator, root, target and counts (a call that
-   holds none has equal ones, `count` each: enqueue_counts); a WRITE's, its bytes (WRITE_UNIT) */
+   holds none has equal ones, `count` each: enqueue_counts); a WRITE's, its bytes (WRITE_UNIT) and its tile, which cuts
+   its transfers (write_transfers): the declaration's steps and its plan's spans are the same fragments only alike */
 static int declared_as(const struct call *c, const struct call *d) {
-  if (c->what != d->what || c->type != d->type || c->op != d->op || c->root != d->root || c->target != d->target) return 0;
+  if (c->what != d->what || c->type != d->type || c->op != d->op || c->root != d->root || c->target != d->target ||
+      c->tile_bytes != d->tile_bytes) return 0;
   if (!counted(d) && c->count != d->count) return 0;
   for (size_t k = 0, v = call_segments(d); k < v && (c->segments || d->segments); k++)
     if ((c->segments ? c->segments[k] : c->count) != (d->segments ? d->segments[k] : d->count)) return 0;
@@ -3047,8 +3049,9 @@ static ncclResult_t definition_of(struct ncclComm *comm, struct call *list, size
     if (!declared_as(c, d)) {
       char why[MESH_DIAGNOSTIC_BYTES];
       snprintf(why, sizeof why, "call %zu of a group on communicator %s is not the call declared at its place (kind %d/%d, type %d/%d, "
-               "op %d/%d, root %d/%d, target %d/%d, count %zu/%zu, issued/declared, or their counts)", i, comm->name, c->what, d->what,
-               (int)c->type, (int)d->type, (int)c->op, (int)d->op, c->root, d->root, c->target, d->target, c->count, d->count);
+               "op %d/%d, root %d/%d, target %d/%d, count %zu/%zu, tile %zu/%zu, issued/declared, or their counts)", i, comm->name,
+               c->what, d->what, (int)c->type, (int)d->type, (int)c->op, (int)d->op, c->root, d->root, c->target, d->target, c->count,
+               d->count, (size_t)c->tile_bytes, (size_t)d->tile_bytes);
       library_end(why);
     }
     call_bind_roles(list + i, d);
