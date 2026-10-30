@@ -6,6 +6,9 @@ LOG=$MESH_ROOT/log/router.log
 [ -d "$MESH_ROOT/log" ] && exec >>"$LOG" 2>&1
 ts(){ date '+%F %T'; }
 ports=$("$(dirname "$0")/mesh-rdma.sh" | awk '{print $1}')
+# no RDMA port (RDMA disabled until a Recovery visit, or none present): nothing to route until the next boot, when
+# launchd runs this again; a clean exit, which the job does not restart (install.sh: KeepAlive SuccessfulExit false)
+[ -n "$ports" ] || { echo "[$(ts)] no RDMA port: babeld not started"; exit 0; }
 uuid=$(ioreg -rd1 -c IOPlatformExpertDevice | awk -F'"' '/IOPlatformUUID/{print $4}')
 h=$(printf '%s' "$uuid" | shasum -a 256 | cut -c1-20)
 g(){ printf '%x' $(( 0x${1} | 0x1000 )); }

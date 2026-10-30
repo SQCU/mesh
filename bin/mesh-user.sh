@@ -9,14 +9,16 @@
 # program and its configuration's path alone: a new binary, libmesh or configuration is installed by rename, and the
 # bridge's heartbeat, sent SIGHUP, restarts the bridge on them, its region kept (design/transport.md section 2).  The install records what it installed
 # (~/.cache/mesh/facts/io.mesh.bridge, which node-info publishes).
-# Run as the user, again after every pull:  mesh-user.sh CONFIGURATION [CHECKOUT]  (~/mesh)
+# Run as the user:  mesh-user.sh CONFIGURATION [CHECKOUT]  (the checkout holding this script: the node's one checkout,
+# etc/mesh-nodes.json `checkouts`/mesh/current, which the hourly moves and builds; a second checkout would leave the
+# bridge on code the hourly never updates)
 set -u
 if [ $# -lt 1 ] || [ $# -gt 2 ] || [ ! -f "$1" ]; then
   echo "mesh-user.sh CONFIGURATION [CHECKOUT]: the node's bridge configuration document (JSON, TOML or YAML; etc/bridge/README.md) is required, the bridge has no default" >&2
   exit 64
 fi
 document=$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")
-source=$(cd "${2:-$HOME/mesh}" && pwd -P) || exit 1
+source=$(cd "${2:-$(dirname "$0")/..}" && pwd -P) || exit 1
 python3 "$source/rdma/mesh_source.py" verify "$source" || exit 1
 venv=$HOME/.venv-mesh-uv
 support="$HOME/Library/Application Support"; state=$HOME/.cache/mesh

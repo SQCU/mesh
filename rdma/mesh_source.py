@@ -70,14 +70,22 @@ def checkout(origin, commit, destination, timeout=None, paths=()):
 
 
 def main():
+    """revision ROOT, verify ROOT, or checkout ORIGIN DESTINATION [COMMIT]: DESTINATION (a node's one checkout,
+    etc/mesh-nodes.json `checkouts`/mesh/current) made or moved to COMMIT, by default main as ORIGIN has it now, as the
+    hourly moves it (a worktree of a bare clone beside it, never a second clone)."""
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=('revision', 'verify'))
-    parser.add_argument('root', type=Path)
+    parser.add_argument('action', choices=('revision', 'verify', 'checkout'))
+    parser.add_argument('operands', nargs='+')
     args = parser.parse_args()
-    if args.action == 'revision':
-        print(revision(args.root))
+    if args.action == 'checkout':
+        origin, destination, *commit = args.operands
+        commit = commit[0] if commit else git(Path.home(), 'ls-remote', origin, 'refs/heads/main').split()[0].decode()
+        checkout(origin, commit, Path(destination).expanduser(), 600)
+        print(f'{destination} at {commit}')
+    elif args.action == 'revision':
+        print(revision(Path(args.operands[0])))
     else:
-        print(verify(args.root))
+        print(verify(Path(args.operands[0])))
 
 
 if __name__ == '__main__':

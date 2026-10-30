@@ -52,9 +52,9 @@ install -C -m 644 -o root -g wheel "$REPO"/viz/index.html "$MESH_ROOT/viz/index.
 # every node spawned processes several times a second for a dashboard nothing else read (2026-10-29)
 # jobs whose sources are gone, each left loaded where it once ran: io.mesh.nodeinfo (gone since 3b85c586), and the
 # hourly's user agent and its boot loader (an hour on 2026-10-29, before io.mesh.hourly became a system job)
-for L in io.mesh.telemetry io.mesh.observer io.mesh.nodeinfo io.mesh.hourly-boot; do launchctl bootout "system/$L" >/dev/null 2>&1; [ -z "${ADMIN_USER:-}" ] || launchctl bootout "gui/$(id -u "$ADMIN_USER")/$L" >/dev/null 2>&1; done
+for L in io.mesh.telemetry io.mesh.observer io.mesh.nodeinfo io.mesh.hourly-boot io.mesh.rdma-init; do launchctl bootout "system/$L" >/dev/null 2>&1; [ -z "${ADMIN_USER:-}" ] || launchctl bootout "gui/$(id -u "$ADMIN_USER")/$L" >/dev/null 2>&1; done
 [ -z "${ADMIN_USER:-}" ] || launchctl bootout "user/$(id -u "$ADMIN_USER")/io.mesh.hourly" >/dev/null 2>&1
-rm -f /Library/LaunchDaemons/io.mesh.{telemetry,observer,nodeinfo,hourly-boot}.plist "$MESH_ROOT/bin/mesh-nodeinfod.py"
+rm -f /Library/LaunchDaemons/io.mesh.{telemetry,observer,nodeinfo,hourly-boot,rdma-init}.plist "$MESH_ROOT"/bin/{mesh-nodeinfod.py,mesh-rdma-init.sh}
 [ -z "${ADMIN_USER:-}" ] || rm -f "$(eval echo "~$ADMIN_USER")"/Library/LaunchAgents/io.mesh.{telemetry,observer,hourly}.plist
 rm -f /Library/LaunchDaemons/io.mesh.{bridge,update,keeper,cartlane.learner,cartlane.viewer}.plist "$MESH_ROOT"/bin/{mesh-flow,mesh-update.sh,mesh-keeper.sh,mesh_restart.py} "$MESH_ROOT"/policy{,.default}; rm -rf "$MESH_ROOT/rdma"
 for L in io.mesh.keeper io.mesh.cartlane.learner io.mesh.cartlane.viewer; do launchctl bootout "system/$L" >/dev/null 2>&1; done
@@ -174,25 +174,26 @@ PL
 launchctl bootout system/io.mesh.caffeinate >/dev/null 2>&1; rm -f /Library/LaunchDaemons/io.mesh.caffeinate.plist
 mkplist io.mesh.beacon "<string>$MESH_ROOT/bin/mesh-beacon.sh</string>"
 mkplist io.mesh.fabric "<string>$MESH_ROOT/bin/mesh-fabric-init.sh</string>"
+# restarted after a failure only (launchd's own 10 s apart): a router with no RDMA port exits 0 and stays down until the
+# next boot, where a ThrottleInterval of 1 respawned it every second forever (operations review, 2026-10-29)
 mkplist io.mesh.router "<string>$MESH_ROOT/bin/mesh-router-init.sh</string>" \
-  "  <key>KeepAlive</key><true/>
-  <key>ThrottleInterval</key><integer>1</integer>"
-mkplist io.mesh.rdma-init "<string>$MESH_ROOT/bin/mesh-rdma-init.sh</string>"
-TSJ=io.mesh.tailscale; [ -d /Applications/Tailscale.app ] && TSJ=
+  "  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>"
+# the tailnet's daemon only where it was built: a job naming a missing program fails every start
+TSJ=io.mesh.tailscale; { [ -d /Applications/Tailscale.app ] || [ ! -x "$MESH_ROOT/bin/tailscaled" ]; } && TSJ=
 [ -n "$TSJ" ] && mkplist io.mesh.tailscale "<string>$MESH_ROOT/bin/tailscaled</string><string>--statedir=$MESH_ROOT/tailscale</string><string>--socket=/var/run/tailscaled.socket</string>" \
-  "  <key>KeepAlive</key><true/>
-  <key>ThrottleInterval</key><integer>1</integer>"
+  "  <key>KeepAlive</key><true/>"
 ADMIN_UID=$(id -u "$ADMIN_USER")
 mkplist io.mesh.bridge-boot "<string>/bin/launchctl</string><string>bootstrap</string><string>user/$ADMIN_UID</string><string>$H/Library/LaunchAgents/io.mesh.bridge.plist</string>"
-for L in io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.rdma-init io.mesh.bridge-boot $TSJ; do
+for L in io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.bridge-boot $TSJ; do
   if out=$("$REPO/bin/mesh-launchd-agent.sh" "$J/$L.plist.new" system "/Library/LaunchDaemons/$L.plist"); then
     [ -n "$out" ] && { replaced=$((replaced+1)); ok "$out"; } || { retained=$((retained+1)); ok "$L loaded"; }
   else bad "$L NOT LOADED: $out"; fi
 done
-for P in "$H/Library/LaunchAgents/"*.plist; do
-  [ "$(plutil -extract LimitLoadToSessionType raw "$P" 2>/dev/null)" = Background ] || continue
+# the user's one agent, the bridge's (bin/mesh-user.sh writes it); no other plist in LaunchAgents is loaded on its say
+P="$H/Library/LaunchAgents/io.mesh.bridge.plist"
+if [ -f "$P" ]; then
   if out=$("$REPO/bin/mesh-launchd-agent.sh" "$P" "user/$ADMIN_UID"); then [ -z "$out" ] || ok "$out"; else bad "$out"; fi
-done
+fi
 for L in $kick; do launchctl kickstart -k "system/$L" >/dev/null 2>&1 && ok "$L restarted on its new program (kickstart -k)" || bad "$L not restarted"; done
 launchctl kickstart system/io.mesh.beacon >/dev/null 2>&1
 "$MESH_ROOT/bin/mesh-tailscale-init.sh"
