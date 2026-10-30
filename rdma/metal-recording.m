@@ -771,7 +771,7 @@ static void MetalDataflow(MetalCapture *capture) {
 
 // A shared buffer over a region lease of its own (ncclMemAlloc, nccl.h Memory), retained: no copy, the lease returned
 // (ncclMemFree) when the buffer is deallocated, after every command that bound it.
-static id<MTLBuffer> MetalLeaseBuffer(id<MTLDevice> device,NSUInteger length) {
+id<MTLBuffer> MetalLeaseBuffer(id<MTLDevice> device,NSUInteger length) {
     const NSUInteger page=(NSUInteger)getpagesize(),bytes=(MAX(length,(NSUInteger)1)+page-1)/page*page;
     void *memory=NULL;
     if(ncclMemAlloc(&memory,bytes))

@@ -27,6 +27,8 @@ MTLCompileOptions *MetalDeviceCompilerOptions(id<MTLDevice> device);
 // `outputOffset` bytes past it (a stride: the next invocation's input).  Any buffer the commands bind
 // that is not named is bound as described, at every invocation; a buffer named twice is its last naming's.
 struct MetalOperand { const char *name; __unsafe_unretained id<MTLBuffer> buffer; NSUInteger stride, instances, outputOffset; };
+// Preparation storage from the shared bridge region. The caller owns the buffer.
+id<MTLBuffer> MetalLeaseBuffer(id<MTLDevice>, NSUInteger bytes) NS_RETURNS_RETAINED;
 static inline NSUInteger MetalInvocationOffset(NSUInteger offset, NSUInteger stride, NSUInteger instances, NSUInteger invocation) {
     return offset + (instances ? invocation % instances : invocation) * stride;
 }
