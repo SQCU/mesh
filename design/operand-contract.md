@@ -25,9 +25,13 @@ address alignment. Python and Swift consume that same contract. The configured
 direct ANE adapter binds an IOSurface over bridge pages and prepares its request
 and completion operand once per invocation. The existing scheduler publishes
 readiness on actual completion and carries the model's declared request capacity.
-Public Core ML output backings remain advisory. Raw provider-owned state
+Public Core ML output backings remain advisory, so that API has no prepared
+execution path. Its metadata remains available. Raw provider-owned state
 from an exported graph is lifted into named input/output pages using its declared
 mutation effects. A precompiled stateful artifact still needs its source graph.
+Returned inputs, repeated results and returned captured tensors become explicit
+page equalities or weight operands before placement. Alias-only graphs need no
+provider task.
 
 LiteRT and its Metal provider now build from matching pinned sources. During
 preparation the provider exports its actual tensor types, physical layouts,
@@ -51,15 +55,25 @@ earlier host operation at each crossing or makes later hosts depend on the
 whole crossing. Fused descriptor setup retains residency declarations; the
 existing producer and landing commands carry the payload dependencies.
 
+Placement joins complete logical storage domains through declared equalities.
+Existing allocations can be composed into one local page view without copying
+their contents. Physical page identity drives dependencies even when two local
+views have different addresses. Composition retains only the original allocations
+backing selected pages; nested views do not retain intermediate mappings.
+
 Evidence is source review, native and frontend builds, Swift type checking,
 graph preparation and ANE load/map/release. Actual LiteRT compilation, placement,
 binding and command export succeeded with changed row counts, named dimensions
 and a nonzero output origin, without boundary copies or numerical invocation.
 Dependency preparation retained the needed producer across crossings and left
 disjoint host work independent. These are preparation results, not latency or
-throughput measurements. Whole-storage producer/gather placement, input/result
-alias binding, nonzero-zero-point sparse product domains and the full-function
-integration review remain open. Vendor ANE submission throttles are documented
+throughput measurements. Nested page-view preparation also checked owner release
+against the bridge's allocation metadata. Nonzero-zero-point sparse products
+compile retained codes and the offset through the shared reduction machinery.
+The remaining integration work is joint placement of fixed and fresh pages under
+consumer layout constraints, source-coordinate quantization through mixed-axis
+views, precise provider read domains, and scheduling independent work across
+collective preparation boundaries. Vendor ANE submission throttles are documented
 separately in `ane-prepared-contract-2026-10-30.md`; a completion callback does not
 remove those framework instructions.
 

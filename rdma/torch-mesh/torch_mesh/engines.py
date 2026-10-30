@@ -72,8 +72,7 @@ _CORE_ML = None
 
 
 def _coreml():
-    """The native Core ML binding (rdma/mesh-coreml.m: predictions on caller memory, no copies on the CPU), the mesh's
-    installed library beside mesh.py; None where it cannot load."""
+    """Load the native compiler, ANE page binding and CPU task interfaces."""
     global _CORE_ML
     if _CORE_ML is None:
         from mesh import RDMA
@@ -377,8 +376,8 @@ class _Compiled:
 class Ane(Engine):
     """Core ML graph shares with explicit tile and channel block configuration.
 
-    Compilation and model loading happen during preparation. Predictions bind
-    shared input/output views and fail if Core ML does not honor output backing.
+    Compilation and model loading happen during preparation. Direct ANE requests
+    bind guaranteed caller-owned input and output pages.
     """
     name, limits, occupies = 'ane', {'dtypes': (torch.float16, torch.bfloat16, torch.float32), 'constants': True}, frozenset({'ane'})
 
@@ -413,7 +412,7 @@ class Ane(Engine):
 
     def declaration(self, op, shard, rows):
         compiled, _, placement = neural_engine_share(shard.kind, shard.arrays, rows, self.tile, self.block, self.model)
-        contract = placement['contract']
+        contract = model_pages(placement['contract'])
         source, target = self.model['input'], self.model['output']
         columns = shard.arrays[0].shape[0] if shard.kind == 'linear' else shard.arrays[2].shape[0]
         return dict(definition=dict(provider='coreml', compiled=str(compiled), configuration=self.model, contract=contract), weights={},
@@ -434,6 +433,13 @@ class ModelView(ctypes.Structure):
 
 
 _MODEL_TYPES = (torch.float16, torch.float32, torch.int32, torch.float64, torch.int8)
+
+
+def model_pages(contract):
+    """Require the provider's storage guarantee before assigning output pages."""
+    if contract['output_storage'] != 'caller-pages':
+        raise ValueError('prepared page execution requires guaranteed caller-owned output pages; public Core ML outputBackings are advisory')
+    return contract
 
 
 def model_requirements(features, shapes):
@@ -474,7 +480,7 @@ def _coreml_addresses(length):
 
 
 class Prediction:
-    """One Core ML invocation's views, bound before the numerical function."""
+    """One direct ANE invocation's pages, bound before the numerical function."""
     def __init__(self, native, model, source, target, *, compiled, configuration, contract):
         from . import _stream
         from .operand import TensorView
@@ -541,7 +547,7 @@ def coreml_contract(compiled, configuration):
 
 
 def coreml_graph(compiled, inputs, outputs, *, configuration, contract):
-    """Bind any compiled Core ML graph to named shared views at preparation.
+    """Bind a compiled graph with guaranteed caller-owned output pages.
 
     ``configuration`` supplies backend, compute units, function and devices.
     The shared loader inspects the provider's preferred placement before binding.
@@ -551,6 +557,7 @@ def coreml_graph(compiled, inputs, outputs, *, configuration, contract):
     supplies the provider's types, layouts, footprints and address alignment,
     which the caller has already consumed when assigning producer storage.
     """
+    model_pages(contract)
     native = _coreml()
     if native is None:
         raise RuntimeError('Core ML graph requires the native shared-memory binding')
@@ -562,128 +569,152 @@ def coreml_graph(compiled, inputs, outputs, *, configuration, contract):
 
 
 def page_state_program(program, pairs):
-    """Keep exported state effects as named tensor arguments and results.
+    """Expose exported effects and aliases before provider placement.
 
-    Export already represents each mutation as an SSA result. Changing its
-    signature keeps Core ML from turning that result back into private state.
-    The pair keys name exported buffer targets or mutated user-input names;
-    each pair supplies the input and output feature names used by the caller.
-    When the same value is also returned to the user, the pair's output name
-    names that one result. Its input is never duplicated or privately retained.
+    Returns the numerical program, named input/result metadata, result aliases
+    and captured weight operands. A placeholder keeps its input name
+    while several result names denote the same pages. No identity operation or
+    copied value is introduced.
     """
     import copy
     from dataclasses import replace
     from torch.export import ExportedProgram
     from torch.export.exported_program import ModuleCallEntry, ModuleCallSignature
-    from torch.export.graph_signature import ExportGraphSignature, InputKind, OutputKind
+    from torch.export.graph_signature import ExportGraphSignature, InputKind, OutputKind, TensorArgument
     from torch.utils._pytree import tree_structure
+    from mesh_graph import needed
 
     signature = copy.deepcopy(program.graph_signature)
     effects = {spec.target: spec for spec in signature.output_specs
                if spec.kind in (OutputKind.BUFFER_MUTATION, OutputKind.USER_INPUT_MUTATION)}
-    if not effects:
-        return program
     missing = effects.keys() - pairs.keys()
     if missing:
         raise ValueError(f'exported state effects need named page pairs: {sorted(missing)}')
     graph = copy.deepcopy(program.graph)
     nodes = {node.name: node for node in graph.nodes}
-    renames, lifted, given = {}, set(), []
+    returned = next(node for node in graph.nodes if node.op == 'output')
+    if any(not isinstance(spec.arg, TensorArgument) for spec in signature.output_specs):
+        raise ValueError('the exported tensor interface requires named tensor results')
+    returned_inputs = {value.name for value in returned.args[0] if value.op == 'placeholder'}
+    renames, given, weights = {}, [], {}
     for spec in signature.input_specs:
         effect = spec.target if spec.kind == InputKind.BUFFER else spec.arg.name
         if effect in effects:
             renames[spec.arg.name] = pairs[effect]['input']
             if spec.kind == InputKind.BUFFER:
-                lifted.add(spec.target)
                 spec = replace(spec, kind=InputKind.USER_INPUT, target=None, persistent=None)
+        elif spec.arg.name in returned_inputs and spec.kind != InputKind.USER_INPUT:
+            weights[spec.arg.name] = (program.state_dict[spec.target] if spec.target in program.state_dict
+                                      else program.constants[spec.target])
+            spec = replace(spec, kind=InputKind.USER_INPUT, target=None, persistent=None)
         given.append(spec)
-    # Export's flat convention puts captured constants before user operands.
-    # Promoted buffers move with their placeholders, leaving every use intact.
     given = ([spec for spec in given if spec.kind != InputKind.USER_INPUT] +
              [spec for spec in given if spec.kind == InputKind.USER_INPUT])
     first = next(node for node in graph.nodes if node.op != 'placeholder')
     for spec in given:
         first.prepend(nodes[spec.arg.name])
-    for effect, spec in effects.items():
-        renames[spec.arg.name] = pairs[effect]['output']
-    # Rename existing nodes, not tensor values. This creates no operation or
-    # storage and changes every use of an effect result together.
+    inputs = {renames.get(spec.arg.name, spec.arg.name): nodes[spec.arg.name].meta['val']
+              for spec in given if spec.kind == InputKind.USER_INPUT}
+    outputs, aliases, canonical, made, values = {}, {}, {}, [], []
+    for spec, value in zip(signature.output_specs, returned.args[0], strict=True):
+        name = (pairs[spec.target]['output'] if spec.kind in
+                (OutputKind.BUFFER_MUTATION, OutputKind.USER_INPUT_MUTATION) else spec.arg.name)
+        outputs[name] = value.meta['val']
+        if value.op == 'placeholder':
+            aliases[name] = renames.get(value.name, value.name)
+        elif value in canonical:
+            if name != canonical[value]:
+                aliases[name] = canonical[value]
+        else:
+            canonical[value] = name
+            renames[value.name] = name
+            made.append(replace(spec, kind=OutputKind.USER_OUTPUT, target=None))
+            values.append(value)
+    # Rename only the provider's actual values; named aliases stay declarations.
     for old, name in renames.items():
         nodes[old].name = name
         if nodes[old].op == 'placeholder':
             nodes[old].target = name
-    for spec in given + signature.output_specs:
-        if spec.arg.name in renames:
-            spec.arg.name = renames[spec.arg.name]
-    made, values = [], []
-    returned = next(node for node in graph.nodes if node.op == 'output')
-    for spec, value in zip(signature.output_specs, returned.args[0], strict=True):
-        if spec.kind in (OutputKind.BUFFER_MUTATION, OutputKind.USER_INPUT_MUTATION):
-            spec = replace(spec, kind=OutputKind.USER_OUTPUT, target=None)
-        # A state result may also be an ordinary result. One named feature and
-        # one page operand express that same SSA value, without an identity copy.
-        if value not in values:
-            made.append(spec)
-            values.append(value)
+    for spec in given + made:
+        spec.arg.name = renames.get(spec.arg.name, spec.arg.name)
     returned.args = (tuple(values),)
+    ordered = list(graph.nodes)
+    live = {i for span in needed([node.all_input_nodes for node in ordered],
+                                [(node,) for node in ordered], (returned,)) for i in span}
+    for i in range(len(ordered) - 1, -1, -1):
+        if i not in live:
+            graph.erase_node(ordered[i])
+    retained = {node.name for node in graph.nodes if node.op == 'placeholder'}
+    given = [spec for spec in given if spec.arg.name in retained]
+    captured = {spec.target for spec in given if spec.kind != InputKind.USER_INPUT}
     signature = ExportGraphSignature(given, made)
     user_inputs = [spec.arg for spec in given if spec.kind == InputKind.USER_INPUT]
-    user_outputs = [spec.arg for spec in made if spec.kind == OutputKind.USER_OUTPUT]
-    calls = copy.deepcopy(program.module_call_graph)
-    for call in calls:
-        if call.signature:
-            for arg in call.signature.inputs + call.signature.outputs:
-                if arg.name in renames:
-                    arg.name = renames[arg.name]
+    user_outputs = [spec.arg for spec in made]
     flat = ModuleCallSignature(user_inputs, user_outputs,
         tree_structure((tuple(None for _ in user_inputs), {})),
         tree_structure(tuple(None for _ in user_outputs)))
-    if calls:
-        calls[0] = ModuleCallEntry('', flat)
-    else:
-        calls = [ModuleCallEntry('', flat)]
-    return ExportedProgram(program.graph_module, graph, signature,
-        {name: value for name, value in program.state_dict.items() if name not in lifted},
-        copy.deepcopy(program.range_constraints), calls,
-        constants={name: value for name, value in program.constants.items() if name not in lifted},
+    prepared = ExportedProgram(program.graph_module, graph, signature,
+        {name: value for name, value in program.state_dict.items() if name in captured},
+        copy.deepcopy(program.range_constraints), [ModuleCallEntry('', flat)],
+        constants={name: value for name, value in program.constants.items() if name in captured},
         verifiers=program.verifiers)
+    return prepared, inputs, outputs, aliases, weights
 
 
-def export_coreml_graph(program, inputs, outputs, *, directory, configuration):
-    """Lower an exported tensor graph once, then bind the common host record.
+def export_coreml_graph(program, *, directory, configuration):
+    """Prepare the ordinary host declaration before assigning operand pages.
 
-    ``program`` is a torch.export.ExportedProgram (its graph and constants).
-    The caller supplies names/views, CPU or ANE placement, target and precision.
-    Conversion emits compiler artifacts in the supplied directory. It does not
-    invoke the numerical graph, and the returned record does no file access.
+    The returned definition and layout requirements feed ``host.declare``.
+    ``input_meta`` and ``output_meta`` retain the source graph's named tensor
+    types, including aliases which require no provider output or host task.
+    ``weights`` supplies returned captures through the existing weight operands.
     """
+    import copy
     import coremltools as ct
     from coremltools.converters.mil.frontend.torch.utils import TORCH_DTYPE_TO_MIL_DTYPE
-    from torch.export.graph_signature import InputKind, OutputKind
-    native = _coreml()
-    if native is None:
-        raise RuntimeError('Core ML graph requires the native shared-memory binding')
-    program = page_state_program(program, configuration['state_pairs'])
+    from torch.export.graph_signature import InputKind
+    program, inputs, outputs, aliases, weights = page_state_program(program, configuration['state_pairs'])
     nodes = {node.name: node for node in program.graph.nodes}
-    def feature(spec):
-        return ct.TensorType(name=spec.arg.name,
-                             dtype=TORCH_DTYPE_TO_MIL_DTYPE[nodes[spec.arg.name].meta['val'].dtype])
-    input_types = [feature(spec) for spec in program.graph_signature.input_specs if spec.kind == InputKind.USER_INPUT]
-    output_types = [feature(spec) for spec in program.graph_signature.output_specs if spec.kind == OutputKind.USER_OUTPUT]
-    compute = coreml_units(configuration['units'])
-    model = ct.convert(program, inputs=input_types, outputs=output_types, convert_to='mlprogram', compute_units=compute,
-                       minimum_deployment_target=getattr(ct.target, configuration['deployment']),
-                       compute_precision=getattr(ct.precision, configuration['precision']), skip_model_load=True)
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
-    package, compiled = directory / 'graph.mlpackage', directory / 'graph.mlmodelc'
-    model.save(str(package))
-    try:
-        if native.mesh_coreml_compile(os.fsencode(package), os.fsencode(compiled)):
-            raise RuntimeError(native.mesh_coreml_error().decode())
-    finally:
-        shutil.rmtree(package)
-    return coreml_graph(compiled, inputs, outputs, configuration=configuration, contract=coreml_contract(compiled, configuration))
+    sources = [spec for spec in program.graph_signature.input_specs if spec.kind == InputKind.USER_INPUT]
+    results = program.graph_signature.output_specs
+    provider = copy.deepcopy(configuration)
+    provider['state_pairs'] = {name: pair for name, pair in configuration['state_pairs'].items()
+                               if pair['output'] not in aliases}
+    source_names, result_names = [spec.arg.name for spec in sources], [spec.arg.name for spec in results]
+    if provider['backend'] == 'ane':
+        symbols = provider['ane']['symbols']
+        symbols['inputs'] = {name: symbols['inputs'][name] for name in source_names}
+        symbols['outputs'] = {name: symbols['outputs'][name] for name in result_names}
+    contract, compiled = {'inputs': {}, 'outputs': {}}, None
+    if results:
+        native = _coreml()
+        if native is None:
+            raise RuntimeError('Core ML graph requires the native shared-memory binding')
+        def feature(spec):
+            return ct.TensorType(name=spec.arg.name,
+                                 dtype=TORCH_DTYPE_TO_MIL_DTYPE[nodes[spec.arg.name].meta['val'].dtype])
+        model = ct.convert(program, inputs=[feature(spec) for spec in sources], outputs=[feature(spec) for spec in results],
+                           convert_to='mlprogram', compute_units=coreml_units(provider['units']),
+                           minimum_deployment_target=getattr(ct.target, provider['deployment']),
+                           compute_precision=getattr(ct.precision, provider['precision']), skip_model_load=True)
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        package, compiled = directory / 'graph.mlpackage', directory / 'graph.mlmodelc'
+        model.save(str(package))
+        try:
+            if native.mesh_coreml_compile(os.fsencode(package), os.fsencode(compiled)):
+                raise RuntimeError(native.mesh_coreml_error().decode())
+        finally:
+            shutil.rmtree(package)
+        contract = model_pages(coreml_contract(compiled, provider))
+    input_layouts = dict.fromkeys(inputs, 'indexed')
+    output_layouts = dict.fromkeys(outputs, 'indexed')
+    input_layouts.update(model_requirements(contract['inputs'], {name: inputs[name].shape for name in contract['inputs']}))
+    output_layouts.update(model_requirements(contract['outputs'], {name: outputs[name].shape for name in contract['outputs']}))
+    return dict(definition=dict(provider='coreml', compiled=None if compiled is None else str(compiled), configuration=provider,
+                               contract=contract, output_aliases=aliases, state_pairs=configuration['state_pairs']),
+                input_layouts=input_layouts, output_layouts=output_layouts, binding_layout=configuration['binding_layout'],
+                input_meta=inputs, output_meta=outputs, weights=weights)
 
 
 def coreml_units(units):

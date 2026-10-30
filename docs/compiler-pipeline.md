@@ -275,15 +275,21 @@ strided output views where the representation agrees. Separate partial results
 remain for a mathematical sum or a dtype conversion; there is no concatenation
 executor. Callers can supply the final output allocation.
 
-`coreml_graph` binds any supported compiled graph's named inputs and outputs to
-shared views. Required `input_layouts` and `output_layouts` mappings describe each
-binding as `strided`, `contiguous`, or an explicit element-stride tuple. Preparation
-uses the same layout resolver as numerical kernels; any necessary copies become
-ordinary command records before or after the host record. `export_coreml_graph`
-converts an exported tensor graph before
-execution, with explicit deployment, precision, compute units and artifact directory.
-Both use the same native Core ML binding as the existing linear/FFN graph builder.
-The binding is no longer limited to one dense two-dimensional input and output.
+`export_coreml_graph` converts an exported tensor graph into the ordinary host
+declaration before page placement. Deployment, precision, compute units and the
+artifact directory are explicit operands. Declared state effects become named
+inputs and results. Returned inputs and shared results become page equalities;
+returned captured tensors become named weight operands. These use the same
+placement solver as native kernels. An alias-only graph has no provider task.
+
+`coreml_graph` binds the resulting numerical graph after placement. The native
+contract supplies physical layout, type, footprint, alignment and the required
+`output_storage` guarantee. Direct ANE requests bind caller-owned page views.
+Public Core ML metadata remains readable, but its advisory output API has no
+prepared execution path. Any necessary layout materialization is an ordinary
+compiled record; it is never hidden in provider output handling. Both the
+exported graph and linear/FFN builder use this same binding. It accepts named
+inputs and outputs of the declared ranks, with no two-dimensional-only interface.
 A host record declares its input and output views; the common schedule derives
 the data dependencies before execution. Native ANE commands bind their actual normalized input directly;
 a sole ANE result binds its final output directly. Multiple numerical partials still

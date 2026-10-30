@@ -1597,20 +1597,74 @@ static id TensorSelectionIndex(NSInteger (^extent)(id),NSArray *shape,id express
 @implementation MetalTensorPages {
     id _owner;
 }
-+ (instancetype)host:(const void *)address {
++ (instancetype)adopt:(ncclMeshPageTable_t)table {
     MetalTensorPages *result=[[[self alloc] init] autorelease];
+    result->_table=table;
     ncclMeshBuffer binding={0};
-    ncclResult_t status=ncclMeshPageTableCreate(address,NULL,0,&result->_table);
-    if(!status)status=ncclMeshPageTableShape(result->_table,&result->_pageCount,&result->_pageBytes);
+    ncclResult_t status=ncclMeshPageTableShape(result->_table,&result->_pageCount,&result->_pageBytes);
     if(!status)status=ncclMeshPageTableBinding(result->_table,&binding);
     if(status)[NSException raise:NSInvalidArgumentException format:@"page operand: %s",ncclGetLastError(NULL)];
     result->_buffer=[(id<MTLBuffer>)binding.buffer retain];
+    result->_origin=binding.offset;
+    return result;
+}
++ (instancetype)host:(const void *)address {
+    ncclMeshPageTable_t table=NULL;
+    if(ncclMeshPageTableCreate(address,NULL,0,&table))
+        [NSException raise:NSInvalidArgumentException format:@"page operand: %s",ncclGetLastError(NULL)];
+    MetalTensorPages *result=[self adopt:table];
     result->_origin=(uintptr_t)address-(uintptr_t)result->_buffer.contents;
     return result;
 }
 + (instancetype)storage:(id<MTLBuffer>)buffer {
     MetalTensorPages *result=[self host:buffer.contents];
     result->_owner=[buffer retain];return result;
+}
+- (MetalTensorLayout *)backing {
+    size_t count=0;
+    if(ncclMeshPageTableBacking(_table,NULL,&count))
+        [NSException raise:NSInvalidArgumentException format:@"page backing: %s",ncclGetLastError(NULL)];
+    NSMutableData *data=[NSMutableData dataWithLength:count*sizeof(ncclMeshPageBacking)];
+    ncclMeshPageBacking *runs=data.mutableBytes;
+    if(ncclMeshPageTableBacking(_table,runs,&count))
+        [NSException raise:NSInvalidArgumentException format:@"page backing: %s",ncclGetLastError(NULL)];
+    NSMutableArray *parts=[NSMutableArray array];
+    for(size_t i=0;i<count;i++)[parts addObject:@[@(runs[i].page),@(runs[i].count),@0,@1]];
+    return [MetalTensorLayout runs:parts];
+}
++ (instancetype)compose:(NSArray<MetalTensorPages *> *)sources placements:(NSArray<MetalTensorLayout *> **)placements {
+    NSMutableArray *domains=[NSMutableArray array],*parts=[NSMutableArray array];
+    for(MetalTensorPages *source in sources)[domains addObject:[source backing]];
+    NSMutableData *selections=[NSMutableData data];
+    for(NSDictionary *cell in MetalTensorCover(domains)) {
+        const NSUInteger source=[cell[@"members"][0] unsignedIntegerValue];
+        MetalTensorLayout *domain=cell[@"domain"],*original=domains[source];
+        MetalTensorLayout *ordinals=[MetalTensorLayout shape:original.shape strides:@[@1] offset:0 maps:@{} indices:nil];
+        NSData *selected=[[domain rebase:original onto:ordinals] orderedSpans],*physical=[domain orderedSpans];
+        const struct MetalTensorSpan *spans=selected.bytes,*pages=physical.bytes;
+        for(NSUInteger k=0;k<selected.length/sizeof *spans;k++) {
+            const ncclMeshPageSelection selection={sources[source].table,(uint64_t)spans[k].offset,spans[k].count};
+            [selections appendBytes:&selection length:sizeof selection];
+        }
+        for(NSUInteger k=0;k<physical.length/sizeof *pages;k++)[parts addObject:@[@(pages[k].offset),@(pages[k].count),@0,@1]];
+    }
+    ncclMeshPageTable_t table=NULL;
+    if(ncclMeshPageTableCompose(selections.bytes,selections.length/sizeof(ncclMeshPageSelection),NULL,0,&table))
+        [NSException raise:NSInvalidArgumentException format:@"page composition: %s",ncclGetLastError(NULL)];
+    MetalTensorPages *result=[self adopt:table];result->_owner=[sources copy];
+    MetalTensorLayout *physical=[MetalTensorLayout runs:parts];
+    MetalTensorLayout *ordinals=[MetalTensorLayout shape:physical.shape strides:@[@1] offset:0 maps:@{} indices:nil];
+    NSMutableArray *mapped=[NSMutableArray array];
+    for(MetalTensorLayout *domain in domains) {
+        MetalTensorLayout *pages=[domain rebase:physical onto:ordinals];
+        [mapped addObject:[[pages components:result.pageBytes] reshape:@[@(pages.count*result.pageBytes)]]];
+    }
+    *placements=mapped;return result;
+}
+- (MetalTensorLayout *)physical:(MetalTensorLayout *)layout elementBytes:(NSUInteger)bytes {
+    MetalTensorLayout *physical=[[[self backing] components:_pageBytes] reshape:@[@(_pageCount*_pageBytes)]];
+    MetalTensorLayout *ordinals=[MetalTensorLayout shape:physical.shape strides:@[@1] offset:0 maps:@{} indices:nil];
+    return [[layout components:bytes] rebase:ordinals onto:physical];
 }
 - (void)dealloc { ncclMeshPageTableDestroy(_table);[_buffer release];[_owner release];[super dealloc]; }
 - (MetalTensorLayout *)bind:(MetalTensorLayout *)layout elementBytes:(NSUInteger)bytes {

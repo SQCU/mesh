@@ -38,6 +38,21 @@ def bound(node):
     return getattr(getattr(node.target, '_schema', None), 'name', '') == 'torch_mesh::host_kernel'
 
 
+def equalities(node):
+    """Named result aliases become the shared typed placement equations."""
+    from .operand import graph_bindings
+    if not bound(node):
+        return
+    arguments, uses = graph_bindings(node)
+    definition = json.loads(arguments['definition'])
+    sources = {name: i for i, name in enumerate(definition['inputs'])}
+    targets = {name: i for i, name in enumerate(definition['outputs'], len(sources))}
+    for name, source in definition.get('output_aliases', {}).items():
+        left, left_view, _ = uses[targets[name]]
+        right, right_view, _ = uses[sources[source] if source in sources else targets[source]]
+        yield left, left_view, right, right_view
+
+
 def prepare(inputs, input_slots, output_slots, output_strides, shapes, dtypes, devices, operands, definition, *, outputs):
     """Bind once after graph placement; no provider lookup survives execution."""
     from .operand import bind
@@ -55,6 +70,16 @@ def prepare(inputs, input_slots, output_slots, output_strides, shapes, dtypes, d
                           input_layouts=definition['input_layouts'], output_layouts=definition['output_layouts'],
                           binding_layout=definition['binding_layout'])
     if definition['provider'] == 'coreml':
+        from .placement import same_view
+        for name, original in definition.get('output_aliases', {}).items():
+            previous = source[original] if original in source else target[original]
+            if not same_view(target[name], previous):
+                raise ValueError(f'{name}: named result alias conflicts with its assigned input/result pages')
+        contract = definition['contract']
+        if not contract['outputs']:
+            return None
+        source = {name: source[name] for name in contract['inputs']}
+        target = {name: target[name] for name in contract['outputs']}
         return coreml_graph(definition['compiled'], source, target, configuration=definition['configuration'],
-                            contract=definition['contract'])
+                            contract=contract)
     raise ValueError(f"unknown declared host provider {definition['provider']}")

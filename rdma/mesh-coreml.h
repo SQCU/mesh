@@ -13,7 +13,7 @@ typedef struct {
   int rank, dtype;
 } MeshModelView;
 
-/* Int8 is an SDK capability checked during binding (macOS 26 and later). */
+/* Scalar codes shared by the compiled model contract and page operands. */
 enum MeshModelType { MeshModelFloat16, MeshModelFloat32, MeshModelInt32, MeshModelFloat64,
                      MeshModelInt8, MeshModelTypeCount };
 enum MeshModelUnits { MeshModelCPUAndANE, MeshModelAll, MeshModelCPU, MeshModelCPUAndGPU };
@@ -31,7 +31,8 @@ void mesh_coreml_release(long model);
 /* Every model input and output must have a view, including optional inputs.
    Binding does not request provider defaults or leave outputs unbound. The
    direct ANE backend retains bridge-page roots and their declared offsets.
-   Public Core ML output backings remain advisory for that explicit backend.
+   The contract must guarantee caller-owned output pages. Public Core ML
+   metadata is inspectable, but its advisory output API cannot be bound.
    Keep all page roots alive until the binding is released. */
 void *mesh_coreml_bind(long model, const MeshModelView *inputs, size_t inputCount,
                       const MeshModelView *outputs, size_t outputCount);
@@ -51,6 +52,7 @@ const char *mesh_coreml_placement(long model);
 /* Prepared provider operand contracts, indexed by the declared feature name.
    Direct ANE contracts include the procedure, symbol, physical shape/strides,
    scalar type, storage footprint and address alignment from its compiled model.
+   output_storage records caller-pages or advisory; only caller-pages can bind.
    The caller resolves these requirements through the shared layout compiler
    before allocation. The returned JSON lives until model release. */
 const char *mesh_coreml_contract(long model);

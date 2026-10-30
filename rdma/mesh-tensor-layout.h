@@ -117,6 +117,15 @@ FOUNDATION_EXPORT NSInteger MetalTensorConstant(id expression, NSArray<NSNumber 
 // nil member returns the combined root domain. Preparation only.
 FOUNDATION_EXPORT MetalTensorLayout *MeshIndexUnion(MetalTensorLayout *sourceRoot, MetalTensorLayout *targetRoot,
     MetalTensorLayout *source, MetalTensorLayout *target, MetalTensorLayout * _Nullable member, BOOL sourceMember);
+// Join explicit position-to-page assignments. Returns covered logical positions,
+// their assigned page positions in that order, and the remaining logical domain.
+// Conflicting assignments are preparation errors; no values are copied.
+FOUNDATION_EXPORT NSArray<MetalTensorLayout *> *MetalTensorAssignments(NSUInteger count,
+    NSArray<MetalTensorLayout *> *uses, NSArray<MetalTensorLayout *> *targets);
+// Identify equal ordered uses within one domain. Returns the compact domain
+// and every original ordinal's image in it, including transitive equalities.
+FOUNDATION_EXPORT NSArray<MetalTensorLayout *> *MetalTensorIdentify(NSUInteger count,
+    MetalTensorLayout *source, MetalTensorLayout *target);
 
 // The domain maps concatenated storage ordinals to logical positions; selection
 // maps requested ordinals to those positions. Preparation unites physical cuts
@@ -157,6 +166,11 @@ FOUNDATION_EXPORT MetalTensorLayout * _Nullable MetalTensorPlace(NSUInteger coun
 @property(nonatomic, readonly) NSUInteger pageBytes, pageCount, origin;
 + (instancetype)storage:(id<MTLBuffer>)buffer;
 + (instancetype)host:(const void *)address;
+// Deduplicate physical pages into one prepared local view. Placements retain
+// each source table's ordered byte selection, including repeated page reads.
++ (instancetype)compose:(NSArray<MetalTensorPages *> *)sources
+    placements:(NSArray<MetalTensorLayout *> * _Nonnull * _Nonnull)placements;
+- (MetalTensorLayout *)physical:(MetalTensorLayout *)layout elementBytes:(NSUInteger)bytes;
 - (MetalTensorLayout *)bind:(MetalTensorLayout *)layout elementBytes:(NSUInteger)bytes;
 @end
 NS_ASSUME_NONNULL_END

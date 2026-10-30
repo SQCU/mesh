@@ -558,13 +558,42 @@ static void MetalAccesses(const struct MetalRecordedDispatch *command, const str
     }
 }
 
+// Every bridge lease and composed view names pages in the process's one region.
+// The virtual address is a binding; physical page identity orders its users.
+static char MetalRegionPageIdentity;
+static BOOL MetalPageAccesses(NSUInteger address,NSUInteger length,uint32_t access,
+    void (^each)(id,NSUInteger,NSUInteger,uint32_t)) {
+    ncclMeshPageTable_t table=NULL;
+    ncclResult_t status=ncclMeshPageTableCreate((const void *)address,NULL,0,&table);
+    if(status==ncclInvalidArgument)return NO; // Ordinary nonbridge storage.
+    if(status)[NSException raise:NSMallocException format:@"dependency page table: %s",ncclGetLastError(NULL)];
+    size_t pages=0,pageBytes=0,count=0;const void *base=NULL;
+    status=ncclMeshPageTableShape(table,&pages,&pageBytes);
+    if(!status)status=ncclMeshPageTableAddress(table,&base);
+    if(!status)status=ncclMeshPageTableBacking(table,NULL,&count);
+    NSMutableData *storage=status?nil:[NSMutableData dataWithLength:count*sizeof(ncclMeshPageBacking)];
+    if(!status)status=ncclMeshPageTableBacking(table,storage.mutableBytes,&count);
+    ncclMeshPageTableDestroy(table);
+    if(status)[NSException raise:NSMallocException format:@"dependency page backing: %s",ncclGetLastError(NULL)];
+    const NSUInteger first=address-(NSUInteger)base,last=first+length;
+    const ncclMeshPageBacking *runs=storage.bytes;
+    NSValue *key=[NSValue valueWithPointer:&MetalRegionPageIdentity];
+    for(size_t r=0;r<count;r++) {
+        const NSUInteger begin=runs[r].first*pageBytes,end=(runs[r].first+runs[r].count)*pageBytes;
+        const NSUInteger lo=MAX(first,begin),hi=MIN(last,end);
+        if(lo<hi){const NSUInteger physical=runs[r].page*pageBytes+lo-begin;each(key,physical,physical+hi-lo,access);}
+    }
+    return YES;
+}
+
 // Canonical storage identity and ranges for every dependency lowering.
 static void MetalViewAccesses(NSData *accesses,void (^each)(id,NSUInteger,NSUInteger,uint32_t)) {
     const struct MetalReach *views=accesses.bytes;
     for(NSUInteger i=0;i<accesses.length/sizeof *views;i++) {
         const struct MetalReach v=views[i];if(!v.length||!(v.access&3))continue;
-        const NSUInteger base=MetalAllocationBase(v.buffer);
-        each(MetalAllocationKey(v.buffer),base+v.offset,base+v.offset+v.length,v.access);
+        const NSUInteger base=MetalAllocationBase(v.buffer),first=base+v.offset;
+        if((!v.buffer||v.buffer.storageMode==MTLStorageModeShared)&&MetalPageAccesses(first,v.length,v.access,each))continue;
+        each(MetalAllocationKey(v.buffer),first,first+v.length,v.access);
     }
 }
 

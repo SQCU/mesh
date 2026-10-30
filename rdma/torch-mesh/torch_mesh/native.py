@@ -136,8 +136,8 @@ def kernel(*args, outputs=None):
 
 class Program:
     """Bound numerical command records; composition happens during preparation."""
-    def __init__(self, commands, output):
-        self.commands, self.output = commands, output
+    def __init__(self, commands, output, pages=()):
+        self.commands, self.output, self.pages = commands, output, tuple(pages)
 
     def append(self, schedule):
         schedule.append(self.commands)
@@ -245,8 +245,11 @@ def compile_graph(module, metadata, operands, *, destinations=None):
         if node.op == 'placeholder' and isinstance(node.meta.get('val'), torch.Tensor):
             placements.bind(node.meta['val'], input_storage[node.name])
     from .layout import place
-    place(module.graph, placements, [v for n in module.graph.nodes if n.op in ('placeholder', 'get_attr')
-                                    for v in tree_flatten(n.meta.get('val'))[0]])
+    place(module.graph, placements)
+    for node in module.graph.nodes:
+        if node.op == 'placeholder' and isinstance(node.meta.get('val'), torch.Tensor):
+            input_storage[node.name] = placements.get(node.meta['val'])
+    operands = [input_storage[node.name] for node in module.graph.nodes if node.op == 'placeholder']
 
     class Preparation(PythonWrapperCodegen):
         def codegen_reinterpret_view(self, data, size, stride, offset, writeline, dtype=None):
@@ -415,4 +418,4 @@ def compile_graph(module, metadata, operands, *, destinations=None):
                 commands = _stream.Commands(records)
         finally:
             _records.reset(token)
-    return Program(commands, output)
+    return Program(commands, output, placements.owners)

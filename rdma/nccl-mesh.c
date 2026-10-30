@@ -26,6 +26,9 @@
 #include <poll.h>
 #include <dispatch/dispatch.h>
 #include <fcntl.h>
+#include <sys/mman.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 
 
 enum { WHAT_COUNTED = ncclMeshCallAlltoAllV };
@@ -754,7 +757,15 @@ static const struct entry *program_of(ncclComm_t comm, int what, int root, uint6
 /* a lease: its address, its first row, its bytes, and the Metal buffer over it (lease_buffer, made at its first use;
    NULL until then) */
 #include "mesh-lease-retire.h"
-struct lease { void *address; uint32_t row; size_t bytes; void *buffer; struct mesh_lease_retire reads; int returned; };
+struct lease {
+  void *address; uint32_t row; size_t bytes; void *buffer;
+  struct mesh_lease_retire reads; int returned;
+  /* A composed local view holds original leases, not new arena ownership.
+     Its flattened physical runs and owners are resolved during preparation. */
+  size_t pins, owners_count;
+  const void **owners;
+  struct mesh_page_runs backing;
+};
 /* design/transport.md section 14: the stream toward node `node` the process holds (`users` the communicator on it, 0
    none: the hold vacant), its holding's view, and the identity it was taken by (`wire`: mesh-call.h mesh_stream_held,
    comm_failure) */
@@ -1670,6 +1681,24 @@ static int lease_detachable(void *context, const struct mesh_lease_retire_dep *d
 static int lease_returnable(struct attach *a, struct lease *l) {
   return mesh_lease_retire_detachable(&l->reads, lease_read_sample, lease_detachable, a);
 }
+/* One preparation resolver for original and composed page views. */
+static int lease_runs(const struct attach *a,const struct lease *l,size_t first,size_t bytes,struct mesh_page_runs *out) {
+  if(first>l->bytes||bytes>l->bytes-first)return EINVAL;
+  if(!l->owners_count)return mesh_page_runs_read(a->context.M,l->row,first,bytes,out);
+  for(size_t at=0;at<bytes;) {
+    const struct mesh_page_run *run=mesh_page_run_at(&l->backing,first+at);
+    if(!run)return EINVAL;
+    const size_t remaining=run->end-first-at;
+    const size_t length=bytes-at<remaining?bytes-at:remaining;
+    int error=mesh_page_run_add(out,at,length,run->offset+first+at-run->first);
+    if(error)return error;
+    at+=length;
+  }
+  return 0;
+}
+static uint64_t lease_page_offset(const struct attach *a,const struct lease *l,size_t offset) {
+  return l->owners_count?mesh_page_run_offset(&l->backing,offset):mesh_page_offset(a->context.M,l->row,offset);
+}
 /* The prepared local view's row, independent of its physical backing. */
 static uint32_t view_row(const struct attach *a, const void *ptr) {
   const struct hdr *m = a->context.M;
@@ -1680,6 +1709,7 @@ static uint32_t view_row(const struct attach *a, const void *ptr) {
 /* lease `i`'s pages named `value` in the page index (i + 1: its own; 0: none) */
 static void lease_mark(struct attach *a, size_t i, uint32_t value) {
   const struct lease *l = a->leases + i;
+  if(l->owners_count)return;
   const uint32_t rows = (uint32_t)(l->bytes / ((size_t)a->context.M->block * a->context.M->pgsz));
   for (uint32_t r = 0; r < rows; r++) a->lease_of[l->row + r] = value;
 }
@@ -1687,8 +1717,16 @@ static void lease_mark(struct attach *a, size_t i, uint32_t value) {
    place: 1, else 0 (it stays, returned) */
 static int lease_give(struct attach *a, size_t i) {
   struct lease *l = a->leases + i;
-  if (!l->returned || !lease_returnable(a, l) || mesh_lease_return(&a->context, l->row)) return 0;
+  if (!l->returned || l->pins || !lease_returnable(a, l)) return 0;
+  if(l->owners_count) {
+    for(size_t k=0;k<l->owners_count;k++) {
+      struct lease *owner=lease_at(l->owners[k],NULL);
+      owner->pins--;
+    }
+  } else if(mesh_lease_return(&a->context,l->row))return 0;
   if (l->buffer) metal_release(l->buffer);
+  if(l->owners_count)munmap(l->address,l->bytes);
+  free(l->owners);free(l->backing.at);
   mesh_lease_retire_destroy(&l->reads);
   lease_mark(a, i, 0);
   a->returned--;
@@ -1698,7 +1736,11 @@ static int lease_give(struct attach *a, size_t i) {
 }
 /* every returned lease whose reads are done given back (a lease returned with reads outstanding waits here) */
 static void leases_reap(struct attach *a) {
-  for (size_t i = 0; a->returned && i < a->count;) i += !lease_give(a, i);
+  size_t before;
+  do {
+    before=a->count;
+    for (size_t i = 0; a->returned && i < a->count;) i += !lease_give(a, i);
+  } while(a->returned&&a->count!=before);
 }
 
 /* a lease of the region: its whole pages covering `size` (one page for 0), already registered on every device of the
@@ -1753,7 +1795,7 @@ ncclResult_t ncclMemFree(void *ptr) {
   struct attach *a = NULL;
   struct lease *l = lease_at(ptr, &a);
   const int found = l && l->address == ptr && !l->returned;
-  if (found) { l->returned = 1; a->returned++; lease_give(a, (size_t)(l - a->leases)); }
+  if (found) { l->returned = 1; a->returned++; leases_reap(a); }
   attach_settle();
   pthread_mutex_unlock(&attach_lock);
   return found ? ncclSuccess : fail(ncclInvalidArgument, "ncclMemFree of %p: no live lease of this process", ptr);
@@ -1767,6 +1809,13 @@ static struct lease *lease_at(const void *ptr, struct attach **held) {
       if (held) *held = a;
       return a->leases + k - 1;
     }
+    for(size_t i=0;i<a->count;i++) {
+      struct lease *l=a->leases+i;
+      if(l->owners_count&&(uintptr_t)ptr>=(uintptr_t)l->address&&(uintptr_t)ptr-(uintptr_t)l->address<l->bytes) {
+        if(held)*held=a;
+        return l;
+      }
+    }
   }
   return NULL;
 }
@@ -1777,7 +1826,7 @@ static uint64_t lease_offset(const void *ptr) {
   pthread_mutex_lock(&attach_lock);
   struct attach *a = NULL;
   const struct lease *l = lease_at(ptr, &a);
-  const uint64_t offset = mesh_page_offset(a->context.M, l->row, (uintptr_t)ptr - (uintptr_t)l->address);
+  const uint64_t offset = lease_page_offset(a,l,(uintptr_t)ptr-(uintptr_t)l->address);
   pthread_mutex_unlock(&attach_lock);
   return offset;
 }
@@ -2309,11 +2358,11 @@ static int crosses(const struct call *c) {
   return (counted(c) || elements(c)) && c->comm->nranks > 1;
 }
 
-/* whether `bytes` at w lie in this node's region (comm's attach's), a lease's pages */
+/* whether `bytes` at w lie in this node's pages; attach_lock held */
 static int in_region(const struct ncclComm *comm, struct where w, size_t bytes) {
-  const struct mesh_ctx *c = &comm->attach->context;
-  const uintptr_t at = (uintptr_t)address_of(w), first = (uintptr_t)c->view;
-  return first && at >= first && at - first <= c->view_bytes && bytes <= c->view_bytes - (at - first);
+  const void *address=address_of(w);struct attach *owner=NULL;
+  const struct lease *lease=lease_at(address,&owner);
+  return lease&&!lease->returned&&owner==comm->attach&&bytes<=lease->bytes-((uintptr_t)address-(uintptr_t)lease->address);
 }
 /* Snapshot a declared local binding in the shared page relation. Registered
    offsets, not its host pointer, determine its transport cuts. */
@@ -2327,7 +2376,7 @@ static ncclResult_t binding_backing(struct ncclComm *comm, struct where binding,
   if (lease) {
     const size_t offset = (uintptr_t)address - (uintptr_t)lease->address;
     if (owner != comm->attach || lease->returned || offset > lease->bytes || bytes > lease->bytes - offset) error = EINVAL;
-    else error = mesh_page_runs_read(owner->context.M, lease->row, offset, bytes, out);
+    else error = lease_runs(owner,lease,offset,bytes,out);
     for (size_t k = 0; k < out->count; k++) out->at[k].offset -= owner->context.M->data_off;
   }
   pthread_mutex_unlock(&attach_lock);
@@ -3299,37 +3348,41 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u) {
             continue;
           }
           const unsigned char *address = address_of(x->data);
-          uint32_t row = 0;
+          struct mesh_page_runs physical={0};
           size_t position = 0;
           if (pass) {
             pthread_mutex_lock(&attach_lock);
             const struct lease *held = in_region(comm, x->data, x->bytes) ? lease_at(address, NULL) : NULL;
             const int valid = held && !held->returned && x->bytes <= held->bytes - (size_t)(address - (const unsigned char *)held->address);
             const void *owner = valid ? held->address : NULL;
-            if (valid) { row = held->row; position = (size_t)(address - (const unsigned char *)held->address); }
+            int backing=0;
+            if (valid) { position = (size_t)(address - (const unsigned char *)held->address);
+              backing=lease_runs(comm->attach,held,position,x->bytes,&physical); }
             pthread_mutex_unlock(&attach_lock);
             if (!valid) return fail(ncclInvalidUsage, "%s on %s: %zu bytes at byte %zu are outside a live local lease",
                                     call_name(x->c), comm->name, x->bytes, x->offset);
-            if (owned_add(&u->owned, owner, 0)) return fail(ncclSystemError, "out of memory");
+            if(backing){free(physical.at);return fail(ncclSystemError,"collective page binding: %s",strerror(backing));}
+            if (owned_add(&u->owned, owner, 0)) {free(physical.at);return fail(ncclSystemError, "out of memory");}
           }
           const struct mesh_packet_view view = st->views[x->step];
           const struct mesh_span_residues *cuts = st->packets + view.domain;
-          if (!cuts->count) return fail(ncclInvalidUsage, "declare actual collective page bindings before recording transfers");
+          if (!cuts->count) {free(physical.at);return fail(ncclInvalidUsage, "declare actual collective page bindings before recording transfers");}
           struct mesh_packet_cursor packets = mesh_packet_begin(cuts, view.first, x->bytes);
           if (!pass) {
             x->pages.n = 0;
             while (mesh_packet_next(cuts, comm->page, &packets)) x->pages.n++;
           }
-          if (!x->pages.n) continue;
-          if (x->pages.n > SIZE_MAX / 2 / sizeof *x->spans) return fail(ncclSystemError, "out of memory");
+          if (!x->pages.n) {free(physical.at);continue;}
+          if (x->pages.n > SIZE_MAX / 2 / sizeof *x->spans) {free(physical.at);return fail(ncclSystemError, "out of memory");}
           struct mesh_dma_span *made = pass ? (struct mesh_dma_span *)((char *)u->tables + length) : NULL;
           length += (x->pages.n * sizeof *x->spans + align - 1) / align * align;
           if (!pass) continue;
           for (uint64_t unit = 0, at = 0, bytes; (bytes = mesh_packet_next(cuts, comm->page, &packets)); unit++, at += bytes) {
-            made[unit] = (struct mesh_dma_span){mesh_page_offset(comm->attach->context.M, row, position + at), bytes};
-            if (!mesh_dma_span_valid(comm->attach->context.M, made[unit]))
-              return fail(ncclInvalidUsage, "collective binding differs from its prepared page backing");
+            made[unit] = (struct mesh_dma_span){mesh_page_run_offset(&physical,at), bytes};
+            if (!mesh_dma_span_valid(comm->attach->context.M, made[unit])) {
+              free(physical.at);return fail(ncclInvalidUsage, "collective binding differs from its prepared page backing"); }
           }
+          free(physical.at);
           x->spans = made;
           x->table = lease_offset(made);
         }
@@ -3591,16 +3644,17 @@ static struct where result_of(const struct call *c) {
 /* each call's buffers bound: a write's the producer's lease itself (not a broadcast's staging copy, which would run
    before a deferred producer makes data), an all-to-all's its own two, a collective's its result (result_of), read in
    place where it may (plan_direct) */
-static int plan_direct(struct call *c, struct where own);
-static void bind_calls(struct call *list, size_t n) {
+static ncclResult_t plan_direct(struct call *c, struct where own, int *result);
+static ncclResult_t bind_calls(struct call *list, size_t n) {
   for (size_t i = 0; i < n; i++) {
     struct call *c = list + i;
     struct steps *st = c->bound;
     if (c->target) { c->sum = c->recv_at; c->direct = 1; }
-    else if (!counted(c)) { c->sum = result_of(c); c->direct = plan_direct(c, c->sum); }
+    else if (!counted(c)) { c->sum = result_of(c);ncclResult_t result=plan_direct(c,c->sum,&c->direct);if(result)return result; }
     if (st) st->buffer[0] = c->target ? (c->comm->rank == c->root ? c->send_at : c->recv_at) : counted(c) ? c->send_at : c->sum;
     if (st && counted(c)) st->buffer[1] = c->recv_at;
   }
+  return ncclSuccess;
 }
 
 /* issue u laid for `list` (issue_lay, `repeats` times `stride` bytes apart, each call's steps that issue's copy made
@@ -3611,7 +3665,7 @@ static ncclResult_t issue_layout(struct ncclComm *comm, struct compiled *x, stru
   for (size_t i = 0; i < n; i++) if (list[i].bound) steps_reset(list[i].bound, 0);
   issue_lay(comm, x, u, list, repeats, stride);
   ncclResult_t result = remote ? bind_slot(comm, x, generation, list, n, u->plans, &u->base, area, slot) : ncclSuccess;
-  if (!result) bind_calls(list, n);
+  if (!result) result=bind_calls(list,n);
   if (!result && remote) place_data(comm, u, *area);
   return result;
 }
@@ -4143,7 +4197,50 @@ static int spans_add(struct spans *w, uint64_t lo, uint64_t hi) {
    writes buffer = send op piece, no scratch buffer is copied into, and the ranges of
    buffer 0 no step writes are copied from the send buffer after the publications (`complement`); else (0) the operand
    is made in place as ever (a premultiply, or a copy within the region) */
-static int plan_direct(struct call *c, struct where own) {
+static int physical_order(const void *left,const void *right) {
+  const struct mesh_page_run *a=left,*b=right;
+  return (a->offset>b->offset)-(a->offset<b->offset);
+}
+/* Both run lists are sorted by physical location. */
+static int physical_overlap(const struct mesh_page_runs *a,const struct mesh_page_runs *b) {
+  for(size_t i=0,j=0;i<a->count&&j<b->count;) {
+    const struct mesh_page_run x=a->at[i],y=b->at[j];
+    const uint64_t xend=x.offset+x.end-x.first,yend=y.offset+y.end-y.first;
+    if(x.offset<yend&&y.offset<xend)return 1;
+    if(xend<=y.offset)i++;else j++;
+  }
+  return 0;
+}
+/* Physical overlap is a page relation, even when local views have different
+   virtual addresses. Resolve it once before direct-placement decisions. */
+static ncclResult_t binding_relations(struct ncclComm *comm,const void *a,size_t sent,
+    const void *b,size_t made,size_t before,int *same,int *overlap) {
+  struct mesh_page_runs source={0},target={0};int error=0;
+  pthread_mutex_lock(&attach_lock);
+  struct attach *owner=NULL;const struct lease *left=lease_at(a,&owner);
+  if(!left||left->returned||owner!=comm->attach)error=EINVAL;
+  else error=lease_runs(owner,left,(uintptr_t)a-(uintptr_t)left->address,sent,&source);
+  const struct lease *right=lease_at(b,&owner);
+  if(!right||right->returned||owner!=comm->attach)error=EINVAL;
+  else if(!error)error=lease_runs(owner,right,(uintptr_t)b-(uintptr_t)right->address,made,&target);
+  pthread_mutex_unlock(&attach_lock);
+  *same=!error&&before<=sent&&made<=sent-before;*overlap=0;
+  for(size_t at=0;*same&&at<made;) {
+    const struct mesh_page_run *x=mesh_page_run_at(&source,before+at),*y=mesh_page_run_at(&target,at);
+    if(!x||!y||x->offset+before+at-x->first!=y->offset+at-y->first){*same=0;break;}
+    const size_t left_bytes=x->end-before-at,right_bytes=y->end-at;
+    at+=left_bytes<right_bytes?left_bytes:right_bytes;
+  }
+  if(!error) {
+    qsort(source.at,source.count,sizeof *source.at,physical_order);
+    qsort(target.at,target.count,sizeof *target.at,physical_order);
+    *overlap=physical_overlap(&source,&target);
+  }
+  free(source.at);free(target.at);
+  return error?fail(error==EINVAL?ncclInvalidUsage:ncclSystemError,"collective page relation: %s",strerror(error)):ncclSuccess;
+}
+static ncclResult_t plan_direct(struct call *c, struct where own,int *result) {
+  *result=0;
   struct steps *st = c->bound;
   const size_t z = SIZE[c->type];
   uint64_t lo = 0, hi = elements(c);
@@ -4157,8 +4254,11 @@ static int plan_direct(struct call *c, struct where own) {
   if (!b) return 0;
   /* a reduce-scatter's result is its own segment alone, which in place (NCCL's) is its own contribution's range */
   if (st->partial) { b += before; made = length * z; }
-  const int aliased = st->partial && b == a + before;
-  if (!in_region(c->comm, send, sent) || (!aliased && a < b + made && b < a + sent)) return 0;
+  int same=0,overlap=0;
+  ncclResult_t related=binding_relations(c->comm,a,sent,b,made,before,&same,&overlap);
+  if(related)return related;
+  const int aliased=st->partial&&same;
+  if(!aliased&&overlap)return ncclSuccess;
   const uint32_t B = st->buffers;
   struct spans *w = kept(KEPT_SPANS, B * sizeof *w);
   for (uint32_t b = 0; w && b < B; b++) w[b].count = 0;
@@ -4198,7 +4298,7 @@ static int plan_direct(struct call *c, struct where own) {
   }
   if (!direct && st->read && st->fresh) { memset(st->read, 0, st->count * sizeof *st->read); memset(st->fresh, 0, st->count); }
   if (!direct) { c->complement = NULL; c->complements = 0; }
-  return direct;
+  *result=direct;return ncclSuccess;
 }
 
 /* a call reading its send buffer in place: its result's ranges no step wrote, copied from the send buffer */
@@ -5211,6 +5311,7 @@ struct ncclMeshPageTable {
   struct mesh_page_runs storage;
   size_t pages, page_bytes;
   int metal;
+  void *owned;
 };
 
 /* A tensor adapter resolves its local address once. Everything below that
@@ -5688,19 +5789,22 @@ ncclResult_t ncclMeshPageTableCreate(const void *local, ncclComm_t comm, int met
   struct attach *owner=NULL;
   struct lease *lease=lease_at(address,&owner);
   struct ncclMeshPageTable *table=NULL;
+  int error=0;
   if (lease && !lease->returned && (!comm || owner==comm->attach)) {
     table=calloc(1,sizeof *table);
+    if(!table)error=ENOMEM;
     if(table) {
       const size_t offset=(uintptr_t)address-(uintptr_t)lease->address;
       table->base=metal ? (struct where){binding.buffer,binding.offset-offset} : (struct where){NULL,(size_t)lease->address};
       table->comm=comm;table->metal=metal;
       table->page_bytes=owner->context.M->pgsz;
       table->pages=lease->bytes/table->page_bytes;
-      const int error=mesh_page_runs_read(owner->context.M,lease->row,0,lease->bytes,&table->storage);
+      error=lease_runs(owner,lease,0,lease->bytes,&table->storage);
       if(error){free(table->storage.at);free(table);table=NULL;}
     }
   }
   pthread_mutex_unlock(&attach_lock);
+  if(error)return fail(ncclSystemError,"preparing page table: %s",strerror(error));
   if(!table)return fail(ncclInvalidArgument,"page table has no live local region allocation");
   *out=table;return ncclSuccess;
 }
@@ -5712,8 +5816,117 @@ ncclResult_t ncclMeshPageTableBinding(ncclMeshPageTable_t table,ncclMeshBuffer *
   if(!table||!binding)return fail(ncclInvalidArgument,"page table binding operands");
   return ncclMeshMemBuffer(address_of(table->base),&binding->buffer,&binding->offset);
 }
+ncclResult_t ncclMeshPageTableAddress(ncclMeshPageTable_t table,const void **address) {
+  if(!table||!address)return fail(ncclInvalidArgument,"page table address operands");
+  *address=address_of(table->base);return ncclSuccess;
+}
+ncclResult_t ncclMeshPageTableBacking(ncclMeshPageTable_t table,ncclMeshPageBacking *runs,size_t *count) {
+  if(!table||!count)return fail(ncclInvalidArgument,"page backing operands");
+  const size_t capacity=*count;*count=table->storage.count;
+  if(!runs)return ncclSuccess;
+  if(capacity<table->storage.count)return fail(ncclInvalidArgument,"page backing result capacity");
+  for(size_t k=0;k<table->storage.count;k++) {
+    const struct mesh_page_run r=table->storage.at[k];
+    runs[k]=(ncclMeshPageBacking){r.first/table->page_bytes,(r.end-r.first)/table->page_bytes,r.offset/table->page_bytes};
+  }
+  return ncclSuccess;
+}
+ncclResult_t ncclMeshPageTableCompose(const ncclMeshPageSelection *selections,size_t count,
+    ncclComm_t comm,int metal,ncclMeshPageTable_t *out) {
+  if(!out||*out||!count||!selections||(metal!=0&&metal!=1))return fail(ncclInvalidArgument,"page composition requires selections, backend and an empty result");
+  struct attach *attachment=NULL;
+  struct mesh_page_runs physical={0};
+  const void **owners=NULL;size_t owner_count=0,owner_room=0,bytes=0,page=0;
+  int error=0;void *view=MAP_FAILED;struct ncclMeshPageTable *table=NULL;
+  pthread_mutex_lock(&attach_lock);
+  for(size_t k=0;!error&&k<count;k++) {
+    const ncclMeshPageSelection selection=selections[k];ncclMeshPageTable_t source=selection.storage;
+    if(!source||selection.first>source->pages||selection.count>source->pages-selection.first){error=EINVAL;break;}
+    if(!selection.count)continue;
+    struct attach *held=NULL;struct lease *lease=lease_at(address_of(source->base),&held);
+    if(!lease||lease->returned||(attachment&&attachment!=held)||(comm&&comm->attach!=held)||
+       (page&&page!=source->page_bytes)){error=EINVAL;break;}
+    attachment=held;page=source->page_bytes;
+    if(selection.count>(SIZE_MAX-bytes)/page){error=EOVERFLOW;break;}
+    const size_t size=(size_t)selection.count*page,first=(size_t)selection.first*page;
+    struct mesh_page_runs selected={0};
+    for(size_t at=0;!error&&at<size;) {
+      const struct mesh_page_run *run=mesh_page_run_at(&source->storage,first+at);
+      if(!run){error=EINVAL;break;}
+      const size_t remaining=run->end-first-at,length=size-at<remaining?size-at:remaining;
+      error=mesh_page_run_add(&physical,bytes+at,length,run->offset+first+at-run->first);
+      if(!error&&lease->owners_count)
+        error=mesh_page_run_add(&selected,at,length,run->offset+first+at-run->first);
+      at+=length;
+    }
+    bytes+=size;
+    /* Retain only original owners backing selected pages. An alias of an
+       alias has no lifetime chain, and bridge rows remain singly owned. */
+    qsort(selected.at,selected.count,sizeof *selected.at,physical_order);
+    const size_t n=lease->owners_count?lease->owners_count:1;
+    for(size_t j=0;!error&&j<n;j++) {
+      const void *owner=lease->owners_count?lease->owners[j]:lease->address;
+      size_t existing=0;while(existing<owner_count&&owners[existing]!=owner)existing++;
+      if(existing==owner_count) {
+        if(lease->owners_count) {
+          const struct lease *original=lease_at(owner,NULL);
+          struct mesh_page_runs backing={0};
+          error=lease_runs(attachment,original,0,original->bytes,&backing);
+          qsort(backing.at,backing.count,sizeof *backing.at,physical_order);
+          const int used=!error&&physical_overlap(&selected,&backing);
+          free(backing.at);
+          if(!used)continue;
+        }
+        if(grow(&owners,&owner_room,owner_count,sizeof *owners)){error=ENOMEM;break;}
+        owners[owner_count++]=owner;
+      }
+    }
+    free(selected.at);
+  }
+  if(!error&&!bytes)error=EINVAL;
+  if(!error) {
+    view=mmap(NULL,bytes,PROT_NONE,MAP_PRIVATE|MAP_ANON,-1,0);
+    if(view==MAP_FAILED)error=errno;
+  }
+  for(size_t k=0;!error&&k<physical.count;k++) {
+    const struct mesh_page_run run=physical.at[k];
+    mach_vm_address_t at=(uintptr_t)view+run.first;vm_prot_t current,maximum;
+    const kern_return_t mapped=mach_vm_remap(mach_task_self(),&at,run.end-run.first,0,VM_FLAGS_FIXED|VM_FLAGS_OVERWRITE,
+      mach_task_self(),(uintptr_t)attachment->context.M+run.offset,FALSE,&current,&maximum,VM_INHERIT_NONE);
+    if(mapped!=KERN_SUCCESS)error=mapped==KERN_NO_SPACE||mapped==KERN_RESOURCE_SHORTAGE?ENOMEM:EINVAL;
+  }
+  if(!error) {
+    table=calloc(1,sizeof *table);
+    if(!table||grow(&attachment->leases,&attachment->room,attachment->count,sizeof *attachment->leases))error=ENOMEM;
+  }
+  if(!error) {
+    for(size_t k=0;!error&&k<physical.count;k++) {
+      const struct mesh_page_run run=physical.at[k];
+      error=mesh_page_run_add(&table->storage,run.first,run.end-run.first,run.offset);
+    }
+  }
+  if(!error) {
+    for(size_t k=0;k<owner_count;k++)lease_at(owners[k],NULL)->pins++;
+    attachment->leases[attachment->count++]=(struct lease){.address=view,.bytes=bytes,
+      .owners=owners,.owners_count=owner_count,.backing=physical};
+    table->base=(struct where){NULL,(size_t)view};table->page_bytes=page;table->pages=bytes/page;table->owned=view;table->comm=comm;
+  }
+  pthread_mutex_unlock(&attach_lock);
+  if(error) {
+    if(view!=MAP_FAILED)munmap(view,bytes);
+    free(physical.at);free(owners);
+    if(table){free(table->storage.at);free(table);}
+    return fail(error==EINVAL?ncclInvalidArgument:ncclSystemError,"composing page operands: %s",strerror(error));
+  }
+  if(metal) {
+    ncclMeshBuffer binding={0};ncclResult_t status=ncclMeshPageTableBinding(table,&binding);
+    if(status){ncclMeshPageTableDestroy(table);return status;}
+    table->base=(struct where){binding.buffer,binding.offset};table->metal=1;
+  }
+  *out=table;return ncclSuccess;
+}
 ncclResult_t ncclMeshPageTableDestroy(ncclMeshPageTable_t table) {
-  if(table)free(table->storage.at);
+  if(table){free(table->storage.at);if(table->owned)ncclMemFree(table->owned);}
   free(table);return ncclSuccess;
 }
 
@@ -6043,7 +6256,7 @@ ncclResult_t ncclMeshWriteSourceReady(ncclMeshWritePlan_t plan, const void *word
     if (!error) error = owned_add(&plan->owned, address, OWNED_TABLE | OWNED_SENDS);
     if (!error && plan->owned.count > held) error = owned_begin(&plan->owned, held);
     for(size_t i=0;!error&&i<layout.instances;i++)for(size_t tile=0;tile<tiles;tile++)
-      offsets[i*tiles+tile]=mesh_page_offset(attachment->context.M,owner->row,offset+tile_offset(layout,tile,i));
+      offsets[i*tiles+tile]=lease_page_offset(attachment,owner,offset+tile_offset(layout,tile,i));
     pthread_mutex_unlock(&attach_lock);
     if (error) { free(offsets); return fail(ncclInvalidArgument, "source readiness table is not an aligned live region operand"); }
     plan->source_ready = ready;

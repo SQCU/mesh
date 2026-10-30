@@ -233,6 +233,62 @@ MetalTensorLayout *MeshIndexUnion(MetalTensorLayout *sourceRoot,MetalTensorLayou
     return result;
 }
 
+NSArray<MetalTensorLayout *> *MetalTensorAssignments(NSUInteger count,NSArray<MetalTensorLayout *> *uses,
+    NSArray<MetalTensorLayout *> *targets) {
+    NSCParameterAssert(uses.count==targets.count);
+    isl_ctx *ctx=isl_ctx_alloc();isl_map *assigned=NULL;isl_set *covered=NULL,*missing=NULL;
+    NSArray *result=nil;
+    @try {
+        for(NSUInteger i=0;i<uses.count;i++) {
+            NSCParameterAssert(uses[i].count==targets[i].count);
+            isl_map *part=isl_map_apply_range(isl_map_reverse(MeshIndexRelation(ctx,uses[i])),MeshIndexRelation(ctx,targets[i]));
+            assigned=assigned?isl_map_union(assigned,part):part;
+        }
+        if(assigned&&isl_map_is_single_valued(assigned)!=isl_bool_true)
+            [NSException raise:NSInvalidArgumentException format:@"one logical position has incompatible fixed page assignments"];
+        covered=assigned?isl_map_domain(isl_map_copy(assigned)):IndexDomain(ctx,0,0);
+        missing=isl_set_subtract(IndexDomain(ctx,0,count),isl_set_copy(covered));
+        MetalTensorLayout *positions=MeshIndexSelection(covered),*rest=MeshIndexSelection(missing),*physical;
+        if(positions.count) {
+            isl_map *mapping=isl_map_apply_range(MeshIndexRelation(ctx,positions),isl_map_copy(assigned));
+            isl_pw_multi_aff *function=isl_pw_multi_aff_from_map(mapping);
+            isl_pw_aff *index=isl_pw_multi_aff_get_pw_aff(function,0);isl_pw_multi_aff_free(function);
+            physical=[MetalTensorLayout shape:positions.shape index:MeshIndexTerms(index) parameters:@{}];
+        } else physical=[MetalTensorLayout shape:@[@0] strides:@[@1] offset:0 maps:@{} indices:nil];
+        result=@[positions,physical,rest];
+    } @finally { isl_map_free(assigned);isl_set_free(covered);isl_set_free(missing);isl_ctx_free(ctx); }
+    return result;
+}
+
+NSArray<MetalTensorLayout *> *MetalTensorIdentify(NSUInteger count,MetalTensorLayout *source,MetalTensorLayout *target) {
+    NSCParameterAssert([source.shape isEqual:target.shape]);
+    isl_ctx *ctx=isl_ctx_alloc();isl_map *relation=NULL;isl_set *representatives=NULL;NSArray *result=nil;
+    @try {
+        MetalTensorLayout *domain=[MetalTensorLayout shape:@[@(count)] strides:@[@1] offset:0 maps:@{} indices:nil];
+        isl_map *links=isl_map_apply_range(isl_map_reverse(MeshIndexRelation(ctx,source)),MeshIndexRelation(ctx,target));
+        relation=isl_map_union(MeshIndexRelation(ctx,domain),isl_map_union(isl_map_copy(links),isl_map_reverse(links)));
+        // Exact finite equivalence closure. Squaring doubles the path length
+        // covered at each preparation step; no graph edges reach execution.
+        for(;;) {
+            isl_map *next=isl_map_coalesce(isl_map_union(isl_map_copy(relation),
+                isl_map_apply_range(isl_map_copy(relation),isl_map_copy(relation))));
+            isl_bool same=isl_map_is_equal(relation,next);isl_map_free(relation);relation=next;
+            if(same==isl_bool_error)[NSException raise:NSInvalidArgumentException format:@"page equality could not be resolved"];
+            if(same==isl_bool_true)break;
+        }
+        relation=isl_map_lexmin(relation);representatives=isl_map_range(isl_map_copy(relation));
+        MetalTensorLayout *selected=MeshIndexSelection(representatives);
+        MetalTensorLayout *compact=[MetalTensorLayout shape:selected.shape strides:@[@1] offset:0 maps:@{} indices:nil];
+        isl_map *numbered=isl_map_apply_range(isl_map_reverse(MeshIndexRelation(ctx,selected)),MeshIndexRelation(ctx,compact));
+        isl_pw_multi_aff *function=isl_pw_multi_aff_from_map(isl_map_apply_range(isl_map_copy(relation),numbered));
+        isl_pw_aff *index=isl_pw_multi_aff_get_pw_aff(function,0);isl_pw_multi_aff_free(function);
+        MetalTensorLayout *mapped=count?[MetalTensorLayout shape:domain.shape index:MeshIndexTerms(index) parameters:@{}]:domain;
+        if(!count)isl_pw_aff_free(index);
+        result=@[compact,mapped];
+    } @finally {isl_map_free(relation);isl_set_free(representatives);isl_ctx_free(ctx);}
+    return result;
+}
+
 static id IndexTerms(isl_ast_expr *expression) {
     enum isl_ast_expr_type type=isl_ast_expr_get_type(expression);
     if(type==isl_ast_expr_int) {

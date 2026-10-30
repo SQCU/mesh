@@ -226,9 +226,9 @@ def trace(function, *arguments, parameters=()):
 
 class Execution:
     """Configuration which appends every numerical span and crossing to one native function."""
-    def __init__(self, steps, output=None):
+    def __init__(self, steps, output=None, pages=()):
         from . import _stream
-        self.steps, self.output = tuple(steps), output
+        self.steps, self.output, self.pages = tuple(steps), output, tuple(pages)
         self.executions = _stream.Executions(output)
         self.forward = self.executions.run
         self.completion = self.executions.completion
@@ -246,8 +246,8 @@ class Execution:
             self.executions.add(schedule)
 
 
-def execution_sequence(steps, output=None):
-    return Execution(steps, output)
+def execution_sequence(steps, output=None, pages=()):
+    return Execution(steps, output, pages)
 
 
 _BOUND = {'all_to_all_single', 'merge_partials', 'reduce_scatterv', 'allgatherv', 'allgatherv_out',
@@ -329,7 +329,7 @@ class BoundGraph:
         from torch.utils._pytree import tree_map, tree_flatten
         from . import backend, host
         from .native import empty_strided
-        from .placement import Placements, alias, same_view
+        from .placement import Placements, alias
         # Waiting on a functional collective describes its result edge. The
         # prepared native binding already supplies that stream dependency.
         attributes = {}
@@ -353,40 +353,32 @@ class BoundGraph:
                 for name in node.target.split('.'):
                     value = getattr(value, name)
                 values[node] = value
-        placements, inputs_placed = Placements(), Placements()
+        placements = Placements()
         for node, value in values.items():
             for described, actual in zip(tree_flatten(_value(node))[0], tree_flatten(value)[0], strict=True):
                 if isinstance(described, torch.Tensor):
-                    inputs_placed.bindings.append((described, actual))
+                    placements.bind(described, actual)
         result = next(n.args[0] for n in graph.graph.nodes if n.op == 'output')
         if destinations is not None:
             for described, destination in zip(tree_flatten(map_arg(result, _value))[0], destinations, strict=True):
                 if destination is not None:
                     placements.bind(described, destination)
         from .layout import place
-        # Solve from recipients back to producers before compiling any span.
-        # A gather which feeds another gather inherits that gather's local view.
-        for node in reversed(list(graph.graph.nodes)):
+        # Collect view equalities before assigning any physical page. Full
+        # storage families retain the producer's untouched sibling values.
+        for node in graph.graph.nodes:
             if not _bound(node):
                 continue
             target, named = operation(node)
             native = dist.distributed_c10d._resolve_process_group(named['group_name'])
             for source, described, dim, sizes in _gathers(target, named, _value(node), native) or ():
-                destination = placements.get(described)
-                if destination is None:
-                    destination = inputs_placed.get(described)
-                if destination is None:
-                    destination = empty_strided(tuple(described.shape), tuple(described.stride()),
-                                                described.dtype, described.device.type)
-                placements.bind(described, destination)
-                own = destination.narrow(dim, sum(sizes[:native.rank()]), sizes[native.rank()])
-                supplied = inputs_placed.get(source)
-                if supplied is not None and not same_view(supplied, own):
-                    raise ValueError('a gather input supplied by the caller must already occupy its final local slice')
-                placements.bind(source, own)
-        # Collective destinations are storage assignments. Layout equations
-        # consume those assignments before placing still-unbound producers.
-        place(graph.graph, placements, [logical for logical, _ in inputs_placed.bindings])
+                own = described.narrow(dim, sum(sizes[:native.rank()]), sizes[native.rank()])
+                placements.equate(source, own)
+        place(graph.graph, placements)
+        self.placements = placements
+        for node in values:
+            values[node] = tree_map(lambda declared, actual: placements.get(declared)
+                if isinstance(declared, torch.Tensor) else actual, _value(node), values[node])
         for module, inputs, exported in sections(graph, cuts):
             args = tuple(values[node] for node in inputs)
             live = {n: v for n, v in zip((n for n in module.graph.nodes if n.op == 'placeholder'), args)}
@@ -418,7 +410,9 @@ class BoundGraph:
                 targets = map_arg(outputs, storage)
                 actual = map_arg(host_call.args, live.__getitem__)
                 keywords = map_arg(host_call.kwargs, live.__getitem__)
-                self.steps.append(host.prepare(*actual, **keywords, outputs=tree_flatten(targets)[0]))
+                prepared = host.prepare(*actual, **keywords, outputs=tree_flatten(targets)[0])
+                if prepared is not None:
+                    self.steps.append(prepared)
                 values.update(zip(exported, targets))
                 continue
             if crossing is None:
@@ -477,7 +471,7 @@ class BoundGraph:
             values.update(zip(exported, targets))
         output = next(node for node in graph.graph.nodes if node.op == 'output')
         self.output = map_arg(output.args[0], values.__getitem__)
-        self.execution = execution_sequence(self.steps, self.output)
+        self.execution = execution_sequence(self.steps, self.output, placements.owners)
 
 class Function:
     """One numerical callable and its framework-derived AOT declaration.

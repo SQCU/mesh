@@ -69,81 +69,53 @@ def pipeline(head, bindings, tail, name, indices=None, instance=''):
     return _specialized(head + _stream.index_constant_prelude() + tail, instance, name, constants)
 
 
-def place(graph, placements, fixed):
-    """Place producer storage from all declared consumer subviews.
+def solve_layout(count, demands, values):
+    """The one relative-placement solve, in byte positions for every scalar type."""
+    uses = [item[0] for item in demands]
+    targets = [required_layout(view, kind).components(width) for _, width, kind, view, _, _ in demands]
+    footprints = [(target.index(0) if target.count else 0, capacity, alignment)
+                  for target, (_, _, _, _, capacity, alignment) in zip(targets, demands)]
+    flexible = [i for i, (_, _, kind, _, capacity, alignment) in enumerate(demands)
+                if kind in ('strided', 'positive_strided') and not capacity and alignment == 1]
+    exact = [i for i in range(len(demands)) if i not in flexible]
+    typed, widths = [item[0] for item in values], [item[1] for item in values]
+    placed = _stream.place_layout(count, [uses[i] for i in exact], [targets[i] for i in exact],
+                                  [footprints[i] for i in exact], typed, widths)
+    if placed is not None and flexible:
+        domain = _stream.TensorLayout((count,), (1,))
+        changed = False
+        for i in flexible:
+            _, width, kind, _, _, _ = demands[i]
+            view = uses[i].rebase(domain, placed).elements(width)
+            target = required_layout(view, kind)
+            changed |= view != target
+            targets[i] = target.components(width)
+        if changed:
+            placed = _stream.place_layout(count, uses, targets, footprints, typed, widths)
+    # Incompatible API requirements retain the shared resolver's explicit
+    # conversion dependencies. The producer still has one complete placement.
+    if placed is None:
+        return _stream.TensorLayout((count,), (1,)), 0
+    domain = _stream.TensorLayout((count,), (1,))
+    extent = max((uses[i].rebase(domain, placed).index(0) + capacity
+                  for i, (_, _, _, _, capacity, _) in enumerate(demands) if uses[i].count and capacity), default=0)
+    return placed, extent
 
-    Caller-owned storage stays fixed. Uses with mutually inconsistent physical
-    requirements retain the shared resolver's explicit conversion edges.
-    """
+
+def place(graph, placements):
+    """Solve whole producer families from all declared page and API operands."""
     from torch.utils._pytree import tree_flatten
+    from . import host
     described = [v for n in graph.nodes for v in tree_flatten(n.meta.get('val'))[0]]
-    groups = []
+    demands = []
     for node in graph.nodes:
+        for left, left_view, right, right_view in host.equalities(node):
+            placements.equate(left, right, left_view, right_view)
         for value, view, required in graph_uses(node):
-            required, capacity, alignment = storage_requirement(required)
-            if required == 'indexed' and not capacity and alignment == 1:
-                continue
-            group = next((g for g in groups if torch_alias(g[0][0], value)), None)
-            if group is None:
-                group = []; groups.append(group)
-            group.append((value, view, required, capacity, alignment))
-    for group in groups:
-        anchor = group[0][0]
-        required = required_layout
-        if all(view == required(view, kind) and not capacity and alignment == 1
-               for _, view, kind, capacity, alignment in group):
-            continue
-        if any(torch_alias(anchor, v) for v in fixed) or any(torch_alias(anchor, v) for v, _ in placements.bindings):
-            continue
-        # The complete declared storage domain covers siblings and differently
-        # typed aliases as well as the constrained consumer slices.
-        domain = anchor.as_strided((anchor.untyped_storage().nbytes() // anchor.element_size(),), (1,), 0)
-        values = list({(value.element_size(), descriptor(value)): value
-                       for value in [domain, *(v for v in described if torch_alias(anchor, v))]}.values())
-        group = list({(value.element_size(), view, required(view, kind), capacity, alignment): (value, view, kind, capacity, alignment)
-                      for value, view, kind, capacity, alignment in group}.values())
-        unit = math.gcd(*(value.element_size() for value in values))
-        fields = [value.element_size() // unit for value in values]
-        widths = [value.element_size() // unit for value, *_ in group]
-        uses = [view.components(width) for (_, view, *_), width in zip(group, widths)]
-        targets = [required(view, kind).components(width) for (_, view, kind, _, _), width in zip(group, widths)]
-        footprints = [(target.index(0) if target.count else 0, -(-capacity // unit), math.lcm(alignment, unit) // unit)
-                      for target, (_, _, _, capacity, alignment) in zip(targets, group)]
-        typed = [descriptor(value).components(width) for value, width in zip(values, fields)]
-        count = anchor.untyped_storage().nbytes() // unit
-        # Strided APIs accept a family of layouts, not the source's current
-        # distances. First solve exact demands, then retain each flexible use
-        # which that placement already satisfies.
-        flexible = [i for i, (_, _, kind, capacity, alignment) in enumerate(group)
-                    if kind in ('strided', 'positive_strided') and not capacity and alignment == 1]
-        exact = [i for i in range(len(group)) if i not in flexible]
-        placed = _stream.place_layout(count, [uses[i] for i in exact], [targets[i] for i in exact],
-                                      [footprints[i] for i in exact], typed, fields)
-        if placed is not None and flexible:
-            scalar_domain = _stream.TensorLayout((count,), (1,))
-            needs_layout = False
-            for i in flexible:
-                view = uses[i].rebase(scalar_domain, placed).elements(widths[i])
-                target = required(view, group[i][2])
-                needs_layout |= view != target
-                targets[i] = target.components(widths[i])
-            if needs_layout:
-                placed = _stream.place_layout(count, uses, targets, footprints, typed, fields)
-        if placed is None:
-            continue
-        scalar_domain = _stream.TensorLayout((count,), (1,))
-        end = max((uses[i].rebase(scalar_domain, placed).index(0) * unit + capacity
-                   for i, (_, _, _, capacity, _) in enumerate(group) if uses[i].count and capacity), default=0)
-        width = domain.element_size() // unit
-        placed = placed.reshape((*domain.shape, width)).elements(width)
-        alignment = math.lcm(*(value.element_size() for value in values), *(entry[4] for entry in group))
-        placements.bind(domain, allocate(placed, domain.dtype, domain.device.type,
-                                        extent=end, alignment=alignment))
-
-
-def torch_alias(left, right):
-    import torch
-    return isinstance(right, torch.Tensor) and torch._C._is_alias_of(left, right)
+            kind, capacity, alignment = storage_requirement(required)
+            if kind != 'indexed' or capacity or alignment != 1:
+                demands.append((value, view, kind, capacity, alignment))
+    placements.solve(described, demands)
 
 
 @lru_cache(None)
@@ -187,7 +159,8 @@ def allocate(layout, dtype, device, *, extent=0, alignment=1):
     origin = -min(0, first)
     alignment = math.lcm(alignment, width)
     count = -(-max((first + length + origin) * width, extent + origin * width) // width)
-    storage = empty((count + alignment // width - 1,), dtype=dtype, device=device)
+    reserved = -(-(count * width + alignment - width) // alignment) * (alignment // width)
+    storage = empty((reserved,), dtype=dtype, device=device)
     base, _, offset = _stream.page_backing(storage)
     padding = (-(base + offset + origin * width)) % alignment
     return TensorView(storage, layout.shift(origin + padding // width))

@@ -336,7 +336,7 @@ static MeshANEModel *ane_model(NSURL *compiled,NSDictionary *given) {
   for(NSDictionary *candidate in attributes[@"NetworkStatusList"])if([candidate[@"Name"] isEqual:given[@"function"]]){network=candidate;break;}
   if(!network){snprintf(error_,sizeof error_,"compiled ANE has no storage schema for function %s",[given[@"function"] UTF8String]);return nil;}
   if([network[@"LiveStateList"] count]){snprintf(error_,sizeof error_,"ANE state must be functionalized into declared input/output pages before compilation");return nil;}
-  NSMutableDictionary *contract=[@{@"backend":@"ane",@"function":given[@"function"],@"procedure":procedure,@"request_capacity":@(prepared.capacity)} mutableCopy];
+  NSMutableDictionary *contract=[@{@"backend":@"ane",@"output_storage":@"caller-pages",@"function":given[@"function"],@"procedure":procedure,@"request_capacity":@(prepared.capacity)} mutableCopy];
   NSArray *sides=@[@[@"inputs",@"LiveInputList",@"kANEFModelInputSymbolsArrayKey",@"kANEFModelInput16KAlignmentArrayKey",@"inputSymbolIndicesForProcedureIndex:"],
                    @[@"outputs",@"LiveOutputList",@"kANEFModelOutputSymbolsArrayKey",@"kANEFModelOutput16KAlignmentArrayKey",@"outputSymbolIndicesForProcedureIndex:"]];
   for(NSArray *side in sides) {
@@ -349,7 +349,7 @@ static MeshANEModel *ane_model(NSURL *compiled,NSDictionary *given) {
 }
 static NSDictionary *coreml_contract(MLModel *model,NSString *function) {
   if(@available(macOS 15.0,*))if(model.modelDescription.stateDescriptionsByName.count){snprintf(error_,sizeof error_,"Core ML state must be functionalized into declared input/output pages before compilation");return nil;}
-  NSMutableDictionary *contract=[@{@"backend":@"coreml",@"function":function} mutableCopy];
+  NSMutableDictionary *contract=[@{@"backend":@"coreml",@"output_storage":@"advisory",@"function":function} mutableCopy];
   for(NSArray *side in @[@[@"inputs",model.modelDescription.inputDescriptionsByName],@[@"outputs",model.modelDescription.outputDescriptionsByName]]) {
     NSMutableDictionary *features=[NSMutableDictionary dictionary];
     for(NSString *name in side[1]) {
@@ -425,117 +425,12 @@ void mesh_coreml_release(long handle) {
   }
 }
 
-static MLMultiArray *wrap(const MeshModelView *view, NSError **error) {
-  const MLMultiArrayDataType types[]={MLMultiArrayDataTypeFloat16,MLMultiArrayDataTypeFloat32,
-                                      MLMultiArrayDataTypeInt32,MLMultiArrayDataTypeDouble};
-  MLMultiArrayDataType type;
-  if(view->dtype==MeshModelInt8) {
-    if(@available(macOS 26.0,*))type=MLMultiArrayDataTypeInt8;
-    else {
-      *error=[NSError errorWithDomain:@"mesh.coreml" code:0 userInfo:@{NSLocalizedDescriptionKey:@"Int8 Core ML views require macOS 26"}];
-      return nil;
-    }
-  } else type=types[view->dtype];
-  NSMutableArray *dims = [NSMutableArray array], *strides = [NSMutableArray array];
-  for (int i = 0; i < view->rank; i++) { [dims addObject:@(view->shape[i])]; [strides addObject:@(view->strides[i])]; }
-  return [[MLMultiArray alloc] initWithDataPointer:(char *)view->pages.base+view->pages.offset shape:dims
-                                       dataType:type strides:strides
-                                       deallocator:nil error:error];
-}
-
 @interface MeshModelInvocation : NSObject { @public const char *(*prepare)(id,MeshHostCompletion,void *,MeshHostTask *); }
 @end
 @implementation MeshModelInvocation
 @end
 
-@interface MeshPrediction : MeshModelInvocation
-@property long handle;
-@property(retain) MLModel *model;
-@property(retain) MLDictionaryFeatureProvider *features;
-@property(retain) MLPredictionOptions *options;
-@property(retain) NSDictionary<NSString *, MLMultiArray *> *outputs;
-@end
-@implementation MeshPrediction
-- (void)dealloc { mesh_coreml_release(_handle); }
-@end
-
-static const char *coreml_prepare(id object,MeshHostCompletion,void *,MeshHostTask *);
-static void *coreml_bind(long handle, const MeshModelView *inputs, size_t ni, const MeshModelView *outputs, size_t no) {
-  @autoreleasepool {
-    MLModel *model;
-    @synchronized([MLModel class]) {
-      if (handle < 0 || handle >= (long)models_.count || models_[handle]==[NSNull null]) {
-        snprintf(error_,sizeof error_,"no model %ld",handle);return NULL;
-      }
-      model=models_[handle];
-    }
-    NSError *error=nil;
-    NSMutableDictionary *features=[NSMutableDictionary new], *backings=[NSMutableDictionary new];
-    for (size_t i=0;i<ni+no;i++) {
-      const MeshModelView *view=i<ni ? inputs+i : outputs+i-ni;
-      if ((unsigned)view->dtype >= MeshModelTypeCount) { snprintf(error_,sizeof error_,"unsupported view dtype");return NULL; }
-      if(!view->name||!view->name[0]){snprintf(error_,sizeof error_,"each model view requires its declared feature name");return NULL;}
-      NSString *name=@(view->name);
-      NSDictionary *descriptions=i<ni ? model.modelDescription.inputDescriptionsByName : model.modelDescription.outputDescriptionsByName;
-      if(!descriptions[name]){snprintf(error_,sizeof error_,"model has no declared %s feature %s",i<ni?"input":"output",view->name);return NULL;}
-      MLMultiArray *array=wrap(view,&error);
-      if(!array){snprintf(error_,sizeof error_,"arrays: %s",error.localizedDescription.UTF8String);return NULL;}
-      if(![descriptions[name] isAllowedValue:[MLFeatureValue featureValueWithMultiArray:array]]){
-        snprintf(error_,sizeof error_,"view %s does not match its model feature declaration",view->name);return NULL;
-      }
-      if(i<ni)features[name]=[MLFeatureValue featureValueWithMultiArray:array];else backings[name]=array;
-    }
-    // Every feature is an operand of the recorded call. Omitted outputs make
-    // Core ML allocate them; omitted optional inputs invoke provider defaults.
-    // Resolve both against the actual model schema before recording.
-    for(NSArray *side in @[@[features,model.modelDescription.inputDescriptionsByName,@"input"],
-                           @[backings,model.modelDescription.outputDescriptionsByName,@"output"]]) {
-      NSMutableSet *missing=[NSMutableSet setWithArray:[side[1] allKeys]];
-      [missing minusSet:[NSSet setWithArray:[side[0] allKeys]]];
-      if(missing.count) {
-        NSString *names=[[missing.allObjects sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@", "];
-        snprintf(error_,sizeof error_,"unbound model %s features: %s",[side[2] UTF8String],names.UTF8String);return NULL;
-      }
-    }
-    MeshPrediction *p=[MeshPrediction new];p->prepare=coreml_prepare;p.handle=handle;
-    @synchronized([MLModel class]) { references_[handle]=@([references_[handle] unsignedLongValue]+1); }
-    p.model=model;p.outputs=backings;
-    p.features=[[MLDictionaryFeatureProvider alloc] initWithDictionary:features error:&error];
-    p.options=[MLPredictionOptions new];p.options.outputBackings=backings;
-    if(!p.features){snprintf(error_,sizeof error_,"features: %s",error.localizedDescription.UTF8String);return NULL;}
-    return (__bridge_retained void *)p;
-  }
-}
-
-typedef void (*MeshPredictionSubmit)(id,SEL,id,id,id);
-@interface MeshPredictionTask : NSObject { @public
-  id model, features, options;
-  MeshPredictionSubmit submit;
-  void (^completed)(id<MLFeatureProvider>,NSError *);
-}
-@property MeshPrediction *source;
-@end
-@implementation MeshPredictionTask
-@end
 static void model_task_release(void *context) { CFRelease(context); }
-static void coreml_submit(void *context) API_AVAILABLE(macos(14.0));
-static void coreml_submit(void *context) {
-  MeshPredictionTask *task=(__bridge MeshPredictionTask *)context;
-  task->submit(task->model,@selector(predictionFromFeatures:options:completionHandler:),task->features,task->options,task->completed);
-}
-static const char *coreml_prepare(id object,MeshHostCompletion complete,void *context,MeshHostTask *result) {
-  MeshPrediction *p=object;MeshPredictionTask *task=[MeshPredictionTask new];task.source=p;
-  task->model=p.model;task->features=p.features;task->options=p.options;
-  task->submit=(MeshPredictionSubmit)[p.model methodForSelector:@selector(predictionFromFeatures:options:completionHandler:)];
-  task->completed=^(id<MLFeatureProvider> value,NSError *error) {
-    if(!value){complete(context,error.localizedDescription.UTF8String?:"Core ML prediction failed");return;}
-    for(NSString *name in p.outputs)if([value featureValueForName:name].multiArrayValue.dataPointer!=p.outputs[name].dataPointer) {
-      complete(context,"Core ML did not use the configured output backing");return;
-    }
-    complete(context,NULL);
-  };
-  *result=(MeshHostTask){(__bridge_retained void *)task,coreml_submit,model_task_release,NULL,0};return NULL;
-}
 
 @interface MeshANEInvocation : MeshModelInvocation
 @property long handle;
@@ -636,7 +531,10 @@ void *mesh_coreml_bind(long handle,const MeshModelView *inputs,size_t ni,const M
       if(handle<0||handle>=(long)models_.count||models_[handle]==NSNull.null){snprintf(error_,sizeof error_,"no model %ld",handle);return NULL;}
       model=models_[handle];
     }
-    return [model isKindOfClass:MeshANEModel.class]?ane_bind(handle,model,inputs,ni,outputs,no):coreml_bind(handle,inputs,ni,outputs,no);
+    if(![contracts_[handle][@"output_storage"] isEqual:@"caller-pages"]) {
+      snprintf(error_,sizeof error_,"prepared page execution requires guaranteed caller-owned output pages; public Core ML outputBackings are advisory");return NULL;
+    }
+    return ane_bind(handle,model,inputs,ni,outputs,no);
   } @catch(NSException *failure){snprintf(error_,sizeof error_,"model binding: %s",failure.reason.UTF8String);return NULL;} }
 }
 const char *mesh_coreml_prepare(void *binding,MeshHostCompletion complete,void *context,MeshHostTask *task) {

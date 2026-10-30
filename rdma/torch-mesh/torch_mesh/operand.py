@@ -217,26 +217,38 @@ def fake_outputs(shapes, strides, dtypes, devices):
             for shape, steps, dtype, device in zip(shapes, strides, dtypes, devices, strict=True)]
 
 
+def graph_bindings(node):
+    """One slot decoder for native/host declarations and their equalities."""
+    import json
+    schema = getattr(node.target, '_schema', None)
+    args = {a.name: node.args[i] if i < len(node.args) else node.kwargs.get(a.name, a.default_value)
+            for i, a in enumerate(schema.arguments)}
+    declarations = json.loads(args['operands'])
+    bindings = [(source.meta['val'], slot) for source, slot in zip(args['inputs'], args['input_slots'], strict=True)]
+    bindings.extend((value, slot) for value, slots in zip(node.meta['val'], args['output_slots'], strict=True) for slot in slots)
+    uses = {}
+    for value, slot in bindings:
+        declaration = declarations[str(slot)]
+        view = restore(declaration['view']).rebase(restore(declaration['source']), descriptor(value))
+        uses[slot] = value, view, declaration['requirements']
+    return args, uses
+
+
 def graph_uses(node):
     """Declared input/output selections and API needs, before page placement."""
-    import json
     from torch.utils._pytree import tree_flatten
     from .compilation import api_layouts
     schema = getattr(node.target, '_schema', None)
     if schema is None:
         return
-    args = {a.name: node.args[i] if i < len(node.args) else node.kwargs.get(a.name, a.default_value)
-            for i, a in enumerate(schema.arguments)}
     if schema.name in ('torch_mesh::native_kernel', 'torch_mesh::host_kernel'):
-        declarations = json.loads(args['operands'])
-        bindings = [(source.meta['val'], slot) for source, slot in zip(args['inputs'], args['input_slots'], strict=True)]
-        bindings.extend((value, slot) for value, slots in zip(node.meta['val'], args['output_slots'], strict=True) for slot in slots)
-        for value, slot in bindings:
-            declaration = declarations[str(slot)]
-            view = restore(declaration['view']).rebase(restore(declaration['source']), descriptor(value))
-            for requirement in declaration['requirements']:
+        _, bindings = graph_bindings(node)
+        for value, view, requirements in bindings.values():
+            for requirement in requirements:
                 yield value, view, requirement
         return
+    args = {a.name: node.args[i] if i < len(node.args) else node.kwargs.get(a.name, a.default_value)
+            for i, a in enumerate(schema.arguments)}
     declaration = api_layouts('graph_operands').get(schema.name)
     if declaration is None:
         return

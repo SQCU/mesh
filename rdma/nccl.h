@@ -1032,6 +1032,19 @@ ncclResult_t ncclMeshPageTableShape(ncclMeshPageTable_t table, size_t* pages, si
    name pages containing indices produced during execution; a fixed binding
    and fixed index-list width do not make those index values constant. */
 ncclResult_t ncclMeshPageTableBinding(ncclMeshPageTable_t table, ncclMeshBuffer* binding);
+/* Preparation-only page composition. The result maps the selected existing
+   pages into one local view and retains their owners; no payload is copied.
+   Destroying the result releases the view, never its owners' arena pages. */
+typedef struct { ncclMeshPageTable_t storage; uint64_t first, count; } ncclMeshPageSelection;
+ncclResult_t ncclMeshPageTableCompose(const ncclMeshPageSelection* selections, size_t count,
+    ncclComm_t comm, int metal, ncclMeshPageTable_t* out);
+/* Physical page identities, coalesced into runs. With runs NULL, return the
+   required count; otherwise *count supplies capacity and receives the count.
+   `page` is the first page in this process's one registered region mapping. */
+typedef struct { uint64_t first, count, page; } ncclMeshPageBacking;
+ncclResult_t ncclMeshPageTableBacking(ncclMeshPageTable_t table, ncclMeshPageBacking* runs, size_t* count);
+/* Local base of the prepared page view; creates no backend resource. */
+ncclResult_t ncclMeshPageTableAddress(ncclMeshPageTable_t table, const void** address);
 ncclResult_t ncclMeshPageTableDestroy(ncclMeshPageTable_t table);
 /* A repeated local binding. Instance selection happens while compiling commands;
    execution reads the resulting page lists. Each rank supplies its own period

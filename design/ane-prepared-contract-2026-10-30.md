@@ -13,10 +13,11 @@ exported buffer target or user-input name to its `input` and `output` feature
 names. The same pairs reach the native model contract.
 
 This changes the signature and its names, not the numerical operations. Lifted
-state is removed from captured constants. Other constants keep their declared
-role and position. When a state result is also a user result, the configured
-state output names that one SSA value and one page operand. Callers bind that
-canonical feature; the exporter does not manufacture a second result copy.
+state is removed from captured constants. Other constants keep their captured role unless the graph returns them. A returned
+parameter, constant tensor or unchanged buffer becomes an ordinary named weight
+operand, retaining its actual captured value. If arithmetic also reads it, that
+same input feeds the provider. When several result names denote one SSA value,
+those names declare equal page selections; the provider emits the value once.
 The caller's graph supplies the next use of those pages and its dependencies.
 
 The converter receives the graph's explicit input and output scalar types.
@@ -32,13 +33,17 @@ functionalized from its operand layout report alone. Such an artifact still
 needs its original graph transformed before compilation. This is a source
 contract boundary, not a claim that ANE hardware cannot calculate stateful work.
 
-One source alias case remains open: an effect result may be the existing input
-placeholder itself. Distinct configured input/output names must then describe
-an alias of those pages. The current signature pass instead overwrites the input
-name when naming the output. The next change must expose the alias before
-allocation and carry it through shared producer placement and export. An
-identity operation or a copied result would hide that missing contract. This
-checkpoint does not claim that case is handled.
+`export_coreml_graph` returns the ordinary host declaration before allocation,
+including named tensor metadata, weight operands and output aliases. It does not
+bind a separate execution interface. A returned input keeps its input name;
+each result name denotes the same page selection. `host.equalities` sends these
+relations through the shared placement solver. `host.prepare` consumes the
+assigned pages and filters the provider's actual features. An alias-only graph
+has no compiled provider artifact and no host task. Conflicting prebound pages
+are a preparation error, never a reason to insert an identity copy.
+
+The source interface is for named tensor results. Non-tensor results are
+reported during preparation; they are not silently dropped from the signature.
 
 ## Output pages are already bound
 
@@ -46,8 +51,16 @@ The direct adapter in `rdma/mesh-coreml.m` prepares IOSurfaces over retained
 bridge-page roots, with explicit offsets. It maps all named inputs and outputs
 to the compiled procedure's symbol indices once. Physical shape, strides,
 scalar type, footprint and alignment reach the shared placement solver before
-allocation. Public Core ML's advisory `outputBackings` are a different declared
-backend contract and do not establish this fixed-output guarantee.
+allocation. The required contract field `output_storage` records `caller-pages`
+for this adapter. Python, Swift and native binding consume this guarantee before
+prepared execution.
+
+Public Core ML's `outputBackings` are advisory. Its metadata remains inspectable
+with `output_storage: advisory`, but it cannot be bound as a page executor. The
+public prediction binder, task and runtime output-pointer check have been
+deleted. A configuration requesting that execution API fails during preparation;
+there is no copy or alternate executor. Core ML source conversion remains useful,
+and native CPU and GPU engines keep their own prepared page contracts.
 
 ## Prepared completion and remaining vendor throttles
 
@@ -56,7 +69,7 @@ and context. Each invocation binds its own ANE request and callback and maps
 its pages before submission. The runtime only calls the prepared submit entry.
 Its return does not publish output readiness. The actual completion callback
 publishes the existing scheduler event. CPU work completes the same operand
-after its body; public Core ML uses its SDK completion-handler API.
+after its body.
 
 Metadata and disassembly inspection on macOS 26.3.2, build 25D2150, established:
 
@@ -91,7 +104,10 @@ submission bucket may still contend. Those limits remain explicit.
 ## Preparation evidence
 
 The signature pass was inspected with persistent and nonpersistent buffer
-effects, changed user inputs, shared state/user results, and retained constants.
+effects, changed user inputs, shared state/user results, returned inputs and
+captured constants used both as results and arithmetic inputs. An actual exported
+input alias passed through the ordinary host declaration, slot relations, shared
+placement and host preparation with the same pages and no provider task.
 Core ML conversion produced ordinary tensor operations without `read_state` or
 `coreml_update_state`. Float32 and int32 feature types were retained, including
 when arithmetic precision was explicitly configured as float16.
@@ -101,7 +117,9 @@ methods. It did not construct a model, device, request or queue, invoke a
 prediction, or evaluate numerical work. The converter inspection likewise did
 not invoke the graph. The shared library then compiled and loaded a small model,
 reported its request capacity, prepared distinct callbacks and mapped bridge
-pages for separate invocations, and released them without submission. A pure
+pages for separate invocations, and released them without submission. Public
+Core ML metadata reported advisory storage, and native and Python binding
+rejected it before an invocation could be created. A pure
 dependency inspection retained the capacity slot edge across preparation
 flushes. Native libraries, the full extension and Swift Engine/Goal A compile.
 Submission behavior has not been measured.
