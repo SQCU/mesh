@@ -2,12 +2,13 @@
 from pathlib import Path
 
 import torch
+import mesh_matrix
 from . import _stream, fused
 from .compilation import operands, api_layouts
 from .layout import bindings, pipeline as layout_pipeline
 
 
-_OPERANDS = ''.join(Path(__file__).with_name(f).read_text() + '\n' for f in ('argmax.metal', 'matrix_operand.metal'))
+_OPERANDS = ''.join(Path(__file__).with_name(f).read_text() + '\n' for f in mesh_matrix.LIBRARIES[:-1])
 _SOURCE = _OPERANDS + Path(__file__).with_suffix('.metal').read_text()
 
 
@@ -18,60 +19,19 @@ def pipeline(definitions, bindings):
 
 def row_tiles(rows):
     """The product's compiled row groups; shared by writes and their producer."""
-    geometry = operands()
-    width = geometry['MATRIX_ROWS'] * geometry['MATRIX_ROW_GROUPS']
-    return tuple((first, min(width, rows - first)) for first in range(0, rows, width))
+    return mesh_matrix.row_tiles(rows, operands())
 
 
 def arguments(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, ready=None, arrivals=None):
-    """Bind matrix views, including batch strides, without packing or execution."""
-    kinds = {torch.float16: 'half', torch.float32: 'float', torch.bfloat16: 'bfloat'}
-    if x.dtype not in kinds or w.dtype not in kinds or out.dtype not in kinds:
-        raise ValueError('matrix operands require supported, explicit input and output types')
-    if x.ndim not in (2, 3) or w.ndim != x.ndim or out.ndim != x.ndim:
-        raise ValueError('matrix operands require two-dimensional or batched matrix views')
-    rows, first, columns = x.shape[-2], x.shape[-1], w.shape[-1]
-    if x1 is not None and (x1.dtype != x.dtype or x1.ndim != x.ndim or x1.shape[-2] != rows):
-        raise ValueError('matrix input segments require the same dtype, rank and row count')
-    inner = first + (x1.shape[-1] if x1 is not None else 0)
-    if w.shape[-2] != inner or out.shape[-2:] != (rows, columns):
-        raise ValueError('matrix views disagree on product dimensions')
-    batches = out.shape[0] if out.ndim == 3 else 1
-    if x.ndim == 3 and (x.shape[0] not in (1, batches) or w.shape[0] not in (1, batches)):
-        raise ValueError('matrix batch views must match or broadcast')
-    if x1 is not None and x1.ndim == 3 and x1.shape[0] not in (1, batches):
-        raise ValueError('matrix input segment batch views must match or broadcast')
-    if bias is not None and (bias.dtype != out.dtype or bias.ndim not in (1, 2) or
-                            bias.shape[-1] not in (1, columns) or
-                            (bias.ndim == 2 and bias.shape[0] not in (1, rows))):
-        raise ValueError('matrix bias requires the output dtype and a broadcastable row view')
-    if ready is not None:
-        tiles = len(row_tiles(rows)) * batches
-        if (ready.dtype != torch.int64 or ready.numel() != tiles or
-                arrivals is None or arrivals.dtype != torch.int32 or arrivals.numel() != tiles):
-            raise ValueError('tile publication needs one ready word and arrival count per batch row tile')
-    def step(binding, value, axis):
-        return f'mesh_matrix_stride<{binding},{axis % value.ndim}>()' if value is not None else 0
-    def affine(binding, value):
-        return f'mesh_affine<{binding}>()' if value is not None else 0
-    definitions = dict(INPUT=kinds[x.dtype], WEIGHT=kinds[w.dtype], OUTPUT=kinds[out.dtype], AM=step(0,x,-2), AK=step(0,x,-1),
-                       BK=step(1,w,-2), BN=step(1,w,-1), AFFINE_A=affine(0,x), AFFINE_B=affine(1,w),
-                       BATCH_A=int(x.ndim == 3 and x.shape[0] > 1), BATCH_B=int(w.ndim == 3 and w.shape[0] > 1),
-                       BIAS_ROWS=bias.shape[0] if bias is not None and bias.ndim == 2 else 1,
-                       BIAS_COLUMNS=bias.shape[-1] if bias is not None else 1,
-                       ACTIVATE=int(act), BIAS=int(bias is not None), ALPHA=repr(float(alpha))+'f',
-                       BETA=repr(float(beta))+'f', PRODUCED=int(ready is not None),
-                       SEGMENTED=int(x1 is not None), K0=first, PRODUCT_ROWS=rows, PRODUCT_COLUMNS=columns, PRODUCT_INNER=inner,
-                       A1M=step(6,x1,-2), A1K=step(6,x1,-1), AFFINE_A1=affine(6,x1),
-                       BATCH_A1=int(x1 is not None and x1.ndim == 3 and x1.shape[0] > 1))
-    geometry = operands()
-    definitions.update((key, geometry['MATRIX_' + key])
-                       for key in ('ROWS', 'COLUMNS', 'INNER', 'ROW_GROUPS', 'COLUMN_GROUPS'))
-    row_tile = definitions['ROWS'] * definitions['ROW_GROUPS']
-    column_tile = definitions['COLUMNS'] * definitions['COLUMN_GROUPS']
-    threads = definitions['ROW_GROUPS'] * definitions['COLUMN_GROUPS'] * geometry['SIMD_WIDTH']
-    return (definitions, [x, w, out, arrivals, None, bias, x1, ready],
-            (-(-rows // row_tile), -(-columns // column_tile), batches), (threads, 1, 1))
+    """Bind page operands to the shared metadata-only product declaration."""
+    kinds = {torch.float16: 'half', torch.float32: 'float', torch.bfloat16: 'bfloat',
+             torch.int64: 'long', torch.int32: 'int'}
+    values = dict(x=x, w=w, out=out, x1=x1, bias=bias, ready=ready, arrivals=arrivals)
+    declarations = {name: None if value is None else dict(shape=tuple(value.shape), type=kinds[value.dtype])
+                    for name, value in values.items()}
+    recipe = mesh_matrix.product(**declarations, geometry=operands(), act=act, alpha=alpha, beta=beta)
+    return (recipe['definitions'], [values[name] if name is not None else None for name in recipe['bindings']],
+            recipe['grid'], recipe['threads'])
 
 
 def product(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, ready=None, arrivals=None, layouts=None):

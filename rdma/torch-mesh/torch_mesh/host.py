@@ -34,6 +34,20 @@ def declare(inputs, outputs, definition, *, input_layouts, output_layouts, bindi
     return {name: slots[i] for i, name in enumerate(outputs, len(inputs))}
 
 
+def assemble(pieces):
+    """One result whose declared slices are the original source pages.
+
+    Each piece is (source view, result view). Placement resolves the equalities;
+    preparation emits no host operation or numerical copy for this declaration.
+    """
+    sources = {str(i): source for i, (source, _) in enumerate(pieces)}
+    targets = {str(i): target for i, (_, target) in enumerate(pieces)}
+    indexed = {name: 'indexed' for name in sources}
+    result = declare(sources, targets, {'provider': 'pages', 'output_aliases': {name: name for name in targets}},
+                     input_layouts=indexed, output_layouts=indexed, binding_layout='indexed')
+    return next(iter(result.values()))
+
+
 def bound(node):
     return getattr(getattr(node.target, '_schema', None), 'name', '') == 'torch_mesh::host_kernel'
 
@@ -63,6 +77,12 @@ def prepare(inputs, input_slots, output_slots, output_strides, shapes, dtypes, d
     values.update((slot, bind(value, uses[str(slot)])) for slots, value in zip(output_slots, outputs, strict=True) for slot in slots)
     source = {name: values[i] for i, name in enumerate(definition['inputs'])}
     target = {name: values[i] for i, name in enumerate(definition['outputs'], len(source))}
+    if definition['provider'] == 'pages':
+        from .placement import same_view
+        for name, original in definition['output_aliases'].items():
+            if not same_view(target[name], source[original]):
+                raise ValueError(f'{name}: page assembly lost its declared source equality')
+        return None
     if definition['provider'] == 'cpu':
         weights = tuple(source[name] for name in definition['weights'])
         shard = weights[0] if definition['operation'] == 'linear' else weights

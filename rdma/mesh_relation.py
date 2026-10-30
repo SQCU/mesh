@@ -55,9 +55,6 @@ class Algebra:
         specs['map_reverse'] = C.c_void_p, (C.c_void_p,)
         specs['map_lexmin'] = C.c_void_p, (C.c_void_p,)
         specs['map_is_single_valued'] = C.c_int, (C.c_void_p,)
-        specs['pw_multi_aff_from_map'] = C.c_void_p, (C.c_void_p,)
-        specs['pw_multi_aff_pullback_pw_multi_aff'] = C.c_void_p, (C.c_void_p, C.c_void_p)
-        specs['map_from_pw_multi_aff'] = C.c_void_p, (C.c_void_p,)
         specs['map_dim'] = C.c_int, (C.c_void_p, C.c_int)
         specs['set_lexmin'] = C.c_void_p, (C.c_void_p,)
         specs['set_project_out'] = C.c_void_p, (C.c_void_p, C.c_int, C.c_uint, C.c_uint)
@@ -72,6 +69,10 @@ class Algebra:
         self.lib.MeshIndexSetRuns.restype = C.POINTER(C.c_int64)
         self.lib.MeshIndexSetCover.argtypes = C.POINTER(C.c_void_p), C.c_size_t, C.POINTER(C.c_size_t)
         self.lib.MeshIndexSetCover.restype = C.POINTER(_Cell)
+        self.lib.MeshIndexCompose.argtypes = C.c_void_p, C.c_void_p
+        self.lib.MeshIndexCompose.restype = C.c_void_p
+        self.lib.MeshIndexNormalize.argtypes = C.c_void_p,
+        self.lib.MeshIndexNormalize.restype = C.c_void_p
         self.lib.MeshIndexSelectionDomain.argtypes = C.c_void_p, C.c_char_p, C.POINTER(C.c_void_p)
         self.lib.MeshIndexSelectionDomain.restype = C.c_void_p
         self.lib.MeshIndexSelectionRelation.argtypes = C.c_void_p, C.c_char_p, C.POINTER(C.c_size_t), C.POINTER(C.c_void_p)
@@ -330,7 +331,7 @@ class IndexRelation(_Object):
     kind = 'map'
 
     def __init__(self, algebra, pointer, shape):
-        super().__init__(algebra, pointer)
+        super().__init__(algebra, algebra.lib.MeshIndexNormalize(pointer))
         self.shape = tuple(map(int, shape))
 
     def pullback(self, shape, equations):
@@ -339,15 +340,7 @@ class IndexRelation(_Object):
 
     def then(self, other):
         """Compose this relation's target coordinates with the next relation."""
-        algebra = self.algebra
-        if self.single_valued() and other.single_valued():
-            source = algebra.pw_multi_aff_from_map(self.copy())
-            target = algebra.pw_multi_aff_from_map(other.copy())
-            composed = algebra.pw_multi_aff_pullback_pw_multi_aff(target, source)
-            result = algebra.map_from_pw_multi_aff(composed)
-        else:
-            result = algebra.map_apply_range(self.copy(), other.copy())
-        return IndexRelation(algebra, result, self.shape)
+        return IndexRelation(self.algebra, self.algebra.lib.MeshIndexCompose(self.copy(), other.copy()), self.shape)
 
     def inverse(self, shape):
         """Reverse the relation with its new domain shape explicitly supplied."""
@@ -461,6 +454,36 @@ def convolution_domain(algebra, input_shape, weight_shape, *, stride, padding, d
     output_shape = (batches, groups * columns, *outputs)
     output_steps = [['reshape', [batches, groups, columns, *outputs]],
                     ['permute', [1, 0, *range(3, 3 + ranks), 2]], ['reshape', list(matrix_shapes[2])]]
+    canonical = dict(input=domain.then(address),
+        weight=algebra.selection_relation({'shape': weight_shape, 'steps': weight_steps}),
+        output=algebra.selection_relation({'shape': output_shape, 'steps': output_steps}))
+    product_shape = (*matrix_shapes[2], reduction)
+    axes = dict(input=(0, 1, 3), weight=(0, 3, 2), output=(0, 1, 2))
+    shapes = dict(zip(axes, matrix_shapes, strict=True))
+    product_accesses = {name: algebra.map(product_shape, relation.shape,
+        lambda x, y, name=name: [f'{y[0]} = {flat(shapes[name], [x[i] for i in axes[name]])}']).then(relation)
+        for name, relation in canonical.items()}
+    # The neutral page is locally supplied, not an input owned by another rank.
+    product_accesses['input'] = product_accesses['input'].then(algebra.map(
+        (source_count + 1,), (source_count,), lambda x, y: [f'{x[0]} = {y[0]}']))
     return dict(input_shape=input_shape, output_shape=output_shape, iteration_shape=iteration,
-                matrix_shapes=matrix_shapes, input_access=access, input_indices=domain.then(address).terms(),
-                input_neutral=neutral, weight_steps=weight_steps, output_steps=output_steps)
+                matrix_shapes=matrix_shapes, input_access=access,
+                input_indices=None if canonical['input'].empty() else canonical['input'].terms(),
+                input_neutral=neutral, weight_steps=weight_steps, output_steps=output_steps,
+                canonical_accesses=canonical, product_shape=product_shape, product_accesses=product_accesses)
+
+
+def owned_domains(algebra, owners, output, inputs):
+    """Resolve ordered output owners into exact work and source-page domains.
+
+    Relations map the common iteration coordinates to logical flat positions.
+    Owners retain their ordered selections; set images only choose which work
+    and source pages are needed. Repeated reads never change output ordering.
+    """
+    result = []
+    for selection in owners:
+        order = algebra.selection_relation(selection)
+        work = output.preimage(order.image(order.domain()))
+        result.append(dict(selection=selection, order=order, work=work,
+                           reads={slot: access.image(work) for slot, access in inputs.items()}))
+    return tuple(result)

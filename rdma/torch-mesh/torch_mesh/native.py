@@ -92,6 +92,20 @@ def topk(x, k, dim=-1, largest=True, sorted=True, *, outputs=None):
     return output
 
 
+def sort(x, dim=-1, descending=False, *, stable=None, outputs=None):
+    """Sorting is the shared ordered selection of the complete axis.
+
+    The selector orders equal values by their original index, so it also
+    implements the stable declaration without another numerical kernel.
+    """
+    shape = x.shape or (1,)
+    source = TensorView.of(x).reshape(shape)
+    destinations = None if outputs is None else [None if value is None else TensorView.of(value).reshape(shape)
+                                                for value in outputs]
+    values = topk(source, shape[dim], dim, descending, True, outputs=destinations)
+    return tuple(TensorView.of(value).reshape(x.shape) for value in values)
+
+
 def cumsum(x, dim, *, dtype=None, out=None):
     from .scan import cumsum as prepare
     output, commands = prepare(x, dim, dtype=dtype, out=out)
@@ -285,6 +299,8 @@ def compile_graph(module, metadata, operands, *, destinations=None):
             names = {'torch.ops.torch_mesh.linear.default': 'linear',
                      'torch.ops.torch_mesh.linears.default': 'linears',
                      'torch.ops.aten.topk.default': 'topk',
+                     'torch.ops.aten.sort.default': 'sort',
+                     'torch.ops.aten.sort.stable': 'sort',
                      'torch.ops.aten.cumsum.default': 'cumsum',
                      'torch.ops.torch_mesh.draw.default': 'draw',
                      'torch.ops.torch_mesh.retain.default': 'retain',
@@ -297,7 +313,7 @@ def compile_graph(module, metadata, operands, *, destinations=None):
             outputs = node.codegen_outputs()
             output_refs = [f'mesh_destinations[{leaf.get_name()!r}]' if isinstance(leaf, ir.IRNode)
                            and leaf.get_name() in bound_storage else 'None' for leaf in tree_flatten(outputs)[0]]
-            keyword = 'outputs' if names[name] in ('linears', 'topk', 'retain', 'kernel') else 'out'
+            keyword = 'outputs' if names[name] in ('linears', 'topk', 'sort', 'retain', 'kernel') else 'out'
             destination = '[' + ', '.join(output_refs) + ']' if keyword == 'outputs' else output_refs[0]
             self.writeline(f'{node.get_name()} = mesh_native.{names[name]}({", ".join(args)}, {keyword}={destination})')
 
@@ -397,7 +413,7 @@ def compile_graph(module, metadata, operands, *, destinations=None):
         def _update_scheduler(self):
             self.scheduler = NativeScheduler(self.operations)
 
-    mode = detect_fake_mode(metadata)
+    mode = detect_fake_mode((metadata, [node.meta.get('val') for node in module.graph.nodes]))
     if mode is None:
         raise ValueError('native lowering requires the declaration\'s fake tensor metadata')
     with config.patch(size_asserts=False, alignment_asserts=False, scalar_asserts=False, split_reductions=True,

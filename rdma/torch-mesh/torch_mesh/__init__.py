@@ -143,11 +143,11 @@ def _compile(gm, example_inputs, destinations):
     described = [node.meta['val'] for node in gm.graph.nodes if 'val' in node.meta]
     mode = detect_fake_mode(described) or FakeTensorMode(allow_non_fake_inputs=True)
     from .operand import TensorView
-    def described_input(value, node):
+    def described_input(value, declared):
         if isinstance(value, TensorView):
-            return node.meta['val']
+            return declared
         return mode.from_tensor(value) if isinstance(value, torch.Tensor) else value
-    inputs = [tree_map(lambda value: described_input(value, node), value)
+    inputs = [tree_map(described_input, value, node.meta['val'])
               for node, value in zip((n for n in lifted.graph.nodes if n.op == 'placeholder'), operands, strict=True)]
     with mode:
         lowered = make_fx(dispatch_functionalize(lifted, propagate_input_mutations=True), decomposition_table=select_decomp_table() | decompositions,
