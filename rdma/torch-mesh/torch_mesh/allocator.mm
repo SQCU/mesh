@@ -61,18 +61,13 @@ void release(void *buffer) {
     memory = found->second.memory;
     leases_->erase(found);
   }
+  // given back once torch's work so far ends (its last use of the lease): torch's own event after it, notified
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
-  MTLCommandBufferHandler returned = ^(id<MTLCommandBuffer>) { ncclMemFree(memory); };
-  if (on_queue(stream)) {
-    [stream->commandBuffer() addCompletedHandler:returned];
-    return;
-  }
-  dispatch_sync(stream->queue(), ^{
-    @autoreleasepool {
-      [stream->commandBuffer() addCompletedHandler:returned];
-      stream->synchronize(at::mps::SyncType::COMMIT);
-    }
-  });
+  const bool off = !on_queue(stream);
+  std::shared_ptr<at::mps::MPSEvent> ended = at::mps::getMPSEventPool()->acquireEvent(false, stream);
+  ended->record(off);
+  ended->notify(off, ^(id<MTLSharedEvent>, uint64_t) { ncclMemFree(memory); (void)ended; });
+  if (off) stream->synchronize(at::mps::SyncType::COMMIT);
 }
 
 c10::DataPtr lease(size_t bytes) {

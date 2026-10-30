@@ -63,10 +63,21 @@ struct MeshStream {
     }
   }
 
-  // On torch's queue: the open buffer committed (and waited for, where `wait`), its end signalling the next count.
+  // On torch's queue: its work so far committed (and waited for, where `wait`), torch's own event after it (MPSEvent)
+  // notifying `progress` of the next count, which a schedule after it awaits (schedule_after_inputs).  Notifications
+  // may come in any order; `progress` only rises.
+  std::mutex rising;
   void signalled(bool wait) {
-    mps->endKernelCoalescing();
-    [mps->commandBuffer() encodeSignalEvent:progress value:++committed];
+    const uint64_t value = ++committed;
+    id<MTLSharedEvent> event = progress;
+    std::mutex *order = &rising;
+    std::shared_ptr<at::mps::MPSEvent> ended = at::mps::getMPSEventPool()->acquireEvent(false, mps);
+    ended->record(false);
+    ended->notify(false, ^(id<MTLSharedEvent>, uint64_t) {
+      std::lock_guard<std::mutex> guard(*order);
+      if (event.signaledValue < value) event.signaledValue = value;
+      (void)ended;
+    });
     mps->synchronize(wait ? at::mps::SyncType::COMMIT_AND_WAIT : at::mps::SyncType::COMMIT);
   }
 
@@ -841,13 +852,6 @@ static void fits(const Dispatch &d) {
   fits_binding(d.state, d.at, d.words.size() * sizeof(uint32_t), true);
   for (size_t i = 0; i < d.bound.size(); i++) if (d.bound[i]) fits_binding(d.state, i, d.lengths[i], false);
 }
-static void encode_in(id<MTLComputeCommandEncoder> encoder, const Dispatch &d) {
-  [encoder setComputePipelineState:d.state];
-  for (size_t i = 0; i < d.bound.size(); i++)
-    if (d.bound[i]) [encoder setBuffer:d.bound[i] offset:d.offsets[i] atIndex:i];
-  [encoder setBytes:d.words.data() length:d.words.size() * sizeof(uint32_t) atIndex:d.at];
-  [encoder dispatchThreadgroups:d.grid threadsPerThreadgroup:d.group];
-}
 // Configuration binds kernels from the Torch frontend into the native recorder.
 // Access modes are explicit operands; the recorder orders the declared byte views.
 static void prepare_dispatch(MetalSchedule *schedule,const Dispatch &d,uint64_t access) {
@@ -861,15 +865,27 @@ static void prepare_dispatch(MetalSchedule *schedule,const Dispatch &d,uint64_t 
 
 }
 
+// A configuration-time dispatch (a repartition's local copy, a probe): on the stream's Metal 4 queue after torch's work
+// so far (schedule_after_inputs), awaited before the call returns, so torch's later work reads its results.
 static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> &buffers, const std::vector<int64_t> &constants,
                    int64_t at, int64_t gx, int64_t gy, int64_t threads) {
   const Dispatch d = encoded(handle, buffers, constants, at, gx, gy, threads);
-  fits(d);   // before the stream's queue: a refusal raised in its block would end the process, not the call
-  at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
-  dispatch_sync(stream->queue(), ^{
-    id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
-    encode_in(encoder, d);
-  });
+  fits(d);
+  uint64_t access = 0;
+  for (size_t j = 0; j < d.bound.size(); j++)
+    if (d.bound[j]) access |= (UINT64_C(1) << j) | (UINT64_C(1) << (MESH_ACCESS_WRITE_SHIFT + j));
+  Schedule schedule = schedule_after_inputs();
+  prepare_dispatch(schedule.get(), d, access);
+  dispatch_semaphore_t done = dispatch_semaphore_create(0);
+  __block std::string failed;
+  checked(MetalScheduleFinish(schedule.get(), ^(NSError *error) {
+    if (error) failed = error.localizedDescription.UTF8String;
+    dispatch_semaphore_signal(done);
+  }));
+  MetalScheduleEnqueue(schedule.get());
+  dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+  dispatch_release(done);
+  TORCH_CHECK(failed.empty(), "torch_mesh.encode: ", failed);
 }
 
 // Linear command geometry is compiled from the shared manifest and discovered GPU cores.
@@ -1985,34 +2001,18 @@ struct ViewWrites {
 
 };
 
-// design/whole-function.md#observations
-static pybind11::capsule completion() {
-  auto stream = at::mps::getCurrentMPSStream();
-  __block id<MTLCommandBuffer> buffer = nil;
-  at::mps::dispatch_sync_with_rethrow(stream->queue(), ^{
-    buffer = [stream->commandBuffer().rootCommandBuffer retain];
-  });
-  return pybind11::capsule((void *)buffer, "mesh.command-buffer", [](PyObject *capsule) {
-    [(id<MTLCommandBuffer>)PyCapsule_GetPointer(capsule, "mesh.command-buffer") release];
-  });
-}
-
 static bool completed(pybind11::object observation) {
   if(pybind11::isinstance<pybind11::tuple>(observation)) {
     bool done=true;
     for(auto item:observation.cast<pybind11::tuple>())done=completed(pybind11::reinterpret_borrow<pybind11::object>(item))&&done;
     return done;
   }
+  // a prepared function's completion (schedule_completion), the one observation there is
   auto token=observation.cast<pybind11::capsule>();
-  if(!strcmp(token.name(),"mesh.prepared-function")) {
-    NSError *error=nil;
-    int status=MetalScheduleStatus(static_cast<Schedule *>(token.get_pointer())->get(),&error);
-    TORCH_CHECK(status>=0,"the prepared function failed: ",error.localizedDescription.UTF8String);return status==1;
-  }
-  id<MTLCommandBuffer> buffer = (id<MTLCommandBuffer>)token.get_pointer();
-  if (buffer.status == MTLCommandBufferStatusError)
-    throw std::runtime_error(buffer.error.localizedDescription.UTF8String);
-  return buffer.status == MTLCommandBufferStatusCompleted;
+  TORCH_CHECK(!strcmp(token.name(),"mesh.prepared-function"),"torch_mesh.completed: ",token.name()," is no prepared function's completion");
+  NSError *error=nil;
+  int status=MetalScheduleStatus(static_cast<Schedule *>(token.get_pointer())->get(),&error);
+  TORCH_CHECK(status>=0,"the prepared function failed: ",error.localizedDescription.UTF8String);return status==1;
 }
 
 // The module: prepared functions, their collectives (Collectives, ViewWrites) and fused crossings; no collective is
@@ -2044,7 +2044,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     } @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
   }, pybind11::call_guard<Drained>());
   module.def("import_attributes",&import_attributes, pybind11::call_guard<Drained>());
-  module.def("completion", &completion, pybind11::call_guard<Drained>());
   module.def("completed", &completed, pybind11::call_guard<Drained>());
   module.def("pipeline", &pipeline, pybind11::call_guard<Drained>());
   module.def("pipeline_specialized", &pipeline_specialized, pybind11::call_guard<Drained>());
