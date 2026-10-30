@@ -182,8 +182,17 @@ None of that is the collective. Every run uses the entire collective, the hourly
     included, each with its node number and model;
   - the launcher's discover() compares every part each hour by reading every map over that same network.
 
-  The part each node is linked into is published nowhere. That is an omission, not a limit: each beacon can announce
-  its node's part beside its model.
+  The part each node is linked into is published nowhere. That is an omission, not a limit. Choosing the part that
+  runs is a top-1 (the operator, 10-29):
+  - **Who speaks for a part.** Each part's representative is its smallest node number, a choice every member reads
+    from the same bridge map, so the members exchange nothing to make it.
+  - **What it shares.** The representative announces its part's capacity, the sum over its members' records, on
+    whatever non-RDMA network reaches other nodes. Today that is its beacon, beside the node's model.
+  - **Who runs.** Every node takes the top-1 of the announcements it heard: the largest capacity, ties going to the
+    smaller representative. The winning part's members run the hourly. Every other node writes one record naming
+    the part that won and its capacity.
+  - **A node that hears no other node by any means.** It closes the hourly early, with a record whose warning says it
+    does not know what is going on.
 - **What was never written as code.** The run's start and its record, on the collective. Everything else a run needs
   is already on the node: membership, capacity, routing, rendezvous, preparation and the guard. Only three things live
   outside:
