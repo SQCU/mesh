@@ -263,7 +263,11 @@ static const uint8_t LANES[KINDS] = {KINDS_OF(KIND_LANES)};
    pages have not landed, so none ever waits inside a step for data), else added to.  Every thread then runs the
    chunk as threadgroup c of its step's own grid (i = c t + l, g = the step's chunks x t: the body a dispatch of that
    grid runs, unchanged), and the chunk's end is added to the task's finished count; the worker that finishes its last
-   chunk raises its track's count where it ends a consumption and moves the cursor to its next task.  A task is a run
+   chunk raises its track's count where it ends a consumption and moves the cursor to its next task, a fence between
+   the two: the next task's worker stores the same count, and its store follows this one only where this one is
+   ordered before the cursor's move (without it the count's store, system-coherent, reached memory after the next
+   consumption's, and a track's count stood one short of its last consumption with every cursor of it ended: m5ult1's
+   all-gather relay awaiting count 530 at 529, 2026-10-30).  A task is a run
    of an item's steps that may run at once (a landing's runs), its first a consumption's or publication's conditions:
    its dependencies (another track's count), a consumption's `need` (its track's publications past that send entry),
    and every chunk's awaited word (a spin's count; a landing chunk's pages, track_want).  A worker that claims nothing
@@ -357,7 +361,8 @@ static NSString *const TRACK_KERNEL =
   "if (atomic_fetch_add_explicit(done + j, 1u, memory_order_relaxed) + 1u == x.chunks) { "
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); "
   "constant track_cursor &cr = cursors[x.cursor]; "
-  "if ((x.flags & 2u) && cr.kind == 1u) mesh_publish(count + cr.track, items[x.item].position + 1); "
+  "if ((x.flags & 2u) && cr.kind == 1u) { mesh_publish(count + cr.track, items[x.item].position + 1); "
+  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); } "
   "atomic_store_explicit(state + x.cursor, j + 1, memory_order_relaxed); } } "
   "threadgroup_barrier(mem_flags::mem_threadgroup); } }\n";
 
