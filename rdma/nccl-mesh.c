@@ -5867,6 +5867,7 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
     const struct lease *lease = !local.status && in_region(comm, binding, extent) ? lease_at(address, NULL) : NULL;
     if (!lease || lease->returned || extent > lease->bytes - (size_t)(address - (const unsigned char *)lease->address))
       local.status = EINVAL;
+    else if (mesh_page_run_offset(&table->storage, origin) == UINT64_MAX) local.status = EINVAL;
     else local.phase = (mesh_page_run_offset(&table->storage,origin)-comm->attach->context.M->data_off)%MESH_DMA_EXTENT;
     pthread_mutex_unlock(&attach_lock);
   }

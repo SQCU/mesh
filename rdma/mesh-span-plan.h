@@ -90,14 +90,17 @@ static inline int mesh_page_runs_read(struct hdr *m,uint32_t row,uint64_t first,
   }
   return 0;
 }
+/* the run holding logical byte `logical`, NULL where none does (past the last run's end, or before the first's start):
+   never the slot past the table's end */
 static inline const struct mesh_page_run *mesh_page_run_at(const struct mesh_page_runs *runs,uint64_t logical) {
   size_t first=0,end=runs->count;
   while(first<end){size_t middle=first+(end-first)/2;if(runs->at[middle].end<=logical)first=middle+1;else end=middle;}
-  return runs->at+first;
+  return first<runs->count&&runs->at[first].first<=logical?runs->at+first:NULL;
 }
+/* logical byte `logical`'s region offset; UINT64_MAX where no run holds it, which no DMA span takes (mesh_dma_span_valid) */
 static inline uint64_t mesh_page_run_offset(const struct mesh_page_runs *runs,uint64_t logical) {
   const struct mesh_page_run *run=mesh_page_run_at(runs,logical);
-  return run->offset+logical-run->first;
+  return run?run->offset+logical-run->first:UINT64_MAX;
 }
 /* Add the physical discontinuities and registration boundaries of one selected
    interval. logical follows message order, including repeats; previous is the
@@ -106,6 +109,7 @@ static inline int mesh_page_run_cuts(const struct mesh_page_runs *runs,uint64_t 
     uint64_t logical,uint64_t registration_origin,uint64_t extent,uint64_t *previous,struct mesh_span_residues *cuts) {
   while(bytes) {
     const struct mesh_page_run *run=mesh_page_run_at(runs,first);
+    if(!run)return ERANGE;   /* the interval runs past the table's pages */
     uint64_t offset=run->offset+first-run->first,phase=(offset-registration_origin)%extent;
     if(logical&&(offset!=*previous||!phase)) {
       int error=mesh_span_residue_add(cuts,logical);if(error)return error;
