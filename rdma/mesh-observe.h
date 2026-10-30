@@ -55,4 +55,17 @@ _Static_assert(MESH_PORTS*sizeof(struct mesh_link_info)+sizeof(struct mesh_bridg
 static inline struct mesh_bridge_pages *mesh_bridge_pages(struct hdr *m){
   return (struct mesh_bridge_pages *)((char *)m+m->bridge_off+MESH_PORTS*sizeof(struct mesh_link_info));
 }
+/* each port's bytes landed on its link, appended after the bridge's pages: the payload bytes of every receive its
+   progress thread took (link_receive, each completion's byte_len), since the region was made, with the clock
+   (CLOCK_MONOTONIC, ns) of the pass that took the last of them.  The progress thread writes the pair to slot
+   (sequence + 1) & 1, then stores sequence + 1 (release), and never waits; a reader (mesh-stat) loads sequence
+   (acquire), the pair at slot sequence & 1, and keeps it where sequence has since moved by less than 2.  Nothing on the
+   data path reads it: a rate is two pairs' bytes over their clocks, as exact as the bridge's clock, however late the
+   reader looks */
+struct mesh_link_landed { _Atomic uint64_t sequence; _Atomic uint64_t at[2][2]; };
+_Static_assert(MESH_PORTS*(sizeof(struct mesh_link_info)+sizeof(struct mesh_link_landed))+sizeof(struct mesh_bridge_pages)<=MESH_BRIDGE_BYTES,
+               "mesh_link_landed");
+static inline struct mesh_link_landed *mesh_links_landed(struct hdr *m){
+  return (struct mesh_link_landed *)((char *)mesh_bridge_pages(m)+sizeof(struct mesh_bridge_pages));
+}
 #endif

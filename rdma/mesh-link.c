@@ -412,6 +412,17 @@ static void link_send(struct port *port,uint32_t served){
     walk_count(l->sending+t,(struct mesh_units){lanes_through((const uint64_t[]){s[0].done,s[1].done})},&x->sent);
   }
 }
+/* the port's bytes landed (mesh-observe.h mesh_link_landed), after the pass's landings are told to their streams: this
+   pass's `bytes` added to the pair last published, which this thread alone writes, and the pair published with the
+   pass's clock in the other slot */
+static void link_landed_bytes(const struct port *port,uint64_t bytes){
+  struct mesh_link_landed *c=mesh_links_landed(M)+port->index;
+  const uint64_t s=atomic_load_explicit(&c->sequence,memory_order_relaxed);
+  const uint64_t total=atomic_load_explicit(&c->at[s&1][1],memory_order_relaxed)+bytes;
+  atomic_store_explicit(&c->at[(s+1)&1][0],clock_ns(),memory_order_relaxed);
+  atomic_store_explicit(&c->at[(s+1)&1][1],total,memory_order_relaxed);
+  atomic_store_explicit(&c->sequence,s+1,memory_order_release);
+}
 /* the link's receive completions, one pass of the port's progress thread, the lanes `served` the pass's: a lane's unit
    landed (lane_landed), a failed one failing the link (link_failed); then each stream a unit of which landed: each
    lane's units landed told (`posts`), and while its holding is served, its `landed` stored where its landings moved it
@@ -423,13 +434,14 @@ static void link_receive(struct port *port,uint32_t served){
   if(count<0){link_failed(port,EIO);return;}
   if(count)atomic_thread_fence(memory_order_acquire);
   uint32_t landed=0;
+  uint64_t bytes=0;
   for(int i=0;i<count;i++){
     const uint32_t lane=link_lane(l,done[i].qp_num);
     if(lane>=MESH_LINK_LANES || !(served>>lane&1))continue;
     uint64_t status_opcode;
     memcpy(&status_opcode,&done[i].status,sizeof status_opcode);
     if((uint32_t)status_opcode){link_failed(port,(uint32_t)status_opcode);return;}
-    if((status_opcode>>32)&IBV_WC_RECV){lane_landed(port,lane,done[i].wr_id);landed|=UINT32_C(1)<<lane;}
+    if((status_opcode>>32)&IBV_WC_RECV){lane_landed(port,lane,done[i].wr_id);landed|=UINT32_C(1)<<lane;bytes+=done[i].byte_len;}
   }
   if(!(landed>>MESH_LANE_FIRST))return;
   for(uint32_t t=0;t<plan_streams(l->plan);t++){
@@ -441,6 +453,7 @@ static void link_receive(struct port *port,uint32_t served){
     if(l->hold[t]!=HOLD_SERVE)continue;
     walk_count(l->landing+t,(struct mesh_units){lanes_through((const uint64_t[]){s[0].got,s[1].got})},&x->landed);
   }
+  link_landed_bytes(port,bytes);
 }
 
 /* the progress thread's tell (the epoch it has seen, the guard it holds at), its raiser woken (port_wait) */
