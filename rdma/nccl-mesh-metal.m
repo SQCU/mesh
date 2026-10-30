@@ -299,7 +299,8 @@ static struct metal_result dispatch4(struct metal_program *program, id<MTLComput
   const NSUInteger most = group ? MESH_TRANSPORT_GROUP_THREADS : MESH_TRANSPORT_ELEMENT_THREADS, width = state.maxTotalThreadsPerThreadgroup < most ? state.maxTotalThreadsPerThreadgroup : most;
   if (group) [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
   else [encoder dispatchThreads:MTLSizeMake(units < MESH_TRANSPORT_GRID_THREADS ? (NSUInteger)units : MESH_TRANSPORT_GRID_THREADS, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
-  [encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+  if (!program->presenting)
+    [encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
   return METAL_DONE;
 }
 
@@ -774,6 +775,12 @@ const char *metal_prelude(void) {
   return text.UTF8String;
 }
 
+void metal_presented(struct metal_program *program) {
+  if (program->encoder)
+    [(id<MTL4ComputeCommandEncoder>)program->encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch
+                                                            visibilityOptions:MTL4VisibilityOptionDevice];
+}
+
 struct metal_result metal_present(struct metal_program *program,void *lists,size_t list_offset,
     void *records,size_t record_offset,size_t count,uint64_t first,void *words,size_t taken,size_t presented) {
   if(count) {
@@ -789,9 +796,12 @@ struct metal_result metal_present(struct metal_program *program,void *lists,size
       {(id)words,presented,sizeof(uint64_t),MetalReachWritten,-1}};
     MetalEncoderReaches(program->encoder,reaches,sizeof reaches/sizeof *reaches);
   }
-  return dispatch(program,KIND_present,lists,records,words,NULL,
+  program->presenting = 1;
+  const struct metal_result result = dispatch(program,KIND_present,lists,records,words,NULL,
     (struct args){.dst=list_offset,.src=record_offset,.n=count,.scalar=first,.aux=taken,
                   .at=presented,.count=MESH_STREAM_ENTRIES},count,1);
+  program->presenting = 0;
+  return result;
 }
 
 void metal_end(struct metal_program *program, void *event, uint64_t value) {

@@ -53,6 +53,9 @@ struct metal_program {
   /* the library's own submission the program is encoded into (metal_submission_make: a host-path group's), committed
      at metal_end; NULL where the encoder is its caller's */
   struct metal_submission *own;
+  /* a group's presents encoded with no barrier between them (metal_present), each ordered by its own waits on its
+     list's `presented` and `taken`; metal_presented ends them with the one barrier before what follows */
+  int presenting;
 };
 #undef METAL_HANDLE
 /* A step's result and its message beside it (design/rubrics.md, Strings are messages): `status` 0, or an errno, and
@@ -212,6 +215,9 @@ size_t metal_tracks_open(const void *records, const void *ended, uint32_t worker
 const char *metal_prelude(void);
 /* Publish a compiled descriptor list. Its only dependency is reuse of slots
    already read by the local bridge; no peer acknowledgement is introduced. */
+/* the barrier after a group's presents (metal_present encodes none between them: each orders itself by its waits), so
+   the gate, the copies and the tracks pool follow every present (design/fake-guards-2026-10-30.md) */
+void metal_presented(struct metal_program *);
 struct metal_result metal_present(struct metal_program *, void *lists, size_t list_offset,
     void *records, size_t record_offset, size_t count, uint64_t first,
     void *words, size_t taken, size_t presented);

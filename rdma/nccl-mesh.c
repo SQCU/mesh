@@ -3834,6 +3834,7 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
       return comm_fail(comm, status == ENOLINK || status == EPERM ? ncclRemoteError : ncclSystemError, "communicator %s: an entry toward node %u "
                        "presented to its bridge: %s", comm->name, ch->node, strerror(status));
   }
+  metal_presented(program);
   return ncclSuccess;
 }
 
