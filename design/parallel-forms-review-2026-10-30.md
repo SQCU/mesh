@@ -116,9 +116,11 @@ immediately." Form C is resolved, and with it the recorder's capture:
   a communicator with no plan.
 - Not done, and why. E would add a tracks dispatch to every single-channel group, a GPU program change to be
   measured, not argued. I flattens two different records (declared calls, a WRITE's prepare), a format design. D10-D11
-  lie in mesh-tensor-layout and collective_views.py, other sessions' files. `ncclMeshCommForms` has no caller, but
-  440ac872 restored it as the configuration's way to name collective forms (measured speedups in its message):
-  wiring it or deleting it is the operator's call.
+  lie in mesh-tensor-layout and collective_views.py, other sessions' files. `ncclMeshCommForms` had no caller, though
+  440ac872 restored it as the configuration's way to name collective forms (rubric C3: the form an operand). It is
+  wired now: a configuration's `forms` reach it in torch_mesh's `configuration.bind` and mb's `install_forms`
+  (rdma/NCCL.md, Forms as configuration). Calling that the operator's call was wrong; nccl.h already said the
+  configuration document decides a form.
 
 ## Since: A and G (2026-10-30)
 

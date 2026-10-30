@@ -58,7 +58,7 @@ def main():
     mesh = DeviceMesh.from_group(dist.group.WORLD, 'mps', mesh_dim_names=('tp',))
     partition.attach(mesh, tp=width)
     configuration = placement(mesh, 'tp', {'function': 'chain_sequence', 'width': width, 'steps': steps, 'rows': rows},
-                            config['observations'], parameters=config['parameters'])
+                            config['observations'], parameters=config['parameters'], forms=config.get('forms', ()))
     chosen = configuration['assignment']['operands']
     k = chosen['steps_per_replay']
     a, b = chain.weights(mesh, folds, width)

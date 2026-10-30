@@ -211,6 +211,12 @@ history). With no forms nothing changes: the structural table as above. Every ra
 point between its groups, taken at the communicator's next group; splits and shrinks keep them; a communicator over the
 caller's own programs compiles them ahead of its programs. A share is 0 or more: a tree of share 0 carries none of its
 root's segment, and a form whose root's trees all take 0 fails as a value where it is compiled.
+A configuration names them as a list of entries, one a form: `collective` (all-reduce, broadcast, reduce,
+reduce-scatter, all-gather), `trees` (own, packed), `root`, `below`, `whole`, `most`, `eps`, and `shares` where any (the
+communicator's ranks times `most`). torch_mesh's configuration takes them at `placement(..., forms=)`, a service
+document's `forms`, and installs them in `bind` before the declaration (routing.py `forms`). metal-microbench's rank
+installs its flow's `routing.forms` before its weights and its declaration, and reports them with its routing graph
+(mesh_rank.m `install_forms`, `routing_report`), so the balancer's next routing keeps them.
 Fused bindings retain physical channels and fragments rather than restricting
 the program to one piece per peer. Historical reproduction target: simulated 0.51x the default's time at 1 GiB on six-node maps and 0.58x at 16 MiB, the ring4
 16 MiB all-reduce 2.18 to 1.71 ms, a six-node full mesh's 1 GiB all-gather 158.1 to 20.5 ms (metal-microbench

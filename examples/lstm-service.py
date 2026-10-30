@@ -51,7 +51,7 @@ def main():
     partition.attach(mesh, tp=H)
     configuration = placement(mesh, 'tp', {'function': 'lstm_sequence', 'layers': L, 'input_width': KIN,
                                         'width': H, 'steps': steps, 'rows': rows},
-                            config['observations'], parameters={**parameters(), **config['parameters']})
+                            config['observations'], parameters={**parameters(), **config['parameters']}, forms=config.get('forms', ()))
     chosen = configuration['assignment']['operands']
     compiler = {'LINEAR_ROW_CROSSOVER': chosen['LINEAR_ROW_CROSSOVER']}
     shape = lambda l: (4, H, (KIN if l == 0 else H) + H)

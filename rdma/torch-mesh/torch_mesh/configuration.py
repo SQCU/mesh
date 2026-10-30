@@ -7,6 +7,7 @@ from pathlib import Path
 import torch.distributed as dist
 import assignment
 import rollout
+import routing
 from mesh_source import revision
 from mesh_statistics import emit
 from . import partition
@@ -16,7 +17,7 @@ _serial = itertools.count()
 _steps = {}
 
 
-def placement(mesh, name, workload, observations, *, parameters):
+def placement(mesh, name, workload, observations, *, parameters, forms=()):
     group = mesh.get_group(name)
     rank, size = group.rank(), group.size()
     store = dist.distributed_c10d._get_default_store()
@@ -57,7 +58,7 @@ def placement(mesh, name, workload, observations, *, parameters):
     return {'mesh': mesh, 'name': name, 'group': group, 'rank': rank, 'size': size,
             'store': store, 'key': key, 'history': history, 'workload': workload, 'records': records,
             'kept': None if isinstance(observations, list) else observations,
-            'decisions': decisions, 'assignment': operands, 'graphs': graphs,
+            'decisions': decisions, 'assignment': operands, 'graphs': graphs, 'forms': list(forms),
             'implementation': revision(Path(assignment.__file__).resolve().parents[1]), 'sequence': 0}
 
 
@@ -66,9 +67,10 @@ def bind(configuration, groups, prepare):
     mesh, name, group = c['mesh'], c['name'], c['group']
     production_seconds = (assignment.producer_seconds(c['assignment'], c['decisions'],
                                 {name: [[rank] for rank in range(c['size'])]}) if c['records'] else [0.0] * c['size'])
+    routing.forms(group.comm, c['forms'])   # before the declaration compiles its groups along them
     partition.plan(mesh, name, groups, production_seconds=production_seconds)
     emit({'phase': 'declared', 'unix': time.time()})   # the function traced and compiled (partition.plan's groups)
-    graph = {**assignment.graph(group.comm), 'production_seconds': list(production_seconds)}
+    graph = {**assignment.graph(group.comm), 'production_seconds': list(production_seconds), 'forms': c['forms']}
     decisions = assignment.domains({k: v for k, v in c['decisions'].items() if not k.startswith('flow:')}, {name: graph})
     previous = c['assignment']['parts']
     operands = {k: previous.get(k, value['parts']) for k, value in decisions.items()}

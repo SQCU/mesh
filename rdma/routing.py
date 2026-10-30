@@ -29,6 +29,28 @@ def weight_ticks(values):
         ticks[i] += 1
     return ticks
 
+
+def forms(comm, entries):
+    """NCCL.md, Forms as configuration: a configuration's forms installed on comm, in order (none: the library's table),
+    each its collective (all-reduce, broadcast, reduce, reduce-scatter, all-gather), trees (own, packed), root, below,
+    whole, most and eps, and its shares where any, the communicator's ranks times most (nccl.h ncclMeshForm)."""
+    import mesh
+    ffi, lib = mesh.ffi, mesh.lib
+    collectives = {'all-reduce': lib.ncclMeshCallAllReduce, 'broadcast': lib.ncclMeshCallBroadcast, 'reduce': lib.ncclMeshCallReduce,
+                   'reduce-scatter': lib.ncclMeshCallReduceScatter, 'all-gather': lib.ncclMeshCallAllGather}
+    trees = {'own': lib.ncclMeshTreesOwn, 'packed': lib.ncclMeshTreesPacked}
+    ranks = ffi.new('int *')
+    mesh.check(lib.ncclCommCount(comm, ranks))
+    made, kept = ffi.new('ncclMeshForm[]', max(len(entries), 1)), []
+    for k, f in enumerate(entries):
+        shares = f.get('shares')
+        if shares is not None and len(shares) != ranks[0] * f['most']:
+            raise ValueError(f"form {k}: its shares are the communicator's {ranks[0]} ranks times most ({f['most']})")
+        kept.append(ffi.NULL if shares is None else ffi.new('double[]', shares))
+        made[k] = {'collective': collectives[f['collective']], 'root': f['root'], 'below': f['below'], 'trees': trees[f['trees']],
+                   'whole': f['whole'], 'most': f['most'], 'eps': f['eps'], 'shares': kept[-1]}
+    mesh.check(lib.ncclMeshCommForms(comm, made, len(entries)))
+
 class Fabric:
     def __init__(self, nodes, cables):
         self.nodes, self.cables = int(nodes), list(cables)
