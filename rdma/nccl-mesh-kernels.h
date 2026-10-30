@@ -19,7 +19,10 @@
    from its packet lengths before execution (mesh-landing.h). Its input is the
    prepared address of the other numerical operand, also for an in-place merge.
    A holding's counts are pages, as words here (nccl-mesh-metal.m wait_args, release_args); aux and first are byte
-   offsets, at an entry */
+   offsets, at an entry.
+   op is the kernel kind's operand, fixed with the kind at compile time (nccl-mesh.c ktype, kop): a reduction's
+   operator (COMBINE_SUM, _PROD, _MAX, _MIN) for a typed kind, and a partials merge's row floats for land_merge and
+   land_merge_from (METAL_MERGE). */
 #define ARGS(NAME, U64, U32) struct NAME { U64 dst, src, n, scalar, aux; U32 op, polls; U64 at, sequence; U32 count, mask, channel, stride; U64 phase, step, input; }
 
 /* a step of a compiled program, the library's one implementation of it (metal-microbench docs/acceptance-20261014.md
@@ -202,7 +205,8 @@ static NSString *const KERNELS =
   "volatile coherent(system) device const float *y = (volatile coherent(system) device const float *)(s + p.src); ulong seen = 0; uint looked = 0; "
   "for (ulong b = i - l; b < p.n; b += g) { const ulong end = min(b + t, p.n); "
   "mesh_pages_await(p, a, vb, tg, l, p.scalar + ((p.phase + (end - 1) * p.step) >> p.mask), seen, looked); "
-  "const ulong r = b + l; if (r < end) merge_row<Same>(x + r * p.op, xs + r * p.op, y + r * p.op, p.op); } }\n"
+  "const ulong r = b + l; const uint u = p.op; /* the merge's row floats (ARGS op) */ "
+  "if (r < end) merge_row<Same>(x + r * u, xs + r * u, y + r * u, u); } }\n"
   "HEAD(land_merge) { land_merge_body<true>(d, s, p, a, vb, progress, i, g, l, t, tg); }\n"
   "HEAD(land_merge_from) { land_merge_body<false>(d, s, p, a, vb, progress, i, g, l, t, tg); }\n"
   "GROUP(present) { ENTER_G const ulong end = p.scalar + p.n; "
