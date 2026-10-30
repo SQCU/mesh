@@ -1352,7 +1352,7 @@ values or empty repetitions. Preparation on 2026-10-29 retained two stored rows
 in a selection of half a billion logical rows, and preserved scalar bits,
 quantization fields and sparse metadata in ordered and repeated selections.
 
-`partition_axes` and `slice_axis` carry declared axes through projections,
+`partition_relations` and `slice_axis` carry declared axes through projections,
 pointwise uses and composite graphs. FFN partitioning starts from the down
 projection's input axis and uses those same operations as head partitioning.
 The old search for every tensor dimension equal to the FFN width is removed.
@@ -1360,11 +1360,21 @@ Equal batch, neuron and output extents do not make them one partition axis.
 Broadcast operands carry the relation on their own rank, and projected biases
 follow the output-channel relation.
 
-The partition mark `(axis, unit)` selects a digit in each repeated group on that
-axis. Reshape carries the digit by its flat span: a channel selection in
-`[batch, heads, channels]` becomes stripes in `[batch, heads * channels]`.
-Shape constants retain the whole selected dimension, including its repeats.
-The constant selector consumes one compact record for those stripes.
+The importer now carries full coordinate-to-owner relations through
+`mesh_relation`, which binds the same page-backed ISL archive as native layout
+lowering. Reshape, transpose and declared operator axis relations compose those
+maps. Shared values retain sets of owners. Constraints apply only to the values
+an operation uses, so a slice cannot erase the rest of a shared input. A fragment
+whose seed assignments need inter-owner edges reports that missing dataflow
+before emitting a provider graph.
+
+At cut realization, ISL projects the selected domain onto its axes and compares
+their product with the original domain. An exact product supplies the existing
+ordered axis selectors, including cuts across several reshaped dimensions.
+Shape constants, slice origins and join operands use those same selections.
+Repeated runs are extracted by set differences and first mismatches, without
+expanding their repetitions. Nonrectangular operation domains still need their
+own iteration lowering; the importer does not substitute their bounding box.
 
 The shared `MetalTensorLayout.select:runs:` consumes these same ordered records.
 Their union composes into integer coordinates without expanding repetitions,
@@ -1443,9 +1453,21 @@ Preparation on 2026-10-29 serialized uneven internal and final sums through that
 member builder, including composite graphs and repeated returned aliases. The
 nonlinear consumer stayed after the internal sum. Transposes and broadcast batch
 axes retained their shapes, the reference-model cuts still prepared, and the
-LiteRT library built. No numerical commands ran. Reshape relations spanning
-several target axes and simultaneous graph cuts on several axes of one tensor
-remain open. The planner also still declares whole-head shares.
+LiteRT library built. No numerical commands ran.
+
+The later relation-based importer prepared a 24-column FFN cut through
+`[2,24]` -> `[2,4,6]` -> nonlinear work -> `[2,24]`, retaining `[2,1,4]` in the
+middle. Transpose/slice origins, repeated joins, reduction free axes and batched
+products serialized through the same path. A mixed free/contracted cut retained
+its partial result's original domain through partial/finish splitting. Internal
+crossings now carry each rank's own selection and the shared result extent;
+these are no longer taken from the last peer's compact shape. A billion-position
+index domain emitted one repeated run. No numerical commands were submitted.
+
+Correlated operation domains, sparse partial-sum routing, and general shared
+requirements between different owner assignments remain open. The planner also
+still declares whole-head shares. These require operation and collective
+lowering, rather than another partial reshape inverse.
 
 Static review on 2026-10-29 found a separate external binding gap. Graph append
 formerly joined selected inputs to earlier full results by name alone. It now
@@ -1907,7 +1929,7 @@ Preparation on 2026-10-29 inspected encoded imports with reordered and repeated
 rows, columns and experts, partial blocks, different row groups and empty
 selections. The emitted lane relation retained the original block bytes. Native
 rank and Goal A built, and table-gather shaders compiled for the supported scalar
-and quantized readers with mapped block views. No numerical command ran. LiteRT's multi-axis graph cuts
+and quantized readers with mapped block views. No numerical command ran. LiteRT's correlated operation domains
 and the provider contracts described above remain open.
 
 The numerical byte view composes each selected column with its encoded block
