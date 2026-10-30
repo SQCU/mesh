@@ -311,6 +311,7 @@ static struct metal_result record_step(struct metal_program *program, uint32_t k
                                        uint64_t units, int group);
 static int recording_on(const struct metal_program *program);
 static void recording_join(struct metal_program *program, int join);
+static void recording_summed(struct metal_program *program, void *summed, size_t offset);
 static struct metal_result dispatch(struct metal_program *program, uint32_t kind, void *d, void *s, void *a, void *v, struct args p,
                                     uint64_t units, int group) {
   if (kind >= KINDS) return (struct metal_result){EINVAL, "no kernel of this operation and data type (nccl-mesh-metal.m TYPED)"};
@@ -419,9 +420,12 @@ struct metal_result metal_spin(struct metal_program *program, const struct metal
 
 struct metal_result metal_land(struct metal_program *program, int type, int op, void *dst, size_t dst_offset,
                                void *with, size_t with_offset,
-                               size_t element_bytes, mesh_pages packets, const struct mesh_landing_run *runs, size_t count, const struct metal_wait *w) {
+                               size_t element_bytes, mesh_pages packets, const struct mesh_landing_run *runs, size_t count, const struct metal_wait *w,
+                               void *summed, size_t summed_offset) {
   if (count) metal_uses(program, &with, 1);
+  recording_summed(program, summed, summed_offset);
   const uint32_t kind = type == METAL_MERGE && (with != dst || with_offset != dst_offset) ? KIND_land_merge_from : typed(OP_LAND, type);
+  struct metal_result result = METAL_DONE;
   for (size_t k = 0; k < count; k++) {
     const struct mesh_landing_run run = runs[k];
     struct args p = wait_args(w, dst_offset + run.first * element_bytes, run.elements, op);
@@ -430,12 +434,12 @@ struct metal_result metal_land(struct metal_program *program, int type, int op, 
     p.scalar = pages_to_word(pages_sub(w->target, packets)) + run.packet;
     p.phase = run.phase; p.step = run.step; p.mask = run.shift;
     recording_join(program, k > 0);
-    const struct metal_result result = dispatch(program, kind, dst, w->data, w->words, w->violation, p,
-      type == METAL_MERGE ? run.elements : (run.elements + 3) / 4, 0);
-    if (result.status) { recording_join(program, 0); return result; }
+    result = dispatch(program, kind, dst, w->data, w->words, w->violation, p, type == METAL_MERGE ? run.elements : (run.elements + 3) / 4, 0);
+    if (result.status) break;
   }
   recording_join(program, 0);
-  return METAL_DONE;
+  recording_summed(program, NULL, 0);
+  return result;
 }
 
 /* Deferred steps retain their compiled records through the function's residency set. */
@@ -453,15 +457,20 @@ struct metal_result metal_land_deferred(struct metal_program *program, void *lan
    whether it is a group kernel, and whether it runs beside the step before it (`joined`: a landing's runs, disjoint
    ranges each awaiting its own pages, metal_land); each item's position, `need`, steps, dependencies and failure
    words; each track's items by cursor; the buffers named, made resident at metal_tracks */
-struct host_op { void *d, *s, *a, *v; struct args p; uint64_t units; uint32_t kind; int group, joined; };
+struct host_op { void *d, *s, *a, *v; struct args p; uint64_t units; uint32_t kind; int group, joined; void *summed; size_t summed_offset; };
 struct host_item { uint64_t position, need; void *v; uint32_t first_op, ops, first_dep, deps; };
 struct host_dep { uint64_t count; uint32_t other; };
 struct host_track { uint32_t *item[2]; size_t count[2], room[2]; };
 struct recording { struct host_op *op; size_t ops, op_room; struct host_item *item; size_t items, item_room; struct host_dep *dep; size_t deps, dep_room;
-                   struct host_track *track; uint32_t tracks; uint32_t current; int on, join; NSMutableSet *named; };
+                   struct host_track *track; uint32_t tracks; uint32_t current; int on, join; NSMutableSet *named;
+                   void *summed; size_t summed_offset; };
 
 static int recording_on(const struct metal_program *program) { return program->recording && program->recording->on; }
 static void recording_join(struct metal_program *program, int join) { if (program->recording) program->recording->join = join; }
+/* the summed word the steps recorded next take (record_step), NULL none: a combine's landing's (metal_land) */
+static void recording_summed(struct metal_program *program, void *summed, size_t offset) {
+  if (program->recording) { program->recording->summed = summed; program->recording->summed_offset = offset; }
+}
 
 static void record_uses(struct metal_program *program, void *const *buffers, size_t n) {
   for (size_t k = 0; k < n; k++) if (buffers[k]) [program->recording->named addObject:(id)buffers[k]];
@@ -493,10 +502,11 @@ static struct metal_result record_step(struct metal_program *program, uint32_t k
   if (!ops) return metal_failed(ENOMEM);
   r->op = ops;
   struct host_item *it = r->item + r->current;
-  const struct host_op made = {d, s ? s : d, a ? a : d, v ? v : d, p, units, kind, group, r->join && it->ops};
+  const struct host_op made = {d, s ? s : d, a ? a : d, v ? v : d, p, units, kind, group, r->join && it->ops, r->summed, r->summed_offset};
   r->op[r->ops++] = made;
   const id named[4] = {(id)made.d, (id)made.s, (id)made.a, (id)made.v};
   for (int k = 0; k < 4; k++) [r->named addObject:named[k]];
+  if (made.summed) [r->named addObject:(id)made.summed];
   it->ops++;
   if (!it->v && p.polls) it->v = made.v;
   return METAL_DONE;
@@ -541,16 +551,19 @@ struct metal_result metal_depend(struct metal_program *program, uint32_t other, 
 
 /* the records as the track kernel reads them (nccl-mesh-kernels.h TRACKS: track_head, track_cursor, track_task,
    track_item, track_op, track_dep), then the state its workers share: each track's consumption count, each cursor's
-   task, each task's chunks claimed and finished, the count of tasks finished and each worker's end */
+   task, each task's chunks claimed and finished, the count of tasks finished, each worker's end, and each chunk's mark
+   (finished) and each task's prefix of marked chunks, which a combine's landing counts its summed units by: its op's
+   `summed` word, the channel's, where a SEND names it to send each unit of the sum on as it is made (nccl-mesh.c
+   forwards) */
 struct track_head { uint64_t cursors_off, tasks_off, items_off, ops_off, deps_off, count_off, state_off, claim_off, done_off, progress_off,
-                    ended_off; uint32_t cursors, polls; };
+                    ended_off, marks_off, prefix_off; uint32_t cursors, polls; };
 struct track_cursor { uint32_t first, end, track, kind; };
-struct track_task { uint32_t first_op, ops, chunks, item, cursor, flags, pad[2]; };
+struct track_task { uint32_t first_op, ops, chunks, item, cursor, flags, marks, pad; };
 struct track_item { uint64_t position, need, v; uint32_t first_dep, deps; };
-struct track_op { uint64_t d, s, a, v; struct args p; uint64_t word, block; uint32_t kind, chunks; };
+struct track_op { uint64_t d, s, a, v; struct args p; uint64_t word, block; uint32_t kind, chunks; uint64_t summed; };
 struct track_dep { uint64_t count; uint32_t other, pad; };
-_Static_assert(sizeof(struct track_head) == 96 && sizeof(struct track_cursor) == 16 && sizeof(struct track_task) == 32 &&
-               sizeof(struct track_item) == 32 && sizeof(struct track_op) == sizeof(struct args) + 7 * sizeof(uint64_t) &&
+_Static_assert(sizeof(struct track_head) == 112 && sizeof(struct track_cursor) == 16 && sizeof(struct track_task) == 32 &&
+               sizeof(struct track_item) == 32 && sizeof(struct track_op) == sizeof(struct args) + 8 * sizeof(uint64_t) &&
                sizeof(struct track_dep) == 16, "the track records");
 /* a task's first and last runs of its item, and whether its chunks' pages decide which may be claimed (TRACK_KERNEL) */
 enum { TASK_FIRST = 1, TASK_LAST = 2, TASK_PACED = 4 };
@@ -602,7 +615,8 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
     const uint64_t at_deps = up(at_ops + r->ops * sizeof(struct track_op)), at_count = up(at_deps + r->deps * sizeof(struct track_dep));
     const uint64_t at_state = up(at_count + T * sizeof(uint64_t)), at_claim = up(at_state + C * sizeof(uint32_t));
     const uint64_t at_done = up(at_claim + tasks * sizeof(uint32_t)), at_progress = up(at_done + tasks * sizeof(uint32_t));
-    const uint64_t at_ended = up(at_progress + sizeof(uint32_t)), bytes = up(at_ended + workers * sizeof(uint64_t));
+    const uint64_t at_ended = up(at_progress + sizeof(uint32_t)), at_marks = up(at_ended + workers * sizeof(uint64_t));
+    const uint64_t at_prefix = up(at_marks + chunks * sizeof(uint32_t)), bytes = up(at_prefix + tasks * sizeof(uint32_t));
     /* the records, a carved piece of the region, done with once every worker has ended (each stores its end word) */
     struct metal_bytes records;
     if (metal_carve(bytes, &records)) { recording_free(r); return metal_failed(ENOMEM); }
@@ -611,11 +625,11 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
     metal_done((const _Atomic uint64_t *)(base + at_ended), (uint32_t)workers, 1);
     const uint64_t address = ((id<MTLBuffer>)records.buffer).gpuAddress + records.offset;
     *(struct track_head *)base = (struct track_head){at_cursors, at_tasks, at_items, at_ops, at_deps, at_count, at_state, at_claim, at_done,
-                                                     at_progress, at_ended, (uint32_t)C, program->polls};
+                                                     at_progress, at_ended, at_marks, at_prefix, (uint32_t)C, program->polls};
     struct track_cursor *cursor = (struct track_cursor *)(base + at_cursors);
     struct track_task *task = (struct track_task *)(base + at_tasks);
     struct track_item *item = (struct track_item *)(base + at_items);
-    uint32_t *current = (uint32_t *)(base + at_state), placed = 0, laid = 0;
+    uint32_t *current = (uint32_t *)(base + at_state), placed = 0, laid = 0, marked = 0;
     for (uint32_t t = 0; t < T; t++)
       for (uint32_t c = 0; c < 2; c++) {
         const uint32_t cu = 2 * t + c;
@@ -624,16 +638,17 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
         for (size_t x = 0; t < r->tracks && x < r->track[t].count[c]; x++, placed++) {
           const struct host_item *it = r->item + r->track[t].item[c][x];
           item[placed] = (struct track_item){it->position, it->need, it->v ? ((id<MTLBuffer>)it->v).gpuAddress : 0, it->first_dep, it->deps};
-          if (!it->ops) task[laid++] = (struct track_task){.chunks = 1, .item = placed, .cursor = cu, .flags = TASK_FIRST | TASK_LAST};
+          if (!it->ops) task[laid++] = (struct track_task){.chunks = 1, .item = placed, .cursor = cu, .flags = TASK_FIRST | TASK_LAST, .marks = marked++};
           for (uint32_t o = 0; o < it->ops;) {
             struct track_task *made = task + laid++;
-            *made = (struct track_task){.first_op = it->first_op + o, .item = placed, .cursor = cu, .flags = o ? 0 : TASK_FIRST};
+            *made = (struct track_task){.first_op = it->first_op + o, .item = placed, .cursor = cu, .flags = o ? 0 : TASK_FIRST, .marks = marked};
             do {
               const struct host_op *op = r->op + it->first_op + o;
               made->ops++; made->chunks += op_chunks(op, width, widest);
               if (LANES[op->kind]) made->flags |= TASK_PACED;
             } while (++o < it->ops && r->op[it->first_op + o].joined);
             if (o == it->ops) made->flags |= TASK_LAST;
+            marked += made->chunks;
           }
         }
         cursor[cu].end = laid;
@@ -644,7 +659,8 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
       void *const word = WORD[o->kind] == WORD_A ? o->a : WORD[o->kind] == WORD_D && o->p.scalar ? o->d : NULL;
       op[x] = (struct track_op){((id<MTLBuffer>)o->d).gpuAddress, ((id<MTLBuffer>)o->s).gpuAddress, ((id<MTLBuffer>)o->a).gpuAddress,
                                 ((id<MTLBuffer>)o->v).gpuAddress, o->p, word ? ((id<MTLBuffer>)word).gpuAddress + o->p.aux : 0,
-                                LANES[o->kind] * width, o->kind, op_chunks(o, width, widest)};
+                                LANES[o->kind] * width, o->kind, op_chunks(o, width, widest),
+                                o->summed ? ((id<MTLBuffer>)o->summed).gpuAddress + o->summed_offset : 0};
     }
     struct track_dep *dep = (struct track_dep *)(base + at_deps);
     for (size_t x = 0; x < r->deps; x++) dep[x] = (struct track_dep){r->dep[x].count, r->dep[x].other, 0};

@@ -161,11 +161,14 @@ struct metal_result metal_spin(struct metal_program *, const struct metal_wait *
    prepared span lengths lower to arithmetic readiness runs (mesh-landing.h),
    including rows split across packets. `with` supplies the other operand,
    whether it is the original input or the existing result. No packet list is
-   read by the kernel. */
+   read by the kernel. `summed` (NULL none), at summed_offset, is the landing channel's count of units summed: each
+   prefix of the landing's chunks summed stores there the landed count its units reach (nccl-mesh-kernels.h
+   track_summed), so a SEND of the sum names it and goes unit by unit as the sum is made. */
 struct mesh_landing_run;
 struct metal_result metal_land(struct metal_program *, int type, int op, void *dst, size_t dst_offset,
                                void *with, size_t with_offset,
-                               size_t element_bytes, mesh_pages packets, const struct mesh_landing_run *, size_t runs, const struct metal_wait *);
+                               size_t element_bytes, mesh_pages packets, const struct mesh_landing_run *, size_t runs, const struct metal_wait *,
+                               void *summed, size_t summed_offset);
 /* the same two steps run by the caller's kernel (nccl.h ncclMeshFused): each one's record written to the function's immutable argument pages as a Metal 4 dispatch's would be, the
    buffers it names made resident, and its six bindings' addresses given in `bound` (0 d, 1 s, 2 the record, 3 a, 4 v,
    5 progress), nothing dispatched.  The publication: d its operand (at dst), a the
