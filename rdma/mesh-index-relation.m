@@ -3,6 +3,7 @@
 #include <isl/id.h>
 #include <isl/ilp.h>
 #include <isl/val.h>
+#include "mesh-isl-memory.h"
 
 static isl_set *IndexDomain(isl_ctx *ctx, NSUInteger first, NSUInteger end) {
     return isl_set_read_from_str(ctx, [[NSString stringWithFormat:@"{ [i] : %lu <= i < %lu }",
@@ -72,6 +73,77 @@ isl_pw_aff *MeshIndexRuns(isl_ctx *ctx,NSArray<NSArray<NSNumber *> *> *runs) {
         result=isl_pw_aff_union_add(result,MeshIndexExpression(ctx,value,begin,begin+count));begin+=count;
     }
     return isl_pw_aff_coalesce(result);
+}
+static isl_set *SetInterval(isl_ctx *ctx,NSInteger first,NSInteger end) {
+    return isl_set_read_from_str(ctx,[[NSString stringWithFormat:@"{ [x] : %ld <= x < %ld }",(long)first,(long)end] UTF8String]);
+}
+static NSInteger SetEdge(isl_set *set,BOOL maximum) {
+    isl_val *value=maximum?isl_set_dim_max_val(isl_set_copy(set),0):isl_set_dim_min_val(isl_set_copy(set),0);
+    NSInteger result=isl_val_get_num_si(value);isl_val_free(value);return result;
+}
+static isl_set *SetRun(isl_ctx *ctx,NSInteger first,NSInteger width,NSInteger step,NSInteger count) {
+    if(count==1)return SetInterval(ctx,first,first+width);
+    return isl_set_read_from_str(ctx,[[NSString stringWithFormat:
+        @"{ [x] : %ld <= x < %ld and (x - %ld) mod %ld < %ld }",(long)first,(long)(first+step*(count-1)+width),
+        (long)first,(long)step,(long)width] UTF8String]);
+}
+int64_t *MeshIndexSetRuns(isl_set *set,size_t *count) { @autoreleasepool {
+    *count=0;
+    isl_ctx *ctx=isl_set_get_ctx(set);isl_set *remaining=isl_set_copy(set);
+    NSMutableData *runs=[NSMutableData data];
+    while(isl_set_is_empty(remaining)==isl_bool_false) {
+        NSInteger first=SetEdge(remaining,NO),end=SetEdge(remaining,YES)+1;
+        isl_set *holes=isl_set_subtract(SetInterval(ctx,first,end),isl_set_copy(remaining));
+        NSInteger width=(isl_set_is_empty(holes)==isl_bool_true?end:SetEdge(holes,NO))-first;
+        isl_set_free(holes);
+        NSInteger step=0,repeats=1;
+        isl_set *after=isl_set_subtract(isl_set_copy(remaining),SetInterval(ctx,first,first+width));
+        if(isl_set_is_empty(after)==isl_bool_false) {
+            step=SetEdge(after,NO)-first;repeats=(end-first-width)/step+1;
+            isl_set *candidate=SetRun(ctx,first,width,step,repeats);
+            isl_set *prefix=isl_set_intersect(isl_set_copy(remaining),SetInterval(ctx,first,first+(repeats-1)*step+width));
+            isl_set *difference=isl_set_union(isl_set_subtract(isl_set_copy(candidate),isl_set_copy(prefix)),
+                isl_set_subtract(prefix,candidate));
+            if(isl_set_is_empty(difference)==isl_bool_false)repeats=MAX(1,(SetEdge(difference,NO)-first)/step);
+            isl_set_free(difference);
+        }
+        isl_set_free(after);if(repeats==1)step=0;
+        int64_t run[4]={first,width,step,repeats};[runs appendBytes:run length:sizeof run];
+        remaining=isl_set_subtract(remaining,SetRun(ctx,first,width,step,repeats));
+    }
+    isl_set_free(remaining);if(isl_ctx_last_error(ctx)!=isl_error_none)return NULL;
+    int64_t *result=mesh_isl_malloc(runs.length);if(!result)return NULL;
+    *count=runs.length/(4*sizeof(int64_t));if(runs.length)memcpy(result,runs.bytes,runs.length);return result;
+}}
+MetalTensorLayout *MeshIndexSelection(isl_set *set) {
+    size_t count=0;int64_t *runs=MeshIndexSetRuns(set,&count);NSMutableArray *values=[NSMutableArray array];
+    if(!runs)[NSException raise:NSInvalidArgumentException format:@"index selection could not be lowered"];
+    for(size_t k=0;k<count;k++)[values addObject:@[@(runs[4*k]),@(runs[4*k+1]),@(runs[4*k+2]),@(runs[4*k+3])]];
+    mesh_isl_free(runs);return [MetalTensorLayout runs:values];
+}
+static void IndexCell(NSMutableArray *cells,isl_set *set,NSArray *members) {
+    if(isl_set_is_empty(set)==isl_bool_true){isl_set_free(set);return;}
+    [cells addObject:@[[NSValue valueWithPointer:set],members]];
+}
+NSArray<NSDictionary *> *MetalTensorCover(NSArray<MetalTensorLayout *> *domains) {
+    isl_ctx *ctx=isl_ctx_alloc();NSMutableArray *cells=[NSMutableArray array];
+    for(NSUInteger k=0;k<domains.count;k++) {
+        isl_set *domain=isl_map_range(MeshIndexRelation(ctx,domains[k])),*remaining=isl_set_copy(domain);
+        NSMutableArray *next=[NSMutableArray array];
+        for(NSArray *cell in cells) {
+            isl_set *prior=[cell[0] pointerValue];
+            IndexCell(next,isl_set_intersect(isl_set_copy(prior),isl_set_copy(domain)),[cell[1] arrayByAddingObject:@(k)]);
+            IndexCell(next,isl_set_subtract(isl_set_copy(prior),isl_set_copy(domain)),cell[1]);
+            remaining=isl_set_subtract(remaining,prior);
+        }
+        IndexCell(next,remaining,@[@(k)]);isl_set_free(domain);cells=next;
+    }
+    NSMutableArray *result=[NSMutableArray array];
+    for(NSArray *cell in cells) {
+        isl_set *set=[cell[0] pointerValue];
+        [result addObject:@{@"members":cell[1],@"domain":MeshIndexSelection(set)}];isl_set_free(set);
+    }
+    isl_ctx_free(ctx);return result;
 }
 isl_pw_aff *MeshIndexFunction(isl_ctx *ctx,MetalTensorLayout *layout) {
     isl_pw_aff *value=IndexLeaf(ctx,@(layout.offset),0,layout.count);

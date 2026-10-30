@@ -11,6 +11,10 @@ isl_pw_aff *MeshIndexExpression(isl_ctx *ctx, id expression, NSUInteger first, N
 isl_pw_aff *MeshIndexFunction(isl_ctx *ctx, MetalTensorLayout *layout);
 isl_map *MeshIndexRelation(isl_ctx *ctx, MetalTensorLayout *layout);
 isl_pw_aff *MeshIndexRuns(isl_ctx *ctx, NSArray<NSArray<NSNumber *> *> *runs);
+// Sorted unique positions as compact (first,width,step,count) records. Borrow
+// the set; release the returned array with mesh_isl_free. NULL reports failure.
+int64_t *MeshIndexSetRuns(isl_set *set, size_t *count);
+MetalTensorLayout *MeshIndexSelection(isl_set *set); // borrows the set
 id MeshIndexTerms(isl_pw_aff *expression); // consumes the expression
 BOOL MeshIndexEqual(id left, id right, NSUInteger count);
 struct MeshIndexBounds { NSInteger low, high; };

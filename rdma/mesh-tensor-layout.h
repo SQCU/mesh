@@ -38,6 +38,12 @@ FOUNDATION_EXPORT NSInteger MetalTensorConstant(id expression, NSArray<NSNumber 
 // domain size. Parameters bind constants or other index relations over this
 // domain. isl composes them before emission; no relation lookup runs at execution.
 + (instancetype)shape:(NSArray<NSNumber *> *)shape index:(id)expression parameters:(NSDictionary<NSString *, id> *)parameters;
+// A compact ordered selection of logical positions, independent of a buffer.
++ (instancetype)runs:(NSArray<NSArray<NSNumber *> *> *)runs;
+// Set intersection of logical positions, in ascending order, for preparation.
+- (MetalTensorLayout *)intersection:(MetalTensorLayout *)other;
+@property(nonatomic, readonly) NSDictionary *configuration;
++ (instancetype)configuration:(NSDictionary *)configuration;
 // Restore/compose flat factor coordinates, retaining no parent view. Coordinate
 // expressions contain integer constants, "i", arithmetic, and the scalar
 // selections emitted from piecewise integer relations. These are preparation
@@ -91,15 +97,22 @@ FOUNDATION_EXPORT NSInteger MetalTensorConstant(id expression, NSArray<NSNumber 
     access:(uint32_t)access binding:(int32_t)binding;
 @end
 
-// Preparation maps ordered storage parts onto the caller's logical intervals.
-// Cuts from every participant are united before a fragment is requested. The
-// fragment is then a direct storage binding; execution never sees this object.
+// The domain maps concatenated storage ordinals to logical positions; selection
+// maps requested ordinals to those positions. Preparation unites physical cuts
+// from every participant before requesting direct bindings. Execution never
+// sees this object.
 struct MetalTensorFragment { NSUInteger part, count; NSInteger offset; };
 @interface MetalTensorTraversal : NSObject
 @property(nonatomic, readonly) NSArray<NSNumber *> *cuts;
-+ (instancetype)layouts:(NSArray<MetalTensorLayout *> *)layouts domains:(NSArray<NSArray<NSNumber *> *> *)domains;
++ (instancetype)layouts:(NSArray<MetalTensorLayout *> *)layouts domain:(MetalTensorLayout *)domain
+    selection:(MetalTensorLayout *)selection;
 - (struct MetalTensorFragment)fragment:(NSUInteger)first end:(NSUInteger)end;
 @end
+
+// Disjoint position sets with identical membership among the supplied domains.
+// Each record contains `members` (domain indices) and `domain` (ordered positions).
+// The sets stay symbolic until emitted as compact index runs.
+FOUNDATION_EXPORT NSArray<NSDictionary *> *MetalTensorCover(NSArray<MetalTensorLayout *> *domains);
 
 // Place one storage domain from declared use layouts. All indices and widths
 // use the caller's common scalar unit. `values` preserves typed element fields

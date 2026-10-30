@@ -1104,17 +1104,37 @@ selections may still produce many native records; this is a granularity limit
 of the current numerical binding, not a limitation of the page representation.
 
 `MetalTensorTraversal` now supplies the ordered boundary and fragment calculation
-to both FX and native crossings. It maps storage parts onto declared logical
-intervals during preparation. The Python-only position and alias calculations
-have been removed. No traversal object is read by numerical execution.
+to both FX and native crossings. Its domain maps local storage ordinals to
+logical positions; its selection names the positions requested by a transaction.
+ISL composes those relations with each storage part before physical cuts are
+emitted. Python and native preparation share the same set-to-run lowering.
+No traversal object is read by numerical execution.
 
-Native `MeshRankCross` records ordered storage-and-layout parts for its source and destination.
-Ranks unite their boundaries with the existing graph configuration, then bind
-each fragment to its original storage. Uneven gather and scatter counts retain
-their rank domains. Fragments of one crossing stay in one transport group.
-Contiguous bindings still make one call; mapped bindings add no layout copy.
-The native FFN passes its prepared result view to this interface. Goal A and
-LiteRT declare their existing linear operands through the same binding.
+Native `MeshRankCross` records these logical domains beside its source and
+destination storage parts. The existing graph exchange shares their layout
+configurations. `MetalTensorCover` splits the position sets into regions with
+fixed contributors and recipients. Each region gets compact ordinal positions
+before storage boundaries are joined across peers. Logical stripes therefore
+need not become many physical transfers when their values are stored together.
+
+Each region combines only its declared contributions. A single contribution
+becomes a broadcast; a reduce-scatter region becomes a reduction to its recipient.
+Holes need no zero-filled operand. A requested result without a producer fails
+preparation. The original fabric stays available for relays, and all fragments
+of one crossing stay in one transport group. Empty domains add no call or group.
+A full contiguous reduction still makes one call. Physical storage breaks can
+still require several fragments; the compiler adds no copy to join them.
+
+The native FFN, Goal A and LiteRT use this interface. LiteRT intersects its
+declared tensor selection with the collective role before binding storage;
+it no longer tries to read a complete result from every partial tensor.
+
+Preparation on 2026-10-29 inspected the actual native crossing compiler with
+overlapping partials, uneven gathers and reduce-scatters, and relay-only ranks.
+A billion-position striped domain holding 500 million values produced one
+collective record per rank. FX binding retained disjoint domains, reversed
+storage and padded rows without layout copies. The shared libraries, extension,
+rank and Goal A built. No numerical commands or performance measurements ran.
 
 Preparation on 2026-10-28 built the shared library, frontend, native rank and
 Goal A. FX collective preparation covered mapped scalars and structured rows.
@@ -1464,10 +1484,11 @@ crossings now carry each rank's own selection and the shared result extent;
 these are no longer taken from the last peer's compact shape. A billion-position
 index domain emitted one repeated run. No numerical commands were submitted.
 
-Correlated operation domains, sparse partial-sum routing, and general shared
-requirements between different owner assignments remain open. The planner also
-still declares whole-head shares. These require operation and collective
-lowering, rather than another partial reshape inverse.
+Sparse partial-sum domains now reach the native collective compiler through
+the shared domain interface described above. Correlated operation domains and
+general shared requirements between different owner assignments remain open.
+The planner still declares whole-head shares. These require operation and
+ownership lowering, rather than another partial reshape inverse.
 
 Static review on 2026-10-29 found a separate external binding gap. Graph append
 formerly joined selected inputs to earlier full results by name alone. It now
@@ -1528,9 +1549,10 @@ handoff adds its axis selection to that relation; it no longer invents physical
 rows or a pitch. The forced `MetalBuffer` choice and the LiteRT adapter's
 name-and-zero-offset collective path are removed.
 
-`MeshRankCrossDomains` supplies each member's contributor and recipient intervals
-from the common collective definition. Preparation composes them with the
-declared tensor view. Matching scalar encodings retain the source's physical
+`MeshRankCrossDomains` supplies each member's default contributor and recipient
+position relations from the common collective definition. LiteRT intersects
+them with the declared tensor domain and composes the result with its storage
+view. Matching scalar encodings retain the source's physical
 indices, including PHWC4 padding and arbitrary selections. A different declared
 wire encoding uses the same tiled conversion as a fixed-layout provider. A
 broadcast root reuses its prepared wire value as its unchanged result. Command

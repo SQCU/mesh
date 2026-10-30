@@ -53,6 +53,8 @@ class Algebra:
             function.restype, function.argtypes = result, arguments
             setattr(self, name, function)
         self.lib.mesh_isl_free.argtypes, self.lib.mesh_isl_free.restype = (C.c_void_p,), None
+        self.lib.MeshIndexSetRuns.argtypes = C.c_void_p, C.POINTER(C.c_size_t)
+        self.lib.MeshIndexSetRuns.restype = C.POINTER(C.c_int64)
         self.ctx = self.ctx_alloc()
         self.references = 1
 
@@ -143,37 +145,13 @@ class IndexSet(_Object):
             self.algebra.val_free(value)
 
     def spans(self):
-        """Ordered (first,width,step,count) runs, without expanding repetitions.
-
-        ISL finds the first hole and the first mismatch with a repeated run.
-        Work scales with changes in the run pattern, not its repeat count.
-        """
-        algebra, remaining, result = self.algebra, self, []
-        interval = lambda lo, hi: algebra.set(f'{{ [x] : {lo} <= x < {hi} }}', 1)
-        while not remaining.empty():
-            lo, hi = remaining.edge(), remaining.edge(True) + 1
-            holes = interval(lo, hi).binary(remaining, 'subtract')
-            end = hi if holes.empty() else holes.edge()
-            width, count, step = end - lo, 1, 0
-            after = remaining.binary(interval(lo, end), 'subtract')
-            if not after.empty():
-                step = after.edge() - lo
-                count = (hi - lo - width) // step + 1
-                candidate = algebra.set(f'{{ [x] : {lo} <= x < {lo + count * step} and (x - {lo}) mod {step} < {width} }}', 1)
-                prefix = remaining.binary(interval(lo, lo + (count - 1) * step + width), 'intersect')
-                missing = candidate.binary(prefix, 'subtract')
-                extra = prefix.binary(candidate, 'subtract')
-                mismatch = missing.binary(extra, 'union')
-                if not mismatch.empty():
-                    count = max(1, (mismatch.edge() - lo) // step)
-            if count == 1:
-                step = 0
-                selected = interval(lo, lo + width)
-            else:
-                selected = algebra.set(f'{{ [x] : {lo} <= x < {lo + count * step} and (x - {lo}) mod {step} < {width} }}', 1)
-            result.append((lo, width, step, count))
-            remaining = remaining.binary(selected, 'subtract')
-        return tuple(result)
+        """The shared native set-to-run lowering; repetitions stay compact."""
+        count = C.c_size_t()
+        runs = self.algebra.checked(self.algebra.lib.MeshIndexSetRuns(self.pointer, C.byref(count)))
+        try:
+            return tuple(tuple(runs[k * 4 + j] for j in range(4)) for k in range(count.value))
+        finally:
+            self.algebra.lib.mesh_isl_free(runs)
 
     def cartesian(self):
         """Axis projections if their product is exactly this domain, else None."""

@@ -58,7 +58,9 @@ def _binding(value, domain, unit, writing, layouts):
             first = end
         if first < count // unit:
             spans.append((value.storage, rows.slice(0, first, count // unit - first)))
-    traversal = _stream.TensorTraversal([view.layout for _, view in spans], domain)
+    selection = _stream.TensorLayout.runs([[first, end - first, 0, 1] for first, end in domain])
+    requested = _stream.TensorLayout.runs([[0, max((end for _, end in domain), default=0), 0, 1]])
+    traversal = _stream.TensorTraversal([view.layout for _, view in spans], selection, requested)
     return spans, traversal, commands
 
 

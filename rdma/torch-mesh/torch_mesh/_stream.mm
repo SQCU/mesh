@@ -676,11 +676,10 @@ struct TensorLayout {
 };
 struct TensorTraversal {
   MetalTensorTraversal *value;
-  TensorTraversal(const std::vector<TensorLayout> &layouts,const std::vector<std::pair<NSUInteger,NSUInteger>> &domains) {
-    NSMutableArray *parts=[NSMutableArray array],*intervals=[NSMutableArray array];
+  TensorTraversal(const std::vector<TensorLayout> &layouts,const TensorLayout &domain,const TensorLayout &selection) {
+    NSMutableArray *parts=[NSMutableArray array];
     for(const auto &layout:layouts)[parts addObject:layout.value];
-    for(const auto &[first,end]:domains)[intervals addObject:@[@(first),@(end)]];
-    @try { value=[[MetalTensorTraversal layouts:parts domains:intervals] retain]; }
+    @try { value=[[MetalTensorTraversal layouts:parts domain:domain.value selection:selection.value] retain]; }
     @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
   }
   TensorTraversal(const TensorTraversal &other):value([other.value retain]){}
@@ -2078,13 +2077,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("pipeline_specialized", &pipeline_specialized, pybind11::call_guard<Drained>());
   module.def("index_constant_prelude", [](){return std::string(MetalViewIndexConstantPrelude().UTF8String);}, pybind11::call_guard<Drained>());
   pybind11::class_<TensorTraversal>(module,"TensorTraversal")
-    .def(pybind11::init<const std::vector<TensorLayout> &,const std::vector<std::pair<NSUInteger,NSUInteger>> &>(), pybind11::call_guard<Drained>())
+    .def(pybind11::init<const std::vector<TensorLayout> &,const TensorLayout &,const TensorLayout &>(), pybind11::call_guard<Drained>())
     .def_property_readonly("cuts",[](const TensorTraversal &v){return tensorNumbers(v.value.cuts);})
     .def("fragment",[](const TensorTraversal &v,NSUInteger first,NSUInteger end){
       @try { auto f=[v.value fragment:first end:end];return std::make_tuple(f.part,f.offset,f.count); }
       @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
     }, pybind11::call_guard<Drained>());
   pybind11::class_<TensorLayout>(module,"TensorLayout")
+    .def_static("runs",[](const std::vector<std::vector<NSInteger>> &runs){
+      NSMutableArray *values=[NSMutableArray array];for(const auto &run:runs)[values addObject:tensorNumbers(run)];
+      return TensorLayout([MetalTensorLayout runs:values]);
+    }, pybind11::call_guard<Drained>())
     .def(pybind11::init(&TensorLayout::make),pybind11::arg("shape"),pybind11::arg("strides"),pybind11::arg("offset")=0,
          pybind11::arg("maps")=std::map<NSUInteger,std::vector<NSInteger>>{},pybind11::arg("indices")=pybind11::none(),
          pybind11::arg("index_shape")=pybind11::none(),pybind11::arg("index_coordinates")=pybind11::none(), pybind11::call_guard<Drained>())

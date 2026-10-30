@@ -4,53 +4,64 @@
 #include <isl/val.h>
 
 struct TensorRun { NSUInteger first, end, part; NSInteger offset; };
+static int TensorRunOrder(const void *a,const void *b) {
+    NSUInteger x=((const struct TensorRun *)a)->first,y=((const struct TensorRun *)b)->first;
+    return x<y?-1:x>y;
+}
 @implementation MetalTensorTraversal {
     NSData *_runs;
-    NSArray *_domains;
 }
-+ (instancetype)layouts:(NSArray<MetalTensorLayout *> *)layouts domains:(NSArray<NSArray<NSNumber *> *> *)domains {
++ (instancetype)layouts:(NSArray<MetalTensorLayout *> *)layouts domain:(MetalTensorLayout *)domain selection:(MetalTensorLayout *)selection {
     MetalTensorTraversal *result=[[[self alloc] init] autorelease];
-    NSMutableData *runs=[NSMutableData data];NSMutableArray *cuts=[NSMutableArray array];
-    NSUInteger count=0;
+    NSMutableData *runs=[NSMutableData data];NSUInteger ordinal=0;
+    domain=[domain reshape:@[@(domain.count)]];
+    isl_ctx *ctx=isl_ctx_alloc();
+    isl_map *indices=isl_map_apply_range(MeshIndexRelation(ctx,selection),isl_map_reverse(MeshIndexRelation(ctx,domain)));
+    indices=isl_map_lexmin(indices);
     for(NSUInteger part=0;part<layouts.count;part++) {
-        NSData *data=[layouts[part] orderedSpans];const struct MetalTensorSpan *spans=data.bytes;
-        for(NSUInteger k=0;k<data.length/sizeof *spans;k++) {
-            struct TensorRun run={count,count+spans[k].count,part,spans[k].offset};
-            if(spans[k].count)[runs appendBytes:&run length:sizeof run];
-            count=run.end;
+        MetalTensorLayout *storage=[layouts[part] reshape:@[@(layouts[part].count)]];
+        NSString *bounds=[NSString stringWithFormat:@"{ [i] : %lu <= i < %lu }",(unsigned long)ordinal,(unsigned long)(ordinal+storage.count)];
+        isl_map *selected=isl_map_intersect_range(isl_map_copy(indices),isl_set_read_from_str(ctx,bounds.UTF8String));
+        isl_set *positions=isl_map_domain(isl_map_copy(selected));
+        MetalTensorLayout *ordered=MeshIndexSelection(positions);isl_set_free(positions);
+        NSString *shift=[NSString stringWithFormat:@"{ [i] -> [i - %lu] }",(unsigned long)ordinal];
+        selected=isl_map_apply_range(selected,isl_map_read_from_str(ctx,shift.UTF8String));
+        selected=isl_map_apply_range(selected,MeshIndexRelation(ctx,storage));
+        selected=isl_map_apply_range(MeshIndexRelation(ctx,ordered),selected);
+        MetalTensorLayout *placed=ordered.count?[MetalTensorLayout shape:ordered.shape
+            index:MeshIndexTerms(isl_map_dim_min(selected,0)) parameters:@{}]:ordered;
+        if(!ordered.count)isl_map_free(selected);
+        ordinal+=storage.count;
+        NSData *logical=[ordered orderedSpans],*physical=[placed orderedSpans];
+        const struct MetalTensorSpan *where=logical.bytes,*at=physical.bytes;
+        NSUInteger i=0,j=0,usedLogical=0,usedPhysical=0;
+        while(i<logical.length/sizeof *where&&j<physical.length/sizeof *at) {
+            NSUInteger count=MIN(where[i].count-usedLogical,at[j].count-usedPhysical);
+            NSUInteger first=where[i].offset+usedLogical;
+            struct TensorRun run={first,first+count,part,at[j].offset+(NSInteger)usedPhysical};
+            if(count)[runs appendBytes:&run length:sizeof run];
+            usedLogical+=count;usedPhysical+=count;
+            if(usedLogical==where[i].count){i++;usedLogical=0;}
+            if(usedPhysical==at[j].count){j++;usedPhysical=0;}
         }
     }
-    NSUInteger total=0;
-    for(NSArray *domain in domains) {
-        NSUInteger first=[domain[0] unsignedIntegerValue],end=[domain[1] unsignedIntegerValue];
-        NSParameterAssert(end>=first);total+=end-first;
+    isl_map_free(indices);isl_ctx_free(ctx);NSParameterAssert(ordinal==domain.count);
+    qsort(runs.mutableBytes,runs.length/sizeof(struct TensorRun),sizeof(struct TensorRun),TensorRunOrder);
+    const struct TensorRun *values=runs.bytes;NSMutableArray *cuts=[NSMutableArray array];
+    for(NSUInteger k=0;k<runs.length/sizeof *values;k++) {
+        [cuts addObjectsFromArray:@[@(values[k].first),@(values[k].end)]];
     }
-    NSParameterAssert(total==count);
-    const struct TensorRun *values=runs.bytes;
-    for(NSUInteger k=0;k+1<runs.length/sizeof *values;k++) {
-        NSUInteger local=values[k].end;
-        for(NSArray *domain in domains) {
-            NSUInteger first=[domain[0] unsignedIntegerValue],end=[domain[1] unsignedIntegerValue];
-            if(local<=end-first){[cuts addObject:@(first+local)];break;}
-            local-=end-first;
-        }
-    }
-    result->_runs=[runs copy];result->_domains=[domains copy];
+    result->_runs=[runs copy];
     result->_cuts=[[[[NSSet setWithArray:cuts] allObjects] sortedArrayUsingSelector:@selector(compare:)] copy];
     return result;
 }
-- (void)dealloc { [_runs release];[_domains release];[_cuts release];[super dealloc]; }
+- (void)dealloc { [_runs release];[_cuts release];[super dealloc]; }
 - (struct MetalTensorFragment)fragment:(NSUInteger)first end:(NSUInteger)end {
-    NSUInteger lo=0,hi=0;
-    for(NSArray *domain in _domains) {
-        NSUInteger start=[domain[0] unsignedIntegerValue],stop=[domain[1] unsignedIntegerValue];
-        lo+=MIN(MAX(first,start),stop)-start;hi+=MIN(MAX(end,start),stop)-start;
-    }
-    if(lo==hi)return (struct MetalTensorFragment){0,0,0};
     const struct TensorRun *runs=_runs.bytes;NSUInteger left=0,right=_runs.length/sizeof *runs;
-    while(left<right){NSUInteger middle=left+(right-left)/2;if(runs[middle].end<=lo)left=middle+1;else right=middle;}
-    NSParameterAssert(left<_runs.length/sizeof *runs&&hi<=runs[left].end);
-    return (struct MetalTensorFragment){runs[left].part,hi-lo,runs[left].offset+(NSInteger)(lo-runs[left].first)};
+    while(left<right){NSUInteger middle=left+(right-left)/2;if(runs[middle].end<=first)left=middle+1;else right=middle;}
+    if(left==_runs.length/sizeof *runs||runs[left].first>=end)return (struct MetalTensorFragment){0,0,0};
+    NSParameterAssert(first>=runs[left].first&&end<=runs[left].end);
+    return (struct MetalTensorFragment){runs[left].part,end-first,runs[left].offset+(NSInteger)(first-runs[left].first)};
 }
 @end
 
@@ -1053,6 +1064,35 @@ static MetalTensorLayout *TensorClosedElements(MetalTensorLayout *layout,NSUInte
 }
 
 @implementation MetalTensorLayout
++ (instancetype)configuration:(NSDictionary *)value {
+    NSMutableDictionary *maps=[NSMutableDictionary dictionary];
+    for(NSString *axis in value[@"maps"])maps[@(axis.integerValue)]=TensorWords(value[@"maps"][axis]);
+    MetalTensorLayout *layout=[self shape:value[@"index_shape"] strides:value[@"strides"]
+        offset:[value[@"offset"] integerValue] maps:maps indices:nil];
+    return [layout shaped:value[@"shape"] coordinates:value[@"index_coordinates"]];
+}
+- (NSDictionary *)configuration {
+    NSMutableDictionary *maps=[NSMutableDictionary dictionary];
+    for(NSNumber *axis in self.maps) {
+        NSData *data=self.maps[axis];const NSInteger *words=data.bytes;NSMutableArray *values=[NSMutableArray array];
+        for(NSUInteger k=0;k<data.length/sizeof *words;k++)[values addObject:@(words[k])];
+        maps[axis.stringValue]=values;
+    }
+    return @{@"shape":self.shape,@"index_shape":self.indexShape,@"strides":self.strides,@"offset":@(self.offset),
+        @"index_coordinates":self.coordinates,@"maps":maps};
+}
++ (instancetype)runs:(NSArray<NSArray<NSNumber *> *> *)runs {
+    NSUInteger count=0;for(NSArray *run in runs)count+=[run[1] unsignedIntegerValue]*[run[3] unsignedIntegerValue];
+    if(!count)return [self shape:@[@0] strides:@[@1] offset:0 maps:@{} indices:nil];
+    isl_ctx *ctx=isl_ctx_alloc();id index=MeshIndexTerms(MeshIndexRuns(ctx,runs));isl_ctx_free(ctx);
+    return [self shape:@[@(count)] index:index parameters:@{}];
+}
+- (MetalTensorLayout *)intersection:(MetalTensorLayout *)other {
+    isl_ctx *ctx=isl_ctx_alloc();
+    isl_set *a=isl_map_range(MeshIndexRelation(ctx,self)),*b=isl_map_range(MeshIndexRelation(ctx,other));
+    isl_set *common=isl_set_intersect(a,b);MetalTensorLayout *result=MeshIndexSelection(common);
+    isl_set_free(common);isl_ctx_free(ctx);return result;
+}
 @synthesize coordinates=_coordinates;
 + (instancetype)shape:(NSArray<NSNumber *> *)shape index:(id)expression parameters:(NSDictionary<NSString *,id> *)parameters {
     const NSUInteger count=TensorCount(shape);
