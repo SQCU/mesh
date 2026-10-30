@@ -65,3 +65,4 @@ engines.py and memory-read.py.
   cable's `bits_per_second` and the case's own interval. That gives link utilization without runtime accounting.
 - **Configuration exchanges.** torch_mesh's configuration-time exchanges through the store (`backend.py`'s collective
   view gather, configuration.py's capacities and proposal) duplicate `ncclMeshCommConfigGather`, and should fold into it.
+  Done in 9eb3f16d: `ProcessGroupMesh.exchange_configuration` gathers over it; the store keeps the `ncclUniqueId`.
