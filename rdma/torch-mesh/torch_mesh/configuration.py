@@ -53,19 +53,6 @@ def placement(mesh, name, workload, chosen=None, *, parameters, forms=()):
             'implementation': revision(Path(assignment.__file__).resolve().parents[1]), 'sequence': 0}
 
 
-def routes(group, name):
-    """The declared function's demands (ncclMeshCommPlanDemands) routed over the fabric as it is, the flows that
-    finish them soonest (assignment.domains: routing.Fabric.allocate), installed on the communicator, so the next plan
-    compiles its transfers along them: what bind does for a partitioned function, for any declared one. The library's
-    own routes, every simple path at one weight, are a configuration's absence: on the five nodes they put each byte of
-    the all-to-all over about three cables and finish on the Mini's busiest one (design/measurement-regressions-
-    2026-10-30.md#link-use). Its graph and decisions."""
-    graph = assignment.graph(group.comm)
-    decisions = assignment.domains({}, {name: graph})
-    assignment.install(group.comm, {key: value['parts'] for key, value in decisions.items()}, name)
-    return graph, decisions
-
-
 def bind(configuration, groups, prepare):
     c = configuration
     mesh, name, group = c['mesh'], c['name'], c['group']

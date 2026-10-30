@@ -102,12 +102,7 @@ def bandwidth(config):
             binding, declarations = prepare_fragments([(declaration, source, output)], group)
             cases.append((binding, useful, declarations, calls, what, requested))
             outputs.append((what, requested, output, expected(what, rank, size, output.numel())))
-    plan = [(declarations, calls) for _, _, declarations, calls, _, _ in cases]
-    group.plan(plan)
-    # the declared calls' demands routed and installed, as a configured program's are, then planned along them
-    from .configuration import routes
-    routes(group, 'bandwidth')
-    group.plan(plan)
+    group.plan([(declarations, calls) for _, _, declarations, calls, _, _ in cases])
     prepared = []
     for binding, useful, _, calls, what, requested in cases:
         binding.realize(calls)
