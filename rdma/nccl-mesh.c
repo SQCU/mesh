@@ -3208,8 +3208,8 @@ static size_t slot_laid(const struct ncclComm *comm, const struct compiled *x, c
   return used;
 }
 /* group x's storage (slot_laid) for generation k in x's slot k (*slot, its storage at *base, its lease's Metal buffer):
-   taken at x's declaration (ncclMeshCommPlan) for each of GENERATIONS, or a WRITE plan's at its first
-   executions, and again where it must grow.  Under group_lock */
+   taken as x is prepared (definition_prepare) for each of GENERATIONS, and again where an issue needs more.  Under
+   group_lock */
 static ncclResult_t bind_slot(struct ncclComm *comm, struct compiled *x, uint32_t k, struct call *list, size_t n, const struct schedule *plans,
                               struct where *base, struct where *area, uint32_t *slot) {
   const size_t need = slot_laid(comm, x, list, n, plans, NULL, NULL);
@@ -5020,6 +5020,20 @@ static ncclResult_t prepared(struct ncclComm *comm, struct compiled *x, int remo
   return result;
 }
 
+/* group x's definition, declared (ncclMeshCommPlan) or a WRITE plan's own (`write`: write_definitions): compile_group,
+   a slot each generation where it crosses (bind_slot finds them held), then prepared.  Under group_lock */
+static ncclResult_t definition_prepare(struct ncclComm *comm, struct compiled *x, struct ncclMeshWritePlan *write) {
+  if (write) x->calls[0].write_plan = write;
+  ncclResult_t result = compile_group(comm, x->calls, x->n, &x->plans);
+  if (write) x->calls[0].write_plan = NULL;
+  int remote = 0;
+  for (size_t i = 0; !result && i < x->n; i++) remote |= crosses(x->calls + i);
+  const size_t need = remote ? slot_laid(comm, x, x->calls, x->n, x->plans, NULL, NULL) : 0;
+  for (uint32_t k = 0; remote && !result && k < GENERATIONS; k++)
+    if (!(x->slot[k] = slot_take(comm, need))) result = fail(ncclSystemError, "a definition's storage: %s", last.text);
+  return result ? result : prepared(comm, x, remote, write);
+}
+
 /* Compile group definitions, then bind the function's repeated-block order.
    Replacing a declaration takes effect at the next group; failure keeps the
    prior declaration. This work precedes numerical submission. */
@@ -5119,15 +5133,8 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
     /* a group's issues are its declaration's (prepared) or, a group of WRITEs, its plans' (issue_bind): never both */
     for (size_t i = 1; i < x->n && !result; i++)
       if (!x->calls[i].target != !x->calls[0].target) result = fail(ncclInvalidArgument, "a declared group of WRITEs and collectives both");
-    if (!result) result = compile_group(comm, x->calls, x->n, &x->plans);
+    if (!result) result = definition_prepare(comm, x, NULL);
     for (uint32_t h = 0; h < comm->count && !result; h++) { made->entries[g][0] += x->plans[h].outs; made->entries[g][1] += x->plans[h].ins; }
-    /* its storage taken here, a slot for each generation (bind_slot finds them held): its issues take none */
-    int remote = 0;
-    for (size_t i = 0; !result && i < x->n; i++) remote |= crosses(x->calls + i);
-    const size_t need = remote ? slot_laid(comm, x, x->calls, x->n, x->plans, NULL, NULL) : 0;
-    for (uint32_t k = 0; remote && !result && k < GENERATIONS; k++)
-      if (!(x->slot[k] = slot_take(comm, need))) result = fail(ncclSystemError, "a declared group's storage: %s", last.text);
-    if (!result) result = prepared(comm, x, remote, NULL);
   }
   if (!result && made) result = plan_declaration(comm, calls, count, order, runs, made);
   if (!result) {
@@ -5557,10 +5564,8 @@ static ncclResult_t write_definitions(struct ncclMeshWritePlan *plan) {
     if (!(x->calls = calloc(1, sizeof *x->calls))) { result = fail(ncclSystemError, "out of memory"); break; }
     x->n = 1; x->repeat = 1;
     x->calls[0] = (struct call){.what = MESH_BROADCAST, .root = plan->from, .target = plan->to + 1, .count = plan->bytes, .type = WRITE_UNIT,
-                                .op = ncclSum, .comm = comm, .write_plan = plan, .invocation = o};
-    result = compile_group(comm, x->calls, 1, &x->plans);
-    x->calls[0].write_plan = NULL;
-    if (!result) result = prepared(comm, x, crosses(x->calls), plan);
+                                .op = ncclSum, .comm = comm, .invocation = o};
+    result = definition_prepare(comm, x, plan);
   }
   if (!result) { plan->compiled = made; plan->next_compiled = comm->compiled_writes; comm->compiled_writes = plan; return ncclSuccess; }
   for (size_t o = 0; made && o < plan->occurrences; o++) compiled_drop(comm, made + o);
