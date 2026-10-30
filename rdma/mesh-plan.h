@@ -138,6 +138,20 @@ int mesh_trees_check(const struct mesh_link_map *,const struct mesh_trees *);
    route and the routes end together.  Writes root, parent (nodes a tree) and log_weight
    for at most nodes x most trees, each root's heaviest first; returns the count, 0 where the map does not join its
    nodes (mesh_link_map_joined) or `roots` holds none.  At two nodes, each node's one tree. */
+/* design/measurement-regressions-2026-10-30.md, b7311501: a plan's traffic as demands, each a root, its leaves (NULL
+   every node) and the bytes that go up toward the root and down from it; mesh_solve routes them all at once over the
+   map's links, Garg and Koenemann's multiplicative weights (FOCS 1998; Fleischer 2000): T = floor(ln 2E / eps^2) + 1
+   rounds, in each every demand taking its least-length tree under lengths exp(eps (x_e - x_max) / rho) / c_e (x_e a
+   direction's load over its capacity, the parallel cables of a pair one link of their bandwidths summed), the loads
+   added after each round. Its output: each distinct tree (`demand` its demand, `parent` n a tree) and its share of its
+   demand (`share`, its rounds over T); their count (at most mesh_solve_room), or UINT32_MAX where a demand's leaf has
+   no route to its root. mesh_flow_trees gives the trees of demands [first, last) as a struct mesh_trees' arrays. */
+struct mesh_demand { uint32_t root,pad; uint64_t up,down; const uint64_t *leaves; };
+uint32_t mesh_solve_room(const struct mesh_link_map *,double eps,uint32_t count);
+uint32_t mesh_solve(const struct mesh_link_map *,double eps,const struct mesh_demand *,uint32_t count,uint32_t room,
+                    uint32_t *demand,uint32_t *parent,double *share);
+uint32_t mesh_flow_trees(uint32_t nodes,const uint32_t *demand,const struct mesh_demand *,const uint32_t *parent,const double *share,
+                         uint32_t count,uint32_t first,uint32_t last,uint32_t *root,uint32_t *tree,double *log_weight);
 uint32_t mesh_trees_pack(const struct mesh_link_map *,const uint64_t *roots,double eps,uint32_t most,uint32_t *root,uint32_t *parent,
                          double *log_weight);
 

@@ -538,7 +538,9 @@ static ncclResult_t comm_routes(struct ncclComm *comm) {
     if (joined) return fail(ncclInternalError, "the members' map of %s: %s", comm->name, strerror(joined));
     if (comm->paths.count && mesh_trees_check(&comm->map, &comm->paths))
       return fail(ncclInvalidArgument, "the paths are not trees of the links of the members' map (mesh_trees_check)");
-    if (!comm->paths.count) {
+    /* a configured form along the communicator's own trees takes the map's links packed (compile_form); no table is
+       made otherwise: a collective no form or program names is routed by the planner's solver (plan_calls) */
+    if (!comm->paths.count && comm->form_count) {
       uint32_t *root = calloc((size_t)n * n * 2 + 1, sizeof *root), *parent = calloc((size_t)n * n * n * 2 + 1, sizeof *parent);
       double *weight = calloc((size_t)n * n * 2 + 1, sizeof *weight);
       uint64_t *only = calloc(n / 64 + 1, sizeof *only);
@@ -568,7 +570,8 @@ static ncclResult_t comm_routes(struct ncclComm *comm) {
     if (program_copy(&comm->entries[comm->programs].program, &comm->given[e].program)) return fail(ncclSystemError, "out of memory");
     comm->entries[comm->programs++].below = comm->given[e].below;
   }
-  if (comm->listed) return ncclSuccess;
+  if (comm->listed || !comm->paths.count) return ncclSuccess;
+  /* the caller's own paths (ncclMeshCommInitRank), its configuration: the table along them */
   if (compile_entry(comm, along, MESH_ALLREDUCE, 0, 0, 0) || compile_entry(comm, along, MESH_REDUCE_SCATTER, 0, 0, 0) ||
       compile_entry(comm, along, MESH_ALLGATHER, 0, 0, 0))
     return fail(ncclInternalError, "the all-reduce, reduce-scatter or all-gather along the communicator's trees does not compile");
@@ -2669,32 +2672,165 @@ static ncclResult_t partial_split(struct call *c) {
   return ncclSuccess;
 }
 
-/* every call that crosses a link planned: a collective along the communicator's table (comm_compile), its steps cut on
-   the communicator's page (mesh-plan.h mesh_program_steps_cut: the program's own cuts on pages; a reduce-scatter's and
-   an all-gather's segments NCCL's, a rank's count each or its counts, so its program's segments must be the ranks), its
-   operand's element a merge's row where it merges; an all-to-all to and
-   from each other rank (mesh_counted_steps). Ordinary and counted collectives
-   share the explicit WRITE physical route compiler. */
+/* design/measurement-regressions-2026-10-30.md: a group's calls routed at once by the planner's one solver (mesh-plan.h
+   mesh_solve, b7311501's, which 3f72cbde's reset of main to an older tree removed and a tree packer and every-path
+   weights of 1 then stood in for): each call's traffic its demands (demands_of), the group's demands solved together
+   in finite time, and every crossing compiled from the solution, a collective along its own demands' trees and shares
+   (solved_steps), an all-to-all's and a WRITE's pairs over the write paths weighed by the flow the solution sends along
+   each (writes_weigh). A configuration's forms and a caller's programs or paths are its own (comm_routes). */
+#define MESH_SOLVE_EPS 0.1
+struct flow { uint32_t count, *demand, *parent; double *share; };
+static void flow_free(struct flow *f) { free(f->demand); free(f->parent); free(f->share); *f = (struct flow){0, NULL, NULL, NULL}; }
+static ncclResult_t flow_solve(ncclComm_t comm, const struct mesh_demand *demands, uint32_t count, struct flow *f) {
+  const uint32_t n = (uint32_t)comm->nranks, room = count ? mesh_solve_room(&comm->map, MESH_SOLVE_EPS, count) : 0;
+  *f = (struct flow){0, calloc((size_t)room + 1, sizeof *f->demand), calloc((size_t)room * n + 1, sizeof *f->parent),
+                     calloc((size_t)room + 1, sizeof *f->share)};
+  if (!f->demand || !f->parent || !f->share) { flow_free(f); return fail(ncclSystemError, "out of memory"); }
+  const uint32_t made = count ? mesh_solve(&comm->map, MESH_SOLVE_EPS, demands, count, room, f->demand, f->parent, f->share) : 0;
+  if (made == UINT32_MAX) { flow_free(f); return fail(ncclInvalidUsage, "communicator %s: its map joins no route between two members its calls cross between", comm->name); }
+  f->count = made;
+  return ncclSuccess;
+}
+
+/* call c's traffic as demands: a WRITE's and an all-to-all's each pair, its bytes up from the source to the destination;
+   a reduce's up to its root and a broadcast's down from it; every other collective a demand a rank, its segment, up to
+   it (a reduce-scatter's, the all-reduce's first phase) and down from it (an all-gather's, its second) */
+static uint32_t demands_of(const struct ncclComm *comm, const struct call *c, struct mesh_demand *d, uint64_t *leaves) {
+  const uint32_t n = (uint32_t)comm->nranks, words = (n + 63) / 64;
+  const uint64_t z = SIZE[c->type];
+  uint32_t made = 0;
+  if (c->target) {
+    const uint32_t a = (uint32_t)c->root, b = (uint32_t)c->target - 1;
+    if (a == b || a >= n || b >= n || !c->count) return 0;
+    leaves[a / 64] |= UINT64_C(1) << (a % 64);
+    d[0] = (struct mesh_demand){b, 0, c->count * z, 0, leaves};
+    return 1;
+  }
+  if (counted(c)) {
+    for (uint32_t a = 0; c->matrix && a < n; a++)
+      for (uint32_t b = 0; b < n; b++) {
+        const uint64_t count = a == b ? 0 : c->matrix[(size_t)a * n + b];
+        if (!count) continue;
+        uint64_t *set = leaves + (size_t)made * words;
+        set[a / 64] |= UINT64_C(1) << (a % 64);
+        d[made++] = (struct mesh_demand){b, 0, count * z, 0, set};
+      }
+    return made;
+  }
+  const uint64_t bytes = elements(c) * z;
+  if (has_root(c->what)) {
+    d[0] = (struct mesh_demand){(uint32_t)c->root, 0, c->what == MESH_REDUCE ? bytes : 0, c->what == MESH_BROADCAST ? bytes : 0, NULL};
+    return 1;
+  }
+  for (uint32_t r = 0; r < n; r++) {
+    const uint64_t part = (c->segments ? c->segments[r] : c->what == MESH_ALLREDUCE ? (c->count + n - 1) / n : c->count) * z;
+    d[made++] = (struct mesh_demand){r, 0, c->what == MESH_ALLGATHER ? 0 : part, c->what == MESH_REDUCE_SCATTER ? 0 : part, NULL};
+  }
+  return made;
+}
+
+/* collective c compiled along its own demands' trees, [first, last) of the group's, with their shares (mesh_flow_trees),
+   the all-reduce in two phases, its reduce-scatter up every segment's trees and its all-gather down them */
+static ncclResult_t solved_steps(struct call *c, const struct mesh_demand *d, const struct flow *f, uint32_t first, uint32_t last,
+                                 struct mesh_operand operand, const uint64_t *cut) {
+  const uint32_t n = (uint32_t)c->comm->nranks;
+  uint32_t *root = calloc((size_t)f->count + 1, sizeof *root), *parent = calloc((size_t)f->count * n + 1, sizeof *parent);
+  double *weight = calloc((size_t)f->count + 1, sizeof *weight);
+  if (!root || !parent || !weight) { free(root); free(parent); free(weight); return fail(ncclSystemError, "out of memory"); }
+  struct entry e = {0};
+  e.trees = (struct mesh_trees){n, mesh_flow_trees(n, f->demand, d, f->parent, f->share, f->count, first, last, root, parent, weight), root, parent, weight};
+  ncclResult_t result = program_compile(&e.trees, (uint32_t)c->what, has_root(c->what) ? (uint32_t)c->root : 0, 0, NULL, NULL, &e.program)
+    ? fail(ncclInternalError, "%s on %s: the solver's trees do not compile", call_name(c), c->comm->name) : ncclSuccess;
+  if (!result) result = collective_steps(c, &e, operand, cut);
+  program_free(&e.program);
+  free(root); free(parent); free(weight);
+  return result;
+}
+
+/* each pair the group's WRITEs and all-to-alls send between (demands [0, count) of them), its write paths weighed by
+   the flow the solution sends along each: a solved tree's route from the pair's source up to its destination, its share
+   times its demand's bytes, split over each hop's parallel cables by their bandwidths; a pair a configuration routed
+   keeps its routes (ncclMeshCommWriteRoutes) */
+static ncclResult_t writes_weigh(ncclComm_t comm, const struct mesh_demand *d, uint32_t count, const struct flow *f) {
+  const uint32_t n = (uint32_t)comm->nranks;
+  const struct mesh_fabric *fabric = &comm->fabric;
+  for (uint32_t a = 0; a < n; a++)
+    for (uint32_t b = 0; b < n; b++) {
+      if (a == b || !comm->writes || (comm->write_overrides && comm->write_overrides[(size_t)a * n + b])) continue;
+      struct mesh_paths *paths = comm->writes + (size_t)a * n + b;
+      double *flow = calloc((size_t)paths->count + 1, sizeof *flow), most = 0;
+      if (!flow) return fail(ncclSystemError, "out of memory");
+      int sent = 0;
+      for (uint32_t k = 0; k < f->count; k++) {
+        const struct mesh_demand *x = d + f->demand[k];
+        if (f->demand[k] >= count || x->root != b || !x->leaves || !(x->leaves[a / 64] >> (a % 64) & 1)) continue;
+        const uint32_t *up = f->parent + (size_t)k * n;
+        for (uint32_t p = 0; p < paths->count; p++) {
+          double part = f->share[k] * (double)x->up;
+          uint32_t at = a;
+          for (uint32_t q = paths->first[p]; part > 0 && q < paths->first[p + 1]; q++) {
+            const struct mesh_cable *cable = fabric->cable + paths->cable[q];
+            const uint32_t next = cable->node[cable->node[0] == at];
+            if (up[at] != next) { part = 0; break; }
+            double joined = 0;
+            for (uint32_t e = 0; e < fabric->cables; e++) {
+              const struct mesh_cable *other = fabric->cable + e;
+              if ((other->node[0] == at && other->node[1] == next) || (other->node[1] == at && other->node[0] == next))
+                joined += other->bandwidth ? (double)other->bandwidth : 1;
+            }
+            part *= (cable->bandwidth ? (double)cable->bandwidth : 1) / joined;
+            at = next;
+          }
+          if (part > 0 && at == b) { flow[p] += part; sent = 1; }
+        }
+      }
+      for (uint32_t p = 0; sent && p < paths->count; p++) if (flow[p] > most) most = flow[p];
+      for (uint32_t p = 0; sent && p < paths->count; p++) ((uint64_t *)paths->weight)[p] = (uint64_t)(flow[p] / most * 1099511627776.0);
+      free(flow);
+    }
+  return ncclSuccess;
+}
+
+/* every call that crosses a link planned, its group's traffic routed at once (above): a WRITE's and an all-to-all's
+   steps over the weighed write paths (write_steps, counted_steps), a collective along a configured form or the caller's
+   programs where one fits it (comm_compile, program_of), else along its solved trees (solved_steps); its steps cut on
+   the communicator's page (mesh-plan.h mesh_program_steps_cut), a reduce-scatter's and an all-gather's segments NCCL's,
+   its operand's element a merge's row where it merges */
 static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
-  for (size_t i = 0; i < n; i++) {
+  const uint32_t N = (uint32_t)comm->nranks, words = (N + 63) / 64;
+  uint32_t room = 0, demands = 0;
+  for (size_t i = 0; i < n; i++)
+    room += !crosses(list + i) ? 0 : list[i].target || has_root(list[i].what) ? 1 : counted(list + i) ? N * N : N;
+  uint32_t *lo = calloc(n + 1, sizeof *lo), *hi = calloc(n + 1, sizeof *hi);
+  struct mesh_demand *d = calloc((size_t)room + 1, sizeof *d);
+  uint64_t *leaves = calloc((size_t)room * words + 1, sizeof *leaves);
+  struct flow f = {0, NULL, NULL, NULL};
+  ncclResult_t result = lo && hi && d && leaves ? ncclSuccess : fail(ncclSystemError, "out of memory");
+  for (size_t i = 0; !result && i < n; i++) {
+    lo[i] = hi[i] = demands;
+    if (crosses(list + i)) hi[i] = demands += demands_of(comm, list + i, d + demands, leaves + (size_t)demands * words);
+  }
+  if (!result) result = flow_solve(comm, d, demands, &f);
+  if (!result) result = writes_weigh(comm, d, demands, &f);
+  for (size_t i = 0; !result && i < n; i++) {
     struct call *c = list + i;
     if (!crosses(c)) continue;
-    if (c->target) { const ncclResult_t result = write_steps(c); if (result) return result; continue; }
-    if (counted(c)) { const ncclResult_t result = counted_steps(c); if (result) return result; continue; }
-    const ncclResult_t compiled = comm_compile(comm);
-    if (compiled) return compiled;
+    if (c->target) { result = write_steps(c); continue; }
+    if (counted(c)) { result = counted_steps(c); continue; }
+    result = comm_compile(comm);
+    if (result) break;
     const struct entry *entry = program_of(comm, c->what, c->root, elements(c) * SIZE[c->type]);
-    if (!entry) return fail(ncclInvalidUsage, "the communicator has no program for collective %d at root %d", c->what, c->root);
     const int segmented = partitioned(c->what);
     const uint32_t u = unit_of(c);
     const struct mesh_operand operand = {(uint32_t)c->type + 1, (uint32_t)(SIZE[c->type] * u), elements(c) / u};
     uint64_t cut[segmented ? comm->nranks : 1];
     for (int r = 0; segmented && r < comm->nranks; r++) cut[r] = (c->segments ? c->segments[r] : c->count) / u;
-    ncclResult_t result = collective_steps(c, entry, operand, segmented ? cut : NULL);
+    result = entry ? collective_steps(c, entry, operand, segmented ? cut : NULL)
+                   : solved_steps(c, d, &f, lo[i], hi[i], operand, segmented ? cut : NULL);
     if (!result && c->what == MESH_REDUCE_SCATTER) result = partial_split(c);
-    if (result) return result;
   }
-  return ncclSuccess;
+  flow_free(&f); free(lo); free(hi); free(d); free(leaves);
+  return result;
 }
 
 /* a step's entry on its channel: its call and step, its entry in its list, its pages (pages_of its bytes) and the
