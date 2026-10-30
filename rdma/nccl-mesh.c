@@ -3662,16 +3662,23 @@ static void bind_calls(struct call *list, size_t n) {
   }
 }
 
-/* whether issue u is laid and placed for the binding of `list` (struct bound): the same buffers and views, a write's
+/* call c's binding as its issue records it (struct bound): its buffers and what binding them made, fused or not, a
+   write's occurrence and instance; its views and segments `kept`'s (their storage is the issue's) */
+static struct bound bound_of(const struct call *c, const struct bound *kept) {
+  const struct ncclMeshWritePlan *w = c->write_plan;
+  return (struct bound){.send = c->send_at, .recv = c->recv_at, .sum = c->sum, .views = {kept->views[0], kept->views[1]},
+                        .occurrence = w ? c->invocation % w->occurrences : 0, .instance = w ? c->invocation % w->layout.instances : 0,
+                        .segments = kept->segments, .complements = c->complements, .direct = c->direct, .fused = c->fused != NULL};
+}
+/* whether issue u is laid and placed for the binding of `list` (bound_of): the same buffers and views, a write's
    same instance and occurrence, fused or not alike, at the same stride in the same slot */
 static int issue_same(const struct ncclComm *comm, const struct issue *u, const struct call *list, size_t n, size_t stride, uint32_t slot) {
   if (!u->laid || u->stride != stride || u->slot != slot) return 0;
   for (size_t i = 0; i < n; i++) {
     const struct call *c = list + i;
-    const struct bound *b = u->bound + i;
-    const struct ncclMeshWritePlan *w = c->write_plan;
-    if (!same(c->send_at, b->send) || !same(c->recv_at, b->recv) || !c->fused != !b->fused ||
-        (w && (c->invocation % w->occurrences != b->occurrence || c->invocation % w->layout.instances != b->instance)))
+    const struct bound *b = u->bound + i, now = bound_of(c, b);
+    if (!same(now.send, b->send) || !same(now.recv, b->recv) || now.fused != b->fused || now.occurrence != b->occurrence ||
+        now.instance != b->instance)
       return 0;
     for (int j = 0; j < 2; j++) {
       const struct where *v = j ? c->receive_views : c->send_views;
@@ -3755,7 +3762,6 @@ static ncclResult_t issue_bind(struct ncclComm *comm, struct call **calls, size_
   if (!result && remote) { landing_needs(comm, u->plans); send_dependencies(comm, u->plans); }
   for (size_t i = 0; !result && i < n; i++) {
     const struct call *c = list + i;
-    const struct ncclMeshWritePlan *w = c->write_plan;
     struct bound *b = u->bound + i;
     for (int j = 0; j < 2 && !result; j++) {
       const struct where *v = j ? c->receive_views : c->send_views;
@@ -3765,9 +3771,7 @@ static ncclResult_t issue_bind(struct ncclComm *comm, struct call **calls, size_
     }
     if (!result && c->send_views) list[i].send_views = b->views[0];
     if (!result && c->receive_views) list[i].receive_views = b->views[1];
-    b->send = c->send_at; b->recv = c->recv_at; b->sum = c->sum; b->direct = c->direct; b->complements = c->complements;
-    b->fused = c->fused != NULL;
-    b->occurrence = w ? c->invocation % w->occurrences : 0; b->instance = w ? c->invocation % w->layout.instances : 0;
+    *b = bound_of(c, b);
   }
   if (!result) { u->laid = 1; u->stride = stride; u->slot = remote ? *slot : 0; u->area = *area; }
   return result;
