@@ -8,8 +8,8 @@ import threading
 import time
 from mesh_statistics import now, completed, emit
 
-# the pause between looks at a pending completion: a stamp's resolution, far below any call this observes
-PAUSE = 50e-6
+# the pause between looks at a pending completion, long enough that looking takes nothing from the program
+PAUSE = 5e-3
 
 
 def start():
