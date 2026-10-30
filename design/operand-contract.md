@@ -57,6 +57,11 @@ dependency frontier across preparation calls. It no longer waits for every
 earlier host operation at each crossing or makes later hosts depend on the
 whole crossing. Fused descriptor setup retains residency declarations; the
 existing producer and landing commands carry the payload dependencies.
+Crossing realization no longer fixes the final commit order. Host completions,
+GPU predecessors, resource capacities and declared external events determine
+the prepared command parts. Independent parts precede unrelated host waits.
+Transport counter accesses join the same dependency graph and visibility
+mechanism. Equal-scope replay ranges remain batched.
 
 Placement joins complete logical storage domains through declared equalities.
 Existing allocations can be composed into one local page view without copying
@@ -81,10 +86,15 @@ compile retained codes and the offset through the shared reduction machinery.
 Preparation also placed existing and fresh pages in a contiguous consumer view
 with a base alignment of three OS pages. It preserved fixed-page bytes when an
 incompatible sub-page layout required separate storage.
-The remaining integration work is precise provider read domains and scheduling
-independent work across collective preparation boundaries. Mutable encoded
-producers still need their storage interpretation carried explicitly into the
-same operand contract; constant lowering does not establish that path.
+The direct ANE adapter also loaded and bound a composed view of four reversed
+physical pages, with the original allocation released. Its prepared requests
+mapped and released that storage without submitting numerical work.
+The remaining integration work is precise provider read domains and explicit
+storage interpretation for mutable encoded producers. Constant lowering does
+not establish the latter path. Transport counter accesses first revealed during
+encoding still constrain that already encoded part; their earlier declaration
+is under review. Scheduler inspection checked commit order and event scopes
+without creating a GPU queue or executing numerical work.
 Vendor ANE submission throttles are documented
 separately in `ane-prepared-contract-2026-10-30.md`; a completion callback does not
 remove those framework instructions.
