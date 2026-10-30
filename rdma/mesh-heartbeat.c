@@ -223,29 +223,37 @@ static void turn(void){
 /* design/transport.md section 2: the bridge's end, as asked or not; its exit reaped without blocking (an exit can wait on
    a device's release with no deadline: mesh-link.c child_reaped), looked at again every REPLACE_TICK_MS while it is not
    yet reapable (TIMER_REAP: the bridge counts as running meanwhile, so none is opened).  Not reapable MESH_PLATFORM_NS
-   after its exit was heard, the heartbeat ends, naming the wait (a release's or an end's region expired first, and 0,
-   so launchd leaves the node released; else 1, so launchd starts the heartbeat again): launchd, the bridge's parent
-   then, reaps it, and no bridge is opened beside it by this heartbeat */
+   after its exit was heard, the wait is named once and goes on, the bridge still counted as running: a heartbeat that
+   ended here was started again by launchd, and the new one, reading an exiting process as no holder (mesh_started),
+   opened a second bridge whose ports took the devices the first one's exit still held in the kernel (operations review,
+   2026-10-29).  Only an end (SIGTERM, a shutdown) ends the heartbeat then, its region expired first, with 0, so launchd
+   starts none again */
 static uint64_t reap_from;
+static int reap_named;
 static void bridge_ended(void){
   int status=0;
   const pid_t was=bridge,got=child?waitpid(was,&status,WNOHANG):0;
   if(child && !got){
     const uint64_t now=mesh_clock_ns();
     if(!reap_from)reap_from=now;
-    if(now-reap_from<MESH_PLATFORM_NS){
-      struct kevent64_s t;
-      EV_SET64(&t,TIMER_REAP,EVFILT_TIMER,EV_ADD|EV_ONESHOT,0,REPLACE_TICK_MS,0,0,0);
-      kevent64(events,&t,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
-      return;
+    if(now-reap_from>=MESH_PLATFORM_NS && asked==ASKED_END){
+      mesh_say("heartbeat","bridge %d not reapable %.0f s after its exit was heard: the heartbeat ends as asked",(int)was,
+               (double)MESH_PLATFORM_NS/1e9);
+      region_expire();
+      exit(0);
     }
-    const int released=asked==ASKED_RELEASE || asked==ASKED_END;
-    mesh_say("heartbeat","bridge %d not reapable %.0f s after its exit was heard: past its deadline; the heartbeat ends",(int)was,
-             (double)MESH_PLATFORM_NS/1e9);
-    if(released)region_expire();
-    exit(!released);
+    if(now-reap_from>=MESH_PLATFORM_NS && !reap_named){
+      reap_named=1;
+      mesh_say("heartbeat","bridge %d not reapable %.0f s after its exit was heard: its exit waits in the kernel; no bridge is "
+               "opened beside it, and the heartbeat waits on",(int)was,(double)MESH_PLATFORM_NS/1e9);
+    }
+    struct kevent64_s t;
+    EV_SET64(&t,TIMER_REAP,EVFILT_TIMER,EV_ADD|EV_ONESHOT,0,REPLACE_TICK_MS,0,0,0);
+    kevent64(events,&t,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
+    return;
   }
-  reap_from=0;
+  if(reap_named)mesh_say("heartbeat","bridge %d reaped %.0f s after its exit was heard",(int)was,(double)(mesh_clock_ns()-reap_from)/1e9);
+  reap_from=0;reap_named=0;
   const int reaped=got==was;
   bridge=0;child=0;
   const int expired=reaped && WIFEXITED(status) && WEXITSTATUS(status)==EX_TEMPFAIL;
