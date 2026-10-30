@@ -110,6 +110,15 @@ immediately." Form C is resolved, and with it the recorder's capture:
   was encoded, while the schedule's entries name the plans' span tables. The plans are now held with the schedule.
   MeshRankDetach destroyed WRITE plans after ncclCommDestroy, and a plan's drop reads its communicator; the plans now
   go first.
+- F's other side: partition.follow's exact-byte migrations (_follow_spans, _follow_bytes) ran WRITE groups with
+  nothing declared. definition_of ends the program on any group but a lone unfused WRITE. Both now declare their
+  groups for the transition, as _scatter_spans does (70b5666e). write_definitions still serves a lone unfused WRITE on
+  a communicator with no plan.
+- Not done, and why. E would add a tracks dispatch to every single-channel group, a GPU program change to be
+  measured, not argued. I flattens two different records (declared calls, a WRITE's prepare), a format design. D10-D11
+  lie in mesh-tensor-layout and collective_views.py, other sessions' files. `ncclMeshCommForms` has no caller, but
+  440ac872 restored it as the configuration's way to name collective forms (measured speedups in its message):
+  wiring it or deleting it is the operator's call.
 
 ## Order
 
