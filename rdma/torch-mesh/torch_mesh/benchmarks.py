@@ -76,8 +76,7 @@ def bandwidth(config):
     for binding, useful, _, calls, what, requested in cases:
         binding.realize(calls)
         prepared.append((binding, useful, calls, what, requested))
-    observer = rollout.start(dist.distributed_c10d._get_default_store(), 'mesh/bandwidth', rank, size,
-                             'bandwidth')
+    observer = rollout.start(dist.distributed_c10d._get_default_store(), 'mesh/bandwidth', rank, size)
     group._observers = [observer]
     for index, (binding, useful, calls, what, requested) in enumerate(prepared):
         started = now()

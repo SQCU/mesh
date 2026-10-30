@@ -357,7 +357,8 @@ The initial graph has its declared traversal and no measured time distinction.
 
 ## Compilation
 
-`configuration.placement` reads observations before tensors are built. `configuration.bind` declares the complete
+`configuration.placement` solves the parts on the collective as it is, before tensors are built, or takes the
+placement its caller passes (a run's 'placed' record names its fit). `configuration.bind` declares the complete
 function and installs the resulting page placements and routes. The numerical function is absent from execution.
 More routes change the compiled tables; they do not add a controller around each transfer.
 
@@ -399,9 +400,11 @@ There is no per-transfer byte ledger, trace observer, timing event, or timing-on
 `ncclMeshTrace*`, `ncclMeshCommSample`, and LSTM split-timing interfaces were removed. Their bookkeeping ran on
 transfers even when no trace was requested. Historical trace analysis does not belong in the execution path.
 
-The record contains commit IDs, installed node IDs, and these completion measurements. Optimizer observations
-stay in the application's memory. They are not restored from the hourly ledger. A fresh process starts from the
-compiler's prior; repeated calls in one application can supply their completed observations to the solver.
+The record contains commit IDs, installed node IDs, and these completion measurements. Observations are emitted, a
+log of the execution, and are never an input to a placement: nothing makes a collective the same machines, capabilities
+or fabric from one execution to the next, so every placement is solved afresh, and a bad fresh fit is the solver's
+defect to fix, not one to hide behind history (the operator, 2026-10-30). A caller that wants a good fit again passes
+it as the placement operand.
 
 ## Roofline
 

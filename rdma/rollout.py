@@ -1,59 +1,32 @@
 # design/whole-function.md#observations
 import json
 from concurrent.futures import Future
-from pathlib import Path
 import queue
 import threading
 from mesh_statistics import now, completed, emit
 
-_history = {}
-
-
-def path(key):
-    """A program's observations file: a path as named, or a bare name's ~/.cache/mesh/observations/<name>.jsonl."""
-    key = str(key)
-    return Path(key).expanduser() if '/' in key else Path.home() / '.cache/mesh/observations' / f'{key}.jsonl'
-
-
-def observations(key):
-    """The observations this program's earlier runs kept (its file, read once, before any execution), with this
-    process's own after them."""
-    key = str(key)
-    if key not in _history:
-        kept = path(key)
-        _history[key] = [json.loads(line) for line in kept.read_text().splitlines() if line.strip()] if kept.is_file() else []
-    return _history[key]
-
-
-def start(store, key, rank, ranks, history, kept=None):
+def start(store, key, rank, ranks):
     outgoing, stopping = queue.SimpleQueue(), threading.Event()
     future = Future()
     def collect():
         try:
-            future.set_result(_collect(store, key, rank, ranks, history, outgoing, stopping))
+            future.set_result(_collect(store, key, rank, ranks, outgoing, stopping))
         except BaseException as error:
             future.set_exception(error)
     worker = threading.Thread(target=collect, name='mesh-observations', daemon=True)
     worker.start()
-    return outgoing, stopping, worker, future, kept
+    return outgoing, stopping, worker, future
 
 
 def close(observer):
-    """The run's observations: emitted, and appended to the program's observations file (`kept`, the key its placement
-    read) once execution has ended, so its next run starts from them."""
-    outgoing, stopping, worker, future, kept = observer
+    """The run's observations, emitted: a log of this execution, never an input to a later placement (the operator,
+    2026-10-30: a fit is reused only when a caller passes it as an operand)."""
+    outgoing, stopping, worker, future = observer
     stopping.set()
-    records = future.result()
-    emit([{'observations': records}])
-    if kept is not None and records:
-        observations(kept).extend(records)
-        file = path(kept)
-        file.parent.mkdir(parents=True, exist_ok=True)
-        with file.open('a') as out:
-            out.write(''.join(json.dumps(record, separators=(',', ':')) + '\n' for record in records))
+    emit([{'observations': future.result()}])
 
 
-def _collect(store, key, rank, ranks, history, outgoing, stopping):
+def _collect(store, key, rank, ranks, outgoing, stopping):
     sent, received, pending = 0, [0] * ranks, {}
     waiting, idle = [], threading.Event()
     announced = False
@@ -103,10 +76,6 @@ def _collect(store, key, rank, ranks, history, outgoing, stopping):
                            'completion_seconds_bounds': [max(p['completion_seconds_bounds'][0] for p in peers.values()),
                                                          max(p['completion_seconds_bounds'][1] for p in peers.values())]}
                     records.append(row)
-                    held = history if isinstance(history, list) else observations(history)
-                    held.append(row)
-                    from assignment import window
-                    held[:] = window(held)
                     del pending[episode]
             finished = [f'{key}/finished/{peer}' for peer in range(1, ranks)]
             if announced and (not finished or store.check(finished)) and all(received[p] == int(store.get(k)) for p, k in enumerate(finished, 1)):

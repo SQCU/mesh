@@ -103,7 +103,7 @@ def main():
     configuration = placement(mesh, 'tp',
         {'function': 'transformer_forward_backward', 'steps': STEPS, 'layers': LAYERS, 'batch': BATCH,
          'sequence': SEQ, 'width': DIM, 'heads': HEADS, 'ffn': FFN, 'sequence_parallel': SP},
-        os.environ.get('MESH_OBSERVATIONS', '~/.cache/mesh/observations/tp.jsonl'), parameters=parameters())
+        None, parameters=parameters())
     with torch.device("meta"):
         model = nn.Sequential(*(Block() for _ in range(LAYERS)))
         whole = torch.empty(BATCH, SEQ, DIM)

@@ -48,11 +48,11 @@ for layer in range(layers):
 key = shared[0].declare(rows, x.dtype, capacities=capacities)
 for operation in shared[1:]:
     operation.declare(rows, x.dtype, capacities=capacities)
-observations = []
-observer = rollout.start(None, 'engines', 0, 1, observations)
+observer = rollout.start(None, 'engines', 0, 1)
 from torch_mesh.declarations import Function, execution_sequence
+# placed once, on this pool as it is: no observation of an earlier chunk or run is an input
+assigned = engines.placement(pool, [], step=0)
 for start in range(0, steps, every):
-    assigned = engines.placement(pool, observations, step=start // every)
     calls = min(every, steps - start)
     spans, source = [], x
     for projection, operation in zip(projections, shared):

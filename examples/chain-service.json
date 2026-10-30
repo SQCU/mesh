@@ -8,7 +8,6 @@
   "steps": 32768,
   "rows": 8,
   "seed": 0,
-  "observations": "chain",
   "parameters": {
     "steps_per_replay": {
       "value": 128,

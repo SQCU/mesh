@@ -149,8 +149,9 @@ the Metal capability manifest directory, relative to the loaded mesh source (`et
 Missing manifests, required fields or device facts fail preparation. The first two scheduling sizes give
 the recurrent frames per prepared write batch and the frames per input block. The third sets the longest
 dependent tile chain used by the fused products. The sample uses 128 recurrent frames and 512 input frames.
-`observations` supplies completed calls used for the next work assignment. It names no tensor files, shares or rank: each rank's block is the
-backend's. [examples/chain-service.json](../examples/chain-service.json) is a sample.
+`placement`, optional, is a fit to reuse (`{"parts": ..., "operands": ...}`, as a run's 'placed' record names it);
+without it the parts are solved afresh on the collective as it is. It names no tensor files or rank: each rank's block
+is the backend's. [examples/chain-service.json](../examples/chain-service.json) is a sample.
 
 `chain.inputs(configuration, steps, rows)` returns input and weight arrays in region memory: standard normal inputs,
 and A and B standard normal over the square root of the width. The draw order and float16 values are the same as
@@ -214,8 +215,8 @@ reads destination-writing operators through PyTorch's functionalization metadata
 before looking up cached numerical code. A chunk's k gathers are one crossing issued once, each tick its repeat.
 See the [partial tensor and FX reference](partial-tensors-and-fx.md) for the complete interfaces.
 
-**Configuration.** `steps`, `rows`, `seed`, `input_width`, `width` (H), `layers`, `steps_per_replay` and
-`observations`. `lstm.inputs(configuration, steps, rows)` returns the input and weights in region memory, using
+**Configuration.** `steps`, `rows`, `seed`, `input_width`, `width` (H), `layers`, `steps_per_replay` and an
+optional `placement`. `lstm.inputs(configuration, steps, rows)` returns the input and weights in region memory, using
 Torch's initialization: `w_ih_<l>` [4H, its input], `w_hh_<l>` [4H, H] and `b_<l>` [4H] in Torch's gate order.
 Rank 0 arranges them before the communicator exists, so no peer's wait spans that host work; every other rank
 passes the global shape alone to the scatter. The input is broadcast once. The top layer's full output sequence

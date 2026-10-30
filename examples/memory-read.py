@@ -15,7 +15,7 @@ def main():
     data = torch.full((count * 8,), 0x5a5a, dtype=torch.int16, device='mps')
     output = torch.zeros(1024, dtype=torch.int32, device='mps')
     function = streamed.prepare_read(data, output, count, config.rounds)
-    observer = rollout.start(None, 'memory-read', 0, 1, [])
+    observer = rollout.start(None, 'memory-read', 0, 1)
     completion = function.completion()
     started = now()
     function.enqueue()

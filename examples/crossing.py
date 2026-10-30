@@ -35,7 +35,7 @@ def main():
     function = Function(chain, x, y, weight)
     group.plan(function.declare(group))
     function.prepare()
-    observer = rollout.start(dist.distributed_c10d._get_default_store(), 'crossing', rank, size, [])
+    observer = rollout.start(dist.distributed_c10d._get_default_store(), 'crossing', rank, size)
     group._observers = [observer]
     started = now()
     function.run()

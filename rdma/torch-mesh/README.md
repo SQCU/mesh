@@ -213,11 +213,12 @@ parallelize_module(block, mesh, {"wq": partition.ColwiseParallel(), "wo": partit
   capacity, and the parts move on the run's own evidence (below); see [design/heterogeneity.md](../../design/heterogeneity.md).
   Parts are indexed by rank, not by node.
 
-### Parts from the run's own evidence
+### Parts solved on the collective as it is
 
 The program declares units. `configuration.placement` computes the next work split before tensors are built.
 `configuration.bind` compiles the declared calls and installs their routes. The function then runs directly.
-Observations are data for the next compilation, not a saved controller to restore.
+Observations are emitted as a log of the execution; they are never an input to a placement, which is solved afresh
+or passed explicitly by its caller.
 
 `partition.follow(*ts)` compiles exact migration ranges. Page-aligned remote ranges in declared contiguous region
 layouts write from original source views to final destination views through the common WRITE interface, with
@@ -256,7 +257,7 @@ from torch_mesh.declarations import execution_sequence
 pool = engines.Engines(["mps", "cpu", "ane"], ane=configuration["ane"])
 ffn = engines.FFN(gate, up, down, engines=pool, name="ffn")
 key = ffn.declare(x.shape[0], x.dtype, capacities=configuration["work_rates"])
-assigned = engines.placement(pool, observations, step=episode)
+assigned = engines.placement(pool, [], step=0)
 call = ffn.prepare(x, parts=assigned["parts"][key])
 program = execution_sequence([call] * invocations, call.output)
 program.realize()
