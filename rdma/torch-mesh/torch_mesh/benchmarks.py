@@ -54,6 +54,36 @@ def collective_operands(what, n, rank, size):
     raise ValueError(f'unknown collective measurement: {what}')
 
 
+def expected(what, rank, size, count):
+    """Each case's output once its calls are done, from its operands (collective_operands): the max of every rank's
+    rank + 1, the root's 1, the all-gather's segment r r + 1, the exchange's its predecessor's"""
+    import torch
+    if what in ('all_reduce_max', 'reduce_scatter_max'):
+        return torch.full((count,), float(size))
+    if what == 'broadcast':
+        return torch.full((count,), 1.0)
+    if what == 'all_gather':
+        return torch.arange(size, dtype=torch.float32).repeat_interleave(count // size) + 1
+    return torch.full((count,), float((rank - 1) % size + 1))
+
+
+def checked(rank, outputs):
+    """Every case's output against what its operands give, read once every call is done: the library's contract,
+    outside every measured interval. A case whose output differs fails the run, naming it."""
+    from .engines import host
+    wrong = []
+    for what, requested, output, want in outputs:
+        got = host(output).float()
+        bad = int((got != want).sum())
+        if bad:
+            first = int((got != want).nonzero()[0])
+            wrong.append(f'{what} at {requested} bytes: {bad} of {got.numel()} elements, the first at {first} '
+                         f'{float(got[first])} against {float(want[first])}')
+    print(json.dumps({'rank': rank, 'checked': len(outputs), 'wrong': wrong}), flush=True)
+    if wrong:
+        raise RuntimeError(f'rank {rank}: ' + '; '.join(wrong))
+
+
 def bandwidth(config):
     # design/whole-function.md#observations
     import torch
@@ -63,7 +93,7 @@ def bandwidth(config):
     dist.init_process_group(backend='mesh', device_id=torch.device('mps', 0))
     rank, size = dist.get_rank(), dist.get_world_size()
     group = dist.distributed_c10d._get_default_group()._get_backend(torch.device('mps'))
-    cases = []
+    cases, outputs = [], []
     for requested in config['sizes']:
         n = requested // 2
         calls = min(config['most_calls'], max(config['least_calls'], config['bytes_per_size'] // requested))
@@ -71,6 +101,7 @@ def bandwidth(config):
             source, output, useful, declaration = collective_operands(what, n, rank, size)
             binding, declarations = prepare_fragments([(declaration, source, output)], group)
             cases.append((binding, useful, declarations, calls, what, requested))
+            outputs.append((what, requested, output, expected(what, rank, size, output.numel())))
     group.plan([(declarations, calls) for _, _, declarations, calls, _, _ in cases])
     prepared = []
     for binding, useful, _, calls, what, requested in cases:
@@ -87,6 +118,8 @@ def bandwidth(config):
             'started': started, 'rank': rank, 'size': size, 'useful_work_bytes': useful * calls,
             'report': {'what': what, 'requested_bytes': requested, 'calls': calls,
                        'useful_output_bytes_per_call_rank': useful}}))
+    rollout.close(observer)
+    checked(rank, outputs)
     dist.destroy_process_group()
 
 
