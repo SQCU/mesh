@@ -573,8 +573,11 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
     struct kernels *k = program_kernels(program, &message);
     if (!k) { recording_free(r); return (struct metal_result){EINVAL, message}; }
     id<MTLComputePipelineState> state = k->pipelines[KIND_tracks];
-    const uint64_t width = state.maxTotalThreadsPerThreadgroup < MESH_TRANSPORT_ELEMENT_THREADS ? state.maxTotalThreadsPerThreadgroup
-                                                                                               : MESH_TRANSPORT_ELEMENT_THREADS;
+    /* a worker the widest threadgroup its pipeline takes, at most a group kernel's: one a core, each claim's chunk
+       as wide as a core holds (a landing's block 4096 elements at 1024 threads), so a claim's scan and fences are
+       spread over four times the elements of a 256-thread chunk */
+    const uint64_t width = state.maxTotalThreadsPerThreadgroup < MESH_TRANSPORT_GROUP_THREADS ? state.maxTotalThreadsPerThreadgroup
+                                                                                             : MESH_TRANSPORT_GROUP_THREADS;
     const uint64_t T = tracks, C = 2 * T, widest = MESH_TRANSPORT_GRID_THREADS / width;
     /* the tasks: each item's runs of joined steps (one for an item of none, which raises its count alone), and every
        chunk they hold; a step's chunks are its dispatch's threadgroups (at most `widest`, a dispatch's most), and the
