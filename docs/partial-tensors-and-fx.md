@@ -1,7 +1,7 @@
 # Partial tensors and the FX declaration path
 
-This is the interface reference for `python/mesh`, the ragged PyTorch frontend, and the native headers they
-use. It describes the source on `main` through 2026-10-27. The [data model](../design/data-model.md)
+This is the interface reference for the ragged PyTorch frontend and the native headers it
+uses. python/mesh, a Pallas-spelled block DSL over torch_mesh, was deleted on 2026-10-30: nothing imported it. It describes the source on `main` through 2026-10-27. The [data model](../design/data-model.md)
 explains why the project uses pages, compilation and one-sided writes. This document names the existing types,
 their operands, and the work each interface performs. The [graph history](../design/aot-graphs-and-pytorch.md)
 records how the native and PyTorch paths acquired their roles.
@@ -10,17 +10,15 @@ records how the native and PyTorch paths acquired their roles.
 
 | Input | Preparation | Execution |
 |---|---|---|
-| `mesh.Program`, tensor blocks and kernel declarations | Build read/write relationships; allocate local backings; declare collective groups and bind native writes | One native schedule contains the numerical spans and prebound crossings. |
 | A PyTorch function, including backward when the function calls it | `declarations.Function` fake-traces the function; the compiler binds numerical commands and collective operands | Submit the same native schedule as the native frontends. |
 | Native `MatrixView`, `MetalProgram`, or recorded Metal commands | Bind dispatches, operand slots, accesses and residency | Native command submission/replay, also used by the FX frontend. |
 
-Partial movements and FX declarations meet in `backend.Call`, `ProcessGroupMesh`, and `libnccl-mesh`.
+FX declarations meet the library in `backend.Call`, `ProcessGroupMesh`, and `libnccl-mesh`.
 The communicator's physical graph retains parallel cables and relay nodes. A logical participant set is an
 operand describing who contributes or receives values; it is not a replacement physical topology.
 
-Three meanings of “partial” must stay distinct:
+Two meanings of “partial” must stay distinct:
 
-- `mesh.Partial` records which mathematical terms a value contains and which it still needs.
 - PyTorch's `Partial` placement describes an unreduced distributed value. `RaggedShard` describes unequal shards.
 - The `PARTIALS` collective combines attention records `[m, l, O...]` with the native log-sum-exp operator.
 
@@ -28,166 +26,6 @@ A tensor block is a numerical view. It is not necessarily one bridge page. Progr
 pages with masks confined to each page. Tensor adapters resolve local storage into that page domain during
 preparation. Affine rows stay compact until the common compiler emits physical DMA descriptors. A descriptor
 can cover a sub-page selection or merge adjacent selections across page boundaries.
-
-## Python partial tensor API
-
-Source: [python/mesh/__init__.py](../python/mesh/__init__.py). The package exports `Program`, `Tensor`, `Ref`,
-`Partial`, `BlockSpec`, `ShapeDtypeStruct`, and `Result`. It also carries the bridge module's
-names from [rdma/mesh.py](../rdma/mesh.py), so existing users of `mesh.ffi`, `mesh.lib`, and region storage use the
-same substrate. Put the checkout's `python/` before `rdma/` on the import path when using this surface.
-
-### Storage and view types
-
-| Type or member | Operands and meaning |
-|---|---|
-| `Tensor` | A two-dimensional shape, block shape, dtype and map from block coordinates to `Ref`. Edge blocks can be smaller. Construct through `Program.tensor`. |
-| `Tensor.blocks`, `Tensor[i, j]` | The block map and one block reference. |
-| `Tensor.region(row, column, rows, columns)` | A view within one backing block, or across blocks when the tensor has a contiguous backing. |
-| `Tensor.T`, `Tensor.broadcast_to(shape)` | Transposed or broadcast view metadata. |
-| `Tensor.on(peer)` | The pair `(tensor, peer)` used to place a copy. |
-| `Tensor.dense()` | The backing view when contiguous; otherwise concatenates blocks into a new tensor. It is not always a zero-copy accessor. |
-| `Ref` | A program, backing, element offset, rows, columns, row and column strides, and logical origin. `shape`, `dtype` and `partial` describe the value. |
-| `Ref.key` | `(backing.index, offset, rows, columns, row_stride, column_stride)`, identifying a view. |
-| `Ref.tensor` | A `torch.as_strided` view over the backing. |
-| `Ref.array` | A NumPy view for CPU storage; converting an MPS value can copy it to CPU. |
-| `Ref.slice(row, column, rows, columns)` | A smaller view within the reference. |
-| `Ref.T`, `Ref.broadcast(rows, columns)` | View transformations; broadcast uses zero strides. |
-| `Ref.on(peer)` | The pair `(ref, peer)` used to place a copy. |
-| `Ref.whole()` | Requires a contiguous view covering its entire backing. This helper's restriction is not the rule for all current remote movement. |
-| `_Backing` | Internal storage record: program, element count, scalar type, transferability, index, storage and region membership. `flat()` creates storage if absent; realization forces the local backings it needs. |
-| `ShapeDtypeStruct(shape, dtype=np.float32)` | Describes a kernel's output before its storage exists. |
-| `Partial(required, terms)` | Frozen sets of required and present term labels. `merge(refs)` unions terms, rejects duplicate terms, and returns `None` when the result is complete. |
-
-Offsets and strides in `Ref` are in elements. Native byte views multiply them by element width during
-preparation. A `Ref` does not expose a remote process pointer. The compiler-local tensor adapters bind a local
-address to a page table; the common WRITE preparer consumes that table and a page-local start. The public
-communication interface takes page identities and within-page masks.
-
-### Block selection and numerical kernels
-
-`BlockSpec(block_shape, index_map=None, region_map=None)` connects an operand to a kernel's grid. Its
-`index_map(*coordinate)`, required for a non-`None` block shape, selects a block origin, multiplied by `block_shape`; edge extents are clipped to the
-tensor. `region_map(ref, *coordinate)` can further select the reference passed to the kernel. A `None` block
-shape passes the operand through. `_bind(tensor)` and `resolve(coordinate)` bind and resolve that metadata while
-recording calls.
-
-`Program.kernel_call(kernel, *, out_shape, grid, in_specs, out_specs, peer=None)` returns a configuration
-function. Calling that function with input operands creates the output `Tensor` objects and records one kernel
-call for each grid coordinate. A single `ShapeDtypeStruct` returns one tensor; a sequence returns a tuple.
-There must be one block specification for each input and output. `peer=None` places the kernel on all ranks;
-a rank number places it on that rank.
-
-The numerical implementation is called as:
-
-```python
-implementation(program, sources, targets, coordinate)
-```
-
-Here `sources` and `targets` are the references resolved by the block specifications. The implementation is
-`program.functions.get(kernel, kernel)`. A kernel accepting incomplete mathematical terms must declare
-`kernel.combine = True`; ordinary kernels cannot consume those terms as complete values. Recording merges
-input term metadata into output metadata. This mechanism does not automatically infer missing terms from an
-arbitrary matrix multiply.
-
-For example, a matrix product can name four output tiles. The input references include each tile's full
-inner dimension, so the following declaration needs no reduction of partial sums:
-
-```python
-from mesh import Program, BlockSpec, ShapeDtypeStruct
-
-def product(program, sources, targets, coordinate):
-    targets[0].tensor.copy_(sources[0].tensor @ sources[1].tensor)
-
-p = Program('metal')
-a = p.tensor((64, 64), block_shape=(32, 64))
-b = p.tensor((64, 64), block_shape=(64, 32))
-c = p.kernel_call(
-    product, out_shape=ShapeDtypeStruct((64, 64)), grid=(2, 2),
-    in_specs=(BlockSpec((32, 64), lambda i, j: (i, 0)),
-              BlockSpec((64, 32), lambda i, j: (0, j))),
-    out_specs=BlockSpec((32, 32), lambda i, j: (i, j)),
-)(a, b)
-# Fill the input views before preparation.
-p.realize()
-```
-
-This compiles the numerical span without executing it. Call `p.run()` to submit
-the prepared function. There is no implicit launch when an input write ends. The distributed form also
-records the collective declarations and rank ownership before `realize`.
-
-### Program lifecycle and host access
-
-| Interface | Behavior |
-|---|---|
-| `Program(backend='cpu', *, functions=None, group=None)` | Creates the SPMD declaration surface. Backends are `cpu`, `metal` and its alias `mps`. Every rank records the same program; ownership operands place work. |
-| `tensor(shape, block_shape=None, dtype=np.float32, transferable=True, *, contiguous=False)` | Declares blocked storage. `contiguous=True` gives blocks one shared backing. |
-| `copy(source.on(a), destination.on(b), *, queue=0)` | Records a local copy or native remote movement. Tensor copies intersect source and destination block cuts. Remote preparation binds original source and final destination views. |
-| `send`, `recv` | Aliases of `copy`. They are two names for the same graph declaration, not a runtime request/response pair. |
-| `replicate(source, peer)` | Declares and caches a copy of the source backing at another peer, retaining the source view's layout. |
-| `constant(ref, value=None)`, `is_constant(ref)` | Mark storage as constant, optionally fill it, and query that declaration. |
-| `write(ref)` | Yields the input's existing torch tensor. It allocates no staging buffer and starts no execution. Fill inputs before preparing their call. |
-| `export(ref)` | Records a local result use and returns a `Result`. Declare it before realization. |
-| `realize()`, alias `start()` | Resolves read/write order, allocates storage, binds native crossings, and compiles numerical spans through `Function`. It executes no payload and starts no threads. |
-| `run` | The native submission function, bound by `realize`. Its commands and storage are already fixed. |
-| `close()` | Ends owned group lifecycle. Context-manager exit calls it. |
-| `group`, `rank`, `size`, `graph` | The communicator, physical rank information and prepared sequence metadata. |
-
-`Result.tensor` is the declared output view. Completion is observed for the whole submitted function,
-using the same external completion mechanism as the other compiled examples. There is no per-result
-readiness guard, consume acknowledgment, reader token, failure controller or execution trace.
-
-`_Task` retains declaration metadata only. `realize` computes overlapping read/write dependencies and a
-single order across all ranks. Maximal numerical spans use `Function`; native crossings retain the original
-and final storage. Both append to one native schedule before execution. No Python scheduler walks tasks
-at runtime. Compilation failure propagates without running the source callable. The native FX emitter
-currently supports Metal; a CPU numerical graph fails preparation instead of using a framework executor.
-CPU/ANE shares explicitly bound by `engines.Prepared` use the common recorder's host records.
-
-A numerical kernel uses tensor operations that the FX compiler can trace. NumPy conversion or opaque host
-work is not an alternate execution path. Constants are input declarations; preparation does not execute a
-separate constant-only numerical graph. Repeated complete calls follow the same compiled graph.
-
-### Collective declarations over blocks
-
-Source: [collective.py](../python/mesh/collective.py). Every function below takes `(program, value, *, ...)`
-and has `queue=0`. `owners` maps block coordinates to physical ranks. `peers` names logical participants.
-Movement functions return the original tensor with its declared movement; a user-supplied combine can create
-new result blocks.
-
-| Function | Other keyword operands | Result placement |
-|---|---|---|
-| `all_gather` | `peers`, `owners` | Owned blocks replicated among participants. |
-| `broadcast` | `root`, `peers` | Root's blocks replicated to participants. |
-| `all_to_all` | `owners`, `destinations` | Each block moved from its owner to its specified destination. |
-| `scatter` | `root`, `owners` | Root's blocks moved to owners. |
-| `gather` | `root`, `owners` | Owners' blocks moved to root. |
-| `reduce_scatter` | `peers`, `owners`, `op=SUM` | Combined blocks held by their owners. |
-| `reduce` | `root`, `peers`, `op=SUM` | Combined blocks held by root. |
-| `all_reduce` | `peers`, `owners=None`, `op=SUM` | Combined blocks replicated among participants. |
-
-`sum_scatter` aliases `reduce_scatter`; `all_sum` aliases `all_reduce`; `all_max` and `all_min` select `MAX`
-and `MIN`. `send` and `recv` alias `Program.copy`; `recv_like` aliases `Program.replicate`.
-
-`SUM`, `MAX` and `MIN` bind native reductions. `PARTIALS` requires complete contiguous float32 records within
-each row, with at least `[m, l, O]`; gaps between rows are allowed. An associative callable `op` moves terms to
-an owner and combines them with a tree of kernel calls. It must declare `combine`, and custom `all_reduce`
-requires an owner map.
-
-The movement preparation hooks build `ViewWrites` from original/final views and compact relay storage.
-Reduction preparation computes common logical cuts, then binds contiguous aliases of the original operands.
-Each preparation returns its native bindings and common `Call` group. The full physical communicator remains present
-when some ranks only relay. [The `_native` adapter](../python/mesh/_native.py) supplies:
-
-| Interface | Role |
-|---|---|
-| `World(device, group)` | Own or reuse a mesh process group; establish rank and size. |
-| `World.union_cuts(task, cuts)` | Exchange layout cuts during preparation. |
-| `World.prepare(keys)`, `World.of(queue, members)` | Bind logical queue/member keys to the physical communicator. |
-| `World.declare(tasks)` | Plan the prepared task declarations through the common library. |
-| `World.close()` | Group lifecycle. |
-| `dtype`, `numpy_dtype` | Normalize scalar types; NumPy conversion does not provide a bfloat16 dtype here. |
-| `allocate(numel, scalar, device, in_region)` | Prepare CPU/MPS storage, using region storage when required. |
-| `call(...)`, `prepare_writes(deliveries, group)`, `prepare_fragments(bindings, group)` | Adapt metadata, prepare native writes, and prepare native reduction fragments. |
 
 ## The FX path
 

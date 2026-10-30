@@ -13,7 +13,7 @@ lines in 5,516. The file is not copy-pasted: what it holds twice are whole alter
 
 | What | Lines | Evidence |
 |---|---|---|
-| `python/mesh/` (`__init__.py`, `_native.py`, `collective.py`) | ≈1,000 | Nothing imports it. The venv's only path file, `mesh.pth`, adds `rdma/`, so every `import mesh` gets rdma/mesh.py. pyproject sets `package = false` (verified). But design/algorithm-sources.md:25-89 calls it the Python surface "restored from mesh `57628982^:python/mesh/`" for the library-core deliverable (deliverables.md L5), and INDEX.md:67 indexes it: deleting it retires that deliverable's surface, the operator's decision. |
+| `python/mesh/` (`__init__.py`, `_native.py`, `collective.py`) | ≈1,000 | Deleted 2026-10-30. Nothing imported it, and `import mesh` gets rdma/mesh.py (mesh.pth adds `rdma/`). It was a Pallas-spelled block DSL whose `_native.py` called torch_mesh's `backend.Call`, `prepare_writes`, `prepare_fragments` and `plan`: a wrapper over the PyTorch deliverable, not one of the closing set (typed MPS programs, FX/torch.export PyTorch, LiteRT on Metal, a non-transformer demo). Calling its deletion the operator's decision was wrong. |
 | `mesh_mpi.Write_pages_prepare` | ≈25 py | No caller in either repo, xonotic included (verified). The library entry it wraps, `ncclMeshWritePagesPrepare`, stays: it is the page-mask half of nccl.h's page-table + page-mask WRITE contract, the integration's named interface, and it already lowers through the layout preparer's `write_prepare`. |
 | External `ncclMeshComplete`, `ncclMeshStream.issue` | (see B') | No frontend sets `issue` or calls `ncclMeshComplete` (verified). Deleted with B', 014471ee. |
 | rdma/mesh_simulate.py | 620 | Deleted, 17e3d812. |
@@ -164,6 +164,6 @@ immediately." Form C is resolved, and with it the recorder's capture:
    their record-time issue, for the reason above.
 5. E's one-track form into tracks; F's and I's single builders.
 
-Steps 1-5 remove roughly 2,500 to 3,000 lines across the two repositories: about 1,025 without callers (most of it python/mesh, the operator's decision), 710 of the
+Steps 1-5 remove roughly 2,500 to 3,000 lines across the two repositories: about 1,025 without callers (most of it python/mesh, deleted 2026-10-30), 710 of the
 library's alternative forms, and the frontends' second copy of one lowering. That is the reduction this evidence
 supports.

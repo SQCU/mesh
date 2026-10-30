@@ -63,8 +63,8 @@ other projects, such as a game bot, and old dated records; they are not listed h
   form compiled, which is meshlib's own. It shows that a guard can halt a call with no party at fault, that a routing
   operand over a declared range needs no guard, and that no program we run needs an eager call, with the code that
   follows.
-- [design/algorithm-sources.md](design/algorithm-sources.md): the published prior art behind each part of the Python
-  surface (`python/mesh`), its kernels and the transport, under the section names the source cites as anchors. It
+- [design/algorithm-sources.md](design/algorithm-sources.md): the published prior art behind each part of the program
+  surface (its Python form, python/mesh, deleted 2026-10-30), its kernels and the transport, under the section names the source cites as anchors. It
   opens with the operator's statements on prior literature and on deleted implementations.
 - [design/distributed-reduce.md](design/distributed-reduce.md): the September 2026 design of the reduce over page
   tables (reduce-scatter then all-gather, completion read from the page table, reuse proved by downstream pages), the

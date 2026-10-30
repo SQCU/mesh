@@ -22,7 +22,7 @@ while consumers are indexed by operand publication. There is no function scan or
 realization. The [execution description](transport.md)
 separates shared function metadata from each value's operands and uses.
 
-**The Python surface** (`python/mesh`, restored from mesh `57628982^:python/mesh/` onto the current library; program
+**The Python surface** (deleted on 2026-10-30, design/deliverables.md section 2; the prior art below stays, cited by the C runtime. It was `python/mesh`, restored from mesh `57628982^:python/mesh/` onto the current library; program
 type B, design/deliverables.md section 5; its type C kernels and layers, examples/kernels.py and examples/nn.py, were
 deleted 2026-10-22 with the examples that exercised it): a program surface spelled as Pallas spells it (the Swift module of the same contract, swift/Mesh.swift,
 was deleted in a8952de9). A `Program(backend, *, functions,

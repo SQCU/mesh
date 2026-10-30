@@ -205,7 +205,7 @@ Where a row's subject has a document of its own, that document describes it: the
 | I8 | Mesh contains no application: no model, layer, game, policy or caller name in the library. | 2026-10-17 (section 5): "program type A in bridge, program type B in meshlib, program type C in meshlib/examples". |
 | I9 | The caller places. The library has no cost model, automatic sharding or topology inference, and infers no collective from rank count or tensor type. | 2026-09-14 (collective-goals-2026-09-14.md): "why are there cost models lol we're talking about a scituation where we specified asnyc producers, async consumers, and all responsibilty lands on the CALLER to supply a MESH AND TENSOR PLACEMENT CONFIG which is USEFUL instead of USELESS."; 2026-09-15: "note that peer>1 prohibits the use of type inference of broadcasts or alls rather than defined scatters and defined gathers" |
 | I10 | Transport fragmentation is invisible: one request does not bound a section's bytes, and chunking changes no shape, partition, function or verb. | 2026-09-15 (collective-goals-2026-09-14.md): "remember that a streaming transportmessagesize transport layer implementation should be totally transparent to all users of a send or receive api call exposed through our mesh api; this is something which is purely internal and have no effect on any caller or user of this api at any point in the future." |
-| I11 | Explicit synchronization is a library call a caller makes (`collective.sync_on_remote_fill`, python/mesh/collective.py), not a default. | 2026-09-14 (collective-goals-2026-09-14.md): "if we want to supply a 'sync_on_remote_fill' barrier, this is library code that needs to be used EXPLICITLY AND DIEGETICALLY IN CALLING CONTEXTS, it can NEVER be a default behavior." |
+| I11 | Explicit synchronization is a library call a caller makes (python/mesh's `collective.sync_on_remote_fill` was one; none is offered since it was deleted), not a default. | 2026-09-14 (collective-goals-2026-09-14.md): "if we want to supply a 'sync_on_remote_fill' barrier, this is library code that needs to be used EXPLICITLY AND DIEGETICALLY IN CALLING CONTEXTS, it can NEVER be a default behavior." |
 | I12 | A failure is a status value out of band: an operation concludes early on a link error, and the driver invokes again at the data layer. | 2026-09-10 (design/pages-and-functions.md): "error status returns are allowed by the specifications we use... but it can never be synchronous or blocking or consumed by a callgraph itself... it can only be passed monadically through a metadata channel..." |
 | I13 | Goal A's period and Goal B's decoded tokens/s ratio on the two-node program were September 2026's measures ([collective-goals.md](collective-goals.md), history). | Quantities (design/rubrics.md), 10-20: "meausrements which do not contian those specific values are lesser than measurements which do". |
 | I14 | The collective is Megatron-LM TP2 (Shoeybi et al. 2019) with a reduce of row-split partials. | 2026-10-22 (design/extents-and-liveness.md): "connection to the prior literature is important for understanding what are choices and what are strictly dominating superior methods we must use". |
@@ -223,25 +223,12 @@ Where a row's subject has a document of its own, that document describes it: the
 
 ## 2. Public surface
 
-Restored 2026-10-17 against the restored interfaces (mesh 604f210e deleted it with the Swift module's record; the
-Python surface came back in python/mesh; the Swift module, restored in 71bced9e, was deleted again in a8952de9 and its
-callers in 2fff7dfe). The importable library is the Python surface `mesh` (`python/mesh`) over the C runtime
-(`rdma/mesh-dataflow.c`, `mesh-collective.c`, `mesh.h`, the node's resident bridge) and libnccl-mesh
-(`torch.distributed`'s "mesh" backend, rdma/torch-mesh) with torch operands; the kernels and layers its examples
-composed (examples/kernels.py, examples/nn.py, program type C) were deleted 2026-10-22 with the other test code:
-
-```
-mesh.Program(backend, *, functions, group, timeout, trace)   // SPMD; realize() == start()
-Program.tensor(shape, block_shape, dtype, transferable, *, contiguous) -> Tensor  // blocks of Refs (views of backings)
-Program.kernel_call(kernel, *, out_shape, grid, in_specs, out_specs, peer)(*operands)  // kernel(program, inputs, outputs, coordinate)
-BlockSpec(block_shape, index_map, region_map) / ShapeDtypeStruct(shape, dtype) / Partial(required, terms)
-Program.copy(src.on(a), dst.on(b), *, queue) == send == recv / Program.replicate(tensor.on(a), b)
-Program.constant(ref, value) / Program.is_constant(ref) / Program.write(ref) / Ref.writable / Program.export(ref) -> Result
-mesh.collective: SUM, MAX, MIN, PARTIALS; send, recv, recv_like, broadcast, scatter, gather, all_gather, all_to_all,
-                 reduce, reduce_scatter, sum_scatter, all_reduce, all_sum, all_max, all_min, sync_on_remote_fill
-                 // a block row one call: AllGatherV, all-to-all, ReduceScatterV, all-reduce, the partials merge; op= a supplied combine
-Program.report / MeshError(kind busy|link|function, code)
-```
+The importable library is libnccl-mesh (rdma/NCCL.md) through `torch.distributed`'s "mesh" backend (rdma/torch-mesh),
+its partial tensors PyTorch's own (DTensor `Partial`, lowered AOT by the FX path: docs/partial-tensors-and-fx.md), with
+rdma/mesh.py its binding and mesh_mpi.py its NumPy calls. The Python surface restored on 2026-10-17 was deleted on 2026-10-30. It was python/mesh, a
+Pallas-spelled block DSL over torch_mesh; nothing imported it, and `import mesh` never reached it, because mesh.pth
+puts rdma/ on the path and rdma/mesh.py answers first. Its Swift twin went in a8952de9, and the kernels and layers its examples composed (examples/kernels.py, examples/nn.py)
+on 2026-10-22.
 
 Frontier, stated as measured: the partial-tensor library's own frontier is the deleted native executor's (mesh
 57628982): the literature
@@ -274,7 +261,8 @@ Each gives its signature, its reference and the restored surfaces.
 ### L — library core
 
 Restored 2026-10-17 (deleted in 604f210e; L5 in 974b5046) against the restored surfaces; each row's text is the
-record's, its last sentence the restored surfaces' names.
+record's, its last sentence the restored surfaces' names. Those surfaces are history now: the Swift module went in
+a8952de9, and python/mesh on 2026-10-30 (section 2). On the PyTorch path a partial is DTensor `Partial`.
 
 **L1. Partial tensor storage = sections with ranks.** A `TensorPart(rank, bytes)` is the storage of one term `T_i = T(Q_i X)` (layout `P`) or one block `Q'_j T(X)` (layout `S`) of the Definition; `Mesh.tensor(on:sections:)`. The partial itself is the mathematical term; the storage never carries more than its coordinates. A section is contiguous locally and addressed globally by `(rank, section)`. Ref: Pallas BlockSpec. Restored surfaces: Python `Tensor` blocks and `Ref` views (`Program.tensor`, `region`).
 
@@ -353,8 +341,8 @@ serialization of one tile's vector; `T_f` the split sublayer's leader-alone time
 - An expression compiler, kernel zoo, scalar DSL, or any numerics inside mesh (I7).
 - A caller's operators moved into mesh (I8), or a model/layer API in mesh.
 - The layering, the operator's (2026-10-17): "program type A in bridge, program type B in meshlib, program type C in
-  meshlib/examples". Type A is the node's resident bridge (rdma/mesh-link.c, built as rdma/mesh-flow), type B the library (the C runtime,
-  libnccl-mesh and its Python surface `python/mesh`), type C its examples. The Python
+  meshlib/examples". Type A is the node's resident bridge (rdma/mesh-link.c, built as rdma/mesh-flow), type B the library (the C runtime and
+  libnccl-mesh, with its bindings; its Python surface python/mesh deleted 2026-10-30), type C its examples. The Python
   surface's kernels and layers (examples/kernels.py, examples/nn.py: compositions over torch, restored 2026-10-17
   from the 09-14 library on the operator's "1: SOME FUCKING HIGHER ORDER FUNCTIONS FOR PARTIAL TENSORS",
   collective-goals-2026-09-14.md) were type C, deleted 2026-10-22 with the other test code; I7 and I8 hold of the library: it calls a supplied callable and
