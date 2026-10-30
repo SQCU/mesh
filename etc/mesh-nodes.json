@@ -3,7 +3,6 @@
   "access": {
     "key": "~/.ssh/primeintellect_ed25519"
   },
-  "run_seconds": 3300,
   "python": "~/.venv-mesh-uv/bin/python",
   "rank_port": 29600,
   "upstreams": {

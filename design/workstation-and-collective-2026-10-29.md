@@ -138,6 +138,13 @@ None of that is the collective. Every run uses the entire collective, the hourly
 
 ## What a run on the collective needs
 
+*Superseded on 2026-10-30.* The operator: the hourly is a health check that runs normal programs from main as they sit
+on the machines, in about two dozen lines; every algorithm that lived only in the hourly is repatriated, deleted or
+collapsed. rdma/mesh_hourly.py is now that: each node's job brings ~/mesh and ~/metal-microbench to main, prepares,
+and runs each listed program as torchrun would, on the nodes its bridge links, its output in the job's log. The
+election, member lists, rank wrapper and ledger below were deleted (mesh 2026-10-30), and a program keeps its own
+observations again.
+
 - **Records.** The run needs none on the operator's machine.
   - Each member writes its own rank's record, named by the run, in its own output directory. A reader (the laptop,
     anyone) fetches them from whichever members survive, when it wants to.

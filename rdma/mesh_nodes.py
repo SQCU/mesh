@@ -3,7 +3,6 @@ import concurrent.futures
 import contextlib
 import codecs
 import collections
-import ctypes
 import dataclasses
 import functools
 import getpass
@@ -11,13 +10,9 @@ import io
 import json
 import math
 import os
-import re
-import select
 import shlex
-import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -25,8 +20,6 @@ from pathlib import Path
 ROOT, HOME = Path(__file__).resolve().parents[1], Path.home()
 SSHO = ['-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'ConnectTimeout=8', '-o', 'ServerAliveInterval=15',
         '-o', 'ServerAliveCountMax=4', '-o', 'ControlPath=none']
-RUNNING, RELEASED = set(), []
-LIBC = ctypes.CDLL(None, use_errno=True)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -41,17 +34,13 @@ class Member:
 
 @dataclasses.dataclass(frozen=True)
 class Cluster:
-    """etc/mesh-nodes.json with the environment: members by bridge node number, the administrator's user and key, a
-    run's bound in seconds, the nodes' Python, the first rank port, and each repository's origin (`upstreams`, which the hourly's every
-    node reads main from)."""
+    """etc/mesh-nodes.json with the environment: members by bridge node number, the administrator's user and key, the
+    nodes' Python and the first rank port."""
     members: dict
     user: str
     key: 'str | None'
-    run_seconds: int
     python: str
     rank_port: int
-    upstreams: dict
-    hourly_minute: int
 
     @property
     def ssh(self):
@@ -66,7 +55,7 @@ def load(path=ROOT / 'etc/mesh-nodes.json'):
                                         frozenset(row.get('roles', ())), row.get('guard_headroom_gib', 0)) for row in raw['nodes'].values()}
     return Cluster(members, access.get('user') or getpass.getuser(),
                    str(Path(access['key']).expanduser()) if 'key' in access else None,
-                   raw['run_seconds'], raw['python'], raw['rank_port'], raw['upstreams'], raw['hourly_minute'])
+                   raw['python'], raw['rank_port'])
 
 
 def home_path(relative):
@@ -75,8 +64,6 @@ def home_path(relative):
 
 
 def sh(argv, input=None, timeout=None, state=None, hold=False):
-    if RELEASED:
-        raise RuntimeError('this process released its commands and starts no more')
     state = {} if state is None else state
     state.clear()
     state.update(command=argv, status='starting', started_unix=time.time(), output=[], records=[], diagnostics=[])
@@ -88,7 +75,6 @@ def sh(argv, input=None, timeout=None, state=None, hold=False):
         state['diagnostics'].append(str(error))
         raise
     state.update(pid=p.pid, status='running')
-    RUNNING.add(p)
 
     def read():
         decode = codecs.getincrementaldecoder('utf-8')('replace')
@@ -140,7 +126,6 @@ def sh(argv, input=None, timeout=None, state=None, hold=False):
     else:
         state['status'] = 'exited'
     finally:
-        RUNNING.discard(p)
         if p.stdin:
             with contextlib.suppress(OSError, ValueError):
                 p.stdin.close()
@@ -153,18 +138,6 @@ def sh(argv, input=None, timeout=None, state=None, hold=False):
     if state['status'] == 'timed-out':
         raise subprocess.TimeoutExpired(argv, timeout, output=output.encode())
     return p.returncode, output
-
-
-def release():
-    """End every running command: a guarded rank's held stdin is closed (its guard then ends the rank and exits), and
-    the rest are terminated. No command starts after."""
-    RELEASED.append(True)
-    for p in list(RUNNING):
-        with contextlib.suppress(OSError, ValueError):
-            if p.stdin and not p.stdin.closed:
-                p.stdin.close()
-            else:
-                p.terminate()
 
 
 def loads(text):
@@ -323,33 +296,6 @@ def wait_paired(nodes, log, end=math.inf):
     return ok
 
 
-def rank(node, k, size, master, tag, folder, command, port, alarm=300, env='', input=None, run=''):
-    """Rank k of `size` on `node` under `node guard` with the run's token (MESH_RUN), its operands the first line of a
-    stdin held open until it ends: closing that stdin (release) has its guard end it."""
-    state = {}
-    invoke = (f'MESH_RUN={shlex.quote(run)} RANK={k} WORLD_SIZE={size} MASTER_ADDR={shlex.quote(master)} '
-              f'MASTER_PORT={port} {env}'
-              f'{node.cluster.python} {home_path(node.source + "/rdma/mesh_nodes.py")} node guard {alarm} {node.guard} '
-              f'{command}')
-    try:
-        code, output = node.run(f'cd {home_path(folder)} && {invoke}', input=(input or b'') + b'\n', hold=True,
-                                timeout=alarm + 30, state=state)
-    except subprocess.TimeoutExpired as error:
-        code = 124
-        reason = 'remote process did not exit after its deadline'
-        state['diagnostics'].append(reason)
-        output = (error.output or b'').decode(errors='replace') + '\n' + reason + '\n'
-    if code:
-        print(f'{tag} rank{k} (exit {code}):\n' + '\n'.join(state['diagnostics']), file=sys.stderr, flush=True)
-    return {'exit': code, 'output': output, 'records': state['records'], 'diagnostics': state['diagnostics']}
-
-
-def started(pid):
-    """`pid`'s start time while it lives (not a zombie), else None."""
-    seen = process(pid)
-    return f'{seen[0][0]}.{seen[0][1]:06d}' if seen and seen[1] != 5 else None
-
-
 def run(*argv, **kw):
     return subprocess.run([str(a) for a in argv], capture_output=True, text=True, stdin=subprocess.DEVNULL, **kw)
 
@@ -445,148 +391,6 @@ def bridge_began():
     return time.mktime(time.strptime(started, '%a %b %d %H:%M:%S %Y')) if started else None
 
 
-def node_resets(since):
-    t = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(int(since)))
-    print('boot ' + re.sub(r'.*} ', '', run('sysctl', '-n', 'kern.boottime').stdout.strip()))
-    found = run('sudo', '-n', 'find', '/Library/Logs/DiagnosticReports', '-type', 'f', '-newermt', t, '(', '-name', 'panic-full*',
-                '-o', '-name', 'ResetCounter*', '-o', '-name', 'shutdown_stall*', ')').stdout.split()
-    for f in found:
-        if f.endswith('.panic'):
-            b = loads(run('sudo', '-n', 'tail', '-n', '+2', f).stdout)
-            pages = b.get('memoryStatus', {}).get('memoryPages', {})
-            print(f'{os.path.basename(f)}: {(str(b.get("panicString", "")).splitlines() or [""])[0]}; '
-                  f'wired {pages.get("wired", "")} free {pages.get("free", "")}')
-        elif f.endswith('.diag'):
-            print(f'{os.path.basename(f)}: ' + run('sudo', '-n', 'grep', '-h', 'Boot faults', f).stdout.rstrip('\n'))
-        else:
-            print(os.path.basename(f))
-    shown = run('/usr/bin/log', 'show', '--start', t, '--style', 'compact', '--predicate',
-                'process == "kernel" AND eventMessage CONTAINS "pmu fault log:"').stdout
-    print(''.join(line + '\n' for line in shown.splitlines() if 'pmu fault log:' in line), end='')
-
-
-class Process(ctypes.Structure):
-    """libproc's struct proc_bsdinfo (PROC_PIDTBSDINFO)."""
-    _fields_ = [('flags', ctypes.c_uint32), ('status', ctypes.c_uint32), ('xstatus', ctypes.c_uint32),
-                ('pid', ctypes.c_uint32), ('ppid', ctypes.c_uint32), ('ids', ctypes.c_uint32 * 7),
-                ('comm', ctypes.c_char * 16), ('name', ctypes.c_char * 32), ('nfiles', ctypes.c_uint32),
-                ('pgid', ctypes.c_uint32), ('tty', ctypes.c_uint32 * 4), ('start', ctypes.c_uint64 * 2)]
-
-
-def process(pid):
-    """`pid`'s (start time, status), reading a process through its exit as docs/facts.md has it, else None."""
-    info = Process()
-    if LIBC.proc_pidinfo(pid, 3, 1, ctypes.byref(info), ctypes.sizeof(info)) != ctypes.sizeof(info):
-        return None
-    return tuple(info.start), info.status
-
-
-def carrying(match):
-    """This user's processes but this one whose environment's MESH_RUN `match` accepts (sysctl KERN_PROCARGS2). It does
-    not read a zombie, another user's process, or a platform binary, whose environment macOS hides."""
-    pids, args, size, found = (ctypes.c_int * 16384)(), ctypes.create_string_buffer(1 << 20), ctypes.c_size_t(), {}
-    for pid in pids[:max(0, LIBC.proc_listpids(4, os.getuid(), pids, ctypes.sizeof(pids))) // 4]:
-        size.value = len(args)
-        if pid in (0, os.getpid()) or LIBC.sysctl((ctypes.c_int * 3)(1, 49, pid), 3, args, ctypes.byref(size), None, 0):
-            continue
-        raw = ctypes.string_at(args, size.value)
-        words = raw[4:].split(b'\0')[1:]
-        first = next((i for i, word in enumerate(words) if word), len(words))
-        token = next((w[9:].decode(errors='replace') for w in words[first + int.from_bytes(raw[:4], sys.byteorder):]
-                      if w.startswith(b'MESH_RUN=')), None)
-        if token is not None and match(token):
-            found[pid] = token
-    return found
-
-
-def sweep(match, last):
-    """SIGKILL the processes `carrying(match)` names until none is left or `last` (monotonic); those left."""
-    while (left := carrying(match)) and time.monotonic() < last:
-        for pid in left:
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(pid, signal.SIGKILL)
-        time.sleep(0.1)
-    return left
-
-
-def node_guard(seconds, floor, workstation, *argv):
-    """Run one rank in its own session, its operands the first line of stdin. End it at its deadline, when the node's
-    headroom falls below `floor` GiB (0: none), when stdin closes, or on SIGTERM or SIGHUP; then SIGKILL it and each
-    descendant tracked by parent pid (sampled every 0.1 s) until none remains, and then every process still carrying
-    this guard's MESH_RUN (carrying), each for at most 30 s (exit 125 naming survivors). Should this guard die, the
-    rank's alarm ends it 10 s late. Still escaping: a descendant that leaves its parent between samples and runs a
-    platform binary or with MESH_RUN scrubbed, and such a descendant of a dead guard."""
-    stop, end, floor, zombie = [], time.monotonic() + float(seconds), float(floor) * 2 ** 30, 5
-    # The headroom is memorystatus's numerator A, the pages neither wired nor compressed (free, speculative, pageable),
-    # read live by sysctl (host_statistics64 is rate-limited); on a workstation, A less the compressor's bytes in use.
-    reads = [(b'vm.page_free_count', page := os.sysconf('SC_PAGE_SIZE')), (b'vm.page_speculative_count', page),
-             (b'vm.page_pageable_internal_count', page), (b'vm.page_pageable_external_count', page),
-             *([(b'vm.compressor_bytes_used', -1)] if workstation == '1' else [])]
-    for s in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(s, lambda signum, _: stop.append(signal.Signals(signum).name))
-    while not (stop or time.monotonic() >= end or select.select([0], [], [], 0.1)[0]):
-        pass
-    line = b'' if stop or time.monotonic() >= end else sys.stdin.buffer.readline()
-    if not line.endswith(b'\n'):
-        print(f'{stop[0] if stop else "no operands"}: rank not started', file=sys.stderr, flush=True)
-        return 124
-    operands = tempfile.TemporaryFile()
-    operands.write(line[:-1])
-    operands.seek(0)
-    # PYTHONFAULTHANDLER: a rank's fatal signal, and the SIGABRT that ends it past its deadline, writes every thread's
-    # traceback to its stderr, so a rank that hangs names where (the guard pauses no rank to look)
-    rank = subprocess.Popen(argv, stdin=operands, start_new_session=True, env={**os.environ, 'PYTHONFAULTHANDLER': '1'},
-                            preexec_fn=lambda: signal.alarm(math.ceil(float(seconds)) + 10))
-    known, why, value, size = {rank.pid: process(rank.pid)[0]}, None, ctypes.c_uint64(), ctypes.c_size_t()
-    own = os.environ.get('MESH_RUN')
-    others = lambda: sorted(set(carrying(lambda token: token != own).values()))
-    from mesh_source import revision
-    print(json.dumps({'loaded': revision(ROOT), 'overlap': others()}), flush=True)
-    live = lambda pid, start: (seen := process(pid)) is not None and seen[0] == start and seen[1] != zombie
-    while why is None and process(rank.pid)[1] != zombie:
-        for pid, start in list(known.items()):
-            children = (ctypes.c_int * 4096)()
-            count = LIBC.proc_listchildpids(pid, children, ctypes.sizeof(children)) if live(pid, start) else 0
-            for child in children[:max(0, count)]:
-                if child not in known and (seen := process(child)):
-                    known[child] = seen[0]
-        headroom = 0
-        for name, scale in reads if floor else ():
-            value.value, size.value = 0, 8
-            if LIBC.sysctlbyname(name, ctypes.byref(value), ctypes.byref(size), None, 0):
-                why = f'GUARD: {name.decode()} unreadable: {os.strerror(ctypes.get_errno())}'
-            headroom += value.value * scale
-        why = why or (f'received {stop[0]}' if stop else f'deadline {seconds} s' if time.monotonic() >= end
-                      else f'GUARD: headroom {headroom / 2 ** 30:.2f} GiB below {floor / 2 ** 30:.2f}' if headroom < floor
-                      else 'its caller closed stdin' if select.select([0], [], [], 0)[0] and not os.read(0, 1 << 16)
-                      else None)
-        time.sleep(0 if why else 0.1)
-    print(json.dumps({'overlap': others()}), flush=True)
-    if why and why.startswith('deadline') and live(rank.pid, known[rank.pid]):
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.kill(rank.pid, signal.SIGABRT)
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            rank.wait(5)
-    last = time.monotonic() + 30
-    # EPERM from killpg is a group of zombies or of a member this user cannot signal (macOS), not a failure of the
-    # rank: each tracked pid is killed alone, and those still live after 30 s are named (exit 125)
-    while (left := [pid for pid, start in known.items() if live(pid, start)]) and time.monotonic() < last:
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(rank.pid, signal.SIGKILL)
-        for pid in left:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.kill(pid, signal.SIGKILL)
-        time.sleep(0.1)
-    token = os.environ.get('MESH_RUN')
-    left += list(sweep(token.__eq__, time.monotonic() + 30)) if token else []
-    code = rank.poll()
-    if why:
-        print(f'{why}: rank {rank.pid} killed', file=sys.stderr, flush=True)
-    if left:
-        print(f'processes {left} of rank {rank.pid} remain after SIGKILL', file=sys.stderr, flush=True)
-    return 125 if left else 124 if why else code if code >= 0 else 128 - code
-
-
 def show():
     nodes = discover(load())[0] or []
     on = {n.number for n in up(nodes)}
@@ -599,7 +403,7 @@ def main(argv=None):
     remote = bool(argv and argv[0] == 'node')
     if remote:
         argv.pop(0)
-    commands = {'prepare': node_prepare, 'resets': node_resets, 'guard': node_guard} if remote else {'discover': show}
+    commands = {'prepare': node_prepare} if remote else {'discover': show}
     return commands[argv[0]](*argv[1:])
 
 
