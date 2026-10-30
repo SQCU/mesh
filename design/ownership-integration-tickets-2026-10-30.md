@@ -41,6 +41,10 @@ it does not add an executor, submission queue, allocator or runtime policy.
   does not yet use retained IR for arbitrary output owners and local views.
 - `declarations.BoundGraph` binds ordinary numerical and collective sections,
   but its numerical sections still enter the compiler as source graphs.
+  `torch_mesh.prepare_source` now exposes the ordinary compiler's existing
+  functionalization, tensor equations and numerical rewrites for shared use.
+  `declarations.normalize_edges` supplies the existing collective-result alias
+  normalization and returns the source aliases to its preparation callers.
 - LiteRT static indexed views now share topological page-view lowering and
   ordered initializer ranges. Live index dependencies still need to reach its
   ownership and product declarations through the shared access contract.
@@ -196,8 +200,8 @@ page bindings agree at numerical/collective boundaries.
 
 ## O5 — LiteRT access adapter
 
-**Implement:** finish immutable indexed-view preparation against the shared
-algebra, then carry live index operands and their dependencies into existing
+**Implement:** with immutable indexed-view preparation completed against the
+shared algebra, carry live index operands and their dependencies into existing
 operation/product declarations. Keep ordered typed pieces and their scalar
 interpretations distinct from code/scale/zero dependency leaves. Preserve source
 identities through the existing topological view pass and provider lowering.

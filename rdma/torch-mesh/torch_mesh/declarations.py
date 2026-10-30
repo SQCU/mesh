@@ -565,6 +565,30 @@ def _bound(node):
     return name in _BOUND
 
 
+def normalize_edges(module):
+    """Retain result dependencies without functional collective wait nodes.
+
+    Return removed-node aliases so preparation retains source result identities.
+    The native collective binding supplies the actual page dependency.
+    """
+    attributes, aliases = {}, {}
+    for node in list(module.graph.nodes):
+        replacement = None
+        if node.op == 'get_attr':
+            replacement = attributes.get(node.target)
+            attributes.setdefault(node.target, node)
+        target, _ = operation(node)
+        if getattr(getattr(target, '_schema', None), 'name', '') == '_c10d_functional::wait_tensor':
+            replacement = node.args[0]
+        if replacement is not None:
+            aliases[node] = replacement
+            node.replace_all_uses_with(replacement)
+            module.graph.erase_node(node)
+    if aliases:
+        module.recompile()
+    return aliases
+
+
 def sections(module, cuts):
     """Materialize the common graph partition as FX fragments, retaining metadata."""
     from mesh_graph import partition
@@ -628,18 +652,7 @@ class BoundGraph:
         from . import backend, host
         from .native import empty_strided
         from .placement import Placements, alias
-        # Waiting on a functional collective describes its result edge. The
-        # prepared native binding already supplies that stream dependency.
-        attributes = {}
-        for node in list(graph.graph.nodes):
-            if node.op == 'get_attr':
-                if node.target in attributes:
-                    node.replace_all_uses_with(attributes[node.target]);graph.graph.erase_node(node)
-                    continue
-                attributes[node.target] = node
-            target, _ = operation(node)
-            if getattr(getattr(target, '_schema', None), 'name', '') == '_c10d_functional::wait_tensor':
-                node.replace_all_uses_with(node.args[0]);graph.graph.erase_node(node)
+        normalize_edges(graph)
         cuts = [at for i, node in enumerate(graph.graph.nodes) if _bound(node) or host.bound(node) for at in (i, i + 1)]
         values, arguments = {}, iter(arguments)
         self.groups, self.steps = {}, []

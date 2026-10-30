@@ -29,21 +29,23 @@ def _autoload():
 
 def compiler(gm, example_inputs, *, configuration=None, destinations=None):
     from .compilation import bind
+    from .native import compile_graph
     with bind(configuration):
-        return _compile(gm, example_inputs, destinations)
+        lowered, metadata, operands = prepare_source(gm, example_inputs)
+        return compile_graph(lowered, metadata, operands, destinations=destinations)
 
 
-def _compile(gm, example_inputs, destinations):
-    """Lower a declared whole function to the shared native command records.
+def prepare_source(gm, example_inputs):
+    """Prepare the common numerical source before logical IR or page binding.
 
-    Torch supplies the graph and tensor metadata. Mathematical fusion and Metal
-    source generation happen here; framework launchers are not an executor.
+    Ownership and ordinary compilation consume these same functionalization,
+    tensor equations and numerical rewrites. The returned operands retain their
+    page identities; no numerical function is invoked.
     """
     from pathlib import Path
     import torch
     from . import _stream, backend, partition
     from .streamed import node
-    from .native import compile_graph
     from .compilation import operands as compiler_operands
     _stream.linear_source((Path(__file__).parent / 'linear.metal').read_text(), node()[1])
     aten = torch.ops.aten
@@ -158,7 +160,7 @@ def _compile(gm, example_inputs, destinations):
         lowered.recompile()
     rewrite(lowered.graph)
     lowered.recompile()
-    return compile_graph(lowered, tree_flatten(inputs)[0], tree_flatten(operands)[0], destinations=destinations)
+    return lowered, tree_flatten(inputs)[0], tree_flatten(operands)[0]
 
 
 def empty(*size, dtype=None, device='mps'):
