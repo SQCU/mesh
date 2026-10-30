@@ -136,16 +136,58 @@ The same placement made the laptop look like a place to collect evidence:
 
 None of that is the collective. Every run uses the entire collective, the hourly's largest linked one.
 
-## What follows
+## What a run on the collective needs
 
-- Every crash above is a source defect, fixed in code:
-  - unbounded waits;
-  - writes past an operand;
-  - a restart rule acting on false positives;
-  - a bridge that cannot answer its signal.
-- The hourly's preparation and standup act on the same collective its placement does, the live fabric. A machine
-  outside it is neither prepared nor restarted.
-- The hourly is launched and recorded by the collective's machines, so its record is kept "by whatever computers
-  survive", and no run restarts the machine it is launched from.
+- **Records.** The run needs none on the operator's machine.
+  - Each member writes its own rank's record, named by the run, in its own output directory. A reader (the laptop,
+    anyone) fetches them from whichever members survive, when it wants to.
+  - Today:
+    - ranks' outputs return over the launcher's ssh sessions;
+    - the record is written only on the launcher's disk;
+    - each rank's stdin is held open by the launcher, and its guard ends the rank when that stdin closes
+      (`mesh_nodes.ranks`). So the laptop sleeping, rebooting or losing its network ends every rank on the collective.
+- **Membership and capacity.** The bridges already hold both.
+  - A member's own bridge (mesh-stat, on the node) lists its linked part: nodes, links, each port's bandwidth, and each
+    node's model, memory, region and available bytes. etc/mesh-capacity.json gives each model's GPU and fabric
+    figures.
+  - The beacons (bin/mesh-beacon.sh, `_meshnode._tcp`) announce every bridge, its node number and model, on every
+    network a node is on.
+  - The fabric is routed (babeld on every fabric port, bin/mesh-router-init.sh), and ranks already meet at rank 0's
+    fabric address.
+  - etc/mesh-nodes.json is needed only to reach a node from outside the fabric (its management address and key) and
+    for names.
+  - Today discover() starts from that table, and node preparation runs on every reachable configured machine (`found`
+    in `_execute_locked`), not on the fabric's members. So the unlinked laptop was prepared, and could be restarted, in
+    every hourly.
+  - "Largest" is by node count today (`max(parts(...), key=len)` in discover and run_workload). By capacity it is a sum
+    over the same records.
+- **Starting a run.** A program on each member, given the run (its scheduled minute and the main commits as of that
+  minute):
+  - prepares its own checkout (node prepare already runs on the node);
+  - reads its linked part from its own bridge, and from that its rank (sorted node numbers, as today) and rank 0's
+    fabric address;
+  - runs its own rank under its own guard, with a local stdin;
+  - writes its own record.
+
+  The members agree without talking: the run's name comes from its minute and commits, and its rank port from its
+  name, as today (crc32 of the run).
+
+  Each member keeps its own schedule, a launchd calendar job installed with the node. mesh has none today: "No job
+  runs on a schedule". An unscheduled run is the same program started on every member, with nothing held open by
+  whoever started it.
+
+  One piece is new. A node outside the largest part must not run its own part, and its bridge knows only its own part.
+  The beacons name every bridge, but not its part. If each beacon also announced its part, every node could compare
+  parts without a table or ssh.
+- **What was never written as code.** The run's start and its record, on the collective. Everything else a run needs
+  is already on the node: membership, capacity, routing, rendezvous, preparation and the guard. Only three things live
+  outside:
+  - the start (the laptop's crontab, then ssh into each machine);
+  - the rank's lifetime (a stdin held by the launcher);
+  - the record (the launcher's disk).
+
+  These three tie the collective to the laptop, and put the collective's tooling on the laptop.
+- Every crash above is a source defect, fixed in code: unbounded waits, writes past an operand, a restart rule acting
+  on false positives, a bridge that cannot answer its signal.
 - Development does not run on, attach to or import from the collective's tooling on the laptop. A check written there
   is a development step, not evidence.
