@@ -972,6 +972,46 @@ static MetalTensorLayout *TensorClosedRebase(MetalTensorLayout *view,MetalTensor
     }
     return TensorCompose(placed,shape,TensorSum(index));
 }
+static BOOL TensorHasGeneral(id expression) {
+    if(![expression isKindOfClass:NSArray.class])return NO;
+    if(TensorGeneral(expression))return YES;
+    for(NSUInteger k=1;k<[expression count];k++)if(TensorHasGeneral(expression[k]))return YES;
+    return NO;
+}
+// A component axis's elements as mesh fc6d8716 made them: the first component's layout, each factor's stride or map
+// divided by the component count. nil where the components are not each at the first's next address, a factor or the
+// origin is not a whole number of elements, or a coordinate is a piecewise term; elements: then composes the relation.
+static MetalTensorLayout *TensorClosedElements(MetalTensorLayout *layout,NSUInteger count,NSArray *shape) {
+    MetalTensorLayout *factors=layout.factored&&[layout.indexShape.lastObject unsignedIntegerValue]==count?[layout reshape:layout.indexShape]:layout;
+    const NSUInteger last=factors.shape.count-1;
+    MetalTensorLayout *base=[factors element:last at:0];
+    for(NSUInteger k=1;k<count;k++)if(![[factors element:last at:k] isEqual:[base shift:(NSInteger)k]])return nil;
+    NSMutableArray *basis=[NSMutableArray array],*steps=[NSMutableArray array],*coordinates=[NSMutableArray array];
+    NSMutableDictionary *maps=[NSMutableDictionary dictionary];NSInteger origin=base.offset;
+    NSArray *digits=base.coordinates;
+    for(NSUInteger d=0;d<base.indexShape.count;d++) {
+        id coordinate=TensorBound(digits[d],base.count);NSData *data=base.maps[@(d)];const NSInteger *values=data.bytes;
+        NSInteger step=[base.strides[d] integerValue];
+        if(TensorHasGeneral(coordinate))return nil;
+        if(TensorConstant(coordinate)) {
+            NSInteger at=[coordinate integerValue];origin+=values?values[at]:at*step;continue;
+        }
+        NSUInteger axis=basis.count;[basis addObject:base.indexShape[d]];[coordinates addObject:coordinate];
+        if(values) {
+            NSMutableData *divided=[NSMutableData dataWithLength:data.length];NSInteger *out=divided.mutableBytes;
+            origin+=values[0];
+            for(NSUInteger k=0;k<data.length/sizeof *values;k++) {
+                if((values[k]-values[0])%(NSInteger)count)return nil;
+                out[k]=(values[k]-values[0])/(NSInteger)count;
+            }
+            maps[@(axis)]=divided;
+        } else if(step%(NSInteger)count)return nil;
+        [steps addObject:@(step/(NSInteger)count)];
+    }
+    if(origin%(NSInteger)count)return nil;
+    MetalTensorLayout *result=[MetalTensorLayout shape:basis strides:steps offset:origin/(NSInteger)count maps:maps indices:nil];
+    return [result shaped:shape coordinates:coordinates];
+}
 
 @implementation MetalTensorLayout
 @synthesize coordinates=_coordinates;
@@ -1225,6 +1265,9 @@ static MetalTensorLayout *TensorClosedRebase(MetalTensorLayout *view,MetalTensor
     NSParameterAssert(count&&[_shape.lastObject unsignedIntegerValue]==count);
     NSMutableArray *shape=[[_shape mutableCopy] autorelease];[shape removeLastObject];
     if(!_count)return [MetalTensorLayout shape:shape strides:TensorStrides(shape) offset:_offset/(NSInteger)count maps:@{} indices:nil];
+    MetalTensorLayout *closed=nil;
+    @try{closed=TensorClosedElements(self,count,shape);}@catch(NSException *unused){(void)unused;closed=nil;}
+    if(closed)return closed;
     isl_ctx *ctx=isl_ctx_alloc();
     isl_pw_aff *first=MeshIndexExpression(ctx,@[@"mul",@"i",@(count)],0,_count/count);
     isl_pw_aff *value=isl_pw_aff_pullback_pw_multi_aff(MeshIndexFunction(ctx,self),isl_pw_multi_aff_from_pw_aff(first));
@@ -1238,7 +1281,9 @@ static MetalTensorLayout *TensorClosedRebase(MetalTensorLayout *view,MetalTensor
     NSParameterAssert([declared.shape isEqual:placed.shape]);
     if([self isEqual:declared])return placed;
     if(!self.count)return [MetalTensorLayout shape:_shape strides:TensorStrides(_shape) offset:0 maps:@{} indices:nil];
-    MetalTensorLayout *closed=TensorClosedRebase(self,declared,placed);if(closed)return closed;
+    MetalTensorLayout *closed=nil;
+    @try{closed=TensorClosedRebase(self,declared,placed);}@catch(NSException *unused){(void)unused;closed=nil;}
+    if(closed)return closed;
     isl_ctx *ctx=isl_ctx_alloc();
     isl_pw_aff *view=MeshIndexFunction(ctx,self),*target=MeshIndexFunction(ctx,placed);
     isl_set *domain=isl_pw_aff_domain(isl_pw_aff_copy(view));
