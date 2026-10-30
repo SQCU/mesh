@@ -23,16 +23,27 @@ collective domains retain their own order through these rewrites.
 Provider requirements now include exact physical layouts, reserved bytes and
 address alignment. Python and Swift consume that same contract. The configured
 direct ANE adapter binds an IOSurface over bridge pages and prepares its request
-once. Public Core ML output backings remain advisory. Raw provider-owned state
-still needs export functionalization into named input/output pages.
+and completion operand once per invocation. The existing scheduler publishes
+readiness on actual completion and carries the model's declared request capacity.
+Public Core ML output backings remain advisory. Raw provider-owned state
+from an exported graph is lifted into named input/output pages using its declared
+mutation effects. A precompiled stateful artifact still needs its source graph.
 
 LiteRT and its Metal provider now build from matching pinned sources. During
 preparation the provider exports its actual tensor types, physical layouts,
 accesses and command descriptions. Its allocator uses bridge pages. Final
 bindings enter the same placement pass and recorder as native commands; the
 provider supplies no runtime executor or command queue. Named dimensions bind
-model fields and page selections before compilation. Integers in those
-selections remain literal.
+model fields and page selections before compilation. Shapes, constant fields and
+composite attributes use the same typed initializer. Magic-number substitution
+and the separate post-compile input-resize path are removed. Integers remain
+literal unless the exporter declares a named expression.
+
+Standalone encoded results retain their logical type, stored support, packed
+positions and quantization beside their stored pages. A scalar consumer requests
+ordinary tiled conversion work using the shared reader. An encoded result with
+no such consumer allocates no dense result. Absent sparse codes retain their
+encoding's meaning, including a nonzero quantization zero point.
 
 Collective crossings declare their local page accesses. The recorder keeps one
 dependency frontier across preparation calls. It no longer waits for every
@@ -46,9 +57,11 @@ binding and command export succeeded with changed row counts, named dimensions
 and a nonzero output origin, without boundary copies or numerical invocation.
 Dependency preparation retained the needed producer across crossings and left
 disjoint host work independent. These are preparation results, not latency or
-throughput measurements. Standalone packed/sparse constant results, legacy model
-constant/attribute substitution, vendor ANE submission waits and the full-function
-integration review remain open.
+throughput measurements. Whole-storage producer/gather placement, input/result
+alias binding, nonzero-zero-point sparse product domains and the full-function
+integration review remain open. Vendor ANE submission throttles are documented
+separately in `ane-prepared-contract-2026-10-30.md`; a completion callback does not
+remove those framework instructions.
 
 ## Pages hold the data
 

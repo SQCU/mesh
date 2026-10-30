@@ -388,21 +388,19 @@ static std::shared_ptr<DeclaredCalls> declared_calls(NSData *bytes) {
   return made;
 }
 
-// A native host entry (run, context, retain, release) as the recorder's host operation, the storage it reads held
+// A native host entry (prepare, context, retain, release) as the recorder's host declaration, the storage it reads held
 // with it; `owned`: the caller's reference to its context passes to the operation, else the operation takes its own.
 static MetalHostOperation host_operation(const std::array<uintptr_t,4> &entry, bool owned, std::vector<at::Tensor> held) {
   for (auto pointer : entry) TORCH_CHECK(pointer, "host operation requires a complete native binding");
-  using Run = const char *(*)(void *);
   using Lifetime = void (*)(void *);
-  auto run = reinterpret_cast<Run>(entry[0]);
+  auto prepare = reinterpret_cast<MeshHostPrepare>(entry[0]);
   auto context = reinterpret_cast<void *>(entry[1]);
   if (!owned) reinterpret_cast<Lifetime>(entry[2])(context);
   auto bound = std::shared_ptr<void>(context, reinterpret_cast<Lifetime>(entry[3]));
-  MetalHostOperation operation = ^NSError * {
+  MetalHostOperation operation = ^const char *(MeshHostCompletion complete,void *context,MeshHostTask *task) {
     // Tensor handles retain the actual storage, including CPU-only weights.
     (void)held;
-    const char *error = run(bound.get());
-    return error ? [NSError errorWithDomain:@"mesh.host-operation" code:1 userInfo:@{NSLocalizedDescriptionKey:@(error)}] : nil;
+    return prepare(bound.get(),complete,context,task);
   };
   return [[operation copy] autorelease];
 }
@@ -2053,6 +2051,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
       @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
     }, pybind11::call_guard<Drained>());
   pybind11::class_<TensorLayout>(module,"TensorLayout")
+    .def_static("unite",[](const TensorLayout &sourceRoot,const TensorLayout &targetRoot,
+        const TensorLayout &source,const TensorLayout &target) {
+      @try {
+        return std::make_tuple(TensorLayout(MeshIndexUnion(sourceRoot.value,targetRoot.value,source.value,target.value,nil,YES)),
+          TensorLayout(MeshIndexUnion(sourceRoot.value,targetRoot.value,source.value,target.value,sourceRoot.value,YES)),
+          TensorLayout(MeshIndexUnion(sourceRoot.value,targetRoot.value,source.value,target.value,targetRoot.value,NO)));
+      } @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
+    }, pybind11::call_guard<Drained>())
     .def_static("runs",[](const std::vector<std::vector<NSInteger>> &runs){
       NSMutableArray *values=[NSMutableArray array];for(const auto &run:runs)[values addObject:tensorNumbers(run)];
       return TensorLayout([MetalTensorLayout runs:values]);

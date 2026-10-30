@@ -85,7 +85,7 @@ def _coreml():
             lib.mesh_coreml_bind.restype = ctypes.c_void_p
             lib.mesh_coreml_bind.argtypes = [ctypes.c_long, ctypes.POINTER(ModelView), ctypes.c_size_t,
                                              ctypes.POINTER(ModelView), ctypes.c_size_t]
-            lib.mesh_coreml_run.restype, lib.mesh_coreml_run.argtypes = ctypes.c_char_p, [ctypes.c_void_p]
+            lib.mesh_coreml_prepare.restype, lib.mesh_coreml_prepare.argtypes = ctypes.c_char_p, [ctypes.c_void_p] * 4
             lib.mesh_coreml_retain.argtypes = [ctypes.c_void_p]
             lib.mesh_coreml_unbind.argtypes = [ctypes.c_void_p]
             lib.mesh_coreml_error.restype = ctypes.c_char_p
@@ -97,8 +97,8 @@ def _coreml():
             lib.mesh_coreml_compile.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
             lib.mesh_cpu_program_create.argtypes = [ctypes.POINTER(CpuCommand), ctypes.c_size_t]
             lib.mesh_cpu_program_create.restype = ctypes.c_void_p
-            lib.mesh_cpu_program_run.argtypes = [ctypes.c_void_p]
-            lib.mesh_cpu_program_run.restype = ctypes.c_char_p
+            lib.mesh_cpu_program_prepare.argtypes = [ctypes.c_void_p] * 4
+            lib.mesh_cpu_program_prepare.restype = ctypes.c_char_p
             lib.mesh_cpu_program_retain.argtypes = [ctypes.c_void_p]
             lib.mesh_cpu_program_release.argtypes = [ctypes.c_void_p]
             lib.mesh_cpu_product_bind.argtypes = [ctypes.POINTER(CpuCommand)]
@@ -267,8 +267,8 @@ class CpuCommand(ctypes.Structure):
     _fields_ += [(name, ctypes.c_int) for name in ('input_transpose', 'weight_transpose')]
 
 
-def _native_entry(run, binding, retain, release):
-    return (ctypes.cast(run, ctypes.c_void_p).value, binding,
+def _native_entry(prepare, binding, retain, release):
+    return (ctypes.cast(prepare, ctypes.c_void_p).value, binding,
             ctypes.cast(retain, ctypes.c_void_p).value, ctypes.cast(release, ctypes.c_void_p).value)
 
 
@@ -318,7 +318,7 @@ def _cpu_declaration(records, workspace):
 
 
 def rebuild(kind, data):
-    """design/replay-templates-2026-10-29.md: the native entry (run, context, retain, release) a host declaration makes,
+    """design/replay-templates-2026-10-29.md: the native entry (prepare, context, retain, release) a host declaration makes,
     its addresses already the instance's; the context's one reference is the caller's."""
     native = _coreml()
     if native is None:
@@ -329,7 +329,7 @@ def rebuild(kind, data):
         records = [(struct.unpack_from('<Q', data, 16 + k * step)[0], CpuCommand.from_buffer_copy(data, 16 + k * step + 8))
                    for k in range(count)]
         binding, _ = _cpu_program(native, records, lambda size: workspace)
-        return _native_entry(native.mesh_cpu_program_run, binding, native.mesh_cpu_program_retain, native.mesh_cpu_program_release)
+        return _native_entry(native.mesh_cpu_program_prepare, binding, native.mesh_cpu_program_retain, native.mesh_cpu_program_release)
     if kind == 'coreml':
         length, = struct.unpack_from('<Q', data)
         header = json.loads(data[8:8 + length])
@@ -344,7 +344,7 @@ def rebuild(kind, data):
             native.mesh_coreml_release(handle)
         if not binding:
             raise RuntimeError(native.mesh_coreml_error().decode())
-        return _native_entry(native.mesh_coreml_run, binding, native.mesh_coreml_retain, native.mesh_coreml_unbind)
+        return _native_entry(native.mesh_coreml_prepare, binding, native.mesh_coreml_retain, native.mesh_coreml_unbind)
     raise ValueError(f'no host operation of kind {kind}')
 
 
@@ -354,7 +354,7 @@ class CpuProgram:
         self.native, self.binding, self.declaration = native, binding, declaration
         self.inputs, self.outputs = inputs, outputs
         self.before, self.after = _stream.Commands(before), _stream.Commands(after)
-        self.entry = _native_entry(self.native.mesh_cpu_program_run, self.binding,
+        self.entry = _native_entry(self.native.mesh_cpu_program_prepare, self.binding,
                                    self.native.mesh_cpu_program_retain, self.native.mesh_cpu_program_release)
 
     def append(self, schedule):
@@ -510,7 +510,7 @@ class Prediction:
         addresses = [a for _, a in given + made]
         data = struct.pack('<Q', len(header)) + header.ljust(at - 8, b' ') + struct.pack(f'<{len(addresses)}Q', *addresses)
         self.declaration = 'coreml', data, [(at + 8 * k, 0) for k in range(len(addresses))]
-        self.entry = _native_entry(native.mesh_coreml_run, self.binding,
+        self.entry = _native_entry(native.mesh_coreml_prepare, self.binding,
                                    native.mesh_coreml_retain, native.mesh_coreml_unbind)
 
     def __del__(self):

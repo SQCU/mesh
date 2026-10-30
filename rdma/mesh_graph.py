@@ -8,6 +8,32 @@ operation or dependency. None of these objects reaches numerical execution.
 from bisect import bisect_right
 
 
+def alias_roots(pairs):
+    """Canonical storage identities from declared alias equalities.
+
+    Frontends may name either side as a source. Joining the equalities once
+    avoids interpreting those names as a directed descriptor chain.
+    """
+    parent = {}
+
+    def root(value):
+        parent.setdefault(value, value)
+        first = value
+        while parent[value] != value:
+            value = parent[value]
+        while first != value:
+            following = parent[first]
+            parent[first] = value
+            first = following
+        return value
+
+    for left, right in pairs:
+        left, right = root(left), root(right)
+        if left != right:
+            parent[left] = right
+    return {value: root(value) for value in parent if root(value) != value}
+
+
 def view_source(value, views=()):
     """The shared storage identity behind a declared chain of views."""
     while value in views:

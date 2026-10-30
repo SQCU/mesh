@@ -23,12 +23,6 @@ isl_pw_aff *MeshIndexRuns(isl_ctx *ctx, NSArray<NSArray<NSNumber *> *> *runs);
 // the set; release the returned array with mesh_isl_free. NULL reports failure.
 int64_t *MeshIndexSetRuns(isl_set *set, size_t *count);
 MetalTensorLayout *MeshIndexSelection(isl_set *set); // borrows the set
-// Unite a declared view equality in source-root order. Unmatched target
-// positions follow it. A member keeps its ordered shape and repeated reads;
-// nil member returns the combined root domain. All operands are resolved once
-// the frontend has bound symbolic extents, before allocation or execution.
-MetalTensorLayout *MeshIndexUnion(MetalTensorLayout *sourceRoot, MetalTensorLayout *targetRoot,
-    MetalTensorLayout *source, MetalTensorLayout *target, MetalTensorLayout *member, BOOL sourceMember);
 id MeshIndexTerms(isl_pw_aff *expression); // consumes the expression
 BOOL MeshIndexEqual(id left, id right, NSUInteger count);
 struct MeshIndexBounds { NSInteger low, high; };

@@ -1,6 +1,7 @@
 #pragma once
 #import <Metal/Metal.h>
 #include "metal-capabilities.h"
+#include "mesh-host.h"
 #import "mesh-tensor-layout.h"
 
 #ifdef __cplusplus
@@ -147,9 +148,12 @@ void MetalScheduleAfter(struct MetalSchedule *, id<MTLEvent>, uint64_t value);
 // Preparation records the function's collective result sources. Observers read
 // their existing failure state; this adds no command or transfer-time check.
 void MetalScheduleCommunicator(struct MetalSchedule *, struct ncclComm *);
+// Preparation binds each invocation's completion and retained task. Submission
+// never allocates a task and never stands for output completion.
+typedef const char *(^MetalHostOperation)(MeshHostCompletion, void *, MeshHostTask *);
 // A host operation over its declared views; its declaration (NULL: none, and its function makes no template).
 void MetalScheduleHost(struct MetalSchedule *, const struct MetalReach *, size_t count, const struct MetalDeclaration *,
-    NSError *(^operation)(void));
+    MetalHostOperation);
 id<MTLResidencySet> MetalScheduleResources(struct MetalSchedule *);
 // Explicit bindings from a compiler which already has its pipelines. These
 // enter the same access ordering and encoding as described commands.
@@ -186,7 +190,7 @@ struct MetalHostDescription {
     NSUInteger at;
     const struct MetalReach *reaches;
     size_t count;
-    __unsafe_unretained NSError *(^operation)(void);
+    __unsafe_unretained MetalHostOperation operation;
 };
 // docs/kernels.md Any program: a program's `count` commands as one invocation, each named operand bound by its slots,
 // and its host operations in command order, prepared as `invocations` of them in `form` (the indirect form's command
@@ -259,7 +263,6 @@ NSError *MetalTemplateArchive(NSDictionary *, NSString *directory);
 // theirs. A host operation's or crossing's declaration, its places rewritten to the instance's, is made again by the
 // frontend's `host` or `cross` (nil, with the reason, where it cannot be), which returns an autoreleased block that
 // lives as long as `schedule`.
-typedef NSError *(^MetalHostOperation)(void);
 typedef MetalHostOperation (^MetalTemplateHost)(NSString *kind, NSData *bytes, NSError **error);
 typedef MetalCrossing (^MetalTemplateCross)(NSString *kind, NSData *bytes, struct MetalSchedule *schedule, NSError **error);
 // A template made where the device's compile facts differ, or where a dispatch's threadgroup holds more threads than

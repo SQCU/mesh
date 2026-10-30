@@ -112,6 +112,12 @@ FOUNDATION_EXPORT NSInteger MetalTensorConstant(id expression, NSArray<NSNumber 
     access:(uint32_t)access binding:(int32_t)binding;
 @end
 
+// Unite a declared view equality in source-root order. Unmatched target
+// positions follow it. A member keeps its ordered shape and repeated reads;
+// nil member returns the combined root domain. Preparation only.
+FOUNDATION_EXPORT MetalTensorLayout *MeshIndexUnion(MetalTensorLayout *sourceRoot, MetalTensorLayout *targetRoot,
+    MetalTensorLayout *source, MetalTensorLayout *target, MetalTensorLayout * _Nullable member, BOOL sourceMember);
+
 // The domain maps concatenated storage ordinals to logical positions; selection
 // maps requested ordinals to those positions. Preparation unites physical cuts
 // from every participant before requesting direct bindings. Execution never

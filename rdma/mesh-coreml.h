@@ -1,6 +1,7 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+#include "mesh-host.h"
 
 /* Compiler operands for the Core ML API. Shapes and strides are in elements.
    Names, storage and types are bound during preparation, never inferred by run. */
@@ -29,12 +30,14 @@ long mesh_coreml_load(const char *compiled, const char *configuration);
 void mesh_coreml_release(long model);
 /* Every model input and output must have a view, including optional inputs.
    Binding does not request provider defaults or leave outputs unbound. The
-   direct ANE backend maps retained bridge-page roots and their declared offsets.
+   direct ANE backend retains bridge-page roots and their declared offsets.
    Public Core ML output backings remain advisory for that explicit backend.
    Keep all page roots alive until the binding is released. */
 void *mesh_coreml_bind(long model, const MeshModelView *inputs, size_t inputCount,
                       const MeshModelView *outputs, size_t outputCount);
-const char *mesh_coreml_run(void *binding);
+/* Bind one invocation's request, map, completion and resource requirements.
+   This is preparation; only the returned task's submit is used during work. */
+const char *mesh_coreml_prepare(void *binding, MeshHostCompletion, void *context, MeshHostTask *);
 void mesh_coreml_retain(void *binding);
 void mesh_coreml_unbind(void *binding);
 const char *mesh_coreml_error(void);
@@ -68,7 +71,7 @@ void mesh_cpu_product_workspace(MeshCpuCommand *command, void *workspace);
 void mesh_cpu_command_release(MeshCpuCommand *command);
 void mesh_cpu_gelu(const MeshCpuCommand *command);
 void *mesh_cpu_program_create(const MeshCpuCommand *commands, size_t count);
-const char *mesh_cpu_program_run(void *program);
+const char *mesh_cpu_program_prepare(void *program, MeshHostCompletion, void *context, MeshHostTask *);
 void mesh_cpu_program_retain(void *program);
 void mesh_cpu_program_release(void *program);
 

@@ -52,7 +52,9 @@
             "modelAtURL:key:": "@32@0:8@16@24",
             "modelAttributes": "@16@0:8",
             "inputSymbolIndicesForProcedureIndex:": "@20@0:8I16",
-            "outputSymbolIndicesForProcedureIndex:": "@20@0:8I16"
+            "outputSymbolIndicesForProcedureIndex:": "@20@0:8I16",
+            "queueDepth": "c16@0:8",
+            "program": "@16@0:8"
           },
           "_ANEClient": {
             "sharedConnection": "@16@0:8",
@@ -67,9 +69,14 @@
             "objectWithIOSurface:startOffset:": "@32@0:8^{__IOSurface=}16@24"
           },
           "_ANERequest": {
-            "requestWithInputs:inputIndices:outputs:outputIndices:procedureIndex:": "@56@0:8@16@24@32@40@48"
+            "requestWithInputs:inputIndices:outputs:outputIndices:procedureIndex:": "@56@0:8@16@24@32@40@48",
+            "setCompletionHandler:": "v24@0:8@?16"
           }
-        }
+        },
+        "completion_arguments": [
+          "BOOL",
+          "NSError"
+        ]
       }
     },
     "state_pairs": {}

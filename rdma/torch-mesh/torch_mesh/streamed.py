@@ -228,8 +228,8 @@ class Fit:
         """This node's fit from its evidence file, made (fit) on a node of its chip and GPU cores from observations read on
         that node, at the bandwidth the file names: any such node's (one of four like nodes fitted serves the others, its
         file copied whole: the file holds its served readings and attention readings themselves, `read` and
-        `attention_read`, its attention model `attention` and its fused readings `fused`); its configurations the
-        instance shapes the evidence observed (none: every admissible one). A node without evidence, whose file another
+        `attention_read`, its attention model `attention` and its fused readings `fused`). Observations price instances;
+        they do not restrict which feasible configurations the compiler may use. A node without evidence, whose file another
         chip or core count made, or one fitted before the file held its readings, is refused: no prior or other node's
         coefficients price its instances (metal-microbench docs/kernels.md#the-instance-fit, Evidence)."""
         path, (chip, cores) = _EVIDENCE_PATH, node()
@@ -246,7 +246,6 @@ class Fit:
             raise RuntimeError(f'{path}: fitted before the file held its readings (`python -m torch_mesh.streamed fit` again over its '
                                f'observations, on this node: metal-microbench docs/kernels.md#the-instance-fit, Evidence)')
         made = cls(cores, known['gbps'], known['coefficients'], known.get('factors'))
-        made.configurations = {tuple(c) for c in known.get('configurations', [])} or None
         made.admitted = set(known.get('forms_at_bar', {}))
         made.read = {}
         for r in known['readings']:
@@ -255,7 +254,6 @@ class Fit:
         made.attention, made.fused = known.get('attention') or {}, known.get('fused') or {}
         return made
 
-    configurations = None
     admitted = frozenset()
     read = attention_read = attention = fused = {}
 
@@ -410,14 +408,14 @@ def configuration(spec):
 
 
 def choose(fit, s, rows, op='product', tables=False, read=None, widths=15):
-    """The argmin over the candidates of the configurations its evidence observed (None where there is none), or at a
-    rows class the fit explores, of the configurations named for it (measured once, in the next profile), and its price
-    (us): where candidates were `read` at the slice and rows (read_key: their readings' median), the least read (a
-    measurement at a shape outranks the model there), else the fit's argmin. Forms named for the class (fit.forms: a
+    """Price every feasible instance, or the configurations explicitly requested for exploration.
+
+    A reading replaces that instance's model estimate; unmeasured instances keep
+    their estimates and remain candidates. Forms named for the class (fit.forms: a
     resolve's --explore, FORM<v>) change only those arguments, where the instance admits them (admits): of the slice's
     least read instance where it was read and no configurations are named (its pair, the same instance in the form),
     else of each candidate in its form 0 (a form any H whose steps F divides)."""
-    allowed = fit.explore.get(rows, fit.configurations)
+    allowed = fit.explore.get(rows)
     forced = fit.forms.get(rows, {})
     listed = candidates(s, rows, op, tables, widths, fit.admitted)
     if forced:
@@ -425,11 +423,12 @@ def choose(fit, s, rows, op='product', tables=False, read=None, widths=15):
         held = min(read, key=read.get) if read and rows not in fit.explore else None
         base = [c for c in listed if read_key(c) == held]
         listed = [formed(base[0])] if base else list({read_key(formed(c)): formed(c) for c in listed if not any(c.get(k, 0) for k in forced)}.values())
-    priced = [(fit.time(c, s, rows), i, c) for i, c in enumerate(listed) if allowed is None or configuration(c) in allowed]
-    read = [(read[read_key(c)], i, c) for _, i, c in priced if read_key(c) in (read or {})] if rows not in fit.explore else []
+    observed = (read or {}) if rows not in fit.explore else {}
+    priced = [(observed[read_key(c)] if read_key(c) in observed else fit.time(c, s, rows), i, c)
+              for i, c in enumerate(listed) if allowed is None or configuration(c) in allowed]
     if not priced:
         return None, None
-    t, _, best = min(read or priced)
+    t, _, best = min(priced)
     return best, t
 
 

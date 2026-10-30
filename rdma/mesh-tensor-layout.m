@@ -1003,7 +1003,8 @@ static NSArray *TensorInverseAxes(MetalTensorLayout *declared,NSInteger *origin)
 // maps, so a mapped placement stays mapped. nil where none applies: the relation composition (rebase) is the general
 // case, whose index functions take the solver once per affine piece wherever they are read (TensorExpressionPiece).
 static MetalTensorLayout *TensorClosedRebase(MetalTensorLayout *view,MetalTensorLayout *declared,MetalTensorLayout *placed) {
-    if([[declared shift:-declared.offset] isEqual:[placed shift:-placed.offset]])return [view shift:placed.offset-declared.offset];
+    if([[declared shift:-declared.offset] isEqual:[placed shift:-placed.offset]]&&
+       [view preimage:declared].count==view.count)return [view shift:placed.offset-declared.offset];
     NSArray *shape=view.shape;
     if(view.count==declared.count&&[[declared reshape:shape] isEqual:view])return [placed reshape:shape];
     if(declared.factored&&view.offset==declared.offset&&[view.indexShape isEqual:declared.indexShape]&&

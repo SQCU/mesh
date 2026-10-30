@@ -1109,7 +1109,9 @@ static NSError *MetalReplayFailure(NSInteger code, NSString *reason) {
 @public
     NSData *accesses;
     void (^encode)(struct MetalSchedule *);
-    NSError *(^operation)(void);
+    MetalHostOperation operation;
+    MeshHostTask task;
+    struct MetalSchedule *root;
     NSMutableIndexSet *dependencies, *successors;
     struct MetalSchedule *part;
     // Objective-C allocation need not have MetalReplay's extended alignment.
@@ -1123,6 +1125,7 @@ static NSError *MetalReplayFailure(NSInteger code, NSString *reason) {
 @end
 @implementation MetalWork
 - (void)dealloc {
+    if(task.release)task.release(task.context);
     [accesses release];[encode release];[operation release];[dependencies release];[successors release];
     [event release];[error release];[super dealloc];
 }
@@ -1150,7 +1153,7 @@ struct MetalSchedule {
     id<MTLSharedEvent> event, start;
     MTLSharedEventListener *listener;
     NSMutableArray *work, *hosts, *waits, *history;
-    NSMutableDictionary *frontierRead, *frontierWritten;
+    NSMutableDictionary *frontierRead, *frontierWritten, *hostResources;
     NSMutableSet *waited;
     NSUInteger commands, ordinal;
     _Atomic int status;
@@ -1209,6 +1212,7 @@ struct MetalSchedule *MetalScheduleCreateOn(id<MTL4CommandQueue> queue, enum Met
     s->owners=[NSMutableSet new];s->read=[NSMutableDictionary new];s->written=[NSMutableDictionary new];
     s->work=[NSMutableArray new];s->hosts=[NSMutableArray new];s->waits=[NSMutableArray new];s->waited=[NSMutableSet new];
     s->history=[NSMutableArray new];s->frontierRead=[NSMutableDictionary new];s->frontierWritten=[NSMutableDictionary new];
+    s->hostResources=[NSMutableDictionary new];
     MTLResidencySetDescriptor *resident=[MTLResidencySetDescriptor new];
     s->residency=[device newResidencySetWithDescriptor:resident error:nil];[resident release];
     s->allocator=[device newCommandAllocator];
@@ -1305,8 +1309,9 @@ static void MetalScheduleComputeNow(struct MetalSchedule *s,id<MTLComputePipelin
 }
 
 static MetalWork *MetalScheduleWork(struct MetalSchedule *root,NSData *accesses,
-    void (^encode)(struct MetalSchedule *),NSError *(^operation)(void)) {
+    void (^encode)(struct MetalSchedule *),MetalHostOperation operation) {
     MetalWork *work=[MetalWork new];work->accesses=[accesses copy];work->encode=[encode copy];work->operation=[operation copy];
+    work->root=root;
     work->dependencies=[NSMutableIndexSet new];work->successors=[NSMutableIndexSet new];
     const struct MetalReach *views=accesses.bytes;
     for(NSUInteger k=0;k<accesses.length/sizeof *views;k++)if(views[k].buffer)[root->owners addObject:views[k].buffer];
@@ -1362,13 +1367,13 @@ int MetalScheduleCross(struct MetalSchedule *root,const struct MetalReach *views
     return MetalScheduleCrossWork(root,accesses,cross);
 }
 
-static void MetalScheduleHostWork(struct MetalSchedule *root,NSData *views,NSError *(^operation)(void)) {
+static void MetalScheduleHostWork(struct MetalSchedule *root,NSData *views,MetalHostOperation operation) {
     if(!operation||!views.length)[NSException raise:NSInvalidArgumentException format:@"host operation needs declared data views"];
     MetalScheduleWork(root,views,nil,operation);
 }
 
 void MetalScheduleHost(struct MetalSchedule *root,const struct MetalReach *views,size_t count,const struct MetalDeclaration *declared,
-    NSError *(^operation)(void)) { @autoreleasepool {
+    MetalHostOperation operation) { @autoreleasepool {
     NSData *accesses=[NSData dataWithBytes:views length:count*sizeof *views];
     NSMutableDictionary *entry=MetalScheduleDeclared(@"host",declared);entry[@"accesses"]=accesses;
     MetalScheduleCall(root,entry);
@@ -1511,10 +1516,35 @@ NSString *MetalViewDependencyDeclaration(NSString *name,NSArray<NSIndexSet *> *d
     return source;
 }
 
+static void MetalHostFinished(void *context,const char *failure) {
+    MetalWork *task=context;
+    NSError *error=failure?MetalReplayFailure(EIO,@(failure)):nil;
+    task->error=[error retain];
+    atomic_store_explicit(&task->status,error?-1:1,memory_order_release);
+    task->event.signaledValue=1;
+    MetalScheduleArrived(task->root);
+}
+
 static NSUInteger MetalWorkDependencies(struct MetalSchedule *root,NSArray *work) {
     const NSUInteger first=root->history.count;
     for(NSUInteger i=0;i<work.count;i++) {
         MetalWork *w=work[i];
+        if(w->operation) {
+            const char *failure=w->operation(MetalHostFinished,w,&w->task);
+            if(failure)[NSException raise:NSInvalidArgumentException format:@"host preparation: %s",failure];
+            if(!w->task.submit||!w->task.release)[NSException raise:NSInvalidArgumentException format:@"host preparation needs submission and lifetime operands"];
+            for(size_t r=0;r<w->task.resource_count;r++) {
+                const MeshHostResource resource=w->task.resources[r];
+                if(!resource.identity||!resource.capacity)[NSException raise:NSInvalidArgumentException format:@"host resource needs identity and capacity"];
+                NSValue *key=[NSValue valueWithPointer:resource.identity];
+                NSMutableDictionary *held=root->hostResources[key];
+                if(!held)root->hostResources[key]=held=[[@{@"capacity":@(resource.capacity),@"uses":[NSMutableArray array]} mutableCopy] autorelease];
+                if([held[@"capacity"] unsignedLongLongValue]!=resource.capacity)[NSException raise:NSInvalidArgumentException format:@"host resource has conflicting capacities"];
+                NSMutableArray *uses=held[@"uses"];
+                if(uses.count>=resource.capacity)[w->dependencies addIndex:[uses[uses.count-resource.capacity] unsignedIntegerValue]];
+                [uses addObject:@(first+i)];
+            }
+        }
         [w->dependencies addIndexes:MetalViewPrior(root->frontierRead,root->frontierWritten,w->accesses)];
         MetalViewDefine(root->frontierRead,root->frontierWritten,w->accesses,first+i);
         [root->history addObject:w];
@@ -1569,10 +1599,7 @@ static void MetalScheduleBindHost(struct MetalSchedule *root,MetalWork *work,NSA
             block:^(id<MTLSharedEvent> reached,uint64_t value){
                 (void)reached;(void)value;
                 if(atomic_fetch_sub_explicit(&task->remaining,1,memory_order_acq_rel)!=1)return;
-                NSError *error=task->operation();task->error=[error retain];
-                atomic_store_explicit(&task->status,error?-1:1,memory_order_release);
-                task->event.signaledValue=1;
-                MetalScheduleArrived(root);
+                task->task.submit(task->task.context);
             }];
     }
 }
@@ -1810,7 +1837,7 @@ void MetalScheduleFree(struct MetalSchedule *s) {
     [s->encoder release];[s->command release];[s->queue release];[s->allocator release];[s->table release];[s->data release];
     [s->residency release];[s->owners release];[s->options release];[s->read release];[s->written release];
     [s->event release];[s->start release];[s->listener release];[s->work release];[s->hosts release];[s->waits release];[s->waited release];
-    [s->history release];[s->frontierRead release];[s->frontierWritten release];
+    [s->history release];[s->frontierRead release];[s->frontierWritten release];[s->hostResources release];
     [s->completed release];[s->error release];[s->after release];[s->device release];[s->communicators release];
     [s->script release];[s->plans release];free(s);
 }

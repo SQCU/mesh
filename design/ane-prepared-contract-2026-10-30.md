@@ -41,12 +41,14 @@ scalar type, footprint and alignment reach the shared placement solver before
 allocation. Public Core ML's advisory `outputBackings` are a different declared
 backend contract and do not establish this fixed-output guarantee.
 
-## Completion remains unfinished
+## Prepared completion and remaining vendor throttles
 
-`mesh_coreml_run` still calls `evaluateWithModel:options:request:qos:error:`
-synchronously. `MetalHostDescription` currently treats return from its operation
-as completion and publishes the output event then. Returning after an enqueue
-without changing this shared contract would publish unfinished pages.
+`MetalHostOperation` now prepares a `MeshHostTask` with a completion function
+and context. Each invocation binds its own ANE request and callback and maps
+its pages before submission. The runtime only calls the prepared submit entry.
+Its return does not publish output readiness. The actual completion callback
+publishes the existing scheduler event. CPU work completes the same operand
+after its body; public Core ML uses its SDK completion-handler API.
 
 Metadata and disassembly inspection on macOS 26.3.2, build 25D2150, established:
 
@@ -64,18 +66,19 @@ processing but retains the same capacity and submission gates. None of these
 observations establishes a zero-wait submission entry. The driver's lower
 device-vtable entry has not been adopted without a supported ABI contract.
 
-The necessary shared-interface change is prepared submission with an explicit
-completion operand. The ANE request binds that operand during preparation and
-publishes readiness only on actual completion. CPU work completes the same
-operand when it returns. The affected consumers are `metal-recording.h/.m`,
+This one shared interface reaches `metal-recording.h/.m`,
 `torch_mesh/_stream.mm`, `engines.Prediction` and its declaration rebuild,
-`matrix_operations.swift` host records, and `neural_engine.swift`. This is one
-scheduler contract, not an extra worker around a blocking provider call.
+`matrix_operations.swift` host records, and `neural_engine.swift`. Native ANE
+results each carry their own access records, rather than one host loop joining
+all model shares. There is no extra worker around a blocking provider call.
 
-Model request slots can become declared scheduling resources using the loaded
-model's queue depth. That can avoid exhaustion by our own graph. It cannot
-remove the vendor semaphore instructions or guarantee that a process-global
-submission bucket is uncontended. Those limits remain explicit.
+The loaded model's queue depth is now a declared scheduling resource. Preparation
+assigns each invocation a slot and carries the dependency on its previous use
+through the same dependency frontier as page accesses. No guessed queue cap is
+introduced. The vendor callback returns its slot after invoking our completion,
+so even this ordering does not establish that the vendor's bookkeeping has
+finished. The vendor semaphore instructions remain, and a process-global
+submission bucket may still contend. Those limits remain explicit.
 
 ## Preparation evidence
 
@@ -88,4 +91,9 @@ when arithmetic precision was explicitly configured as float16.
 The native inspection process only loaded framework metadata and disassembled
 methods. It did not construct a model, device, request or queue, invoke a
 prediction, or evaluate numerical work. The converter inspection likewise did
-not invoke the graph. Submission behavior has not been measured or changed.
+not invoke the graph. The shared library then compiled and loaded a small model,
+reported its request capacity, prepared distinct callbacks and mapped bridge
+pages for separate invocations, and released them without submission. A pure
+dependency inspection retained the capacity slot edge across preparation
+flushes. Native libraries, the full extension and Swift Engine/Goal A compile.
+Submission behavior has not been measured.
