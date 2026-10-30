@@ -1234,7 +1234,6 @@ struct FusedForm {
   struct Ring {
     std::vector<at::Tensor> slots[2];
     std::vector<std::vector<at::Tensor>> segments[2];
-    std::vector<at::Tensor> relays[2];
     std::shared_ptr<PreparedWrites> plans[2];
   };
   std::map<int64_t, Ring> rings;
@@ -1321,8 +1320,8 @@ static void fused_reconfigure(int64_t comm) {
 // A tensor's WRITE from its abstract layout (nccl.h ncclMeshLayout): its storage's page table, its sizes, strides and
 // storage offset in elements and its element bits; no address or byte geometry (design/pointer-lowering-2026-10-28.md).
 // `frames` frames of `view`, `frame_stride` elements apart, are one train (nccl.h ncclMeshLayout frames).
-// An undefined `view` is a rank that neither ends nor forwards the WRITE (ncclMeshCommWriteForwards): no relay, its
-// binding an empty page table over `unbound` contiguous elements of `like`'s type, the bytes every rank reports.
+// An undefined `view` is a rank that ends neither side of the WRITE: its binding an empty page table over `unbound`
+// contiguous elements of `like`'s type, the library's relay (nccl.h ncclMeshWriteLayoutPrepare).
 static void tensor_write(Group &g, const at::Tensor &view, int source, int destination, ncclComm_t comm, bool metal,
                          ncclMeshWriteLayout layout, ncclMeshWritePlan_t *out, int64_t frames = 1, int64_t frame_stride = 0,
                          int64_t unbound = 0, const at::Tensor &like = at::Tensor()) {
@@ -1361,32 +1360,19 @@ static void fused_allocate_ring(FusedForm &f, FusedForm::Ring &ring, const at::T
       }
   }
   // Prepare each bound generation once. Metadata exchange agrees common
-  // registration cuts before any receive is presented. Relay allocations
-  // are disjoint per pair, so another destination cannot overwrite a live
-  // forwarding range or any local original contribution.
+  // registration cuts before any receive is presented. A rank that ends
+  // neither side binds the library's relay, a lease of its own a pair, so
+  // another destination cannot overwrite a live forwarding range or any local
+  // original contribution.
   for (int h = 0; h < 2; h++) if (!ring.plans[h]) {
     auto prepared = std::make_shared<PreparedWrites>();
     Group g{true};
     for (int64_t source = 0; source < f.ranks; source++) if (f.counts[source])
       for (int64_t destination = 0; destination < f.ranks; destination++) if (source != destination) {
-        const at::Tensor source_view = ring.segments[h][0][source];
-        at::Tensor landing_view = source_view;
-        int64_t local_stride = f.slot * (int64_t)xc.element_size();
-        int forwards = 1;
-        if (f.rank != source && f.rank != destination) {
-          // a relay only where an installed path of nonzero weight crosses this rank (ncclMeshCommWriteForwards)
-          checked(ncclMeshCommWriteForwards(communicator(f.comm), (int)source, (int)destination, &forwards));
-          landing_view = at::Tensor();
-          if (forwards) {
-            ring.relays[h].push_back(region_empty({repeats * f.counts[source]}, xc, true));
-            landing_view = ring.relays[h].back().narrow(0, 0, f.counts[source]);
-          }
-          local_stride = f.counts[source] * (int64_t)xc.element_size();
-        }
+        const bool ends = f.rank == source || f.rank == destination;
         prepared->handles.push_back(nullptr);
-        tensor_write(g, f.rank == source ? source_view : landing_view, (int)source, (int)destination, communicator(f.comm), true,
-                     ncclMeshWriteLayout{0, 1, 0, 1}, &prepared->handles.back(), repeats, local_stride / (int64_t)xc.element_size(),
-                     f.counts[source], xc);
+        tensor_write(g, ends ? ring.segments[h][0][source] : at::Tensor(), (int)source, (int)destination, communicator(f.comm), true,
+                     ncclMeshWriteLayout{0, 1, 0, 1}, &prepared->handles.back(), repeats, f.slot, f.counts[source], xc);
       }
     prepared->prepare(f.comm, f.polls, repeats, f.slot * (int64_t)xc.element_size());
     ring.plans[h] = std::move(prepared);
@@ -1507,24 +1493,11 @@ static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, c
     const at::Tensor source = input.select(0, first);
     auto prepared = std::make_unique<PreparedWrites>();
     Group g{true};
+    // rank 0's input frames to each destination's own; any other rank's binding the library's relay
     for (int64_t destination = 1; destination < ranks; destination++) {
-      at::Tensor landing = source;
-      size_t stride = input_pitch;
-      if (f.rank != 0 && f.rank != destination) {
-        // a relay only where an installed path of nonzero weight crosses this rank (ncclMeshCommWriteForwards)
-        int forwards = 1;
-        checked(ncclMeshCommWriteForwards(communicator(f.comm), 0, (int)destination, &forwards));
-        landing = at::Tensor();
-        if (forwards) {
-          chain->held.push_back(region_empty({count * source.numel()}, input, true));
-          landing = chain->held.back().narrow(0, 0, source.numel());
-        }
-        stride = source.nbytes();
-      }
       prepared->handles.push_back(nullptr);
-      TORCH_CHECK(stride % (size_t)source.element_size() == 0, "a chain's frame pitch is whole elements");
-      tensor_write(g, f.rank == 0 ? source : landing, 0, (int)destination, communicator(f.comm), true, ncclMeshWriteLayout{0, 1, 0, 1},
-                   &prepared->handles.back(), count, (int64_t)(stride / (size_t)source.element_size()), source.numel(), source);
+      tensor_write(g, f.rank == 0 || f.rank == destination ? source : at::Tensor(), 0, (int)destination, communicator(f.comm), true,
+                   ncclMeshWriteLayout{0, 1, 0, 1}, &prepared->handles.back(), count, input.stride(0), source.numel(), source);
     }
     prepared->prepare(f.comm, f.polls, count, input_pitch);
     chain->inputs.push_back(std::move(prepared));
@@ -1659,7 +1632,7 @@ static pybind11::capsule chain_completion(int64_t index) {
 // parallel cables; relay readiness stays in the compiled stream entries.
 
 static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> fused_writes_impl(
-    MetalSchedule *schedule, const at::Tensor &send, const std::vector<at::Tensor> &landings,
+    MetalSchedule *schedule, PreparedWrites &plans, const at::Tensor &send, const std::vector<at::Tensor> &landings,
     const std::vector<std::array<int, 2>> &pairs, int64_t comm, int64_t polls, int64_t repeats, int64_t stride,
     const std::optional<at::Tensor> &ready, int64_t ready_value, int64_t tile_bytes) {
   TORCH_CHECK(landings.size() == pairs.size(), "fused writes: one landing lease per declared write");
@@ -1695,7 +1668,6 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
     in.push_back(g.moving(landing));
     TORCH_CHECK(in.back().bytes == send.nbytes(), "fused writes: a landing holds the source's bytes (a WRITE moves bytes, not typed values)");
   }
-  PreparedWrites plans;
   plans.prepare(comm, polls, repeats, stride);
   const size_t binding_words=sizeof(ncclMeshBinding)/sizeof(uint64_t),record_words=1+plans.land.size()*binding_words;
   std::vector<uint64_t> tile_landings(tile_bytes ? tiles*record_words : 0);
@@ -1767,9 +1739,9 @@ struct ScheduleBinding {
     if(!gx||!gy)return;
     prepare_dispatch(schedule.get(),encoded(kernel,buffers,words,at,gx,gy,threads),access);
   }
-  // A None landing is the library's relay: a rank that ends neither side of its pair, one frame. A relay shaped like
-  // `send` (a meta tensor where this rank sends nothing) is leased only where an installed path of nonzero weight
-  // crosses this rank (ncclMeshCommWriteForwards), and held with the schedule; elsewhere none (tensor_write's empty table).
+  // A None landing is the library's relay: a rank that ends neither side of its pair (tensor_write's empty table).
+  // Each call's plans are held with the schedule, whose every enqueue runs the entries their preparation laid.
+  std::vector<std::shared_ptr<PreparedWrites>> prepared;
   auto writes(const at::Tensor &send,const std::vector<std::optional<at::Tensor>> &given,
       const std::vector<std::array<int,2>> &pairs,int64_t comm,int64_t polls,int64_t repeats,int64_t stride,
       const std::optional<at::Tensor> &ready,int64_t ready_value,int64_t tile_bytes) {
@@ -1778,17 +1750,20 @@ struct ScheduleBinding {
     std::vector<at::Tensor> landings(given.size());
     for(size_t i=0;i<given.size();i++) {
       if(given[i]){landings[i]=*given[i];continue;}
-      TORCH_CHECK(repeats==1&&rank!=pairs[i][0]&&rank!=pairs[i][1],"fused writes: only a relay's landing, of one frame, may be the library's");
-      int forwards=1;checked(ncclMeshCommWriteForwards(communicator(comm),pairs[i][0],pairs[i][1],&forwards));
-      if(forwards)landings[i]=region_empty(send.sizes().vec(),send,true);
+      TORCH_CHECK(rank!=pairs[i][0]&&rank!=pairs[i][1],"fused writes: only a relay's landing may be the library's");
     }
     if(!send.is_meta())operands.push_back(send);
     for(const auto &landing:landings)if(landing.defined())operands.push_back(landing);
     if(ready)operands.push_back(*ready);
-    return fused_writes_impl(schedule.get(),send,landings,pairs,comm,polls,repeats,stride,ready,ready_value,tile_bytes);
+    prepared.push_back(std::make_shared<PreparedWrites>());
+    return fused_writes_impl(schedule.get(),*prepared.back(),send,landings,pairs,comm,polls,repeats,stride,ready,ready_value,
+                             tile_bytes);
   }
 
-  void finish() { const auto held=operands; checked(MetalScheduleFinish(schedule.get(),^(NSError *){(void)held;})); }
+  void finish() {
+    const auto held=operands;const auto plans=prepared;
+    checked(MetalScheduleFinish(schedule.get(),^(NSError *){(void)held;(void)plans;}));
+  }
   void enqueue() { MetalScheduleEnqueue(schedule.get()); }
   pybind11::capsule completion() { return schedule_completion(schedule); }
 
@@ -1928,8 +1903,8 @@ struct ViewWrites {
   std::vector<ViewBinding> bindings;
   PreparedWrites plans;
   std::vector<at::Tensor> leases;
-  // A meta storage is a relay's: its shape and type alone, a lease taken at preparation only where an installed path of
-  // nonzero weight crosses this rank (ncclMeshCommWriteForwards), else an empty page table.
+  // A meta storage is a relay's: its shape and type alone over an empty page table, the library's relay (nccl.h
+  // ncclMeshWriteLayoutPrepare).
   ViewWrites(const std::vector<ViewBinding> &given, int64_t handle) : comm(handle), metal(true), bindings(given) {
     TORCH_CHECK(!bindings.empty(), "view writes require at least one declared delivery");
     for(const auto &binding:bindings)if(!std::get<0>(binding).is_meta()){metal=std::get<0>(binding).is_mps();break;}
@@ -1938,22 +1913,10 @@ struct ViewWrites {
   void prepare() {
     if(!plans.handles.empty())return;
     Group g{metal};
-    for (const auto &[given_storage, bits, shape, strides, offset, mapped, runs, source, destination] : bindings) {
-      at::Tensor storage = given_storage;
+    for (const auto &[storage, bits, shape, strides, offset, mapped, runs, source, destination] : bindings) {
       ncclMeshPageTable_t table = nullptr;
-      if (storage.is_meta()) {
-        int forwards = 1;
-        checked(ncclMeshCommWriteForwards(communicator(comm), source, destination, &forwards));
-        if (forwards) {
-          int64_t extent = offset + 1;
-          for (size_t d = 0; d < shape.size(); d++) extent += (shape[d] - 1) * (mapped ? 0 : strides[d]);
-          storage = region_empty({std::max<int64_t>(extent, 1)}, given_storage, metal);
-          leases.push_back(storage);
-        }
-      }
-      TORCH_CHECK(!storage.defined() || storage.is_meta() || storage.is_mps() == metal, "view writes require one local device");
-      if (storage.is_meta()) checked(ncclMeshPageTableCreate(nullptr, communicator(comm), metal, &table));
-      else checked(ncclMeshPageTableCreate(g.where(storage), communicator(comm), metal, &table));
+      TORCH_CHECK(storage.is_meta() || storage.is_mps() == metal, "view writes require one local device");
+      checked(ncclMeshPageTableCreate(storage.is_meta() ? nullptr : g.where(storage), communicator(comm), metal, &table));
       const std::vector<uint64_t> dims(shape.begin(), shape.end()), elements(runs.begin(), runs.end());
       const ncclMeshLayout layout{table, (uint32_t)bits, (uint32_t)dims.size(), dims.data(), strides.data(), (uint64_t)offset,
                                   mapped ? elements.data() : nullptr, elements.size() / 2};

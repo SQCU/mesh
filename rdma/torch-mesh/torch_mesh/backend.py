@@ -281,9 +281,10 @@ class ProcessGroupMesh(dist.ProcessGroup):
         """Bind exact logical tensor views once to the common physical WRITE plan.
 
         Each delivery is ``(local_view, source, destination)``. On the source it
-        names original values, on the destination final output bytes, and on a
-        forwarding rank a distinct relay lease. Local strides and span counts
-        may differ; native preparation agrees their common logical byte units.
+        names original values, on the destination final output bytes, and on any
+        other rank a meta tensor of its shape and type, the library's relay
+        (nccl.h ncclMeshWriteLayoutPrepare). Local strides and span counts may
+        differ; native preparation agrees their common logical byte units.
         """
         from .operand import TensorView
         bindings = [(*TensorView.of(view).write_layout(), int(source), int(destination))

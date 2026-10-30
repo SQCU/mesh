@@ -678,16 +678,6 @@ static int write_forwards(ncclComm_t comm, int source, int destination) {
   return 0;
 }
 
-/* nccl.h ncclMeshCommWriteForwards */
-ncclResult_t ncclMeshCommWriteForwards(ncclComm_t comm, int source, int destination, int *forwards) {
-  if (!comm || !forwards || source < 0 || destination < 0 || source >= comm->nranks || destination >= comm->nranks || source == destination)
-    return fail(ncclInvalidArgument, "relay inspection requires distinct endpoints of the physical communicator");
-  pthread_mutex_lock(&group_lock);
-  *forwards = write_forwards(comm, source, destination);
-  pthread_mutex_unlock(&group_lock);
-  return ncclSuccess;
-}
-
 ncclResult_t ncclMeshCommWritePaths(ncclComm_t comm, int source, int destination, const struct mesh_paths **paths) {
   if (!comm || !paths || source < 0 || destination < 0 || source >= comm->nranks || destination >= comm->nranks || source == destination)
     return fail(ncclInvalidArgument, "route inspection requires distinct endpoints of the physical communicator");
@@ -2046,6 +2036,7 @@ struct ncclMeshWritePlan {
   size_t *span_first; /* step, binding occurrence -> immutable repeated descriptor train */
   mesh_pages *step_units; /* same step/occurrence index, one fused repetition */
   void *payload;
+  void *relay; /* the library's relay lease (relay_layout), returned as the plan is freed */
   struct owned owned; /* its payload's, span table's and source readiness table's leases; held where `uses` */
   struct where source, landing;
   struct where source_ready;
@@ -2136,6 +2127,7 @@ static void write_plan_drop(struct ncclMeshWritePlan *p) {
     owned_end(&p->owned, 1);
     pthread_mutex_unlock(&attach_lock);
     if (p->spans) ncclMemFree(p->spans);
+    if (p->relay) ncclMemFree(p->relay);
     for (int r = 0; p->transfers && r < p->comm->nranks; r++) free(p->transfers[r]);
     free(p->transfers); free(p->transferred);
     write_packets_free(p); free(p->span_first); free(p->step_units); free(p->view); free(p->view_first); free(p->ready_offsets);
@@ -5923,8 +5915,10 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
   if (source < 0 || source >= comm->nranks || destination < 0 ||
       destination >= comm->nranks || source == destination || !repeats || !packet || packet > UINT32_MAX ||
       (metal != 0 && metal != 1) || !layout.instances || !layout.invocations) local.status = EINVAL;
-  /* a table of no pages binds nothing: only a rank that neither ends nor forwards this write gives one (its phase 0) */
+  /* a table of no pages binds nothing: only a rank that neither ends nor forwards this write gives one (its phase 0),
+     and it has no period of its own (one slot), so it adds no occurrence to the plan's */
   const int unbound = !table->pages;
+  if (unbound) { layout.instances = 1; layout.instance_stride = 0; local.layout = layout; }
   if (!local.status && unbound) {
     pthread_mutex_lock(&group_lock);
     if (write_forwards(comm, source, destination) || comm->rank == source || comm->rank == destination) local.status = EINVAL;
@@ -6315,10 +6309,60 @@ ncclResult_t ncclMeshWritePagesPrepare(ncclMeshPageTable_t table,const ncclMeshP
   return result;
 }
 
+/* nccl.h ncclMeshWriteLayoutPrepare's relay: where `v` is an empty table on a rank that ends neither side of the WRITE
+   and forwards it (write_forwards), a lease of the region (ncclMemAlloc's) holding its logical bytes a slot, its frames'
+   then its instances', contiguous, laid as `*lowered` over `*table` (`*slot` the shape it names); elsewhere none (all
+   untouched).  A rank that does not forward keeps its empty table, binding nothing (write_prepare) */
+static ncclResult_t relay_layout(const ncclMeshLayout *v, int source, int destination, void **relay,
+                                 ncclMeshPageTable_t *table, ncclMeshLayout *lowered, uint64_t *slot) {
+  static const int64_t dense = 1;
+  if (!v || !v->storage || v->storage->pages || !v->storage->comm || !v->element_bits || (v->rank && !v->shape)) return ncclSuccess;
+  const ncclComm_t comm = v->storage->comm;
+  if (source < 0 || destination < 0 || source >= comm->nranks || destination >= comm->nranks || source == destination)
+    return ncclSuccess;   /* write_prepare refuses the endpoints */
+  pthread_mutex_lock(&group_lock);
+  const int forwards = write_forwards(comm, source, destination);
+  pthread_mutex_unlock(&group_lock);
+  if (!forwards) return ncclSuccess;
+  /* its logical elements: its runs' counts, or its shape's */
+  uint64_t elements = 1;
+  int overflow = 0;
+  if (v->runs) { elements = 0; for (size_t k = 0; k < v->nruns; k++) overflow |= __builtin_add_overflow(elements, v->runs[2 * k + 1], &elements); }
+  else for (uint32_t i = 0; i < v->rank; i++) overflow |= __builtin_mul_overflow(elements, v->shape[i], &elements);
+  uint64_t bits = 0, total = 0;
+  const uint64_t frames = v->frames > 1 ? v->frames : 1, instances = v->instances > 1 ? v->instances : 1;
+  overflow |= __builtin_mul_overflow(elements, (uint64_t)v->element_bits, &bits);
+  const uint64_t bytes = bits / 8;
+  overflow |= __builtin_mul_overflow(bytes, frames, &total) || __builtin_mul_overflow(total, instances, &total) ||
+              total > (uint64_t)INT64_MAX;
+  if (overflow || bits % 8) return fail(ncclInvalidArgument, "a relay's logical bytes (nccl.h ncclMeshLayout)");
+  void *lease = NULL;
+  ncclResult_t result = mem_alloc(&lease, (size_t)total, MESH_BACKING_PAGES);
+  ncclMeshBuffer at = {NULL, 0};
+  if (!result && v->storage->metal && lease_buffer(lease, &at.buffer, &at.offset))
+    result = fail(ncclSystemError, "a relay lease's Metal buffer");
+  if (!result) result = ncclMeshPageTableCreate(v->storage->metal ? (const void *)&at : lease, comm, v->storage->metal, table);
+  if (result) { ncclMemFree(lease); return result; }
+  *slot = bytes;
+  *lowered = (ncclMeshLayout){.storage = *table, .element_bits = 8, .rank = 1, .shape = slot, .strides = &dense,
+                              .frames = (uint32_t)frames, .frame_stride = (int64_t)(bytes ? bytes : 1),
+                              .instances = instances, .instance_stride = (int64_t)(frames * (bytes ? bytes : 1))};
+  *relay = lease;
+  return ncclSuccess;
+}
+
 ncclResult_t ncclMeshWriteLayoutPrepare(const ncclMeshLayout *v, int source, int destination, size_t max_packet,
     ncclMeshWriteLayout layout, ncclMeshWritePlan_t *out) {
-  const ncclResult_t result = write_layout_declared(v, source, destination, max_packet, layout, out);
-  if (!result) write_declare(*out, v->storage, NULL, 0, v, source, destination, max_packet, layout);
+  void *relay = NULL;
+  ncclMeshPageTable_t table = NULL;
+  ncclMeshLayout lowered;
+  uint64_t slot = 0;
+  ncclResult_t result = relay_layout(v, source, destination, &relay, &table, &lowered, &slot);
+  if (!result) result = write_layout_declared(table ? &lowered : v, source, destination, max_packet, layout, out);
+  ncclMeshPageTableDestroy(table);
+  /* the declaration names the empty table, so a template's instance takes its own relay */
+  if (!result) { (*out)->relay = relay; relay = NULL; write_declare(*out, v->storage, NULL, 0, v, source, destination, max_packet, layout); }
+  ncclMemFree(relay);
   return result;
 }
 

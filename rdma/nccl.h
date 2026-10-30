@@ -1007,11 +1007,6 @@ ncclResult_t ncclMeshCommWriteRoutes(ncclComm_t comm, int source, int destinatio
    weights. The borrowed value remains valid until that pair is reconfigured or
    the communicator is destroyed. Execution does not query routing policy. */
 ncclResult_t ncclMeshCommWritePaths(ncclComm_t comm, int source, int destination, const struct mesh_paths** paths);
-/* Whether this rank forwards a WRITE from source to destination: it ends a cable of an installed path of nonzero weight,
-   and neither end of the write (1 where no paths are installed). A rank that does not forward holds no relay. It
-   binds its WRITE with an empty page table, ncclMeshPageTableCreate(NULL, comm, metal, &table), and its layout's other
-   fields as any rank's. */
-ncclResult_t ncclMeshCommWriteForwards(ncclComm_t comm, int source, int destination, int* forwards);
 /* The channels this rank's lists lay, a cable each that ends here: the count every kernel's per-channel records hold. */
 ncclResult_t ncclMeshCommChannels(ncclComm_t comm, int* channels);
 /* The most entries one repeat of a group of WRITEs, `root` to each of the n `destinations` with `count` elements of
@@ -1073,7 +1068,12 @@ typedef struct { ncclMeshPageTable_t storage; uint32_t element_bits, rank; const
                  uint64_t offset; const uint64_t* runs; size_t nruns; uint32_t frames; int64_t frame_stride;
                  uint64_t instances; int64_t instance_stride; } ncclMeshLayout;
 /* The WRITE whose local view is `local`: the source's values on `source`, the landing on `destination`, a relay's on any
-   other rank; every rank's view holds the same logical bytes, in its own layout. */
+   other rank; every rank's view holds the same logical bytes, in its own layout.  On a rank that ends neither side,
+   `local` over an empty table (ncclMeshPageTableCreate(NULL, comm, metal, &table)) is the library's relay: where an
+   installed path of nonzero weight crosses this rank (any, where none is installed), a lease of the region the plan
+   holds, its layout's logical bytes a slot for each of its frames and instances (its shape or runs, element bits, frames
+   and instances read; its strides and offset not); elsewhere no pages.  The plan returns the lease as it is destroyed
+   and its last execution ends. */
 ncclResult_t ncclMeshWriteLayoutPrepare(const ncclMeshLayout* local, int source, int destination, size_t max_packet,
     ncclMeshWriteLayout layout, ncclMeshWritePlan_t* out);
 /* Bind source words once (ncclMeshBuffer on Metal, region address on host).

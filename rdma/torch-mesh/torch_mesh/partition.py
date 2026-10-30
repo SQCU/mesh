@@ -770,7 +770,7 @@ def _follow_bytes(placement, local, logical_shape, logical_stride, key, rank, gr
             flat = result.view(-1)
             view = flat.as_strided((rows, width), (run.destination_stride // size, 1), flat.storage_offset() + run.destination_offset // size)
             kernel = _migration_kernel('migration_ready', channels)
-        else:   # a relay: its shape and type alone, the library's lease where a route crosses this rank (ncclMeshCommWriteForwards)
+        else:   # a relay: its shape and type alone, the library's lease where a route crosses this rank (nccl.h ncclMeshWriteLayoutPrepare)
             view, kernel = torch.empty((rows, width), dtype=local.dtype, device='meta'), None
         jobs.append((run, kernel, _migration_words(run, run.row_bytes, 1), 1, view, 0))
     schedule = _stream.Schedule()
@@ -834,8 +834,9 @@ def _scatter_spans(tensor, dim, sizes, rank, source, group):
     for destination, count in enumerate(sizes):
         if destination == source or not count * row:
             continue
+        # a relay is its shape and type alone: the library leases it where a route crosses this rank
         view = (original.narrow(dim, offsets[destination], count) if rank == source
-                else result if rank == destination else _empty((count * row,), tensor, group))
+                else result if rank == destination else torch.empty((count * row,), dtype=tensor.dtype, device='meta'))
         deliveries.append((view, source, destination))
         calls.append(Call(WRITE, count * row * tensor.element_size(), torch.uint8, root=source, destination=destination))
     if deliveries:
@@ -878,9 +879,9 @@ def _follow_spans(placement, local, logical_shape, key, rank, group, publish_bou
                 view = local.narrow(dim, first - before[source], count)
             elif rank == destination:
                 view = result.narrow(dim, first - after[destination], count)
-            else:
+            else:   # a relay is its shape and type alone: the library leases it where a route crosses this rank
                 extent = math.prod(local.shape[:dim] + local.shape[dim + 1:]) * count
-                view = _empty((extent,), local, group)
+                view = torch.empty((extent,), dtype=local.dtype, device='meta')
             deliveries.append((view, source, destination))
     if deliveries:
         prepared = group.prepare_writes(deliveries)
