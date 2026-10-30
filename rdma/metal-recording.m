@@ -1288,6 +1288,7 @@ struct MetalSchedule *MetalScheduleCreateOn(id<MTL4CommandQueue> queue, enum Met
 }
 
 void MetalScheduleAfter(struct MetalSchedule *s,id<MTLEvent> after,uint64_t value) {
+    if(!after)return; // No declared predecessor, as on a function's first invocation.
     struct MetalSchedule *root=s->root;
     s=MetalScheduleTail(root);
     // This declaration governs the current command part and subsequent work.
