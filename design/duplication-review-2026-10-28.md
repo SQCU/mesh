@@ -913,8 +913,9 @@ Python lists, rank lists for masks, and (buffer, offset) pairs for bindings, and
 **Instances**
 - torch: collective_views.py `_domains` 14-28 and `lower` 70-131. `lower` covers the all-to-all matrix exchange and
   pairing check (78-86), the cut union (110) and the fragment V-counts by overlap (117-128).
-- backend.py `exchange_configuration` 317-325 and `union_cuts` 327-333. These run through the c10d store as JSON:
-  a second configuration channel beside the library's.
+- backend.py `exchange_configuration` 317-325 and `union_cuts` 327-333. These ran through the c10d store as JSON:
+  a second configuration channel beside the library's. `exchange_configuration` now gathers over
+  `ncclMeshCommConfigGather` (each rank's length, then the JSON padded to the longest).
 - native: mesh_rank.m `cross_domains` 378-394 and `MeshRankCrossLayouts` 396-404. The cuts are in `mark_records`
   594-599 and `merge_records` 639-640, and the union rides the `ncclMeshCommConfigGather` JSON in `MeshRankPlan`
   856-869. The fragment counts by overlap are in `cross_fragments` 657-683.
@@ -933,6 +934,8 @@ bytes for gathers. Torch has ALLTOALL; native has holders and scatter.
 **Single form.** In two steps.
 - (a) Low risk. Torch's union and matrix exchange go through `ncclMeshCommConfigGather`, exposed as
   `mesh.config_gather`, and the matrix comes from `prepare_counted`'s exchange. The c10d-store side channel goes.
+  The exchange half is done: `ProcessGroupMesh.exchange_configuration` is the gather, with no `mesh.config_gather`,
+  and configuration.py's capacities and proposal use it too. The matrix still comes from torch's gathered counts.
 - (b) In nccl.h, preparation only:
   ```c
   ncclResult_t ncclMeshCallDomains(ncclComm_t, const ncclMeshCall *, int rank, uint64_t (*send)[2], size_t *sends,

@@ -1,10 +1,8 @@
 # design/whole-function.md
 import itertools
-import json
 import time
 from pathlib import Path
 
-import torch.distributed as dist
 import assignment
 import rollout
 import routing
@@ -24,10 +22,8 @@ def placement(mesh, name, workload, chosen=None, *, parameters, forms=()):
     collective is refused."""
     group = mesh.get_group(name)
     rank, size = group.rank(), group.size()
-    store = dist.distributed_c10d._get_default_store()
     key = f'mesh/configuration/{group.group_name}/{name}/{next(_serial)}'
-    store.set(f'{key}/capacity/{rank}', str(node()[1]))
-    capacities = [int(store.get(f'{key}/capacity/{p}')) for p in range(size)]
+    capacities = group.exchange_configuration(int(node()[1]))
     operand = partition.operand(mesh, name)
     decisions = {name: {'parts': operand.parts.tolist(), 'grain': 1,
                         'low': [1] * size, 'high': [operand.units] * size, 'capacity': capacities}}
@@ -44,16 +40,15 @@ def placement(mesh, name, workload, chosen=None, *, parameters, forms=()):
     # One proposal on every member (rubric C7): the solve's floating point can round its parts differently on another
     # node's hardware, and a split a row apart makes the members bind different bytes for one WRITE (hourly
     # 2026-10-29T06:21Z, chain-n3 and lstm-n3: "rank 4's bytes 493568 is not rank 0's 495616"). Rank 0's parts and
-    # operands are taken.
-    if rank == 0:
-        store.set(key + '/proposal', json.dumps({'parts': {k: [int(v) for v in values] for k, values in operands['parts'].items()},
-                                                 'operands': {k: int(v) for k, v in operands['operands'].items()}}))
-    operands = {**operands, **json.loads(store.get(key + '/proposal'))}
+    # operands are taken: its report of the configuration gather, on every member.
+    proposal = ({'parts': {k: [int(v) for v in values] for k, values in operands['parts'].items()},
+                 'operands': {k: int(v) for k, v in operands['operands'].items()}} if rank == 0 else None)
+    operands = {**operands, **group.exchange_configuration(proposal)[0]}
     partition._attach(mesh, name, operands['parts'][name])
     # every member leaves together, each having waited for rank 0's proposal; the fit is named, to be passed again
     emit({'phase': 'placed', 'unix': time.time(), 'placement': {'parts': operands['parts'], 'operands': operands['operands']}})
     return {'mesh': mesh, 'name': name, 'group': group, 'rank': rank, 'size': size,
-            'store': store, 'key': key, 'workload': workload, 'records': [],
+            'key': key, 'workload': workload, 'records': [],
             'decisions': decisions, 'assignment': operands, 'graphs': {}, 'forms': list(forms),
             'implementation': revision(Path(assignment.__file__).resolve().parents[1]), 'sequence': 0}
 

@@ -65,7 +65,7 @@ The same job, implemented in two or more of them (S = torch_mesh/_stream.mm):
 | D1 | Collective kind → nccl entry point | S:238-326; mesh_rank.m:343-374; mesh_mpi:306-366 | 180 |
 | D2-D5 | ncclMeshCall/PlanRun marshalling, producer times, plan demands and route units, route weights | backend.py:181-273; assignment.py:8-60; routing.py:159-181; mesh_rank.m:785-1044 | 340 |
 | D6-D9 | The pair loop: own, landing or relay; relay sizing after WriteForwards; page table, ncclMeshLayout and LayoutPrepare; GroupStart, WriteExecute, GroupEnd | S four times (1351-1377, 1489-1516, 1688-1702, 1925-1949); mesh_rank.m:842-916; backend.py:343-358; partition.py:831-883 | 300 |
-| D10-D11 | Roles → logical domains; the cut union across ranks and traversal fragmenting | collective_views.py:14-133; mesh_rank.m:377-393, 676-731; exchanged by torch's store (backend.py:293-309) and by ncclMeshCommConfigGather (mesh_rank.m:929-941) | 180 |
+| D10-D11 | Roles → logical domains; the cut union across ranks and traversal fragmenting | collective_views.py:14-133; mesh_rank.m:377-393, 676-731; exchanged by ncclMeshCommConfigGather on both sides (backend.py exchange_configuration, formerly torch's store; mesh_rank.m:929-941) | 180 |
 | D12-D15 | Communicator lifecycle; dtype → ncclDataType_t; reduce-op table; tensor or array → address | backend.py, mesh_mpi.py, S, mesh_rank.m, engines.py | 200 |
 | D16 | Channel count | mesh_rank.m:446-453 counts cables by hand; S asks ncclMeshCommChannels | 8 |
 | D17 | FFI to libnccl-mesh | cffi `_mesh_c` from the headers (it binds 155 functions, 63 named in Python); hand ctypes prototypes in mesh_relation.py; pybind11 in S; the Swift bridging header | — |

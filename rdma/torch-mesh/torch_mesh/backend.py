@@ -16,8 +16,9 @@ The partials merge (merge_partials) is an all-reduce,
 reduce or V reduce-scatter by the library's partials operator.
 
 A group's communicator is NCCL's bootstrap's (ncclCommInitRank, rank 0's ncclGetUniqueId passed through the group's
-store, as ProcessGroupNCCL does), its sessions each on the map the bridges keep when it opens; its pg_options are not
-read.
+store, as ProcessGroupNCCL does, the store's one use), its sessions each on the map the bridges keep when it opens; its
+pg_options are not read.  What its ranks agree before a function runs (exchange_configuration) crosses the
+communicator's configuration channel (ncclMeshCommConfigGather).
 The silent-link bound is the library's (nccl.h)."""
 import collections
 import contextlib
@@ -292,14 +293,19 @@ class ProcessGroupMesh(dist.ProcessGroup):
         return _stream.ViewWrites(bindings, self.handle)
 
     def exchange_configuration(self, value):
-        """Share preparation operands before compiling the function."""
+        """Every rank's `value` (JSON), in rank order, before the function runs: the communicator's configuration
+        channel (nccl.h ncclMeshCommConfigGather), whose ranks each give the same extent, so each rank's encoded
+        length is gathered first and then each encoding padded to the longest (mesh_rank.m MeshRankPlan's two
+        gathers). Every rank calls it at the same point; a broadcast is this gather read at its root's report."""
         import json
-        serial = getattr(self, '_view_serial', 0)
-        self._view_serial = serial + 1
-        store = dist.distributed_c10d._get_default_store()
-        key = f'mesh/views/{self.group_name}/{serial}'
-        store.set(f'{key}/{self.rank()}', json.dumps(value))
-        return [json.loads(store.get(f'{key}/{rank}')) for rank in range(self.size())]
+        local, n = json.dumps(value).encode(), self._size
+        lengths = ffi.new('uint64_t[]', n)
+        check(LIB.ncclMeshCommConfigGather(self.comm, ffi.new('uint64_t *', len(local)), lengths,
+                                           ffi.sizeof('uint64_t')))
+        room = max(lengths)
+        reports = ffi.new('char[]', n * room)
+        check(LIB.ncclMeshCommConfigGather(self.comm, ffi.from_buffer(local.ljust(room, b'\0')), reports, room))
+        return [json.loads(ffi.unpack(reports + r * room, lengths[r])) for r in range(n)]
 
     def union_cuts(self, cuts):
         """Agree view boundaries during configuration, before the function runs."""
