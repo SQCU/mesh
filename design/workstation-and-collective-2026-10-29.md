@@ -176,9 +176,14 @@ None of that is the collective. Every run uses the entire collective, the hourly
   runs on a schedule". An unscheduled run is the same program started on every member, with nothing held open by
   whoever started it.
 
-  One piece is new. A node outside the largest part must not run its own part, and its bridge knows only its own part.
-  The beacons name every bridge, but not its part. If each beacon also announced its part, every node could compare
-  parts without a table or ssh.
+  A node outside the largest part does not run its own part. Seeing the other parts is not a limit of the node. Only
+  its bridge's map is bounded by its links, and the node is also on the LAN and the tailnet with every other node:
+  - a 3 s browse of `_meshnode._tcp` from m5ult1 (10-29 18:3x) listed all six beacons, the unplugged laptop's
+    included, each with its node number and model;
+  - the launcher's discover() compares every part each hour by reading every map over that same network.
+
+  The part each node is linked into is published nowhere. That is an omission, not a limit: each beacon can announce
+  its node's part beside its model.
 - **What was never written as code.** The run's start and its record, on the collective. Everything else a run needs
   is already on the node: membership, capacity, routing, rendezvous, preparation and the guard. Only three things live
   outside:
