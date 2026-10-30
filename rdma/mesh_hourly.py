@@ -23,7 +23,7 @@ import time
 import traceback
 import zlib
 
-from mesh_source import checkout, git
+from mesh_source import git, move
 
 HOURLY = Path.home() / '.cache/mesh/hourly'
 # seconds after the run's minute: a node that starts later than LATE cannot hear this hour's election. Until
@@ -166,8 +166,8 @@ def node():
     try:
         record['commits'] = {name: git(Path.home(), 'ls-remote', url, 'refs/heads/main').split()[0].decode()
                              for name, url in cluster.upstreams.items()}
-        mesh = Path.home() / cluster.checkouts / 'mesh/current'
-        checkout(cluster.upstreams['mesh'], record['commits']['mesh'], mesh, 60)
+        mesh = Path.home() / 'mesh'
+        move(mesh, cluster.upstreams['mesh'], record['commits']['mesh'], 120)
     except Exception as error:
         record.update(status='failed', errors=[{'stage': 'checkout', 'error': str(error)}])
         write(record)
@@ -396,17 +396,16 @@ def collective(record):
                 return 0
             if record['commits']['mesh'] != mesh_commit:
                 # the representative read another mesh commit: this node runs it, by its committed code
-                checkout(cluster.upstreams['mesh'], record['commits']['mesh'], Path.home() / me.source, 120)
+                move(Path.home() / me.source, cluster.upstreams['mesh'], record['commits']['mesh'], 120)
                 silence()
                 os.execv(sys.executable, [sys.executable, str(Path.home() / me.source / 'rdma/mesh_hourly.py'),
                                           'collective', json.dumps(record)])
         write(record)
         stage = 'preparation'
         record['status'] = 'preparing'
-        bench = Path.home() / cluster.checkouts / 'metal-microbench/current'
-        # only the hourly's own directory: its workloads and their configurations
-        checkout(cluster.upstreams['metal-microbench'], record['commits']['metal-microbench'], bench,
-                 max(1, record['deadline_unix'] - time.time()), paths=('tools/mesh/hourly',))
+        bench = Path.home() / 'metal-microbench'
+        move(bench, cluster.upstreams['metal-microbench'], record['commits']['metal-microbench'],
+             max(1, record['deadline_unix'] - time.time()))
         began = time.time()
         code, output = me.py('prepare', timeout=max(1, record['deadline_unix'] - time.time()))
         if code:

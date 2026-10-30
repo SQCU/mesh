@@ -5,7 +5,6 @@
   },
   "run_seconds": 3300,
   "python": "~/.venv-mesh-uv/bin/python",
-  "checkouts": ".cache/mesh-checkouts",
   "rank_port": 29600,
   "upstreams": {
     "mesh": "https://github.com/SQCU/mesh.git",

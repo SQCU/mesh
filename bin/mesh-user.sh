@@ -9,9 +9,7 @@
 # program and its configuration's path alone: a new binary, libmesh or configuration is installed by rename, and the
 # bridge's heartbeat, sent SIGHUP, restarts the bridge on them, its region kept (design/transport.md section 2).  The install records what it installed
 # (~/.cache/mesh/facts/io.mesh.bridge, which node-info publishes).
-# Run as the user:  mesh-user.sh CONFIGURATION [CHECKOUT]  (the checkout holding this script: the node's one checkout,
-# etc/mesh-nodes.json `checkouts`/mesh/current, which the hourly moves and builds; a second checkout would leave the
-# bridge on code the hourly never updates)
+# Run as the user:  mesh-user.sh CONFIGURATION [CHECKOUT]  (the checkout holding this script: ~/mesh, the node's one)
 set -u
 if [ $# -lt 1 ] || [ $# -gt 2 ] || [ ! -f "$1" ]; then
   echo "mesh-user.sh CONFIGURATION [CHECKOUT]: the node's bridge configuration document (JSON, TOML or YAML; etc/bridge/README.md) is required, the bridge has no default" >&2
@@ -46,7 +44,8 @@ PL
 # the loaded bridge is this checkout's only when its job runs this checkout's heartbeat: another checkout's images did
 # not change here, so its bridge is not signalled (its job takes this definition at its next load)
 loaded=
-[ "$(launchctl print "user/$(id -u)/io.mesh.bridge" 2>/dev/null | awk '/^[[:space:]]*program = /{print $3; exit}')" = "$source/rdma/mesh-heartbeat" ] && loaded=1
+program=$(launchctl print "user/$(id -u)/io.mesh.bridge" 2>/dev/null | awk '/^[[:space:]]*program = /{print $3; exit}')
+[ -n "$program" ] && [ "$(cd "$(dirname "$program")" 2>/dev/null && pwd -P)/$(basename "$program")" = "$source/rdma/mesh-heartbeat" ] && loaded=1
 out=$("$source/bin/mesh-launchd-agent.sh" "$launchd_agents/io.mesh.bridge.plist.new") || { printf '%s\n' "$out"; exit 1; }
 [ -z "$out" ] || printf '%s\n' "$out"
 { [ -z "$loaded" ] || { [ -z "$renew" ] && [ -z "$images_changed" ]; }; } \

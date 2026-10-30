@@ -42,15 +42,13 @@ class Member:
 @dataclasses.dataclass(frozen=True)
 class Cluster:
     """etc/mesh-nodes.json with the environment: members by bridge node number, the administrator's user and key, a
-    run's bound in seconds, the nodes' Python, the directory under home of each repository's one checkout
-    (`<repository>/current`), the first rank port, and each repository's origin (`upstreams`, which the hourly's every
+    run's bound in seconds, the nodes' Python, the first rank port, and each repository's origin (`upstreams`, which the hourly's every
     node reads main from)."""
     members: dict
     user: str
     key: 'str | None'
     run_seconds: int
     python: str
-    checkouts: str
     rank_port: int
     upstreams: dict
     hourly_minute: int
@@ -68,7 +66,7 @@ def load(path=ROOT / 'etc/mesh-nodes.json'):
                                         frozenset(row.get('roles', ())), row.get('guard_headroom_gib', 0)) for row in raw['nodes'].values()}
     return Cluster(members, access.get('user') or getpass.getuser(),
                    str(Path(access['key']).expanduser()) if 'key' in access else None,
-                   raw['run_seconds'], raw['python'], raw['checkouts'], raw['rank_port'], raw['upstreams'], raw['hourly_minute'])
+                   raw['run_seconds'], raw['python'], raw['rank_port'], raw['upstreams'], raw['hourly_minute'])
 
 
 def home_path(relative):
@@ -194,8 +192,7 @@ class Node:
         member = cluster.members.get(number)
         self.name, self.guard = ((member.name, f'{member.guard_headroom_gib} {int("workstation" in member.roles)}')
                                  if member else (number, '0 0'))
-        # the node's one mesh checkout (etc/mesh-nodes.json `checkouts`), under its home
-        self.source = f'{cluster.checkouts}/mesh/current'
+        self.source = 'mesh'  # the node's one mesh checkout, ~/mesh
         self.discovered_links = 0
         self.commands = []
 
@@ -358,7 +355,7 @@ def run(*argv, **kw):
 
 
 def node_prepare():
-    """Build the node's one checkout, `current` (the bridge's and the ranks', moved to this commit before this runs),
+    """Build the node's one checkout, ~/mesh (the bridge's and the ranks', moved to this commit before this runs),
     as nothing but make's and ninja's staleness decide: bin/mesh-user.sh's `make all install` (in parallel), the one
     build of the libraries and the bridge, which restarts the bridge (SIGHUP, its region kept) only where its images
     changed; then _mesh_c and torch_mesh's extension in place."""
@@ -423,7 +420,7 @@ def heartbeat_stale(root):
     if not pid:
         return 'no heartbeat runs'
     program = run('ps', '-o', 'comm=', '-p', pid).stdout.strip()
-    if program != str(image):
+    if os.path.realpath(program) != os.path.realpath(image):
         return f'the heartbeat runs {program}, not {image}'
     # a heartbeat runs its image again on its restart signal (mesh-heartbeat.c: execv, its pid and start time kept), so
     # whether it runs the installed image is the file it executes (its first text, lsof), not when it started
