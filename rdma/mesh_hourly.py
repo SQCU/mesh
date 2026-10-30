@@ -380,13 +380,11 @@ def collective(record):
     stage = 'election'
     try:
         local = mesh.Node(cluster, '-', 'localhost', local=True, deadline=record['deadline_unix'])
-        local.source = f'{cluster.checkouts}/mesh/current'
         _, report = local.stat()
         if not report.get('up'):
             raise RuntimeError(f'its bridge is not up: {report}')
         own = str(report['node'])
         me = mesh.Node(cluster, own, 'localhost', local=True, deadline=record['deadline_unix'])
-        me.source = local.source
         record.update(node=own, token=f'{record["run"]}:{own}:{os.getpid()}:{mesh.started(os.getpid())}')
         if 'members' not in record:
             if time.time() > record['minute'] + LATE:
@@ -498,7 +496,6 @@ def read(output_root):
     here = None
     try:
         local = mesh.Node(cluster, '-', 'localhost', local=True, deadline=time.time() + 30)
-        local.source = f'{cluster.checkouts}/mesh/current'
         here = str(local.stat()[1].get('node'))
     except Exception:
         pass

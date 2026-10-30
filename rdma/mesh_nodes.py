@@ -194,7 +194,8 @@ class Node:
         member = cluster.members.get(number)
         self.name, self.guard = ((member.name, f'{member.guard_headroom_gib} {int("workstation" in member.roles)}')
                                  if member else (number, '0 0'))
-        self.source = 'mesh'
+        # the node's one mesh checkout (etc/mesh-nodes.json `checkouts`), under its home
+        self.source = f'{cluster.checkouts}/mesh/current'
         self.discovered_links = 0
         self.commands = []
 
