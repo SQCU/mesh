@@ -45,7 +45,7 @@ def fetch(node):
     """This node's telemetry over loopback, read once; another node's stays on that node, the map giving its facts."""
     started = time.monotonic()
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{TELEMETRY_PORT}{LATEST}") as response: envelope = json.load(response)
+        with urllib.request.urlopen(f"http://127.0.0.1:{TELEMETRY_PORT}{LATEST}", timeout=5) as response: envelope = json.load(response)
         node.rtt = time.monotonic() - started
     except (OSError, ValueError) as error:
         node.error, node.rtt = f"{type(error).__name__}: {error}", None

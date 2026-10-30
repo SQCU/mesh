@@ -296,22 +296,12 @@ def parts(names, pairs):
     return found
 
 
-def paired(nodes):
-    """The node pairs a PAIRED cable joins, as the nodes' bridges report them."""
-    return {tuple(sorted((n.number, str(p['node'])))) for n, (_, d) in zip(nodes, parallel([lambda n=n: n.stat() for n in nodes]))
-            for p in d.get('peers', []) if p.get('phase') == 'PAIRED'}
-
-
 def up(nodes, log=None):
     def one(n):
         if n.stat()[1].get('up') is True:
             return n
         note(log, f'not up {n.number}')
     return [n for n in parallel([lambda n=n: one(n) for n in nodes]) if n]
-
-
-def at(nodes, number):
-    return next((n for n in nodes if n.number == number), None)
 
 
 def ports(n):
