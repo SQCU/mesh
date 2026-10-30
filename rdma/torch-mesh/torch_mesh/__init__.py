@@ -50,6 +50,20 @@ def prepare_source(gm, example_inputs):
     _stream.linear_source((Path(__file__).parent / 'linear.metal').read_text(), node()[1])
     aten = torch.ops.aten
 
+    def replace(module, before, after):
+        """Carry result identities through an equivalent numerical rewrite."""
+        after.meta = before.meta.copy()
+        before.replace_all_uses_with(after)
+        module.meta['mesh_source_results'] = tree_map(
+            lambda value: after if value is before else value, module.meta.get('mesh_source_results', {}))
+
+    def remove_unobserved(module, value):
+        # A fused intermediate has no separately emitted result. Its source
+        # origins remain on the fused operation; it cannot name the final value.
+        module.meta['mesh_source_results'] = {source: result for source, result in
+            module.meta.get('mesh_source_results', {}).items()
+            if not any(leaf is value for leaf in tree_flatten(result)[0])}
+
     def rows(x, w):
         """Whether x @ w is linear's: on MPS (its one implementation), fp16, x [R, K] in row views, w the transposed
         view of a [N, K] whose rows lie apart by K or more."""
@@ -66,10 +80,11 @@ def prepare_source(gm, example_inputs):
             return None
         return x.args[0]
 
-    def grouped(graph):
+    def grouped(module):
         """Consecutive products of torch_mesh::linear, within the manifest binding capacity, none reading another's output nor any of their outputs
         used before the last of them, as one torch_mesh::linears: one dispatch."""
         import operator
+        graph = module.graph
         order = {n: i for i, n in enumerate(graph.nodes)}
         products = [n for n in graph.nodes if n.target is torch.ops.torch_mesh.linear.default]
         above = {}
@@ -98,13 +113,15 @@ def prepare_source(gm, example_inputs):
                     made.meta['val'] = [m.meta['val'] for m in group]
                     for j, m in enumerate(group):
                         part = graph.call_function(operator.getitem, (made, j))
-                        part.meta['val'] = m.meta['val']
-                        m.replace_all_uses_with(part)
+                        replace(module, m, part)
+                    made.meta['mesh_source_nodes'] = tuple(dict.fromkeys(
+                        origin for item in group for origin in item.meta.get('mesh_source_nodes', (item,))))
                 for m in group:
                     graph.erase_node(m)
             i += len(group)
 
-    def rewrite(graph):
+    def rewrite(module):
+        graph = module.graph
         for node in list(graph.nodes):
             mm = node.target is aten.mm.default and rows(*node.args)
             addmm = (node.target is aten.addmm.default and not node.kwargs and len(node.args) == 3 and rows(*node.args[1:])
@@ -118,29 +135,31 @@ def prepare_source(gm, example_inputs):
                     made = graph.call_function(torch.ops.torch_mesh.linear.default,
                                                (parts[0] if parts else x, weight, node.args[0] if addmm else None, 0) +
                                                ((parts[1],) if parts else ()))
-                made.meta['val'] = node.meta['val']
-                node.replace_all_uses_with(made)
+                replace(module, node, made)
                 graph.erase_node(node)
                 if parts:
+                    remove_unobserved(module, x)
                     graph.erase_node(x)
                 users = list(made.users)
                 if len(users) == 1 and users[0].target is aten.tanh.default:
                     made.args = made.args[:3] + (1,) + made.args[4:]
-                    users[0].replace_all_uses_with(made)
+                    origins = tuple(dict.fromkeys((*made.meta.get('mesh_source_nodes', ()),
+                                                   *users[0].meta.get('mesh_source_nodes', (users[0],)))))
+                    remove_unobserved(module, made)
+                    replace(module, users[0], made)
+                    made.meta['mesh_source_nodes'] = origins
                     graph.erase_node(users[0])
-        grouped(graph)
+        grouped(module)
 
     from torch._guards import detect_fake_mode
     from torch._subclasses.fake_tensor import FakeTensorMode
-    from torch.fx.experimental.proxy_tensor import make_fx
     from torch._inductor.decomposition import select_decomp_table
     from .algebra import decompositions
-    from torch._subclasses.functional_tensor import dispatch_functionalize
     from torch.utils._pytree import tree_map, tree_flatten
     # Functionalization receives every tensor as an operand, including
     # weights and prebound outputs. It can then lower out= operations
     # while retaining their writes to those exact destinations.
-    from .compilation import lift_attributes
+    from .compilation import functionalize_source, lift_attributes
     lifted, operands = lift_attributes(gm, example_inputs)
     described = [node.meta['val'] for node in gm.graph.nodes if 'val' in node.meta]
     mode = detect_fake_mode(described) or FakeTensorMode(allow_non_fake_inputs=True)
@@ -152,13 +171,12 @@ def prepare_source(gm, example_inputs):
     inputs = [tree_map(described_input, value, node.meta['val'])
               for node, value in zip((n for n in lifted.graph.nodes if n.op == 'placeholder'), operands, strict=True)]
     with mode:
-        lowered = make_fx(dispatch_functionalize(lifted, propagate_input_mutations=True), decomposition_table=select_decomp_table() | decompositions,
-                          tracing_mode='fake', _allow_non_fake_inputs=True)(*inputs)
+        lowered = functionalize_source(lifted, inputs, select_decomp_table() | decompositions)
     output = next(node for node in lowered.graph.nodes if node.op == 'output')
     if not isinstance(output.args[0], (tuple, list)):
         output.args = ((output.args[0],),)
         lowered.recompile()
-    rewrite(lowered.graph)
+    rewrite(lowered)
     lowered.recompile()
     return lowered, tree_flatten(inputs)[0], tree_flatten(operands)[0]
 

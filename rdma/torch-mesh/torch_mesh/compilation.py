@@ -57,8 +57,8 @@ def lift_state(module, arguments):
     import torch
     if not any(node.op == 'get_attr' for node in module.graph.nodes):
         return module, list(arguments)
-    graph = torch.fx.Graph()
-    graph.output(graph.graph_copy(module.graph, {}))
+    graph, copied, aliases = torch.fx.Graph(), {}, {}
+    graph.output(graph.graph_copy(module.graph, copied))
     lifted = torch.fx.GraphModule(module, graph)
     lifted.meta = module.meta.copy()
     values = []
@@ -83,10 +83,13 @@ def lift_state(module, arguments):
             bindings[id(value)] = operand
             values.append(value)
         node.replace_all_uses_with(operand)
+        aliases[node] = operand
         if node is first:
             first = node.next
         graph.erase_node(node)
     lifted.recompile()
+    lifted.meta['mesh_source_results'] = _source_results(module, {
+        source: aliases.get(value, value) for source, value in copied.items()})
     return lifted, [*arguments, *values]
 
 
@@ -140,6 +143,109 @@ def inline_source(module, operands):
     return metadata
 
 
+def _source_origins(node, graph, before):
+    """Annotate nodes created by one source equation, without name matching."""
+    origins, created = node.meta.get('mesh_source_nodes', (node,)), []
+    current = before.next
+    while current is not graph._root:
+        current.meta.setdefault('mesh_source_nodes', origins)
+        created.append(current)
+        current = current.next
+    return origins, created
+
+
+def _source_result(node, made, path, declared, value, origins):
+    """Keep arbitrary result declarations on the corresponding result only."""
+    import torch
+    from torch.utils import _pytree as pytree
+    provenance = made.meta.get('from_node')
+    metadata = dict(node.meta, val=value)
+    for field in ('mesh_ownership', 'mesh_local_source', 'mesh_gradient'):
+        if field in metadata and not isinstance(declared, torch.Tensor):
+            metadata[field] = pytree.key_get(metadata[field], path)
+    made.meta.update(metadata)
+    if provenance is not None:
+        made.meta['from_node'] = provenance
+    made.meta.update(mesh_source=node.meta.get('mesh_source', node.name),
+                     mesh_source_nodes=origins, mesh_result_path=path)
+
+
+def _source_results(module, results):
+    """Compose existing result identities through this source transformation."""
+    import torch
+    from torch.utils import _pytree as pytree
+    original = {node: pytree.tree_map(lambda value: results[value] if isinstance(value, torch.fx.Node) else value, tree)
+                for node, tree in module.meta.get('mesh_source_results', {}).items()}
+    return dict(results) | original
+
+
+def functionalize_source(module, inputs, decompositions):
+    """The ordinary functionalization trace with exact source/result metadata.
+
+    The source interpreter supplies node identity while the existing framework
+    performs functionalization and decomposition. Generated FakeTensor values
+    retain their transformed storage aliases; source declarations are copied
+    only onto the corresponding final values, never onto intermediate math.
+    """
+    import torch
+    import torch.fx.traceback as traceback
+    from torch._subclasses.functional_tensor import FunctionalTensor, dispatch_functionalize
+    from torch.fx.experimental.proxy_tensor import get_proxy_mode, get_proxy_slot, make_fx
+    from torch.utils import _pytree as pytree
+    results = {}
+
+    class Source(torch.fx.Interpreter):
+        def run_node(self, node):
+            tracer = get_proxy_mode().tracer
+            before = tracer.graph._root.prev
+            with traceback.set_current_meta(node, 'mesh functional source'):
+                value = super().run_node(node)
+                origins, created = _source_origins(node, tracer.graph, before)
+                if node.op == 'output':
+                    return value
+                declared = node.meta.get('val', value)
+
+                def retain(path, item):
+                    if not isinstance(item, torch.Tensor):
+                        return item
+                    actual = item.from_functional() if isinstance(item, FunctionalTensor) else item
+                    made = get_proxy_slot(actual, tracer).proxy.node
+                    if made not in created and node.op not in ('placeholder', 'get_attr'):
+                        item = torch.ops.aten.alias.default(item)
+                        actual = item.from_functional() if isinstance(item, FunctionalTensor) else item
+                        made = get_proxy_slot(actual, tracer).proxy.node
+                    _source_result(node, made, path, declared, made.meta.get('val', actual), origins)
+                    return item
+
+                value = pytree.tree_map_with_path(retain, value)
+                def result(item):
+                    if not isinstance(item, torch.Tensor):
+                        return item
+                    actual = item.from_functional() if isinstance(item, FunctionalTensor) else item
+                    return get_proxy_slot(actual, tracer).proxy.node
+                results[node] = pytree.tree_map(result, value)
+                return value
+
+    functional = dispatch_functionalize(Source(module).run, propagate_input_mutations=True)
+    output = next(node for node in module.graph.nodes if node.op == 'output')
+    def declaration(*arguments):
+        tracer = get_proxy_mode().tracer
+        before = tracer.graph._root.prev
+        with traceback.set_current_meta(output, 'mesh functional result'):
+            value = functional(*arguments)
+            # Deferred view replay and input writeback belong to the source's
+            # result boundary. The framework supplies their exact graph edges.
+            _source_origins(output, tracer.graph, before)
+            results[output] = pytree.tree_map(lambda item: get_proxy_slot(item, tracer).proxy.node
+                if isinstance(item, torch.Tensor) else item, value)
+            return value
+    with traceback.preserve_node_meta():
+        lowered = make_fx(declaration, decomposition_table=decompositions, tracing_mode='fake',
+                          _allow_non_fake_inputs=True)(*inputs)
+    lowered.meta = dict(module.meta, mesh_source_results=_source_results(module, results))
+    return lowered
+
+
 def normalize_source(module, decompositions):
     """Apply shared tensor equations to captured types before ownership.
 
@@ -169,14 +275,7 @@ def normalize_source(module, decompositions):
             before = graph._root.prev
             with traceback.set_current_meta(node, 'mesh tensor equations'):
                 value = super().run_node(node)
-                created = []
-                current = before.next
-                while current is not graph._root:
-                    created.append(current)
-                    current = current.next
-                origins = node.meta.get('mesh_source_nodes', (node,))
-                for made in created:
-                    made.meta['mesh_source_nodes'] = origins
+                origins, created = _source_origins(node, graph, before)
                 if node.op == 'output':
                     return value
                 declared = node.meta.get('val', value)
@@ -190,18 +289,7 @@ def normalize_source(module, decompositions):
                         # result. The ordinary alias is a page view, not a copy.
                         item = torch.ops.aten.alias.default(item)
                         made = get_proxy_slot(item, self.tracer).proxy.node
-                    provenance = made.meta.get('from_node')
-                    metadata = node.meta.copy()
-                    metadata['val'] = pytree.key_get(declared, path)
-                    for field in ('mesh_ownership', 'mesh_local_source', 'mesh_gradient'):
-                        if field in metadata and not isinstance(declared, torch.Tensor):
-                            metadata[field] = pytree.key_get(metadata[field], path)
-                    made.meta.update(metadata)
-                    if provenance is not None:
-                        made.meta['from_node'] = provenance
-                    made.meta['mesh_source'] = node.meta.get('mesh_source', node.name)
-                    made.meta['mesh_source_nodes'] = origins
-                    made.meta['mesh_result_path'] = path
+                    _source_result(node, made, path, declared, pytree.key_get(declared, path), origins)
                     return item
 
                 value = pytree.tree_map_with_path(retain, value)
@@ -215,6 +303,6 @@ def normalize_source(module, decompositions):
     with torch.no_grad(), mode, traceback.preserve_node_meta():
         Normalize(module, graph, decompositions).run(*metadata, enable_io_processing=False)
     normalized = torch.fx.GraphModule(module, graph)
-    normalized.meta = dict(module.meta, mesh_source_results=results)
+    normalized.meta = dict(module.meta, mesh_source_results=_source_results(module, results))
     normalized.recompile()
     return normalized
