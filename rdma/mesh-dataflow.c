@@ -496,66 +496,37 @@ static void mesh_reclaim(struct hdr *m){
    start, struct mesh_stream `child`, no longer a live process: its queue pairs, and the requests on them, went with
    it), whichever launch of the bridge spawned it.  Each lane's units completed are read before those posted, every
    read sequentially consistent after the caller's give or retirement */
-/* Actual registered-memory overlap, independent of the row/alias that named
-   a DMA. A racing pin snapshot conservatively keeps storage for a later reap. */
-static int mesh_interval_pinned(struct hdr *m,struct mesh_dma_span allocation){
+/* design/fake-guards-2026-10-30.md: whether a live port child may still post or read on any stream: inside an entry's
+   scope (its metadata pin, sequentially consistent against the give that ends a holding: the child pins and then
+   reads the owner, a reclaim gives and then reads the pin), or with units posted on a lane and not completed.  No
+   interval is kept a unit: a lease the library returns has none outstanding (its compiled lifetime), and only a client
+   that died or failed leaves a request in flight: a lease returned (`client` its holder) waits for that client's own
+   streams alone, a retired client's rows (`client` 0) for every live child's lanes and scopes */
+static int mesh_interval_pinned(struct hdr *m,uint64_t client){
   for(uint32_t s=0;s<m->streams && s<MESH_STREAMS;s++){
     const struct mesh_stream *x=mesh_stream_at(m,s);
-    int live=-1;
+    if(client && (atomic_load_explicit(&x->owner,memory_order_seq_cst)&~MESH_STREAM_GIVEN)!=client)continue;
     const struct mesh_cpu_pin *cpu=&x->metadata;
     const uint64_t before=atomic_load_explicit(&cpu->sequence,memory_order_seq_cst);
-    const struct mesh_dma_span table={atomic_load_explicit(&cpu->offset,memory_order_seq_cst),
-                                     atomic_load_explicit(&cpu->bytes,memory_order_seq_cst)};
-    const uint64_t word=atomic_load_explicit(&cpu->word,memory_order_seq_cst);
-    const int racing=(before&1) || before!=atomic_load_explicit(&cpu->sequence,memory_order_seq_cst);
-    if(racing || table.bytes || word){
-      const pid_t child=(pid_t)atomic_load(&x->child);live=mesh_holds(child,x->child_start);
-      if(live && (racing || mesh_span_overlaps(allocation,table) ||
-                  (word && mesh_span_overlaps(allocation,(struct mesh_dma_span){word,8}))))return 1;
-    }
-    for(int way=0;x->rows && way<2;way++)
-      for(int lane=0;lane<2;lane++){
-        const uint64_t done=atomic_load(&x->posts[way].done[lane]),posted=atomic_load(&x->posts[way].posted[lane]);
-        if(done<posted && live<0){const pid_t child=(pid_t)atomic_load(&x->child);live=mesh_holds(child,x->child_start);}
-        if(live<=0)continue;
-        if(posted-done>MESH_LANE_UNITS)return 1;
-        for(uint64_t u=done;u<posted;u++){
-          struct mesh_dma_span pin;
-          if(!mesh_pin_load(mesh_unit_pin(m,x->rows,way,lane,u),u,&pin)){
-            if(atomic_load(&x->posts[way].done[lane])>u)continue;
-            return 1;
-          }
-          if(mesh_span_overlaps(allocation,pin))return 1;
-        }
-      }
-  }
-  return 0;
-}
-static int mesh_pinned(struct hdr *m,uint32_t first,uint32_t count){
-  /* Lease backing, not a table's logical row IDs, is what reclaim frees.
-     Coalescing physical runs scans each allocation row once in the usual
-     contiguous case; scatter allocations retain each intersected run. */
-  for(uint32_t i=0;i<count;){
-    const uint32_t page=(uint32_t)atomic_load_explicit(&mesh_page(m)[first+i].mapping,memory_order_acquire);
-    if(page==MESH_ABSENT){i++;continue;}
-    uint32_t run=1;
-    while(run<count-i &&
-          (uint32_t)atomic_load_explicit(&mesh_page(m)[first+i+run].mapping,memory_order_acquire)==(uint64_t)page+(uint64_t)run*m->block)run++;
-    const struct mesh_dma_span allocation={m->data_off+(uint64_t)page*m->pgsz,(uint64_t)run*m->block*m->pgsz};
-    if(mesh_interval_pinned(m,allocation))return 1;
-    i+=run;
+    const int scoped=(before&1) || atomic_load_explicit(&cpu->bytes,memory_order_seq_cst) || atomic_load_explicit(&cpu->word,memory_order_seq_cst) ||
+                     before!=atomic_load_explicit(&cpu->sequence,memory_order_seq_cst);
+    int busy=scoped;
+    for(int way=0;!busy && way<2;way++)
+      for(int lane=0;!busy && lane<2;lane++)
+        busy=atomic_load_explicit(&x->posts[way].done[lane],memory_order_seq_cst)<atomic_load_explicit(&x->posts[way].posted[lane],memory_order_seq_cst);
+    if(busy && mesh_holds((pid_t)atomic_load(&x->child),x->child_start))return 1;
   }
   return 0;
 }
 /* design/algorithm-sources.md#programtensor; design/transport.md section 14: a retired client's closed rows released,
    and a lease returned while a request still named a page of it, but those a request outstanding on a lane still
-   names (mesh_pinned); their count */
+   names (mesh_interval_pinned); their count */
 uint32_t mesh_retired_release(struct hdr *m){
   uint32_t kept=0;
   for(uint32_t row=0;row<mesh_rows(m);row++){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     uint64_t owner=atomic_load_explicit(&buffer->owner,memory_order_acquire);
-    if(owner && atomic_load_explicit(&buffer->closed,memory_order_acquire) && mesh_pinned(m,row,buffer->pages/m->block)){kept++;continue;}
+    if(owner && atomic_load_explicit(&buffer->closed,memory_order_acquire) && mesh_interval_pinned(m,0)){kept++;continue;}
     if(owner && atomic_load_explicit(&buffer->closed,memory_order_acquire) &&
        atomic_compare_exchange_strong_explicit(&buffer->owner,&owner,0,memory_order_acq_rel,memory_order_relaxed)){
       atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
@@ -570,7 +541,7 @@ uint32_t mesh_retired_release(struct hdr *m){
 /* design/transport.md: the lease's rows other than its head disowned and every one of its rows released
    while they stay hot, then the head reclaimed (mesh_buffer_reclaim: its pages' arena bits, then its rows' hot bits),
    so no client claims a row or page of it before it is whole again; while a request outstanding on a lane names a page
-   of it (mesh_pinned), the head closed instead, which the bridge releases once none does (mesh_retired_release, each
+   of it (mesh_interval_pinned), the head closed instead, which the bridge releases once none does (mesh_retired_release, each
    liveness turn) */
 int mesh_lease_return(struct mesh_ctx *c,uint32_t row){
   struct hdr *m=c->M;
@@ -580,7 +551,7 @@ int mesh_lease_return(struct mesh_ctx *c,uint32_t row){
      atomic_load_explicit(&buffer->closed,memory_order_acquire))return EINVAL;
   for(uint32_t r=row+1;r<row+rows;r++)atomic_store_explicit(&mesh_buffers(m)[r].owner,0,memory_order_relaxed);
   mesh_bits_clear(mesh_plane(m,MESH_ROW_OWN),row,rows);
-  if(mesh_pinned(m,row,rows)){atomic_store_explicit(&buffer->closed,1,memory_order_release);return 0;}
+  if(mesh_interval_pinned(m,c->client)){atomic_store_explicit(&buffer->closed,1,memory_order_release);return 0;}
   mesh_buffer_reclaim(m,row);
   return 0;
 }

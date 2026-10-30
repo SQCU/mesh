@@ -165,19 +165,13 @@ static void metadata_pin(struct mesh_stream *x,const struct taken *entry){
   atomic_store_explicit(&p->word,entry && entry->word?(uint64_t)((const char *)entry->word-(const char *)M):0,memory_order_seq_cst);
   atomic_store_explicit(&p->sequence,sequence+2,memory_order_seq_cst);
 }
-/* design/transport.md section 14: unit u of stream x's lane c one way (`way`: 0 a SEND, 1 a receive) told before it is
-   posted: the actual byte interval it names in its lane's ring, then the lane's units posted past it (sequentially
-   consistent, so a reader of the count reads the stable interval), then whether its holding is still `owner`'s (holding_kept, its
-   reads sequentially consistent).  A client that gives its stream or retires and then reads the lanes' units
-   (mesh-dataflow.c mesh_pinned) so sees the unit, or the unit is not posted: where the holding is no longer kept the
-   count goes back and 0 is returned.  1: post it */
-static int unit_told(struct mesh_stream *x,int way,uint32_t c,uint64_t u,struct mesh_dma_span span,uint64_t owner){
-  if(u>=(UINT64_MAX-1)/2)return 0;
-  mesh_pin_store(mesh_unit_pin(M,x->rows,way,(int)c,u),u,span);
-  atomic_store_explicit(&x->posts[way].posted[c],u+1,memory_order_seq_cst);
-  if(holding_kept(x,owner))return 1;
-  atomic_store_explicit(&x->posts[way].posted[c],u,memory_order_release);
-  return 0;
+/* design/fake-guards-2026-10-30.md: unit u of stream x's lane c one way (`way`: 0 a SEND, 1 a receive) told before
+   it is posted, the lane's units posted past it: what a reclaim of a dead client's rows reads (mesh-dataflow.c
+   mesh_pinned: a live child's lane with units posted and not done keeps every row).  The holding is not asked again
+   a unit: its owner was read where the walk entered the unit's entry (metadata_pin, holding_kept), and a lease the
+   library returns has no unit outstanding (its compiled lifetime) */
+static void unit_told(struct mesh_stream *x,int way,uint32_t c,uint64_t u){
+  atomic_store_explicit(&x->posts[way].posted[c],u+1,memory_order_release);
 }
 /* design/transport.md section 14: stream t's holding ended a pass ago (its owner word given, or its client retired), so
    every completion its lanes had before the end was taken (port_pass).  Where nothing its lanes posted is outstanding
@@ -259,7 +253,8 @@ static void stream_send(struct port *port,uint32_t t,uint32_t served){
     const struct mesh_dma_span bytes=e->spans[i.n];
     const struct frames each=frames_of(bytes.bytes);
     struct send_gate *gate=l->gate+lane;
-    if(!gate_holds(gate,each) || !unit_told(x,0,j,state->sent,bytes,l->held[t]))break;
+    if(!gate_holds(gate,each))break;
+    unit_told(x,0,j,state->sent);
     struct ibv_sge span=dma_span(port,bytes);
     struct ibv_send_wr posting={.wr_id=gate_post(gate,lane,each),.sg_list=&span,.num_sge=1,
                                 .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
@@ -292,7 +287,7 @@ static void stream_post(struct port *port,uint32_t t,uint32_t served){
     const struct mesh_dma_span bytes=e->spans[mesh_units_sub(q,e->unit).n];
     const struct frames each=frames_of(bytes.bytes);
     if(((state->frames_posted-state->frames_retired)&MESH_GATE_MASK)+each.n>state->frame_capacity)break;
-    if(!unit_told(x,1,j,state->posted,bytes,l->held[t]))break;
+    unit_told(x,1,j,state->posted);
     state->frames_posted+=each.n;
     struct ibv_sge span=dma_span(port,bytes);
     struct ibv_recv_wr request={.wr_id=((uint64_t)lane<<MESH_GATE_COUNT_BITS)|(state->frames_posted&MESH_GATE_MASK),.sg_list=&span,.num_sge=1},*bad;
