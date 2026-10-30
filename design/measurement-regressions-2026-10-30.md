@@ -93,3 +93,41 @@ Still serialized, next:
   and guard() already protect the storage.
 - **cc8a6f8e (10-17) removed chunked pipelining** with the cost model. The forms (ncclMeshCommForms) carry chunks
   again only where a configuration names them.
+
+## The tracks pool's spinners
+
+After the one-call all-gather ran (f8059d25, 37575833), the bandwidth case on the five nodes still read far under one
+cable for the reductions and the all-to-all, and the rows said why: a cliff, not a slope. From 64 KiB to 256 KiB the
+all-reduce went from 0.2 ms a call to 25 ms, the reduce-scatter to 5.5 ms and the exchange to 8.3 ms, while the
+broadcast and all-gather did not move. The hourly at 27e41a0d (20261030T1428Z) had the all-reduce at 0.26 ms there, and
+e576a6f1, 4530374d's parent, run on the five nodes the same afternoon, at 0.29 ms (64 MiB: 5.6 ms). 4530374d itself
+stalls on the count-ordering defect f8059d25 fixed, as does every commit up to it, so the range could not be bisected
+further; nothing else in it changes what the GPU runs during a call.
+
+- **The cause.** metal_tracks sized the pool by its chunks, up to 4096 threadgroups of 256 threads. A worker that
+  finds no ready task scans again at once, a system-scope fence and the loads of every open cursor, so every worker
+  past what the GPU holds at once only added spinners beside the ones doing the work. The form 4530374d replaced ran one
+  threadgroup a track. The pool's own premise, persistent workers, is a pool the GPU holds whole.
+- **d946e1e4.** At most one worker a GPU core (IORegistry gpu-core-count). The 256 KiB all-reduce 25 ms -> 0.35 ms,
+  the exchange 8.3 -> 0.18; the 64 MiB all-reduce 92 -> 27 ms.
+- **4ed1a7f3.** A claim scanned every cursor, a fence each, for a 1024-element chunk. Thread 0 now fences once a pass
+  and looks first at the task it ran last. 64 MiB all-reduce 27 -> 19.7 ms.
+- **ace45b89.** A worker is the widest threadgroup the pipeline takes (1024 on the M5), so a chunk is a core's width.
+  64 MiB all-reduce 19.7 -> 6.6 ms, reduce-scatter 22.5 -> 6.6; from 256 KiB to 4 MiB the reductions are at or under
+  e576a6f1's.
+
+## Link use
+
+The rows are each rank's useful output over an interval the observer stamps once every 5 ms, so a 64 MiB case of 8
+calls carries a third of its time in error, and they say nothing about cables. b0a71107 has each port's progress thread
+publish its bytes landed with the bridge's clock (mesh-observe.h mesh_link_landed: two slots and a sequence, the writer
+never waiting, nothing on the data path reading it), and `mesh-stat landed` watches them from a read-only mapping.
+rdma/mesh_landed.py turns the members' watches into each node's inbound use against its ports' stated bandwidth and the
+desk's computer-pounds: each member's use times its weight (a Studio 8.0 lb, the Mini 1.6; the workstation is no member).
+
+The bandwidth case at ace45b89/b0a71107 on the five nodes (5 ms windows, the members' 33.6 lb): a peak of 17.8 to 19.5
+computer-pounds, every node at 55 to 63% of its inbound and the Mini at 63 to 87%; 13.3 to 13.5 on average over the
+windows over 12, the 16 and 64 MiB cases. The Mini's 30 GB/s is the bound: an all-gather gives every node the same bytes,
+so with the Mini's cables full the Studios' are about half full, 17.6 computer-pounds. The 64 MiB all-gather is at 63%
+of the Mini's bound (1.79 ms), the all-reduce at about 35% of its own (2.3 ms): the serializations above, a combined
+SEND published once its whole landing is summed and every call completed in its own launch, are what remains.
