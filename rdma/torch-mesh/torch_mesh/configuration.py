@@ -77,7 +77,7 @@ def bind(configuration, groups, prepare):
     prepare()
     emit({'phase': 'prepared', 'unix': time.time()})
     c.update(decisions=decisions, graphs={name: graph}, assignment={**c['assignment'], 'parts': operands})
-    c['observer'] = rollout.start(c['store'], c['key'] + '/observations', c['rank'], c['size'])
+    c['observer'] = rollout.start()
     group._observers = getattr(group, '_observers', []) + [c['observer']]
 
 

@@ -46,7 +46,7 @@ def completed(record, seconds):
     result = {**record['report'], 'rank': record['rank'], 'size': record['size'],
               'seconds': measured['seconds'], 'useful_output_bytes': record['useful_work_bytes'],
               'useful_gigabytes_per_second': measured['useful_gigabytes_per_second'],
-              'timing_method': 'host-clock-observation-of-ordinary-completion'}
+              'timing_method': 'continuous submission; each completion stamped as seen, timed from its start or the completion before it'}
     if 'steps' in result:
         result.update(step_microseconds=seconds / result['steps'] * 1e6,
                       calls_per_second=measured['units_per_second'])

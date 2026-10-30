@@ -48,7 +48,7 @@ for layer in range(layers):
 key = shared[0].declare(rows, x.dtype, capacities=capacities)
 for operation in shared[1:]:
     operation.declare(rows, x.dtype, capacities=capacities)
-observer = rollout.start(None, 'engines', 0, 1)
+observer = rollout.start()
 from torch_mesh.declarations import Function, execution_sequence
 # placed once, on this pool as it is: no observation of an earlier chunk or run is an input
 assigned = engines.placement(pool, [], step=0)

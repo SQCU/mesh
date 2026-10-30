@@ -1,86 +1,54 @@
-# design/whole-function.md#observations
-import json
-from concurrent.futures import Future
+# design/measurement-regressions-2026-10-30.md#the-observer
+"""A program's completion observations, on its own rank alone: each completion stamped as soon as it is seen, its own
+interval from when it began or from the completion queued ahead of it, whichever is later (one queue runs one call at a
+time, so a call submitted behind another starts when that one ends), and emitted as this rank's record. No store and
+no peer: ranks' records are joined from their logs afterwards, so no control-plane round trip clocks a measurement."""
 import queue
 import threading
+import time
 from mesh_statistics import now, completed, emit
 
-def start(store, key, rank, ranks):
+# the pause between looks at a pending completion: a stamp's resolution, far below any call this observes
+PAUSE = 50e-6
+
+
+def start():
+    """An observer: put (completion, record) pairs, in submission order, with record['started'] the clock (now) as the
+    call was submitted; close it once the program's calls are submitted."""
     outgoing, stopping = queue.SimpleQueue(), threading.Event()
-    future = Future()
-    def collect():
-        try:
-            future.set_result(_collect(store, key, rank, ranks, outgoing, stopping))
-        except BaseException as error:
-            future.set_exception(error)
-    worker = threading.Thread(target=collect, name='mesh-observations', daemon=True)
+    worker = threading.Thread(target=_observe, args=(outgoing, stopping), name='mesh-observations', daemon=True)
     worker.start()
-    return outgoing, stopping, worker, future
+    return outgoing, stopping, worker
 
 
 def close(observer):
-    """The run's observations, emitted: a log of this execution, never an input to a later placement (the operator,
-    2026-10-30: a fit is reused only when a caller passes it as an operand)."""
-    outgoing, stopping, worker, future = observer
+    """Every observation put before this emitted, then the observer ended."""
+    outgoing, stopping, worker = observer
     stopping.set()
-    emit([{'observations': future.result()}])
+    worker.join()
 
 
-def _collect(store, key, rank, ranks, outgoing, stopping):
-    sent, received, pending = 0, [0] * ranks, {}
-    waiting, idle = [], threading.Event()
-    announced = False
-    records = []
+def _observe(outgoing, stopping):
+    from torch_mesh import _stream
+    waiting, ended = [], 0.0
     while True:
         while True:
             try:
                 waiting.append(outgoing.get_nowait())
             except queue.Empty:
                 break
-        remaining = []
-        from torch_mesh import _stream
-        for completion, record in waiting:
-            pending_at = now()
-            if not _stream.completed(completion):
-                record['last_pending'] = pending_at
-                remaining.append((completion, record))
-                continue
-            observed = now()
-            seconds = observed - record['started']
-            record['seconds'] = seconds
-            record['completion_seconds_bounds'] = [record.get('last_pending', record['started']) - record['started'], seconds]
-            emit([completed(record, seconds)])
-            if rank == 0:
-                pending.setdefault(record['episode'], {})[0] = record
-                received[0] += 1
-            else:
-                store.set(f'{key}/{rank}/{sent}', json.dumps(record))
-            sent += 1
-        waiting = remaining
-        if stopping.is_set() and not waiting and not announced:
-            if rank:
-                store.set(f'{key}/finished/{rank}', str(sent))
-            announced = True
-        if rank == 0:
-            for peer in range(1, ranks):
-                address = f'{key}/{peer}/{received[peer]}'
-                while store.check([address]):
-                    record = json.loads(store.get(address))
-                    pending.setdefault(record['episode'], {})[peer] = record
-                    received[peer] += 1
-                    address = f'{key}/{peer}/{received[peer]}'
-            for episode, peers in list(pending.items()):
-                if len(peers) == ranks:
-                    row = {**peers[0], 'seconds': max(p['seconds'] for p in peers.values()),
-                           'rank_seconds': [peers[p]['seconds'] for p in range(ranks)],
-                           'completion_seconds_bounds': [max(p['completion_seconds_bounds'][0] for p in peers.values()),
-                                                         max(p['completion_seconds_bounds'][1] for p in peers.values())]}
-                    records.append(row)
-                    del pending[episode]
-            finished = [f'{key}/finished/{peer}' for peer in range(1, ranks)]
-            if announced and (not finished or store.check(finished)) and all(received[p] == int(store.get(k)) for p, k in enumerate(finished, 1)):
-                break
-        elif announced:
-            break
-        idle.wait(.005)
-    return records
+        if not waiting:
+            if stopping.is_set():
+                return
+            time.sleep(PAUSE)
+            continue
+        completion, record = waiting[0]
+        if not _stream.completed(completion):
+            time.sleep(PAUSE)
+            continue
+        observed = now()
+        began = max(record['started'], ended)
+        ended = observed
+        record['report'] = {**record['report'], 'queued_seconds': began - record['started']}
+        emit([completed(record, observed - began)])
+        waiting.pop(0)
