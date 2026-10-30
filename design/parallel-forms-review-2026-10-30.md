@@ -126,7 +126,7 @@ immediately." Form C is resolved, and with it the recorder's capture:
   generation and each slot of a declared group's bindings, the least common multiple of their slot counts, and
   `packets_prepare` joins every issue's cuts. An issue takes the prepared issue of its generation and its
   invocation's slot (`ncclMeshStream.invocation`, new). Its calls keep what they were laid for; the issue gives only
-  its stream's context, a WRITE's plan, its invocation and a premultiplier. The buffers an issue names are not read,
+  its stream's context, its invocation and a premultiplier (a lone WRITE's prepared calls hold its plan already). The buffers an issue names are not read,
   and torch_mesh's `encoded` and mesh_rank's `issue` name none. A WRITE plan's own definitions are prepared the same
   way, as the plan is prepared.
 - Deleted: `issue_same`, `bound_of`, `binding_contains`, `struct bound`, the issue's segment copies, `operands_check`
@@ -136,11 +136,20 @@ immediately." Form C is resolved, and with it the recorder's capture:
   `ncclMeshReduceScatterBuffers`, `ncclMeshAlltoAllBuffers`, `bind_views`, the view rooms, and `send_views` and
   `receive_views` with every branch on them. A per-rank view form returns, when a caller needs one, as
   `ncclMeshCall` views prepared like bindings.
-- Left: a declared group of WRITEs is still laid and placed at each issue for the plans its calls name. Preparing it
-  needs the declaration to name each WRITE's plan, so the frontends must prepare plans before declaring. mb does
-  that already (columns_prepare comes before ncclMeshCommPlan); torch's `ScheduleBinding::writes`, `fused_step` and
-  partition's configurations do not. A declared group of both WRITEs and collectives is now refused at
-  `ncclMeshCommPlan`, and a declared group of collectives that binds nothing covers no issue (`definition_of`).
+- A declared group of both WRITEs and collectives is now refused at `ncclMeshCommPlan`, and a declared group of
+  collectives that binds nothing covers no issue (`definition_of`).
+- An issue is never held past its launch (mesh 9171d8f1). `launch_metal` holds `group_lock` from `issue_bind` to its
+  return. In that span a group either completes (`complete`, `retire`) or is lost with its communicator
+  (`walk_failed` → `inflight_lose`), and every drop of a definition takes the same lock. `held`, `dropped`,
+  `issue_let`, `issue_drop` and the inflight record's issue are gone (-25 net; nccl-mesh.c is 6,393 lines).
+- Declared groups of WRITEs stay laid at their issue, for the plans the issue names. That issue happens at record
+  time: every one is a `ncclMeshWriteExecute` inside a `MetalScheduleCross` block, in torch_mesh's
+  `prepare_fused_writes`, its `views` and `writes` template crossings, and `ViewWrites::encode`, and in mb's
+  crossing. So laying there adds no work to an execution. Preparing these groups at declaration would need the
+  declaration to name each plan, and a template blocks that: it replays the communicator's declaration (its `plan`
+  call) before the crossing whose plans `declared_plans` makes again. A declaration that named the plans would
+  have to carry and remake them itself, which gives each plan a second owner beside its crossing. That is a new
+  mechanism, and it would buy the deletion of one branch of `issue_bind`.
 
 ## Order
 
@@ -149,7 +158,8 @@ immediately." Form C is resolved, and with it the recorder's capture:
 3. B, B' and C together: mesh_mpi onto a library-owned Metal 4 queue, then the host path, the issue-then-complete
    path and the classic program form go; MPS remains an ordering point between queues.
 4. A and G: prepared generations for every slot instance and WRITE, then issue-time re-binding goes. Done for
-   collectives and a WRITE plan's own definitions, and G deleted (above); declared groups of WRITEs remain.
+   collectives and a WRITE plan's own definitions, and G deleted (above); declared groups of WRITEs stay laid at
+   their record-time issue, for the reason above.
 5. E's one-track form into tracks; F's and I's single builders.
 
 Steps 1-5 remove roughly 2,500 to 3,000 lines across the two repositories: about 1,025 without callers (most of it python/mesh, the operator's decision), 710 of the
