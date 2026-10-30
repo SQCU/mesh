@@ -46,7 +46,9 @@ FOUNDATION_EXPORT NSInteger MetalTensorConstant(id expression, NSArray<NSNumber 
 + (instancetype)configuration:(NSDictionary *)configuration;
 // Ordered logical selections shared by graph dependency analysis and final
 // page binding. The resolver supplies frontend configuration extents; nil
-// accepts literal integer extents and products. Only preparation calls this.
+// accepts integers, products and bound {parameter,value,scale,offset} extents.
+// The latter retain substitution identity through repeated preparation. Only
+// preparation calls this.
 + (instancetype)selection:(NSDictionary *)declaration extent:(NSInteger (^ _Nullable)(id))extent;
 // Restore/compose flat factor coordinates, retaining no parent view. Coordinate
 // expressions contain integer constants, "i", arithmetic, and the scalar

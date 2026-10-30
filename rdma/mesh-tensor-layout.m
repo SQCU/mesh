@@ -1076,6 +1076,8 @@ static MetalTensorLayout *TensorClosedElements(MetalTensorLayout *layout,NSUInte
 }
 
 static NSInteger TensorSelectionExtent(id value) {
+  if([value isKindOfClass:NSDictionary.class]&&value[@"parameter"])
+    return [value[@"offset"]?:@0 longLongValue]+[value[@"scale"]?:@1 longLongValue]*TensorSelectionExtent(value[@"value"]);
   if([value isKindOfClass:NSArray.class]) {
     NSInteger product=1;for(id factor in value)product*=TensorSelectionExtent(factor);return product;
   }
