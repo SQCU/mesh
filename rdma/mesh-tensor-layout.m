@@ -800,13 +800,16 @@ static isl_map *TensorEquations(MetalTensorLayout *values,isl_pw_aff *group,isl_
     isl_ctx *ctx=isl_pw_aff_get_ctx(group);
     isl_map *triples=isl_map_flat_range_product(isl_map_flat_range_product(
         MeshIndexRelation(ctx,values),isl_map_from_pw_aff(group)),isl_map_from_pw_aff(position));
-    isl_set *pairs=isl_set_apply(isl_set_detect_equalities(isl_map_range(triples)),isl_map_read_from_str(ctx,
+    // Resolve ordinal locals before the inverse join duplicates their constraints.
+    isl_set *declared=isl_set_coalesce(isl_set_compute_divs(isl_map_range(triples)));
+    isl_set *pairs=isl_set_apply(isl_set_detect_equalities(declared),isl_map_read_from_str(ctx,
         "{ [v,g,d] -> [v,p,g,q] : q = p - d }"));
     isl_map *assigned=isl_map_detect_equalities(TensorSplitRelation(pairs,2));
-    // Equal group origins equate every pair's displacement directly. This is
-    // the declared relation composed with its inverse, not a list of star edges.
-    isl_map *inverse=isl_map_reverse(isl_map_copy(assigned));
-    return isl_map_coalesce(isl_map_detect_equalities(isl_map_apply_range(assigned,inverse)));
+    // A group's least member carries the same displacement equations without
+    // forming every pair. Selection and inversion remain symbolic relations.
+    isl_map *representative=isl_map_lexmin(isl_map_reverse(isl_map_copy(assigned)));
+    isl_map *edges=isl_map_apply_range(assigned,representative);
+    return isl_map_coalesce(isl_map_detect_equalities(isl_map_union(isl_map_copy(edges),isl_map_reverse(edges))));
 }
 MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *> *uses,
     NSArray<MetalTensorLayout *> *targets,NSArray<NSArray<NSNumber *> *> *footprints,
@@ -842,12 +845,14 @@ MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *
         isl_bool covered=isl_set_is_equal(domain,ids);isl_set_free(domain);
         if(covered!=isl_bool_true)goto finished;
     }
-    equations=MeshIndexClosure(equations,count);
+    // Distinct logical bytes require distinct positions; one byte has one
+    // position. An equation contradicting either condition ends feasibility
+    // before the solver expands any further paths.
     {
-        isl_map *conflicts=isl_map_intersect(isl_map_copy(equations),
-            isl_map_read_from_str(ctx,"{ [i,p] -> [i,q] : p != q }"));
-        isl_bool empty=isl_map_is_empty(conflicts);isl_map_free(conflicts);
-        if(empty!=isl_bool_true)goto finished;
+        isl_map *forbidden=isl_map_read_from_str(ctx,
+            "{ [i,p] -> [j,q] : (i = j and p != q) or (i != j and p = q) }");
+        equations=MeshIndexClosure(equations,count,MeshIndexSymmetricClosure,forbidden);
+        isl_map_free(forbidden);if(!equations)goto finished;
     }
     // Each value names its least root and its displacement from that root.
     roots=isl_map_project_out(isl_map_fix_si(isl_map_copy(equations),isl_dim_in,1,0),isl_dim_in,1,1);
@@ -912,7 +917,7 @@ MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *
         // end. Propagating that range removes unreachable alignment phases.
         isl_set *domain=isl_set_union(isl_set_copy(states),isl_map_range(isl_map_copy(walk)));
         walk=isl_map_coalesce(isl_map_intersect_domain(walk,isl_set_copy(domain)));
-        walk=MeshIndexClosure(isl_map_union(walk,isl_set_identity(domain)),count);
+        walk=MeshIndexClosure(isl_map_union(walk,isl_set_identity(domain)),count,MeshIndexDirectedClosure,NULL);
         states=isl_set_apply(states,isl_map_copy(walk));
         isl_map *bases=isl_map_project_out(isl_map_intersect_domain(isl_map_copy(base),isl_set_copy(states)),isl_dim_in,1,1);
         isl_map *which=isl_map_project_out(isl_map_copy(roots),isl_dim_out,1,1);
@@ -1156,6 +1161,12 @@ static id TensorSelectionIndex(NSInteger (^extent)(id),NSArray *shape,id express
     isl_ctx *ctx=isl_ctx_alloc();
     isl_set *a=isl_map_range(MeshIndexRelation(ctx,self)),*b=isl_map_range(MeshIndexRelation(ctx,other));
     isl_set *common=isl_set_intersect(a,b);MetalTensorLayout *result=MeshIndexSelection(common);
+    isl_set_free(common);isl_ctx_free(ctx);return result;
+}
+- (MetalTensorLayout *)union:(MetalTensorLayout *)other {
+    isl_ctx *ctx=isl_ctx_alloc();
+    isl_set *a=isl_map_range(MeshIndexRelation(ctx,self)),*b=isl_map_range(MeshIndexRelation(ctx,other));
+    isl_set *common=isl_set_union(a,b);MetalTensorLayout *result=MeshIndexSelection(common);
     isl_set_free(common);isl_ctx_free(ctx);return result;
 }
 - (MetalTensorLayout *)preimage:(MetalTensorLayout *)values {

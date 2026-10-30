@@ -260,20 +260,37 @@ NSArray<MetalTensorLayout *> *MetalTensorAssignments(NSUInteger count,NSArray<Me
     return result;
 }
 
-// Both uses are finite graphs: weighted components over `count` values and
-// the ordered chain of their roots. An exact closure is sufficient; an
-// overapproximation is not. Repeated squaring includes every simple path and
-// cycle after at most ceil(log2(count)) compositions when acceleration is inexact.
-isl_map *MeshIndexClosure(isl_map *relation,NSUInteger count) {
-    isl_bool exact=isl_bool_false;
-    isl_map *closed=isl_map_transitive_closure(isl_map_copy(relation),&exact);
-    if(!closed||exact==isl_bool_true){isl_map_free(relation);return closed;}
-    isl_map_free(closed);
+static isl_map *IndexFeasible(isl_map *relation,isl_map *forbidden) {
+    if(!forbidden||isl_map_is_disjoint(relation,forbidden)==isl_bool_true)return relation;
+    isl_map_free(relation);return NULL;
+}
+
+// Symmetric relations close by finite composition. Directed recurrences use
+// ISL's symbolic acceleration, which retains compact paths for large domains.
+// Normalize existential locals before acceleration and each composition. If
+// acceleration is inexact, the declared vertex bound still supplies every
+// simple path and cycle. The caller's forbidden edges make contradictions
+// decisive as soon as they follow from these exact compositions.
+isl_map *MeshIndexClosure(isl_map *relation,NSUInteger count,enum MeshIndexClosureKind kind,isl_map *forbidden) {
+    relation=IndexFeasible(relation,forbidden);
+    if(!relation)return NULL;
+    relation=isl_map_coalesce(isl_map_compute_divs(relation));
+    if(kind==MeshIndexDirectedClosure) {
+        isl_bool exact=isl_bool_false;
+        isl_map *closed=isl_map_transitive_closure(isl_map_copy(relation),&exact);
+        if(!closed||exact==isl_bool_true){isl_map_free(relation);return IndexFeasible(closed,forbidden);}
+        isl_map_free(closed);
+    }
     for(NSUInteger length=1;relation&&length<count;) {
-        closed=isl_map_coalesce(isl_map_detect_equalities(isl_map_union(isl_map_copy(relation),
-            isl_map_apply_range(isl_map_copy(relation),isl_map_copy(relation)))));
-        isl_bool same=isl_map_is_equal(relation,closed);isl_map_free(relation);relation=closed;
-        if(same!=isl_bool_false)break;
+        isl_map *closed=IndexFeasible(isl_map_union(isl_map_copy(relation),
+            isl_map_apply_range(isl_map_copy(relation),isl_map_copy(relation))),forbidden);
+        if(!closed){isl_map_free(relation);return NULL;}
+        closed=isl_map_coalesce(isl_map_detect_equalities(isl_map_compute_divs(closed)));
+        // The union already includes relation; only the converse inclusion
+        // remains to establish a fixed point.
+        isl_bool same=isl_map_is_subset(closed,relation);isl_map_free(relation);relation=closed;
+        if(same==isl_bool_error){isl_map_free(relation);return NULL;}
+        if(same==isl_bool_true)break;
         length=length>count/2?count:length*2;
     }
     return relation;
@@ -285,7 +302,7 @@ NSArray<MetalTensorLayout *> *MetalTensorIdentify(NSUInteger count,MetalTensorLa
         MetalTensorLayout *domain=[MetalTensorLayout shape:@[@(count)] strides:@[@1] offset:0 maps:@{} indices:nil];
         isl_map *links=isl_map_apply_range(isl_map_reverse(MeshIndexRelation(ctx,source)),MeshIndexRelation(ctx,target));
         relation=isl_map_union(MeshIndexRelation(ctx,domain),isl_map_union(isl_map_copy(links),isl_map_reverse(links)));
-        relation=MeshIndexClosure(relation,count);
+        relation=MeshIndexClosure(relation,count,MeshIndexSymmetricClosure,NULL);
         relation=isl_map_lexmin(relation);representatives=isl_map_range(isl_map_copy(relation));
         MetalTensorLayout *selected=MeshIndexSelection(representatives);
         MetalTensorLayout *compact=[MetalTensorLayout shape:selected.shape strides:@[@1] offset:0 maps:@{} indices:nil];

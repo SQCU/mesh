@@ -3,7 +3,11 @@
 #include <isl/aff.h>
 #include <isl/map.h>
 // Exact closure for a finite relation over at most count participating values.
-isl_map *MeshIndexClosure(isl_map *relation, NSUInteger count);
+// The construction supplies its direction and forbidden edges (NULL means none).
+// Consumes relation, keeps forbidden. A witnessed forbidden edge returns NULL
+// without setting an ISL error; an algebra error retains the context error.
+enum MeshIndexClosureKind { MeshIndexSymmetricClosure, MeshIndexDirectedClosure };
+isl_map *MeshIndexClosure(isl_map *relation, NSUInteger count, enum MeshIndexClosureKind kind, isl_map *forbidden);
 #include <isl/set.h>
 
 // Preparation only. The relation type and its closed operations are isl's;
