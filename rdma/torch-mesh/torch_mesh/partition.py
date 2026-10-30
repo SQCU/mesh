@@ -773,24 +773,30 @@ def _follow_bytes(placement, local, logical_shape, logical_stride, key, rank, gr
         else:   # a relay: its shape and type alone, the library's lease where a route crosses this rank (nccl.h ncclMeshWriteLayoutPrepare)
             view, kernel = torch.empty((rows, width), dtype=local.dtype, device='meta'), None
         jobs.append((run, kernel, _migration_words(run, run.row_bytes, 1), 1, view, 0))
-    schedule = _stream.Schedule()
-    consumers = []
-    for run, kernel, words, groups, view, _ in jobs:
-        if run.source == run.destination:
-            schedule.compute(kernel, [local, result], fused._encode_words(words, channels, None, None),
-                             15, groups, 1, _GATHER_THREADS, 1 | (2 << _stream.compilation['ACCESS_WRITE_SHIFT']))
-            continue
-        crossing = fused.write_rows(schedule, view, [None if view.is_meta else view], [(run.source, run.destination)], group)
-        if rank == run.source:
-            schedule.compute(kernel, [], fused._encode_words(words, channels, None, crossing),
+    # each crossing run's fused WRITE its own group, declared for this configuration transition as its crossings are
+    # recorded (a group no declaration covers ends the program: nccl.h ncclMeshCommPlan)
+    from .backend import Call, WRITE
+    writes = [[Call(WRITE, run.rows * run.row_bytes, torch.uint8, root=run.source, destination=run.destination, fused=True)]
+              for run, *_ in jobs if run.source != run.destination]
+    with group.configuration(writes) if writes else contextlib.nullcontext():
+        schedule = _stream.Schedule()
+        consumers = []
+        for run, kernel, words, groups, view, _ in jobs:
+            if run.source == run.destination:
+                schedule.compute(kernel, [local, result], fused._encode_words(words, channels, None, None),
+                                 15, groups, 1, _GATHER_THREADS, 1 | (2 << _stream.compilation['ACCESS_WRITE_SHIFT']))
+                continue
+            crossing = fused.write_rows(schedule, view, [None if view.is_meta else view], [(run.source, run.destination)], group)
+            if rank == run.source:
+                schedule.compute(kernel, [], fused._encode_words(words, channels, None, crossing),
+                                 15, 1, 1, _GATHER_THREADS, 0)
+            elif rank == run.destination:
+                consumers.append((kernel, words, crossing))
+        for kernel, words, crossing in consumers:
+            schedule.compute(kernel, [], fused._encode_words(words, channels, crossing, None),
                              15, 1, 1, _GATHER_THREADS, 0)
-        elif rank == run.destination:
-            consumers.append((kernel, words, crossing))
-    for kernel, words, crossing in consumers:
-        schedule.compute(kernel, [], fused._encode_words(words, channels, crossing, None),
-                         15, 1, 1, _GATHER_THREADS, 0)
-    schedule.finish()
-    schedule.enqueue()
+        schedule.finish()
+        schedule.enqueue()
     return result
 
 
@@ -853,6 +859,7 @@ def _follow_spans(placement, local, logical_shape, key, rank, group, publish_bou
     """Arbitrary regional strides use exact AOT span WRITE bindings."""
     if not hasattr(group, 'prepare_writes'):
         return None
+    from .backend import Call, WRITE
     dim = placement.dim % local.ndim
     old, new = _OPERANDS[placement.key], _OPERANDS[key]
     before_sizes, before = _blocks(old, logical_shape[dim])
@@ -862,7 +869,8 @@ def _follow_spans(placement, local, logical_shape, key, rank, group, publish_bou
     shape = list(local.shape)
     shape[dim] = after_sizes[rank]
     result = _empty(shape, local, group)
-    deliveries = []
+    deliveries, calls = [], []
+    row = math.prod(local.shape[:dim] + local.shape[dim + 1:])
     for source in range(len(before)):
         for destination in range(len(after)):
             first = max(before[source], after[destination])
@@ -880,17 +888,19 @@ def _follow_spans(placement, local, logical_shape, key, rank, group, publish_bou
             elif rank == destination:
                 view = result.narrow(dim, first - after[destination], count)
             else:   # a relay is its shape and type alone: the library leases it where a route crosses this rank
-                extent = math.prod(local.shape[:dim] + local.shape[dim + 1:]) * count
-                view = torch.empty((extent,), dtype=local.dtype, device='meta')
+                view = torch.empty((row * count,), dtype=local.dtype, device='meta')
             deliveries.append((view, source, destination))
+            calls.append(Call(WRITE, row * count * local.element_size(), torch.uint8, root=source, destination=destination))
     if deliveries:
         prepared = group.prepare_writes(deliveries)
         if local.device.type == 'mps':
             publish_boundary()
-        # Repartition is a configuration transition. Ordinary native stream
-        # completion orders next consumers; no application receipt is emitted.
-        prepared.realize()
-        prepared.enqueue()
+        # Repartition is a configuration transition, its WRITE group declared for it as _scatter_spans' is (a group no
+        # declaration covers ends the program: nccl.h ncclMeshCommPlan). Ordinary native stream completion orders next
+        # consumers; no application receipt is emitted.
+        with group.configuration([calls]):
+            prepared.realize()
+            prepared.enqueue()
     return result
 
 
