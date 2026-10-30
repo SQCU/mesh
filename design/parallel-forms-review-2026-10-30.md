@@ -81,6 +81,20 @@ Objective-C unit both link.
 - nccl.h 1102's "first-compiled definition" predates declarations.
 - NCCL.md:313-316 cites a classic fused path through torch_mesh/fused.py; fused.py goes through `_stream.mm`'s Metal 4.
 
+## Since: Metal 4 alone (2026-10-30)
+
+The operator, 10-30: "no more non-metal-4 apis ever again. anything that called them is ignored or migrated
+immediately." Form C is resolved, and with it the recorder's capture:
+- libnccl-mesh has one program form (1c736159). Its host path (B) is a submission of the library's own on an
+  MTL4CommandQueue, so mesh_mpi.py and xonotic keep their calls.
+- torch_mesh's dispatches run on its Metal 4 queue, and torch's queue is ordered through torch's own events (fba41159).
+- The recorder's classic Serial form, MetalScheduleCommand, MetalReplayEncode and the recording-device capture are
+  deleted (metal-recording.m 2,741 to 2,279 lines). A replay is built from descriptions alone (MetalReplayDescribed,
+  2cdae155), and metal-microbench's engine and rank engine append to Metal 4 schedules (73f39fd5).
+- Ignored: the standalone classic benchmarks and tools (c446ba94). LiteRT provider stages, which LiteRT's Metal
+  accelerator encodes itself and which were captured only through the classic proxies, are refused at preparation
+  until they are lowered to native stages (T8, LiteRT's operator tables).
+
 ## Order
 
 1. The no-caller set above.
