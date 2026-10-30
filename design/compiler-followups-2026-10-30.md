@@ -22,6 +22,10 @@ Build and preparation evidence establishes emitted structure. Numerical results
 and whole-function performance need their own evidence; these followups remain
 open until their implementation and relevant verification are complete.
 
+Item 1's active work is divided in
+[Ownership integration tickets](ownership-integration-tickets-2026-10-30.md),
+including file claims, shared operands, dependencies and handoffs to items 2–6.
+
 ## Window relations
 
 `mesh_relation.Algebra.window` describes a window's source accesses. Both FX and
@@ -232,8 +236,12 @@ The retained-IR checkpoint completed reduction and declared-intermediate page
 preparation. Earlier source capture and static-selection preparation also
 completed. The subsequent shared native library build succeeded, but the latest
 source/ownership and matrix-domain preparations stop at their first page
-allocation: the local bridge region reports layout 154 while current source
-requires 155. Metadata-only preparation retained source identities, partial
-expression state, body masks, and changing-index producers. Algebra-backed
-binding of these latest connections awaits the ordinary bridge installation.
-These results do not establish numerical or whole-function performance.
+allocation: the local bridge region reported layout 154 while source required
+155. The ordinary committed-source installation now supplies layout 155.
+Metadata-only preparation retained source identities, partial expression state,
+body masks, and changing-index producers. Subsequent immutable-index preparation
+composed reordered/repeated views and named parameters with no copy commands;
+encoded indexed views retained exact code/scale/zero selections through the
+existing decoder. Algebra-backed binding of the newest source/ownership
+connections remains in progress. These results do not establish numerical or
+whole-function performance.
