@@ -147,3 +147,25 @@ co-place without commands. Fixed external bytes with an incompatible layout
 retain their positions and use the existing compiled byte copy. These are source
 and preparation results, without numerical execution or whole-function
 performance claims.
+
+## Shared IR boundary still to connect
+
+The native compiler already has scalar and reduction read/write records in its
+logical IR. Ownership needs those records before physical binding. The next
+split must retain one IR object from source lowering through page assignment
+and final code generation. Captured parameters and gradients keep their source
+identities and global types beside their actual local page operands.
+
+Logical materialization requirements must be available before consumers lower:
+the current `NativeGraph.run_node` realizes values with declared destinations
+before a later consumer can inline them. Moving physical binding later must
+retain that dependency decision. The final binding can then compose the IR's
+indices with assigned pages through the existing `PageKernel` and preparation
+view emitter, without building the logical graph again.
+
+Dynamic updates expose this boundary. Unchanged base pages remain shared, and
+ordinary index expressions choose changed values from update pages. Compatible
+consumers can fuse those reads; a consumer requiring materialized storage gets
+an explicit conversion edge. The attempted whole-base copy and the old
+same-shape ownership shortcut are removed. Distributed update declarations,
+including live index operands for external products, remain unfinished.
