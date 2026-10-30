@@ -173,7 +173,9 @@ rdma/nccl-mesh.c).
     kinds and counts alone, so the buffers are still named at the issue.
   - Once callers declare their bindings, the run-time paths that serve a call with no declared binding are removed:
     - a group's definition compiled when no plan covers its issue (`signature` and `same_call`, rdma/nccl-mesh.c);
-    - an issue laid and placed again for buffers other than its declaration's (`issue_bind` and `issue_same`);
+    - an issue laid and placed again for buffers other than its declaration's (`issue_bind` and `issue_same`). Gone
+      (mesh 4ae7ed5f): a group of collectives is laid for every slot of its bindings as it is declared, and its issue
+      takes its invocation's slot. A declared group of WRITEs is still laid at its issue for the plans it names;
     - the callers that declare nothing: torch's `_c10d_functional` ops issued on an unplanned group (`functional`,
       _stream.mm), ProcessGroupMesh's methods on one (backend.py), and mesh_mpi's methods without `Plan`
       (rdma/mesh_mpi.py).

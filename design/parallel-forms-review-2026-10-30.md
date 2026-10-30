@@ -120,13 +120,36 @@ immediately." Form C is resolved, and with it the recorder's capture:
   440ac872 restored it as the configuration's way to name collective forms (measured speedups in its message):
   wiring it or deleting it is the operator's call.
 
+## Since: A and G (2026-10-30)
+
+- A, for collectives (mesh 4ae7ed5f, metal-microbench 2cb4bff4). `prepared` lays and places one issue for each
+  generation and each slot of a declared group's bindings, the least common multiple of their slot counts, and
+  `packets_prepare` joins every issue's cuts. An issue takes the prepared issue of its generation and its
+  invocation's slot (`ncclMeshStream.invocation`, new). Its calls keep what they were laid for; the issue gives only
+  its stream's context, a WRITE's plan, its invocation and a premultiplier. The buffers an issue names are not read,
+  and torch_mesh's `encoded` and mesh_rank's `issue` name none. A WRITE plan's own definitions are prepared the same
+  way, as the plan is prepared.
+- Deleted: `issue_same`, `bound_of`, `binding_contains`, `struct bound`, the issue's segment copies, `operands_check`
+  and `sent_bytes`. nccl-mesh.c is 6,418 lines (-141 net).
+- G is deleted rather than declared. torch_mesh's only `Collectives` come from `prepare_fragments`, one tensor a side,
+  so its `*Buffers` branches were never reached, and no other caller exists. Gone: `ncclMeshAllGatherBuffers`,
+  `ncclMeshReduceScatterBuffers`, `ncclMeshAlltoAllBuffers`, `bind_views`, the view rooms, and `send_views` and
+  `receive_views` with every branch on them. A per-rank view form returns, when a caller needs one, as
+  `ncclMeshCall` views prepared like bindings.
+- Left: a declared group of WRITEs is still laid and placed at each issue for the plans its calls name. Preparing it
+  needs the declaration to name each WRITE's plan, so the frontends must prepare plans before declaring. mb does
+  that already (columns_prepare comes before ncclMeshCommPlan); torch's `ScheduleBinding::writes`, `fused_step` and
+  partition's configurations do not. A declared group of both WRITEs and collectives is now refused at
+  `ncclMeshCommPlan`, and a declared group of collectives that binds nothing covers no issue (`definition_of`).
+
 ## Order
 
 1. The no-caller set above.
 2. The frontends' one lowering (D6-D11), the largest duplicate, beneath both Metal frontends.
 3. B, B' and C together: mesh_mpi onto a library-owned Metal 4 queue, then the host path, the issue-then-complete
    path and the classic program form go; MPS remains an ordering point between queues.
-4. A and G: prepared generations for every slot instance and WRITE, then issue-time re-binding goes.
+4. A and G: prepared generations for every slot instance and WRITE, then issue-time re-binding goes. Done for
+   collectives and a WRITE plan's own definitions, and G deleted (above); declared groups of WRITEs remain.
 5. E's one-track form into tracks; F's and I's single builders.
 
 Steps 1-5 remove roughly 2,500 to 3,000 lines across the two repositories: about 1,025 without callers (most of it python/mesh, the operator's decision), 710 of the

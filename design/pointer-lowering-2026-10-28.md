@@ -92,8 +92,9 @@ Open, in order:
    `ncclMeshLayout` in elements. `ncclMeshWriteLayout` then keeps what every rank shares: tile bytes and invocations.
 5. **G6, reconsidered.** `ncclAllReduce(sendbuff, recvbuff, ...)` takes pointers because it is NCCL's API, and C1
    (design/rubric-actionable.md) ranks higher the form that keeps NCCL's API and semantics as its interface. So an
-   issue's pointers stay. The no-eager rule asks that an issue be its declaration, which `declared_as` and
-   `issue_same` enforce; an issue whose buffers are not the declared bindings ends the program.
+   issue's pointers stay in the API, unread: a group of collectives is laid and placed for every slot of its declared
+   bindings (`prepared`), its issue takes the slot of its stream's invocation, and `declared_as` holds it to its
+   declaration's kind and counts (mesh 4ae7ed5f; `issue_same` deleted).
    - What remains eager is the frontends' per-call paths that restate a declaration at every call
      (design/duplication-review-2026-10-28.md, across-files 1).
    - Declared bindings in `ncclMeshCall.bindings` can move to layouts once those paths are gone.
