@@ -432,8 +432,8 @@ contiguous view if an allocator or user says 'this one has to be contiguous'").
   - a recorder pass splicing transport into LiteRT's kernels ≺ a module or header (10-14);
   - "random graph algorithms in random places" (a Dijkstra inside the collective solver, breadth-first walks inside the
     link-map and fabric checks, a path enumerator inside Python routing) ≺ "one header" of graph algorithms "for
-    consumers of weights upon graphs or samples upon graphs" (10-30). Each commit is read for this by an agent hook
-    (the `C9 review of the commit` PostToolUse hook in the user settings), not by a parser.
+    consumers of weights upon graphs or samples upon graphs" (10-30). Each commit to mesh or metal-microbench is read
+    for this by an agent hook (`C9 review of the commit`, in each repository's .claude/settings.json), not by a parser.
 
 ## D. Data code
 
