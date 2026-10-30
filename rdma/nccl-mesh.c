@@ -2400,25 +2400,43 @@ static struct steps *steps_make(size_t room, struct steps initial) {
   steps_free(s);
   return NULL;
 }
+/* rank `rank`'s transfers of the WRITE `root` to `destination` of `operand`, cut at every `tile` elements (0: none):
+   mesh_write_compile over the communicator's fabric, the pair's installed paths and its page, the one evaluation that
+   every reader of a WRITE's transfers makes (write_steps, order_writes, write_prepare_spans), into *out (malloc'd,
+   its count + 1 room, the caller's to free) and *count.  0, else the compile's errno */
+static int write_transfers(const struct ncclComm *comm, uint32_t rank, uint32_t root, uint32_t destination,
+                           struct mesh_operand operand, uint64_t tile, struct mesh_transfer **out, uint32_t *count) {
+  const struct mesh_paths *paths = comm->writes ? comm->writes + (size_t)root * comm->nranks + destination : NULL;
+  *out = NULL; *count = 0;
+  const int needed = mesh_write_compile(&comm->fabric, rank, root, destination, paths, operand, comm->page, tile, NULL, 0);
+  if (needed < 0) return -needed;
+  if (!(*out = malloc(((size_t)needed + 1) * sizeof **out))) return ENOMEM;
+  const int made = mesh_write_compile(&comm->fabric, rank, root, destination, paths, operand, comm->page, tile, *out, (uint32_t)needed);
+  if (made != needed) { free(*out); *out = NULL; return made < 0 ? -made : EPROTO; }
+  *count = (uint32_t)needed;
+  return 0;
+}
+/* a WRITE call's operand, in its type's elements (a prepared WRITE's: its bytes, WRITE_UNIT) */
+static struct mesh_operand write_operand(const struct call *c) {
+  return (struct mesh_operand){(uint32_t)c->type + 1, (uint32_t)SIZE[c->type], c->count};
+}
+
 /* design/whole-function.md#one-way-writes */
 static ncclResult_t write_steps(struct call *c) {
   struct ncclComm *comm = c->comm;
-  const struct mesh_paths *paths = comm->writes ? comm->writes + c->root * comm->nranks + c->target - 1 : NULL;
-  const struct mesh_operand operand = {(uint32_t)c->type + 1, (uint32_t)SIZE[c->type], c->count};
-  const int count = mesh_write_compile(&comm->fabric, (uint32_t)comm->rank, (uint32_t)c->root, (uint32_t)c->target - 1,
-    paths, operand, comm->page, c->tile_bytes / SIZE[c->type], NULL, 0);
-  if (count < 0) return fail(ncclInvalidUsage, "one-way write requires its compiled physical paths: %s", strerror(-count));
+  struct mesh_transfer *transfers = NULL;
+  uint32_t count = 0;
+  const int compiled = write_transfers(comm, (uint32_t)comm->rank, (uint32_t)c->root, (uint32_t)c->target - 1, write_operand(c),
+                                       c->tile_bytes / SIZE[c->type], &transfers, &count);
+  if (compiled) return compiled == ENOMEM ? fail(ncclSystemError, "out of memory")
+                                          : fail(ncclInvalidUsage, "one-way write requires its compiled physical paths: %s", strerror(compiled));
   const size_t room = (size_t)count + 1;
-  struct steps *s = steps_make(room, (struct steps){.references = 1, .count = (uint32_t)count, .buffers = 1, .initialized = 1});
-  struct mesh_transfer *transfers = malloc(room * sizeof *transfers);
+  struct steps *s = steps_make(room, (struct steps){.references = 1, .count = count, .buffers = 1, .initialized = 1});
   uint32_t *received=malloc(room*sizeof *received);
-  if (!s || !transfers || !received || !(s->prior = malloc(room*sizeof *s->prior)) || !(s->extent = calloc(2, sizeof *s->extent))) {
+  if (!s || !received || !(s->prior = malloc(room*sizeof *s->prior)) || !(s->extent = calloc(2, sizeof *s->extent))) {
     steps_free(s); free(transfers); free(received); return fail(ncclSystemError, "out of memory");
   }
-  const int made = mesh_write_compile(&comm->fabric, (uint32_t)comm->rank, (uint32_t)c->root, (uint32_t)c->target - 1,
-    paths, operand, comm->page, c->tile_bytes / SIZE[c->type], transfers, (uint32_t)room);
-  if (made < 0) { steps_free(s); free(transfers); free(received); return fail(ncclInternalError, "one-way write compile: %s", strerror(-made)); }
-  for (int k = 0; k < made; k++) { s->steps[k] = transfers[k].step; s->cable[k] = transfers[k].cable; }
+  for (uint32_t k = 0; k < count; k++) { s->steps[k] = transfers[k].step; s->cable[k] = transfers[k].cable; }
   /* WRITE paths own disjoint payload intervals, in increasing interval order.
      A relay's receive and send have identical tile cuts. Join those intervals
      once; there is no need to compare each tile with every earlier tile. */
@@ -2778,32 +2796,35 @@ static uint32_t write_fragment_find(const struct write_fragment *fragments,uint3
 }
 
 static ncclResult_t order_writes(const struct ncclComm *comm, const struct call *list, size_t calls, struct schedule *plans) {
+  /* every call's transfers at every rank (write_transfers), call i's at rank r at i * nranks + r */
+  const size_t compiled = calls * (size_t)comm->nranks;
+  struct mesh_transfer **each = calloc(compiled + 1, sizeof *each);
+  uint32_t *counts = calloc(compiled + 1, sizeof *counts);
+  struct mesh_write_task *tasks = NULL;
+  struct write_fragment *fragments = NULL;
+  double *capacity = NULL;
   size_t room = 0;
-  for (size_t i = 0; i < calls; i++) for (int r = 0; r < comm->nranks; r++) {
-    const struct call *c = list + i;
-    const struct mesh_paths *paths = comm->writes + c->root * comm->nranks + c->target - 1;
-    const int n = mesh_write_compile(&comm->fabric, (uint32_t)r, (uint32_t)c->root, (uint32_t)c->target - 1,
-      paths, (struct mesh_operand){(uint32_t)c->type + 1, (uint32_t)SIZE[c->type], c->count}, comm->page, c->tile_bytes / SIZE[c->type], NULL, 0);
-    if (n < 0 || (size_t)n > UINT32_MAX - room) return fail(ncclInvalidUsage, "write schedule extent");
-    room += (size_t)n;
+  ncclResult_t result = each && counts ? ncclSuccess : fail(ncclSystemError, "out of memory");
+  for (size_t x = 0; !result && x < compiled; x++) {
+    const struct call *c = list + x / (size_t)comm->nranks;
+    const int error = write_transfers(comm, (uint32_t)(x % (size_t)comm->nranks), (uint32_t)c->root, (uint32_t)c->target - 1,
+                                      write_operand(c), c->tile_bytes / SIZE[c->type], each + x, counts + x);
+    if (error || counts[x] > UINT32_MAX - room) result = fail(ncclInvalidUsage, "write schedule extent");
+    else room += counts[x];
   }
-  struct mesh_write_task *tasks = calloc(room + 1, sizeof *tasks);
-  struct write_fragment *fragments = calloc(room + 1, sizeof *fragments);
-  struct mesh_transfer *transfers = calloc(room + 1, sizeof *transfers);
-  double *capacity = calloc(2 * comm->fabric.cables + 1, sizeof *capacity);
-  ncclResult_t result = ncclSuccess;
-  if (!tasks || !fragments || !transfers || !capacity) { result = fail(ncclSystemError, "out of memory"); goto done; }
+  if (result) goto done;
+  tasks = calloc(room + 1, sizeof *tasks);
+  fragments = calloc(room + 1, sizeof *fragments);
+  capacity = calloc(2 * comm->fabric.cables + 1, sizeof *capacity);
+  if (!tasks || !fragments || !capacity) { result = fail(ncclSystemError, "out of memory"); goto done; }
   for (uint32_t e = 0; e < comm->fabric.cables; e++)
     capacity[2 * e] = capacity[2 * e + 1] = comm->fabric.cable[e].bandwidth / 8.0;
   uint32_t count = 0;
-  for (size_t i = 0; i < calls; i++) for (int r = 0; r < comm->nranks; r++) {
-    const struct call *c = list + i;
-    const struct mesh_paths *paths = comm->writes + c->root * comm->nranks + c->target - 1;
-    const int n = mesh_write_compile(&comm->fabric, (uint32_t)r, (uint32_t)c->root, (uint32_t)c->target - 1,
-      paths, (struct mesh_operand){(uint32_t)c->type + 1, (uint32_t)SIZE[c->type], c->count}, comm->page, c->tile_bytes / SIZE[c->type], transfers, (uint32_t)room);
-    if (n < 0) { result = fail(ncclInternalError, "write schedule realization"); goto done; }
-    for (int k = 0; k < n; k++) {
-      const struct mesh_transfer *t = transfers + k;
+  for (size_t x = 0; x < compiled; x++) {
+    const struct call *c = list + x / (size_t)comm->nranks;
+    const uint32_t r = (uint32_t)(x % (size_t)comm->nranks);
+    for (uint32_t k = 0; k < counts[x]; k++) {
+      const struct mesh_transfer *t = each[x] + k;
       if (t->step.op != MESH_STEP_SEND) continue;
       const size_t tile = c->tile_bytes ? t->step.first * SIZE[c->type] / c->tile_bytes : 0;
       const ncclMeshProduction production = c->production ? c->production[tile] : (ncclMeshProduction){0};
@@ -2844,7 +2865,8 @@ static ncclResult_t order_writes(const struct ncclComm *comm, const struct call 
     for (size_t k = 0; k < n; k++) { end = pages_add(end, items[k].pages); items[k].entry = k; items[k].end = end; }
   }
 done:
-  free(tasks); free(fragments); free(transfers); free(capacity);
+  for (size_t x = 0; each && x < compiled; x++) free(each[x]);
+  free(each); free(counts); free(tasks); free(fragments); free(capacity);
   return result;
 }
 
@@ -5717,21 +5739,22 @@ static int write_storage_packets(const struct write_binding_report *reports,
    them alive until the bridge has finished reading them after plan destruction. */
 static ncclResult_t write_prepare_spans(struct ncclMeshWritePlan *plan,ncclMeshPageTable_t table,size_t origin) {
   const ncclComm_t comm = plan->comm;
-  const struct mesh_paths *paths = comm->writes + plan->from * comm->nranks + plan->to;
-  const struct mesh_operand operand = {(uint32_t)WRITE_UNIT + 1, 1, plan->bytes};
-  const int count = mesh_write_compile(&comm->fabric, (uint32_t)comm->rank, (uint32_t)plan->from,
-    (uint32_t)plan->to, paths, operand, comm->page, plan->layout.tile_bytes, NULL, 0);
-  if (count < 0) return fail(ncclInvalidUsage, "preparing physical write spans: %s", strerror(-count));
-  if((size_t)count>(SIZE_MAX/sizeof(size_t)-1)/plan->occurrences)
-    return fail(ncclInvalidUsage,"prepared write binding index extent");
+  struct mesh_transfer *transfers = NULL;
+  uint32_t transferred = 0;
+  const int compiled = write_transfers(comm, (uint32_t)comm->rank, (uint32_t)plan->from, (uint32_t)plan->to,
+                                       (struct mesh_operand){(uint32_t)WRITE_UNIT + 1, (uint32_t)SIZE[WRITE_UNIT], plan->bytes},
+                                       plan->layout.tile_bytes, &transfers, &transferred);
+  if (compiled) return compiled == ENOMEM ? fail(ncclSystemError, "allocating write span geometry")
+                                          : fail(ncclInvalidUsage, "preparing physical write spans: %s", strerror(compiled));
+  const int count = (int)transferred;
+  if((size_t)count>(SIZE_MAX/sizeof(size_t)-1)/plan->occurrences) {
+    free(transfers); return fail(ncclInvalidUsage,"prepared write binding index extent");
+  }
   const size_t entries=(size_t)count*plan->occurrences;
-  struct mesh_transfer *transfers = calloc((size_t)count + 1, sizeof *transfers);
   plan->span_first = calloc(entries + 1, sizeof *plan->span_first);
   plan->step_units = calloc(entries + 1, sizeof *plan->step_units);
-  if (!transfers || !plan->span_first || !plan->step_units) { free(transfers); return fail(ncclSystemError, "allocating write span geometry"); }
-  const int made = mesh_write_compile(&comm->fabric, (uint32_t)comm->rank, (uint32_t)plan->from,
-    (uint32_t)plan->to, paths, operand, comm->page, plan->layout.tile_bytes, transfers, (uint32_t)count);
-  ncclResult_t result = made == count ? ncclSuccess : fail(ncclInternalError, "preparing physical write fragments");
+  if (!plan->span_first || !plan->step_units) { free(transfers); return fail(ncclSystemError, "allocating write span geometry"); }
+  ncclResult_t result = ncclSuccess;
   for (int k = 0; !result && k < count; k++) for(size_t instance=0;!result&&instance<plan->occurrences;instance++) {
     const struct mesh_step *s = &transfers[k].step;
     const size_t index=write_span_index(plan,(size_t)k,instance);
