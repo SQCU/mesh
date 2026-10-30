@@ -102,10 +102,11 @@ What the operator said and did points the other way:
     collective try to use a specific list of computers instead of what's in the collective?"
   - After the 19:46 reset it was out at the cable level again by 20:07.
   - Every hourly since records it "outside the linked fabric".
-- **Where the hourly starts.** The hourly's mandate (metal-microbench 0bdb5a9f, 10-22) says nothing about where it
-  starts. It says results "must be logged by whatever computers survive those runs". A single launcher on the laptop
-  is the opposite. It writes the only record to its own disk (output_data is not versioned), and its own run can
-  restart it.
+- **Where the hourly runs.** The hourly's mandate (metal-microbench 0bdb5a9f, 10-22) is short because its premise
+  already answers this. The collective is several nodes with a lot of aggregate bandwidth and high reachability, and
+  the hourly runs on it, its results "logged by whatever computers survive those runs". A single launcher on the
+  laptop contradicts that premise. It writes the only record to its own disk (output_data is not versioned), and its
+  own run can restart it.
 - **A bridge on a development machine.** The operator's one statement of this, on 10-21, is a tool for upgrades:
   "build the same version of the bridge on your dev machine and use that to connect and upgrade". That makes the
   machine neither a member, nor the launcher, nor a restart target.
