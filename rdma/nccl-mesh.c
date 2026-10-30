@@ -3666,7 +3666,9 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
       struct mesh_entry entry = {m->table, pages_to_word(m->pages), 0, pages_to_word(pages_sub(m->end, m->pages))};
       /* the landing it forwards (send_dependencies): that channel's landing count before the group, plus its base */
       if (m->dep_h != UINT32_MAX) {
-        entry.word = (uint64_t)((m->dep_summed ? (char *)(comm->sums + m->dep_h) : (char *)comm->channels[m->dep_h].view.landed) - (char *)context->M);
+        /* a channel's landed count, in its stream's record; or its word of comm->sums, a lease, at its region offset */
+        entry.word = m->dep_summed ? lease_offset(comm->sums) + m->dep_h * sizeof(uint64_t)
+                                   : (uint64_t)((char *)comm->channels[m->dep_h].view.landed - (char *)context->M);
         entry.base = pages_to_word(pages_add(comm->channels[m->dep_h].in, m->dep_rel));
       } else if (m->c->write_plan && m->c->write_plan->ready_value) {
         const struct ncclMeshWritePlan *plan = m->c->write_plan;
