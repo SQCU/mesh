@@ -179,3 +179,32 @@ in-place operand's SEND are the cases; the next call's landing there needs that 
   to 1.5x slower in two of three runs; found at preparation (mesh-graph.h mesh_graph_meets) and copied by an issue the
   stream lays from its instance's prepared one, every 64 MiB rate is within main's band (reduce-scatter 2741 and 2756
   us, all-reduce 4960 and 4884, against 2722 to 2760 and 4892 to 4897).
+
+## The pool's last users, as the code stands at f4086e35
+
+zabbadoo (nccl-mesh.c) takes a group whose every landing is a copy or a sum and whose every SEND its presents
+published; complete() runs the rest, on the host's mirror (struct inflight, `published`, `consumed`) and, but for a
+fused crossing, the tracks pool (metal_tracks, metal_record, metal_depend, metal_after). What it leaves there, and the
+form each takes in the block above:
+
+- A fused crossing (`fused`): records for its caller's kernels (metal_send_deferred, metal_land_deferred), no tracks,
+  but on the mirror and `fusing`. Its form: the records written where the group is laid, its own pages' SENDs zook's.
+- A declared frame train (`repeats` past 1: only WRITE plans declare frames; the chain service's input frames):
+  zabbadoo's sums are keyed on a step's buffer and elements, not its frame, so two frames' contributions would fold
+  into one sum. Its form: the frame in the key; zelloq unchanged (each channel's landings awaited past its last).
+- A WRITE (`write_binding`): its SENDs name their own readiness words or are the rank's own pages (zook); a plain
+  landing is zelloq's (a copy's landing is the copy); a landing with consumer records (`land_records`) is a wait its
+  consumer's kernel makes (metal_land_deferred), encoded at the same place.
+- A partials merge (METAL_MERGE, its row's floats): zelloth has no merge operator. Its form: zelloth with it.
+- A SEND waiting on a consumption it cannot forward (present_publish stops at it: forwards() finds no receive that
+  holds its piece, or send_dependencies drops a sum whose units do not line up with the landing's): the pool
+  publishes it after that receive's whole consumption. Its form: the bridge's whole requirement on the landing's own
+  word (`landed` or its summed word, every unit at the landing's end), which mesh_entry's per-unit form cannot state:
+  an entry kind.
+- A combine with a `need` (a sum into bytes an earlier SEND of its call on that channel reads: landing_needs): the
+  pool runs it after that SEND's publication, the witness proofs (item 4) standing for the SEND's completion. Its
+  form: the sum on pages of its own (zennets), never bytes a SEND of the same call reads, which is the compiler's
+  placement of the sum (mesh-collective.c mesh_compile_sets' scratch), not a wait.
+
+Then the pool and the mirror go: metal_tracks and its kernels, complete, retire, consume, publish, inflight and the
+channels' `published`, `consumed`, `waited`.
