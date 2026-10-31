@@ -211,7 +211,15 @@ class Observations:
     def __init__(self, declaration=None):
         self.submitted, self.records = [], []
         self.declaration = copy.deepcopy(declaration or {})
-        if self.declaration:
+        # The declaration's line (megabytes: its graphs and layouts) is written at the first report, after the
+        # program it declares has started, never between a prepared program and its start: there it took 1 to 6 s
+        # of a pipe's time a rank (chain service, 2026-10-31), longer than a peer's GPU wait is bounded, so the ranks
+        # that started first ended their waits.  rehydrate reads it before any completion that refers to it.
+        self.declared = not self.declaration
+
+    def _declare(self):
+        if not self.declared:
+            self.declared = True
             emit({'phase': 'observation_configuration', **self.declaration})
 
     def put(self, completion, record):
@@ -219,6 +227,7 @@ class Observations:
         self._emit(False)
 
     def close(self):
+        self._declare()
         self._emit(True)
 
     def poll(self):
@@ -239,6 +248,7 @@ class Observations:
             self.submitted.pop(index)
             result = completed(record, end)
             self.records.append(result)
+            self._declare()
             # The full executed operands stay on the preparation channel. A
             # completion line references the declaration emitted once above.
             retained = {key: value for key, value in result.items()
