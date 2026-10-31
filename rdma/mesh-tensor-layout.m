@@ -783,7 +783,7 @@ static isl_map *TensorSplitRelation(isl_set *set,unsigned inputs) {
     unsigned outputs=isl_set_dim(set,isl_dim_set)-inputs;
     return isl_map_move_dims(isl_map_from_domain(set),isl_dim_out,0,isl_dim_in,inputs,outputs);
 }
-static isl_map *TensorEquations(MetalTensorLayout *values,isl_pw_aff *group,isl_pw_aff *position) {
+static isl_map *TensorEquations(MetalTensorLayout *values,isl_pw_aff *group,isl_pw_aff *position,isl_map *roots) {
     isl_ctx *ctx=isl_pw_aff_get_ctx(group);
     // A changed logical shape can expose affine axes in an existing index
     // expression. Use the shared exact normalization before joining fields.
@@ -793,7 +793,20 @@ static isl_map *TensorEquations(MetalTensorLayout *values,isl_pw_aff *group,isl_
         isl_map_from_pw_multi_aff(isl_pw_multi_aff_copy(groups)))));
     first=isl_pw_multi_aff_pullback_pw_multi_aff(first,groups);
     isl_pw_aff *anchor=isl_pw_aff_pullback_pw_multi_aff(MeshIndexFunction(ctx,values),isl_pw_multi_aff_copy(first));
-    isl_pw_aff *delta=isl_pw_aff_sub(isl_pw_aff_pullback_pw_multi_aff(isl_pw_aff_copy(position),first),position);
+    isl_pw_aff *delta=isl_pw_aff_sub(isl_pw_aff_pullback_pw_multi_aff(isl_pw_aff_copy(position),isl_pw_multi_aff_copy(first)),position);
+    // Check the established representatives in the declared iteration order.
+    // Permuting complete typed fields adds no equations when their roots and
+    // relative positions already agree. This forward check needs no inverse
+    // of the value permutation or projected value/anchor/displacement tuple.
+    isl_map *current=isl_map_project_out(isl_map_fix_si(isl_map_copy(roots),isl_dim_in,1,0),isl_dim_in,1,1);
+    isl_pw_multi_aff *observed=isl_pw_multi_aff_from_map(MeshIndexCompose(MeshIndexRelation(ctx,values),current));
+    isl_pw_multi_aff *reference=isl_pw_multi_aff_pullback_pw_multi_aff(isl_pw_multi_aff_copy(observed),first);
+    isl_pw_aff *r=isl_pw_multi_aff_get_pw_aff(observed,0),*a=isl_pw_multi_aff_get_pw_aff(reference,0);
+    isl_pw_aff *d=isl_pw_aff_sub(isl_pw_multi_aff_get_pw_aff(observed,1),isl_pw_multi_aff_get_pw_aff(reference,1));
+    BOOL implied=isl_pw_aff_is_equal(r,a)==isl_bool_true&&isl_pw_aff_is_equal(d,delta)==isl_bool_true;
+    isl_pw_aff_free(r);isl_pw_aff_free(a);isl_pw_aff_free(d);
+    isl_pw_multi_aff_free(observed);isl_pw_multi_aff_free(reference);
+    if(implied){isl_pw_aff_free(anchor);isl_pw_aff_free(delta);return isl_map_empty(isl_map_get_space(roots));}
     isl_pw_multi_aff *relative=isl_pw_multi_aff_flat_range_product(
         isl_pw_multi_aff_from_pw_aff(MeshIndexFunction(ctx,values)),
         isl_pw_multi_aff_flat_range_product(isl_pw_multi_aff_from_pw_aff(anchor),isl_pw_multi_aff_from_pw_aff(delta)));
@@ -861,7 +874,7 @@ MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *
         if(width==1)continue; // A one-unit field adds no relative-position equation.
         isl_map *fields=TensorEquations(value,
             MeshIndexExpression(ctx,@[@"div",@"i",@(width)],0,value.count),
-            MeshIndexExpression(ctx,@[@"mod",@"i",@(width)],0,value.count));
+            MeshIndexExpression(ctx,@[@"mod",@"i",@(width)],0,value.count),equations);
         equations=TensorJoinEquations(equations,fields,count,forbidden);
         if(!equations)goto finished;
     }
@@ -869,7 +882,7 @@ MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *
         MetalTensorLayout *use=uses[k],*target=targets[k];NSCParameterAssert(use.count==target.count);
         if(!use.count)continue;
         equations=TensorJoinEquations(equations,TensorEquations(use,
-            MeshIndexExpression(ctx,@0,0,use.count),MeshIndexFunction(ctx,target)),count,forbidden);
+            MeshIndexExpression(ctx,@0,0,use.count),MeshIndexFunction(ctx,target),equations),count,forbidden);
         if(!equations)goto finished;
     }
     equations=isl_map_detect_equalities(isl_map_coalesce(equations));

@@ -177,9 +177,44 @@ static isl_set *SetRun(isl_ctx *ctx,NSInteger first,NSInteger width,NSInteger st
         @"{ [x] : %ld <= x < %ld and (x - %ld) mod %ld < %ld }",(long)first,(long)(first+step*(count-1)+width),
         (long)first,(long)step,(long)width] UTF8String]);
 }
+static isl_set *SetAbsorbIntervals(isl_set *set) {
+    // In one dimension a basic set without local divisions is an interval.
+    // Such an explicit component can cover projected components without
+    // reconstructing their existential divisions just to take a complement.
+    isl_basic_set_list *parts=isl_set_get_basic_set_list(set);
+    isl_size count=isl_basic_set_list_size(parts);
+    isl_set *intervals=isl_set_empty(isl_set_get_space(set));
+    for(isl_size i=0;i<count;i++) {
+        isl_basic_set *part=isl_basic_set_list_get_at(parts,i);
+        if(isl_basic_set_dim(part,isl_dim_div)==0)
+            intervals=isl_set_union(intervals,isl_set_from_basic_set(part));
+        else isl_basic_set_free(part);
+    }
+    intervals=isl_set_coalesce(intervals);
+    if(isl_set_is_empty(intervals)!=isl_bool_false) {
+        isl_set_free(intervals);isl_basic_set_list_free(parts);return set;
+    }
+    isl_set *result=isl_set_copy(intervals);
+    for(isl_size i=0;i<count;i++) {
+        isl_basic_set *basic=isl_basic_set_list_get_at(parts,i);
+        if(isl_basic_set_dim(basic,isl_dim_div)==0){isl_basic_set_free(basic);continue;}
+        isl_set *part=isl_set_from_basic_set(basic);
+        // ISL computes local divisions only for the subtracted right side.
+        // Testing this direction leaves the projected component existential.
+        isl_bool covered=isl_set_is_subset(part,intervals);
+        if(covered==isl_bool_true)isl_set_free(part);
+        else result=isl_set_union(result,part);
+    }
+    isl_basic_set_list_free(parts);isl_set_free(intervals);isl_set_free(set);return result;
+}
 int64_t *MeshIndexSetRuns(isl_set *set,size_t *count) { @autoreleasepool {
     *count=0;
-    isl_ctx *ctx=isl_set_get_ctx(set);isl_set *remaining=isl_set_copy(set);
+    // Projection can leave many overlapping descriptions of the same bytes.
+    // Normalize that set once before repeatedly asking for its next run.
+    isl_ctx *ctx=isl_set_get_ctx(set);
+    isl_set *remaining=isl_set_remove_redundancies(isl_set_copy(set));
+    remaining=SetAbsorbIntervals(remaining);
+    remaining=isl_set_coalesce(isl_set_detect_equalities(remaining));
     NSMutableData *runs=[NSMutableData data];
     while(isl_set_is_empty(remaining)==isl_bool_false) {
         NSInteger first=SetEdge(remaining,NO),end=SetEdge(remaining,YES)+1;
