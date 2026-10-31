@@ -44,14 +44,44 @@ WRITE = 8
 # element_shape declares one indivisible numerical element in those scalar units.
 # bindings, where given, are the (send, receive) tensors the call is issued with (nccl.h ncclMeshCall bindings).
 # design/eager-execution.md#what-follows
-Call = collections.namedtuple('Call', 'kind count dtype root op counts destination fused contributors matrix recipients tile_bytes production element_shape bindings views frames max_packet source_ready landings ready_value ready_layout land_layout land_capacity',
-                              defaults=(0, ReduceOp.SUM, None, 0, False, None, None, None, 0, None, (), None, None, 1, 0, None, None, 0, None, None, 0))
+Call = collections.namedtuple('Call', 'kind count dtype root op counts destination fused contributors matrix recipients tile_bytes production element_shape bindings views frames max_packet source_ready landings ready_value ready_layout land_layout land_capacity sources route_scope',
+                              defaults=(0, ReduceOp.SUM, None, 0, False, None, None, None, 0, None, (), None, None, 1, 0, None, None, 0, None, None, 0, (), None))
 WHAT = {ALLREDUCE: LIB.MESH_ALLREDUCE, REDUCE: LIB.MESH_REDUCE, BROADCAST: LIB.MESH_BROADCAST, ALLGATHER: LIB.MESH_ALLGATHER,
         REDUCE_SCATTER: LIB.MESH_REDUCE_SCATTER, ALLTOALL: LIB.ncclMeshCallAlltoAllV, WRITE: LIB.ncclMeshCallWrite}
 TYPES = {torch.int8: LIB.ncclInt8, torch.uint8: LIB.ncclUint8, torch.bool: LIB.ncclUint8, torch.int32: LIB.ncclInt32,
          torch.uint32: LIB.ncclUint32, torch.int64: LIB.ncclInt64, torch.uint64: LIB.ncclUint64, torch.float16: LIB.ncclFloat16,
          torch.float32: LIB.ncclFloat32, torch.float64: LIB.ncclFloat64, torch.bfloat16: LIB.ncclBfloat16,
          torch.float8_e4m3fn: LIB.ncclFloat8e4m3, torch.float8_e5m2: LIB.ncclFloat8e5m2}
+
+
+def bind_source(call, *, source, occurrences, work, route_scope, occurrence_extent=1):
+    """Attach declared source identity and ordered occurrence/byte-work operands."""
+    from .operand import layout_configuration
+    def configured(value):
+        return layout_configuration(value) if isinstance(value, _stream.TensorLayout) else value
+    record = dict(source=source, occurrences=configured(occurrences), work=configured(work),
+                  occurrence_extent=occurrence_extent)
+    return call._replace(sources=(*call.sources, record), route_scope=route_scope)
+
+
+def source_work(call, order):
+    """Carry a physical fragment's byte order through its original source work."""
+    from .operand import layout_configuration, relation_layout
+    import json
+    records = []
+    for record in call.sources:
+        declaration = record['work']
+        if 'steps' in declaration:
+            from mesh_relation import Algebra
+            relation = Algebra().selection_relation(declaration)
+            original = relation_layout(relation, relation.shape, math.prod(declaration['shape']))
+        else:
+            original = _stream.TensorLayout(declaration['shape'], declaration['strides'], declaration['offset'],
+                {int(axis): values for axis, values in declaration['maps'].items()}, None,
+                declaration['index_shape'], json.dumps(declaration['index_coordinates']))
+        selected = order.rebase(_stream.TensorLayout((original.count,), (1,)), original.reshape((original.count,)))
+        records.append(dict(record, work=layout_configuration(selected)))
+    return call._replace(sources=tuple(records))
 
 
 def op(reduce_op):
@@ -103,7 +133,10 @@ class ProcessGroupMesh(dist.ProcessGroup):
         self._rank, self._size, self._operators = rank, size, {}
         # the completions submitted under this group (mesh_statistics.Observations), emitted by its shutdown at the latest
         self.observations = []
-        self._declaration = ([], [])
+        # Completed cohorts and still-missing peers are preparation operands.
+        # Completion callbacks never exchange or install configurations.
+        self.configuration_observations = []
+        self._declaration = {'groups': [], 'order': [], 'production_seconds': None, 'routing': None}
         self.comm = comm
         self.handle = int(ffi.cast('uintptr_t', self.comm))
         # Native realization installs default routes over every physical path.
@@ -181,7 +214,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     pg_name = group_name
 
-    def plan(self, groups, *, order=None, production_seconds=None):
+    def plan(self, groups, *, order=None, production_seconds=None, routing=None):
         """This group's collectives declared once, in their order (nccl.h ncclMeshCommPlan): `groups` the groups its
         calls issue, each a list of Calls (one torch collective is one group), or (that list, repeat) issued repeat
         times in a row, the order repeated from this group's next collective on.  Each is compiled now, so none is
@@ -190,6 +223,8 @@ class ProcessGroupMesh(dist.ProcessGroup):
         An explicit order supplies ncclMeshPlanRun dictionaries to repeat whole
         blocks of group definitions without expanding their calls."""
         groups = list(groups)
+        import assignment
+        routes, route_held = assignment.routing_bindings(routing)
         rows = [(g, *(group if isinstance(group, tuple) else (group, 1))) for g, group in enumerate(groups)]
         if any(not calls for _, calls, _ in rows):
             raise ValueError('a declared collective group must contain calls')
@@ -203,7 +238,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
                 for source in {c.root for c in calls if c.production is not None}:
                     producer_groups[source] += block['repeat']
         rows = [(g, repeat, call) for g, calls, repeat in rows for call in calls]
-        made, kept = [], []
+        made, kept = [], list(route_held)
         for g, repeat, c in rows:
             reduces = c.kind in (ALLREDUCE, REDUCE, REDUCE_SCATTER)
             nccl, per = typed(c.dtype, reduces)
@@ -261,17 +296,25 @@ class ProcessGroupMesh(dist.ProcessGroup):
             slots = ffi.new('ncclMeshBufferSlots[2]', bindings) if c.bindings is not None or c.views is not None else ffi.NULL
             views = ffi.new('ncclMeshLayout[2]', geometries) if c.views is not None else ffi.NULL
             kept.extend((slots, views))
+            sources, source_held = assignment.source_bindings(c.sources)
+            kept.extend(source_held)
             made.append({'what': WHAT[c.kind], 'peer': c.root, 'count': c.count * per, 'type': nccl, 'op': code,
                          'group': g, 'destination': c.destination, 'fused': int(c.fused), 'tile_bytes': c.tile_bytes,
                          'production': production, 'bindings': slots, 'views': views, 'frames': c.frames,
                          'max_packet': c.max_packet, 'source_ready': _binding(c.source_ready),
                          'landings': _binding(c.landings), 'ready_value': c.ready_value,
                          'ready_layout': c.ready_layout or {}, 'land_layout': c.land_layout or {}, 'land_capacity': c.land_capacity,
-                         'counts': counts, 'matrix': matrix, 'contributors': masks[0], 'recipients': masks[1]})
+                         'counts': counts, 'matrix': matrix, 'contributors': masks[0], 'recipients': masks[1],
+                         'sources': sources, 'source_count': len(c.sources),
+                         'route_scope': assignment.json_operand(c.route_scope, kept) if c.route_scope is not None else ffi.NULL,
+                         'routing': routes if not made else ffi.NULL,
+                         'routing_count': len(routing or ()) if not made else 0})
         view = ffi.new('ncclMeshPlan **')
         check(LIB.ncclMeshCommPlan(self.comm, ffi.new('ncclMeshCall[]', made or 1), len(made),
                                    ffi.new('ncclMeshPlanRun[]', order or 1), len(order), view))
-        self._declaration, self._plan = (groups, order), view[0]
+        self._declaration = {'groups': groups, 'order': order, 'production_seconds': production_seconds,
+                             'routing': assignment.routing_records(view[0])}
+        self._plan = view[0]
         return [] if view[0] == ffi.NULL else [tuple(view[0].entries[g]) for g in range(view[0].groups)]
 
     def count_matrices(self, calls):
@@ -296,7 +339,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
         try:
             yield
         finally:
-            self.plan(previous[0], order=previous[1])
+            self.plan(**previous)
 
     def plan_demands(self):
         """Compiler-derived useful deliveries for the entire declared graph.
@@ -311,7 +354,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
         return {(a, b): int(values[a * n + b]) for a in range(n) for b in range(n)
                 if a != b and values[a * n + b]}
 
-    def prepare_writes(self, deliveries):
+    def prepare_writes(self, deliveries, *, declarations=None):
         """Bind local source/result geometry into ordinary communicator Calls."""
         from .operand import TensorView
         bindings, calls = [], []
@@ -322,34 +365,18 @@ class ProcessGroupMesh(dist.ProcessGroup):
             sides = tuple(geometry if self.rank() == rank else None for rank in (source, destination))
             calls.append(Call(WRITE, view.numel() * view.element_size(), torch.uint8,
                               root=source, destination=destination, views=sides))
+        if declarations is not None:
+            calls = [declared._replace(views=physical.views)
+                     for declared, physical in zip(declarations, calls, strict=True)]
         return _stream.ViewWrites(bindings, self.handle), calls
 
     def exchange_configuration(self, value):
-        """Every rank's `value` (JSON), in rank order, before the function runs: the communicator's configuration
-        channel (nccl.h ncclMeshCommConfigGather), whose ranks each give the same extent, so each rank's encoded
-        length is gathered first and then each encoding padded to the longest (mesh_rank.m MeshRankPlan's two
-        gathers). Every rank calls it at the same point."""
-        import json
-        local, n = json.dumps(value).encode(), self._size
-        lengths = ffi.new('uint64_t[]', n)
-        check(LIB.ncclMeshCommConfigGather(self.comm, ffi.new('uint64_t *', len(local)), lengths,
-                                           ffi.sizeof('uint64_t')))
-        room = max(lengths)
-        reports = ffi.new('char[]', n * room)
-        check(LIB.ncclMeshCommConfigGather(self.comm, ffi.from_buffer(local.ljust(room, b'\0')), reports, room))
-        return [json.loads(ffi.unpack(reports + r * room, lengths[r])) for r in range(n)]
+        """Every member's preparation operand through the shared native channel."""
+        return mesh.exchange_configuration(self.comm, value)
 
     def broadcast_configuration(self, value, root=0):
-        """Rank `root`'s `value` (JSON) on every rank, before the function runs (nccl.h ncclMeshCommConfigBroadcast):
-        its encoded length, then its encoding, each the root's bytes alone; another rank's `value` is not read. Every
-        rank calls it at the same point."""
-        import json
-        local = json.dumps(value).encode() if self._rank == root else b''
-        length = ffi.new('uint64_t *', len(local))
-        check(LIB.ncclMeshCommConfigBroadcast(self.comm, root, length, ffi.sizeof('uint64_t')))
-        data = ffi.new('char[]', local if self._rank == root else length[0])
-        check(LIB.ncclMeshCommConfigBroadcast(self.comm, root, data, length[0]))
-        return json.loads(ffi.unpack(data, length[0]))
+        """The root's preparation operand through the shared native channel."""
+        return mesh.broadcast_configuration(self.comm, value, root)
 
     def union_cuts(self, cuts):
         """Agree view boundaries during configuration, before the function runs."""

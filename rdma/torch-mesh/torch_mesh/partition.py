@@ -442,30 +442,43 @@ def _row(x, dim):
     return math.prod(s for k, s in enumerate(x.shape) if k != dim)
 
 
-def _gather_writes(counts, dtype):
+def _gather_writes(counts, dtype, *, declaration=None):
     """One exact routed WRITE per nonempty source/destination pair, in native order.
 
     Source rank segments are immutable publications. Each final segment and
     each relay generation has its own landing interval; the common physical
     write planner chooses all stripes and relay paths.
     """
-    from .backend import WRITE, Call
-    return [Call(WRITE, count, dtype, root=source, destination=destination, fused=True)
+    from .backend import WRITE, Call, source_work
+    def declared(call):
+        if declaration is None:
+            return call
+        from . import _stream
+        origin = source_work(declaration, _stream.TensorLayout((call.count * dtype.itemsize,), (1,)))
+        return call._replace(sources=origin.sources, route_scope=origin.route_scope)
+    return [declared(Call(WRITE, count, dtype, root=source, destination=destination, fused=True))
             for source, count in enumerate(counts) if count
             for destination in range(len(counts)) if source != destination]
 
 
-def gathered(x, dim, sizes, group):
+def gathered(x, dim, sizes, group, *, declaration=None):
     """The exact writes made by a generic gather, declared before execution.
 
     No rank segment is padded to a transport page. Non-mesh backends retain
     their own collective declaration.
     """
-    from .backend import ALLGATHER, WRITE, Call
+    from .backend import ALLGATHER, WRITE, Call, source_work
     counts = [s * _row(x, dim) for s in sizes]
     if not _region_backed(x, group):
-        return [Call(ALLGATHER, x.numel(), x.dtype, counts=counts)]
-    return [Call(WRITE, count * x.element_size(), torch.uint8, root=source, destination=destination)
+        return [declaration if declaration is not None else Call(ALLGATHER, x.numel(), x.dtype, counts=counts)]
+    def declared(call, source):
+        if declaration is None:
+            return call
+        from . import _stream
+        origin = source_work(declaration, _stream.TensorLayout((call.count,), (1,),
+                                                               sum(counts[:source]) * x.element_size()))
+        return call._replace(sources=origin.sources, route_scope=origin.route_scope)
+    return [declared(Call(WRITE, count * x.element_size(), torch.uint8, root=source, destination=destination), source)
             for source, count in enumerate(counts) if count
             for destination in range(len(counts)) if source != destination]
 
@@ -822,26 +835,14 @@ def calls(tensor):
             for i, p in enumerate(tensor.placements) if isinstance(p, RaggedShard) and mesh.size(i) > 1]
 
 
-def plan(mesh, name, groups, *, production_seconds=None):
+def plan(mesh, name, groups, *, production_seconds=None, routing=None):
     """The program's collectives on mesh dimension `name`'s group declared once, in their order (torch_mesh.plan):
     `groups` from the ops' own (calls, gathered, scattered), as a step issues them, or a function of no arguments
-    giving them from the parts attached now, called again when the controller moves the parts. A list declares
+    giving them from the parts attached now, called when preparation supplies new parts. A list declares
     invariant counts; use a callable for every declaration whose counts depend on the current partition."""
     from . import plan as declare
-    _PLANS[mesh, name] = (groups, production_seconds)
-    return declare(mesh.get_group(name), groups() if callable(groups) else groups, production_seconds=production_seconds)
-
-
-_PLANS = {}
-
-
-def _replan(mesh, name):
-    """Re-realize the declared graph, including unchanged-count graphs after route updates."""
-    held = _PLANS.get((mesh, name))
-    if held is not None:
-        groups, production_seconds = held
-        from . import plan as declare
-        declare(mesh.get_group(name), groups() if callable(groups) else groups, production_seconds=production_seconds)
+    return declare(mesh.get_group(name), groups() if callable(groups) else groups,
+                   production_seconds=production_seconds, routing=routing)
 
 
 def split(mesh, name, N):

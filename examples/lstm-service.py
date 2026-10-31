@@ -9,12 +9,12 @@ import torch_mesh
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Shard
 from torch_mesh import partition
-from torch_mesh.backend import BROADCAST, Call
+from torch_mesh.backend import BROADCAST, Call, bind_source
 from torch_mesh.declarations import Function, execution_sequence
 from torch_mesh.configuration import placement, bind, record
 from torch_mesh import _stream
 from torch_mesh.compilation import parameters
-from mesh_statistics import now
+from mesh_statistics import now, next_configuration
 
 import chain
 import lstm
@@ -36,8 +36,9 @@ def weights(config, values):
 
 
 # docs/writing-a-service.md#the-lstm
-def main():
-    config = json.load(sys.stdin if sys.argv[1] == '-' else open(sys.argv[1]))
+def main(config=None):
+    if config is None:
+        config = json.load(sys.stdin if sys.argv[1] == '-' else open(sys.argv[1]))
     steps, rows = config['steps'], config['rows']
     inputs, held = None, None
     if os.environ['RANK'] == '0':
@@ -49,11 +50,14 @@ def main():
     L, KIN, H = config['layers'], config['input_width'], config['width']
     mesh = DeviceMesh.from_group(dist.group.WORLD, 'mps', mesh_dim_names=('tp',))
     partition.attach(mesh, tp=H)
-    configuration = placement(mesh, 'tp', {'function': 'lstm_sequence', 'layers': L, 'input_width': KIN,
-                                        'width': H, 'steps': steps, 'rows': rows},
-                            config.get('placement'), parameters={**parameters(), **config['parameters']}, forms=config.get('forms', ()))
+    workload = {'function': 'lstm_sequence', 'layers': L, 'input_width': KIN,
+                'width': H, 'steps': steps, 'rows': rows}
+    configuration = placement(mesh, 'tp', workload, config.get('placement'),
+        parameters={**parameters(), **config['parameters']}, forms=config.get('forms', ()),
+        observations=config.get('observations', []), proposal=config.get('proposal', 0), family=config.get('family', workload))
     chosen = configuration['assignment']['operands']
-    compiler = {'LINEAR_ROW_CROSSOVER': chosen['LINEAR_ROW_CROSSOVER']}
+    compiler = {'LINEAR_ROW_CROSSOVER': chosen['LINEAR_ROW_CROSSOVER'],
+                'layout_preferences': chosen['layout_preferences']}
     shape = lambda l: (4, H, (KIN if l == 0 else H) + H)
     split = lambda t: partition.distribute_tensor(t, mesh, [Shard(1)], src_data_rank=0)
     held = held or [(torch_mesh.empty(1, 1, shape(l)[2], dtype=torch.half).expand(shape(l)),
@@ -66,26 +70,36 @@ def main():
     group = mesh.get_group('tp')
     full, rest = divmod(steps, k)
     chunks = [k] * full + [rest] * bool(rest)
-    functions = {}
-    for count in dict.fromkeys(chunks):
-        function = Function(tick.stepper(X, O, count), t, configuration=compiler)
+    unit = Function(tick.stepper(X, O, 1), t, configuration=compiler,
+                    source_scope={'program': 'lstm_sequence', 'phase': 'step'}).capture()
+    functions, first = [], 0
+    for count in chunks:
+        function = unit.repeated(count, first=first)
         function.declare(group)
-        functions[count] = function
-    initial = [Function(tick.starting, s, X[s], configuration=compiler) for s in range(L - 1)]
+        functions.append(function)
+        first += count
+    initial = [Function(tick.starting, s, X[s], configuration=compiler,
+                        source_scope={'program': 'lstm_sequence', 'phase': 'starting', 'step': s}) for s in range(L - 1)]
     for function in initial:
         function.declare(group)
-    ordered = [*initial, *(functions[count] for count in chunks)]
+    ordered = [*initial, *functions]
     groups = [calls for function in ordered for calls in function.groups.get(group.group_name, [])]
     if rank == 0:
         X.copy_(torch.from_numpy(inputs[:]))
     torch_mesh.check_memory()
     ticks = steps + L - 1
     from torch_mesh.backend import prepare_fragments
-    broadcast = Call(BROADCAST, X.numel(), X.dtype, root=0)
+    source = {'program': 'lstm_sequence', 'statement': 'inputs'}
+    broadcast = bind_source(Call(BROADCAST, X.numel(), X.dtype, root=0), source=source,
+        occurrences=_stream.TensorLayout((1,), (1,)),
+        work=_stream.TensorLayout((X.numel() * X.element_size(),), (1,)), route_scope=source)
     # the broadcast's lowered fragments, each with the tensors it is issued with (design/eager-execution.md#what-follows)
     inputs, declared = prepare_fragments([(broadcast, X, X)], group)
     program = execution_sequence([inputs, *ordered], O)
-    bind(configuration, [declared, *groups], program.realize)
+    def prepare():
+        program.realize()
+        return {'layouts': [choice for function in ordered for choice in function.layout_choices]}
+    bind(configuration, [declared, *groups], prepare)
     started = now()
     program.forward()
     completion = program.completion()
@@ -94,7 +108,10 @@ def main():
                    input_width=KIN, width=H, steps=steps, ticks=ticks, latency_ticks=L)
     record(configuration, completion, started, steps * rows * H * torch.half.itemsize, summary)
     dist.destroy_process_group()
-    return O
+    state = next_configuration(configuration['observations'].declaration,
+        [*configuration['group'].configuration_observations, *configuration['observations'].poll()],
+        family=configuration['family']['source'])
+    return {'output': O, 'configuration': state}
 
 
 if __name__ == '__main__':

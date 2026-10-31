@@ -58,7 +58,7 @@ class Placements:
             raise ValueError('shared page uses require the same ordered value type')
         self.equalities.append((left, right, left_view, right_view))
 
-    def declare(self, described, requirements, materializations=(), *, fields=(), uses=()):
+    def declare(self, described, requirements, materializations=(), *, fields=(), uses=(), choices=()):
         """Unite logical storage families before physical pages are assigned.
 
         ``fields`` supplies (root, byte view, scalar width). ``uses`` supplies
@@ -112,6 +112,7 @@ class Placements:
             root(value)
         for value, *_ in (*fields, *uses):
             root(value)
+        self.choice_groups = tuple(choices)
         self.declaration = (tuple(described), tuple(requirements), roots, families, use, tuple(fields), tuple(uses))
 
     def materializes(self, value):
@@ -119,15 +120,18 @@ class Placements:
         return isinstance(value, torch.Tensor) and any(
             torch._C._is_alias_of(root['logical'], value) for root in self.declaration[2])
 
-    def solve(self, described=None, requirements=None):
+    def solve(self, described=None, requirements=None, *, choice_scope=(), preferences=None, report=True):
         """Solve the retained logical families, then bind their actual pages."""
         import math
         from . import _stream
-        from .layout import allocate, solve_layout
+        from .layout import allocate, prefer_layout
+        from .operand import layout_configuration, required_layout
+        from .compilation import layout_preferences, layout_choice
         if described is not None:
             self.declare(described, requirements)
         described, requirements, roots, families, use, fields, uses = self.declaration
-        self.bindings, self.owners = [], []
+        self.bindings, self.owners, self.choices = [], [], []
+        use_groups = {index: choice for choice in self.choice_groups for index in choice["uses"]}
         for family in families:
             members, domain = family['members'], family['domain']
             related = lambda value: any(torch._C._is_alias_of(member['logical'], value) for member in members)
@@ -136,24 +140,56 @@ class Placements:
             fixed = [(logical, view, placed) for logical, view, placed in self.fixed if related(logical)]
             demands = [(use(value, view), value.element_size(), kind, view, capacity, alignment)
                        for value, view, kind, capacity, alignment in requirements if related(value)]
+            labels = [(('requirement', index), {}) for index, item in enumerate(requirements) if related(item[0])]
+            labels.extend((use_groups[index]['key'], use_groups[index]['definition']) if index in use_groups else
+                          (('use', index), {}) for index, item in enumerate(uses) if related(item[0]))
             # These uses already describe byte positions. Preserve their
             # scalar-component axis instead of appending the root's uint8 axis.
             demands.extend((use(value, view).reshape(view.shape), width, kind, target, capacity, alignment)
                            for value, view, width, kind, target, capacity, alignment in uses if related(value))
             typed = [(use(value), value.element_size()) for value in values]
             typed.extend((use(value, view).reshape(view.shape), width) for value, view, width in fields if related(value))
-            alignment = math.lcm(*(width for _, width in typed), *(entry[5] for entry in demands))
+            def choose(count, demands, typed):
+                groups, keys, definitions = [], [], []
+                for demand, (key, definition) in zip(demands, labels, strict=True):
+                    if key not in keys:
+                        keys.append(key);groups.append([]);definitions.append(definition)
+                    groups[keys.index(key)].append(demand)
+                def declared(demand):
+                    view, width, kind, target, capacity, alignment = demand
+                    return dict(use=layout_configuration(view), width=width,
+                        target=layout_configuration(required_layout(target, kind)),
+                        flexible=kind if isinstance(kind, str) and kind in ('strided', 'positive_strided') else '',
+                        capacity=capacity, alignment=alignment)
+                family = dict(scope=choice_scope,
+                    uses=[dict(id=key, source={k: v for k, v in definition.items() if k != 'selection'},
+                               requirements=[item[2] if isinstance(item[2], str) else
+                                             'layout' if isinstance(item[2], dict) else 'fixed' for item in group])
+                          for key, definition, group in zip(keys, definitions, groups, strict=True)])
+                operands = dict(count=count,
+                    uses=[dict(selection=definition.get('selection'), demands=[declared(item) for item in group])
+                          for definition, group in zip(definitions, groups, strict=True)],
+                    fields=[dict(layout=layout_configuration(view), width=width) for view, width in typed])
+                weights = layout_preferences(family, preferences)
+                solved = prefer_layout(count, groups, weights, typed)
+                if solved is None:
+                    raise ValueError('declared typed fields and fixed pages have no legal placement')
+                record = dict(family=family, operands=operands, weights=weights,
+                    direct=[index in solved['accepted'] for index in range(len(groups))],
+                    conflicts=solved['conflicts'])
+                if groups:
+                    self.choices.append(record)
+                    if report:
+                        layout_choice(record)
+                return solved['layout'], solved['extent'], solved['alignment']
             if not fixed:
-                mapping, extent = solve_layout(domain.count, demands, typed)
-                if mapping is None:
-                    mapping, extent = solve_layout(domain.count, [], typed)
+                mapping, extent, alignment = choose(domain.count, demands, typed)
                 placed = allocate(mapping, torch.uint8, members[0]['logical'].device.type, extent=extent, alignment=alignment)
                 self.owners.append(placed.storage)
             else:
                 actuals = [TensorView.of(actual) for _, _, actual in fixed]
                 owners = [value.storage for value in actuals]
                 physical_pages, page = _stream.page_domain(owners)
-                alignment = math.lcm(alignment, page)
                 fixed_bytes = physical_pages.components(page).reshape((physical_pages.count * page,))
                 fixed_domain = _stream.TensorLayout(tuple(fixed_bytes.shape), (1,))
                 def assignments():
@@ -181,11 +217,8 @@ class Placements:
                 typed.append((pages, page))
                 demanded = [(view.rebase(domain, original), width, kind, target, capacity, aligned)
                             for view, width, kind, target, capacity, aligned in demands]
-                mapping, extent = solve_layout(joint.count, demanded, typed)
-                if mapping is None:
-                    # An incompatible consumer gets the existing explicit AOT
-                    # conversion edge. Fixed pages still use the same solver.
-                    mapping, extent = solve_layout(joint.count, [], typed)
+                mapping, extent, alignment = choose(joint.count, demanded, typed)
+                alignment = math.lcm(alignment, page)
                 placed_pages = pages.rebase(joint, mapping).reshape((physical_pages.count, page)).elements(page)
                 first, length = mapping.storage_span()
                 count = -(-max(first + length, extent) // page)
@@ -264,7 +297,8 @@ def field_storage(bindings, domains, *, algebra):
     return fields, tuple(equalities)
 
 
-def selected(projection, *, algebra, device, results=(), fixed=(), requirements=(), equalities=()):
+def selected(projection, *, algebra, device, results=(), fixed=(), requirements=(), equalities=(),
+             choice_scope=(), preferences=None):
     """Place one projected numerical span through the ordinary family solver.
 
     Canonical storage demands and returned ``source`` layouts are bytes.
@@ -323,7 +357,7 @@ def selected(projection, *, algebra, device, results=(), fixed=(), requirements=
     with mode:
         roots = {name: torch.empty((layout.count,), dtype=torch.uint8, device=device) for name, layout in original.items()}
     compact = {name: descriptor(value) for name, value in roots.items()}
-    placements, fields, demands = Placements(), [], []
+    placements, fields, demands, choices = Placements(), [], [], []
 
     def use(name, layout):
         return layout.rebase(original[name], compact[name])
@@ -357,6 +391,7 @@ def selected(projection, *, algebra, device, results=(), fixed=(), requirements=
         target = order.rebase(ordinals, actual.layout.components(width).reshape((logical_bytes.count,)))
         placements.bind(roots[name], TensorView(actual.storage_as(torch.uint8), target), view=use(name, source))
     for record, layout in consumers:
+        first = len(demands)
         binding, width = record['binding'], record['binding']['dtype'].itemsize
         source = use(binding['name'], layout.components(width))
         for requirement in record['requirements']:
@@ -372,8 +407,11 @@ def selected(projection, *, algebra, device, results=(), fixed=(), requirements=
                 demands.append((roots[binding['name']], positions, width, 'contiguous', target, capacity, alignment))
             else:
                 demands.append((roots[binding['name']], source, width, kind, layout, capacity, alignment))
-    placements.declare(tuple(roots.values()), (), tuple(roots.values()), fields=fields, uses=demands)
-    placements.solve()
+        choices.append(dict(key=record['key'], uses=tuple(range(first, len(demands))),
+            definition=dict(name=binding['name'], dtype=str(binding['dtype']), access=record['access'],
+                            selection=layout_configuration(layout))))
+    placements.declare(tuple(roots.values()), (), tuple(roots.values()), fields=fields, uses=demands, choices=choices)
+    placements.solve(choice_scope=choice_scope, preferences=preferences, report=False)
     storage = {name: dict(source=original[name], source_dtype=torch.uint8, operand=placements.get(root))
                for name, root in roots.items()}
 
@@ -386,6 +424,11 @@ def selected(projection, *, algebra, device, results=(), fixed=(), requirements=
         after = tuple(commands) if writing else tuple(copies(operand, value)) if record['access'] == 'readwrite' else ()
         owners.append(operand.storage)
         resolved[record['key']] = dict(record, operand=operand, before=before, after=after)
+    from .compilation import layout_choice
+    for choice in placements.choices:
+        choice['direct'] = [not (resolved[use['id']]['before'] or resolved[use['id']]['after'])
+                            for use in choice['family']['uses']]
+        layout_choice(choice)
     return dict(storage=storage, results=tuple(selected_view(storage, record, algebra=algebra, layout=layout)
                                               for record, layout in requested),
                 pages=tuple(owners), uses=resolved)

@@ -1120,6 +1120,43 @@ static inline size_t ncclMeshInvocationIndex(uint64_t invocation, int64_t displa
    displacement is independent of buffer.offset. A group is laid and placed for
    every slot as it is declared, and its issue names none. */
 typedef struct { ncclMeshBuffer buffer; size_t stride, instances; int64_t invocation; } ncclMeshBufferSlots;
+/* Exact source declarations and their selected occurrence/work relations.
+   Strings are canonical serialized frontend values, not hashes or generated
+   physical call names. They are retained only during preparation/reporting. */
+typedef struct { const char *source, *occurrences, *work; } ncclMeshSource;
+/* Native routing choices, retained as explicit preparation operands. A demand's
+   call is its ordinal within the group; directions is bit 0 up, bit 1 down.
+   Extents, grain (bytes per allocation quantum), units and realized bytes are
+   readback, recomputed from the current calls. They are not family identity. */
+/* form names the retained configured program entry, or UINT32_MAX for the
+   solved tree basis. Size bounds choose an initial entry only; explicit reuse
+   validates the program's collective/root/member semantics at current extents. */
+typedef struct { uint32_t call, what, type, root, element_bytes, directions, form;
+                 uint64_t up, down, grain, units; } ncclMeshRouteDemand;
+typedef struct { uint32_t demand, adjustable; double initial, share;
+                 uint64_t units, bytes; } ncclMeshRouteTree;
+/* kind 0 routes a WRITE/all-to-all transaction; kind 1 realizes a collective
+   tree edge on physical cables. Zero weight disables a choice, not its path.
+   units/bytes sum actual allocations over this group's logical transactions.
+   resolution is their maximum transaction allocation-unit count. */
+typedef struct { uint32_t kind, source, destination, scope; uint64_t initial, weight, units, bytes, resolution; } ncclMeshRoutePath;
+typedef struct {
+  uint32_t nodes, cables, calls, demands, trees, paths, hops, sources, scopes;
+  const struct mesh_cable* cable;
+  const ncclMeshRouteDemand* demand;
+  const uint64_t* leaves;       /* demands * ceil(nodes/64) */
+  const uint64_t* contributors; /* calls * ceil(nodes/64) */
+  const uint64_t* recipients;   /* calls * ceil(nodes/64) */
+  const ncclMeshRouteTree* tree;
+  const uint32_t* parents;     /* trees * nodes; UINT32_MAX outside a tree */
+  const ncclMeshRoutePath* path;
+  const uint32_t* first;       /* paths + 1 offsets into links */
+  const uint32_t* links;       /* hops physical cable indices */
+  const ncclMeshSource* source; /* sources complete source/occurrence records */
+  const uint32_t* source_first; /* calls + 1 offsets into source */
+  const char* const* scope;     /* scopes exact declared choice identities */
+  const uint32_t* call_scope;   /* calls indices into scope */
+} ncclMeshRouting;
 typedef struct {
   int what, peer;
   size_t count;
@@ -1160,6 +1197,18 @@ typedef struct {
   uint64_t ready_value;
   ncclMeshTileLayout ready_layout, land_layout;
   uint32_t land_capacity;
+  /* A physical call can cover multiple original equations/occurrences. An
+     explicit equal route_scope permits their routing choices to be shared,
+     independently of physical group boundaries. NULL declares a fresh local
+     scope which cannot match a prior catalog. */
+  const ncclMeshSource* sources;
+  uint32_t source_count;
+  const char* route_scope;
+  /* First function call only: the full prior basis catalog. Native preparation
+     reuses compatible explicitly scoped choices before binding transfers;
+     newly declared legal domains generate their initial basis once. */
+  const ncclMeshRouting* routing;
+  uint32_t routing_count;
 } ncclMeshCall;
 /* A communicator's plan (ncclMeshCommPlan): its `groups` declared groups, the groups one pass of its order issues
    (`issues`, the sum of each block's count times repeat), the number of the communicator's group the order starts at (`first`: its groups
@@ -1176,6 +1225,9 @@ typedef struct {
   const uint64_t (*entries)[2];
   const double* seconds;
   const uint64_t* const* matrices;
+  /* groups immutable routing records, valid until this plan is replaced.
+     Defaults and selected weights accompany exact realized allocations. */
+  const ncclMeshRouting* routing;
 } ncclMeshPlan;
 /* A compact sequence of contiguous declared groups, repeated as a block.
    first is a group index, not the caller's arbitrary group label. */

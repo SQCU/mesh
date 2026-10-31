@@ -5,6 +5,7 @@ from functools import lru_cache
 from . import _stream
 
 _bound = ContextVar('mesh_compilation_operands', default=None)
+_layouts = ContextVar('mesh_compilation_layouts', default=None)
 
 
 def operands():
@@ -15,18 +16,57 @@ def operands():
 @contextmanager
 def bind(configuration):
     values = dict(operands())
+    preferences = ()
     if configuration is not None:
         for key, value in configuration.items():
+            if key == 'layout_preferences':
+                preferences = value
+                continue
             if key not in values:
                 raise ValueError(f'unknown compiler operand {key}')
             if not isinstance(value, int) or value <= 0:
                 raise ValueError(f'{key}: compiler operand must be a positive integer')
             values[key] = value
     token = _bound.set(values)
+    layouts = _layouts.set(dict(preferences=preferences, choices=[]))
     try:
         yield values
     finally:
+        _layouts.reset(layouts)
         _bound.reset(token)
+
+
+def layout_preferences(family, supplied=None):
+    """Match complete semantic family metadata, never a vector length or hash."""
+    import json
+    import math
+    family = json.loads(json.dumps(family))
+    held = _layouts.get()
+    supplied = supplied if supplied is not None else (() if held is None else held['preferences'])
+    if family['scope'] is None:
+        if supplied:
+            raise ValueError('layout preferences require a declared source_scope')
+        return [1.0] * len(family['uses'])
+    matches = [record for record in supplied if json.loads(json.dumps(record['family'])) == family]
+    if len(matches) > 1:
+        raise ValueError('layout family has multiple preference declarations')
+    weights = list(matches[0]['weights']) if matches else [1.0] * len(family['uses'])
+    if len(weights) != len(family['uses']) or any(not math.isfinite(weight) or weight < 0 for weight in weights):
+        raise ValueError('layout preferences must match the declared uses and be finite and nonnegative')
+    return weights
+
+
+def layout_choice(record):
+    """Retain the actual prepared direct/conversion choice for whole-call feedback."""
+    import json
+    held = _layouts.get()
+    if held is not None and record['family']['scope'] is not None:
+        held['choices'].append(json.loads(json.dumps(record)))
+
+
+def layout_choices():
+    held = _layouts.get()
+    return tuple(held['choices']) if held is not None else ()
 
 
 def parameters():
@@ -221,9 +261,79 @@ def _source_origins(node, graph, before):
     current = before.next
     while current is not graph._root:
         current.meta.setdefault('mesh_source_nodes', origins)
+        for field in ('mesh_source_records', 'mesh_route_scope'):
+            if field in node.meta:
+                current.meta.setdefault(field, node.meta[field])
         created.append(current)
         current = current.next
     return origins, created
+
+
+def source_records(node):
+    """Original captured equations and occurrence domains, before physical grouping."""
+    if 'mesh_source_records' in node.meta:
+        return node.meta['mesh_source_records']
+    return tuple(record for source in node.meta.get('mesh_source_nodes', ())
+                 for record in source.meta.get('mesh_source_records', ()))
+
+
+def source_scope(module, scope, route_scope=None):
+    """Declare a caller namespace on the captured source, never on lowered ordinals."""
+    from .operand import layout_configuration
+    occurrence = layout_configuration(_stream.TensorLayout((1,), (1,)))
+    for node in module.graph.nodes:
+        if node.op == 'output':
+            continue
+        definition = dict(scope=scope, statement=node.name, definition=node.format_node())
+        node.meta['mesh_source_records'] = (dict(source=definition, occurrences=occurrence, occurrence_extent=1),)
+        node.meta['mesh_route_scope'] = definition if route_scope is None else route_scope
+    module.meta.update(mesh_program_scope=scope, mesh_route_scope=route_scope, mesh_occurrence_count=1)
+    return module
+
+
+def repeat_source(module, count, first=0):
+    """Compose one captured imperative graph before functionalization and fusion.
+
+    Input and captured-state identities remain shared. Only the final return is
+    published; every equation retains its original source and occurrence order.
+    """
+    import torch
+    if count < 1 or first < 0:
+        raise ValueError('source repetition requires a positive count and nonnegative first occurrence')
+    graph, inputs, result, operations = torch.fx.Graph(), {}, None, {}
+    extent = module.meta.get('mesh_occurrence_count', 1)
+    for node in module.graph.nodes:
+        if node.op == 'placeholder':
+            inputs[node] = graph.node_copy(node, inputs.__getitem__)
+            inputs[node].meta = node.meta.copy()
+    for at in range(count):
+        bound = dict(inputs)
+        for node in module.graph.nodes:
+            if node.op == 'placeholder':
+                continue
+            if node.op == 'output':
+                result = torch.fx.node.map_arg(node.args[0], bound.__getitem__)
+                continue
+            made = graph.node_copy(node, bound.__getitem__)
+            made.meta = node.meta.copy()
+            made.meta.pop('mesh_collective_declaration', None)
+            made.meta['mesh_source_nodes'] = node.meta.get('mesh_source_nodes', (node,))
+            records = []
+            for record in source_records(node):
+                declared = record['occurrences']
+                # Occurrences are produced here as affine ordered intervals;
+                # graph composition translates that same relation, not node IDs.
+                records.append(dict(record, occurrence_extent=count * extent, occurrences=dict(declared,
+                    offset=declared['offset'] + first + at * extent)))
+            made.meta['mesh_source_records'] = tuple(records)
+            bound[node] = made
+            operations.setdefault(node, []).append(made)
+    graph.output(result)
+    repeated = torch.fx.GraphModule(module, graph)
+    repeated.meta = dict(module.meta, mesh_occurrence_count=count * extent,
+                         mesh_source_results=_source_results(module, bound),
+                         mesh_source_operations={node: tuple(values) for node, values in operations.items()})
+    return repeated
 
 
 def _source_result(node, made, path, declared, value, origins):

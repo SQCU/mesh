@@ -189,6 +189,41 @@ def check(result):
                            f'{ffi.string(lib.ncclGetLastError(ffi.NULL)).decode()}')
 
 
+def exchange_configuration(comm, value):
+    """Gather explicit preparation operands on the existing configuration channel."""
+    import json
+    count = ffi.new('int *')
+    check(lib.ncclCommCount(comm, count))
+    local, size = json.dumps(value).encode(), int(count[0])
+    lengths = ffi.new('uint64_t[]', size)
+    check(lib.ncclMeshCommConfigGather(comm, ffi.new('uint64_t *', len(local)), lengths,
+                                      ffi.sizeof('uint64_t')))
+    room = max(lengths)
+    reports = ffi.new('char[]', size * room)
+    check(lib.ncclMeshCommConfigGather(comm, ffi.from_buffer(local.ljust(room, b'\0')), reports, room))
+    return [json.loads(ffi.unpack(reports + rank * room, lengths[rank])) for rank in range(size)]
+
+
+def broadcast_configuration(comm, value, root=0):
+    """Broadcast one prepared operand; this is never an execution-time barrier."""
+    import json
+    rank = ffi.new('int *')
+    check(lib.ncclCommUserRank(comm, rank))
+    local = json.dumps(value).encode() if rank[0] == root else b''
+    length = ffi.new('uint64_t *', len(local))
+    check(lib.ncclMeshCommConfigBroadcast(comm, root, length, ffi.sizeof('uint64_t')))
+    data = ffi.new('char[]', local if rank[0] == root else length[0])
+    check(lib.ncclMeshCommConfigBroadcast(comm, root, data, length[0]))
+    return json.loads(ffi.unpack(data, length[0]))
+
+
+def configuration_members(comm):
+    """Actual bridge member IDs in communicator order, declared during preparation."""
+    member = ffi.new('uint32_t *')
+    lib.mesh_reached(ffi.NULL, 0, member)
+    return exchange_configuration(comm, int(member[0]))
+
+
 def lease(nbytes):
     """ncclMemAlloc: `nbytes` (at least one) of this node's bridge's region, whole pages already registered on its
     devices (design/transport.md), as a writable buffer (numpy.frombuffer and torch.frombuffer take it),

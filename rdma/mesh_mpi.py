@@ -158,16 +158,19 @@ class Comm:
     def Get_size(self):
         return self.size
 
-    def Plan(self, calls, *, order=None):
+    def Plan(self, calls, *, order=None, routing=None):
         """Declare the complete function's native calls through the shared compiler.
 
         Calls are dictionaries of ncclMeshCall fields, with ordinary count lists
         where required and `bindings` the (send, receive) arrays a call is
-        issued with. This is configuration metadata, not a Python schedule or
+        issued with. `sources` and `route_scope` are explicit source and choice
+        declarations; retained `routing` supplies the prior compiled basis.
+        This is configuration metadata, not a Python schedule or
         a collective decomposition. Every rank declares the same function.
         """
         from assignment import declare
-        return declare(self.comm, calls, order=order)
+        self._plan = declare(self.comm, calls, order=order, routing=routing)
+        return self._plan
 
     def PlanDemands(self):
         """Exact compiler-reported directed bytes for the declared complete function."""

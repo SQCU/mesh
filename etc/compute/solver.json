@@ -10,5 +10,6 @@
   "observation_window": 64,
   "unknown_capacity": 1.0,
   "observation_relative_noise": 0.03125,
-  "route_function_tolerance": 1e-12
+  "route_function_tolerance": 1e-12,
+  "route_weight_units": 1099511627776
 }

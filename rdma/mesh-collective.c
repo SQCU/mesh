@@ -570,7 +570,7 @@ static int mesh_cut(uint32_t segments,uint64_t elements,const uint64_t *sizes,ui
    flows into them), each a whole number of quanta of `q` elements from the segment's start but the segment's last,
    the remainder's quanta one each to the first parts of weight above 0 (a part of weight 0, a tree of share 0, takes
    none); 0 where the cut is none */
-static int mesh_program_ranges(const struct mesh_program *program,uint64_t elements,const uint64_t *sizes,uint64_t q,uint64_t *lo,
+int mesh_program_ranges(const struct mesh_program *program,uint64_t elements,const uint64_t *sizes,uint64_t q,uint64_t *lo,
                                uint64_t *count){
   const uint32_t segments=mesh_program_segments(program);
   uint64_t *bases=malloc(2*(size_t)segments*sizeof *bases);

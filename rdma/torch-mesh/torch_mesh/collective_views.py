@@ -30,7 +30,8 @@ def selected_calls(record, algebra):
     The common relation cover supplies cells with equal roles. Routing and
     reduction ordering remain the existing collective compiler's work.
     """
-    from .backend import ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, ALLTOALL, WRITE
+    from .backend import ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, ALLTOALL, WRITE, source_work
+    from .operand import relation_layout
     source = record['call']
     extent = _domains(source, 0, record['group'].size())[0]
     writes = record['write_relations']
@@ -72,6 +73,8 @@ def selected_calls(record, algebra):
         root = contributors[0] if identity else recipients[0]
         call = source._replace(kind=kind, count=order.shape[0], root=root, counts=None, matrix=None,
                                contributors=contributors, recipients=recipients)
+        call = source_work(call, relation_layout(order, order.shape, extent).components(source.dtype.itemsize)
+                           .reshape((order.shape[0] * source.dtype.itemsize,)))
         yield dict(call=call, reads={rank: order.then(record['read_relations'][rank]) for rank in contributors},
                    writes={rank: order.then(record['write_relations'][rank]) for rank in recipients},
                    identity=identity)
@@ -120,6 +123,12 @@ def complete_calls(calls, group):
     if missing:
         for i, matrix in zip(missing, group.count_matrices([calls[i] for i in missing]), strict=True):
             calls[i] = calls[i]._replace(matrix=matrix)
+    from .operand import layout_configuration
+    for i, call in enumerate(calls):
+        if any(record['work'] is None for record in call.sources):
+            work = layout_configuration(_stream.TensorLayout((_domains(call, 0, group.size())[0] * call.dtype.itemsize,), (1,)))
+            calls[i] = call._replace(sources=tuple(dict(record, work=work) if record['work'] is None else record
+                                                  for record in call.sources))
     return calls
 
 
@@ -166,7 +175,7 @@ def _alias(spans, traversal, first, last):
 
 def lower(bindings, group):
     """Return native bindings, matching declarations, and required copy edges."""
-    from .backend import ALLTOALL, ALLGATHER, REDUCE_SCATTER
+    from .backend import ALLTOALL, ALLGATHER, REDUCE_SCATTER, source_work
     from .compilation import api_layouts
     bindings = list(bindings)
     rank, size = group.rank(), group.size()
@@ -206,7 +215,9 @@ def lower(bindings, group):
         counts = call.matrix if call.kind == ALLTOALL else call.counts
         bounds = list(accumulate([0, *counts])) if counts is not None else []
         for first, last in intervals:
-            fragment = call._replace(count=last - first)
+            fragment = source_work(call, _stream.TensorLayout(((last - first) * call.dtype.itemsize,),
+                                                              (1,), first * call.dtype.itemsize))
+            fragment = fragment._replace(count=last - first)
             if call.kind in (ALLGATHER, REDUCE_SCATTER, ALLTOALL):
                 counts = [max(0, min(last, end) - max(first, start)) for start, end in zip(bounds, bounds[1:])]
                 if call.kind == ALLTOALL:

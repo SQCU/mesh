@@ -78,33 +78,27 @@ def pipeline(head, bindings, tail, name, indices=None, instance='', origins=None
 
 def solve_layout(count, demands, values):
     """The one relative-placement solve, in byte positions for every scalar type."""
-    uses = [item[0] for item in demands]
-    targets = [required_layout(view, kind).components(width) for _, width, kind, view, _, _ in demands]
-    footprints = [(target.index(0) if target.count else 0, capacity, alignment)
-                  for target, (_, _, _, _, capacity, alignment) in zip(targets, demands)]
-    flexible = [i for i, (_, _, kind, _, capacity, alignment) in enumerate(demands)
-                if kind in ('strided', 'positive_strided') and not capacity and alignment == 1]
-    exact = [i for i in range(len(demands)) if i not in flexible]
-    typed, widths = [item[0] for item in values], [item[1] for item in values]
-    placed = _stream.place_layout(count, [uses[i] for i in exact], [targets[i] for i in exact],
-                                  [footprints[i] for i in exact], typed, widths)
-    if placed is not None and flexible:
-        domain = _stream.TensorLayout((count,), (1,))
-        changed = False
-        for i in flexible:
-            _, width, kind, _, _, _ = demands[i]
-            view = uses[i].rebase(domain, placed).elements(width)
-            target = required_layout(view, kind)
-            changed |= view != target
-            targets[i] = target.components(width)
-        if changed:
-            placed = _stream.place_layout(count, uses, targets, footprints, typed, widths)
-    if placed is None:
-        return None, 0
-    domain = _stream.TensorLayout((count,), (1,))
-    extent = max((uses[i].rebase(domain, placed).index(0) + capacity
-                  for i, (_, _, _, _, capacity, _) in enumerate(demands) if uses[i].count and capacity), default=0)
-    return placed, extent
+    result = prefer_layout(count, (), (), values, hard=demands)
+    return (None, 0) if result is None else (result['layout'], result['extent'])
+
+
+def prefer_layout(count, groups, preferences, values, *, hard=()):
+    """Realize declared priorities with the shared hard placement algebra.
+
+    Every group is one consumer's atomic requirements. A rejected direct use
+    still requires its ordinary conversion; provider requirements never become
+    optional. The same selector serves the native and portable binders.
+    """
+    def records(demands):
+        result = []
+        for use, width, kind, view, capacity, alignment in demands:
+            target = required_layout(view, kind).components(width)
+            flexible = kind if isinstance(kind, str) and kind in ('strided', 'positive_strided') and not capacity and alignment == 1 else ''
+            result.append(dict(use=use, target=target, width=width, flexible=flexible,
+                               footprint=(target.index(0) if target.count else 0, capacity, alignment)))
+        return result
+    return _stream.prefer_layout(count, records(hard), [records(group) for group in groups],
+                                list(preferences), [item[0] for item in values], [item[1] for item in values])
 
 
 def declare(graph, placements, materializations=()):

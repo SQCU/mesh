@@ -227,7 +227,7 @@ def check_memory():
     return outside
 
 
-def plan(group, calls, *, production_seconds=None):
+def plan(group, calls, *, production_seconds=None, routing=None):
     """The collectives a program issues on `group` (None: the default group) declared once, in their order: `calls`
     the groups, each a list of torch_mesh.backend.Call (one torch collective, or one coalesced batch, a group) or (that
     list, repeat) issued repeat times in a row, the order repeated from the group's next collective on (backend
@@ -237,7 +237,7 @@ def plan(group, calls, *, production_seconds=None):
 
     from . import backend
     group = group or dist.distributed_c10d._get_default_group()
-    return backend._mesh(group.group_name, 'plan').plan(calls, production_seconds=production_seconds)
+    return backend._mesh(group.group_name, 'plan').plan(calls, production_seconds=production_seconds, routing=routing)
 
 
 def merge_partials(out, lse, group=None, root=-1):

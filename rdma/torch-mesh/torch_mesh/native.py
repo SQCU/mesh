@@ -626,6 +626,8 @@ def prepare_graph(module, metadata, *, materializations=()):
         def index_to_str(self, index):
             expression = super().index_to_str(index)
             name = getattr(self, 'page_access', None)
+            if name is not None:
+                name = V.graph.scheduler.mutation_real_name.get(name, name)
             if name is not None and name not in storage_layouts:
                 raise ValueError(f'numerical access {name} has no assigned page operand')
             if name is not None:
@@ -684,7 +686,11 @@ def prepare_graph(module, metadata, *, materializations=()):
         if value is None:
             return None
         storage, layout = ir.as_storage_and_layout(value, freeze=False)
-        return dict(name=storage.get_name(), dtype=layout.dtype, storage_dtype=storage.get_dtype(),
+        name = storage.get_name()
+        if V.graph.scheduler is not None:
+            name = V.graph.scheduler.mutation_real_name.get(name, name)
+            storage = V.graph.get_buffer(name)
+        return dict(name=name, dtype=layout.dtype, storage_dtype=storage.get_dtype(),
                     storage_bytes=storage.get_layout().storage_size() * storage.get_dtype().itemsize,
                     view=ir_layout(layout))
 
@@ -837,8 +843,9 @@ def prepare_graph(module, metadata, *, materializations=()):
                                     if conditions and condition.free_symbols <= known else None)
                 if relation is not None and predicate_domain is not None:
                     relation = relation.subtract_domain(relation.domain().binary(predicate_domain, 'subtract'))
+                name = V.graph.scheduler.mutation_real_name.get(item['name'], item['name'])
                 dtype = V.graph.get_dtype(item['name'])
-                storage = V.graph.get_buffer(item['name'])
+                storage = V.graph.get_buffer(name)
                 # A changing address has ordinary scalar producers. Retain
                 # their declared value dimensions alongside the work axes in
                 # the same relation, rather than substituting the whole input
@@ -855,8 +862,8 @@ def prepare_graph(module, metadata, *, materializations=()):
                     if conditions and condition.free_symbols <= index_known else None)
                 if symbols and index_map is not None and index_predicate is not None:
                     index_map = index_map.subtract_domain(index_map.domain().binary(index_predicate, 'subtract'))
-                result[slot] = dict(item, dtype=dtype, storage_dtype=dtype, variables=axes,
-                                    storage_bytes=storage.get_layout().storage_size() * dtype.itemsize,
+                result[slot] = dict(item, name=name, dtype=dtype, storage_dtype=storage.get_dtype(), variables=axes,
+                                    storage_bytes=storage.get_layout().storage_size() * storage.get_dtype().itemsize,
                                     operation=operation, relation=relation, predicate_domain=predicate_domain,
                                     index_space=dict(shape=index_shape, variables=index_axes, work_dimensions=len(axes),
                                         values=tuple(dict(symbol=symbol, **declared['index_producers'][symbol]) for symbol in symbols),
@@ -1012,8 +1019,9 @@ def prepare_graph(module, metadata, *, materializations=()):
                     work = algebra.map(domain['work'], (), lambda source, target: []).domain()
                     for side in ('reads', 'writes'):
                         for item in domain[side].values():
-                            if item['name'] in arguments:
-                                accesses.append(dict(side=side, slot=arguments.index(item['name']), access=item, work=work,
+                            argument_name = V.graph.scheduler.mutation_real_name.get(item['name'], item['name'])
+                            if argument_name in arguments:
+                                accesses.append(dict(side=side, slot=arguments.index(argument_name), access=item, work=work,
                                                      origins=tuple(node.node.get_origins())))
             index = len(command_accesses)
             command_accesses.append(tuple(accesses))
@@ -1419,7 +1427,11 @@ def prepare_graph(module, metadata, *, materializations=()):
                 materialized_buffers.add(storage.get_name())
                 leaves[i] = view
             result = tree_unflatten(leaves, spec)
-            self.source_values[node] = result
+            # Inductor mutates the live TensorBox while lowering an in-place
+            # write. Input page declarations retain its original InputBuffer,
+            # which Inductor already stores separately for writeback binding.
+            self.source_values[node] = (self.graph_inputs_original.get(self.qualify_name(str(node.target)), result)
+                                        if node.op == 'placeholder' else result)
             return result
 
         def value_binding(self, value, algebra):

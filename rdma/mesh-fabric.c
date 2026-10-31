@@ -136,19 +136,15 @@ int mesh_paths_check(const struct mesh_fabric *f,uint32_t source,uint32_t destin
   return status?status:total?0:EINVAL;
 }
 
-int mesh_write_compile(const struct mesh_fabric *f,uint32_t rank,uint32_t source,uint32_t destination,
-                        const struct mesh_paths *paths,struct mesh_operand operand,uint64_t page,uint64_t tile,
-                        struct mesh_transfer *out,uint32_t room){
-  const int check=mesh_paths_check(f,source,destination,paths);
-  if(check || rank>=f->nodes || !operand.element_bytes || !page)return -(check?check:EINVAL);
-  if(!operand.elements)return 0;
+int mesh_write_ranges(const struct mesh_paths *paths,struct mesh_operand operand,uint64_t page,uint64_t *base,uint64_t *count){
+  if(!paths||!paths->count||!paths->weight||!operand.element_bytes||!page||!base||!count)return EINVAL;
   const uint32_t P=paths->count;
-  const uint64_t q=mesh_page_quantum(page,operand.element_bytes),units=(operand.elements-1)/q+1;
-  uint64_t *count=calloc(P,sizeof *count),*base=calloc(P,sizeof *base);
+  const uint64_t q=mesh_page_quantum(page,operand.element_bytes),units=operand.elements?(operand.elements-1)/q+1:0;
   uint64_t *remainder=calloc(P,sizeof *remainder);
-  if(!count || !base || !remainder){free(count);free(base);free(remainder);return -ENOMEM;}
+  if(!remainder)return ENOMEM;
   uint64_t total=0;
-  for(uint32_t p=0;p<P;p++)total+=paths->weight[p];
+  for(uint32_t p=0;p<P;p++){if(paths->weight[p]>UINT64_MAX-total){free(remainder);return EOVERFLOW;}total+=paths->weight[p];}
+  if(!total){free(remainder);return EINVAL;}
   uint64_t assigned=0;
   for(uint32_t p=0;p<P;p++){
     /* Weights describe total flow, not surplus after a page on every path.
@@ -162,18 +158,34 @@ int mesh_write_compile(const struct mesh_fabric *f,uint32_t rank,uint32_t source
     for(uint32_t p=1;p<P;p++)if(remainder[p]>remainder[best])best=p;
     count[best]++;remainder[best]=0;assigned++;
   }
-  for(uint32_t p=1;p<P;p++)base[p]=base[p-1]+count[p-1];
+  uint64_t at=0;
+  for(uint32_t p=0;p<P;p++){base[p]=at;count[p]=count[p]>(operand.elements-at)/q?operand.elements-at:count[p]*q;at+=count[p];}
+  free(remainder);return 0;
+}
+
+
+int mesh_write_compile(const struct mesh_fabric *f,uint32_t rank,uint32_t source,uint32_t destination,
+                        const struct mesh_paths *paths,struct mesh_operand operand,uint64_t page,uint64_t tile,
+                        struct mesh_transfer *out,uint32_t room){
+  const int check=mesh_paths_check(f,source,destination,paths);
+  if(check || rank>=f->nodes || !operand.element_bytes || !page)return -(check?check:EINVAL);
+  if(!operand.elements)return 0;
+  const uint32_t P=paths->count;
+  uint64_t *count=calloc(P,sizeof *count),*base=calloc(P,sizeof *base);
+  if(!count||!base){free(count);free(base);return -ENOMEM;}
+  const int allocation=mesh_write_ranges(paths,operand,page,base,count);
+  if(allocation){free(count);free(base);return -allocation;}
   uint32_t written=0;
   for(uint32_t p=0;p<P;p++){
     if(!count[p])continue;
-    const uint64_t lo=base[p]*q;
-    const uint64_t amount=count[p]>(operand.elements-lo)/q?operand.elements-lo:count[p]*q;
+    const uint64_t lo=base[p];
+    const uint64_t amount=count[p];
     uint32_t at=source;
     for(uint32_t k=paths->first[p];k<paths->first[p+1];k++){
       const uint32_t e=paths->cable[k],next=f->cable[e].node[f->cable[e].node[0]==at];
       if(rank==at || rank==next){
         const uint64_t fragments=tile?(lo+amount-1)/tile-lo/tile+1:1;
-        if(fragments>INT_MAX-written){free(count);free(base);free(remainder);return -EOVERFLOW;}
+        if(fragments>INT_MAX-written){free(count);free(base);return -EOVERFLOW;}
         if(!out)written+=(uint32_t)fragments;
         else for(uint64_t first=lo,left=amount;left;){
           uint64_t n=tile?tile-first%tile:left;
@@ -187,7 +199,7 @@ int mesh_write_compile(const struct mesh_fabric *f,uint32_t rank,uint32_t source
       at=next;
     }
   }
-  free(count);free(base);free(remainder);
+  free(count);free(base);
   return out && written>room?-ENOSPC:(int)written;
 }
 

@@ -1,6 +1,11 @@
 """The solver worker: the mesh answers the game server's bot-plan requests (ef6adb10^:xonotic/solver/worker.py,
 restored onto HEAD's wire and library).
 
+Collective construction uses the canonical communicator plan and retained
+routing operands. The imperative numerical world adapters remain source for
+whole-function migration; this file does not restore their removed host
+execution or plan activate/deactivate interfaces.
+
     PYTHONPATH=xonotic:rdma bin/mesh-python -B -m solver.worker serve CONFIG.json   # every rank of the world
     PYTHONPATH=xonotic:rdma bin/mesh-python -B -m solver.worker --check              # validate, no mesh needed
     PYTHONPATH=xonotic:rdma bin/mesh-python -B -m solver.worker --bench 20           # time the solve, no mesh needed
@@ -202,6 +207,8 @@ class TorchWorld:
         from torch_mesh import backend
         group = dist.distributed_c10d._get_default_group()
         self.native = backend._mesh(group.group_name, 'whole-function controller').comm
+        import mesh
+        self.members = mesh.configuration_members(self.native)
 
     def buffer(self, shape, dtype, device=None):
         return self.torch_mesh.empty(shape, dtype={np.float32: torch.float32, np.int64: torch.int64}[dtype],
@@ -234,6 +241,8 @@ class MPIWorld:
         self.comm = mesh_mpi.Comm()
         self.rank, self.size = self.comm.Get_rank(), self.comm.Get_size()
         self.native = self.comm.comm
+        import mesh
+        self.members = mesh.configuration_members(self.native)
 
     def buffer(self, shape, dtype, device=None):
         return self.mpi.empty(shape, dtype)
@@ -420,50 +429,59 @@ class CtxSolver:
             return None
         import mesh
         import assignment
+        from mesh_source import revision
         data = self.assignment_data
-        widths = [hi - lo for lo, hi in (self.span(RES, rank) for rank in range(self.world.size))]
-        calls = [{'what': mesh.lib.MESH_ALLREDUCE, 'count': (self.T + 1) * RES, 'type': mesh.lib.ncclFloat32,
-                  'op': mesh.lib.ncclSum},
-                 {'what': mesh.lib.MESH_ALLREDUCE, 'count': RES * NOUT + NV * NV, 'type': mesh.lib.ncclFloat32,
-                  'op': mesh.lib.ncclSum},
-                 {'what': mesh.lib.MESH_ALLGATHER, 'count': rows * widths[self.rank()],
-                  'counts': [rows * width for width in widths], 'type': mesh.lib.ncclFloat32}]
-        assignment.declare(self.world.native, calls)
-        decisions = assignment.domains(data['decisions'], {'world': assignment.graph(self.world.native)})
-        observations = [row for row in data['observations'] if row['workload'] == {'rows': rows}]
-        proposal = assignment.assign(decisions, observations, step=self.solves)
-        proposal['workload'] = {'rows': rows}
+        workload = {'rows': rows, 'context': self.T, 'residual': RES, 'columns': FF,
+                    'experts': EXPERTS, 'objectives': NOUT, 'group_values': NV}
+        family = {'source': 'xonotic-context-solver', 'members': self.world.members, 'workload': workload}
+        graphs = data.get('graphs', {})
+        decisions = assignment.domains(data['decisions'], graphs)
+        observations = [row for row in data['observations'] if row['workload'] == workload]
+        proposal = assignment.assign(decisions, observations, step=self.solves, family=family) if self.rank() == 0 else None
+        proposal = mesh.broadcast_configuration(self.world.native, proposal)
         self.columns = list(proposal['parts']['columns'])
         widths = [hi - lo for lo, hi in (self.span(RES, rank) for rank in range(self.world.size))]
-        calls[2].update(count=rows * widths[self.rank()], counts=[rows * width for width in widths])
-        for key, values in proposal['parts'].items():
-            decisions[key]['parts'] = values
-        data['decisions'] = decisions
-        assignment.install(self.world.native, proposal['parts'], 'world')
-        assignment.declare(self.world.native, calls)
-        mesh.check(mesh.lib.ncclMeshCommPlanActive(self.world.native, 1))
+        def provenance(statement, byte_count):
+            source = {'function': 'xonotic-context-solver', 'statement': statement}
+            return {'route_scope': source, 'sources': [{'source': source,
+                'occurrences': {'shape': [1], 'steps': []}, 'work': {'shape': [byte_count], 'steps': []}}]}
+        calls = [{'what': mesh.lib.MESH_ALLREDUCE, 'count': (self.T + 1) * RES, 'type': mesh.lib.ncclFloat32,
+                  'op': mesh.lib.ncclSum, **provenance('expert-output-reduction', (self.T + 1) * RES * np.dtype(np.float32).itemsize)},
+                 {'what': mesh.lib.MESH_ALLREDUCE, 'count': RES * NOUT + NV * NV, 'type': mesh.lib.ncclFloat32,
+                  'op': mesh.lib.ncclSum, **provenance('conditioned-basis-reduction', (RES * NOUT + NV * NV) * np.dtype(np.float32).itemsize)},
+                 {'what': mesh.lib.MESH_ALLGATHER, 'count': rows * widths[self.rank()],
+                  'counts': [rows * width for width in widths], 'type': mesh.lib.ncclFloat32,
+                  **provenance('conditioned-column-gather', rows * RES * np.dtype(np.float32).itemsize)}]
+        routing = assignment.route_operands(proposal['parts'], 'world', graphs['world']) if graphs else None
+        self.compiled_assignment = assignment.declare(self.world.native, calls, routing=routing)
+        graphs = {'world': assignment.graph(self.world.native, self.compiled_assignment)}
+        data['decisions'] = {key: {**value, 'parts': proposal['parts'][key]}
+                             for key, value in data['decisions'].items()}
+        data['graphs'] = graphs
+        realized = assignment.domains(data['decisions'], graphs)
+        proposal.update(parts={key: value['parts'] for key, value in realized.items()},
+                        domains=assignment.choice_domains(realized), graphs=graphs, workload=workload,
+                        implementation={'source': revision(ROOT), 'backend': self.backend},
+                        episode=f'context-solver:{self.solves}')
         return proposal
 
     def solve(self, X):
         proposal = self.configure(min(len(X), self.T))
         started = time.monotonic()
-        try:
-            Xb = np.ascontiguousarray(X[:, :REQ_WIDTH], np.float32)
-            Xn = (Xb / (1.0 + np.abs(Xb))).astype(np.float32)
-            idx = self._insert(X, Xn)
-            G = self._solve(idx)
-            self.solves += 1
-            result = np.nan_to_num(G).astype(np.float32)
-            self.previous_function = {'proposal': proposal, 'seconds': time.monotonic() - started}
-        finally:
-            if proposal is not None:
-                import mesh
-                mesh.check(mesh.lib.ncclMeshCommPlanActive(self.world.native, 0))
+        Xb = np.ascontiguousarray(X[:, :REQ_WIDTH], np.float32)
+        Xn = (Xb / (1.0 + np.abs(Xb))).astype(np.float32)
+        idx = self._insert(X, Xn)
+        G = self._solve(idx)
+        self.solves += 1
+        result = np.nan_to_num(G).astype(np.float32)
+        self.previous_function = {'proposal': proposal, 'seconds': time.monotonic() - started}
         if self.pending_feedback is not None:
             previous, seconds = self.pending_feedback
             self.pending_feedback = None
-            self.assignment_data['observations'].append({'parts': previous['parts'], 'workload': previous['workload'], 'seconds': seconds,
-                                                        'implementation': 'loaded-program', 'proposal': previous['proposal']})
+            self.assignment_data['observations'].append({**{key: previous[key] for key in
+                ('parts', 'domains', 'graphs', 'family', 'workload', 'implementation', 'proposal', 'episode')},
+                'scope': 'function', 'complete': True, 'seconds': seconds,
+                'timing_scope': 'maximum rank whole-solve latency carried by the existing reduction'})
             import assignment
             self.assignment_data['observations'][:] = assignment.window(self.assignment_data['observations'])
         return result

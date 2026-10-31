@@ -349,20 +349,23 @@ a fabricated duration or an instruction to roll back its allocation.
 ## Observations
 
 Programs execute their own function calls. There is no measurement runner taking a callable. Whole-function
-observations use a host clock and ordinary command-buffer completion state. No GPU timing event, timestamp shader,
-completion callback, or timing-only host drain is added. The stream's existing publication operation submits output
-writes without waiting for their completion.
+observations use the caller's submission clock and the latest existing GPU-part or host-task completion timestamp.
+No GPU timing event, timestamp shader, completion callback, or timing-only host drain is added. The stream's existing
+publication operation submits output writes without waiting for their completion.
 
-A separate statistics thread polls that state. It records the interval between its last pending observation and its
-first completed observation. Reported elapsed time uses the upper end, so useful bandwidth uses the conservative
-lower end. Completion at a shared command-buffer boundary is coarse. Pending records and several late peer records
-can coexist; observing them does not halt a subsequent function. Shutdown drains the records after submission ends.
+`Observations.put` and `poll` inspect existing completion state without waiting. Each episode retains its original
+configuration and measures its own submission-to-completion latency. Independent calls can overlap or finish out of
+order, so another call's end is never subtracted to invent a service time or queue delay. Useful output rate uses the
+same whole-function interval; it is not an isolated kernel rate or an additive rate across overlapping calls. Rank
+cohorts report the maximum rank latency and retain each rank's original timestamps, without comparing clocks across
+machines. Pending records and late peer records can coexist; observing them does not halt a subsequent function.
+Only administrative shutdown drains remaining records after submission ends.
 
 Records contain whole-call time and useful bytes together. Relays do not increase the useful byte count. The hourly
 runner uses committed main and the same library functions as the examples. Its scripts supply configuration operands.
 
-Configuration and observation state stays in memory while functions run. A statistics worker never opens a log or
-rewrites a configuration file. Rank reports travel over pipes into memory. The hourly writes its complete metric
+Configuration and observation state stays in memory while functions run. Observation helpers never open a log or
+rewrite a configuration file. Rank reports travel over pipes into memory. The hourly writes its complete metric
 record only after all workloads end. Seeded inputs, weights and full outputs stay in memory; they have no file format
 or disk path. Code installation and compilation happen before execution. Unchanged committed code is reused.
 

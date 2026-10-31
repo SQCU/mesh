@@ -164,6 +164,18 @@ FOUNDATION_EXPORT MetalTensorLayout * _Nullable MetalTensorPlace(NSUInteger coun
     NSArray<MetalTensorLayout *> *uses, NSArray<MetalTensorLayout *> *targets,
     NSArray<NSArray<NSNumber *> *> *footprints, NSArray<MetalTensorLayout *> *values, NSArray<NSNumber *> *widths);
 
+// Admit atomic consumer requirement groups in descending declared preference.
+// Typed values and hard demands always remain constraints. Each demand carries
+// use/target byte layouts, footprint [first,capacity,alignment], width, and
+// flexible/requirements (the ordinary scalar layout requirements). Rejected
+// groups retain their conversion obligations in the caller's binding compiler.
+// Returns layout, extent, alignment, accepted group ordinals, and incompatible
+// group sets. Stable input order breaks equal preferences. No allocation,
+// numerical cost estimate, or execution policy is introduced here.
+FOUNDATION_EXPORT NSDictionary * _Nullable MetalTensorPlacePreferred(NSUInteger count,
+    NSArray<NSDictionary *> *hard, NSArray<NSArray<NSDictionary *> *> *groups, NSArray<NSNumber *> *preferences,
+    NSArray<MetalTensorLayout *> *values, NSArray<NSNumber *> *widths);
+
 // The storage domain is the bridge's existing page table. This is compiler
 // metadata: it resolves local frontend handles once and emits backend bindings.
 // Neither this object nor a tensor layout is followed during execution.

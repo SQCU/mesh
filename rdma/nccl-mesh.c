@@ -649,10 +649,10 @@ ncclResult_t ncclMeshCommWriteRoutes(ncclComm_t comm, int source, int destinatio
 
 /* whether this rank forwards a WRITE from `source` to `destination`: an endpoint of a cable of an installed path of
    nonzero weight, and neither end of the write; 1 where no path is installed (the routes are the library's to choose) */
-static int write_forwards(ncclComm_t comm, int source, int destination) {
+static int write_forwards(ncclComm_t comm, int source, int destination,const struct mesh_paths *paths) {
   const int me = comm->rank;
   if (me == source || me == destination) return 0;
-  const struct mesh_paths *paths = comm->writes ? comm->writes + (size_t)source * comm->nranks + destination : NULL;
+  if(!paths)paths = comm->writes ? comm->writes + (size_t)source * comm->nranks + destination : NULL;
   if (!paths || !paths->first) return 1;
   for (uint32_t p = 0; p < paths->count; p++) {
     if (!paths->weight[p]) continue;
@@ -671,7 +671,7 @@ ncclResult_t ncclMeshCommWritePaths(ncclComm_t comm, int source, int destination
   return *paths ? ncclSuccess : fail(ncclInvalidUsage, "the communicator has no realized physical routes");
 }
 
-static int write_transfers(const struct ncclComm *comm, uint32_t rank, uint32_t root, uint32_t destination,
+static int write_transfers(const struct ncclComm *comm,const struct mesh_paths *paths, uint32_t rank, uint32_t root, uint32_t destination,
                            struct mesh_operand operand, uint64_t tile, struct mesh_transfer **out, uint32_t *count);
 /* nccl.h ncclMeshCommChannels */
 ncclResult_t ncclMeshCommChannels(ncclComm_t comm, int *channels) {
@@ -696,7 +696,7 @@ ncclResult_t ncclMeshCommWriteEntries(ncclComm_t comm, int root, const int *dest
   for (int i = 0; !error && i < n; i++) for (int r = 0; !error && r < comm->nranks; r++) {
     struct mesh_transfer *transfers = NULL;
     uint32_t made = 0;
-    error = write_transfers(comm, (uint32_t)r, (uint32_t)root, (uint32_t)destinations[i], operand, 0, &transfers, &made);
+    error = write_transfers(comm,NULL, (uint32_t)r, (uint32_t)root, (uint32_t)destinations[i], operand, 0, &transfers, &made);
     for (uint32_t k = 0; !error && k < made; k++)
       if (transfers[k].step.op == MESH_STEP_SEND)
         laid[2 * (size_t)transfers[k].cable + ((uint32_t)r == comm->fabric.cable[transfers[k].cable].node[1])]++;
@@ -2078,6 +2078,7 @@ struct write_binding {
      they lay the same fragments whatever routes are installed after it (call_transfers) */
   struct mesh_transfer **transfers;
   uint32_t *transferred;
+  const struct mesh_paths *paths; /* the owning group's selected pair */
 
 };
 static size_t write_span_index(const struct write_binding *p, size_t step, size_t invocation) {
@@ -2218,6 +2219,7 @@ struct steps {
    of `unit` elements); its buffers where they are (`send_at`, `recv_at`: struct where), its result's (`sum`, the
    operand made in place) and whether it reads its send buffer in place (`direct`: plan_direct); on the host path a
    buffer of its own where nothing crosses (`result`) and a send to itself's copy (`copy`) */
+struct routing;
 struct call {
   int what, root, target;
   const void *send;
@@ -2253,9 +2255,14 @@ struct call {
   ncclMeshFused *fused;
   struct where send_at, recv_at, sum;
   struct write_binding *write_binding;
+  struct routing *routing; /* borrowed from the compiled group */
+  uint32_t routing_scope; /* explicit preparation choice scope */
 };
 
 static ncclResult_t write_binding_prepare(struct call *c, const ncclMeshCall *d, uint64_t invocations);
+static const struct mesh_paths *call_paths(const struct call *, unsigned kind);
+static ncclResult_t route_path_counts(struct call *,unsigned,uint32_t,uint32_t,struct mesh_operand);
+static ncclResult_t route_tree_counts(struct call *,const struct mesh_program *,struct mesh_operand,const uint64_t *,const uint32_t *);
 
 static _Thread_local int depth;
 static _Thread_local struct call *calls;
@@ -2433,9 +2440,9 @@ static struct steps *steps_make(size_t room, struct steps initial) {
    mesh_write_compile over the communicator's fabric, the pair's installed paths and its page, the one evaluation that
    every reader of a WRITE's transfers makes (write_steps, order_transfers, write_prepare_spans), into *out (malloc'd,
    its count + 1 room, the caller's to free) and *count.  0, else the compile's errno */
-static int write_transfers(const struct ncclComm *comm, uint32_t rank, uint32_t root, uint32_t destination,
+static int write_transfers(const struct ncclComm *comm,const struct mesh_paths *paths, uint32_t rank, uint32_t root, uint32_t destination,
                            struct mesh_operand operand, uint64_t tile, struct mesh_transfer **out, uint32_t *count) {
-  const struct mesh_paths *paths = comm->writes ? comm->writes + (size_t)root * comm->nranks + destination : NULL;
+  if(!paths)paths = comm->writes ? comm->writes + (size_t)root * comm->nranks + destination : NULL;
   *out = NULL; *count = 0;
   const int needed = mesh_write_compile(&comm->fabric, rank, root, destination, paths, operand, comm->page, tile, NULL, 0);
   if (needed < 0) return -needed;
@@ -2456,7 +2463,7 @@ static int call_transfers(const struct ncclComm *comm, const struct call *c, uin
   const struct write_binding *plan = c->write_binding;
   *owned = !plan || !plan->transfers;
   if (!*owned) { *out = plan->transfers[rank]; *count = plan->transferred[rank]; return 0; }
-  return write_transfers(comm, rank, (uint32_t)c->root, (uint32_t)c->target - 1, write_operand(c), c->tile_bytes / SIZE[c->type], out, count);
+  return write_transfers(comm,call_paths(c,0)+(size_t)c->root*comm->nranks+c->target-1, rank, (uint32_t)c->root, (uint32_t)c->target - 1, write_operand(c), c->tile_bytes / SIZE[c->type], out, count);
 }
 
 /* design/whole-function.md#one-way-writes */
@@ -2514,6 +2521,10 @@ static ncclResult_t bind_routed_steps(struct call *c, const uint32_t *first, con
                                        const uint32_t *initialized, const struct mesh_paths *paths) {
   struct ncclComm *comm = c->comm;
   struct mesh_routed_program physical = {0};
+  ncclResult_t counted_routes=ncclSuccess;
+  for(uint32_t r=0;r<(uint32_t)comm->nranks&&!counted_routes;r++)for(uint32_t k=first[r];k<first[r+1]&&!counted_routes;k++)
+    if(logical[k].op==MESH_STEP_SEND)counted_routes=route_path_counts(c,counted(c)?0:1,r,logical[k].peer,logical[k].piece);
+  if(counted_routes)return counted_routes;
   const int status = mesh_routed_compile(&comm->fabric, paths,
                                            first, logical, initialized, comm->page, counted(c) ? MESH_PACKET_TRANSACTIONS : MESH_PACKET_OPERAND, &physical);
   ncclResult_t result = status ? fail(ncclInvalidUsage, "physical collective lowering for %s: %s", comm->name, strerror(status)) : ncclSuccess;
@@ -2566,7 +2577,7 @@ static ncclResult_t routed_steps(struct call *c, const struct mesh_program *prog
     initialized[r] = 1 + program->scratch;
     first[r + 1] = first[r] + mesh_program_steps_cut(program, r, operand, cut, c->comm->page, logical + first[r]);
   }
-  if (!result) result = bind_routed_steps(c, first, logical, initialized, c->comm->composed);
+  if (!result) result = bind_routed_steps(c, first, logical, initialized, call_paths(c,1));
   free(first); free(initialized); free(logical);
   return result;
 }
@@ -2593,7 +2604,7 @@ static ncclResult_t counted_steps(struct call *c, const struct mesh_paths *paths
    explicit program already specifies its contribution graph and is lowered
    unchanged; generated forms are specialized to the declared operand roles. */
 static ncclResult_t collective_steps(struct call *c, const struct entry *entry,
-                                      struct mesh_operand operand, const uint64_t *cut) {
+                                      struct mesh_operand operand, const uint64_t *cut,const uint32_t *tree_indices) {
   struct mesh_program subset = {0};
   const struct mesh_program *program = &entry->program;
   ncclResult_t result = ncclSuccess;
@@ -2615,6 +2626,7 @@ static ncclResult_t collective_steps(struct call *c, const struct entry *entry,
     if (status) result = fail(ncclInvalidArgument, "the declared %s reads an absent input or leaves a required result undefined: %s",
                               call_name(c), strerror(status));
   }
+  if (!result) result = route_tree_counts(c,program,operand,cut,tree_indices);
   if (!result) result = routed_steps(c, program, operand, cut);
   program_free(&subset);
   return result;
@@ -2665,7 +2677,7 @@ static uint32_t demands_of(const struct ncclComm *comm, const struct call *c, st
   uint32_t made = 0;
   if (c->target) {
     const uint32_t a = (uint32_t)c->root, b = (uint32_t)c->target - 1;
-    if (a == b || a >= n || b >= n || !c->count) return 0;
+    if (a == b || a >= n || b >= n) return 0;
     leaves[a / 64] |= UINT64_C(1) << (a % 64);
     d[0] = (struct mesh_demand){b, 0, c->count * z, 0, leaves};
     return 1;
@@ -2674,7 +2686,7 @@ static uint32_t demands_of(const struct ncclComm *comm, const struct call *c, st
     for (uint32_t a = 0; c->matrix && a < n; a++)
       for (uint32_t b = 0; b < n; b++) {
         const uint64_t count = a == b ? 0 : c->matrix[(size_t)a * n + b];
-        if (!count) continue;
+        if (a == b) continue;
         uint64_t *set = leaves + (size_t)made * words;
         set[a / 64] |= UINT64_C(1) << (a % 64);
         d[made++] = (struct mesh_demand){b, 0, count * z, 0, set};
@@ -2705,7 +2717,15 @@ static ncclResult_t solved_steps(struct call *c, const struct mesh_demand *d, co
   e.trees = (struct mesh_trees){n, mesh_flow_trees(n, f->demand, d, f->parent, f->share, f->count, first, last, root, parent, weight), root, parent, weight};
   ncclResult_t result = program_compile(&e.trees, (uint32_t)c->what, has_root(c->what) ? (uint32_t)c->root : 0, 0, NULL, NULL, &e.program)
     ? fail(ncclInternalError, "%s on %s: the solver's trees do not compile", call_name(c), c->comm->name) : ncclSuccess;
-  if (!result) result = collective_steps(c, &e, operand, cut);
+  uint32_t *indices=calloc((size_t)f->count+1,sizeof *indices);
+  if(!indices&&!result)result=fail(ncclSystemError,"allocating tree choice correspondence");
+  uint32_t indexed=0;
+  const uint64_t *owners=c->what==MESH_ALLGATHER?c->contributors:c->recipients;
+  for(uint32_t root=0;!result&&root<n;root++)if(has_root(c->what)||rank_member(owners,root))
+    for(uint32_t k=0;k<f->count;k++)
+      if(f->demand[k]>=first&&f->demand[k]<last&&d[f->demand[k]].root==root)indices[indexed++]=k;
+  if (!result) result = collective_steps(c, &e, operand, cut,indices);
+  free(indices);
   program_free(&e.program);
   free(root); free(parent); free(weight);
   return result;
@@ -2784,48 +2804,419 @@ static ncclResult_t writes_weigh(ncclComm_t comm, const struct mesh_demand *d, c
   return ncclSuccess;
 }
 
+/* Source identities, occurrence relations and choice scopes are preparation
+   operands. Physical groups are merely competition/recording boundaries. */
+struct routing {
+  ncclMeshRouting view;
+  struct mesh_demand *demands;
+  uint32_t *lo,*hi;
+  struct flow flow;
+  struct mesh_paths **paths[2];
+  uint32_t **path_first[2];
+};
+static void routing_free(struct routing *r) {
+  if(!r)return;
+  free((void *)r->view.cable);free((void *)r->view.demand);free((void *)r->view.leaves);
+  free((void *)r->view.contributors);free((void *)r->view.recipients);free((void *)r->view.tree);
+  free((void *)r->view.parents);free((void *)r->view.path);free((void *)r->view.first);free((void *)r->view.links);
+  for(uint32_t s=0;r->view.source&&s<r->view.sources;s++) {
+    free((void *)r->view.source[s].source);free((void *)r->view.source[s].occurrences);free((void *)r->view.source[s].work);
+  }
+  for(uint32_t s=0;s<r->view.scopes;s++)free((void *)r->view.scope[s]);
+  free((void *)r->view.source);free((void *)r->view.source_first);free((void *)r->view.scope);free((void *)r->view.call_scope);
+  free(r->demands);free(r->lo);free(r->hi);flow_free(&r->flow);
+  for(int k=0;k<2;k++) {
+    for(uint32_t s=0;s<r->view.scopes;s++) {
+      if(r->paths[k])mesh_write_routes_free(r->paths[k][s],r->view.nodes);
+      if(r->path_first[k])free(r->path_first[k][s]);
+    }
+    free(r->paths[k]);free(r->path_first[k]);
+  }
+  free(r);
+}
+static const struct mesh_paths *call_paths(const struct call *c,unsigned kind) {
+  return c->routing?c->routing->paths[kind][c->routing_scope]:kind?c->comm->composed:c->comm->writes;
+}
+static void routing_members(uint64_t *out,const uint64_t *in,uint32_t n) {
+  const uint32_t words=(n+63)/64;
+  for(uint32_t w=0;w<words;w++)out[w]=in?in[w]:UINT64_MAX;
+  if(n%64)out[words-1]&=(UINT64_C(1)<<(n%64))-1;
+}
+static int routing_tree_check(const struct ncclComm *comm,const struct mesh_demand *d,const uint32_t *parent) {
+  const uint32_t n=(uint32_t)comm->nranks,root=d->root;
+  if(root>=n||parent[root]!=root)return EINVAL;
+  for(uint32_t v=0;v<n;v++) {
+    if(parent[v]==UINT32_MAX) {if(!d->leaves||(d->leaves[v/64]>>(v%64)&1))return EINVAL;continue;}
+    uint32_t at=v,steps=0;
+    while(at!=root&&steps++<n) {
+      const uint32_t next=parent[at];
+      if(next>=n||!mesh_link_between(&comm->map,at,next))return EINVAL;
+      at=next;
+    }
+    if(at!=root)return EINVAL;
+  }
+  return 0;
+}
+struct route_prior { const ncclMeshRouting *route; uint32_t index; };
+struct route_catalog { const ncclMeshRouting *at[2]; uint32_t count[2]; };
+static int route_scope_equal(const char *a,const char *b) { return a&&b&&!strcmp(a,b); }
+static int route_topology_equal(const ncclMeshRouting *a,const ncclMeshRouting *b) {
+  if(a->nodes!=b->nodes||a->cables!=b->cables)return 0;
+  for(uint32_t e=0;e<a->cables;e++)if(a->cable[e].wire!=b->cable[e].wire||
+    a->cable[e].node[0]!=b->cable[e].node[0]||a->cable[e].node[1]!=b->cable[e].node[1])return 0;
+  return 1;
+}
+static ncclResult_t routing_catalog_check(const ncclMeshRouting *r) {
+  if(!r->nodes||(r->cables&&!r->cable)||(r->demands&&(!r->demand||!r->leaves))||
+     (r->calls&&(!r->contributors||!r->recipients||!r->call_scope))||(r->trees&&(!r->tree||!r->parents))||
+     (r->paths&&!r->path)||(r->hops&&!r->links)||!r->first||!r->source_first||
+     (r->sources&&!r->source)||(r->scopes&&!r->scope)||r->source_first[0]||r->source_first[r->calls]!=r->sources||
+     r->first[0]||r->first[r->paths]!=r->hops)
+    return fail(ncclInvalidArgument,"incomplete routing catalog declaration");
+  for(uint32_t c=0;c<r->calls;c++)if(r->call_scope[c]>=r->scopes||r->source_first[c]>r->source_first[c+1])
+    return fail(ncclInvalidArgument,"routing source/scope domain");
+  for(uint32_t s=0;s<r->sources;s++)if(!r->source[s].source||!r->source[s].occurrences||!r->source[s].work)
+    return fail(ncclInvalidArgument,"routing provenance needs complete source and occurrence/work relations");
+  for(uint32_t d=0;d<r->demands;d++)if(r->demand[d].call>=r->calls)return fail(ncclInvalidArgument,"routing demand call domain");
+  for(uint32_t t=0;t<r->trees;t++)if(r->tree[t].demand>=r->demands||!isfinite(r->tree[t].share)||r->tree[t].share<0||
+    !isfinite(r->tree[t].initial)||r->tree[t].initial<0)return fail(ncclInvalidArgument,"routing tree domain/weights");
+  for(uint32_t p=0;p<r->paths;p++)if(r->path[p].scope>=r->scopes||r->path[p].kind>1||
+    r->path[p].source>=r->nodes||r->path[p].destination>=r->nodes||r->first[p]>r->first[p+1])
+    return fail(ncclInvalidArgument,"routing path domain");
+  return ncclSuccess;
+}
+static ncclResult_t routing_sources(struct routing *r,struct call *calls,const ncclMeshCall *declared,size_t count) {
+  size_t sources=0;
+  for(size_t c=0;c<count;c++)if(__builtin_add_overflow(sources,(size_t)declared[c].source_count,&sources)||sources>UINT32_MAX)
+    return fail(ncclInvalidArgument,"routing source count");
+  ncclMeshSource *source=calloc(sources+1,sizeof *source);uint32_t *first=calloc(count+1,sizeof *first),*scope=calloc(count+1,sizeof *scope);
+  const char **names=calloc(count+1,sizeof *names);
+  r->view.source=source;r->view.source_first=first;r->view.call_scope=scope;r->view.scope=names;r->view.sources=(uint32_t)sources;
+  if(!source||!first||!scope||!names)return fail(ncclSystemError,"allocating routing source declarations");
+  uint32_t at=0;
+  for(size_t c=0;c<count;c++) {
+    const ncclMeshCall *d=declared+c;
+    if(d->source_count&&!d->sources)return fail(ncclInvalidArgument,"routing source records are absent");
+    first[c]=at;
+    for(uint32_t k=0;k<d->source_count;k++,at++) {
+      if(!d->sources[k].source||!d->sources[k].occurrences||!d->sources[k].work)
+        return fail(ncclInvalidArgument,"source declaration needs occurrence/work relations");
+      source[at]=(ncclMeshSource){strdup(d->sources[k].source),strdup(d->sources[k].occurrences),strdup(d->sources[k].work)};
+      if(!source[at].source||!source[at].occurrences||!source[at].work)return fail(ncclSystemError,"retaining source declaration");
+    }
+    uint32_t s=0;while(s<r->view.scopes&&!route_scope_equal(d->route_scope,names[s]))s++;
+    if(s==r->view.scopes) {
+      names[s]=d->route_scope?strdup(d->route_scope):NULL;r->view.scopes++;
+      if(d->route_scope&&!names[s])return fail(ncclSystemError,"retaining routing choice scope");
+    }
+    scope[c]=s;calls[c].routing_scope=s;
+  }
+  first[count]=at;return ncclSuccess;
+}
+static int route_demand_equal(const ncclMeshRouting *a,uint32_t x,const ncclMeshRouting *b,uint32_t y) {
+  const ncclMeshRouteDemand *left=a->demand+x,*right=b->demand+y;
+  const size_t words=((size_t)a->nodes+63)/64;
+  return route_scope_equal(a->scope[a->call_scope[left->call]],b->scope[b->call_scope[right->call]])&&
+    !memcmp((const char *)left+offsetof(ncclMeshRouteDemand,what),(const char *)right+offsetof(ncclMeshRouteDemand,what),
+      offsetof(ncclMeshRouteDemand,form)-offsetof(ncclMeshRouteDemand,what))&&
+    !memcmp(a->leaves+(size_t)x*words,b->leaves+(size_t)y*words,words*sizeof(uint64_t))&&
+    !memcmp(a->contributors+(size_t)left->call*words,b->contributors+(size_t)right->call*words,words*sizeof(uint64_t))&&
+    !memcmp(a->recipients+(size_t)left->call*words,b->recipients+(size_t)right->call*words,words*sizeof(uint64_t));
+}
+static int route_tree_basis_equal(struct route_prior a,struct route_prior b) {
+  const ncclMeshRouting *x=a.route,*y=b.route;uint32_t i=0,j=0;
+  if(x->demand[a.index].form!=y->demand[b.index].form)return 0;
+  for(;;) {
+    while(i<x->trees&&x->tree[i].demand!=a.index)i++;
+    while(j<y->trees&&y->tree[j].demand!=b.index)j++;
+    if(i==x->trees||j==y->trees)return i==x->trees&&j==y->trees;
+    if(x->tree[i].adjustable!=y->tree[j].adjustable||x->tree[i].share!=y->tree[j].share||
+       memcmp(x->parents+(size_t)i*x->nodes,y->parents+(size_t)j*y->nodes,x->nodes*sizeof(uint32_t)))return 0;
+    i++;j++;
+  }
+}
+static int route_path_basis_equal(struct route_prior a,struct route_prior b) {
+  const ncclMeshRouting *x=a.route,*y=b.route;uint32_t i=0,j=0;
+  for(;;) {
+    while(i<x->paths&&x->path[i].scope!=a.index)i++;
+    while(j<y->paths&&y->path[j].scope!=b.index)j++;
+    if(i==x->paths||j==y->paths)return i==x->paths&&j==y->paths;
+    const ncclMeshRoutePath *p=x->path+i,*q=y->path+j;
+    const uint32_t n=x->first[i+1]-x->first[i],m=y->first[j+1]-y->first[j];
+    if(p->kind!=q->kind||p->source!=q->source||p->destination!=q->destination||p->weight!=q->weight||n!=m||
+       memcmp(x->links+x->first[i],y->links+y->first[j],n*sizeof(uint32_t)))return 0;
+    i++;j++;
+  }
+}
+static ncclResult_t routing_prior(struct routing *r,const struct route_catalog *catalog,
+    struct route_prior *demands,struct route_prior *paths) {
+  for(unsigned bank=0;bank<2;bank++)for(uint32_t g=0;g<catalog->count[bank];g++) {
+    const ncclMeshRouting *prior=catalog->at[bank]+g;
+    ncclResult_t error=routing_catalog_check(prior);if(error)return error;
+    if(!route_topology_equal(&r->view,prior))continue;
+    for(uint32_t d=0;d<r->view.demands;d++)for(uint32_t p=0;p<prior->demands;p++)if(route_demand_equal(&r->view,d,prior,p)) {
+      int supplied=0;for(uint32_t old=0;bank&&old<catalog->count[0];old++)supplied|=demands[d].route==catalog->at[0]+old;
+      if(supplied)continue;
+      const struct route_prior found={prior,p};
+      if(demands[d].route&&!route_tree_basis_equal(demands[d],found))return fail(ncclInvalidArgument,"one routing scope supplies conflicting tree choices");
+      demands[d]=found;
+    }
+    for(uint32_t s=0;s<r->view.scopes;s++)for(uint32_t p=0;p<prior->scopes;p++)if(route_scope_equal(r->view.scope[s],prior->scope[p])) {
+      int supplied=0;for(uint32_t old=0;bank&&old<catalog->count[0];old++)supplied|=paths[s].route==catalog->at[0]+old;
+      if(supplied)continue;
+      const struct route_prior found={prior,p};
+      if(paths[s].route&&!route_path_basis_equal(paths[s],found))return fail(ncclInvalidArgument,"one routing scope supplies conflicting physical choices");
+      paths[s]=found;
+    }
+  }
+  return ncclSuccess;
+}
+static ncclResult_t routing_paths(struct ncclComm *comm,struct routing *r,const struct route_prior *prior) {
+  const uint32_t n=r->view.nodes,scopes=r->view.scopes;
+  struct mesh_paths **weighed=calloc((size_t)scopes+1,sizeof *weighed);
+  if(!weighed)return fail(ncclSystemError,"allocating scope routing defaults");
+  ncclResult_t result=ncclSuccess;size_t count=0,hops=0;
+  for(uint32_t s=0;s<scopes&&!result;s++) {
+    if(prior[s].route) {
+      const ncclMeshRouting *p=prior[s].route;
+      for(uint32_t k=0;k<p->paths;k++)if(p->path[k].scope==prior[s].index){count++;hops+=p->first[k+1]-p->first[k];}
+    } else {
+      unsigned char *use=calloc((size_t)r->view.demands+1,1);
+      if(!use){result=fail(ncclSystemError,"allocating scope demand relation");break;}
+      for(uint32_t d=0;d<r->view.demands;d++)use[d]=r->view.call_scope[r->view.demand[d].call]==s&&
+        (r->view.demand[d].what==ncclMeshCallWrite||r->view.demand[d].what==WHAT_COUNTED);
+      result=writes_weigh(comm,r->demands,use,r->view.demands,&r->flow,weighed+s);free(use);
+      for(unsigned kind=0;kind<2;kind++)for(size_t pair=0;!result&&pair<(size_t)n*n;pair++) {
+        const struct mesh_paths *p=(kind?comm->composed:weighed[s]);if(!p)continue;p+=pair;
+        count+=p->count;hops+=p->count?p->first[p->count]:0;
+      }
+    }
+  }
+  if(!result&&(count>UINT32_MAX||hops>UINT32_MAX))result=fail(ncclInvalidArgument,"routing path basis exceeds index width");
+  ncclMeshRoutePath *path=NULL;uint32_t *first=NULL,*links=NULL;
+  if(!result) {
+    path=calloc(count+1,sizeof *path);first=calloc(count+1,sizeof *first);links=calloc(hops+1,sizeof *links);
+    r->view.path=path;r->view.first=first;r->view.links=links;r->view.paths=(uint32_t)count;r->view.hops=(uint32_t)hops;
+    if(!path||!first||!links)result=fail(ncclSystemError,"allocating scoped physical route basis");
+  }
+  size_t p=0,h=0;
+  for(uint32_t s=0;s<scopes&&!result;s++) {
+    if(prior[s].route) {
+      const ncclMeshRouting *x=prior[s].route;
+      for(uint32_t k=0;k<x->paths;k++)if(x->path[k].scope==prior[s].index) {
+        path[p]=x->path[k];path[p].scope=s;path[p].units=path[p].bytes=path[p].resolution=0;first[p++]=(uint32_t)h;
+        const uint32_t length=x->first[k+1]-x->first[k];memcpy(links+h,x->links+x->first[k],length*sizeof *links);h+=length;
+      }
+    } else for(unsigned kind=0;kind<2;kind++)for(uint32_t a=0;a<n;a++)for(uint32_t b=0;b<n;b++) {
+      const struct mesh_paths *d=kind?comm->composed:weighed[s];if(!d)continue;d+=(size_t)a*n+b;
+      for(uint32_t k=0;k<d->count;k++,p++) {
+        path[p]=(ncclMeshRoutePath){.kind=kind,.source=a,.destination=b,.scope=s,.initial=d->weight[k],.weight=d->weight[k]};first[p]=(uint32_t)h;
+        const uint32_t length=d->first[k+1]-d->first[k];memcpy(links+h,d->cable+d->first[k],length*sizeof *links);h+=length;
+      }
+    }
+  }
+  for(uint32_t s=0;s<scopes;s++)weighed_free(weighed[s],n*n);free(weighed);
+  if(result)return result;
+  first[count]=(uint32_t)h;
+  for(unsigned kind=0;kind<2;kind++) {
+    r->paths[kind]=calloc((size_t)scopes+1,sizeof *r->paths[kind]);r->path_first[kind]=calloc((size_t)scopes+1,sizeof *r->path_first[kind]);
+    if(!r->paths[kind]||!r->path_first[kind])return fail(ncclSystemError,"allocating scoped route bindings");
+  }
+  size_t cursor=0;
+  for(uint32_t s=0;s<scopes;s++)for(unsigned kind=0;kind<2;kind++) {
+    r->paths[kind][s]=calloc((size_t)n*n+1,sizeof **r->paths[kind]);r->path_first[kind][s]=calloc((size_t)n*n+1,sizeof **r->path_first[kind]);
+    if(!r->paths[kind][s]||!r->path_first[kind][s])return fail(ncclSystemError,"allocating scoped endpoint routes");
+    for(uint32_t a=0;a<n;a++)for(uint32_t b=0;b<n;b++) {
+      const size_t pair=(size_t)a*n+b,begin=cursor;
+      while(cursor<count&&path[cursor].scope==s&&path[cursor].kind==kind&&path[cursor].source==a&&path[cursor].destination==b)cursor++;
+      const size_t amount=cursor-begin;r->path_first[kind][s][pair]=(uint32_t)begin;
+      if(a==b){if(amount)return fail(ncclInvalidArgument,"a routing path cannot have identical endpoints");continue;}
+      if(!amount)return fail(ncclInvalidArgument,"routing basis omits a physical endpoint pair");
+      const uint32_t length=first[cursor]-first[begin];
+      uint32_t *starts=malloc((amount+1)*sizeof *starts),*cables=malloc(((size_t)length+1)*sizeof *cables);uint64_t *weights=malloc(amount*sizeof *weights);
+      struct mesh_paths *bound=r->paths[kind][s]+pair;*bound=(struct mesh_paths){(uint32_t)amount,starts,cables,weights};
+      if(!starts||!cables||!weights)return fail(ncclSystemError,"allocating scoped path operands");
+      for(size_t k=0;k<amount;k++){starts[k]=first[begin+k]-first[begin];weights[k]=path[begin+k].weight;}
+      starts[amount]=length;if(length)memcpy(cables,links+first[begin],length*sizeof *cables);
+      const int error=mesh_paths_check(&comm->fabric,a,b,bound);
+      if(error)return fail(ncclInvalidArgument,"invalid retained physical route: %s",strerror(error));
+    }
+  }
+  return cursor==count?ncclSuccess:fail(ncclInvalidArgument,"routing paths are not in declared scope/kind/source/destination order");
+}
+static ncclResult_t routing_prepare(struct ncclComm *comm,struct call *calls,const ncclMeshCall *declared,
+    size_t count,const struct route_catalog *catalog,struct routing **out) {
+  const uint32_t n=(uint32_t)comm->nranks,words=(n+63)/64;
+  ncclResult_t result=comm_compile(comm);if(result)return result;
+  if(count>UINT32_MAX)return fail(ncclInvalidArgument,"routing group call count");
+  struct routing *r=calloc(1,sizeof *r);*out=r;
+  if(!r)return fail(ncclSystemError,"allocating group routing");
+  size_t room=0;
+  for(size_t i=0;i<count;i++)room+=calls[i].target||has_root(calls[i].what)?1:counted(calls+i)?(size_t)n*(n-1):n;
+  if(room>UINT32_MAX)return fail(ncclInvalidArgument,"routing demand count");
+  r->view=(ncclMeshRouting){.nodes=n,.cables=comm->fabric.cables,.calls=(uint32_t)count};
+  result=routing_sources(r,calls,declared,count);if(result)return result;
+  struct mesh_cable *cables=calloc((size_t)comm->fabric.cables+1,sizeof *cables);
+  ncclMeshRouteDemand *demand=calloc(room+1,sizeof *demand);
+  uint64_t *leaves=calloc(room*words+1,sizeof *leaves),*contributors=calloc(count*words+1,sizeof *contributors),*recipients=calloc(count*words+1,sizeof *recipients);
+  r->view.cable=cables;r->view.demand=demand;r->view.leaves=leaves;r->view.contributors=contributors;r->view.recipients=recipients;
+  r->demands=calloc(room+1,sizeof *r->demands);r->lo=calloc(count+1,sizeof *r->lo);r->hi=calloc(count+1,sizeof *r->hi);
+  if(!cables||!demand||!leaves||!contributors||!recipients||!r->demands||!r->lo||!r->hi)return fail(ncclSystemError,"allocating routing operands");
+  if(comm->fabric.cables)memcpy(cables,comm->fabric.cable,comm->fabric.cables*sizeof *cables);
+  uint32_t made=0;
+  for(size_t i=0;i<count;i++) {
+    struct call *c=calls+i;c->routing=r;
+    routing_members(contributors+i*words,c->contributors,n);routing_members(recipients+i*words,c->recipients,n);
+    r->lo[i]=made;made+=demands_of(comm,c,r->demands+made,leaves+(size_t)made*words);r->hi[i]=made;
+    const uint32_t element=(uint32_t)(SIZE[c->type]*unit_of(c));
+    const uint64_t grain=mesh_page_quantum(comm->page,element)*element;
+    const uint32_t direction=c->target||counted(c)||c->what==MESH_REDUCE||c->what==MESH_REDUCE_SCATTER?1:
+      c->what==MESH_BROADCAST||c->what==MESH_ALLGATHER?2:3;
+    const struct entry *entry=c->target||counted(c)?NULL:program_of(comm,c->what,c->root,elements(c)*SIZE[c->type]);
+    const uint32_t form=entry?(uint32_t)(entry-comm->entries):UINT32_MAX;
+    for(uint32_t d=r->lo[i];d<made;d++) {
+      struct mesh_demand *x=r->demands+d;routing_members(leaves+(size_t)d*words,x->leaves,n);x->leaves=leaves+(size_t)d*words;
+      const uint64_t extent=x->up>x->down?x->up:x->down;
+      demand[d]=(ncclMeshRouteDemand){(uint32_t)i,c->target?ncclMeshCallWrite:(uint32_t)c->what,(uint32_t)c->type,x->root,element,direction,form,x->up,x->down,grain,extent?(extent-1)/grain+1:0};
+    }
+  }
+  r->view.demands=made;
+  struct route_prior *prior=calloc((size_t)made+1,sizeof *prior),*paths=calloc((size_t)r->view.scopes+1,sizeof *paths);
+  uint32_t *representative=calloc((size_t)made+1,sizeof *representative);
+  struct flow initial={0};
+  if(!prior||!paths||!representative)result=fail(ncclSystemError,"allocating scoped routing correspondence");
+  if(!result)result=routing_prior(r,catalog,prior,paths);
+  int fresh=0;
+  for(uint32_t d=0;d<made&&!result;d++) {
+    representative[d]=d;
+    for(uint32_t p=0;p<d;p++)if(route_demand_equal(&r->view,d,&r->view,p)){representative[d]=representative[p];break;}
+    if(!prior[d].route&&!prior[representative[d]].route)fresh=1;
+    if(!prior[d].route)prior[d]=prior[representative[d]];
+    if(prior[d].route) {
+      const uint32_t form=prior[d].route->demand[prior[d].index].form;const struct call *c=calls+demand[d].call;
+      if(form!=UINT32_MAX) {
+        if(c->target||counted(c)||form>=comm->programs){result=fail(ncclInvalidArgument,"routing basis configured program is absent");break;}
+        const struct mesh_program *program=&comm->entries[form].program;
+        if(program->what!=(uint32_t)c->what||program->nodes!=n||(has_root(c->what)&&program->root!=(uint32_t)c->root)) {
+          result=fail(ncclInvalidArgument,"routing basis configured program names another collective/root");break;
+        }
+      }
+      demand[d].form=form;
+    }
+    if(d>r->lo[demand[d].call]&&demand[d].form!=demand[d-1].form)result=fail(ncclInvalidArgument,"one call must retain one configured program");
+  }
+  // One ordinary initial solve generates only previously undeclared domains.
+  // Retained columns remain authoritative even when other domains are new.
+  if(!result&&fresh)result=flow_solve(comm,r->demands,made,&initial);
+  size_t columns=0;
+  for(uint32_t d=0;d<made&&!result;d++) {
+    const ncclMeshRouting *p=prior[d].route;
+    if(p){for(uint32_t t=0;t<p->trees;t++)columns+=p->tree[t].demand==prior[d].index;}
+    else for(uint32_t t=0;t<initial.count;t++)columns+=initial.demand[t]==representative[d];
+  }
+  if(!result&&columns>UINT32_MAX)result=fail(ncclInvalidArgument,"retained tree column count");
+  ncclMeshRouteTree *trees=NULL;uint32_t *parents=NULL;
+  if(!result) {
+    r->flow=(struct flow){(uint32_t)columns,calloc(columns+1,sizeof(uint32_t)),calloc(columns*n+1,sizeof(uint32_t)),calloc(columns+1,sizeof(double))};
+    trees=calloc(columns+1,sizeof *trees);parents=calloc(columns*n+1,sizeof *parents);
+    r->view.tree=trees;r->view.parents=parents;r->view.trees=(uint32_t)columns;
+    if(!r->flow.demand||!r->flow.parent||!r->flow.share||!trees||!parents)result=fail(ncclSystemError,"allocating retained routing columns");
+  }
+  uint32_t at=0;
+  for(uint32_t d=0;d<made&&!result;d++) {
+    const ncclMeshRouting *p=prior[d].route;const uint32_t begin=at;
+    const struct call *c=calls+demand[d].call;
+    const uint32_t adjustable=!c->target&&!counted(c)&&demand[d].form==UINT32_MAX;
+    double sum=0;
+    for(uint32_t t=0;t<(p?p->trees:initial.count);t++)if((p?p->tree[t].demand:initial.demand[t])==(p?prior[d].index:representative[d])) {
+      const uint32_t *parent=(p?p->parents:initial.parent)+(size_t)t*n;
+      const double share=p?p->tree[t].share:initial.share[t],origin=p?p->tree[t].initial:share;
+      if((p&&p->tree[t].adjustable!=adjustable)||routing_tree_check(comm,r->demands+d,parent)) {
+        result=fail(ncclInvalidArgument,"retained tree is not legal for its declared demand");break;
+      }
+      r->flow.demand[at]=d;r->flow.share[at]=share;sum+=share;
+      memcpy(r->flow.parent+(size_t)at*n,parent,n*sizeof *parent);memcpy(parents+(size_t)at*n,parent,n*sizeof *parent);
+      trees[at++]=(ncclMeshRouteTree){d,adjustable,origin,share,0,0};
+    }
+    if(!(sum>0)||!isfinite(sum)){result=fail(ncclInvalidArgument,"each routing demand requires positive finite total share");break;}
+    for(uint32_t t=begin;t<at;t++){r->flow.share[t]/=sum;trees[t].share=r->flow.share[t];if(!p)trees[t].initial=trees[t].share;}
+  }
+  if(!result)result=routing_paths(comm,r,paths);
+  free(prior);free(paths);free(representative);flow_free(&initial);return result;
+}
+static ncclResult_t route_path_counts(struct call *c,unsigned kind,uint32_t source,uint32_t destination,struct mesh_operand operand) {
+  if(!c->routing||source==destination||!operand.elements)return ncclSuccess;
+  struct routing *r=c->routing;const size_t pair=(size_t)source*r->view.nodes+destination;
+  const struct mesh_paths *p=call_paths(c,kind)+pair;
+  uint64_t *parts=calloc(2*(size_t)p->count+1,sizeof *parts);
+  if(!parts)return fail(ncclSystemError,"allocating route allocation readback");
+  int error=mesh_write_ranges(p,operand,c->comm->page,parts,parts+p->count);
+  const uint64_t quantum=mesh_page_quantum(c->comm->page,operand.element_bytes);
+  ncclMeshRoutePath *paths=(ncclMeshRoutePath *)r->view.path+r->path_first[kind][c->routing_scope][pair];
+  for(uint32_t k=0;!error&&k<p->count;k++) {
+    const uint64_t elements=parts[p->count+k],units=elements?(elements-1)/quantum+1:0;
+    const uint64_t resolution=(operand.elements-1)/quantum+1;
+    if(resolution>paths[k].resolution)paths[k].resolution=resolution;
+    uint64_t bytes=0;
+    if(__builtin_mul_overflow(elements,(uint64_t)operand.element_bytes,&bytes)||
+       __builtin_add_overflow(paths[k].units,units,&paths[k].units)||__builtin_add_overflow(paths[k].bytes,bytes,&paths[k].bytes))error=EOVERFLOW;
+  }
+  free(parts);return error?fail(ncclInvalidArgument,"route allocation readback: %s",strerror(error)):ncclSuccess;
+}
+static ncclResult_t route_tree_counts(struct call *c,const struct mesh_program *p,struct mesh_operand operand,const uint64_t *cut,const uint32_t *indices) {
+  if(!indices||!c->routing)return ncclSuccess;
+  uint64_t *parts=calloc(2*(size_t)p->parts+1,sizeof *parts);
+  if(!parts)return fail(ncclSystemError,"allocating tree allocation readback");
+  const uint64_t q=mesh_page_quantum(c->comm->page,operand.element_bytes);
+  int good=mesh_program_ranges(p,operand.elements,cut,q,parts,parts+p->parts);
+  ncclMeshRouteTree *tree=(ncclMeshRouteTree *)c->routing->view.tree;
+  for(uint32_t k=0;good&&k<p->parts;k++) {
+    const uint64_t elements=parts[p->parts+k];tree[indices[k]].units=elements?(elements-1)/q+1:0;
+    if(__builtin_mul_overflow(elements,(uint64_t)operand.element_bytes,&tree[indices[k]].bytes))good=0;
+  }
+  if(good) {
+    ncclMeshRouteDemand *demands=(ncclMeshRouteDemand *)c->routing->view.demand;
+    for(uint32_t d=0;d<c->routing->view.demands;d++) {
+      uint64_t units=0,bytes=0;int active=0;
+      for(uint32_t t=0;t<c->routing->view.trees;t++)if(tree[t].demand==d&&tree[t].adjustable) {
+        active=1;
+        if(__builtin_add_overflow(units,tree[t].units,&units)||__builtin_add_overflow(bytes,tree[t].bytes,&bytes)){good=0;break;}
+      }
+      if(active) {demands[d].units=units;if(demands[d].directions&1)demands[d].up=bytes;if(demands[d].directions&2)demands[d].down=bytes;}
+    }
+  }
+  free(parts);return good?ncclSuccess:fail(ncclInvalidArgument,"tree allocation readback");
+}
+
 /* every call that crosses a link planned, its group's traffic routed at once (above): a WRITE's steps over its pair's
    paths (write_steps), an all-to-all's over the group's weighed table (counted_steps), a collective along a configured form or the caller's
    programs where one fits it (comm_compile, program_of), else along its solved trees (solved_steps); its steps cut on
    the communicator's page (mesh-plan.h mesh_program_steps_cut), a reduce-scatter's and an all-gather's segments NCCL's,
    its operand's element a merge's row where it merges */
 static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
-  const uint32_t N = (uint32_t)comm->nranks, words = (N + 63) / 64;
-  uint32_t room = 0, demands = 0;
-  for (size_t i = 0; i < n; i++)
-    room += !crosses(list + i) ? 0 : list[i].target || has_root(list[i].what) ? 1 : counted(list + i) ? N * N : N;
-  uint32_t *lo = calloc(n + 1, sizeof *lo), *hi = calloc(n + 1, sizeof *hi);
-  struct mesh_demand *d = calloc((size_t)room + 1, sizeof *d);
-  uint64_t *leaves = calloc((size_t)room * words + 1, sizeof *leaves);
-  unsigned char *weighs = calloc((size_t)room + 1, 1);
-  struct mesh_paths *weighed = NULL;
-  struct flow f = {0, NULL, NULL, NULL};
-  ncclResult_t result = lo && hi && d && leaves && weighs ? ncclSuccess : fail(ncclSystemError, "out of memory");
-  for (size_t i = 0; !result && i < n; i++) {
-    lo[i] = hi[i] = demands;
-    if (crosses(list + i)) hi[i] = demands += demands_of(comm, list + i, d + demands, leaves + (size_t)demands * words);
-    for (uint32_t k = lo[i]; counted(list + i) && k < hi[i]; k++) weighs[k] = 1;
-  }
-  if (!result) result = flow_solve(comm, d, demands, &f);
-  if (!result) result = writes_weigh(comm, d, weighs, demands, &f, &weighed);
+  struct routing *r=n?list[0].routing:NULL;
+  if(n&&!r)return fail(ncclInvalidUsage,"compile calls from their declared routing basis");
+  ncclResult_t result=ncclSuccess;
   for (size_t i = 0; !result && i < n; i++) {
     struct call *c = list + i;
     if (!crosses(c)) continue;
-    if (c->target) { result = write_steps(c); continue; }
-    if (counted(c)) { result = counted_steps(c, weighed); continue; }
-    result = comm_compile(comm);
-    if (result) break;
-    const struct entry *entry = program_of(comm, c->what, c->root, elements(c) * SIZE[c->type]);
+    if (c->target) {
+      result=route_path_counts(c,0,(uint32_t)c->root,(uint32_t)c->target-1,write_operand(c));
+      if(!result)result=write_steps(c);
+      continue;
+    }
+    if (counted(c)) { result = counted_steps(c, call_paths(c,0)); continue; }
+    const uint32_t form=r->view.demand[r->lo[i]].form;
+    const struct entry *entry=form==UINT32_MAX?NULL:comm->entries+form;
     const int segmented = partitioned(c->what);
     const uint32_t u = unit_of(c);
     const struct mesh_operand operand = {(uint32_t)c->type + 1, (uint32_t)(SIZE[c->type] * u), elements(c) / u};
     uint64_t cut[segmented ? comm->nranks : 1];
-    for (int r = 0; segmented && r < comm->nranks; r++) cut[r] = (c->segments ? c->segments[r] : c->count) / u;
-    result = entry ? collective_steps(c, entry, operand, segmented ? cut : NULL)
-                   : solved_steps(c, d, &f, lo[i], hi[i], operand, segmented ? cut : NULL);
+    for (int rank = 0; segmented && rank < comm->nranks; rank++) cut[rank] = (c->segments ? c->segments[rank] : c->count) / u;
+    result = entry ? collective_steps(c, entry, operand, segmented ? cut : NULL,NULL)
+                   : solved_steps(c, r->demands, &r->flow, r->lo[i], r->hi[i], operand, segmented ? cut : NULL);
     if (!result && c->what == MESH_REDUCE_SCATTER) result = partial_split(c);
   }
-  flow_free(&f); free(lo); free(hi); free(d); free(leaves); free(weighs); weighed_free(weighed, N * N);
   return result;
 }
 
@@ -3099,7 +3490,7 @@ struct issue { struct schedule *plans; struct steps **steps; struct inflight *gr
                struct owned owned; /* the leases its entries read, held from its placement to the next or its end */ };
 /* All operation kinds use the same prepared generation/slot table. */
 struct compiled { struct call *calls; size_t n; uint64_t repeat; struct schedule *plans; double seconds; uint32_t slot[GENERATIONS], uses, period;
-                  struct issue **prepared; };
+                  struct issue **prepared; struct routing *routing; };
 /* a definition dropped: its slots back to the communicator's, for the next definition under the same guard, and its
    issues freed */
 static void calls_free(struct call *list, size_t n);
@@ -3110,7 +3501,7 @@ static void compiled_drop(struct ncclComm *comm, struct compiled *x) {
   }
   for (size_t j = 0; x->prepared && j < (size_t)GENERATIONS * x->period; j++) issue_free(comm, x->prepared[j]);
   free(x->prepared);
-  calls_free(x->calls, x->n); schedules_free(comm, x->plans);
+  calls_free(x->calls, x->n); schedules_free(comm, x->plans);routing_free(x->routing);
   *x = (struct compiled){0};
 }
 struct plan {
@@ -3119,6 +3510,7 @@ struct plan {
   ncclMeshPlanRun *order;
   uint64_t *ends, (*entries)[2];
   double *seconds; /* each declared group's compiled finish (view.seconds) */
+  ncclMeshRouting *routing; /* borrowed views of each group's owned basis */
   const uint64_t **matrices; /* each declared call's count matrix, its call's own (view.matrices) */
   size_t runs;
   /* the declaration it was made from, flat (plan_declaration), and its bindings' places in it */
@@ -5161,7 +5553,7 @@ static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call
 /* a plan's own: its groups' calls and entries, their storage back to the communicator's (compiled_drop) */
 static void plan_free(struct ncclComm *comm, struct plan *plan) {
   for (uint32_t g = 0; plan && plan->group && g < plan->view.groups; g++) compiled_drop(comm, plan->group + g);
-  if (plan) { free(plan->group); free(plan->order); free(plan->ends); free(plan->entries); free(plan->seconds); free(plan->matrices); free(plan->declaration); free(plan->places); }
+  if (plan) { free(plan->group); free(plan->order); free(plan->ends); free(plan->entries); free(plan->seconds); free(plan->matrices); free(plan->routing); free(plan->declaration); free(plan->places); }
   free(plan);
 }
 
@@ -5309,16 +5701,16 @@ static ncclResult_t definition_prepare(struct ncclComm *comm, struct compiled *x
    kept as its offset in the bytes, 0 for none), each binding's ncclMeshBuffer a place */
 struct flat_plan { int count; size_t runs; };
 static size_t flat_at(size_t at) { return (at + 15) & ~(size_t)15; }
-enum { FLAT_CALL_ARRAYS = 7, FLAT_VIEW_ARRAYS = 3 };
+enum { FLAT_CALL_ARRAYS = 9, FLAT_VIEW_ARRAYS = 3, FLAT_ROUTE_ARRAYS = 14 };
 static int flat_lengths(const ncclMeshCall *c, size_t n, size_t lengths[FLAT_CALL_ARRAYS]) {
   const size_t v = c->counts ? segments_of(c->what, n) : 0;
   size_t bytes = 0, matrix = 0;
   if (c->production && ((unsigned)c->type >= ncclNumTypes || __builtin_mul_overflow(c->count, SIZE[c->type], &bytes))) return EOVERFLOW;
   if (c->matrix && c->what == WHAT_COUNTED && __builtin_mul_overflow(n, n, &matrix)) return EOVERFLOW;
   const size_t counts[FLAT_CALL_ARRAYS] = {v, c->production ? (c->tile_bytes && bytes ? (bytes - 1) / c->tile_bytes + 1 : 1) : 0,
-    matrix, c->contributors ? (n + 63) / 64 : 0, c->recipients ? (n + 63) / 64 : 0, c->bindings ? 2 : 0, c->views ? 2 : 0};
+    matrix, c->contributors ? (n + 63) / 64 : 0, c->recipients ? (n + 63) / 64 : 0, c->bindings ? 2 : 0, c->views ? 2 : 0,c->routing_count,c->source_count};
   const size_t widths[FLAT_CALL_ARRAYS] = {sizeof *c->counts, sizeof *c->production, sizeof *c->matrix,
-    sizeof *c->contributors, sizeof *c->recipients, sizeof *c->bindings, sizeof *c->views};
+    sizeof *c->contributors, sizeof *c->recipients, sizeof *c->bindings, sizeof *c->views,sizeof *c->routing,sizeof *c->sources};
   for (int k = 0; k < FLAT_CALL_ARRAYS; k++) if (__builtin_mul_overflow(counts[k], widths[k], lengths + k)) return EOVERFLOW;
   return 0;
 }
@@ -5331,10 +5723,27 @@ static int flat_view_lengths(const ncclMeshLayout *v, size_t lengths[FLAT_VIEW_A
 static void flat_fields(ncclMeshCall *c, const void **fields[FLAT_CALL_ARRAYS]) {
   fields[0]=(const void **)&c->counts; fields[1]=(const void **)&c->production; fields[2]=(const void **)&c->matrix;
   fields[3]=(const void **)&c->contributors; fields[4]=(const void **)&c->recipients; fields[5]=(const void **)&c->bindings;
-  fields[6]=(const void **)&c->views;
+  fields[6]=(const void **)&c->views;fields[7]=(const void **)&c->routing;fields[8]=(const void **)&c->sources;
 }
 static void flat_view_fields(ncclMeshLayout *v, const void **fields[FLAT_VIEW_ARRAYS]) {
   fields[0]=(const void **)&v->shape; fields[1]=(const void **)&v->strides; fields[2]=(const void **)&v->runs;
+}
+static int flat_route_lengths(const ncclMeshRouting *r,size_t lengths[FLAT_ROUTE_ARRAYS]) {
+  const size_t words=((size_t)r->nodes+63)/64;
+  size_t leaves=0,members=0,parents=0;
+  if(__builtin_mul_overflow((size_t)r->demands,words,&leaves)||__builtin_mul_overflow((size_t)r->calls,words,&members)||
+     __builtin_mul_overflow((size_t)r->trees,(size_t)r->nodes,&parents))return EOVERFLOW;
+  const size_t counts[FLAT_ROUTE_ARRAYS]={r->cables,r->demands,leaves,members,members,r->trees,parents,r->paths,(size_t)r->paths+1,r->hops,r->sources,(size_t)r->calls+1,r->scopes,r->calls};
+  const size_t widths[FLAT_ROUTE_ARRAYS]={sizeof *r->cable,sizeof *r->demand,sizeof *r->leaves,sizeof *r->contributors,
+    sizeof *r->recipients,sizeof *r->tree,sizeof *r->parents,sizeof *r->path,sizeof *r->first,sizeof *r->links,sizeof *r->source,sizeof *r->source_first,sizeof *r->scope,sizeof *r->call_scope};
+  for(int k=0;k<FLAT_ROUTE_ARRAYS;k++)if(__builtin_mul_overflow(counts[k],widths[k],lengths+k))return EOVERFLOW;
+  return 0;
+}
+static void flat_route_fields(ncclMeshRouting *r,const void **fields[FLAT_ROUTE_ARRAYS]) {
+  fields[0]=(const void **)&r->cable;fields[1]=(const void **)&r->demand;fields[2]=(const void **)&r->leaves;
+  fields[3]=(const void **)&r->contributors;fields[4]=(const void **)&r->recipients;fields[5]=(const void **)&r->tree;
+  fields[6]=(const void **)&r->parents;fields[7]=(const void **)&r->path;fields[8]=(const void **)&r->first;fields[9]=(const void **)&r->links;
+  fields[10]=(const void **)&r->source;fields[11]=(const void **)&r->source_first;fields[12]=(const void **)&r->scope;fields[13]=(const void **)&r->call_scope;
 }
 static int flat_extend(size_t *length, size_t bytes) {
   if (*length > SIZE_MAX - 15 || bytes > SIZE_MAX - flat_at(*length)) return EOVERFLOW;
@@ -5355,6 +5764,35 @@ static int flat_restore_arrays(char *bytes, size_t length, size_t first, const v
   }
   return 0;
 }
+/* The same nested text fields are sized, relocated and restored. Restoring
+   proves each terminating byte belongs to this declaration before use. */
+enum flat_text_mode { FLAT_TEXT_SIZE, FLAT_TEXT_COPY, FLAT_TEXT_RESTORE };
+static int flat_text(enum flat_text_mode mode,char *bytes,size_t length,size_t first,size_t *at,const char **field) {
+  if(!*field)return 0;
+  if(mode==FLAT_TEXT_RESTORE) {
+    const uintptr_t offset=(uintptr_t)*field;
+    if(offset<first||offset%16||offset>=length||!memchr(bytes+offset,0,length-offset))return EINVAL;
+    *field=bytes+offset;return 0;
+  }
+  const size_t size=strlen(*field)+1;
+  if(mode==FLAT_TEXT_SIZE)return flat_extend(at,size);
+  *at=flat_at(*at);memcpy(bytes+*at,*field,size);*field=(const char *)(uintptr_t)*at;*at+=size;return 0;
+}
+static int flat_source_text(enum flat_text_mode mode,char *bytes,size_t length,size_t first,size_t *at,
+    ncclMeshSource *sources,size_t count) {
+  for(size_t s=0;s<count;s++) {
+    const char **fields[]={&sources[s].source,&sources[s].occurrences,&sources[s].work};
+    for(size_t f=0;f<3;f++)if(flat_text(mode,bytes,length,first,at,fields[f]))return EINVAL;
+  }
+  return 0;
+}
+static int flat_route_text(enum flat_text_mode mode,char *bytes,size_t length,size_t first,size_t *at,ncclMeshRouting *r) {
+  ncclMeshSource *sources=(ncclMeshSource *)(mode==FLAT_TEXT_COPY?bytes+(uintptr_t)r->source:(char *)r->source);
+  if(flat_source_text(mode,bytes,length,first,at,sources,r->sources))return EINVAL;
+  const char **scopes=(const char **)(mode==FLAT_TEXT_COPY?bytes+(uintptr_t)r->scope:(char *)r->scope);
+  for(uint32_t s=0;s<r->scopes;s++)if(flat_text(mode,bytes,length,first,at,scopes+s))return EINVAL;
+  return 0;
+}
 static ncclResult_t plan_declaration(ncclComm_t comm, const ncclMeshCall *calls, int count, const ncclMeshPlanRun *order,
                                      size_t runs, struct plan *made) {
   const size_t n = (size_t)comm->nranks, first = flat_at(sizeof(struct flat_plan));
@@ -5370,6 +5808,16 @@ static ncclResult_t plan_declaration(ncclComm_t comm, const ncclMeshCall *calls,
     if (flat_lengths(calls + i, n, lengths)) return fail(ncclInvalidArgument,"a plan declaration's array extent overflows");
     for (int k = 0; k < FLAT_CALL_ARRAYS; k++) if (lengths[k] && flat_extend(&length,lengths[k]))
       return fail(ncclInvalidArgument,"a plan declaration's arrays exceed its byte domain");
+    const char *scope=calls[i].route_scope;
+    if(flat_text(FLAT_TEXT_SIZE,NULL,0,0,&length,&scope)||
+       flat_source_text(FLAT_TEXT_SIZE,NULL,0,0,&length,(ncclMeshSource *)calls[i].sources,calls[i].source_count))
+      return fail(ncclInvalidArgument,"source declaration text extent");
+    for(uint32_t g=0;g<calls[i].routing_count;g++) {
+      size_t nested[FLAT_ROUTE_ARRAYS];ncclMeshRouting *routing=(ncclMeshRouting *)calls[i].routing+g;
+      if(flat_route_lengths(routing,nested))return fail(ncclInvalidArgument,"routing array extent overflows");
+      for(int k=0;k<FLAT_ROUTE_ARRAYS;k++)if(nested[k]&&flat_extend(&length,nested[k]))return fail(ncclInvalidArgument,"routing arrays exceed declaration extent");
+      if(flat_route_text(FLAT_TEXT_SIZE,NULL,0,0,&length,routing))return fail(ncclInvalidArgument,"routing source text extent");
+    }
     places += lengths[5] ? 2 : 0;
     places += !!(calls[i].source_ready.buffer || calls[i].source_ready.offset) + !!(calls[i].landings.buffer || calls[i].landings.offset);
     for (int j=0;calls[i].views && j<2;j++) {
@@ -5392,6 +5840,15 @@ static ncclResult_t plan_declaration(ncclComm_t comm, const ncclMeshCall *calls,
     flat_lengths(calls + i, n, lengths);
     const void **fields[FLAT_CALL_ARRAYS];flat_fields(c,fields);
     flat_copy_arrays(bytes,&at,fields,lengths,FLAT_CALL_ARRAYS);
+    flat_text(FLAT_TEXT_COPY,bytes,0,0,&at,&c->route_scope);
+    flat_source_text(FLAT_TEXT_COPY,bytes,0,0,&at,(ncclMeshSource *)(bytes+(uintptr_t)c->sources),c->source_count);
+    for(uint32_t g=0;g<c->routing_count;g++) {
+      ncclMeshRouting *routing=(ncclMeshRouting *)(bytes+(uintptr_t)c->routing)+g;
+      size_t nested[FLAT_ROUTE_ARRAYS];const void **members[FLAT_ROUTE_ARRAYS];
+      flat_route_lengths(routing,nested);flat_route_fields(routing,members);
+      flat_copy_arrays(bytes,&at,members,nested,FLAT_ROUTE_ARRAYS);
+      flat_route_text(FLAT_TEXT_COPY,bytes,0,0,&at,routing);
+    }
     if (lengths[5]) for (int j=0;j<2;j++)
       made->places[made->place_count++]=(uintptr_t)c->bindings+(size_t)j*sizeof *c->bindings+offsetof(ncclMeshBufferSlots,buffer);
     if (c->source_ready.buffer || c->source_ready.offset) made->places[made->place_count++]=(char *)&c->source_ready-bytes;
@@ -5412,11 +5869,16 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
   if (plan) *plan = NULL;
   if (!comm || count < 0 || (count && !calls) || (runs && !order) || (!!count != !!runs))
     return fail(ncclInvalidArgument, "ncclMeshCommPlan's arguments");
+  if(count&&((calls[0].routing_count&&!calls[0].routing)||(!calls[0].routing_count&&calls[0].routing)))
+    return fail(ncclInvalidArgument,"routing catalog pointer/count differ");
+  for(int i=1;i<count;i++)if(calls[i].routing||calls[i].routing_count)
+    return fail(ncclInvalidArgument,"the prior routing catalog belongs to the first function call");
   uint32_t groups = 0;
   for (int i = 0; i < count; i++) groups += !i || calls[i].group != calls[i - 1].group;
   struct plan *made = groups ? calloc(1, sizeof *made) : NULL;
   ncclResult_t result = !groups || (made && (made->group = calloc(groups, sizeof *made->group)) && (made->entries = calloc(groups, sizeof *made->entries))
                                     && (made->seconds = calloc(groups, sizeof *made->seconds))
+                                    && (made->routing = calloc(groups, sizeof *made->routing))
                                     && (made->matrices = calloc((size_t)count, sizeof *made->matrices)))
                         ? ncclSuccess : fail(ncclSystemError, "out of memory");
   if (made) made->view.groups = groups;
@@ -5450,6 +5912,11 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
   }
   for (size_t i = 0, g = 0; g < groups && !result; g++) {
     struct compiled *x = made->group + g;
+    const struct route_catalog catalog={{calls[0].routing,made->routing},{calls[0].routing_count,(uint32_t)g}};
+    pthread_mutex_lock(&group_lock);
+    if(!result)result=routing_prepare(comm,x->calls,calls+i,x->n,&catalog,&x->routing);
+    pthread_mutex_unlock(&group_lock);
+    if(!result)made->routing[g]=x->routing->view;
     for (size_t j = 0; j < x->n && !result; j++, i++)
       if (x->calls[j].target && x->calls[j].declared_bindings) {
         const uint32_t frames = x->calls[j].frames;
@@ -5464,11 +5931,19 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
     if (!result) made->seconds[g] = x->seconds;
     for (uint32_t h = 0; h < comm->count && !result; h++) { made->entries[g][0] += x->plans[h].outs; made->entries[g][1] += x->plans[h].ins; }
   }
-  if (!result && made) result = plan_declaration(comm, calls, count, order, runs, made);
+  if (!result && made) {
+    ncclMeshCall *declaration=malloc((size_t)count*sizeof *declaration);
+    if(!declaration)result=fail(ncclSystemError,"retaining realized routing declaration");
+    else {
+      memcpy(declaration,calls,(size_t)count*sizeof *declaration);
+      declaration[0].routing=made->routing;declaration[0].routing_count=groups;
+      result=plan_declaration(comm,declaration,count,order,runs,made);free(declaration);
+    }
+  }
   if (!result) {
     struct plan *was = comm->plan;
     if (made) { made->view.first = comm->groups + 1; made->view.entries = (const uint64_t (*)[2])made->entries;
-                made->view.seconds = made->seconds; made->view.matrices = made->matrices; }
+                made->view.seconds = made->seconds; made->view.matrices = made->matrices;made->view.routing=made->routing; }
     comm->plan = made;
     made = was;
     if (plan) *plan = comm->plan ? &comm->plan->view : NULL;
@@ -5522,6 +5997,17 @@ ncclResult_t ncclMeshCommPlanDeclared(ncclComm_t comm, const void *bytes, size_t
     const void **fields[FLAT_CALL_ARRAYS];size_t lengths[FLAT_CALL_ARRAYS];flat_fields(calls+i,fields);
     if (flat_lengths(calls+i,(size_t)comm->nranks,lengths) || flat_restore_arrays(copy,length,arrays,fields,lengths,FLAT_CALL_ARRAYS))
       result=fail(ncclInvalidArgument,"ncclMeshCommPlanDeclared: an array extent outside its declaration");
+    if(!result&&(flat_text(FLAT_TEXT_RESTORE,copy,length,arrays,NULL,&calls[i].route_scope)||
+       flat_source_text(FLAT_TEXT_RESTORE,copy,length,arrays,NULL,(ncclMeshSource *)calls[i].sources,calls[i].source_count)))
+      result=fail(ncclInvalidArgument,"source text outside declaration");
+    for(uint32_t g=0;!result&&g<calls[i].routing_count;g++) {
+      ncclMeshRouting *routing=(ncclMeshRouting *)calls[i].routing+g;
+      size_t nested[FLAT_ROUTE_ARRAYS];const void **members[FLAT_ROUTE_ARRAYS];
+      flat_route_fields(routing,members);
+      if(flat_route_lengths(routing,nested)||flat_restore_arrays(copy,length,arrays,members,nested,FLAT_ROUTE_ARRAYS)||
+         flat_route_text(FLAT_TEXT_RESTORE,copy,length,arrays,NULL,routing))
+        result=fail(ncclInvalidArgument,"routing array/text extent outside declaration");
+    }
     ncclMeshLayout *views=(ncclMeshLayout *)calls[i].views;
     for (int j=0;!result && views && j<2;j++) {
       const void **members[FLAT_VIEW_ARRAYS];size_t nested[FLAT_VIEW_ARRAYS];flat_view_fields(views+j,members);
@@ -5827,7 +6313,7 @@ static ncclResult_t write_prepare_spans(struct write_binding *plan,ncclMeshPageT
   plan->transferred = calloc((size_t)comm->nranks, sizeof *plan->transferred);
   if (!plan->transfers || !plan->transferred) return fail(ncclSystemError, "allocating write span geometry");
   for (int r = 0; r < comm->nranks; r++) {
-    const int compiled = write_transfers(comm, (uint32_t)r, (uint32_t)plan->from, (uint32_t)plan->to,
+    const int compiled = write_transfers(comm,plan->paths, (uint32_t)r, (uint32_t)plan->from, (uint32_t)plan->to,
                                          (struct mesh_operand){(uint32_t)WRITE_UNIT + 1, (uint32_t)SIZE[WRITE_UNIT], plan->bytes},
                                          plan->layout.tile_bytes, plan->transfers + r, plan->transferred + r);
     if (compiled) return compiled == ENOMEM ? fail(ncclSystemError, "allocating write span geometry")
@@ -5894,7 +6380,7 @@ static ncclResult_t write_prepare_spans(struct write_binding *plan,ncclMeshPageT
 
 static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_index start, size_t bytes,
     int source, int destination, uint32_t repeats, size_t frame_stride, size_t stride, size_t max_packet,
-    size_t row_bytes, size_t rows, const ncclMeshSpan *view, size_t views, int indexed, struct mesh_write_layout layout, struct write_binding **out) {
+    size_t row_bytes, size_t rows, const ncclMeshSpan *view, size_t views, int indexed, struct mesh_write_layout layout, const struct mesh_paths *paths,struct write_binding **out) {
   if (!table || !out || *out || !table->comm || !table->comm->attach)
     return fail(ncclInvalidArgument, "write preparation requires a page table and an empty output handle");
   const ncclComm_t comm = table->comm;
@@ -5913,7 +6399,7 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
   if (unbound || !layout.instance_stride) { layout.instances = 1; layout.instance_stride = 0; layout.invocation = 0; local.layout = layout; }
   if (!local.status && unbound && local.bytes) {
     pthread_mutex_lock(&group_lock);
-    if (write_forwards(comm, source, destination) || comm->rank == source || comm->rank == destination) local.status = EINVAL;
+    if (write_forwards(comm, source, destination,paths) || comm->rank == source || comm->rank == destination) local.status = EINVAL;
     pthread_mutex_unlock(&group_lock);
   }
   uint64_t view_extent = 0, view_origin = 0;
@@ -6057,7 +6543,7 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
   plan->source = binding; plan->landing = binding; plan->comm = comm;
   plan->stride = frame_stride; plan->bytes = local.bytes; plan->repeats = repeats;
   plan->row_bytes = row_bytes; plan->rows = rows; plan->pitch = stride;
-  plan->from = source; plan->to = destination; plan->metal = metal;
+  plan->from = source; plan->to = destination; plan->metal = metal;plan->paths=paths;
   const ncclResult_t prepared = write_prepare_spans(plan,table,origin);
   if (prepared) { write_binding_drop(plan); return prepared; }
   *out = plan;
@@ -6272,7 +6758,7 @@ long mesh_view_layout(const uint64_t *shape, const int64_t *strides, size_t rank
    an allocation's shape or from a backend name. */
 static ncclResult_t write_layout_prepare(ncclMeshPageTable_t table,size_t origin,
     const ncclMeshLayout *v,size_t expected,int source,int destination,uint32_t frames,
-    size_t max_packet,struct mesh_write_layout local,struct write_binding **out) {
+    size_t max_packet,struct mesh_write_layout local,const struct mesh_paths *paths,struct write_binding **out) {
   if (!v || !v->element_bits || (!v->runs && v->rank && (!v->shape || !v->strides)))
     return fail(ncclInvalidArgument,"a WRITE needs its declared element and axis geometry");
   const uint64_t bits=v->element_bits;
@@ -6329,7 +6815,7 @@ static ncclResult_t write_layout_prepare(ncclMeshPageTable_t table,size_t origin
     const size_t page=table->page_bytes;
     const struct write_page_index start={(size_t)first/page,(size_t)first%page};
     result=write_prepare(table,start,(size_t)bytes,source,destination,frames,(size_t)(framed/8),
-      rows[1]?(size_t)rows[2]:0,max_packet,(size_t)rows[0],(size_t)rows[1],spans,(size_t)needed,!rows[1],local,out);
+      rows[1]?(size_t)rows[2]:0,max_packet,(size_t)rows[0],(size_t)rows[1],spans,(size_t)needed,!rows[1],local,paths,out);
   }
   free(shape);free(strides);free(spans);return result;
 }
@@ -6395,6 +6881,7 @@ static ncclResult_t write_binding_prepare(struct call *c,const ncclMeshCall *d,u
   if (!d->bindings || !invocations) return fail(ncclInvalidArgument,"WRITE needs declared page bindings and invocation extent");
   const int source=c->root,destination=c->target-1,endpoint=c->comm->rank==source?0:1;
   const int relay=c->comm->rank!=source&&c->comm->rank!=destination;
+  const struct mesh_paths *paths=call_paths(c,0)+(size_t)source*c->comm->nranks+destination;
   ncclMeshBufferSlots slots=d->bindings[endpoint];
   struct where binding={slots.buffer.buffer,slots.buffer.offset};
   void *lease=NULL;
@@ -6407,7 +6894,7 @@ static ncclResult_t write_binding_prepare(struct call *c,const ncclMeshCall *d,u
   ncclResult_t result=ncclSuccess;
   if (relay&&!binding.buffer&&!binding.offset) {
     view=&plain;
-    pthread_mutex_lock(&group_lock);const int forwards=write_forwards(c->comm,source,destination);pthread_mutex_unlock(&group_lock);
+    pthread_mutex_lock(&group_lock);const int forwards=write_forwards(c->comm,source,destination,paths);pthread_mutex_unlock(&group_lock);
     if (forwards && bytes) {
       size_t frame_bytes=0,last=0,total=0;
       if (__builtin_mul_overflow((size_t)bytes,(size_t)c->frames,&frame_bytes))
@@ -6429,7 +6916,7 @@ static ncclResult_t write_binding_prepare(struct call *c,const ncclMeshCall *d,u
   size_t origin=0;
   if (!result&&table->pages) origin=(size_t)((uintptr_t)address_of(binding)-(uintptr_t)address_of(table->base));
   struct write_binding *made=NULL;
-  if (!result) result=write_layout_prepare(table,origin,view,c->count,source,destination,c->frames,d->max_packet,local,&made);
+  if (!result) result=write_layout_prepare(table,origin,view,c->count,source,destination,c->frames,d->max_packet,local,paths,&made);
   if (table) ncclMeshPageTableDestroy(table);
   if (!result) { made->relay=lease;lease=NULL; }
   if (!result&&d->ready_value) result=write_ready(made,d->source_ready,d->ready_value,d->ready_layout);

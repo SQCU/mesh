@@ -85,47 +85,72 @@ Followups 2–6 are still outstanding.
 
 ## Whole-call feedback handoff
 
-`assignment.assign` already consumes complete-function observations and updates
-bounded work-share and compiler operands. The remaining connection is from
-those operands to the compiler's actual legal choices, then back from the
-executed choices to the next preparation. It does not require another executor.
+Followup 2 now has one numerical update over work shares, compiler operands,
+retained native routing choices and consumer-layout preferences. The result is
+preparation data. It does not add an executor or a runtime policy wrapper.
 
-The source review found these specific breaks for followup 2:
+`CommPlan` retains its legal tree/path basis and realized allocations. Its next
+call accepts that catalog before WRITE bindings and relay storage are placed.
+Each original source declaration carries its occurrence and byte-work relations;
+a separate declared scope states which routing choices are shared. Splitting,
+reordering or merging physical groups does not rename those choices. Native
+preparation matches the explicit scopes and legal columns. A new legal domain
+receives its initial native basis and is reported as that new domain.
 
-- `configuration.placement` starts with an empty observation list.
-  `configuration.record` supplies episode, proposal and executed operands, but
-  `mesh_statistics.completed` drops them from emitted results. No consumer feeds
-  those observations into the next placement here.
-- The native group solver produces demand/tree/share columns, then `plan_calls`
-  discards them. WRITE demands enter that solve but their transfers have already
-  been frozen over communicator paths; the group solution does not reach them.
-- Microbench `rates.step` still expects removed `flow:*` domains and
-  `assignment.routes`. The native compiler now owns routing. Its prepared
-  choices must be the feedback operands instead of reconstructed Python paths.
-- `placement.selected` carries legal layouts and conversion edges, but accepts
-  no empirical preference among those alternatives. The feasibility solve alone
-  does not provide that choice.
+The shared layout binder consumes explicit preference weights while preserving
+hard page and consumer requirements. Compatible consumers bind directly; a
+required conversion remains an ordinary prepared command. Python and LiteRT use
+the same selector and report the realized direct bindings and conversion edges.
+This priority solve is not a claim of a globally optimal layout.
 
-Retain the native group's generated choices, their logical demand identities,
-topology, allocation grain and realized shares. The canonical communicator
-declaration must accept the next weights before WRITE bindings freeze their
-transfers. Numerical ownership and consumer-layout choices likewise enter as
-explicit preparation operands. Report the realized choices with the completed
-function's identity and paired latency/useful-throughput result. Observations
-must name compatible choice families, not merely vectors of the same length.
+Observations carry the executed coordinate domains as well as their values.
+Workload/member identity remains separate from conditional routing and layout
+bases. The numerical fit retains compatible compute-share evidence when the
+physical group list changes. Historical choice columns remain distinct nuisance
+variables, so their effects are not assigned to unrelated current choices.
+Missing columns have an explicit presence mask; they are not zero-share
+executions or NaN values. Implementation and basis offsets are separate from
+the fixed and work-dependent compute costs. The residual update uses the same
+whole-function observations, including their declared importance weights.
 
-Microbench already ingests complete rank reports and applies `rates.update` on
-the existing deferred work queue while subsequent calls proceed. Reuse that
-channel and its asynchronous preparation. Torch's local observation producer
-needs to preserve identity and join this ingestion; it must not perform a
-configuration gather from its observer. Late cohorts remain pending data, and
-the next preparation consumes whichever complete observations are available.
+`mesh_statistics` retains each episode's configuration and its own submission
+and completion times. Completed later calls may be reported while earlier calls
+remain pending. It does not assume that whole functions are serialized, subtract
+another call's duration, or gather peers from its observer. Configuration gathers
+consume already available reports; incomplete cohorts remain data for later
+preparation. Native completion status includes the existing final-arrival state,
+so a successful nonblocking probe cannot lead into a waiting end-time read.
 
-The compiler already accepts declared call groups and invocation order. Legal
-changes to those competition windows must follow the retained dependencies;
-replay batching does not define them. Backend resource assignment remains
-followup 3, command dependency lowering followup 5, and live application
-measurements followup 6.
+Native and Torch callers use the shared preparation gather/broadcast functions.
+The examples return their prepared configuration and available observations as
+ordinary operands for the next call. The microbench driver uses its existing
+in-memory configuration channel. Hourlies remain ordinary demo callers; no
+second optimizer or observer is inlined into them.
+
+The current source integration carries original FX declarations through
+functionalization, selected delivery cuts and physical transport fragments.
+Repeated source units compose before ordinary numerical lowering, so repetition
+does not impose a per-step command or submission boundary. Handwritten native
+and imported programs must likewise supply their original source declarations;
+physical mark positions are not substitutes for source identity.
+
+Preparation evidence covers native scope retention across split/merged groups,
+changed and zero work extents, serialized catalogs and layout preferences that
+change which consumer requires conversion. Imported declarations retain their
+original section, graph and value identities through decoding, cuts and physical
+crossings. Partial decomposition returns its typed value directly; callers do
+not recover its identity by searching generated names. Repeated FX declarations
+retain occurrence relations and bind mutations to the supplied input pages.
+Layout feedback uses the declared source scope and retained source definitions.
+Library, extension and application builds establish integration only.
+Whole-application execution and paired latency/useful-throughput measurements
+remain followup 6. The Xonotic construction/feedback callers now consume the
+canonical plan; their still-imperative numerical bodies also need ordinary
+whole-function capture in that application integration, not another executor.
+
+Backend assignment remains followup 3, partial-result fusion followup 4, and the
+command dependency work below followup 5. No numerical or cluster run is part
+of this structural pass.
 
 ## Dependency handoff through command lowering
 
@@ -153,6 +178,14 @@ commands. Lowering an established relation into a different hardware form is
 necessary; dropping it and recovering it from addresses is not. The existing
 `MetalWork.dependencies` graph is the handoff, not another scheduling interface.
 
+The required output is an executable page schedule. An encoding callback that
+still decides which commands exist leaves that output incomplete. A per-issue
+barrier table only closes the gap when its commands and predecessors also join
+the whole function's graph. Producer writes, reads, overwrites and resource
+capacities establish those predecessors. Dispatch kinds and group boundaries do
+not establish them. The final encoder lowers the chosen edges to the backend's
+barriers and events; it does not decide the edges again.
+
 The common compiled record must carry the following facts through each lowering:
 
 | Fact established during preparation | Required consumer |
@@ -165,12 +198,21 @@ The common compiled record must carry the following facts through each lowering:
 | Provider resource capacities and actual host dependencies | Prepared resource assignments, event conditions and submission parts |
 | The final command order and dependency edges | Barrier bits, ICB segments and wait/signal records |
 
-`CommPlan` already prepares generation/slot variants and transfer geometry.
+`CommPlan` prepares binding variants and transfer geometry.
 Those variants must retain their task/command records instead of rebuilding
 call arrays, tracks, argument pages and reach lists in direct encoding.
 `MetalWork.dependencies` and the existing submission graph remain the common
 dependency representation. Capture census, replay barriers and final encoding
 must consume it instead of each recovering dependencies from ranges.
+
+The concurrent `f5276dbc` change removes generation slots and guards, but its
+`zorvek` encoding path searches completion counters for reusable issue storage
+and can create and place a new issue when none is reusable. `zappoff` adds a
+completion store for that choice. These are preparation/encoding operations,
+not work in `MetalScheduleEnqueue`. They nevertheless leave page assignment
+dependent on observed progress at encoding. The compiler handoff must include
+issue storage and reuse dependencies before encoding, so newly chosen physical
+pages cannot appear after the command dependency graph is solved.
 
 In particular, `launch_metal` still walks `operand_copies` to count work and then
 again to emit it. `present_group` constructs descriptor records; `complete`

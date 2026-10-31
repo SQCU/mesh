@@ -978,12 +978,12 @@ class FFN(Operation):
         return ffn(x.reshape(-1, x.shape[-1]), self.gate, self.up, self.down).reshape(*x.shape[:-1], -1)
 
 
-def placement(engines, observations, *, step):
+def placement(engines, observations, *, step, family):
     # design/whole-function.md#numerical-operands
     from assignment import assign, domains
     decisions = {k: {field: d[field] for field in ('parts', 'grain', 'low', 'high', 'capacity')}
                  for k, d in engines.decisions.items()}
-    assigned = assign(domains(decisions, {}, engines.parameters), observations, step=step)
+    assigned = assign(domains(decisions, {}, engines.parameters), observations, step=step, family=family)
     for key, parts in assigned['parts'].items():
         if key in engines.decisions:
             engines.decisions[key]['parts'] = parts

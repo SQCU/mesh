@@ -1433,7 +1433,7 @@ struct PreparedChain {
   std::vector<ChainStep> steps;
   std::vector<ChainChunk> chunks;
   std::vector<std::unique_ptr<WriteOperands>> inputs;
-  std::vector<uint32_t> input_last;
+  std::vector<uint32_t> input_first, input_last;
   Dispatch dispatch, input_publication;
   std::vector<Dispatch> products;
   std::vector<Dispatch *> regular, final;
@@ -1466,7 +1466,7 @@ static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, c
   buffers.push_back(x);  // previous landing; replaced by its compiled page below
   std::vector<int64_t> words = constants;
   words.resize(12 + 36 * f.channels);
-  auto chain = std::make_unique<PreparedChain>(PreparedChain{f.comm, operands, {}, {}, {}, {},
+  auto chain = std::make_unique<PreparedChain>(PreparedChain{f.comm, operands, {}, {}, {}, {}, {},
       encoded(kernel, buffers, words, 15, groups, 1, threads),
       encoded(input_kernel, {}, std::vector<int64_t>(2 + 12 * f.channels), 15, 1, 1, MESH_SIMD_WIDTH),
       {}, {}, {}, nullptr, 6, 9, 12,
@@ -1506,6 +1506,7 @@ static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, c
     }
     prepared->prepare(f.comm, f.polls, count, input_pitch);
     chain->inputs.push_back(std::move(prepared));
+    chain->input_first.push_back((uint32_t)first);
     chain->input_last.push_back((uint32_t)(count - 1));
   }
   {
@@ -1627,11 +1628,14 @@ static void compile_chain(PreparedChain &chain) {
 
 static pybind11::list chain_declarations(int64_t index) {
   auto &chain=*(*prepared_chains_)[index];pybind11::list result;
-  auto append=[&](const WriteOperands &write){result.append(write.declarations());};
-  if(!chain.inputs.empty())append(*chain.inputs[0]);
+  auto append=[&](const WriteOperands &write,const char *source,size_t first,size_t count){
+    result.append(pybind11::make_tuple(write.declarations(),source,first,count));
+  };
+  auto input=[&](size_t k){append(*chain.inputs[k],"input",chain.input_first[k],chain.input_last[k]+1);};
+  if(!chain.inputs.empty())input(0);
   for(const auto &chunk:chain.chunks) {
-    for(size_t j=0;j<chunk.prefetch_count;j++)append(*chain.inputs[chunk.prefetch_first+j]);
-    append(*chunk.plans);
+    for(size_t j=0;j<chunk.prefetch_count;j++)input(chunk.prefetch_first+j);
+    append(*chunk.plans,"recurrent",chunk.first,chunk.count);
   }
   return result;
 }
@@ -2016,6 +2020,36 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
       return placed?pybind11::cast(TensorLayout(placed)):pybind11::none();
     } @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
   }, pybind11::call_guard<Drained>());
+  module.def("prefer_layout",[](NSUInteger count,const pybind11::list &hard,const pybind11::list &groups,
+      const std::vector<double> &preferences,const std::vector<TensorLayout> &values,
+      const std::vector<NSInteger> &widths)->pybind11::object {
+    auto demands=[](const pybind11::handle &items) {
+      NSMutableArray *result=[NSMutableArray array];
+      for(const auto &item:items.cast<pybind11::list>()) {
+        auto record=item.cast<pybind11::dict>();std::string flexible=record["flexible"].cast<std::string>();
+        [result addObject:@{@"use":record["use"].cast<TensorLayout>().value,
+          @"target":record["target"].cast<TensorLayout>().value,
+          @"footprint":tensorNumbers(record["footprint"].cast<std::vector<NSInteger>>()),
+          @"width":@(record["width"].cast<NSUInteger>()),@"flexible":@(!flexible.empty()),
+          @"requirements":flexible.empty()?@[]:@[@{@"kind":@(flexible.c_str())}]}];
+      }
+      return result;
+    };
+    @try {
+      NSMutableArray *choices=[NSMutableArray array],*weights=[NSMutableArray array],*typed=[NSMutableArray array];
+      for(const auto &group:groups)[choices addObject:demands(group)];
+      for(double weight:preferences)[weights addObject:@(weight)];
+      for(const auto &value:values)[typed addObject:value.value];
+      NSDictionary *solved=MetalTensorPlacePreferred(count,demands(hard),choices,weights,typed,tensorNumbers(widths));
+      if(!solved)return pybind11::none();
+      pybind11::dict result;result["layout"]=TensorLayout(solved[@"layout"]);
+      result["extent"]=[solved[@"extent"] unsignedIntegerValue];result["alignment"]=[solved[@"alignment"] unsignedIntegerValue];
+      std::vector<NSUInteger> accepted;for(NSNumber *index in solved[@"accepted"])accepted.push_back(index.unsignedIntegerValue);
+      std::vector<std::vector<NSUInteger>> conflicts;
+      for(NSArray *group in solved[@"conflicts"]) {std::vector<NSUInteger> row;for(NSNumber *index in group)row.push_back(index.unsignedIntegerValue);conflicts.push_back(row);}
+      result["accepted"]=accepted;result["conflicts"]=conflicts;return std::move(result);
+    } @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
+  },pybind11::call_guard<Drained>());
   module.def("import_attributes",&import_attributes, pybind11::call_guard<Drained>());
   module.def("page_backing",[](const pybind11::object &value) {
     TensorOperand operand(value);

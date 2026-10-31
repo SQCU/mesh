@@ -11,7 +11,7 @@ from torch_mesh import partition
 from torch_mesh import chain as sequence
 from torch_mesh.configuration import placement, bind, record
 from torch_mesh import _stream, compute
-from mesh_statistics import now
+from mesh_statistics import now, next_configuration
 
 import chain
 
@@ -44,8 +44,9 @@ def folded(config, full):
 
 
 # docs/writing-a-service.md#the-configuration
-def main():
-    config = json.load(sys.stdin if sys.argv[1] == '-' else open(sys.argv[1]))
+def main(config=None):
+    if config is None:
+        config = json.load(sys.stdin if sys.argv[1] == '-' else open(sys.argv[1]))
     capabilities = compute.metal(config['capabilities'])
     steps, rows = config['steps'], config['rows']
     inputs, folds = None, None
@@ -57,19 +58,25 @@ def main():
     rank, size, width = dist.get_rank(), dist.get_world_size(), config['width']
     mesh = DeviceMesh.from_group(dist.group.WORLD, 'mps', mesh_dim_names=('tp',))
     partition.attach(mesh, tp=width)
-    configuration = placement(mesh, 'tp', {'function': 'chain_sequence', 'width': width, 'steps': steps, 'rows': rows},
-                            config.get('placement'), parameters=config['parameters'], forms=config.get('forms', ()))
+    workload = {'function': 'chain_sequence', 'width': width, 'steps': steps, 'rows': rows}
+    configuration = placement(mesh, 'tp', workload, config.get('placement'), parameters=config['parameters'],
+        observations=config.get('observations', []), proposal=config.get('proposal', 0),
+        family=config.get('family', workload), forms=config.get('forms', ()))
     chosen = configuration['assignment']['operands']
     k = chosen['steps_per_replay']
     a, b = chain.weights(mesh, folds, width)
     del folds
     E, O = (torch_mesh.empty(steps, rows, width, dtype=torch.half) for _ in range(2))
     group = mesh.get_group('tp')
-    groups, operands = sequence.operands(a, b, E, O, group, k, chosen['resident_tiles'], chosen['input_frames'], capabilities)
+    groups, operands = sequence.operands(a, b, E, O, group, k, chosen['resident_tiles'], chosen['input_frames'], capabilities,
+                                         source_scope={'program': 'chain_sequence'})
     if rank == 0:
         E.copy_(torch.from_numpy(inputs[:]))
     torch_mesh.check_memory()
-    bind(configuration, groups, lambda: sequence.prepare(operands))
+    def prepare():
+        sequence.prepare(operands)
+        return {'layouts': []}
+    bind(configuration, groups, prepare)
     completion = _stream.chain_completion(operands[0])
     started = now()
     _stream.chain_run(operands[0])
@@ -77,7 +84,10 @@ def main():
                    steps_per_replay=k)
     record(configuration, completion, started, O.numel() * O.element_size(), summary)
     dist.destroy_process_group()
-    return O
+    state = next_configuration(configuration['observations'].declaration,
+        [*configuration['group'].configuration_observations, *configuration['observations'].poll()],
+        family=configuration['family']['source'])
+    return {'output': O, 'configuration': state}
 
 
 if __name__ == '__main__':

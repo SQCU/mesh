@@ -982,6 +982,72 @@ finished:;
     return result;
 }
 
+static NSDictionary *TensorPlaceDemands(NSUInteger count,NSArray<NSDictionary *> *demands,
+    NSArray<MetalTensorLayout *> *values,NSArray<NSNumber *> *widths) {
+    NSMutableArray *uses=[NSMutableArray array],*targets=[NSMutableArray array],*footprints=[NSMutableArray array];
+    for(NSDictionary *demand in demands)if(![demand[@"flexible"] boolValue]) {
+        [uses addObject:demand[@"use"]];[targets addObject:demand[@"target"]];[footprints addObject:demand[@"footprint"]];
+    }
+    MetalTensorLayout *placed=MetalTensorPlace(count,uses,targets,footprints,values,widths);
+    if(!placed)return nil;
+    MetalTensorLayout *domain=[MetalTensorLayout shape:@[@(count)] strides:@[@1] offset:0 maps:@{} indices:nil];
+    BOOL changed=NO;
+    for(NSDictionary *demand in demands)if([demand[@"flexible"] boolValue]) {
+        NSUInteger width=[demand[@"width"] unsignedIntegerValue];
+        MetalTensorLayout *view=[[(MetalTensorLayout *)demand[@"use"] rebase:domain onto:placed] elements:width];
+        MetalTensorLayout *target=[view requirements:demand[@"requirements"]];
+        changed|=![view equivalent:target];
+        [uses addObject:demand[@"use"]];[targets addObject:[target components:width]];[footprints addObject:demand[@"footprint"]];
+    }
+    if(changed)placed=MetalTensorPlace(count,uses,targets,footprints,values,widths);
+    if(!placed)return nil;
+    NSUInteger extent=0,alignment=1;
+    NSMutableArray *alignments=[NSMutableArray arrayWithArray:widths];
+    for(NSUInteger k=0;k<uses.count;k++) {
+        [alignments addObject:footprints[k][2]];
+        if([uses[k] count]&&[footprints[k][1] unsignedIntegerValue]) {
+            NSInteger first=[[(MetalTensorLayout *)uses[k] rebase:domain onto:placed] index:0]-[targets[k] index:0]+[footprints[k][0] integerValue];
+            extent=MAX(extent,first+[footprints[k][1] unsignedIntegerValue]);
+        }
+    }
+    for(NSNumber *value in alignments) {
+        NSUInteger a=alignment,b=value.unsignedIntegerValue;NSCParameterAssert(b);
+        while(b){NSUInteger r=a%b;a=b;b=r;}alignment=alignment/a*value.unsignedIntegerValue;
+    }
+    return @{@"layout":placed,@"extent":@(extent),@"alignment":@(alignment)};
+}
+
+NSDictionary *MetalTensorPlacePreferred(NSUInteger count,NSArray<NSDictionary *> *hard,
+    NSArray<NSArray<NSDictionary *> *> *groups,NSArray<NSNumber *> *preferences,
+    NSArray<MetalTensorLayout *> *values,NSArray<NSNumber *> *widths) {
+    NSCParameterAssert(groups.count==preferences.count);
+    NSMutableArray *order=[NSMutableArray array],*all=[NSMutableArray arrayWithArray:hard];
+    for(NSUInteger k=0;k<groups.count;k++) {
+        double weight=[preferences[k] doubleValue];
+        if(!isfinite(weight)||weight<0)[NSException raise:NSInvalidArgumentException format:@"layout preferences must be finite and nonnegative"];
+        [order addObject:@(k)];[all addObjectsFromArray:groups[k]];
+    }
+    NSDictionary *solved=TensorPlaceDemands(count,all,values,widths);
+    NSMutableArray *accepted=[NSMutableArray array],*conflicts=[NSMutableArray array];
+    if(solved)[accepted addObjectsFromArray:order];
+    else {
+        solved=TensorPlaceDemands(count,hard,values,widths);if(!solved)return nil;
+        [order sortUsingComparator:^NSComparisonResult(NSNumber *left,NSNumber *right) {
+            NSComparisonResult compared=[preferences[right.unsignedIntegerValue] compare:preferences[left.unsignedIntegerValue]];
+            return compared==NSOrderedSame?[left compare:right]:compared;
+        }];
+        NSMutableArray *held=[NSMutableArray arrayWithArray:hard];
+        for(NSNumber *index in order) {
+            NSArray *candidate=[held arrayByAddingObjectsFromArray:groups[index.unsignedIntegerValue]];
+            NSDictionary *next=TensorPlaceDemands(count,candidate,values,widths);
+            if(next){solved=next;[held addObjectsFromArray:groups[index.unsignedIntegerValue]];[accepted addObject:index];}
+            else [conflicts addObject:[accepted arrayByAddingObject:index]];
+        }
+    }
+    NSMutableDictionary *result=[[solved mutableCopy] autorelease];
+    result[@"accepted"]=accepted;result[@"conflicts"]=conflicts;return result;
+}
+
 // Bind configured names into the existing integer term type. The result goes
 // straight to isl; this is neither a second algebra nor a runtime evaluator.
 static id TensorBind(id expression,NSDictionary *values) {
@@ -1154,6 +1220,8 @@ static id TensorSelectionIndex(NSInteger (^extent)(id),NSArray *shape,id express
       id term=TensorSelectionIndex(extent,shape,step[1][@"index"],parameters,[NSMutableDictionary dictionary]);
       MetalTensorLayout *indices=[MetalTensorLayout shape:shape index:term parameters:parameters];
       layout=[indices rebase:[self shape:layout.shape strides:TensorStrides(layout.shape) offset:0 maps:@{} indices:nil] onto:layout];
+    } else if([step[0] isEqual:@"components"]) {
+      layout=[layout components:(NSUInteger)extent(step[1])];
     } else if([step[0] isEqual:@"rebase"]) {
       layout=[layout rebase:[self selection:step[1][@"source"] extent:extent]
           onto:[self selection:step[1][@"target"] extent:extent]];

@@ -217,6 +217,8 @@ int mesh_paths_check(const struct mesh_fabric *,uint32_t source,uint32_t destina
 int mesh_write_compile(const struct mesh_fabric *,uint32_t rank,uint32_t source,uint32_t destination,
                         const struct mesh_paths *,struct mesh_operand,uint64_t page,uint64_t tile,
                         struct mesh_transfer *,uint32_t room);
+/* The exact allocation used by mesh_write_compile, in operand elements. */
+int mesh_write_ranges(const struct mesh_paths *,struct mesh_operand,uint64_t page,uint64_t *first,uint64_t *count);
 /* A fabric's write routes (mesh-fabric.c), the communicator's defaults (nccl-mesh.c fabric_discover) and a tool's alike:
    mesh_write_routes_default every simple node path of every ordered pair, parallel cables distinct choices, each of
    weight 1, into *out (NULL on entry), a nodes x nodes table; mesh_write_routes_compose those routes with every pair a
@@ -279,6 +281,9 @@ enum { MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE, MESH_REDUCE_SCATTER, MESH_AL
 struct mesh_move { uint32_t op,peer,round,buffer,part,parts; };
 struct mesh_program { uint32_t what,root,nodes,parts,scratch,segments; const uint32_t *segment; const double *log_weight;
                       const uint32_t *first; const struct mesh_move *move; };
+
+/* Exact per-part allocation used by mesh_program_steps_cut; q is in elements. */
+int mesh_program_ranges(const struct mesh_program *,uint64_t elements,const uint64_t *sizes,uint64_t q,uint64_t *first,uint64_t *count);
 
 /* The room mesh_compile needs: parts and moves. */
 void mesh_compile_room(const struct mesh_trees *,uint32_t *parts,uint32_t *moves);

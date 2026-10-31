@@ -8,7 +8,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch_mesh import partition
 from torch_mesh.configuration import placement, bind, record
 from torch_mesh.compilation import parameters
-from mesh_statistics import now
+from mesh_statistics import now, next_configuration
 
 from tp import DIM, HEADS, STEPS, Attention, held
 
@@ -25,13 +25,15 @@ class Landed(torch.nn.Module):
         return torch.matmul(x, self.weight.mT, out=self.out.to_local().view(x.shape[:-1] + (self.width,)))
 
 
-def main():
+def main(configuration_operand=None):
+    configuration_operand = configuration_operand or {'observations': [], 'proposal': 0}
     dist.init_process_group(backend=os.environ.get("BACKEND", "mesh"))
     mesh = DeviceMesh.from_group(dist.group.WORLD, "mps", mesh_dim_names=("cp",))
     partition.attach(mesh, cp=SEQ // POSITIONS)
-    configuration = placement(mesh, 'cp',
-        {'function': 'attention_and_unshard', 'steps': STEPS, 'sequence': SEQ, 'width': DIM, 'heads': HEADS},
-        None, parameters=parameters())
+    workload = {'function': 'attention_and_unshard', 'steps': STEPS, 'sequence': SEQ, 'width': DIM, 'heads': HEADS}
+    configuration = placement(mesh, 'cp', workload, configuration_operand.get('placement'), parameters=parameters(),
+        observations=configuration_operand['observations'], proposal=configuration_operand['proposal'],
+        family=configuration_operand.get('family', workload))
     with torch.device("meta"):
         layer = Attention()
     run = held(layer)
@@ -46,16 +48,23 @@ def main():
     from torch_mesh.declarations import Function, execution_sequence
     function = Function(lambda: partition.context_parallel_unshard(
         mesh, "cp", [run(x.to_local(), ring)], [1], load_balance=False, sequence_length=SEQ),
-        configuration=configuration['assignment']['operands'])
+        configuration=configuration['assignment']['operands'], source_scope={'program': 'attention_and_unshard'})
     with torch.no_grad():
         program = execution_sequence([function] * STEPS)
-        bind(configuration, lambda: function.declare(mesh.get_group('cp')), program.realize)
+        def prepare():
+            program.realize()
+            return {'layouts': list(function.layout_choices)}
+        bind(configuration, lambda: function.declare(mesh.get_group('cp')), prepare)
         started = now()
         program.forward()
         completion = program.completion()
         record(configuration, completion, started, STEPS * SEQ * DIM * x.element_size(),
                {'program': 'cp', 'steps': STEPS, 'parts': configuration['assignment']['parts']['cp']})
     dist.destroy_process_group()
+    state = next_configuration(configuration['observations'].declaration,
+        [*configuration['group'].configuration_observations, *configuration['observations'].poll()],
+        family=configuration['family']['source'])
+    return {'output': None, 'configuration': state}
 
 
 if __name__ == "__main__":

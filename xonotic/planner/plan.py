@@ -1,3 +1,8 @@
+"""Planner source with canonical collective preparation.
+
+Its imperative NumPy producers and consumers still need whole-function
+lowering; the removed blocking host collective executor is not restored.
+"""
 import argparse
 import json
 from pathlib import Path
@@ -12,6 +17,7 @@ import assignment
 from assignment import declare
 from mesh_mpi import Comm, empty
 import mesh
+from mesh_source import revision
 
 TEAMS = 5
 EXPERTS = 8
@@ -43,6 +49,9 @@ def solve(positions, route, up, down, out):
 
 
 def main():
+    # The source declaration below uses the canonical plan. Numerical NumPy
+    # producers/consumers still require whole-function lowering; mesh_mpi does
+    # not restore an imperative host executor for this legacy application.
     split = json.loads(SPLIT.read_text())
     parser = argparse.ArgumentParser()
     parser.add_argument('ticks', type=int)
@@ -61,15 +70,20 @@ def main():
     # current tick retains its exact proposal until all its computations end.
     comm = Comm()
     rank = comm.Get_rank()
+    members = mesh.configuration_members(comm.comm)
     local = empty((args.bots + 1, args.width), np.float32)
     local[...] = 0
     total = empty(local.shape, local.dtype)
+    source = {'function': 'xonotic-planner', 'statement': 'expert-output-reduction'}
     calls = [{'what': mesh.lib.MESH_ALLREDUCE, 'count': local.size, 'type': mesh.lib.ncclFloat32,
-              'op': mesh.lib.ncclSum}]
-    declare(comm.comm, calls)
-    decisions = assignment.domains(
-        {'columns': {'parts': columns, 'grain': split['grain'], 'low': split['low']}},
-        {'world': assignment.graph(comm.comm)})
+              'op': mesh.lib.ncclSum, 'bindings': (local, total), 'route_scope': source,
+              'sources': [{'source': source, 'occurrences': {'shape': [1], 'steps': []},
+                           'work': {'shape': [local.nbytes], 'steps': []}}]}]
+    work = {'columns': {'parts': columns, 'grain': split['grain'], 'low': split['low']}}
+    graphs = {}
+    workload = {'bots': args.bots, 'width': args.width, 'experts': EXPERTS, 'columns': FF, 'teams': TEAMS}
+    family = {'source': 'xonotic-planner', 'members': members, 'workload': workload}
+    implementation = revision(ROOT)
     observations = []
     previous = None
     shares = columns
@@ -82,12 +96,18 @@ def main():
                       'experts': EXPERTS, 'columns': columns[rank]}), flush=True)
     start = ready = time.monotonic()
     for tick in range(args.ticks):
-        proposal = assignment.assign(decisions, observations, step=tick)
-        for key, values in proposal['parts'].items():
-            decisions[key]['parts'] = values
+        decisions = assignment.domains(work, graphs)
+        proposal = assignment.assign(decisions, observations, step=tick, family=family) if rank == 0 else None
+        proposal = mesh.broadcast_configuration(comm.comm, proposal)
         shares = proposal['parts']['columns']
-        assignment.install(comm.comm, proposal['parts'], 'world')
-        declare(comm.comm, calls)
+        routing = assignment.route_operands(proposal['parts'], 'world', graphs['world']) if graphs else None
+        plan = declare(comm.comm, calls, routing=routing)
+        graphs = {'world': assignment.graph(comm.comm, plan)}
+        work['columns'] = {**work['columns'], 'parts': list(shares)}
+        realized = assignment.domains(work, graphs)
+        proposal.update(parts={key: value['parts'] for key, value in realized.items()},
+                        domains=assignment.choice_domains(realized), graphs=graphs, workload=workload,
+                        implementation=implementation, episode=f'planner:{tick}')
         function_started = began = time.monotonic()
         low = sum(shares[:rank])
         share = slice(low, low + shares[rank])
@@ -110,8 +130,10 @@ def main():
         positions[:, 1:] *= .98
         previous = {'proposal': proposal, 'seconds': time.monotonic() - function_started}
         if feedback is not None:
-            observations.append({'parts': feedback[0]['parts'], 'seconds': feedback[1],
-                                 'implementation': 'loaded-program', 'proposal': feedback[0]['proposal']})
+            observations.append({**{key: feedback[0][key] for key in
+                ('parts', 'domains', 'graphs', 'family', 'workload', 'implementation', 'proposal', 'episode')},
+                'scope': 'function', 'complete': True, 'seconds': feedback[1],
+                'timing_scope': 'maximum rank whole-tick latency carried by the existing reduction'})
             observations[:] = assignment.window(observations)
     elapsed = time.monotonic() - start
     comm.Free()

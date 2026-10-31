@@ -2,7 +2,7 @@
 import json
 import sys
 from types import SimpleNamespace
-from mesh_statistics import now
+from mesh_statistics import now, next_configuration
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
@@ -11,23 +11,34 @@ from torch_mesh.configuration import placement, bind, record
 from torch_mesh.dnn import DNN
 
 
-def main():
-    args = SimpleNamespace(**(json.load(sys.stdin) if sys.argv[1] == '-' else json.loads(open(sys.argv[1]).read())))
+def main(config=None):
+    if config is None:
+        config = json.load(sys.stdin) if sys.argv[1] == '-' else json.loads(open(sys.argv[1]).read())
+    args = SimpleNamespace(**config)
     dist.init_process_group(backend='mesh', device_id=torch.device('mps', 0))
     mesh = DeviceMesh.from_group(dist.group.WORLD, 'mps', mesh_dim_names=('ffn',))
     partition.attach(mesh, ffn=args.expansion // 64)
     workload = {k: getattr(args, k) for k in ('rows', 'width', 'expansion', 'layers')}
-    configuration = placement(mesh, 'ffn', workload, getattr(args, 'placement', None), parameters=args.parameters)
+    configuration = placement(mesh, 'ffn', workload, getattr(args, 'placement', None), parameters=args.parameters,
+        observations=getattr(args, 'observations', []), proposal=getattr(args, 'proposal', 0),
+        family=getattr(args, 'family', {'function': 'fabric-dnn', **workload}))
     args.tile_rows = configuration['assignment']['operands']['tile_rows']
     group = mesh.get_group('ffn')
-    dnn = DNN(args, group, group.fabric)
-    bind(configuration, dnn.declare(), lambda: dnn.prepare({'compute': partition.split(mesh, 'ffn', args.expansion)}))
+    dnn = DNN(args, group, group.fabric, source_scope={'program': 'fabric-dnn'})
+    def prepare():
+        dnn.prepare({'compute': partition.split(mesh, 'ffn', args.expansion)})
+        return {'layouts': []}
+    bind(configuration, dnn.declare(), prepare)
     started = now()
     dnn.run()
     record(configuration, dnn.completion, started, args.rows * args.width * 4,
            {'program': 'fabric-dnn', 'steps': 1, **workload,
             'parts': configuration['assignment']['parts']['ffn']})
     dist.destroy_process_group()
+    state = next_configuration(configuration['observations'].declaration,
+        [*configuration['group'].configuration_observations, *configuration['observations'].poll()],
+        family=configuration['family']['source'])
+    return {'output': None, 'configuration': state}
 
 
 if __name__ == '__main__':

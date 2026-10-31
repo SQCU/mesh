@@ -9,8 +9,9 @@ from .matrix import product, row_tiles
 class DNN:
     """docs/measurement.md#physical-fabric-dnn"""
 
-    def __init__(self, args, group, fabric):
+    def __init__(self, args, group, fabric, *, source_scope):
         self.args, self.group = args, group
+        self.source_scope = source_scope
         self.channels = _stream.channels(group.group_name)
         B, H, K, L = args.rows, args.width, args.expansion, args.layers
         self.input = torch_mesh.empty(B, H)
@@ -128,6 +129,8 @@ kernel void fold(device const float *own [[buffer(0)]], {inputs}device float *ou
 
     def declare(self):
         """Bind producer words and local pages before the communicator plan is compiled."""
+        from .backend import bind_source
+        from ._stream import TensorLayout
         calls, self.declarations = [], []
         for first, rows in self.tiles:
             declared = []
@@ -144,7 +147,12 @@ kernel void fold(device const float *own [[buffer(0)]], {inputs}device float *ou
                     declaration, bound = fused.declare(partial, landings, self.pairs, self.group,
                         ready=ready, ready_value=tile_bytes, tile_bytes=tile_bytes)
                     production = [{'seconds': 0, 'order': tile} for tile in range(len(tiles))]
-                    calls.append([call._replace(production=production) for call in bound])
+                    source = {'scope': self.source_scope, 'statement': 'partial output'}
+                    occurrences = TensorLayout((1,), (1,), layer)
+                    work = TensorLayout((partial.numel() * partial.element_size(),), (1,),
+                                        first * self.args.width * partial.element_size())
+                    calls.append([bind_source(call._replace(production=production), source=source,
+                        occurrences=occurrences, work=work, route_scope={'source': source, 'layer': layer}) for call in bound])
                 declared.append((ready, arrivals, declaration))
             self.declarations.append(declared)
         return calls

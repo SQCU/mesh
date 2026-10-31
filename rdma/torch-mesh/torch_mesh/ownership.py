@@ -45,7 +45,7 @@ def partial_expression(source, value, placement, mesh, axis):
     before output domains are split among uses. State tensor identities become
     ordinary operands; the placement object never enters the runtime graph.
     """
-    from .compilation import source_expression
+    from .compilation import source_expression, source_records
     from .declarations import _bound
     held = source.meta.setdefault('mesh_partial_expressions', {})
     key = (id(value), id(placement), id(mesh), axis)
@@ -54,6 +54,8 @@ def partial_expression(source, value, placement, mesh, axis):
         origins = source.meta.get('mesh_source_nodes', (source,))
         for node in module.graph.nodes:
             node.meta.setdefault('mesh_source_nodes', origins)
+            node.meta.setdefault('mesh_source_records', source_records(source))
+            node.meta.setdefault('mesh_route_scope', source.meta.get('mesh_route_scope'))
         result = next(node for node in module.graph.nodes if node.op == 'output').args[0]
         held[key] = dict(graph=module, operands=tuple(operands), result=result,
                          boundaries=tuple(node for node in module.graph.nodes if _bound(node)),
@@ -600,6 +602,8 @@ def project_numerical(span, demands, algebra, *, constraints=None, work=None):
     constraints = {} if constraints is None else constraints
     assigned = work
     needed, exact, pending, records, live_reads = {}, {}, [], [], []
+    input_names = {binding['name'] for _, binding in binding_uses(span['input_bindings'])}
+    written_inputs = {}
     for key, binding in binding_uses(span['output_bindings']):
         if key in demands:
             positions = byte_relation(binding).image(demands[key])
@@ -629,6 +633,11 @@ def project_numerical(span, demands, algebra, *, constraints=None, work=None):
                 result[slot] = projected
                 if side == 'writes':
                     result[slot]['requested'] = needed.get(access['name'], _empty(algebra, 1))
+                    if positions is not None and access['name'] in input_names:
+                        # Supplied input pages also bind explicit mutations.
+                        # A write-only input is not a read/transfer demand, but
+                        # its exact written bytes must reach fixed placement.
+                        _union(written_inputs, access['name'], positions)
                 if side == 'reads' and not work.empty():
                     if positions is None:
                         pending.append(dict(domain=domain, access=access, work=work))
@@ -665,7 +674,10 @@ def project_numerical(span, demands, algebra, *, constraints=None, work=None):
         live_inputs[key] = (*live_inputs.get(key, ()),
             *(record for record in live_reads if record['access']['name'] == binding['name']))
     live_inputs = {key: records for key, records in live_inputs.items() if records}
-    return dict(section=span, outputs=dict(demands), inputs=inputs, storage_bytes=needed,
+    storage = dict(needed)
+    for name, positions in written_inputs.items():
+        _union(storage, name, positions)
+    return dict(section=span, outputs=dict(demands), inputs=inputs, storage_bytes=storage,
                 records=tuple(records), live_reads=tuple(live_reads), live_inputs=live_inputs, pending=tuple(pending))
 
 
@@ -776,7 +788,16 @@ def _assigned_read_group(section, records, produced, algebra, *, delivery, trans
                 owner=byte_relation(binding).image(selected)))
         value = pytree.key_get(source[0].meta['val'], source[1])
         site['fields'] = tuple(fields.placeholder(f'read_{len(fields.nodes)}') for _ in range(2))
+        from .compilation import source_records
+        origins = tuple(site['effect']['operation'].get_origins())
+        provenance = []
+        for original in (*origins, source[0]):
+            for record in source_records(original):
+                if record not in provenance:
+                    provenance.append(record)
         for node in site['fields']:
+            node.meta.update(mesh_source_nodes=origins, mesh_source_records=tuple(provenance),
+                             mesh_route_scope=source[0].meta.get('mesh_route_scope'))
             with value.fake_mode:
                 node.meta['val'] = torch.empty(site['domain']['work'], dtype=site['access']['dtype'], device=value.device)
         site.update(providers=providers, work=work, dimensions=dimensions)

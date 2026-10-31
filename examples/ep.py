@@ -12,7 +12,7 @@ from torch.distributed.tensor import Shard
 from torch_mesh import partition
 from torch_mesh.configuration import placement, bind, record
 from torch_mesh.compilation import parameters
-from mesh_statistics import now
+from mesh_statistics import now, next_configuration
 
 from tp import DIM, STEPS, drawn
 
@@ -54,26 +54,36 @@ class MoE:
         return torch.sum(rows.mul_((weights / weights.sum(-1, keepdim=True) * kept)[..., None]), 1, out=self.combined.to_local())
 
 
-def main():
+def main(configuration_operand=None):
+    configuration_operand = configuration_operand or {'observations': [], 'proposal': 0}
     dist.init_process_group(backend=os.environ.get("BACKEND", "mesh"))
     mesh = DeviceMesh.from_group(dist.group.WORLD, "mps", mesh_dim_names=("ep",))
     partition.attach(mesh, ep=EXPERTS)
-    configuration = placement(mesh, 'ep',
-        {'function': 'moe_dispatch_experts_combine', 'steps': STEPS, 'tokens': TOKENS, 'width': DIM,
-         'experts': EXPERTS, 'ffn': FFN, 'top_k': TOP_K, 'slots': SLOTS},
-        None, parameters=parameters())
+    workload = {'function': 'moe_dispatch_experts_combine', 'steps': STEPS, 'tokens': TOKENS, 'width': DIM,
+                'experts': EXPERTS, 'ffn': FFN, 'top_k': TOP_K, 'slots': SLOTS}
+    configuration = placement(mesh, 'ep', workload, configuration_operand.get('placement'), parameters=parameters(),
+        observations=configuration_operand['observations'], proposal=configuration_operand['proposal'],
+        family=configuration_operand.get('family', workload))
     with torch.no_grad():
         from torch_mesh.declarations import Function, execution_sequence
         model = MoE(mesh)
-        function = Function(model, configuration=configuration['assignment']['operands'])
+        function = Function(model, configuration=configuration['assignment']['operands'],
+                            source_scope={'program': 'moe_dispatch_experts_combine'})
         program = execution_sequence([function] * STEPS)
-        bind(configuration, lambda: function.declare(mesh.get_group("ep")), program.realize)
+        def prepare():
+            program.realize()
+            return {'layouts': list(function.layout_choices)}
+        bind(configuration, lambda: function.declare(mesh.get_group("ep")), prepare)
         started = now()
         program.forward()
         completion = program.completion()
         record(configuration, completion, started, STEPS * TOKENS * DIM * model.x.element_size(),
                {'program': 'ep', 'steps': STEPS, 'parts': configuration['assignment']['parts']['ep']})
     dist.destroy_process_group()
+    state = next_configuration(configuration['observations'].declaration,
+        [*configuration['group'].configuration_observations, *configuration['observations'].poll()],
+        family=configuration['family']['source'])
+    return {'output': None, 'configuration': state}
 
 
 if __name__ == "__main__":

@@ -293,9 +293,12 @@ def _selected_layout(value, selection):
     return selection.rebase(logical, descriptor(value).reshape((value.numel(),)))
 
 
-def _bind_exchange(source, destination, plan, group):
+def _bind_exchange(source, destination, plan, group, *, source_field=None, source_orders=(), algebra=None):
     from .operand import TensorView
-    deliveries = []
+    from . import backend, _stream
+    from .operand import relation_layout
+    from .compilation import source_records
+    deliveries, declarations = [], []
     for a, b, read, write in plan:
         if a == b:
             continue
@@ -306,7 +309,18 @@ def _bind_exchange(source, destination, plan, group):
         else:
             value = torch.empty(read.count, dtype=source.dtype, device='meta')
         deliveries.append((value, a, b))
-    return group.prepare_writes(deliveries) if deliveries else (None, [])
+        call = backend.Call(backend.WRITE, read.count * source.dtype.itemsize, torch.uint8, root=a, destination=b)
+        if source_field is not None:
+            node, path = source_field
+            order = algebra.selection_relation(source_orders[a])
+            original = relation_layout(order, order.shape, math.prod(source_orders[a]['shape'])).reshape((math.prod(order.shape),))
+            work = read.rebase(_stream.TensorLayout((original.count,), (1,)), original).components(source.dtype.itemsize)
+            for record in source_records(node):
+                call = backend.bind_source(call, source=dict(record['source'], field=tuple(str(part) for part in path)),
+                    occurrences=record['occurrences'], work=work, route_scope=node.meta.get('mesh_route_scope'),
+                    occurrence_extent=record['occurrence_extent'])
+        declarations.append(call)
+    return group.prepare_writes(deliveries, declarations=declarations) if deliveries else (None, [])
 
 
 def effects(nodes):
@@ -419,6 +433,18 @@ def _collective_results(node, target, arguments):
     return [value for value in tree_leaves(result) if isinstance(value, torch.Tensor)], preserved
 
 
+def _source_call(call, node, extent, *, field=()):
+    """Attach retained source equations before transport expansion."""
+    from . import backend, _stream
+    from .compilation import source_records
+    for record in source_records(node):
+        call = backend.bind_source(call, source=dict(record['source'], field=field),
+            occurrences=record['occurrences'],
+            work=None if extent is None else _stream.TensorLayout((extent * call.dtype.itemsize,), (1,)),
+            route_scope=node.meta.get('mesh_route_scope'), occurrence_extent=record['occurrence_extent'])
+    return call
+
+
 def _collective_declaration(node):
     """Normalize source syntax once, retaining math before transport expansion."""
     from . import backend, partition, _stream
@@ -443,15 +469,19 @@ def _collective_declaration(node):
     reduction = args.get('reduce_op', args.get('op', 'sum'))
 
     def declare(call, source, result, *, source_axis=None, result_axis=None, reads=None, writes=None, initialization=False):
+        from .collective_views import _domains
+        extent = None if call.kind == backend.ALLTOALL and call.matrix is None else _domains(call, 0, n)[0]
+        field = (next(i for i, value in enumerate(results) if value is result),) if len(results) > 1 else ()
+        call = _source_call(call, node, extent, field=field)
         mathematical.append(dict(call=call, source=source, result=result, source_axis=source_axis,
                                  result_axis=result_axis, reads=reads, writes=writes, initialization=initialization))
         return call
 
     def gather(source, result, dim, sizes):
         counts = [int(size) * partition._row(source, dim) for size in sizes]
-        declare(backend.Call(backend.ALLGATHER, source.numel(), source.dtype, counts=counts), source, result,
-                source_axis=dim, result_axis=dim)
-        return partition.gathered(source, dim, sizes, group)
+        call = declare(backend.Call(backend.ALLGATHER, source.numel(), source.dtype, counts=counts), source, result,
+                       source_axis=dim, result_axis=dim)
+        return partition.gathered(source, dim, sizes, group, declaration=call)
 
     if namespace == 'torch_mesh' and name == 'select_exchange':
         for source, destination, read, write in _exchange_plan(node, args):
@@ -479,9 +509,10 @@ def _collective_declaration(node):
             calls = [declare(backend.Call(backend.ALLREDUCE, x.numel(), x.dtype, op=_operation(reduction)), x, results[0])]
         elif name == 'linear_sum' or args.get('adds'):
             output = _value(node) if name != 'fused_step_out' else args['out']
-            calls = partition._gather_writes([output.numel()] * n, output.dtype) if n > 1 else []
+            call = _source_call(backend.Call(backend.ALLREDUCE, output.numel(), output.dtype), node, output.numel())
+            calls = partition._gather_writes([output.numel()] * n, output.dtype, declaration=call) if n > 1 else []
         else:
-            calls = partition.gathered(x, args['dim'], args['sizes'], group)
+            calls = gather(x, results[0], args['dim'], args['sizes'])
     elif namespace == 'torch_mesh' and name == 'reduce_scatterv':
         counts = [int(size) * partition._row(x, args['dim']) for size in args['sizes']]
         calls = [declare(backend.Call(backend.REDUCE_SCATTER, x.numel(), x.dtype, counts=counts, op=_operation(reduction)),
@@ -536,7 +567,7 @@ def lower(graph, *, forms=None):
         if declaration is None:
             continue
         target, args = declaration['operation'], declaration['arguments']
-        group_name, group, calls = declaration['group_name'], declaration['group'], declaration['calls']
+        group_name, group, calls = declaration['group_name'], declaration['group'], list(declaration['calls'])
         name, n = target._schema.name.split('::', 1)[1], group.size()
         x = args.get('input', args.get('x', args.get('self', args.get('partials'))))
         if calls:
@@ -545,15 +576,26 @@ def lower(graph, *, forms=None):
             if repeats < 1:
                 raise ValueError('compiled collective repeat count must be positive')
             if group_name in trains:
-                expected, remaining = trains[group_name]
-                if calls != expected:
+                train = trains[group_name]
+                if ([call._replace(sources=(), route_scope=None) for call in calls] != train['physical']):
                     raise ValueError('another collective interrupts a compiled fused repeat train')
-                if remaining == 1:
-                    del trains[group_name]
+                previous = train['calls']
+                if [call.route_scope for call in calls] == [call.route_scope for call in previous]:
+                    previous[:] = [old._replace(sources=(*old.sources, *new.sources))
+                                   for old, new in zip(previous, calls, strict=True)]
+                    train['count'] += 1
+                    groups[group_name][-1] = previous, train['count']
                 else:
-                    trains[group_name] = expected, remaining - 1
+                    # Scope is a preparation operand. Keep the same numerical
+                    # train and logical invocation order, but give this run
+                    # its own ordinary Call definition and routing choices.
+                    groups[group_name].append(calls)
+                    train['calls'], train['count'] = calls, 1
+                train['remaining'] -= 1
+                if not train['remaining']:
+                    del trains[group_name]
                 continue
-            groups.setdefault(group_name, []).append((calls, repeats) if repeats > 1 else calls)
+            groups.setdefault(group_name, []).append(calls)
             if forms is not None and fused_calls:
                 weight, adds = args.get('w'), name in ('all_reduce', 'linear_sum') or args.get('adds', False)
                 source = x.view(1) if x.ndim == 0 else x
@@ -561,7 +603,8 @@ def lower(graph, *, forms=None):
                 sizes = args.get('sizes', [source.shape[dim]] * n)
                 forms.append((source, weight, dim, tuple(sizes), group_name, adds, repeats))
             if repeats > 1:
-                trains[group_name] = calls, repeats - 1
+                trains[group_name] = dict(physical=[call._replace(sources=(), route_scope=None) for call in calls],
+                    calls=calls, count=1, remaining=repeats - 1)
     if trains:
         raise ValueError('the function graph ends inside a fused repeat train')
     return groups
@@ -790,7 +833,7 @@ def boundary_projection(section, outputs, algebra, *, ranks=None):
     return dict(inputs=inputs, peer_inputs=peer_inputs, records=tuple(records), pending=tuple(pending))
 
 
-def trace(function, *arguments, parameters=()):
+def trace(function, *arguments, parameters=(), source_scope=None, route_scope=None):
     """Trace one complete function, including its backward, using FakeTensor.
 
     Parameters' real gradient references are saved and restored; fake backward
@@ -828,6 +871,9 @@ def trace(function, *arguments, parameters=()):
     # not part of the declared function or its explicit gradient outputs.
     spans(graph.graph)
     graph.recompile()
+    if source_scope is not None:
+        from .compilation import source_scope as scoped
+        scoped(graph, source_scope, route_scope)
     return graph
 
 
@@ -1090,6 +1136,8 @@ def _local_assignment(prepared, arguments):
 class BoundGraph:
     """Bind declared work and page deliveries once through the shared placement."""
     def __init__(self, graph, arguments, group, configuration, destinations=None, *, prepared=None, ownership=None):
+        if configuration and configuration.get('layout_preferences') and graph.meta.get('mesh_program_scope') is None:
+            raise ValueError('layout preferences require a declared source_scope')
         if ownership is None:
             from .ownership import prepare_expression
             if prepared is None:
@@ -1098,6 +1146,8 @@ class BoundGraph:
         self.prepared = ownership['prepared']
         self.groups, self.steps = {}, []
         self._bind_sections(ownership, destinations)
+        from .compilation import layout_choices
+        self.layout_choices = layout_choices()
         self.execution.initializations = tuple(graph.meta.get('mesh_initializations', ()))
 
     def _bind_sections(self, ownership, destinations):
@@ -1210,8 +1260,21 @@ class BoundGraph:
                 requirements.extend(retained.consumer_uses())
             types = [described(key) for key in (*input_bindings, *output_bindings)]
             device = types[0].device.type
+            from .compilation import source_records
+            def field_identity(key):
+                definitions = []
+                for record in source_records(key[0]):
+                    if record['source'] not in definitions:
+                        definitions.append(record['source'])
+                return dict(sources=definitions, field=tuple(str(part) for part in key[1]))
+            program_scope = None if section is None else section['graph'].meta.get('mesh_program_scope')
+            choice_scope = (None if program_scope is None else dict(source_scope=program_scope,
+                coordinate=None if coordinate is None else list(coordinate),
+                inputs=[field_identity(key) for key in input_bindings],
+                outputs=[field_identity(key) for key in output_bindings]))
             plan = selected(projection, algebra=algebra, device=device, results=requested,
                             fixed=fixed, requirements=requirements,
+                            choice_scope=choice_scope,
                             equalities=(*equalities, *input_relations, *output_relations,
                                         *page_equalities(section, fixed_uses)))
             owners.extend(plan['pages'])
@@ -1227,7 +1290,9 @@ class BoundGraph:
                                                     [step['destinations'][peer] for peer in peers], algebra=algebra)
                     source = placed(binding, step['sources'][coordinate])
                     destination = placed(binding, step['destinations'][coordinate])
-                    command, calls = _bind_exchange(source, destination, transfers, group)
+                    command, calls = _bind_exchange(source, destination, transfers, group,
+                        source_field=delivery['source'], source_orders=[step['sources'][peer] for peer in peers],
+                        algebra=algebra)
                     if command is not None:
                         self.steps.append(command)
                         self.groups.setdefault(group.group_name, []).append(calls)
@@ -1337,17 +1402,20 @@ class Function:
     Its source graph is captured before numerical decomposition, then rewritten
     into the same page operands and commands as the other declarations.
     """
-    def __init__(self, function, *arguments, parameters=(), configuration=None, ownership=None):
+    def __init__(self, function, *arguments, parameters=(), configuration=None, ownership=None,
+                 source_scope=None, route_scope=None):
         self.function, self.parameters = function, tuple(parameters)
         self.arguments = arguments
         self.configuration = configuration
         self.ownership = ownership
+        self.source_scope, self.route_scope = source_scope, route_scope
+        self.captured_graph = None
         self.source_graph = None
         self.graph, self.groups, self.run, self.output_spec = None, {}, None, None
         self.execution = None
 
-    def declare(self, group, *, destinations=None):
-        from functools import partial
+    def capture(self):
+        """Capture the source once, before functionalization, partitioning or fusion."""
         from torch.utils._pytree import tree_flatten
         from torch.distributed.tensor import DTensor
         from .compilation import bind
@@ -1360,8 +1428,26 @@ class Function:
             return (*values, *gradients)
 
         with bind(self.configuration):
-            graph = trace(recorded, *self.arguments, parameters=self.parameters)
-        return self.declare_graph(graph, group, destinations=destinations)
+            self.captured_graph = trace(recorded, *self.arguments, parameters=self.parameters,
+                                        source_scope=self.source_scope, route_scope=self.route_scope)
+        return self
+
+    def repeated(self, count, *, first=0):
+        """Compose captured occurrences into one ordinary compiler input graph."""
+        from .compilation import repeat_source
+        if self.captured_graph is None:
+            self.capture()
+        made = Function(self.function, *self.arguments, parameters=self.parameters,
+                        configuration=self.configuration, ownership=self.ownership,
+                        source_scope=self.source_scope, route_scope=self.route_scope)
+        made.captured_graph = repeat_source(self.captured_graph, count, first)
+        made.output_spec = self.output_spec
+        return made
+
+    def declare(self, group, *, destinations=None):
+        if self.captured_graph is None:
+            self.capture()
+        return self.declare_graph(self.captured_graph, group, destinations=destinations)
 
     def declare_graph(self, graph, group, *, destinations=None):
         """Lower an existing typed graph, retaining its source identities."""
@@ -1388,6 +1474,8 @@ class Function:
             graph, arguments = assigned['graph'], assigned['arguments']
         with bind(self.configuration):
             prepared = BoundGraph(graph, arguments, group, self.configuration, destinations, ownership=assigned)
+            from .compilation import layout_choices
+            self.layout_choices = layout_choices()
         self.graph, self.groups, self.execution = graph, prepared.groups, prepared.execution
         self.run = self.execution.forward
         self.completion = self.execution.completion

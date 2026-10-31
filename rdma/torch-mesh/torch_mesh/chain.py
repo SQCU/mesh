@@ -85,7 +85,7 @@ def _form(K, S, rows, ranks, channels, resident_tiles, capabilities):
             SG = _floor2(available // simd)
 
 
-def operands(a, b, inputs, outputs, group, batch, resident_tiles, input_frames, capabilities):
+def operands(a, b, inputs, outputs, group, batch, resident_tiles, input_frames, capabilities, *, source_scope):
     """Realize numerical operands and declarations before the sequence runs.
 
     ``a`` and ``b`` hold this rank's rows of the two weights. Zero-padded tiles
@@ -135,7 +135,17 @@ def operands(a, b, inputs, outputs, group, batch, resident_tiles, input_frames, 
     _stream.prepare_chain(index, kernel, ready, products, linear, [At, Bt, inputs, outputs, X, Y, X, arrivals],
         [1, 0, *words, 0, width, rows, 0, 0], workers, threads, group.group_name, group.size(), batch, input_frames)
     from .fused import calls as bound_calls
-    return [(bound_calls(records), records[0]['frames']) for records in _stream.chain_declarations(index) if records], (index,)
+    from .backend import bind_source
+    from ._stream import TensorLayout
+    groups = []
+    for records, role, first, count in _stream.chain_declarations(index):
+        source = {'scope': source_scope, 'statement': role}
+        occurrences = TensorLayout((count,), (1,), first)
+        calls = [bind_source(call, source=source, occurrences=occurrences,
+                             work=TensorLayout((call.count,), (1,)), route_scope=source) for call in bound_calls(records)]
+        if calls:
+            groups.append((calls, records[0]['frames']))
+    return groups, (index,)
 
 
 def prepare(operands):

@@ -15,7 +15,7 @@ from torch_mesh.attention import attention
 from torch_mesh.partition import ColwiseParallel, RowwiseParallel, SequenceParallel
 from torch_mesh.configuration import placement, bind, record
 from torch_mesh.compilation import parameters
-from mesh_statistics import now
+from mesh_statistics import now, next_configuration
 
 DIM, HEADS, FFN, LAYERS, BATCH, SEQ = 2048, 16, 5632, 4, 2, 1024
 SP = os.environ.get("SP", "1") == "1"
@@ -96,14 +96,16 @@ def step(model, x):
     return out
 
 
-def main():
+def main(configuration_operand=None):
+    configuration_operand = configuration_operand or {'observations': [], 'proposal': 0}
     dist.init_process_group(backend=os.environ.get("BACKEND", "mesh"))
     mesh = DeviceMesh.from_group(dist.group.WORLD, "mps", mesh_dim_names=("tp",))
     partition.attach(mesh, tp=HEADS)
-    configuration = placement(mesh, 'tp',
-        {'function': 'transformer_forward_backward', 'steps': STEPS, 'layers': LAYERS, 'batch': BATCH,
-         'sequence': SEQ, 'width': DIM, 'heads': HEADS, 'ffn': FFN, 'sequence_parallel': SP},
-        None, parameters=parameters())
+    workload = {'function': 'transformer_forward_backward', 'steps': STEPS, 'layers': LAYERS, 'batch': BATCH,
+                'sequence': SEQ, 'width': DIM, 'heads': HEADS, 'ffn': FFN, 'sequence_parallel': SP}
+    configuration = placement(mesh, 'tp', workload, configuration_operand.get('placement'), parameters=parameters(),
+        observations=configuration_operand['observations'], proposal=configuration_operand['proposal'],
+        family=configuration_operand.get('family', workload))
     with torch.device("meta"):
         model = nn.Sequential(*(Block() for _ in range(LAYERS)))
         whole = torch.empty(BATCH, SEQ, DIM)
@@ -113,15 +115,23 @@ def main():
     x = drawn(partition.distribute_tensor(whole, mesh, [Shard(1) if SP else Replicate()], src_data_rank=None))
     from torch_mesh.declarations import Function, execution_sequence
     function = Function(lambda: step(model, x), parameters=model.parameters(),
-                        configuration=configuration['assignment']['operands'])
+                        configuration=configuration['assignment']['operands'],
+                        source_scope={'program': 'transformer_forward_backward'})
     program = execution_sequence([function] * STEPS)
-    bind(configuration, lambda: function.declare(mesh.get_group('tp')), program.realize)
+    def prepare():
+        program.realize()
+        return {'layouts': list(function.layout_choices)}
+    bind(configuration, lambda: function.declare(mesh.get_group('tp')), prepare)
     started = now()
     program.forward()
     completion = program.completion()
     record(configuration, completion, started, STEPS * BATCH * SEQ * DIM * x.element_size(),
            {'program': 'tp', 'steps': STEPS, 'parts': configuration['assignment']['parts']['tp']})
     dist.destroy_process_group()
+    state = next_configuration(configuration['observations'].declaration,
+        [*configuration['group'].configuration_observations, *configuration['observations'].poll()],
+        family=configuration['family']['source'])
+    return {'output': None, 'configuration': state}
 
 
 if __name__ == "__main__":
