@@ -1,7 +1,16 @@
-# Every wait, sync and guard a transaction pays at run time, 3f2a90b7 against main (2026-10-30)
+# Transaction waits and repeated encoding work, 3f2a90b7 against main (2026-10-30)
+
+Phase correction from tracing the ordinary callers: `Function` realization and
+`MeshRankPrepare` call the encode path before `MetalScheduleEnqueue`. The host
+range/page walks below are therefore repeated encoding work during preparation,
+not work done by each prepared numerical invocation. GPU waits and fences remain
+execution work. Their costs must not be combined into one runtime attribution.
+The missing shared command-graph handoff is recorded in
+[Compiler followups](compiler-followups-2026-10-30.md#dependency-handoff-through-command-lowering).
 
 Found by reading the issue path, the kernels and the bridge at 3f2a90b7 and at main (b2fe8bf3), not by running and
-counting. Preparation (declaration, compile_group and what it calls) is left out: it does not run per issue. A
+counting. Initial declaration and routing (`compile_group` and what it calls) are left out. Encoding is included
+below as host preparation work. A
 transaction is one physical piece: a SEND entry, its posted receive, its page units (16 KiB, block 1, so 4,096 for 64
 MiB) and the combine or copy that consumes it.
 
@@ -19,7 +28,7 @@ size; an all-reduce adds its combines' chunks, about 3,300 a rank at 64 MiB (the
 
 ## What changed, and the 64 MiB rates
 
-The bridge and the kernels are the same in both revisions; c56f21a9 changed only what the host does per issue:
+The bridge and the kernels are the same in both revisions; c56f21a9 changed host encoding and the barriers it emits:
 
 - removed: the unconditional encoder barriers (begin, after the presents, after the pool, after each direct
   dispatch), and the per-forward `lease_offset(comm->sums)` under `attach_lock`;
@@ -33,9 +42,10 @@ The bridge and the kernels are the same in both revisions; c56f21a9 changed only
   erased only by writes, so it also grows with issues.
 
 Measured once each, slowest rank, 3f2a90b7 against main at 51a6ff10: at 64 MiB all-reduce 7,511 -> 9,390 us, all-gather
-5,630 -> 6,569, exchange 5,633 -> 4,696, reduce-scatter 7,508 -> 6,574. The reading above fits: the barriers' removal
-lets calls overlap (the exchange and the reduce-scatter gain), and the per-record page walk is paid most by the issue
-with the most records (the all-reduce loses most). The walk's share of the time is not measured.
+5,630 -> 6,569, exchange 5,633 -> 4,696, reduce-scatter 7,508 -> 6,574. These earlier observations do not establish
+the page walk's contribution: their interval boundaries were not inspected in this source review. Changed GPU
+barriers and repeated host preparation are different costs. The proposed runtime attribution to the page walk is
+withdrawn pending evidence that the measured interval included it.
 
 ## The fix, in order
 
