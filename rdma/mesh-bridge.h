@@ -108,8 +108,10 @@ static inline void gate_retire(struct send_gate *gate,uint64_t id){ gate->retire
    the cumulative frame prefix retired by each completion. */
 struct lane_state { uint64_t sent,done,posted,got,frames_posted,frames_retired,frame_capacity; };
 /* An entry as the walk reads it from its call's tables: its immutable resolved span table, `unit` its first unit over
-   this holding; every dependency/completion prefix counts units. */
-struct taken { const struct mesh_dma_span *spans; struct mesh_units units,base,unit; const _Atomic uint64_t *word; };
+   this holding; every dependency/completion prefix counts units. A landing's `after` (mesh.h struct
+   mesh_zwoggle_entry), with its call's requirements each bit names (`afters`, channel h's at h) */
+struct taken { const struct mesh_dma_span *spans; struct mesh_units units,base,unit; const _Atomic uint64_t *word;
+               uint64_t after; const struct mesh_zwoggle_after *afters; };
 /* Unit p goes on lane p mod MESH_STREAM_LANES as unit p/lanes there.
    Only the contiguous completed prefix across both lanes becomes available. */
 _Static_assert(MESH_STREAM_LANES>=1 && MESH_STREAM_LANES<=2*MESH_STREAM_PAIRS,"a stream's lanes, of its pair");

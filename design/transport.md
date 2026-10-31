@@ -435,7 +435,11 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
   1 GiB registration key; payload does not round to an allocation page or hardware credit frame. Parallel paths
   and relay buffers use the same descriptor. Storage ownership must hold for every physical reader.
 - A SEND unit k is available when its selected word (0 selects `ready`) reaches `base+k+1`. A receive's optional
-  word permits first write at `base`; fresh disjoint destinations need no reciprocal publication. `landed` advances
+  word permits first write at `base`; fresh disjoint destinations need no reciprocal publication. A receive into pages
+  some SEND of the program reads also waits, before its first write, for every SEND before its call on those SENDs'
+  channels to complete (its `after`, mesh.h struct mesh_zwoggle_entry: each named channel's `sent` at the call's base
+  there), so a page is written again only once its last outgoing DMA read ended (pages-and-functions.md, Freeing
+  6-7); the bridge reads its own prefixes, no receipt. `landed` advances
   only through the completed prefix across both lanes, enabling the actual dependent consumer without a receipt.
 - Queue accounting retains two separate limits: `ceil(actual_length / 4096)` frames per request, and the outstanding
   request slots in the `MESH_LANE_UNITS` pin ring. Receive completions retire their actual cumulative frame charge.

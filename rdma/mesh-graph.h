@@ -91,4 +91,12 @@ int mesh_graph_chain(struct mesh_graph_chain *cursor, uint64_t q, uint64_t (*fol
                      uint64_t (*items)(const void *context, uint64_t node),
                      uint64_t (*weight)(const void *context, uint64_t node, uint64_t item), const void *context,
                      void (*leave)(void *consumer, uint64_t node, uint64_t left), void *consumer);
+/* Interval meets (a dependency's edges between the spans a set of writers and a set of readers touch): `a` n spans
+   [begin, end) sorted on begin, reach[i] the greatest end among a[0..i] (mesh_graph_span_reach); each a[i] span b
+   meets (a[i].begin < b.end and b.begin < a[i].end) told to meet(consumer, i), in descending i.  O(log n plus the
+   spans scanned back past b's begin, those it meets where a's spans are disjoint) */
+struct mesh_graph_span { uint64_t begin, end; };
+void mesh_graph_span_reach(const struct mesh_graph_span *a, size_t n, uint64_t *reach);
+void mesh_graph_meets(const struct mesh_graph_span *a, const uint64_t *reach, size_t n, struct mesh_graph_span b,
+                      void (*meet)(void *consumer, size_t i), void *consumer);
 #endif

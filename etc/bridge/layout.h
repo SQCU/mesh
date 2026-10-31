@@ -8,7 +8,7 @@
 #define MESH_ULA_PREFIX "fd6d:6573:68:"
 #define MESH_MODE 0666
 #define MESH_VERSION 135u
-#define MESH_LAYOUT 156u
+#define MESH_LAYOUT 157u
 #define MESH_STREAMS 32
 #define MESH_CLIENTS 64
 #define MESH_LANE_UNITS 4096u

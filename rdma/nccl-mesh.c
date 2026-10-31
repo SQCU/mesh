@@ -3246,7 +3246,8 @@ struct message { struct call *c; uint32_t step, frame; uint64_t entry; mesh_page
                  uint64_t needs; /* a landing's need past its channel's first send entry, 0 none (landing_needs) */
                  /* a SEND's landing it forwards: its channel (UINT32_MAX none) and its base past that channel's landing
                     count before the group (send_dependencies) */
-                 uint32_t dep_h; mesh_pages dep_rel; uint64_t dep_summed; };
+                 uint32_t dep_h; mesh_pages dep_rel; uint64_t dep_summed;
+                 uint64_t after; /* a landing's channels whose SENDs read the caller's pages it lands into (landing_readers) */ };
 /* a group's entries on one channel, each list in its order from its first (`first`: [0] the send list's, [1] the
    landing list's), its landing entries' gate (`word` a region offset, 0 none; `base` the value it reaches: a page
    count of the holding's `ready`, or the number of a group at the communicator's gate word: gate_of), and each list's
@@ -3493,6 +3494,7 @@ static ncclResult_t compile_group(struct ncclComm *comm, struct call *list, size
    (zumbled). Recording selects those tables; it does not allocate or place WRITE operands. Definition disposal owns
    their lifetime. */
 struct inflight;
+struct compiled;
 struct issue { struct schedule *plans; struct steps **steps; struct inflight *group; struct call *calls; size_t n; uint32_t repeats;
                /* its own pages (zappo, design/zorvek.md: the definition's buffers the communicator holds and its combines'
                   landing area, laid from `base`, the landing area at `area`), its span tables a lease (`tables`) */
@@ -3511,6 +3513,12 @@ struct issue { struct schedule *plans; struct steps **steps; struct inflight *gr
                   before the call on its send and landing lists, then the communicator's gates before it), their region
                   offset, and whether its entries are laid (present_group: at its first call, then only the bases) */
                uint64_t *bases, bases_at; int laid;
+               /* its calls' requirements a landing's `after` names (mesh.h struct mesh_zwoggle_after, a channel each,
+                  at region offset `afters_at`), and what each is found from (landing_readers): an issue's definition
+                  and binding instance whose SEND `k` on channel `q` is the last of those reading caller's pages its
+                  landings land into */
+               struct mesh_zwoggle_after *afters; uint64_t afters_at;
+               struct reader { const struct compiled *x; uint64_t instance; size_t k; uint32_t q; } *readers; size_t readers_count;
                struct owned owned; /* the leases its entries read, held from its placement to the next or its end */ };
 /* All operation kinds share the declared binding instances and routing basis. */
 struct compiled { struct call *calls; size_t n; uint64_t repeat; struct schedule *plans; double seconds; uint32_t period;
@@ -4013,6 +4021,8 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u) {
     }
     if (pass) u->bases = (uint64_t *)((char *)u->tables + length);
     length += ((2 * (size_t)comm->count + 1) * sizeof *u->bases + align - 1) / align * align;
+    if (pass) u->afters = (struct mesh_zwoggle_after *)((char *)u->tables + length);
+    length += ((size_t)comm->count * sizeof *u->afters + align - 1) / align * align;
   }
   u->laid = 0;
   size_t linked = 0;
@@ -4023,6 +4033,7 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u) {
       u->linking[h].offset = linked + (size_t)((char *)u->linking[h].tables - (char *)u->tables);
     }
   u->bases_at = lease_offset(u->bases);
+  u->afters_at = lease_offset(u->afters);
   for (uint32_t h = 0; h < comm->count; h++) schedule_units(plans + h, u->repeats);
   int error = landing_runs(comm, u);
   if (!error) {
@@ -4184,6 +4195,102 @@ static ncclResult_t present_publish(struct metal_program *program, struct channe
   return ncclSuccess;
 }
 
+/* whether byte `at` is in issue v's own pages (zappo: from `zeeb` to its use count at `counted`) */
+static int own_page(const struct issue *v, uintptr_t at) {
+  return v->zeeb && at >= (uintptr_t)v->zeeb && at < (uintptr_t)v->zeeb + (v->counted.offset - v->base.offset);
+}
+/* design/pages-and-functions.md Freeing 6-7 (a page written again only once its last outgoing DMA read ended): for
+   each of issue u's landings its `after`, the channels on which a SEND of an issue `plan` lays reads the caller's
+   bytes it lands into (two calls are given the same pages where they bind the same buffers: a definition's issues for
+   one binding instance, the stream laying one while another's call is on the wire, zorvek; or two definitions'), and
+   in u->readers, for each such issue's definition, binding instance and channel, the last of those SENDs (mesh-graph.h
+   mesh_graph_meets over u's landings).  An issue's own pages are no other issue's, and its previous call's SENDs
+   completed before it is taken again (zumbled): no requirement.  Every function's local reads of the pages are, in
+   stream order, before the call's link (zinth).  Once for each issue the plan prepares, when it has laid them all; one
+   the stream lays later takes its instance's prepared issue's (landing_readers_of) */
+struct landing_span { struct mesh_graph_span span; struct message *m; };
+static int landing_span_order(const void *left, const void *right) {
+  const struct landing_span *a = left, *b = right;
+  return (a->span.begin > b->span.begin) - (a->span.begin < b->span.begin);
+}
+struct landing_meet { struct landing_span *spans; uint32_t q; int met; };
+static void landing_met(void *consumer, size_t i) {
+  struct landing_meet *at = consumer;
+  at->spans[i].m->after |= 1ull << at->q; at->met = 1;
+}
+static ncclResult_t landing_readers(const struct ncclComm *comm, const struct plan *plan, struct issue *u) {
+  size_t n = 0, room = 0;
+  for (uint32_t h = 0; h < comm->count; h++) n += u->plans[h].ins;
+  struct landing_span *spans = malloc((n + 1) * sizeof *spans);
+  uint64_t *reach = malloc((n + 1) * sizeof *reach);
+  if (!spans || !reach) { free(spans); free(reach); return fail(ncclSystemError, "out of memory"); }
+  n = 0;
+  for (uint32_t h = 0; h < comm->count; h++)
+    for (size_t k = 0; k < u->plans[h].ins; k++) {
+      struct message *m = u->plans[h].in + k;
+      const uintptr_t begin = (uintptr_t)address_of(m->data);
+      m->after = 0;
+      if (m->bytes && !own_page(u, begin)) spans[n++] = (struct landing_span){{begin, begin + m->bytes}, m};
+    }
+  qsort(spans, n, sizeof *spans, landing_span_order);
+  struct mesh_graph_span *a = malloc((n + 1) * sizeof *a);
+  ncclResult_t result = a ? ncclSuccess : fail(ncclSystemError, "out of memory");
+  for (size_t i = 0; a && i < n; i++) a[i] = spans[i].span;
+  if (a) mesh_graph_span_reach(a, n, reach);
+  u->readers_count = 0;
+  for (uint32_t g = 0; !result && n && g < plan->view.groups; g++) {
+    const struct compiled *x = plan->group + g;
+    for (size_t j = 0; !result && j < x->laid_count; j++)
+      for (uint32_t q = 0; !result && q < comm->count; q++) {
+        const struct issue *v = x->laid[j];
+        const struct schedule *p = v->plans + q;
+        size_t last = SIZE_MAX;
+        for (size_t k = 0; k < p->outs; k++) {
+          const uintptr_t first = (uintptr_t)address_of(p->out[k].data);
+          if (!p->out[k].bytes || own_page(v, first)) continue;
+          struct landing_meet at = {spans, q, 0};
+          mesh_graph_meets(a, reach, n, (struct mesh_graph_span){first, first + p->out[k].bytes}, landing_met, &at);
+          if (at.met) last = k;
+        }
+        if (last == SIZE_MAX) continue;
+        size_t r = 0;
+        while (r < u->readers_count && !(u->readers[r].x == x && u->readers[r].instance == v->instance && u->readers[r].q == q)) r++;
+        if (r < u->readers_count) { if (last > u->readers[r].k) u->readers[r].k = last; }
+        else if (grow(&u->readers, &room, u->readers_count, sizeof *u->readers)) result = fail(ncclSystemError, "out of memory");
+        else u->readers[u->readers_count++] = (struct reader){x, v->instance, last, q};
+      }
+  }
+  free(spans); free(reach); free(a);
+  return result;
+}
+/* issue u, laid by the stream (zorvek), takes the readers of `from`, its definition's prepared issue of its binding
+   instance: the same caller's pages at the same places in its lists, its own pages no other issue's */
+static ncclResult_t landing_readers_of(const struct ncclComm *comm, struct issue *u, const struct issue *from) {
+  for (uint32_t h = 0; h < comm->count; h++)
+    for (size_t k = 0; k < u->plans[h].ins; k++) u->plans[h].in[k].after = from->plans[h].in[k].after;
+  free(u->readers);
+  u->readers = from->readers_count ? malloc(from->readers_count * sizeof *u->readers) : NULL;
+  if (from->readers_count && !u->readers) return fail(ncclSystemError, "out of memory");
+  if (u->readers) memcpy(u->readers, from->readers, from->readers_count * sizeof *u->readers);
+  u->readers_count = from->readers_count;
+  return ncclSuccess;
+}
+/* issue u's call's requirements (mesh.h struct mesh_zwoggle_after), from its readers: on each channel, the end of the
+   last SEND of the caller's pages its landings land into in the latest call of each other issue that has had one,
+   that issue's laid ends (schedule_laid); 0, none, where no other has */
+static void landing_afters(const struct ncclComm *comm, struct issue *u) {
+  for (uint32_t q = 0; q < comm->count; q++) u->afters[q].base = 0;
+  for (size_t r = 0; r < u->readers_count; r++) {
+    const struct reader *a = u->readers + r;
+    for (size_t j = 0; j < a->x->laid_count; j++) {
+      const struct issue *v = a->x->laid[j];
+      if (v == u || !v->laid || v->instance != a->instance) continue;
+      const uint64_t end = pages_to_word(v->plans[a->q].out[a->k].end);
+      if (end > u->afters[a->q].base) u->afters[a->q].base = end;
+    }
+  }
+}
+
 static ncclResult_t present_group(struct metal_program *program, struct ncclComm *comm, struct issue *owner, struct schedule *plans,
                                   int direct) {
   struct mesh_ctx *context = &comm->attach->context;
@@ -4192,6 +4299,11 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
     owner->bases[2 * h] = pages_to_word(comm->channels[h].out); owner->bases[2 * h + 1] = pages_to_word(comm->channels[h].in);
   }
   owner->bases[2 * comm->count] = comm->gates;
+  /* design/pages-and-functions.md Freeing 6-7: each channel's requirement a landing's `after` names (landing_readers),
+     its `sent` word laid once, its value the call's (landing_afters) */
+  for (uint32_t h = 0; !owner->laid && h < comm->count; h++)
+    owner->afters[h].word = (uint64_t)((char *)comm->channels[h].view.sent - (char *)context->M);
+  landing_afters(comm, owner);
   /* every entry's payload and descriptor tables are held by its owner since its preparation, a prepared WRITE (its
      plan) or its issue (owned_begin), each a registration scope open on its leases: a present only advances its
      channel's use, before anything is presented */
@@ -4243,14 +4355,15 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
         metal_resident(program, plan->source_ready.buffer);
       }
       if (relative) entry.base -= owner->bases[relative - 1];
-      records[k] = (struct mesh_zwoggle_entry){entry, relative};
+      records[k] = (struct mesh_zwoggle_entry){entry, relative, 0};
     }
     /* a landing's gate (gate_of): the channel's `ready` past its own send units, or the communicator's gate past its
        gates; ungated, none */
     const uint64_t landing = p->word == comm->channels[h].ready_at ? 1 + 2 * (uint64_t)h : p->word == comm->gate_at ? 1 + 2 * (uint64_t)comm->count : 0;
     for (size_t k = 0; !owner->laid && k < p->ins; k++)
       records[p->outs + k] = (struct mesh_zwoggle_entry){{p->in[k].table, pages_to_word(p->in[k].pages), p->word,
-                                                          p->base - (landing ? owner->bases[landing - 1] : 0)}, p->word ? landing : 0};
+                                                          p->base - (landing ? owner->bases[landing - 1] : 0)}, p->word ? landing : 0,
+                                                         p->in[k].after};
     if (!p->word)
       for (size_t k = 0; k < p->ins; k++) {
         const struct message *m = p->in + k;
@@ -4260,6 +4373,7 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
     atomic_store_explicit(&tables->next, 0, memory_order_relaxed);
     tables->entries[0] = laid->region + sizeof *tables; tables->entries[1] = tables->entries[0] + p->outs * sizeof *records;
     tables->count[0] = p->outs; tables->count[1] = p->ins; tables->bases = owner->bases_at;
+    tables->after = owner->afters_at;
     ch->tables = laid->region; ch->after = owner->linkable; ch->after_at = laid->offset + offsetof(struct mesh_zwoggle, next);
     if (direct) { const ncclResult_t published = present_publish(program, ch, p); if (published) return published; }
   }
@@ -4476,6 +4590,7 @@ static ncclResult_t zorvek(struct ncclComm *comm, struct compiled *x, int remote
   if (!u) {
     ncclResult_t result = zoblimp(comm, x, instance, remote, &u);
     if (!result && remote) result = issue_place(comm, u);
+    if (!result && remote) result = landing_readers_of(comm, u, x->laid[instance]);
     if (result) return result;
   }
   for (size_t i = 0; i < n; i++) {
@@ -4552,7 +4667,7 @@ static void issue_free(struct ncclComm *comm, struct issue *u) {
   if (u->tables) ncclMemFree(u->tables);
   if (u->progress) ncclMemFree(u->progress);
   if (u->zeeb) ncclMemFree(u->zeeb);
-  free(u->steps); free(u->calls); free(u->group); free(u->landings); free(u->sent); free(u->landed); free(u->linking); free(u);
+  free(u->steps); free(u->calls); free(u->group); free(u->landings); free(u->sent); free(u->landed); free(u->linking); free(u->readers); free(u);
 }
 /* a group done with: what its calls own (the list is its issue's) */
 static void inflight_free(struct inflight *g) { parts_free(g->list, g->n); }
@@ -6104,6 +6219,9 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
     if (!result) made->seconds[g] = x->seconds;
     for (uint32_t h = 0; h < comm->count && !result; h++) { made->entries[g][0] += x->plans[h].outs; made->entries[g][1] += x->plans[h].ins; }
   }
+  /* each prepared issue's landings' readers, once the plan has laid every issue (landing_readers) */
+  for (uint32_t g = 0; made && g < groups && !result; g++)
+    for (size_t j = 0; j < made->group[g].laid_count && !result; j++) result = landing_readers(comm, made, made->group[g].laid[j]);
   if (!result && made) {
     ncclMeshCall *declaration=malloc((size_t)count*sizeof *declaration);
     if(!declaration)result=fail(ncclSystemError,"retaining realized routing declaration");

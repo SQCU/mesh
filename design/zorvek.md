@@ -149,3 +149,33 @@ What runs (mesh.h struct mesh_zwoggle, nccl-mesh.c present_group and zinth, mesh
   Measured on all five: chain service exits 0, bandwidth 45 of 45 in each of three runs, every rate within main's
   band measured the same hour (two runs' scattered outliers, 2-3x on one case each, moved between cases and did not
   repeat).
+
+## A landing's `after`: pages two calls are given
+
+Where two calls are given the same pages, a later call's receive could be posted into them while an earlier call's
+SEND of them was still on the wire: no call's completion waits on `sent`, and consecutive calls of one definition run
+on different issues over the same caller's buffers (zorvek lays another where the last is not zumbled, which it never
+is at the next call: its walk leaves its tables only once that call links). A relay forwarding from its recvbuff and an
+in-place operand's SEND are the cases; the next call's landing there needs that SEND completed
+(design/pages-and-functions.md Freeing 6-7: a page is written again only once its last outgoing DMA read ended).
+
+- landing_readers (nccl-mesh.c), at an issue's first call: each landing's `after`, the channels on which a SEND of any
+  issue the program lays reads the caller's bytes it lands into, and for each such definition, binding instance and
+  channel the last of those SENDs. An issue's own pages are no other's, and its previous call's SENDs all completed
+  before it is taken again (zumbled), so they need nothing.
+- landing_afters, each call: on each channel, the end of that SEND in the latest call of every other issue that has had
+  one (their laid ends), into the call's struct mesh_zwoggle_after; the bridge posts no unit of a landing whose bit is
+  set until that channel's `sent` reaches it (mesh-link.c after_holds). MESH_LAYOUT 157.
+- The pages' local reads (zelloth, the caller's kernels) are before the call's link in stream order: the barrier before
+  zinth's first store orders them, and item 5 keeps it.
+- The landing gate is already inert: its store is encoded before that barrier, so the bridge never reads a landing
+  entry before the gate holds. Deleting it (item 7 above) removes no order.
+- Measured first in a coarser form (test-after, not landed): every SEND before the call on each such channel, the
+  issue's own included. It deadlocked the chain service on all five: m5ult4's and m5ult1's landing walks each held for
+  SENDs the other's held receives kept from completing, SENDs past the real reader in the channel's order. The exact
+  form (the last real reader, other issues' only), on all five, 2026-10-31: chain service exits 0, bandwidth 45 of 45
+  in each of five runs. With the readers found at an issue's first call (test-after2), the issues the stream lays
+  mid-loop scanned every SEND of the program inside the timed calls, and 64 MiB reduce-scatter and all-reduce ran up
+  to 1.5x slower in two of three runs; found at preparation (mesh-graph.h mesh_graph_meets) and copied by an issue the
+  stream lays from its instance's prepared one, every 64 MiB rate is within main's band (reduce-scatter 2741 and 2756
+  us, all-reduce 4960 and 4884, against 2722 to 2760 and 4892 to 4897).

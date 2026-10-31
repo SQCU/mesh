@@ -116,10 +116,21 @@ static struct taken *walk_chain(struct walk *w,struct mesh_stream *x,int land,st
   if(!mesh_graph_chain(&w->chain,q.n,chain_follow,chain_items,chain_weight,&c,chain_leave,&x->taken[land]))return NULL;
   const struct mesh_zwoggle_entry z=*entry_at(w->chain.node,land,w->chain.item);
   const struct mesh_entry e=z.entry;
-  const uint64_t base=e.base+(z.relative?((const uint64_t *)((const char *)M+tables_at(w->chain.node)->bases))[z.relative-1]:0);
+  const struct mesh_zwoggle *t=tables_at(w->chain.node);
+  const uint64_t base=e.base+(z.relative?((const uint64_t *)((const char *)M+t->bases))[z.relative-1]:0);
   w->current=(struct taken){(const struct mesh_dma_span *)((const char *)M+e.spans),{e.units},{base},{w->chain.before},
-                            e.word?stream_words(e.word):land?NULL:&x->ready};
+                            e.word?stream_words(e.word):land?NULL:&x->ready,
+                            land?z.after:0,land && z.after?(const struct mesh_zwoggle_after *)((const char *)M+t->after):NULL};
   return &w->current;
+}
+/* whether a landing's `after` holds (mesh.h struct mesh_zwoggle_entry): on each channel it names, the last SEND an
+   earlier call laid of its pages completed, that channel's `sent` at its call's requirement there; reads alone */
+static int after_holds(const struct taken *e){
+  for(uint64_t a=e->after;a;a&=a-1){
+    const struct mesh_zwoggle_after *r=e->afters+__builtin_ctzll(a);
+    if(mesh_units_lt(mesh_units_load(stream_words(r->word)),(struct mesh_units){r->base}))return 0;
+  }
+  return 1;
 }
 /* design/transport.md section 14: a walk's count (`sent` or `landed`, in units of the holding) stored where its
    stream's units completed in order moved (`through`: SENDs or landings, lanes_through) */
@@ -249,6 +260,7 @@ static void stream_post(struct port *port,uint32_t t,uint32_t served){
     const struct taken *e=walk_chain(w,x,1,q);
     if(!e)break;
     if(e->word && mesh_units_lt(mesh_units_load(e->word),e->base))break;
+    if(!after_holds(e))break;
     const struct mesh_dma_span bytes=e->spans[mesh_units_sub(q,e->unit).n];
     const struct frames each=frames_of(bytes.bytes);
     if(((state->frames_posted-state->frames_retired)&MESH_GATE_MASK)+each.n>state->frame_capacity)break;

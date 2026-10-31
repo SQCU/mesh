@@ -397,3 +397,13 @@ int mesh_graph_row(const uint32_t *first, const uint32_t *head, uint32_t v, int 
   }
   return 0;
 }
+
+void mesh_graph_span_reach(const struct mesh_graph_span *a, size_t n, uint64_t *reach) {
+  for (size_t i = 0; i < n; i++) reach[i] = i && reach[i - 1] > a[i].end ? reach[i - 1] : a[i].end;
+}
+void mesh_graph_meets(const struct mesh_graph_span *a, const uint64_t *reach, size_t n, struct mesh_graph_span b,
+                      void (*meet)(void *consumer, size_t i), void *consumer) {
+  size_t low = 0, high = n;
+  while (low < high) { const size_t mid = low + (high - low) / 2; if (a[mid].begin < b.end) low = mid + 1; else high = mid; }
+  for (size_t i = low; i-- > 0 && reach[i] > b.begin;) if (a[i].end > b.begin) meet(consumer, i);
+}

@@ -104,9 +104,16 @@ _Static_assert(sizeof(struct mesh_entry)==MESH_SIZEOF_MESH_ENTRY,"mesh_entry ABI
    its own `base` plus, where `relative` is not 0, the call's base relative - 1 (its place where the holder counts it:
    a list's units before the call, the holder's gates before it), so a laid issue's entries are written once and each
    of its calls writes its bases alone. 73b5df63's compiled program (a declared call order and each call's prefixes in
-   it) is deleted: a call's pages are the allocator's (zappo), not a position in an order, so no order compiles them */
-struct mesh_zwoggle_entry { struct mesh_entry entry; uint64_t relative; };
-struct mesh_zwoggle { _Atomic uint64_t next; uint64_t entries[2], count[2], bases; };
+   it) is deleted: a call's pages are the allocator's (zappo), not a position in an order, so no order compiles them.
+   A landing entry's `after` (design/pages-and-functions.md Freeing 6-7, a page written again only once its last
+   outgoing DMA read ended): bit h set where a SEND the holder's program lays on its channel h reads bytes the entry
+   lands into, so that no unit of it is posted before the call's struct mesh_zwoggle_after for channel h holds
+   (`after`: their region offset, channel h's at h): that channel's `sent` (`word`, a region offset) at `base`, the end
+   there of the last SEND an earlier call has laid of those pages, so it has completed: a whole requirement, the
+   holder's for those pages alone (0: none; a SEND entry's is 0) */
+struct mesh_zwoggle_after { uint64_t word, base; };
+struct mesh_zwoggle_entry { struct mesh_entry entry; uint64_t relative, after; };
+struct mesh_zwoggle { _Atomic uint64_t next; uint64_t entries[2], count[2], bases, after; };
 struct mesh_units { uint64_t n; };
 static inline struct mesh_units mesh_units_add(struct mesh_units a,struct mesh_units b){ return (struct mesh_units){a.n+b.n}; }
 static inline struct mesh_units mesh_units_sub(struct mesh_units a,struct mesh_units b){ return (struct mesh_units){a.n-b.n}; }
