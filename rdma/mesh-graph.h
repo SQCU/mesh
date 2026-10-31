@@ -184,13 +184,21 @@ struct mesh_graph_span { uint64_t begin, end; };
 void mesh_graph_span_reach(const struct mesh_graph_span *a, size_t n, uint64_t *reach);
 void mesh_graph_meets(const struct mesh_graph_span *a, const uint64_t *reach, size_t n, struct mesh_graph_span b,
                       void (*meet)(void *consumer, size_t i), void *consumer);
+/* Several partitions' graphs joined into one (a group's calls, each its steps' prior rows: nccl-mesh.c zabbadoo_plan):
+   partition p's vertices the joined [base[p], base[p + 1]), its vertex j's row [first[p][j], first[p][j + 1]) of
+   head[p][] (first[p] NULL: a partition with no rows); each marked vertex's row kept, mapped to the joined vertices,
+   its edges to unmarked vertices counted in *outside and dropped; *rows (base[parts] + 1 of them) and *heads
+   malloc'd, the caller's to free.  0; ENOMEM */
+int mesh_graph_join(uint32_t parts, const size_t *base, const uint32_t *const *first, const uint32_t *const *head,
+                    const unsigned char *marked, size_t **rows, uint32_t **heads, size_t *outside);
 /* Classes of vertices ordered by the edges between them (a group's sums, each a class of its steps: nccl-mesh.c
    zabbadoo_plan): vertex v's row [first[v], first[v + 1]) of head[], class_of[v] its class (UINT32_MAX: none); an edge
-   from class a to class b != a wherever a vertex of b's row reaches one of a, kept in *from and *to (*edges of them,
-   malloc'd: the caller frees them).  span[k] class k's range and part[k] its partition: two classes of different
-   partitions whose spans meet, which no edge orders, are refused.  place[k] k's place in a topological order of the
-   edges (mesh_graph_order).  0; 1 where spans of two partitions meet or the edges hold a cycle; ENOMEM */
+   from class a to class b != a wherever a vertex of b's row reaches one of a.  span[k] class k's range and part[k] its
+   partition: two classes of different partitions whose spans meet, which no edge orders, are refused.  place[k] k's
+   place in a topological order of the edges (mesh_graph_order); class k's in-edges, each class once, its row
+   [(*in_first)[k], (*in_first)[k + 1]) of *in_from (both malloc'd, the caller's to free).  0; 1 where spans of two
+   partitions meet or the edges hold a cycle; ENOMEM */
 int mesh_graph_classes(uint32_t vertices, const size_t *first, const uint32_t *head, const uint32_t *class_of,
                        uint32_t classes, const struct mesh_graph_span *span, const uint32_t *part, uint32_t *place,
-                       uint32_t **from, uint32_t **to, size_t *edges);
+                       size_t **in_first, uint32_t **in_from);
 #endif

@@ -4797,7 +4797,7 @@ static int tile_landing_order(const void *left,const void *right) {
    A WRITE's landings are copies (its landing records are a fused crossing's alone: complete), a frame train's
    (`repeats` past 1) every frame's entries, so zelloq past the last awaits them all; a sum is keyed on its step, not
    its frame, so a frame train with a sum fails as a value (zabbadoo_plan). */
-struct zsum { const struct message *m; uint32_t h; uint64_t at; uint32_t depth; };
+struct zsum { const struct message *m; uint32_t h; uint64_t at; uint32_t depth, call; };
 static int zsum_order(const void *left, const void *right) {
   const struct zsum *a = left, *b = right;
   const struct mesh_step *x = a->m->c->bound->steps + a->m->step, *y = b->m->c->bound->steps + b->m->step;
@@ -4841,147 +4841,100 @@ static ncclResult_t zabbadoo_plan(struct ncclComm *comm, struct issue *u) {
       if (u->repeats != 1) return fail(ncclInvalidUsage, "%s: a combine in a frame train (its sums are keyed on their steps)", call_name(m->c));
       count++;
     }
+  /* the arrays the plan builds, freed together on every way out (`made` the plan's, kept) */
   struct zsum *sums = malloc((count + 1) * sizeof *sums);
   struct metal_zelloth_input *in = malloc((count + 1) * sizeof *in);
-  if (!sums || !in) { free(sums); free(in); return fail(ncclSystemError, "out of memory"); }
+  struct metal_zelloth_sum *group = malloc((count + 1) * sizeof *group);
+  const struct call **of = malloc((count + 1) * sizeof *of);
+  size_t *first_step = malloc((u->n + 1) * sizeof *first_step), *rows = NULL, *in_first = NULL, steps = 0, groups = 0, outside = 0;
+  const uint32_t **firsts = malloc((u->n + 1) * sizeof *firsts), **priors = malloc((u->n + 1) * sizeof *priors);
+  uint32_t *heads = NULL, *depth = NULL, *class_of = NULL, *part = NULL, *place = NULL, *in_from = NULL;
+  unsigned char *marked = NULL;
+  struct zgroup *G = malloc((count + 1) * sizeof *G);
+  struct mesh_graph_span *span = malloc((count + 1) * sizeof *span);
+  size_t *laid = malloc((count + 1) * sizeof *laid), *position = malloc((count + 1) * sizeof *position);
+  struct metal_zelloth_wait *listed = NULL;
+  ncclResult_t result = sums && in && group && of && first_step && firsts && priors && G && span && laid && position ? ncclSuccess
+                                                                                                                       : fail(ncclSystemError, "out of memory");
   count = 0;
-  for (uint32_t h = 0; h < comm->count; h++)
+  for (uint32_t h = 0; !result && h < comm->count; h++)
     for (size_t k = 0; k < u->plans[h].ins; k++) {
       const struct message *m = u->plans[h].in + k;
-      if (m->c->bound->steps[m->step].op == MESH_STEP_REDUCE) sums[count++] = (struct zsum){m, h, k, 0};
+      if (m->c->bound->steps[m->step].op != MESH_STEP_REDUCE) continue;
+      size_t i = 0;
+      while (i < u->n && u->calls + i != m->c) i++;
+      if (i == u->n) { result = fail(ncclInternalError, "%s: a combine of no call of its group", call_name(m->c)); break; }
+      sums[count++] = (struct zsum){m, h, k, 0, (uint32_t)i};
     }
-  /* each step a vertex: its call's place among the issue's steps plus its own */
-  size_t *first_step = malloc((u->n + 1) * sizeof *first_step), steps = 0, groups = 0;
-  if (!first_step) { free(sums); free(in); return fail(ncclSystemError, "out of memory"); }
-  for (size_t i = 0; i < u->n; i++) { first_step[i] = steps; steps += u->calls[i].bound ? u->calls[i].bound->count : 0; }
-  uint32_t *call_of = malloc((count + 1) * sizeof *call_of);
-  int refused = call_of ? 0 : -1;
-  for (size_t e = 0; refused == 0 && e < count; e++) {
-    size_t i = 0;
-    while (i < u->n && u->calls + i != sums[e].m->c) i++;
-    if (i == u->n) refused = 1; else call_of[e] = (uint32_t)i;
+  /* each step a vertex, its call's place among the issue's steps plus its own, the sums' steps marked, and their
+     prior rows joined (mesh-graph.h mesh_graph_join); a prior that is no sum's step is a COPY's landing, whose wait in
+     the kernel, on another rank's progress, held every threadgroup while the sums laid after it starved (test-ov,
+     2026-10-31: bandwidth's GPU wait ended in zelloth) */
+  for (size_t i = 0; !result && i < u->n; i++) {
+    const struct steps *st = u->calls[i].bound;
+    first_step[i] = steps; steps += st ? st->count : 0;
+    firsts[i] = st ? st->prior_first : NULL; priors[i] = st ? st->prior : NULL;
   }
-  /* each sum step's depth among them (mesh-graph.h mesh_graph_depth over their prior rows): steps over one range fold
-     into one sum only at one depth, so a step that follows another through a third sum folds in a later sum, and the
-     sums hold no cycle (bandwidth's all-reduce on two ranks went to the pool for one: test-zd, 2026-10-31) */
-  unsigned char *marked = refused ? NULL : calloc(steps + 1, 1);
-  size_t *drows = refused ? NULL : calloc(steps + 2, sizeof *drows);
-  uint32_t *dheads = NULL, *depth = refused ? NULL : malloc((steps + 1) * sizeof *depth);
-  if (refused == 0 && (!marked || !drows || !depth)) refused = -1;
-  for (size_t e = 0; refused == 0 && e < count; e++) marked[first_step[call_of[e]] + sums[e].m->step] = 1;
-  for (size_t e = 0; refused == 0 && e < count; e++) {
-    const struct steps *st = sums[e].m->c->bound;
-    const uint32_t x = sums[e].m->step;
-    for (uint32_t d = st->prior_first[x]; d < st->prior_first[x + 1]; d++)
-      drows[first_step[call_of[e]] + x + 1] += marked[first_step[call_of[e]] + st->prior[d]];
-  }
-  for (size_t v = 0; refused == 0 && v < steps; v++) drows[v + 1] += drows[v];
-  if (refused == 0 && !(dheads = malloc((drows[steps] + 1) * sizeof *dheads))) refused = -1;
-  for (size_t e = 0; refused == 0 && e < count; e++) {
-    const struct steps *st = sums[e].m->c->bound;
-    const uint32_t x = sums[e].m->step;
-    size_t at = drows[first_step[call_of[e]] + x];
-    for (uint32_t d = st->prior_first[x]; d < st->prior_first[x + 1]; d++)
-      if (marked[first_step[call_of[e]] + st->prior[d]]) dheads[at++] = (uint32_t)(first_step[call_of[e]] + st->prior[d]);
-  }
-  if (refused == 0) {
-    const int deep = mesh_graph_depth((uint32_t)steps, drows, dheads, marked, depth);
-    if (deep) refused = deep == ENOMEM ? -1 : 1;
-  }
-  for (size_t e = 0; refused == 0 && e < count; e++) sums[e].depth = depth[first_step[call_of[e]] + sums[e].m->step];
-  free(marked); free(drows); free(dheads); free(depth); free(call_of);
-  if (refused) { free(first_step); free(sums); free(in);
-    return fail(refused < 0 ? ncclSystemError : ncclInvalidUsage, refused < 0 ? "out of memory" : "a combine's steps hold a cycle, or one is no call of the group's"); }
-  qsort(sums, count, sizeof *sums, zsum_order);
-  /* every sum's inputs share one run structure, checked before anything is encoded */
-  for (size_t a = 0, b = 0; a < count; a = b) {
-    for (b = a + 1; b < count && zsum_same(sums + a, sums + b); b++) {
+  if (!result) first_step[u->n] = steps;
+  if (!result && !(marked = calloc(steps + 1, 1))) result = fail(ncclSystemError, "out of memory");
+  for (size_t e = 0; !result && e < count; e++) marked[first_step[sums[e].call] + sums[e].m->step] = 1;
+  if (!result && mesh_graph_join((uint32_t)u->n, first_step, firsts, priors, marked, &rows, &heads, &outside))
+    result = fail(ncclSystemError, "out of memory");
+  if (!result && outside) result = fail(ncclInvalidUsage, "%s: a combine over a COPY's landing", call_name(sums[0].m->c));
+  /* each sum step's depth among them (mesh-graph.h mesh_graph_depth): steps over one range fold into one sum only at one
+     depth, so a step that follows another through a third sum folds in a later sum, and the sums hold no cycle
+     (bandwidth's all-reduce on two ranks had one: test-zd, 2026-10-31) */
+  if (!result && !(depth = malloc((steps + 1) * sizeof *depth))) result = fail(ncclSystemError, "out of memory");
+  if (!result && mesh_graph_depth((uint32_t)steps, rows, heads, marked, depth))
+    result = fail(ncclInvalidUsage, "%s: a combine's steps hold a cycle", call_name(sums[0].m->c));
+  for (size_t e = 0; !result && e < count; e++) sums[e].depth = depth[first_step[sums[e].call] + sums[e].m->step];
+  if (!result) qsort(sums, count, sizeof *sums, zsum_order);
+  /* every sum's inputs share one run structure */
+  for (size_t a = 0, b = 0; !result && a < count; a = b)
+    for (b = a + 1; !result && b < count && zsum_same(sums + a, sums + b); b++) {
       const struct message *x = sums[a].m, *y = sums[b].m;
       int same = x->landing_count == y->landing_count;
       for (size_t r = 0; same && r < x->landing_count; r++)
         same = x->landings[r].first == y->landings[r].first && x->landings[r].elements == y->landings[r].elements;
-      if (!same) { free(first_step); free(sums); free(in); return fail(ncclInvalidUsage, "%s: one sum's inputs land in runs that differ", call_name(x->c)); }
+      if (!same) result = fail(ncclInvalidUsage, "%s: one sum's inputs land in runs that differ", call_name(x->c));
     }
-  }
   /* the sums ordered as the tracks pool ordered their combines (each after every earlier overlapping receive, its
-     step's prior row): a sum over an earlier sum's result waits for that sum's done word, its result the later one's
-     own operand (struct metal_zelloth_wait), the sums laid in a topological order (mesh-graph.h mesh_graph_order)
-     so a wait names an earlier sum's blocks, which no threadgroup waiting on it holds.  Two
-     steps that combine into overlapping ranges, not one sum, folded each from the rank's own operand, lost one's
-     contributions (bandwidth's 16 MiB reduce-scatter max, 4.0 against 5.0: a01e4cd4).  Sums of two calls that overlap
-     (no prior relates them), a cycle among the sums (none, past their depths), or a sum over a COPY's landing: the
-     plan fails as a value */
-  /* each sum a class of its steps (mesh-graph.h mesh_graph_classes): a step its call's place among the issue's steps
-     plus its own, its row its prior receives, its class's span its result's bytes and its partition its call */
-  struct zgroup *G = malloc((count + 1) * sizeof *G);
-  if (!G) { free(first_step); free(sums); free(in); return fail(ncclSystemError, "out of memory"); }
-  for (size_t a = 0, b = 0; a < count && !refused; a = b) {
+     step's prior row): each sum a class of its steps (mesh-graph.h mesh_graph_classes), its span its result's bytes,
+     its partition its call; a sum over an earlier sum's result waits for that sum's done word, its result the later
+     one's own operand (struct metal_zelloth_wait), the sums laid in a topological order so a wait names an earlier
+     sum's blocks, which no threadgroup waiting on it holds.  Two steps that combine into overlapping ranges, not one
+     sum, folded each from the rank's own operand, lost one's contributions (bandwidth's 16 MiB reduce-scatter max, 4.0
+     against 5.0: a01e4cd4).  Sums of two calls that overlap (no prior relates them): the plan fails as a value */
+  for (size_t a = 0, b = 0; !result && a < count; a = b) {
     for (b = a + 1; b < count && zsum_same(sums + a, sums + b); b++) {}
-    size_t i = 0;
-    while (i < u->n && u->calls + i != sums[a].m->c) i++;
-    if (i == u->n) refused = 1;
-    else G[groups++] = (struct zgroup){a, b, (uint32_t)i, 0};
-  }
-  uint32_t *class_of = refused ? NULL : malloc((steps + 1) * sizeof *class_of), *part = NULL, *place = NULL, *edge_from = NULL, *edge_to = NULL;
-  size_t *rows = refused ? NULL : calloc(steps + 2, sizeof *rows), edge_count = 0;
-  struct mesh_graph_span *span = refused ? NULL : malloc((groups + 1) * sizeof *span);
-  if (!refused && (!class_of || !rows || !span || !(part = malloc((groups + 1) * sizeof *part)) || !(place = malloc((groups + 1) * sizeof *place))))
-    refused = -1;
-  uint32_t *heads = NULL;
-  for (size_t v = 0; refused == 0 && v < steps; v++) class_of[v] = UINT32_MAX;
-  for (size_t k = 0; refused == 0 && k < groups; k++) {
-    const struct message *m = sums[G[k].a].m;
+    const struct message *m = sums[a].m;
     const uintptr_t at = (uintptr_t)address_of(shifted(m->c->bound->buffer[m->c->bound->steps[m->step].buffer], m->offset));
-    span[k] = (struct mesh_graph_span){at, at + m->bytes}; part[k] = G[k].call;
-    for (size_t e = G[k].a; e < G[k].b; e++) {
-      const struct message *x = sums[e].m;
-      const struct steps *st = x->c->bound;
-      const size_t v = first_step[G[k].call] + x->step;
-      class_of[v] = (uint32_t)k;
-      rows[v + 1] = st->prior_first[x->step + 1] - st->prior_first[x->step];
-      /* a sum over a COPY's landing: its wait in the kernel, on another rank's progress, held every threadgroup
-         while the sums laid after it starved (test-ov, 2026-10-31: bandwidth's GPU wait ended in zelloth); refused */
-      for (uint32_t d = st->prior_first[x->step]; d < st->prior_first[x->step + 1]; d++)
-        if (st->steps[st->prior[d]].op != MESH_STEP_REDUCE) refused = 1;
-    }
+    span[groups] = (struct mesh_graph_span){at, at + m->bytes};
+    G[groups++] = (struct zgroup){a, b, sums[a].call, 0};
   }
-  for (size_t v = 0; refused == 0 && v < steps; v++) rows[v + 1] += rows[v];
-  if (refused == 0 && !(heads = malloc((rows[steps] + 1) * sizeof *heads))) refused = -1;
-  for (size_t k = 0; refused == 0 && k < groups; k++)
-    for (size_t e = G[k].a; e < G[k].b; e++) {
-      const struct message *x = sums[e].m;
-      const struct steps *st = x->c->bound;
-      const size_t v = first_step[G[k].call] + x->step;
-      for (uint32_t d = st->prior_first[x->step]; d < st->prior_first[x->step + 1]; d++)
-        heads[rows[v] + d - st->prior_first[x->step]] = (uint32_t)(first_step[G[k].call] + st->prior[d]);
-    }
-  if (refused == 0) {
-    const int ordered = mesh_graph_classes((uint32_t)steps, rows, heads, class_of, (uint32_t)groups, span, part, place, &edge_from, &edge_to, &edge_count);
-    if (ordered) refused = ordered == ENOMEM ? -1 : 1;
-    for (size_t k = 0; refused == 0 && k < groups; k++) G[k].place = place[k];
+  if (!result && (!(class_of = malloc((steps + 1) * sizeof *class_of)) || !(part = malloc((groups + 1) * sizeof *part)) ||
+                  !(place = malloc((groups + 1) * sizeof *place)))) result = fail(ncclSystemError, "out of memory");
+  for (size_t v = 0; !result && v < steps; v++) class_of[v] = UINT32_MAX;
+  for (size_t k = 0; !result && k < groups; k++) {
+    part[k] = G[k].call;
+    for (size_t e = G[k].a; e < G[k].b; e++) class_of[first_step[sums[e].call] + sums[e].m->step] = (uint32_t)k;
   }
-  free(class_of); free(rows); free(span); free(part); free(place); free(heads); free(first_step);
-  if (refused) {
-    free(G); free(edge_from); free(edge_to); free(sums); free(in);
-    return fail(refused < 0 ? ncclSystemError : ncclInvalidUsage, refused < 0 ? "out of memory" :
-                "a group's sums over a COPY's landing, or two of its calls' sums overlapping, or no order among them");
+  if (!result) {
+    const int ordered = mesh_graph_classes((uint32_t)steps, rows, heads, class_of, (uint32_t)groups, span, part, place, &in_first, &in_from);
+    if (ordered) result = ordered == ENOMEM ? fail(ncclSystemError, "out of memory")
+                                            : fail(ncclInvalidUsage, "%s: two calls' sums overlap, or no order among a group's sums", call_name(sums[0].m->c));
   }
+  for (size_t k = 0; !result && k < groups; k++) G[k].place = place[k];
   /* laid by call (a dispatch takes one call's type and operator), each call's sums in that order */
-  size_t *laid = malloc((groups + 1) * sizeof *laid), *position = malloc((groups + 1) * sizeof *position);
-  struct metal_zelloth_wait *listed = malloc((edge_count + 1) * sizeof *listed);
-  struct metal_zelloth_sum *group = malloc((count + 1) * sizeof *group);
-  const struct call **of = malloc((count + 1) * sizeof *of);
-  if (!laid || !position || !listed || !group || !of) {
-    free(laid); free(position); free(listed); free(group); free(of); free(G); free(edge_from); free(edge_to); free(sums); free(in);
-    return fail(ncclSystemError, "out of memory");
+  if (!result && !(listed = malloc((in_first[groups] + 1) * sizeof *listed))) result = fail(ncclSystemError, "out of memory");
+  if (!result) {
+    for (size_t k = 0; k < groups; k++) laid[k] = k;
+    zgroups_by = G;
+    qsort(laid, groups, sizeof *laid, zgroup_order);
+    for (size_t k = 0; k < groups; k++) position[laid[k]] = k;
   }
-  for (size_t k = 0; k < groups; k++) laid[k] = k;
-  zgroups_by = G;
-  qsort(laid, groups, sizeof *laid, zgroup_order);
-  for (size_t k = 0; k < groups; k++) position[laid[k]] = k;
-  ncclResult_t result = ncclSuccess;
   size_t made = 0, used = 0;
-  for (size_t l = 0; l < groups; l++) {
+  for (size_t l = 0; !result && l < groups; l++) {
     const size_t k = laid[l], a = G[k].a, b = G[k].b;
     const struct message *m = sums[a].m;
     const struct steps *st = m->c->bound;
@@ -4999,16 +4952,18 @@ static ncclResult_t zabbadoo_plan(struct ncclComm *comm, struct issue *u) {
                                            x->end, x->pages, x->landings, x->landing_count};
     }
     const size_t from = used;
-    for (size_t d = 0; d < edge_count; d++)
-      if (edge_to[d] == k) listed[used++] = (struct metal_zelloth_wait){group + position[edge_from[d]]};
+    for (size_t d = in_first[k]; d < in_first[k + 1]; d++) listed[used++] = (struct metal_zelloth_wait){group + position[in_from[d]]};
     of[made] = m->c;
     group[made++] = (struct metal_zelloth_sum){to.buffer, to.offset, own.buffer, own.offset, (uint32_t)(b - a), in + a,
                                                (uint32_t)(used - from), used > from ? listed + from : NULL};
   }
-  free(G); free(edge_from); free(edge_to); free(laid); free(position);
+  free(first_step); free(firsts); free(priors); free(marked); free(rows); free(heads); free(depth); free(class_of); free(part);
+  free(place); free(in_first); free(in_from); free(G); free(span); free(laid); free(position);
+  if (result) { free(sums); free(in); free(group); free(of); free(listed); return result; }
   *plan = (struct zplan){count, made, sums, in, group, of, listed};
-  return result;
+  return ncclSuccess;
 }
+
 /* design/zorvek.md zabbadoo: a group run from its issue's zplan (zabbadoo_plan); each input's target this call's, then
    its sums, then its landings awaited (zelloq) */
 static ncclResult_t zabbadoo(struct metal_program *program, struct ncclComm *comm, struct inflight *g, struct issue *u) {

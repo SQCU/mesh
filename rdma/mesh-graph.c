@@ -494,26 +494,40 @@ static void classes_met(void *consumer, size_t i) {
   if (m->part[m->spans[i].k] != m->part[m->at]) m->crossed = 1;
 }
 static uint32_t classes_head(const void *context, size_t k) { return ((const uint32_t *)context)[k]; }
+static int classes_from_order(const void *left, const void *right) {
+  const uint64_t a = *(const uint64_t *)left, b = *(const uint64_t *)right;
+  return (a > b) - (a < b);
+}
 int mesh_graph_classes(uint32_t vertices, const size_t *first, const uint32_t *head, const uint32_t *class_of,
                        uint32_t classes, const struct mesh_graph_span *span, const uint32_t *part, uint32_t *place,
-                       uint32_t **from, uint32_t **to, size_t *edges) {
+                       size_t **in_first, uint32_t **in_from) {
   size_t n = 0;
   for (uint32_t v = 0; v < vertices; v++)
     if (class_of[v] != UINT32_MAX)
       for (size_t k = first[v]; k < first[v + 1]; k++) n += class_of[head[k]] != UINT32_MAX && class_of[head[k]] != class_of[v];
-  *from = malloc((n + 1) * sizeof **from); *to = malloc((n + 1) * sizeof **to); *edges = 0;
+  /* each edge as (to << 32 | from), sorted and each kept once: the in-edges' rows */
+  uint64_t *pairs = malloc((n + 1) * sizeof *pairs);
+  *in_first = calloc((size_t)classes + 2, sizeof **in_first); *in_from = malloc((n + 1) * sizeof **in_from);
   struct classes_span *sorted = malloc(((size_t)classes + 1) * sizeof *sorted);
   struct mesh_graph_span *spans = malloc(((size_t)classes + 1) * sizeof *spans);
   uint64_t *reach = malloc(((size_t)classes + 1) * sizeof *reach);
-  size_t *rows = calloc((size_t)classes + 2, sizeof *rows), *at = calloc((size_t)classes + 1, sizeof *at);
+  size_t *rows = calloc((size_t)classes + 2, sizeof *rows), *at = calloc((size_t)classes + 1, sizeof *at), edges = 0;
   uint32_t *heads = malloc((n + 1) * sizeof *heads), *indegree = malloc(((size_t)classes + 1) * sizeof *indegree);
-  int result = !*from || !*to || !sorted || !spans || !reach || !rows || !at || !heads || !indegree ? ENOMEM : 0;
+  int result = !pairs || !*in_first || !*in_from || !sorted || !spans || !reach || !rows || !at || !heads || !indegree ? ENOMEM : 0;
   for (uint32_t v = 0; !result && v < vertices; v++)
     if (class_of[v] != UINT32_MAX)
       for (size_t k = first[v]; k < first[v + 1]; k++) {
         const uint32_t a = class_of[head[k]];
-        if (a != UINT32_MAX && a != class_of[v]) { (*from)[*edges] = a; (*to)[(*edges)++] = class_of[v]; }
+        if (a != UINT32_MAX && a != class_of[v]) pairs[edges++] = (uint64_t)class_of[v] << 32 | a;
       }
+  if (!result) {
+    qsort(pairs, edges, sizeof *pairs, classes_from_order);
+    size_t kept = 0;
+    for (size_t k = 0; k < edges; k++) if (!kept || pairs[k] != pairs[kept - 1]) pairs[kept++] = pairs[k];
+    edges = kept;
+    for (size_t k = 0; k < edges; k++) { (*in_first)[(pairs[k] >> 32) + 1]++; (*in_from)[k] = (uint32_t)pairs[k]; }
+    for (uint32_t k = 0; k < classes; k++) (*in_first)[k + 1] += (*in_first)[k];
+  }
   if (!result) {
     for (uint32_t k = 0; k < classes; k++) sorted[k] = (struct classes_span){span[k], k};
     qsort(sorted, classes, sizeof *sorted, classes_span_order);
@@ -527,13 +541,39 @@ int mesh_graph_classes(uint32_t vertices, const size_t *first, const uint32_t *h
     if (meet.crossed) result = 1;
   }
   if (!result) {
-    for (size_t k = 0; k < *edges; k++) rows[(*from)[k] + 1]++;
+    for (size_t k = 0; k < edges; k++) rows[(uint32_t)pairs[k] + 1]++;
     for (uint32_t k = 0; k < classes; k++) rows[k + 1] += rows[k];
-    for (size_t k = 0; k < *edges; k++) heads[rows[(*from)[k]] + at[(*from)[k]]++] = (*to)[k];
+    for (size_t k = 0; k < edges; k++) heads[rows[(uint32_t)pairs[k]] + at[(uint32_t)pairs[k]]++] = (uint32_t)(pairs[k] >> 32);
     if (mesh_graph_order(classes, rows, classes_head, heads, indegree, place)) result = 1;
   }
-  free(sorted); free(spans); free(reach); free(rows); free(at); free(heads); free(indegree);
+  free(pairs); free(sorted); free(spans); free(reach); free(rows); free(at); free(heads); free(indegree);
   return result;
+}
+
+int mesh_graph_join(uint32_t parts, const size_t *base, const uint32_t *const *first, const uint32_t *const *head,
+                    const unsigned char *marked, size_t **rows, uint32_t **heads, size_t *outside) {
+  const size_t vertices = base[parts];
+  size_t n = 0;
+  *outside = 0;
+  *rows = calloc(vertices + 2, sizeof **rows);
+  for (uint32_t p = 0; *rows && p < parts; p++)
+    for (size_t j = 0; first[p] && j < base[p + 1] - base[p]; j++)
+      if (marked[base[p] + j])
+        for (uint32_t k = first[p][j]; k < first[p][j + 1]; k++) {
+          if (marked[base[p] + head[p][k]]) { (*rows)[base[p] + j + 1]++; n++; }
+          else (*outside)++;
+        }
+  *heads = malloc((n + 1) * sizeof **heads);
+  if (!*rows || !*heads) return ENOMEM;
+  for (size_t v = 0; v < vertices; v++) (*rows)[v + 1] += (*rows)[v];
+  for (uint32_t p = 0; p < parts; p++)
+    for (size_t j = 0; first[p] && j < base[p + 1] - base[p]; j++) {
+      size_t at = (*rows)[base[p] + j];
+      if (marked[base[p] + j])
+        for (uint32_t k = first[p][j]; k < first[p][j + 1]; k++)
+          if (marked[base[p] + head[p][k]]) (*heads)[at++] = (uint32_t)(base[p] + head[p][k]);
+    }
+  return 0;
 }
 
 /* mesh-graph.h mesh_graph_depth */
