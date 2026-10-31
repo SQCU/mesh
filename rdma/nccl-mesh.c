@@ -251,7 +251,6 @@ static uint64_t deadline_left(const struct mesh_deadline *d) {
   return d->at - now;
 }
 static void channel_counts(const struct ncclComm *comm, char *out, size_t room, int lists);
-static void tracks_report(const char *name);
 /* the GPU wait whose bound a communicator's failure words record (METAL_BOUND, nccl-mesh-kernels.h mesh_step_check),
    named into `wait`; its deadline, 0 where they record none.  Every channel's counts, its lists' too, a line of their
    own on stderr: which ring of which channel stood still, past the one the wait was on */
@@ -791,15 +790,13 @@ static void watch_turn(void *unused) {
   char wait[MESH_DIAGNOSTIC_BYTES];
   uint64_t idle = 0;
   pthread_mutex_lock(&live_lock);
-  const char *bounded = NULL;
   for (struct ncclComm *c = live; c && !idle; c = c->next_live) {
     int held = !__atomic_load_n(&c->revoked, __ATOMIC_ACQUIRE);
     for (uint32_t h = 0; held && h < c->count; h++)
       if (!(held = mesh_stream_held(&c->attach->context, c->channels[h].stream, *c->channels[h].wire))) comm_lost(c, h);
-    if ((idle = bound_reached(c, wait, sizeof wait))) bounded = c->name;
+    idle = bound_reached(c, wait, sizeof wait);
   }
   pthread_mutex_unlock(&live_lock);
-  if (bounded && !pthread_mutex_trylock(&group_lock)) { tracks_report(bounded); pthread_mutex_unlock(&group_lock); }
   if (idle) mesh_library_expired(wait, idle);
 }
 static void watch_start(void *unused) {
@@ -2008,7 +2005,6 @@ static ncclResult_t comm_failure(struct ncclComm *comm) {
       const int n = every[0] ? snprintf(line, sizeof line, "libnccl-mesh: communicator %s as its link to node %u was lost%s\n", comm->name,
                                         a->holds[k].node, every) : 0;
       if (n > 0) (void)!write(2, line, (size_t)n < sizeof line ? (size_t)n : sizeof line - 1);
-      tracks_report(comm->name);
       return comm_fail(comm, ncclRemoteError, "the link to node %u was lost and paired again: communicator %s's stream there is no "
                        "longer its own (design/transport.md section 14); it is made again (ncclCommDestroy, then an init)%s",
                        a->holds[k].node, comm->name, counts);
@@ -2016,7 +2012,6 @@ static ncclResult_t comm_failure(struct ncclComm *comm) {
   _Atomic uint64_t *v = comm->words;
   const uint64_t at = v ? atomic_load_explicit(v + 2, memory_order_acquire) : 0;
   if (at) {
-    tracks_report(comm->name);
     const uint64_t cause = atomic_load_explicit(v, memory_order_relaxed), h = atomic_load_explicit(v + 3, memory_order_relaxed);
     const uint32_t node = h < comm->count ? comm->channels[h].node : UINT32_MAX;
     if (cause == METAL_LOST)
@@ -3237,13 +3232,12 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
    its bytes lie (a SEND's source, a COPY's destination, a combine's landing area: `data`) and the first of the rows
    they lie in (`row`); a landing's `need` (the send entries a combine into bytes an earlier SEND of its call on its
    channel reads waits to be published: that entry + 1, 0 none) */
-struct message { struct call *c; uint32_t step, frame; uint64_t entry; mesh_pages pages, end; uint64_t need; size_t offset, bytes;
+struct message { struct call *c; uint32_t step, frame; uint64_t entry; mesh_pages pages, end; size_t offset, bytes;
                  struct where data; struct mesh_dma_span *spans; uint64_t table; double priority;
                  const struct mesh_landing_run *landings; size_t landing_count;
                  /* This receive's prepared chunk-progress word, storing its physical/global packet prefix. */
                  struct where summed; uint64_t summed_word;
                  uint64_t listed; mesh_pages laid; /* its entry and end in its issue's own lists (issue_lay), schedule_laid's base */
-                 uint64_t needs; /* a landing's need past its channel's first send entry, 0 none (landing_needs) */
                  /* a SEND's landing it forwards: its channel (UINT32_MAX none) and its base past that channel's landing
                     count before the group (send_dependencies) */
                  uint32_t dep_h; mesh_pages dep_rel; uint64_t dep_summed;
@@ -3727,7 +3721,6 @@ static void schedule_laid(struct ncclComm *comm, struct schedule *plans) {
         struct message *m = (send ? p->out : p->in) + k;
         m->entry = m->listed + p->first[!send];
         m->end = pages_add(send ? ch->out : ch->in, m->laid);
-        m->need = !send && m->needs ? p->first[0] + m->needs : 0;
         m->c->bound->channel[m->step] = h; m->c->bound->entry[m->step] = m->entry;
       }
     for (size_t k = 0; k < p->ins; k++) {
@@ -3801,26 +3794,6 @@ int metal_carve(size_t bytes, struct metal_bytes *made) {
 void metal_done(const _Atomic uint64_t *words, uint32_t n, uint64_t value) {
   struct use *u = carving->done + carving->uses - 1;
   u->words = words; u->n = n; u->value = value;
-}
-/* on a failure only: every tracks pool begun whose workers have not all ended (at most 8), its open cursors as they stand
-   (nccl-mesh-metal.m metal_tracks_open: a use whose end words lie in its own records), a line each on stderr, so a
-   stall names the task, dependency and count it stands at on the rank where it began.  Reads alone; under group_lock */
-static void tracks_report(const char *name) {
-  char line[4096];
-  for (size_t k = 0, told = 0; k < piece_count && told < 8; k++)
-    for (size_t u = 0; u < pieces[k]->uses && told < 8; u++) {
-      const struct use *x = pieces[k]->done + u;
-      if (!x->words || !x->at) continue;
-      const int n = snprintf(line, sizeof line, "libnccl-mesh: communicator %s's ", name);
-      const size_t head = n > 0 ? (size_t)n : 0;
-      size_t used = metal_tracks_open(x->at, (const void *)x->words, x->n, line + head, sizeof line - head - 1);
-      if (!used) continue;
-      used += head;
-      if (used > sizeof line - 2) used = sizeof line - 2;
-      line[used++] = '\n';
-      (void)!write(2, line, used);
-      told++;
-    }
 }
 void *metal_piece_hold(struct metal_bytes *made, size_t *bytes) {
   struct piece *p = piece_take(MESH_COMMAND_DATA_BYTES);
@@ -4071,25 +4044,6 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u) {
   return ncclSuccess;
 }
 
-/* each combine landing's need, past its channel's first send entry: the last earlier SEND of its call on that channel
-   whose piece it meets, but for one reading a named copy (0: none).  Fixed while the issue is laid and placed (its steps
-   and their `read` kept: steps_reset with its binding), so found once there, not at each schedule (schedule_laid adds the channel's
-   first entry) */
-static void landing_needs(struct ncclComm *comm, struct schedule *plans) {
-  for (uint32_t h = 0; h < comm->count; h++)
-    for (size_t k = 0; k < plans[h].ins; k++) {
-      struct message *m = plans[h].in + k;
-      const struct steps *st = m->c->bound;
-      m->needs = 0;
-      if (st->steps[m->step].op != MESH_STEP_REDUCE) continue;
-      for (size_t j = 0; j < plans[h].outs; j++) {
-        const struct message *o = plans[h].out + j;
-        if (o->c == m->c && o->step < m->step && !(st->read && named(st->read[o->step])) &&
-            meet(st->steps + o->step, st->steps + m->step) && o->listed + 1 > m->needs) m->needs = o->listed + 1;
-      }
-    }
-}
-
 /* each SEND's dependency, fixed while the issue is laid and placed (its steps' priors, its lists' positions, a write's
    occurrence's packet cuts): the landing it forwards, on channel `dep_h`, its entry's base `dep_rel` past that channel's
    landing count before the group, which present_group adds.  Found once here, not at each issue's presentation */
@@ -4106,7 +4060,7 @@ static void send_dependencies(struct ncclComm *comm, struct schedule *plans) {
     for (size_t k = 0; k < plans[h].outs; k++) {
       struct message *m = plans[h].out + k;
       const struct steps *s = m->c->bound;
-      /* a sum's landing counts its units summed (zelloth, or the tracks pool: consume; no fused crossing's, no WRITE
+      /* a sum's landing counts its units summed (zelloth; no fused crossing's, no WRITE
          plan's), a partials merge's as any other's */
       const int summed = !m->c->fused && !m->c->write_binding;
       /* a WRITE relay's SEND goes on along its first receive; any other along the last before it, where that holds its
@@ -4143,8 +4097,8 @@ static void send_dependencies(struct ncclComm *comm, struct schedule *plans) {
    `after`): its list in the room place_group left, one requirement for each word those receives' consumptions count,
    a COPY's its channel's `landed`, a combine's its summed word (landing_progress), each at the latest such receive's
    end, rewritten each call (present_group); so it is published with its presents (present_publish) and its channel's
-   later SENDs no longer wait for it on the GPU.  A receive's word unknown (a combine without one), or past 64 words:
-   no list, the SEND the pool's as before */
+   later SENDs no longer wait for it on the GPU.  A receive's word unknown (a combine without one), past 64 words, or
+   a WRITE's SEND (no list's room): the plan fails as a value, the tracks pool that published such a SEND deleted */
 /* a SEND's receive j: its message in the issue's lists (the frame the SEND's), the word its consumption counts, and
    its place on its channel (mesh-graph.h mesh_graph_frontier's key and rank) */
 struct requiring { const struct ncclComm *comm; const struct schedule *plans; const struct message *m; const char *M; };
@@ -4169,13 +4123,18 @@ static ncclResult_t send_requirements(struct ncclComm *comm, struct issue *u) {
     for (size_t k = 0; k < plans[h].outs; k++) {
       struct message *m = plans[h].out + k;
       m->required = 0;
-      if (!m->requirement || m->dep_h != UINT32_MAX) continue;
       const struct steps *s = m->c->bound;
+      const int follows = s->prior_first[m->step] != s->prior_first[m->step + 1];
+      if (m->dep_h != UINT32_MAX || !follows || !needs_publication(m) || m->c->fused) continue;
+      if (!m->requirement)
+        return fail(ncclInvalidUsage, "%s: a WRITE's SEND that follows receives it does not forward (no list states its wait)", call_name(m->c));
       const struct requiring a = {comm, plans, m, M};
       uint32_t kept[64];
       uint64_t words[64];
       const int64_t n = mesh_graph_frontier(s->prior_first, s->prior, m->step, required_word, required_place, &a, 64, kept, words);
-      if (n <= 0) continue;
+      if (n <= 0)
+        return fail(ncclInvalidUsage, "%s: a SEND that follows receives it does not forward, past what a list states (a word unknown, or "
+                    "more than 64)", call_name(m->c));
       struct mesh_zwoggle_after *list = (struct mesh_zwoggle_after *)(m->requirement + 1);
       m->requirement[0] = (uint64_t)n;
       for (int64_t r = 0; r < n; r++) {
@@ -4252,9 +4211,9 @@ static void gate_of(struct ncclComm *comm, struct schedule *plans, int *gate, ui
 /* design/zorvek.md zook: each channel's leading publications that wait for nothing, the rank's own pages and every SEND
    that forwards a landing (the bridge waits on that landing's own word), published once with the channel's presents
    (`direct`: no operand copy made after them, no fused crossing), or once its operand copies are made
-   (launch_metal), so no SEND of the rank's own pages waits for a GPU task but those copies; the pool records only
-   the publications that wait for a consumption. `ready` only rises: these are the
-   channel's first publications of the group, and the pool's come after them */
+   (launch_metal), so no SEND of the rank's own pages waits for a GPU task but those copies: every publication of
+   the group's, a SEND that follows a receive it does not forward waiting for it in the bridge (send_requirements).
+   `ready` only rises: these are the channel's first publications of the group */
 static ncclResult_t present_publish(struct metal_program *program, struct channel *ch, const struct schedule *p) {
   if (!p->outs || ch->published != p->first[0]) return ncclSuccess;
   const struct message *last = NULL;
@@ -4498,7 +4457,7 @@ static ncclResult_t schedule(struct metal_program *program, struct ncclComm *com
   schedule_laid(comm, plans);
   if (!fused && !writes) gate_of(comm, plans, gate, copies);
   /* design/zorvek.md "The pool's last users": an all-WRITE group's publications, its SENDs that name no readiness word
-     of their own, made with its presents as a collective's (zook), not by the pool: immutable generations need no
+     of their own, made with its presents as a collective's (zook): immutable generations need no
      landing gate, but its SENDs still wait for the stream's earlier work. A fused crossing's stay its records */
   ncclResult_t result = present_group(program, comm, owner, plans, !fused && !copies);
   if (result) return result;
@@ -4556,12 +4515,12 @@ static ncclResult_t issue_layout(struct ncclComm *comm, struct compiled *x, stru
   return result;
 }
 /* a crossing issue's entries' pages placed (place_group), their overwrites proved (bind_retirements), and its landings'
-   and SENDs' dependencies found (landing_needs, send_dependencies) */
+   and SENDs' dependencies found (send_dependencies, send_requirements) and its sums' plan made (zabbadoo_plan) */
 static ncclResult_t zabbadoo_plan(struct ncclComm *comm, struct issue *u);
 static ncclResult_t issue_place(struct ncclComm *comm, struct issue *u) {
   ncclResult_t result = place_group(comm, u);
   if (!result) result = bind_retirements(comm, u->plans);
-  if (!result) { landing_needs(comm, u->plans); send_dependencies(comm, u->plans); }
+  if (!result) send_dependencies(comm, u->plans);
   if (!result) result = send_requirements(comm, u);
   if (!result) result = zabbadoo_plan(comm, u);
   return result;
@@ -4776,33 +4735,8 @@ static void inflight_lose(struct ncclComm *comm) {
   }
 }
 
-/* the group in flight on comm whose entries of list `list` on channel h hold `at`, sought from group `from` (NULL: the
-   first in flight).  The groups in flight are in issue order, a communicator's holding consecutive entries on every
-   list, so a walk in increasing `at` that passes each lookup the group of its last (a cursor) visits each group once */
-static struct inflight *inflight_from(struct inflight *from, const struct ncclComm *comm, uint32_t h, int list, uint64_t at) {
-  for (struct inflight *g = from ? from : inflight; g; g = g->next_group)
-    if (g->comm == comm && at < g->end[h][list]) return at >= g->start[h][list] ? g : NULL;
-  return NULL;
-}
-static struct inflight *inflight_at(struct ncclComm *comm, uint32_t h, int list, uint64_t at) {
-  return inflight_from(NULL, comm, h, list, at);
-}
 static struct message *out_at(struct inflight *g, uint32_t h, uint64_t at) { return g->plans[h].out + (at - g->start[h][0]); }
 static struct message *in_at(struct inflight *g, uint32_t h, uint64_t at) { return consumption_at(g->plans + h, at - g->start[h][1]); }
-/* channel h's entry `at` of list `list` in none of comm's groups in flight, failed naming the channel's counts and each
-   group's entries on it */
-static ncclResult_t outside_groups(struct ncclComm *comm, uint32_t h, int list, uint64_t at) {
-  const struct channel *ch = comm->channels + h;
-  char spans[256] = "";
-  size_t used = 0;
-  for (struct inflight *g = inflight; g && used < sizeof spans - 48; g = g->next_group)
-    if (g->comm == comm)
-      used += (size_t)snprintf(spans + used, sizeof spans - used, " [%llu, %llu)", (unsigned long long)g->start[h][list], (unsigned long long)g->end[h][list]);
-  return fail(ncclInternalError, "%s entry %llu of channel %u is in no group (published %llu, consumed %llu, waited %llu; groups in flight on it:%s)",
-              list ? "landing" : "send", (unsigned long long)at, h, (unsigned long long)ch->published, (unsigned long long)ch->consumed,
-              (unsigned long long)ch->waited, *spans ? spans : " none");
-}
-
 
 /* the fused crossing of the group being encoded (nccl.h ncclMeshFused): its records' lists, the room the
    caller gave each (`room`: publications, landings), and the publications and landings written in place of their
@@ -4813,127 +4747,13 @@ static struct { ncclMeshFused *out; uint32_t room[2], published, landed; } fusin
    on channel h that needs a publication (needs_publication), NULL none */
 static const struct message *channel_publication(struct inflight *g, uint32_t h, uint64_t first, uint64_t end) {
   const struct message *last = NULL;
-  struct inflight *x = NULL;
   for (uint64_t at = first; at < end; at++) {
-    const struct message *m = out_at(x = inflight_from(x, g->comm, h, 0, at), h, at);
+    const struct message *m = out_at(g, h, at);
     if (needs_publication(m)) last = m;
   }
   return last;
 }
 
-/* channel h's send entries [published, upto) published, their steps' bytes written by the stream's work before:
-   one release storing the holding's `ready` past the last (one system fence, nccl-mesh-kernels.h mesh_step_release),
-   or, the fused crossing's, its record for its caller's kernel (metal_send_deferred), whose last threadgroup to write
-   its operand stores it, its first repeat's alone (a later repeat's is the record's at its own j) */
-static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm, uint32_t h, uint64_t upto, int *published) {
-  struct channel *ch = comm->channels + h;
-  struct inflight *g = inflight_at(comm, h, 0, upto - 1);
-  if (!g) return outside_groups(comm, h, 0, upto - 1);
-  const struct message *m = channel_publication(g, h, ch->published, upto);
-  if (!m) { ch->published = upto; return ncclSuccess; }
-  const struct metal_release release = {ch->buffer, ch->ready, m->end, g->plans[h].each[0]};
-  ncclResult_t result = ncclSuccess;
-  if (g->fused && (upto - 1 - g->start[h][0]) * g->repeats < g->end[h][0] - g->start[h][0]) {
-    if (fusing.published >= fusing.room[0])
-      return fail(ncclInvalidUsage, "a fused crossing's publications past the %u its ncclMeshFused has room for (ncclMeshPlan's entries)", fusing.room[0]);
-    result = gpu(metal_send_deferred(program, m->data.buffer, m->data.offset, &release, fusing.out->publish[fusing.published]),
-                 "a fused publication's record");
-    fusing.published += !result;
-  } else if (!g->fused) {
-    struct uses batch = {0};
-    struct inflight *x = NULL;
-    for(uint64_t at=ch->published;at<upto;at++) {
-      const struct message *sent=out_at(x=inflight_from(x,comm,h,0,at),h,at);
-      uses_add(program,&batch,sent->data,sent->bytes,ncclMeshAccessRead);
-    }
-    metal_accesses(program,batch.ranges,batch.n);
-    result = gpu(metal_publish(program, &release), "a publication");
-  }
-  if (!result) { ch->published = upto; *published = 1; }
-  return result;
-}
-
-/* channel h's next AOT consumer entry (possibly a later physical landing), as its track's item (metal_record; rdma/NCCL.md "Per-channel progress") or,
-   `base` METAL_NONE, a fused crossing's, in the stream's order (complete): its first wait on the holding's `landed`
-   past it; a combine's landed bytes combined
-   into its buffer (its first one reads the original input through the same landing operation), a COPY's
-   wait alone (it landed in place), the fused crossing's landing recorded for its caller's kernel
-   (metal_land_deferred: its first repeat's alone, as publish); a receive depends on every earlier overlapping receive
-   (metal_depend), while disjoint ranges on separate cables can proceed independently */
-/* consume's visit of a receive's earlier overlapping receives (mesh-graph.h mesh_graph_row over its steps' `prior`
-   rows): each one's whole consumption awaited (metal_depend) */
-struct depending { struct metal_program *program; const struct steps *st; uint32_t base; };
-static int depend_on(void *consumer, uint32_t j) {
-  const struct depending *d = consumer;
-  return (int)gpu(metal_depend(d->program, d->base + d->st->channel[j], d->st->consumption[j] + 1), "a receive's dependency");
-}
-static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm, uint32_t h, uint32_t base, struct inflight *held) {
-  struct channel *ch = comm->channels + h;
-  const uint64_t at = ch->consumed;
-  /* `held`: the group its caller found holding the entry, else NULL */
-  struct inflight *g = held ? held : inflight_at(comm, h, 1, at);
-  if (!g) return outside_groups(comm, h, 1, at);
-  const struct message *m = in_at(g, h, at);
-  struct steps *st = m->c->bound;
-  const struct mesh_step *step = st->steps + m->step;
-  ncclResult_t result = ncclSuccess;
-  if(!g->fused) {
-    const uint64_t gate=g->plans[h].word;
-    if(gate) {
-      const struct where word=gate==ch->ready_at?(struct where){ch->buffer,ch->ready}:(struct where){comm->gate,0};
-      const ncclMeshAccess use={{word.buffer,word.offset},sizeof(uint64_t),ncclMeshAccessRead|ncclMeshAccessObserve};
-      metal_accesses(program,&use,1);
-    }
-  }
-  /* a combine whose last earlier overlapping receive is a combine of the same elements in the same runs, both a track
-     pool's (as `summed` below): its chunk c follows that one's chunk c (metal_after), not that one's whole consumption,
-     and every other earlier receive, each meeting that one's piece too, is that one's own dependency already; partials
-     combine block by block as they land, child after child, rather than one child's whole landing after another's
-     (d3869552 made every receive wait for each earlier overlapping receive's whole consumption) */
-  int32_t after = -1;
-  uint32_t priors = 0, j = 0;
-  mesh_graph_row(st->prior_first, st->prior, m->step, NULL, NULL, &priors, &j);
-  if (base != METAL_NONE && step->op == MESH_STEP_REDUCE && !g->fused && !m->c->write_binding && ktype(m->c) != METAL_MERGE && priors) {
-    const struct mesh_step *a = st->steps + j;
-    const uint32_t q = st->channel[j];
-    const struct message *earlier = a->op == MESH_STEP_REDUCE && a->buffer == step->buffer && a->first == step->first &&
-                                    a->piece.elements == step->piece.elements && st->consumption[j] >= g->start[q][1] &&
-                                    st->consumption[j] < g->end[q][1] ? in_at(g, q, st->consumption[j]) : NULL;
-    int same = earlier && earlier->c == m->c && earlier->step == j && earlier->landing_count == m->landing_count;
-    for (size_t r = 0; same && r < m->landing_count; r++)
-      same = earlier->landings[r].first == m->landings[r].first && earlier->landings[r].elements == m->landings[r].elements;
-    if (same) after = (int32_t)j;
-  }
-  struct depending depending = {program, st, base};
-  if (!result && base != METAL_NONE && after < 0)
-    result = (ncclResult_t)mesh_graph_row(st->prior_first, st->prior, m->step, depend_on, &depending, NULL, NULL);
-  if (!result && after >= 0)
-    result = gpu(metal_after(program, base + st->channel[after], st->consumption[after]), "a combine's chunks after an earlier combine's");
-  const struct metal_wait wait = {ch->buffer, comm->violation, m->data.buffer, ch->landed, m->data.offset, m->end, at, h, g->plans[h].each[1],m->bytes};
-  if (!result && step->op == MESH_STEP_REDUCE) {
-    const struct where to = shifted(st->buffer[step->buffer], m->offset);
-    const struct where with = st->fresh && st->fresh[m->step] ? shifted(st->read[m->step], m->offset) : to;
-    result = gpu(metal_land(program, ktype(m->c), kop(m->c), to.buffer, to.offset, with.buffer, with.offset,
-      SIZE[m->c->type] * unit_of(m->c), m->pages, m->landings, m->landing_count, &wait,
-      m->summed.buffer, m->summed.offset), "a landing");
-  } else if (!result && g->fused && (at - g->start[h][1]) * g->repeats < g->end[h][1] - g->start[h][1]) {
-    if (fusing.landed >= fusing.room[1])
-      return fail(ncclInvalidUsage, "a fused crossing's landings past the %u its ncclMeshFused has room for (ncclMeshPlan's entries)", fusing.room[1]);
-    result = gpu(metal_land_deferred(program, m->data.buffer, m->data.offset, &wait, fusing.out->land[fusing.landed]), "a fused landing's record");
-    fusing.landed += !result;
-  } else if (!result && !g->fused) result = gpu(metal_spin(program, &wait), "a wait");
-  if (result) return result;
-  ch->consumed = at + 1;
-  if (ch->waited < at + 1) ch->waited = at + 1;
-  return ncclSuccess;
-}
-
-/* every group in flight through `through` completed, each channel progressing on its own however many there are
-   (nccl-mesh-metal.h metal_record; rdma/NCCL.md "Per-channel progress"): channel h of
-   the k-th communicator met is track base[k] + h, its publications to its communicator's last group through `through`
-   each an item of its own (nothing credits it; a SEND's step after the consumption of the receive before it), then its
-   consumptions (a combine into bytes an earlier SEND of its channel reads after that publication: its `need`); the
-   tracks run by one pool of workers (metal_tracks).  No rank orders anything another rank must share */
 /* Only values addressed to this rank are inputs to its fused consumer. Relay
    arrivals have their own landed-word dependencies in the transport program;
    their immutable leases live through the enclosing data function. */
@@ -4948,7 +4768,7 @@ static uint64_t own_landing(const struct inflight *g, uint32_t h) {
 /* group_lock's arrays, kept from call to call (plan_direct's ranges, complete()'s tracks and tiles): `bytes` of one,
    grown (its new bytes zeroed) where it has fewer, so none is allocated once each has its size; NULL where memory runs
    out */
-enum { KEPT_SPANS, KEPT_COMMS, KEPT_BASES, KEPT_CONSUMED, KEPT_ENDS, KEPT_TILES, KEPTS };
+enum { KEPT_SPANS, KEPT_TILES, KEPTS };
 static void *kept(int k, size_t bytes) {
   static struct { void *at; size_t room; } room[KEPTS];
   if (bytes > room[k].room) {
@@ -4973,11 +4793,10 @@ static int tile_landing_order(const void *left,const void *right) {
    the same runs each; a partials merge's rows as a sum's elements, merge_row its fold) one zelloth, one writer an
    element from the rank's own element and every contribution's once all have landed, whatever their order, its
    summed count stored past each block; then each
-   channel's landings awaited once (zelloq: a copy's landing is the copy); nothing of the group in the tracks pool.
+   channel's landings awaited once (zelloq: a copy's landing is the copy).
    A WRITE's landings are copies (its landing records are a fused crossing's alone: complete), a frame train's
    (`repeats` past 1) every frame's entries, so zelloq past the last awaits them all; a sum is keyed on its step, not
-   its frame, so a frame train with a sum stays the pool's.
-   *taken 0, nothing encoded, where a group's sums do not each share one run structure (the pool runs it as before) */
+   its frame, so a frame train with a sum fails as a value (zabbadoo_plan). */
 struct zsum { const struct message *m; uint32_t h; uint64_t at; uint32_t depth; };
 static int zsum_order(const void *left, const void *right) {
   const struct zsum *a = left, *b = right;
@@ -5001,10 +4820,10 @@ static int zgroup_order(const void *left, const void *right) {
   return (a->place > b->place) - (a->place < b->place);
 }
 /* zabbadoo's sums as the issue's lists lay them, found once where it is placed (issue_place), not at each call: their
-   groups, order and waits, and their inputs' tables but for each call's targets (`in`, zabbadoo); `pooled` where the
-   pool runs the issue's groups (a sum without landing runs or of a frame train, sums whose inputs' runs differ, two
-   calls' sums that overlap, a cycle, a sum over a COPY's landing) */
-struct zplan { int pooled; size_t count, made; struct zsum *sums; struct metal_zelloth_input *in;
+   groups, order and waits, and their inputs' tables but for each call's targets (`in`, zabbadoo).  A sum without
+   landing runs or in a frame train, sums whose inputs' runs differ, two calls' sums that overlap, a sum over a COPY's
+   landing, or no order among them: the plan fails as a value (the tracks pool that ran them is deleted) */
+struct zplan { size_t count, made; struct zsum *sums; struct metal_zelloth_input *in;
                struct metal_zelloth_sum *group; const struct call **of; struct metal_zelloth_wait *listed; };
 static void zplan_free(struct zplan *z) {
   if (z) { free(z->sums); free(z->in); free(z->group); free(z->of); free(z->listed); free(z); }
@@ -5013,12 +4832,14 @@ static ncclResult_t zabbadoo_plan(struct ncclComm *comm, struct issue *u) {
   zplan_free(u->zplan);
   struct zplan *plan = u->zplan = calloc(1, sizeof *plan);
   if (!plan) return fail(ncclSystemError, "out of memory");
-  plan->pooled = 1;
   size_t count = 0;
   for (uint32_t h = 0; h < comm->count; h++)
     for (size_t k = 0; k < u->plans[h].ins; k++) {
       const struct message *m = u->plans[h].in + k;
-      if (m->c->bound->steps[m->step].op == MESH_STEP_REDUCE) { if (!m->landing_count || u->repeats != 1) return ncclSuccess; count++; }
+      if (m->c->bound->steps[m->step].op != MESH_STEP_REDUCE) continue;
+      if (!m->landing_count) return fail(ncclInvalidUsage, "%s: a combine with no landing runs", call_name(m->c));
+      if (u->repeats != 1) return fail(ncclInvalidUsage, "%s: a combine in a frame train (its sums are keyed on their steps)", call_name(m->c));
+      count++;
     }
   struct zsum *sums = malloc((count + 1) * sizeof *sums);
   struct metal_zelloth_input *in = malloc((count + 1) * sizeof *in);
@@ -5034,42 +4855,43 @@ static ncclResult_t zabbadoo_plan(struct ncclComm *comm, struct issue *u) {
   if (!first_step) { free(sums); free(in); return fail(ncclSystemError, "out of memory"); }
   for (size_t i = 0; i < u->n; i++) { first_step[i] = steps; steps += u->calls[i].bound ? u->calls[i].bound->count : 0; }
   uint32_t *call_of = malloc((count + 1) * sizeof *call_of);
-  int pooled = call_of ? 0 : -1;
-  for (size_t e = 0; pooled == 0 && e < count; e++) {
+  int refused = call_of ? 0 : -1;
+  for (size_t e = 0; refused == 0 && e < count; e++) {
     size_t i = 0;
     while (i < u->n && u->calls + i != sums[e].m->c) i++;
-    if (i == u->n) pooled = 1; else call_of[e] = (uint32_t)i;
+    if (i == u->n) refused = 1; else call_of[e] = (uint32_t)i;
   }
   /* each sum step's depth among them (mesh-graph.h mesh_graph_depth over their prior rows): steps over one range fold
      into one sum only at one depth, so a step that follows another through a third sum folds in a later sum, and the
      sums hold no cycle (bandwidth's all-reduce on two ranks went to the pool for one: test-zd, 2026-10-31) */
-  unsigned char *marked = pooled ? NULL : calloc(steps + 1, 1);
-  size_t *drows = pooled ? NULL : calloc(steps + 2, sizeof *drows);
-  uint32_t *dheads = NULL, *depth = pooled ? NULL : malloc((steps + 1) * sizeof *depth);
-  if (pooled == 0 && (!marked || !drows || !depth)) pooled = -1;
-  for (size_t e = 0; pooled == 0 && e < count; e++) marked[first_step[call_of[e]] + sums[e].m->step] = 1;
-  for (size_t e = 0; pooled == 0 && e < count; e++) {
+  unsigned char *marked = refused ? NULL : calloc(steps + 1, 1);
+  size_t *drows = refused ? NULL : calloc(steps + 2, sizeof *drows);
+  uint32_t *dheads = NULL, *depth = refused ? NULL : malloc((steps + 1) * sizeof *depth);
+  if (refused == 0 && (!marked || !drows || !depth)) refused = -1;
+  for (size_t e = 0; refused == 0 && e < count; e++) marked[first_step[call_of[e]] + sums[e].m->step] = 1;
+  for (size_t e = 0; refused == 0 && e < count; e++) {
     const struct steps *st = sums[e].m->c->bound;
     const uint32_t x = sums[e].m->step;
     for (uint32_t d = st->prior_first[x]; d < st->prior_first[x + 1]; d++)
       drows[first_step[call_of[e]] + x + 1] += marked[first_step[call_of[e]] + st->prior[d]];
   }
-  for (size_t v = 0; pooled == 0 && v < steps; v++) drows[v + 1] += drows[v];
-  if (pooled == 0 && !(dheads = malloc((drows[steps] + 1) * sizeof *dheads))) pooled = -1;
-  for (size_t e = 0; pooled == 0 && e < count; e++) {
+  for (size_t v = 0; refused == 0 && v < steps; v++) drows[v + 1] += drows[v];
+  if (refused == 0 && !(dheads = malloc((drows[steps] + 1) * sizeof *dheads))) refused = -1;
+  for (size_t e = 0; refused == 0 && e < count; e++) {
     const struct steps *st = sums[e].m->c->bound;
     const uint32_t x = sums[e].m->step;
     size_t at = drows[first_step[call_of[e]] + x];
     for (uint32_t d = st->prior_first[x]; d < st->prior_first[x + 1]; d++)
       if (marked[first_step[call_of[e]] + st->prior[d]]) dheads[at++] = (uint32_t)(first_step[call_of[e]] + st->prior[d]);
   }
-  if (pooled == 0) {
+  if (refused == 0) {
     const int deep = mesh_graph_depth((uint32_t)steps, drows, dheads, marked, depth);
-    if (deep) pooled = deep == ENOMEM ? -1 : 1;
+    if (deep) refused = deep == ENOMEM ? -1 : 1;
   }
-  for (size_t e = 0; pooled == 0 && e < count; e++) sums[e].depth = depth[first_step[call_of[e]] + sums[e].m->step];
+  for (size_t e = 0; refused == 0 && e < count; e++) sums[e].depth = depth[first_step[call_of[e]] + sums[e].m->step];
   free(marked); free(drows); free(dheads); free(depth); free(call_of);
-  if (pooled) { free(first_step); free(sums); free(in); return pooled < 0 ? fail(ncclSystemError, "out of memory") : ncclSuccess; }
+  if (refused) { free(first_step); free(sums); free(in);
+    return fail(refused < 0 ? ncclSystemError : ncclInvalidUsage, refused < 0 ? "out of memory" : "a combine's steps hold a cycle, or one is no call of the group's"); }
   qsort(sums, count, sizeof *sums, zsum_order);
   /* every sum's inputs share one run structure, checked before anything is encoded */
   for (size_t a = 0, b = 0; a < count; a = b) {
@@ -5078,36 +4900,36 @@ static ncclResult_t zabbadoo_plan(struct ncclComm *comm, struct issue *u) {
       int same = x->landing_count == y->landing_count;
       for (size_t r = 0; same && r < x->landing_count; r++)
         same = x->landings[r].first == y->landings[r].first && x->landings[r].elements == y->landings[r].elements;
-      if (!same) { free(first_step); free(sums); free(in); return ncclSuccess; }
+      if (!same) { free(first_step); free(sums); free(in); return fail(ncclInvalidUsage, "%s: one sum's inputs land in runs that differ", call_name(x->c)); }
     }
   }
-  /* the sums ordered as the pool ordered their combines (consume: each after every earlier overlapping receive, its
+  /* the sums ordered as the tracks pool ordered their combines (each after every earlier overlapping receive, its
      step's prior row): a sum over an earlier sum's result waits for that sum's done word, its result the later one's
      own operand (struct metal_zelloth_wait), the sums laid in a topological order (mesh-graph.h mesh_graph_order)
      so a wait names an earlier sum's blocks, which no threadgroup waiting on it holds.  Two
      steps that combine into overlapping ranges, not one sum, folded each from the rank's own operand, lost one's
      contributions (bandwidth's 16 MiB reduce-scatter max, 4.0 against 5.0: a01e4cd4).  Sums of two calls that overlap
      (no prior relates them), a cycle among the sums (none, past their depths), or a sum over a COPY's landing: the
-     pool's */
+     plan fails as a value */
   /* each sum a class of its steps (mesh-graph.h mesh_graph_classes): a step its call's place among the issue's steps
      plus its own, its row its prior receives, its class's span its result's bytes and its partition its call */
   struct zgroup *G = malloc((count + 1) * sizeof *G);
   if (!G) { free(first_step); free(sums); free(in); return fail(ncclSystemError, "out of memory"); }
-  for (size_t a = 0, b = 0; a < count && !pooled; a = b) {
+  for (size_t a = 0, b = 0; a < count && !refused; a = b) {
     for (b = a + 1; b < count && zsum_same(sums + a, sums + b); b++) {}
     size_t i = 0;
     while (i < u->n && u->calls + i != sums[a].m->c) i++;
-    if (i == u->n) pooled = 1;
+    if (i == u->n) refused = 1;
     else G[groups++] = (struct zgroup){a, b, (uint32_t)i, 0};
   }
-  uint32_t *class_of = pooled ? NULL : malloc((steps + 1) * sizeof *class_of), *part = NULL, *place = NULL, *edge_from = NULL, *edge_to = NULL;
-  size_t *rows = pooled ? NULL : calloc(steps + 2, sizeof *rows), edge_count = 0;
-  struct mesh_graph_span *span = pooled ? NULL : malloc((groups + 1) * sizeof *span);
-  if (!pooled && (!class_of || !rows || !span || !(part = malloc((groups + 1) * sizeof *part)) || !(place = malloc((groups + 1) * sizeof *place))))
-    pooled = -1;
+  uint32_t *class_of = refused ? NULL : malloc((steps + 1) * sizeof *class_of), *part = NULL, *place = NULL, *edge_from = NULL, *edge_to = NULL;
+  size_t *rows = refused ? NULL : calloc(steps + 2, sizeof *rows), edge_count = 0;
+  struct mesh_graph_span *span = refused ? NULL : malloc((groups + 1) * sizeof *span);
+  if (!refused && (!class_of || !rows || !span || !(part = malloc((groups + 1) * sizeof *part)) || !(place = malloc((groups + 1) * sizeof *place))))
+    refused = -1;
   uint32_t *heads = NULL;
-  for (size_t v = 0; pooled == 0 && v < steps; v++) class_of[v] = UINT32_MAX;
-  for (size_t k = 0; pooled == 0 && k < groups; k++) {
+  for (size_t v = 0; refused == 0 && v < steps; v++) class_of[v] = UINT32_MAX;
+  for (size_t k = 0; refused == 0 && k < groups; k++) {
     const struct message *m = sums[G[k].a].m;
     const uintptr_t at = (uintptr_t)address_of(shifted(m->c->bound->buffer[m->c->bound->steps[m->step].buffer], m->offset));
     span[k] = (struct mesh_graph_span){at, at + m->bytes}; part[k] = G[k].call;
@@ -5118,14 +4940,14 @@ static ncclResult_t zabbadoo_plan(struct ncclComm *comm, struct issue *u) {
       class_of[v] = (uint32_t)k;
       rows[v + 1] = st->prior_first[x->step + 1] - st->prior_first[x->step];
       /* a sum over a COPY's landing: its wait in the kernel, on another rank's progress, held every threadgroup
-         while the sums laid after it starved (test-ov, 2026-10-31: bandwidth's GPU wait ended in zelloth); the pool's */
+         while the sums laid after it starved (test-ov, 2026-10-31: bandwidth's GPU wait ended in zelloth); refused */
       for (uint32_t d = st->prior_first[x->step]; d < st->prior_first[x->step + 1]; d++)
-        if (st->steps[st->prior[d]].op != MESH_STEP_REDUCE) pooled = 1;
+        if (st->steps[st->prior[d]].op != MESH_STEP_REDUCE) refused = 1;
     }
   }
-  for (size_t v = 0; pooled == 0 && v < steps; v++) rows[v + 1] += rows[v];
-  if (pooled == 0 && !(heads = malloc((rows[steps] + 1) * sizeof *heads))) pooled = -1;
-  for (size_t k = 0; pooled == 0 && k < groups; k++)
+  for (size_t v = 0; refused == 0 && v < steps; v++) rows[v + 1] += rows[v];
+  if (refused == 0 && !(heads = malloc((rows[steps] + 1) * sizeof *heads))) refused = -1;
+  for (size_t k = 0; refused == 0 && k < groups; k++)
     for (size_t e = G[k].a; e < G[k].b; e++) {
       const struct message *x = sums[e].m;
       const struct steps *st = x->c->bound;
@@ -5133,15 +4955,16 @@ static ncclResult_t zabbadoo_plan(struct ncclComm *comm, struct issue *u) {
       for (uint32_t d = st->prior_first[x->step]; d < st->prior_first[x->step + 1]; d++)
         heads[rows[v] + d - st->prior_first[x->step]] = (uint32_t)(first_step[G[k].call] + st->prior[d]);
     }
-  if (pooled == 0) {
+  if (refused == 0) {
     const int ordered = mesh_graph_classes((uint32_t)steps, rows, heads, class_of, (uint32_t)groups, span, part, place, &edge_from, &edge_to, &edge_count);
-    if (ordered) pooled = ordered == ENOMEM ? -1 : 1;
-    for (size_t k = 0; pooled == 0 && k < groups; k++) G[k].place = place[k];
+    if (ordered) refused = ordered == ENOMEM ? -1 : 1;
+    for (size_t k = 0; refused == 0 && k < groups; k++) G[k].place = place[k];
   }
   free(class_of); free(rows); free(span); free(part); free(place); free(heads); free(first_step);
-  if (pooled) {
+  if (refused) {
     free(G); free(edge_from); free(edge_to); free(sums); free(in);
-    return pooled < 0 ? fail(ncclSystemError, "out of memory") : ncclSuccess;
+    return fail(refused < 0 ? ncclSystemError : ncclInvalidUsage, refused < 0 ? "out of memory" :
+                "a group's sums over a COPY's landing, or two of its calls' sums overlapping, or no order among them");
   }
   /* laid by call (a dispatch takes one call's type and operator), each call's sums in that order */
   size_t *laid = malloc((groups + 1) * sizeof *laid), *position = malloc((groups + 1) * sizeof *position);
@@ -5183,17 +5006,18 @@ static ncclResult_t zabbadoo_plan(struct ncclComm *comm, struct issue *u) {
                                                (uint32_t)(used - from), used > from ? listed + from : NULL};
   }
   free(G); free(edge_from); free(edge_to); free(laid); free(position);
-  *plan = (struct zplan){0, count, made, sums, in, group, of, listed};
+  *plan = (struct zplan){count, made, sums, in, group, of, listed};
   return result;
 }
-/* design/zorvek.md zabbadoo: a group run from its issue's zplan (zabbadoo_plan), every SEND its presents published
-   and no landing of it consumed (`published`, `consumed`); each input's target this call's, then its sums */
-static ncclResult_t zabbadoo(struct metal_program *program, struct ncclComm *comm, struct inflight *g, struct issue *u, int *taken) {
-  *taken = 0;
+/* design/zorvek.md zabbadoo: a group run from its issue's zplan (zabbadoo_plan); each input's target this call's, then
+   its sums, then its landings awaited (zelloq) */
+static ncclResult_t zabbadoo(struct metal_program *program, struct ncclComm *comm, struct inflight *g, struct issue *u) {
   struct zplan *z = u->zplan;
-  if (g->fused || !z || z->pooled) return ncclSuccess;
+  /* a group's every SEND published with its presents (send_requirements: none waits on the GPU) and every earlier
+     group completed at its own call */
   for (uint32_t h = 0; h < comm->count; h++)
-    if (comm->channels[h].published != g->end[h][0] || comm->channels[h].consumed != g->start[h][1]) return ncclSuccess;
+    if (!z || comm->channels[h].published != g->end[h][0] || comm->channels[h].consumed != g->start[h][1])
+      return fail(ncclInternalError, "a group whose SENDs its presents did not all publish, or after a group not completed");
   for (size_t k = 0; k < z->count; k++) z->in[k].target = z->sums[k].m->end;
   ncclResult_t result = ncclSuccess;
   /* one dispatch for each type and operator among the group's calls (a group of one call: one) */
@@ -5231,120 +5055,71 @@ static ncclResult_t zabbadoo(struct metal_program *program, struct ncclComm *com
     ch->consumed = g->end[h][1]; if (ch->waited < g->end[h][1]) ch->waited = g->end[h][1];
   }
   if (!result && landings.n) metal_boundary(program, landings.ranges, landings.n);
-  if (!result) *taken = 1;
   return result;
 }
 
-static ncclResult_t complete(struct metal_program *program, struct inflight *through, int *published) {
-  if (through->fused) {
-    /* A group of immutable one-way writes. Relay entries already name their
-       incoming landed word; publishing a channel never releases relay bytes
-       early. The producer releases each physical channel once. Its consumer
-       needs only that channel's last landing addressed to this rank. A later
-       relay must not delay local compute. All leases belong to the enclosing
-       data function, including relay-only arrivals skipped by this consumer. */
-    struct ncclComm *comm = through->comm;
-    ncclResult_t result = ncclSuccess;
-    metal_gate(program, comm->violation);
-    for (uint32_t h = 0; h < comm->count && !result; h++) {
-      struct channel *ch = comm->channels + h;
-      const uint64_t first_end = through->start[h][0] +
-                                 (through->end[h][0] - through->start[h][0]) / through->repeats;
-      if (ch->published < first_end) result = publish(program, comm, h, first_end, published);
-      if (!result) ch->published = through->end[h][0];
-      const struct schedule *schedule = through->plans + h;
-      struct tile_landing *tiles=kept(KEPT_TILES,(schedule->ins/through->repeats+1)*sizeof *tiles);
-      if(!tiles)return fail(ncclSystemError,"allocating consumer prefix compilation indices");
-      size_t count=0;
-      for (size_t k = schedule->ins / through->repeats; !result && k; k--) {
-        const struct message *m = schedule->in + k - 1;
-        struct write_binding *write = m->c->write_binding;
-        if (!write || !write->land_records || write->to != comm->rank) continue;
-        const size_t tile=write_tile(write,m->offset);
-        uint64_t *record=(uint64_t *)((char *)write->land_records+tile_offset(write->land_layout,tile,m->c->invocation));
-        tiles[count++]=(struct tile_landing){record,k-1};
-      }
-      qsort(tiles,count,sizeof *tiles,tile_landing_order);
-      for(size_t t=0;!result&&t<count;t++) {
-        if(t&&tiles[t].record==tiles[t-1].record)continue;
-        const size_t k=tiles[t].entry;
-        const struct message *m=schedule->in+k;
-        uint64_t *record=tiles[t].record;
-        if (*record == m->c->write_binding->land_capacity) {
-          result=fail(ncclInvalidUsage, "WRITE consumer bindings exceed their prepared physical-channel capacity");break;
-        }
-        const struct metal_wait wait = {ch->buffer, comm->violation, m->data.buffer, ch->landed, m->data.offset,
-          m->end, through->start[h][1] + k, h, schedule->each[1],m->bytes};
-        ncclMeshBinding *bindings=(ncclMeshBinding *)(record+1);
-        result = gpu(metal_land_deferred(program, m->data.buffer, m->data.offset, &wait,
-          bindings[(*record)++]), "a WRITE consumer's landing record");
-      }
-      const uint64_t own = own_landing(through, h);
-      if (!result && ch->consumed < own) {
-        ch->consumed = own - 1;
-        result = consume(program, comm, h, METAL_NONE, NULL);
-      }
-      if (!result) ch->consumed = through->end[h][1];
-    }
-    return result;
-  }
-  size_t comms = 0;
-  struct ncclComm **comm = NULL;
-  uint32_t *base = NULL, tracks = 0;
+/* a fused crossing's records for its caller's kernels (nccl.h ncclMeshFused), its first repeat's alone (a later
+   repeat's are the records' at their own j): on each channel its last publication's (metal_send_deferred: its last
+   threadgroup to write the operand stores `ready`), each WRITE consumer's landing record (metal_land_deferred, the
+   last landing of each consumer tile), and its last landing addressed to this rank (own_landing), recorded for its
+   consumer.  Relay entries already name their incoming landed word, so no publication releases relay bytes early;
+   all leases belong to the enclosing data function, relay-only arrivals among them */
+static ncclResult_t fused_records(struct metal_program *program, struct inflight *g, int *published) {
+  struct ncclComm *comm = g->comm;
   ncclResult_t result = ncclSuccess;
-  for (struct inflight *g = inflight; g && !result; g = g == through ? NULL : g->next_group) {
-    size_t k = 0;
-    while (k < comms && comm[k] != g->comm) k++;
-    if (k < comms) continue;
-    if (!(comm = kept(KEPT_COMMS, (comms + 1) * sizeof *comm)) || !(base = kept(KEPT_BASES, (comms + 1) * sizeof *base))) {
-      result = fail(ncclSystemError, "out of memory"); break;
+  metal_gate(program, comm->violation);
+  for (uint32_t h = 0; h < comm->count && !result; h++) {
+    struct channel *ch = comm->channels + h;
+    const struct schedule *schedule = g->plans + h;
+    const uint64_t first_end = g->start[h][0] + (g->end[h][0] - g->start[h][0]) / g->repeats;
+    const struct message *m = channel_publication(g, h, g->start[h][0], first_end);
+    if (m) {
+      if (fusing.published >= fusing.room[0])
+        return fail(ncclInvalidUsage, "a fused crossing's publications past the %u its ncclMeshFused has room for (ncclMeshPlan's entries)", fusing.room[0]);
+      const struct metal_release release = {ch->buffer, ch->ready, m->end, schedule->each[0]};
+      result = gpu(metal_send_deferred(program, m->data.buffer, m->data.offset, &release, fusing.out->publish[fusing.published]),
+                   "a fused publication's record");
+      fusing.published += !result; *published = 1;
     }
-    comm[comms] = g->comm; base[comms++] = tracks; tracks += g->comm->count;
-  }
-  uint64_t *consumed = result ? NULL : kept(KEPT_CONSUMED, ((size_t)tracks + 1) * sizeof *consumed), (*end)[2] = NULL;
-  if (!result && !consumed) result = fail(ncclSystemError, "out of memory");
-  for (size_t k = 0; k < comms && !result; k++) {
-    struct ncclComm *const c = comm[k];
-    metal_gate(program, c->violation);
-    if (!(end = kept(KEPT_ENDS, ((size_t)c->count + 1) * sizeof *end))) { result = fail(ncclSystemError, "out of memory"); break; }
-    for (struct inflight *g = inflight; g; g = g == through ? NULL : g->next_group)
-      if (g->comm == c) memcpy(end, g->end, c->count * sizeof *end);
-    for (uint32_t h = 0; h < c->count && !result; h++) {
-      struct channel *ch = c->channels + h;
-      const uint32_t track = base[k] + h;
-      consumed[track] = ch->consumed;
-      struct inflight *g = NULL;
-      while (!result && ch->published < end[h][0]) {
-        const uint64_t at = ch->published;
-        g = inflight_from(g, c, h, 0, at);
-        if (!g || g->fused) { result = g ? fail(ncclInternalError, "a fused crossing's publication on two tracks") : outside_groups(c, h, 0, at); break; }
-        const struct message *m = out_at(g, h, at);
-        if (!needs_publication(m)) { ch->published++; continue; }
-        result = gpu(metal_record(program, track, METAL_PUBLISH, at, 0), "a publication's record");
-        const struct steps *prior = m->c->bound;
-        /* a SEND that forwards a landing goes unit by unit on that landing's own word (send_dependencies: `landed`, or a
-           combine's summed word), which the bridge reads for it: its publication waits for nothing, so the publications
-           after it on this cursor, the rank's own pages among them, do not wait for the whole consumption of the landing
-           it forwards (a relay's arrival time lent to every later SEND of the channel) */
-        for (uint32_t d = prior->prior_first[m->step]; !result && m->dep_h == UINT32_MAX && d < prior->prior_first[m->step + 1]; d++) {
-          const uint32_t j = prior->prior[d];
-          result = gpu(metal_depend(program, base[k] + prior->channel[j], prior->consumption[j] + 1), "a SEND's dependency");
-        }
-        if (!result) result = publish(program, c, h, at + 1, published);
-      }
-      g = NULL;
-      while (!result && ch->consumed < end[h][1]) {
-        const uint64_t at = ch->consumed;
-        g = inflight_from(g, c, h, 1, at);
-        if (!g || g->fused) { result = g ? fail(ncclInternalError, "a fused crossing's landing on two tracks") : outside_groups(c, h, 1, at); break; }
-        result = gpu(metal_record(program, track, METAL_CONSUME, at, in_at(g, h, at)->need), "a consumption's record");
-        if (!result) result = consume(program, c, h, base[k], g);
-      }
+    if (!result) ch->published = g->end[h][0];
+    struct tile_landing *tiles=kept(KEPT_TILES,(schedule->ins/g->repeats+1)*sizeof *tiles);
+    if(!tiles)return fail(ncclSystemError,"allocating consumer prefix compilation indices");
+    size_t count=0;
+    for (size_t k = schedule->ins / g->repeats; !result && k; k--) {
+      const struct message *x = schedule->in + k - 1;
+      struct write_binding *write = x->c->write_binding;
+      if (!write || !write->land_records || write->to != comm->rank) continue;
+      const size_t tile=write_tile(write,x->offset);
+      uint64_t *record=(uint64_t *)((char *)write->land_records+tile_offset(write->land_layout,tile,x->c->invocation));
+      tiles[count++]=(struct tile_landing){record,k-1};
     }
+    qsort(tiles,count,sizeof *tiles,tile_landing_order);
+    for(size_t t=0;!result&&t<count;t++) {
+      if(t&&tiles[t].record==tiles[t-1].record)continue;
+      const size_t k=tiles[t].entry;
+      const struct message *x=schedule->in+k;
+      uint64_t *record=tiles[t].record;
+      if (*record == x->c->write_binding->land_capacity) {
+        result=fail(ncclInvalidUsage, "WRITE consumer bindings exceed their prepared physical-channel capacity");break;
+      }
+      const struct metal_wait wait = {ch->buffer, comm->violation, x->data.buffer, ch->landed, x->data.offset,
+        x->end, g->start[h][1] + k, h, schedule->each[1],x->bytes};
+      ncclMeshBinding *bindings=(ncclMeshBinding *)(record+1);
+      result = gpu(metal_land_deferred(program, x->data.buffer, x->data.offset, &wait,
+        bindings[(*record)++]), "a WRITE consumer's landing record");
+    }
+    const uint64_t own = own_landing(g, h);
+    if (!result && own > g->start[h][1]) {
+      if (fusing.landed >= fusing.room[1])
+        return fail(ncclInvalidUsage, "a fused crossing's landings past the %u its ncclMeshFused has room for (ncclMeshPlan's entries)", fusing.room[1]);
+      const struct message *x = in_at(g, h, own - 1);
+      const struct metal_wait wait = {ch->buffer, comm->violation, x->data.buffer, ch->landed, x->data.offset, x->end, own - 1, h,
+                                      schedule->each[1], x->bytes};
+      result = gpu(metal_land_deferred(program, x->data.buffer, x->data.offset, &wait, fusing.out->land[fusing.landed]), "a fused landing's record");
+      fusing.landed += !result;
+    }
+    if (!result) { ch->consumed = g->end[h][1]; if (ch->waited < g->end[h][1]) ch->waited = g->end[h][1]; }
   }
-  if (!result) result = gpu(metal_record(program, METAL_NONE, 0, 0, 0), "the tracks' end");
-  if (!result) result = gpu(metal_tracks(program, tracks, consumed), "the tracks");
-  else metal_record(program, METAL_NONE, 0, 0, 0);
   return result;
 }
 
@@ -5617,8 +5392,8 @@ static ncclResult_t operand_copies(struct metal_program *program, struct ncclCom
    into recvbuff as it completes; the program's end signals `finished` where the
    library made its encoder.  Its channels' counts, its slot and the buffers its deferred steps' bindings name are made
    resident through the stream's residency set, for its dispatches and the caller's kernels alike. */
-/* a call's operands as its caller's kernels read and write them, declared once at its group's pool (metal_boundary) so
-   the caller's schedule orders those kernels, in place of a barrier after the pool: its send operand read and its result
+/* a call's operands as its caller's kernels read and write them, declared once with its group (metal_boundary) so
+   the caller's schedule orders those kernels after its waits, in place of a barrier after them: its send operand read and its result
    written, their whole extents (design/runtime-waits-2026-10-30.md).  None for a WRITE, whose views keep the barrier */
 static size_t call_boundary(const struct call *c, ncclMeshAccess *out) {
   if (c->target) return 0;
@@ -5689,7 +5464,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   /* design/zorvek.md zorvek: the group's issue, on pages no use the stream has not passed holds */
   if (!result) result = zorvek(comm, x, remote, &list, n, &plans, &u, &area);
   if (!result && u->zeeb) metal_resident(program, u->base.buffer);
-  struct inflight *g = NULL, *before = NULL;
+  struct inflight *g = NULL;
   uint64_t ticket = 0;
   uint32_t copies = 0;
   if (!result && remote) {
@@ -5704,7 +5479,6 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     if (!result) {
       for (uint32_t h = 0; h < comm->count; h++) { g->end[h][0] = comm->channels[h].sends; g->end[h][1] = comm->channels[h].lands; }
       g->list = list; g->n = n; g->ticket = ticket = ++tickets;
-      before = inflight_last;
       if (inflight_last) inflight_last->next_group = g; else inflight = g;
       inflight_last = g;
       scheduled = 1;
@@ -5712,7 +5486,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   }
   if (!result) result = operand_copies(program, comm, list, n, NULL);
   /* design/zorvek.md zook: a group that makes operands in place publishes its leading SENDs once they are made, as
-     its presents could not (present_group `direct`), and not in the tracks pool */
+     its presents could not (present_group `direct`) */
   for (uint32_t h = 0; !result && copies && g && !g->fused && h < comm->count; h++)
     result = present_publish(program, comm->channels + h, g->plans + h);
   for (uint32_t h = 0; !result && gate && g && h < comm->count; h++) {
@@ -5731,13 +5505,8 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       publishes += g->fused ? channel_publication(g, h, g->start[h][0], g->end[h][0]) != NULL : (uint32_t)((g->end[h][0] - g->start[h][0]) / repeats);
       lands += g->fused ? own_landing(g, h) > g->start[h][1] : (uint32_t)((g->end[h][1] - g->start[h][1]) / repeats);
     }
-    /* a fused group's steps are records its caller's kernels run, and the library encodes no wait of it; the groups in
-       flight before it are completed first, so it completes alone, in complete's fused form (each channel released
-       once, its last landing to this rank its consumer's) */
-    if (g->fused && before) {
-      result = complete(program, before, &published);
-      if (!result) result = retire(program);
-    }
+    /* a fused group's steps are records its caller's kernels run (fused_records), and the library encodes no wait of
+       it: each channel released once, its last landing to this rank its consumer's */
     if (g->fused) {
       fusing.out = fused; fusing.room[0] = fusing.out->publishes; fusing.room[1] = fusing.out->lands;
       fusing.published = fusing.landed = 0;
@@ -5748,10 +5517,10 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       for (size_t i = 0; i < n; i++) k += call_boundary(list + i, bounds + k);
       metal_boundary(program, bounds, k);
     }
-    /* design/zorvek.md zabbadoo: a group of copies and sums runs as its own dispatches, outside the pool */
-    int zabbadood = 0;
-    if (!result && !g->fused) result = zabbadoo(program, comm, g, u, &zabbadood);
-    if (!result) result = complete(program, g, &published);
+    /* design/zorvek.md zabbadoo: every other group runs as its own dispatches; the tracks pool that ran what it did not
+       take is deleted (design/zorvek.md "The pool's last users": what it ran, each now zabbadoo's or a plan's failure) */
+    if (!result && !g->fused) result = zabbadoo(program, comm, g, u);
+    if (!result && g->fused) result = fused_records(program, g, &published);
     if (!result && g->fused && (fusing.published != publishes || fusing.landed != lands))
       result = fail(ncclInvalidUsage, "a fused crossing whose program is not this rank's publications and landings of its whole operands");
     if (g->fused) { fusing.out->publishes = fusing.published; fusing.out->lands = fusing.landed; }
