@@ -233,10 +233,15 @@ channels' `published`, `consumed`, `waited`.
   channel that is not ready yet. The cable abstraction in that sentence is the code's, not the model's: a
   channel is one cable (struct channel `cable`, `wire`), routing binds each piece to one wire, and the walk
   takes each wire's entries in host call order. In the model there are only edges, a node pair with all its
-  cables and relay paths, and nothing is ordered but by a page. The one real constraint is a lane's: the
-  transport is two-sided (TN3205, design/deliverables.md I1), so on a queue pair the k-th SEND lands in the
-  k-th posted receive, an order both ends compute. The defect is that this order comes from host call
-  order instead of the dependencies. It is not item 3's.
+  cables and relay paths, and nothing is ordered but by a page. The links' own abstraction, the queue pair
+  (TN3205: UC, SEND into the oldest posted RECV), is the bridge's alone: every queue pair, request and
+  completion queue, and "in what order a link's queue pairs carry which call's positions" (design/
+  transport.md section 2). Complete mediation keeps it out of every program's reach, because its state
+  machines check preconditions by faulting and its finite shared lanes deadlock when parties order their parts
+  on their own (Coffman's hold-and-wait). The defect: the collective names a cable (a stream per wire, routes
+  as cable lists, a transfer's cable index), so the order the program compiles becomes the order of that
+  cable's queue pairs. Program-dependent code thereby orders queue pairs, and the stand is the non-termination
+  section 2 predicts. It is not item 3's.
 - fabric-dnn fails at 4f34df7d (before zinth), at 2b5a2fac and since: m5ult1's GPU wait ends with nothing it
   sends sent.
 - Found: zelloth's threadgroups take blocks in a fixed order (block q to threadgroup q mod G) and spin on each
@@ -269,8 +274,9 @@ channels' `published`, `consumed`, `waited`.
   and those frames queue on m5ult4's channel behind its later input frames. Those wait for m5ult4's chain
   kernel, which waits on m5ult1's state, which waits on m5ult2's. That is a cycle through the chain
   program's input publication and a lane order taken from host call order, not through the library's
-  waits. Its form: the compiler orders each lane's units by a topological order of the actual page
-  dependencies, the cross-rank ones included (the chain's input publication order is declared in its
-  production records). Units are spread over the whole edge's capacity, every cable between the two nodes
-  and every relay path, so no unit waits behind one that depends on it. Host call order and cables are no
-  inputs.
+  waits. Its form is not a compiler that orders lanes, which leaks the queue pair to program-dependent code
+  again. The collective names a node and positions in its rows; its dependencies reach the transport only
+  as its readiness words. Links, cables, queue pairs and lanes, and the order in which a link's queue pairs
+  carry positions, are the bridge's alone, chosen by a rule independent of data and program, so no program
+  can make the transport stand (transport.md section 2's table: "a port and a lane pair ≺ a node"; "the
+  bridge stripes a node's stream over the link's lane pairs").
