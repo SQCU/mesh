@@ -169,7 +169,8 @@ def allocate(layout, dtype, device, *, extent=0, alignment=1):
     count = -(-max((first + length + origin) * width, extent + origin * width) // width)
     reserved = -(-(count * width + alignment - width) // alignment) * (alignment // width)
     storage = empty((reserved,), dtype=dtype, device=device)
-    base, _, offset = _stream.page_backing(storage)
+    base, _, backing = _stream.page_backing(storage)
+    offset = backing.index(0) if backing.count else backing.offset
     padding = (-(base + offset + origin * width)) % alignment
     return TensorView(storage, layout.shift(origin + padding // width))
 
@@ -185,7 +186,8 @@ def resolve(value, declarations, *, writing=False, device=None):
     capacity = max((item[1] for item in contracts), default=0)
     alignment = math.lcm(*(item[2] for item in contracts))
     device = value.device.type if device is None else device
-    base, available, at = _stream.page_backing(value)
+    base, available, backing = _stream.page_backing(value)
+    at = backing.index(0) if backing.count else backing.offset
     storage = TensorView.of(value).storage
     first = descriptor(value).index(0) if descriptor(value).count else 0
     fits = ((base + at) % alignment == 0 and at + capacity <= available

@@ -324,12 +324,14 @@ def prepare_expression(expression):
     section's source inputs/results keep their tensor-field identities while
     the common numerical compiler performs its ordinary source rewrites.
     """
-    from .compilation import operands as compiler_operands, implementations, normalize_source
+    from .compilation import operands as compiler_operands, implementations, implementation_assignment, normalize_source
     configuration = dict(compiler_operands())
     import copy
     available = copy.deepcopy(implementations())
+    assigned = copy.deepcopy(implementation_assignment())
     if ('prepared' in expression and expression['prepared']['configuration'] == configuration
-            and expression['prepared']['implementations'] == available):
+            and expression['prepared']['implementations'] == available
+            and expression['prepared']['implementation_assignment'] == assigned):
         return expression['prepared']
     import torch
     from torch.fx.node import map_arg
@@ -403,7 +405,7 @@ def prepare_expression(expression):
     normalized = dict(expression, graph=module)
     normalized.pop('prepared', None)
     prepared = dict(expression=normalized, algebra=algebra, aliases=aliases, fields=fields, sections=tuple(spans),
-                    configuration=configuration, implementations=available)
+                    configuration=configuration, implementations=available, implementation_assignment=assigned)
     expression['prepared'] = prepared
     return prepared
 

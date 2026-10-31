@@ -190,17 +190,52 @@ solve. CPU programs and provider models retain these records through preparation
 and replay. The last prepared holder releases the identity. Submission does not
 look up resource names, allocate requests or decide how much work may run.
 
-This establishes the declaration and binding handoffs, not arbitrary backend
-coverage. The generic scalar compiler still needs its CPU emitter and mixed
-implementation partitioning. External numerical recipes still need their
-implementation candidates. Generic Core ML export can supply a compiled
+The retained scalar body now feeds both Metal and C++ source emission. Each
+selected work record can name its implementation. The configured initial
+assignment lives in `etc/compute/assignment.json`; neither catalog order nor
+the input tensor's storage device chooses it. Disjoint pieces of one operation
+can use different implementations. Source emission preserves each piece's
+operands until its command has been declared.
+
+The C++ emitter reuses scalar/SIMD arithmetic, loop fusion and reduction code
+generation. Its enclosing command graph supplies parallel work; an individual
+command creates no OpenMP worker team. This is not a limit on the number of CPU
+work pieces. Original byte relations compose with the final page bindings
+before native compilation. Both frontends use the same storage-expression
+lowering, argument record and native CPU instruction program. The native
+instruction loop consumes only a bound entry and its fixed arguments.
+
+Python and imported programs use one source-compilation helper. The pinned
+Torch source extension makes OpenMP an explicit build operand. The CPU profile
+links standalone [SLEEF 3.9.0](https://github.com/shibatch/sleef/tree/906ca7512ee483296780a81a21b9ca715d40dfe1)
+vector arithmetic, built by `rdma/cpu.mk` from `etc/compute/cpu.mk`, and requires
+symbols to resolve at link time. Native preparation therefore does not depend
+on Python having loaded a numerical library. Replay declarations retain source
+and build operands, not paths to temporary compiler output. Successful
+compilation removes source and diagnostic files; process teardown removes its
+cached libraries. No compiler or file operation enters the numerical entry.
+
+Mixed command declarations retain CPU entries and GPU commands in the common
+schedule, with exact read/write selections and resource operands. A host-only
+sequence has no dummy GPU command. The imported CPU recipe carries the same
+source and typed page relations; its final binder composes its own invocation
+pages. It does not copy the exporting process's physical addresses. Ordinary
+Accelerate recipes use the same native instruction interface.
+
+This establishes scalar emission and mixed binding, not arbitrary backend
+coverage. External numerical recipes still need their implementation
+candidates. Generic Core ML export can supply a compiled
 provider declaration; assigning arbitrary source sections to it must use its
 actual compiled contract. The current model-specific share adapters do not
 establish that broader assignment. Replay-template serialization of recorded
 host stages remains part of the common declaration work in followup 5.
 
 Source and preparation inspection cover eligibility, retained work coordinates,
-typed CPU recipes and host invocation bindings. These are structural results;
+typed CPU recipes, scalar reductions, noncontiguous views, mixed work pieces,
+native schedule composition and imported host invocation bindings. Standalone
+native loading also covers vector transcendental source. Existing Metal scalar,
+reduction, product, gather and empty preparation remains available. Library,
+extension and importer builds passed. These are structural results;
 whole-function execution and performance remain followup 6.
 
 ## Dependency handoff through command lowering

@@ -6,6 +6,7 @@ IMAGES = libmesh.dylib libnccl-mesh.dylib libmesh-coreml.dylib libmesh-statistic
 METAL_CONFIGURATION ?= ../etc/compute/metal.mk
 include $(METAL_CONFIGURATION)
 include isl.mk
+include cpu.mk
 METAL_DEFINES = -DMESH_METAL_LANGUAGE=$(MESH_METAL_LANGUAGE_ENUM)
 RDMA_CONFIGURATION ?= ../etc/bridge/thunderbolt.mk
 include $(RDMA_CONFIGURATION)
@@ -15,7 +16,7 @@ MESH_CODESIGN_IDENTITY ?= Mesh Bridge
 WARN = -Wall -Wextra -Werror -Wno-error=deprecated-declarations
 $(IMAGES:%=.build/%) .build/nccl-mesh-kernels: $(METAL_CONFIGURATION)
 $(IMAGES:%=.build/%) .build/nccl-mesh-kernels: metal-capabilities.h ../etc/compute/metal.def ../etc/bridge/layout.h ../etc/bridge/thunderbolt.h
-all: $(IMAGES:%=.build/%)
+all: $(IMAGES:%=.build/%) .build/libsleef.a
 # the bridge and mesh-stat read the region through libmesh: beside them once installed, and at ../rdma from $MESH_ROOT/bin
 LIBMESH = -L.build -lmesh -Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../rdma
 # design/transport.md: the bridge, mesh-link.c and mesh-records.c over mesh-bridge.h
@@ -34,7 +35,7 @@ LIBMESH = -L.build -lmesh -Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../rdm
 # keeps the files it mapped, and the bridge runs a new binary once stopped by SIGTERM (bin/mesh-user.sh;
 # design/transport.md section 9); then libnccl-mesh (install-nccl), whose failure leaves these installed
 install: install-images install-nccl
-OTHERS = $(filter-out libnccl-mesh.dylib,$(IMAGES))
+OTHERS = $(filter-out libnccl-mesh.dylib,$(IMAGES)) libsleef.a
 install-images: $(OTHERS:%=.build/%)
 	@moved=; for f in $(OTHERS); do \
 	  if cmp -s .build/$$f $$f; then [ $$f = mesh-flow ] && [ -n "$$moved" ] || continue; \

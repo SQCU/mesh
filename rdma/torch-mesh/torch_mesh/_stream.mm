@@ -795,12 +795,49 @@ static void fits_binding(id<MTLComputePipelineState> state, NSUInteger index, NS
   TORCH_CHECK(false, "kernel ", name ? name.UTF8String : "(unnamed)", " declares ", declared, " bytes at buffer ", index,
               ", and its dispatch binds ", bound, " bytes of ", record ? "its record" : "a buffer");
 }
+using HostDeclaration=std::tuple<std::string,pybind11::bytes,std::vector<std::pair<size_t,int>>>;
+using CommandHost=std::tuple<size_t,std::array<uintptr_t,4>,std::vector<pybind11::object>,
+  std::vector<pybind11::object>,std::optional<HostDeclaration>>;
+// Both direct host declarations and mixed command streams retain the same
+// page accesses, native entry and relocation declaration at preparation.
+struct PreparedHost {
+  std::vector<MetalReach> views;
+  MetalHostOperation operation;
+  std::string kind,bytes;
+  std::vector<MetalPlace> places;
+  bool declared;
+  PreparedHost(const std::array<uintptr_t,4> &entry,const std::vector<pybind11::object> &inputs,
+      const std::vector<pybind11::object> &outputs,const std::optional<HostDeclaration> &declaration):declared(declaration.has_value()) {
+    std::vector<at::Tensor> held;
+    auto accesses=[&](const std::vector<pybind11::object> &tensors,uint32_t access) {
+      for(const auto &object:tensors) {
+        const TensorOperand operand(object);const auto &t=operand.storage;held.push_back(t);
+        NSData *data=[operand.layout.value reaches:operand.pages.buffer base:0 elementBytes:t.element_size() access:access binding:-1];
+        const auto *spans=(const MetalReach *)data.bytes;
+        views.insert(views.end(),spans,spans+data.length/sizeof *spans);
+      }
+    };
+    accesses(inputs,MetalReachRead);accesses(outputs,MetalReachWritten);
+    if(declaration) {
+      kind=std::get<0>(*declaration);bytes=std::get<1>(*declaration);
+      for(const auto &[at,relocation]:std::get<2>(*declaration))places.push_back({at,(MetalRelocation)relocation});
+    }
+    operation=[host_operation(entry,false,held) copy];
+  }
+  ~PreparedHost(){[operation release];}
+  void append(MetalSchedule *schedule) {
+    const MetalDeclaration definition{kind.c_str(),bytes.data(),bytes.size(),places.data(),places.size()};
+    MetalScheduleHost(schedule,views.data(),views.size(),declared?&definition:nullptr,operation);
+  }
+};
 struct Commands {
-  MetalReplay *replay=nullptr;
+  std::vector<MetalReplay *> replays;
+  std::vector<std::unique_ptr<PreparedHost>> hosts;
   std::vector<at::Tensor> operands;
-  explicit Commands(const std::vector<CommandRecord> &records,const std::optional<CommandReaches> &declared=std::nullopt) {
+  explicit Commands(const std::vector<CommandRecord> &records,const std::optional<CommandReaches> &declared=std::nullopt,
+      const std::vector<CommandHost> &hostRecords={}) {
     TORCH_CHECK(!declared||declared->size()==records.size(),"each command has one declared access list");
-    if(records.empty())return;
+    if(records.empty()&&hostRecords.empty())return;
     auto device=at::mps::MPSDevice::getInstance()->device();
     std::vector<std::vector<MetalCommandBinding>> bindings(records.size());
     std::vector<std::vector<MetalReach>> reaches(records.size());
@@ -855,14 +892,27 @@ struct Commands {
       descriptions.push_back({state,bound.data(),bound.size(),nullptr,0,ranges.data(),ranges.size(),nullptr,0,
         MTLSizeMake(grid[0],grid[1],grid[2]),MTLSizeMake(group[0],group[1],group[2]),(BOOL)threadGrid});
     }
-    replay=MetalReplayCommands(device,descriptions.data(),descriptions.size(),MetalFormEncoded);
-    TORCH_CHECK(replay,"native command preparation failed");
+    size_t first=0;
+    auto replay=[&](size_t end) {
+      TORCH_CHECK(first<=end&&end<=descriptions.size(),"host positions must follow declared command order");
+      auto *made=first==end?nullptr:MetalReplayCommands(device,descriptions.data()+first,end-first,MetalFormEncoded);
+      TORCH_CHECK(first==end||made,"native command preparation failed");
+      replays.push_back(made);first=end;
+    };
+    for(const auto &[at,entry,inputs,outputs,definition]:hostRecords) {
+      replay(at);hosts.push_back(std::make_unique<PreparedHost>(entry,inputs,outputs,definition));
+    }
+    replay(descriptions.size());
   }
-  ~Commands(){MetalReplayFree(replay);}
+  ~Commands(){for(auto *replay:replays)MetalReplayFree(replay);}
   void append(MetalSchedule *schedule) {
-    if(!replay)return;
-    NSError *error=MetalScheduleAppend(schedule,replay,NSMakeRange(0,1),@[],nil,nil);
-    TORCH_CHECK(!error,error?error.localizedDescription.UTF8String:"");
+    for(size_t i=0;i<replays.size();i++) {
+      if(replays[i]) {
+        NSError *error=MetalScheduleAppend(schedule,replays[i],NSMakeRange(0,1),@[],nil,nil);
+        TORCH_CHECK(!error,error?error.localizedDescription.UTF8String:"");
+      }
+      if(i<hosts.size())hosts[i]->append(schedule);
+    }
   }
 };
 // Fixed operands for a declared block graph. Shared lowering supplies scalar
@@ -886,7 +936,7 @@ struct Collectives {
   void append(MetalSchedule *schedule,size_t repetitions=1) {
     const ncclComm_t handle=communicator(comm);
     MetalScheduleCommunicator(schedule,handle);
-    const size_t batches=before.replay||after.replay?repetitions:(size_t)(repetitions!=0);
+    const size_t batches=!before.replays.empty()||!after.replays.empty()?repetitions:(size_t)(repetitions!=0);
     const size_t repeat=batches==1?repetitions:1;
     std::vector<uint8_t> declared;std::vector<MetalPlace> places;
     declare_group({handle,issues.empty()?0:repeat,0,0,0,0,0},declared,places);
@@ -1716,27 +1766,9 @@ struct ScheduleBinding {
   // completion worker neither owns a Python callback nor acquires the GIL.
   // `declaration` (kind, bytes, places as (offset, relocation)): what the engine makes the operation from again
   // (design/replay-templates-2026-10-29.md); None: the function makes no template.
-  using HostDeclaration=std::tuple<std::string,pybind11::bytes,std::vector<std::pair<size_t,int>>>;
   void host(const std::array<uintptr_t,4> &entry,const std::vector<pybind11::object> &inputs,
       const std::vector<pybind11::object> &outputs,const std::optional<HostDeclaration> &declaration) { @autoreleasepool {
-    std::vector<MetalReach> views;
-    std::vector<at::Tensor> held;
-    auto declare=[&](const std::vector<pybind11::object> &tensors,uint32_t access) {
-      for(const auto &object:tensors) {
-        const TensorOperand operand(object);const auto &t=operand.storage;held.push_back(t);
-        NSData *data=[operand.layout.value reaches:operand.pages.buffer base:0 elementBytes:t.element_size() access:access binding:-1];
-        const auto *spans=(const MetalReach *)data.bytes;
-        views.insert(views.end(),spans,spans+data.length/sizeof *spans);
-      }
-    };
-    declare(inputs,MetalReachRead);declare(outputs,MetalReachWritten);
-    std::string kind,bytes;std::vector<MetalPlace> places;
-    if(declaration) {
-      kind=std::get<0>(*declaration);bytes=std::get<1>(*declaration);
-      for(const auto &[at,relocation]:std::get<2>(*declaration))places.push_back({at,(MetalRelocation)relocation});
-    }
-    const MetalDeclaration declared{kind.c_str(),bytes.data(),bytes.size(),places.data(),places.size()};
-    MetalScheduleHost(schedule.get(),views.data(),views.size(),declaration?&declared:nullptr,host_operation(entry,false,held));
+    PreparedHost(entry,inputs,outputs,declaration).append(schedule.get());
   }}
   void copy(const at::Tensor &source,const at::Tensor &destination) {
     TORCH_CHECK(source.is_mps()&&destination.is_mps()&&source.scalar_type()==at::kByte&&
@@ -2053,8 +2085,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("import_attributes",&import_attributes, pybind11::call_guard<Drained>());
   module.def("page_backing",[](const pybind11::object &value) {
     TensorOperand operand(value);
-    return std::array<uint64_t,3>{(uint64_t)(uintptr_t)operand.pages.buffer.contents,
-      operand.pages.buffer.length,(uint64_t)((operand.layout.value.count?[operand.layout.value index:0]:operand.layout.value.offset)*operand.storage.element_size())};
+    return std::make_tuple((uint64_t)(uintptr_t)operand.pages.buffer.contents,
+      operand.pages.buffer.length,TensorLayout([operand.layout.value components:operand.storage.element_size()]));
   }, pybind11::call_guard<Drained>());
   module.def("page_storage",&page_storage,pybind11::call_guard<Drained>());
   module.def("page_domain",[](const std::vector<at::Tensor> &owners){
@@ -2165,6 +2197,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
       return out;},pybind11::arg("binding"),pybind11::arg("origin")=pybind11::none(),pybind11::call_guard<Drained>())
     .def("storage_declaration",[](const TensorLayout &v,NSUInteger binding,const TensorLayout &source){
       return std::string([v.value declaration:binding fromStorage:source.value].UTF8String);}, pybind11::call_guard<Drained>())
+    .def("storage_byte_declaration",[](const TensorLayout &v,NSUInteger binding,const TensorLayout &source,NSUInteger width){
+      return std::string([v.value scalarStorageDeclaration:binding fromBytes:source.value elementBytes:width].UTF8String);}, pybind11::call_guard<Drained>())
     .def("storage_span",[](const TensorLayout &v){
       const MetalTensorSpan span=v.value.storageSpan;return std::make_pair(span.offset,span.count);
     }, pybind11::call_guard<Drained>())
@@ -2250,8 +2284,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("linear_source", &linear_source, pybind11::call_guard<Drained>());
   module.def("linear_groups", &linear_groups, pybind11::call_guard<Drained>());
   module.def("linear_commands", &linear_commands, pybind11::call_guard<Drained>());
-  pybind11::class_<Commands>(module,"Commands").def(pybind11::init<const std::vector<CommandRecord> &,const std::optional<CommandReaches> &>(),
-    pybind11::arg("records"),pybind11::arg("reaches")=pybind11::none());
+  pybind11::class_<Commands>(module,"Commands").def(pybind11::init<const std::vector<CommandRecord> &,const std::optional<CommandReaches> &,const std::vector<CommandHost> &>(),
+    pybind11::arg("records"),pybind11::arg("reaches")=pybind11::none(),pybind11::arg("hosts")=std::vector<CommandHost>{});
   module.def("linear_split", &linear_split, pybind11::call_guard<Drained>());
   module.def("device_facts", &device_facts, pybind11::call_guard<Drained>());
   module.def("pipeline_facts", &pipeline_facts, pybind11::call_guard<Drained>());

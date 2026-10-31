@@ -250,8 +250,16 @@ class Program:
 
     @classmethod
     def prepare(cls, declaration):
-        recorded = tuple(command_records(declaration['commands'], with_reaches=True))
-        return cls(_stream.Commands([record for record, _ in recorded], [reach for _, reach in recorded]),
+        recorded, hosts, owners = [], [], []
+        for command in declaration['commands']:
+            if isinstance(command, dict) and command['kind'] == 'cpu':
+                from . import cpu
+                host = cpu.prepare(command)
+                owners.append(host)
+                hosts.append((len(recorded), host.entry, host.inputs, host.outputs, host.declaration))
+            else:
+                recorded.extend(command_records((command,), with_reaches=True))
+        return cls(_stream.Commands([record for record, _ in recorded], [reach for _, reach in recorded], hosts),
                    declaration['output'], declaration['pages'])
 
 
@@ -586,7 +594,7 @@ def prepare_graph(module, metadata, *, materializations=()):
     from torch.utils._pytree import tree_flatten, tree_unflatten
     from torch.fx.node import map_arg
     from .placement import Placements, same_view
-    from .compilation import implementations
+    from .compilation import implementations, implementation_assignment
     from contextlib import contextmanager
     from mesh_compute import hardware
 
@@ -596,6 +604,7 @@ def prepare_graph(module, metadata, *, materializations=()):
     materialized_buffers = set()
     configuration = compiler_operands()
     implementation_catalog = copy.deepcopy(implementations())
+    implementation_choices = copy.deepcopy(implementation_assignment())
 
     class NativeChoices(InductorChoices):
         def reduction_split_factor(self, device, reduction_numel_hint, numel_hint, inner_reduction):
@@ -963,9 +972,7 @@ def prepare_graph(module, metadata, *, materializations=()):
                 raise NotImplementedError(f'no native preparation for {kernel} on {device}')
             self.writeline(f'mesh_native.{names[kernel]}({", ".join(args)}, out={out_view or out})')
 
-    class MetalSource(MetalScheduling):
-        kernel_type = PageKernel
-
+    class SelectedSource:
         def codegen_node(self, node):
             for child in node.get_nodes():
                 if child.get_name() in self.scheduler.removed_ops:
@@ -976,6 +983,10 @@ def prepare_graph(module, metadata, *, materializations=()):
             pending = self.scheduler.buffer_names_to_free.copy()
             self.scheduler.buffer_names_to_free.clear()
             for at, piece in enumerate(pieces):
+                # Emit the preceding piece before releasing any operands whose
+                # final use belongs to this piece. This is source generation;
+                # runtime ordering comes from the final command accesses.
+                self.scheduler.flush()
                 future = {self.scheduler.mutation_real_name.get(name, name)
                           for later in pieces[at + 1:] for name in later.used_or_aliased_buffer_names()}
                 ready = pending.difference(future)
@@ -984,10 +995,14 @@ def prepare_graph(module, metadata, *, materializations=()):
                 piece.outputs, piece.outputs_by_name = node.outputs, node.outputs_by_name
                 piece.ancestors, piece.last_usage = node.ancestors, node.last_usage
                 piece.mutation_renames = node.mutation_renames
-                super().codegen_node(piece)
+                backend = self.scheduler.get_backend(piece.get_device())
+                backend.codegen_node(piece)
             self.scheduler.buffer_names_to_free.update(pending)
             if not pieces:
                 node.mark_run()
+
+    class MetalSource(SelectedSource, MetalScheduling):
+        kernel_type = PageKernel
 
         def define_kernel(self, source, node_schedule, kernel):
             wrapper = V.graph.wrapper_code
@@ -1035,20 +1050,30 @@ def prepare_graph(module, metadata, *, materializations=()):
             wrapper.header.writeline(f'{name} = mesh_native.shader({source_text!r}, "generated_kernel", {access}, {tuple(arguments)!r}, {types!r}, mesh_accesses[{index}])')
             return name
 
-    scalar_compilers = {'metal_scalar': (MetalSource, 'mps')}
+    from . import cpu
+    class CpuSource(SelectedSource, cpu.scheduling(storage_layouts, command_accesses, computed_domains,
+            lambda nodes: nodes[0].implementation)):
+        pass
+    scalar_compilers = {'metal_scalar': (MetalSource, 'mps'), 'cpp_scalar': (CpuSource, 'cpu')}
 
     class DeclaredSchedulerNode(SchedulerNode):
         """Start backend scheduling from the retained, assigned scalar body."""
-        def __init__(self, scheduler, operation, declaration):
+        def __init__(self, scheduler, operation, declaration, implementation=None):
             self.declaration = declaration
+            self.implementation = implementation if implementation is not None else next(
+                (choice['implementation'] for choice in V.graph.selected_implementations if choice['operation'] is operation),
+                implementation_catalog[implementation_choices['scalar']])
             super().__init__(scheduler, operation)
+
+        def get_device(self):
+            return torch.device(scalar_compilers[self.implementation['compiler']][1])
 
         def _compute_attrs(self, *args, **kwargs):
             declaration = self.__dict__.pop('declaration', None)
             if declaration is None:
                 return super()._compute_attrs(*args, **kwargs)
             self._body, self._sizes = declaration._body, declaration._sizes
-            device = self.node.get_device_or_error()
+            device = self.get_device()
             self.group = device, self.scheduler.get_backend(device).group_fn(self._sizes)
             self.set_read_writes(declaration.read_writes)
 
@@ -1094,6 +1119,10 @@ def prepare_graph(module, metadata, *, materializations=()):
             # remain ordinary commands; equal single domains use normal fusion.
             if any(hasattr(node, 'page_pieces') for group in (left, right) for node in group.get_nodes()):
                 return False
+            selected = {node.implementation['id'] for group in (left, right) for node in group.get_nodes()
+                        if isinstance(node, DeclaredSchedulerNode)}
+            if len(selected) > 1:
+                return False
             return super().can_fuse(left, right, *args, **kwargs)
 
         def merge_loops(self):
@@ -1106,9 +1135,10 @@ def prepare_graph(module, metadata, *, materializations=()):
         def create_backend(self, device):
             # The selected compiler owns code generation. A source tensor's
             # storage device is not a numerical implementation assignment.
-            if V.graph.selected_implementations:
-                compiler = V.graph.selected_implementations[0]['implementation']['compiler']
-                return scalar_compilers[compiler][0](self)
+            selected = [choice['implementation']['compiler'] for choice in V.graph.selected_implementations
+                        if scalar_compilers[choice['implementation']['compiler']][1] == device.type]
+            if selected:
+                return scalar_compilers[selected[0]][0](self)
             # Externals already name their current native numerical recipe.
             return MetalSource(self)
 
@@ -1506,7 +1536,8 @@ def prepare_graph(module, metadata, *, materializations=()):
                     (not record['work'].empty() or record['finish'] is not None and not record['finish']['work'].empty())))
                 for record in requests:
                     implementation = select_implementation(declaration['required'], implementation_catalog.values(),
-                        None if record is None else record.get('implementation'))
+                        implementation_choices['scalar'] if record is None else
+                        record.get('implementation', implementation_choices['scalar']))
                     if implementation['compiler'] not in scalar_compilers:
                         raise NotImplementedError(f"retained scalar emission has no compiler for {implementation['compiler']}")
                     choices.append(dict(operation=operation, domain=None if record is None else record['domain'],
@@ -1590,14 +1621,14 @@ def prepare_graph(module, metadata, *, materializations=()):
             for stage in stages:
                 stage.origins = operation.get_origins()
                 declaration = self.declaration(stage)
-                prepared = DeclaredSchedulerNode(self.scheduler, stage, declaration)
+                prepared = DeclaredSchedulerNode(self.scheduler, stage, declaration, node.implementation)
                 prepared.declared_read_writes = declaration.read_writes
                 physical.append(prepared)
                 binding = self.value_binding(stage, algebra)
                 relation = algebra.layout(layout_configuration(binding['view']))
                 self.reduction_uses.append(dict(key=('reduction', stage.get_operation_name()),
                     binding=binding, relation=relation, shape=relation.shape, requirements=(), access='readwrite'))
-            final_node = DeclaredSchedulerNode(self.scheduler, final, self.declaration(final, final_body))
+            final_node = DeclaredSchedulerNode(self.scheduler, final, self.declaration(final, final_body), node.implementation)
             final_node.declared_read_writes = final_node.read_writes
             return tuple(physical), final_node
 
@@ -1650,27 +1681,32 @@ def prepare_graph(module, metadata, *, materializations=()):
                     requests = selected.get(operation.get_operation_name(), ())
                     if isinstance(node, SchedulerNode):
                         pieces = []
-                        def append(body, domain):
+                        def append(body, domain, implementation):
                             piece = copy.copy(node)
+                            piece.implementation = implementation
                             piece.__dict__.pop('page_pieces', None)
                             piece._body = piece_body(body, domain)
                             piece._sizes = piece._body.sizes
-                            device = operation.get_device_or_error()
+                            device = piece.get_device()
                             piece.group = device, self.scheduler.get_backend(device).group_fn(piece._sizes)
                             piece.mutation_renames = {}
                             piece.read_writes = node.declared_read_writes
                             piece.refresh_dependencies(normalize=False, need_clear_tiling_cache=True)
-                            stages, piece = self.split_reduction(piece)
+                            stages, piece = (self.split_reduction(piece) if implementation['compiler'] == 'metal_scalar'
+                                             else ((), piece))
                             for stage in stages:
                                 prepared[stage.get_name()] = stage, stage.read_writes
                                 backend_operations.append(stage.node)
                             pieces.append(piece)
                         for request in requests:
+                            implementation = next(choice['implementation'] for choice in self.selected_implementations
+                                if choice['operation'] is operation and choice['domain'] is request['domain']
+                                and choice['work'] is request['work'])
                             body = request['domain']['body']
                             boundary = len(body.iter_vars)
                             cuts = (boundary,) if 0 < boundary < len(request['domain']['work']) else ()
                             for domain in request['work'].products(cuts):
-                                append(body, domain)
+                                append(body, domain, implementation)
                             if body.reduce_vars and request['finish'] is not None:
                                 missing = request['finish']['work'].binary(request['work'].project(0, boundary), 'subtract')
                                 if not missing.empty():
@@ -1700,7 +1736,7 @@ def prepare_graph(module, metadata, *, materializations=()):
                                             if write['name'] == source['name']:
                                                 selected = write['relation'].preimage(source['relation'].image(missing))
                                                 selected_finish = selected if selected_finish is None else selected_finish.binary(selected, 'union')
-                                    append(finish_body, selected_finish)
+                                    append(finish_body, selected_finish, implementation)
                         if len(pieces) == 1:
                             node = pieces[0]
                             node.__dict__.pop('page_pieces', None)
@@ -1858,11 +1894,13 @@ def prepare_graph(module, metadata, *, materializations=()):
                 finally:
                     _records.reset(token)
             for declaration in records:
-                if not isinstance(declaration, dict) or declaration['kind'] != 'shader':
+                if not isinstance(declaration, dict) or declaration['kind'] not in ('shader', 'cpu'):
                     continue
                 # Shader slots retain their source identity and coordinate
                 # units. A portable caller composes this declared relation
                 # with its own pages; it never identifies an input by address.
+                argument_slots = (tuple(spec['slot'] for spec in declaration['argument_specs'] if spec['kind'] == 'pointer')
+                                  if declaration['kind'] == 'cpu' else range(len(declaration['names'])))
                 declaration['arguments'] = tuple(
                     dict(slot=slot, name=name, dtype=dtype, binding_origin=declaration['binding_origins'][slot],
                          storage_dtype=self.get_buffer(name).get_dtype(),
@@ -1870,13 +1908,13 @@ def prepare_graph(module, metadata, *, materializations=()):
                              * self.get_buffer(name).get_dtype().itemsize,
                          source=storage_layouts[name]['source'],
                          source_dtype=storage_layouts[name]['source_dtype'])
-                    for slot, (name, dtype) in enumerate(zip(declaration['names'], declaration['types'], strict=True)))
+                    for slot, name, dtype in zip(argument_slots, declaration['names'], declaration['types'], strict=True))
                 from .operand import bound_access
                 from .command_declarations import dense, bind_accesses
                 accesses = []
                 for item in declaration['accesses']:
                     slot = item['slot']
-                    argument = declaration['arguments'][slot]
+                    argument = next(argument for argument in declaration['arguments'] if argument['slot'] == slot)
                     count = argument['source'].count * argument['source_dtype'].itemsize
                     selected = bound_access(item['access'], item['work'], argument['source'],
                                             argument['source_dtype'], dense((count,)))

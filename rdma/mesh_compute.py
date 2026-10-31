@@ -15,6 +15,13 @@ def implementations():
     return json.loads(path.read_text())
 
 
+@cache
+def implementation_assignment():
+    """Configured initial choices; later preparations consume supplied choices."""
+    path = Path(__file__).resolve().parents[1] / 'etc/compute/assignment.json'
+    return json.loads(path.read_text())
+
+
 def eligibility(required, implementation):
     """Compare explicit semantic sets, retaining the reasons with the candidate.
 

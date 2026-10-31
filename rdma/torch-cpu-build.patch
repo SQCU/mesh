@@ -1,0 +1,51 @@
+The CPU source emitter declares whether its enclosing graph supplies parallelism.
+OpenMP is an explicit build option; standalone scalar commands do not link a
+second worker runtime. Apply at dependency installation, never during execution.
+
+--- a/torch/_inductor/cpp_builder.py
++++ b/torch/_inductor/cpp_builder.py
+@@ -1686,6 +1686,7 @@
+     use_relative_path: bool,
+     use_mmap_weights: bool,
+     use_mmap_weights_external: bool,
++    openmp: bool = True,
+ ) -> tuple[list[str], list[str], list[str], list[str], list[str], list[str], list[str]]:
+     """
+     This function is used to get the build args of torch related build options.
+@@ -1731,7 +1732,7 @@
+         omp_lib_dir_paths,
+         omp_lib,
+         omp_passthrough_args,
+-    ) = _get_openmp_args(cpp_compiler)
++    ) = _get_openmp_args(cpp_compiler) if openmp else ([], [], [], [], [], [])
+ 
+     fb_macro_passthrough_args = _use_fb_internal_macros()
+ 
+@@ -1799,6 +1800,7 @@
+         min_optimize: bool = False,
+         precompiling: bool = False,
+         preprocessing: bool = False,
++        openmp: bool = True,
+     ) -> None:
+         super().__init__(
+             compile_only=compile_only,
+@@ -1829,6 +1831,7 @@
+             use_relative_path=use_relative_path,
+             use_mmap_weights=use_mmap_weights,
+             use_mmap_weights_external=use_mmap_weights_external,
++            openmp=openmp,
+         )
+ 
+         _append_list(self._definitions, torch_definitions)
+--- a/torch/include/torch/csrc/inductor/cpp_prefix.h
++++ b/torch/include/torch/csrc/inductor/cpp_prefix.h
+@@ -1,7 +1,9 @@
+ #if !defined(TORCH_STABLE_ONLY) && !defined(TORCH_TARGET_VERSION)
+ #pragma once
+ 
++#ifdef _OPENMP
+ #include <omp.h>
++#endif
+ #include <algorithm>
+ #include <atomic>
+ #include <cmath>

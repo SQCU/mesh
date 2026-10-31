@@ -50,8 +50,8 @@ def host(t):
 def _host_address(value):
     """Bind the shared allocation and its declared offset once at preparation."""
     from . import _stream
-    base, _, offset = _stream.page_backing(value)
-    return base + offset
+    base, _, layout = _stream.page_backing(value)
+    return base + (layout.index(0) if layout.count else layout.offset)
 
 
 def _host_bindings(source, target, input_layouts, output_layouts, binding_layout):
@@ -93,8 +93,10 @@ def _coreml():
             lib.mesh_coreml_contract.argtypes = [ctypes.c_long]
             lib.mesh_coreml_compile.restype = ctypes.c_int
             lib.mesh_coreml_compile.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
-            lib.mesh_cpu_program_create.argtypes = [ctypes.POINTER(CpuCommand), ctypes.c_size_t, ctypes.c_char_p]
+            lib.mesh_cpu_program_create.argtypes = [ctypes.POINTER(CpuInstruction), ctypes.c_size_t, ctypes.c_char_p]
             lib.mesh_cpu_program_create.restype = ctypes.c_void_p
+            lib.mesh_cpu_compile.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+            lib.mesh_cpu_compile.restype = ctypes.c_char_p
             lib.mesh_cpu_program_prepare.argtypes = [ctypes.c_void_p] * 4
             lib.mesh_cpu_program_prepare.restype = ctypes.c_char_p
             lib.mesh_cpu_program_retain.argtypes = [ctypes.c_void_p]
@@ -266,7 +268,7 @@ class Cpu(Engine):
             # one workspace that covers all their declared requirements.
             pages = empty(size, dtype=torch.uint8, device='cpu')
             return _host_address(pages)
-        binding, address = _cpu_program(native, records, workspace, self.implementation)
+        binding, address = _cpu_bind(native, _cpu_records(records), workspace, self.implementation)
         if pages is not None:
             outputs += (pages,)
         return CpuProgram(native, binding, _cpu_declaration(records, address, self.implementation), tuple(values[name] for name in reads), outputs, before, after)
@@ -310,6 +312,11 @@ class CpuCommand(ctypes.Structure):
     _fields_ += [(name, ctypes.c_int) for name in ('input_transpose', 'weight_transpose')]
 
 
+class CpuInstruction(ctypes.Structure):
+    _fields_ = [('run', ctypes.c_void_p), ('arguments', ctypes.c_void_p), ('argument_bytes', ctypes.c_size_t),
+                ('release_arguments', ctypes.c_void_p), ('library', ctypes.c_char_p), ('symbol', ctypes.c_char_p)]
+
+
 def _native_entry(prepare, binding, retain, release):
     return (ctypes.cast(prepare, ctypes.c_void_p).value, binding,
             ctypes.cast(retain, ctypes.c_void_p).value, ctypes.cast(release, ctypes.c_void_p).value)
@@ -318,49 +325,98 @@ def _native_entry(prepare, binding, retain, release):
 _CPU_PRODUCT, _CPU_GELU = 0, 1
 
 
-def _cpu_program(native, records, workspace, implementation):
-    """The native program of CPU commands `records` ((kind, CpuCommand as declared, before binding), in order): each
-    product bound to its bulk contraction, the activation to mesh_cpu_gelu, and the products that need one given
-    `workspace(bytes)`'s address, which covers the largest requirement. Returns the program and that address (0: none)."""
-    commands, needs = [], []
-    for kind, declared in records:
-        command = CpuCommand.from_buffer_copy(declared)
-        if kind == _CPU_PRODUCT:
-            size = native.mesh_cpu_product_bind(ctypes.byref(command))
-            if size < 0:
-                for made in commands:
-                    native.mesh_cpu_command_release(ctypes.byref(made))
-                raise ValueError('CPU matrix views could not be bound to a bulk contraction')
-            if size:
-                needs.append((len(commands), size))
-        else:
-            command.run = ctypes.cast(native.mesh_cpu_gelu, ctypes.c_void_p)
-        commands.append(command)
-    address = workspace(max(size for _, size in needs)) if needs else 0
-    for k, _ in needs:
-        native.mesh_cpu_product_workspace(ctypes.byref(commands[k]), address)
-    bound = (CpuCommand * len(commands))(*commands)
-    binding = native.mesh_cpu_program_create(bound, len(bound), json.dumps(implementation['resources'], separators=(',', ':')).encode())
-    if not binding:
-        for command in bound:
-            native.mesh_cpu_command_release(ctypes.byref(command))
-        raise RuntimeError(native.mesh_coreml_error().decode())
-    return binding, address
+def _cpu_records(records):
+    declarations = []
+    for kind, command in records:
+        declared = CpuCommand.from_buffer_copy(command)
+        declared.run = None
+        declarations.append(dict(kind=kind, arguments=bytes(declared),
+            places=tuple((getattr(CpuCommand, name).offset, 0) for name in _CPU_FIELDS)))
+    return declarations
+
+
+def _cpu_bind(native, records, workspace, implementation):
+    """Resolve declared entries and argument records once into the native program."""
+    commands, arguments, instructions, needs = [], [], [], []
+    transferred = False
+    try:
+        for record in records:
+            if 'kind' in record:
+                command = CpuCommand.from_buffer_copy(record['arguments'])
+                if record['kind'] == _CPU_PRODUCT:
+                    size = native.mesh_cpu_product_bind(ctypes.byref(command))
+                    if size < 0:
+                        raise ValueError('CPU matrix views could not be bound to a bulk contraction')
+                    if size:
+                        needs.append((command, size))
+                elif record['kind'] == _CPU_GELU:
+                    command.run = ctypes.cast(native.mesh_cpu_gelu, ctypes.c_void_p)
+                else:
+                    raise ValueError(f"unknown declared Accelerate command {record['kind']}")
+                commands.append(command)
+                instructions.append(CpuInstruction(command.run, ctypes.addressof(command), ctypes.sizeof(command),
+                    ctypes.cast(native.mesh_cpu_command_release, ctypes.c_void_p), None, None))
+            else:
+                library = native.mesh_cpu_compile(record['source'].encode(),
+                    json.dumps(record['compiler'], separators=(',', ':')).encode())
+                if library is None:
+                    raise RuntimeError(native.mesh_coreml_error().decode())
+                data = ctypes.create_string_buffer(bytes(record['arguments']))
+                arguments.append(data)
+                instructions.append(CpuInstruction(None, ctypes.addressof(data), len(record['arguments']), None,
+                    library, record['symbol'].encode()))
+        address = workspace(max(size for _, size in needs)) if needs else 0
+        for command, _ in needs:
+            native.mesh_cpu_product_workspace(ctypes.byref(command), address)
+        bound = (CpuInstruction * len(instructions))(*instructions)
+        binding = native.mesh_cpu_program_create(bound, len(bound), json.dumps(implementation['resources'], separators=(',', ':')).encode())
+        if not binding:
+            raise RuntimeError(native.mesh_coreml_error().decode())
+        transferred = True
+        return binding, address
+    finally:
+        if not transferred:
+            for command in commands:
+                native.mesh_cpu_command_release(ctypes.byref(command))
 
 
 _CPU_FIELDS = ('input', 'weight', 'output', 'scratch')
 
 
 def _cpu_declaration(records, workspace, implementation):
-    """design/replay-templates-2026-10-29.md: CPU commands as a host declaration ('cpu', bytes, places): their count and
-    workspace address, then each command's kind and its CpuCommand before binding; each address a place.
-    The trailing implementation operand preserves the compiler contract through template restoration."""
-    step = 8 + ctypes.sizeof(CpuCommand)
-    data = struct.pack('<QQ', len(records), workspace) + b''.join(struct.pack('<Q', kind) + bytes(command) for kind, command in records)
-    places = [(8, 0)] + [(16 + k * step + 8 + getattr(CpuCommand, name).offset, 0) for k in range(len(records)) for name in _CPU_FIELDS]
-    metadata = json.dumps(implementation, separators=(',', ':')).encode()
-    data += struct.pack('<Q', len(metadata)) + metadata
+    return _cpu_serialized(_cpu_records(records), workspace, implementation)
+
+
+def _cpu_serialized(records, workspace, implementation):
+    """One replay declaration for static numerical entries and compiled symbols.
+
+    Pointer words remain ordinary relocation places in copied argument records;
+    executable addresses are resolved from declarations during preparation.
+    """
+    metadata = dict(implementation=implementation, instructions=[dict(
+        {key: value for key, value in record.items() if key not in ('arguments', 'places')},
+        argument_bytes=len(record['arguments'])) for record in records])
+    header = json.dumps(metadata, separators=(',', ':')).encode()
+    data = struct.pack('<QQ', len(header), workspace) + header
+    places = [(8, 0)]
+    for record in records:
+        places.extend((len(data) + offset, relocation) for offset, relocation in record.get('places', ()))
+        data += record['arguments']
     return 'cpu', data, places
+
+
+def cpu_native(source, compiler, symbol, arguments, places, *, implementation, inputs=(), outputs=()):
+    """Bind a compiled CPU entry through the existing host program and recorder.
+
+    ``places`` uses MetalDeclaration's (byte offset, relocation kind) records.
+    """
+    native = _coreml()
+    if native is None:
+        raise RuntimeError('CPU commands require the native engine library')
+    records = [dict(source=source, compiler=compiler, symbol=symbol, arguments=bytes(arguments), places=tuple(places))]
+    binding, workspace = _cpu_bind(native, records, None, implementation)
+    return CpuProgram(native, binding, _cpu_serialized(records, workspace, implementation),
+                      tuple(inputs), tuple(outputs), (), ())
 
 
 def rebuild(kind, data):
@@ -370,15 +426,17 @@ def rebuild(kind, data):
     if native is None:
         raise RuntimeError('host operations require the native engine library')
     if kind == 'cpu':
-        count, workspace = struct.unpack_from('<QQ', data)
-        step = 8 + ctypes.sizeof(CpuCommand)
-        length, = struct.unpack_from('<Q', data, 16 + count * step)
-        implementation = json.loads(data[24 + count * step:24 + count * step + length])
-        if implementation['compiler'] != 'accelerate':
-            raise ValueError('CPU replay requires its declared Accelerate implementation')
-        records = [(struct.unpack_from('<Q', data, 16 + k * step)[0], CpuCommand.from_buffer_copy(data, 16 + k * step + 8))
-                   for k in range(count)]
-        binding, _ = _cpu_program(native, records, lambda size: workspace, implementation)
+        length, workspace = struct.unpack_from('<QQ', data)
+        header = json.loads(data[16:16 + length])
+        at, records = 16 + length, []
+        for instruction in header['instructions']:
+            end = at + instruction['argument_bytes']
+            if end > len(data):
+                raise ValueError('CPU replay argument record exceeds its declaration')
+            records.append(dict(instruction, arguments=data[at:end]));at = end
+        if at != len(data):
+            raise ValueError('CPU replay has bytes outside its declared argument records')
+        binding, _ = _cpu_bind(native, records, lambda size: workspace, header['implementation'])
         return _native_entry(native.mesh_cpu_program_prepare, binding, native.mesh_cpu_program_retain, native.mesh_cpu_program_release)
     if kind == 'coreml':
         length, = struct.unpack_from('<Q', data)

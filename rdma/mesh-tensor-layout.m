@@ -1195,6 +1195,21 @@ static id TensorSelectionIndex(NSInteger (^extent)(id),NSArray *shape,id express
   return terms;
 }
 
+static NSString *TensorStorageDeclaration(MetalTensorLayout *physical,MetalTensorLayout *source,NSString *name) {
+    NSCParameterAssert([source.shape isEqual:physical.shape]);
+    if(!physical.count)return [NSString stringWithFormat:@"inline long %@(long) { return 0; }\n",name];
+    isl_ctx *ctx=isl_ctx_alloc();
+    isl_pw_multi_aff *inverse=isl_map_lexmax_pw_multi_aff(isl_map_reverse(MeshIndexRelation(ctx,source)));
+    id terms=MeshIndexTerms(isl_pw_aff_pullback_pw_multi_aff(MeshIndexFunction(ctx,physical),inverse));
+    // Storage indices can have gaps and can start below zero. The emitted
+    // expression is valid on the declared source image; it adds no validity guard.
+    struct MeshIndexBounds bounds=MeshIndexImageBounds(MeshIndexRelation(ctx,source));isl_ctx_free(ctx);
+    NSInteger low=bounds.low,high=bounds.high;
+    terms=TensorSubstitute(terms,TensorSum(@[@"i",@(low)]));
+    return [NSString stringWithFormat:@"inline long %@(long storage) { long i = storage - %ldl; return %@; }\n",
+        name,(long)low,TensorExpressionSource(terms,MAX(1,high-low+1))];
+}
+
 @implementation MetalTensorLayout
 + (instancetype)selection:(NSDictionary *)declaration extent:(NSInteger (^)(id))extent {
   if(!extent)extent=^NSInteger(id value){return TensorSelectionExtent(value);};
@@ -1652,18 +1667,15 @@ static id TensorSelectionIndex(NSInteger (^extent)(id),NSArray *shape,id express
     return MetalViewPositionDeclaration(binding,[self declaration:0],_count,span);
 }
 - (NSString *)declaration:(NSUInteger)binding fromStorage:(MetalTensorLayout *)source {
-    NSParameterAssert([source.shape isEqual:_shape]);
-    if(!_count)return [[self declaration:binding] stringByAppendingFormat:@"inline long mesh_storage_%lu(long) { return 0; }\n",(unsigned long)binding];
-    isl_ctx *ctx=isl_ctx_alloc();
-    isl_pw_multi_aff *inverse=isl_map_lexmax_pw_multi_aff(isl_map_reverse(MeshIndexRelation(ctx,source)));
-    id terms=MeshIndexTerms(isl_pw_aff_pullback_pw_multi_aff(MeshIndexFunction(ctx,self),inverse));
-    // Storage indices can have gaps and can start below zero. The emitted
-    // expression is valid on the declared source image; it adds no validity guard.
-    struct MeshIndexBounds bounds=MeshIndexImageBounds(MeshIndexRelation(ctx,source));isl_ctx_free(ctx);
-    NSInteger low=bounds.low,high=bounds.high;
-    terms=TensorSubstitute(terms,TensorSum(@[@"i",@(low)]));
-    return [[self declaration:binding] stringByAppendingFormat:@"inline long mesh_storage_%lu(long storage) { long i = storage - %ldl; return %@; }\n",
-        (unsigned long)binding,(long)low,TensorExpressionSource(terms,MAX(1,high-low+1))];
+    return [[self declaration:binding] stringByAppendingString:TensorStorageDeclaration(self,source,
+        [NSString stringWithFormat:@"mesh_storage_%lu",(unsigned long)binding])];
+}
+- (NSString *)scalarStorageDeclaration:(NSUInteger)binding fromBytes:(MetalTensorLayout *)source elementBytes:(NSUInteger)width {
+    NSParameterAssert(width>0);
+    NSString *name=[NSString stringWithFormat:@"mesh_storage_bytes_%lu",(unsigned long)binding];
+    return [TensorStorageDeclaration(self,source,name) stringByAppendingFormat:
+        @"inline long mesh_storage_%lu(long i) { return %@(i * %lul) / %lul; }\n",
+        (unsigned long)binding,name,(unsigned long)width,(unsigned long)width];
 }
 - (NSData *)orderedSpans {
     if(_coordinates)return TensorExpressionSpans(self,YES);

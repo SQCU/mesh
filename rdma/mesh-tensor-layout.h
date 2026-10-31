@@ -112,6 +112,10 @@ FOUNDATION_EXPORT NSInteger MetalTensorConstant(id expression, NSArray<NSNumber 
 // Lower the declared storage indices of a frontend IR to this page selection.
 // The source index is compiler structure, not a payload index tensor.
 - (NSString *)declaration:(NSUInteger)binding fromStorage:(MetalTensorLayout *)source;
+// Both layouts are in bytes. Emit the same composed storage-address relation
+// for a scalar pointer, preserving its declared element width at the boundary.
+- (NSString *)scalarStorageDeclaration:(NSUInteger)binding fromBytes:(MetalTensorLayout *)source
+    elementBytes:(NSUInteger)width;
 // Logical traversal order, including repeated reads; unlike dependency union.
 - (NSData *)orderedSpans;
 - (NSData *)reaches:(nullable id<MTLBuffer>)buffer base:(NSUInteger)base elementBytes:(NSUInteger)bytes

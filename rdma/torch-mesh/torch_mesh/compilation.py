@@ -7,6 +7,7 @@ from . import _stream
 _bound = ContextVar('mesh_compilation_operands', default=None)
 _layouts = ContextVar('mesh_compilation_layouts', default=None)
 _implementations = ContextVar('mesh_compilation_implementations', default=None)
+_assignment = ContextVar('mesh_compilation_implementation_assignment', default=None)
 
 
 def operands():
@@ -21,11 +22,19 @@ def implementations():
     return mesh_compute.implementations() if held is None else held
 
 
+def implementation_assignment():
+    """Implementation choices supplied to preparation, independent of storage."""
+    import mesh_compute
+    held = _assignment.get()
+    return mesh_compute.implementation_assignment() if held is None else held
+
+
 @contextmanager
 def bind(configuration):
     values = dict(operands())
     preferences = ()
     available = implementations()
+    assigned = implementation_assignment()
     if configuration is not None:
         for key, value in configuration.items():
             if key == 'layout_preferences':
@@ -33,6 +42,9 @@ def bind(configuration):
                 continue
             if key == 'implementations':
                 available = value
+                continue
+            if key == 'implementation_assignment':
+                assigned = value
                 continue
             if key not in values:
                 raise ValueError(f'unknown compiler operand {key}')
@@ -42,9 +54,11 @@ def bind(configuration):
     token = _bound.set(values)
     layouts = _layouts.set(dict(preferences=preferences, choices=[]))
     candidates = _implementations.set(available)
+    assignments = _assignment.set(assigned)
     try:
         yield values
     finally:
+        _assignment.reset(assignments)
         _implementations.reset(candidates)
         _layouts.reset(layouts)
         _bound.reset(token)

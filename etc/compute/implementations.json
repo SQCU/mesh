@@ -11,6 +11,19 @@
     "resources": [],
     "output_storage": "caller-pages"
   },
+  "cpp_scalar": {
+    "id": "cpp_scalar",
+    "compiler": "cpp_scalar",
+    "build": {"libraries": ["libsleef.a"], "link_flags": ["-Wl,-undefined,error"]},
+    "accepts": {
+      "interfaces": ["scalar"],
+      "arithmetic_types": ["bool", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float16", "bfloat16", "float32", "float64"]
+    },
+    "requires": {},
+    "devices": ["cpu"],
+    "resources": [],
+    "output_storage": "caller-pages"
+  },
   "metal_engine": {
     "id": "metal_engine",
     "compiler": "native",

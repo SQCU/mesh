@@ -16,6 +16,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 static NSMutableArray *models_;
 static NSMutableDictionary *loaded_;
@@ -23,6 +28,84 @@ static NSMutableArray *placements_, *placement_text_;
 static NSMutableArray *contracts_, *contract_text_;
 static NSMutableArray *references_, *keys_, *model_resources_;
 static _Thread_local char error_[2048];
+extern char **environ;
+
+/* Both frontends supply the same final source and explicit compiler command.
+   This cache stores compilation artifacts, not bound numerical operands. */
+@interface MeshCpuCompilation : NSObject
+@property NSString *directory;
+@property NSData *path;
+@end
+@implementation MeshCpuCompilation
+- (void)dealloc {
+  if(_directory)[[NSFileManager defaultManager] removeItemAtPath:_directory error:nil];
+}
+@end
+static NSMutableDictionary<NSArray *,MeshCpuCompilation *> *cpu_artifacts_;
+static void cpu_compilation_end(void) { @autoreleasepool { cpu_artifacts_=nil; } }
+const char *mesh_cpu_compile(const char *source,const char *configuration_json) {
+  @autoreleasepool { @try {
+    NSString *text=source?[NSString stringWithUTF8String:source]:nil;
+    id configuration=configuration_json?[NSJSONSerialization JSONObjectWithData:
+      [NSData dataWithBytes:configuration_json length:strlen(configuration_json)] options:0 error:nil]:nil;
+    if(!text||![configuration isKindOfClass:NSDictionary.class]||
+       ![configuration[@"argv"] isKindOfClass:NSArray.class]||![configuration[@"argv"] count]||
+       ![configuration[@"source_argument"] isKindOfClass:NSString.class]||
+       ![configuration[@"output_argument"] isKindOfClass:NSString.class]||
+       [configuration[@"source_argument"] isEqual:configuration[@"output_argument"]]) {
+      snprintf(error_,sizeof error_,"CPU compilation needs source and explicit argv/source_argument/output_argument");return NULL;
+    }
+    NSArray *declared=configuration[@"argv"];NSUInteger sources=0,outputs=0;
+    for(id value in declared) {
+      if(![value isKindOfClass:NSString.class]){snprintf(error_,sizeof error_,"CPU compiler arguments must be strings");return NULL;}
+      sources += [value isEqual:configuration[@"source_argument"]];outputs += [value isEqual:configuration[@"output_argument"]];
+    }
+    if(sources!=1||outputs!=1||[declared[0] isEqual:configuration[@"source_argument"]]||
+       [declared[0] isEqual:configuration[@"output_argument"]]) {
+      snprintf(error_,sizeof error_,"CPU compiler command needs one source token and one output token");return NULL;
+    }
+    @synchronized([MeshCpuCompilation class]) {
+      if(!cpu_artifacts_){cpu_artifacts_=[NSMutableDictionary dictionary];atexit(cpu_compilation_end);}
+      NSArray *key=@[text,configuration];MeshCpuCompilation *held=cpu_artifacts_[key];if(held)return held.path.bytes;
+      NSString *pattern=[NSTemporaryDirectory() stringByAppendingPathComponent:@"mesh-cpu-XXXXXX"];
+      char *directory=strdup(pattern.fileSystemRepresentation);
+      if(!directory||!mkdtemp(directory)){free(directory);snprintf(error_,sizeof error_,"CPU artifact directory: %s",strerror(errno));return NULL;}
+      NSString *root=[NSString stringWithUTF8String:directory];free(directory);
+      MeshCpuCompilation *artifact=[MeshCpuCompilation new];artifact.directory=root;
+      NSString *input=[root stringByAppendingPathComponent:@"kernel.cpp"],*output=[root stringByAppendingPathComponent:@"kernel.so"],
+               *diagnostics=[root stringByAppendingPathComponent:@"compiler.log"];
+      NSError *error=nil;
+      if(![text writeToFile:input atomically:YES encoding:NSUTF8StringEncoding error:&error]) {
+        snprintf(error_,sizeof error_,"CPU source preparation: %s",error.localizedDescription.UTF8String);return NULL;
+      }
+      NSMutableArray<NSString *> *arguments=[NSMutableArray array];
+      for(NSString *value in declared)[arguments addObject:[value isEqual:configuration[@"source_argument"]]?input:
+        [value isEqual:configuration[@"output_argument"]]?output:value];
+      char **argv=calloc(arguments.count+1,sizeof *argv);
+      if(!argv){snprintf(error_,sizeof error_,"CPU compiler argument allocation");return NULL;}
+      for(NSUInteger i=0;i<arguments.count;i++)argv[i]=(char *)arguments[i].UTF8String;
+      int fd=open(diagnostics.fileSystemRepresentation,O_WRONLY|O_CREAT|O_TRUNC,0600);
+      if(fd<0){free(argv);snprintf(error_,sizeof error_,"CPU compiler diagnostics: %s",strerror(errno));return NULL;}
+      posix_spawn_file_actions_t actions;int status=posix_spawn_file_actions_init(&actions);BOOL initialized=!status;
+      if(!status)status=posix_spawn_file_actions_adddup2(&actions,fd,STDOUT_FILENO);
+      if(!status)status=posix_spawn_file_actions_adddup2(&actions,fd,STDERR_FILENO);
+      if(!status)status=posix_spawn_file_actions_addclose(&actions,fd);
+      pid_t child=0;if(!status)status=posix_spawnp(&child,argv[0],&actions,NULL,argv,environ);
+      if(initialized)posix_spawn_file_actions_destroy(&actions);close(fd);free(argv);
+      if(status){snprintf(error_,sizeof error_,"CPU compiler launch: %s (%s)",strerror(status),diagnostics.fileSystemRepresentation);return NULL;}
+      pid_t ended;do { ended=waitpid(child,&status,0); } while(ended<0&&errno==EINTR);
+      if(ended<0){snprintf(error_,sizeof error_,"CPU compiler completion: %s",strerror(errno));return NULL;}
+      if(!WIFEXITED(status)||WEXITSTATUS(status)||![[NSFileManager defaultManager] fileExistsAtPath:output]) {
+        NSString *detail=[NSString stringWithContentsOfFile:diagnostics encoding:NSUTF8StringEncoding error:nil];
+        snprintf(error_,sizeof error_,"CPU source preparation (%s): %s",diagnostics.fileSystemRepresentation,detail.UTF8String?:"compiler produced no library");return NULL;
+      }
+      const char *path=output.fileSystemRepresentation;
+      artifact.path=[NSData dataWithBytes:path length:strlen(path)+1];
+      unlink(input.fileSystemRepresentation);unlink(diagnostics.fileSystemRepresentation);
+      cpu_artifacts_[key]=artifact;return artifact.path.bytes;
+    }
+  } @catch(NSException *failure) {snprintf(error_,sizeof error_,"CPU source preparation: %s",failure.reason.UTF8String);return NULL;} }
+}
 
 /* Explicit resource names are preparation operands. Live prepared programs
    share one identity; the final holder removes it from this registry. */
@@ -95,7 +178,8 @@ static MeshResourceBinding *host_resources(id declaration) {
 
 /* Prepared CPU numerical commands, on the same shared views as graph shares.
    Weights and scratch are bound by the compiler; execution allocates nothing. */
-void mesh_cpu_product(const MeshCpuCommand *c) {
+void mesh_cpu_product(const void *arguments) {
+      const MeshCpuCommand *c=arguments;
       cblas_sgemm(CblasRowMajor,c->input_transpose,c->weight_transpose,c->rows,c->columns,c->inner,
                   1,c->input,c->input_stride,c->weight,c->weight_stride,0,c->output,c->output_stride);
 }
@@ -104,7 +188,8 @@ typedef struct {
   void *workspace;
 } MeshCpuProduct;
 
-static void mesh_cpu_product_strided(const MeshCpuCommand *c) {
+static void mesh_cpu_product_strided(const void *arguments) {
+  const MeshCpuCommand *c=arguments;
   MeshCpuProduct *p=(MeshCpuProduct *)c->scratch;
   if(BNNSMatMul(false,true,1,&p->input,&p->weight,&p->output,p->workspace,NULL)) {
     fputs("mesh: prepared CPU contraction failed\n",stderr);abort();
@@ -155,12 +240,14 @@ void mesh_cpu_product_workspace(MeshCpuCommand *c, void *workspace) {
   MeshCpuProduct *p=(MeshCpuProduct *)c->scratch;p->workspace=workspace;
 }
 
-void mesh_cpu_command_release(MeshCpuCommand *c) {
+void mesh_cpu_command_release(void *arguments) {
+  MeshCpuCommand *c=arguments;
   if(c->run==mesh_cpu_product_strided) {
     free(c->scratch);
   }
 }
-void mesh_cpu_gelu(const MeshCpuCommand *c) {
+void mesh_cpu_gelu(const void *arguments) {
+      const MeshCpuCommand *c=arguments;
       const int n=c->rows*c->columns;
       for(int i=0;i<n;i++) {
         const float x=c->input[i];c->scratch[i]=0.7978845608028654f*(x+0.044715f*x*x*x);
@@ -168,25 +255,56 @@ void mesh_cpu_gelu(const MeshCpuCommand *c) {
       vvtanhf(c->scratch,c->scratch,&n);
       for(int i=0;i<n;i++)c->output[i]=0.5f*c->input[i]*(1+c->scratch[i])*c->weight[i];
 }
+typedef struct { void (*run)(const void *); void *arguments; } MeshCpuBound;
+typedef struct { void (*release_arguments)(void *); void *library; } MeshCpuOwnership;
 typedef struct {
   _Atomic unsigned references;
   size_t count;
   void *resources; /* retained MeshResourceBinding */
-  MeshCpuCommand commands[];
+  MeshCpuOwnership *owners;
+  MeshCpuBound instructions[];
 } MeshCpuProgram;
 
 /* Preparation transfers command-owned workspace into this native lifetime.
    The schedule retains it independently of the frontend that constructed it. */
-void *mesh_cpu_program_create(const MeshCpuCommand *commands, size_t count, const char *resources_json) {
+void *mesh_cpu_program_create(const MeshCpuInstruction *instructions, size_t count, const char *resources_json) {
+  if(count&&!instructions){snprintf(error_,sizeof error_,"CPU program has no declared instructions");return NULL;}
   id declared=resources_json?[NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:resources_json length:strlen(resources_json)] options:0 error:nil]:nil;
   MeshResourceBinding *resources=host_resources(declared);if(!resources)return NULL;
-  if(count>(SIZE_MAX-sizeof(MeshCpuProgram))/sizeof *commands){snprintf(error_,sizeof error_,"CPU command extent overflows");return NULL;}
-  MeshCpuProgram *p=malloc(sizeof *p+count*sizeof *commands);
+  if(count>(SIZE_MAX-sizeof(MeshCpuProgram))/sizeof(MeshCpuBound)||count>SIZE_MAX/sizeof(MeshCpuOwnership)){
+    snprintf(error_,sizeof error_,"CPU instruction extent overflows");return NULL;
+  }
+  MeshCpuProgram *p=calloc(1,sizeof *p+count*sizeof(MeshCpuBound));
   if(!p){snprintf(error_,sizeof error_,"allocating CPU program");return NULL;}
+  p->owners=calloc(MAX(count,(size_t)1),sizeof *p->owners);
+  if(!p->owners){free(p);snprintf(error_,sizeof error_,"allocating CPU instruction ownership");return NULL;}
+  for(size_t i=0;i<count;i++) {
+    const MeshCpuInstruction *source=instructions+i;MeshCpuBound *bound=p->instructions+i;
+    if((source->argument_bytes&&!source->arguments)||
+       (source->run?(source->library||source->symbol):(!source->library||!source->symbol))) {
+      snprintf(error_,sizeof error_,"CPU instruction needs explicit arguments and one static entry or library/symbol");goto failed;
+    }
+    bound->run=source->run;
+    if(source->library) {
+      p->owners[i].library=dlopen(source->library,RTLD_NOW|RTLD_LOCAL);
+      if(!p->owners[i].library){snprintf(error_,sizeof error_,"CPU instruction library: %s",dlerror());goto failed;}
+      bound->run=(void(*)(const void *))dlsym(p->owners[i].library,source->symbol);
+      if(!bound->run){snprintf(error_,sizeof error_,"CPU instruction symbol: %s",dlerror());goto failed;}
+    }
+    bound->arguments=malloc(MAX(source->argument_bytes,(size_t)1));
+    if(!bound->arguments){snprintf(error_,sizeof error_,"copying CPU instruction arguments");goto failed;}
+    if(source->argument_bytes)memcpy(bound->arguments,source->arguments,source->argument_bytes);
+    p->owners[i].release_arguments=source->release_arguments;
+  }
   p->resources=(__bridge_retained void *)resources;
   atomic_init(&p->references,1);p->count=count;
-  memcpy(p->commands,commands,count*sizeof *commands);
   return p;
+failed:
+  for(size_t i=0;i<count;i++) {
+    free(p->instructions[i].arguments);
+    if(p->owners[i].library)dlclose(p->owners[i].library);
+  }
+  free(p->owners);free(p);return NULL;
 }
 void mesh_cpu_program_retain(void *program) {
   MeshCpuProgram *p=program;atomic_fetch_add_explicit(&p->references,1,memory_order_relaxed);
@@ -194,13 +312,17 @@ void mesh_cpu_program_retain(void *program) {
 void mesh_cpu_program_release(void *program) {
   MeshCpuProgram *p=program;
   if(atomic_fetch_sub_explicit(&p->references,1,memory_order_acq_rel)!=1)return;
-  for(size_t j=0;j<p->count;j++)mesh_cpu_command_release(p->commands+j);
-  CFRelease(p->resources);free(p);
+  for(size_t j=0;j<p->count;j++) {
+    if(p->owners[j].release_arguments)p->owners[j].release_arguments(p->instructions[j].arguments);
+    free(p->instructions[j].arguments);
+    if(p->owners[j].library)dlclose(p->owners[j].library);
+  }
+  CFRelease(p->resources);free(p->owners);free(p);
 }
 typedef struct { MeshCpuProgram *program; MeshHostCompletion complete; void *context; } MeshCpuTask;
 static void cpu_submit(void *bound) {
   MeshCpuTask *task=bound;MeshCpuProgram *p=task->program;
-  for(size_t j=0;j<p->count;j++)p->commands[j].run(p->commands+j);
+  for(size_t j=0;j<p->count;j++)p->instructions[j].run(p->instructions[j].arguments);
   task->complete(task->context,NULL);
 }
 static void cpu_release(void *bound) {
