@@ -107,16 +107,7 @@ def bandwidth(config):
         binding.realize(calls)
         prepared.append((binding, useful, calls, what, requested))
     observations = Observations()
-    store = dist.distributed_c10d._get_default_store()
     for index, (binding, useful, calls, what, requested) in enumerate(prepared):
-        # each case submitted once every rank has ended the one before (this rank's completions, then a store barrier
-        # outside the interval), so its submission-to-completion time is its own: submitted with every case ahead of it
-        # still queued, a case's time included all of theirs (design/measurement-regressions-2026-10-30.md, d4916d1e's
-        # "Cumulative"); and a rank whose part of a case ends early (a broadcast's root, its pages still on the wire)
-        # would carry the rest of that case into its next
-        observations.close()
-        store.set(f'mesh/bandwidth/{index}/{rank}', '1')
-        store.wait([f'mesh/bandwidth/{index}/{r}' for r in range(size)])
         started = now()
         binding.enqueue()
         completion = binding.completion()
