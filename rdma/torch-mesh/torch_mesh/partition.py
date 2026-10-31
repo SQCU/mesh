@@ -408,7 +408,7 @@ def reduce_scatterv(x: torch.Tensor, dim: int, sizes: list[int], rank: int, op: 
     lies in the region and the output holds no lease of the input."""
     group = dist.distributed_c10d._resolve_process_group(group_name)
     if hasattr(group, 'prepare_writes'):
-        raise RuntimeError('torch_mesh::reduce_scatterv on a mesh group runs inside a prepared function (bind_scatter_views); '
+        raise RuntimeError('torch_mesh::reduce_scatterv on a mesh group runs inside a prepared Function declaration; '
                            'an eager collective is not executed (design/eager-execution.md)')
     y = x.movedim(dim, 0)
     held = _empty(y.shape, y) if not _in_region(y) else None
@@ -1504,7 +1504,7 @@ def lower_owned_graph(graph, arguments, configuration):
     """
     import operator
     from .ownership import (from_spec, propagate, prepare_expression, compile_assignments, contribution_domains,
-                            source_uses, bind_ports, prepare_sources)
+                            source_uses, bind_ports, prepare_sources, source_ports)
     from .compilation import normalize_source
     from .algebra import partition_decompositions
     mesh = configuration['mesh']
@@ -1531,7 +1531,7 @@ def lower_owned_graph(graph, arguments, configuration):
     records = {node: node.meta['mesh_ownership'] for node in nodes if 'mesh_ownership' in node.meta}
     allocated = set(records)
     materialized = set(allocated)
-    uses, crossings, cuts = {}, [], set()
+    uses, crossings, cuts, scopes = {}, [], set(), {}
     pending = [dict(source=node, declaration=node.meta['mesh_local_source'], requirement='local_source_scope')
                for node in nodes if 'mesh_local_source' in node.meta]
 
@@ -1676,16 +1676,19 @@ def lower_owned_graph(graph, arguments, configuration):
         if not complete_work and 'mesh_sharding' in node.meta:
             declared_uses = [use for use in uses.values() if use['consumer'] is node
                              and use['provided'] is not None and use['required'] is not None]
-            value_change = any(not same_value(use['provided'], use['required']) for use in declared_uses)
             local_types = tuple(use for use in declared_uses if
                 tuple(use['required']['owners'][tuple(mesh.get_coordinate())]['shape']) !=
                 tuple(pytree.key_get(use['source'][0].meta['val'], use['source'][1]).shape))
-            if value_change and local_types:
-                # A schema's local value expression can change index values as
-                # well as storage placement. Its declared local operand types
-                # must enter the same source scope before global equations can
-                # consume those values. Keep that unfinished connection visible.
-                pending.append(dict(source=node, uses=local_types, requirement='source_value_scope'))
+            output_owners = {tuple(path): owner for path, owner in
+                pytree.tree_flatten_with_path(produced, is_leaf=leaf)[0] if leaf(owner)}
+            local_outputs = any(tuple(owner['owners'][tuple(mesh.get_coordinate())]['shape']) !=
+                tuple(pytree.key_get(node.meta['val'], path).shape) for path, owner in output_owners.items())
+            if local_types or local_outputs:
+                # The existing source rule declares a local numerical scope.
+                # In particular, placement expressions may change index values;
+                # their consumer must see the required local tensor type.
+                scopes[node] = dict(uses=tuple(declared_uses), outputs=output_owners,
+                    sharding=node.meta['mesh_sharding'])
 
     result = next(node.args[0] for node in nodes if node.op == 'output')
     result_nodes = tuple(dict.fromkeys(item for item in pytree.tree_leaves(result) if isinstance(item, torch.fx.Node)))
@@ -1705,18 +1708,30 @@ def lower_owned_graph(graph, arguments, configuration):
             for rank, owner in declared[path]['owners'].items():
                 requests[rank][(node, path)] = owner
     metadata = tuple(node.meta['val'] for node in placeholders)
-    expression, ports, source_nodes = source_uses(graph, replacements, result_versions)
-    expression.update(materializations=tuple(source_nodes[node] for node in nodes if node in observable),
-                      cuts=tuple((source_nodes[node], side) for node, side in sorted(cuts, key=lambda item: nodes.index(item[0]))))
-    prepared = prepare_expression(expression)
-    normalized_ports = {}
-    for (node, path), port in ports.items():
-        while node in prepared['aliases']:
-            node = prepared['aliases'][node]
-        normalized_ports[node, path] = port
-    prepared = dict(prepared, sections=tuple(bind_ports(section, normalized_ports, prepared['algebra'])
-                                             for section in prepared['sections']),
-                    external_fields=tuple((node, path) for node in placeholders for path, _ in fields(node)))
+    variants = {}
+    for rank in (_coordinates(mesh) if scopes else (tuple(mesh.get_coordinate()),)):
+        expression, ports, source_nodes = source_uses(graph, replacements, result_versions, scopes=scopes, coordinate=rank)
+        expression.update(materializations=(*expression['materializations'],
+                              *(source_nodes[node] for node in nodes if node in observable)),
+                          cuts=(*expression['cuts'], *((source_nodes[node], side) for node, side in
+                              sorted(cuts, key=lambda item: nodes.index(item[0])))))
+        if variants:
+            expression['algebra'] = next(iter(variants.values()))['algebra']
+        prepared = prepare_expression(expression)
+        normalized_ports = source_ports(prepared, ports)
+        variants[rank] = dict(prepared, sections=tuple(bind_ports(section, normalized_ports, prepared['algebra'])
+                                                 for section in prepared['sections']),
+                        external_fields=tuple((node, path) for node in placeholders for path, _ in fields(node)))
+    prepared = variants[tuple(mesh.get_coordinate())]
+    expression = prepared['expression']
+    if scopes:
+        shared = []
+        for members in zip(*(value['sections'] for value in variants.values()), strict=True):
+            wrapper = dict(members[0])
+            wrapper['rank_sections'] = {rank: dict(section, source_section=wrapper)
+                for rank, section in zip(variants, members, strict=True)}
+            shared.append(wrapper)
+        prepared = dict(prepared, sections=tuple(shared))
     programs = prepare_sources(programs, prepared['algebra']) if programs else ()
     for route in routes:
         node, path = route['source']
@@ -1735,6 +1750,58 @@ def lower_owned_graph(graph, arguments, configuration):
                                    routing=candidates[0]['sources'] if candidates else None)
         pending.extend(record['pending'])
         return record
+    def read_transition(site, ports, algebra):
+        from .compilation import source_expression
+        from mesh_relation import flat
+        described = site['fields'][0].meta['val']
+        shape = tuple(described.shape)
+        flattened = algebra.map(shape, (described.numel(),),
+            lambda x, y: [f'{y[0]} = {flat(shape, x)}'])
+        owners = {}
+        for rank, port in ports.items():
+            boundary = port['boundary']
+            positions = (algebra.set('{ [i] : false }', 1) if boundary is None else
+                         flattened.image(boundary['work']))
+            selection = dict(shape=list(shape), steps=[['reshape', [described.numel()]],
+                                                       ['select', 0, positions.spans()]])
+            owners[rank] = dict(selection=selection, shape=algebra.selection_relation(selection).shape)
+        source, result = ((node, ()) for node in site['fields'])
+        dimensions = site['dimensions']
+        partial = tuple(Partial('sum') if axis in dimensions else Replicate() for axis in range(mesh.ndim))
+        complete = (Replicate(),) * mesh.ndim
+        local_shape = owners[tuple(mesh.get_coordinate())]['shape']
+        if any(owner['shape'] != local_shape for owner in owners.values()):
+            return dict(pending=(dict(source=site['source'], ports=ports, owners=owners,
+                dimensions=dimensions, requirement='collective_source_scope'),))
+        with described.fake_mode:
+            local = torch.empty(local_shape, dtype=described.dtype, device=described.device)
+        width = math.prod(local_shape) * described.dtype.itemsize
+        meta = TensorMeta(torch.Size((width,)), (1,), torch.uint8)
+        before, after = DTensorSpec(mesh, partial, tensor_meta=meta), DTensorSpec(mesh, complete, tensor_meta=meta)
+        def declaration(value):
+            bits = value.reshape(-1).view(torch.uint8)
+            received = _local_redistribute(bits, before, after)
+            return received.view(described.dtype).reshape(local_shape)
+        module, operands = source_expression(declaration, local)
+        argument = next(node for node in module.graph.nodes if node.op == 'placeholder')
+        output = next(node.args[0] for node in module.graph.nodes if node.op == 'output')
+        selecting = {rank: owner['selection'] for rank, owner in owners.items()}
+        bindings = {(argument, ()): dict(field=source, selection=owners[tuple(mesh.get_coordinate())]['selection'],
+                                        selections=selecting),
+                    (output, ()): dict(field=result, selection=owners[tuple(mesh.get_coordinate())]['selection'],
+                                      selections=selecting)}
+        expression = dict(graph=module, operands=tuple(operands), algebra=algebra)
+        captured = prepare_expression(expression)
+        normalized = source_ports(captured, bindings)
+        captured = dict(captured, sections=tuple(bind_ports(span, normalized, algebra) for span in captured['sections']))
+        typ = TensorMeta(described.shape, described.stride(), described.dtype)
+        # The typed prefix returns masked values. Its byte view, inside the
+        # captured declaration, carries the SUM semantics; the float/int source
+        # field itself is never mislabeled as a numerical Partial(sum).
+        values[source] = dict(type=typ, owners=owners, dimensions=dimensions,
+                             reductions=(), mesh=mesh, spec=None)
+        values[result] = dict(type=typ, owners=owners, dimensions=(), reductions=(), mesh=mesh, spec=None)
+        return dict(source=source, result=result, prepared=captured, state_outputs=())
     constraints = {}
     for rank in requests:
         limits, unresolved = contribution_domains(prepared, values, rank, uses=uses)
@@ -1746,7 +1813,7 @@ def lower_owned_graph(graph, arguments, configuration):
         constraints=constraints,
         delivery=delivery,
         boundary_projection=lambda section, needs, algebra: _project_owned_boundaries(section, needs, algebra, mesh),
-        transitions=programs)
+        transitions=programs, read_transition=read_transition)
     projections, deliveries = selected['projections'], selected['deliveries']
     pending.extend(dict(item, coordinate=rank) for rank, projection in projections.items() for item in projection['pending'])
     local = pytree.tree_map(lambda value: value._local_tensor if isinstance(value, DTensor) else value, arguments)

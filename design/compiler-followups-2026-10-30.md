@@ -33,8 +33,11 @@ declares page deliveries. The binder preserves local identities as page
 equalities, actual input pages, ordered result uses and supplied destinations.
 Source/placement preparation has reached ordinary owned native shader binding.
 Partial/complete transitions now splice their captured expressions and distinct
-value versions into those forward sections. Local index-value source scopes and
-multiple storage uses of one semantic field remain open.
+value versions into those forward sections. Registered local source scopes retain
+each rank's operand types and global page relations, including ragged index/mask
+expressions. Explicit `to_local` source-shape provenance, multiple storage uses
+of one semantic field, and independently typed rank/cohort source scopes remain
+open.
 
 Native scalar emission now returns passive command declarations before pipeline
 realization. The native and LiteRT consumers retain the same typed byte
@@ -43,11 +46,17 @@ can decode into final pages; sub-scalar requests retain their exact byte
 interpretation. The LiteRT importer now consumes those stages and their exact
 per-command accesses. Selected native results feed the existing provider input
 pages, including explicit scalar-type conversions. Retained live-read sections
-now prepare through the same page and shader binder; their ownership/collective
-and importer connection remains open. Computed-source substitution through live reads, selector/scan
+now feed the importer's distributed scalar selections through the same page and
+shader binder. Forward ownership also composes the returned read values with
+the existing byte-collective expression. Inspection reaches selected collective
+calls and their input page binding; a fake process group cannot prepare the
+transport endpoint. This does not establish a complete distributed execution.
+Cached pointwise producers now
+compose into live reads before page placement; an imported UPDATE→GATHER emits
+one command without a full updated-table intermediate. Selector/scan
 declarations and pool reduction ordering remain open. These are source, build
-and preparation observations, with no new
-numerical or performance claim. Followups 2–6 are still outstanding.
+and preparation observations, with no new numerical or performance claim.
+Followups 2–6 are still outstanding.
 
 ## Window relations
 
@@ -219,8 +228,9 @@ dependencies do not yet supply a numerical work-to-access relation.
 Logical materialization requirements enter before consumers lower, so a later
 consumer reads a declared intermediate instead of inlining its producer.
 `graph.bind` assigns physical pages and emits commands from that same IR through
-the existing `PageKernel` and preparation view emitter. The ordinary
-`compile_graph` entry calls those two stages. Preparation retained a reduction's
+the existing `PageKernel` and preparation view emitter. The public compiler and
+`Function` now share selected-section preparation; the separate whole-family
+`compile_graph` wrapper and ordinary `BoundGraph` branch are removed. Preparation retained a reduction's
 common variables, a declared intermediate, and a strided destination without
 building the logical graph again. This is data-kind source: on D2 and D4,
 `old ≺ new` because one lowered graph now supplies dependencies before binding

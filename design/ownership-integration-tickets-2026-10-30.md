@@ -53,11 +53,11 @@ distributed closure remains open at the connections below.
 
 | Ticket | State at this handoff | Next connection |
 |---|---|---|
-| O1 | Selected work and typed live-read sections reach ordinary page/shader preparation | Connect live-read sections to ownership/importer; selector/scan declarations and pool unrolling |
-| O2 | Supplied assignments compile forward through typed placement transitions | Local-value source scopes and multiple storage uses of one field |
-| O3 | Partial/complete value versions splice into ordered sections; captured mask-state edges compose | Connect local index-value scopes and live reads |
-| O4 | Binder consumes expanded sections and shared port relations; collective identities and assembled views share pages | Joined distributed binding, multiple storage uses and ordinary/owned preparation unification |
-| O5 | Actual importer consumes shared native stages; selected results bind existing provider pages | Live-read cuts, computed-source substitution and encoded index folding |
+| O1 | Selected work and typed live-read sections reach ordinary page/shader preparation; cut coordinates survive loop optimization | Selector/scan declarations and pool unrolling |
+| O2 | Supplied assignments compile forward through typed transitions and returned live-read values | Explicit local-body shape provenance, multiple storage uses, and independently typed rank/cohort scopes |
+| O3 | Partial/complete value versions, captured mask state and byte-collective source expressions compose | Retain explicit to_local source-shape relations and varying cohort types |
+| O4 | Ordinary and owned Function plus the public FX compiler use one selected-section binder | Joined distributed binding and multiple storage uses |
+| O5 | Actual importer consumes shared live-read sections; UPDATE→GATHER composes through its cached scalar producer | Encoded index folding and remaining packed-reader integration |
 | O6 | Open | Join ordinary entry points, remove superseded paths, then build and inspect preparation |
 
 None of O1–O6 is closed by a helper alone. The later whole-function measurements
@@ -89,7 +89,7 @@ frontend.
 | Existing producer | Record passed to its consumer |
 |---|---|
 | `partition.lower_owned_graph` | `graph`; actual local `arguments`; global captured `metadata`; `mesh`; `values` and `uses`; per-rank `requests`; `expression` and `prepared`; per-rank `projections`; `crossings`, `deliveries`, `pending`, `external`, `result` |
-| `ownership.prepare_expression` | Original expression, shared algebra and aliases, ordered sections. A numerical section retains its source/result bindings, numerical IR and access effects. |
+| `ownership.prepare_expression` | Normalized expression, shared algebra, original-to-normalized tensor fields, aliases and ordered sections. A numerical section retains its source/result bindings, numerical IR and access effects. |
 | `ownership.project_expression` | Ordered `output_selections`, required inputs, and section projections. Numerical projections contain `storage_bytes`, selected work/read/write records, separate `finish` work and unresolved declarations. |
 | `declarations.boundary_projection` | Local and peer input requests, collective records and unresolved declarations. Other ranks' output requests enter explicitly through `peer_outputs`. |
 | `placement.selected` | `storage`, ordered `results`, owning `pages`, and resolved consumer `uses`, passed to the retained graph's `bind`. |
@@ -101,6 +101,12 @@ names its source field, provided owner, type, section, and destination selection
 on **every** rank, including explicit empty selections. A crossing separately
 names the required placement/value transition and its before-use or after-result
 site. A delivery alone does not perform a pending reduction.
+
+Shared source equations run before section splitting, so their page declarations
+enter the same boundary pass as explicit declarations. `prepared['fields']` and
+`source_ports` carry the original tensor fields through this rewrite. Exact
+generated-operation records preserve the requested before/after cuts. A change
+of scalar width is an equality of ordered bytes; it emits no numerical command.
 
 Deliveries also retain actual producer `sources` and the existing mesh-axis
 `steps`. A final-output delivery has `section=None`. An explicit
@@ -135,6 +141,15 @@ role and `before`/`after` conversion commands.
 Equalities pair declared uses of the same values, including local collective
 deliveries. They join page placement before allocation. Ordered returned uses
 keep every supplied destination, even when the same value occurs more than once.
+`page_equalities` shares a fresh receiver's pages with its sole identity consumer
+when the result has no separate fixed backing. This is the same preparation
+helper in FX binding and the LiteRT importer. Equality of values at one operation
+does not by itself permit later writes to share storage.
+
+Host result aliases also enter this shared solve. Provider requirements can
+give an input a contiguous copy while a forwarded result keeps its original
+pages. Provider binding consumes those resolved uses without repeating the
+semantic alias check against the converted input.
 
 An unresolved declaration is preparation work still to do. Resolve it before
 binding an executable. Changing index contents remain page data; resolving their
@@ -288,10 +303,20 @@ configuration matches the expression's contributor and normalization semantics.
 **Resume here:** bind O3's expanded, versioned sections through the same selected
 page mechanism. `Function` consumes O2's record; `BoundGraph` keeps actual local
 arguments separate from global metadata. Finish the joined distributed
-preparation. Ordinary full-domain binding still has its earlier whole-family
-preparation branch: normalize those declarations to the selected binding record
-and remove that branch. Both already emit through the same numerical compiler
-and recorder; O4 is not complete until their preparation is shared too.
+preparation. Ordinary full-domain declarations now supply explicit full work
+domains to that same selected binder. The separate whole-family branch and
+native `compile_graph` wrapper are removed; the public compiler enters through
+`Function.declare_graph`.
+
+Full collectives retain their original call kind and per-rank counts instead
+of becoming one broadcast per source. Local identity slices still share pages.
+Host providers retain their named views, layout requirements and whole-invocation
+granularity; this does not assert a missing partial numerical declaration.
+Fixed caller bytes still enter the shared page-order solve: their addresses are
+known, but a consumer's virtual page order can still change. CPU-provider,
+ordinary pointwise, explicit-shard, page assembly and normal/grouped/transposed
+convolution preparation reached the shared binder. Whole-function runtime
+results remain for followup 6.
 
 **Implement:** make ordinary `Function`/`BoundGraph` preparation consume O1–O3's
 retained numerical sections. Share the existing compiler's functionalization,
@@ -316,12 +341,13 @@ page bindings agree at numerical/collective boundaries.
 
 ## O5 — LiteRT access adapter
 
-**Resume here:** connect the shared live-read sections to the existing importer
-consumer. `prepare_e2b.indexed_source` already reaches retained access projection,
+**Resume here:** retain encoded index-value meaning and join remaining packed
+reader uses. `prepare_e2b.indexed_source` reaches retained access projection,
 selected placement and native stage emission through the actual save path.
-Those results feed ordinary provider inputs with their declared scalar types.
-Computed producers still need substitution through live reads; a staged
-UPDATE→GATHER must not materialize the whole updated table merely to select rows.
+Distributed scalar selections consume shared live-read sections. Computed
+pointwise producers compose into those reads; UPDATE→GATHER emits one command
+without a full updated-table intermediate. Results feed ordinary provider input
+pages with their declared scalar types.
 
 The adapter returns a source graph and explicit operands. Placeholder metadata
 `mesh_litert_operand`, source-node metadata `mesh_litert_origin`, and module
@@ -410,8 +436,16 @@ installation as other changes.
   The ordinary owned entry point prepared a two-rank local shard and retained
   both supplied destinations of a repeated result. A selected ragged gather's
   local delivery composed to identical physical pages.
-- O5 prepared live indexed source expressions through shared source lowering
-  and native access extraction. This did not connect the importer stage emitter.
+- Live ownership preparation connects a changing-index read to its owner
+  predicates, selected byte reductions and typed receiver. Requests narrow the
+  collective's actual returned-value payload. Prefix and page-boundary binding
+  reach transport preparation, where the inspection's fake process group has no
+  native endpoint. Rank-local access identity and unequal cohort source widths
+  remain explicit preparation gaps; they do not receive guessed metadata.
+- O5 connects the actual importer to retained live-read sections and native
+  access extraction. The ordinary stage/native pipeline prepared integer and
+  floating-point selections with no incidental copies; the identity continuation
+  emitted no command. Explicit packed code, scale and zero-point readers remain.
   The portable emitter's actual commands also reached native-stage preparation:
   ordinary/mixed byte views needed no copies, and complete packed values decoded
   directly into final pages. A partial-byte demand decoded only its reached

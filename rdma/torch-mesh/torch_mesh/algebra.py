@@ -138,6 +138,24 @@ def index_values(expression, count, device):
     return result if isinstance(result, torch.Tensor) else torch.full((count,), result, dtype=torch.int64, device=device)
 
 
+def view_dtype(self, dtype):
+    """A changed scalar width declares the same backing bytes with a new type."""
+    if self.dtype.itemsize == dtype.itemsize:
+        return NotImplemented
+    from torch.fx.experimental.proxy_tensor import disable_proxy_modes_tracing
+    from .host import assemble
+    # Ask the existing metadata dispatcher for the precise view contract and
+    # its validity constraints; no payload is read and no source op is retraced.
+    with disable_proxy_modes_tracing():
+        described = self.view(dtype)
+    unit = math.lcm(self.dtype.itemsize, dtype.itemsize)
+    extent = self.untyped_storage().nbytes() // unit * unit
+    source = self.as_strided((extent // self.dtype.itemsize,), (1,), 0)
+    target = torch.empty((extent // dtype.itemsize,), dtype=dtype, device=self.device)
+    storage = assemble(((source, target),))
+    return storage.as_strided(described.shape, described.stride(), described.storage_offset())
+
+
 def convolution(input, weight, bias, stride, padding, dilation, transposed, output_padding, groups):
     """Declare the shared window relation to the existing indexed product."""
     from mesh_relation import Algebra, convolution_domain
@@ -190,4 +208,5 @@ decompositions = {**native_decompositions,
                   torch.ops.aten._scaled_dot_product_attention_math_for_mps.default:
                       native_decompositions[torch.ops.aten._scaled_dot_product_attention_math.default],
                   **partition_decompositions,
+                  torch.ops.aten.view.dtype: view_dtype,
                   torch.ops.aten.convolution.default: convolution}

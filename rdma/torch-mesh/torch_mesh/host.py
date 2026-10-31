@@ -65,7 +65,8 @@ def describe(node):
 
 
 def equalities(node):
-    """Named result aliases become the shared typed placement equations."""
+    """Named aliases share ordered bytes; their declared uses keep scalar types."""
+    from .operand import TensorView, byte_operand
     declared = describe(node)
     if declared is None:
         return
@@ -73,24 +74,21 @@ def equalities(node):
     for name, source in definition.get('output_aliases', {}).items():
         left, left_view, _ = targets[name]
         right, right_view, _ = sources[source] if source in sources else targets[source]
-        yield left, left_view, right, right_view
+        left = byte_operand(TensorView(left, left_view))
+        right = byte_operand(TensorView(right, right_view))
+        yield left.storage, left.layout.reshape((left.layout.count,)), right.storage, right.layout.reshape((right.layout.count,))
 
 
-def prepare(inputs, input_slots, output_slots, output_strides, shapes, dtypes, devices, operands, definition, *, outputs):
-    """Bind once after graph placement; no provider lookup survives execution."""
-    from .operand import bind
+def prepare_views(definition, source, target):
+    """Bind resolved provider uses after semantic aliases have been placed.
+
+    Alias equations belong to the shared placement solve. A provider's input
+    may use a required contiguous copy while a forwarded result keeps the
+    original pages; those two API uses need not have the same physical view.
+    """
     from .engines import Cpu, coreml_graph
     from types import SimpleNamespace
-    uses, definition = json.loads(operands), json.loads(definition)
-    values = {slot: bind(value, uses[str(slot)]) for slot, value in zip(input_slots, inputs, strict=True)}
-    values.update((slot, bind(value, uses[str(slot)])) for slots, value in zip(output_slots, outputs, strict=True) for slot in slots)
-    source = {name: values[i] for i, name in enumerate(definition['inputs'])}
-    target = {name: values[i] for i, name in enumerate(definition['outputs'], len(source))}
     if definition['provider'] == 'pages':
-        from .placement import same_view
-        for name, original in definition['output_aliases'].items():
-            if not same_view(target[name], source[original]):
-                raise ValueError(f'{name}: page assembly lost its declared source equality')
         return None
     if definition['provider'] == 'cpu':
         weights = tuple(source[name] for name in definition['weights'])
@@ -99,11 +97,6 @@ def prepare(inputs, input_slots, output_slots, output_strides, shapes, dtypes, d
                           input_layouts=definition['input_layouts'], output_layouts=definition['output_layouts'],
                           binding_layout=definition['binding_layout'])
     if definition['provider'] == 'coreml':
-        from .placement import same_view
-        for name, original in definition.get('output_aliases', {}).items():
-            previous = source[original] if original in source else target[original]
-            if not same_view(target[name], previous):
-                raise ValueError(f'{name}: named result alias conflicts with its assigned input/result pages')
         contract = definition['contract']
         if not contract['outputs']:
             return None

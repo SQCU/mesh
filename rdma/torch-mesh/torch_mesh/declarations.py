@@ -22,6 +22,7 @@ class SourceCapture(TorchFunctionMode):
     def __init__(self, mode):
         super().__init__()
         self.mode, self.values, self.originals, self.local_sources = mode, {}, {}, {}
+        self.source_nodes = {}
         self.meshes = []
 
     def value(self, value):
@@ -51,6 +52,8 @@ class SourceCapture(TorchFunctionMode):
         from .partition import _rank_selection, _value_ownership
         from torch.fx.experimental.proxy_tensor import get_proxy_mode, get_proxy_slot
         made = self.value(value)
+        proxy = get_proxy_mode()
+        source = get_proxy_slot(made, proxy.tracer).proxy.node
         original = self.originals.get(id(made), value)
         selection, _ = _rank_selection(original._spec, original.device_mesh.get_coordinate())
         for _, axis, runs in selection['steps']:
@@ -58,9 +61,8 @@ class SourceCapture(TorchFunctionMode):
             made = made.narrow(axis, first, count)
         made = torch.ops.aten.alias.default(made)
         declaration, _ = _value_ownership(original, original.device_mesh)
-        proxy = get_proxy_mode()
         get_proxy_slot(made, proxy.tracer).proxy.node.meta['mesh_local_source'] = dict(
-            declaration, mesh=original.device_mesh, selection=selection)
+            declaration, mesh=original.device_mesh, selection=selection, source=(source, ()))
         return made
 
     def __torch_function__(self, operation, types, args=(), kwargs=None):
@@ -96,6 +98,7 @@ class SourceCapture(TorchFunctionMode):
                 self.local_sources[id(traced._local_tensor)] = original
                 slot = get_proxy_slot(traced, proxy.tracer)
                 set_proxy_slot(made, proxy.tracer, slot)
+                self.source_nodes[id(original)] = slot.proxy.node
                 slot.proxy.node.meta['val'] = made
                 declaration, _ = _value_ownership(original, original.device_mesh)
                 slot.proxy.node.meta['mesh_ownership'] = dict(declaration, mesh=original.device_mesh)
@@ -124,6 +127,8 @@ class SourceCapture(TorchFunctionMode):
             if local_source is not None:
                 declaration, _ = _value_ownership(local_source, local_source.device_mesh)
                 node.meta['mesh_local_source'] = dict(declaration, mesh=local_source.device_mesh)
+                if id(local_source) in self.source_nodes:
+                    node.meta['mesh_local_source']['source'] = (self.source_nodes[id(local_source)], ())
         graph.meta['mesh_scopes'] = tuple(self.meshes)
 
     def gradients(self, parameters):
@@ -195,23 +200,6 @@ def _reduce_plan(node, named):
                     missing.append((rank, write))
         node.meta['mesh_selection_reductions'] = tuple(plans), tuple(missing)
     return node.meta['mesh_selection_reductions']
-
-
-def _bind_reduce(source, destination, plan, group, reduction):
-    from . import backend
-    from .operand import TensorView
-    bindings = []
-    source = TensorView.of(source)
-    for root, contributors, reads, write in plan:
-        if contributors == (root,):
-            continue  # The common placement already aliases this identity edge.
-        read = (TensorView(source.storage, _selected_layout(source, reads[group.rank()]))
-                if group.rank() in reads else source.reshape((source.numel(),)).slice(0, 0, 0))
-        output = TensorView(TensorView.of(destination).storage, _selected_layout(destination, write)) if root == group.rank() else None
-        call = backend.Call(backend.REDUCE, write.count, source.dtype, root=root,
-                            op=_operation(reduction), contributors=contributors)
-        bindings.append((call, read, output))
-    return backend.prepare_fragments(bindings, group) if bindings else (None, [])
 
 
 def _select_exchange_context(ctx, inputs, output):
@@ -679,6 +667,19 @@ def boundary_projection(section, outputs, algebra, *, ranks=None):
                     source=source, result=target, positions=needed,
                     source_fields=tuple(source_fields), result_fields=tuple(result_fields)))
             continue
+        if declared is not None:
+            # A provider declaration names one compiled invocation and exact
+            # page views. Its internal work is not a scalar-body relation.
+            # Selecting any result retains that invocation and its inputs.
+            if any(not positions.empty() for positions in outputs.values()):
+                from dataclasses import replace
+                for value, layout, _ in declared['inputs'].values():
+                    source = replace(TensorView.of(value), layout=layout)
+                    positions = algebra.selection(dict(shape=[source.numel()], steps=[]))
+                    for key, relation in bindings(source, input_fields):
+                        join(inputs, key, positions if relation is None else relation.image(positions))
+                records.append(dict(boundary=source_nodes.get(node, node), host=declared, node=node))
+            continue
         declaration = _collective_declaration(node)
         if declaration is None or not declaration['mathematical']:
             peers = section.get('peer_outputs', {}).get(declaration['group_name'], {}) if declaration else {}
@@ -920,20 +921,6 @@ def sections(module, cuts, requested_outputs=()):
         yield fragment, tuple(inputs), tuple(outputs)
 
 
-def _gathers(target, named, outputs, group):
-    """Gather sources and final views, independent of the frontend spelling."""
-    name = target._schema.name.split('::', 1)[1]
-    from torch.utils._pytree import tree_flatten
-    destinations = [named['out']] if named.get('out') is not None else tree_flatten(outputs)[0]
-    if name in ('allgatherv', 'allgatherv_out'):
-        return [(named['x'], destinations[0], named['dim'], named['sizes'])]
-    if name in ('all_gather_into_tensor', 'all_gather_into_tensor_out', 'all_gather_into_tensor_coalesced'):
-        sources = named['inputs'] if name.endswith('_coalesced') else [named['input']]
-        return [(source, destination, 0, [source.shape[0]] * group.size())
-                for source, destination in zip(sources, destinations, strict=True)]
-    return None
-
-
 def _boundary_work(section, projection, algebra):
     """The same selected storage operands for declared collective work."""
     from .ownership import _source_leaves, port_bindings
@@ -950,7 +937,7 @@ def _boundary_work(section, projection, algebra):
               if isinstance(value, torch.Tensor)}
     outputs = {key: binding(value) for key, value in _source_leaves(section['outputs'])
                if isinstance(value, torch.Tensor)}
-    domains, records, equalities, commands = {}, [], [], []
+    domains, records, equalities, commands, requirements = {}, [], [], [], []
 
     def retain(access, work):
         name = access['name']
@@ -963,6 +950,25 @@ def _boundary_work(section, projection, algebra):
         return dict(binding=described, relation=relation.then(described['relation']), shape=relation.shape)
 
     for record in projection.get('records', ()):
+        if 'host' in record:
+            from . import host
+            from dataclasses import replace
+            declared, roles = record['host'], {}
+            for side, access in (('inputs', 'read'), ('outputs', 'write')):
+                roles[side] = {}
+                for name, (value, layout, constraints) in declared[side].items():
+                    view = replace(TensorView.of(value), layout=layout)
+                    order = algebra.selection_relation(dict(shape=list(view.shape), steps=[]))
+                    described = dict(use(view, order), shape=tuple(view.shape))
+                    key = (record['node'], side, name)
+                    roles[side][name] = key
+                    requirements.append(dict(described, key=key, access=access, requirements=constraints))
+            for left, a, right, b in host.equalities(record['node']):
+                order = algebra.selection_relation(dict(shape=list(a.shape), steps=[]))
+                equalities.append((use(replace(TensorView.of(left), layout=a), order),
+                                   use(replace(TensorView.of(right), layout=b), order)))
+            commands.append(dict(host=declared['definition'], **roles))
+            continue
         if record.get('preserved'):
             if 'group' not in record or record['rank'] == record['group'].rank():
                 order = algebra.selection_relation(dict(shape=[record['result'].numel()],
@@ -971,6 +977,9 @@ def _boundary_work(section, projection, algebra):
             continue
         group, rank = record['group'], record['group'].rank()
         for selected in selected_calls(record, algebra):
+            if rank in selected.get('equalities', {}):
+                read, write = selected['equalities'][rank]
+                equalities.append((use(record['source'], read), use(record['result'], write)))
             roles, accesses = {}, {'reads': {}, 'writes': {}}
             work = None
             for side, value in (('reads', record['source']), ('writes', record['result'])):
@@ -993,211 +1002,74 @@ def _boundary_work(section, projection, algebra):
     ports = section.get('ports', {})
     return dict(inputs=port_bindings(inputs, ports, algebra), outputs=port_bindings(outputs, ports, algebra),
                 projection=dict(storage_bytes=domains, records=tuple(records)),
-                equalities=tuple(equalities), commands=tuple(commands))
+                equalities=tuple(equalities), requirements=tuple(requirements), commands=tuple(commands))
+
+
+def _local_assignment(prepared, arguments):
+    """Full declared work is one scope of the same selected-page contract."""
+    from .ownership import _source_leaves, project_numerical
+    graph, algebra = prepared['expression']['graph'], prepared['algebra']
+    values, requests, projections, pending = {}, {}, [], []
+    for node in graph.graph.nodes:
+        if node.op == 'output':
+            continue
+        for key, value in _source_leaves((node,)):
+            if isinstance(value, torch.Tensor):
+                owner = dict(selection=dict(shape=list(value.shape), steps=[]), shape=tuple(value.shape))
+                values[key] = dict(owners={None: owner})
+                requests[key] = owner
+    for section in prepared['sections']:
+        outputs = {key: algebra.selection(requests[key]['selection'])
+                   for key, value in _source_leaves(section['outputs']) if isinstance(value, torch.Tensor)}
+        if section['boundaries']:
+            # This declaration requests the complete operation on every peer.
+            # The call's own per-rank relations bound these requests; a ragged
+            # peer's extent is never borrowed from this rank's result shape.
+            entire = algebra.set('{ [i] : i >= 0 }', 1)
+            peers = {name: {rank: dict.fromkeys(outputs, entire) for rank in range(group.size())}
+                     for name, group in boundary_groups(section).items()}
+            projection = boundary_projection(dict(section, peer_outputs=peers), outputs, algebra)
+            projection.update(section=section, outputs=outputs)
+        else:
+            work = {id(part): algebra.map(part['work'], (), lambda x, y: []).domain()
+                    for effect in section['effects'] for domain in effect['domains']
+                    for part in (domain, domain.get('finish')) if part is not None}
+            projection = project_numerical(section, outputs, algebra, work=work)
+        pending.extend(projection['pending'])
+        projections.append(projection)
+    result = next(node.args[0] for node in graph.graph.nodes if node.op == 'output')
+    return dict(graph=graph, arguments=tuple(arguments), coordinate=None, values=values,
+                requests={None: requests}, prepared=prepared, pending=tuple(pending), deliveries=(),
+                projections={None: dict(sections=tuple(projections))}, result=result)
 
 
 class BoundGraph:
-    """Configuration-time binding of ordinary collective graph boundaries.
-
-    The producer span writes the source region; the native collective binds
-    that region and its final output. There is no eager transport call in the
-    generated execution sequence. Numerical spans use the existing compiler.
-    """
+    """Bind declared work and page deliveries once through the shared placement."""
     def __init__(self, graph, arguments, group, configuration, destinations=None, *, prepared=None, ownership=None):
-        if ownership is not None:
-            self.prepared = ownership['prepared']
-            self.groups, self.steps = {}, []
-            self._bind_owned(ownership, destinations)
-            self.execution.initializations = tuple(graph.meta.get('mesh_initializations', ()))
-            return
-        from .compilation import lift_attributes
-        if prepared is None:
-            graph, arguments = lift_attributes(graph, arguments)
+        if ownership is None:
             from .ownership import prepare_expression
-            prepared = prepare_expression(dict(graph=graph, operands=tuple(arguments)))
-        else:
-            graph = prepared['expression']['graph']
-        self.prepared = prepared
-        from torch.fx.node import map_arg
-        from torch.utils._pytree import tree_map, tree_flatten
-        from . import backend, host
-        from .native import empty_strided
-        from .placement import Placements, alias
-        values, arguments = {}, iter(arguments)
+            if prepared is None:
+                prepared = prepare_expression(dict(graph=graph, operands=tuple(arguments)))
+            ownership = _local_assignment(prepared, arguments)
+        self.prepared = ownership['prepared']
         self.groups, self.steps = {}, []
-        for node in graph.graph.nodes:
-            if node.op == 'placeholder':
-                values[node] = next(arguments)
-            elif node.op == 'get_attr':
-                value = graph
-                for name in node.target.split('.'):
-                    value = getattr(value, name)
-                values[node] = value
-        placements = Placements()
-        for node, value in values.items():
-            for described, actual in zip(tree_flatten(_value(node))[0], tree_flatten(value)[0], strict=True):
-                if isinstance(described, torch.Tensor):
-                    placements.bind(described, actual)
-        result = next(n.args[0] for n in graph.graph.nodes if n.op == 'output')
-        if destinations is not None:
-            for described, destination in zip(tree_flatten(map_arg(result, _value))[0], destinations, strict=True):
-                if destination is not None:
-                    placements.bind(described, destination)
-        from .layout import place
-        # Collect view equalities before assigning any physical page. Full
-        # storage families retain the producer's untouched sibling values.
-        for node in graph.graph.nodes:
-            if not _bound(node):
-                continue
-            target, named = operation(node)
-            native = dist.distributed_c10d._resolve_process_group(named['group_name'])
-            if target is torch.ops.torch_mesh.select_exchange.default:
-                for source, destination, read, write in _exchange_plan(node, named):
-                    if source == destination == native.rank():
-                        placements.equate(named['x'], _value(node),
-                            _selected_layout(named['x'], read), _selected_layout(_value(node), write))
-            if target is torch.ops.torch_mesh.select_reduce.default:
-                from . import _stream
-                plans, missing = _reduce_plan(node, named)
-                for rank, write in missing:
-                    if rank == native.rank():
-                        placements.equate(named['zero'], _value(node),
-                            _stream.TensorLayout((write.count,), (0,)), _selected_layout(_value(node), write))
-                for root, contributors, reads, write in plans:
-                    if contributors == (root,) and root == native.rank():
-                        placements.equate(named['x'], _value(node),
-                            _selected_layout(named['x'], reads[root]), _selected_layout(_value(node), write))
-            for source, described, dim, sizes in _gathers(target, named, _value(node), native) or ():
-                own = described.narrow(dim, sum(sizes[:native.rank()]), sizes[native.rank()])
-                placements.equate(source, own)
-        place(graph.graph, placements)
-        self.placements = placements
-        for node in values:
-            values[node] = tree_map(lambda declared, actual: placements.get(declared)
-                if isinstance(declared, torch.Tensor) else actual, _value(node), values[node])
-        for section in prepared['sections']:
-            module, inputs, exported = section['graph'], section['inputs'], section['outputs']
-            args = tuple(values[node] for node in inputs)
-            live = {n: v for n, v in zip((n for n in module.graph.nodes if n.op == 'placeholder'), args)}
-            for n in module.graph.nodes:
-                if n.op == 'get_attr':
-                    value = module
-                    for name in n.target.split('.'):
-                        value = getattr(value, name)
-                    live[n] = value
-            outputs = next(n.args[0] for n in module.graph.nodes if n.op == 'output')
-            aliases = [(described, value) for dependency, operand in live.items()
-                       for described, value in zip(tree_flatten(_value(dependency))[0], tree_flatten(operand)[0])
-                       if isinstance(described, torch.Tensor)]
-            def storage(n):
-                def bind(metadata):
-                    if not isinstance(metadata, torch.Tensor):
-                        return metadata
-                    destination = placements.get(metadata)
-                    if destination is not None:
-                        return destination
-                    for described, value in aliases:
-                        if torch._C._is_alias_of(metadata, described):
-                            return alias(described, value, metadata)
-                    return empty_strided(tuple(metadata.shape), tuple(metadata.stride()), metadata.dtype, metadata.device.type)
-                return tree_map(bind, _value(n))
-            host_call = next((n for n in module.graph.nodes if host.bound(n)), None)
-            crossing = next((n for n in module.graph.nodes if _bound(n)), None)
-            if host_call is not None:
-                targets = map_arg(outputs, storage)
-                actual = map_arg(host_call.args, live.__getitem__)
-                keywords = map_arg(host_call.kwargs, live.__getitem__)
-                prepared = host.prepare(*actual, **keywords, outputs=tree_flatten(targets)[0])
-                if prepared is not None:
-                    self.steps.append(prepared)
-                values.update(zip(exported, targets))
-                continue
-            if crossing is None:
-                from torch.utils._pytree import tree_unflatten
-                output_spec = tree_flatten(tree_map(_value, outputs))[1]
-                destinations = [placements.get(value) for value in tree_flatten(tree_map(_value, outputs))[0]]
-                made = section['retained'].bind(tree_flatten(args)[0], destinations=destinations)
-                targets = tree_unflatten(tree_flatten(made.output)[0], output_spec)
-                self.steps.append(made)
-                declarations = lower(module)
-            else:
-                targets = map_arg(outputs, storage)
-                target, metadata = operation(crossing)
-                if crossing.target is not target:
-                    raise NotImplementedError('bound collectives require functional graph operands')
-                actual = map_arg(crossing.args, live.__getitem__)
-                keywords = map_arg(crossing.kwargs, live.__getitem__)
-                named = {a.name: actual[i] if i < len(actual) else keywords.get(a.name, a.default_value)
-                         for i, a in enumerate(target._schema.arguments)}
-                source = named.get('input', named.get('x', named.get('self', named.get('partials'))))
-                native = dist.distributed_c10d._resolve_process_group(metadata['group_name'])
-                declarations = lower(module)
-                if target is torch.ops.torch_mesh.select_exchange.default:
-                    prepared, calls = _bind_exchange(named['x'], tree_flatten(targets)[0][0],
-                                              _exchange_plan(crossing, metadata), native)
-                    if prepared is not None:
-                        self.steps.append(prepared)
-                    if calls:
-                        self.groups.setdefault(metadata['group_name'], []).append(calls)
-                    values.update(zip(exported, targets))
-                    continue
-                if target is torch.ops.torch_mesh.select_reduce.default:
-                    prepared, calls = _bind_reduce(named['x'], tree_flatten(targets)[0][0],
-                                                   _reduce_plan(crossing, metadata)[0], native, metadata['reduce_op'])
-                    if prepared is not None:
-                        self.steps.append(prepared)
-                    if calls:
-                        self.groups.setdefault(metadata['group_name'], []).append(calls)
-                    values.update(zip(exported, targets))
-                    continue
-                gathers = _gathers(target, named, targets, native)
-                if gathers is not None:
-                    prepared, calls = backend.bind_gather_views(gathers, native)
-                    if prepared is not None:
-                        self.steps.append(prepared)
-                    if calls:
-                        self.groups.setdefault(metadata['group_name'], []).append(calls)
-                    values.update(zip(exported, targets))
-                    continue
-                if target is torch.ops.torch_mesh.reduce_scatterv.default:
-                    destination = tree_flatten(targets)[0][0]
-                    made, calls = backend.bind_scatter_views(source, destination, named['dim'], named['sizes'],
-                                                             _operation(named['op']), native)
-                    self.steps.append(made)
-                    self.groups.setdefault(metadata['group_name'], []).append(calls)
-                    values.update(zip(exported, targets))
-                    continue
-                calls = declarations[metadata['group_name']]
-                if len(calls) != 1:
-                    raise ValueError('a bound crossing declares one collective group')
-                outputs_flat = tree_flatten(targets)[0]
-                sources = named.get('inputs', [source])
-                if len(outputs_flat) != len(calls[0]) or len(sources) != len(calls[0]):
-                    raise ValueError('each declared collective needs its source and final output')
-                made, lowered = backend.prepare_fragments(list(zip(calls[0], sources, outputs_flat)), native)
-                self.steps.append(made)
-                declarations[metadata['group_name']] = [lowered]
-            for name, calls in declarations.items():
-                self.groups.setdefault(name, []).extend(calls)
-            values.update(zip(exported, targets))
-        output = next(node for node in graph.graph.nodes if node.op == 'output')
-        self.output = map_arg(output.args[0], values.__getitem__)
-        self.execution = execution_sequence(self.steps, self.output, placements.owners,
-                                           graph.meta.get('mesh_initializations', ()))
+        self._bind_sections(ownership, destinations)
+        self.execution.initializations = tuple(graph.meta.get('mesh_initializations', ()))
 
-    def _bind_owned(self, ownership, destinations):
+    def _bind_sections(self, ownership, destinations):
         """Bind explicit work and delivery assignments to the existing recorder."""
         from torch.utils import _pytree as tree
         from torch.fx.node import map_arg
         from . import backend
-        from .ownership import _source_leaves
+        from .ownership import _source_leaves, page_equalities
         from .operand import TensorView, layout_configuration, relation_view
         from .placement import selected, selected_view
         from .collective_views import selection_exchanges
         from .native import empty_strided
 
-        prepared, mesh = self.prepared, ownership['mesh']
-        algebra, coordinate = prepared['algebra'], tuple(mesh.get_coordinate())
+        prepared = self.prepared
+        algebra = prepared['algebra']
+        coordinate = ownership['coordinate'] if 'coordinate' in ownership else tuple(ownership['mesh'].get_coordinate())
         if ownership['pending']:
             requirements = tuple(dict.fromkeys(item.get('requirement', 'access relation') for item in ownership['pending']))
             raise ValueError('function preparation needs declared ' + ', '.join(requirements))
@@ -1239,9 +1111,10 @@ class BoundGraph:
             if field(key) and destination is not None:
                 final_targets.setdefault(original(key), []).append((key, destination))
 
-        def bind_section(section, projection, input_bindings, output_bindings, *, equalities=()):
-            delivered = [record for record in ownership['deliveries'] if record['section'] is section]
-            fixed, requirements = [], []
+        def bind_section(section, projection, input_bindings, output_bindings, *, equalities=(), requirements=()):
+            source_section = None if section is None else section.get('source_section', section)
+            delivered = [record for record in ownership['deliveries'] if record['section'] is source_section]
+            fixed, requirements = [], list(requirements)
             wanted = projection.get('outputs', {})
             requested = []
             empty = algebra.set('{ [i] : false }', 1)
@@ -1286,7 +1159,8 @@ class BoundGraph:
             types = [described(key) for key in (*input_bindings, *output_bindings)]
             device = types[0].device.type
             plan = selected(projection, algebra=algebra, device=device, results=requested,
-                            fixed=fixed, requirements=requirements, equalities=equalities)
+                            fixed=fixed, requirements=requirements,
+                            equalities=(*equalities, *page_equalities(section, fixed)))
             owners.extend(plan['pages'])
 
             def placed(binding, order):
@@ -1309,6 +1183,7 @@ class BoundGraph:
             return plan
 
         local = ownership['projections'][coordinate]
+        declared_sections = set()
         for projection in local['sections']:
             section = projection['section']
             if not section['boundaries']:
@@ -1319,12 +1194,35 @@ class BoundGraph:
                            input_actuals.get(name, value)
                            for name, value in zip(section['retained'].graph_inputs, section['operands'], strict=True)]
                 self.steps.append(section['retained'].bind(actuals, **plan))
+                source = section.get('source_section', section)
+                if id(source) not in declared_sections:
+                    for name, calls in lower(section['graph']).items():
+                        self.groups.setdefault(name, []).extend(calls)
+                    declared_sections.add(id(source))
             else:
                 boundary = _boundary_work(section, projection, algebra)
                 projected = dict(boundary['projection'], outputs=projection['outputs'])
                 plan = bind_section(section, projected, boundary['inputs'], boundary['outputs'],
-                                    equalities=boundary['equalities'])
+                                    equalities=boundary['equalities'], requirements=boundary['requirements'])
                 for command in boundary['commands']:
+                    if 'host' in command:
+                        from . import host, _stream
+                        from .native import Program
+                        uses = plan['uses']
+                        source = {name: uses[key]['operand'] for name, key in command['inputs'].items()}
+                        target = {name: uses[key]['operand'] for name, key in command['outputs'].items()}
+                        before = [copy for side in ('inputs', 'outputs') for key in command[side].values()
+                                  for copy in uses[key]['before']]
+                        after = [copy for side in ('inputs', 'outputs') for key in command[side].values()
+                                 for copy in uses[key]['after']]
+                        if before:
+                            self.steps.append(Program(_stream.Commands(before), ()))
+                        made = host.prepare_views(command['host'], source, target)
+                        if made is not None:
+                            self.steps.append(made)
+                        if after:
+                            self.steps.append(Program(_stream.Commands(after), ()))
+                        continue
                     def operand(role):
                         use = command[role]
                         return None if use is None else selected_view(plan['storage'], use, algebra=algebra)

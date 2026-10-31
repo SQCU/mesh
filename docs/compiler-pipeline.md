@@ -43,12 +43,12 @@ remain batched; GPU-only spans keep compact ranges without constructing the host
 dependency graph. This changes our scheduling machinery, not the internals of
 Accelerate or Core ML.
 
-The third correction passes gather destinations backward through graph preparation.
-`BoundGraph` resolves final outputs in reverse collective order before compiling
-numerical spans. Each producer receives its final local slice as an output operand.
-Ragged, standard and coalesced FX gathers bind the same indexed WRITEs. Coalesced
-gathers retain one declared group. `bind_gather_views` no longer constructs a local
-`Function(...copy_...)` or returns a second numerical executor.
+The third correction joins gather destinations with producer views during page
+placement. `BoundGraph` binds ordinary and owned functions through the same
+selected sections. Local gather slices share their producer pages. Complete
+collectives keep their declared call kind and per-rank counts; selected crossings
+use the same collective compiler. The separate `bind_gather_views` and
+`bind_scatter_views` implementations are removed.
 
 `Function.declare`, `declare_graph` and `compiler` accept `destinations`: one tensor
 or `None` per flattened result. These operands reach the existing numerical builders
@@ -131,7 +131,9 @@ ran. These are structural changes, not measured performance claims.
 6. Existing rewrites recognize eligible matrix products as native linears; replace a two-part input
    concatenation with two views; fuse a following `tanh`; and group independent products up to the
    configured binding capacity. These rules have explicit dtype, rank and stride conditions.
-7. `native.compile_graph` uses Inductor's numerical IR, fusion scheduler and Metal source generator.
+7. `native.prepare_graph` retains numerical IR, typed accesses and the fusion scheduler.
+   `BoundGraph` selects work and binds its page operands through the same emitter for ordinary
+   and owned functions. The separate `native.compile_graph` wrapper is removed.
    Matrix and linear external operations instead bind our existing numerical kernels. Unsupported
    external operations fail preparation. CPU/ANE exported graphs use Core ML conversion and the shared host-record binding described below.
 8. The generated Python is a preparation program. It assigns region storage, resolves views, binds

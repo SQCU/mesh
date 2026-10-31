@@ -71,7 +71,7 @@ The complete transformation inventory and native/LiteRT correspondence are in
 | `lower(graph)` | Produces ordered common `Call` groups; unknown communication fails preparation. |
 | `BoundGraph` | Splits the declaration at communication and binds consumers directly to prepared numerical outputs and their aliases. It adds no publication copy or separate numerical output allocation. |
 | `compiler(graph, operands)` | Functionalizes the declaration, preserves the existing small-row linear fusions, and calls the native emitter. |
-| `native.compile_graph` | Uses Inductor's tensor IR, fusion and Metal source generator. Its generated Python runs once to allocate and bind commands, not to execute data. Unknown external kernels fail preparation. |
+| `native.prepare_graph` | Retains tensor IR, typed access relations and the fusion scheduler. Ordinary and owned functions select and bind this same graph through `BoundGraph`; generated Python runs during preparation to bind native commands. |
 | `native.empty_strided(shape, stride, dtype, device)` | Assigns a compiler-declared view to bridge region storage during preparation. Both ordinary intermediates and custom linear outputs use it. |
 | `_stream.Commands` | Converts pipelines, tensor views, constants, access modes and dispatch dimensions into `MetalCommandDescription` records. |
 | `Execution` | Appends numerical and transport records to the common schedule before execution. |

@@ -334,7 +334,7 @@ def normalize_source(module, decompositions):
     from torch.utils import _pytree as pytree
     if not any(node.op == 'call_function' and node.target in decompositions for node in module.graph.nodes):
         return module
-    graph, results = torch.fx.Graph(), {}
+    graph, results, operations = torch.fx.Graph(), {}, {}
 
     class Normalize(DecompositionInterpreter):
         def get_attr(self, target, args, kwargs):
@@ -369,6 +369,11 @@ def normalize_source(module, decompositions):
                 results[node] = pytree.tree_map(
                     lambda item: get_proxy_slot(item, self.tracer).proxy.node if isinstance(item, torch.Tensor) else item,
                     value)
+                current, introduced = before.next, []
+                while current is not graph._root:
+                    introduced.append(current)
+                    current = current.next
+                operations[node] = tuple(introduced)
                 return value
 
     metadata = [node.meta['val'] for node in module.graph.nodes if node.op == 'placeholder']
@@ -376,6 +381,7 @@ def normalize_source(module, decompositions):
     with torch.no_grad(), mode, traceback.preserve_node_meta():
         Normalize(module, graph, decompositions).run(*metadata, enable_io_processing=False)
     normalized = torch.fx.GraphModule(module, graph)
-    normalized.meta = dict(module.meta, mesh_source_results=_source_results(module, results))
+    normalized.meta = dict(module.meta, mesh_source_results=_source_results(module, results),
+                           mesh_source_operations=operations)
     normalized.recompile()
     return normalized

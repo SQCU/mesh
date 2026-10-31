@@ -136,10 +136,12 @@ class Placements:
             fixed = [(logical, view, placed) for logical, view, placed in self.fixed if related(logical)]
             demands = [(use(value, view), value.element_size(), kind, view, capacity, alignment)
                        for value, view, kind, capacity, alignment in requirements if related(value)]
-            demands.extend((use(value, view), width, kind, target, capacity, alignment)
+            # These uses already describe byte positions. Preserve their
+            # scalar-component axis instead of appending the root's uint8 axis.
+            demands.extend((use(value, view).reshape(view.shape), width, kind, target, capacity, alignment)
                            for value, view, width, kind, target, capacity, alignment in uses if related(value))
             typed = [(use(value), value.element_size()) for value in values]
-            typed.extend((use(value, view), width) for value, view, width in fields if related(value))
+            typed.extend((use(value, view).reshape(view.shape), width) for value, view, width in fields if related(value))
             alignment = math.lcm(*(width for _, width in typed), *(entry[5] for entry in demands))
             if not fixed:
                 mapping, extent = solve_layout(domain.count, demands, typed)
@@ -304,8 +306,12 @@ def selected(projection, *, algebra, device, results=(), fixed=(), requirements=
         if name not in domains:
             continue
         logical_bytes = layout.components(width).reshape((layout.count * width,))
+        # Use the compact selected byte domain already lowered above. Feeding
+        # the original nested work equations through another inverse repeats
+        # elimination which the retained run layout has already resolved.
         relation = algebra.layout(layout_configuration(logical_bytes))
-        selected_bytes = relation.preimage(domains[name])
+        compact_domain = algebra.layout(layout_configuration(original[name]))
+        selected_bytes = relation.preimage(compact_domain.image(compact_domain.domain()))
         order = _stream.TensorLayout.runs(selected_bytes.spans())
         if not order.count:
             continue

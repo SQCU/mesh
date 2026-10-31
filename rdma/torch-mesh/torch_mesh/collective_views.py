@@ -30,12 +30,37 @@ def selected_calls(record, algebra):
     The common relation cover supplies cells with equal roles. Routing and
     reduction ordering remain the existing collective compiler's work.
     """
-    from .backend import ALLREDUCE, REDUCE, BROADCAST
+    from .backend import ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, ALLTOALL, WRITE
     source = record['call']
+    extent = _domains(source, 0, record['group'].size())[0]
+    writes = record['write_relations']
+    if all(rank in record['requested'] and relation.domain().binary(record['requested'][rank], 'subtract').empty()
+           for rank, relation in writes.items()):
+        # A complete declared collective remains one collective. Expanding an
+        # all-gather into one broadcast per root loses the routing compiler's
+        # ability to interleave those roots over all of its cables.
+        def compact(relation, domain=None):
+            domain = relation.domain() if domain is None else domain
+            order = algebra.selection_relation(dict(shape=[extent], steps=[['select', 0, domain.spans()]]))
+            return order.then(relation)
+        equalities = {}
+        if source.kind in (BROADCAST, ALLGATHER, ALLTOALL, WRITE) or record.get('initialization'):
+            for rank, read in record['read_relations'].items():
+                if rank in writes:
+                    common = read.domain().binary(writes[rank].domain(), 'intersect')
+                    if not common.empty():
+                        equalities[rank] = compact(read, common), compact(writes[rank], common)
+        contributors = tuple(record['read_relations'])
+        recipients = tuple(writes)
+        if record.get('initialization'):
+            source = source._replace(contributors=contributors, recipients=recipients)
+        yield dict(call=source, reads={rank: compact(relation) for rank, relation in record['read_relations'].items()},
+                   writes={rank: compact(relation) for rank, relation in writes.items()},
+                   equalities=equalities, identity=len(contributors) == 1 and contributors == recipients)
+        return
     roles = [('read', rank, relation.domain().binary(record['work'], 'intersect'))
              for rank, relation in record['read_relations'].items()]
     roles.extend(('write', rank, domain) for rank, domain in record['requested'].items())
-    extent = _domains(source, 0, record['group'].size())[0]
     for domain, members in algebra.cover([domain for _, _, domain in roles]):
         contributors = tuple(roles[i][1] for i in members if roles[i][0] == 'read')
         recipients = tuple(roles[i][1] for i in members if roles[i][0] == 'write')

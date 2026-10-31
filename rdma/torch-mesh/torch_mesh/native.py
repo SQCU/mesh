@@ -256,6 +256,176 @@ def body_accesses(body):
     return dict(body=body, reads=tuple(reads), writes=tuple(writes), index_producers=producers)
 
 
+def clone_body(body):
+    """Copy the cached compiler graph and retain its original node identities."""
+    import copy
+    from collections import Counter, defaultdict
+    from torch._inductor.loop_body import LoopBodyBlock
+    result = copy.copy(body)
+    result.indexing_exprs = dict(body.indexing_exprs)
+    result.indexing_exprs_name = {expr: name for name, expr in result.indexing_exprs.items()}
+    result.indirect_vars = list(body.indirect_vars)
+    result.indirect_var_ranges = dict(body.indirect_var_ranges)
+    result.memory_usage = defaultdict(list)
+    result.op_counts = Counter()
+    result.indexing = None
+    nodes = {}
+    def block(value):
+        made = LoopBodyBlock.__new__(LoopBodyBlock)
+        made.body, made.graph = result, torch.fx.Graph()
+        for node in value.graph.nodes:
+            nodes[node] = made.graph.node_copy(node, lambda value: nodes[value])
+            nodes[node].meta['mesh_source_node'] = node.meta.get('mesh_source_node', node)
+        return made
+    result.root_block = block(body.root_block)
+    result.subblocks = {name: block(value) for name, value in body.subblocks.items()}
+    result.submodules = {'get_index': result.get_index,
+        **{name: value.clone(result) for name, value in body.submodules.items() if name != 'get_index'}}
+    return result, nodes
+
+
+def body_index(result, graph, expression):
+    name = result.indexing_exprs_name.get(expression)
+    if name is None:
+        ordinal = len(result.indexing_exprs)
+        while (name := f'index{ordinal}') in result.indexing_exprs:
+            ordinal += 1
+        result.indexing_exprs[name] = expression
+        result.indexing_exprs_name[expression] = name
+    return graph.call_module('get_index', (name,))
+
+def finish_body(result, *, writes=False):
+    from collections import Counter, defaultdict
+    from torch._inductor.loop_body import MemoryEntry, MemoryUsageType
+    # get_index names its indirect scalar producer through a symbolic
+    # variable, not an FX argument. Include those exact existing edges.
+    producers = body_accesses(result)['index_producers']
+    live, blocks = set(), set()
+    def keep(node):
+        if node in live:
+            return
+        live.add(node)
+        for value in node.all_input_nodes:
+            keep(value)
+        if node.op == 'call_module' and node.target == 'get_index':
+            for symbol in result.indexing_exprs[node.args[0]].free_symbols:
+                if symbol in producers:
+                    keep(producers[symbol]['node'])
+        elif node.op == 'call_module' and node.target in result.subblocks:
+            keep_block(result.subblocks[node.target])
+    def keep_block(block):
+        if block in blocks:
+            return
+        blocks.add(block)
+        keep(next(node for node in block.graph.nodes if node.op == 'output'))
+        if writes:
+            for node in block.graph.nodes:
+                if node.op == 'call_method' and node.target in ('store', 'store_reduction', 'partial_accumulate'):
+                    keep(node)
+    keep_block(result.root_block)
+    result.subblocks = {name: block for name, block in result.subblocks.items() if block in blocks}
+    for block in blocks:
+        for node in reversed(tuple(block.graph.nodes)):
+            if node not in live and node.op != 'placeholder':
+                block.graph.erase_node(node)
+        block.graph.lint()
+    used_modules = {node.target for node in live if node.op == 'call_module'}
+    result.submodules = {name: value for name, value in result.submodules.items() if name in used_modules or name == 'get_index'}
+    expressions = {node.args[0] for node in live if node.op == 'call_module' and node.target == 'get_index'}
+    result.indexing_exprs = {name: expr for name, expr in result.indexing_exprs.items() if name in expressions}
+    result.indexing_exprs_name = {expr: name for name, expr in result.indexing_exprs.items()}
+    result.memory_usage, result.op_counts = defaultdict(list), Counter()
+    kinds = {'load': MemoryUsageType.LOAD, 'load_seed': MemoryUsageType.LOAD_SEED,
+             'store': MemoryUsageType.STORE, 'store_reduction': MemoryUsageType.STORE_REDUCTION}
+    for node in live:
+        if node.op != 'call_method':
+            continue
+        result.op_counts[node.target] += 1
+        if node.target in kinds:
+            expression = node.args[2]
+            name = expression.args[0] if isinstance(expression, torch.fx.Node) else result.add_index_expr(expression, kinds[node.target])
+            mode = node.args[4] if node.target == 'store' and len(node.args) > 4 else None
+            result.memory_usage[kinds[node.target]].append(MemoryEntry(name, node.args[1], mode))
+        elif node.target in ('index_expr', 'value_expr', 'check_bounds'):
+            kind = MemoryUsageType.CHECK_BOUNDS if node.target == 'check_bounds' else MemoryUsageType.INDEX_EXPR
+            for value in node.all_input_nodes:
+                if value.op == 'call_module' and value.target == 'get_index':
+                    result.memory_usage[kind].append(MemoryEntry(value.args[0], None, None))
+    result.has_partial_accumulate = bool(result.op_counts['partial_accumulate'])
+    return result
+
+
+def compose_body_read(body, access, producer, coordinates, dtype):
+    """Substitute a cached scalar producer at one of its declared reads.
+
+    Coordinates come from the producer's write relation. Compiler graphs,
+    masks and indirect-index shims are copied without evaluating source code.
+    The original storage rounding and load arithmetic type remain explicit.
+    """
+    from torch._inductor.loop_body import LoopBody, LoopBodyBlock
+    from torch._inductor.utils import sympy_subs, upcast_compute_type
+    result, copied = clone_body(body)
+    selected = copied[access['node']]
+    replacements = dict(zip(producer.iter_vars, coordinates, strict=True))
+    for var in producer.indirect_vars:
+        replacements[var] = result.add_indirect(sympy_subs(producer.indirect_var_ranges[var], replacements))
+
+    names = {}
+    for name, shim in producer.submodules.items():
+        if name == 'get_index':
+            continue
+        if shim.clone.func is LoopBody.bind_set_indirect_shim:
+            # Upstream index analysis uses this established ordinal spelling.
+            names[name] = f"set_indirect{result.indirect_vars.index(replacements[shim.clone.keywords['var']])}"
+            result.submodules[names[name]] = None
+        else:
+            names[name] = result.add_submodule(None, name)
+    for name, shim in producer.submodules.items():
+        if name == 'get_index':
+            continue
+        arguments = dict(shim.clone.keywords)
+        if shim.clone.func is LoopBody.bind_set_indirect_shim:
+            arguments['var'] = replacements[arguments['var']]
+            arguments['size'] = sympy_subs(arguments['size'], replacements)
+        elif shim.clone.func is LoopBody.bind_masked_shim:
+            arguments['name'] = names[arguments['name']]
+        result.submodules[names[name]] = shim.clone.func(result, **arguments)
+
+    def append(source, graph, ops, *, storing=False):
+        mapped, returned = {}, None
+        for node in source.graph.nodes:
+            if node.op == 'placeholder':
+                made = ops
+            elif node.op == 'output':
+                returned = torch.fx.node.map_arg(node.args[0], mapped.__getitem__)
+                continue
+            elif node.op == 'call_module' and node.target == 'get_index':
+                made = body_index(result, graph, sympy_subs(producer.indexing_exprs[node.args[0]], replacements))
+            elif storing and node.op == 'call_method' and node.target == 'store':
+                made = graph.call_method('to_dtype', (ops, mapped[node.args[3]], dtype), {'use_compute_types': False})
+                if not selected.meta.get('mesh_read_bits') and upcast_compute_type(dtype) != dtype:
+                    made = graph.call_method('to_dtype', (ops, made, upcast_compute_type(dtype)))
+            else:
+                made = graph.node_copy(node, mapped.__getitem__)
+                if made.op == 'call_module':
+                    made.target = names[made.target]
+                made.meta['mesh_source_node'] = node.meta.get('mesh_source_node', node)
+            mapped[node] = made
+        return returned
+
+    for name, block in producer.subblocks.items():
+        made = LoopBodyBlock.__new__(LoopBodyBlock)
+        made.body, made.graph = result, torch.fx.Graph()
+        ops = made.graph.placeholder('ops')
+        made.graph.output(append(block, made.graph, ops))
+        result.subblocks[names[name]] = made
+    with selected.graph.inserting_before(selected):
+        value = append(producer.root_block, selected.graph, selected.args[0], storing=True)
+    selected.replace_all_uses_with(value)
+    selected.graph.erase_node(selected)
+    return finish_body(result, writes=True)
+
+
 def cut_body_read(body, access, output, incoming, ordinal, owner):
     """Split one cached scalar load into a page producer and its continuation.
 
@@ -264,100 +434,15 @@ def cut_body_read(body, access, output, incoming, ordinal, owner):
     dependencies participate in graph liveness alongside ordinary FX edges.
     """
     import copy
-    from collections import Counter, defaultdict
-    from torch._inductor.loop_body import LoopBody, LoopBodyBlock, MemoryEntry, MemoryUsageType
+    from collections import defaultdict
+    from torch._inductor.loop_body import LoopBodyBlock, MemoryUsageType
     from .operand import access_owner
 
     def cloned():
-        result = copy.copy(body)
-        result.indexing_exprs = dict(body.indexing_exprs)
-        result.indexing_exprs_name = {expr: name for name, expr in result.indexing_exprs.items()}
-        result.memory_usage = defaultdict(list)
-        result.op_counts = Counter()
-        result.indexing = None
-        nodes = {}
-        def block(value):
-            made = LoopBodyBlock.__new__(LoopBodyBlock)
-            made.body, made.graph = result, torch.fx.Graph()
-            for node in value.graph.nodes:
-                nodes[node] = made.graph.node_copy(node, lambda value: nodes[value])
-                nodes[node].meta['mesh_source_node'] = node.meta.get('mesh_source_node', node)
-            return made
-        result.root_block = block(body.root_block)
-        result.subblocks = {name: block(value) for name, value in body.subblocks.items()}
-        result.submodules = {'get_index': result.get_index,
-            **{name: value.clone(result) for name, value in body.submodules.items() if name != 'get_index'}}
+        result, nodes = clone_body(body)
         selected = next(value for old, value in nodes.items()
                         if old is access['node'] or old.meta.get('mesh_source_node') is access['node'])
         return result, selected
-
-    def index(result, graph, expression):
-        name = result.indexing_exprs_name.get(expression)
-        if name is None:
-            ordinal = len(result.indexing_exprs)
-            while (name := f'index{ordinal}') in result.indexing_exprs:
-                ordinal += 1
-            result.indexing_exprs[name] = expression
-            result.indexing_exprs_name[expression] = name
-        return graph.call_module('get_index', (name,))
-
-    def finish(result, *, writes=False):
-        # get_index names its indirect scalar producer through a symbolic
-        # variable, not an FX argument. Include those exact existing edges.
-        producers = body_accesses(result)['index_producers']
-        live, blocks = set(), set()
-        def keep(node):
-            if node in live:
-                return
-            live.add(node)
-            for value in node.all_input_nodes:
-                keep(value)
-            if node.op == 'call_module' and node.target == 'get_index':
-                for symbol in result.indexing_exprs[node.args[0]].free_symbols:
-                    if symbol in producers:
-                        keep(producers[symbol]['node'])
-            elif node.op == 'call_module' and node.target in result.subblocks:
-                keep_block(result.subblocks[node.target])
-        def keep_block(block):
-            if block in blocks:
-                return
-            blocks.add(block)
-            keep(next(node for node in block.graph.nodes if node.op == 'output'))
-            if writes:
-                for node in block.graph.nodes:
-                    if node.op == 'call_method' and node.target in ('store', 'store_reduction', 'partial_accumulate'):
-                        keep(node)
-        keep_block(result.root_block)
-        result.subblocks = {name: block for name, block in result.subblocks.items() if block in blocks}
-        for block in blocks:
-            for node in reversed(tuple(block.graph.nodes)):
-                if node not in live and node.op != 'placeholder':
-                    block.graph.erase_node(node)
-            block.graph.lint()
-        used_modules = {node.target for node in live if node.op == 'call_module'}
-        result.submodules = {name: value for name, value in result.submodules.items() if name in used_modules or name == 'get_index'}
-        expressions = {node.args[0] for node in live if node.op == 'call_module' and node.target == 'get_index'}
-        result.indexing_exprs = {name: expr for name, expr in result.indexing_exprs.items() if name in expressions}
-        result.indexing_exprs_name = {expr: name for name, expr in result.indexing_exprs.items()}
-        result.memory_usage, result.op_counts = defaultdict(list), Counter()
-        kinds = {'load': MemoryUsageType.LOAD, 'load_seed': MemoryUsageType.LOAD_SEED,
-                 'store': MemoryUsageType.STORE, 'store_reduction': MemoryUsageType.STORE_REDUCTION}
-        for node in live:
-            if node.op != 'call_method':
-                continue
-            result.op_counts[node.target] += 1
-            if node.target in kinds:
-                expression = node.args[2]
-                name = expression.args[0] if isinstance(expression, torch.fx.Node) else result.add_index_expr(expression, kinds[node.target])
-                mode = node.args[4] if node.target == 'store' and len(node.args) > 4 else None
-                result.memory_usage[kinds[node.target]].append(MemoryEntry(name, node.args[1], mode))
-            elif node.target in ('index_expr', 'value_expr', 'check_bounds'):
-                kind = MemoryUsageType.CHECK_BOUNDS if node.target == 'check_bounds' else MemoryUsageType.INDEX_EXPR
-                for value in node.all_input_nodes:
-                    if value.op == 'call_module' and value.target == 'get_index':
-                        result.memory_usage[kind].append(MemoryEntry(value.args[0], None, None))
-        result.has_partial_accumulate = bool(result.op_counts['partial_accumulate'])
-        return result
 
     prefix, selected = cloned()
     path = []
@@ -388,7 +473,7 @@ def cut_body_read(body, access, output, incoming, ordinal, owner):
         if declared_owner in (True, False):
             predicate = graph.call_method('constant', (ops, bool(declared_owner), torch.bool))
         else:
-            predicate = graph.call_method('index_expr', (ops, index(prefix, graph, declared_owner), torch.bool))
+            predicate = graph.call_method('index_expr', (ops, body_index(prefix, graph, declared_owner), torch.bool))
         value = graph.call_module(name, (predicate, 0))
     selected.replace_all_uses_with(value)
     graph.erase_node(selected)
@@ -405,7 +490,7 @@ def cut_body_read(body, access, output, incoming, ordinal, owner):
             # or index read. Erase those dead scalar dependencies now, rather
             # than requiring unused argument pages in the prepared command.
             returned.args = (graph.call_method('constant', (ops, 0, access['dtype'])),)
-        stored = graph.call_method('store', (ops, output, index(prefix, graph, ordinal), returned.args[0], None))
+        stored = graph.call_method('store', (ops, output, body_index(prefix, graph, ordinal), returned.args[0], None))
     returned.args = (stored,)
     prefix.iter_vars = [*body.iter_vars, *body.reduce_vars]
     prefix.reduce_vars = []
@@ -413,9 +498,9 @@ def cut_body_read(body, access, output, incoming, ordinal, owner):
 
     continuation, selected = cloned()
     with selected.graph.inserting_before(selected):
-        replacement = index(continuation, selected.graph, ordinal)
+        replacement = body_index(continuation, selected.graph, ordinal)
     selected.args = (selected.args[0], incoming, replacement)
-    prefix, continuation = finish(prefix), finish(continuation, writes=True)
+    prefix, continuation = finish_body(prefix), finish_body(continuation, writes=True)
     value_body = copy.copy(prefix)
     value_body.root_block = prefix.root_block.clone(value_body)
     value_body.root_block.graph = torch.fx.Graph()
@@ -567,6 +652,28 @@ def prepare_graph(module, metadata, *, materializations=()):
 
         operand = ir_operand
 
+        if isinstance(operation, ir.MultiOutput):
+            # Selecting a declared result from an external call introduces no
+            # numerical work or new storage. The producer already writes this
+            # named result; preserve its exact typed view through projection.
+            value = operand(operation)
+            work = tuple(value['view'].shape)
+            use = dict(value, relation=algebra.layout(layout_configuration(value['view'])).reshape(work))
+            return (dict(kind='alias', work=work, reads={0: use}, writes={0: use}, reduction=None,
+                         finish=None, source=operation.inputs[0], path=tuple(operation.indices)),)
+
+        def atomic(reads, writes):
+            # A registered command is an indivisible work item until its
+            # numerical declaration supplies finer fibers. These are its
+            # actual typed argument views, not scheduler StarDep envelopes.
+            work = (int(any(value['view'].count for value in writes.values())),)
+            def accesses(values):
+                return {slot: dict(value, relation=algebra.map(work, (value['view'].count,),
+                    lambda x, y: []).then(algebra.layout(layout_configuration(value['view']))))
+                    for slot, value in values.items()}
+            return (dict(kind='atomic', work=work, reads=accesses(reads), writes=accesses(writes),
+                         reduction=None, finish=None),)
+
         def product(values, parameters):
             declared = {name: None if value is None else dict(shape=tuple(value['view'].shape), type=value['dtype'])
                         for name, value in values.items()}
@@ -624,7 +731,10 @@ def prepare_graph(module, metadata, *, materializations=()):
             if declaration['kind'] != 'product':
                 raise ValueError(f"undeclared native mathematical domain {declaration['kind']}")
             result.append(product({name: uses[slot] for name, slot in declaration['operands'].items()}, declaration['parameters']))
-        return tuple(result)
+        if result:
+            return tuple(result)
+        return atomic({slot: uses[slot] for slot in named['input_slots']},
+                      {slot: uses[slot] for slots in named['output_slots'] for slot in slots})
 
     def computed_domains(operation, body, algebra):
         """Address relations and scalar operands from the same prepared body."""
@@ -710,7 +820,8 @@ def prepare_graph(module, metadata, *, materializations=()):
             dtype = data.get_dtype() if dtype is None else dtype
             described = _stream.TensorLayout(tuple(map(int, size)), tuple(map(int, stride)), int(offset))
             mapped = rebase_typed(described, dtype.itemsize, original, unit.itemsize, physical.layout)
-            views.append(TensorView(physical.storage_as(dtype), mapped))
+            with unset_fake_temporarily():
+                views.append(TensorView(physical.storage_as(dtype), mapped))
             return f'mesh_views[{len(views) - 1}]'
 
         def make_allocation(self, name, device, dtype, shape, stride, allocation_shape=None, is_pinned=False):
@@ -743,13 +854,16 @@ def prepare_graph(module, metadata, *, materializations=()):
             for plan in selected:
                 product_arguments.append(plan)
                 self.writeline(f'mesh_native.product(**mesh_products[{len(product_arguments) - 1}])')
+            self.bound_external_results(node)
+            return True
+
+        def bound_external_results(self, node):
             from torch.utils._pytree import tree_map
             declared = node.codegen_outputs() if isinstance(node, ir.FallbackKernel) else node
             outputs = tree_map(lambda leaf: bound_storage[leaf.get_name()] if isinstance(leaf, ir.IRNode) else leaf,
                                declared)
             external_outputs.append(outputs)
             self.writeline(f'{node.get_name()} = mesh_external_outputs[{len(external_outputs) - 1}]')
-            return True
 
         def _generate_extern_kernel_alloc_helper(self, node, args):
             names = _ALLOC_ADAPTERS
@@ -757,8 +871,9 @@ def prepare_graph(module, metadata, *, materializations=()):
             if name not in names:
                 raise NotImplementedError(f'no native preparation for {name}; a framework fallback is not an executor')
             outputs = node.codegen_outputs()
-            output_refs = [f'mesh_destinations[{leaf.get_name()!r}]' if isinstance(leaf, ir.IRNode)
-                           and leaf.get_name() in bound_storage else 'None' for leaf in tree_flatten(outputs)[0]]
+            output_refs = [self.codegen_reinterpret_view(leaf, leaf.get_size(), leaf.get_stride(),
+                           leaf.get_layout().offset, False) if isinstance(leaf, ir.IRNode)
+                           and leaf.get_name() in storage_layouts else 'None' for leaf in tree_flatten(outputs)[0]]
             keyword = 'outputs' if names[name] in ('linears', 'topk', 'sort', 'retain', 'kernel') else 'out'
             destination = '[' + ', '.join(output_refs) + ']' if keyword == 'outputs' else output_refs[0]
             self.writeline(f'{node.get_name()} = mesh_native.{names[name]}({", ".join(args)}, {keyword}={destination})')
@@ -773,6 +888,9 @@ def prepare_graph(module, metadata, *, materializations=()):
         kernel_type = PageKernel
 
         def codegen_node(self, node):
+            for child in node.get_nodes():
+                if child.get_name() in self.scheduler.removed_ops:
+                    child.mark_run()
             pieces = getattr(node, 'page_pieces', None)
             if pieces is None:
                 return super().codegen_node(node)
@@ -839,6 +957,11 @@ def prepare_graph(module, metadata, *, materializations=()):
 
     class NativeScheduler(Scheduler):
         def codegen_extern_call(self, node):
+            if getattr(node, 'page_atomic', None) is False:
+                node.mark_run()
+                V.graph.wrapper_code.bound_external_results(node.node)
+                self.free_buffers()
+                return
             if not hasattr(node, 'page_products'):
                 return super().codegen_extern_call(node)
             # This is the ordinary external declaration's preparation boundary.
@@ -890,8 +1013,14 @@ def prepare_graph(module, metadata, *, materializations=()):
         """A compiler operation slice of the same retained graph and scheduler."""
         def __init__(self, graph, operations, inputs, outputs, nodes, algebra):
             self.graph, self.operations = graph, tuple(operations)
-            self.inputs, self.outputs = dict(inputs), tuple(outputs)
+            self.graph_inputs_original, self.outputs = dict(inputs), tuple(outputs)
+            self.graph_inputs = {name: ir.TensorBox.create(value) for name, value in inputs.items()}
             self.nodes = {op.get_operation_name(): nodes[op.get_operation_name()] for op in operations}
+            # Assignment coordinates belong to these retained declaration
+            # bodies. Scheduler loop merging may optimize its own nodes before
+            # selection; it must not change the caller's work coordinate space.
+            self.declaration_bodies = {name: node._body for name, node in self.nodes.items()
+                                       if isinstance(node, SchedulerNode)}
             self.algebra, self.declared_effects, self.selected_domains = algebra, None, None
             self.scheduler_state = None
             self.pending_declarations = ()
@@ -912,8 +1041,8 @@ def prepare_graph(module, metadata, *, materializations=()):
             with environment(), V.set_graph_handler(graph), V.set_extern_kernel_nodes([]), mode:
                 try:
                     graph.operations = list(self.operations)
-                    graph.graph_inputs = {name: ir.TensorBox.create(value) for name, value in self.inputs.items()}
-                    graph.graph_inputs_original, graph.graph_input_names = dict(self.inputs), list(self.inputs)
+                    graph.graph_inputs = dict(self.graph_inputs)
+                    graph.graph_inputs_original, graph.graph_input_names = dict(self.graph_inputs_original), list(self.graph_inputs)
                     graph.graph_outputs, graph.example_inputs = list(self.outputs), None
                     graph.wrapper_code = None
                     for name in ('removed_operations', 'removed_buffers', 'inplaced_to_remove'):
@@ -945,7 +1074,8 @@ def prepare_graph(module, metadata, *, materializations=()):
         def effects(self, algebra=None):
             if self.declared_effects is None:
                 with self.active() as graph:
-                    self.declared_effects = graph.effects(self.algebra if algebra is None else algebra)
+                    self.declared_effects = graph.effects(self.algebra if algebra is None else algebra,
+                                                         bodies=self.declaration_bodies)
             return self.declared_effects
 
         def value_binding(self, value, algebra):
@@ -962,13 +1092,17 @@ def prepare_graph(module, metadata, *, materializations=()):
             with self.active() as graph:
                 return graph.consumer_uses()
 
+        def page_aliases(self):
+            with self.active() as graph:
+                return graph.page_aliases()
+
         def emit(self, operands, **placement):
             if placement.get('storage') is None:
                 raise ValueError('a numerical section requires its declared page storage operands')
             with self.active() as graph:
                 # The ordinary binder consumes the same named storage records
                 # for original operands, carried values and received ports.
-                bound = [placement['storage'][name]['operand'] for name in self.inputs]
+                bound = [placement['storage'][name]['operand'] for name in self.graph_inputs]
                 bound_storage.clear(); storage_layouts.clear()
                 views.clear(); product_arguments.clear(); external_outputs.clear(); command_accesses.clear()
                 return graph.emit(bound, **placement)
@@ -977,6 +1111,87 @@ def prepare_graph(module, metadata, *, materializations=()):
             return Program.prepare(self.emit(operands, **placement))
 
     class NativeGraph(GraphLowering):
+        def compose_reads(self):
+            """Fold live reads of cached pointwise values into their consumers.
+
+            Explicit materializations remain page boundaries. Reductions and
+            external commands keep their own declarations. Pure scalar values
+            use their exact write inverse; no intermediate table is allocated
+            solely because an index into that value changes at execution.
+            """
+            import copy
+            from mesh_relation import Algebra, flat
+            from .layout import strides
+            from .operand import access_domain, byte_relation, layout_configuration, symbolic_index
+            algebra = Algebra()
+            nodes = {op.get_operation_name(): self.scheduler.name_to_node[op.get_operation_name()]
+                     for op in self.operations}
+            producers = {value.get_name(): op for op in self.operations for value in op.get_outputs()}
+            protected = self.never_reuse_buffers | {value.get_name() for value in self.graph_outputs}
+            substituted = set()
+            for operation in self.operations:
+                node = nodes[operation.get_operation_name()]
+                if not isinstance(node, SchedulerNode):
+                    continue
+                while True:
+                    domain, = computed_domains(operation, node._body, algebra)
+                    changed = False
+                    for access in domain['reads'].values():
+                        producer = producers.get(access['name'])
+                        if (producer is None or producer is operation or access['name'] in protected or
+                            access['relation'] is not None or access['index'] is None or
+                            not isinstance(producer, ir.ComputedBuffer) or not isinstance(producer.data, ir.Pointwise)):
+                            continue
+                        source = nodes[producer.get_operation_name()]
+                        if not isinstance(source, SchedulerNode) or source._body.reduce_vars:
+                            continue
+                        source_domain, = computed_domains(producer, source._body, algebra)
+                        if len(source_domain['writes']) != 1:
+                            continue
+                        write, = source_domain['writes'].values()
+                        if (write['name'] != access['name'] or write['relation'] is None or write['predicates'] or
+                            write['node'].target != 'store' or write['node'].args[4] is not None):
+                            continue
+                        inverse = write['relation'].inverse((int(write['storage_bytes']) // write['dtype'].itemsize,))
+                        if not inverse.single_valued():
+                            continue
+                        work = algebra.map(domain['work'], (), lambda x, y: []).domain()
+                        read = access_domain(access, work)['positions']
+                        written = byte_relation(write).image(write['relation'].domain())
+                        if read is None or not read.binary(written, 'subtract').empty():
+                            continue
+                        shape = source_domain['work']
+                        flatten = algebra.map(shape, (math.prod(shape),),
+                            lambda x, y: [f'{y[0]} = {flat(shape, x)}'])
+                        ordinal = symbolic_index(inverse.then(flatten).terms(), access['index'])
+                        coordinates = layout_configuration(_stream.TensorLayout(shape, strides(shape)))['index_coordinates']
+                        node._body = compose_body_read(node._body, access, source._body,
+                            [symbolic_index(term, ordinal) for term in coordinates], access['dtype'])
+                        node.read_writes = node.declared_read_writes
+                        node.refresh_dependencies(normalize=False, need_clear_tiling_cache=True)
+                        node.declared_read_writes = node.read_writes
+                        operation.origins = operation.get_origins() | producer.get_origins()
+                        substituted.add(producer.get_operation_name())
+                        changed = True
+                        break
+                    if not changed:
+                        break
+            if not substituted:
+                return self
+            retained = list(self.operations)
+            for operation in reversed(self.operations):
+                if operation.get_operation_name() not in substituted:
+                    continue
+                live = protected | {dep.name for other in retained if other is not operation
+                                    for dep in nodes[other.get_operation_name()].read_writes.reads}
+                if not any(value.get_name() in live for value in operation.get_outputs()):
+                    retained.remove(operation)
+            self.operations = retained
+            self.scheduler.prepared_nodes = {op.get_operation_name(): (copy.copy(nodes[op.get_operation_name()]),
+                nodes[op.get_operation_name()].read_writes) for op in retained}
+            self.scheduler._init(retained)
+            return self
+
         def cut_reads(self, requests):
             """Expose ordered page-result cuts in this retained scalar graph.
 
@@ -1087,7 +1302,8 @@ def prepare_graph(module, metadata, *, materializations=()):
                     pending.append(produced)
                     stages.append(tuple(pending)); pending = []
                     output_port, input_port = port(produced), port(incoming)
-                    boundaries.append(dict(key=request['key'], access=access, work=work,
+                    boundaries.append(dict(key=request['key'], access=access, work=work, owner=request['owner'],
+                        source_order=(at,read_order[operation.get_operation_name()][id(access['node'])]),
                         output=output_port, input=input_port, ordinals=work_ordinals,
                         before=len(stages) - 1, after=len(stages)))
                 stages.append((*pending, *original_operations[cursor:]))
@@ -1152,18 +1368,20 @@ def prepare_graph(module, metadata, *, materializations=()):
                 binding = ir_operand(value)
                 return dict(binding, value=value, relation=algebra.layout(layout_configuration(binding['view'])))
 
-        def loop_body(self, operation):
+        def loop_body(self, operation, bodies=None):
             """The scheduler's current cached body, without retracing or freezing."""
+            if bodies is not None:
+                return bodies.get(operation.get_operation_name())
             scheduled = self.scheduler.name_to_node[operation.get_operation_name()]
             return scheduled._body if isinstance(scheduled, SchedulerNode) else None
 
-        def consumer_constraints(self):
+        def consumer_constraints(self, bodies=None):
             """Typed backend eligibility, separate from storage interpretation."""
             from .compilation import api_layouts
             allowed = tuple(getattr(torch, name.lower()) for name in api_layouts('scalar_emitter')['arithmetic_types'])
             declarations = []
             for operation in self.operations:
-                body = self.loop_body(operation)
+                body = self.loop_body(operation, bodies)
                 if body is None:
                     continue
                 required = {operation.get_dtype()}
@@ -1275,7 +1493,12 @@ def prepare_graph(module, metadata, *, materializations=()):
                         rw = dependencies.ReadWrites.merge_list([piece.read_writes for piece in pieces])
                     else:
                         import mesh_matrix
-                        if declarations[operation.get_operation_name()]['domains']:
+                        domains = declarations[operation.get_operation_name()]['domains']
+                        if domains and all(domain.get('kind') == 'alias' for domain in domains):
+                            pass
+                        elif domains and all(domain.get('kind') == 'atomic' for domain in domains):
+                            node.page_atomic = any(not request['work'].empty() for request in requests)
+                        elif domains:
                             node.selected_products = tuple(plan for request in requests for plan in mesh_matrix.selected_products(
                                 request['domain'], request['work'], request['finish']['work']))
                         else:
@@ -1307,6 +1530,26 @@ def prepare_graph(module, metadata, *, materializations=()):
                                          shape=use['shape'], requirements=(layouts[roles[role]],),
                                          access='write' if role == 'out' else 'read'))
             return tuple(uses)
+
+        def page_aliases(self):
+            """Exact selected value equalities from cached load/store bodies."""
+            from .operand import iteration_order
+            aliases = []
+            for record in getattr(self, 'selected_domains', None) or ():
+                domain, work = record['domain'], record['work']
+                body = domain.get('body')
+                if body is None or not body.is_memory_copy() or work.empty():
+                    continue
+                read, = domain['reads'].values()
+                write, = domain['writes'].values()
+                if (read['dtype'] != write['dtype'] or read['relation'] is None or write['relation'] is None or
+                    write['node'].args[4] is not None):
+                    continue
+                order, _ = iteration_order(work, domain['work'])
+                pair = tuple(dict(binding=access, relation=order.then(access['relation']), shape=order.shape)
+                             for access in (read, write))
+                aliases.append(dict(operation=record['effect']['operation'], domain=domain, work=work, pair=pair))
+            return tuple(aliases)
 
         def emit(self, operands, *, destinations=None, storage=None, results=None, pages=(), uses=None):
             """Bind already selected scalar domains to their assigned pages.
@@ -1410,7 +1653,35 @@ def prepare_graph(module, metadata, *, materializations=()):
                                 arguments[role] = TensorView(physical.storage_as(access['dtype']), mapped)
                             plans.append(arguments)
                         scheduled.page_products = tuple(plans)
-                source, _ = self.codegen()
+                # Identity continuations disappear only after the supplied
+                # pages actually satisfy their declared selected equalities.
+                # The ordinary scheduler's removed-op mechanism also handles
+                # a copy embedded in an otherwise fused scheduling group.
+                removed = self.scheduler.removed_ops.copy()
+                aliased = {}
+                with unset_fake_temporarily():
+                    for alias in self.page_aliases():
+                        actual = []
+                        for use in alias['pair']:
+                            from .operand import relation_layout
+                            access = use['binding']
+                            binding = storage_layouts.get(access['name'])
+                            if binding is None:
+                                break
+                            original, unit, physical = (binding[key] for key in ('source', 'source_dtype', 'operand'))
+                            logical = relation_layout(use['relation'], use['shape'],
+                                int(access['storage_bytes']) // access['dtype'].itemsize)
+                            mapped = rebase_typed(logical, access['dtype'].itemsize, original, unit.itemsize, physical.layout)
+                            actual.append(TensorView(physical.storage_as(access['dtype']), mapped))
+                        name = alias['operation'].get_operation_name()
+                        aliased[name] = aliased.get(name, True) and len(actual) == 2 and same_view(*actual)
+                for name, same in aliased.items():
+                    if same:
+                        self.scheduler.removed_ops.add(name)
+                try:
+                    source, _ = self.codegen()
+                finally:
+                    self.scheduler.removed_ops = removed
                 namespace = {'__name__': 'mesh_preparation', 'mesh_destinations': bound_storage, 'mesh_views': views,
                              'mesh_results': assigned_results, 'mesh_products': product_arguments,
                              'mesh_external_outputs': external_outputs, 'mesh_accesses': command_accesses}
@@ -1458,7 +1729,7 @@ def prepare_graph(module, metadata, *, materializations=()):
         def bind(self, operands, **placement):
             return Program.prepare(self.emit(operands, **placement))
 
-        def effects(self, algebra=None):
+        def effects(self, algebra=None, *, bodies=None):
             """Logical operations with one shared iteration domain per body.
 
             Domains retain the cached body's symbols, guards and scalar nodes.
@@ -1482,10 +1753,10 @@ def prepare_graph(module, metadata, *, materializations=()):
 
             with environment(), V.set_graph_handler(self), V.set_extern_kernel_nodes([]), mode:
                 records = []
-                requirements = {record['operation'].get_operation_name(): record for record in self.consumer_constraints()}
+                requirements = {record['operation'].get_operation_name(): record for record in self.consumer_constraints(bodies)}
                 for operation in self.operations:
                     data = operation.data if isinstance(operation, ir.ComputedBuffer) else None
-                    body = self.loop_body(operation)
+                    body = self.loop_body(operation, bodies)
                     dependencies = self.scheduler.name_to_node[operation.get_operation_name()].read_writes
                     records.append(dict(operation=operation, body=body, scheduling_dependencies=dependencies,
                         scheduling_reads=tuple((dep, value_type(dep.name)) for dep in dependencies.reads),
@@ -1537,16 +1808,5 @@ def prepare_graph(module, metadata, *, materializations=()):
             # this wrapper and scheduler after physical page bindings arrive.
             graph.init_wrapper_code()
             graph._update_scheduler()
+            graph.compose_reads()
     return graph
-
-
-def compile_graph(module, metadata, operands, *, destinations=None):
-    """Build one logical IR, then assign its pages and emit native commands."""
-    from torch.fx.node import map_arg
-    from torch.utils._pytree import tree_flatten
-    materializations = []
-    if destinations is not None:
-        outputs = next(node.args[0] for node in module.graph.nodes if node.op == 'output')
-        described = tree_flatten(map_arg(outputs, lambda node: node.meta['val']))[0]
-        materializations = [value for value, destination in zip(described, destinations, strict=True) if destination is not None]
-    return prepare_graph(module, metadata, materializations=materializations).bind(operands, destinations=destinations)

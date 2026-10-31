@@ -125,7 +125,7 @@ def bind_ports(section, ports, algebra):
     return made
 
 
-def source_uses(module, replacements, results):
+def source_uses(module, replacements, results, *, scopes=None, coordinate=None):
     """Give distinct typed source versions their own ordinary FX inputs.
 
     Only source edges are copied. No numerical operation is evaluated or
@@ -134,7 +134,10 @@ def source_uses(module, replacements, results):
     import operator
     import torch
     from torch.fx.node import map_arg
-    graph, bound, versions, ports = torch.fx.Graph(), {}, {}, {}
+    scopes = {} if scopes is None else scopes
+    graph, bound, versions, ports, local_uses = torch.fx.Graph(), {}, {}, {}, {}
+    declared_uses = []
+    scope_cuts, scope_results = set(), set()
     for node in module.graph.nodes:
         if node.op == 'placeholder':
             made = graph.placeholder(node.name)
@@ -148,6 +151,60 @@ def source_uses(module, replacements, results):
                 made.meta['val'] = pytree.key_get(node.meta['val'], path)
                 versions[field] = made
                 ports[made, ()] = dict(field=field, selection=dict(shape=list(made.meta['val'].shape), steps=[]))
+
+    def typed(value, shape):
+        with value.fake_mode:
+            return torch.empty(shape, dtype=value.dtype, device=value.device,
+                               requires_grad=value.requires_grad)
+
+    def input_use(target, value, declaration, selections=None):
+        for field, owner, made in declared_uses:
+            if field == target and owner == declaration:
+                return made
+        made = graph.placeholder(f'use_{len(declared_uses)}')
+        made.meta['val'] = typed(value, declaration['shape'])
+        ports[made, ()] = dict(field=target, selection=declaration['selection'])
+        if selections is not None:
+            ports[made, ()]['selections'] = selections
+        declared_uses.append((target, declaration, made))
+        return made
+
+    for consumer, scope in scopes.items():
+        for use in scope['uses']:
+            source, path = use['source']
+            target = replacements.get((consumer, use['side'], use['path']), {}).get(path, (source, path))
+            owner = use['required']
+            producer = scopes.get(source, {}).get('outputs', {}).get(path)
+            if target == (source, path) and producer is not None and producer['owners'] == owner['owners']:
+                # One local source scope remains one ordinary graph. No page
+                # boundary is inserted between compatible producer/consumer
+                # declarations merely because both have owner metadata.
+                continue
+            declaration = owner['owners'][coordinate]
+            made = input_use(target, pytree.key_get(source.meta['val'], path), declaration,
+                {rank: value['selection'] for rank, value in owner['owners'].items()})
+            local_uses[consumer, use['side'], use['path'], path] = made
+            scope_cuts.add((consumer, 'before'))
+            if source.op != 'placeholder' and target == (source, path):
+                scope_cuts.add((source, 'after'))
+                scope_results.add(source)
+    for consumer in module.graph.nodes:
+        if consumer in scopes or consumer.op in ('placeholder', 'output'):
+            continue
+        for side in ('args', 'kwargs'):
+            for argument, source in pytree.tree_flatten_with_path(getattr(consumer, side))[0]:
+                if not isinstance(source, torch.fx.Node) or source not in scopes:
+                    continue
+                for path, value in _source_leaves((source,)):
+                    if not isinstance(value, torch.Tensor):
+                        continue
+                    field_path = path[1]
+                    target = replacements.get((consumer, side, tuple(argument)), {}).get(field_path, path)
+                    made = input_use(target, value, dict(shape=tuple(value.shape),
+                        selection=dict(shape=list(value.shape), steps=[])))
+                    local_uses[consumer, side, tuple(argument), field_path] = made
+                    scope_cuts.update(((source, 'after'), (consumer, 'before')))
+                    scope_results.add(source)
 
     def field(node, path):
         value, declared = bound[node], node.meta['val']
@@ -164,12 +221,25 @@ def source_uses(module, replacements, results):
         original = getattr(node, side)
         def replace(path, value):
             chosen = replacements.get((node, side, tuple(path)))
-            if chosen is None:
+            local = {field: made for (consumer, where, argument, field), made in local_uses.items()
+                     if consumer is node and where == side and argument == tuple(path)}
+            if chosen is None and not local:
                 return bound[value] if isinstance(value, torch.fx.Node) else value
             return pytree.tree_map_with_path(lambda field_path, described:
-                versions[chosen[tuple(field_path)]] if tuple(field_path) in chosen else field(value, field_path)
+                local[tuple(field_path)] if tuple(field_path) in local else
+                versions[chosen[tuple(field_path)]] if chosen and tuple(field_path) in chosen else field(value, field_path)
                 if isinstance(described, torch.Tensor) else described, value.meta['val'])
-        return pytree.tree_map_with_path(replace, original)
+        made = pytree.tree_map_with_path(replace, original)
+        scope = scopes.get(node)
+        if scope is not None and scope['sharding'].use_val_from_redistribute_schema:
+            schema = scope['sharding'].redistribute_schema
+            declared = schema.args_schema if side == 'args' else schema.kwargs_schema
+            # The registered sharding rule already supplied local scalar/shape
+            # operands. Preserve tensor edges while consuming those operands.
+            def scalar(path, value):
+                return pytree.key_get(made, path) if isinstance(value, DTensorSpec) else value
+            made = pytree.tree_map_with_path(scalar, declared, is_leaf=lambda value: isinstance(value, DTensorSpec))
+        return made
 
     for node in module.graph.nodes:
         if node.op == 'placeholder':
@@ -177,18 +247,32 @@ def source_uses(module, replacements, results):
         if node.op == 'output':
             graph.output(map_arg(node.args[0], bound.__getitem__))
             continue
-        made = graph.create_node(node.op, node.target, arguments(node, 'args'), arguments(node, 'kwargs'), node.name)
+        scope = scopes.get(node)
+        schema = scope['sharding'].redistribute_schema if scope is not None else None
+        target = schema.op if schema is not None and scope['sharding'].needs_redistribute else node.target
+        made = graph.create_node(node.op, target, arguments(node, 'args'), arguments(node, 'kwargs'), node.name)
         made.meta = node.meta.copy()
+        if scope is not None:
+            made.meta['val'] = pytree.tree_map_with_path(lambda path, value:
+                typed(value, scope['outputs'][tuple(path)]['owners'][coordinate]['shape'])
+                if isinstance(value, torch.Tensor) else value, node.meta['val'])
+            made.meta['mesh_source_scope'] = coordinate
         bound[node] = made
     for node, made in bound.items():
         for key, value in _source_leaves((node,)):
             if isinstance(value, torch.Tensor):
-                ports[made, key[1]] = dict(field=results.get(key, key), selection=dict(shape=list(value.shape), steps=[]))
+                owner = scopes.get(node, {}).get('outputs', {}).get(key[1])
+                ports[made, key[1]] = dict(field=results.get(key, key), selection=(
+                    owner['owners'][coordinate]['selection'] if owner is not None else
+                    dict(shape=list(value.shape), steps=[])))
     from .compilation import _source_results
     copied = torch.fx.GraphModule(module, graph)
     copied.meta = dict(module.meta, mesh_source_results=_source_results(module, bound))
     metadata = tuple(node.meta['val'] for node in graph.nodes if node.op == 'placeholder')
-    return dict(graph=copied, operands=metadata), ports, bound
+    return dict(graph=copied, operands=metadata,
+                cuts=tuple((bound[node], side) for node in module.graph.nodes for side in ('before', 'after')
+                           if (node, side) in scope_cuts),
+                materializations=tuple(bound[node] for node in module.graph.nodes if node in scope_results)), ports, bound
 
 
 def prepare_expression(expression):
@@ -198,7 +282,7 @@ def prepare_expression(expression):
     section's source inputs/results keep their tensor-field identities while
     the common numerical compiler performs its ordinary source rewrites.
     """
-    from .compilation import operands as compiler_operands
+    from .compilation import operands as compiler_operands, normalize_source
     configuration = dict(compiler_operands())
     if 'prepared' in expression and expression['prepared']['configuration'] == configuration:
         return expression['prepared']
@@ -208,8 +292,11 @@ def prepare_expression(expression):
     from . import host, prepare_source
     from .declarations import _bound, normalize_edges, sections
     from .native import prepare_graph
-    module = expression['graph']
+    from .algebra import decompositions
+    original = expression['graph']
     aliases = expression.setdefault('aliases', {})
+    source_nodes = tuple(dict.fromkeys((*original.graph.nodes, *aliases)))
+    module = normalize_source(original, decompositions)
     aliases.update(normalize_edges(module))
     def current(node):
         while node in aliases:
@@ -219,10 +306,31 @@ def prepare_expression(expression):
     arguments = dict(zip((node for node in module.graph.nodes if node.op == 'placeholder'),
                          expression['operands'], strict=True))
     order = {node: index for index, node in enumerate(module.graph.nodes)}
+    fields = {}
+    results = module.meta.get('mesh_source_results', {})
+    for node in source_nodes:
+        if 'val' not in node.meta:
+            continue
+        result = results.get(node, results.get(current(node), current(node)))
+        for key, value in _source_leaves((node,)):
+            if isinstance(value, torch.Tensor):
+                fields[key] = ((current(result), key[1]) if isinstance(result, torch.fx.Node)
+                               else (current(pytree.key_get(result, key[1])), ()))
+
+    def generated(node):
+        declared = tuple(fields[key][0] for key, value in _source_leaves((node,))
+                         if isinstance(value, torch.Tensor)) if 'val' in node.meta else (current(node),)
+        introduced = module.meta.get('mesh_source_operations', {}).get(node, declared) if module is not original else declared
+        return tuple(dict.fromkeys(current(value) for value in introduced if current(value) in order))
+
     cuts = {at for node, index in order.items() if _bound(node) or host.bound(node) for at in (index, index + 1)}
-    materializations = tuple(dict.fromkeys(current(node) for node in expression.get('materializations', ())))
+    materializations = tuple(dict.fromkeys(fields[key][0]
+        for node in expression.get('materializations', ()) for key, value in _source_leaves((node,))
+        if isinstance(value, torch.Tensor)))
     cuts.update(order[node] + 1 for node in materializations)
-    cuts.update(order[current(node)] + {'before': 0, 'after': 1}[side] for node, side in expression.get('cuts', ()))
+    cuts.update((min(order[value] for value in generated(node)) if side == 'before'
+                 else max(order[value] for value in generated(node)) + 1)
+                for node, side in expression.get('cuts', ()))
     spans = []
     for fragment, inputs, outputs in sections(module, sorted(cuts), requested_outputs=materializations):
         boundary = tuple(node for node in fragment.graph.nodes if _bound(node) or host.bound(node))
@@ -247,10 +355,92 @@ def prepare_expression(expression):
                                        for node, tree in lowered.meta.get('mesh_source_results', {}).items()},
                         effects=retained.effects(algebra))
         spans.append(span)
-    prepared = dict(expression=expression, algebra=algebra, aliases=aliases, sections=tuple(spans),
+    normalized = dict(expression, graph=module)
+    normalized.pop('prepared', None)
+    prepared = dict(expression=normalized, algebra=algebra, aliases=aliases, fields=fields, sections=tuple(spans),
                     configuration=configuration)
     expression['prepared'] = prepared
     return prepared
+
+
+def source_ports(prepared, ports):
+    """Carry exact source fields through the common source normalization."""
+    aliases, fields, result = prepared['aliases'], prepared['fields'], {}
+    for key, port in ports.items():
+        node, path = fields.get(key, key)
+        while node in aliases:
+            node = aliases[node]
+        result[node, path] = port
+    return result
+
+
+def cut_sections(parent, split, algebra):
+    """Normalize retained read cuts to the ordinary numerical section contract.
+
+    The compiler's existing port fields identify carried values. Original
+    named storage keeps its parent semantic fields and declared relations.
+    A cut's contribution and received value remain distinct:
+    only the caller's declared delivery can make those two ports equal.
+    """
+    if not split['boundaries']:
+        return dict(sections=(parent,), boundaries=())
+
+    consumers = {boundary['input']['binding']['name']: set() for boundary in split['boundaries']}
+    for section in split['sections']:
+        for operation, node in section.nodes.items():
+            for access in node.read_writes.reads:
+                if access.name in consumers:
+                    consumers[access.name].add(operation)
+    received = {name: next(iter(operations)) for name, operations in consumers.items() if len(operations) == 1}
+    spans = []
+    for section in split['sections']:
+        inputs, outputs = tuple(section.input_ports.values()), tuple(section.output_ports)
+        def bindings(ports, side):
+            names = {port['binding']['name'] for port in ports}
+            retained = {field: binding for field, binding in parent[side].items() if binding['name'] in names}
+            known = {binding['name'] for binding in retained.values()}
+            for port in ports:
+                name = port['binding']['name']
+                if name in known:
+                    continue
+                matches = [(field, binding) for other in ('input_bindings', 'output_bindings')
+                           for field, binding in parent[other].items() if binding['name'] == name]
+                retained.update(matches or [(port['field'], port['binding'])])
+            return retained
+        input_bindings, output_bindings = bindings(inputs, 'input_bindings'), bindings(outputs, 'output_bindings')
+        spans.append(dict(parent,
+            source_section=parent.get('source_section', parent),
+            inputs=tuple(dict.fromkeys(field[0] for field in input_bindings)),
+            outputs=tuple(dict.fromkeys(field[0] for field in output_bindings)),
+            operands=tuple(pytree.key_get(port['field'][0].meta['val'], port['field'][1]) for port in inputs),
+            boundaries=(), retained=section, effects=section.effects(algebra),
+            input_bindings=input_bindings, output_bindings=output_bindings,
+            received_values={name: operation for name, operation in received.items() if operation in section.nodes}))
+    return dict(sections=tuple(spans), boundaries=tuple(split['boundaries']))
+
+
+def page_equalities(section, fixed=()):
+    """Safe co-placement of a fresh received value's sole identity consumer.
+
+    Equal values at one operation do not establish storage identity across
+    later writes. Fresh receivers have no other observer when dependencies
+    name one consuming operation. Its ordinary unfixed result may share those
+    pages; caller-fixed or mutation-backed targets retain the normal copy.
+    """
+    received = {} if section is None else section.get('received_values', {})
+    if not received:
+        return ()
+    retained = section['retained']
+    aliases = retained.page_aliases()
+    mutations = retained.scheduler_state['mutation_real_name']
+    fixed_names = {mutations.get(record['binding']['name'], record['binding']['name']) for record in fixed}
+    result = []
+    for alias in aliases:
+        source, target = (use['binding']['name'] for use in alias['pair'])
+        if (received.get(source) == alias['operation'].get_operation_name()
+                and mutations.get(target, target) == target and target not in fixed_names):
+            result.append(alias['pair'])
+    return tuple(result)
 
 
 def prepare_sources(sources, algebra):
@@ -273,11 +463,7 @@ def prepare_sources(sources, algebra):
                        if isinstance(node, torch.fx.Node))
     joined.update(algebra=algebra, cuts=tuple(cuts), materializations=tuple(results))
     prepared = prepare_expression(joined)
-    normalized = {}
-    for (node, path), port in ports.items():
-        while node in prepared['aliases']:
-            node = prepared['aliases'][node]
-        normalized[node, path] = port
+    normalized = source_ports(prepared, ports)
     spans = [[] for _ in sources]
     for section in prepared['sections']:
         sites = {node.meta['mesh_placement_site'] for node in section['graph'].graph.nodes
@@ -310,10 +496,11 @@ def contribution_domains(prepared, values, coordinate, *, uses=None):
     contribution's declared mesh axes restrict which terms this rank produces.
     Address predicates preserve work that makes no read on a particular edge.
     """
-    from .operand import byte_relation
+    from .operand import access_domain, byte_relation
     algebra, limits, pending = prepared['algebra'], {}, []
     uses = {} if uses is None else uses
     for section in prepared['sections']:
+        section = section.get('rank_sections', {}).get(coordinate, section)
         if section['boundaries']:
             continue
         axes, available = {}, {}
@@ -346,8 +533,10 @@ def contribution_domains(prepared, values, coordinate, *, uses=None):
                         owned = owned.binary(byte_relation(binding).image(positions), 'union')
                     read = byte_relation(access)
                     if read is None or access.get('unresolved_predicates'):
-                        pending.append(dict(domain=domain, access=access, owned_bytes=owned,
-                                            requirement='contribution_access'))
+                        possible = access_domain(access, work)['positions']
+                        if possible is None or not possible.binary(owned, 'subtract').empty():
+                            pending.append(dict(domain=domain, access=access, owned_bytes=owned,
+                                                requirement='contribution_access'))
                         continue
                     absent = read.image(work).binary(owned, 'subtract')
                     work = work.binary(read.preimage(absent), 'subtract')
@@ -433,7 +622,143 @@ def project_numerical(span, demands, algebra, *, constraints=None, work=None):
                 records=tuple(records), live_reads=tuple(live_reads), live_inputs=live_inputs, pending=tuple(pending))
 
 
-def compile_assignments(prepared, assignments, outputs, *, delivery, boundary_projection, constraints=None, transitions=()):
+def assigned_read_sections(section, records, produced, algebra, *, delivery, transition):
+    """Splice cached owner reads into supplied numerical work.
+
+    Possible read positions select providers and resident pages only. The cut's
+    returned values, ordered by the original work coordinates, are the payload
+    of the ordinary placement expression supplied by the frontend adapter.
+    """
+    import math
+    import torch
+    from mesh_relation import flat
+    from .operand import byte_relation
+    sites, pending = {}, []
+    for rank, record in records.items():
+        member = record['section']
+        for source, reads in record.get('live_inputs', {}).items():
+            binding = member['input_bindings'][source]
+            owned = byte_relation(binding).image(produced[rank].get(source, _empty(algebra, 1)))
+            for read in reads:
+                if read['positions'].binary(owned, 'subtract').empty():
+                    continue
+                for projected in record['records']:
+                    for slot, value in projected['reads'].items():
+                        if value['access'] is read['access']:
+                            key = (source, id(projected['domain']), slot)
+                            sites.setdefault(key, dict(source=source, effect=projected['effect'],
+                                domain=projected['domain'], access=read['access'], slot=slot,
+                                retained=member['retained']))
+    if not sites:
+        return None
+    # A source use is the retained scalar node itself, not its generated name.
+    if any(member['section']['retained'] is not site['retained']
+           for member in records.values() for site in sites.values()):
+        return dict(pending=(dict(section=section, requirement='rank_source_access_identity'),))
+    requests = {rank: [] for rank in records}
+    fields = torch.fx.Graph()
+    for key, site in sites.items():
+        source = site['source']
+        needed, work = {}, {}
+        for rank, record in records.items():
+            matching = next(row for row in record['records'] if row['domain'] is site['domain'])
+            work[rank] = matching['work']
+            read = matching['reads'][site['slot']]
+            needed[rank] = byte_relation(record['section']['input_bindings'][source]).preimage(read['positions'])
+        providers = delivery(section, source, needed, algebra)
+        pending.extend(providers['pending'])
+        provided = providers['provided']
+        if provided is None:
+            pending.append(dict(source=source, requirement='live_read_owners'))
+            continue
+        dimensions = tuple(provided['dimensions'])
+        fixed = tuple(axis for axis in range(provided['mesh'].ndim) if axis not in dimensions)
+        owners = {rank: algebra.selection(selection) for rank, selection in providers['sources'].items()}
+        for rank, selected in owners.items():
+            if not selected.binary(produced[rank].get(source, _empty(algebra, 1)), 'subtract').empty():
+                pending.append(dict(source=source, coordinate=rank, requirement='assigned_source_pages'))
+            peers = tuple(peer for peer in records if all(peer[axis] == rank[axis] for axis in fixed))
+            if any(not selected.binary(owners[peer], 'intersect').empty() for peer in peers if peer < rank):
+                pending.append(dict(source=source, coordinate=rank, requirement='delivery_sources'))
+            available = _empty(algebra, 1)
+            selected_work = _empty(algebra, len(site['domain']['work']))
+            for peer in peers:
+                available = available.binary(owners[peer], 'union')
+                selected_work = selected_work.binary(work[peer], 'union')
+            if not needed[rank].binary(available, 'subtract').empty():
+                pending.append(dict(source=source, coordinate=rank, requirement='live_read_owners'))
+            requests[rank].append(dict(site, key=key, work=selected_work,
+                owner=byte_relation(records[rank]['section']['input_bindings'][source]).image(selected)))
+        value = pytree.key_get(source[0].meta['val'], source[1])
+        site['fields'] = tuple(fields.placeholder(f'read_{len(fields.nodes)}') for _ in range(2))
+        for node in site['fields']:
+            with value.fake_mode:
+                node.meta['val'] = torch.empty(site['domain']['work'], dtype=site['access']['dtype'], device=value.device)
+        site.update(providers=providers, work=work, dimensions=dimensions)
+    if pending:
+        return dict(pending=tuple(pending))
+    split, boundaries = {}, {}
+    for rank, requested in requests.items():
+        member = records[rank]['section']
+        cut = cut_sections(member, member['retained'].cut_reads(requested), algebra)
+        ports = {}
+        boundaries[rank] = {boundary['key']: boundary for boundary in cut['boundaries']}
+        for boundary in cut['boundaries']:
+            site = sites[boundary['key']]
+            shape = site['domain']['work']
+            flatten = algebra.map(shape, (math.prod(shape),), lambda x, y: [f'{y[0]} = {flat(shape, x)}'])
+            order = boundary['ordinals'].then(flatten)
+            selecting = dict(shape=list(map(int, shape)),
+                             steps=[['reindex', dict(shape=list(map(int, order.shape)), index=order.terms())]])
+            for side, field in zip(('output', 'input'), site['fields'], strict=True):
+                ports[boundary[side]['field']] = dict(field=(field, ()), selection=selecting)
+        split[rank] = tuple(bind_ports(span, ports, algebra) for span in cut['sections'])
+    programs = []
+    for key, site in sites.items():
+        ports = {rank: dict(boundary=boundaries[rank].get(key), source=(site['fields'][0], ()),
+                           result=(site['fields'][1], ())) for rank in records}
+        program = transition(site, ports, algebra)
+        pending.extend(program.get('pending', ()))
+        programs.append(program)
+    if pending:
+        return dict(pending=tuple(pending))
+    projected = {rank: [] for rank in records}
+    for rank, spans in split.items():
+        old = {id(row['effect']['operation']): row for row in records[rank]['records']}
+        for at, span in enumerate(spans):
+            assigned = {}
+            for effect in span['effects']:
+                original = old.get(id(effect['operation']))
+                for domain in effect['domains']:
+                    assigned[id(domain)] = (original['work'] if original is not None else
+                        algebra.map(domain['work'], (), lambda x, y: []).domain())
+                    if domain.get('finish') is not None:
+                        assigned[id(domain['finish'])] = (original['finish']['work'] if original is not None else
+                            algebra.map(domain['finish']['work'], (), lambda x, y: []).domain())
+            demanded = {key: value for key, value in records[rank]['outputs'].items() if key in span['output_bindings']}
+            record = project_numerical(span, demanded, algebra, work=assigned)
+            record['read_cut'] = next((key for key, boundary in boundaries[rank].items()
+                                       if boundary['before'] == at), None)
+            # Publish the stores of that supplied work, including carried
+            # intermediate values and the cut's ordinary contribution port.
+            for field, binding in span['output_bindings'].items():
+                positions = _empty(algebra, 1)
+                for row in record['records']:
+                    for domain in (row, row.get('finish')):
+                        if domain is not None:
+                            for write in domain['writes'].values():
+                                if write['access']['name'] == binding['name'] and write['positions'] is not None:
+                                    positions = positions.binary(write['positions'], 'union')
+                record['outputs'][field] = byte_relation(binding).preimage(positions)
+            projected[rank].append(record)
+    ordered = sorted(sites, key=lambda key: next(values[key]['source_order']
+                     for values in boundaries.values() if key in values))
+    return dict(sections=projected, boundaries=boundaries, programs=dict(zip(sites, programs, strict=True)),
+                order=(*ordered, None), pending=())
+
+
+def compile_assignments(prepared, assignments, outputs, *, delivery, boundary_projection, constraints=None, transitions=(),
+                        read_transition=None):
     """Compile supplied materialized-value assignments in producer order.
 
     A section's retained equations determine its input footprint. Delivering
@@ -479,7 +804,7 @@ def compile_assignments(prepared, assignments, outputs, *, delivery, boundary_pr
     def append(section, records):
         route(section, {rank: record['inputs'] for rank, record in records.items()})
         for rank, record in records.items():
-            record['section'] = section
+            record.setdefault('section', section)
             sections[rank].append(record)
             pending[rank].extend(record['pending'])
             for key, positions in record['outputs'].items():
@@ -521,7 +846,8 @@ def compile_assignments(prepared, assignments, outputs, *, delivery, boundary_pr
                 if identity(key) not in assigned[rank]:
                     pending[rank].append(dict(source=key, section=section, requirement='section_assignment'))
         records = (boundary_projection(section, needs, algebra) if section['boundaries'] else
-                   {rank: project_numerical(section, values, algebra, constraints=constraints.get(rank))
+                   {rank: project_numerical(section.get('rank_sections', {}).get(rank, section), values, algebra,
+                                            constraints=constraints.get(rank))
                     for rank, values in needs.items()})
         sources = section['graph'].meta.get('mesh_source_results', {})
         for program in transitions:
@@ -529,18 +855,50 @@ def compile_assignments(prepared, assignments, outputs, *, delivery, boundary_pr
             if program['before'] and transition['consumer'] in sources:
                 conversion(program, {rank: {program['result']: record['inputs'][program['result']]}
                     if program['result'] in record['inputs'] else {} for rank, record in records.items()})
+        split = (assigned_read_sections(section, records, produced, algebra, delivery=delivery,
+                                        transition=read_transition)
+                 if read_transition is not None and not section['boundaries'] else None)
+        if split is not None and not split['pending']:
+            for event in split['order']:
+                stage = {rank: next((record for record in spans if record['read_cut'] == event), None)
+                         for rank, spans in split['sections'].items()}
+                stage = {rank: record for rank, record in stage.items() if record is not None}
+                if not stage:
+                    continue
+                wrapper = dict(next(iter(stage.values()))['section'])
+                for rank, record in stage.items():
+                    record['section'] = dict(record['section'], source_section=wrapper)
+                append(wrapper, stage)
+                if event in split['programs']:
+                    program = split['programs'][event]
+                    needs = {rank: {} for rank in assignments}
+                    for rank, spans in split['sections'].items():
+                        for record in spans:
+                            if program['result'] in record['inputs']:
+                                _union(needs[rank], program['result'], record['inputs'][program['result']])
+                    if any(needs.values()):
+                        conversion(program, needs)
+            for program in transitions:
+                if not program['before'] and program['transition']['consumer'] in sources:
+                    conversion(program, {rank: {program['result']: assigned[rank][program['result']]}
+                        for rank in assignments})
+            continue
+        if split is not None:
+            for rank in pending:
+                pending[rank].extend(split['pending'])
         from .operand import byte_relation
         for rank, record in records.items():
             for key, reads in record.get('live_inputs', {}).items():
                 source = identity(key)
-                binding = section['input_bindings'][key]
+                binding = record['section']['input_bindings'][key]
                 available = byte_relation(binding).image(produced[rank].get(source, _empty(algebra, 1)))
                 for read in reads:
                     if not read['positions'].binary(available, 'subtract').empty():
                         pending[rank].append(dict(source=source, section=section, access=read,
                                                   requirement='selected_source_reads'))
         for rank, record in records.items():
-            record.update(section=section, outputs=needs[rank])
+            record.setdefault('section', section)
+            record['outputs'] = needs[rank]
         append(section, records)
         for program in transitions:
             if not program['before'] and program['transition']['consumer'] in sources:

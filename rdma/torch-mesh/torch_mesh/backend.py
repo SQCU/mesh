@@ -381,48 +381,6 @@ def prepare_fragments(bindings, group):
     return _stream.Collectives(calls, group.handle, operands, before, after), declarations
 
 
-def bind_gather_views(gathers, group):
-    """Original producer views to final recipient views through indexed WRITEs.
-
-    Preparation binds the producer to its final local slice. This interface
-    cannot insert a numerical copy or a second executor to repair placement.
-    """
-    from .placement import same_view
-    deliveries = []
-    for source, output, dim, sizes in gathers:
-        dim %= output.ndim
-        slices = list(output.split(sizes, dim))
-        own = slices[group.rank()]
-        if not same_view(source, own):
-            raise ValueError('gather producer must be bound to its final local output slice')
-        for a, segment in enumerate(slices):
-            if segment.numel() == 0:
-                continue
-            for b in range(group.size()):
-                if a == b:
-                    continue
-                # a relay is its shape and type alone: the library leases it where a route crosses this rank
-                view = (source if group.rank() == a else segment if group.rank() == b else
-                        torch.empty(segment.numel() * segment.element_size(), dtype=torch.uint8, device='meta'))
-                deliveries.append((view, a, b))
-    return group.prepare_writes(deliveries) if deliveries else (None, [])
-
-
-def bind_scatter_views(source, output, dim, sizes, reduction, group):
-    """Reduce original strided fragments into their owners' final tensor views.
-
-    The partial-tensor API uses the same alias/cut calculation and native
-    reductions. No transpose, packed operand or received-result copy is made.
-    """
-    from .operand import TensorView
-    source, output = TensorView.of(source), TensorView.of(output)
-    bindings = []
-    for root, send in enumerate(source.split(sizes, dim)):
-        bindings.append((Call(REDUCE, send.numel(), source.dtype, root=root, op=reduction), send,
-                         output if root == group.rank() else None))
-    return prepare_fragments(bindings, group)
-
-
 def partial(out, lse):
     """An attention's output over some keys (shape x dim) and each row's logsumexp (shape) as the library's partials,
     float32 rows (shape x (2 + dim)) of [m, l, O]: m the logsumexp, l 1, O the output; a row that saw no key (its
