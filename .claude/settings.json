@@ -1,30 +1,15 @@
 {
-  "permissions": {
-    "allow": [
-      "Bash(git show *)",
-      "Bash(git -C * show *)",
-      "Bash(git log *)",
-      "Bash(git -C * log *)",
-      "Bash(git diff *)",
-      "Bash(git -C * diff *)",
-      "Bash(git rev-parse *)",
-      "Bash(git -C * rev-parse *)",
-      "Read(~/dox/mesh/**)",
-      "Read(~/metal-microbench/**)"
-    ]
-  },
   "hooks": {
     "PostToolUse": [
       {
         "matcher": "Bash",
         "hooks": [
           {
-            "type": "agent",
+            "type": "command",
             "if": "Bash(git *commit*)",
-            "model": "claude-haiku-5-5",
             "timeout": 180,
             "statusMessage": "C9 review of the commit",
-            "prompt": "If no git invocation in tool_input.command below has the subcommand `commit` (options such as `-C <dir>` or `-c <key>=<value>` may stand between `git` and `commit`), it is verified: read nothing. A Bash call made a git commit: $ARGUMENTS\nCommit: the sha in tool_response's `[branch sha]` line, else HEAD; repository: the `git -C`/`cd` directory in the command, else cwd. Only the two repositories of this project are reviewed: if `git -C <repo> rev-parse --path-format=absolute --git-common-dir` is neither /Users/mdot/dox/mesh/.git nor /Users/mdot/metal-microbench/.git, it is verified: read nothing more.\nVerify the commit splices no graph algorithm into a module that does other work (C9, /Users/mdot/dox/mesh/design/rubrics.md:422). Read its source hunks (`git show <sha>`, and `git show <sha>:<path>` for the changed functions whole); skip documents, data and generated files.\nA graph algorithm computes over a graph's vertices, edges, weights or samples: shortest paths, traversals and worklists, reachability, topological orders, spanning trees, arborescences, flows, cuts, packings (multiplicative weights), union-find, components, cycle checks, path enumeration, walks over parent or next-hop tables, tree heights. Its one home is mesh's graph module (rdma/mesh-graph.h, rdma/mesh_graph.py), whose functions take the consumer's weights and visits as operands; metal-microbench reaches it through libmesh and writes none of its own. Code in that module, and code that only calls it or builds its inputs, passes.\nFail when the commit adds or changes one elsewhere, the reason one line each: `path:line function(): the algorithm; it moves into the graph module`. Nothing else."
+            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-c9-review.py"
           }
         ]
       }
