@@ -150,7 +150,7 @@ uint32_t mesh_graph_climb(const uint32_t *parent, uint32_t vertices, uint32_t ro
   uint32_t at = from;
   for (uint32_t step = 0; step <= vertices; step++) {
     if (visit) visit(consumer, at, step);
-    if (at == root || parent[at] >= vertices || parent[at] == at) return step;
+    if (at == root || parent[at] >= vertices) return step;
     at = parent[at];
   }
   return UINT32_MAX;
