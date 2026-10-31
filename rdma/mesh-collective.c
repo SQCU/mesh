@@ -1,5 +1,6 @@
 #include "mesh-call.h"
 #include "mesh-plan.h"
+#include "mesh-graph.h"
 #include <errno.h>
 #include <math.h>
 #include <stdlib.h>
@@ -116,6 +117,8 @@ int mesh_link_map_check(const struct mesh_link_map *map){
   return result;
 }
 
+/* link l's end `side` (mesh-graph.h's edge ends) */
+static uint32_t mesh_link_end(const void *context,uint32_t l,uint32_t side){ return ((const struct mesh_link_map *)context)->link[l][side]; }
 int mesh_link_map_joined(const struct mesh_link_map *map,uint32_t *apart){
   const int form=mesh_link_map_check(map);
   if(form)return form;
@@ -130,13 +133,11 @@ int mesh_link_map_joined(const struct mesh_link_map *map,uint32_t *apart){
     return 0;
   }
   if(map->kind!=MESH_LINKS_GRAPH)return 0;
-  /* breadth first from node 0 over the links either way */
-  uint32_t *order=malloc((size_t)n*sizeof *order),reached=1;
-  unsigned char *seen=calloc(n,1);
+  /* the nodes node 0 reaches over the links either way (mesh-graph.h) */
+  uint32_t *order=malloc((size_t)n*sizeof *order);
+  unsigned char *seen=malloc(n);
   if(!order || !seen){free(order);free(seen);return ENOMEM;}
-  order[0]=0;seen[0]=1;
-  for(uint32_t head=0;head<reached;head++)for(uint32_t l=0;l<map->links;l++)for(uint32_t e=0;e<2;e++)
-    if(map->link[l][e]==order[head] && !seen[map->link[l][1-e]]){seen[map->link[l][1-e]]=1;order[reached++]=map->link[l][1-e];}
+  mesh_graph_reach(n,map->links,mesh_link_end,map,0,order,seen);
   uint32_t first=0;
   while(first<n && seen[first])first++;
   free(order);free(seen);
@@ -740,56 +741,6 @@ int mesh_program_check_members(const struct mesh_program *program,struct mesh_op
   return result;
 }
 
-/* Chu-Liu/Edmonds: the minimum spanning arborescence of nodes [0, N) rooted at `root` in which each other node v
-   takes one edge e with to[e] == v (its parent from[e]); chosen[v] that edge, the root's -1; 0, or -1 where a node has
-   none.  Each node's lightest edge; a cycle among them contracted, the edges into it weighing their excess over the
-   edge they would replace, the contracted graph's arborescence expanded (the edge into a cycle replaces the cycle's
-   edge into the same node). */
-static int mesh_arborescence(uint32_t N,uint32_t root,uint32_t E,const uint32_t *from,const uint32_t *to,const double *weight,int32_t *chosen){
-  int32_t *best=malloc(N*sizeof *best),*id=malloc(N*sizeof *id),*seen=malloc(N*sizeof *seen);
-  uint32_t *nfrom=malloc((E+1)*sizeof *nfrom),*nto=malloc((E+1)*sizeof *nto),*origin=malloc((E+1)*sizeof *origin);
-  double *nweight=malloc((E+1)*sizeof *nweight);
-  int32_t *nchosen=malloc(N*sizeof *nchosen);
-  unsigned char *cyclic=calloc(N,1);
-  int status=-1;
-  if(!best || !id || !seen || !nfrom || !nto || !origin || !nweight || !nchosen || !cyclic)goto done;
-  for(uint32_t v=0;v<N;v++){best[v]=-1;id[v]=-1;seen[v]=-1;}
-  for(uint32_t e=0;e<E;e++)
-    if(from[e]!=to[e] && to[e]!=root && (best[to[e]]<0 || weight[e]<weight[best[to[e]]]))best[to[e]]=(int32_t)e;
-  for(uint32_t v=0;v<N;v++)if(v!=root && best[v]<0)goto done;
-  uint32_t components=0;
-  for(uint32_t v=0;v<N;v++){
-    uint32_t at=v;
-    while(at!=root && seen[at]<0 && id[at]<0){seen[at]=(int32_t)v;at=from[best[at]];}
-    if(at!=root && id[at]<0 && seen[at]==(int32_t)v){
-      uint32_t x=at;
-      do{id[x]=(int32_t)components;x=from[best[x]];}while(x!=at);
-      cyclic[components++]=1;
-    }
-  }
-  if(!components){
-    for(uint32_t v=0;v<N;v++)chosen[v]=v==root?-1:best[v];
-    status=0;goto done;
-  }
-  for(uint32_t v=0;v<N;v++)if(id[v]<0)id[v]=(int32_t)components++;
-  uint32_t m=0;
-  for(uint32_t e=0;e<E;e++){
-    const uint32_t u=(uint32_t)id[from[e]],w=(uint32_t)id[to[e]];
-    if(u==w)continue;
-    nfrom[m]=u;nto[m]=w;origin[m]=e;
-    nweight[m]=cyclic[w]?weight[e]-weight[best[to[e]]]:weight[e];
-    m++;
-  }
-  if(mesh_arborescence(components,(uint32_t)id[root],m,nfrom,nto,nweight,nchosen))goto done;
-  for(uint32_t v=0;v<N;v++)chosen[v]=v==root?-1:best[v];
-  for(uint32_t x=0;x<components;x++)
-    if(x!=(uint32_t)id[root]){const uint32_t e=origin[nchosen[x]];chosen[to[e]]=(int32_t)e;}
-  status=0;
-done:
-  free(best);free(id);free(seen);free(nfrom);free(nto);free(origin);free(nweight);free(nchosen);free(cyclic);
-  return status;
-}
-
 /* A packed tree while packing: its root, parents and the flow it carries */
 struct mesh_packed { uint32_t root; double flow; uint32_t *parent; };
 static int mesh_packed_heavier(const void *a,const void *b){
@@ -963,7 +914,7 @@ uint32_t mesh_trees_pack(const struct mesh_link_map *map,const uint64_t *roots,d
   for(uint32_t k=0;k<P;k++){length[k]=delta/capacity[k];D+=length[k]*capacity[k];}
   while(D<1)for(uint32_t r=0;r<n && D<1;r++)for(double demand=mesh_member(roots,r);demand>0 && D<1;){
     for(uint32_t e=0;e<m;e++){weight[e]=0;for(uint32_t i=through[e];i<through[e+1];i++)weight[e]+=length[crossing[i]];}
-    if(mesh_arborescence(n,r,m,from,to,weight,chosen))goto done;
+    if(mesh_graph_arborescence(n,r,m,from,to,weight,chosen))goto done;
     /* the tree's flow: its demand, at most each directed hop's capacity over the tree's edges crossing it */
     for(uint32_t v=0;v<n;v++)if(v!=r)for(uint32_t i=through[chosen[v]];i<through[chosen[v]+1];i++)uses[crossing[i]]++;
     double f=demand;

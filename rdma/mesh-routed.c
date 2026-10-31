@@ -1,5 +1,6 @@
 #include "mesh-plan.h"
 #include "mesh-write-order.h"
+#include "mesh-graph.h"
 #include <errno.h>
 #include <limits.h>
 #include <stdlib.h>
@@ -233,16 +234,8 @@ static int byte_retired(const struct routed_piece *pieces,const size_t *send,con
   if(frontier==end)*proven=1;
   free(states);free(covered);return status;
 }
-/* every strict causal ancestor of the events on `stack` stamped */
-static void ancestors(const size_t *first,const struct routed_edge *edges,uint32_t *seen,uint32_t *stack,size_t pending,uint32_t stamp){
-  while(pending){
-    const uint32_t at=stack[--pending];
-    for(size_t e=first[at];e<first[at+1];e++){
-      const uint32_t prior=edges[e].after;
-      if(seen[prior]!=stamp){seen[prior]=stamp;stack[pending++]=prior;}
-    }
-  }
-}
+/* edge k's event entered (mesh-graph.h's edge heads, over the edges' compressed rows) */
+static uint32_t routed_after(const void *context,size_t k){ return ((const struct routed_edge *)context)[k].after; }
 static int retirement_proofs(struct routed_piece *pieces,size_t count,uint64_t page){
   if(count/2>UINT32_MAX/3)return EOVERFLOW;
   const uint32_t events=(uint32_t)(count/2)*3;
@@ -292,7 +285,7 @@ static int retirement_proofs(struct routed_piece *pieces,size_t count,uint64_t p
       if(s->op==MESH_STEP_SEND)continue; /* a COPY landing in place, or a combine into its buffer */
       const uint32_t stamp=(uint32_t)k+1,root=3*s->round;
       stack[0]=root;seen[root]=stamp;
-      ancestors(first,edges,seen,stack,1,stamp);
+      mesh_graph_mark(first,routed_after,edges,seen,stamp,stack,1);
       for(size_t j=begin;j<k;j++){
         const struct mesh_step *a=&pieces[j].transfer.step;
         if(a->op!=MESH_STEP_SEND || !pieces_meet(a,s))continue;
@@ -315,7 +308,7 @@ static int retirement_proofs(struct routed_piece *pieces,size_t count,uint64_t p
         const uint32_t root=3*pieces[k].transfer.step.round;
         if(pieces[k].transfer.step.op!=MESH_STEP_SEND && seen[root]!=stamp){seen[root]=stamp;stack[pending++]=root;}
       }
-      ancestors(first,edges,seen,stack,pending,stamp);
+      mesh_graph_mark(first,routed_after,edges,seen,stamp,stack,pending);
       for(size_t k=begin;k<end;k++)
         pieces[k].witnessed=pieces[k].transfer.step.op==MESH_STEP_SEND && seen[3*pieces[k].transfer.step.round+1]==stamp;
     }

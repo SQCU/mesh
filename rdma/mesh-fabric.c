@@ -1,4 +1,5 @@
 #include "mesh-plan.h"
+#include "mesh-graph.h"
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 #include <stdatomic.h>
@@ -207,54 +208,25 @@ void mesh_write_routes_free(struct mesh_paths *routes, uint32_t nodes) {
   free(routes);
 }
 
-struct mesh_write_routes_walk {
-  uint32_t *node, *next, *path;
-  unsigned char *seen;
-};
-
-/* Count first, then fill exactly the same paths. The explicit DFS stack keeps
-   depth off the C call stack. `next` is the next cable index at each depth;
-   visiting a destination ends that path rather than forwarding through it. */
-static int mesh_write_routes_walk(const struct mesh_fabric *f, uint32_t source, uint32_t destination,
-                                         struct mesh_write_routes_walk *walk, uint32_t *first, uint32_t *cable,
-                                         uint32_t *paths, uint32_t *edges) {
-  uint32_t depth = 0;
-  *paths = *edges = 0;
-  if (first) first[0] = 0;
-  memset(walk->seen, 0, f->nodes);
-  walk->node[0] = source; walk->next[0] = 0; walk->seen[source] = 1;
-  for (;;) {
-    const uint32_t at = walk->node[depth];
-    if (at == destination) {
-      if (*paths == UINT32_MAX || depth > UINT32_MAX - *edges) return EOVERFLOW;
-      if (cable) memcpy(cable + *edges, walk->path, (size_t)depth * sizeof *cable);
-      *edges += depth;
-      (*paths)++;
-      if (first) first[*paths] = *edges;
-    } else {
-      uint32_t other = 0, edge = 0;
-      int found = 0;
-      while (walk->next[depth] < f->cables) {
-        edge = walk->next[depth]++;
-        const struct mesh_cable *c = f->cable + edge;
-        if (c->node[0] != at && c->node[1] != at) continue;
-        other = c->node[c->node[0] == at];
-        if (!walk->seen[other]) { found = 1; break; }
-      }
-      if (found) {
-        walk->path[depth++] = edge;
-        walk->node[depth] = other; walk->next[depth] = 0; walk->seen[other] = 1;
-        continue;
-      }
-    }
-    if (!depth) break;
-    walk->seen[at] = 0;
-    depth--;
-  }
-  return *paths ? 0 : ENOLINK;
+/* cable e's end `side` (mesh-graph.h's edge ends) */
+static uint32_t mesh_cable_end(const void *context, uint32_t e, uint32_t side) {
+  return ((const struct mesh_fabric *)context)->cable[e].node[side];
+}
+/* a pair's paths as mesh-graph.h mesh_graph_paths visits them: counted, and where `cable` is given written (each
+   path's cables after the last's, `first[p + 1]` where path p ends) */
+struct mesh_path_tally { uint32_t paths, edges, *first, *cable; };
+static int mesh_path_tally(void *consumer, const uint32_t *path, uint32_t length) {
+  struct mesh_path_tally *t = consumer;
+  if (t->paths == UINT32_MAX || length > UINT32_MAX - t->edges) return EOVERFLOW;
+  if (t->cable) memcpy(t->cable + t->edges, path, (size_t)length * sizeof *path);
+  t->edges += length;
+  t->paths++;
+  if (t->first) t->first[t->paths] = t->edges;
+  return 0;
 }
 
-/* Positive errno on failure, with *out unchanged. *out must initially be NULL:
+/* Each pair's every simple path (mesh_graph_paths), counted and then written. Positive errno on failure, with *out
+   unchanged. *out must initially be NULL:
    initialization cannot accidentally overwrite a solver's existing routes.
    There is no path-count/hop cap: only mesh_paths' uint32 representation and
    allocation limits bound enumeration. No partial table is ever published. */
@@ -268,29 +240,18 @@ int mesh_write_routes_default(const struct mesh_fabric *f, struct mesh_paths **o
   struct mesh_paths *routes = calloc((size_t)n * n, sizeof *routes);
   if (!routes) return ENOMEM;
   if (n == 1) { *out = routes; return 0; }
-  struct mesh_write_routes_walk walk = {
-    .node = malloc((size_t)n * sizeof *walk.node),
-    .next = malloc((size_t)n * sizeof *walk.next),
-    .path = malloc((size_t)n * sizeof *walk.path),
-    .seen = calloc(n, sizeof *walk.seen)
-  };
-  if (!walk.node || !walk.next || !walk.path || !walk.seen) { error = ENOMEM; goto done; }
+  uint32_t *work = malloc(3 * (size_t)n * sizeof *work);
+  unsigned char *seen = malloc(n);
+  if (!work || !seen) { error = ENOMEM; goto done; }
   /* Reject disconnected fabrics before enumerating potentially large connected
-     components. This is connectivity validation, not a subset of allowed paths. */
-  uint32_t reached = 1;
-  walk.node[0] = 0; walk.seen[0] = 1;
-  for (uint32_t k = 0; k < reached; k++) for (uint32_t e = 0; e < f->cables; e++) {
-    const struct mesh_cable *c = f->cable + e;
-    if (c->node[0] != walk.node[k] && c->node[1] != walk.node[k]) continue;
-    const uint32_t other = c->node[c->node[0] == walk.node[k]];
-    if (!walk.seen[other]) { walk.seen[other] = 1; walk.node[reached++] = other; }
-  }
-  if (reached != n) { error = ENOLINK; goto done; }
+     components (mesh-graph.h). This is connectivity validation, not a subset of allowed paths. */
+  if (mesh_graph_reach(n, f->cables, mesh_cable_end, f, 0, work, seen) != n) { error = ENOLINK; goto done; }
   for (uint32_t source = 0; source < n; source++) for (uint32_t destination = 0; destination < n; destination++) {
     if (source == destination) continue;
-    uint32_t paths, edges;
-    error = mesh_write_routes_walk(f, source, destination, &walk, NULL, NULL, &paths, &edges);
+    struct mesh_path_tally counted = {0, 0, NULL, NULL};
+    error = mesh_graph_paths(n, f->cables, mesh_cable_end, f, source, destination, work, seen, mesh_path_tally, &counted);
     if (error) goto done;
+    const uint32_t paths = counted.paths, edges = counted.edges;
     if ((uint64_t)paths + 1 > SIZE_MAX / sizeof(uint32_t) ||
         (uint64_t)edges > SIZE_MAX / sizeof(uint32_t) ||
         (uint64_t)paths > SIZE_MAX / sizeof(uint64_t)) { error = EOVERFLOW; goto done; }
@@ -301,11 +262,13 @@ int mesh_write_routes_default(const struct mesh_fabric *f, struct mesh_paths **o
     *pair = (struct mesh_paths){paths, first, cable, weights};
     if (!first || !cable || !weights) { error = ENOMEM; goto done; }
     for (uint32_t p = 0; p < paths; p++) weights[p] = 1;
-    error = mesh_write_routes_walk(f, source, destination, &walk, first, cable, &paths, &edges);
+    first[0] = 0;
+    struct mesh_path_tally written = {0, 0, first, cable};
+    error = mesh_graph_paths(n, f->cables, mesh_cable_end, f, source, destination, work, seen, mesh_path_tally, &written);
     if (error) goto done;
   }
 done:
-  free(walk.node); free(walk.next); free(walk.path); free(walk.seen);
+  free(work); free(seen);
   if (error) mesh_write_routes_free(routes, n);
   else *out = routes;
   return error;
