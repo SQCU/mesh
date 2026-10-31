@@ -3668,8 +3668,10 @@ static void send_dependencies(struct ncclComm *comm, struct schedule *plans) {
       const int32_t dependency = m->c->target && comm->rank != m->c->root ? (int32_t)s->prior[s->prior_first[m->step]] : forwards(s, m->step, summed);
       m->dep_h = UINT32_MAX; m->dep_summed = 0;
       if (dependency < 0) continue;
-      const uint32_t repeats = m->c->fused && m->c->fused->repeats ? m->c->fused->repeats : 1;
-      const size_t repeat = k / (plans[h].outs / repeats);
+      /* The declaration owns the frame train. The fused output sink is still
+         empty while issues are prepared, before any stream is recorded. */
+      const uint32_t repeats = m->c->frames;
+      const size_t repeat = m->frame;
       const uint32_t incoming = s->channel[dependency];
       const struct schedule *received = plans + incoming;
       const struct message *from = received->in + s->entry[dependency] - (repeats - 1 - repeat) * (received->ins / repeats);

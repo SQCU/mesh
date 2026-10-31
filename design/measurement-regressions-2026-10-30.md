@@ -172,3 +172,20 @@ instead of whole buffers.
 
 7e7f8726's message names 18709d4d's climb stop as the cause; the bisect above refutes that (d217b906 fails without it).
 7e7f8726 stays: it restores mesh_tree_shape's walk for a node its own parent, as it was before 18709d4d.
+
+The existing m5ult4 crash report locates the SIGBUS in `prepared`, inside its
+inlined `send_dependencies` span walk. That function still read the frame count
+from the fused recording result, which is empty during declaration. It therefore
+treated the 128-frame train as one frame and paired a first-frame SEND with a
+last-frame receive. The crash register holds the resulting unsigned offset:
+`-127 * 16384`. The scan then reaches an unmapped page. Preparation now consumes
+the declared `call.frames` and the message's explicit `frame`; no guard or wait
+was added. The crash instruction/registers, strict C compilation and prepared
+descriptor geometry establish this correction. Cluster execution has not yet
+verified recovery.
+
+The large-bandwidth failures have a separate first error still under review.
+In the saved c56f21a9 rank-3 log, a link is lost and paired again during the
+16 MiB all-reduce; the observer reports that failure before the later output
+comparisons. Those unchanged later outputs are consequences of an aborted run,
+not independent evidence of a defective kernel for each later shape.
