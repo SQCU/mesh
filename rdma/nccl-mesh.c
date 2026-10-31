@@ -5425,6 +5425,9 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     /* Indexed writes carry immutable source/landing generations. Their destinations need no local publication
        handshake, whether the GPU producer is fused or was encoded before this call (mesh 84056c43) */
     operand_copies(NULL, comm, list, n, &copies);
+    if (getenv("MESH_COPIES_TRACE") && copies)
+      fprintf(stderr, "copies %u: what %d count %zu direct %d premultiplied %d initialized %u\n", copies, (int)list[0].what,
+              list[0].count, list[0].direct, list[0].premultiplied, list[0].bound ? list[0].bound->initialized : 0);
     if (!(result = schedule(program, comm, u, plans, fused_kind != 0, copies))) { g->plans = plans; plans = NULL; }
     else g = NULL;
     if (!result) {
