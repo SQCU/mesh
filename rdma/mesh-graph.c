@@ -432,6 +432,36 @@ int mesh_graph_cut_at(uint64_t delta, uint64_t a, uint64_t b, uint64_t (*weight)
   return same;
 }
 
+void mesh_graph_through(const uint64_t *a, size_t na, const uint64_t *b, size_t nb, uint64_t *through) {
+  for (size_t j = 0; j < nb; j++) {
+    size_t lo = 0, hi = na;
+    while (lo < hi) { const size_t at = lo + (hi - lo) / 2; if (a[at] <= b[j]) lo = at + 1; else hi = at; }
+    through[j] = lo;
+  }
+}
+
+int mesh_graph_cells_through(const uint64_t *a_first, const uint64_t *a_length, size_t na, const uint64_t *b_first,
+                             const uint64_t *b_length, size_t nb, int64_t delta, uint64_t cell, uint64_t *through) {
+  const uint64_t theirs = mesh_graph_cells(a_length, na, cell, NULL, NULL);
+  uint64_t *starts = malloc((theirs + 1) * sizeof *starts), at = 0, j = 0;
+  int ordered = starts != NULL;
+  for (size_t r = 0; starts && r < na; r++)
+    for (uint64_t k = 0; k < (a_length[r] + cell - 1) / cell; k++, at++) {
+      starts[at] = a_first[r] + k * cell;
+      if (at && starts[at] < starts[at - 1]) ordered = 0;
+    }
+  for (size_t r = 0; r < nb; r++)
+    for (uint64_t k = 0; k < (b_length[r] + cell - 1) / cell; k++, j++) {
+      const uint64_t end = (k + 1) * cell < b_length[r] ? (k + 1) * cell : b_length[r];
+      const int64_t last = delta + (int64_t)(b_first[r] + end) - 1;
+      if (!ordered) through[j] = theirs;
+      else if (last < 0) through[j] = 0;
+      else { const uint64_t value = (uint64_t)last; mesh_graph_through(starts, theirs, &value, 1, through + j); }
+    }
+  free(starts);
+  return ordered ? 0 : -1;
+}
+
 uint64_t mesh_graph_cells(const uint64_t *length, size_t n, uint64_t cell, uint64_t *segment, uint64_t *place) {
   uint64_t q = 0;
   for (size_t i = 0; i < n; i++) {
@@ -440,15 +470,6 @@ uint64_t mesh_graph_cells(const uint64_t *length, size_t n, uint64_t cell, uint6
     q += cells;
   }
   return q;
-}
-
-int mesh_graph_disjoint(const struct mesh_graph_span *a, size_t n) {
-  uint64_t reach = 0;
-  for (size_t i = 0; i < n; i++) {
-    if (i && a[i].begin < reach) return 0;
-    if (a[i].end > reach) reach = a[i].end;
-  }
-  return 1;
 }
 
 void mesh_graph_span_reach(const struct mesh_graph_span *a, size_t n, uint64_t *reach) {

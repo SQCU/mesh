@@ -145,8 +145,12 @@ struct metal_result metal_publish(struct metal_program *, const struct metal_rel
    each block in order */
 struct metal_zelloth_input { void *data; size_t data_offset; void *words; size_t word; void *summed; size_t summed_offset;
                              mesh_pages target, packets; const struct mesh_landing_run *runs; size_t count; };
-/* a sum: its result `out`, the rank's own operand `own`, its `inputs` landings */
-struct metal_zelloth_sum { void *out; size_t out_offset; void *own; size_t own_offset; uint32_t inputs; const struct metal_zelloth_input *in; };
+/* a wait of a sum's before it folds: an earlier sum of the same array (`after`), its done word at its blocks, its
+   result this sum's own operand */
+struct metal_zelloth_wait { const struct metal_zelloth_sum *after; };
+/* a sum: its result `out`, the rank's own operand `own`, its `inputs` landings, its `waits` */
+struct metal_zelloth_sum { void *out; size_t out_offset; void *own; size_t own_offset; uint32_t inputs; const struct metal_zelloth_input *in;
+                           uint32_t waits; const struct metal_zelloth_wait *wait; };
 /* every sum of a group of one `type` and `op` in one dispatch, one threadgroup a core for all of them, after a barrier
    (no present still spinning holds a core one of them needs) */
 struct metal_result metal_zelloth(struct metal_program *, int type, int op, size_t element_bytes, uint32_t sums,

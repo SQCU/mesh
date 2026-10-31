@@ -8,6 +8,7 @@
 #import <Foundation/Foundation.h>
 #include <stdint.h>
 #include "nccl-mesh-metal.h"
+#include "mesh-graph.h"
 #include "nccl.h"
 
 #define STR(...) #__VA_ARGS__
@@ -178,15 +179,29 @@ static NSString *const KERNELS =
   /* design/zorvek.md zelloth: a group's sums, each element written once, by one thread, from the rank's own element
      and every contribution's for it, once all of them have landed, in whatever order they landed. The table at
      s + p.src (GPU addresses): [0] S sums, [1] a block's elements, [2] blocks of every sum, [3] the word offset of
-     the blocks' cells; then S sums of 8 words {K inputs, R runs, own, out, its done word (its blocks published), its
-     first block, its blocks, the word offset of its payload}; a payload: K inputs {landed data, landed word, summed
+     the blocks' cells; then S sums of 9 words {K inputs, R runs, own, out, its done word (its blocks published), its
+     first block, its blocks, the word offset of its payload, the word offset of its waits (0: none)}; its waits, the
+     earlier sums whose results its own operand holds, each laid before it: a count, then {its done word, the word
+     offset of its thresholds} each, then each one's thresholds, a word for each of this sum's blocks: the done prefix
+     of that sum the block waits for (metal_zelloth: its blocks starting at or before this block's last element),
+     as the pool's combine followed an earlier one chunk by chunk (zelloth_needs); a payload: K inputs {landed data,
+     landed word, summed
      word (0: none)}, then R runs {first, elements, K x {scalar, phase, step, shift}}: element j of a run needs
      scalar + ((phase + j * step) >> shift) of its input's word; then each block's cell {its sum's word offset, its
      run's, its place in that run in blocks}, in their global order (mesh-graph.h mesh_graph_cells, laid by
-     metal_zelloth). One threadgroup a core for the whole group (all resident), each taking blocks in their global order:
-     thread 0 awaits a block's inputs, the threadgroup folds it, then, once every earlier block of its sum is published
-     (its done word), stores each input's summed count past it (zuuz zimped, a SEND of the sum's readiness) and the
-     done word.  FOLD writes element j: ZFOLD_OP an operator's, ZFOLD_MERGE a partials merge's row of p.op floats
+     metal_zelloth); then each sum's done word, the threadgroups' `ended`, the first sum with open blocks `low`, each
+     block's state (0 open, 1 claimed, 2 computed), each sum's computed prefix and its first unclaimed block, all zero at
+     the start.  One threadgroup a core for the whole group (all resident), each claiming whichever sum's first open
+     block is ready (mesh-graph.h mesh_graph_claim, a sum a run: its inputs landed past the block and each earlier sum
+     it waits on done, zelloth_ready; a later block of a sum is ready only once its first open one is, its inputs'
+     units landing in order), not the next block in a fixed order, which stood bandwidth once a sum waited on another
+     (test-ov), nor any block a scan over all of them finds, whose loads took 64 MiB all-reduce from 4.8 ms to 11
+     (test-cz); the threadgroup folds it, marks it computed and moves its sum's
+     prefix past every computed block, then stores each input's summed count and the done word for the prefix it saw,
+     again while the prefix moves (a count published late is one the prefix passed, so the bridge acts on none too
+     high; the tracks pool's marks and prefix, nccl-mesh-kernels.h TRACKS).  A thread 0 that finds nothing ready ends
+     once it has looked at p.polls blocks, each at least a load, as a wait at its bound does (mesh_step_check), every threadgroup once one has failed; each counts
+     itself `ended` as it leaves, the table's end (metal_done).  FOLD writes element j: ZFOLD_OP an operator's, ZFOLD_MERGE a partials merge's row of p.op floats
      (merge_row, after its definition below), the own row merged with each input's in turn, any order a valid one */
   "#define ZFOLD_OP(T, OP) T v = mesh_payload(own + j); "
   "for (uint k = 0; k < K; k++) v = OP(v, mesh_payload((volatile coherent(system) device const T *)in[3 * k] + j), p.op); out[j] = v;\n"
@@ -194,28 +209,57 @@ static NSString *const KERNELS =
   "merge_row<false>(out + row, own + row, (volatile coherent(system) device const float *)in[0] + row, p.op); "
   "for (uint k = 1; k < K; k++) merge_row<true>(out + row, out + row, (volatile coherent(system) device const float *)in[3 * k] + row, p.op);\n"
   "#define ZELLOTH(name, T, OP) ZELLOTH_OF(name, T, OP, ZFOLD_OP)\n"
+  MESH_GRAPH_METAL
+  "struct zelloth_runs { device const ulong *z; uint head(uint r) const { return uint(z[4 + 9 * ulong(r) + 5]); } "
+  "uint count(uint r) const { return uint(z[4 + 9 * ulong(r) + 6]); } };\n"
+  "struct zelloth_needs { device const ulong *z; ulong block, seen, want; bool lost; "
+  "device const ulong *sum, *run, *in; ulong end, local; uint K; "
+  "uint count(ulong q, uint r) { device const ulong *cell = z + z[3] + 3 * q; sum = z + 4 + 9 * ulong(r); run = z + cell[1]; "
+  "in = z + sum[7]; end = min((cell[2] + 1) * block, run[1]); local = q - sum[5]; K = uint(sum[0]); "
+  "return K + (sum[8] ? uint(z[sum[8]]) : 0u); } "
+  "ulong at(ulong q, uint r, uint k, thread ulong &need) const { (void)q; (void)r; "
+  "if (k < K) { device const ulong *x = run + 2 + 4 * ulong(k); "
+  "need = x[0] + ((x[1] + (end - 1) * x[2]) >> x[3]); return *(volatile coherent(system) device const ulong *)in[3 * k + 1]; } "
+  "device const ulong *w = z + sum[8] + 1 + 2 * ulong(k - K); "
+  "need = z[w[1] + local]; return *(volatile coherent(system) device const ulong *)w[0]; } "
+  "void short_of(ulong v, ulong w) { seen = v; want = w; if (v == ~0UL) lost = true; } };\n"
+  "struct zelloth_publish { device const ulong *z, *sum, *in; ulong block; uint K, head; "
+  "void at(uint p) { device const ulong *c = z + z[3] + 3 * ulong(head + p - 1), *r = z + c[1]; "
+  "const ulong e2 = min((c[2] + 1) * block, r[1]); "
+  "for (uint k = 0; k < K; k++) if (in[3 * k + 2]) { device const ulong *x = r + 2 + 4 * ulong(k); "
+  "mesh_publish((volatile coherent(system) device ulong *)in[3 * k + 2], x[0] + ((x[1] + (e2 - 1) * x[2]) >> x[3])); } "
+  "mesh_publish((volatile coherent(system) device ulong *)sum[4], ulong(p)); } };\n"
+  "struct zelloth_stop { constant mesh_args *p; device uchar *vb; thread zelloth_needs *needs; "
+  "bool now() { return mesh_step_failed(*p, vb) || needs->lost; } bool bound(ulong looked) const { return looked >= ulong(p->polls); } };\n"
   "#define ZELLOTH_OF(name, T, OP, FOLD) HEAD(zelloth_##name) { ENTER(i == 0) "
-  "device const ulong *z = (device const ulong *)(s + p.src); const ulong block = z[1], blocks = z[2], G = ulong(g) / ulong(t); "
-  "for (ulong q = ulong(i - l) / ulong(t); q < blocks; q += G) { "
-  "device const ulong *cell = z + z[3] + 3 * q, *sum = z + cell[0], *run = z + cell[1]; "
+  "device const ulong *z = (device const ulong *)(s + p.src); const ulong S = z[0], block = z[1], blocks = z[2]; "
+  "device const ulong *done = z + z[3] + 3 * blocks; device atomic_uint *ended = (device atomic_uint *)(done + S); "
+  "device atomic_uint *low = (device atomic_uint *)(done + S + 1), *state = (device atomic_uint *)(done + S + 2), "
+  "*prefix = state + blocks, *next = prefix + S; "
+  "const zelloth_runs shape = {z}; "
+  "for (;;) { "
+  "if (l == 0) { zelloth_needs needs = {z, block, 0, 0, false, nullptr, nullptr, nullptr, 0, 0, 0u}; zelloth_stop stop = {&p, vb, &needs}; "
+  "const ulong got = mesh_graph_take(low, next, state, uint(S), shape, needs, stop); "
+  "if (got == ~0UL && atomic_load_explicit(low, memory_order_relaxed) < uint(S) && !mesh_step_failed(p, vb)) "
+  "mesh_step_check(p, needs.lost ? ~0UL : needs.seen, needs.want, vb); "
+  "tg[0] = got; } "
+  "threadgroup_barrier(mem_flags::mem_threadgroup); const ulong q = tg[0]; threadgroup_barrier(mem_flags::mem_threadgroup); "
+  "if (q == ~0UL) break; "
+  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); "
+  "device const ulong *cell = z + z[3] + 3 * q, *sum = z + cell[0], *run = z + cell[1], *in = z + sum[7]; "
   "const uint K = uint(sum[0]); "
   "volatile coherent(system) device const T *own = (volatile coherent(system) device const T *)sum[2]; "
   "volatile coherent(system) device T *out = (volatile coherent(system) device T *)sum[3]; "
-  "volatile coherent(system) device ulong *done = (volatile coherent(system) device ulong *)sum[4]; "
-  "device const ulong *in = z + sum[7]; const ulong local = q - sum[5]; "
   "const ulong first = run[0], b = cell[2] * block, end = min(b + block, run[1]); "
-  "if (l == 0) for (uint k = 0; k < K && !mesh_step_failed(p, vb); k++) { device const ulong *x = run + 2 + 4 * ulong(k); "
-  "const ulong want = x[0] + ((x[1] + (end - 1) * x[2]) >> x[3]); "
-  "mesh_step_check(p, mesh_step_wait(p, (device uchar *)in[3 * k + 1], want, vb), want, vb); } "
-  "threadgroup_barrier(mem_flags::mem_threadgroup); "
-  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); "
   "for (ulong e = b + l; e < end; e += t) { const ulong j = first + e; FOLD(T, OP) } "
   "threadgroup_barrier(mem_flags::mem_device); "
-  "if (l == 0) { mesh_step_check(p, mesh_step_wait(p, (device uchar *)done, local, vb), local, vb); "
-  "for (uint k = 0; k < K; k++) if (in[3 * k + 2]) { device const ulong *x = run + 2 + 4 * ulong(k); "
-  "mesh_publish((volatile coherent(system) device ulong *)in[3 * k + 2], x[0] + ((x[1] + (end - 1) * x[2]) >> x[3])); } "
-  "mesh_publish(done, local + 1); } "
-  "threadgroup_barrier(mem_flags::mem_threadgroup); } }\n"
+  "if (l == 0) { atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); "
+  "atomic_store_explicit(state + q, 2u, memory_order_relaxed); "
+  "zelloth_publish publish = {z, sum, in, block, K, uint(sum[5])}; "
+  "mesh_graph_settle(state, uint(sum[5]), uint(sum[6]), prefix + (cell[0] - 4) / 9, publish); } "
+  "threadgroup_barrier(mem_flags::mem_threadgroup); } "
+  "if (l == 0) { atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); "
+  "atomic_fetch_add_explicit(ended, 1u, memory_order_relaxed); } }\n"
   "#define INTEGER(name, T, SIGNED) COMBINE(name, T, op_int<T>) ZELLOTH(name, T, op_int<T>) "
   "HEAD(premul_##name) { ENTER(i == 0) volatile coherent(system) device T *x = (volatile coherent(system) device T *)(d + p.dst); device const T *y = (device const T *)(s + p.src); ulong c = ulong(T(p.scalar)); LOOP x[k] = T(ulong(y[k]) * c); } "
   "HEAD(truncdiv_##name) { ENTER(i == 0) volatile coherent(system) device T *x = (volatile coherent(system) device T *)(d + p.dst); volatile coherent(system) device const T *y = (volatile coherent(system) device const T *)(s + p.src); LOOP { T v = mesh_payload(y + k); bool negative = SIGNED && v < T(0); "
