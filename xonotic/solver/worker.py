@@ -1,23 +1,20 @@
 """The solver worker: the mesh answers the game server's bot-plan requests (ef6adb10^:xonotic/solver/worker.py,
 restored onto HEAD's wire and library).
 
-Collective construction uses the canonical communicator plan and retained
-routing operands. The imperative numerical world adapters remain source for
-whole-function migration; this file does not restore their removed host
-execution or plan activate/deactivate interfaces.
+The numerical solve is one prepared Function: request broadcast, persistent
+context update, indexed matrix products, reductions and column placement.
+The game policy reads its result pages after completion. There is no eager
+NumPy/MPI/Torch numerical executor.
 
-    PYTHONPATH=xonotic:rdma bin/mesh-python -B -m solver.worker serve CONFIG.json   # every rank of the world
-    PYTHONPATH=xonotic:rdma bin/mesh-python -B -m solver.worker --check              # validate, no mesh needed
-    PYTHONPATH=xonotic:rdma bin/mesh-python -B -m solver.worker --bench 20           # time the solve, no mesh needed
-    PYTHONPATH=xonotic:rdma bin/mesh-python -B -m solver.worker --synth 400          # train against the synthetic cart
+    PYTHONPATH=xonotic:rdma bin/mesh-python -B -m solver.worker serve CONFIG.json
+    PYTHONPATH=xonotic:rdma bin/mesh-python -B -m solver.worker --bench 20
+    PYTHONPATH=xonotic:rdma bin/mesh-python -B -m solver.worker --synth 400
 
-`serve` is one rank of a world (RANK, WORLD_SIZE, MASTER_ADDR, MASTER_PORT, as plan.py and torchrun launch one a
-node).  Rank 0 is the game's host: it binds the engine's local socket (solver/xonwire.py Engine, mesh_ipc.c's
-MESH_EXPERT_SOCKET), joins each tick's OBSERVATION, CART, TEAM and STATE (xonwire.RuntimeFrames), binds them to the
-request layout below (request_rows) and hands the rows to every rank; every rank solves its share of the window; rank 0
-answers with one response row per bot under the configured response kind.  The configuration is the call's operand
-(solver/configs/pair-example.json, xonotic/README.md "The solver"): the world's backend (torch on MPS or CPU, its collectives torch.distributed's "mesh"
-backend, rdma/torch-mesh; or numpy, its collectives mesh_mpi's, rdma/NCCL.md "NumPy"), the window, the column shares.
+`serve` is one rank per node. Rank zero receives the engine's local wire frames,
+declares each request shape, and supplies the request pages. The compiled
+broadcast distributes their values; administrative messages contain only the
+request kind and shape. Device/compiler capabilities and column shares are
+preparation operands from the service configuration.
 
 Request rows (bridge/PORT.md section 2 as the solver read it on 08-29, width 72): id, team, health, armor, ammo,
 origin/1024 (3), velocity/1024 (3), distance to the nearest cart, its progress, friends and enemies within 700 units,
@@ -38,7 +35,7 @@ planner/plan.py divides its experts: rank r holds the columns `columns.parts[r]`
 same rows of its down projection, so its expert output is a partial sum one all-reduce completes; the window's Gram
 Z^T Z is then column-parallel over the same share of its RES columns, its products with the objective bases and the
 group means row-parallel (one all-reduce of their partial sums), the conditioned current rows gathered by columns
-(MPI_Allgatherv).  The routing is argmax(C (Ein Rt)) in float64 on the host, the same product reassociated, so every
+(the compiled ragged gather). The routing is argmax(C (Ein Rt)) in float64, lowered to the declared CPU scalar compiler, so every
 rank routes every row alike.  The shares are rdma/allocate.py's Balancer's, moved every tick on the tick's own times
 (the expert all-reduce's last row carries each rank's own work from the rows' arrival to the all-reduce, as
 plan.py's carries its segment).
@@ -120,56 +117,19 @@ DOM_FORMULA = ("0.005*(health+armor) + 0.3*ammo + 0.15*weapons + 0.5*powerup"
 NOUT = TEAMS + K_CARTS * TEAMS
 NV = TEAMS * NINST
 
-try:
-    import torch
-except Exception:
-    torch = None
-
-
-def default_device():
-    return "mps" if torch is not None and torch.backends.mps.is_available() else "cpu"
+import torch
+import torch.distributed._functional_collectives as collective
+from torch_mesh import _stream
+from torch_mesh.declarations import Function
+from torch_mesh.engines import host
+from torch_mesh.partition import allgatherv
+from mesh_statistics import now, measure
+from prepared import World, pages
 
 
 def _init(seed):
     g = np.random.default_rng(seed)
     return lambda *s: (g.standard_normal(s) * (1.0 / np.sqrt(s[-2]))).astype(np.float32)
-
-
-def weights(D):
-    """The original per-row model: small MoE (torch) and tanh MLP (fallback)."""
-    f = _init(SEED)
-    return dict(R=f(D, EXPERTS), W1=f(EXPERTS, D, FF), W2=f(EXPERTS, FF, D),
-                O=f(D, TEAMS), A=f(D, HID), P=f(HID, TEAMS))
-
-
-def scores_torch(X, w, device):
-    Xm = torch.from_numpy(np.ascontiguousarray(X)).to(device)
-    e = torch.argmax(Xm @ torch.from_numpy(w["R"]).to(device), dim=1).cpu().numpy()
-    Y = torch.zeros((X.shape[0], X.shape[1]), dtype=torch.float32, device=device)
-    for i in range(EXPERTS):
-        sel = np.nonzero(e == i)[0]
-        if sel.size:
-            rows = torch.from_numpy(sel).to(device)
-            Y[rows] = (Xm[rows] @ torch.from_numpy(w["W1"][i]).to(device)).clip(min=0) @ torch.from_numpy(w["W2"][i]).to(device)
-    G = Y @ torch.from_numpy(w["O"]).to(device)
-    return np.nan_to_num(G.cpu().numpy()).astype(np.float32)
-
-
-def scores_np(X, w):
-    with np.errstate(all="ignore"):
-        return np.nan_to_num(np.tanh(X @ w["A"]) @ w["P"]).astype(np.float32)
-
-
-def scores_moe_ref(X, w):
-    """Pure-numpy reference for scores_torch: same routing, experts, basis."""
-    with np.errstate(all="ignore"):
-        e = np.argmax(X @ w["R"], axis=1)
-        Y = np.zeros_like(X)
-        for i in range(EXPERTS):
-            sel = np.nonzero(e == i)[0]
-            if sel.size:
-                Y[sel] = np.maximum(X[sel] @ w["W1"][i], 0.0) @ w["W2"][i]
-        return np.nan_to_num(Y @ w["O"]).astype(np.float32)
 
 
 def ctx_weights(D):
@@ -194,76 +154,6 @@ def dominance(X):
             + 0.15 * ext[:, 0] + 0.5 * ext[:, 1] - 0.5 * tss).astype(np.float32)
 
 
-class TorchWorld:
-    """The world as torch.distributed's "mesh" backend (rdma/torch-mesh): one rank a node, its operands region
-    tensors (torch_mesh.empty) so the collectives read and write them where they lie."""
-
-    def __init__(self, device):
-        import torch.distributed as dist
-        import torch_mesh
-        self.dist, self.torch_mesh, self.device = dist, torch_mesh, device
-        dist.init_process_group(backend="mesh", **({"device_id": torch.device("mps", 0)} if device == "mps" else {}))
-        self.rank, self.size = dist.get_rank(), dist.get_world_size()
-        from torch_mesh import backend
-        group = dist.distributed_c10d._get_default_group()
-        self.native = backend._mesh(group.group_name, 'whole-function controller').comm
-        import mesh
-        self.members = mesh.configuration_members(self.native)
-
-    def buffer(self, shape, dtype, device=None):
-        return self.torch_mesh.empty(shape, dtype={np.float32: torch.float32, np.int64: torch.int64}[dtype],
-                                     device=device or self.device)
-
-    def host(self, shape, dtype):
-        return self.buffer(shape, dtype, "cpu").numpy()
-
-    def bcast(self, value):
-        self.dist.broadcast(torch.from_numpy(value) if isinstance(value, np.ndarray) else value, 0)
-
-    def allreduce(self, value):
-        self.dist.all_reduce(value)
-
-    def allgatherv(self, value, counts):
-        parts = [self.buffer((count,), np.float32) for count in counts]
-        self.dist.all_gather(parts, value.reshape(-1))
-        return [part.cpu().numpy() for part in parts]
-
-    def free(self):
-        self.dist.destroy_process_group()
-
-
-class MPIWorld:
-    """The world as mesh_mpi's Comm (rdma/NCCL.md "NumPy"), its operands mesh_mpi.empty arrays in the region."""
-
-    def __init__(self):
-        import mesh_mpi
-        self.mpi = mesh_mpi
-        self.comm = mesh_mpi.Comm()
-        self.rank, self.size = self.comm.Get_rank(), self.comm.Get_size()
-        self.native = self.comm.comm
-        import mesh
-        self.members = mesh.configuration_members(self.native)
-
-    def buffer(self, shape, dtype, device=None):
-        return self.mpi.empty(shape, dtype)
-
-    host = buffer
-
-    def bcast(self, value):
-        self.comm.Bcast(value)
-
-    def allreduce(self, value):
-        self.comm.Allreduce(self.mpi.IN_PLACE, value)
-
-    def allgatherv(self, value, counts):
-        out = self.mpi.empty(sum(counts), np.float32)
-        self.comm.Allgatherv(value.reshape(-1), [out, counts])
-        return np.split(out, np.cumsum(counts)[:-1])
-
-    def free(self):
-        self.comm.Free()
-
-
 class CtxSolver:
     """MoE + Gram-over-residual over a rolling context window.
 
@@ -273,69 +163,46 @@ class CtxSolver:
     centroid, spread, mean dominance) are the empirical mixes the strategy
     layer best-responds to. The Gram the solve already computes is the same
     window's second moment. All state is a deterministic function of
-    (seed, request history).  `backend` is "torch" (its `device`) or "np";
-    `world` (TorchWorld, MPIWorld or None for one process) and `columns` (the
-    ranks' parts of FF, the Balancer's operand `assignment_data`) divide it."""
+    (seed, request history). The source is captured by Function. `world`
+    and `columns` declare the collective and each rank's share; compiler
+    configuration chooses the hardware implementation."""
 
-    def __init__(self, T=CTX, backend="torch", device=None, world=None, columns=None, assignment_data=None):
-        self.T, self.backend = T, backend
-        self.device = device or default_device()
+    def __init__(self, T=CTX, device="mps", world=None, columns=None, assignment_data=None, configuration=None):
+        self.T, self.device, self.configuration = T, device, configuration
         self.world, self.assignment_data = world, assignment_data
         self.previous_function = None
         self.pending_feedback = None
-        self.compiled_assignment = None
         self.columns = list(columns) if columns else [FF]
         if world is not None and len(self.columns) != world.size:
             raise ValueError(f"columns {self.columns}: one part a rank of {world.size}")
         if sum(self.columns) != FF:
             raise ValueError(f"columns {self.columns} must sum to {FF}")
         w = ctx_weights(REQ_WIDTH)
-        self.route = w["Ein"].astype(np.float64) @ w["Rt"].astype(np.float64)
+        self.route = pages(w["Ein"].astype(np.float64) @ w["Rt"].astype(np.float64), device="cpu")
         w["W1T"] = np.ascontiguousarray(w.pop("W1").transpose(0, 2, 1))
         w["O"] = np.ascontiguousarray(np.concatenate((w.pop("Og"), w.pop("Og2")), axis=1))
-        self.w = {k: self.array(v) for k, v in w.items()}
+        self.w = {k: pages(v, device=device) for k, v in w.items()}
         g = np.random.default_rng(SEED + 1)
         C0 = (g.standard_normal((T, REQ_WIDTH)) * 0.5).astype(np.float32)
-        self.C = (C0 / (1.0 + np.abs(C0))).astype(np.float32)
+        self.context = pages((C0 / (1.0 + np.abs(C0))).astype(np.float32), device=device)
+        self.C = host(self.context).numpy()
         self.pos = 0
         self.expert_rows = np.zeros(EXPERTS, np.int64)
         self.Zc = None
-        self.m_team = np.full(T, -1, np.int32)
+        self.teams = pages(np.full(T, -1, np.int64), device=device)
+        self.m_team = host(self.teams).numpy()
         self.m_obj = np.full(T, -1, np.int32)
-        self.m_cart = np.zeros(T, np.int32)
+        self.carts = pages(np.zeros(T, np.int64), device=device)
+        self.m_cart = host(self.carts).numpy()
         self.m_dom = np.zeros(T, np.float32)
         self.m_pos = np.zeros((T, 3), np.float32)
         self.G2 = None
         self.kappa = np.zeros((TEAMS * NINST, TEAMS * NINST), np.float32)
         self.white = np.ones(RES, np.float32)
         self.Vg = np.zeros((TEAMS * NINST, RES), np.float32)
-        self.operands = {}
+        self.programs = {}
+        self.active = None
         self.solves = 0
-        self.collective_s = 0.0
-
-    def array(self, value):
-        if self.backend == "torch":
-            return torch.from_numpy(np.ascontiguousarray(value)).to(self.device)
-        return np.ascontiguousarray(value)
-
-    def index(self, value):
-        return self.array(np.asarray(value, np.int64))
-
-    def host(self, value):
-        return value.detach().cpu().numpy() if self.backend == "torch" else np.asarray(value)
-
-    def operand(self, name, shape):
-        made = self.operands.get(name)
-        if made is None or tuple(made.shape) != tuple(shape):
-            if self.world is not None:
-                made = self.world.buffer(shape, np.float32)
-            elif self.backend == "torch":
-                made = torch.empty(shape, dtype=torch.float32, device=self.device)
-            else:
-                made = np.empty(shape, np.float32)
-            self.operands[name] = made
-        made[...] = 0
-        return made
 
     def rank(self):
         return self.world.rank if self.world is not None else 0
@@ -345,39 +212,13 @@ class CtxSolver:
         lo = sum(self.columns[:rank])
         return lo * extent // FF, (lo + self.columns[rank]) * extent // FF
 
-    def reduce(self, value):
-        if self.world is not None:
-            began = time.monotonic()
-            self.world.allreduce(value)
-            self.collective_s += time.monotonic() - began
-
-    def gather_columns(self, block, n):
-        if self.world is None:
-            return self.host(block)
-        began = time.monotonic()
-        widths = [hi - lo for lo, hi in (self.span(RES, rank) for rank in range(self.world.size))]
-        parts = self.world.allgatherv(block, [n * width for width in widths])
-        self.collective_s += time.monotonic() - began
-        return np.concatenate([np.asarray(part).reshape(n, width) for part, width in zip(parts, widths)], axis=1)
-
-    def _insert(self, X, Xn):
-        n = Xn.shape[0]
-        if n >= self.T:
-            idx = np.arange(self.T)
-            X, Xn = X[-self.T:], Xn[-self.T:]
-            self.pos = 0
-        else:
-            idx = (self.pos + np.arange(n)) % self.T
-            self.pos = int((self.pos + n) % self.T)
-        self.C[idx] = Xn
-        self.m_team[idx] = X[:, 1].astype(np.int32)
+    def _insert(self, X, idx):
+        # Application policy state, after the graph's input broadcast completed.
+        # The numerical graph itself updates context/team/cart page operands.
         comb = np.clip(X[:, 15], 0, ITEM_BASE + P_MAX - 1).astype(np.int32)
         self.m_obj[idx] = np.where(comb < ITEM_BASE, comb % TEAMS, 0)
-        self.m_cart[idx] = np.where(comb < ITEM_BASE, comb // TEAMS,
-                                    K_CARTS + (comb - ITEM_BASE))
         self.m_dom[idx] = dominance(X)
         self.m_pos[idx] = X[:, 5:8]
-        return idx
 
     def mixes(self):
         out = {}
@@ -403,26 +244,6 @@ class CtxSolver:
                           dom=float(self.m_dom[sel].mean()), rows=k)
         return out
 
-    def _group_mask(self):
-        M = np.zeros((TEAMS * NINST, self.T), np.float32)
-        for j in range(1, TEAMS + 1):
-            for c in range(NINST):
-                sel = (self.m_team == j) & (self.m_cart == c)
-                k = float(sel.sum())
-                if k:
-                    i = (j - 1) * NINST + c
-                    M[i, sel] = 1.0 / k
-                    M[i] -= 1.0 / self.T
-        return M
-
-    @staticmethod
-    def _kappa_norm(K):
-        d = np.sqrt(np.maximum(np.diag(K), 0.0))
-        den = np.outer(d, d) + 1e-9
-        Kn = K / den
-        np.fill_diagonal(Kn, 0.0)
-        return np.nan_to_num(Kn).astype(np.float32)
-
     def configure(self, rows):
         # design/whole-function.md
         if self.assignment_data is None or self.world is None:
@@ -440,41 +261,139 @@ class CtxSolver:
         proposal = assignment.assign(decisions, observations, step=self.solves, family=family) if self.rank() == 0 else None
         proposal = mesh.broadcast_configuration(self.world.native, proposal)
         self.columns = list(proposal['parts']['columns'])
-        widths = [hi - lo for lo, hi in (self.span(RES, rank) for rank in range(self.world.size))]
-        def provenance(statement, byte_count):
-            source = {'function': 'xonotic-context-solver', 'statement': statement}
-            return {'route_scope': source, 'sources': [{'source': source,
-                'occurrences': {'shape': [1], 'steps': []}, 'work': {'shape': [byte_count], 'steps': []}}]}
-        calls = [{'what': mesh.lib.MESH_ALLREDUCE, 'count': (self.T + 1) * RES, 'type': mesh.lib.ncclFloat32,
-                  'op': mesh.lib.ncclSum, **provenance('expert-output-reduction', (self.T + 1) * RES * np.dtype(np.float32).itemsize)},
-                 {'what': mesh.lib.MESH_ALLREDUCE, 'count': RES * NOUT + NV * NV, 'type': mesh.lib.ncclFloat32,
-                  'op': mesh.lib.ncclSum, **provenance('conditioned-basis-reduction', (RES * NOUT + NV * NV) * np.dtype(np.float32).itemsize)},
-                 {'what': mesh.lib.MESH_ALLGATHER, 'count': rows * widths[self.rank()],
-                  'counts': [rows * width for width in widths], 'type': mesh.lib.ncclFloat32,
-                  **provenance('conditioned-column-gather', rows * RES * np.dtype(np.float32).itemsize)}]
-        routing = assignment.route_operands(proposal['parts'], 'world', graphs['world']) if graphs else None
-        self.compiled_assignment = assignment.declare(self.world.native, calls, routing=routing)
-        graphs = {'world': assignment.graph(self.world.native, self.compiled_assignment)}
-        data['decisions'] = {key: {**value, 'parts': proposal['parts'][key]}
-                             for key, value in data['decisions'].items()}
-        data['graphs'] = graphs
-        realized = assignment.domains(data['decisions'], graphs)
-        proposal.update(parts={key: value['parts'] for key, value in realized.items()},
-                        domains=assignment.choice_domains(realized), graphs=graphs, workload=workload,
-                        implementation={'source': revision(ROOT), 'backend': self.backend},
-                        episode=f'context-solver:{self.solves}')
         return proposal
 
-    def solve(self, X):
-        proposal = self.configure(min(len(X), self.T))
-        started = time.monotonic()
-        Xb = np.ascontiguousarray(X[:, :REQ_WIDTH], np.float32)
-        Xn = (Xb / (1.0 + np.abs(Xb))).astype(np.float32)
-        idx = self._insert(X, Xn)
-        G = self._solve(idx)
+    def _declare(self, rows):
+        key = rows, tuple(self.columns)
+        if key in self.programs:
+            return self.programs[key]
+        group = self.world.group if self.world else None
+        T = self.T
+        size = len(self.columns)
+        lo, hi = self.span(FF)
+        rlo, rhi = self.span(RES)
+        widths = [b - a for a, b in (self.span(RES, r) for r in range(len(self.columns)))]
+        request = pages(np.zeros((rows, REQUEST_WIDTH), np.float32), device=self.device)
+        indices = pages(np.zeros(rows, np.int64), device=self.device)
+        previous = pages(np.zeros(size, np.float32), device=self.device)
+        w = self.w
+
+        def source(X, idx, prior, C, teams, carts, route, Ein, W1T, W2, O):
+            if group is not None:
+                X = collective.wait_tensor(collective.broadcast(X, 0, group.group_name))
+            features = X[:, :REQ_WIDTH]
+            C.copy_(C.index_copy(0, idx, features / (1.0 + torch.abs(features))))
+            teams.copy_(teams.index_copy(0, idx, X[:, 1].to(torch.int64)))
+            combined = X[:, 15].clamp(0, ITEM_BASE + P_MAX - 1).to(torch.int64)
+            cart = torch.where(combined < ITEM_BASE, combined // TEAMS, K_CARTS + combined - ITEM_BASE)
+            carts.copy_(carts.index_copy(0, idx, cart))
+            # This small replicated router keeps its declared double arithmetic.
+            # Its scalar contraction is compiled for a capable CPU implementation.
+            routing = (C.to(device='cpu', dtype=torch.float64)[:, :, None] * route[None]).sum(dim=1)
+            selected = routing.argmax(dim=1)
+            H = C @ Ein
+            first = W1T[:, lo:hi].transpose(1, 2).index_select(0, selected)
+            second = W2[:, lo:hi].index_select(0, selected)
+            Y = torch.bmm(torch.relu(torch.bmm(H[:, None, :], first)), second)[:, 0, :]
+            complete = torch.cat((Y.reshape(-1), prior))
+            if group is not None:
+                complete = collective.wait_tensor(collective.all_reduce(complete, 'sum', group.group_name))
+            Z = H + complete[:T * RES].reshape(T, RES)
+            squared = Z * Z
+            tr = squared.sum() / T
+            mss = squared.mean(dim=0)
+            Zcur = Z.index_select(0, idx)
+            labels = torch.arange(NV, device=teams.device)
+            members = (teams[None, :] == (labels // NINST + 1)[:, None]) & (carts[None, :] == (labels % NINST)[:, None])
+            counts = members.sum(dim=1, keepdim=True)
+            mask = torch.where(counts > 0, members.to(Z.dtype) / counts.clamp(min=1) - 1.0 / T, 0.0)
+            V = mask @ Z
+            Gm = Z.T @ Z[:, rlo:rhi] / T
+            P = torch.cat(((Gm @ O[rlo:rhi]).reshape(-1), ((V @ Gm) @ V[:, rlo:rhi].T).reshape(-1)))
+            if group is not None:
+                P = collective.wait_tensor(collective.all_reduce(P, 'sum', group.group_name))
+            GmO = P[:RES * NOUT].reshape(RES, NOUT)
+            G = torch.nan_to_num(Zcur @ GmO[:, :TEAMS])
+            G2 = torch.nan_to_num(Zcur @ GmO[:, TEAMS:])
+            block = (Zcur @ Gm) * (RES / tr)
+            Zc = allgatherv(block, 1, widths, group.group_name) if group is not None else block
+            K = P[RES * NOUT:].reshape(NV, NV).to(device='cpu', dtype=torch.float64)
+            d = torch.sqrt(torch.diagonal(K).clamp(min=0))
+            norm = torch.nan_to_num(K / (d[:, None] * d[None, :] + 1e-9))
+            kappa = (norm * (1 - torch.eye(NV, device=K.device, dtype=K.dtype))).to(device=Zcur.device, dtype=torch.float32)
+            white = torch.rsqrt(mss.clamp(min=0) + 1e-6)
+            expert_rows = (selected[:, None] == torch.arange(EXPERTS, device=selected.device)[None]).sum(dim=0)
+            return dict(G=G, G2=G2, Zc=torch.nan_to_num(Zc), kappa=kappa, Vg=torch.nan_to_num(V),
+                        white=white, expert_rows=expert_rows, request=X, times=complete[T * RES:])
+
+        function = Function(source, request, indices, previous, self.context, self.teams, self.carts,
+                            self.route, w['Ein'], w['W1T'], w['W2'], w['O'], configuration=self.configuration,
+                            source_scope={'function': 'xonotic-context-solver'})
+        result_shapes = dict(G=(rows, TEAMS), G2=(rows, NOUT - TEAMS), Zc=(rows, RES), kappa=(NV, NV),
+                             Vg=(NV, RES), white=(RES,), expert_rows=(EXPERTS,), request=(rows, REQUEST_WIDTH), times=(size,))
+        destinations = {name: pages(np.zeros(shape, np.int64 if name == 'expert_rows' else np.float32),
+                                    device='cpu' if name == 'expert_rows' else self.device)
+                        for name, shape in result_shapes.items()}
+        calls = function.declare(group, destinations=destinations.values())
+        state = dict(function=function, calls=calls, request=host(request).numpy(), indices=host(indices).numpy(),
+                     previous=host(previous).numpy(), results={name: host(value).numpy() for name, value in destinations.items()})
+        self.programs.clear()
+        self.programs[key] = state
+        return state
+
+    def prepare(self, rows):
+        """Resolve this invocation's graph and routing before any numerical work."""
+        import assignment
+        from mesh_source import revision
+        proposal = self.configure(rows)
+        state = self._declare(rows)
+        if self.world is not None:
+            data = self.assignment_data
+            graphs = data.get('graphs', {}) if data else {}
+            routing = assignment.route_operands(proposal['parts'], 'world', graphs['world']) if graphs and proposal else None
+            self.world.group.plan(state['calls'], routing=routing)
+            if data is not None:
+                graphs = {'world': assignment.graph(self.world.native, self.world.group._plan)}
+                data['graphs'] = graphs
+                data['decisions'] = {key: {**value, 'parts': proposal['parts'][key]}
+                                     for key, value in data['decisions'].items()}
+                realized = assignment.domains(data['decisions'], graphs)
+                proposal.update(parts={key: value['parts'] for key, value in realized.items()},
+                                domains=assignment.choice_domains(realized), graphs=graphs,
+                                workload={'rows': rows, 'context': self.T, 'residual': RES, 'columns': FF,
+                                          'experts': EXPERTS, 'objectives': NOUT, 'group_values': NV},
+                                implementation={'source': revision(ROOT), 'compiler': self.configuration},
+                                episode=f'context-solver:{self.solves}')
+        state['function'].prepare()
+        state['proposal'] = proposal
+        self.active = state
+        return state
+
+    def submit(self, X):
+        """Populate application inputs, then submit the already prepared function."""
+        state = self.active
+        n = len(state['indices'])
+        state['request'][...] = 0
+        state['request'][:, :X.shape[1]] = X[-n:]
+        state['indices'][...] = (self.pos + np.arange(n)) % self.T if n < self.T else np.arange(self.T)
+        self.pos = (self.pos + n) % self.T if n < self.T else 0
+        state['previous'][...] = 0
+        state['previous'][self.rank()] = self.previous_function['seconds'] if self.previous_function else 0.0
+        self.started = now()
+        state['function'].run()
+        self.completion = state['function'].completion()
+        return self.completion
+
+    def result(self, ended):
+        """Read pages after the application's completion observation."""
+        state, values = self.active, self.active['results']
+        self._insert(values['request'], state['indices'])
+        self.observe(values['times'])
+        self.Zc, self.G2, self.kappa = values['Zc'], values['G2'], values['kappa']
+        self.Vg, self.white, self.expert_rows = values['Vg'], values['white'], values['expert_rows']
         self.solves += 1
-        result = np.nan_to_num(G).astype(np.float32)
-        self.previous_function = {'proposal': proposal, 'seconds': time.monotonic() - started}
+        useful = sum(value.nbytes for key, value in values.items() if key not in ('times', 'request'))
+        self.previous_function = {'proposal': state['proposal'], **measure(self.started, ended, useful, len(values['G']))}
         if self.pending_feedback is not None:
             previous, seconds = self.pending_feedback
             self.pending_feedback = None
@@ -484,57 +403,8 @@ class CtxSolver:
                 'timing_scope': 'maximum rank whole-solve latency carried by the existing reduction'})
             import assignment
             self.assignment_data['observations'][:] = assignment.window(self.assignment_data['observations'])
-        return result
+        return values['G']
 
-    def _solve(self, idx):
-        started = time.monotonic()
-        w, T = self.w, self.T
-        en = np.argmax(self.C.astype(np.float64) @ self.route, axis=1)
-        self.expert_rows = np.bincount(en, minlength=EXPERTS)
-        order = np.argsort(en, kind="stable")
-        lo, hi = self.span(FF)
-        rlo, rhi = self.span(RES)
-        H = self.array(self.C) @ w["Ein"]
-        Y = self.operand("experts", (T + 1, RES))
-        start = 0
-        for i in range(EXPERTS):
-            c = int(self.expert_rows[i])
-            if c and hi > lo:
-                rows = self.index(order[start:start + c])
-                Y[rows] = (H[rows] @ w["W1T"][i, lo:hi].T).clip(min=0) @ w["W2"][i, lo:hi]
-            start += c
-        if self.backend == "torch" and self.device == "mps":
-            torch.mps.synchronize()
-        Y[T, self.rank()] = self.previous_function['seconds'] if self.previous_function is not None else 0.0
-        self.reduce(Y)
-        self.observe(self.host(Y[T]))
-        Z = H + Y[:T]
-        tr = float((Z * Z).sum()) / T
-        mss = (Z * Z).mean(0)
-        Zcur = Z[self.index(idx)]
-        V = self.array(self._group_mask()) @ Z
-        Gm = Z.T @ Z[:, rlo:rhi] * (1.0 / T)
-        P = self.operand("gram", (RES * NOUT + NV * NV,))
-        P[:RES * NOUT] = (Gm @ w["O"][rlo:rhi]).reshape(-1)
-        P[RES * NOUT:] = ((V @ Gm) @ V[:, rlo:rhi].T).reshape(-1)
-        self.reduce(P)
-        GmO = P[:RES * NOUT].reshape(RES, NOUT)
-        G = Zcur @ GmO[:, :TEAMS]
-        G2 = Zcur @ GmO[:, TEAMS:]
-        # Produce the collective source directly into its final region operand.
-        block = self.operand("gather_source", (len(idx), rhi - rlo))
-        if self.backend == "torch":
-            torch.matmul(Zcur, Gm, out=block)
-        else:
-            np.matmul(Zcur, Gm, out=block)
-        block *= RES / tr
-        Zc = self.gather_columns(block, len(idx))
-        self.Zc = np.nan_to_num(Zc).astype(np.float32)
-        self.G2 = np.nan_to_num(self.host(G2)).astype(np.float32)
-        self.kappa = self._kappa_norm(self.host(P[RES * NOUT:]).reshape(NV, NV).astype(np.float64))
-        self.Vg = np.nan_to_num(self.host(V)).astype(np.float32)
-        self.white = (1.0 / np.sqrt(np.maximum(self.host(mss), 0.0) + 1e-6)).astype(np.float32)
-        return self.host(G)
 
     def observe(self, times):
         # Previous complete solve is carried by an existing numerical reduction.
@@ -1382,14 +1252,10 @@ class SynthEnv:
                 self.mark[c] += 1
 
 
-def local_backend():
-    return "torch" if torch is not None else "np"
-
-
 def run_synth(episodes, T, seed, ep_ticks, hold, lr, theta_values=None, log=True,
               strat=None, train=True, overrides=None, explore=None,
               env_items=True, lr_w=0.5, reg=0.01, qkv=False):
-    solver = CtxSolver(T, local_backend())
+    solver = CtxSolver(T)
     if strat is None:
         strat = Strategy(theta_values, seed, lr, lr_w, reg, qkv)
     else:
@@ -1412,7 +1278,9 @@ def run_synth(episodes, T, seed, ep_ticks, hold, lr, theta_values=None, log=True
             meter.tick(X, ms, env.reset)
             ms["score"] = meter.cum.copy()
             if t % hold == 0:
-                G = solver.solve(X)
+                solver.prepare(min(len(X), solver.T))
+                completion = solver.submit(X)
+                G = solver.result(_stream.completion_end(completion))
                 mixes = solver.mixes()
                 strat.tick(X, solver.G2, mixes, solver.kappa, ms, True, sample,
                            itimer, solver.Zc, solver.white, solver.Vg)
@@ -1497,275 +1365,34 @@ def _ticks(rows, count, seed=3):
     return out
 
 
-def check(rows):
-    from solver.xonwire import Reassembler, OBSERVATION_KIND as KIND
-    ok = True
-
-    def report_check(name, good, detail):
-        nonlocal ok
-        ok = ok and good
-        print(("PASS" if good else "FAIL") + f" {name}: {detail}", flush=True)
-
-    message = np.random.default_rng(4).standard_normal((37, 84)).astype(np.float32)
-    rx = Reassembler(KIND, 84, 1024)
-    framed = frames(KIND, 9, 9, message, 1024, session=5)
-    done = [rx.feed(frame) for frame in framed[::-1]]
-    joined_rows = rx.stage.copy()
-    restarted = [rx.feed(frame) for frame in frames(KIND, 1, 1, message[:3], 1024, session=6)]
-    report_check("wire frames join in any order and a restarted session is adopted",
-                 done[-1] is not None and all(d is None for d in done[:-1]) and np.array_equal(joined_rows, message)
-                 and restarted[-1] is not None and restarted[-1]["session"] == 6
-                 and np.array_equal(rx.stage, message[:3]),
-                 f"37x84 rows in {len(framed)} frames of 1024 bytes joined bit-identical, completion on the last; "
-                 f"session 5 -> 6 adopted")
-
-    st = Strategy("", 1)
-    ids = np.array([7, 8], np.int32)
-    st._pick_leader(1, ids, np.array([0.675, 0.6]))
-    first = st.leaders[1]
-    st._pick_leader(1, ids, np.array([0.6, 0.675]))
-    stay = st.leaders[1]
-    st._pick_leader(1, ids, np.array([0.6, 0.9]))
-    moved = st.leaders[1]
-    report_check("leader hysteresis", first == 7 and stay == 7 and moved == 8,
-                 f"leader {first} held at +0.075 dominance ({stay}), moved at +0.30 ({moved}), "
-                 f"hysteresis {HYSTERESIS}")
-    X26 = np.zeros((4, 26), np.float32)
-    X26[:, 15] = [7, 2, 9, 0]
-    X26[0, 20], X26[0, 21], X26[0, 22] = 0.35, 2, 0
-    X26[0, 23], X26[0, 24], X26[0, 25] = 0.8, 3, 1
-    X26[:, 20:26] = X26[0, 20:26]
-    msb = bind_match(X26)
-    report_check("bind_match reads the width-26 contract",
-                 msb["carts"] == 2 and abs(msb["prog"][0] - 0.35) < 1e-6
-                 and abs(msb["prog"][1] - 0.8) < 1e-6
-                 and list(msb["controller"][:2]) == [2, 3]
-                 and list(msb["regress"][:2]) == [0, 1]
-                 and list(msb["bot_cart"]) == [1, 0, 1, 0],
-                 f"carts {msb['carts']} prog {[round(float(v),2) for v in msb['prog']]} "
-                 f"controllers {list(msb['controller'])} bot_cart {list(msb['bot_cart'])}")
-    X66 = np.zeros((2, 66), np.float32)
-    X66[:, 20:26] = X26[0, 20:26]
-    X66[:, 26] = 3.0
-    X66[:, 27:30] = [0.1, 0.2, 0.3]
-    X66[:, 30] = 1.0
-    X66[:, 31] = 4.0
-    X66[:, 35] = 0.0
-    ms66 = bind_match(X66)
-    X72 = np.zeros((2, 72), np.float32)
-    X72[:, 20:32] = np.tile([0.5, 1, 0], 4)
-    X72[:, 26], X72[:, 29] = 0.7, 0.9
-    X72[:, 32] = 6.0
-    X72[:, 33:36] = [0.4, 0.5, 0.6]
-    X72[:, 36] = 1.0
-    ms72 = bind_match(X72)
-    report_check("bind_match serves legacy 66 and current 72 side by side",
-                 ms66["carts"] == 2 and len(ms66["posts"]) == 8
-                 and ms66["posts"][0]["rank"] == 3.0 and ms66["posts"][0]["avail"]
-                 and ms66["posts"][1]["rank"] == 4.0 and not ms66["posts"][1]["avail"]
-                 and ms72["carts"] == 4 and abs(ms72["prog"][2] - 0.7) < 1e-6
-                 and abs(ms72["prog"][3] - 0.9) < 1e-6
-                 and len(ms72["posts"]) == 8 and ms72["posts"][0]["rank"] == 6.0
-                 and abs(ms72["posts"][0]["pos"][1] - 0.5) < 1e-6,
-                 f"66: carts {ms66['carts']} post0 rank {ms66['posts'][0]['rank']}; "
-                 f"72: carts {ms72['carts']} prog {[round(float(v),2) for v in ms72['prog']]} "
-                 f"post0 rank {ms72['posts'][0]['rank']}")
-    obs = np.zeros((4, OBS["BOT_CONFIG_SCHEMA"] + 1), np.float32)
-    obs[:3, OBS["PRESENT"]] = 1
-    obs[:, OBS["ID"]] = [1, 2, 3, 4]
-    obs[:, OBS["TEAM"]] = [1, 1, 2, 0]
-    obs[:3, OBS["POS_X"]] = [0, 300, 600]
-    obs[:3, OBS["WEAPONS_X"]] = [5, 1, 0]
-    obs[:3, OBS["ENGINE_TIME"]] = 50
-    obs[:3, OBS["SPAWN_TIME"]] = [45, 10, 50]
-    obs[0, OBS["STRENGTH_FINISHED"]] = 60
-    cart = np.zeros((2, CS["CHECKPOINT_COUNT"] + 1), np.float32)
-    cart[:, CS["ID"]] = [1, 0]
-    cart[:, CS["PATH_POSITION"]] = [30, 10]
-    cart[:, CS["PATH_LENGTH"]] = 100
-    cart[:, CS["CONTROL_TEAM"]] = [2, 1]
-    cart[:, CS["SPEED"]] = [-1, 1]
-    cart[:, CS["POS_X"]] = [600, 0]
-    posts = ItemPosts()
-    event = np.zeros((2, EVT["EPISODE"] + 1), np.float32)
-    event[:, EVT["KIND"]] = [EVT_KIND["ITEM_HERE"], EVT_KIND["ITEM_GONE"]]
-    event[:, EVT["SUBJECT"]] = [40, 40]
-    event[:, EVT["TIME"]] = [1, 2]
-    event[:, EVT["POS_X"]] = 1024
-    posts.observe([event])
-    objective = np.zeros(TEAMS + 1)
-    objective[1] = 7
-    Xr = request_rows(obs, cart, objective, posts)
-    report_check("request_rows binds HEAD's OBSERVATION and CART rows",
-                 list(Xr[:, 1]) == [1, 1, 2, 0] and not Xr[3, :20].any()
-                 and abs(Xr[0, 20] - 0.1) < 1e-6 and Xr[0, 21] == 1 and Xr[0, 25] == 1
-                 and abs(Xr[2, 11]) < 1e-6 and abs(Xr[2, 12] - 0.3) < 1e-6
-                 and list(Xr[:, 13]) == [1, 1, 0, 0] and list(Xr[:, 14]) == [1, 1, 2, 0]
-                 and list(Xr[:, 15]) == [7, 7, 0, 0] and list(Xr[:, 16]) == [2, 1, 0, 0]
-                 and list(Xr[:, 17]) == [1, 0, 0, 0] and list(Xr[:, 18]) == [5, 40, 0, 0]
-                 and Xr[0, ITEM_COL] == 1 and Xr[0, ITEM_COL + 1] == 1 and Xr[0, ITEM_COL + 4] == 0,
-                 f"teams {list(Xr[:, 1])} carts by id {list(Xr[0, 20:26])} friends {list(Xr[:, 13])} "
-                 f"enemies {list(Xr[:, 14])} weapons {list(Xr[:, 16])} post0 {list(Xr[0, ITEM_COL:ITEM_COL + 5])}")
-    picks = np.array([3, 3, ITEM_BASE, 0], np.float32)
-    voted = vote(Xr, picks, 2, posts.ranks(), objective)
-    report_check("objective vote", voted[1] == 3 and voted[2] == ITEM_BASE,
-                 f"team 1 -> {voted[1]:.0f}, team 2 -> {voted[2]:.0f} (live post)")
-    mt = MatchMeter()
-    Xd = np.zeros((2, 26), np.float32)
-    Xd[:, 1] = 1
-    mk = lambda p, ctl: dict(carts=K_CARTS,
-                             prog=np.array([p] + [0.0] * (K_CARTS - 1)),
-                             controller=np.array([ctl] + [0] * (K_CARTS - 1),
-                                                 np.int32),
-                             regress=np.zeros(K_CARTS),
-                             score=np.zeros(TEAMS + 1),
-                             bot_cart=np.zeros(2, np.int32))
-    for pv in (0.15, 0.25, 0.18, 0.26, 0.99, 1.0, 0.1, 0.25):
-        mt.tick(Xd, mk(pv, 1), np.full(K_CARTS, pv == 0.1))
-    report_check("meter banks watermarked crossings", mt.cum[1] == 6.0,
-                 f"0.15->0.25 (+1), regress-recross (+0), ->0.99 (+3), ->1.0 (+1), "
-                 f"reset, ->0.25 (+1): cum {int(mt.cum[1])} == 6")
-    it = ItemTracker()
-    seq = [1, 1, 1] + [0] * 10 + [1, 1] + [0] * 10 + [1] + [0] * 7
-    for av in seq:
-        it.tick([dict(avail=bool(av))])
-    tim = it.timing(0, False)
-    report_check("item tracker learns the respawn period",
-                 it.period.get(0) == 10.0 and abs(tim - 0.8) < 1e-9
-                 and it.timing(0, True) == 1.0,
-                 f"toggle history gives period {it.period.get(0)}, timing ramps to "
-                 f"{tim:.2f} four ticks out, 1.0 while up")
-    st2 = Strategy("", 1)
-    ms0 = dict(carts=K_CARTS,
-               prog=np.array([0.5, 0.5] + [0.0] * (K_CARTS - 2)),
-               controller=np.array([1, 0] + [0] * (K_CARTS - 2), np.int32),
-               score=np.array([0.0, 3.0, 2.8, 0.0, 0.0, 0.0]),
-               bot_cart=np.zeros(2, np.int32))
-    l1 = st2._team_leader(ms0, [1, 2, 3])
-    ms0["score"][2] = 3.5
-    l2 = st2._team_leader(ms0, [1, 2, 3])
-    ms0["score"][2] = 4.5
-    l3 = st2._team_leader(ms0, [1, 2, 3])
-    report_check("team-leader hysteresis", l1 == 1 and l2 == 1 and l3 == 2,
-                 f"lead j{l1}, held under +{TEAM_HYST} dominance (j{l2}), moved past it (j{l3})")
-
-    w = weights(REQ_WIDTH)
-    X = _ticks(max(rows, 256), 1, seed=5)[0]
-    Xn = X / (1.0 + np.abs(X))
-    if torch is not None:
-        device = default_device()
-        a, b = scores_torch(Xn, w, device), scores_torch(Xn, w, device)
-        report_check("scores_torch deterministic", np.array_equal(a, b),
-                     f"two runs bit-identical on {Xn.shape[0]} rows ({device})")
-        ref = scores_moe_ref(Xn, w)
-        err = float(np.max(np.abs(a - ref)) / (np.max(np.abs(ref)) + 1e-30))
-        report_check("scores_torch == numpy MoE reference", err < 1e-3,
-                     f"max rel err {err:.2e}, pick agreement "
-                     f"{float(np.mean(np.argmax(a, 1) == np.argmax(ref, 1))):.3f}")
-        same = int(np.sum(np.argmax(a, 1) == np.argmin(a, 1)))
-        report_check("scores_torch policies disjoint", same == 0,
-                     f"{same}/{a.shape[0]} rows where nearest == inverted")
-    else:
-        print("skip scores_torch checks: torch not importable here", flush=True)
-    g = scores_np(Xn, w)
-    same = int(np.sum(np.argmax(g, 1) == np.argmin(g, 1)))
-    report_check("scores_np policies disjoint", same == 0,
-                 f"{same}/{g.shape[0]} rows where nearest == inverted")
-
-    stream = _ticks(rows, 3, seed=7)
-    if torch is not None:
-        s1, s2 = CtxSolver(), CtxSolver()
-        for X in stream:
-            a, b = s1.solve(X), s2.solve(X)
-        report_check("ctx solve deterministic", np.array_equal(a, b),
-                     f"two fresh solvers, same 3-tick stream, bit-identical scores")
-        sn = CtxSolver(backend="np")
-        for X in stream:
-            c = sn.solve(X)
-        err = float(np.max(np.abs(a - c)) / (np.max(np.abs(c)) + 1e-30))
-        agree = float(np.mean(np.argmax(a, 1) == np.argmax(c, 1)))
-        report_check("ctx solve torch == numpy", err < 5e-3 and agree == 1.0,
-                     f"max rel err {err:.2e}, pick agreement {agree:.3f}")
-        same = int(np.sum(np.argmax(a, 1) == np.argmin(a, 1)))
-        report_check("ctx policies disjoint", same == 0,
-                     f"{same}/{a.shape[0]} rows where nearest == inverted")
-        mean = float(s1.expert_rows.mean())
-        report_check("rows per expert at floor", mean >= 512,
-                     f"mean {mean:.0f} (design operating point T*k/E >= 512), "
-                     f"min {int(s1.expert_rows.min())}")
-
-        r1, b1, t1, _ = run_synth(12, 256, 42, 45, 15, 0.1, "", log=False)
-        r2, b2, t2, _ = run_synth(12, 256, 42, 45, 15, 0.1, "", log=False)
-        report_check("reinforce deterministic per seed",
-                     all(t1.theta[k] == t2.theta[k] for k in t1.names) and np.allclose(r1, r2),
-                     "two fresh 12-episode k-cart synth runs, identical scalars and returns")
-        moved = max(abs(t1.theta[k] - THETA[k]) for k in t1.names)
-        report_check("reinforce updates applied", moved > 0,
-                     f"max scalar movement {moved:.3f} after 12 episodes")
-
-        ro1, bo1, _, _ = run_synth(2, 256, 42, 45, 15, 0.1, "", log=False,
-                                   train=False, explore=True)
-        rq0, bq0, sq0, _ = run_synth(2, 256, 42, 45, 15, 0.1, "", log=False,
-                                     train=False, explore=True, qkv=True)
-        report_check("qkv inert at init (qkvw=0)",
-                     np.array_equal(ro1, rq0) and np.array_equal(bo1, bq0)
-                     and sq0.qkvw == 0.0 and np.all(sq0.M == 1.0),
-                     "qkv on with no updates reproduces the qkv-off returns bit-for-bit")
-        rq1, _, tq1, _ = run_synth(12, 256, 42, 45, 15, 0.1, "", log=False, qkv=True)
-        rq2, _, tq2, _ = run_synth(12, 256, 42, 45, 15, 0.1, "", log=False, qkv=True)
-        dev = float(np.max(np.abs(tq1.M - 1.0)))
-        report_check("qkv trains, deterministic and bounded",
-                     np.array_equal(rq1, rq2) and tq1.qkvw == tq2.qkvw
-                     and np.array_equal(tq1.M, tq2.M)
-                     and (abs(tq1.qkvw) > 0 or dev > 0)
-                     and abs(tq1.qkvw) <= 4.0 and dev < 5.0 and np.all(np.isfinite(tq1.M)),
-                     f"qkvw {tq1.qkvw:+.3f} max|M-1| {dev:.3f} after 12 episodes, "
-                     f"identical across two runs")
-    else:
-        print("skip ctx/trained checks: torch not importable here", flush=True)
-    return ok
-
-
-def bench(reps, rows, T):
-    backends = (["torch"] if torch is not None else []) + ["np"]
-    fl = ctx_flops(T, rows)
-    print(f"bench: T={T} RES={RES} FF={FF} experts={EXPERTS} rows/tick={rows} "
-          f"flops/solve={fl/1e9:.1f} GFLOP "
-          f"weights={(EXPERTS*2*RES*FF + REQ_WIDTH*RES + RES*EXPERTS + RES*TEAMS)*4/1e6:.0f} MB",
-          flush=True)
-    for backend in backends:
-        s = CtxSolver(T, backend)
-        n = reps if backend == "torch" else max(3, reps // 4)
-        times = []
-        for X in _ticks(rows, n, seed=9):
-            t0 = time.perf_counter()
-            s.solve(X)
-            times.append(time.perf_counter() - t0)
-        med = float(np.median(times))
-        name = f"{backend}:{s.device}" if backend == "torch" else backend
-        print(f"bench: {name:9s} median {med*1e3:8.2f} ms  min {min(times)*1e3:8.2f} ms  "
-              f"{fl/med/1e9:8.1f} GFLOP/s over {n} solves", flush=True)
-
-
-def attach(config):
-    """The world this rank is one of: torch.distributed's "mesh" backend for the torch backend, mesh_mpi's Comm for
-    numpy.  A failure is the caller's value (RuntimeError from the library), never retried here."""
-    if config["backend"] == "torch":
-        return TorchWorld(config["device"])
-    return MPIWorld()
+def bench(reps, rows, T, device, configuration):
+    solver = CtxSolver(T, device=device, configuration=configuration)
+    observations = []
+    for X in _ticks(rows, reps, seed=9):
+        # Preparation is outside the numerical interval. Both the local demo
+        # and service submit this same complete Function.
+        solver.prepare(min(len(X), T))
+        completion = solver.submit(X)
+        solver.result(_stream.completion_end(completion))
+        observations.append(solver.previous_function)
+    middle = sorted(observations, key=lambda row: row['seconds'])[len(observations) // 2]
+    seconds = middle['seconds']
+    print(json.dumps(dict(program='xonotic-context-solver', context=T, rows=rows,
+        seconds=seconds, rows_per_second=rows / seconds,
+        useful_gigabytes_per_second=middle['useful_gigabytes_per_second'],
+        gigaflops_per_second=ctx_flops(T, rows) / seconds / 1e9, repetitions=reps)), flush=True)
 
 
 REQUEST, STOP = 1, 2
 
 
 def serve(config):
-    world = attach(config)
+    world = World(config["device"])
     shares = config["columns"]
     assignment_data = {'decisions': {"columns": {"parts": list(shares["parts"]), "grain": shares["grain"],
                                                  "low": shares["low"]}}, 'observations': []}
-    solver = CtxSolver(config["ctx"], config["backend"], config.get("device"), world, shares["parts"], assignment_data)
-    header = world.host((4,), np.int64)
-    rows = world.host((config["maxrows"], REQUEST_WIDTH), np.float32)
+    solver = CtxSolver(config["ctx"], config["device"], world, shares["parts"], assignment_data, config.get("compiler"))
+    header = np.zeros(4, np.int64)
     stopping = {"signal": None}
     wake, woken = os.pipe()
     os.set_blocking(woken, False)
@@ -1775,30 +1402,31 @@ def serve(config):
         stopping["signal"] = signum
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signum, stop)
-    report("solver_started", rank=world.rank, size=world.size, backend=config["backend"],
-           device=solver.device if config["backend"] == "torch" else "cpu", ctx=config["ctx"], columns=solver.columns,
+    report("solver_started", rank=world.rank, size=world.size, device=solver.device,
+           ctx=config["ctx"], columns=solver.columns,
            flops_per_solve=ctx_flops(config["ctx"], config["maxrows"]))
     result = None
     try:
         if world.rank == 0:
-            result = relay(config, world, solver, header, rows, stopping, wake)
+            result = relay(config, world, solver, header, stopping, wake)
         else:
             while True:
-                world.bcast(header)
-                kind, n = int(header[0]), int(header[1])
+                message = world.configuration(None)
+                kind, n = int(message[0]), int(message[1])
                 if kind == STOP:
                     break
                 if kind == REQUEST:
-                    world.bcast(rows[:n])
-                    solver.solve(np.asarray(rows[:n]))
+                    solver.prepare(min(n, solver.T))
+                    completion = solver.submit(np.zeros((n, REQUEST_WIDTH), np.float32))
+                    solver.result(_stream.completion_end(completion))
     finally:
         report("solver_finished", rank=world.rank, solves=solver.solves, columns=solver.columns,
-               collective_s=round(solver.collective_s, 3), signal=stopping["signal"])
+               whole_function=solver.previous_function, signal=stopping["signal"])
         world.free()
     return result
 
 
-def relay(config, world, solver, header, rows, stopping, wake):
+def relay(config, world, solver, header, stopping, wake):
     measurements = []
     def record(event, **fields):
         measurements.append({'event': event, **fields})
@@ -1830,16 +1458,18 @@ def relay(config, world, solver, header, rows, stopping, wake):
     episode = None
     try:
         while stopping["signal"] is None:
-            readable, _, _ = select.select([engine, wake], [], [])
-            if wake in readable:
-                os.read(wake, 64)
-                continue
-            for node, address, frame in engine.receive():
-                joined.feed(frame)
-                route[OBSERVATION_KIND] = (node, address)
             ready = joined.take()
             if ready is None:
-                continue
+                readable, _, _ = select.select([engine, wake], [], [])
+                if wake in readable:
+                    os.read(wake, 64)
+                    continue
+                for node, address, frame in engine.receive():
+                    joined.feed(frame)
+                    route[OBSERVATION_KIND] = (node, address)
+                ready = joined.take()
+                if ready is None:
+                    continue
             (session, tick), records, events = ready
             done = records[OBSERVATION_KIND][0]
             posts.observe(list(events.values()))
@@ -1848,12 +1478,21 @@ def relay(config, world, solver, header, rows, stopping, wake):
             if not n:
                 continue
             header[0], header[1] = REQUEST, n
-            world.bcast(header)
-            rows[:n] = X
-            world.bcast(rows[:n])
-            began = time.monotonic()
-            G = solver.solve(X)
-            solve_s += time.monotonic() - began
+            world.configuration(header.tolist())
+            solver.prepare(min(n, solver.T))
+            completion = solver.submit(X)
+            # This host application can receive more frames while numerical
+            # work runs. Completion changes no compiled dispatch ordering.
+            while not _stream.completion_ended(completion):
+                readable, _, _ = select.select([engine, wake], [], [], config['completion_poll_seconds'])
+                if wake in readable:
+                    os.read(wake, 64)
+                if engine in readable:
+                    for node, address, frame in engine.receive():
+                        joined.feed(frame)
+                        route[OBSERVATION_KIND] = (node, address)
+            G = solver.result(_stream.completion_end(completion))
+            solve_s += solver.previous_function['seconds']
             if trained:
                 ms = bind_match(X)
                 itimer.tick(ms.get("posts", []))
@@ -1899,12 +1538,15 @@ def relay(config, world, solver, header, rows, stopping, wake):
                 record("plan", request=done["req_id"], tick=tick, rows=n, live=int((X[:, 1] > 0).sum()),
                        picks=np.bincount(pick.astype(np.int32) % TEAMS, minlength=TEAMS).tolist(),
                        objective=objective[1:].astype(int).tolist(), columns=solver.columns,
-                       solve_ms=round(1e3 * (time.monotonic() - began), 3))
+                       seconds=solver.previous_function['seconds'],
+                       rows_per_second=solver.previous_function['units_per_second'],
+                       useful_gigabytes_per_second=solver.previous_function['useful_gigabytes_per_second'])
     finally:
         header[...] = 0
         header[0] = STOP
-        world.bcast(header)
-        record("relay_finished", blocks=blocks, rows=served, solve_ms=round(1e3 * solve_s / max(1, blocks), 3),
+        world.configuration(header.tolist())
+        record("relay_finished", blocks=blocks, rows=served, seconds=solve_s,
+               rows_per_second=served / solve_s if solve_s else 0,
                transport=engine.report(), frames=joined.report())
         engine.close()
     return {'event': 'solver_result', 'strategy': strat.state() if strat is not None else None, 'measurements': measurements}
@@ -1914,7 +1556,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", nargs="?", choices=("serve",))
     ap.add_argument("config", nargs="?")
-    ap.add_argument("--check", action="store_true")
+    ap.add_argument("--device", default="mps")
+    ap.add_argument("--compiler", type=Path)
     ap.add_argument("--bench", type=int, default=0)
     ap.add_argument("--rows", type=int, default=64)
     ap.add_argument("--ctx", type=int, default=CTX)
@@ -1939,10 +1582,8 @@ def main():
         result = serve(config)
         print(json.dumps(result, default=lambda value: np.asarray(value).tolist()), flush=True)
         return
-    if a.check:
-        sys.exit(0 if check(a.rows) else 1)
     if a.bench:
-        bench(a.bench, a.rows, a.ctx)
+        bench(a.bench, a.rows, a.ctx, a.device, json.loads(a.compiler.read_text()) if a.compiler else None)
         return
     if a.synth:
         if a.episode is None or a.hold is None:

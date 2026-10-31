@@ -108,8 +108,8 @@ static inline void gate_retire(struct send_gate *gate,uint64_t id){ gate->retire
    the cumulative frame prefix retired by each completion. */
 struct lane_state { uint64_t sent,done,posted,got,frames_posted,frames_retired,frame_capacity; };
 /* An entry as the walk reads it from its call's tables: its immutable resolved span table, `unit` its first unit over
-   this holding; every dependency/completion prefix counts units. A landing's `after` (mesh.h struct
-   mesh_zwoggle_entry), with its call's requirements each bit names (`afters`, channel h's at h) */
+   this holding; every dependency/completion prefix counts units. `after` is the
+   length of the compiled prerequisite list, identical for both directions */
 struct taken { const struct mesh_dma_span *spans; struct mesh_units units,base,unit; const _Atomic uint64_t *word;
                uint64_t after; const struct mesh_zwoggle_after *afters; };
 /* Unit p goes on lane p mod MESH_STREAM_LANES as unit p/lanes there.
@@ -127,7 +127,7 @@ static inline uint64_t lanes_through(const uint64_t *u){
    units, the nodes left the list's calls left), `current` the entry holding the unit last asked for, read from the
    call's tables (mesh-link.c walk_chain). The bridge's 4,096-entry rings of entries copied from the holder's
    presented lists are deleted: every holder links its tables */
-struct walk { struct mesh_units base,count; struct mesh_graph_chain chain; struct taken current; };
+struct walk { struct mesh_units base,count; struct mesh_graph_chain chain[MESH_STREAM_LANES]; struct taken current; };
 /* design/transport.md section 14: a holding's state on its stream at its port's progress thread: none (`HOLD_NONE`);
    served (`HOLD_SERVE`); ended (its owner word given, or its client retired), until the next pass has taken its lanes'
    completions (`HOLD_END`); ended with units outstanding on the stream's lanes, the stream not live and nothing served

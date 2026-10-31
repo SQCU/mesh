@@ -57,9 +57,7 @@ language model and this chain look the same: rows of bytes, sent and landed.
 ## Program two: the mesh collective client
 
 The collective client is a library inside your process. It is `libnccl-mesh` ([rdma/NCCL.md](../rdma/NCCL.md)), and
-it is reached through torch-mesh ([rdma/torch-mesh/README.md](../rdma/torch-mesh/README.md)) or `mesh_mpi.py`. It rents rows of the region for your tensors and opens groups of ranks. It turns calls like all-reduce,
-broadcast and send into work on the bridge's streams. Its waits end when data lands, or at their bound: a GPU wait's
-loads, or a host wait's platform deadline, 5 s in which nothing moves. Then the call fails as a value.
+it is reached through prepared functions in torch-mesh ([rdma/torch-mesh/README.md](../rdma/torch-mesh/README.md)). Preparation binds the tensor pages and groups of ranks. It turns declared all-reduce, broadcast and send operations into work on the bridge's streams. The compiled page relations connect each producer to the work that consumes its results. The service can inspect progress and failures while work runs.
 
 The client does not own the devices, and it does not know your function or where your inputs come from. It does not
 pick how the work is split, and it is not a process of its own. It lives and dies with the service that loads it, and nothing

@@ -51,18 +51,20 @@ static int number_pieces(struct routed_piece *pieces,size_t count){
 /* Restore streaming refinement before proving lifetimes. Split both endpoint
    views together, so each publication/arrival event still names one exact byte
    interval. Repeat until upstream cuts have propagated through all relays.
-   Each change adds an existing page boundary, hence the finite page graph
+   Each change adds an existing value boundary, hence the finite page graph
    bounds this closure; no transport hop or path is excluded. */
+static int cut_end_order(const void *a,const void *b){
+  const uint64_t x=*(const uint64_t *)a,y=*(const uint64_t *)b;return (x>y)-(x<y);
+}
 static int refine_pieces(struct routed_piece **storage,size_t *length,uint64_t page){
   int status=0,changed=1;
   while(changed && !status){
     struct routed_piece *pieces=*storage;
     const size_t count=*length,pairs=count/2;
-    struct cuts { uint64_t *end;uint32_t count; };
+    struct cuts { uint64_t *end;size_t count; };
     struct cuts *cuts=calloc(pairs+1,sizeof *cuts);
     if(!cuts)return ENOMEM;
-    size_t extra=0;
-    changed=0;
+    size_t extra=0;changed=0;
     for(size_t first=0;first<count && !status;){
       size_t last=first+1;
       while(last<count && pieces[last].rank==pieces[first].rank)last++;
@@ -76,20 +78,26 @@ static int refine_pieces(struct routed_piece **storage,size_t *length,uint64_t p
       if(mesh_fabric_refine(input,n,page,output,(uint32_t)room)!=room)status=EPROTO;
       for(uint32_t k=0,at=0;k<n && !status;k++){
         const struct mesh_step *original=&input[k].step;
-        uint32_t begin=at;
-        uint64_t extent=0;
+        uint32_t begin=at;uint64_t extent=0;
         do { extent+=output[at++].step.piece.elements; } while(at<(uint32_t)room && extent<original->piece.elements);
         if(extent!=original->piece.elements){status=EPROTO;break;}
         if(at==begin+1)continue;
         struct cuts *cut=cuts+original->round;
-        cut->count=at-begin;
-        cut->end=malloc((size_t)cut->count*sizeof *cut->end);
-        if(!cut->end){status=ENOMEM;break;}
-        extent=0;
-        for(uint32_t j=begin;j<at;j++){extent+=output[j].step.piece.elements;cut->end[j-begin]=extent;}
-        extra+=2*((size_t)cut->count-1);changed=1;
+        const size_t added=at-begin;
+        uint64_t *more=realloc(cut->end,(cut->count+added)*sizeof *more);
+        if(!more){status=ENOMEM;break;}
+        cut->end=more;extent=0;
+        for(uint32_t j=begin;j<at;j++){extent+=output[j].step.piece.elements;cut->end[cut->count++]=extent;}
       }
       free(input);free(output);first=last;
+    }
+    /* Both endpoints can contribute cuts to the same transfer. Their union is
+       one common partition, counted once and applied to both page views. */
+    for(size_t k=0;k<pairs&&!status;k++)if(cuts[k].count){
+      struct cuts *cut=cuts+k;qsort(cut->end,cut->count,sizeof *cut->end,cut_end_order);
+      size_t kept=0;
+      for(size_t j=0;j<cut->count;j++)if(!kept||cut->end[j]!=cut->end[kept-1])cut->end[kept++]=cut->end[j];
+      cut->count=kept;extra+=2*(kept-1);changed|=kept>1;
     }
     if(!status && changed){
       if(extra>UINT32_MAX-count || count+extra>SIZE_MAX/sizeof **storage)status=EOVERFLOW;
@@ -101,15 +109,14 @@ static int refine_pieces(struct routed_piece **storage,size_t *length,uint64_t p
           const struct cuts *cut=cuts+pieces[k].transfer.step.round;
           if(!cut->count){next[written++]=pieces[k];continue;}
           uint64_t first=0;
-          for(uint32_t j=0;j<cut->count;j++){
+          for(size_t j=0;j<cut->count;j++){
             struct routed_piece p=pieces[k];
             p.offset+=first;p.transfer.step.first+=first;p.view.first+=first*p.transfer.step.piece.element_bytes;
             p.transfer.step.piece.elements=cut->end[j]-first;
             next[written++]=p;first=cut->end[j];
           }
         }
-        free(pieces);*storage=next;*length=count+extra;
-        status=number_pieces(next,*length);
+        free(pieces);*storage=next;*length=written;status=number_pieces(next,written);
       }
     }
     for(size_t k=0;k<pairs;k++)free(cuts[k].end);

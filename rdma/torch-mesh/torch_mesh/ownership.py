@@ -7,8 +7,6 @@ import itertools
 
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor._dtensor_spec import DTensorSpec
-from torch.distributed.tensor._op_schema import OpSchema, OutputSharding
-from torch.distributed.tensor._sharding_prop import ShardingPropagator
 from torch.utils import _pytree as pytree
 
 
@@ -25,16 +23,40 @@ def owner_layouts(typ, owners):
 
 def from_spec(spec):
     """Keep a declared global type and every rank's ordered page selection."""
-    from .partition import _rank_selection
+    from .partition import _rank_selection, _is_shard
     mesh = spec.mesh
     coordinates = itertools.product(*(range(mesh.size(i)) for i in range(mesh.ndim)))
     owners = owner_layouts(spec.tensor_meta, {rank: dict(zip(('selection', 'shape'), _rank_selection(spec, rank)))
                                               for rank in coordinates})
     return dict(type=spec.tensor_meta, owners=owners,
-                dimensions=tuple(i for i, placement in enumerate(spec.placements) if placement.is_shard()),
+                dimensions=tuple(i for i, placement in enumerate(spec.placements) if _is_shard(placement)),
                 reductions=tuple((i, placement) for i, placement in enumerate(spec.placements)
                                  if placement.is_partial()),
                 mesh=mesh, spec=spec)
+
+
+def result_owners(typ, mesh, policy):
+    """Realize the configured result page assignment, independent of its op."""
+    import math
+    from torch.distributed.tensor import Replicate, Shard
+    from torch.distributed.tensor._dtensor_spec import DTensorSpec, TensorMeta
+    from .partition import _placements, _rank_selection
+    names = tuple(mesh.mesh_dim_names or range(mesh.ndim))
+    selected = names if policy['mesh_axes'] == 'all' else tuple(policy['mesh_axes'])
+    axes = tuple(names.index(name) for name in selected)
+    if policy['layout'] != 'flat':
+        raise ValueError(f"unknown declared result ownership layout {policy['layout']}")
+    count = math.prod(typ.shape)
+    placements = _placements(mesh, tuple(Shard(0) if axis in axes else Replicate()
+                                        for axis in range(mesh.ndim)), 1)
+    flat = DTensorSpec(mesh, placements, tensor_meta=TensorMeta((count,), (1,), typ.dtype))
+    owners = {}
+    for rank in itertools.product(*(range(mesh.size(axis)) for axis in range(mesh.ndim))):
+        selection, shape = _rank_selection(flat, rank,
+            dict(shape=list(typ.shape), steps=[['reshape', [count]]]))
+        local = () if not typ.shape and shape == (1,) else shape
+        owners[rank] = dict(selection=selection, shape=local, stride=() if not local else (1,))
+    return dict(type=typ, owners=owners, dimensions=axes, reductions=(), mesh=mesh, spec=None)
 
 
 def partial_expression(source, value, placement, mesh, axis):
@@ -1116,45 +1138,3 @@ def project_expression(prepared, outputs, *, boundary_projection=None, constrain
         return {None: record}
     return project_expressions(prepared, {None: outputs}, boundary_projection=boundaries,
                                constraints={None: constraints})['projections'][None]
-
-
-class _DeclaredTypes(ShardingPropagator):
-    """Use the captured result types with the existing sharding registries."""
-    def __init__(self, source, result_types):
-        self.source, self.result_types = source, result_types
-
-    def __getattr__(self, name):
-        return getattr(self.source, name)
-
-    def _propagate_tensor_meta_non_cached(self, schema):
-        return self.result_types
-
-
-def propagate(operation, arguments, keywords, mesh, *, result_types):
-    """Consume existing operator schemas without invoking numerical dispatch.
-
-    Tensor leaves are DTensorSpecs, including explicit replicated input specs.
-    Result types come from the captured graph; propagation does not infer them
-    again by running the operation on another set of fake inputs.
-    OutputSharding retains compound results and the required input schema. Its
-    input redistributions remain declarations for the shared access compiler.
-    Missing operator declarations raise in the upstream propagator; this adapter
-    never substitutes replication. Ragged placements retain their configured
-    shares when upstream rules change which tensor axis a mesh axis partitions.
-    """
-    from .partition import _keys, _plain, _retag, _schema
-    specs = [value for value in pytree.tree_leaves((arguments, keywords)) if isinstance(value, DTensorSpec)]
-    if any(spec.mesh != mesh for spec in specs):
-        raise ValueError('operator input specs must name their enclosing ownership mesh')
-    keys = _keys(specs)
-    propagator = _DeclaredTypes(DTensor._op_dispatcher.sharding_propagator, result_types)
-    schema_info = propagator.op_to_schema_info.get(operation)
-    if schema_info is None:
-        schema_info = propagator.op_to_schema_info_for_single_dim_strategy.get(operation)
-    schema = OpSchema(operation, arguments, keywords, schema_info=schema_info)
-    result = propagator.propagate_op_sharding_non_cached(_schema(schema, _plain))
-    output = pytree.tree_map_only(DTensorSpec, lambda spec: _retag(spec, keys), result.output_spec)
-    required = (_schema(result.redistribute_schema, lambda spec: _retag(spec, keys))
-                if result.redistribute_schema is not None else None)
-    return OutputSharding(output, required, needs_redistribute=result.needs_redistribute,
-                          use_val_from_redistribute_schema=result.use_val_from_redistribute_schema)

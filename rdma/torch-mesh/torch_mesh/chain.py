@@ -8,7 +8,7 @@ from pathlib import Path
 
 import torch
 
-from . import _stream, argmax, empty, fused
+from . import _stream, argmax, empty, fused, partition
 from .streamed import instance
 
 
@@ -66,9 +66,11 @@ def _form(K, S, rows, ranks, channels, resident_tiles, capabilities):
             # linear geometry at the wide hourly shapes. This is a compilation
             # operand, not a runtime alternative or a change of transport.
             if linear:
-                _stream.linear_source(partition._LINEAR_SOURCE, cores)
-                first, second = _stream.linear_split(K, S, rows), _stream.linear_split(S, K, rows)
                 geometry = _stream.compilation
+                from mesh_matrix import row_split
+                resources = dict(capabilities, compute_units=cores)
+                first = row_split(_stream.linear_groups(rows, S), K, geometry, resources)
+                second = row_split(_stream.linear_groups(rows, K), S, geometry, resources)
                 vector, columns, loads = (geometry[k] for k in ('LINEAR_VECTOR', 'LINEAR_COLUMNS', 'LINEAR_LOADS'))
                 name, specialization = instance('linear_rows', vector, vector, columns, first, loads, 1)
                 product = _stream.pipeline(partition._LINEAR_SOURCE + '\n' + specialization, name)
@@ -129,10 +131,10 @@ def operands(a, b, inputs, outputs, group, batch, resident_tiles, input_frames, 
         counts[count] += 1
         first += count
     for repeats, batches in counts.items():
-        _stream.fused_prepare(X, None, 0, [X.shape[0]] * group.size(), group.group_name, True, repeats, batches)
+        _stream.fused_prepare(X, 0, [X.shape[0]] * group.size(), group.group_name, repeats, batches)
     index = _stream.chain_slot()
     _stream.prepare_chain(index, kernel, ready, products, linear, [At, Bt, inputs, outputs, X, Y, X, arrivals],
-        [1, 0, *words, 0, width, rows, 0, 0], workers, threads, group.group_name, group.size(), batch, input_frames)
+        [1, 0, *words, 0, width, rows, 0, 0], workers, threads, group.group_name, group.size(), batch, input_frames, [At, Bt, inputs, arrivals])
     from .fused import calls as bound_calls
     from .backend import bind_source
     from ._stream import TensorLayout

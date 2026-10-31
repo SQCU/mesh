@@ -1,8 +1,11 @@
-import time
 from typing import NamedTuple
 
 import numpy as np
 import torch
+import torch_mesh
+from torch_mesh.engines import host
+from mesh_statistics import now, measure
+from prepared import pages
 
 from .inputs import ChorusArrays, capacity_for, frame_shapes, fill_frame
 from .strategy import Strategy
@@ -20,6 +23,7 @@ class PolicyEmission(NamedTuple):
     residual: np.ndarray
     preparation_seconds: float
     inference_seconds: float
+    performance: dict
 
 
 class InputArena:
@@ -62,7 +66,7 @@ class InputArena:
 
 
 def prepare_policies(programs, frame):
-    started = time.perf_counter()
+    started = now()
     owner = next(iter(programs.values()))
     capacity = tuple(map(max, zip(*(program.capacity for program in programs.values()))))
     values = owner.inputs.stage(frame, capacity=capacity)[id(frame)]
@@ -74,12 +78,12 @@ def prepare_policies(programs, frame):
         owner.command = TensorStorage(device=owner.device)
     owner.command.realize({'velocity': (tuple(shape), np.float32), 'residual': (tuple(shape), np.float32),
         'logp': ((shape[0],), np.float32)})
-    return values, owner.command, time.perf_counter() - started
+    return values, owner.command, now() - started
 
 
 def emit_policies(programs, prepared, frame, arms, key, recorded=None):
     values, command, preparation = prepared
-    started = time.perf_counter()
+    started = now()
     outputs, comparisons = {}, {}
     n, width = frame.state.shape
     velocity, residual = (command.host[name][:n, :width] for name in ('velocity', 'residual'))
@@ -104,8 +108,9 @@ def emit_policies(programs, prepared, frame, arms, key, recorded=None):
     writable = writable_words(frame.layout, np).reshape(n, width)
     np.copyto(velocity, 0, where=~writable)
     np.copyto(residual, 0, where=~writable)
+    performance = measure(started, now(), velocity.nbytes + logp.nbytes + residual.nbytes, n)
     return PolicyEmission(outputs, comparisons, velocity, logp, residual,
-        preparation, time.perf_counter() - started)
+        preparation, performance['seconds'], performance)
 
 
 LOSS_WEIGHTS = {"actor": POLICY_ACTOR_WEIGHT, "winnie": 0.5, "lou": 0.5, "moe_balance": POLICY_MOE_BALANCE_WEIGHT}
@@ -195,8 +200,10 @@ class AdamW:
     def __init__(self, parameters, learning_rate, weight_decay, betas=(0.9, 0.999), eps=1e-8):
         self.parameters = dict(parameters)
         self.learning_rate, self.weight_decay, self.betas, self.eps = float(learning_rate), float(weight_decay), betas, eps
-        self.step = 0
-        self.moments = {name: (torch.zeros_like(value), torch.zeros_like(value)) for name, value in self.parameters.items()}
+        self.step = pages(np.asarray(0, np.int64), device='cpu')
+        self.moments = {name: (pages(np.zeros(tuple(value.shape), host(value).numpy().dtype), device=value.device.type),
+                               pages(np.zeros(tuple(value.shape), host(value).numpy().dtype), device=value.device.type))
+                        for name, value in self.parameters.items()}
 
     @torch.no_grad()
     def apply(self, gradients):
@@ -210,35 +217,43 @@ class AdamW:
             m.mul_(first).add_(gradient, alpha=1 - first)
             v.mul_(second).add_(gradient.square(), alpha=1 - second)
             parameter.mul_(1 - rate * self.weight_decay).sub_(rate * m / (v.sqrt() + self.eps))
-        self.step += 1
+        self.step.add_(1)
 
     def state(self):
-        out = {'step': np.asarray(self.step), 'learning_rate': np.asarray(self.learning_rate, np.float32)}
+        out = {'step': host(self.step).numpy().copy(), 'learning_rate': np.asarray(self.learning_rate, np.float32)}
         for name, (m, v) in self.moments.items():
-            out[name + '.m'] = m.detach().cpu().numpy()
-            out[name + '.v'] = v.detach().cpu().numpy()
+            out[name + '.m'] = host(m).numpy().copy()
+            out[name + '.v'] = host(v).numpy().copy()
         return out
 
     @torch.no_grad()
     def load(self, state):
-        self.step = int(np.asarray(state.get('step', self.step)))
+        host(self.step).numpy()[...] = state.get('step', host(self.step).numpy())
         if 'learning_rate' in state:
             self.learning_rate = float(np.asarray(state['learning_rate']))
         for name, (m, v) in self.moments.items():
-            m.copy_(torch.as_tensor(np.asarray(state[name + '.m'])))
-            v.copy_(torch.as_tensor(np.asarray(state[name + '.v'])))
+            np.copyto(host(m).numpy(), state[name + '.m'])
+            np.copyto(host(v).numpy(), state[name + '.v'])
 
 
 class PolicyProgram:
-    """1e1d8fb5^:execution.PolicyProgram with 578de271^:persistent_policy.PersistentPolicy's queries (infer, emit,
-    integrate, contribute, update) as torch calls of one program: evaluation and training are queries of the same
-    forward, autograd deriving the training query's backward.  On a world (products.World) rank 0 announces each query
-    with its operands and every rank runs it (serve), so the partitioned products' collectives pair; a rank updates the
-    parameters it owns (rank 0 the replicated ones and its shards, every other rank its shards) and rank 0's replicated
-    values are then every rank's (World.broadcast_)."""
+    """Policy queries are whole Function declarations over persistent page operands.
+
+    Capture includes the complete forward, gradient accumulation or optimizer
+    update and its collectives. The application consumes the completed outputs;
+    no tensor backend runs an eager copy of the function.
+    """
 
     def __init__(self, model, forward, learner=None, world=None, arm=None, device='cpu', lead=0.0):
         self.model, self.forward = model, forward
+        if model is not None:
+            shared = {}
+            for name, value in list(model.named_parameters(remove_duplicate=False)):
+                if id(value) not in shared:
+                    tensor = pages(value.detach().cpu().numpy(), device=device)
+                    shared[id(value)] = torch.nn.Parameter(tensor, requires_grad=value.requires_grad)
+                owner, _, field = name.rpartition('.')
+                setattr(model.get_submodule(owner) if owner else model, field, shared[id(value)])
         self.capacity = (1,) * 10
         self.device = device
         self.inputs = InputArena(device)
@@ -250,8 +265,8 @@ class PolicyProgram:
         self.optimizer = None
         self.gradient_clip = None
         self.policy_arm = arm
-        self.accumulated = {}
         self.queries = {}
+        self.programs, self.operand_pages, self.measurements = {}, {}, {}
 
     def announce(self, name, *operands):
         self.queries[name] = self.queries.get(name, 0) + 1
@@ -273,10 +288,71 @@ class PolicyProgram:
         self.optimizer = AdamW(self.owned(), learning_rate, weight_decay)
         self.gradient_clip, self.policy_arm = abs(float(gradient_clip)), policy_arm
 
-    def synchronize(self):
-        self.announce('synchronize')
-        if self.world is not None and self.model is not None:
-            self.world.broadcast_([value.data for value in self.replicated()])
+    def _query(self, name, source, operands=(), *, distribute=True):
+        """Prepare an ordinary Function for these page bindings and consume its result."""
+        from torch.utils._pytree import tree_flatten, tree_unflatten
+        from torch_mesh import _stream
+        from torch_mesh.declarations import Function
+        import torch.distributed._functional_collectives as collective
+        leaves, structure = tree_flatten(operands)
+        bound, signature = [], []
+        for index, value in enumerate(leaves):
+            if isinstance(value, torch.Tensor):
+                tensor = value
+            else:
+                array = np.asarray(value)
+                key = (name, index, array.shape, array.dtype.str)
+                if key not in self.operand_pages:
+                    self.operand_pages = {k: v for k, v in self.operand_pages.items() if k[:2] != key[:2]}
+                    self.operand_pages[key] = pages(array, device=self.device)
+                tensor = self.operand_pages[key]
+                np.copyto(host(tensor).numpy(), array)
+            bound.append(tensor)
+            signature.append((tuple(tensor.shape), tensor.dtype, tensor.device, tensor.data_ptr()))
+        signature = (tuple(signature), structure)
+        plan = self.programs.get(name)
+        if plan is None or plan['signature'] != signature:
+            group = self.world.group if self.world is not None else None
+            def declared(*values):
+                if distribute and group is not None:
+                    values = tuple(collective.wait_tensor(collective.broadcast(value, 0, group.group_name)) for value in values)
+                return source(*tree_unflatten(values, structure))
+            parameters = tuple(self.model.parameters()) if self.model is not None else ()
+            function = Function(declared, *bound, parameters=parameters,
+                                source_scope={'function': 'policy-' + name, 'arm': self.arm})
+            function.capture()
+            output = next(node.args[0] for node in function.captured_graph.graph.nodes if node.op == 'output')
+            destinations, outputs = [], []
+            for node in output:
+                value = node.meta['val'] if isinstance(node, torch.fx.Node) else node
+                if isinstance(value, torch.Tensor):
+                    destination = torch_mesh.empty(tuple(value.shape), dtype=value.dtype, device=value.device.type)
+                    destinations.append(destination)
+                    outputs.append(host(destination).numpy())
+                else:
+                    destinations.append(None); outputs.append(value)
+            calls = function.declare(group, destinations=destinations)
+            useful = sum(value.nbytes for value in outputs[:function.output_spec.num_leaves] if isinstance(value, np.ndarray))
+            plan = dict(signature=signature, function=function, outputs=outputs, useful=useful, calls=calls)
+            self.programs[name] = plan
+        function = plan['function']
+        if self.world is not None and self.world.group is not None:
+            self.world.group.plan(plan['calls'])
+        function.prepare()
+        started = now()
+        function.run()
+        _stream.completion_end(function.completion())
+        self.measurements[name] = measure(started, now(), plan['useful'], 1)
+        return tree_unflatten(plan['outputs'][:function.output_spec.num_leaves], function.output_spec)
+
+    def initialize_replicas(self):
+        self.announce('initialize_replicas')
+        if self.world is not None and self.world.size > 1 and self.model is not None:
+            def source():
+                with torch.no_grad():
+                    self.world.broadcast_(self.replicated())
+                return ()
+            self._query('initialize_replicas', source, distribute=False)
 
     def bind_capacity(self, capacity):
         self.capacity_changes += self.capacity != tuple(capacity)
@@ -291,57 +367,67 @@ class PolicyProgram:
 
     def infer(self, values, frame):
         self.announce('infer', list(values), frame)
-        with torch.no_grad():
-            output = self.forward(self.model, *values)
+        def source(inputs):
+            with torch.no_grad():
+                return self.forward(self.model, *inputs)
+        output = self._query('infer', source, (values,))
         return None if self.member() else self.crop(output, frame)
 
     def emit(self, values, frame, key):
-        self.announce('emit', list(values), frame, np.asarray(key))
-        with torch.no_grad():
-            output = self.forward(self.model, *values)
-            if self.member():
-                return None
-            velocity, likelihood = sample(output.rate, key)
-            residual = torch.where(output.rate.present, integrate(values.residual, velocity, values.delta,
-                                                                  values.relaxation_time, self.lead), 0.0)
+        key = np.asarray(key, dtype=np.int64)
+        self.announce('emit', list(values), frame, key)
+        def source(inputs, sampling_key):
+            with torch.no_grad():
+                output = self.forward(self.model, *inputs)
+                velocity, likelihood = sample(output.rate, sampling_key)
+                residual = torch.where(output.rate.present, integrate(inputs.residual, velocity, inputs.delta,
+                    inputs.relaxation_time, self.lead), 0.0)
+                return output, velocity, likelihood, residual
+        output, velocity, likelihood, residual = self._query('emit', source, (values, key))
+        if self.member():
+            return None
         n, width = frame.state.shape
-        host = lambda value: value.detach().cpu().numpy()
-        return self.crop(output, frame), host(velocity)[:n, :width].copy(), host(likelihood)[:n].copy(), host(residual)[:n, :width].copy()
+        return self.crop(output, frame), velocity[:n, :width].copy(), likelihood[:n].copy(), residual[:n, :width].copy()
 
     def integrate(self, values, velocity):
-        with torch.no_grad():
-            return integrate(values.residual, velocity, values.delta, values.relaxation_time, self.lead).cpu().numpy()
+        self.announce('integrate', list(values), velocity)
+        def source(inputs, rate):
+            return integrate(inputs.residual, rate, inputs.delta, inputs.relaxation_time, self.lead)
+        return self._query('integrate', source, (values, velocity))
 
-    def contribute(self, before, after, item, weights, reset):
-        self.announce('contribute', list(before), list(after), item, weights, bool(reset))
-        before, after = ChorusArrays(*before), ChorusArrays(*after)
-        if reset:
-            self.model.zero_grad(set_to_none=True)
-            self.accumulated = {}
-        loss, (metrics, log_ratio, ratio, active) = tensor_loss(self.model, self.forward, self.policy_arm, before, after, item)
-        loss.backward()
-        weights = torch.as_tensor(weights, dtype=metrics.dtype, device=metrics.device)
-        self.accumulated['loss'] = self.accumulated.get('loss', 0.0) + loss.detach()
-        self.accumulated['metrics'] = self.accumulated.get('metrics', 0.0) + metrics * weights
-        return log_ratio.detach().cpu().numpy(), ratio.detach().cpu().numpy(), active.detach().cpu().numpy()
-
-    def update(self):
-        self.announce('update')
+    def learn(self, items):
+        """The entire supplied transition batch and optimizer update are one graph."""
+        self.announce('learn', items)
+        items = tuple((ChorusArrays(*before), ChorusArrays(*after), item, weights)
+                      for before, after, item, weights in items)
+        parameters = {name: value for name, value in self.model.named_parameters() if value.requires_grad}
         owned = self.owned()
-        gradients = {name: value.grad for name, value in owned.items()}
-        reduce = self.world.reduce_norm if self.world is not None and self.world.size > 1 else None
-        clipped, magnitude = clip_grad_norm(gradients, self.gradient_clip, reduce)
-        self.optimizer.apply(clipped)
-        if self.world is not None and self.world.size > 1:
-            self.world.broadcast_([value.data for value in self.replicated()])
-        total = self.accumulated.get('loss', torch.zeros(()))
-        parts = self.accumulated.get('metrics', torch.zeros(()))
-        return (np.asarray(total.detach().cpu().numpy() if torch.is_tensor(total) else total),
-                np.asarray(parts.detach().cpu().numpy() if torch.is_tensor(parts) else parts), np.asarray(magnitude))
+        def source(batch):
+            losses, metrics, observations, derivatives = [], [], [], []
+            for before, after, item, weights in batch:
+                loss, (metric, log_ratio, ratio, active) = tensor_loss(
+                    self.model, self.forward, self.policy_arm, before, after, item)
+                derivatives.append(torch.autograd.grad(loss, tuple(parameters.values()), allow_unused=True))
+                losses.append(loss.detach()); metrics.append(metric * weights.to(metric.dtype))
+                observations.append((log_ratio.detach(), ratio.detach(), active.detach()))
+            gradients = {}
+            for index, (name, parameter) in enumerate(parameters.items()):
+                if name in owned:
+                    values = tuple(torch.zeros_like(parameter) if derivative[index] is None else derivative[index]
+                                   for derivative in derivatives)
+                    gradients[name] = torch.stack(values).sum(0)
+            reduce = self.world.reduce_norm if self.world is not None and self.world.size > 1 else None
+            clipped, magnitude = clip_grad_norm(gradients, self.gradient_clip, reduce)
+            self.optimizer.apply(clipped)
+            if self.world is not None:
+                with torch.no_grad():
+                    self.world.broadcast_(self.replicated())
+            return observations, torch.stack(losses).sum(0), torch.stack(metrics).sum(0), magnitude
+        return self._query('learn', source, (items,))
 
     def export_shard(self):
         sharded = getattr(self.model, 'sharded', frozenset())
-        payload = {name: value.detach().cpu().numpy().copy()
+        payload = {name: host(value).numpy().copy()
                    for name, value in self.model.named_parameters() if name in sharded} if self.model is not None else {}
         if self.optimizer is not None:
             payload.update({'__opt__' + name: value for name, value in self.optimizer.state().items()})
@@ -351,14 +437,15 @@ class PolicyProgram:
         with torch.no_grad():
             for name, value in self.model.named_parameters() if self.model is not None else ():
                 if name in payload:
-                    value.copy_(torch.as_tensor(payload[name], device=value.device))
+                    np.copyto(host(value).numpy(), payload[name])
         if self.optimizer is not None:
             self.optimizer.load({name[7:]: value for name, value in payload.items() if name.startswith('__opt__')})
+        self.programs.clear()
 
     def crop(self, out, frame):
         n, width = frame.state.shape
         pages = 1 + frame.layout.shape[1]
-        host = lambda value: value.detach().cpu().numpy()
+        host = np.asarray
         ir = host(out.ir)
         latent_width = ir.shape[-1] // (1 + self.capacity[1])
         ir = ir[:n].reshape(n, 1 + self.capacity[1], latent_width)[:, :pages].reshape(n, pages * latent_width)
@@ -371,7 +458,7 @@ class PolicyProgram:
     def report(self):
         return {'capacity': dict(zip(('participants', 'state_pages', 'events', 'observations', 'carts', 'teams', 'navigation_nodes', 'navigation_edges', 'navigation_cells', 'neighbors'), self.capacity)),
                 'capacity_changes': self.capacity_changes, 'input_storage': self.inputs.report(),
-                'device': self.device, 'queries': dict(self.queries),
+                'device': self.device, 'queries': dict(self.queries), 'functions': dict(self.measurements),
                 'world': self.world.report() if self.world is not None else None}
 
 
@@ -389,9 +476,10 @@ def serve(world, initialize):
         if name in ('infer', 'emit'):
             values, frame = ChorusArrays(*operands[0]), ChorusArrays(*operands[1])
             getattr(program, name)(values, frame, *operands[2:])
-        elif name == 'contribute':
-            before, after, item, weights, reset = operands
-            program.contribute(before, after, item, weights, reset)
+        elif name == 'integrate':
+            program.integrate(ChorusArrays(*operands[0]), operands[1])
+        elif name == 'learn':
+            program.learn(operands[0])
         else:
             getattr(program, name)()
     return programs

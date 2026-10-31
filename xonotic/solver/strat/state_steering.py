@@ -80,10 +80,8 @@ def logp_of(rate, velocity, active=None):
 
 
 def normal(shape, key, device):
-    """A standard normal of `shape` from the 64-bit sampling key (the uint64 counter schedule of advance_key): drawn
-    on the host's generator, so every rank given the key draws the same values."""
-    generator = torch.Generator().manual_seed((int(key[0]) << 32) | int(key[1]))
-    return torch.randn(tuple(shape), generator=generator).to(device)
+    from torch_mesh.random import normal as counter_normal
+    return counter_normal(shape, key, device=device)
 
 
 def sample(rate, key):

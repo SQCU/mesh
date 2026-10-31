@@ -29,6 +29,7 @@ class SourceCapture(TorchFunctionMode):
         self.local_values = {}
         self.local_shapes = None
         self.meshes = []
+        self.scalar_results = {}
 
     def value(self, value):
         from torch.distributed.tensor import DTensor
@@ -42,7 +43,11 @@ class SourceCapture(TorchFunctionMode):
             made = self.local(self.local_sources[id(value)])
             self.values[id(value)] = made
             return made
-        if isinstance(value, FakeTensor):
+        if (isinstance(value, FakeTensor) or torch._is_functional_tensor(value)
+                or torch._C._functorch.is_functorch_wrapped_tensor(value)):
+            # Batch and mutation transforms already carry the traced source
+            # value. Converting their wrapper to another fake tensor would
+            # lift the operand into an unrelated captured constant.
             return value
         with disable_proxy_modes_tracing(), self.mode:
             if isinstance(value, DTensor):
@@ -72,9 +77,11 @@ class SourceCapture(TorchFunctionMode):
         source = get_proxy_slot(made, proxy.tracer).proxy.node
         self.source_nodes[id(original)] = source
         selection, _ = _rank_selection(original._spec, original.device_mesh.get_coordinate())
+        from .operand import TensorView
+        from .partition import _page_tensor
         for _, axis, runs in selection['steps']:
-            first, count, _, _ = runs[0]
-            made = made.narrow(axis, first, count)
+            selected = TensorView.of(made)
+            made = _page_tensor(TensorView(selected.storage, selected.layout.select_runs(axis, runs)))
         made = torch.ops.aten.alias.default(made)
         declaration, _ = _value_ownership(original, original.device_mesh)
         coordinate = tuple(original.device_mesh.get_coordinate())
@@ -100,9 +107,41 @@ class SourceCapture(TorchFunctionMode):
         self.local_values[id(original)] = symbolic
         return symbolic
 
+    def placed(self, value, spec):
+        """Attach output ownership to an identity in the retained source graph.
+
+        Redistribution describes where this value will live. The ordinary
+        ownership pass derives its selected page deliveries; this declaration
+        performs no local operation or collective.
+        """
+        from .partition import RaggedTensor
+        from .ownership import from_spec
+        from torch.fx.experimental.proxy_tensor import get_proxy_mode, get_proxy_slot, disable_proxy_modes_tracing
+        made = torch.ops.aten.alias.default(self.value(value))
+        node = get_proxy_slot(made, get_proxy_mode().tracer).proxy.node
+        declaration = from_spec(spec)
+        node.meta['mesh_ownership'] = declaration
+        owner = declaration['owners'][tuple(spec.mesh.get_coordinate())]
+        with disable_proxy_modes_tracing(), self.mode:
+            local = torch.empty_strided(owner['shape'], owner['stride'], dtype=spec.tensor_meta.dtype,
+                                       device=made.device, requires_grad=made.requires_grad)
+            described = RaggedTensor(local, spec, requires_grad=made.requires_grad)
+        self.values[id(described)], self.originals[id(made)] = made, described
+        self.local_sources[id(local)] = described
+        return described
+
     def __torch_function__(self, operation, types, args=(), kwargs=None):
         from torch.utils._pytree import tree_map
         args, kwargs = tree_map(self.value, (args, kwargs or {}))
+        if operation is torch.equal or getattr(getattr(operation, '_schema', None), 'name', None) == 'aten::equal':
+            left, right = args
+            result = ((left == right).all() if left.shape == right.shape else
+                      torch.scalar_tensor(False, dtype=torch.bool, device=left.device))
+            return self.scalar(result, 'bool')
+        if operation is torch.Tensor.item:
+            value, = args
+            kind = 'complex' if value.dtype.is_complex else 'float' if value.dtype.is_floating_point else 'bool' if value.dtype == torch.bool else 'int'
+            return self.scalar(value.detach().reshape(()), kind)
         if self.local_shapes is None:
             return operation(*args, **kwargs)
         # Only source operators are captured here. Their fake shape branches
@@ -110,6 +149,23 @@ class SourceCapture(TorchFunctionMode):
         # they cannot specialize another rank's source shape to this hint.
         with self.local_shapes.suppress_guards():
             return operation(*args, **kwargs)
+
+    def scalar(self, value, kind=None):
+        """Scalar source results are ordinary typed, zero-dimensional pages."""
+        from torch.fx.experimental.proxy_tensor import get_proxy_mode, get_proxy_slot
+        if kind is None:
+            kind = type(value).__name__
+            dtype = {'bool': torch.bool, 'int': torch.int64, 'float': torch.float64, 'complex': torch.complex128}[kind]
+            value = torch.scalar_tensor(value, dtype=dtype)
+        node = get_proxy_slot(value, get_proxy_mode().tracer).proxy.node
+        node.meta['mesh_scalar_result'] = kind
+        self.scalar_results[id(value)] = kind
+        return value
+
+    def outputs(self, values):
+        from torch.utils._pytree import tree_map
+        return tree_map(lambda value: self.scalar(value) if type(value) in (bool, int, float, complex)
+                        else self.value(value), values)
 
     def __enter__(self):
         from .partition import _SOURCE_CAPTURE
@@ -464,7 +520,7 @@ def _collective_declaration(node):
         raise ValueError(f'communication operator {schema.name} has no declared group')
     group = dist.distributed_c10d._resolve_process_group(group_name)
     n, calls, mathematical = group.size(), [], []
-    x = args.get('input', args.get('x', args.get('self', args.get('partials'))))
+    x = args.get('input', args.get('x', args.get('self', args.get('partials', args.get('value')))))
     results, preserved = _collective_results(node, target, args)
     reduction = args.get('reduce_op', args.get('op', 'sum'))
 
@@ -504,19 +560,19 @@ def _collective_declaration(node):
                     reads={root: _stream.TensorLayout((write.count,), (0,))}, writes={root: write}, initialization=True)
     elif namespace == 'torch_mesh' and name in ('allgatherv', 'allgatherv_out'):
         calls = gather(x, results[0], args['dim'], args['sizes'])
-    elif namespace == 'torch_mesh' and name in ('all_reduce', 'linear_sum', 'fused_step', 'fused_step_out'):
-        if name == 'all_reduce':
-            calls = [declare(backend.Call(backend.ALLREDUCE, x.numel(), x.dtype, op=_operation(reduction)), x, results[0])]
-        elif name == 'linear_sum' or args.get('adds'):
-            output = _value(node) if name != 'fused_step_out' else args['out']
-            call = _source_call(backend.Call(backend.ALLREDUCE, output.numel(), output.dtype), node, output.numel())
-            calls = partition._gather_writes([output.numel()] * n, output.dtype, declaration=call) if n > 1 else []
-        else:
-            calls = gather(x, results[0], args['dim'], args['sizes'])
+    elif namespace == 'torch_mesh' and name == 'all_reduce':
+        calls = [declare(backend.Call(backend.ALLREDUCE, x.numel(), x.dtype, op=_operation(reduction)), x, results[0])]
     elif namespace == 'torch_mesh' and name == 'reduce_scatterv':
         counts = [int(size) * partition._row(x, args['dim']) for size in args['sizes']]
         calls = [declare(backend.Call(backend.REDUCE_SCATTER, x.numel(), x.dtype, counts=counts, op=_operation(reduction)),
                          x, results[0], source_axis=args['dim'], result_axis=args['dim'])]
+    elif namespace == 'torch_mesh' and name == 'reduce_function':
+        from .reduction import declaration as reduction_declaration
+        reducer = reduction_declaration(node, args)
+        root, cells = args['root'], args['counts']
+        calls = [declare(backend.Call(backend.REDUCE_SCATTER if cells else backend.ALLREDUCE if root < 0 else backend.REDUCE,
+            x.numel(), x.dtype, root=max(0, root), op=reducer.operator(group), element_shape=reducer.element_shape,
+            counts=[count * reducer.unit for count in cells] if cells else None), x, results[0])]
     elif namespace == 'torch_mesh' and name == 'merge_partials':
         operator = group.partials_operator(x.shape[-1])
         root, rows = args['root'], args.get('rows', [])
@@ -558,7 +614,7 @@ def _collective_declaration(node):
     return declaration
 
 
-def lower(graph, *, forms=None):
+def lower(graph):
     """Transport Calls from the source's retained mathematical declarations."""
     from . import backend
     groups, trains = {}, {}
@@ -569,7 +625,7 @@ def lower(graph, *, forms=None):
         target, args = declaration['operation'], declaration['arguments']
         group_name, group, calls = declaration['group_name'], declaration['group'], list(declaration['calls'])
         name, n = target._schema.name.split('::', 1)[1], group.size()
-        x = args.get('input', args.get('x', args.get('self', args.get('partials'))))
+        x = args.get('input', args.get('x', args.get('self', args.get('partials', args.get('value')))))
         if calls:
             fused_calls = all(call.kind == backend.WRITE and call.fused for call in calls)
             repeats = int(args.get('repeats', 1)) if fused_calls else 1
@@ -596,12 +652,6 @@ def lower(graph, *, forms=None):
                     del trains[group_name]
                 continue
             groups.setdefault(group_name, []).append(calls)
-            if forms is not None and fused_calls:
-                weight, adds = args.get('w'), name in ('all_reduce', 'linear_sum') or args.get('adds', False)
-                source = x.view(1) if x.ndim == 0 else x
-                dim = args.get('dim', 0)
-                sizes = args.get('sizes', [source.shape[dim]] * n)
-                forms.append((source, weight, dim, tuple(sizes), group_name, adds, repeats))
             if repeats > 1:
                 trains[group_name] = dict(physical=[call._replace(sources=(), route_scope=None) for call in calls],
                     calls=calls, count=1, remaining=repeats - 1)
@@ -854,7 +904,7 @@ def trace(function, *arguments, parameters=(), source_scope=None, route_scope=No
         with source:
             output = function(*values)
             source.gradients(parameters)
-            return output
+            return source.outputs(output)
 
     try:
         with mode:
@@ -870,6 +920,9 @@ def trace(function, *arguments, parameters=(), source_scope=None, route_scope=No
     # graph (including a mesh-coordinate nonzero). They are configuration work,
     # not part of the declared function or its explicit gradient outputs.
     spans(graph.graph)
+    result = next(node.args[0] for node in graph.graph.nodes if node.op == 'output')
+    graph.meta['mesh_result_types'] = torch.utils._pytree.tree_map(
+        lambda value: value.meta.get('mesh_scalar_result') if isinstance(value, torch.fx.Node) else None, result)
     graph.recompile()
     if source_scope is not None:
         from .compilation import source_scope as scoped
@@ -879,10 +932,10 @@ def trace(function, *arguments, parameters=(), source_scope=None, route_scope=No
 
 class Execution:
     """Configuration which appends every numerical span and crossing to one native function."""
-    def __init__(self, steps, output=None, pages=(), initializations=()):
+    def __init__(self, steps, output=None, pages=(), initializations=(), inputs=()):
         from . import _stream
         self.steps, self.output, self.pages = tuple(steps), output, tuple(pages)
-        self.initializations = tuple(initializations)
+        self.initializations, self.inputs = tuple(initializations), tuple(inputs)
         self._initialized = False
         self.executions = _stream.Executions(output)
         self.forward = self.executions.run
@@ -892,6 +945,7 @@ class Execution:
         # This is declaration-time state: only the first prepared invocation
         # contains imports. Runtime submits the already recorded schedules.
         if not self._initialized:
+            schedule.inputs([*self.inputs, *(source for source, _ in self.initializations)])
             for source, destination in self.initializations:
                 schedule.copy(source, destination)
         for step in self.steps:
@@ -907,11 +961,11 @@ class Execution:
             self.executions.add(schedule)
 
 
-def execution_sequence(steps, output=None, pages=(), initializations=()):
-    return Execution(steps, output, pages, initializations)
+def execution_sequence(steps, output=None, pages=(), initializations=(), inputs=()):
+    return Execution(steps, output, pages, initializations, inputs)
 
 
-_BOUND = {'all_to_all_single', 'merge_partials', 'reduce_scatterv', 'allgatherv', 'allgatherv_out', 'select_exchange', 'select_reduce',
+_BOUND = {'all_to_all_single', 'merge_partials', 'reduce_function', 'reduce_scatterv', 'allgatherv', 'allgatherv_out', 'select_exchange', 'select_reduce',
           'reduce_scatter_tensor', 'all_gather_into_tensor', 'all_gather_into_tensor_out',
           'broadcast', 'broadcast_', 'all_reduce_coalesced', 'all_gather_into_tensor_coalesced',
           'reduce_scatter_tensor_coalesced'}
@@ -1095,7 +1149,7 @@ def _boundary_work(section, projection, algebra):
                 equalities=tuple(equalities), requirements=tuple(requirements), commands=tuple(commands))
 
 
-def _local_assignment(prepared, arguments):
+def _local_assignment(prepared, arguments, page_effects=None):
     """Full declared work is one scope of the same selected-page contract."""
     from .ownership import _source_leaves, project_numerical
     graph, algebra = prepared['expression']['graph'], prepared['algebra']
@@ -1125,6 +1179,9 @@ def _local_assignment(prepared, arguments):
                     for effect in section['effects'] for domain in effect['domains']
                     for part in (domain, domain.get('finish')) if part is not None}
             projection = project_numerical(section, outputs, algebra, work=work)
+            if page_effects is not None:
+                from .page_effects import refine
+                projection = refine(section, projection, page_effects, algebra)
         pending.extend(projection['pending'])
         projections.append(projection)
     result = next(node.args[0] for node in graph.graph.nodes if node.op == 'output')
@@ -1135,20 +1192,26 @@ def _local_assignment(prepared, arguments):
 
 class BoundGraph:
     """Bind declared work and page deliveries once through the shared placement."""
-    def __init__(self, graph, arguments, group, configuration, destinations=None, *, prepared=None, ownership=None):
+    def __init__(self, graph, arguments, group, configuration, destinations=None, *, prepared=None, ownership=None,
+                 page_effects=None):
         if configuration and configuration.get('layout_preferences') and graph.meta.get('mesh_program_scope') is None:
             raise ValueError('layout preferences require a declared source_scope')
         if ownership is None:
             from .ownership import prepare_expression
             if prepared is None:
                 prepared = prepare_expression(dict(graph=graph, operands=tuple(arguments)))
-            ownership = _local_assignment(prepared, arguments)
+            ownership = _local_assignment(prepared, arguments, page_effects)
         self.prepared = ownership['prepared']
         self.groups, self.steps = {}, []
+        self.page_effects = page_effects
         self._bind_sections(ownership, destinations)
         from .compilation import layout_choices
         self.layout_choices = layout_choices()
         self.execution.initializations = tuple(graph.meta.get('mesh_initializations', ()))
+        from torch.utils._pytree import tree_leaves
+        from .operand import TensorView
+        self.execution.inputs = tuple(value for value in tree_leaves(ownership['arguments'])
+                                      if isinstance(value, (torch.Tensor, TensorView)))
 
     def _bind_sections(self, ownership, destinations):
         """Bind explicit work and delivery assignments to the existing recorder."""
@@ -1258,6 +1321,7 @@ class BoundGraph:
             if retained is not None:
                 retained.select_domains(projection['records'])
                 requirements.extend(retained.consumer_uses())
+                projection = retained.page_projection(projection)
             types = [described(key) for key in (*input_bindings, *output_bindings)]
             device = types[0].device.type
             from .compilation import source_records
@@ -1315,7 +1379,8 @@ class BoundGraph:
                 actuals = [plan['storage'][name]['operand'] if name in plan['storage'] else
                            input_actuals.get(name, value)
                            for name, value in zip(section['retained'].graph_inputs, section['operands'], strict=True)]
-                self.steps.append(section['retained'].bind(actuals, **plan))
+                declaration = section['retained'].emit(actuals, **plan)
+                self.steps.append(declaration)
                 source = section.get('source_section', section)
                 if id(source) not in declared_sections:
                     for name, calls in lower(section['graph']).items():
@@ -1375,17 +1440,21 @@ class BoundGraph:
             owner = ownership['requests'][coordinate][key]
             return view(available[original(key)], owner['selection'], owner['shape'])
         from . import _stream
-        from .layout import copies
+        from .layout import copy_declarations
         from .native import Program
         values, spec = tree.tree_flatten(tree.tree_map(result, results, is_leaf=field))
         copied = []
         for index, (value, destination) in enumerate(zip(values, targets, strict=True)):
             if destination is not None:
-                copied.extend(copies(value, destination))
+                copied.extend(copy_declarations(value, destination))
                 values[index] = destination
         self.output = tree.tree_unflatten(values, spec)
         if copied:
-            self.steps.append(Program(_stream.Commands(copied), self.output))
+            self.steps.append(dict(commands=tuple(copied), output=self.output, pages=()))
+        if self.page_effects is not None:
+            from .page_effects import lower
+            lower([step for step in self.steps if isinstance(step, dict)], self.page_effects)
+        self.steps = [Program.prepare(step) if isinstance(step, dict) else step for step in self.steps]
         self.execution = execution_sequence(self.steps, self.output, owners)
 
 class Function:
@@ -1413,6 +1482,7 @@ class Function:
         self.source_graph = None
         self.graph, self.groups, self.run, self.output_spec = None, {}, None, None
         self.execution = None
+        self.result_types = None
 
     def capture(self):
         """Capture the source once, before functionalization, partitioning or fusion."""
@@ -1430,6 +1500,7 @@ class Function:
         with bind(self.configuration):
             self.captured_graph = trace(recorded, *self.arguments, parameters=self.parameters,
                                         source_scope=self.source_scope, route_scope=self.route_scope)
+        self.result_types = self.captured_graph.meta['mesh_result_types']
         return self
 
     def repeated(self, count, *, first=0):
@@ -1441,7 +1512,7 @@ class Function:
                         configuration=self.configuration, ownership=self.ownership,
                         source_scope=self.source_scope, route_scope=self.route_scope)
         made.captured_graph = repeat_source(self.captured_graph, count, first)
-        made.output_spec = self.output_spec
+        made.output_spec, made.result_types = self.output_spec, self.result_types
         return made
 
     def declare(self, group, *, destinations=None):
@@ -1456,6 +1527,7 @@ class Function:
         from .compilation import lift_attributes, bind
         graph, arguments = lift_attributes(graph, self.arguments)
         self.source_graph = graph
+        self.result_types = graph.meta.get('mesh_result_types', self.result_types)
         ownership = self.ownership
         if ownership is None:
             scopes = list(graph.meta.get('mesh_scopes', ()))

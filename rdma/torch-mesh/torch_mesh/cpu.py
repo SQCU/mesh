@@ -80,6 +80,12 @@ template<class T> inline T select(T a, T b, bool condition) { return condition ?
 '''
 
 
+_SCALAR_ABI = dict(bool=ctypes.c_bool, int8_t=ctypes.c_int8, uint8_t=ctypes.c_uint8,
+                  int16_t=ctypes.c_int16, uint16_t=ctypes.c_uint16, int32_t=ctypes.c_int32,
+                  uint32_t=ctypes.c_uint32, int64_t=ctypes.c_int64, uint64_t=ctypes.c_uint64,
+                  float=ctypes.c_float, double=ctypes.c_double, size_t=ctypes.c_size_t)
+
+
 def argument_record(command, pointer_values):
     """The native entry's fixed ABI and its explicit pointer relocations."""
     fields, values, places = [], {}, []
@@ -89,7 +95,7 @@ def argument_record(command, pointer_values):
             fields.append((name, ctypes.c_void_p))
             values[name] = pointer_values[slot]
         else:
-            kind = ctypes.c_float if spec['type'] == 'const float' else ctypes.c_int64
+            kind = _SCALAR_ABI[spec['type'].removeprefix('const ')]
             fields.append((name, kind))
             values[name] = command['constants'][slot]
     record = type('CpuArguments', (ctypes.Structure,), {'_fields_': fields})

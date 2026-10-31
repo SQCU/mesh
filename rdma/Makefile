@@ -131,7 +131,7 @@ kernels: .build/libnccl-mesh.metallib
 	  [ "$$(cat $@ 2>/dev/null)" = "$$environment" ] || printf '%s\n' "$$environment" > $@
 $(IMAGES:%=.build/%) .build/nccl-mesh-kernels .build/libnccl-mesh.binarchive: .build/metal-environment
 .PHONY: FORCE kernels install-images install-nccl clean-kernels
-.build/libnccl-mesh.dylib: nccl-mesh.c mesh-statistics.c mesh-statistics.h metal-recording.m metal-recording.h mesh-host.h mesh-tensor-layout.m mesh-tensor-layout.h mesh-index-relation.m mesh-index-relation.h mesh-isl-memory.c mesh-isl-memory.h mesh-sparse.c mesh-sparse.h $(ISL_ARCHIVE) mesh-span-plan.h mesh-landing.h mesh-lease-retire.h nccl-mesh-metal.m nccl-mesh-metal.h nccl-mesh-kernels.h .build/libnccl-mesh.sha256 .build/mesh_metal.h nccl.h mesh-graph.h mesh-write-compiler.h \
+.build/libnccl-mesh.dylib: nccl-mesh.c mesh-statistics.c mesh-statistics.h metal-recording.m metal-recording.h mesh-host.h mesh-tensor-layout.m mesh-tensor-layout.h mesh-index-relation.m mesh-index-relation.h mesh-isl-memory.c mesh-isl-memory.h mesh-sparse.c mesh-sparse.h $(ISL_ARCHIVE) mesh-span-plan.h mesh-landing.h mesh-lease-retire.h nccl-mesh-metal.m nccl-mesh-metal.h mesh-publication.h nccl-mesh-kernels.h .build/libnccl-mesh.sha256 .build/mesh_metal.h nccl.h mesh-graph.h mesh-write-compiler.h \
   mesh-call.h mesh-dataflow.h mesh.h mesh-plan.h mesh-fabric.h .build/libmesh.dylib Makefile $(METAL_CONFIGURATION)
 	cc -fblocks -O2 $(WARN) $(METAL_DEFINES) -DMESH_ISL_SLAB_BYTES=$(MESH_ISL_SLAB_BYTES) -dynamiclib $(ISL_HEADERS) -I .build -DKERNELS_SHA256=\"$$(cat .build/libnccl-mesh.sha256)\" \
 	  -Wl,-install_name,@rpath/libnccl-mesh.dylib -Wl,-rpath,@loader_path \

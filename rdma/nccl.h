@@ -312,6 +312,7 @@ typedef struct {
   /* Each declared binding uses (invocation + displacement) % instances. */
   size_t invocation;
 } ncclMeshStream;
+
 /* ncclCollConfig_t.launchCompletionEvent: not used; must be NULL. */
 typedef void *cudaEvent_t;
 
@@ -670,6 +671,49 @@ typedef enum { ncclInt8       = 0, ncclChar       = 0,
                ncclFloat8e5m2 = 11,
                ncclNumTypes   = 12
 } ncclDataType_t;
+/* A reduction is a compiler operand. `lower` runs only while the enclosing
+   function is prepared; it emits ordinary commands into the supplied stream.
+   One independent value is `unit` scalars. Cuts never split that value.
+   Sources are already in the declared fold order. The lowering must load all
+   inputs needed by one value before storing that value into an aliased output.
+   A zero-source relation emits the supplied function's identity. */
+typedef struct {
+  size_t source;
+  ncclMeshBuffer word;
+  ncclMeshBuffer violation;
+  uint32_t polls, channel;
+  uint64_t entry; /* observation constants, emitted during preparation */
+} ncclMeshReductionObservation;
+typedef struct {
+  size_t observation; /* the incoming threshold the completed result publishes */
+  ncclMeshBuffer word;
+} ncclMeshReductionPublication;
+typedef struct {
+  ncclMeshBuffer destination;
+  const ncclMeshBuffer *sources;
+  size_t source_count, cells;
+  uint32_t unit;
+  ncclDataType_t type;
+  const uint32_t *source_access; /* page-version access modes, consumed at preparation */
+  const ncclMeshReductionObservation *observations;
+  size_t observation_count;
+  const ncclMeshReductionPublication *publications;
+  size_t publication_count;
+  /* One page-backed uint64 row per cut: first value, value count, then each
+     observation's threshold. Sources and destination cover the full relation.
+     Completion holds uint32[cut_count] settled words followed by its prefix.
+     These are ordinary function-owned operands, not a second task scheduler. */
+  ncclMeshBuffer cuts, completion;
+  size_t cut_count;
+} ncclMeshReductionCell;
+typedef ncclResult_t (*ncclMeshReductionLower)(void *context, const ncclMeshReductionCell *, const ncclMeshStream *);
+enum { ncclMeshReductionReassociate = 1, ncclMeshReductionReorder = 2 };
+typedef struct {
+  uint32_t unit, flags;
+  void *context;
+  ncclMeshReductionLower lower;
+} ncclMeshReductionFunction;
+ncclResult_t ncclMeshRedOpCreateFunction(ncclRedOp_t *, const ncclMeshReductionFunction *, ncclDataType_t, ncclComm_t);
 
 /* ncclScalarResidence_t: Location and dereferencing logic for scalar arguments. */
 typedef enum {
@@ -1060,9 +1104,10 @@ typedef struct ncclMeshGroup {
   size_t invocation;
   uint64_t groups;
 } ncclMeshGroup;
-/* Observe qualifies a monotone progress read: it requires the preceding
-   publication, but does not prevent a later publication from advancing it. */
-enum { ncclMeshAccessRead = 1, ncclMeshAccessWritten = 2, ncclMeshAccessObserve = 4 };
+/* Observe qualifies a monotone progress read. Initialization stays ordered;
+   exact payload-page accesses carry producer dependencies. Atomic contributors
+   commute, so neither peers nor prefix observers acquire a whole-output join. */
+enum { ncclMeshAccessRead = 1, ncclMeshAccessWritten = 2, ncclMeshAccessObserve = 4, ncclMeshAccessNext = 64, ncclMeshAccessAtomic = 128 };
 typedef struct { ncclMeshBuffer storage; size_t bytes; uint32_t access; } ncclMeshAccess;
 /* With accesses NULL return required count; otherwise *count is capacity. */
 ncclResult_t ncclMeshGroupAccesses(const ncclMeshGroup* group, ncclMeshAccess* accesses, size_t* count);
@@ -1084,9 +1129,9 @@ typedef struct { uint32_t element_bits, rank; const uint64_t* shape; const int64
    and ncclMeshReduceScatterV's, a rank's count each; ncclMeshAlltoAllV's sendcounts then recvcounts), `type` (a WRITE's
    `count` of it is the WRITE's bytes, all a WRITE moves: its values' type is its producer's and consumer's), `op` (a
    reduction's), and `group`: consecutive calls of one number are one group (ncclGroupStart to ncclGroupEnd; a call
-   outside one its own group). ncclMeshPlanRun supplies their invocation order. `fused` (not 0): the call is
-   recorded with a fused record sink (ncclMeshStream fused). All calls in a
-   group share that sink and frame count. It uses the same physical striping and routed-write
+   outside one its own group). ncclMeshPlanRun supplies their invocation order. `fused` (not 0) gives explicit WRITE calls a producer/consumer record sink
+   (ncclMeshStream fused). Numerical collectives always enter the common command
+   graph. All calls in a WRITE group share its sink and frame count. It uses the same physical striping and routed-write
    representation as other calls; fusion changes publication/consumption encoding, not available cables. */
 enum { ncclMeshCallAllReduce = 0, ncclMeshCallBroadcast = 1, ncclMeshCallReduce = 2, ncclMeshCallReduceScatter = 3,
        ncclMeshCallAllGather = 4, ncclMeshCallAlltoAllV = 18, ncclMeshCallWrite = 19 };
@@ -1245,8 +1290,16 @@ ncclResult_t ncclMeshCommEncode(ncclComm_t comm, cudaStream_t stream);
    `count` offsets in them of each binding's ncclMeshBuffer. With bytes and places NULL, only their sizes (0: no plan);
    else each holds at least as many. */
 ncclResult_t ncclMeshCommPlanDeclaration(ncclComm_t comm, void* bytes, size_t* length, size_t* places, size_t* count);
-/* ncclMeshCommPlan from a declaration ncclMeshCommPlanDeclaration gave, its bindings the caller's. */
-ncclResult_t ncclMeshCommPlanDeclared(ncclComm_t comm, const void* bytes, size_t length);
+/* Dynamic reducer handles belong to one communicator. A saved handle is only
+   an identity within its declaration, never a pointer or a reusable operator.
+   Register the instance's reducers first, then supply every saved dynamic
+   handle's replacement, including replacements with the same numerical ID.
+   Builtin-only declarations supply NULL, 0. This mapping runs at preparation. */
+typedef struct { ncclRedOp_t declared, instance; } ncclMeshRedOpBinding;
+/* ncclMeshCommPlan from a declaration ncclMeshCommPlanDeclaration gave, its
+   page bindings and dynamic reducer bindings explicitly supplied by the caller. */
+ncclResult_t ncclMeshCommPlanDeclared(ncclComm_t comm, const void* bytes, size_t length,
+    const ncclMeshRedOpBinding* operators, size_t count);
 /* Compiler-derived useful directed bytes for one entire declared function.
    demand has nranks*nranks entries (source-major); group repeats are included.
    Relay amplification is excluded. Query after configuration, before execution;
@@ -1257,13 +1310,13 @@ ncclResult_t ncclMeshCommPlanDemands(ncclComm_t comm, uint64_t* demand, size_t e
    increase this number. A weight change smaller than 1/units may compile to the
    identical schedule; this is probe resolution, never a minimum path share. */
 ncclResult_t ncclMeshCommPlanRouteUnits(ncclComm_t comm, uint64_t* units, size_t entries);
-/* Fused execution uses the same physical fragment compiler and channel bindings
+/* Fused WRITE records use the same physical fragment compiler and channel bindings
    as ordinary compiled writes. A peer may have any number of parallel channels,
    and a logical transfer may contain multiple fragments and relay hops. There is
    no peer-sized restriction and no silent fallback that reads an operand before
-   the caller's publishing kernel has produced it. Unsupported arithmetic or
-   ownership forms must be resolved at realization, not changed to a different
-   publication contract while executing.
+   the caller's publishing kernel has produced it. Numerical reductions emit
+   their commands into the common graph; this WRITE record interface does not
+   replace or suppress them.
 
    The caller supplies room for the declared physical publication and landing
    bindings (ncclMeshFused). The producer writes source pages with the required

@@ -178,23 +178,15 @@ static inline uint64_t mesh_segment_first(const uint64_t *segment,uint32_t q){ u
 /* design/whole-function.md#fabric */
 struct mesh_transfer { struct mesh_step step; uint32_t cable,padding; };
 int mesh_fabric_check(const struct mesh_fabric *);
-/* Refine physical SENDs where their latest preceding COPY changes: a COPY's page units are what a later SEND
-   forwards as they land. A REDUCE's are not cut owners: c56f21a9 made them owners, and every collective at 16 and
-   64 MiB then landed nothing on ranks 1-4 and chain-service ended in SIGBUS, with COPY-only owners it passes
-   (design/measurement-regressions-2026-10-30.md). Only receives in
-   the same buffer with the same element size participate. Adjacent pieces with
-   the same latest receive are kept whole, including where older writes overlap.
-   Non-SEND transfers are unchanged; each SEND's pieces retain its order, cable,
-   round, peer, type and exact coverage. Every inserted boundary is a multiple
-   of page bytes from that SEND's start, so its wire page sequence is unchanged
-   and its peer may retain the unsplit receive. Entry-indexed diagnostics must
-   match page ranges rather than require one local entry per remote entry.
-   An indivisible non-page dependency keeps its SEND whole; other SENDs still
-   refine. Returns the required count (out NULL: count only), or -errno: EINVAL for
-   invalid operands/page or aliased input/output; ENOSPC
-   for insufficient room; EOVERFLOW for unrepresentable extents/count. out must
-   be separate storage; a negative return leaves no usable output. No state,
-   receive gate, payload copy or synchronization is introduced. */
+/* Refine every physical operation at the boundaries of its local producers
+   and consumers. COPY, REDUCE and SEND share exact value cells, including cuts
+   within a page. The routed compiler unions both endpoints' cuts and propagates
+   them through relays before constructing packets or dependencies; no peer may
+   retain a different partition. Pieces preserve order, cable, peer, type and
+   exact coverage. Returns required count (out NULL), or -errno for malformed
+   operands, insufficient output storage, or unrepresentable extents. Input and
+   output storage are distinct. This is preparation algebra: no payload copy,
+   receive gate, runtime work selector or serialization is added. */
 int mesh_fabric_refine(const struct mesh_transfer *,uint32_t count,uint64_t page,
                        struct mesh_transfer *out,uint32_t room);
 /* One preparation scheduler for physical WRITE and collective fragments.

@@ -8,6 +8,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, "..", "..", "..", "rdma"))
 sys.path.insert(0, os.path.join(_HERE, "..", ".."))
 
+from mesh_statistics import now, measure
 from solver.strat.cast_header import Wally, parameter_seed
 from solver.strat.scale_rpc import RemoteCross, RemoteScale
 from solver.strat.baselines import BaselinePolicy, baseline_strategy, default_strategy
@@ -204,7 +205,6 @@ def main():
                 model.parameter_seed = seed
                 model.state_schema = str(schema_id)
                 made_remotes.update({f'{arm}.{name}': remote for name, remote in place(model, arm, world).items()})
-                model.to(device)
             made_models[arm] = (model, forward, seed)
         return made_models, made_remotes
 
@@ -268,7 +268,7 @@ def main():
     def initialize(width, schema_id):
         nonlocal models, learners, provenance, remotes, programs
         models, learners, provenance, programs = {}, {}, {}, {}
-        world.announce('initialize', width, schema_id, shards)
+        world.announce('initialize', width, schema_id, shards, materialize=True)
         made, remotes = realize(width, schema_id)
         for arm in evaluation_arms:
             model, forward, seed = made[arm]
@@ -293,7 +293,7 @@ def main():
             programs[arm] = learners[arm].program if arm in learners else PolicyProgram(
                 model, forward, world=world, arm=arm, device=device, lead=lead)
             if model is not None:
-                programs[arm].synchronize()
+                programs[arm].initialize_replicas()
             provenance[arm] = policy_source(arm, model, source, 'online_train' if arm in learners else 'inference')
         history.clear()
         print(json.dumps({"event": "state_schema_realized", "state_width": width,
@@ -367,7 +367,7 @@ def main():
             versions.update({arm: provenance[arm].get('updates') for arm in models if arm not in versions})
             arms = np.asarray([assigned[(int(team) - 1) % len(assigned)] for team in teams])
             advance_key(key, sampling_key)
-            response_started = time.perf_counter()
+            response_started = now()
             prepared = prepare_policies(programs, chorus)
             emission = emit_policies(programs, prepared, chorus, arms, sampling_key)
             outputs, comparisons = emission.outputs, emission.comparisons
@@ -378,8 +378,9 @@ def main():
             if 'engine' in route:
                 node, address = route['engine']
                 engine.send(address, node, frames(STRATEGY_KIND, request, tick_id, response, placement["framebytes"], session))
-            response_elapsed = time.perf_counter() - response_started
-            reporting_started = time.perf_counter()
+            response_performance = measure(response_started, now(), response.nbytes, len(rows))
+            response_elapsed = response_performance['seconds']
+            reporting_started = now()
             assignments, decisions = history.assignments(rows, applied_sequences, request, velocity, integrated,
                                                          behavior_logp, arms, versions, provenance)
             labels = [f'page_word.{index}' for index in range(state_rows.shape[1])]
@@ -426,14 +427,14 @@ def main():
                           velocity=velocity.copy(), behavior_logp=behavior_logp.copy(), behavior_arms=arms.copy(),
                           policy_updates=versions)
             history.put(request, decisions, set(applied_sequences), state=issued)
-            source_reporting_elapsed = time.perf_counter() - reporting_started
-            optimization_started = time.perf_counter()
+            source_reporting_elapsed = now() - reporting_started
+            optimization_started = now()
             learning = {arm: value for arm, learner in learners.items()
                         if (value := learner.observe_attributed(attributed.get(arm, []))) is not None}
             if terminal is not None:
                 for learner in learners.values():
                     learner.end_episode(winning_team=terminal, episode_id=current_episode)
-            optimization_elapsed = time.perf_counter() - optimization_started
+            optimization_elapsed = now() - optimization_started
             learning_state = {arm: {'updates': learner.updates,
                               'schedule_updates': learner.updates - learner.schedule_start_updates,
                               'training_contract': learner.training_contract,
@@ -449,10 +450,10 @@ def main():
                               for arm, learner in learners.items()}
             count += 1
             sampled = args.model_sample_every > 0 and count % args.model_sample_every == 0
-            comparison_started = time.perf_counter()
+            comparison_started = now()
             comparison = compare_policies(comparisons, assignments, versions, sampled)
             comparison.update(sampled_at=time.time(), response=count,
-                              producer_pid=os.getpid(), elapsed_s=time.perf_counter() - comparison_started)
+                              producer_pid=os.getpid(), elapsed_s=now() - comparison_started)
             line = {'at': time.time(), 'resp_id': count, 'request_seq': request,
                     'producer_id': producer_id, 'record_id': f'{producer_id}:{count}',
                     'engine_session': session, 'engine_episode': int(team_rows[0, TS['EPISODE']]),
@@ -505,7 +506,8 @@ def main():
                              for arm in models]
             totals = {name: sum(part[name] for part in response_work)
                       for name in ('lower_flops', 'upper_flops', 'lower_bytes', 'upper_bytes')}
-            line['work'] = {**totals, 'elapsed_s': response_elapsed,
+            line['work'] = {**totals, 'elapsed_s': response_elapsed, 'response': response_performance,
+                            'inference': emission.performance,
                             'preparation_elapsed_s': preparation_elapsed, 'inference_elapsed_s': inference_elapsed,
                             'source_reporting_elapsed_s': source_reporting_elapsed,
                             'strategy_interval_s': interval,

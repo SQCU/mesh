@@ -44,7 +44,7 @@ int mesh_fabric_refine(const struct mesh_transfer *in,uint32_t count,uint64_t pa
   for(uint32_t k=0;k<count && !error;k++){
     if(written>=INT_MAX){error=-EOVERFLOW;break;}
     const struct mesh_step *s=&in[k].step;
-    if(s->op!=MESH_STEP_SEND || !s->piece.elements){
+    if(!s->piece.elements){
       if(out && written<room)out[written]=in[k];
       written++;
       continue;
@@ -52,51 +52,25 @@ int mesh_fabric_refine(const struct mesh_transfer *in,uint32_t count,uint64_t pa
     const uint64_t end=s->first+s->piece.elements;
     size_t n=0;
     cuts[n++]=s->first;cuts[n++]=end;
-    for(uint32_t j=0;j<k;j++){
+    for(uint32_t j=0;j<count;j++){
       const struct mesh_step *a=&in[j].step;
-      if(a->op==MESH_STEP_SEND || a->buffer!=s->buffer || a->piece.element_bytes!=s->piece.element_bytes ||
+      if(a->buffer!=s->buffer || a->piece.element_bytes!=s->piece.element_bytes ||
          !a->piece.elements || a->first>=end || a->first+a->piece.elements<=s->first)continue;
       if(a->first>s->first)cuts[n++]=a->first;
       if(a->first+a->piece.elements<end)cuts[n++]=a->first+a->piece.elements;
     }
     qsort(cuts,n,sizeof *cuts,mesh_cut_order);
-    const uint64_t quantum=mesh_page_quantum(page,s->piece.element_bytes);
+    /* A producer and each of its consumers use the same dependency cells.
+       Both earlier definitions and later partial uses contribute boundaries.
+       Page masks represent sub-page cuts; alignment is not a refusal case. */
     uint64_t first=s->first;
-    const uint64_t begin=written;
-    int whole=0;
-    int64_t owner=-2;
-    for(size_t i=0;i+1<n;i++){
-      if(cuts[i]==cuts[i+1])continue;
-      int64_t next=-1;
-      for(uint32_t j=k;j>0;){
-        const struct mesh_step *prior=&in[--j].step;
-        if(prior->op==MESH_STEP_SEND || prior->buffer!=s->buffer ||
-           prior->piece.element_bytes!=s->piece.element_bytes || prior->first>cuts[i] ||
-           prior->first+prior->piece.elements<=cuts[i])continue;
-        /* a COPY's units own cuts; a combine's do not (mesh-plan.h) */
-        if(prior->op==MESH_STEP_COPY)next=j;
-        break;
-      }
-      if(next>=0 && next!=owner && (cuts[i]-in[next].step.first)%quantum){whole=1;break;}
-      if(owner!=-2 && next!=owner){
-        if((cuts[i]-s->first)%quantum){whole=1;break;}
-        if(out && written<room){
-          out[written]=in[k];out[written].step.first=first;
-          out[written].step.piece.elements=cuts[i]-first;
-        }
-        written++;first=cuts[i];
-      }
-      owner=next;
-    }
-    /* The packet operand determines representable streaming cuts. An indivisible
-       dependency keeps this SEND whole, without suppressing other SEND cuts. */
-    if(whole){written=begin;first=s->first;}
-    if(!error){
+    for(size_t i=1;i<n;i++) {
+      if(cuts[i]==first)continue;
       if(out && written<room){
         out[written]=in[k];out[written].step.first=first;
-        out[written].step.piece.elements=end-first;
+        out[written].step.piece.elements=cuts[i]-first;
       }
-      written++;
+      written++;first=cuts[i];
     }
     if(written>INT_MAX)error=-EOVERFLOW;
   }

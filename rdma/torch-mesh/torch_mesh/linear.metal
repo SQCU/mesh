@@ -21,54 +21,52 @@ template <> inline vec<float, MESH_LINEAR_VECTOR> linear_load<1>(device const ha
     for (uint j = 0; j < MESH_LINEAR_VECTOR; j++) v[j] = float(p[j]);
     return v; }
 
-template <uint VW, uint VX, uint COLS, uint NSG, uint U, typename Store>
-inline void linear_body(device const half* x, device const half* x1, device const half* w, const linear_dims d, thread const Store& store,
+template <uint COLS, uint NSG, uint U, typename Read, typename Read1, typename ReadWeight, typename Store>
+inline void linear_body_read(thread const Read& x, thread const Read1& x1, thread const ReadWeight& w, const linear_dims d, thread const Store& store,
                         threadgroup float* part, uint sg, uint lane, uint tg, uint tid) {
     const uint R = d.R, K = d.K, N = d.N;
     const uint columns = (N + COLS - 1) / COLS;
     const uint n0 = (tg % columns) * COLS, r0 = (tg / columns) * MESH_LINEAR_ROWS;
     const uint span = (K + NSG * MESH_LINEAR_VECTOR - 1) / (NSG * MESH_LINEAR_VECTOR) * MESH_LINEAR_VECTOR;
     const uint k0 = sg * span, k1 = min(K, k0 + span);
-    device const half* wr[COLS];
-    for (uint c = 0; c < COLS; c++) wr[c] = w + ulong(min(n0 + c, N - 1)) * d.LDW;
+    uint wr[COLS];
+    for (uint c = 0; c < COLS; c++) wr[c] = min(n0 + c, N - 1);
     {
         float acc[MESH_LINEAR_ROWS][COLS];
         for (uint r = 0; r < MESH_LINEAR_ROWS; r++)
             for (uint c = 0; c < COLS; c++) acc[r][c] = 0.0f;
-        device const half* xr[MESH_LINEAR_ROWS];
-        device const half* xs[MESH_LINEAR_ROWS];
+        uint xr[MESH_LINEAR_ROWS];
         for (uint r = 0; r < MESH_LINEAR_ROWS; r++) {
-            xr[r] = x + ulong(min(r0 + r, R - 1)) * d.LD0;
-            xs[r] = x1 + ulong(min(r0 + r, R - 1)) * d.LD1;
+            xr[r] = min(r0 + r, R - 1);
         }
-        for (uint seg = 0; seg < 2; seg++) {
-            const uint lo = seg ? max(k0, d.K0) : k0, hi = seg ? k1 : min(k1, d.K0), off = seg ? d.K0 : 0;
-            device const half* const* xx = seg ? xs : xr;
+        const auto segment = [&](thread const auto& xx, uint lo, uint hi, uint off) {
             const uint full = lo + (hi > lo ? (hi - lo) / MESH_LINEAR_VECTOR * MESH_LINEAR_VECTOR : 0);
             uint k = lo + lane * MESH_LINEAR_VECTOR;
             for (; k + (MESH_SIMD_WIDTH * MESH_LINEAR_VECTOR) * (U - 1) < full; k += (MESH_SIMD_WIDTH * MESH_LINEAR_VECTOR) * U) {
                 vec<float, MESH_LINEAR_VECTOR> wv[U][COLS];
                 for (uint u = 0; u < U; u++)
-                    for (uint c = 0; c < COLS; c++) wv[u][c] = linear_load<VW>(wr[c] + k + (MESH_SIMD_WIDTH * MESH_LINEAR_VECTOR) * u);
+                    for (uint c = 0; c < COLS; c++) wv[u][c] = w.vector(wr[c], k + (MESH_SIMD_WIDTH * MESH_LINEAR_VECTOR) * u);
                 for (uint u = 0; u < U; u++)
                     for (uint r = 0; r < MESH_LINEAR_ROWS; r++) {
-                        const vec<float, MESH_LINEAR_VECTOR> xv = linear_load<VX>(xx[r] + k - off + (MESH_SIMD_WIDTH * MESH_LINEAR_VECTOR) * u);
+                        const vec<float, MESH_LINEAR_VECTOR> xv = xx.vector(xr[r], k - off + (MESH_SIMD_WIDTH * MESH_LINEAR_VECTOR) * u);
                         for (uint c = 0; c < COLS; c++) acc[r][c] += dot(xv, wv[u][c]);
                     }
             }
             for (; k < full; k += (MESH_SIMD_WIDTH * MESH_LINEAR_VECTOR)) {
                 vec<float, MESH_LINEAR_VECTOR> wv[COLS];
-                for (uint c = 0; c < COLS; c++) wv[c] = linear_load<VW>(wr[c] + k);
+                for (uint c = 0; c < COLS; c++) wv[c] = w.vector(wr[c], k);
                 for (uint r = 0; r < MESH_LINEAR_ROWS; r++) {
-                    const vec<float, MESH_LINEAR_VECTOR> xv = linear_load<VX>(xx[r] + k - off);
+                    const vec<float, MESH_LINEAR_VECTOR> xv = xx.vector(xr[r], k - off);
                     for (uint c = 0; c < COLS; c++) acc[r][c] += dot(xv, wv[c]);
                 }
             }
             if (full + lane < hi)
                 for (uint r = 0; r < MESH_LINEAR_ROWS; r++)
                     for (uint c = 0; c < COLS; c++)
-                        acc[r][c] += float(xx[r][full + lane - off]) * float(wr[c][full + lane]);
-        }
+                        acc[r][c] += float(xx.scalar(xr[r], full + lane - off)) * float(w.scalar(wr[c], full + lane));
+        };
+        segment(x, k0, min(k1, d.K0), 0);
+        segment(x1, max(k0, d.K0), k1, d.K0);
         for (uint r = 0; r < MESH_LINEAR_ROWS; r++)
             for (uint c = 0; c < COLS; c++) {
                 const float s = simd_sum(acc[r][c]);
@@ -83,6 +81,24 @@ inline void linear_body(device const half* x, device const half* x1, device cons
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
+}
+
+// The same arithmetic body consumes prepared page readers and the chain's
+// directly declared row operands. Reader templates disappear at compilation.
+template <uint Vector>
+struct linear_native_read {
+    device const half* values;
+    ulong stride;
+    float scalar(uint row, uint column) const { return float(values[ulong(row)*stride+column]); }
+    vec<float,MESH_LINEAR_VECTOR> vector(uint row,uint column) const {
+        return linear_load<Vector>(values+ulong(row)*stride+column);
+    }
+};
+template <uint VW,uint VX,uint COLS,uint NSG,uint U,typename Store>
+inline void linear_body(device const half* x,device const half* x1,device const half* w,
+    const linear_dims d,thread const Store& store,threadgroup float* part,uint sg,uint lane,uint tg,uint tid) {
+    linear_body_read<COLS,NSG,U>(linear_native_read<VX>{x,d.LD0},linear_native_read<VX>{x1,d.LD1},
+        linear_native_read<VW>{w,d.LDW},d,store,part,sg,lane,tg,tid);
 }
 
 template <uint ACT>
@@ -106,18 +122,6 @@ kernel void linear_rows(device const half* x [[buffer(0)]], device const half* w
     const linear_store<ACT> store{y, bias, d.LDY, d.SDY, d.B};
     linear_body<VW, VX, COLS, NSG, U>(x, x1, w, d, store, part, sg, lane, tg, tid);
 }
-
-struct linear_act_store {
-    device half* y;
-    device const half* bias;
-    uint LDY, SDY, B, ACT;
-    void operator()(uint r, uint n, float s) const {
-        const float v = s + (B ? float(bias[n]) : 0.0f);
-        y[ulong(r) * LDY + ulong(n) * SDY] = half(ACT == 1 ? tanh(v) : v);
-    }
-};
-
-// linear_group is specialized by the compiler from the manifest binding capacity.
 
 #ifdef MESH_METAL
 template <uint CHANNELS>

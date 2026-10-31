@@ -52,15 +52,31 @@ def declaration(operands, parameters, configuration):
                            OUTPUT_SELECTED=int(maps is not None and not complete['out']))
         selected = maps['out'] if maps is not None else dense((count * extent,))
         grid, group = (blocks, count, 1), (threads, 1, 1)
+        from mesh_relation import Algebra
+        from .operand import layout_configuration
+        algebra = Algebra()
+        cells = algebra.map((blocks * count,), (count * extent,),
+            lambda g, i: [f'floor({i[0]}/{extent}) = floor({g[0]}/{blocks})',
+                          f'({g[0]} mod {blocks}) * {threads} <= {i[0]} mod {extent} < (({g[0]} mod {blocks}) + 1) * {threads}'])
+        output = cells.then(algebra.layout(layout_configuration(selected)))
+        total = algebra.map((blocks * count,), (blocks * count,), lambda g, i: [f'{i[0]} = {g[0]}'])
+        initial_dispatch = [dict(side='reads', slot=0, group_relation=cells)]
+        initial_dispatch.extend((dict(side='writes', slot=2, group_relation=total),
+                                 dict(side='writes', slot=3, group_relation=cells)) if blocks > 1 else
+                                (dict(side='writes', slot=1, group_relation=output),))
         commands.shader(_SOURCE, 'scan_blocks', [source, target, totals, partial],
             definitions=definitions, indices={8: selected}, grid=grid, threadgroup=group,
-            access=1 | ((12 if blocks > 1 else 2) << shift), limits=limits)
+            access=1 | ((12 if blocks > 1 else 2) << shift), limits=limits, dispatch=tuple(initial_dispatch))
         if blocks > 1:
             result = commands.temporary(prefix + '/prefix', (count, blocks), accumulator,
                                         requirements=('contiguous',))
             scan(totals, result, 1, prefix=prefix + '/nested')
             commands.shader(_SOURCE, 'add_prefix', [target, result, partial], definitions=definitions,
-                indices={8: selected}, grid=grid, threadgroup=group, access=6 | (1 << shift), limits=limits)
+                indices={8: selected}, grid=grid, threadgroup=group, access=6 | (1 << shift), limits=limits,
+                dispatch=(dict(side='writes', slot=0, group_relation=output),
+                          dict(side='reads', slot=1, group_relation=algebra.map((blocks * count,), (blocks * count,),
+                              lambda g, i: [f'{g[0]} mod {blocks} > 0', f'{i[0]} = {g[0]} - 1'])),
+                          dict(side='reads', slot=2, group_relation=cells)))
 
     scan(commands.view('x'), commands.view('out'), parameters['dim'], parameters.get('write_maps'),
          parameters.get('write_complete'))

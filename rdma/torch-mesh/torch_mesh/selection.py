@@ -143,19 +143,39 @@ def declaration(operands, parameters, configuration):
     shift = geometry['ACCESS_WRITE_SHIFT']
     options = dict(definitions=definitions, indices=indices, grid=grid, threadgroup=group,
                    limits={'threadgroup_memory_bytes': memory})
+    from mesh_relation import Algebra
+    from .operand import layout_configuration
+    algebra = Algebra()
+    def dispatch(bindings, modes):
+        result = []
+        for slot, (view, mode) in enumerate(zip(bindings, modes, strict=True)):
+            if view is None:
+                continue
+            role = 'values' if view is target else 'indices' if view is positions else None
+            columns = k if role else pad if view is scratch else extent
+            relation = algebra.map((count,), (count * columns,),
+                lambda g, i: [f'{g[0]} * {columns} <= {i[0]} < ({g[0]} + 1) * {columns}'])
+            if role and maps is not None:
+                relation = relation.then(algebra.layout(layout_configuration(maps[role])))
+            result.extend(dict(side=side, slot=slot, group_relation=relation)
+                          for side, flag in (('reads', 1), ('writes', 2)) if mode & flag)
+        return tuple(result)
     commands.shader(_SOURCE, 'select_top', [source, target, positions, scratch],
-                    access=1 | ((8 if external else 6) << shift), **options)
+                    access=1 | ((8 if external else 6) << shift),
+                    dispatch=dispatch([source, target, positions, scratch], [1, 0 if external else 2, 0 if external else 2, 2 if external else 0]),
+                    **options)
     if external:
         width = 2
         while width <= pad:
             stride = width // 2
             while stride:
                 commands.shader(_SOURCE, 'order_top', [source, scratch],
-                    constants={2: struct.pack('2I', width, stride)}, access=3 | (2 << shift), **options)
+                    constants={2: struct.pack('2I', width, stride)}, access=3 | (2 << shift),
+                    dispatch=dispatch([source, scratch], [1, 3]), **options)
                 stride //= 2
             width *= 2
         commands.shader(_SOURCE, 'write_top', [source, target, positions, scratch],
-                        access=9 | (6 << shift), **options)
+                        access=9 | (6 << shift), dispatch=dispatch([source, target, positions, scratch], [1, 2, 2, 1]), **options)
     return commands.declaration()
 
 

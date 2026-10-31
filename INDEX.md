@@ -51,7 +51,7 @@ other projects, such as a game bot, and old dated records; they are not listed h
   Apple GPUs, on any number of Macs in any cabling. It quotes the operator's statements that set it.
 - [rdma/NCCL.md](rdma/NCCL.md): the contract of libnccl-mesh, NCCL's C API over the bridges. It covers building and
   running, communicators, the host and Metal paths, plans, persistent exchanges, memory, routes between unlinked ranks,
-  failures and the planner in `mesh-plan.h`, then the NumPy binding (`mesh_mpi.py`) and what is not implemented.
+  failures and the planner in `mesh-plan.h`, then whole-function callers and what is not implemented.
 - [design/heterogeneity.md](design/heterogeneity.md): work split over nodes of different speeds and moved over links
   of different costs: torch-mesh's partition operand, the parts `allocate.Balancer` moves from each rank's measured
   stretches, and the literature's requirements R1-R14 beside what the code does for each.

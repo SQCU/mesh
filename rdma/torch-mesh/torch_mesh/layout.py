@@ -124,17 +124,15 @@ def place(graph, placements):
 
 
 @lru_cache(None)
-def _copy_pipeline(source, destination, width, source_origin, destination_origin):
-    kind = {1: 'uchar', 2: 'ushort', 4: 'uint', 8: 'ulong'}[width]
-    prefix = (f'#define MESH_COPY_INPUT_TYPE {kind}\n#define MESH_COPY_OUTPUT_TYPE {kind}\n#define MESH_COPY_COUNT {source.count}ul\n'
-              '#define MESH_COPY_SOURCE (mesh_index<0>(i))\n#define MESH_COPY_DESTINATION (mesh_index<1>(i))\n')
-    return pipeline('', {0: source, 1: destination}, prefix + Path(__file__).with_suffix('.metal').read_text(), 'mesh_layout_copy',
-                    origins={0: None if source_origin is None else source_origin // width,
-                             1: None if destination_origin is None else destination_origin // width})
+def _copy_source():
+    return Path(__file__).with_suffix('.metal').read_text()
 
 
-def copies(source, destination):
-    """Compile a necessary copy into independently schedulable logical tiles."""
+def copy_declarations(source, destination):
+    """Retain a necessary copy's shared source and exact group/page relation."""
+    import torch
+    from mesh_relation import Algebra
+    from .operand import byte_operand
     from .placement import same_view
     if same_view(source, destination) or not source.numel():
         return []
@@ -146,17 +144,34 @@ def copies(source, destination):
     commands = []
     width = math.gcd(source.element_size(), 8)
     units = source.element_size() // width
+    dtype, kind = {1: (torch.uint8, 'uchar'), 2: (torch.uint16, 'ushort'),
+                   4: (torch.uint32, 'uint'), 8: (torch.uint64, 'ulong')}[width]
+    algebra = Algebra()
     for origin, size in _stream.view_tiles(source.shape, limit):
         left, right = source, destination
         for axis, (first, count) in enumerate(zip(origin, size)):
             left, right = left.slice(axis, first, count), right.slice(axis, first, count)
-        handle = _copy_pipeline(_stream.operand_layout(left).components(units), _stream.operand_layout(right).components(units),
-                                width, left.binding_origin, right.binding_origin)
-        threads = min(configuration['GATHER_THREADS'], _stream.pipeline_facts(handle)[0])
-        count = left.numel() * units
-        commands.append((handle, [left, right], {}, (-(-count // threads), 1, 1), (threads, 1, 1), False,
-                         1 | (2 << configuration['ACCESS_WRITE_SHIFT'])))
+        left = TensorView(left.storage_as(dtype), left.layout.components(units), left.binding_origin)
+        right = TensorView(right.storage_as(dtype), right.layout.components(units), right.binding_origin)
+        threads = min(configuration['GATHER_THREADS'], _stream.device_facts()[1])
+        count = left.numel()
+        groups = -(-count // threads)
+        relation = algebra.map((groups,), (count,), lambda g, x: [f'{g[0]} * {threads} <= {x[0]} < ({g[0]} + 1) * {threads}'])
+        prefix = (f'#define MESH_COPY_INPUT_TYPE {kind}\n#define MESH_COPY_OUTPUT_TYPE {kind}\n#define MESH_COPY_COUNT {count}ul\n'
+                  '#define MESH_COPY_SOURCE (mesh_index<0>(i))\n#define MESH_COPY_DESTINATION (mesh_index<1>(i))\n')
+        commands.append(dict(kind='shader', source=prefix + _copy_source(), function='mesh_layout_copy',
+            operands=[left, right], constants={}, grid=(groups, 1, 1), threadgroup=(threads, 1, 1), thread_grid=False,
+            access=1 | (2 << configuration['ACCESS_WRITE_SHIFT']), types=(dtype, dtype), arguments=(),
+            binding_origins=(left.binding_origin, right.binding_origin),
+            dispatch=(dict(side='reads', slot=0, group_relation=relation), dict(side='writes', slot=1, group_relation=relation)),
+            reaches=((0, 1, byte_operand(left)), (1, 2, byte_operand(right)))))
     return commands
+
+
+def copies(source, destination):
+    """Bind the same declared copy through the common command compiler."""
+    from .native import command_records
+    return list(command_records(copy_declarations(source, destination)))
 
 
 def allocate(layout, dtype, device, *, extent=0, alignment=1):

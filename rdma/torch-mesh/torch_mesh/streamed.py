@@ -1105,6 +1105,10 @@ class Matrix(torch.Tensor):
 
     @staticmethod
     def ffn(x, gate, up, down, decomposition=None):
+        return _Ffn.apply(x, gate, up, down, decomposition)
+
+    @staticmethod
+    def _ffn(x, gate, up, down, decomposition=None):
         """Compose the projections through their logical neuron domain.
 
         Each encoded order remains part of its operand. The activation writes
@@ -1155,6 +1159,29 @@ class Matrix(torch.Tensor):
                 -(-max(P, A) // (4 * threads)), n, threads, line, outputs=(4, 7) if A else (4,), indexed=(0, 1, 2, 3, 6))
         coded = down.coded_input(hidden)[0][0] if rotated else hidden
         return down.apply(coded, decomposition).to(x.dtype)
+
+
+class _Ffn(torch.autograd.Function):
+    """The coded forward and its ordinary tensor derivative share one source.
+
+    Coded matrices are constant operands. Backward uses their existing products
+    in the opposite direction; the whole-function compiler records both graphs.
+    """
+    @staticmethod
+    def forward(ctx, x, gate, up, down, decomposition):
+        ctx.save_for_backward(x)
+        ctx.matrices = gate, up, down
+        return Matrix._ffn(x, gate, up, down, decomposition)
+
+    @staticmethod
+    def backward(ctx, gradient):
+        x, = ctx.saved_tensors
+        gate, up, down = ctx.matrices
+        gates, values = (x @ gate.T).float(), (x @ up.T).float()
+        hidden = (gradient @ down).float()
+        gate_gradient = torch.ops.aten.gelu_backward.default(hidden * values, gates, approximate='tanh')
+        up_gradient = hidden * torch.nn.functional.gelu(gates, approximate='tanh')
+        return ((gate_gradient.to(x.dtype) @ gate) + (up_gradient.to(x.dtype) @ up), None, None, None, None)
 
 
 def pair_units(sg, su):

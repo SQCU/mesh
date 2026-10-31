@@ -37,10 +37,21 @@ static inline NSUInteger MetalInvocationOffset(NSUInteger offset, NSUInteger str
 // tools/mesh/schedule.py: whether MetalReplayDescribed lists its commands
 void MetalRecordingList(int on);
 // docs/kernels.md Any program
-// Observe qualifies only monotone progress reads. It retains the producer edge
-// without an anti-dependency on later publications of the same progress word.
+// Observe qualifies only monotone progress reads. Initializing the word remains
+// a dependency; concurrent Atomic publications do not order these observations.
+// Exact data-page reaches carry producer ordering. The prepared observation
+// threshold is an operand, not a join of all publishers of its progress word.
+// Observations do not create anti-dependencies on later publications either.
 enum { MetalReachRead = 1, MetalReachWritten = 2, MetalReachBinding = 4, MetalReachResident = 8, MetalReachAddress = 16,
-    MetalReachObserve = 32 };
+    MetalReachObserve = 32, MetalReachNext = 64, MetalReachAtomic = 128 };
+// Atomic qualifies an order-independent contribution (with Written, and Read
+// for read-modify-write). The caller declares that peer contributions commute.
+// Contributors retain prior ordinary-access edges but do not order each other;
+// later ordinary reads and writes depend on every overlapping contributor.
+// This is a preparation relation, not permission to reorder arbitrary atomics.
+// Next qualifies a read of the next declared writer of each selected page
+// range. Preparation binds that version and orders its producer before the
+// reader, even when the producer is declared later. It has no runtime flag.
 // Binding reaches name their actual argument index. Several disjoint ranges
 // can describe one view; all follow that argument's prepared invocation slot.
 // Address reaches use binding = the command address-record ordinal.
@@ -97,7 +108,8 @@ NSDictionary<NSString *, NSData *> *MetalViewBlockGather(const int32_t *present,
     size_t stored, const int32_t *selected, size_t selectedCount, NSUInteger block);
 // One dependency compiler for recorded commands and fused producer/consumer
 // tiles. Each entry contains MetalReach records in execution order. The result
-// names prior writers/readers of overlapping ranges; shared aliases share keys.
+// names writers/readers of overlapping ranges, including declared next versions;
+// shared aliases share keys.
 NSArray<NSIndexSet *> *MetalViewDependencies(NSArray<NSData *> *accesses);
 // A fused bipartite relation: first `producers` entries write, the remaining
 // entries read. Emit fixed adjacency/arrival counts from those dependencies.
@@ -129,13 +141,6 @@ NSData *MetalViewMappedReaches(id<MTLBuffer> buffer, NSUInteger offset, const NS
 // Union prepared element spans with the same byte-access representation.
 NSData *MetalTensorSpanReaches(id<MTLBuffer> buffer, NSUInteger base, NSData *spans,
     NSUInteger elementBytes, uint32_t access, int32_t binding);
-// Preparation only: carry declared page accesses across encoders on the supplied
-// queue. Prepare and enqueue its functions in the same order. Disjoint ranges
-// add no dependency. Transport uses this declaration for its shared counters.
-void MetalEncoderReaches(id<MTL4ComputeCommandEncoder>, const struct MetalReach *, size_t count);
-// One dispatch's accesses enter the same prepared phase frontier as replayed
-// commands. The result requests a barrier only for a real prior hazard.
-BOOL MetalEncoderOrder(id<MTL4ComputeCommandEncoder>, const struct MetalReach *, size_t count);
 // docs/kernels.md#collectives
 typedef int (^MetalCrossing)(id<MTL4ComputeCommandEncoder> encoder, id<MTL4ArgumentTable> table, id<MTLResidencySet> residency,
     NSUInteger invocation, NSUInteger mark);
@@ -154,7 +159,14 @@ struct MetalDeclaration { const char *kind; const void *bytes; size_t length; co
 // The execution context supplies its queue. Preparing invocation slots cannot
 // create more queues; the number of slots is not a hardware resource count.
 struct MetalSchedule *MetalScheduleCreateOn(id<MTL4CommandQueue> queue, enum MetalForm);
-void MetalScheduleAfter(struct MetalSchedule *, id<MTLEvent>, uint64_t value);
+// A producer outside this function publishes these exact page ranges. Only
+// commands consuming or replacing those pages inherit its event dependency.
+// No command, observer or whole-function gate is added for the declaration.
+void MetalScheduleInput(struct MetalSchedule *, const struct MetalReach *, size_t count, id<MTLEvent>, uint64_t value);
+// Preparation scope: reads of these source versions retain their supplied
+// Next qualifier across alias views. A local write ends that source version
+// for its covered range. The callback appends ordinary commands to this function.
+void MetalScheduleReadVersions(struct MetalSchedule *, const struct MetalReach *, size_t count, void (^declare)(void));
 // Preparation records the function's collective result sources. Observers read
 // their existing failure state; this adds no command or transfer-time check.
 void MetalScheduleCommunicator(struct MetalSchedule *, struct ncclComm *);
@@ -165,6 +177,8 @@ typedef const char *(^MetalHostOperation)(MeshHostCompletion, void *, MeshHostTa
 void MetalScheduleHost(struct MetalSchedule *, const struct MetalReach *, size_t count, const struct MetalDeclaration *,
     MetalHostOperation);
 id<MTLResidencySet> MetalScheduleResources(struct MetalSchedule *);
+// Preparation-owned page objects live as long as this recorded function.
+void MetalScheduleRetainObject(struct MetalSchedule *, id object);
 // Explicit bindings from a compiler which already has its pipelines. These
 // enter the same access ordering and encoding as described commands.
 struct MetalCommandBinding {
@@ -201,7 +215,20 @@ struct MetalCommandDescription {
     size_t addressCount;
     MTLSize groups, threads;
     BOOL threadGrid;
+    // An optional page of MTLDispatch{Threadgroups,Threads}IndirectArguments.
+    // Its producer is an ordinary dependency; CPU submission never reads it.
+    __unsafe_unretained id<MTLBuffer> indirectGrid;
+    NSUInteger indirectOffset;
+    NSInteger indirectInvocation;
 };
+// Collective preparation uses the same command declaration as every frontend.
+// The encoder identifies its preparation context; this records a command and
+// never dispatches it or builds a second execution-order interface.
+void MetalEncoderCompute(id<MTL4ComputeCommandEncoder>, const struct MetalCommandDescription *);
+// Preparation callback's enclosing function, for appending ordinary commands.
+struct MetalSchedule *MetalEncoderSchedule(id<MTL4ComputeCommandEncoder>);
+void MetalEncoderHost(id<MTL4ComputeCommandEncoder>, const struct MetalReach *, size_t count,
+    const struct MetalDeclaration *, MetalHostOperation);
 struct MetalReplay *MetalReplayCommands(id<MTLDevice>, const struct MetalCommandDescription *, size_t count, enum MetalForm);
 // docs/kernels.md#collectives: a host operation of a described program, run in each invocation before its command `at`
 // (after those before it). Host operations declare the same read/write views as GPU commands. The
@@ -305,9 +332,13 @@ typedef MetalHostOperation (^MetalTemplateHost)(NSString *kind, NSData *bytes, N
 typedef MetalCrossing (^MetalTemplateCross)(NSString *kind, NSData *bytes, struct MetalSchedule *schedule, struct ncclMeshGroup *group, NSError **error);
 // A template made where the device's compile facts differ, or where a dispatch's threadgroup holds more threads than
 // this device's pipeline takes, fails as a value naming them.
+// operators follows communicators: each NSData is an array of ncclMeshRedOpBinding
+// from saved dynamic IDs to reducers registered on that instance's communicator.
+// Empty entries (or nil for builtin-only templates) contain no dynamic bindings.
+// These operands are used before rebuilding each plan; they are not serialized.
 NSError *MetalScheduleInstantiate(struct MetalSchedule *const *schedules, size_t count, NSDictionary *,
-    NSArray<id<MTLBuffer>> *bound, NSArray<NSNumber *> *offsets, NSArray<NSValue *> *communicators, MetalTemplateHost host,
-    MetalTemplateCross cross);
+    NSArray<id<MTLBuffer>> *bound, NSArray<NSNumber *> *offsets, NSArray<NSValue *> *communicators,
+    NSArray<NSData *> *operators, MetalTemplateHost host, MetalTemplateCross cross);
 
 #ifdef __cplusplus
 }

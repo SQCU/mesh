@@ -89,10 +89,15 @@ typedef struct {
   size_t argument_bytes;
   void (*release_arguments)(void *);
   const char *library, *symbol;
+  const MeshHostAccess *accesses;
+  size_t access_count;
 } MeshCpuInstruction;
 /* resources_json is the implementation's declared resource array, including
    an explicit [] when none are required. Each row names a JSON identity and a
    positive integer capacity. Identity lifetime is held by prepared programs. */
+/* Each instruction supplies its own page accesses, including any workspace.
+   Program preparation expands these into ordinary host dependency nodes; the
+   instruction array does not impose serial execution. */
 void *mesh_cpu_program_create(const MeshCpuInstruction *instructions, size_t count, const char *resources_json);
 const char *mesh_cpu_program_prepare(void *program, MeshHostCompletion, void *context, MeshHostTask *);
 void mesh_cpu_program_retain(void *program);

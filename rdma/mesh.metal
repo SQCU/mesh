@@ -58,14 +58,15 @@ __attribute__((always_inline)) static inline T mesh_payload(volatile coherent(sy
     return value;
 }
 
-// Publishes a count: a system-scope fence orders every system-coherent store before it (the bytes a SEND reads from the
-// client's own pages, stored system-coherent: a plain store reaches the NIC only once its command buffer has ended,
-// metal-microbench docs/measurement.md, 2026-09-29) before `value` is stored into `cell` (a holding's `ready`,
-// design/transport.md section 14; a failure word).
-template <typename W>
-__attribute__((always_inline)) static inline void mesh_publish(volatile coherent(system) device W *cell, ulong value) {
+// Counts form a maximum: concurrent publishers cannot move a count backwards.
+// The release fence orders payload stores before the system-visible atomic.
+// The SDK's public atomic overload fixes device coherence and device scope;
+// its underlying primitive also takes the system coherence/scope needed here.
+// The target declares ulong atomic min/max support (Apple8 macOS, Apple9+).
+__attribute__((always_inline)) static inline void mesh_publish(volatile coherent(system) device ulong *cell, ulong value) {
     metal::atomic_thread_fence(metal::mem_flags::mem_device, metal::memory_order_seq_cst, static_cast<metal::thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
-    *cell = W(value);
+    volatile coherent(system) device metal::atomic_ulong *word = (volatile coherent(system) device metal::atomic_ulong *)cell;
+    __metal_atomic_max_explicit(&word->__s, value, int(metal::memory_order_relaxed), MESH_SYSTEM_THREAD_SCOPE);
 }
 
 // FP8 E4M3 (fn: no infinity, S.1111.111 NaN) and, with e5, E5M2 (IEEE-like) [OCP 8-bit floating point, 2023]: a byte's

@@ -42,6 +42,17 @@ def eligibility(required, implementation):
     return dict(implementation=implementation, required=required, missing=missing)
 
 
+def assigned_implementation(required, assignment):
+    """Resolve the configured typed domains before assigning any runtime work."""
+    if isinstance(assignment, str):
+        return assignment
+    matches = [rule['implementation'] for rule in assignment['domains']
+               if all(set(required[field]).intersection(values) for field, values in rule['when'].items())]
+    if len(set(matches)) > 1:
+        raise ValueError(f'implementation assignment has overlapping typed domains: {matches}')
+    return matches[0] if matches else assignment['otherwise']
+
+
 def select_implementation(required, catalog, selected=None):
     """Resolve a declared choice, or the sole legal implementation.
 

@@ -123,45 +123,9 @@ void mesh_graph_through(const uint64_t *a, size_t na, const uint64_t *b, size_t 
    through[] then the first's count */
 int mesh_graph_cells_through(const uint64_t *a_first, const uint64_t *a_length, size_t na, const uint64_t *b_first,
                              const uint64_t *b_length, size_t nb, int64_t delta, uint64_t cell, uint64_t *through);
-/* A worklist on the GPU, as Metal source the kernels compile (nccl-mesh-kernels.h zelloth): runs of items, run r's
-   items [shape.head(r), shape.head(r) + shape.count(r)), each item's `state` 0 open, 1 claimed, 2 done.  An item is
-   ready once each of its requirements holds (mesh_graph_holds: needs.count(q, r) of them, the k-th a count read and
-   the value it must reach, needs.at(q, r, k, want); one short, or a count lost at ~0, told to needs.short_of), and an
-   item of a run only once every earlier one of it would be (readiness rising along a run, as a landing's units arrive
-   in order).  mesh_graph_claim: from run `low` on, each run's first open item (`next[r]`, its first item not yet
-   claimed, moved past the claimed ones it passes) claimed (0 -> 1) and returned where it is ready; `low` moved to the
-   first run with an open item; ~0 where none is ready or none open (*open false then); `looked` counts the runs it
-   examined.  mesh_graph_take: claims until one is taken, none is open, stop.now(), or stop.bound(looked); ~0 but the
-   first.  mesh_graph_prefix: run r's done prefix `at` moved past each done item; the prefix it reached.
-   mesh_graph_settle: the prefix moved and publish.at(prefix) told it, again while it moves (a prefix told late is one
-   already passed, so no reader acts on one too high).  Every state, cursor and prefix starts 0 */
-#define MESH_GRAPH_METAL \
-  "template <typename Needs> static inline bool mesh_graph_holds(thread Needs &needs, ulong q, uint r) { " \
-  "const uint n = needs.count(q, r); " \
-  "for (uint k = 0; k < n; k++) { ulong want = 0; const ulong v = needs.at(q, r, k, want); " \
-  "if (v < want || v == ~0UL) { needs.short_of(v, want); return false; } } return true; }\n" \
-  "template <typename Runs, typename Needs> static inline ulong mesh_graph_claim(device atomic_uint *low, device atomic_uint *next, " \
-  "device atomic_uint *state, uint runs, thread const Runs &shape, thread Needs &needs, thread ulong &looked, thread bool &open) { " \
-  "open = false; uint first = runs; " \
-  "for (uint r = atomic_load_explicit(low, memory_order_relaxed); r < runs; r++) { " \
-  "const uint head = shape.head(r), n = shape.count(r); uint c = atomic_load_explicit(next + r, memory_order_relaxed); " \
-  "while (c < n && atomic_load_explicit(state + head + c, memory_order_relaxed) != 0u) c++; " \
-  "atomic_fetch_max_explicit(next + r, c, memory_order_relaxed); " \
-  "if (c == n) continue; " \
-  "open = true; if (first == runs) first = r; looked++; " \
-  "if (!mesh_graph_holds(needs, ulong(head + c), r)) continue; " \
-  "uint zero = 0u; " \
-  "if (atomic_compare_exchange_weak_explicit(state + head + c, &zero, 1u, memory_order_relaxed, memory_order_relaxed)) { " \
-  "atomic_fetch_max_explicit(low, first, memory_order_relaxed); return ulong(head + c); } } " \
-  "atomic_fetch_max_explicit(low, first, memory_order_relaxed); return ~0UL; }\n" \
-  "template <typename Runs, typename Needs, typename Stop> static inline ulong mesh_graph_take(device atomic_uint *low, " \
-  "device atomic_uint *next, device atomic_uint *state, uint runs, thread const Runs &shape, thread Needs &needs, thread Stop &stop) { " \
-  "ulong got = ~0UL, looked = 0; bool open = true; " \
-  "while (got == ~0UL && open && !stop.now()) { " \
-  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); " \
-  "got = mesh_graph_claim(low, next, state, runs, shape, needs, looked, open); " \
-  "if (got == ~0UL && open && stop.bound(looked)) break; } " \
-  "return got; }\n" \
+/* A prefix scan over completed output cells. This publishes data availability;
+   it neither chooses work nor reconstructs dependencies. */
+#define MESH_GRAPH_PREFIX_METAL \
   "static inline uint mesh_graph_prefix(device atomic_uint *state, uint head, uint n, device atomic_uint *at) { " \
   "uint p = atomic_load_explicit(at, memory_order_relaxed); " \
   "while (p < n && atomic_load_explicit(state + head + p, memory_order_relaxed) == 2u) " \
@@ -169,9 +133,7 @@ int mesh_graph_cells_through(const uint64_t *a_first, const uint64_t *a_length, 
   "return p; }\n" \
   "template <typename Publish> static inline void mesh_graph_settle(device atomic_uint *state, uint head, uint n, " \
   "device atomic_uint *at, thread Publish &publish) { " \
-  "uint p = mesh_graph_prefix(state, head, n, at); " \
-  "for (uint told = 0u; p > told; ) { told = p; publish.at(p); " \
-  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device); p = mesh_graph_prefix(state, head, n, at); } }\n"
+  "const uint p = mesh_graph_prefix(state, head, n, at); if (p) publish.at(p); }\n"
 int mesh_graph_chain(struct mesh_graph_chain *cursor, uint64_t q, uint64_t (*follow)(const void *context, uint64_t node),
                      uint64_t (*items)(const void *context, uint64_t node),
                      uint64_t (*weight)(const void *context, uint64_t node, uint64_t item), const void *context,

@@ -3,6 +3,7 @@ from pathlib import Path
 
 import torch
 import mesh_matrix
+from torch._inductor.codegen.mps import DTYPE_TO_METAL
 from .compilation import operands, api_layouts
 from .layout import bindings
 
@@ -18,12 +19,12 @@ def row_tiles(rows):
 
 def arguments(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, ready=None, arrivals=None):
     """Bind page operands to the shared metadata-only product declaration."""
-    kinds = {torch.float16: 'half', torch.float32: 'float', torch.bfloat16: 'bfloat',
-             torch.int64: 'long', torch.int32: 'int'}
+    kinds = DTYPE_TO_METAL
     values = dict(x=x, w=w, out=out, x1=x1, bias=bias, ready=ready, arrivals=arrivals)
     declarations = {name: None if value is None else dict(shape=tuple(value.shape), type=kinds[value.dtype])
                     for name, value in values.items()}
-    recipe = mesh_matrix.product(**declarations, geometry=operands(), act=act, alpha=alpha, beta=beta)
+    from .command_declarations import configuration
+    recipe = mesh_matrix.product(**declarations, **configuration(), act=act, alpha=alpha, beta=beta)
     return (recipe['definitions'], [values[name] if name is not None else None for name in recipe['bindings']],
             recipe['grid'], recipe['threads'])
 
@@ -31,20 +32,63 @@ def arguments(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, read
 def declaration(operands, parameters, configuration):
     """The shared product source and typed role slots before page binding."""
     from .command_declarations import Commands
-    kinds = {torch.float16: 'half', torch.float32: 'float', torch.bfloat16: 'bfloat',
-             torch.int64: 'long', torch.int32: 'int'}
+    kinds = DTYPE_TO_METAL
     commands = Commands(operands, **configuration)
-    descriptions = {name: dict(shape=value['shape'], type=kinds[value['dtype']]) for name, value in operands.items()}
+    roles = ('x', 'w', 'out', 'x1', 'bias', 'ready', 'arrivals')
+    descriptions = {name: dict(shape=value['shape'], type=kinds[value['dtype']])
+                    for name, value in operands.items() if name in roles}
     options = {name: parameters[name] for name in ('act', 'alpha', 'beta') if name in parameters}
-    recipe = mesh_matrix.product(**descriptions, geometry=configuration['geometry'], **options)
+    recipe = mesh_matrix.product(**descriptions, geometry=configuration['geometry'], capabilities=configuration['capabilities'], **options)
     if not all(operands['out']['shape']):
         return commands.declaration()
+    from mesh_relation import Algebra
+    algebra = Algebra()
+    logical_accesses = mesh_matrix.product_dispatch(algebra, recipe,
+        {name: value for name, value in descriptions.items() if name in ('x', 'w', 'out', 'x1', 'bias')})
+    dispatch = []
     shift = configuration['geometry']['ACCESS_WRITE_SHIFT']
-    commands.shader(_SOURCE, recipe['function'],
-        [None if role is None else commands.view(role) for role in recipe['bindings']],
-        definitions=recipe['definitions'], grid=recipe['grid'], threadgroup=recipe['threads'],
-        access=3 | (32 if 'bias' in operands else 0) | (64 if 'x1' in operands else 0)
-        | ((140 if 'ready' in operands else 4) << shift))
+    readers = parameters.get('readers', {})
+    views = [None if role is None or role in readers else commands.view(role) for role in recipe['bindings']]
+    access = (3 | (32 if 'bias' in operands else 0) | (64 if 'x1' in operands else 0)
+              | ((140 if 'ready' in operands else 4) << shift))
+    indices, access_layouts, definitions, sources, declarations = {}, {}, dict(recipe['definitions']), {}, []
+    for role, reader in readers.items():
+        logical_slot = recipe['bindings'].index(role)
+        access &= ~(1 << logical_slot)
+        indices[logical_slot] = reader['layout']
+        types, values = [], []
+        for input_index, name in enumerate(reader['bindings']):
+            slot = len(views)
+            views.append(commands.view(name));access |= 1 << slot
+            access_layouts[slot] = reader['accesses'][input_index]
+            scalar = kinds[operands[name]['dtype']]
+            declarations.append(f'device const {scalar}* reader_input{slot} [[buffer({slot})]],')
+            types.append(f'mesh_page_read<{slot},{scalar}>')
+            values.append(f'mesh_page_read<{slot},{scalar}>{{reader_input{slot}}}')
+        source_type = reader['name'] + (f"<{','.join(types)}>" if types else '')
+        expression = f"{source_type}{{{','.join(values)}}}"
+        definitions[f'MESH_MATRIX_{role.upper()}_READ'] = f'mesh_mapped_value_read<{logical_slot},{source_type}>{{{expression}}}'
+        if role in ('x', 'w', 'x1'):
+            definitions[dict(x='AFFINE_A', w='AFFINE_B', x1='AFFINE_A1')[role]] = 0
+        sources[reader['name']] = reader['source']
+    for use in logical_accesses:
+        role, relation = use['role'], use['group_relation']
+        if role in readers:
+            reader = readers[role]
+            for name, dependency in zip(reader['bindings'], reader['relations'], strict=True):
+                # The retained reader relation starts in its product-role
+                # coordinates and ends in its original input storage ordinals.
+                selected = relation.then(dependency.reshape((reader['layout'].count,)))
+                slot = next(i for i, view in enumerate(views) if view is not None and view['name'] == name)
+                dispatch.append(dict(side=use['side'], slot=slot, group_relation=selected))
+        else:
+            slot = recipe['bindings'].index(role)
+            dispatch.append(dict(side=use['side'], slot=slot, group_relation=relation))
+    definitions['MESH_MATRIX_PARAMETERS'] = ''.join(declarations)
+    from .native import shader_source
+    source = _OPERANDS + shader_source(''.join(sources.values())) + Path(__file__).with_suffix('.metal').read_text()
+    commands.shader(source, recipe['function'], views, definitions=definitions,
+        indices=indices, access_layouts=access_layouts, grid=recipe['grid'], threadgroup=recipe['threads'], access=access, dispatch=tuple(dispatch))
     return commands.declaration()
 
 
@@ -72,3 +116,62 @@ def declare(x, w, out):
                   indexed=(), requirements={0: layouts['input'], 1: layouts['weight'], 2: layouts['output']}, prefix=prefix,
                   domains=({'kind': 'product', 'operands': {'x': 0, 'w': 1, 'out': 2},
                             'parameters': {'alpha': 1, 'beta': 1, 'act': False}},))[0]
+
+
+def _row_group_declaration(operands, requests, configuration):
+    """Bind the common row-product recipe to the ordinary page schema."""
+    from .command_declarations import Commands
+    commands = Commands(operands, **configuration)
+    typed = {name: dict(shape=value['shape'], type=DTYPE_TO_METAL[value['dtype']])
+             for name, value in operands.items()}
+    recipe = mesh_matrix.row_product_group(typed, requests, **configuration)
+    from mesh_relation import Algebra
+    algebra, dispatch = Algebra(), []
+    for prefix, part, start in recipe['products']:
+        shapes = {name[len(prefix):]: value for name, value in typed.items() if name.startswith(prefix)}
+        for use in mesh_matrix.product_dispatch(algebra, part, shapes, offset=start,
+                total=recipe['grid'][0], group_order=(2, 1, 0)):
+            dispatch.append(dict(side=use['side'], slot=recipe['bindings'].index(prefix + use['role']),
+                                 group_relation=use['group_relation']))
+    commands.shader(_OPERANDS + recipe['source'], recipe['function'],
+        [commands.view(name) for name in recipe['bindings']], grid=recipe['grid'],
+        threadgroup=recipe['threads'], access=recipe['access'], dispatch=tuple(dispatch))
+    return commands.declaration()
+
+
+def products(requests, *, layouts=None):
+    """Prepare product groups using one capability and page-binding contract."""
+    from .command_declarations import descriptions, configuration, bind
+    from .native import command_records
+    layouts = api_layouts('matrix') if layouts is None else layouts
+    configuration = configuration()
+    geometry = configuration['geometry']
+    result, group, values = [], [], {}
+
+    def flush():
+        if not group:
+            return
+        constraints = {name: layouts[dict(x='input', x1='input', w='weight', bias='bias')[name.split('_', 1)[1]]]
+                       for name in values if not name.endswith('_out')}
+        inputs, before = bindings({name: value for name, value in values.items() if name in constraints}, constraints)
+        outputs, after = bindings({name: value for name, value in values.items() if name.endswith('_out')},
+                                  {name: layouts['output'] for name in values if name.endswith('_out')}, writing=True)
+        bound = dict(inputs, **outputs)
+        declared = _row_group_declaration(descriptions(bound), group, configuration)
+        result.extend((*before, *command_records(bind(declared, bound)), *after))
+        group.clear();values.clear()
+
+    for request in requests:
+        if not all(request['out'].shape):
+            continue
+        actual = {role: value for role, value in request.items() if role in ('x', 'w', 'out', 'x1', 'bias') and value is not None}
+        options = {key: request[key] for key in ('act', 'alpha', 'beta') if key in request}
+        if request['x'].shape[-2] > geometry['LINEAR_ROW_CROSSOVER'] or len(request['x'].shape) != 2:
+            flush();result.extend(product(**request, layouts=layouts));continue
+        if len(values) + len(actual) > geometry['BUFFER_BINDINGS']:
+            flush()
+        prefix = f'p{len(group)}_'
+        values.update((prefix + role, value) for role, value in actual.items())
+        group.append((prefix, options))
+    flush()
+    return result

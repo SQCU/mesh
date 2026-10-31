@@ -11,6 +11,7 @@
 #include <string.h>
 #include "mesh.h"
 #include "nccl.h"
+#include "metal-capabilities.h"
 /* the library's own: none is an ABI target of the libraries it is built into (design/rubrics.md, Three kinds of source: the interface table) */
 #pragma GCC visibility push(hidden)
 
@@ -48,8 +49,8 @@ struct metal_program {
   int added;
   uint32_t polls;
   struct kernels *kernels;
-  /* metal_order's state: a present being dispatched, and the presents dispatched so far */
-  int presenting, presented;
+  /* Preparation-owned exact accesses for the next typed command. */
+  void *accesses;
 };
 #undef METAL_HANDLE
 /* A step's result and its message beside it (design/rubrics.md, Strings are messages): `status` 0, or an errno, and
@@ -62,14 +63,9 @@ static inline struct metal_result metal_failed(int status) { return (struct meta
 
 void *metal_device(void);
 void *metal_wrap(void *address, size_t bytes);
-/* bytes of the region the GPU reads once a program has encoded them (nccl-mesh.c, struct piece): metal_carve cuts
-   `bytes` (256-aligned) for one use, whose end metal_done names next (each of `n` words at `words` at least `value`;
-   a use never named is never done); metal_piece_hold takes a whole piece (*bytes of it) until metal_piece_give.  Under
-   the groups' lock but metal_piece_give; 0 or a piece, ENOMEM or NULL where the region cannot meet it */
+/* Preparation allocates argument pages and retains them with the function. */
 struct metal_bytes { void *buffer; size_t offset; void *contents; };
-int metal_carve(size_t bytes, struct metal_bytes *made);
-void metal_done(const _Atomic uint64_t *words, uint32_t n, uint64_t value);
-void *metal_piece_hold(struct metal_bytes *made, size_t *bytes);
+void *metal_piece_hold(struct metal_bytes *made,size_t *bytes,size_t minimum);
 void metal_piece_give(void *piece);
 void *metal_event(void);
 uint64_t metal_signaled(void *event);
@@ -94,9 +90,9 @@ void *metal_retain(void *object);
    clock has risen, about 1.0 to 1.1 us while it rises (an idle GPU's first ~4 ms of work), in either of the library's
    wait shapes (rdma/NCCL.md "Bounded waits"; metal-microbench output_data/library-20261015/round3, 2026-10-16); the M5
    Max's is not yet read.  A dispatch with no failure words records nothing, and its wait makes one load. */
-#define METAL_BOUND 1
-#define METAL_LOST 2
-#define METAL_REVOKED 4
+#define METAL_BOUND MESH_OBSERVATION_BOUND
+#define METAL_LOST MESH_OBSERVATION_LOST
+#define METAL_REVOKED MESH_OBSERVATION_REVOKED
 /* The kernels encoded into the caller's id<MTL4ComputeCommandEncoder, left open for its recorder,
    on pipelines of the residency set's device, every binding through the
    id<MTL4ArgumentTable> (each dispatch's arguments a record of the function's immutable argument pages). Exact payload
@@ -121,8 +117,9 @@ struct metal_result metal_copy(struct metal_program *, int mode, void *dst, size
 /* dst = with op src, n elements of an ncclDataType_t: landed bytes (src, loaded system-coherent) combined with an
    operand read in place (`with`: a lease's send buffer, nccl.h ncclMeshMemBuffer), the first combine of a range no step
    wrote, after a wait (metal_spin) */
+struct metal_scalar { void *buffer; size_t offset; uint64_t bits; };
 struct metal_result metal_premultiply(struct metal_program *, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n,
-                                      size_t element_bytes, uint64_t scalar);
+                                      size_t element_bytes, struct metal_scalar scalar);
 struct metal_result metal_truncdiv(struct metal_program *, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n,
                                    size_t element_bytes, uint64_t divisor);
 /* A wait (design/transport.md section 14): in `words` (the Metal buffer over a holding's counts), the count at `word`
@@ -141,38 +138,24 @@ struct metal_result metal_publish(struct metal_program *, const struct metal_rel
    each block in order */
 struct metal_zelloth_input { void *data; size_t data_offset; void *words; size_t word; void *summed; size_t summed_offset;
                              mesh_pages target, packets; const struct mesh_landing_run *runs; size_t count; };
-/* a wait of a sum's before it folds: an earlier sum of the same array (`after`), its done word at its blocks, its
-   result this sum's own operand */
-struct metal_zelloth_wait { const struct metal_zelloth_sum *after; };
-/* a sum: its result `out`, the rank's own operand `own`, its `inputs` landings, its `waits` */
-struct metal_zelloth_sum { void *out; size_t out_offset; void *own; size_t own_offset; uint32_t inputs; const struct metal_zelloth_input *in;
-                           uint32_t waits; const struct metal_zelloth_wait *wait; };
-/* every sum of a group of one `type` and `op` in one dispatch, one threadgroup a core for all of them, after a barrier
-   (no present still spinning holds a core one of them needs) */
+/* Each sum's exact accesses enter the common command graph. */
+struct metal_zelloth_sum { void *out; size_t out_offset; void *own; size_t own_offset;
+  uint32_t inputs; const struct metal_zelloth_input *in; uint32_t own_access; };
+/* Emit each resolved value version as a command with its exact page accesses.
+   The grid assigns one common landing cell to each threadgroup. */
 struct metal_result metal_zelloth(struct metal_program *, int type, int op, size_t element_bytes, uint32_t sums,
                                   const struct metal_zelloth_sum *sum, uint32_t channel, uint64_t at);
-/* The same publication as part of a group's presenting (design/zorvek.md zook): after its presents' barrier and with
-   none of its own, as a later present takes none */
-struct metal_result metal_publish_presented(struct metal_program *, const struct metal_release *);
+/* A user combine is compiled onto the same resolved landing cells. */
+struct metal_result metal_reduce_function(struct metal_program *,const ncclMeshReductionFunction *,
+  ncclDataType_t,uint32_t unit,const struct metal_zelloth_sum *,uint32_t channel,uint64_t entry);
 /* The next dispatch reads/writes these prepared page
    ranges. Residency and diagnostic atomic words do not imply data ordering. */
 void metal_accesses(struct metal_program *, const ncclMeshAccess *, size_t n);
-/* a group's operands, read and written, declared once to its caller's schedule in place of a barrier after its waits */
-void metal_boundary(struct metal_program *, const ncclMeshAccess *, size_t n);
 /* A communicator's gate word (at `word` in `words`) stored `value` after one system fence, as metal_publish stores: the
    number of the group whose landings it opens (nccl-mesh.c gate_of), a count of groups and no holding's. */
 struct metal_result metal_open_gate(struct metal_program *, void *words, size_t word, uint64_t value);
-/* design/zorvek.md zinth: a group's tables linked to its holding's streams, `n` stores (each `value` at `word` in
-   `words`, as metal_open_gate stores), one barrier before the first (they follow everything before them) and none
-   between them (each its own word) */
-struct metal_link { void *words; size_t word; uint64_t value; };
-struct metal_result metal_link(struct metal_program *, const struct metal_link *, size_t n);
 /* the wait alone (a COPY's landing in place), one threadgroup */
 struct metal_result metal_spin(struct metal_program *, const struct metal_wait *);
-/* n such waits, none barred from another or from the dispatches before them: each reads only a count the bridge
-   stores, so a group's channels' landings are awaited at once (nccl-mesh.c zabbadoo's zelloq), the next dispatch's
-   barrier, or its caller's schedule, ordering what follows after all of them */
-struct metal_result metal_spins(struct metal_program *, const struct metal_wait *, size_t n);
 struct mesh_landing_run;
 /* a publication and a landing run by the caller's kernel (nccl.h ncclMeshFused): each one's record written to the function's immutable argument pages as a Metal 4 dispatch's would be, the
    buffers it names made resident, and its six bindings' addresses given in `bound` (0 d, 1 s, 2 the record, 3 a, 4 v,

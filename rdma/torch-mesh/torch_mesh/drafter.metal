@@ -181,7 +181,7 @@ kernel void mesh_mtp_begin(device const uint *state [[buffer(0)]], device const 
                            constant uint &slot [[buffer(7)]], uint c [[thread_position_in_grid]]) {
     const uint p0 = state[1], at = own[1];
     const uint row = slot == 0u ? min(state[5], R - 1u) : (at > p0 ? min(at - p0, R - 1u) : 1u);
-    device const half *from = slot == 0u ? activations : chain;
+    device const half *from = slot == 0u ? activations + ulong(state[7]) * R * D : chain;
     if (c < D) hidden[c] = from[ulong(row) * D + c];
     if (c == 0) {
         mtp[0] = max(p0, 1u) - 1u;

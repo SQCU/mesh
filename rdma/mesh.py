@@ -2,7 +2,7 @@
 no layout or prototype here is written by hand; `make mesh-c` builds it for this interpreter).  The read side is the
 node's bridge's: current() is the map it keeps (mesh_map) and wait() the map's serial (mesh_map_wait); link maps,
 their routes and a communicator's members' map are the header's own.
-Collectives run through libnccl-mesh (mesh_mpi for NumPy, torch-mesh for torch); lease() is its ncclMemAlloc, the
+Collectives run through libnccl-mesh in prepared whole functions (torch-mesh); lease() is its ncclMemAlloc, the
 memory they move taken from the node's bridge's region (rdma/NCCL.md "Memory")."""
 import errno
 import os

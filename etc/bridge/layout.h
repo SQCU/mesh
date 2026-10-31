@@ -8,10 +8,13 @@
 #define MESH_ULA_PREFIX "fd6d:6573:68:"
 #define MESH_MODE 0666
 #define MESH_VERSION 135u
-#define MESH_LAYOUT 158u
+#define MESH_LAYOUT 159u
 #define MESH_STREAMS 32
 #define MESH_CLIENTS 64
 #define MESH_LANE_UNITS 4096u
+/* Completion service cadence, independent of queue capacity and link use. */
+#define MESH_POST_QUANTUM 64u
+#define MESH_COMPLETION_BATCH 64
 #define MESH_PAUSE_NS UINT64_C(3000000000)
 #define MESH_PLATFORM_NS UINT64_C(5000000000)
 #define MESH_PREPARATION_NS UINT64_C(12000000000)

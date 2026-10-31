@@ -1,3 +1,28 @@
 {
-  "scalar": "metal_scalar"
+  "scalar": {
+    "domains": [
+      {
+        "when": {
+          "arithmetic_types": [
+            "float64"
+          ]
+        },
+        "implementation": "cpp_scalar"
+      }
+    ],
+    "otherwise": "metal_scalar"
+  },
+  "product": {
+    "domains": [
+      {
+        "when": {"arithmetic_types": ["float16", "bfloat16", "float32"]},
+        "implementation": "metal_product"
+      }
+    ],
+    "otherwise": "scalar_contraction"
+  },
+  "result_ownership": {
+    "layout": "flat",
+    "mesh_axes": "all"
+  }
 }

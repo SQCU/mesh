@@ -46,7 +46,6 @@ def prepare_source(gm, example_inputs):
     from . import _stream, backend, partition
     from .streamed import node
     from .compilation import operands as compiler_operands
-    _stream.linear_source((Path(__file__).parent / 'linear.metal').read_text(), node()[1])
     aten = torch.ops.aten
 
     def replace(module, before, after):
@@ -64,18 +63,16 @@ def prepare_source(gm, example_inputs):
             if not any(leaf is value for leaf in tree_flatten(result)[0])}
 
     def rows(x, w):
-        """Whether x @ w is linear's: on MPS (its one implementation), fp16, x [R, K] in row views, w the transposed
-        view of a [N, K] whose rows lie apart by K or more."""
+        """Row-shaped products share the same reader and layout declarations."""
         x, w = x.meta.get('val'), w.meta.get('val')
-        return (x is not None and w is not None and x.device.type == 'mps' and x.dtype == w.dtype == torch.half and x.dim() == w.dim() == 2
-                and x.stride(1) == 1 and w.stride(0) == 1 and w.stride(1) >= w.shape[0])
+        return (x is not None and w is not None and x.dtype == w.dtype and x.dim() == w.dim() == 2)
 
     def joined(x):
-        """The two fp16 rows-segments x is the cat of along its last dimension, where that cat has no other use."""
+        """The two row segments joined along their last dimension, with no other use."""
         if x.target is not aten.cat.default or len(x.users) != 1 or len(x.args[0]) != 2 or (x.args[1:] or (0,))[0] not in (1, -1):
             return None
         parts = [p.meta.get('val') for p in x.args[0]]
-        if any(p is None or p.dtype != torch.half or p.dim() != 2 or p.stride(1) != 1 for p in parts):
+        if any(p is None or p.dim() != 2 for p in parts) or parts[0].dtype != parts[1].dtype:
             return None
         return x.args[0]
 
@@ -101,7 +98,7 @@ def prepare_source(gm, example_inputs):
         i = 0
         while i < len(products):
             group = [products[i]]
-            for m in products[i + 1:compiler_operands()['LINEAR_PRODUCTS'] + i]:
+            for m in products[i + 1:compiler_operands()['BUFFER_BINDINGS'] // 3 + i]:
                 if any(g in ancestors(m) for g in group) or any(order[u] < order[m] for g in group for u in g.users):
                     break
                 group.append(m)

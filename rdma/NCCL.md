@@ -4,8 +4,8 @@ NCCL-style collective signatures over the mesh: Macs joined by Thunderbolt 5 RDM
 a bridge process (`mesh-flow`) on each. Supported collective callers compile
 against `rdma/nccl.h`; directed transfers use its declared WRITE interface.
 Its header comment is the contract; this page is
-how to run it. PyTorch programs use it through [torch-mesh](torch-mesh/README.md). NumPy programs use it through
-`mesh_mpi.py` (below). Uneven nodes and links: [design/heterogeneity.md](../design/heterogeneity.md).
+how to run it. Tensor programs use the whole-function declaration in [torch-mesh](torch-mesh/README.md).
+NumPy may view their shared input and output pages. Uneven nodes and links: [design/heterogeneity.md](../design/heterogeneity.md).
 
 ## Build and run
 
@@ -285,11 +285,11 @@ See [transport.md](../design/transport.md) for registration and credit units.
   - The calls of one group name one encoder (the group's dispatches are one program) and one communicator; a group
     completes at once. A call that crosses no link makes its result in recvbuff; what a crossing sends from or lands
     in that is not the caller's is the communicator's (nccl.h, Memory).
-  - **Fused crossings.** Immutable explicit WRITE, point calls, and supported in-place broadcast/all-gather forms
-    lower to the same physical SEND/COPY fragments as ordinary compiled writes. Parallel cables, multiple fragments
-    per channel, and multihop relay paths remain available. Arithmetic that combines operands belongs in the
-    caller's producer or consumer. A remote fused request whose lowered form needs library arithmetic or unsupported
-    ownership fails as a value; it never silently executes an ordinary source read before the caller's producer.
+  - **Fused WRITE records.** Explicit WRITE calls retain the physical SEND/COPY
+    fragments of their declaration. Parallel cables, multiple fragments per
+    channel, and multihop relay paths remain available. Numerical collectives
+    always emit their actual reductions into the common command graph. A record
+    sink can no longer suppress those numerical operations.
     On a stream whose `fused` is set, the call writes the argument records and returns `ncclMeshFused` bindings in
     physical channel order. The caller supplies enough room for the declared physical bindings; rank counts remain
     separate metadata. The caller's kernels run publication and consumption steps. Zero counts mean no applicable
@@ -497,8 +497,6 @@ Porting:
 
 - An NCCL program takes its collectives' buffers from `ncclMemAlloc` (NCCL's allocator for the buffers it registers), and
   its node's bridge configuration's region holds them.
-- A NumPy program takes them from `mesh_mpi.empty(shape, dtype)`, the role mpi4py's `MPI.Alloc_mem` plays; `mesh_mpi`'s
-  own temporaries are such arrays.
 - Python's lease is `mesh.lease(nbytes)`: a writable buffer for `numpy.frombuffer` or `torch.frombuffer`, returned to
   the region when it and everything over it are gone.
 - torch-mesh's own CPU staging and temporaries are leases ([torch-mesh](torch-mesh/README.md)).
@@ -639,20 +637,13 @@ communicator a stream (a holding's lists and counts are its holder's alone), of 
 | `NCCL_COMM_ID` | library (ncclGetUniqueId) | the bootstrap root's `host:port` |
 | `MESH_RDMA` | torch-mesh's build | the rdma directory its extension links against (default its parent; `node prepare` passes its checkout's) |
 
-## NumPy
+## Whole-function callers
 
-`rdma/mesh_mpi.py` retains legacy NumPy caller source and page-allocation helpers.
-Its imperative buffer methods are not a supported execution path: the library
-no longer creates or waits on a private host-path submission. The removed
-standalone WRITE preparation/execution wrappers are not available.
-
-`Comm.Plan(calls)` and `PlanDemands()` describe the complete communicator
-function and query its compiled payload demands. A usable NumPy frontend must
-also lower its numerical producers and consumers into the existing prepared
-function. The current `xonotic/planner/plan.py` and
-`xonotic/solver/worker.py:MPIWorld` still interleave imperative NumPy work with
-collective results; their complete numerical capture remains unconnected.
-Replacing them with imperative `TorchWorld` calls would not close that gap.
+The Xonotic planner and solver declare their complete tensor functions through
+`torch_mesh.declarations.Function`. Input/output page bindings and configuration
+are prepared before submission. NumPy host views inspect the same page storage
+when the function's completion is available. There is no separate imperative
+MPI collective executor or per-call buffer API.
 
 All compiled frontends declare `ncclMeshCallWrite` through `ncclMeshCommPlan`.
 `bindings` supplies local page-backed buffer slots; optional `views` supplies

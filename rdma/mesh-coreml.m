@@ -255,15 +255,23 @@ void mesh_cpu_gelu(const void *arguments) {
       vvtanhf(c->scratch,c->scratch,&n);
       for(int i=0;i<n;i++)c->output[i]=0.5f*c->input[i]*(1+c->scratch[i])*c->weight[i];
 }
-typedef struct { void (*run)(const void *); void *arguments; } MeshCpuBound;
-typedef struct { void (*release_arguments)(void *); void *library; } MeshCpuOwnership;
+typedef struct MeshCpuProgram MeshCpuProgram;
 typedef struct {
+  void (*run)(const void *);
+  void *arguments;
+  MeshHostAccess *accesses;
+  MeshCpuProgram *program;
+} MeshCpuBound;
+typedef struct { void (*release_arguments)(void *); void *library; } MeshCpuOwnership;
+struct MeshCpuProgram {
   _Atomic unsigned references;
   size_t count;
   void *resources; /* retained MeshResourceBinding */
   MeshCpuOwnership *owners;
+  MeshHostCommand *commands;
   MeshCpuBound instructions[];
-} MeshCpuProgram;
+};
+static const char *cpu_instruction_prepare(void *,MeshHostCompletion,void *,MeshHostTask *);
 
 /* Preparation transfers command-owned workspace into this native lifetime.
    The schedule retains it independently of the frontend that constructed it. */
@@ -278,8 +286,13 @@ void *mesh_cpu_program_create(const MeshCpuInstruction *instructions, size_t cou
   if(!p){snprintf(error_,sizeof error_,"allocating CPU program");return NULL;}
   p->owners=calloc(MAX(count,(size_t)1),sizeof *p->owners);
   if(!p->owners){free(p);snprintf(error_,sizeof error_,"allocating CPU instruction ownership");return NULL;}
+  p->commands=calloc(MAX(count,(size_t)1),sizeof *p->commands);
+  if(!p->commands){free(p->owners);free(p);snprintf(error_,sizeof error_,"allocating CPU instruction declarations");return NULL;}
   for(size_t i=0;i<count;i++) {
     const MeshCpuInstruction *source=instructions+i;MeshCpuBound *bound=p->instructions+i;
+    if(!source->access_count||!source->accesses||source->access_count>SIZE_MAX/sizeof(MeshHostAccess)) {
+      snprintf(error_,sizeof error_,"CPU instruction requires its declared page accesses");goto failed;
+    }
     if((source->argument_bytes&&!source->arguments)||
        (source->run?(source->library||source->symbol):(!source->library||!source->symbol))) {
       snprintf(error_,sizeof error_,"CPU instruction needs explicit arguments and one static entry or library/symbol");goto failed;
@@ -295,16 +308,22 @@ void *mesh_cpu_program_create(const MeshCpuInstruction *instructions, size_t cou
     if(!bound->arguments){snprintf(error_,sizeof error_,"copying CPU instruction arguments");goto failed;}
     if(source->argument_bytes)memcpy(bound->arguments,source->arguments,source->argument_bytes);
     p->owners[i].release_arguments=source->release_arguments;
+    bound->accesses=malloc(source->access_count*sizeof *bound->accesses);
+    if(!bound->accesses){snprintf(error_,sizeof error_,"copying CPU instruction page accesses");goto failed;}
+    memcpy(bound->accesses,source->accesses,source->access_count*sizeof *bound->accesses);
+    bound->program=p;
+    p->commands[i]=(MeshHostCommand){cpu_instruction_prepare,bound,bound->accesses,source->access_count};
   }
   p->resources=(__bridge_retained void *)resources;
   atomic_init(&p->references,1);p->count=count;
   return p;
 failed:
   for(size_t i=0;i<count;i++) {
+    free(p->instructions[i].accesses);
     free(p->instructions[i].arguments);
     if(p->owners[i].library)dlclose(p->owners[i].library);
   }
-  free(p->owners);free(p);return NULL;
+  free(p->commands);free(p->owners);free(p);return NULL;
 }
 void mesh_cpu_program_retain(void *program) {
   MeshCpuProgram *p=program;atomic_fetch_add_explicit(&p->references,1,memory_order_relaxed);
@@ -315,25 +334,34 @@ void mesh_cpu_program_release(void *program) {
   for(size_t j=0;j<p->count;j++) {
     if(p->owners[j].release_arguments)p->owners[j].release_arguments(p->instructions[j].arguments);
     free(p->instructions[j].arguments);
+    free(p->instructions[j].accesses);
     if(p->owners[j].library)dlclose(p->owners[j].library);
   }
-  CFRelease(p->resources);free(p->owners);free(p);
+  CFRelease(p->resources);free(p->commands);free(p->owners);free(p);
 }
-typedef struct { MeshCpuProgram *program; MeshHostCompletion complete; void *context; } MeshCpuTask;
+typedef struct { MeshCpuBound *instruction; MeshHostCompletion complete; void *context; } MeshCpuTask;
 static void cpu_submit(void *bound) {
-  MeshCpuTask *task=bound;MeshCpuProgram *p=task->program;
-  for(size_t j=0;j<p->count;j++)p->instructions[j].run(p->instructions[j].arguments);
+  MeshCpuTask *task=bound;MeshCpuBound *instruction=task->instruction;
+  instruction->run(instruction->arguments);
   task->complete(task->context,NULL);
 }
 static void cpu_release(void *bound) {
-  MeshCpuTask *task=bound;mesh_cpu_program_release(task->program);free(task);
+  MeshCpuTask *task=bound;mesh_cpu_program_release(task->instruction->program);free(task);
 }
-const char *mesh_cpu_program_prepare(void *program,MeshHostCompletion complete,void *context,MeshHostTask *result) {
+static const char *cpu_instruction_prepare(void *declaration,MeshHostCompletion complete,void *context,MeshHostTask *result) {
+  MeshCpuBound *instruction=declaration;MeshCpuProgram *program=instruction->program;
   MeshCpuTask *task=malloc(sizeof *task);
   if(!task)return "preparing CPU completion operand";
-  mesh_cpu_program_retain(program);*task=(MeshCpuTask){program,complete,context};
-  MeshResourceBinding *resources=(__bridge MeshResourceBinding *)task->program->resources;
-  *result=(MeshHostTask){task,cpu_submit,cpu_release,resources->entries,resources->count};return NULL;
+  mesh_cpu_program_retain(program);*task=(MeshCpuTask){instruction,complete,context};
+  MeshResourceBinding *resources=(__bridge MeshResourceBinding *)program->resources;
+  *result=(MeshHostTask){.context=task,.submit=cpu_submit,.release=cpu_release,
+    .resources=resources->entries,.resource_count=resources->count};return NULL;
+}
+const char *mesh_cpu_program_prepare(void *program,MeshHostCompletion complete,void *context,MeshHostTask *result) {
+  (void)complete;(void)context;
+  MeshCpuProgram *p=program;
+  mesh_cpu_program_retain(p);
+  *result=(MeshHostTask){.context=p,.release=mesh_cpu_program_release,.commands=p->commands,.command_count=p->count};return NULL;
 }
 
 const char *mesh_coreml_error(void) { return error_; }
@@ -685,7 +713,8 @@ static const char *ane_prepare(id object,MeshHostCompletion complete,void *conte
   ((void(*)(id,SEL,id))objc_msgSend)(task->request,@selector(setCompletionHandler:),completed);
   NSError *error=nil;task.mapped=model.map(model.client,@selector(mapIOSurfacesWithModel:request:cacheInference:error:),model.model,task->request,model.cacheMapping,&error);
   if(!task.mapped){snprintf(error_,sizeof error_,"direct ANE page mapping: %s",error.localizedDescription.UTF8String);return error_;}
-  *result=(MeshHostTask){(__bridge_retained void *)task,ane_submit,model_task_release,model.resources.bytes,model.resources.length/sizeof(MeshHostResource)};return NULL;
+  *result=(MeshHostTask){.context=(__bridge_retained void *)task,.submit=ane_submit,.release=model_task_release,
+    .resources=model.resources.bytes,.resource_count=model.resources.length/sizeof(MeshHostResource)};return NULL;
 }
 static void *ane_bind(long handle,MeshANEModel *model,const MeshModelView *inputs,size_t ni,const MeshModelView *outputs,size_t no) {
   Class surfaceClass=NSClassFromString(@"_ANEIOSurfaceObject"),requestClass=NSClassFromString(@"_ANERequest");

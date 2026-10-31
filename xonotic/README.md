@@ -2,11 +2,11 @@
 
 The game's numerical caller is `planner/plan.py`, the routed-expert bot planner. Each
 rank holds a block of every expert's columns (Megatron-LM tensor parallelism), and one
-all-reduce per tick completes the expert output: `mesh_mpi`'s `Comm().Allreduce` on
-libnccl-mesh (`rdma/NCCL.md`), over the map nccl.h `ncclCommInitRank`'s bootstrap joins
-from the ranks' bridges. Each node's bridge is its resident service. The planner is a
-`mesh_mpi` world, one rank a node: on every node, from the repository root, with that
-node's rank and rank 0's address,
+all-reduce per tick completes the expert output. `torch_mesh.declarations.Function`
+captures the indexed products, reduction and position update together. Its prepared
+page commands use libnccl-mesh (`rdma/NCCL.md`) and the resident bridge on each node.
+PyTorch describes the tensor operations; the mesh compiler chooses declared native
+implementations. Start one rank per node from the repository root:
 
     RANK=r WORLD_SIZE=n MASTER_ADDR=host0 MASTER_PORT=29500 \
         PYTHONPATH=xonotic:rdma bin/mesh-python -B -m planner.plan TICKS BOTS
@@ -28,10 +28,14 @@ follower tiers) with a REINFORCE logit field of 81,920 parameters under L2 decay
 logit 0 (ac3b543b) picks each bot's objective. On a world it divides as the planner
 does: rank r holds `columns.parts[r]` of every expert's columns, one all-reduce
 completes the expert output, the window's Gram is column-parallel over the same share
-with one all-reduce of its row-parallel products and an MPI_Allgatherv of the
-conditioned rows; `rdma/allocate.py`'s Balancer moves the parts on each tick's own
-times. The torch backend computes on the GPU with torch.distributed's `mesh` backend
-(`rdma/torch-mesh`), the numpy backend with `mesh_mpi`; operands are region leases.
+with one all-reduce of its row-parallel products and a compiled ragged gather of the
+conditioned rows. `rdma/assignment.py` chooses subsequent work and routing operands
+from completed whole-function observations. The request broadcast, persistent
+context update, router, products, reductions and result placement are one Function.
+There is one numerical executor. Scalar and product implementations come from the
+compiler capability and assignment operands; the double-precision router retains
+its CPU scalar arithmetic. Indexed weight selections are inputs to the shared
+product lowerer, not host loops over individual experts.
 
     RANK=r WORLD_SIZE=n MASTER_ADDR=host0 MASTER_PORT=29500 \
         PYTHONPATH=xonotic:rdma bin/mesh-python -B -m solver.worker serve CONFIG.json
@@ -46,13 +50,20 @@ request of 08-29 (`request_rows`: the held objective is the team's vote over the
 worker's own last answer; item posts are the items the bots perceived, each at class
 rank 1, since the wire carries no item class), and frames one 8-column row a bot back
 (id, pick, five node weights, leader) under the configured `response` kind. The other
-ranks wait in the broadcast of the next request. `rdma/xonwire.def` defines no plan kind at HEAD
+ranks receive only request kind and shape through administrative configuration.
+The request values travel through the compiled broadcast. Rank zero keeps receiving
+wire frames while the numerical function runs, then reads its prebound result pages
+when the common completion observer reports them ready. `rdma/xonwire.def` defines no plan kind at HEAD
 and the game opens no handle for one: until the game side restores sv_payload_mesh.qc's
 consumer (a `PLAN` entry in xonwire.def, `mesh_open(node, NONE, PLAN, 8, maxclients)`,
 `mesh_scatter_rows` into the pick, weights and leader fields, the per-team vote), the
 worker solves every tick and withholds its rows. `solver/sendreq.py CONFIG.json` stands
-in for the engine; `solver.worker --check`, `--bench N` and `--synth N` run on one
-process with no mesh.
+in for the engine; `solver.worker --bench N` and `--synth N` use the same prepared
+function on one process. `--device` selects operand storage and `--compiler FILE`
+supplies compiler configuration for the benchmark. Service configuration accepts the
+same document under `compiler`; `completion_poll_seconds` controls only the socket
+event loop's observation cadence. Numerical execution contains no polling loop,
+per-product MPS drain, or eager collective adapter.
 
 Reproduction targets (the solver): 104 GFLOP a solve (`ctx_flops`, T=4096, RES=2048) in 24 ms
 median at 4.29 TF/s on the Mini alone, numpy 54 ms (4905622f, mlx); a full-scale tick
@@ -70,15 +81,23 @@ heads), its learner (`online.OnlineLearner`: decoupled PPO with rollout importan
 weights, winner and loser values, replay), the responder that answers the game
 (`strat_responder.py`: STATE pages in, STRATEGY residual/rate pages out through
 `xonwire.Engine`), the match supervisor (`curriculum.py`) and the analyses (`study.py`,
-`joracle/`). Evaluation and training are queries of one torch program
-(`execution.PolicyProgram`); autograd derives every backward. The 09-14 graph compiler
-and Metal executor are not restored.
+`joracle/`). Evaluation, sampling, gradient accumulation and AdamW updates are
+complete `torch_mesh.declarations.Function` declarations. One learner declaration
+contains its whole prepared transition batch, gradient sum and optimizer update;
+there is no host completion between transition contributions. PyTorch supplies the source
+and autograd graph; the shared page compiler emits execution. Parameters, gradients,
+moments and the update counter have persistent region pages. The sampler is the
+shared counter-based `torch_mesh.random.normal` source (Philox4x32-10 with Box–Muller),
+so seed values stay numerical operands. Its sequence differs from the former host
+PyTorch generator; `training_contract.sampler` records that choice.
 
 The learner is one program on every rank of a world (`products.World`, torch.distributed's
 `mesh` backend): rank 0 is the game's host, serves the engine's socket and runs the
-responder; it announces each model call with its operands in one broadcast and every
-other rank runs the same call (`execution.serve`), waiting in the broadcast of the next
-announcement. The placement document's `products` divide the remote
+responder. Administrative announcements carry only a query kind and operand types;
+the declared function carries the numerical broadcasts and products. Other ranks
+prepare the same declaration in `execution.serve`. Output pages are observed at the
+application's consumption point. Paired latency and useful bandwidth use
+`mesh_statistics`; product declarations do not time themselves or drain MPS. The placement document's `products` divide the remote
 products as Megatron-LM divides a block (`products.py` copy/reduce, `scale_rpc.py`):
 `cross`, the row-Gram contraction Rᵀ V, by rows; `scale`, the routed experts, by hidden
 columns, each rank keeping and updating its columns (saved as `<checkpoint>.rank<r>.npz`
@@ -92,8 +111,6 @@ relaxation's τ; neither has a default. `solver/strat/placements/` holds didacti
 
     RANK=r WORLD_SIZE=n MASTER_ADDR=host0 MASTER_PORT=29500 PYTHONPATH=xonotic:rdma \
         bin/mesh-python -B -m solver.strat.strat_responder --placement PLACEMENT.json --train ...
-    RANK=r WORLD_SIZE=2 MASTER_ADDR=host0 MASTER_PORT=29500 PYTHONPATH=xonotic:rdma \
-        bin/mesh-python -B -m solver.strat.cross PLACEMENT.json [--capture FRAME.npz]
 
 `curriculum.py --placement` runs matches on the game's host (rank 0); the other ranks
 are started on their nodes with the same responder arguments, as any world's ranks
@@ -103,8 +120,8 @@ responder each serve `MESH_EXPERT_SOCKET`; a game talks to one of them, its engi
 with `MESH_EXPERT_SOCKET` and `MESH_EXPERT_FRAMEBYTES` (the placement's `socket` and
 `framebytes`) and `g_payload_strategy_interval`, as `curriculum.py` starts it.
 
-Reproduction targets (the learner, measurements/policy-feature-integration-20260906):
-the RDMA cross test, `solver.strat.cross` on the pair with `placements/pair-cross.json`:
+Historical measurements (the learner, measurements/policy-feature-integration-20260906;
+the former eager comparison programs have been removed):
 a 257 × 13 and 257 × 19 contraction's forward and both VJPs exact (errors 0, 0, 0) and the
 policy's largest parameter-gradient discrepancy 3.73e-9 against the local cross; a
 native run of the responder (`placements/local.json`, host-only as on 09-06) reaching 15

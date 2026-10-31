@@ -438,7 +438,7 @@ watch cannot end (a thread inside a kernel call) leaves the heartbeat to launchd
 | `viz/` | the whole-fabric observer (:8787, run by hand beside `user/mesh-telemetry.py`; nothing runs it in the background) and its page: the nodes in its bridge's records, each sampled every `period_s` of its configuration document (`etc/observer.json`, installed as the node's where it has none; no default in code). |
 | `docs/` | the bring-up writeup. `./serve.sh` to read it locally. |
 | `rdma/` substrate | the node's bridge and what it publishes: `mesh.h`, `mesh-link.c`, `mesh-observe.h` and `mesh-bridge.h` (the bridge), `mesh-heartbeat.c` (its heartbeat), `mesh-dataflow.c` and `mesh-call.h`, `mesh.metal` (the GPU wait, payload read and publication), `mesh-disk.h`, `mesh_disk.py`, `mesh-stat.c`, `mesh.py`, `peers.py`, `store.py`, `mesh_c_build.py`, `mesh-coreml.m`, and torch-mesh's `_stream.mm` (torch's MPS stream as the library's stream) |
-| `rdma/` collectives | NCCL's API over the substrate: `nccl.h`, `nccl-mesh.c` (its communicators and groups), `nccl-mesh-metal.m`/`.h`, `nccl-mesh-kernels.h`/`.m` (its kernels), `mesh-collective.c`, `mesh_mpi.py`, `allocate.py`, and torch-mesh's `backend.py`, `partition.py`, `evidence.py`, `engines.py`, `attention.py` and its kernels (`streamed.metal`, `attention.metal`, `argmax.metal`, `speculate.metal`, `drafter.metal`) |
+| `rdma/` collectives | NCCL's API over the substrate: `nccl.h`, `nccl-mesh.c` (its communicators and groups), `nccl-mesh-metal.m`/`.h`, `nccl-mesh-kernels.h`/`.m` (its kernels), `mesh-collective.c`, `allocate.py`, and torch-mesh's `backend.py`, `partition.py`, `evidence.py`, `engines.py`, `attention.py` and its kernels (`streamed.metal`, `attention.metal`, `argmax.metal`, `speculate.metal`, `drafter.metal`) |
 | `rdma/mesh-plan.h` | the one header both publish: the substrate's read side (`mesh_reached`, `mesh_region`, `mesh_map`, `mesh_nodes_health`, defined in `mesh-dataflow.c`) and the collectives' planning |
 | consumers | everything that calls them: metal-microbench, `xonotic/`, `rdma/workload.py` and `xonwire.def` |
 
@@ -606,7 +606,7 @@ A program that uses the mesh, step by step, with what the bridge, the collective
 [docs/writing-a-service.md](docs/writing-a-service.md) (its program: `examples/chain-service.py`).
 
 The mesh's collectives are NCCL's API over the bridges: [rdma/NCCL.md](rdma/NCCL.md) (libnccl-mesh, the C
-library; `rdma/mesh_mpi.py` for NumPy), [rdma/torch-mesh/README.md](rdma/torch-mesh/README.md)
+library), [rdma/torch-mesh/README.md](rdma/torch-mesh/README.md)
 (torch.distributed's `mesh` backend) and [design/heterogeneity.md](design/heterogeneity.md) (nodes of
 different speeds, links of different costs). A node's bridge (`rdma/mesh-flow`) is its resident service, the admin user's launchd agent
 `io.mesh.bridge` run from the user's mesh checkout with the node's bridge configuration, a document its consumer writes and passes

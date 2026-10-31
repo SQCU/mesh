@@ -12,6 +12,90 @@ from torch._inductor import lowering as _native_lowerings
 from .structured import expand as butterfly
 
 
+def product_implementation(dtype):
+    """The configured numerical equation family for a typed contraction."""
+    from mesh_compute import assigned_implementation, implementation_assignment
+    return assigned_implementation(dict(arithmetic_types=[str(dtype).removeprefix('torch.')]),
+                                   implementation_assignment()['product'])
+
+
+def real_components(value):
+    """Complex storage is the same pages viewed as pairs of real components."""
+    scalar = types.corresponding_real_dtype(value.dtype)
+    return value.view(scalar).reshape((*value.shape, 2))
+
+
+def complex_components(value):
+    scalar = types.corresponding_complex_dtype(value.dtype)
+    return value.reshape((*value.shape[:-1], 2)).view(scalar).reshape(value.shape[:-1])
+
+
+def component_product(left, right):
+    a, b = real_components(left), real_components(right)
+    ar, ai, br, bi = a[..., 0], a[..., 1], b[..., 0], b[..., 1]
+    dot = lambda x, y: (x.unsqueeze(-1) * y.unsqueeze(-3)).sum(-2, dtype=x.dtype)
+    return dot(ar, br) - dot(ai, bi), dot(ar, bi) + dot(ai, br)
+
+
+def component_scale(real, imag, factor):
+    return real * factor.real - imag * factor.imag, real * factor.imag + imag * factor.real
+
+
+def contraction(left, right, out_dtype=None):
+    """One typed scalar contraction; the native compiler owns its tiling.
+
+    Integer sums retain their declared scalar width. Complex arithmetic uses
+    real page components, so the lower compiler sees ordinary typed loads,
+    products and reductions and never an opaque complex executor.
+    """
+    dtype = left.dtype if out_dtype is None else out_dtype
+    if left.dtype.is_complex:
+        real, imag = component_product(left, right)
+        scalar = types.corresponding_real_dtype(dtype)
+        return complex_components(torch.stack((real.to(scalar), imag.to(scalar)), -1))
+    values = left.unsqueeze(-1) * right.unsqueeze(-3)
+    return values.sum(-2, dtype=dtype)
+
+
+def matrix_product(left, right, out_dtype=None):
+    if product_implementation(left.dtype) == 'metal_product':
+        return NotImplemented
+    return contraction(left, right, out_dtype)
+
+
+def matrix_add(bias, left, right, out_dtype=None, beta=1, alpha=1):
+    if product_implementation(left.dtype) == 'metal_product':
+        return NotImplemented
+    if left.dtype.is_complex:
+        real, imag = component_scale(*component_product(left, right), alpha)
+        if beta != 0:
+            values = real_components(bias)
+            br, bi = component_scale(values[..., 0], values[..., 1], beta)
+            real, imag = real + br, imag + bi
+        scalar = types.corresponding_real_dtype(left.dtype if out_dtype is None else out_dtype)
+        return complex_components(torch.stack((real.to(scalar), imag.to(scalar)), -1))
+    product = contraction(left, right, out_dtype)
+    # beta=0 does not read bias (including its NaNs), as the source declares.
+    return product * alpha if beta == 0 else product * alpha + bias * beta
+
+
+def declared_linear(x, w, bias=None, act=0, x1=None):
+    if product_implementation(x.dtype) == 'metal_product':
+        return NotImplemented
+    source = x if x1 is None else torch.cat((x, x1), -1)
+    result = contraction(source, w.t())
+    if bias is not None:
+        result = result + bias
+    return result.tanh() if act else result
+
+
+def declared_linears(xs, ws, biases, acts, x1s):
+    if all(product_implementation(x.dtype) == 'metal_product' for x in xs):
+        return NotImplemented
+    return [torch.ops.torch_mesh.linear.default(x, w, bias, act, x1)
+            for x, w, bias, act, x1 in zip(xs, ws, biases, acts, x1s, strict=True)]
+
+
 def linear_backward(self, grad_output, weight, output_mask):
     """Linear's requested gradients as products and a row reduction.
 
@@ -188,6 +272,13 @@ def convolution(input, weight, bias, stride, padding, dilation, transposed, outp
 # table. Lowering to scalar prims before partitioning would erase the tensor
 # operations whose ownership relations the distributed frontend consumes.
 partition_decompositions = {
+    torch.ops.aten.mm.default: matrix_product,
+    torch.ops.aten.bmm.default: matrix_product,
+    torch.ops.aten.addmm.default: matrix_add,
+    torch.ops.torch_mesh.linear.default: declared_linear,
+    torch.ops.torch_mesh.linears.default: declared_linears,
+    torch.ops.aten.view_as_real.default: real_components,
+    torch.ops.aten.view_as_complex.default: complex_components,
     torch.ops.aten.mean.default: mean,
     torch.ops.aten.mean.dim: mean,
     torch.ops.aten.linear_backward.default: linear_backward,
@@ -197,6 +288,17 @@ partition_decompositions = {
     torch.ops.aten._softmax_backward_data.default: softmax_backward,
     torch.ops.aten._log_softmax_backward_data.default: log_softmax_backward,
     torch.ops.aten.linalg_vector_norm.default: vector_norm}
+
+# Attention is the same declared products, masks and reductions before owner
+# assignment, including the CPU capture form and grouped-query head sharing.
+# No placement-specific attention executor or graph break is required.
+partition_decompositions.update(get_decompositions([
+    torch.ops.aten._scaled_dot_product_flash_attention_for_cpu.default]))
+for operation in (torch.ops.aten.scaled_dot_product_attention.default,
+                  torch.ops.aten._scaled_dot_product_attention_math.default):
+    partition_decompositions[operation] = native_decompositions[operation]
+partition_decompositions[torch.ops.aten._scaled_dot_product_attention_math_for_mps.default] = (
+    native_decompositions[torch.ops.aten._scaled_dot_product_attention_math.default])
 
 for name, root, mean in (('var', False, False), ('std', True, False),
                          ('var_mean', False, True), ('std_mean', True, True)):

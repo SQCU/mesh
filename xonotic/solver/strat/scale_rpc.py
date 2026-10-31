@@ -1,5 +1,3 @@
-import time
-
 from .cast_header import scale_operator
 from .matmul import matrix_multiply_transpose_left
 
@@ -21,13 +19,12 @@ class RemoteCross:
     def __call__(self, lhs, rhs):
         if self.world.parts(self.product) is None:
             return matrix_multiply_transpose_left(lhs, rhs)
-        started = time.perf_counter()
         lo, hi = self.world.span(self.product, lhs.shape[0])
         lhs, rhs = self.world.copy(lhs), self.world.copy(rhs)
         product = self.world.reduce(matrix_multiply_transpose_left(lhs[lo:hi], rhs[lo:hi]))
-        self.last = {'completed': True, 'backend': 'libnccl-mesh', 'product': self.product,
+        self.last = {'declared': True, 'backend': 'libnccl-mesh', 'product': self.product,
                      'parts': self.world.parts(self.product), 'rank': self.world.rank, 'rows': [lo, hi],
-                     'row_mass': int(lhs.shape[0]), 'issue_s': time.perf_counter() - started}
+                     'row_mass': int(lhs.shape[0])}
         return product
 
 
@@ -41,10 +38,8 @@ class RemoteScale(RemoteCross):
     def __call__(self, *tensors, topk):
         if self.world.parts(self.product) is None:
             return scale_operator(*tensors, topk=topk)
-        started = time.perf_counter()
         result = scale_operator(*tensors, topk=topk, world=self.world)
-        self.last = {'completed': True, 'backend': 'libnccl-mesh', 'product': self.product,
+        self.last = {'declared': True, 'backend': 'libnccl-mesh', 'product': self.product,
                      'parts': self.world.parts(self.product), 'rank': self.world.rank,
-                     'hidden_columns': int(tensors[3].shape[-1]),
-                     'issue_s': time.perf_counter() - started}
+                     'hidden_columns': int(tensors[3].shape[-1])}
         return result

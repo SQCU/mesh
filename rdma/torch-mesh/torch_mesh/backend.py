@@ -387,11 +387,10 @@ class ProcessGroupMesh(dist.ProcessGroup):
         return sorted(set(cut for row in rows for cut in row))
 
     def partials_operator(self, width):
-        """Realize a partial-row reduction operator before declaring a function."""
+        """The supplied partial-row function uses the same reduction compiler."""
         if width not in self._operators:
-            made = ffi.new('ncclRedOp_t *')
-            check(LIB.ncclMeshRedOpCreatePartials(made, width - 2, LIB.ncclFloat32, self.comm))
-            self._operators[width] = made[0]
+            from .reduction import partials
+            self._operators[width] = partials(torch.float32, width).operator(self)
         return self._operators[width]
 
 def prepare_fragments(bindings, group):
@@ -451,39 +450,18 @@ def _(partials, root, group_name, rows):
 
 @torch.library.custom_op('torch_mesh::all_reduce', mutates_args=())
 def all_reduce(input: torch.Tensor, reduce_op: str, group_name: str, repeats: int = 1) -> torch.Tensor:
-    """torch's functional all_reduce as an op a compiled graph calls (torch_mesh.compiler).  A sum of MPS tensors on a
-    mesh group is a compiler-indexed crossing, as allgatherv's: this rank's part published from a held lease by
-    a kernel of partition's own, every peer's awaited and all of them added in rank order by another, the host issuing
-    the crossing (once for `repeats` of them: the graph's, torch_mesh.compiler) and two encodes; any other its
-    functional kernel's, its work waited where the graph waits on it (wait_tensor)."""
-    group = dist.distributed_c10d._resolve_process_group(group_name)
-    if (reduce_op == 'sum' and isinstance(group, ProcessGroupMesh) and input.device.type == 'mps'
-            and input.dtype in (torch.float16, torch.float32)):
-        if group.size() == 1:
-            return input.clone()
-        raise RuntimeError('mesh sum must be lowered to an indexed crossing before execution')
-    return torch.ops._c10d_functional.all_reduce.default(input, reduce_op, group_name)
+    """Declare a reduction of any supported scalar type on the named mesh.
+
+    The same whole-function crossing handles all reduction operators, devices
+    and membership sizes; a declaration never delegates numerical execution.
+    """
+    _mesh(group_name, 'all_reduce')
+    raise RuntimeError('all_reduce requires whole-function preparation')
 
 
 @all_reduce.register_fake
 def _(input, reduce_op, group_name, repeats=1):
     return torch.empty_like(input)
-
-
-@torch.library.custom_op('torch_mesh::linear_sum', mutates_args=())
-def linear_sum(x: torch.Tensor, w: torch.Tensor, group_name: str, repeats: int = 1) -> torch.Tensor:
-    """x w^T (torch_mesh::linear's product, x [R, K], w [N, K]) summed over the mesh group named `group_name` as one
-    compiler-indexed crossing, issued once for `repeats` of them (torch_mesh.compiler): linear.metal's
-    linear_publish computes this rank's product into its segment and publishes it through the collective's steps,
-    sum_land adds every rank's in rank order (torch_mesh.compiler)."""
-    if dist.distributed_c10d._resolve_process_group(group_name).size() == 1:
-        return torch.ops.torch_mesh.linear(x, w)
-    raise RuntimeError('linear_sum must be lowered to an indexed crossing before execution')
-
-
-@linear_sum.register_fake
-def _(x, w, group_name, repeats=1):
-    return x.new_empty(x.shape[0], w.shape[0])
 
 
 @torch.library.register_fake('torch_mesh::linears')

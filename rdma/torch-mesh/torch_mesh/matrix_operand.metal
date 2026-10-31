@@ -25,6 +25,10 @@ inline Scalar mesh_matrix_scaled(Code code, float scale, long zero) {
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 using namespace metal;
 
+#ifndef MESH_OBSERVED_BINDINGS
+#define MESH_OBSERVED_BINDINGS 0ul
+#endif
+template<uint Binding> constexpr bool mesh_observed() {return (MESH_OBSERVED_BINDINGS >> Binding) & 1ul;}
 template<uint Binding> constexpr bool mesh_affine();
 template<uint Binding, uint Axis> constexpr long mesh_stride();
 template<uint Binding> inline long mesh_position(ulong i);
@@ -53,14 +57,26 @@ inline void mesh_matrix_fill(thread Fragment &tile, thread const Read &read, int
     }
 }
 
-template <uint Binding, typename Scalar>
-struct mesh_matrix_read {
-    device const Scalar *values;
-    ulong base;
-    uint columns;
-    Scalar operator()(int2 at) const {
-        return values[mesh_index<Binding>(base + ulong(at.y) * columns + at.x)];
+// A scalar value is either a direct page load or a composed scalar equation.
+// Both expose load(ordinal); no runtime descriptor or allocation is involved.
+template <uint Binding,typename Scalar>
+struct mesh_page_read {
+    device const Scalar* values;
+    Scalar load(ulong i) const {
+        if constexpr(mesh_observed<Binding>())
+            return mesh_step_read<Scalar>((device const uchar *)values, mesh_index<Binding>(i));
+        else return values[mesh_index<Binding>(i)];
     }
+};
+template <uint Binding,typename Read>
+struct mesh_mapped_value_read {
+    Read reader;
+    auto load(ulong i) const {return reader.load(mesh_index<Binding>(i));}
+};
+template <typename Read>
+struct mesh_matrix_read {
+    Read reader;ulong base;uint columns;
+    auto operator()(int2 at) const {return reader.load(base+ulong(at.y)*columns+at.x);}
 };
 
 template <uint Binding, uint Bits>
@@ -103,9 +119,9 @@ inline auto mesh_matrix_extents(int x, int y) {
 }
 
 template <bool Left, uint Binding, bool Affine, uint Rows, uint Columns, long RowStride, long ColumnStride,
-          typename L, typename R, bool FullRows = false, bool FullColumns = false, typename Scalar, typename Operation>
+          typename L, typename R, bool FullRows = false, bool FullColumns = false, typename Scalar, typename Operation, typename Read>
 inline auto mesh_matrix_operand(thread const Operation &operation, device const Scalar *values,
-                                ulong base, int2 extent, int2 origin, uint columns) {
+                                ulong base, int2 extent, int2 origin, uint columns, thread const Read &read) {
     if constexpr (Affine) {
         auto view = tensor(const_cast<device Scalar *>(values) + mesh_index<Binding>(base),
                            mesh_matrix_extents<FullColumns ? Columns : dynamic_extent,
@@ -114,8 +130,16 @@ inline auto mesh_matrix_operand(thread const Operation &operation, device const 
         return view.template slice<Columns,Rows>(origin.x,origin.y);
     } else {
         return mesh_matrix_fragment_operand<Left,L,R,FullRows,FullColumns>(
-            operation,mesh_matrix_read<Binding,Scalar>{values,base,columns},extent,origin);
+            operation,mesh_matrix_read<Read>{read,base,columns},extent,origin);
     }
+}
+
+template <bool Left,uint Binding,bool Affine,uint Rows,uint Columns,long RowStride,long ColumnStride,
+          typename L,typename R,bool FullRows=false,bool FullColumns=false,typename Scalar,typename Operation>
+inline auto mesh_matrix_operand(thread const Operation &operation,device const Scalar *values,
+    ulong base,int2 extent,int2 origin,uint columns) {
+    return mesh_matrix_operand<Left,Binding,Affine,Rows,Columns,RowStride,ColumnStride,L,R,FullRows,FullColumns>(
+        operation,values,base,extent,origin,columns,mesh_page_read<Binding,Scalar>{values});
 }
 
 template <bool Left, uint Binding, bool Affine, uint Rows, uint Columns, long RowStride, long ColumnStride,

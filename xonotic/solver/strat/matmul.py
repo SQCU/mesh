@@ -32,13 +32,9 @@ def batched_matrix_vector(matrices, vectors):
 
 
 def expert_matrix_multiply(rows, weights, experts):
-    """57628982^:paged_matrix.experts: each row through its expert's matrix, rows grouped per expert (the routed
-    table), one product an expert present."""
-    output = rows.new_zeros((rows.shape[0], weights.shape[2]))
-    for expert in torch.unique(experts).tolist():
-        selected = torch.nonzero(experts == expert).reshape(-1)
-        output = output.index_add(0, selected, rows[selected] @ weights[expert])
-    return output
+    """Indexed matrix operands; the shared product lowerer consumes the index pages."""
+    return torch.bmm(rows[:, None, :], weights.index_select(0, experts))[:, 0, :]
+
 
 
 __all__ = [

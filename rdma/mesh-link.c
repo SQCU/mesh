@@ -108,35 +108,39 @@ static uint64_t chain_follow(const void *context,uint64_t node){
 }
 static uint64_t chain_items(const void *context,uint64_t node){ return tables_at(node)->count[((const struct chained *)context)->land]; }
 static uint64_t chain_weight(const void *context,uint64_t node,uint64_t item){ return entry_at(node,((const struct chained *)context)->land,item)->entry.units; }
-static void chain_leave(void *consumer,uint64_t node,uint64_t left){ (void)node; atomic_store_explicit((_Atomic uint64_t *)consumer,left,memory_order_release); }
+struct chain_progress { struct walk *walk; _Atomic uint64_t *word; };
+static void chain_leave(void *consumer,uint64_t node,uint64_t left){
+  (void)node;(void)left;
+  const struct chain_progress *progress=consumer;
+  uint64_t through=progress->walk->chain[0].left;
+  for(uint32_t lane=1;lane<MESH_STREAM_LANES;lane++)
+    if(progress->walk->chain[lane].left<through)through=progress->walk->chain[lane].left;
+  atomic_store_explicit(progress->word,through,memory_order_release);
+}
 /* the entry holding unit q of a holding that links its calls' tables, read where its call's tables hold it, its base
    the call's where it names one (mesh.h struct mesh_zwoggle); NULL where the call holding q is not yet linked */
-static struct taken *walk_chain(struct walk *w,struct mesh_stream *x,int land,struct mesh_units q){
+static struct taken *walk_chain(struct walk *w,struct mesh_stream *x,int land,uint32_t lane,struct mesh_units q){
   const struct chained c={x,land};
-  if(!mesh_graph_chain(&w->chain,q.n,chain_follow,chain_items,chain_weight,&c,chain_leave,&x->taken[land]))return NULL;
-  const struct mesh_zwoggle_entry z=*entry_at(w->chain.node,land,w->chain.item);
+  struct mesh_graph_chain *cursor=w->chain+lane;
+  struct chain_progress progress={w,&x->taken[land]};
+  if(!mesh_graph_chain(cursor,q.n,chain_follow,chain_items,chain_weight,&c,chain_leave,&progress))return NULL;
+  const struct mesh_zwoggle_entry z=*entry_at(cursor->node,land,cursor->item);
   const struct mesh_entry e=z.entry;
-  const struct mesh_zwoggle *t=tables_at(w->chain.node);
+  const struct mesh_zwoggle *t=tables_at(cursor->node);
   const uint64_t base=e.base+(z.relative?((const uint64_t *)((const char *)M+t->bases))[z.relative-1]:0);
-  /* mesh.h struct mesh_zwoggle_entry `after`: a landing's channels in its call's table, a SEND's own list (its count,
-     then its requirements), either read as the requirements a mask names */
-  uint64_t after=z.after;
-  const struct mesh_zwoggle_after *afters=NULL;
-  if(z.after && land)afters=(const struct mesh_zwoggle_after *)((const char *)M+t->after);
-  else if(z.after){
-    const uint64_t *list=(const uint64_t *)((const char *)M+z.after);
-    afters=(const struct mesh_zwoggle_after *)(list+1);after=list[0]>=64?~0ull:(1ull<<list[0])-1;
-  }
-  w->current=(struct taken){(const struct mesh_dma_span *)((const char *)M+e.spans),{e.units},{base},{w->chain.before},
-                            e.word?stream_words(e.word):land?NULL:&x->ready,after,afters};
+  const uint64_t *list = z.after ? (const uint64_t *)((const char *)M + z.after) : NULL;
+  const uint64_t count = list ? list[0] : 0;
+  const struct mesh_zwoggle_after *afters = list ? (const struct mesh_zwoggle_after *)(list + 1) : NULL;
+  w->current=(struct taken){(const struct mesh_dma_span *)((const char *)M+e.spans),{e.units},{base},{cursor->before},
+                            e.word?stream_words(e.word):land?NULL:&x->ready,count,afters};
   return &w->current;
 }
 /* whether an entry's `after` holds (mesh.h struct mesh_zwoggle_entry): a landing's, on each channel it names, the last
    SEND an earlier call laid of its pages completed, that channel's `sent` at its call's requirement there; a SEND's,
    each receive it follows and does not forward consumed, its word at that receive's end; reads alone */
 static int after_holds(const struct taken *e){
-  for(uint64_t a=e->after;a;a&=a-1){
-    const struct mesh_zwoggle_after *r=e->afters+__builtin_ctzll(a);
+  for(uint64_t a=0;a<e->after;a++){
+    const struct mesh_zwoggle_after *r=e->afters+a;
     if(mesh_units_lt(mesh_units_load(stream_words(r->word)),(struct mesh_units){r->base}))return 0;
   }
   return 1;
@@ -223,19 +227,18 @@ static void stream_turn(struct port *port,uint32_t t){
 /* the units a pass posts on a stream's lanes, each way, before it reaps completions: the time `landed`, `sent` and the
    frame credits wait to be told (design/runtime-waits-2026-10-30.md: posting a whole window first held them about 1 ms
    at a call's start) */
-#define MESH_PASS_UNITS 64
 static void stream_send(struct port *port,uint32_t t,uint32_t served){
   struct link *l=&port->link;
   const uint32_t k=MESH_LANE_FIRST+2*t;
   if(l->hold[t]!=HOLD_SERVE || (served>>k&3)!=3)return;
   struct mesh_stream *x=stream_of(port,t);
   struct walk *w=l->sending+t;
-  for(uint32_t budget=2*MESH_PASS_UNITS;budget;budget--){
-    const uint32_t j=MESH_STREAM_LANES>1 && lane_page(1,l->lane[k+1].sent)<lane_page(0,l->lane[k].sent),lane=k+j;
+  for(uint32_t j=0;j<MESH_STREAM_LANES;j++)for(uint32_t budget=MESH_POST_QUANTUM;budget;budget--){
+    const uint32_t lane=k+j;
     struct lane_state *state=l->lane+lane;
     if(state->sent-state->done>=MESH_LANE_UNITS)break;
     const struct mesh_units q=mesh_units_sub((struct mesh_units){lane_page(j,state->sent)},w->base);
-    const struct taken *e=walk_chain(w,x,0,q);
+    const struct taken *e=walk_chain(w,x,0,j,q);
     if(!e)break;
     if(!after_holds(e))break;
     const struct mesh_units i=mesh_units_sub(q,e->unit);
@@ -262,12 +265,12 @@ static void stream_post(struct port *port,uint32_t t,uint32_t served){
   if(l->hold[t]!=HOLD_SERVE || (served>>k&3)!=3)return;
   struct mesh_stream *x=stream_of(port,t);
   struct walk *w=l->landing+t;
-  for(uint32_t budget=2*MESH_PASS_UNITS;budget;budget--){
-    const uint32_t j=MESH_STREAM_LANES>1 && lane_page(1,l->lane[k+1].posted)<lane_page(0,l->lane[k].posted),lane=k+j;
+  for(uint32_t j=0;j<MESH_STREAM_LANES;j++)for(uint32_t budget=MESH_POST_QUANTUM;budget;budget--){
+    const uint32_t lane=k+j;
     struct lane_state *state=l->lane+lane;
     if(state->posted-state->got>=MESH_LANE_UNITS)break;
     const struct mesh_units q=mesh_units_sub((struct mesh_units){lane_page(j,state->posted)},w->base);
-    const struct taken *e=walk_chain(w,x,1,q);
+    const struct taken *e=walk_chain(w,x,1,j,q);
     if(!e)break;
     if(e->word && mesh_units_lt(mesh_units_load(e->word),e->base))break;
     if(!after_holds(e))break;
@@ -314,11 +317,11 @@ static void link_failed(struct port *port,int64_t code){
    stored where its completions moved it (walk_count) */
 static void link_send(struct port *port,uint32_t served){
   struct link *l=&port->link;
-  struct ibv_wc done[64];
+  struct ibv_wc done[MESH_COMPLETION_BATCH];
   uint32_t completed=0;
   /* every completion waiting, not one poll's worth a pass */
-  for(int count=64;count==64;){
-    count=l->provider.poll(l->provider.sent,64,done);
+  for(int count=MESH_COMPLETION_BATCH;count==MESH_COMPLETION_BATCH;){
+    count=l->provider.poll(l->provider.sent,MESH_COMPLETION_BATCH,done);
     if(count<0){link_failed(port,EIO);return;}
     for(int i=0;i<count;i++){
       const uint32_t lane=link_lane(l,done[i].qp_num);
@@ -355,12 +358,12 @@ static void link_landed_bytes(const struct port *port,uint64_t bytes){
    (the stamp of every row it covers) */
 static void link_receive(struct port *port,uint32_t served){
   struct link *l=&port->link;
-  struct ibv_wc done[64];
+  struct ibv_wc done[MESH_COMPLETION_BATCH];
   uint32_t landed=0;
   uint64_t bytes=0;
   /* every landing waiting, not one poll's worth a pass */
-  for(int count=64;count==64;){
-    count=l->provider.poll(l->provider.completion,64,done);
+  for(int count=MESH_COMPLETION_BATCH;count==MESH_COMPLETION_BATCH;){
+    count=l->provider.poll(l->provider.completion,MESH_COMPLETION_BATCH,done);
     if(count<0){link_failed(port,EIO);return;}
     if(count)atomic_thread_fence(memory_order_acquire);
     for(int i=0;i<count;i++){

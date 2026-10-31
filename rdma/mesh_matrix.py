@@ -7,13 +7,24 @@ lowerings; this module neither allocates numerical storage nor executes work.
 from math import prod
 
 
-LIBRARIES = ('argmax.metal', 'matrix_operand.metal', 'matrix.metal')
+LIBRARIES = ('argmax.metal', 'matrix_operand.metal', 'linear.metal', 'matrix_rows.metal', 'matrix.metal')
 
 
 def row_tiles(rows, geometry):
     """The product's compiled row groups, also used by tile publications."""
-    width = geometry['MATRIX_ROWS'] * geometry['MATRIX_ROW_GROUPS']
+    width = (geometry['LINEAR_ROWS'] if rows <= geometry['LINEAR_ROW_CROSSOVER']
+             else geometry['MATRIX_ROWS'] * geometry['MATRIX_ROW_GROUPS'])
     return tuple((first, min(width, rows - first)) for first in range(0, rows, width))
+
+
+def row_split(groups, inner, geometry, capabilities):
+    """SIMD groups per row tile from declared work and compute capacity."""
+    split = 1
+    maximum = min(geometry['LINEAR_SIMDGROUPS'], capabilities['max_threads_per_threadgroup'] // geometry['SIMD_WIDTH'])
+    while (split * 2 <= maximum and split * groups < capabilities['compute_units'] * geometry['LINEAR_GROUPS_PER_CORE']
+           and inner // (split * 2) >= geometry['LINEAR_MIN_INNER']):
+        split *= 2
+    return split
 
 
 def product_domains(algebra, x, w, out, *, x1=None, bias=None):
@@ -61,7 +72,7 @@ def product_domains(algebra, x, w, out, *, x1=None, bias=None):
                             writes={'out': access(iterations, out, output)}))
 
 
-def product(x, w, out, geometry, *, x1=None, bias=None, act=False, alpha=1, beta=1,
+def product(x, w, out, geometry, capabilities, *, x1=None, bias=None, act=False, alpha=1, beta=1,
             ready=None, arrivals=None):
     """Declare the shared product from ``{shape, type}`` scalar views.
 
@@ -100,7 +111,7 @@ def product(x, w, out, geometry, *, x1=None, bias=None, act=False, alpha=1, beta
         return f'mesh_matrix_stride<{binding},{axis % len(shape(value))}>()' if value is not None else 0
 
     def affine(binding, value):
-        return f'mesh_affine<{binding}>()' if value is not None else 0
+        return f'(mesh_affine<{binding}>() && !mesh_observed<{binding}>())' if value is not None else 0
 
     definitions = dict(INPUT=x['type'], WEIGHT=w['type'], OUTPUT=out['type'],
                        AM=step(0, x, -2), AK=step(0, x, -1), BK=step(1, w, -2), BN=step(1, w, -1),
@@ -110,20 +121,61 @@ def product(x, w, out, geometry, *, x1=None, bias=None, act=False, alpha=1, beta
                        BIAS_COLUMNS=shape(bias)[-1] if bias is not None else 1,
                        ACTIVATE=int(act), BIAS=int(bias is not None), ALPHA=repr(float(alpha))+'f',
                        BETA=repr(float(beta))+'f', PRODUCED=int(ready is not None),
-                       SEGMENTED=int(x1 is not None), K0=first, PRODUCT_ROWS=rows,
+                       SEGMENTED=int(x1 is not None), PRODUCT_FIRST=first, PRODUCT_ROWS=rows,
                        PRODUCT_COLUMNS=columns, PRODUCT_INNER=inner,
                        A1M=step(6, x1, -2), A1K=step(6, x1, -1), AFFINE_A1=affine(6, x1),
                        BATCH_A1=int(x1 is not None and len(shape(x1)) == 3 and shape(x1)[0] > 1))
     definitions.update((key, geometry['MATRIX_' + key])
                        for key in ('ROWS', 'COLUMNS', 'INNER', 'ROW_GROUPS', 'COLUMN_GROUPS'))
-    row_tile = definitions['ROWS'] * definitions['ROW_GROUPS']
-    column_tile = definitions['COLUMNS'] * definitions['COLUMN_GROUPS']
-    threads = definitions['ROW_GROUPS'] * definitions['COLUMN_GROUPS'] * geometry['SIMD_WIDTH']
+    row_kernel = rows <= geometry['LINEAR_ROW_CROSSOVER']
+    row_tile = geometry['LINEAR_ROWS'] if row_kernel else definitions['ROWS'] * definitions['ROW_GROUPS']
+    column_tile = geometry['LINEAR_COLUMNS'] if row_kernel else definitions['COLUMNS'] * definitions['COLUMN_GROUPS']
+    groups = -(-rows // row_tile) * -(-columns // column_tile) * batches
+    split = row_split(groups, inner, geometry, capabilities) if row_kernel else 1
+    threads = (split if row_kernel else definitions['ROW_GROUPS'] * definitions['COLUMN_GROUPS']) * geometry['SIMD_WIDTH']
+    definitions.update(PRODUCT_ROW_KERNEL=int(row_kernel), ROW_SPLIT=split,
+        AB=step(0, x, 0) if len(xs) == 3 else 0,
+        BB=step(1, w, 0) if len(ws) == 3 else 0,
+        A1B=step(6, x1, 0) if x1 is not None and len(shape(x1)) == 3 else 0)
     bindings = ('x', 'w', 'out', 'arrivals' if arrivals is not None else None, None,
                 'bias' if bias is not None else None, 'x1' if x1 is not None else None,
                 'ready' if ready is not None else None)
     return dict(definitions=definitions, bindings=bindings, libraries=LIBRARIES, function='product',
-                grid=(-(-rows // row_tile), -(-columns // column_tile), batches), threads=(threads, 1, 1))
+                grid=(-(-rows // row_tile), -(-columns // column_tile), batches), threads=(threads, 1, 1),
+                tile=(row_tile, column_tile), group_order=(1, 2, 0))
+
+
+def product_dispatch(algebra, recipe, operands, *, offset=0, total=None, group_order=None):
+    """Project the declared product's work onto its emitted threadgroup grid.
+
+    The same tile operands that formed the launch now group its retained access
+    relations. Page binding composes these logical ordinals with actual storage.
+    """
+    domain = product_domains(algebra, **operands)
+    rows, columns, batches = recipe['grid']
+    row_width, column_width = recipe['tile']
+    total = prod(recipe['grid']) if total is None else total
+    order = recipe['group_order'] if group_order is None else group_order
+    widths = {0: batches, 1: rows, 2: columns}
+
+    def grouped(shape):
+        def equations(i, o):
+            coordinates = {0: i[0], 1: f'floor({i[1]} / {row_width})',
+                           2: f'floor({i[2]} / {column_width})'}
+            stride, terms = 1, [str(offset)]
+            for axis in order:
+                terms.append(f'{stride} * ({coordinates[axis]})')
+                stride *= widths[axis]
+            return [f'{o[0]} = ' + ' + '.join(terms)]
+        return algebra.map(shape, (total,), equations).inverse((total,))
+
+    result = []
+    for stage, sides in ((domain, ('reads',)), (domain['finish'], ('reads', 'writes'))):
+        groups = grouped(stage['work'])
+        for side in sides:
+            for role, relation in stage[side].items():
+                result.append(dict(side=side, role=role, group_relation=groups.then(relation)))
+    return tuple(result)
 
 
 def selected_products(domain, work, finish, *, requirements):
@@ -189,3 +241,60 @@ def selected_products(domain, work, finish, *, requirements):
                 parameters['act'] = False
             plans.append(dict(operands=operands, parameters=parameters))
     return tuple(plans)
+
+
+def row_product_group(operands, requests, geometry, capabilities):
+    """Emit independent row products from the same typed product contract."""
+    recipes = {}
+    for prefix, options in requests:
+        declared = {name[len(prefix):]: value for name, value in operands.items() if name.startswith(prefix)}
+        recipes[prefix] = product(**declared, geometry=geometry, capabilities=capabilities, **options)
+    slots, bindings, parameters, accesses = {}, [], [], 0
+    for name, value in operands.items():
+        slot = len(bindings);slots[name] = slot;bindings.append(name)
+        scalar = value['type']
+        output = name.endswith('_out')
+        parameters.append(f'device {"" if output else "const "}{scalar}* value{slot} [[buffer({slot})]]')
+        accesses |= 1 << (slot + (geometry['ACCESS_WRITE_SHIFT'] if output else 0))
+    tiles, total, least = [], 0, None
+    for prefix, options in requests:
+        rows, first = operands[prefix + 'x']['shape']
+        inner, columns = operands[prefix + 'w']['shape']
+        groups = -(-rows // geometry['LINEAR_ROWS']) * -(-columns // geometry['LINEAR_COLUMNS'])
+        tiles.append((prefix, options, total, rows, first, inner, columns));total += groups
+        least = inner if least is None else min(least, inner)
+    split = row_split(total, least, geometry, capabilities)
+    lines = ['kernel void products(' + ','.join(parameters) + ',uint tg [[threadgroup_position_in_grid]],'
+             'uint sg [[simdgroup_index_in_threadgroup]],uint lane [[thread_index_in_simdgroup]],'
+             'uint tid [[thread_index_in_threadgroup]]) {',
+             f'threadgroup float part[{split}*MESH_LINEAR_ROWS*MESH_LINEAR_COLUMNS];']
+    for index, (prefix, options, start, rows, first, inner, columns) in enumerate(reversed(tiles)):
+        lines.append(('if' if index == 0 else 'else if') + f'(tg>={start}) {{')
+        def reader(role, width, transpose=False):
+            slot = slots[prefix + role];dtype = operands[prefix + role]['type']
+            row, column = ((1, 0) if transpose else (0, 1))
+            read = f'mesh_page_read<{slot},{dtype}>'
+            return (f'matrix_row_read<{slot},{dtype},{str(transpose).lower()},{width},mesh_affine<{slot}>(),'
+                    f'mesh_matrix_stride<{slot},{row}>(),mesh_matrix_stride<{slot},{column}>(),0,{read}>'
+                    f'{{{read}{{value{slot}}},0}}')
+        lines.append(f'const auto x={reader("x", first)};const auto w={reader("w", columns, True)};')
+        lines.append(f'const auto x1={reader("x1", inner-first) if prefix+"x1" in operands else "x"};')
+        bias = prefix + 'bias'
+        bias_shape = operands[bias]['shape'] if bias in operands else (0,)
+        br, bc = (bias_shape[-2] if len(bias_shape) == 2 else 1), bias_shape[-1]
+        out = slots[prefix + 'out'];dtype = operands[prefix + 'out']['type']
+        if bias in slots:
+            lines.append(f'const mesh_page_read<{slots[bias]},{dtype}> bias{{value{slots[bias]}}};')
+        else:
+            lines.append(f'const mesh_page_read<{out},{dtype}> bias{{value{out}}};')
+        lines.append(f'const linear_dims dims={{{rows},{inner},{columns},0,0,{first},0,0,0,0}};')
+        act = str(bool(options.get('act', False))).lower()
+        alpha, beta = (repr(float(options.get(key, 1))) + 'f' for key in ('alpha', 'beta'))
+        lines.append(f'const matrix_row_store<{out},{dtype},decltype(bias),{rows},{columns},{br},{bc},{act}>'
+                     f' store{{(device uchar*)value{out},bias,0,{alpha},{beta}}};')
+        lines.append(f'linear_body_read<MESH_LINEAR_COLUMNS,{split},MESH_LINEAR_LOADS>'
+                     f'(x,x1,w,dims,store,part,sg,lane,tg-{start},tid);}}')
+    lines.append('}')
+    return dict(source='\n'.join(lines), function='products', bindings=tuple(bindings), access=accesses,
+                grid=(total, 1, 1), threads=(split * geometry['SIMD_WIDTH'], 1, 1),
+                products=tuple((prefix, recipes[prefix], start) for prefix, _, start, *_ in tiles))

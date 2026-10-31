@@ -11,6 +11,37 @@ struct mesh_landing_run {
   uint32_t shift;
 };
 
+/* Common refinement of independently packetized operands. Every emitted cell
+   lies in one run of every input. Its thresholds are constants of preparation;
+   a numerical block loads those words directly, without walking run tables.
+   Each input describes the same logical extent, irrespective of wire cuts. */
+struct mesh_landing_map { const struct mesh_landing_run *runs; size_t count; uint64_t base; };
+typedef void (*mesh_landing_emit)(void *context,uint64_t first,uint64_t elements,const uint64_t *through);
+static inline uint64_t mesh_landing_cells(const struct mesh_landing_map *maps,size_t inputs,uint64_t width,
+    size_t *cursor,uint64_t *through,mesh_landing_emit emit,void *context) {
+  if(!inputs||!maps[0].count)return 0;
+  for(size_t k=0;k<inputs;k++)cursor[k]=0;
+  const struct mesh_landing_run *last=maps[0].runs+maps[0].count-1;
+  const uint64_t end=last->first+last->elements;
+  uint64_t count=0;
+  for(uint64_t first=0;first<end;) {
+    uint64_t stop=end-first<width?end:first+width;
+    for(size_t k=0;k<inputs;k++) {
+      const struct mesh_landing_run *r=maps[k].runs+cursor[k];
+      while(first>=r->first+r->elements)r=maps[k].runs+(++cursor[k]);
+      const uint64_t boundary=r->first+r->elements;
+      if(boundary<stop)stop=boundary;
+    }
+    for(size_t k=0;k<inputs;k++) {
+      const struct mesh_landing_run *r=maps[k].runs+cursor[k];
+      through[k]=maps[k].base+r->packet+((r->phase+(stop-r->first-1)*r->step)>>r->shift);
+    }
+    if(emit)emit(context,first,stop-first,through);
+    count++;first=stop;
+  }
+  return count;
+}
+
 /* Element j within a run needs packet + ((phase + j * step) >> shift).
    A row split across packets belongs to the run containing its final byte.
    Packet offsets are deliberately irrelevant: the local page view has already

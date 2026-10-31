@@ -40,7 +40,7 @@ __attribute__((always_inline)) static inline void mesh_spec_step(State state, Hi
                                                                  Words words, uint stride, Record record,
                                                                  threadgroup uint *shared, uint lane) {
     if (lane == 0) {
-        uint step = state[0], p0 = state[1], length = state[2], flags = state[3] & ~4u, n = 0;
+        uint step = state[0], p0 = state[1], length = state[2], flags = state[3] & ~4u, n = step == 0u ? state[5] : 0u;
         if (p0 + R <= state[6]) {
             flags |= 4u;
         } else if (step == 0) {
@@ -50,8 +50,8 @@ __attribute__((always_inline)) static inline void mesh_spec_step(State state, Hi
             uint y[R];
             for (uint i = 0; i < R; i++)
                 y[i] = taught == 0u ? selected[i] : p0 + 1u + i < taught ? teacher[p0 + 1u + i] : 0xffffffffu;
-            while (n + 1u < R && state[MESH_SPEC_STATE + n + 1u] == y[n]) n++;
-            if (y[n] == 0xffffffffu || length + n + 1u + R > capacity || p0 + n + 1u + R > context) {
+            while (n + 1u < R && y[n + 1u] != 0xffffffffu && state[MESH_SPEC_STATE + n + 1u] == y[n]) n++;
+            if (y[n] == 0xffffffffu || length + n + 1u > capacity || p0 + n + 1u > context) {
                 flags |= 2u;
                 n = 0u;
             } else {
@@ -60,7 +60,7 @@ __attribute__((always_inline)) static inline void mesh_spec_step(State state, Hi
                 p0 += n + 1u;
             }
         }
-        state[1] = p0; state[2] = length; state[3] = flags; state[5] = n;
+        state[1] = p0; state[2] = length; state[3] = flags & ~8u; state[5] = n;
         shared[0] = length; shared[1] = p0; shared[2] = n; shared[3] = flags;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
@@ -94,9 +94,9 @@ __attribute__((always_inline)) static inline void mesh_spec_step(State state, Hi
             token = history[p + 1u + (row - 1u) % period];
         }
         words[row * stride + 0u] = token;
-        words[row * stride + 1u] = p0 + row;
+        words[row * stride + 1u] = min(p0 + row, context - 1u);
         words[row * stride + 2u] = state[7];
-        words[row * stride + 3u] = 7u;
+        words[row * stride + 3u] = (7u & ~(uint(row == 0u && (shared[3] & 8u) != 0u) * 2u)) * uint(p0 + row < context);
         state[MESH_SPEC_STATE + row] = token;
         record[3u + row] = token;
     }
@@ -136,6 +136,67 @@ kernel void mesh_saguaro_probe(device const uint *state [[buffer(0)]], device co
     }
     drafts[r] = found != 0u ? chains[(found - 1u) * R + r] : state[MESH_SPEC_STATE + r];
     if (r == 0u) hit[0] = found;
+}
+
+// A fan's prompt-lookup source, over the same history and candidate-row pages
+// as its neural source. Each slot owns one bounded prefix and one output chain.
+// The next probe consumes these pages directly; the host does not choose a
+// cache branch, wait for a worker, or construct another command graph.
+template <uint R>
+__attribute__((always_inline)) static inline uint mesh_lookup_prefix(device const uint *history,
+    device const uint *state, uint length, uint drafts, uint candidate, uint at) {
+    return at < length ? history[at] : at < length + drafts ? state[MESH_SPEC_STATE + 1u + at - length] : candidate;
+}
+
+template <uint R, uint N, uint ORDER>
+kernel void mesh_saguaro_lookup(device const uint *state [[buffer(0)]], device const uint *history [[buffer(1)]],
+    device const uint *slots [[buffer(2)]], device const uint *ranks [[buffer(3)]], device uint *keys [[buffer(4)]],
+    device uint *chains [[buffer(5)]], uint slot [[thread_position_in_grid]]) {
+    if (slot >= N) return;
+    const uint length = state[2], drafts = slots[slot], extent = length + drafts;
+    const uint excluded = drafts + 1u < R ? state[MESH_SPEC_STATE + drafts + 1u] : 0xffffffffu;
+    uint seen[N], selected = 0xffffffffu, used = 0u;
+    for (uint rank = 0; rank <= ranks[slot]; rank++) {
+        uint bestLength = 0u, bestEnd = 0u, bestToken = 0xffffffffu;
+        for (uint end = 0; end + 1u < extent; end++) {
+            const uint token = mesh_lookup_prefix<R>(history, state, length, drafts, 0u, end + 1u);
+            bool held = token == excluded;
+            for (uint i = 0; i < used; i++) held |= seen[i] == token;
+            uint matched = 0u;
+            for (uint k = 0; k < ORDER && k <= end && !held; k++) {
+                if (mesh_lookup_prefix<R>(history, state, length, drafts, 0u, end - k)
+                    != mesh_lookup_prefix<R>(history, state, length, drafts, 0u, extent - 1u - k)) break;
+                matched = k + 1u;
+            }
+            if (matched > bestLength || (matched != 0u && matched == bestLength && end > bestEnd)) {
+                bestLength = matched; bestEnd = end; bestToken = token;
+            }
+        }
+        selected = bestToken;
+        if (selected == 0xffffffffu) break;
+        seen[used++] = selected;
+    }
+    keys[slot] = selected;
+    chains[slot * R] = selected;
+    const uint total = extent + 1u;
+    uint bestLength = 0u, bestEnd = 0u;
+    for (uint end = 0; end + 1u < total; end++) {
+        uint matched = 0u;
+        for (uint k = 0; k < ORDER && k <= end; k++) {
+            if (mesh_lookup_prefix<R>(history, state, length, drafts, selected, end - k)
+                != mesh_lookup_prefix<R>(history, state, length, drafts, selected, total - 1u - k)) break;
+            matched = k + 1u;
+        }
+        if (matched > bestLength || (matched != 0u && matched == bestLength && end > bestEnd)) {
+            bestLength = matched; bestEnd = end;
+        }
+    }
+    for (uint row = 1; row < R; row++) {
+        chains[slot * R + row] = bestLength == 0u ? selected
+            : mesh_lookup_prefix<R>(history, state, length, drafts, selected,
+                bestEnd + 1u + (row - 1u) % (total - 1u - bestEnd));
+    }
+    if (slot == 0u) keys[N] = state[0];
 }
 
 // The step as a kernel, one threadgroup of T lanes: metal-microbench's engine instantiates it (decode_crossings.swift

@@ -18,7 +18,9 @@ def dense(shape):
 def configuration():
     from .compilation import operands
     _, threads, memory = _stream.device_facts()
-    return dict(geometry=operands(), capabilities=dict(max_threads_per_threadgroup=threads,
+    from mesh_compute import hardware
+    cores = hardware()['gpu']['cores']
+    return dict(geometry=operands(), capabilities=dict(compute_units=cores, max_threads_per_threadgroup=threads,
                                                        threadgroup_memory_bytes=memory))
 
 
@@ -53,7 +55,7 @@ class Commands:
 
     def shader(self, source, function, operands, *, grid, threadgroup, access,
                constants=None, definitions=None, indices=None, instance='', thread_grid=False,
-               threadgroup_policy=None, limits=None):
+               threadgroup_policy=None, limits=None, access_layouts=None, dispatch=None):
         from mesh_relation import Algebra
         from .operand import layout_configuration
         algebra = Algebra()
@@ -71,18 +73,21 @@ class Commands:
                 storage_bytes=math.prod(binding['shape']) * binding['dtype'].itemsize,
                 requirements=binding.get('requirements', ()))
             arguments.append(argument);types[slot] = dtype
-            relation = algebra.layout(layout_configuration(source_layout))
+            reached = source_layout if access_layouts is None else access_layouts.get(slot, source_layout)
+            relation = algebra.layout(layout_configuration(reached))
             typed = dict(name=name, dtype=dtype, storage_bytes=argument['storage_bytes'], relation=relation)
             for side, shift in (('reads', 0), ('writes', self.geometry['ACCESS_WRITE_SHIFT'])):
                 if access & (1 << (slot + shift)):
+                    local = (dense(source_layout.shape) if reached is source_layout else
+                             reached.rebase(source_layout, dense(source_layout.shape)))
                     accesses.append(dict(side=side, slot=slot, access=typed, work=relation.domain(), origins=(),
-                                         argument_layout=dense((source_layout.count * dtype.itemsize,))))
+                                         argument_layout=local.components(dtype.itemsize).reshape((local.count * dtype.itemsize,))))
         self.commands.append(dict(kind='shader', source=prefix + source + instance, function=function,
             arguments=tuple(arguments), types=tuple(types), index_dtype=None,
             index_layouts={} if indices is None else indices,
             binding_origins=tuple(origins), constants=constants, access=access, accesses=tuple(accesses),
             grid=tuple(grid), threadgroup=None if threadgroup is None else tuple(threadgroup),
-            threadgroup_policy=threadgroup_policy, limits=limits, thread_grid=thread_grid))
+            threadgroup_policy=threadgroup_policy, limits=limits, thread_grid=thread_grid, dispatch=dispatch))
 
     def declaration(self):
         return dict(commands=tuple(self.commands), bindings=dict(self.bindings))

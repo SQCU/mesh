@@ -43,7 +43,7 @@ static void lay(struct mesh_ctx *c,const struct mesh_stream_view *v,uint32_t rou
   entries[1]=(struct mesh_zwoggle_entry){.entry={.spans=first+rounds*sizeof *spans,.units=rounds},.relative=0};
   atomic_store_explicit(&tables->next,0,memory_order_relaxed);
   tables->entries[0]=metadata+sizeof *tables;tables->entries[1]=tables->entries[0]+sizeof *entries;
-  tables->count[0]=tables->count[1]=1;tables->bases=tables->after=0;
+  tables->count[0]=tables->count[1]=1;tables->bases=0;
   atomic_store_explicit(v->zwoggle,metadata,memory_order_release);
 }
 

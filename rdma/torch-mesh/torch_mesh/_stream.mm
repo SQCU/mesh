@@ -157,7 +157,7 @@ struct MeshStream {
   }
 
   // On torch's queue: its work so far committed (and waited for, where `wait`), torch's own event after it (MPSEvent)
-  // notifying `progress` of the next count, which a schedule after it awaits (schedule_after_inputs).  Notifications
+  // notifying `progress` of the next count for consumers of its declared external input pages.  Notifications
   // may come in any order; `progress` only rises.
   std::mutex rising;
   void signalled(bool wait) {
@@ -442,13 +442,11 @@ static MetalHostOperation host_operation(const std::array<uintptr_t,4> &entry, b
 
 using Schedule = std::shared_ptr<MetalSchedule>;
 
-static Schedule schedule_after_inputs() {
+static Schedule prepared_schedule() {
   at::mps::MPSStream *stream=at::mps::getCurrentMPSStream();
   MeshStream *source=&stream_of(stream);
   Schedule schedule(MetalScheduleCreateOn(source->prepared,MetalFormEncoded),MetalScheduleFree);
   TORCH_CHECK(schedule,"creating the prepared function command stream");
-  at::mps::dispatch_sync_with_rethrow(stream->queue(), ^{ source->signalled(false); });
-  MetalScheduleAfter(schedule.get(),source->progress,source->committed);
   return schedule;
 }
 
@@ -747,6 +745,32 @@ struct TensorOperand {
   ~TensorOperand(){[pages release];}
 };
 
+// Import only the pages produced by the framework before preparation.  The
+// recorder connects their event to intersecting consumers; unrelated commands
+// have no dependency on the framework queue.
+static void schedule_input_reaches(MetalSchedule *schedule,const std::vector<MetalReach> &inputs) {
+  std::vector<MetalReach> reaches;
+  for(auto reach:inputs)if(reach.access&MetalReachRead) {
+    reach.access=MetalReachWritten;reach.binding=-1;reaches.push_back(reach);
+  }
+  if(reaches.empty())return;
+  auto *stream=at::mps::getCurrentMPSStream();auto *source=&stream_of(stream);
+  at::mps::dispatch_sync_with_rethrow(stream->queue(), ^{ source->signalled(false); });
+  MetalScheduleInput(schedule,reaches.data(),reaches.size(),source->progress,source->committed);
+}
+static void schedule_inputs(MetalSchedule *schedule,const std::vector<pybind11::object> &inputs) {
+  std::vector<MetalReach> reaches;
+  for(const auto &value:inputs) {
+    const TensorOperand operand(value);
+    if(!operand.storage.is_mps())continue;
+    NSData *data=[operand.layout.value reaches:operand.pages.buffer base:0
+      elementBytes:operand.storage.element_size() access:MetalReachRead binding:-1];
+    const auto *spans=(const MetalReach *)data.bytes;
+    reaches.insert(reaches.end(),spans,spans+data.length/sizeof *spans);
+  }
+  schedule_input_reaches(schedule,reaches);
+}
+
 // The canonical bridge backing is already allocated. This preparation handle
 // retains the contributing leases and exposes their one page table to ordinary
 // tensor views; execution receives the same root buffer and compiled indices.
@@ -783,9 +807,6 @@ using CommandRecord = std::tuple<int64_t, std::vector<pybind11::object>,
 // address and full binding layout. Both become the existing command ABI here.
 using CommandReach = std::tuple<uint32_t,uint32_t,pybind11::object>;
 using CommandReaches = std::vector<std::optional<std::vector<CommandReach>>>;
-static std::vector<pybind11::object> commandOperands(const std::vector<std::optional<at::Tensor>> &tensors) {
-  std::vector<pybind11::object> result;for(const auto &t:tensors)result.push_back(t?pybind11::cast(*t):pybind11::none());return result;
-}
 // A record (words, constants) is refused short of its declared type; a buffer, holding part of one declared element: an
 // array of none is a ragged share of nothing (a rank given no columns).
 static void fits_binding(id<MTLComputePipelineState> state, NSUInteger index, NSUInteger bound, bool record) {
@@ -959,7 +980,9 @@ struct Collectives {
     }
   }
   void realize(size_t repetitions=1) {
-    auto made=schedule_after_inputs();append(made.get(),repetitions);
+    auto made=prepared_schedule();
+    schedule_input_reaches(made.get(),collective_views(issues,communicator(comm)));
+    append(made.get(),repetitions);
     const auto held=operands;
     checked(MetalScheduleFinish(made.get(),^(NSError *){(void)held;}));executions.push_back(std::move(made));
   }
@@ -990,125 +1013,14 @@ static void prepare_dispatch(MetalSchedule *schedule,const Dispatch &d,uint64_t 
 }
 
 // Linear command geometry is compiled from the shared manifest and discovered GPU cores.
-static std::string linear_source_;
-static int64_t linear_cores_ = 0;
-static std::map<std::tuple<int, int, int, int, int>, int64_t> linear_pipelines_;
-static constexpr const char *LINEAR_PARAMETERS[]={"device const half* x", "device const half* w", "device half* y", "device const half* b", "device const half* s"};
-constexpr size_t LINEAR_BINDINGS = sizeof(LINEAR_PARAMETERS) / sizeof(*LINEAR_PARAMETERS);
-constexpr size_t LINEAR_PRODUCTS = (MESH_BUFFER_BINDINGS - 1) / LINEAR_BINDINGS;
-struct LinearDimensions { uint32_t rows, inner, columns, bias, weight_stride, first, stride0, stride1, output_row, output_column; };
-struct LinearGroupWords {
-  LinearDimensions dimensions[LINEAR_PRODUCTS];
-  uint32_t first[LINEAR_PRODUCTS], activation[LINEAR_PRODUCTS];
-};
-
-static void linear_source(const std::string &source, int64_t cores) {
-  linear_source_ = source;
-  linear_cores_ = cores;
-}
-
-static int64_t linear_fit(int64_t K, int64_t groups) {
-  int64_t split = 1;
-  while (split * 2 <= MESH_LINEAR_SIMDGROUPS && split * groups < linear_cores_ * MESH_LINEAR_GROUPS_PER_CORE &&
-         K / (split * 2) >= MESH_LINEAR_MIN_INNER) split *= 2;
-  return split;
-}
 static int64_t linear_groups(int64_t rows, int64_t columns) {
   return ((rows + MESH_LINEAR_ROWS - 1) / MESH_LINEAR_ROWS) * ((columns + MESH_LINEAR_COLUMNS - 1) / MESH_LINEAR_COLUMNS);
 }
-static int64_t linear_split(int64_t K, int64_t N, int64_t rows) { return linear_fit(K, linear_groups(rows, N)); }
 
-static std::string linear_group_source(size_t products) {
-  const std::string count=std::to_string(products);
-  std::string source="\nstruct linear_group_words { linear_dims d["+count+"]; uint first["+count+"], act["+count+"]; };\n"
-    "template <uint VW, uint VX, uint COLS, uint NSG, uint U>\n"
-    "[[max_total_threads_per_threadgroup(NSG * MESH_SIMD_WIDTH)]] kernel void linear_group(";
-  for(size_t p=0;p<products;p++) {
-    const std::string n=std::to_string(p);
-    for(size_t k=0;k<LINEAR_BINDINGS;k++)source+=std::string(LINEAR_PARAMETERS[k])+n+" [[buffer("+std::to_string(LINEAR_BINDINGS*p+k)+")]],";
-  }
-  source+="constant linear_group_words& g [[buffer("+std::to_string(products*LINEAR_BINDINGS)+")]],"
-    "uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],"
-    "uint tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {"
-    "threadgroup float part[NSG*MESH_LINEAR_ROWS*COLS];";
-  for(size_t p=products;p-- > 0;) {
-    const std::string n=std::to_string(p);
-    source+="if(tg>=g.first["+n+"]) { const linear_act_store store{y"+n+",b"+n+",g.d["+n+"].LDY,g.d["+n+"].SDY,g.d["+n+"].B,g.act["+n+"]};"
-      "linear_body<VW,VX,COLS,NSG,U>(x"+n+",s"+n+",w"+n+",g.d["+n+"],store,part,sg,lane,tg-g.first["+n+"],tid);return;}";
-  }
-  return source+"}\n";
-}
-
-static int64_t linear_pipeline(const std::tuple<int, int, int, int, int> &key) {
-  const auto found = linear_pipelines_.find(key);
-  if (found != linear_pipelines_.end()) return found->second;
-  const int64_t split = std::get<2>(key), act = std::get<3>(key);
-  std::string args = std::to_string(std::get<0>(key)) + ", " + std::to_string(std::get<1>(key)) + ", " +
-                     std::to_string(MESH_LINEAR_COLUMNS) + ", " + std::to_string(split) + ", " + std::to_string(MESH_LINEAR_LOADS);
-  const std::string kernel = act < 0 ? "linear_group" : "linear_rows";
-  if (act >= 0) args += ", " + std::to_string(act);
-  std::string name = kernel + "_" + args + "_p" + std::to_string(std::get<4>(key));
-  for (auto &ch : name) ch = ch == ',' || ch == ' ' ? '_' : ch;
-  return linear_pipelines_.emplace(key, pipeline(linear_source_ + (act < 0 ? linear_group_source(std::get<4>(key)) : "") + "\ntemplate [[host_name(\"" + name + "\")]] [[kernel]] decltype(" +
-                                         kernel + "<" + args + ">) " + kernel + "<" + args + ">;\n", name)).first->second;
-}
-
-// Independent products share a dispatch up to the manifest binding capacity.
-// Row tiles and column tiles both contribute independent groups.
-static std::vector<CommandRecord> linear_commands(const std::vector<at::Tensor> &xs, const std::vector<at::Tensor> &ws,
-                                       const std::vector<std::optional<at::Tensor>> &biases, const std::vector<int64_t> &acts,
-                                       const std::vector<std::optional<at::Tensor>> &x1s, const std::vector<at::Tensor> &ys) {
-  const size_t P = xs.size();
-  TORCH_CHECK(P >= 1 && P <= LINEAR_PRODUCTS && ws.size() == P && biases.size() == P && acts.size() == P && x1s.size() == P && ys.size() == P,
-              "torch_mesh::linears exceeds the manifest binding capacity or lacks product operands");
-  std::vector<std::optional<at::Tensor>> buffers(LINEAR_BINDINGS * P);
-  LinearGroupWords words{};
-  int64_t first = 0, least = INT64_MAX;
-  bool wide_w = true, wide_x = true;
-  for (size_t p = 0; p < P; p++) {
-    const at::Tensor &x = xs[p], &w = ws[p];
-    const int64_t K0 = x.size(1), K = K0 + (x1s[p] ? x1s[p]->size(1) : 0);
-    TORCH_CHECK(x.scalar_type() == at::kHalf && w.scalar_type() == at::kHalf && x.dim() == 2 && w.dim() == 2 && w.size(1) == K,
-                "torch_mesh::linears: product ", p, " takes fp16 x [R, K0], x1 [R, K - K0] and w [N, K]");
-    TORCH_CHECK(x.stride(1)==1 && w.stride(1)==1 && (!x1s[p] || x1s[p]->stride(1)==1) &&
-        (!biases[p] || biases[p]->is_contiguous()),
-        "linear commands require declared row views; implicit contiguous copies are not supported");
-    const at::Tensor &xc=x, &wc=w, &x1c=x1s[p]?*x1s[p]:x;
-    const int64_t R = x.size(0), N = w.size(0), ldw = wc.stride(0), ld0 = xc.stride(0), ld1 = x1c.stride(0);
-    buffers[LINEAR_BINDINGS * p] = xc, buffers[LINEAR_BINDINGS * p + 1] = wc, buffers[LINEAR_BINDINGS * p + 2] = ys[p];
-    buffers[LINEAR_BINDINGS * p + 3] = biases[p] ? biases[p] : std::make_optional(ys[p]), buffers[LINEAR_BINDINGS * p + 4] = x1c;
-    words.dimensions[p] = {(uint32_t)R, (uint32_t)K, (uint32_t)N, (uint32_t)bool(biases[p]),
-                           (uint32_t)ldw, (uint32_t)K0, (uint32_t)ld0, (uint32_t)ld1,
-                           (uint32_t)ys[p].stride(0), (uint32_t)ys[p].stride(1)};
-    words.first[p] = first; words.activation[p] = acts[p];
-    first += linear_groups(R, N);
-    least = std::min(least, K);
-    wide_w &= ldw % MESH_LINEAR_VECTOR == 0 && K0 % MESH_LINEAR_VECTOR == 0 && wc.storage_offset() % MESH_LINEAR_VECTOR == 0;
-    wide_x &= K0 % MESH_LINEAR_VECTOR == 0 && ld0 % MESH_LINEAR_VECTOR == 0 && ld1 % MESH_LINEAR_VECTOR == 0 &&
-              xc.storage_offset() % MESH_LINEAR_VECTOR == 0 && x1c.storage_offset() % MESH_LINEAR_VECTOR == 0;
-  }
-  const int64_t split = linear_fit(least, first);
-  if(P==1) {
-    buffers.resize(6);buffers[5]=buffers[4];buffers[4]=std::nullopt;
-    return {{linear_pipeline(std::make_tuple(wide_w?MESH_LINEAR_VECTOR:1,wide_x?MESH_LINEAR_VECTOR:1,(int)split,(int)acts[0],1)),commandOperands(buffers),
-        {{4,pybind11::bytes((char *)&words.dimensions[0],sizeof(LinearDimensions))}},
-        {(NSUInteger)first,1,1},{(NSUInteger)(split*MESH_SIMD_WIDTH),1,1},false,UINT64_C(43)|(UINT64_C(4)<<MESH_ACCESS_WRITE_SHIFT)}};
-  }
-  const auto key = std::make_tuple(wide_w ? MESH_LINEAR_VECTOR : 1, wide_x ? MESH_LINEAR_VECTOR : 1, (int)split, -1, (int)P);
-  std::string packed((char *)words.dimensions,P*sizeof(LinearDimensions));
-  packed.append((char *)words.first,P*sizeof(*words.first));
-  packed.append((char *)words.activation,P*sizeof(*words.activation));
-  uint64_t access=0;
-  for(size_t p=0;p<P;p++)access|=(UINT64_C(27)<<(LINEAR_BINDINGS*p))|(UINT64_C(4)<<(MESH_ACCESS_WRITE_SHIFT+LINEAR_BINDINGS*p));
-  return {{linear_pipeline(key),commandOperands(buffers),{{LINEAR_BINDINGS*P,pybind11::bytes(packed)}},
-      {(NSUInteger)first,1,1},{(NSUInteger)(split*MESH_SIMD_WIDTH),1,1},false,access}};
-}
 
 TORCH_LIBRARY_FRAGMENT(torch_mesh, m) {
   m.def("linear(Tensor x, Tensor w, Tensor? bias=None, int act=0, Tensor? x1=None) -> Tensor");
   m.def("linears(Tensor[] x, Tensor[] w, Tensor?[] bias, int[] act, Tensor?[] x1) -> Tensor[]");
-  m.def("fused_step(Tensor x, Tensor? w, int dim, int[] sizes, str group_name, bool adds, int repeats) -> Tensor");
-  m.def("fused_step_out(Tensor x, Tensor? w, Tensor(a!) out, int dim, int[] sizes, str group_name, bool adds, int repeats) -> ()");
 }
 
 // Region tensors (torch_mesh.empty, records, address): a tensor whose bytes are a lease of this node's bridge's region
@@ -1294,7 +1206,6 @@ static void prepare_fused_writes(MetalSchedule *schedule,WriteOperands &plans) {
 struct FusedForm {
   int64_t comm = 0, polls = 0, ranks = 0, rank = 0, publish = -1, land = -1, pj = 0, lj = 0, pgx = 0, pthreads = 0, lgx = 0, lthreads = 0,
           slot = 0, ready = -1, channels = 0;
-  bool with_w = false;
   std::vector<int64_t> pwords, lwords, starts, counts, shape;
   at::Tensor arrivals;
   struct Ring {
@@ -1322,40 +1233,35 @@ static void fused_maker(pybind11::object maker) { fused_maker_ = new pybind11::o
 
 // The form of a crossing on `group`'s communicator, made during preparation; `held` (fused_lock_) is let go
 // while the maker runs (it takes the GIL, which a thread waiting on the lock may hold)
-static FusedForm &fused_form_of(const at::Tensor &x, const std::optional<at::Tensor> &w, int64_t dim, const std::vector<int64_t> &sizes,
-                                const std::string &group, bool adds, std::unique_lock<std::mutex> &held) {
+static FusedForm &fused_form_of(const at::Tensor &x, int64_t dim, const std::vector<int64_t> &sizes,
+                                const std::string &group, std::unique_lock<std::mutex> &held) {
   const int64_t comm = communicator_of(c10::IValue(group));
-  TORCH_CHECK(comm, "torch_mesh::fused_step: ", group, " is no live mesh group of this process");
+  TORCH_CHECK(comm, "chain crossing: ", group, " is no live mesh group of this process");
   std::vector<int64_t> key(x.sizes().begin(), x.sizes().end());
-  key.insert(key.end(), {-1, (int64_t)x.scalar_type(), dim, comm, adds ? 1 : 0, -2});
+  key.insert(key.end(), {-1, (int64_t)x.scalar_type(), dim, comm, -2});
   key.insert(key.end(), sizes.begin(), sizes.end());
   key.push_back(-4);
   key.insert(key.end(), x.strides().begin(), x.strides().end());
-  if (w) {
-    key.push_back(-3);
-    key.insert(key.end(), w->sizes().begin(), w->sizes().end());
-    key.insert(key.end(), w->strides().begin(), w->strides().end());
-  }
   auto found = fused_forms_->find(key);
   if (found != fused_forms_->end()) return found->second;
-  TORCH_CHECK(fused_maker_, "torch_mesh::fused_step: no form maker (partition registers it as it loads)");
+  TORCH_CHECK(fused_maker_, "chain crossing: no form maker (partition registers it as it loads)");
   FusedForm f;
   held.unlock();
   {
     pybind11::gil_scoped_acquire gil;
     const int channels = physical_channels(communicator(comm));
-    const pybind11::tuple t = (*fused_maker_)(x, w ? pybind11::cast(*w) : pybind11::none(), dim, sizes, group, adds, channels);
+    const pybind11::tuple t = (*fused_maker_)(x, dim, sizes, group, channels);
     f.comm = t[0].cast<int64_t>(), f.polls = t[1].cast<int64_t>(), f.ranks = t[2].cast<int64_t>(), f.rank = t[3].cast<int64_t>();
     f.publish = t[4].cast<int64_t>(), f.pwords = t[5].cast<std::vector<int64_t>>(), f.pj = t[6].cast<int64_t>();
     f.pgx = t[7].cast<int64_t>(), f.pthreads = t[8].cast<int64_t>();
     f.land = t[9].cast<int64_t>(), f.lwords = t[10].cast<std::vector<int64_t>>(), f.lj = t[11].cast<int64_t>();
     f.lgx = t[12].cast<int64_t>(), f.lthreads = t[13].cast<int64_t>();
     f.starts = t[14].cast<std::vector<int64_t>>(), f.counts = t[15].cast<std::vector<int64_t>>(), f.shape = t[16].cast<std::vector<int64_t>>();
-    f.arrivals = t[17].cast<at::Tensor>(), f.with_w = w.has_value(), f.slot = f.starts.back();
+    f.arrivals = t[17].cast<at::Tensor>(), f.slot = f.starts.back();
     f.ready = t[18].cast<int64_t>(), f.channels = t[19].cast<int64_t>();
   }
   held.lock();
-  TORCH_CHECK(f.comm == comm, "torch_mesh::fused_step: ", group, "'s form names another communicator");
+  TORCH_CHECK(f.comm == comm, "chain crossing: ", group, "'s form names another communicator");
   return fused_forms_->try_emplace(key, std::move(f)).first->second;
 }
 
@@ -1422,12 +1328,12 @@ static void fused_allocate_ring(FusedForm &f, FusedForm::Ring &ring, const at::T
   }
 }
 
-static void fused_prepare(const at::Tensor &x, const std::optional<at::Tensor> &w, int64_t dim,
-                          const std::vector<int64_t> &sizes, const std::string &group, bool adds,
+static void fused_prepare(const at::Tensor &x, int64_t dim,
+                          const std::vector<int64_t> &sizes, const std::string &group,
                           int64_t repeats, int64_t batches) {
   TORCH_CHECK(batches >= 1, "fused preparation requires a positive batch count");
   std::unique_lock<std::mutex> held(*fused_lock_);
-  FusedForm &f = fused_form_of(x, w, dim, sizes, group, adds, held);
+  FusedForm &f = fused_form_of(x, dim, sizes, group, held);
   TORCH_CHECK(f.j == 0, "fused preparation requires a complete preceding repeat train");
   const bool fresh = std::any_of(f.counts.begin(), f.counts.end(), [](int64_t n) { return n == 0; });
   auto &sequence = f.sequences[repeats];
@@ -1478,6 +1384,7 @@ struct PreparedChain {
   MeshStream *stream;
   uint32_t channels;
   Schedule schedule;
+  std::vector<at::Tensor> initial_inputs;
 };
 static void compile_chain(PreparedChain &chain);
 static auto *prepared_chains_ = new std::vector<std::unique_ptr<PreparedChain>>;
@@ -1493,11 +1400,12 @@ static int64_t chain_slot() {
 static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, const std::vector<int64_t> &products, bool linear,
                           const std::vector<at::Tensor> &operands,
                           const std::vector<int64_t> &constants, int64_t groups, int64_t threads,
-                          const std::string &group, int64_t ranks, int64_t batch, int64_t input_frames) {
+                          const std::string &group, int64_t ranks, int64_t batch, int64_t input_frames,
+                          const std::vector<at::Tensor> &initial_inputs) {
   const at::Tensor &input = operands[2], &output = operands[3], &x = operands[4];
   const int64_t steps = input.size(0);
   std::unique_lock<std::mutex> held(*fused_lock_);
-  FusedForm &f = fused_form_of(x, std::nullopt, 0, std::vector<int64_t>(ranks, x.size(0)), group, true, held);
+  FusedForm &f = fused_form_of(x, 0, std::vector<int64_t>(ranks, x.size(0)), group, held);
   std::vector<std::optional<at::Tensor>> buffers(operands.begin(), operands.end());
   buffers.push_back(x);  // previous landing; replaced by its compiled page below
   std::vector<int64_t> words = constants;
@@ -1507,6 +1415,7 @@ static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, c
       encoded(input_kernel, {}, std::vector<int64_t>(2 + 12 * f.channels), 15, 1, 1, MESH_SIMD_WIDTH),
       {}, {}, {}, nullptr, 6, 9, 12,
       &stream_of(at::mps::getCurrentMPSStream()), (uint32_t)f.channels});
+  chain->initial_inputs=initial_inputs;
   chain->regular = chain->final = {&chain->dispatch};
   if (linear) {
     const at::Tensor &y = operands[5];
@@ -1581,8 +1490,11 @@ static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, c
 }
 
 static void compile_chain(PreparedChain &chain) {
-  chain.schedule=schedule_after_inputs();
+  chain.schedule=prepared_schedule();
   MetalSchedule *schedule=chain.schedule.get();
+  std::vector<pybind11::object> inputs;
+  for(const auto &value:chain.initial_inputs)inputs.push_back(pybind11::cast(value));
+  schedule_inputs(schedule,inputs);
   Dispatch &d = chain.dispatch;
   Dispatch &publication = *chain.publication;
   const auto &steps = chain.steps;
@@ -1746,8 +1658,13 @@ static std::pair<std::vector<std::vector<uint64_t>>,std::vector<std::vector<uint
 // receive configuration; enqueue is the native header's submission operation.
 struct ScheduleBinding {
   Schedule schedule;
-  ScheduleBinding():schedule(schedule_after_inputs()){}
+  ScheduleBinding():schedule(prepared_schedule()){}
+  explicit ScheduleBinding(MetalSchedule *prepared):schedule(prepared,[](MetalSchedule *){}){}
   std::vector<at::Tensor> operands;
+  void inputs(const std::vector<pybind11::object> &values) {
+    for(const auto &value:values)operands.push_back(TensorOperand(value).storage);
+    schedule_inputs(schedule.get(),values);
+  }
   // Preparation supplies native run/context/retain/release operands. The
   // completion worker neither owns a Python callback nor acquires the GIL.
   // `declaration` (kind, bytes, places as (offset, relocation)): what the engine makes the operation from again
@@ -1799,6 +1716,144 @@ struct ScheduleBinding {
   }
 };
 
+// A higher-order reducer contributes normal compiler output to the enclosing
+// function. Its Python callable exists only during preparation. Recorded leaves
+// retain page operands and contain neither this object nor a callback lookup.
+struct ReductionBinding {
+  struct Storage {void *buffer;size_t first,bytes;at::Tensor value;};
+  pybind11::object lower;
+  at::ScalarType dtype;
+  std::vector<int64_t> elementShape;
+  ncclRedOp_t operation;
+  std::string error;
+  ReductionBinding(pybind11::object lower,at::ScalarType dtype,std::vector<int64_t> shape,
+      uint32_t flags,int type,int64_t comm):lower(std::move(lower)),dtype(dtype),elementShape(std::move(shape)) {
+    size_t unit=1;for(int64_t extent:elementShape)unit*=(size_t)extent;
+    TORCH_CHECK(unit&&unit<=UINT32_MAX,"a reduction's independent value must fit its declared scalar unit");
+    const ncclMeshReductionFunction declaration{(uint32_t)unit,flags,this,&ReductionBinding::prepare};
+    checked(ncclMeshRedOpCreateFunction(&operation,&declaration,(ncclDataType_t)type,communicator(comm)));
+  }
+  static ncclMeshBuffer resolved(ncclMeshBuffer binding) {
+    if(!binding.buffer) {
+      void *buffer=nullptr;size_t offset=0;
+      checked(ncclMeshMemBuffer((void *)binding.offset,&buffer,&offset));binding={buffer,offset};
+    }
+    return binding;
+  }
+  static Storage storage(ncclMeshBuffer binding,size_t bytes) {
+    id<MTLBuffer> buffer=(id<MTLBuffer>)binding.buffer;
+    [buffer retain];
+    auto base=at::from_blob((char *)buffer.contents+binding.offset,{(int64_t)bytes},
+      [buffer](void *){[buffer release];},at::TensorOptions().dtype(at::kByte).device(at::kCPU));
+    return {binding.buffer,binding.offset,bytes,std::move(base)};
+  }
+  at::Tensor page(ncclMeshBuffer binding,std::vector<int64_t> shape,at::ScalarType type,
+      std::vector<Storage> &storages) const {
+    binding=resolved(binding);
+    size_t bytes=c10::elementSize(type);for(int64_t extent:shape)bytes*=extent;
+    auto found=std::find_if(storages.begin(),storages.end(),[&](const Storage &held){
+      return held.buffer==binding.buffer&&held.first<=binding.offset&&
+        binding.offset+bytes<=held.first+held.bytes;
+    });
+    if(found==storages.end()) {
+      storages.push_back(storage(binding,bytes));found=storages.end()-1;
+    }
+    std::vector<int64_t> strides(shape.size());int64_t width=1;
+    for(size_t i=shape.size();i-->0;){strides[i]=width;width*=shape[i];}
+    const size_t scalar=c10::elementSize(type);
+    return found->value.as_strided({(int64_t)(found->bytes/scalar*scalar)},{1},0).view(type)
+      .as_strided(shape,strides,(binding.offset-found->first)/scalar);
+  }
+  at::Tensor value(ncclMeshBuffer binding,size_t cells,std::vector<Storage> &storages) const {
+    std::vector<int64_t> shape{(int64_t)cells};shape.insert(shape.end(),elementShape.begin(),elementShape.end());
+    return page(binding,std::move(shape),dtype,storages);
+  }
+  static ncclResult_t prepare(void *context,const ncclMeshReductionCell *cell,const ncclMeshStream *stream) {
+    auto &self=*static_cast<ReductionBinding *>(context);
+    pybind11::gil_scoped_acquire gil;
+    @autoreleasepool {
+      try {
+        MetalSchedule *root=MetalEncoderSchedule((id<MTL4ComputeCommandEncoder>)stream->commandEncoder);
+        TORCH_CHECK(root,"a reduction is lowered into its enclosing prepared function");
+        ScheduleBinding schedule(root);
+        pybind11::list sources;
+        std::vector<Storage> storages;
+        std::vector<ncclMeshBuffer> payloads;
+        for(size_t i=0;i<cell->source_count;i++)payloads.push_back(resolved(cell->sources[i]));
+        payloads.push_back(resolved(cell->destination));
+        std::sort(payloads.begin(),payloads.end(),[](const auto &a,const auto &b){
+          return (uintptr_t)a.buffer<(uintptr_t)b.buffer||(a.buffer==b.buffer&&a.offset<b.offset);
+        });
+        const size_t payloadBytes=cell->cells*cell->unit*c10::elementSize(self.dtype);
+        for(size_t first=0;first<payloads.size();) {
+          size_t last=first+1,end=payloads[first].offset+payloadBytes;
+          while(last<payloads.size()&&payloads[last].buffer==payloads[first].buffer&&payloads[last].offset<end) {
+            end=std::max(end,payloads[last].offset+payloadBytes);last++;
+          }
+          storages.push_back(storage(payloads[first],end-payloads[first].offset));first=last;
+        }
+        std::vector<MetalReach> versions;
+        for(size_t i=0;i<cell->source_count;i++) {
+          auto source=self.value(cell->sources[i],cell->cells,storages);
+          sources.append(source);schedule.operands.push_back(source);
+          const uint32_t access=cell->source_access?cell->source_access[i]:MetalReachRead;
+          if(access&MetalReachNext) {
+            TensorOperand operand(pybind11::cast(source));
+            NSData *data=[operand.layout.value reaches:operand.pages.buffer base:0 elementBytes:source.element_size()
+              access:access binding:-1];
+            const auto *ranges=(const MetalReach *)data.bytes;
+            versions.insert(versions.end(),ranges,ranges+data.length/sizeof *ranges);
+          }
+        }
+        auto destination=self.value(cell->destination,cell->cells,storages);
+        schedule.operands.push_back(destination);
+        pybind11::dict effects;
+        pybind11::list observations,publications,rows;
+        for(size_t i=0;i<cell->observation_count;i++) {
+          const auto &item=cell->observations[i];pybind11::dict observation;
+          observation["source"]=item.source;
+          observation["word"]=self.page(item.word,{1},at::kUInt64,storages);
+          observation["violation"]=self.page(item.violation,
+            {(int64_t)(((id<MTLBuffer>)item.violation.buffer).length-item.violation.offset)},at::kByte,storages);
+          observation["polls"]=item.polls;observation["channel"]=item.channel;observation["entry"]=item.entry;
+          observations.append(observation);
+        }
+        for(size_t i=0;i<cell->publication_count;i++) {
+          const auto &item=cell->publications[i];pybind11::dict publication;
+          publication["observation"]=item.observation;
+          publication["word"]=self.page(item.word,{1},at::kUInt64,storages);
+          publications.append(publication);
+        }
+        if(cell->cut_count) {
+          effects["cuts"]=self.page(cell->cuts,{(int64_t)cell->cut_count,(int64_t)(2+cell->observation_count)},at::kUInt64,storages);
+          effects["completion"]=self.page(cell->completion,{(int64_t)(cell->cut_count+1)},at::kUInt32,storages);
+          const auto *cuts=(const uint64_t *)((const char *)((id<MTLBuffer>)cell->cuts.buffer).contents+cell->cuts.offset);
+          for(size_t q=0;q<cell->cut_count;q++) {
+            pybind11::tuple row(2+cell->observation_count);
+            for(size_t k=0;k<2+cell->observation_count;k++)row[k]=cuts[q*(2+cell->observation_count)+k];
+            rows.append(row);
+          }
+        }
+        effects["rows"]=rows;effects["observations"]=observations;effects["publications"]=publications;
+        auto *binding=&schedule;
+        MetalScheduleReadVersions(root,versions.data(),versions.size(),^{
+          self.lower(sources,destination,pybind11::cast(binding,pybind11::return_value_policy::reference),effects);
+        });
+        const auto pages=schedule.operands;
+        id owner=[^{(void)pages;} copy];
+        MetalScheduleRetainObject(root,owner);[owner release];
+        return ncclSuccess;
+      } catch(pybind11::error_already_set &exception) {
+        self.error=exception.what();exception.discard_as_unraisable("compiled reduction preparation");
+      } catch(const std::exception &exception) {
+        self.error=exception.what();
+        fprintf(stderr,"compiled reduction preparation: %s\n",self.error.c_str());
+      }
+      return ncclInternalError;
+    }
+  }
+};
+
 // design/replay-templates-2026-10-29.md: a program's functions as one template in `directory`, `bound` (their inputs,
 // outputs and the weights a later instance replaces) their operands in order, every other storage they name kept by
 // value; the plan their crossings assume is declared once.
@@ -1817,7 +1872,8 @@ static void save(const std::string &directory,const std::vector<ScheduleBinding 
 // operands in order; `communicators` the instance's, in the order its crossings first named theirs; `host(kind, bytes)`
 // the native entry (run, context, retain, release) a host operation's declaration makes, its context the caller's to pass.
 static pybind11::list load(const std::string &directory,const std::vector<at::Tensor> &bound,
-    const std::vector<int64_t> &communicators,const std::optional<pybind11::function> &host) {
+    const std::vector<int64_t> &communicators,const std::optional<pybind11::function> &host,
+    const std::vector<std::vector<std::pair<int,pybind11::object>>> &reductions) {
   NSError *error=nil;
   NSDictionary *read=MetalTemplateRead(at::mps::MPSDevice::getInstance()->device(),@(directory.c_str()),&error);
   TORCH_CHECK(read,"template ",directory,": ",error.localizedDescription.UTF8String);
@@ -1827,6 +1883,16 @@ static pybind11::list load(const std::string &directory,const std::vector<at::Te
   }
     NSMutableArray *comms=[NSMutableArray array];
     for(auto comm:communicators)[comms addObject:[NSValue valueWithPointer:(void *)communicator(comm)]];
+    NSMutableArray *operators=[NSMutableArray array];
+    for(size_t communicatorIndex=0;communicatorIndex<communicators.size();communicatorIndex++) {
+      NSMutableData *bindings=[NSMutableData data];
+      if(communicatorIndex<reductions.size())for(const auto &entry:reductions[communicatorIndex]) {
+        const auto &replacement=entry.second.cast<const ReductionBinding &>();
+        const ncclMeshRedOpBinding binding{(ncclRedOp_t)entry.first,replacement.operation};
+        [bindings appendBytes:&binding length:sizeof binding];
+      }
+      [operators addObject:bindings];
+    }
     const std::vector<at::Tensor> held=bound;
     MetalTemplateHost made_host=nil;
     if(host)made_host=^MetalHostOperation(NSString *kind,NSData *bytes,NSError **failed){
@@ -1867,7 +1933,7 @@ static pybind11::list load(const std::string &directory,const std::vector<at::Te
       return [[crossing copy] autorelease];
     };
   NSArray *offsets=nil;NSArray *buffers=ScheduleBinding::storages(bound,&offsets);
-  error=MetalScheduleInstantiate(schedules.data(),schedules.size(),read,buffers,offsets,comms,made_host,made_cross);
+  error=MetalScheduleInstantiate(schedules.data(),schedules.size(),read,buffers,offsets,comms,operators,made_host,made_cross);
   TORCH_CHECK(!error,"template ",directory,": ",error.localizedDescription.UTF8String);
   // a device of an architecture the template has no pipelines for compiles them from its libraries, and keeps them
   if((error=MetalTemplateArchive(read,@(directory.c_str()))))
@@ -1883,10 +1949,21 @@ struct Executions {
   std::vector<Schedule> schedules;
   pybind11::object output;
   size_t next=0;
+  Schedule latest;
   explicit Executions(pybind11::object value):output(std::move(value)){}
-  void add(ScheduleBinding &binding){schedules.push_back(binding.schedule);}
-  pybind11::object run(){MetalScheduleEnqueue(schedules[next++].get());return output;}
-  pybind11::capsule completion(){return schedule_completion(schedules[next-1]);}
+  void add(ScheduleBinding &binding){
+    size_t ended=0;
+    while(ended<next) {
+      NSError *error=nil;const int status=MetalScheduleStatus(schedules[ended].get(),&error);
+      TORCH_CHECK(status>=0,"prepared function failed: ",error.localizedDescription.UTF8String);
+      if(!status)break;
+      ended++;
+    }
+    schedules.erase(schedules.begin(),schedules.begin()+ended);next-=ended;
+    schedules.push_back(binding.schedule);
+  }
+  pybind11::object run(){latest=schedules[next++];MetalScheduleEnqueue(latest.get());return output;}
+  pybind11::capsule completion(){return schedule_completion(latest);}
 };
 
 // Compact row geometry and explicit indexed selections lower to one prepared
@@ -1954,7 +2031,7 @@ struct ViewWrites {
     }));
   }
   void realize() {
-    auto made=schedule_after_inputs();append(made.get());
+    auto made=prepared_schedule();prepare();schedule_input_reaches(made.get(),views);append(made.get());
     const auto held=leases;
     checked(MetalScheduleFinish(made.get(),^(NSError *){(void)held;}));executions.push_back(std::move(made));
   }
@@ -2265,14 +2342,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
 #define MESH_METAL_VALUE(name, value) compilation[#name] = value;
 #include "metal.def"
 #undef MESH_METAL_VALUE
-  compilation["LINEAR_PRODUCTS"] = LINEAR_PRODUCTS;
   module.attr("compilation") = compilation;
-  module.def("linear_source", &linear_source, pybind11::call_guard<Drained>());
   module.def("linear_groups", &linear_groups, pybind11::call_guard<Drained>());
-  module.def("linear_commands", &linear_commands, pybind11::call_guard<Drained>());
   pybind11::class_<Commands>(module,"Commands").def(pybind11::init<const std::vector<CommandRecord> &,const std::optional<CommandReaches> &,const std::vector<CommandHost> &>(),
     pybind11::arg("records"),pybind11::arg("reaches")=pybind11::none(),pybind11::arg("hosts")=std::vector<CommandHost>{});
-  module.def("linear_split", &linear_split, pybind11::call_guard<Drained>());
   module.def("device_facts", &device_facts, pybind11::call_guard<Drained>());
   module.def("pipeline_facts", &pipeline_facts, pybind11::call_guard<Drained>());
   module.attr("polls") = (int64_t)NCCL_MESH_POLLS;
@@ -2290,6 +2363,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def(pybind11::init<>(), pybind11::call_guard<Drained>())
     .def("append",[](ScheduleBinding &s,Commands &commands){commands.append(s.schedule.get());
         s.operands.insert(s.operands.end(),commands.operands.begin(),commands.operands.end());}, pybind11::call_guard<Drained>())
+    .def("inputs",&ScheduleBinding::inputs,pybind11::call_guard<Drained>())
     .def("copy",&ScheduleBinding::copy,pybind11::call_guard<Drained>())
     .def("compute",&ScheduleBinding::compute, pybind11::call_guard<Drained>())
     .def("writes",&ScheduleBinding::writes, pybind11::call_guard<Drained>())
@@ -2298,6 +2372,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def("finish",&ScheduleBinding::finish, pybind11::call_guard<Drained>())
     .def("enqueue",&ScheduleBinding::enqueue, pybind11::call_guard<Drained>())
     .def("completion",&ScheduleBinding::completion, pybind11::call_guard<Drained>());
+  pybind11::class_<ReductionBinding>(module,"Reduction")
+    .def(pybind11::init<pybind11::object,at::ScalarType,std::vector<int64_t>,uint32_t,int,int64_t>())
+    .def_property_readonly("operator",[](const ReductionBinding &r){return (int)r.operation;})
+    .def_readonly("error",&ReductionBinding::error);
   pybind11::class_<ViewWrites, std::shared_ptr<ViewWrites>>(module, "ViewWrites")
     .def(pybind11::init<const std::vector<ViewBinding> &, int64_t>(), pybind11::call_guard<Drained>())
     .def("realize", &ViewWrites::realize, pybind11::call_guard<Drained>())
@@ -2318,7 +2396,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def("enqueue", &Collectives::enqueue, pybind11::call_guard<Drained>());
   module.def("save",&save,pybind11::arg("directory"),pybind11::arg("functions"),pybind11::arg("bound"),pybind11::call_guard<Drained>());
   module.def("load",&load,pybind11::arg("directory"),pybind11::arg("bound"),
-             pybind11::arg("communicators")=std::vector<int64_t>{},pybind11::arg("host")=pybind11::none(),pybind11::call_guard<Drained>());
+             pybind11::arg("communicators")=std::vector<int64_t>{},pybind11::arg("host")=pybind11::none(),
+             pybind11::arg("reductions")=std::vector<std::vector<std::pair<int,pybind11::object>>>{},pybind11::call_guard<Drained>());
   pybind11::class_<Executions>(module,"Executions")
     .def(pybind11::init<pybind11::object>(), pybind11::call_guard<Drained>())
     .def("add",&Executions::add, pybind11::call_guard<Drained>())
@@ -2340,7 +2419,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("chain_record", &chain_record, pybind11::call_guard<Drained>());
   module.def("chain_run", &chain_run, pybind11::call_guard<Drained>());
   module.def("chain_completion", &chain_completion, pybind11::call_guard<Drained>());
-  module.def("fused_prepare", &fused_prepare, pybind11::arg("x"), pybind11::arg("w"), pybind11::arg("dim"),
-             pybind11::arg("sizes"), pybind11::arg("group"), pybind11::arg("adds"),
+  module.def("fused_prepare", &fused_prepare, pybind11::arg("x"), pybind11::arg("dim"),
+             pybind11::arg("sizes"), pybind11::arg("group"),
              pybind11::arg("repeats") = 1, pybind11::arg("batches") = 1, pybind11::call_guard<Drained>());
 }

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import time
+from mesh_statistics import now
 from collections import deque
 from contextlib import nullcontext
 
@@ -94,7 +94,7 @@ class OnlineLearner:
         self.training_contract = {"update_schedule": "state-rate-application-v1", "gradient_steps_per_group": 1, "outcome_gradient_steps": 0, "gamma": self.gamma, "replay_weight": self.replay_weight, "replay_batch": self.replay_batch, "learning_rate": learning_rate, "gradient_clip": self.gradient_clip, "loss_weights": LOSS_WEIGHTS, "action_representation": "full_state_rate", "integrator": "exact_exponential_relaxation", "historical_target": "observed_behavior_return", "actor_source": "own_first_observed_state_application", "historical_actor_weight": 0.0,
                                   "actor_objective": "decoupled_ppo", "proximal_policy": "reuse_train_logp", "rollout_is": "per_action", "rollout_is_threshold": POLICY_ROLLOUT_IS_THRESHOLD, "rollout_is_batch_normalize": False, "rollout_rs": None, "log_ratio_bound": POLICY_LOG_RATIO_BOUND,
                                   "optimizer": "AdamW", "weight_decay": OPTIMIZER_WEIGHT_DECAY,
-                                  "sampler": "torch_cpu_generator_normal", "sampling_key_schedule": "uint64_counter",
+                                  "sampler": "philox4x32_10_box_muller_pages", "sampling_key_schedule": "uint64_counter",
                                   "anticipatory_lead": float(lead)}
         self.schedule_start_updates = 0
         self.reward_fingerprint = reward_fingerprint(policy_arm)
@@ -110,6 +110,7 @@ class OnlineLearner:
             self._load_full(state)
         self.input_arena = InputArena(device)
         self.item_storage = TensorStorage(device=device)
+        self.item_storages = [self.item_storage]
         self.loss_traces = self.update_traces = self.accumulation_traces = 0
 
     def _load_full(self, payload):
@@ -285,7 +286,7 @@ class OnlineLearner:
             weights=((len(METRIC_NAMES),), np.float32))
         self.item_storage.realize(shapes)
 
-    def _prepare_item(self, item, value_scale, actor_scale, storage):
+    def _prepare_item(self, item, value_scale, actor_scale, storage, first_slot):
         n = len(item['behavior_logp'])
         for value in storage.host.values():
             value.fill(0)
@@ -298,20 +299,20 @@ class OnlineLearner:
         storage.host['target_present'][...] = 'value_target' in item
         payload = {name: value for name, value in storage.values.items() if name != 'weights'}
         before, after = (self.input_arena.load(item[name], slot)
-            for slot, name in enumerate(('chorus_in', 'chorus_out')))
+            for slot, name in enumerate(('chorus_in', 'chorus_out'), first_slot))
         return before, after, payload
 
     def prepare_update(self, items, replay_items):
         items = list(items)
         if not items:
             return None
-        rebuild_t0 = time.perf_counter()
+        rebuild_t0 = now()
         items = [self.replay.materialize(item) for item in items]
         replay_items = [self.replay.materialize(item) for item in replay_items]
-        self.rebuild_seconds += time.perf_counter() - rebuild_t0
+        self.rebuild_seconds += now() - rebuild_t0
         self.rebuild_calls += 1
         self.input_arena.reserve(*(frame for item in items + replay_items for frame in
-            (item['chorus_in'], item['chorus_out'])), count=2, capacity=self.program.capacity)
+            (item['chorus_in'], item['chorus_out'])), count=2 * (len(items) + len(replay_items)), capacity=self.program.capacity)
         self.program.bind_capacity(self.input_arena.capacity)
         self.program.reserve(items[0]['chorus_in'])
         replay_weight = self.replay_weight if replay_items else 0.0
@@ -328,24 +329,30 @@ class OnlineLearner:
         for item in replay_items:
             prepared.append((item, replay_weight / len(replay_items), 0.0,
                 np.zeros(len(METRIC_NAMES), dtype=np.float32)))
-        return items, replay_items, prepared
+        while len(self.item_storages) < len(prepared):
+            self.item_storages.append(TensorStorage(device=self.device))
+        shape = {name: (value.shape, value.dtype) for name, value in self.item_storage.host.items()}
+        operands = []
+        for index, (item, value_scale, actor_scale, weights) in enumerate(prepared):
+            storage = self.item_storages[index]
+            storage.realize(shape)
+            arguments = self._prepare_item(item, value_scale, actor_scale, storage, 2 * index)
+            np.copyto(storage.host['weights'], weights)
+            operands.append((*arguments, storage.values['weights']))
+        return items, replay_items, prepared, operands
 
     def learn(self, prepared_update):
-        items, replay_items, prepared = prepared_update
+        items, replay_items, prepared, operands = prepared_update
         proximal_updates = self.updates
+        observations, total, parts, gradient_norm = self.program.learn(operands)
+        self.loss_traces = self.accumulation_traces = 1
         ratios = []
-        storage = self.item_storage
-        for index, (item, value_scale, actor_scale, weights) in enumerate(prepared):
-            arguments = self._prepare_item(item, value_scale, actor_scale, storage)
-            log_ratio, ratio, active = self.program.contribute(*arguments, weights, index == 0)
-            self.loss_traces = 1
-            self.accumulation_traces = 1
+        for log_ratio, ratio, active in observations:
             mask = np.asarray(active)
             if np.any(mask):
                 ratios.append(np.stack((np.asarray(log_ratio), np.asarray(ratio)), axis=-1)[mask])
         if ratios:
             self.ratios.append(np.concatenate(ratios))
-        total, parts, gradient_norm = self.program.update()
         self.update_traces = 1
         self.updates += 1
         self.gradient_steps += 1
@@ -363,11 +370,12 @@ class OnlineLearner:
             execution={**self.program.report(), 'loss_traces': self.loss_traces,
                        'optimizer_traces': self.update_traces,
                        'accumulation_traces': self.accumulation_traces,
-                       'source_group_size': len(prepared), 'resident_transition_slots': 1,
-                       'gradient_reduction': 'ordered_local',
+                       'source_group_size': len(prepared), 'resident_transition_slots': len(operands),
+                       'gradient_reduction': 'compiled_batch_sum',
                        'training_input_storage': self.input_arena.report(),
-                       'transition_storage': {'slots': 1, 'allocations': self.item_storage.allocations,
-                            'bytes': self.item_storage.nbytes}},
+                       'transition_storage': {'slots': len(operands),
+                            'allocations': sum(storage.allocations for storage in self.item_storages),
+                            'bytes': sum(storage.nbytes for storage in self.item_storages)}},
             bootstrap_gamma=self.bootstrap_gamma,
             gradient_steps=1,
             batch=len(items),

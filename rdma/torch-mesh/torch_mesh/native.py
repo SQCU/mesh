@@ -44,7 +44,7 @@ def shader_source(source):
     return _embed_headers(source.splitlines(keepends=True), [Path(torch.__file__).parent / 'include'], set())
 
 
-def shader(source, name, access, names=(), types=(), accesses=()):
+def shader(source, name, access, names=(), types=(), accesses=(), dispatch=None):
     """Retain the emitted command declaration before final pipeline binding."""
     source = shader_source(source)
 
@@ -56,7 +56,7 @@ def shader(source, name, access, names=(), types=(), accesses=()):
             if not isinstance(value, (torch.Tensor, TensorView)):
                 constants[index] = struct.pack('q', int(value))
         _records.get().append(dict(kind='shader', source=source, function=name, access=access,
-            accesses=accesses,
+            accesses=accesses, dispatch=dispatch,
             operands=tensors, names=tuple(names), types=tuple(types), index_dtype=torch.uint8, constants=constants,
             binding_origins=tuple(None if value is None else value.binding_origin for value in tensors),
             grid=tuple(map(int, threads)) + (1,) * (3 - len(threads)),
@@ -74,9 +74,12 @@ def command_declaration(declaration, configuration=None):
                            requirements=use.get('requirements', ()))
                  for role, use in original['operands'].items()} if original is not None else
                 commands.descriptions(declaration['operands']))
+    actual = commands.descriptions(declaration['operands'])
+    operands.update((role, value) for role, value in actual.items() if role not in operands)
     kind, parameters = declaration['kind'], declaration['parameters']
     if kind == 'product':
         from .matrix import declaration as prepare
+        parameters = dict(parameters, readers=declaration.get('readers', {}))
     elif kind == 'topk':
         from .selection import declaration as prepare
     elif kind == 'cumsum':
@@ -94,16 +97,9 @@ def command_declaration(declaration, configuration=None):
 def command_records(declarations, *, with_reaches=False):
     """Realize the shared preparation declarations into ordinary command records."""
     from . import layout
-    for declaration in declarations:
+    for declaration in declared_commands(declarations):
         if not isinstance(declaration, dict):
             yield (declaration, None) if with_reaches else declaration
-            continue
-        if declaration['kind'] in ('product', 'topk', 'cumsum', 'draw', 'retain', 'fwht_stage'):
-            yield from command_records(declaration['before'], with_reaches=with_reaches)
-            from .command_declarations import bind
-            commands = bind(command_declaration(declaration), declaration['operands'])
-            yield from command_records(commands, with_reaches=with_reaches)
-            yield from command_records(declaration['after'], with_reaches=with_reaches)
             continue
         operands = declaration['operands']
         views = {i: value for i, value in enumerate(operands) if value is not None}
@@ -134,6 +130,18 @@ def command_records(declarations, *, with_reaches=False):
         yield (record, declaration['reaches']) if with_reaches else record
 
 
+def declared_commands(declarations):
+    """Expand shared numerical recipes before page effects or pipeline binding."""
+    for declaration in declarations:
+        if isinstance(declaration, dict) and declaration['kind'] in ('product', 'topk', 'cumsum', 'draw', 'retain', 'fwht_stage'):
+            from .command_declarations import bind
+            yield from declared_commands(declaration['before'])
+            yield from declared_commands(bind(command_declaration(declaration), declaration['operands']))
+            yield from declared_commands(declaration['after'])
+        else:
+            yield declaration
+
+
 def linear(x, w, bias=None, act=0, x1=None, *, out=None):
     return linears([x], [w], [bias], [act], [x1], outputs=None if out is None else [out])[0]
 
@@ -142,17 +150,9 @@ def linears(xs, ws, biases, acts, x1s, *, outputs=None):
     from .placement import output
     outputs = [output((x.shape[0], w.shape[0]), x.dtype, x.device, out)
                for x, w, out in zip(xs, ws, outputs if outputs is not None else [None] * len(xs), strict=True)]
-    if (all(descriptor(value).affine for value in (*xs, *ws, *biases, *x1s, *outputs) if value is not None)
-        and all(x.dtype == w.dtype == torch.half and x.shape[0] <= compiler_operands()['LINEAR_ROW_CROSSOVER'] and x.stride(1) == w.stride(1) == 1
-           and (part is None or part.stride(1) == 1) and (bias is None or bias.is_contiguous())
-           for x, w, part, bias, out in zip(xs, ws, x1s, biases, outputs))):
-        handles = lambda values: [None if v is None else TensorView.of(v).tensor() for v in values]
-        _records.get().extend(_stream.linear_commands(handles(xs), handles(ws), handles(biases), acts, handles(x1s), handles(outputs)))
-    else:
-        from .matrix import product
-        for x, w, part, bias, act, out in zip(xs, ws, x1s, biases, acts, outputs):
-            if out.numel():
-                _records.get().extend(product(x, w.t(), out, x1=part, bias=bias, act=bool(act)))
+    from .matrix import products
+    _records.get().extend(products([dict(x=x,w=w.t(),out=out,x1=part,bias=bias,act=bool(act))
+        for x,w,part,bias,act,out in zip(xs,ws,x1s,biases,acts,outputs,strict=True)]))
     return outputs
 
 
@@ -163,9 +163,9 @@ def product(x, w, out, *, before=(), after=(), declaration=None, **parameters):
                               before=tuple(before), after=tuple(after), declaration=declaration))
 
 
-def external(adapter, operands, parameters, *, before=(), after=(), declaration=None):
+def external(adapter, operands, parameters, *, before=(), after=(), declaration=None, readers=None):
     """The selected operands of an existing numerical preparation declaration."""
-    _records.get().append(dict(kind=adapter, operands=operands, parameters=parameters,
+    _records.get().append(dict(kind=adapter, operands=operands, parameters=parameters, readers=readers or {},
                               before=tuple(before), after=tuple(after), declaration=declaration))
 
 
@@ -251,7 +251,7 @@ class Program:
     @classmethod
     def prepare(cls, declaration):
         recorded, hosts, owners = [], [], []
-        for command in declaration['commands']:
+        for command in declared_commands(declaration['commands']):
             if isinstance(command, dict) and command['kind'] == 'cpu':
                 from . import cpu
                 host = cpu.prepare(command)
@@ -405,6 +405,64 @@ def finish_body(result, *, writes=False):
                     result.memory_usage[kind].append(MemoryEntry(value.args[0], None, None))
     result.has_partial_accumulate = bool(result.op_counts['partial_accumulate'])
     return result
+
+
+def scalar_reader_source(body, coordinates, dtype, name):
+    """Emit the retained scalar body as a typed value getter.
+
+    Its fields are ordinary page readers supplied by the final binder. Both
+    arithmetic and indexing use the same scalar backend as a normal kernel;
+    this emits no dispatch, allocation, event, or second executable program.
+    """
+    from torch._inductor.codegen.common import Kernel
+    from torch._inductor.codegen.mps import MetalOverrides, MetalExprPrinter, DTYPE_TO_METAL
+    from torch._inductor.virtualized import V
+    from torch.utils._ordered_set import OrderedSet
+
+    class Reader(Kernel):
+        overrides = MetalOverrides
+        suffix, newvar_prefix = ';', 'auto '
+        headers = OrderedSet(['utils'])
+
+        def __init__(self):
+            super().__init__(increase_kernel_count=False)
+            self.fields = {}
+            self.result = None
+
+        def prepare_indexing(self, index):
+            return index
+
+        def index_to_str(self, index):
+            return MetalExprPrinter().doprint(index)
+
+        def load(self, source, index):
+            field = self.fields.setdefault(source, len(self.fields))
+            dtype = V.graph.get_dtype(source)
+            expression = f'input{field}.load({self.index_to_str(index)})'
+            if dtype in (torch.float16, torch.bfloat16):
+                expression, dtype = f'static_cast<float>({expression})', torch.float32
+            return self.cse.generate(self.loads, expression, dtype=dtype)
+
+        def store(self, target, index, value, mode=None):
+            self.result = value
+
+        def check_bounds(self, *args, **kwargs):
+            # The body retains masks and negative-index semantics. Index
+            # validity is the declared operand domain, never a payload guard.
+            return None
+
+    reader = Reader()
+    with V.graph.set_current_device(torch.device('mps')), reader:
+        body(coordinates, [], allow_same_symbol_in_index=True)
+    fields = tuple(reader.fields)
+    parameters = ','.join(f'typename Input{index}' for index in range(len(fields)))
+    declarations = ''.join(f'Input{index} input{index};' for index in range(len(fields)))
+    headers = ''.join(f'#include <c10/metal/{header}.h>\n' for header in reader.headers)
+    text = (headers + (f'template<{parameters}> ' if parameters else '') + f'struct {name} {{' + declarations +
+            f'inline {DTYPE_TO_METAL[dtype]} load(long reader_ordinal) const {{\n' +
+            reader.loads.getvalue() + reader.compute.getvalue() +
+            f'return static_cast<{DTYPE_TO_METAL[dtype]}>({reader.result});\n}} }};\n')
+    return dict(source=text, name=name, inputs=fields, dtype=dtype)
 
 
 def compose_body_read(body, access, producer, coordinates, dtype):
@@ -631,6 +689,28 @@ def prepare_graph(module, metadata, *, materializations=()):
         max_threadgroup_size = configuration['ROW_THREADS']
         simd_group_size = configuration['SIMD_WIDTH']
 
+        def retain_dispatch_access(self, side, name, index):
+            from torch._inductor.utils import sympy_subs
+            import sympy
+            roots = tuple(self.range_trees)
+            expression = sympy.sympify(index)
+            expression = sympy_subs(expression, {symbol: entry.expr for symbol, entry in self.range_tree_nodes.items()})
+            accesses = self.__dict__.setdefault('dispatch_accesses', [])
+            indirect = tuple((symbol, extent) for symbol, extent in getattr(self, 'dispatch_indirect', {}).items()
+                             if symbol in expression.free_symbols)
+            accesses.append(dict(side=side, name=name, index=expression,
+                variables=(*[root.index_sym() for root in roots], *[symbol for symbol, _ in indirect]),
+                shape=(*[int(root.numel) for root in roots], *[int(extent) for _, extent in indirect]),
+                active=tuple(roots.index(root) for root in self.active_range_trees()),
+                reductions=tuple(index for index, root in enumerate(roots) if root.is_reduction)))
+
+        def indirect_indexing(self, index, size, *args, **kwargs):
+            result = super().indirect_indexing(index, size, *args, **kwargs)
+            known = set(self.range_tree_nodes) | {root.index_sym() for root in self.range_trees}
+            for symbol in result.free_symbols - known:
+                self.__dict__.setdefault('dispatch_indirect', {})[symbol] = size
+            return result
+
         @contextmanager
         def access(self, name):
             previous = getattr(self, 'page_access', None)
@@ -654,6 +734,7 @@ def prepare_graph(module, metadata, *, materializations=()):
             return expression
 
         def load(self, name, index):
+            self.retain_dispatch_access('reads', name, index)
             with self.access(name):
                 if getattr(V.interpreter, 'current_node', None) is not None and V.interpreter.current_node.meta.get('mesh_read_bits'):
                     # This declared value is transported, not evaluated in a
@@ -665,10 +746,12 @@ def prepare_graph(module, metadata, *, materializations=()):
                 return super().load(name, index)
 
         def store(self, name, index, value, mode=None):
+            self.retain_dispatch_access('writes', name, index)
             with self.access(name):
                 return super().store(name, index, value, mode)
 
         def store_reduction(self, name, index, value):
+            self.retain_dispatch_access('writes', name, index)
             with self.access(name):
                 return super().store_reduction(name, index, value)
 
@@ -716,7 +799,13 @@ def prepare_graph(module, metadata, *, materializations=()):
         import mesh_matrix
         from .operand import binding_layout, layout_configuration
 
-        operand = ir_operand
+        def operand(value):
+            declared = ir_operand(value)
+            if declared is not None:
+                reader = V.graph.value_reader(declared['name'], algebra)
+                if reader is not None:
+                    declared = dict(declared, reader=reader)
+            return declared
 
         if isinstance(operation, ir.MultiOutput):
             # Selecting a declared result from an external call introduces no
@@ -968,7 +1057,7 @@ def prepare_graph(module, metadata, *, materializations=()):
 
         def _generate_extern_kernel_out_helper(self, kernel, out, out_view, args, device, stack_traces=None):
             names = _OUT_ADAPTERS
-            if kernel not in names or device != 'mps':
+            if kernel not in names:
                 raise NotImplementedError(f'no native preparation for {kernel} on {device}')
             self.writeline(f'mesh_native.{names[kernel]}({", ".join(args)}, out={out_view or out})')
 
@@ -1047,7 +1136,14 @@ def prepare_graph(module, metadata, *, materializations=()):
                                                      origins=tuple(node.node.get_origins())))
             index = len(command_accesses)
             command_accesses.append(tuple(accesses))
-            wrapper.header.writeline(f'{name} = mesh_native.shader({source_text!r}, "generated_kernel", {access}, {tuple(arguments)!r}, {types!r}, mesh_accesses[{index}])')
+            dispatch = []
+            for item in getattr(kernel, 'dispatch_accesses', ()):
+                argument = V.graph.scheduler.mutation_real_name.get(item['name'], item['name'])
+                if argument in arguments:
+                    dispatch.append(dict(item, name=argument, slot=arguments.index(argument)))
+            dispatch_index = len(command_accesses)
+            command_accesses.append(tuple(dispatch))
+            wrapper.header.writeline(f'{name} = mesh_native.shader({source_text!r}, "generated_kernel", {access}, {tuple(arguments)!r}, {types!r}, mesh_accesses[{index}], mesh_accesses[{dispatch_index}])')
             return name
 
     from . import cpu
@@ -1061,8 +1157,7 @@ def prepare_graph(module, metadata, *, materializations=()):
         def __init__(self, scheduler, operation, declaration, implementation=None):
             self.declaration = declaration
             self.implementation = implementation if implementation is not None else next(
-                (choice['implementation'] for choice in V.graph.selected_implementations if choice['operation'] is operation),
-                implementation_catalog[implementation_choices['scalar']])
+                choice['implementation'] for choice in V.graph.selected_implementations if choice['operation'] is operation)
             super().__init__(scheduler, operation)
 
         def get_device(self):
@@ -1076,6 +1171,31 @@ def prepare_graph(module, metadata, *, materializations=()):
             device = self.get_device()
             self.group = device, self.scheduler.get_backend(device).group_fn(self._sizes)
             self.set_read_writes(declaration.read_writes)
+
+    def selected_body(body, domain):
+        from torch._inductor import dependencies
+        from torch._inductor.loop_body import LoopBody
+        from .operand import iteration_order, layout_configuration, symbolic_index
+        from .layout import strides
+        shapes = tuple(map(tuple, body.sizes))
+        boundary = len(shapes[0])
+        domains = (domain.project(0, boundary), domain.project(boundary, len(shapes[1])))
+        orders = [iteration_order(part, shape) for part, shape in zip(domains, shapes, strict=True)]
+        sizes = tuple(shape if whole else (order.shape[0],)
+                      for shape, (order, whole) in zip(shapes, orders, strict=True))
+        if all(whole for _, whole in orders):
+            return body
+        variables, ranges = dependencies.index_vars_no_squeeze(*sizes, prefix='q')
+        arguments = []
+        for shape, (order, whole), values in zip(shapes, orders, variables, strict=True):
+            if whole:
+                arguments.append(values)
+            else:
+                ordinal = symbolic_index(order.terms(), values[0])
+                coordinates = layout_configuration(_stream.TensorLayout(shape, strides(shape)))['index_coordinates']
+                arguments.append([symbolic_index(term, ordinal) for term in coordinates])
+        return LoopBody(body, arguments, ranges, *variables, allow_same_symbol_in_index=True)
+
 
     class NativeScheduler(Scheduler):
         def codegen_extern_call(self, node):
@@ -1115,15 +1235,131 @@ def prepare_graph(module, metadata, *, materializations=()):
             return result
 
         def can_fuse(self, left, right, *args, **kwargs):
-            # Distinct reduction fibers have distinct launch domains. They
-            # remain ordinary commands; equal single domains use normal fusion.
-            if any(hasattr(node, 'page_pieces') for group in (left, right) for node in group.get_nodes()):
+            if hasattr(left, 'page_pieces') or hasattr(right, 'page_pieces'):
+                plan = self.fusion_pieces(left, right)
+                if plan is None:
+                    return False
+                from mesh_relation import Algebra
+                algebra = Algebra()
+                regions = {id(piece): self.fusion_regions(piece, algebra)
+                           for pair in plan for piece in pair if piece is not None}
+                # A fused cell runs its left producer before its right consumer.
+                # Check only pairs whose order differs from the original two
+                # groups; the final recorder still sees the precise accesses.
+                for index, (later, _) in enumerate(plan):
+                    if later is None:
+                        continue
+                    for _, earlier in plan[:index]:
+                        if earlier is None:
+                            continue
+                        a, b = regions[id(later)], regions[id(earlier)]
+                        for left_side, right_side in (('reads', 'writes'), ('writes', 'reads'), ('writes', 'writes')):
+                            for name in a[left_side].keys() & b[right_side].keys():
+                                if not a[left_side][name].binary(b[right_side][name], 'intersect').empty():
+                                    return False
+                for side in (0, 1):
+                    selected = [pair[side] for pair in plan if pair[side] is not None]
+                    for index, earlier in enumerate(selected):
+                        for later in selected[index + 1:]:
+                            a, b = regions[id(earlier)], regions[id(later)]
+                            for left_side, right_side in (('reads', 'writes'), ('writes', 'reads'), ('writes', 'writes')):
+                                for name in a[left_side].keys() & b[right_side].keys():
+                                    if not a[left_side][name].binary(b[right_side][name], 'intersect').empty():
+                                        return False
+                decisions = tuple(a is not None and b is not None and self.can_fuse(a, b, *args, **kwargs)
+                                  for a, b in plan)
+                if any(decisions):
+                    if not hasattr(self, 'page_fusions'):
+                        self.page_fusions = {}
+                    self.page_fusions[id(left), id(right)] = plan, decisions
+                    return True
                 return False
             selected = {node.implementation['id'] for group in (left, right) for node in group.get_nodes()
                         if isinstance(node, DeclaredSchedulerNode)}
             if len(selected) > 1:
                 return False
             return super().can_fuse(left, right, *args, **kwargs)
+
+        def fusion_pieces(self, left, right):
+            import copy
+            first, second = (getattr(node, 'page_pieces', (node,)) for node in (left, right))
+            pieces = (*first, *second)
+            if not pieces:
+                return None
+            selections = [getattr(piece, 'page_selection', None) for piece in pieces]
+            if not all(selections):
+                return tuple(zip(first, second, strict=True)) if len(first) == len(second) else None
+            shapes = {tuple(map(tuple, body.sizes)) for body, _ in selections}
+            if len(shapes) != 1:
+                return None
+            domains = [selection[1] for selection in selections]
+            algebra = domains[0].algebra
+            # All cells are in the original iteration coordinates. No selected
+            # ordinal is mistaken for another piece's physical page order.
+            domains = [domain if domain.algebra is algebra else algebra.set(str(domain), domain.rank)
+                       for domain in domains]
+            boundary = len(selections[0][0].iter_vars)
+            cuts = (boundary,) if 0 < boundary < domains[0].rank else ()
+
+            def selected(index, domain):
+                original = pieces[index]
+                if domain.equal(domains[index]):
+                    return original
+                body = selections[index][0]
+                # A reduction's scalar state belongs to its complete fiber.
+                # Partition outer cells freely; retain its original fiber.
+                if body.reduce_vars and not domain.project(boundary).equal(domains[index].project(boundary)):
+                    return None
+                piece = copy.copy(original)
+                piece._body = selected_body(body, domain)
+                piece._sizes = piece._body.sizes
+                piece.page_selection = body, domain
+                device = piece.get_device()
+                piece.group = device, self.get_backend(device).group_fn(piece._sizes)
+                piece.mutation_renames = {}
+                piece.refresh_dependencies(normalize=False, need_clear_tiling_cache=True)
+                return piece
+
+            result = []
+            for cell, members in algebra.cover(domains):
+                for domain in cell.products(cuts):
+                    lefts = [member for member in members if member < len(first)]
+                    rights = [member for member in members if member >= len(first)]
+                    # Distinct work instances remain distinct even when their
+                    # selections overlap. Pair once; never form a Cartesian
+                    # product that would duplicate their numerical work.
+                    for index in range(max(len(lefts), len(rights))):
+                        a = selected(lefts[index], domain) if index < len(lefts) else None
+                        b = selected(rights[index], domain) if index < len(rights) else None
+                        if (index < len(lefts) and a is None) or (index < len(rights) and b is None):
+                            return None
+                        result.append((a, b))
+            return tuple(result)
+
+        def fusion_regions(self, piece, algebra):
+            from .operand import access_domain
+            result = dict(reads={}, writes={})
+            for node in piece.get_nodes():
+                for domain in computed_domains(node.node, node._body, algebra):
+                    work = algebra.map(domain['work'], (), lambda source, target: []).domain()
+                    for side in result:
+                        for access in domain[side].values():
+                            positions = access_domain(access, work)['positions']
+                            if positions is None:
+                                positions = algebra.map((access['storage_bytes'],), (), lambda source, target: []).domain()
+                            name = self.mutation_real_name.get(access['name'], access['name'])
+                            previous = result[side].get(name)
+                            result[side][name] = positions if previous is None else previous.binary(positions, 'union')
+            return result
+
+        def fuse(self, left, right):
+            made = super().fuse(left, right)
+            if hasattr(left, 'page_pieces') or hasattr(right, 'page_pieces'):
+                plan, decisions = self.page_fusions.pop((id(left), id(right)))
+                made.page_pieces = tuple(piece for (a, b), combine in zip(plan, decisions, strict=True)
+                    for piece in ((super(NativeScheduler, self).fuse(a, b),) if combine else
+                                  tuple(value for value in (a, b) if value is not None)))
+            return made
 
         def merge_loops(self):
             super().merge_loops()
@@ -1160,7 +1396,8 @@ def prepare_graph(module, metadata, *, materializations=()):
             names = ('operations', 'graph_inputs', 'graph_inputs_original', 'graph_input_names',
                      'graph_outputs', 'example_inputs', 'wrapper_code', 'removed_operations',
                      'removed_buffers', 'inplaced_to_remove', 'declared_effects', 'selected_domains',
-                     'pending_declarations', 'declaration_nodes', 'scheduler', 'selected_implementations', 'reduction_uses')
+                     'pending_declarations', 'declaration_nodes', 'scheduler', 'selected_implementations', 'reduction_uses',
+                     'getter_uses', 'virtual_values')
             absent = object()
             saved = {name: getattr(graph, name, absent) for name in names}
             with environment(), V.set_graph_handler(graph), V.set_extern_kernel_nodes([]), mode:
@@ -1178,11 +1415,14 @@ def prepare_graph(module, metadata, *, materializations=()):
                     graph.declaration_nodes, graph.scheduler = self.nodes, self.scheduler
                     graph.selected_implementations = getattr(self, 'selected_implementations', None)
                     graph.reduction_uses = getattr(self, 'reduction_uses', ())
+                    graph.getter_uses = getattr(self, 'getter_uses', {})
+                    graph.virtual_values = getattr(self, 'virtual_values', set())
                     yield graph
                 finally:
                     self.scheduler = graph.scheduler
                     self.selected_implementations = graph.selected_implementations
                     self.reduction_uses = graph.reduction_uses
+                    self.getter_uses, self.virtual_values = graph.getter_uses, graph.virtual_values
                     self.pending_declarations = graph.pending_declarations
                     for name, value in saved.items():
                         if value is absent:
@@ -1209,6 +1449,14 @@ def prepare_graph(module, metadata, *, materializations=()):
         def consumer_uses(self):
             with self.active() as graph:
                 return graph.consumer_uses()
+
+        def consumer_constraints(self):
+            with self.active() as graph:
+                return graph.consumer_constraints()
+
+        def page_projection(self, projection):
+            with self.active() as graph:
+                return graph.page_projection(projection)
 
         def page_aliases(self):
             with self.active() as graph:
@@ -1253,6 +1501,41 @@ def prepare_graph(module, metadata, *, materializations=()):
                 for output in operation.get_outputs():
                     for source in output.get_mutation_names():
                         self.storage_aliases[output.get_name()] = self.storage_aliases.get(source, source)
+
+        def value_reader(self, name, algebra):
+            """One retained producer body and its page dependencies, by value."""
+            import sympy
+            from mesh_relation import flat
+            from .layout import strides
+            from .operand import layout_configuration, symbolic_index
+            operation = next((operation for operation in self.operations
+                              if any(value.get_name() == name for value in operation.get_outputs())), None)
+            if not isinstance(operation, ir.ComputedBuffer) or not isinstance(operation.data, ir.Pointwise):
+                return None
+            body = self.declaration_nodes[operation.get_operation_name()]._body
+            if body is None or body.reduce_vars:
+                return None
+            domain, = computed_domains(operation, body, algebra)
+            if len(domain['writes']) != 1:
+                return None
+            written, = domain['writes'].values()
+            if (written['name'] != name or written['relation'] is None or written['predicates'] or
+                    written['node'].target != 'store' or written['node'].args[4] is not None):
+                return None
+            count = int(written['storage_bytes']) // written['dtype'].itemsize
+            inverse = written['relation'].inverse((count,))
+            if not inverse.single_valued():
+                return None
+            flatten = algebra.map(domain['work'], (math.prod(domain['work']),),
+                                  lambda x, y: [f'{y[0]} = {flat(domain["work"], x)}'])
+            ordinal = symbolic_index(inverse.then(flatten).terms(), sympy.Symbol('reader_ordinal', integer=True, nonnegative=True))
+            coordinates = layout_configuration(_stream.TensorLayout(domain['work'], strides(domain['work'])))['index_coordinates']
+            getter = scalar_reader_source(body, [symbolic_index(term, ordinal) for term in coordinates],
+                                          written['dtype'], f'mesh_value_{name}')
+            inputs = {source: tuple(read for read in domain['reads'].values() if read['name'] == source)
+                      for source in getter['inputs']}
+            return dict(getter, operation=operation, body=body, work=domain['work'], variables=domain['variables'],
+                        ordinal_to_work=inverse, reads=inputs, index_producers=domain['index_producers'])
 
         def compose_reads(self):
             """Fold live reads of cached pointwise values into their consumers.
@@ -1527,7 +1810,7 @@ def prepare_graph(module, metadata, *, materializations=()):
 
         def select_implementations(self, records=None):
             """Resolve explicit choices against the retained typed requirements."""
-            from mesh_compute import select_implementation
+            from mesh_compute import assigned_implementation, select_implementation
             choices = []
             for declaration in self.consumer_constraints():
                 operation = declaration['operation']
@@ -1536,8 +1819,8 @@ def prepare_graph(module, metadata, *, materializations=()):
                     (not record['work'].empty() or record['finish'] is not None and not record['finish']['work'].empty())))
                 for record in requests:
                     implementation = select_implementation(declaration['required'], implementation_catalog.values(),
-                        implementation_choices['scalar'] if record is None else
-                        record.get('implementation', implementation_choices['scalar']))
+                        record['implementation'] if record is not None and 'implementation' in record else
+                        assigned_implementation(declaration['required'], implementation_choices['scalar']))
                     if implementation['compiler'] not in scalar_compilers:
                         raise NotImplementedError(f"retained scalar emission has no compiler for {implementation['compiler']}")
                     choices.append(dict(operation=operation, domain=None if record is None else record['domain'],
@@ -1650,27 +1933,22 @@ def prepare_graph(module, metadata, *, materializations=()):
                 operation = record['effect']['operation']
                 selected.setdefault(operation.get_operation_name(), []).append(record)
 
-            def piece_body(body, domain):
-                shapes = tuple(map(tuple, body.sizes))
-                boundary = len(shapes[0])
-                domains = (domain.project(0, boundary), domain.project(boundary, len(shapes[1])))
-                orders = [iteration_order(part, shape) for part, shape in zip(domains, shapes, strict=True)]
-                sizes = tuple(shape if whole else (order.shape[0],)
-                              for shape, (order, whole) in zip(shapes, orders, strict=True))
-                if all(whole for _, whole in orders):
-                    return body
-                variables, ranges = dependencies.index_vars_no_squeeze(*sizes, prefix='q')
-                arguments = []
-                for shape, (order, whole), values in zip(shapes, orders, variables, strict=True):
-                    if whole:
-                        arguments.append(values)
-                    else:
-                        ordinal = symbolic_index(order.terms(), values[0])
-                        coordinates = layout_configuration(_stream.TensorLayout(shape, strides(shape)))['index_coordinates']
-                        arguments.append([symbolic_index(term, ordinal) for term in coordinates])
-                return LoopBody(body, arguments, ranges, *variables, allow_same_symbol_in_index=True)
-
             with environment(), V.set_graph_handler(self), V.set_extern_kernel_nodes([]), mode:
+                claims, users = {}, {}
+                for effect in self.declared_effects:
+                    consumer = effect['operation'].get_operation_name()
+                    for dependency in effect['scheduling_dependencies'].reads:
+                        users.setdefault(dependency.name, set()).add(consumer)
+                    for domain in effect['domains']:
+                        for part in (domain, domain.get('finish')):
+                            if part is not None:
+                                for access in part['reads'].values():
+                                    if access.get('reader') is not None:
+                                        claims.setdefault(access['name'], set()).add(consumer)
+                protected = self.never_reuse_buffers | set(self.get_output_names())
+                self.virtual_values = {name for name, consumers in claims.items()
+                                       if name not in protected and users.get(name, set()) <= consumers}
+                self.getter_uses = {}
                 self.select_implementations(records)
                 self._update_scheduler()
                 prepared, undeclared, backend_operations = {}, set(), []
@@ -1678,14 +1956,16 @@ def prepare_graph(module, metadata, *, materializations=()):
                 declarations = {effect['operation'].get_operation_name(): effect for effect in self.declared_effects}
                 for operation in tuple(self.operations):
                     node = self.scheduler.name_to_node[operation.get_operation_name()]
-                    requests = selected.get(operation.get_operation_name(), ())
+                    requests = (() if any(value.get_name() in self.virtual_values for value in operation.get_outputs())
+                                else selected.get(operation.get_operation_name(), ()))
                     if isinstance(node, SchedulerNode):
                         pieces = []
                         def append(body, domain, implementation):
                             piece = copy.copy(node)
                             piece.implementation = implementation
                             piece.__dict__.pop('page_pieces', None)
-                            piece._body = piece_body(body, domain)
+                            piece._body = selected_body(body, domain)
+                            piece.page_selection = body, domain
                             piece._sizes = piece._body.sizes
                             device = piece.get_device()
                             piece.group = device, self.scheduler.get_backend(device).group_fn(piece._sizes)
@@ -1734,8 +2014,8 @@ def prepare_graph(module, metadata, *, materializations=()):
                                     for write in finish_domain['writes'].values():
                                         for source in produced.values():
                                             if write['name'] == source['name']:
-                                                selected = write['relation'].preimage(source['relation'].image(missing))
-                                                selected_finish = selected if selected_finish is None else selected_finish.binary(selected, 'union')
+                                                positions = write['relation'].preimage(source['relation'].image(missing))
+                                                selected_finish = positions if selected_finish is None else selected_finish.binary(positions, 'union')
                                     append(finish_body, selected_finish, implementation)
                         if len(pieces) == 1:
                             node = pieces[0]
@@ -1776,7 +2056,8 @@ def prepare_graph(module, metadata, *, materializations=()):
             return self
 
         def consumer_uses(self):
-            """Selected external API uses, before the common page-placement solve."""
+            """Selected page uses, including the scalar readers' real inputs."""
+            from .operand import access_domain, layout_configuration, relation_layout
             live = {output.get_name() for group in self.scheduler.nodes for node in group.get_nodes()
                     for output in node.get_outputs()}
             uses = [use for use in getattr(self, 'reduction_uses', ()) if use['binding']['name'] in live]
@@ -1785,9 +2066,59 @@ def prepare_graph(module, metadata, *, materializations=()):
                 scheduled = self.scheduler.name_to_node[name]
                 for index, plan in enumerate(getattr(scheduled, 'selected_plans', ())):
                     for role, use in plan['operands'].items():
-                        uses.append(dict(key=(name, index, role), binding=use['access'], relation=use['relation'],
-                                         shape=use['shape'], requirements=use['requirements'], access=use['access_mode']))
+                        reader = use['access'].get('reader')
+                        if reader is None:
+                            uses.append(dict(key=(name, index, role), binding=use['access'], relation=use['relation'],
+                                shape=use['shape'], requirements=use['requirements'], access=use['access_mode']))
+                            continue
+                        mapped = use['relation'].then(reader['ordinal_to_work'])
+                        work, algebra = mapped.image(mapped.domain()), mapped.algebra
+                        declared = []
+                        for slot, source in enumerate(reader['inputs']):
+                            accesses = reader['reads'][source]
+                            positions, read_relation = None, None
+                            for access in accesses:
+                                selected = access_domain(access, work)['positions']
+                                positions = selected if positions is None else positions.binary(selected, 'union')
+                                address = access['relation']
+                                if address is None:
+                                    space = access['index_space']
+                                    dimensions = space['work_dimensions']
+                                    projection = algebra.map(space['shape'], space['shape'][:dimensions],
+                                        lambda x, y: [f'{target} = {source}' for source, target in zip(x, y)])
+                                    address = projection.inverse(space['shape'][:dimensions]).then(space['relation'])
+                                selected_relation = mapped.then(address)
+                                read_relation = (selected_relation if read_relation is None else
+                                                 read_relation.union(selected_relation))
+                            binding = accesses[0]
+                            count = int(binding['storage_bytes']) // binding['dtype'].itemsize
+                            layout = _stream.TensorLayout.runs(positions.spans()).elements(binding['dtype'].itemsize)
+                            relation = algebra.layout(layout_configuration(layout))
+                            key = (name, index, role, slot)
+                            uses.append(dict(key=key, binding=binding, relation=relation, shape=relation.shape,
+                                             requirements=('indexed',), access='read'))
+                            declared.append(dict(key=key, shape=(count,),
+                                relation=relation.inverse((count,)), role=f'{role}_input{slot}',
+                                access_layout=relation_layout(relation, relation.shape, count),
+                                read_relation=read_relation))
+                        self.getter_uses[name, index, role] = tuple(declared)
             return tuple(uses)
+
+        def page_projection(self, projection):
+            """Remove storage for values consumed directly as scalar readers.
+
+            Their original body still supplied ownership and sparse-read cuts.
+            Only its redundant local materialization is absent from this final
+            page assignment; its actual input reads remain declared.
+            """
+            virtual = self.virtual_values
+            def part(value):
+                return None if value is None else dict(value, **{side:
+                    {slot: access for slot, access in value[side].items() if access['access']['name'] not in virtual}
+                    for side in ('reads', 'writes')})
+            return dict(projection, storage_bytes={name: value for name, value in projection['storage_bytes'].items()
+                                                  if name not in virtual},
+                records=tuple(dict(part(record), finish=part(record.get('finish'))) for record in projection['records']))
 
         def page_aliases(self):
             """Exact selected value equalities from cached load/store bodies."""
@@ -1795,6 +2126,8 @@ def prepare_graph(module, metadata, *, materializations=()):
             aliases = []
             for record in getattr(self, 'selected_domains', None) or ():
                 domain, work = record['domain'], record['work']
+                if any(access['name'] in getattr(self, 'virtual_values', ()) for access in domain['writes'].values()):
+                    continue
                 body = domain.get('body')
                 if body is None or not body.is_memory_copy() or work.empty():
                     continue
@@ -1846,7 +2179,23 @@ def prepare_graph(module, metadata, *, materializations=()):
                             arguments = dict(adapter=plan['adapter'], operands={}, parameters=plan['parameters'], before=[], after=[],
                                 declaration=dict(operation=operation, index=index,
                                                  operands=plan['operands'], parameters=plan['parameters']))
-                            for role in plan['operands']:
+                            for role, use in plan['operands'].items():
+                                reader = use['access'].get('reader')
+                                if reader is not None:
+                                    from .operand import relation_view, relation_layout
+                                    selected_reader = {key: reader[key] for key in ('source', 'name', 'inputs', 'dtype')}
+                                    selected_reader['bindings'] = tuple(item['role'] for item in self.getter_uses[operation.get_operation_name(), index, role])
+                                    selected_reader['accesses'] = tuple(item['access_layout'] for item in self.getter_uses[operation.get_operation_name(), index, role])
+                                    selected_reader['relations'] = tuple(item['read_relation'] for item in self.getter_uses[operation.get_operation_name(), index, role])
+                                    selected_reader['layout'] = relation_layout(use['relation'], use['shape'],
+                                        int(use['access']['storage_bytes']) // use['access']['dtype'].itemsize)
+                                    arguments.setdefault('readers', {})[role] = selected_reader
+                                    arguments['declaration'].setdefault('readers', {})[role] = selected_reader
+                                    for item in self.getter_uses[operation.get_operation_name(), index, role]:
+                                        assigned = uses[item['key']]
+                                        arguments['operands'][item['role']] = relation_view(assigned['operand'], item['relation'], item['shape'])
+                                        arguments['before'].extend(assigned['before']);arguments['after'].extend(assigned['after'])
+                                    continue
                                 assigned = uses[operation.get_operation_name(), index, role]
                                 arguments['operands'][role] = assigned['operand']
                                 arguments['before'].extend(assigned['before'])

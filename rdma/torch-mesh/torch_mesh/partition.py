@@ -1,98 +1,24 @@
-"""A partition operand the backend sets: DTensor's Shard, tensor parallelism and context parallelism split a mesh
-dimension by parts the backend moves between calls by the measured residual (design/heterogeneity.md §4, R3, R14).
+"""Distributed source operands and prepared page ownership.
 
-Stock PyTorch splits every sharded extent equally (Shard follows torch.chunk).  Here a program declares a mesh
-dimension's P relative units, attach(mesh, tp=P), the same on every rank. Each rank holds the interval between
-two integer-rounded cumulative shares of the declared extent. These intervals cover the axis exactly, including
-odds, tails and empty shares. Divisible extents retain their previous boundaries. The capacity and index operands
-are fixed during preparation; a later assignment constructs a new generation.  follow(*ts) moves sharded tensors onto the parts the Balancer attached, one group a move.  On raw
-tensors split(mesh, "tp", N) gives the valid blocks in rank order, the ones the list collectives take
-(dist.all_gather into a list of unequal outputs, dist.reduce_scatter of a list of unequal inputs: MPI's v-collectives
-in torch's spelling).
+A mesh dimension has configured relative shares. RaggedShard names those
+shares; every distributed value retains its global type and rank-local pages.
+Function captures numerical source once, including its backward. The ownership
+pass carries exact page selections through the retained graph and compiles
+only the intersections required by each consumer. A reshape or repartition
+never requires whole replication merely because a single-axis placement cannot
+name the resulting selection.
 
-On DTensor the partition is a placement, RaggedShard(dim, key) [veScale's RaggedShard(local_units), pytorch#169320],
-held by the tensors it splits.  A DTensor holding one is a
-RaggedTensor, a DTensor subclass whose own dispatch keeps it ragged through every op.  distribute_tensor, from_local and
-redistribute below are torch's, with a Shard on an attached mesh dimension that dimension's RaggedShard; from_local
-requires the declared global shape and stride for a ragged local operand.  ColwiseParallel, RowwiseParallel and
-SequenceParallel below are torch's parallel styles over them.  A tensor that meets a RaggedShard on its mesh dimension
-holds the same one or none there (R6: a plain Shard or another partition raises ValueError).
+RaggedTensor is the common source operand for regular and ragged placements.
+Its tensor operations are captured into Function; it has no eager numerical
+executor. A source redistribute annotates a value with its chosen destination
+owners. to_local declares a local view while preserving the global source edge.
+Partial placements retain their mathematical expression, including masks and
+scales, until their contributions and reductions are lowered together.
 
-No block holds padding (each capacity is its part), so an op on a local shard runs as torch runs it, a contraction
-or reduction over a partitioned dimension giving the Partial its sharding gives, with nothing masked:
-- Count-dependent: mean over a partitioned dimension is the sum divided by its logical count. Vector norms,
-  softmax, log-softmax and their gradients use the shared algebra before sharding propagation. Their sum/max/min
-  summaries are reduced across the split dimensions; their input rows remain sharded. An op whose sharding gives
-  another Partial there (avg, embedding's mask), a reshape that changes rank ownership,
-  and equal still get the dimension whole first. Convolution consumes explicit result ownership
-  through Function's source graph declaration. Argmax/argmin reduce finite value/position summaries;
-  owner-split index_select combines integer representations so value bits are unchanged. Static window,
-  slice and select views move only their declared page intersections. Sort and scans retain DTensor's
-  own whole-dimension rules until their lowering is extended.
-- Attention: SDPA on query, key and value split along the sequence by one RaggedShard (on any mesh dimension) is ring
-  attention, each source's keys past its valid extents masked (score -inf); context parallelism's ring
-  (ring_attention) masks the same way over head-tail halves.  The softmax over the split is the library's partials
-  merge (below).
-
-Redistribution, each block its part (static counts, never padded to a common size): Shard to Replicate all-gathers
-the blocks, which laid end to end are the logical tensor; Replicate to Shard takes this rank's block of it; Partial to
-Shard reduce-scatters the blocks; Shard to Partial places this rank's block among zeros; Shard(d) to Shard(d') goes
-through Replicate; Shard's scatter from a source rank is the rooted V (the backend's scatter, MPI_Scatterv through
-ncclMeshAlltoAllV), each segment carrying its exact useful element count. Context parallelism's head-tail split keeps
-each half at its exact weighted boundaries: rank r holds its head positions followed by its tail positions
-(context_parallel_buffers, context_parallel_unshard, ring_attention: torch's context_parallel, its unshard and its
-ring, called in their place).
-The ring is split-KV attention [Dao et al. 2023, Flash-Decoding]: every rank's query block gathered (one Allgatherv),
-each block's attention over this rank's own keys and values its partials (the row's logsumexp and output), and the
-partials reduce-scattered by the library's partials operator (ncclMeshRedOpCreatePartials in ncclMeshReduceScatterV),
-each block's merged at its owner by their log-sum-exp, so the crossing follows from the role of the split axis, a
-softmax over it, as a contraction's is a reduction.  On a group
-of the mesh backend the MPS buffers these collectives send from and land in are region tensors (torch_mesh.empty, mesh
-5ff5d699 and f9898875): the all-gather's output, this rank's block copied into its place there and the call run in
-place; the reduce-scatter's input (where it does not lie in the region already, its copy) and its output; the ring's
-gathered queries and its partials; so the library reads what they send where it lies.  Elsewhere, and where the region
-refuses a lease, torch's own memory.
-
-Torch entry points (torch 2.14; nothing of torch is assigned, so a tensor with no RaggedShard runs as torch runs it):
-- torch.library.custom_op with register_fake: torch_mesh::allgatherv and reduce_scatterv.
-- RaggedShard subclasses torch.distributed.tensor.placement_types.Shard and overrides the methods DTensor calls on a
-  placement instance: local_shard_size_and_offset and _local_shard_size_and_offset (compute_local_shape_and_global_
-  offset, the redistribute planner, the RNG), _split_tensor and _select_split_tensor (and through them the inherited
-  _replicate_to_shard), _shard_tensor, _reduce_shard_tensor (Partial._reduce_shard_value calls the target's),
-  _to_replicate_tensor, _to_partial_tensor and _to_new_shard_dim (the redistribution calls the source's).  It equals
-  Shard(dim), as DTensorSpec requires, so torch's cached planner (_gen_transform_infos) would serve a stock spec's or
-  another partition's placements for its own: redistribution here (_local_redistribute) runs torch's planner uncached
-  (_gen_transform_infos_non_cached) and calls each step's placement method as redistribute_local_tensor does, one mesh
-  dimension a step (never merged into a flattened collective).
-- RaggedTensor subclasses torch.distributed.tensor.DTensor with its own __torch_dispatch__ (DTensor.__torch_dispatch__
-  exists for subclasses; the C++ fast path serves the base class alone), to_local, redistribute, full_tensor and
-  __tensor_unflatten__, whose autograd functions keep gradients ragged.  The dispatch calls, never assigns:
-  DTensor._op_dispatcher.unwrap_to_op_info, sharding_propagator.propagate (on the specs with each RaggedShard a Shard,
-  so strategies, costs and its cache are stock) and _adjust_shape_and_stride_args (local shapes of views and
-  factories from the RaggedShard), the dispatcher's _custom_op_handlers and _random_ops (read);
-  torch.utils._python_dispatch.return_and_correct_aliasing.
-- DTensor RNG: a subclass of torch.distributed.tensor._random.OffsetBasedRNGTracker whose _compute_rng_offsets follows
-  capacity blocks, held here per mesh (torch's own tracker is never replaced).
-- ColwiseParallel, RowwiseParallel and SequenceParallel subclass torch.distributed.tensor.parallel's, overriding
-  _partition_linear_fn, _partition_embedding_fn, _prepare_input_fn and _prepare_output_fn.
-- Context parallelism: the blocks are _block's (MPS's SDPA returns no logsumexp), merged by the backend's partials
-  merge (the library's partials operator).
-All but custom_op, DTensor, Shard and the parallel styles are underscored: torch 2.14's internals, read again on an
-upgrade.
-
-A partitioned dimension may be any of its mesh's (a RaggedShard on any mesh dimension: each placement's methods take
-their mesh dimension's group and coordinate, and the redistribution moves one mesh dimension a step).  Not implemented
-(NotImplementedError on every rank alike; the code past it computes even splits or indexes another dimension's
-capacities): _StridedShard (FSDP2 with TP, nested views), a flattened or unflattened partitioned dimension, a BlockMask
-(flex attention) and LocalTensor's RNG tracker on a RaggedShard.  from_local's run_check on a RaggedShard broadcasts its
-Replicate mesh dimensions, as torch's does, and compares no shape (a ragged one's differ by rank).
-Left as they are: the strategy costs (MeshTopoInfo, redistribute_cost), which choose among collectives, not splits.
-Under torch.compile the SDPA ring is a graph break (UnsupportedOperatorException on fake tensors).
-
-The initial partition is even. evaluations() keeps a realized generation immutable while submitting functions.
-Asynchronous rank-max evidence updates a proposed vector without blocking that sequence; configuration construction
-applies a subsequent generation's vector.
-A declared native graph supplies exact useful-delivery demands for the physical routing vectors."""
+Initial distribution and changed configurations prepare ordinary declared
+writes. Their storage and collective bindings are fixed before processing.
+Execution consumes the same page operands as other Function frontends.
+"""
 import contextlib
 from contextvars import ContextVar
 import itertools
@@ -107,20 +33,16 @@ import torch
 import torch.distributed as dist
 import torch.distributed._functional_collectives as funcol
 import torch.nn as nn
-from torch._subclasses.fake_tensor import FakeTensor, UnsupportedOperatorException
-from torch.distributed._local_tensor import maybe_enable_local_tracker, maybe_run_for_local_tensor
-from torch.distributed.tensor import DTensor, Partial, Replicate, Shard, _random
+from torch.distributed._local_tensor import maybe_run_for_local_tensor
+from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
 from torch.distributed.tensor import distribute_tensor as _distribute_tensor
 from torch.distributed.tensor._collective_utils import mesh_broadcast
 from torch.distributed.tensor._dtensor_spec import DTensorSpec, TensorMeta
-from torch.distributed.tensor._op_schema import OpSchema
-from torch.distributed.tensor._redistribute import _gen_transform_infos_non_cached
 from torch.distributed.tensor.parallel import ColwiseParallel as _Colwise
 from torch.distributed.tensor.parallel import RowwiseParallel as _Rowwise
 from torch.distributed.tensor.parallel import SequenceParallel as _Sequence
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.utils import _pytree as pytree
-from torch.utils._python_dispatch import return_and_correct_aliasing
 
 aten = torch.ops.aten
 _LINEAR_SOURCE = Path(__file__).with_name('linear.metal').read_text()
@@ -160,12 +82,6 @@ def _blocks(o, N):
 # The collectives, each block its part, the split dimension moved to the front.
 
 
-def _region_backed(like, group):
-    """Whether the collectives' buffers like `like` on `group` are region tensors: an MPS tensor on a group of the mesh
-    backend (its communicator's handle), whose node's bridge leases the region (mesh 5ff5d699)."""
-    return group is not None and like.device.type == 'mps' and bool(getattr(group, 'handle', 0))
-
-
 def _empty(shape, like, group=None, dtype=None):
     """A region tensor (torch_mesh.empty) on `like`'s device, of its dtype or `dtype`: every buffer a collective here
     sends from or lands in is a lease, and a region that refuses one is the library's error, raised."""
@@ -173,33 +89,17 @@ def _empty(shape, like, group=None, dtype=None):
     return empty(tuple(shape), dtype=dtype or like.dtype, device=like.device.type)
 
 
-def _in_region(y):
-    """Whether contiguous `y` lies in the region already (torch_mesh.address), so a collective reads it where it lies."""
-    from . import address
-    return y.is_contiguous() and address(y) != 0
-
-
 @torch.library.custom_op('torch_mesh::allgatherv', mutates_args=())
 def allgatherv(x: torch.Tensor, dim: int, sizes: list[int], group_name: str, repeats: int = 1) -> torch.Tensor:
     """A graph declaration; the compiler binds each multi-rank occurrence."""
-    if len(sizes) == 1:
-        return x.clone()
     raise RuntimeError('allgatherv must be lowered to an indexed crossing before execution')
 
 
 @torch.library.custom_op('torch_mesh::allgatherv_out', mutates_args=('out',))
 def allgatherv_out(x: torch.Tensor, out: torch.Tensor, dim: int, sizes: list[int], group_name: str,
                   repeats: int = 1) -> None:
-    """Gather directly into a caller's declared destination.
-
-    This is the same physical write program as allgatherv. The destination's
-    previous readers must precede this call on the MPS stream; its next readers
-    follow it. No intermediate output lease and copy into `out` are encoded.
-    """
-    if len(sizes) == 1:
-        out.copy_(x)
-    else:
-        raise RuntimeError('allgatherv_out must be lowered to an indexed crossing before execution')
+    """The indexed gather declaration with an explicit output page operand."""
+    raise RuntimeError('allgatherv_out requires whole-function preparation')
 
 
 @allgatherv_out.register_fake
@@ -330,20 +230,17 @@ def _gather_paths(fabric):
     return routes
 
 
-def _fused_form(x, w, dim, sizes, group_name, adds, channels):
-    """A fused crossing's form for torch_mesh::fused_step, made during preparation (_stream.mm fused_maker): the
-    communicator and the waits' bound; this rank and the ranks; the publication's kernel (partial_publish, or
-    linear_publish where `w`), constant words, its repeat's word and grid; the reduction's (sum_land, and
+def _fused_form(x, dim, sizes, group_name, channels):
+    """A chain crossing's prepared physical declarations: the communicator;
+    this rank and its peers; the partial publication's kernel and grid; the reduction's (sum_land, and
     this rank's segment's start and each rank's sizes in its words); every rank's exact segment start and count
     and the output's shape; the publication's arrival count; the separate landing-prefix
     observer and physical channel extent."""
     from . import _stream
     from lifetimes import prove_recurrent_gather
-    if not adds:
-        raise ValueError('gathers use prepared final views, not fused reduction storage')
     group = dist.distributed_c10d._resolve_process_group(group_name)
     n, rank = len(sizes), group.rank()
-    operand = tuple(x.shape) if w is None else (x.shape[0], w.shape[0])
+    operand = tuple(x.shape)
     dim %= len(operand)
     copy_bytes = 1 if x.element_size() == 1 else 2
     row, half = math.prod(operand[:dim] + operand[dim + 1:]), x.element_size() // copy_bytes
@@ -365,57 +262,23 @@ def _fused_form(x, w, dim, sizes, group_name, adds, channels):
     groups = spread(math.prod(shape) * half)
     inline_wait = groups == 1
     land = _gather_kernel('sum_land', x.element_size(), n, channels, inline_wait)
-    if w is None:
-        publish_words = [math.prod(operand) * half, 0, *x.shape, *x.stride()]
-        publish = (_gather_kernel('partial_publish', x.ndim, half, copy_bytes, channels, x.is_contiguous()), publish_words, 1,
-                   spread(words[0]), _GATHER_THREADS)
-    else:
-        K, N, ldw = x.shape[1], w.shape[0], w.stride(0)
-        if x.stride(1) != 1:
-            raise ValueError('mesh: linear publication requires contiguous columns; realize a strided producer kernel')
-        split = _stream.linear_split(K, N, x.shape[0])
-        vector, columns, loads = (geometry[k] for k in ('LINEAR_VECTOR', 'LINEAR_COLUMNS', 'LINEAR_LOADS'))
-        publish = (_linear_kernel(vector if ldw % vector == 0 else 1, vector if x.stride(0) % vector == 0 else 1, columns, split, loads, channels),
-                   [x.shape[0], K, N, 0, ldw, K, x.stride(0), x.stride(0), 0], 8, _stream.linear_groups(x.shape[0], N), split * geometry['SIMD_WIDTH'])
+    publish_words = [math.prod(operand) * half, 0, *x.shape, *x.stride()]
+    publish = (_gather_kernel('partial_publish', x.ndim, half, copy_bytes, channels, x.is_contiguous()), publish_words, 1,
+               spread(words[0]), _GATHER_THREADS)
     return (group.handle, _stream.polls, n, rank, *publish, land, words, 4, groups, _GATHER_THREADS,
             starts, counts, list(shape), torch.zeros(1, dtype=torch.int32, device='mps'),
             -1 if inline_wait else _gather_kernel('gather_ready', n, channels), channels)
 
 
-from . import _stream as _native  # noqa: E402  (torch_mesh::fused_step's library)
+from . import _stream as _native  # noqa: E402
 
 _native.fused_maker(_fused_form)
 
 
-@torch.library.register_fake('torch_mesh::fused_step')
-def _(x, w, dim, sizes, group_name, adds, repeats):
-    operand = tuple(x.shape) if w is None else (x.shape[0], w.shape[0])
-    dim %= len(operand)
-    return x.new_empty(operand if adds else operand[:dim] + (sum(sizes),) + operand[dim + 1:])
-
-
-@torch.library.register_fake('torch_mesh::fused_step_out')
-def _(x, w, out, dim, sizes, group_name, adds, repeats):
-    return None
-
-
 @torch.library.custom_op('torch_mesh::reduce_scatterv', mutates_args=())
 def reduce_scatterv(x: torch.Tensor, dim: int, sizes: list[int], rank: int, op: str, group_name: str) -> torch.Tensor:
-    """The blocks reduce-scattered out of place from x (contiguous along dim), this rank's block, an opaque op.  On
-    the mesh backend the list is a split of `y`, so it is one MPI_Reduce_scatter reading `y` in place
-    (ncclMeshReduceScatterV: backend.py reduce_scatter).  `y` is x's block where it lies in the region already, else its
-    contiguous copy into a region tensor (mesh f9898875), and the output a region tensor of its own, so what it sends
-    lies in the region and the output holds no lease of the input."""
-    group = dist.distributed_c10d._resolve_process_group(group_name)
-    if hasattr(group, 'prepare_writes'):
-        raise RuntimeError('torch_mesh::reduce_scatterv on a mesh group runs inside a prepared Function declaration; '
-                           'an eager collective is not executed (design/eager-execution.md)')
-    y = x.movedim(dim, 0)
-    held = _empty(y.shape, y) if not _in_region(y) else None
-    y = held.copy_(y) if held is not None else y.contiguous()
-    out = _empty((sizes[rank],) + y.shape[1:], y, group)
-    dist.reduce_scatter(out, list(y.split(sizes)), op=getattr(dist.ReduceOp, op.upper()), group=group)
-    return out.movedim(0, dim).contiguous()
+    """Declare the selected output pages of a reduction across the group."""
+    raise RuntimeError('reduce_scatterv requires whole-function preparation')
 
 
 @allgatherv.register_fake
@@ -442,50 +305,11 @@ def _row(x, dim):
     return math.prod(s for k, s in enumerate(x.shape) if k != dim)
 
 
-def _gather_writes(counts, dtype, *, declaration=None):
-    """One exact routed WRITE per nonempty source/destination pair, in native order.
-
-    Source rank segments are immutable publications. Each final segment and
-    each relay generation has its own landing interval; the common physical
-    write planner chooses all stripes and relay paths.
-    """
-    from .backend import WRITE, Call, source_work
-    def declared(call):
-        if declaration is None:
-            return call
-        from . import _stream
-        origin = source_work(declaration, _stream.TensorLayout((call.count * dtype.itemsize,), (1,)))
-        return call._replace(sources=origin.sources, route_scope=origin.route_scope)
-    return [declared(Call(WRITE, count, dtype, root=source, destination=destination, fused=True))
-            for source, count in enumerate(counts) if count
-            for destination in range(len(counts)) if source != destination]
-
-
 def gathered(x, dim, sizes, group, *, declaration=None):
-    """The exact writes made by a generic gather, declared before execution.
-
-    No rank segment is padded to a transport page. Non-mesh backends retain
-    their own collective declaration.
-    """
-    from .backend import ALLGATHER, WRITE, Call, source_work
+    """The common collective compiler owns every gather's direct placement."""
+    from .backend import ALLGATHER, Call
     counts = [s * _row(x, dim) for s in sizes]
-    if not _region_backed(x, group):
-        return [declaration if declaration is not None else Call(ALLGATHER, x.numel(), x.dtype, counts=counts)]
-    def declared(call, source):
-        if declaration is None:
-            return call
-        from . import _stream
-        origin = source_work(declaration, _stream.TensorLayout((call.count,), (1,),
-                                                               sum(counts[:source]) * x.element_size()))
-        return call._replace(sources=origin.sources, route_scope=origin.route_scope)
-    return [declared(Call(WRITE, count * x.element_size(), torch.uint8, root=source, destination=destination), source)
-            for source, count in enumerate(counts) if count
-            for destination in range(len(counts)) if source != destination]
-
-
-def summed(x, group):
-    """Exact routed partial writes followed by the generic data function's sum."""
-    return _gather_writes([x.numel()] * group.size(), x.dtype)
+    return [declaration if declaration is not None else Call(ALLGATHER, x.numel(), x.dtype, counts=counts)]
 
 
 def scattered(x, dim, sizes, op='sum'):
@@ -855,6 +679,10 @@ def _ragged(placements):
     return any(isinstance(p, RaggedShard) for p in placements)
 
 
+def _is_shard(placement):
+    return isinstance(placement, (Shard, _StridedShard))
+
+
 def _same(a, b):
     """Placements alike, a RaggedShard's key and type included (torch's equality takes a RaggedShard for Shard(dim))."""
     a, b = tuple(a), tuple(b)
@@ -867,54 +695,62 @@ def _placement_key(placements):
 
 
 def _local_redistribute(local, current, target, async_op=False):
-    """torch's redistribute_local_tensor: its planner's steps (_gen_transform_infos_non_cached; its cache takes a
-    RaggedShard for the Shard it equals, one partition's for another's), each the method of the placement torch calls
-    there.  A shard of the same dimension under another partition (or none) goes through Replicate."""
+    """Declare exact page exchanges, plus explicitly typed partial expressions.
+
+    Ordinary placement changes compose all source and target page selections
+    directly. Partial values retain their placement's numerical expression;
+    capture lowers that expression and its crossings into the same function.
+    """
     mesh = current.mesh
-    if not mesh._is_current_rank_part_of_mesh():
+    if not mesh._is_current_rank_part_of_mesh() or _same(current.placements, target.placements):
         return local
-    mid = tuple(Replicate() if p.is_shard() and q.is_shard() and p.dim == q.dim and not _same((p,), (q,)) else p
-                for p, q in zip(current.placements, target.placements))
-    if not _same(mid, current.placements):
-        local, current = _local_redistribute(local, current, _with(current, mid), async_op), _with(current, mid)
-    for info in _planned(current, target):
-        i, (p, q) = info.mesh_dim, info.src_dst_placements
-        if mesh.size(i) == 1 or _same((p,), (q,)):
+    from .ownership import from_spec
+    sources, destinations = list(current.placements), list(target.placements)
+    sparse = {}
+    for axis, (source, destination) in enumerate(zip(sources, destinations, strict=True)):
+        if _same((source,), (destination,)):
             continue
-        if isinstance(p, _StridedShard) or isinstance(q, _StridedShard):
-            raise NotImplementedError('mesh: _StridedShard with a partitioned mesh dimension')
-        if q.is_replicate():
-            local = p._reduce_value(local, mesh, i) if p.is_partial() else p._to_replicate_tensor(local, mesh, i, info.logical_shape)
-        elif q.is_shard():
-            if p.is_partial():
-                local = p._reduce_shard_value(local, mesh, i, q)
-            elif p.is_replicate():
-                local = q._replicate_to_shard(local, mesh, i, mesh._sym_get_coordinate(i))
-            elif p.dim != q.dim:
-                local = p._to_new_shard_dim(local, mesh, i, info.logical_shape, q.dim)
-        elif p.is_replicate():
-            local = q._partition_value(local, mesh, i)
-        elif p.is_shard() and type(q) is Partial and q.reduce_op == 'sum':
-            local = p._to_partial_tensor(local, mesh, i, info.logical_shape)
-        else:
-            raise RuntimeError(f'redistribute from {p} to {q} not supported yet')
-        if not async_op and isinstance(local, funcol.AsyncCollectiveTensor):
-            local = local.wait()
+        if source.is_partial():
+            local = source._reduce_value(local, mesh, axis)
+            sources[axis] = Replicate()
+        if destination.is_partial():
+            if _is_shard(source) and type(destination) is Partial and destination.reduce_op == 'sum':
+                sparse[axis] = source
+                destinations[axis] = source
+            else:
+                destinations[axis] = Replicate()
+    before = DTensorSpec(mesh, tuple(sources), tensor_meta=current.tensor_meta)
+    after = DTensorSpec(mesh, tuple(destinations), tensor_meta=target.tensor_meta)
+    # Declared reductions remain ordinary graph equations. Backward page
+    # demand selects only the needed fibers, including reduce-scatter outputs.
+    local = _page_tensor(_exchange_domains(local, lambda rank: _rank_selection(after, rank), mesh,
+                                          ownership=from_spec(before)))
+    if sparse:
+        from . import _stream
+        from mesh_relation import Algebra
+        from .host import assemble
+        from .operand import TensorView, relation_view
+        algebra, coordinate = Algebra(), tuple(mesh.get_coordinate())
+        expanded = tuple(Replicate() if axis in sparse else placement
+                         for axis, placement in enumerate(destinations))
+        complete = DTensorSpec(mesh, expanded, tensor_meta=target.tensor_meta)
+        source_order = algebra.selection_relation(_rank_selection(after, coordinate)[0])
+        wanted, shape = _rank_selection(complete, coordinate)
+        destination_order = algebra.selection_relation(wanted)
+        positions = source_order.then(destination_order.inverse((math.prod(current.shape),)))
+        out = torch.empty(shape, dtype=local.dtype, device=local.device)
+        selected = relation_view(out, positions, local.shape)
+        missing = destination_order.domain().binary(positions.image(positions.domain()), 'subtract')
+        absent = _stream.TensorLayout.runs(missing.spans())
+        zero = torch.zeros((), dtype=local.dtype, device=local.device)
+        zero_view = TensorView(zero, _stream.TensorLayout((absent.count,), (0,)))
+        flat = TensorView.of(out).reshape((math.prod(shape),))
+        target_view = TensorView(out, absent.rebase(_stream.TensorLayout((math.prod(shape),), (1,)), flat.layout))
+        local = assemble(((local, selected), (zero_view, target_view)))
+    for axis, (source, destination) in enumerate(zip(current.placements, target.placements, strict=True)):
+        if axis not in sparse and destination.is_partial() and not _same((source,), (destination,)):
+            local = destination._partition_value(local, mesh, axis)
     return local
-
-
-_PLANNED = {}
-
-
-def _planned(current, target):
-    """torch's planner's steps from `current` to `target` (_gen_transform_infos_non_cached), planned once for their
-    placements, each told apart by its type and a RaggedShard's key as _same tells them, and their shape, which the
-    program fixes when it is compiled (design/data-model.md section 9: no planning per call)."""
-    key = (current.mesh, current.mesh.get_coordinate(), _placement_key(current.placements),
-           _placement_key(target.placements), tuple(current.shape))
-    if key not in _PLANNED:
-        _PLANNED[key] = _gen_transform_infos_non_cached(current, target)
-    return _PLANNED[key]
 
 
 def _placements(mesh, placements, ndim, held=None):
@@ -922,7 +758,9 @@ def _placements(mesh, placements, ndim, held=None):
     RaggedShard: the one `held` (a tensor's own placements) has there, else the attached one."""
     out, names = [], mesh.mesh_dim_names
     for i, p in enumerate(placements):
-        if isinstance(p, Shard):
+        if isinstance(p, _StridedShard):
+            p = _StridedShard(p.dim % ndim, split_factor=p.split_factor)
+        elif isinstance(p, Shard):
             d = p.dim + ndim if p.dim < 0 else p.dim
             if isinstance(p, RaggedShard):
                 key = p.key
@@ -936,9 +774,8 @@ def _placements(mesh, placements, ndim, held=None):
 
 
 def _wrap(local, spec, requires_grad=None):
-    """local as a DTensor of spec: a RaggedTensor where it holds a RaggedShard."""
-    cls = RaggedTensor if _ragged(spec.placements) else DTensor
-    return cls(local, spec, requires_grad=local.requires_grad if requires_grad is None else requires_grad)
+    """One source operand type for every configured ownership relation."""
+    return RaggedTensor(local, spec, requires_grad=local.requires_grad if requires_grad is None else requires_grad)
 
 
 class _FromLocal(torch.autograd.Function):
@@ -979,39 +816,21 @@ class _ToLocal(torch.autograd.Function):
         return _wrap(grad, DTensorSpec(spec.mesh, placements, tensor_meta=meta), grad.requires_grad), None
 
 
-class _Redistribute(torch.autograd.Function):
-    """torch's Redistribute over RaggedShards: its backward redistributes the gradient to the input's placements."""
-
-    @staticmethod
-    def forward(ctx, input, placements, async_op):
-        ctx.spec, ctx.async_op = input._spec, async_op
-        target = DTensorSpec(input.device_mesh, placements, tensor_meta=input._spec.tensor_meta)
-        return _wrap(_local_redistribute(input._local_tensor, input._spec, target, async_op), target, input.requires_grad)
-
-    @staticmethod
-    def backward(ctx, grad):
-        mesh = ctx.spec.mesh
-        placements = tuple(Replicate() if q.is_partial() and (p.is_shard() or p.is_replicate()) else q
-                           for p, q in zip(grad.placements, ctx.spec.placements))
-        local = _local_redistribute(grad._local_tensor, grad._spec, DTensorSpec(mesh, placements, tensor_meta=grad._spec.tensor_meta),
-                                    ctx.async_op)
-        meta = TensorMeta(grad.shape, grad.stride(), local.dtype)
-        return _wrap(local, DTensorSpec(mesh, placements, tensor_meta=meta), local.requires_grad), None, None
-
 
 def distribute_tensor(tensor, device_mesh, placements, *, src_data_rank=0):
     """torch's distribute_tensor, a Shard on an attached mesh dimension its RaggedShard: each rank's capacity block,
     scattered from src_data_rank, or this rank's own exact block where it is None."""
     placements = _placements(device_mesh, placements, tensor.ndim)
     if not _ragged(placements) or isinstance(tensor, DTensor):
-        return _distribute_tensor(tensor, device_mesh, placements, src_data_rank=src_data_rank)
+        made = _distribute_tensor(tensor, device_mesh, placements, src_data_rank=src_data_rank)
+        return _register(_wrap(made._local_tensor, made._spec, made.requires_grad))
     if not tensor.is_leaf:
         raise RuntimeError('`distribute_tensor` should be used to distribute leaf tensors! but found non-leaf tensor!')
     local = tensor.detach()
     if local.device.type != device_mesh.device_type and not local.is_meta:
         local = local.to(device_mesh.device_type)
     for i, p in enumerate(placements):
-        if isinstance(p, Shard):
+        if _is_shard(p):
             local = p._shard_tensor(local, device_mesh, i, src_data_rank)
         elif isinstance(p, (Replicate, Partial)):
             local = Replicate._make_replicate_tensor(local, device_mesh, i, src_data_rank)
@@ -1031,8 +850,9 @@ def from_local(local_tensor, device_mesh, placements, *, run_check=False, shape=
     """
     placements = _placements(device_mesh, placements, local_tensor.ndim)
     if not _ragged(placements):
-        return DTensor.from_local(local_tensor, device_mesh, placements, run_check=run_check, shape=shape, stride=stride,
-                                  grad_placements=grad_placements)
+        made = DTensor.from_local(local_tensor, device_mesh, placements, run_check=run_check, shape=shape, stride=stride,
+                                 grad_placements=grad_placements)
+        return _register(_wrap(made._local_tensor, made._spec, made.requires_grad))
     if shape is None or stride is None:
         raise ValueError('a ragged local operand requires its declared global shape and stride')
     if local_tensor.device.type != device_mesh.device_type and not local_tensor.is_meta:
@@ -1047,25 +867,53 @@ def from_local(local_tensor, device_mesh, placements, *, run_check=False, shape=
                                       None if grad_placements is None else tuple(grad_placements)))
 
 
-def redistribute(tensor, placements, *, async_op=False):
-    """tensor.redistribute(placements=...), a Shard on an attached mesh dimension its RaggedShard (the tensor's own
-    there first); a ragged one to Partial from Replicate takes each coordinate's term (Partial._partition_value), and
-    from a Shard to Partial(sum) places its valid elements among zeros (_local_redistribute)."""
+class _OwnershipCast(torch.autograd.Function):
+    """Capture configured forward/backward wire types as ordinary source ops."""
+    @staticmethod
+    def forward(ctx, value, forward_dtype, backward_dtype, source, spec):
+        ctx.input_dtype, ctx.backward_dtype, ctx.source, ctx.spec = value.dtype, backward_dtype, source, spec
+        return value.to(forward_dtype)
+
+    @staticmethod
+    def backward(ctx, gradient):
+        gradient = gradient.to(ctx.backward_dtype)
+        typ = TensorMeta(ctx.spec.shape, ctx.spec.tensor_meta.stride, ctx.backward_dtype)
+        gradient = ctx.source.value(ctx.source.placed(gradient,
+            DTensorSpec(ctx.spec.mesh, ctx.spec.placements, tensor_meta=typ)))
+        return gradient.to(ctx.input_dtype), None, None, None, None
+
+
+def redistribute(tensor, placements, *, async_op=False, forward_dtype=None, backward_dtype=None):
+    """Declare changed ownership inside the complete function source."""
     placements = _placements(tensor.device_mesh, placements, tensor.ndim, tensor.placements)
-    if _same(tensor.placements, placements):
+    if _same(tensor.placements, placements) and forward_dtype is None and backward_dtype is None:
         return tensor
-    if not (_ragged(placements) or _ragged(tensor.placements)):
-        return DTensor.redistribute(tensor, placements=placements, async_op=async_op)
-    return _Redistribute.apply(tensor, placements, async_op)
+    source = _SOURCE_CAPTURE.get()
+    if source is None:
+        raise RuntimeError('redistribute is a Function source declaration; prepare the complete function before execution')
+    value, meta = tensor, tensor._spec.tensor_meta
+    if forward_dtype is not None or backward_dtype is not None:
+        value = _OwnershipCast.apply(source.value(tensor), forward_dtype or tensor.dtype,
+                                     backward_dtype or tensor.dtype, source, tensor._spec)
+        meta = TensorMeta(meta.shape, meta.stride, forward_dtype or tensor.dtype)
+    return source.placed(value, DTensorSpec(tensor.device_mesh, placements, tensor_meta=meta))
 
 
 class RaggedTensor(DTensor):
-    """A DTensor holding a RaggedShard.  Its ops are dispatched here (_dispatch) and its to_local, redistribute and
-    full_tensor keep its gradients ragged; every DTensor one makes that holds a RaggedShard is one."""
+    """A typed source operand, whose numerical uses belong to Function capture."""
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
-        return _dispatch(func, args, kwargs or {})
+        source = _SOURCE_CAPTURE.get()
+        if source is not None:
+            arguments, keywords = pytree.tree_map(source.value, (args, kwargs or {}))
+            return func(*arguments, **keywords)
+        if func in (aten.detach.default, aten.alias.default):
+            value = args[0]
+            local = value._local_tensor.detach() if func is aten.detach.default else value._local_tensor
+            made = _wrap(local, value._spec, local.requires_grad)
+            return _register(made) if _registered(value) else made
+        raise RuntimeError('distributed numerical operations are Function source; prepare the complete function before execution')
 
     @staticmethod
     def __tensor_unflatten__(inner_tensors, flatten_spec, outer_size, outer_stride):
@@ -1093,33 +941,12 @@ class RaggedTensor(DTensor):
             raise NotImplementedError('Cross device mesh comm not supported yet!')
         if placements is None:
             raise RuntimeError('placements is needed for redistribute!')
-        if forward_dtype is not None or backward_dtype is not None:
-            raise NotImplementedError('mesh: redistribute\'s forward_dtype and backward_dtype on a RaggedShard')
-        return redistribute(self, placements, async_op=async_op)
+        return redistribute(self, placements, async_op=async_op,
+                            forward_dtype=forward_dtype, backward_dtype=backward_dtype)
 
     def full_tensor(self, *, grad_placements=None):
         whole = self.redistribute(placements=[Replicate()] * self.device_mesh.ndim)
         return whole.to_local(grad_placements=grad_placements)
-
-
-# The dispatch: DTensor's (sharding propagation, redistribution, the local op, the wrap), each Shard on a partitioned
-# mesh dimension its RaggedShard.
-_REMASKED = ('sum', 'max', 'min')
-_WHOLE = (aten.equal.default,)
-
-
-def _map(f, x):
-    return pytree.tree_map_only(DTensorSpec, f, x)
-
-
-def _specs(x):
-    if isinstance(x, DTensorSpec):
-        return [x]
-    if isinstance(x, (list, tuple)):
-        return [s for y in x for s in _specs(y)]
-    if isinstance(x, dict):
-        return [s for y in x.values() for s in _specs(y)]
-    return []
 
 
 def _with(spec, placements):
@@ -1129,63 +956,27 @@ def _with(spec, placements):
     return DTensorSpec(spec.mesh, placements, tensor_meta=spec.tensor_meta)
 
 
-def _plain(spec):
-    return _with(spec, (Shard(p.dim) if isinstance(p, RaggedShard) else p for p in spec.placements))
-
-
-def _retag(spec, keys):
-    placements = []
-    for i, p in enumerate(spec.placements):
-        if i in keys:
-            if isinstance(p, _StridedShard):
-                raise NotImplementedError('mesh: _StridedShard (FSDP2 with TP, nested views) on a partitioned mesh dimension')
-            if isinstance(p, Shard) and not isinstance(p, RaggedShard):
-                p = RaggedShard(p.dim, keys[i])
-        placements.append(p)
-    return _with(spec, placements)
-
-
-def _schema(schema, f):
-    return OpSchema(schema.op, _map(f, schema.args_schema), _map(f, schema.kwargs_schema), schema_info=schema.schema_info)
-
-
-def _keys(specs):
-    """{mesh dimension: the key of its RaggedShard} over the inputs; ValueError where inputs meeting there differ."""
-    keys = {}
-    for s in specs:
-        for i, p in enumerate(s.placements):
-            if isinstance(p, RaggedShard) and keys.setdefault(i, p.key) != p.key:
-                raise ValueError(f'mesh: tensors partitioned by {keys[i]} and {p.key} meet on mesh dimension {i}')
-    for s in specs:
-        for i, p in enumerate(s.placements):
-            if i in keys and (isinstance(p, (Shard, _StridedShard)) and not isinstance(p, RaggedShard)):
-                raise ValueError(f'mesh: a {p} meets {keys[i]}\'s RaggedShard on mesh dimension {i} (design/heterogeneity.md '
-                                 f'R6: tensors that meet split their shared extent alike)')
-    return keys
-
-
-def _view_region(spec, coordinates):
-    """The ordered page selection held by a rank, in the common layout algebra."""
-    from . import _stream
-    view = _stream.TensorLayout(tuple(spec.shape), tuple(spec.tensor_meta.stride))
-    for i, rank in enumerate(coordinates):
-        p = spec.placements[i]
-        if p.is_shard():
-            count, first = p._local_shard_size_and_offset(view.shape[p.dim], spec.mesh.size(i), rank)
-            view = view.slice(p.dim, first, count, 1)
-    return view.reshape((view.count,))
-
-
 def _rank_selection(spec, coordinate, selection=None):
     """One rank's ordered logical pages, retaining all preceding axis cuts."""
     declaration = {'shape': list(spec.shape), 'steps': []} if selection is None else {
         'shape': selection['shape'], 'steps': list(selection['steps'])}
     shape = list(spec.shape)
     for i, p in enumerate(spec.placements):
-        if p.is_shard():
-            count, first = p._local_shard_size_and_offset(shape[p.dim], spec.mesh.size(i), coordinate[i])
-            declaration['steps'].append(['select', p.dim, [[first, count, 0, 1]]])
-            shape[p.dim] = count
+        if _is_shard(p):
+            width = shape[p.dim]
+            if isinstance(p, _StridedShard):
+                block = -(-width // p.split_factor)
+                runs = []
+                for start in range(0, width, max(1, block)):
+                    count, first = Shard(p.dim)._local_shard_size_and_offset(min(block, width - start),
+                                                                            spec.mesh.size(i), coordinate[i])
+                    if count:
+                        runs.append([start + first, count, 0, 1])
+            else:
+                count, first = p._local_shard_size_and_offset(width, spec.mesh.size(i), coordinate[i])
+                runs = [[first, count, 0, 1]] if count else []
+            declaration['steps'].append(['select', p.dim, runs])
+            shape[p.dim] = sum(run[1] for run in runs)
     return declaration, tuple(shape)
 
 
@@ -1344,7 +1135,7 @@ def _exchange_domains(x, desired, mesh, ownership=None):
     if isinstance(x, DTensor) and any(p.is_partial() for p in x.placements):
         x = redistribute(x, [Replicate() if p.is_partial() else p for p in x.placements])
     dimensions = (tuple(ownership['dimensions']) if ownership is not None else
-                  tuple(i for i, p in enumerate(x.placements) if p.is_shard()) if isinstance(x, DTensor) else ())
+                  tuple(i for i, p in enumerate(x.placements) if _is_shard(p)) if isinstance(x, DTensor) else ())
     coordinates, held = _coordinates(mesh), tuple(mesh.get_coordinate())
     sources = {rank: ownership['owners'][rank]['selection'] if ownership is not None else
                _rank_selection(x._spec, rank)[0] if isinstance(x, DTensor) else
@@ -1377,11 +1168,6 @@ def _page_tensor(value):
     from .host import assemble
     target = torch.empty(value.shape, dtype=value.dtype, device=value.device)
     return assemble([(value, TensorView.of(target))])
-
-
-def _exchange_view(x, target, selection):
-    selected = _exchange_domains(x, lambda coordinate: _rank_selection(target, coordinate, selection), x.device_mesh)
-    return _wrap(selected.tensor(), target, selected.storage.requires_grad)
 
 
 def _coordinates(mesh):
@@ -1518,7 +1304,7 @@ def lower_owned_graph(graph, arguments, configuration):
     numerical relations select work and pages for every declared rank.
     """
     import operator
-    from .ownership import (from_spec, propagate, prepare_expression, compile_assignments, contribution_domains,
+    from .ownership import (from_spec, result_owners, prepare_expression, compile_assignments, contribution_domains,
                             source_uses, bind_ports, prepare_sources, source_ports)
     from .compilation import normalize_source
     from .algebra import partition_decompositions
@@ -1551,6 +1337,14 @@ def lower_owned_graph(graph, arguments, configuration):
     leaf = lambda value: isinstance(value, dict) and 'owners' in value
     records = {node: node.meta['mesh_ownership'] for node in nodes if 'mesh_ownership' in node.meta}
     allocated = set(records)
+    from .compilation import implementation_assignment
+    policy = configuration.get('result_ownership', implementation_assignment()['result_ownership'])
+    results = next(node.args[0] for node in nodes if node.op == 'output')
+    for node in dict.fromkeys(value for value in pytree.tree_leaves(results) if isinstance(value, torch.fx.Node)):
+        if node not in records:
+            records[node] = pytree.tree_map(lambda value: result_owners(
+                TensorMeta(value.shape, value.stride(), value.dtype), mesh, policy)
+                if isinstance(value, torch.Tensor) else None, node.meta['val'])
     materialized = set(allocated)
     uses, crossings, cuts, scopes = {}, [], set(), {}
     pending = []
@@ -1588,13 +1382,6 @@ def lower_owned_graph(graph, arguments, configuration):
         return tuple(axis for axis, _ in first) == tuple(axis for axis, _ in second) and _same(
             tuple(placement for _, placement in first), tuple(placement for _, placement in second))
 
-    def schema_value(value):
-        if not isinstance(value, torch.fx.Node):
-            return value
-        if value in records:
-            return record_map(lambda item: item.get('spec') if leaf(item) else item, records[value])
-        return pytree.tree_map(lambda item: None if isinstance(item, torch.Tensor) else item, value.meta['val'])
-
     def complete_value(value):
         if not leaf(value) or not value.get('reductions'):
             return value
@@ -1610,11 +1397,6 @@ def lower_owned_graph(graph, arguments, configuration):
         if value in records:
             return record_map(complete_value, records[value])
         return pytree.tree_map(lambda item: None if isinstance(item, torch.Tensor) else item, value.meta['val'])
-
-    def same_value(left, right):
-        first, second = left.get('reductions', ()), right.get('reductions', ())
-        return tuple(axis for axis, _ in first) == tuple(axis for axis, _ in second) and _same(
-            tuple(placement for _, placement in first), tuple(placement for _, placement in second))
 
     def declare_uses(consumer, side, original, required, path=()):
         if isinstance(original, torch.fx.Node):
@@ -1672,66 +1454,25 @@ def lower_owned_graph(graph, arguments, configuration):
                 node.meta['val'] = pytree.tree_map_with_path(global_value, value)
             scopes[node] = dict(uses=(), outputs=output_owners, sharding=None, source=source)
             continue
-        required = None
-        assigned = records.get(node) if node in allocated else None
-        complete_work = (assigned is not None and len(owners(node)) == len(fields(node))
-                         and all(not owner.get('reductions') for owner in owners(node).values()))
-        if complete_work:
-            # These are the captured global equations with an explicit output
-            # assignment. Local sharding strategies cannot replace that work.
-            # Partial-valued inputs still need their complete source expression.
-            args, kwargs = pytree.tree_map(complete_inputs, (node.args, node.kwargs))
-            if node.target is operator.getitem and node.args[0] in records and not leaf(records[node.args[0]]):
-                # A structural result-field selection consumes only that field.
-                source = records[node.args[0]]
-                selected = node.args[1]
-                values_ = dict(source) if isinstance(source, dict) else list(source)
-                values_[selected] = record_map(complete_value, source[selected])
-                args = (tuple(values_) if isinstance(source, tuple) else values_, *args[1:])
-            required = OpSchema(node.target, args, kwargs)
-        elif node.target is operator.getitem and node.args[0] in records and not leaf(records[node.args[0]]):
-            records.setdefault(node, records[node.args[0]][node.args[1]])
-        else:
-            inputs = [record for source in node.all_input_nodes for record in owners(source).values()]
-            complete = (inputs and all(record.get('spec') is not None for record in inputs)
-                        and all(len(owners(source)) == len(fields(source)) for source in node.all_input_nodes))
-            if complete:
-                args, kwargs = pytree.tree_map(schema_value, (node.args, node.kwargs))
-                sharding = propagate(node.target, args, kwargs, mesh, result_types=types(node.meta['val']))
-                node.meta['mesh_sharding'] = sharding
-                produced = pytree.tree_map_only(DTensorSpec, from_spec, sharding.output_spec)
-                records[node] = assigned if assigned is not None else produced
-                if assigned is not None:
-                    for path, target in pytree.tree_flatten_with_path(assigned, is_leaf=leaf)[0]:
-                        source = pytree.key_get(produced, path)
-                        if leaf(target) and leaf(source) and not same_value(source, target):
-                            source = dict(source, owners=target['owners'], dimensions=target['dimensions'])
-                            transition = dict(source=(node, tuple(path)), provided=source, required=target,
-                                consumer=node, side='results', path=tuple(path), mesh=mesh, order=len(crossings))
-                            crossings.append(transition)
-                            materialized.add(node)
-                            cuts.add((node, 'after'))
-                required = sharding.redistribute_schema
-            elif assigned is not None:
-                pending.append(dict(source=node, declaration=assigned, requirement='placement_value_relation'))
-        declare_uses(node, 'args', node.args, None if required is None else required.args_schema)
-        declare_uses(node, 'kwargs', node.kwargs, None if required is None else required.kwargs_schema)
-        if not complete_work and 'mesh_sharding' in node.meta:
-            declared_uses = [use for use in uses.values() if use['consumer'] is node
-                             and use['provided'] is not None and use['required'] is not None]
-            local_types = tuple(use for use in declared_uses if
-                tuple(use['required']['owners'][tuple(mesh.get_coordinate())]['shape']) !=
-                tuple(pytree.key_get(use['source'][0].meta['val'], use['source'][1]).shape))
-            output_owners = {tuple(path): owner for path, owner in
-                pytree.tree_flatten_with_path(produced, is_leaf=leaf)[0] if leaf(owner)}
-            local_outputs = any(tuple(owner['owners'][tuple(mesh.get_coordinate())]['shape']) !=
-                tuple(pytree.key_get(node.meta['val'], path).shape) for path, owner in output_owners.items())
-            if local_types or local_outputs:
-                # The existing source rule declares a local numerical scope.
-                # In particular, placement expressions may change index values;
-                # their consumer must see the required local tensor type.
-                scopes[node] = dict(uses=tuple(declared_uses), outputs=output_owners,
-                    sharding=node.meta['mesh_sharding'])
+        # All ordinary nodes keep the captured global equation. Page demand
+        # and the configured owners assign its numerical work; no operator's
+        # local sharding rule may substitute a replicated implementation.
+        args, kwargs = pytree.tree_map(complete_inputs, (node.args, node.kwargs))
+        if node.target is operator.getitem and node.args[0] in records and not leaf(records[node.args[0]]):
+            source = records[node.args[0]]
+            selected = node.args[1]
+            values_ = dict(source) if isinstance(source, dict) else list(source)
+            values_[selected] = record_map(complete_value, source[selected])
+            args = (tuple(values_) if isinstance(source, tuple) else values_, *args[1:])
+        declare_uses(node, 'args', node.args, args)
+        declare_uses(node, 'kwargs', node.kwargs, kwargs)
+        for path, target in owners(node).items():
+            if target.get('reductions'):
+                before = complete_value(target)
+                crossings.append(dict(source=(node, path), provided=before, required=target,
+                    consumer=node, side='results', path=path, mesh=mesh, order=len(crossings)))
+                materialized.add(node)
+                cuts.add((node, 'after'))
 
     result = next(node.args[0] for node in nodes if node.op == 'output')
     result_nodes = tuple(dict.fromkeys(item for item in pytree.tree_leaves(result) if isinstance(item, torch.fx.Node)))
@@ -1880,409 +1621,7 @@ def lower_owned_graph(graph, arguments, configuration):
                 crossings=tuple(crossings), deliveries=tuple(deliveries), pending=tuple(pending), external=external, result=result)
 
 
-def _unfold(op, args, kwargs):
-    """Declare the window's output ownership and exact input-page relation."""
-    from mesh_relation import Algebra, flat
-    x, dimension, size, step = args
-    dimension %= x.ndim
-    if not any(p.is_shard() and p.dim == dimension for p in x.placements):
-        return _propagated(op, args, kwargs)
-    shape = list(x.shape)
-    shape[dimension] = (shape[dimension] - size) // step + 1
-    shape.append(size)
-    described = op(torch.empty_strided(x.shape, x.stride(), dtype=x.dtype, device='meta'), dimension, size, step)
-    target = DTensorSpec(x.device_mesh, x.placements, tensor_meta=TensorMeta(described.shape, described.stride(), x.dtype))
-    algebra = Algebra()
-    access = algebra.window(shape, tuple(x.shape), axes=[(dimension, dimension, x.ndim)],
-        strides=[step], dilations=[1], padding=[0], transposed=False,
-        equations=lambda a, b: [f'{a[i]} = {b[i]}' for i in range(x.ndim) if i != dimension])
-    source = algebra.map(tuple(x.shape), (x.numel(),), lambda a, b: [f'{flat(x.shape, a)} = {b[0]}'])
-    order = algebra.map((math.prod(shape),), shape, lambda a, b: [f'{a[0]} = {flat(shape, b)}'])
-    selection = {'shape': list(x.shape), 'steps': [['reindex', {'shape': shape, 'index': order.then(access).then(source).terms()}]]}
-    return _exchange_view(x, target, selection)
 
-
-def _slice_view(op, args, kwargs):
-    """A static view cut uses the same selected-page crossing as a window."""
-    from mesh_relation import Algebra, flat
-    named = _named(op, args, kwargs)
-    x = named['self']
-    dim = named['dim'] % x.ndim
-    if not any(p.is_shard() and p.dim == dim for p in x.placements):
-        return _propagated(op, args, kwargs)
-    described = op(torch.empty_strided(x.shape, x.stride(), dtype=x.dtype, device='meta'), *args[1:], **kwargs)
-    selecting = op is aten.select.int
-    if selecting:
-        first = named['index'] % x.shape[dim]
-        placements = [Replicate() if p.is_shard() and p.dim == dim else
-                      RaggedShard(p.dim - int(p.dim > dim), p.key) if isinstance(p, RaggedShard) else
-                      Shard(p.dim - int(p.dim > dim)) if p.is_shard() else p for p in x.placements]
-        equations = lambda a, b: [f'{b[dim]} = {first}', *[f'{a[i - int(i > dim)]} = {b[i]}' for i in range(x.ndim) if i != dim]]
-    else:
-        first, _, step = slice(named.get('start'), named.get('end'), named.get('step', 1)).indices(x.shape[dim])
-        placements = x.placements
-        equations = lambda a, b: [f'{b[i]} = {first} + {a[i]} * {step}' if i == dim else f'{a[i]} = {b[i]}' for i in range(x.ndim)]
-    target = DTensorSpec(x.device_mesh, tuple(placements), tensor_meta=TensorMeta(described.shape, described.stride(), x.dtype))
-    algebra = Algebra()
-    access = algebra.map(tuple(described.shape), tuple(x.shape), equations)
-    source = algebra.map(tuple(x.shape), (x.numel(),), lambda a, b: [f'{flat(x.shape, a)} = {b[0]}'])
-    order = algebra.map((described.numel(),), tuple(described.shape), lambda a, b: [f'{a[0]} = {flat(described.shape, b)}'])
-    selection = {'shape': list(x.shape), 'steps': [['reindex', {'shape': list(described.shape), 'index': order.then(access).then(source).terms()}]]}
-    return _exchange_view(x, target, selection)
-
-
-def _reshape(op, args, kwargs):
-    """Compose declared view regions before applying a rank's local shape.
-
-    Ordinary Shard cannot express every mapped page selection. A changed
-    ownership relation remains an explicit collective in the declared graph.
-    """
-    x = args[0]
-    described = op(torch.empty_strided(x.shape, x.stride(), dtype=x.dtype, device='meta'), *args[1:], **kwargs)
-    meta = TensorMeta(described.shape, described.stride(), x.dtype)
-    placements = list(x.placements)
-    for i, p in enumerate(x.placements):
-        if not p.is_shard():
-            continue
-        for dim in range(described.ndim):
-            candidate = RaggedShard(dim, p.key) if isinstance(p, RaggedShard) else Shard(dim)
-            target = DTensorSpec(x.device_mesh, (*placements[:i], candidate, *placements[i + 1:]), tensor_meta=meta)
-            coordinates = itertools.product(*(range(x.device_mesh.size(axis)) for axis in range(i + 1)))
-            if all(_view_region(x._spec, rank).equivalent(_view_region(target, rank)) for rank in coordinates):
-                placements[i] = candidate
-                break
-        else:
-            source = redistribute(x, [Replicate() if axis == i else p for axis, p in enumerate(x.placements)])
-            return op(source, *args[1:], **kwargs)
-    shape = list(described.shape)
-    for i, p in enumerate(placements):
-        if p.is_shard():
-            shape[p.dim] = p._local_shard_size_and_offset(shape[p.dim], x.device_mesh.size(i), x.device_mesh.get_local_rank(i))[0]
-    local = op(x._local_tensor, shape)
-    result = _wrap(local, DTensorSpec(x.device_mesh, tuple(placements), tensor_meta=meta), local.requires_grad)
-    return return_and_correct_aliasing(op, args, kwargs, result) if op._schema._is_view_op() else result
-
-
-def _unfit(specs, keys):
-    """Collective dimensions with a partial operation not yet lowered here."""
-    dims = set()
-    for s in specs:
-        for i, p in enumerate(s.placements):
-            if i not in keys:
-                continue
-            if p.is_partial() and not (type(p) is Partial and p.reduce_op in _REMASKED):
-                dims.add(i)
-    return dims
-
-
-def _whole(tree, dims):
-    """Each DTensor in tree replicated on the partitioned mesh dimensions `dims`: its valid elements, gathered."""
-    def whole(t):
-        if not _ragged(t.placements[i] for i in dims):
-            return t
-        return redistribute(t, [Replicate() if i in dims and isinstance(p, RaggedShard) else p for i, p in enumerate(t.placements)])
-    with torch.no_grad():
-        return pytree.tree_map_only(DTensor, whole, tree)
-
-
-def _dispatch(op_call, args, kwargs):
-    if op_call in (aten.convolution.default, aten.convolution_backward.default):
-        raise ValueError('distributed convolution requires result ownership on the Function source graph')
-    if op_call is aten.index_select.default:
-        return _index_select(op_call, args, kwargs)
-    from .algebra import partition_decompositions
-    if op_call in partition_decompositions:
-        return partition_decompositions[op_call](*args, **kwargs)
-    handler = _HANDLERS.get(op_call)
-    if handler is not None:
-        return handler(op_call, args, kwargs)
-    return _propagated(op_call, args, kwargs)
-
-
-def _propagated(op_call, args, kwargs):
-    d = DTensor._op_dispatcher
-    sp = d.sharding_propagator
-    info = d.unwrap_to_op_info(op_call, args, kwargs)
-    keys = _keys(_specs(info.flat_args_schema) + _specs(info.schema.kwargs_schema))
-    if not keys:
-        return DTensor.__torch_dispatch__(op_call, (), args, kwargs)
-    if op_call in _WHOLE:
-        return op_call(*_whole(args, set(keys)), **_whole(kwargs, set(keys)))
-    if op_call in d._custom_op_handlers:
-        return d._custom_op_handlers[op_call](op_call, args, kwargs)
-    schema = info.schema
-    info.schema = _schema(schema, _plain)
-    try:
-        sp.propagate(info)
-    except NotImplementedError:
-        if torch._C._dispatch_has_kernel_for_dispatch_key(op_call.name(), torch._C.DispatchKey.CompositeImplicitAutograd):
-            return op_call.decompose(*args, **kwargs)
-        raise
-    out = info.output_sharding
-    spec = _map(lambda s: _retag(s, keys), out.output_spec)
-    whole = _unfit(_specs(spec), keys)
-    whole |= set(keys) if op_call in sp.op_to_scalar_shape_adjuster else set()
-    if whole:
-        return op_call(*_whole(args, whole), **_whole(kwargs, whole))
-    flat, local = info.flat_args_schema, list(info.local_args)
-    if out.needs_redistribute:
-        target = _schema(out.redistribute_schema, lambda s: _retag(s, keys))
-        if out.use_val_from_redistribute_schema and target.op in sp.op_to_shape_and_stride_idx and _ragged(spec.placements):
-            target = sp._adjust_shape_and_stride_args(spec.tensor_meta, target, spec)
-        flat = pytree.tree_leaves(target.args_schema) if info.args_tree_spec is not None else target.args_schema
-        local = [(t if _same(s.placements, w.placements) else _local_redistribute(t, s, w)) if isinstance(s, DTensorSpec)
-                 else (w if out.use_val_from_redistribute_schema else s)
-                 for s, w, t in zip(info.flat_args_schema, flat, local)]
-        if out.use_val_from_redistribute_schema:
-            local.extend(flat[len(info.flat_args_schema):])
-    mesh = info.compute_mesh
-    local_args = pytree.tree_unflatten(local, info.args_tree_spec) if info.args_tree_spec is not None else local
-    op = out.redistribute_schema.op if out.needs_redistribute and out.redistribute_schema.op != op_call else op_call
-    if op_call in d._random_ops and _random.is_rng_supported_mesh(mesh) and not local_args[0].is_meta:
-        generator = info.local_kwargs.pop('generator', None)
-        with _tracker(mesh)._distribute_region(args[0]._spec, generator):
-            result = op(*local_args, **info.local_kwargs)
-    elif op in (aten.amax.default, aten.amin.default) and local_args[0].numel() == 0:
-        named = _named(op, local_args, info.local_kwargs)
-        x, dims = named['self'], named.get('dim')
-        dims = {d % x.ndim for d in dims} if dims else set(range(x.ndim))
-        shape = tuple(1 if axis in dims else size for axis, size in enumerate(x.shape)) if named.get('keepdim', False) else tuple(
-            size for axis, size in enumerate(x.shape) if axis not in dims)
-        low, high = ((-math.inf, math.inf) if x.is_floating_point() else
-                     (False, True) if x.dtype == torch.bool else (torch.iinfo(x.dtype).min, torch.iinfo(x.dtype).max))
-        result = x.new_full(shape, low if op is aten.amax.default else high)
-    else:
-        result = op(*local_args, **info.local_kwargs)
-    if spec is None:
-        return result
-    if schema.is_inplace_op():
-        if not _same(args[0]._spec.placements, spec.placements):
-            args[0]._spec = spec
-        return args[0]
-    if schema.is_out_variant_op():
-        outs = [kwargs[a.name] for a in op_call._schema.arguments if a.is_out]
-        for t, s in zip(outs, spec if isinstance(spec, tuple) else (spec,)):
-            t._spec = s
-        return tuple(outs) if len(outs) > 1 else outs[0]
-    ret = _wrapped(result, spec)
-    return return_and_correct_aliasing(op_call, args, kwargs, ret) if op_call._schema._is_view_op() else ret
-
-
-def _wrapped(result, spec):
-    if isinstance(result, torch.Tensor):
-        if spec is None:
-            return result
-        return _wrap(result, spec, result.requires_grad)
-    if isinstance(result, (list, tuple)):
-        out = [_wrapped(r, s) for r, s in zip(result, spec)]
-        return tuple(out) if isinstance(result, tuple) else out
-    return result
-
-
-def _named(op_call, args, kwargs):
-    return {a.name: args[i] if i < len(args) else kwargs.get(a.name, a.default_value)
-            for i, a in enumerate(op_call._schema.arguments)}
-
-
-def _index_select(op_call, args, kwargs):
-    """Select owned values and combine their bytes, never their numeric values.
-
-    Exactly one owner supplies each selected value. Integer-byte SUM therefore
-    moves its representation unchanged, including signed zero and NaN payloads.
-    The index tensor remains ordinary runtime data; only its page relationships
-    and output width are fixed during preparation.
-    """
-    named = _named(op_call, args, kwargs)
-    x, dim, index = named['self'], named['dim'] % named['self'].ndim, named['index']
-    if not isinstance(x, DTensor) or not any(p.is_shard() and p.dim == dim for p in x.placements):
-        return _propagated(op_call, args, kwargs)
-    reduced = [i for i, p in enumerate(x.placements) if p.is_shard() and p.dim == dim]
-    requested = list(x.placements)
-    index_placements = list(index.placements) if isinstance(index, DTensor) else [Replicate()] * x.device_mesh.ndim
-    for i, p in enumerate(requested):
-        if i in reduced:
-            q = index_placements[i]
-            requested[i] = RaggedShard(dim, q.key) if isinstance(q, RaggedShard) else Shard(dim) if q.is_shard() else Replicate()
-        elif p.is_replicate() and index_placements[i].is_shard():
-            q = index_placements[i]
-            requested[i] = RaggedShard(dim, q.key) if isinstance(q, RaggedShard) else Shard(dim)
-    if isinstance(index, DTensor):
-        index = redistribute(index, [Replicate() if i in reduced or x.placements[i].is_shard() else p
-                                     for i, p in enumerate(index.placements)])._local_tensor
-    first, extent = 0, x.shape[dim]
-    for i, p in enumerate(x.placements):
-        if p.is_shard() and p.dim == dim:
-            extent, offset = p._local_shard_size_and_offset(extent, x.device_mesh.size(i), x.device_mesh.get_local_rank(i))
-            first += offset
-    shape = list(x.shape)
-    shape[dim] = named['index'].numel()
-    local_shape = list(x._local_tensor.shape)
-    local_shape[dim] = index.numel()
-    if extent:
-        selected = torch.index_select(x._local_tensor, dim, (index - first).clamp(0, extent - 1))
-        raw = selected.contiguous().view(torch.uint8).reshape((*local_shape, x.element_size()))
-        mask_shape = [1] * (x.ndim + 1)
-        mask_shape[dim] = index.numel()
-        owned = ((index >= first) & (index < first + extent)).reshape(mask_shape)
-        raw = torch.where(owned, raw, 0)
-    else:
-        raw = x._local_tensor.new_zeros((*local_shape, x.element_size()), dtype=torch.uint8)
-    for i in reduced:
-        raw = funcol.all_reduce(raw, 'sum', x.device_mesh.get_group(i))
-    local = raw.reshape((*local_shape[:-1], local_shape[-1] * x.element_size())).view(x.dtype).reshape(local_shape)
-    held = [Replicate() if i in reduced else p for i, p in enumerate(requested)]
-    result = _wrap(local, DTensorSpec(x.device_mesh, tuple(held),
-                   tensor_meta=TensorMeta(torch.Size(shape), torch.empty(shape, device='meta').stride(), x.dtype)))
-    return redistribute(result, requested)
-
-
-def _arg_extreme(op_call, args, kwargs):
-    """Reduce values and first global positions without moving the input pages."""
-    named = _named(op_call, args, kwargs)
-    x, dim, keep = named['self'], named.get('dim'), named.get('keepdim', False)
-    if dim is None:
-        result = _arg_extreme(op_call, (x.reshape(-1), 0, False), {})
-        return result.reshape((1,) * x.ndim) if keep else result
-    dim %= x.ndim
-    if not any(isinstance(p, RaggedShard) and p.dim == dim for p in x.placements):
-        return _propagated(op_call, args, kwargs)
-    x = redistribute(x, [Replicate() if p.is_partial() else p for p in x.placements])
-    reduced = [i for i, p in enumerate(x.placements) if p.is_shard() and p.dim == dim]
-    first, extent = 0, x.shape[dim]
-    for i in reduced:
-        extent, offset = x.placements[i]._local_shard_size_and_offset(extent, x.device_mesh.size(i), x.device_mesh.get_local_rank(i))
-        first += offset
-    maximum = op_call is aten.argmax.default
-    local = x._local_tensor
-    shape = list(local.shape)
-    shape[dim] = 1
-    neutral = (-math.inf if maximum else math.inf) if x.is_floating_point() else (
-        (False if maximum else True) if x.dtype == torch.bool else
-        (torch.iinfo(x.dtype).min if maximum else torch.iinfo(x.dtype).max))
-    nan = torch.isnan(local) if x.is_floating_point() else None
-    values = torch.where(nan, neutral, local) if nan is not None else local
-    best = (values.amax if maximum else values.amin)(dim, keepdim=True) if extent else local.new_full(shape, neutral)
-    def combine(value, operation):
-        for i in reduced:
-            value = funcol.all_reduce(value, operation, x.device_mesh.get_group(i))
-        return value
-    best = combine(best, 'max' if maximum else 'min')
-    matches = local == best
-    if nan is not None:
-        seen = nan.to(torch.uint8).amax(dim, keepdim=True) if extent else local.new_zeros(shape, dtype=torch.uint8)
-        matches = torch.where(combine(seen, 'max').bool(), nan, matches)
-    index_shape = [1] * local.ndim
-    index_shape[dim] = extent
-    positions = torch.arange(first, first + extent, dtype=torch.int64, device=local.device).reshape(index_shape)
-    candidate = torch.where(matches, positions, x.shape[dim]).amin(dim, keepdim=keep) if extent else torch.full(
-        shape if keep else shape[:dim] + shape[dim + 1:], x.shape[dim], dtype=torch.int64, device=local.device)
-    result = combine(candidate, 'min')
-    placements = []
-    for i, p in enumerate(x.placements):
-        if i in reduced:
-            p = Replicate()
-        elif p.is_shard() and not keep and p.dim > dim:
-            p = RaggedShard(p.dim - 1, p.key) if isinstance(p, RaggedShard) else Shard(p.dim - 1)
-        placements.append(p)
-    logical = list(x.shape)
-    logical[dim] = 1
-    if not keep:
-        logical.pop(dim)
-    return _wrap(result, DTensorSpec(x.device_mesh, tuple(placements), tensor_meta=TensorMeta(
-        torch.Size(logical), torch.empty(logical, device='meta').stride(), torch.int64)))
-
-
-def _spec_like(spec, shape, dtype):
-    stride = torch.empty(shape, device='meta').stride()
-    return DTensorSpec(spec.mesh, spec.placements, tensor_meta=TensorMeta(torch.Size(shape), stride, dtype))
-
-
-def _attention(op_call, args, kwargs):
-    """SDPA on query, key and value split along the sequence (dimension 2) by one RaggedShard, on any mesh dimension
-    (its others replicated or splitting the batch or the heads, the three tensors placed alike): ring attention over
-    their capacity blocks, contiguous shares, along that dimension's group (_ring_attention).  torch.compile's tracing
-    runs ops on fake tensors, and the ring (its collectives, the operand's host-side tables) runs only on real ones:
-    under fake tensors the op is refused as unsupported, which dynamo takes as a graph break."""
-    named = _named(op_call, args, kwargs)
-    query, key, value = named['query'], named['key'], named['value']
-    spec = query._spec
-    ragged = [i for i, p in enumerate(query.placements) if isinstance(p, RaggedShard) and p.dim % query.ndim == 2]
-    if len(ragged) != 1 or not all(_same(t.placements, query.placements) for t in (key, value)) or any(
-            p.is_partial() or (p.is_shard() and p.dim % query.ndim > 1) for i, p in enumerate(query.placements) if i != ragged[0]):
-        return _propagated(op_call, args, kwargs)
-    held = query.placements[ragged[0]]
-    if any(isinstance(t._local_tensor, FakeTensor) for t in (query, key, value)):
-        raise UnsupportedOperatorException(op_call)
-    if (named.get('attn_mask') is not None or named.get('dropout_p', 0.0) or named.get('dropout_mask') is not None
-            or named.get('enable_gqa', False)):
-        raise NotImplementedError('mesh: ragged SDPA takes no attn_mask, dropout or enable_gqa')
-    out, lse = _ring_attention(spec.mesh.get_group(ragged[0]), held.key, query._local_tensor, key._local_tensor,
-                               value._local_tensor, named.get('is_causal', False), named.get('scale'), 1, sequence_length=query.shape[2])
-    out = RaggedTensor(out, _spec_like(spec, query.shape[:-1] + value.shape[-1:], out.dtype), requires_grad=False)
-    if op_call is aten._scaled_dot_product_attention_math_for_mps.default:
-        return out, None
-    return out, RaggedTensor(lse, _spec_like(spec, query.shape[:-1], lse.dtype), requires_grad=False)
-
-
-def _detached(op_call, args, kwargs):
-    """detach (nn.Parameter makes a parameter by it) of a tensor split along a partitioned dimension, registered as
-    its source is (_register), so the parameter is the one re-laid."""
-    out = _propagated(op_call, args, kwargs)
-    return _register(out) if _registered(args[0]) else out
-
-
-_HANDLERS = {aten.argmax.default: _arg_extreme, aten.argmin.default: _arg_extreme,
-             aten.unfold.default: _unfold, aten.slice.Tensor: _slice_view, aten.select.int: _slice_view,
-             aten.view.default: _reshape, aten.reshape.default: _reshape, aten._unsafe_view.default: _reshape,
-             aten._scaled_dot_product_flash_attention_for_cpu.default: _attention,
-             aten._scaled_dot_product_attention_math_for_mps.default: _attention, aten.detach.default: _detached}
-
-
-class _Offsets(_random.OffsetBasedRNGTracker):
-    """torch's offset-based DTensor RNG tracker over capacity blocks: stock's (start, end) offset increments are k times
-    the first shard's elements for shard k and the tensor's elements, which past equal shards would run the larger
-    blocks into the next op's offsets.  Here block k (stock's row-major order over the shard grid) starts past the
-    blocks before it and the op ends past the last, each rounded up to 4 as stock rounds."""
-
-    def _compute_rng_offsets(self, spec):
-        mesh = spec.mesh
-        extents = [[N] for N in spec.shape]
-        for i, p in enumerate(spec.placements):
-            if isinstance(p, _StridedShard):
-                raise NotImplementedError('mesh: DTensor RNG over _StridedShard with a partitioned mesh dimension')
-            if p.is_shard():
-                n = mesh.size(i)
-                extents[p.dim] = [p._local_shard_size_and_offset(e, n, r)[0] for e in extents[p.dim] for r in range(n)]
-        starts, end = [], 0
-        for index in itertools.product(*(range(len(e)) for e in extents)):
-            starts.append(end)
-            end = (end + math.prod(e[j] for e, j in zip(extents, index)) + 3) // 4 * 4
-        coordinate = [mesh._sym_get_coordinate(i) for i in range(mesh.ndim)]
-        return starts[_random._calc_shard_linear_idx(*_random._calc_shard_info(coordinate, spec))], end
-
-    @contextlib.contextmanager
-    def _distribute_region(self, spec, generator=None):
-        if maybe_enable_local_tracker(self._device.type, self.distribute_region_enabled, spec, generator) is not None:
-            raise NotImplementedError("mesh: LocalTensor's DTensor RNG on a RaggedShard")
-        with super()._distribute_region(spec, generator):
-            yield
-
-
-_TRACKERS = {}
-
-
-def _tracker(mesh):
-    """This module's RNG tracker of mesh (its device states synchronized from rank 0 when made, as torch's is), on or
-    off as torch's own is."""
-    tracker = _TRACKERS.get(mesh)
-    if tracker is None:
-        tracker = _TRACKERS[mesh] = _Offsets(mesh)
-    if _random._rng_tracker is not None:
-        tracker.distribute_region_enabled = _random._rng_tracker.distribute_region_enabled
-    return tracker
-
-
-# torch's tensor-parallel styles over the partition.
 def _prepare(x, layouts, desired, mesh):
     if not isinstance(x, DTensor):
         x = from_local(x, mesh, layouts)
@@ -2333,7 +1672,7 @@ class RowwiseParallel(_Rowwise):
     def _prepare_input_fn(input_layouts, desired_input_layouts, mod, inputs, device_mesh):
         x = inputs[0]
         if (not isinstance(x, DTensor) and isinstance(mod, nn.Linear)
-                and any(p.is_shard() and p.dim % x.ndim == x.ndim - 1 for p in input_layouts)):
+                and any(_is_shard(p) and p.dim % x.ndim == x.ndim - 1 for p in input_layouts)):
             shape = x.shape[:-1] + (mod.in_features,)
             x = from_local(x, device_mesh, input_layouts, shape=shape,
                            stride=torch.empty(shape, device='meta').stride())
