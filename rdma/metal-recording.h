@@ -63,7 +63,7 @@ NSString *MetalViewIndexPrelude(void);
 // and an affine view's values for it ([index, type (0 bool, 1 uint, 2 long, 3 ulong), value] each; nil: use the source form)
 NSString *MetalViewIndexConstantPrelude(void);
 NSArray<NSArray<NSNumber *> *> *MetalViewIndexConstants(NSUInteger binding, const NSUInteger *shape, const NSInteger *strides,
-    size_t rank, NSUInteger elementOffset);
+    size_t rank, NSUInteger elementOffset, NSInteger relativeOffset);
 // Required API strides are equivalent when they address the same elements.
 // Empty and singleton axes do not impose a different physical layout.
 BOOL MetalViewLayoutMatches(const NSUInteger *shape, const NSInteger *strides,
@@ -111,7 +111,7 @@ NSDictionary<NSString *, id> *MetalViewNormalizeAxes(const NSInteger *strides, s
 // vector span; nil coordinates use the ordinary mixed-radix digits of shape.
 NSString *MetalViewMappedIndexDeclaration(NSUInteger binding, const NSUInteger *shape, const NSInteger *strides,
     size_t rank, NSUInteger elementOffset, NSDictionary<NSNumber *, NSData *> *maps,
-    NSArray<NSString *> *coordinates, NSUInteger vectorSpan);
+    NSArray<NSString *> *coordinates, NSUInteger vectorSpan, NSInteger relativeOffset);
 // Declared index relations, such as an encoding's row positions. These are
 // compiler metadata, never a substitute for a computed index tensor. The
 // relation is defined on its `count` values alone: mesh_position<B>(i) for

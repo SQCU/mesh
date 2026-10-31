@@ -26,6 +26,24 @@ Item 1's active work is divided in
 [Ownership integration tickets](ownership-integration-tickets-2026-10-30.md),
 including file claims, shared operands, dependencies and handoffs to items 2–6.
 
+The subsequent ownership integration connects ordinary `Function` preparation
+to retained selected sections. Work assignments remain operands, including
+deliberate replication; backward demand selects unassigned internal work and
+declares page deliveries. The binder preserves local identities as page
+equalities, actual input pages, ordered result uses and supplied destinations.
+Source/placement preparation has reached ordinary owned native shader binding.
+Complete partial-value transitions and local-view normalization remain open.
+
+Native scalar emission now returns passive command declarations before pipeline
+realization. The native and LiteRT consumers retain the same typed byte
+selections, explicit slots, constants and binding origins. Full encoded values
+can decode into final pages; sub-scalar requests retain their exact byte
+interpretation. The portable stage consumer is prepared, but the automatic
+LiteRT importer connection and live-read split around collectives remain open.
+Per-command access export, selector/scan declarations and pool reduction ordering
+also remain. These are source, build and preparation observations, with no new
+numerical or performance claim. Followups 2–6 are still outstanding.
+
 ## Window relations
 
 `mesh_relation.Algebra.window` describes a window's source accesses. Both FX and

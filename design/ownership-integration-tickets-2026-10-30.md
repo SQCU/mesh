@@ -1,20 +1,24 @@
 # Ownership integration tickets
 
-Recorded 2026-10-30 23:14 UTC; handoffs updated 23:50 UTC. Committed checkpoints:
-mesh `64477c9f` (source), `0e15c86c` (rubrics), and metal-microbench `8a4454f2`.
-The ticket status below also names prepared, **uncommitted** integration work.
-It must not be read as functionality available from those commits. This divides
+Recorded 2026-10-30 23:14 UTC; updated 2026-10-31 00:29 UTC. The initial source
+checkpoints were mesh `64477c9f` and metal-microbench `8a4454f2`; the status below
+describes the implementation accompanying this update and its open connections.
+This divides
 item 1 of [Compiler followups](compiler-followups-2026-10-30.md) among concurrent
 integrators. It records implementation work, not a new runtime interface or a
 replacement for the [data model](data-model.md).
 
 ## Finish line
 
-Ownership and partitioning must consume the retained numerical graph throughout
-lowering. A requested output selection determines the necessary producer work;
-that work determines the input pages. The same graph then emits that selected
-work into its assigned pages. It must reduce the actual work and storage, not
-compute a whole result and select from it afterward.
+Frontend declarations and the placement solver supply the work assignment.
+Lowering can compile that assignment forward, including deliberately replicated
+work. The assignment's access relations give its input pages and output pages.
+The same retained graph emits the assigned numerical work into those pages.
+
+Demand propagation can trim internal work that has no use. It must preserve
+explicit work assignments. A copy-source selection chooses which existing value
+to deliver; it does not decide where that value is computed. Narrowing numerical
+work changes the emitted work and storage, not just a view of a whole result.
 
 Source types, source identity, masks, reduction semantics, changing index values,
 and consumer layout constraints cross each step explicitly. The compiler solves
@@ -36,21 +40,20 @@ ordinary compiler. Source identities survive those rewrites and state lifting.
 LiteRT's immutable indexed views use the shared relation algebra, ordered typed
 initializers and existing encoded-value reader.
 
-The current integration changes select actual scalar/product work, project
-ownership through retained sections, and bind compact page storage. They have
-preparation evidence, but their ordinary distributed caller is not joined yet.
-In particular, `lower_owned_graph` now returns an ownership record while
-`Function.declare_graph` still unpacks its former `(graph, arguments)` result.
-That consumer change belongs to O4; this worktree is not a runnable completion
-of the owned-function path.
+`Function.declare_graph` now consumes the ownership record and binds retained
+sections to selected pages. Both ordinary and owned functions enter `BoundGraph`
+and the existing recorder. Selected numerical bodies use `placement.selected`
+and the same native emitter; they do not re-enter source compilation. Actual
+owned local-shard preparation reaches shader construction. The complete
+distributed closure remains open at the connections below.
 
 | Ticket | State at this handoff | Next connection |
 |---|---|---|
-| O1 | Selected scalar/product domains and compact native binding prepared; uncommitted | Missing external access declarations and declared domains for changing indices |
-| O2 | Retained ownership record replaces local graph reconstruction; uncommitted | Local-view scope normalization and all-rank demand propagation |
-| O3 | Numerical sections and collective projections prepared; uncommitted | Complete placement-transition expressions and their shared state edges |
-| O4 | Selected placement and ordinary retained-section binding prepared; uncommitted | Consume O2's record in `Function` and bind selected numerical/collective sections |
-| O5 | Immutable views committed; live source adapter prepared but unconnected | Feed selected ownership/access facts into existing native/provider stage emission |
+| O1 | Selected scalar/product work, passive command emission, exact byte origins and type eligibility prepared | Live-read splitting, selector/scan declarations, pool unrolling, per-command access export |
+| O2 | One demand pass preserves assigned work and emits explicit deliveries | Local-view normalization and the remaining typed transition connections |
+| O3 | Shared state expressions and ragged per-rank transition captures prepared | Splice distinct value versions into ordered per-rank sections |
+| O4 | Ordinary owned `Function` consumes selected bindings; local collective identities share pages | Bind expanded transition sections and complete joined distributed preparation |
+| O5 | Portable native consumer, typed byte ports and direct final-page decoding prepared | Connect the importer entry point, live accesses and provider/codec ownership |
 | O6 | Open | Join ordinary entry points, remove superseded paths, then build and inspect preparation |
 
 None of O1–O6 is closed by a helper alone. The later whole-function measurements
@@ -86,6 +89,7 @@ frontend.
 | `ownership.project_expression` | Ordered `output_selections`, required inputs, and section projections. Numerical projections contain `storage_bytes`, selected work/read/write records, separate `finish` work and unresolved declarations. |
 | `declarations.boundary_projection` | Local and peer input requests, collective records and unresolved declarations. Other ranks' output requests enter explicitly through `peer_outputs`. |
 | `placement.selected` | `storage`, ordered `results`, owning `pages`, and resolved consumer `uses`, passed to the retained graph's `bind`. |
+| `NativeGraph.emit` | Passive numerical command declarations with typed arguments, source-byte relations, constants, slots, pointer origins and dispatch operands. Native `bind` realizes them through the existing recorder; LiteRT consumes the same declarations. |
 
 Source fields are keyed by `(original FX node, result-field path)`. Owner records
 retain the declared global type and every rank's ordered selection. A delivery
@@ -93,6 +97,12 @@ names its source field, provided owner, type, section, and destination selection
 on **every** rank, including explicit empty selections. A crossing separately
 names the required placement/value transition and its before-use or after-result
 site. A delivery alone does not perform a pending reduction.
+
+Deliveries also retain actual producer `sources` and the existing mesh-axis
+`steps`. A final-output delivery has `section=None`. An explicit
+`configuration.deliveries` operand can select copy sources independently of work
+assignments. Distinct partial and completed values retain distinct identities,
+even when their coordinate ranges are equal.
 
 Global metadata describes numerical lowering; local arguments supply actual
 pages. They must not replace one another. Logical result selections retain scalar
@@ -108,7 +118,7 @@ the cached preparation.
 
 For selected binding, call the retained graph's `select_domains(records)`, obtain
 its `consumer_uses()`, and pass those requirements to
-`placement.selected(projection, algebra=..., device=..., results=..., fixed=..., requirements=...)`.
+`placement.selected(projection, algebra=..., device=..., results=..., fixed=..., requirements=..., equalities=...)`.
 The algebra and device are explicit operands.
 Results supply `binding`, `selection` or `relation`, and `shape`; fixed operands
 also supply their actual page `operand`. Each consumer use supplies its key,
@@ -118,6 +128,9 @@ commands attached to that consumer. The same graph's `bind(actuals, **plan)`
 emits the existing numerical program.
 Use keys are stable consumer identities; their resolved records keep the access
 role and `before`/`after` conversion commands.
+Equalities pair declared uses of the same values, including local collective
+deliveries. They join page placement before allocation. Ordered returned uses
+keep every supplied destination, even when the same value occurs more than once.
 
 An unresolved declaration is preparation work still to do. Resolve it before
 binding an executable. Changing index contents remain page data; resolving their
@@ -200,9 +213,10 @@ requires another source capture or full numerical lowering.
 
 ## O2 — Whole-graph owner propagation
 
-**Resume here:** normalize declared local-view scopes into global source
-relations, and join every rank's requests across collective boundaries. Keep the
-new record return value; coordinate its caller change with O4.
+**Resume here:** normalize declared local-view scopes and join typed transition
+sections to the existing all-rank demand pass. Explicit work assignments retain
+the same meaning with and without a `DTensorSpec`; delivery choices remain
+separate operands.
 
 **Implement:** use source value/result identities to carry explicit owners and
 schema-derived ownership through the retained graph. Propagate requests backward
@@ -227,11 +241,11 @@ no implicit replication or whole-result computation fills a missing connection.
 
 ## O3 — Source and partial-expression sections
 
-**Resume here:** join the whole declared placement transition, including state
-produced by one part and consumed by a later part. The current partial-expression
-helper and collective projection are not yet that complete connection. Source
-capture has exposed the exact producing node for shared mask state; retaining
-that edge through the common functionalization is still implementation work.
+**Resume here:** splice captured placement transitions into ordered per-rank
+sections with explicit source/result ports. Shared mask state now follows its
+actual producing node through source composition. The existing DeviceMesh rank
+operand supplies ragged local types; no local trace is resized to describe a
+peer. Those expressions still need the joined binding path.
 
 **Implement:** prepare numerical sections of an existing source expression once,
 split at its declared collective or provider boundaries, and retain original
@@ -255,11 +269,13 @@ configuration matches the expression's contributor and normalization semantics.
 
 ## O4 — Bind the retained graph once
 
-**Resume here:** update `Function.declare_graph` to consume O2's ownership record
-and feed each rank's selected sections into placement/binding. Keep actual local
-`arguments` distinct from the global metadata in `prepared['expression']`.
-`BoundGraph` currently replaces its arguments with that metadata when given
-`prepared`; fix that handoff while joining compact owned storage.
+**Resume here:** bind O3's expanded, versioned sections through the same selected
+page mechanism. `Function` consumes O2's record; `BoundGraph` keeps actual local
+arguments separate from global metadata. Finish the joined distributed
+preparation. Ordinary full-domain binding still has its earlier whole-family
+preparation branch: normalize those declarations to the selected binding record
+and remove that branch. Both already emit through the same numerical compiler
+and recorder; O4 is not complete until their preparation is shared too.
 
 **Implement:** make ordinary `Function`/`BoundGraph` preparation consume O1–O3's
 retained numerical sections. Share the existing compiler's functionalization,
@@ -373,8 +389,15 @@ installation as other changes.
   scalar widths, repeated/strided results, empty outputs and required per-use
   layout conversions kept their declared page relations. Ordinary numerical
   sections emitted `Program` directly, without recursive `Function` compilation.
+  The ordinary owned entry point prepared a two-rank local shard and retained
+  both supplied destinations of a repeated result. A selected ragged gather's
+  local delivery composed to identical physical pages.
 - O5 prepared live indexed source expressions through shared source lowering
   and native access extraction. This did not connect the importer stage emitter.
+  The portable emitter's actual commands also reached native-stage preparation:
+  ordinary/mixed byte views needed no copies, and complete packed values decoded
+  directly into final pages. A partial-byte demand decoded only its reached
+  scalar values before the required byte selection.
 
 A requested partial contraction retains its reduction axis until ownership is
 applied. `finish.work` assigns finishing work from the source semantics: an

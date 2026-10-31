@@ -90,6 +90,10 @@ def lift_state(module, arguments):
     lifted.recompile()
     lifted.meta['mesh_source_results'] = _source_results(module, {
         source: aliases.get(value, value) for source, value in copied.items()})
+    if 'mesh_tensor_producers' in module.meta:
+        lifted.meta['mesh_tensor_producers'] = tuple(
+            (value, aliases.get(copied[node], copied[node]))
+            for value, node in module.meta['mesh_tensor_producers'])
     return lifted, [*arguments, *values]
 
 
@@ -111,19 +115,77 @@ def lift_attributes(module, arguments):
 
 
 def source_expression(function, *arguments):
-    """Capture a pure value expression while retaining its tensor-state edges.
+    """Capture a value declaration and its exact tensor-state producer edges.
 
-    Mutation in a value declaration is functionalized; no input writeback is
-    added. The returned source graph still contains any declared collective or
-    postprocessing. It has not been partitioned or lowered to native commands.
+    Existing placement methods may retain a tensor for a later declaration.
+    Capture them before functionalization so that retained value is the same
+    ordinary FakeTensor lifted by its consumer. The common source lowerer
+    functionalizes the joined expression without value-input writeback.
     """
     import torch
-    from torch._subclasses.functional_tensor import dispatch_functionalize
-    from torch.fx.experimental.proxy_tensor import make_fx
+    from torch.fx.experimental.proxy_tensor import get_proxy_mode, make_fx
+    producers = []
+    def declaration(*values):
+        result = function(*values)
+        producers.extend((value, proxy.proxy.node)
+                         for value, proxy in get_proxy_mode().tracer.tensor_tracker.items())
+        return result
     with torch.no_grad():
-        module = make_fx(dispatch_functionalize(function), decomposition_table={},
-                         tracing_mode='fake', _allow_non_fake_inputs=True)(*arguments)
+        module = make_fx(declaration, decomposition_table={}, tracing_mode='fake',
+                         _allow_non_fake_inputs=True)(*arguments)
+    module.meta.update(mesh_tensor_producers=tuple(producers), mesh_input_writeback=False)
     return lift_state(module, arguments)
+
+
+def compose_sources(expressions):
+    """Join captured value declarations by their existing tensor identities.
+
+    The caller supplies source order. FX copies each already captured body;
+    a state tensor lifted by a later declaration binds directly to the earlier
+    node that made that same tensor. No placement method is called again.
+    """
+    import torch
+    graph, root = torch.fx.Graph(), torch.nn.Module()
+    operands, identities, results, sources, mappings = [], {}, [], {}, []
+    for ordinal, expression in enumerate(expressions):
+        module, bound = expression['graph'], {}
+        values = module.graph.process_inputs(*expression['operands'])
+        for node, value in zip((node for node in module.graph.nodes if node.op == 'placeholder'), values, strict=True):
+            held = identities.get(id(value)) if isinstance(value, torch.Tensor) else None
+            if held is None:
+                first = next((made for made in graph.nodes if made.op != 'placeholder'), graph._root)
+                with graph.inserting_before(first):
+                    made = graph.placeholder(f'source_{ordinal}_{node.name}')
+                made.meta = node.meta.copy()
+                operands.append(value)
+                if isinstance(value, torch.Tensor):
+                    identities[id(value)] = value, made
+            else:
+                _, made = held
+            bound[node] = made
+        for node in module.graph.nodes:
+            if node.op != 'get_attr':
+                continue
+            value = module
+            for field in node.target.split('.'):
+                value = getattr(value, field)
+            name = f'source_{ordinal}_{node.name}'
+            setattr(root, name, value)
+            made = graph.get_attr(name)
+            made.meta = node.meta.copy()
+            bound[node] = made
+        result = graph.graph_copy(module.graph, bound)
+        bound[next(node for node in module.graph.nodes if node.op == 'output')] = result
+        results.append(result)
+        mappings.append(bound)
+        sources.update(_source_results(module, bound))
+        for value, node in module.meta.get('mesh_tensor_producers', ()):
+            identities[id(value)] = value, bound[node]
+    graph.output(tuple(results))
+    module = torch.fx.GraphModule(root, graph)
+    module.meta.update(mesh_source_results=sources, mesh_tensor_producers=tuple(identities.values()),
+                       mesh_input_writeback=False)
+    return dict(graph=module, operands=tuple(operands), result=tuple(results), source_maps=tuple(mappings))
 
 
 def inline_source(module, operands):
@@ -226,7 +288,8 @@ def functionalize_source(module, inputs, decompositions):
                 results[node] = pytree.tree_map(result, value)
                 return value
 
-    functional = dispatch_functionalize(Source(module).run, propagate_input_mutations=True)
+    functional = dispatch_functionalize(Source(module).run,
+        propagate_input_mutations=module.meta.get('mesh_input_writeback', True))
     output = next(node for node in module.graph.nodes if node.op == 'output')
     def declaration(*arguments):
         tracer = get_proxy_mode().tracer

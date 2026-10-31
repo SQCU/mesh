@@ -701,11 +701,14 @@ struct TensorOperand {
   at::Tensor storage;
   MetalTensorPages *pages;
   TensorLayout layout;
+  NSUInteger origin;
   explicit TensorOperand(const pybind11::object &object):
     storage((THPVariable_Check(object.ptr())?object:object.attr("storage")).cast<at::Tensor>()),
     pages(tensorPages(storage)),
     layout([pages bind:(THPVariable_Check(object.ptr())?TensorLayout::tensor(storage):object.attr("layout").cast<TensorLayout>()).value
-                 elementBytes:storage.element_size()]){}
+                 elementBytes:storage.element_size()]),
+    origin(THPVariable_Check(object.ptr())||!pybind11::hasattr(object,"binding_origin")||object.attr("binding_origin").is_none()
+      ?(NSUInteger)layout.value.offset*storage.element_size():object.attr("binding_origin").cast<NSUInteger>()){}
   ~TensorOperand(){[pages release];}
 };
 
@@ -786,7 +789,7 @@ struct Commands {
         const TensorOperand operand(buffers[j]);const auto &t=operand.storage;const auto &layout=operand.layout;
         id<MTLBuffer> buffer=operand.pages.buffer;
         const uint32_t mode=((access>>j)&1?MetalReachRead:0)|((access>>(MESH_ACCESS_WRITE_SHIFT+j))&1?MetalReachWritten:0);
-        bound.push_back({buffer,(NSUInteger)layout.value.offset*t.element_size(),layout.value.count*t.element_size(),(uint32_t)j,mode,0});
+        bound.push_back({buffer,operand.origin,layout.value.count*t.element_size(),(uint32_t)j,mode,0});
         if(mode) {
           NSData *data=[layout.value reaches:buffer base:0 elementBytes:t.element_size() access:mode binding:(int32_t)j];
           const auto *spans=(const MetalReach *)data.bytes;
@@ -2165,13 +2168,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
       @try { return TensorLayout([v.value requirements:values]); }
       @catch(NSException *error){TORCH_CHECK(false,error.reason.UTF8String);}
     }, pybind11::call_guard<Drained>())
-    .def("declaration",[](const TensorLayout &v,NSUInteger binding){return std::string([v.value declaration:binding].UTF8String);}, pybind11::call_guard<Drained>())
-    .def("constants",[](const TensorLayout &v,NSUInteger binding)->pybind11::object{
-      NSArray<NSArray<NSNumber *> *> *values=[v.value constants:binding];
+    .def("declaration",[](const TensorLayout &v,NSUInteger binding,const std::optional<NSInteger> &origin){
+      return std::string([v.value declaration:binding origin:origin?*origin:v.value.offset].UTF8String);
+      },pybind11::arg("binding"),pybind11::arg("origin")=pybind11::none(),pybind11::call_guard<Drained>())
+    .def("constants",[](const TensorLayout &v,NSUInteger binding,const std::optional<NSInteger> &origin)->pybind11::object{
+      NSArray<NSArray<NSNumber *> *> *values=[v.value constants:binding origin:origin?*origin:v.value.offset];
       if(!values)return pybind11::none();
       pybind11::list out;
       for(NSArray<NSNumber *> *c in values)out.append(pybind11::make_tuple(c[0].longLongValue,c[1].longLongValue,c[2].longLongValue));
-      return out;}, pybind11::call_guard<Drained>())
+      return out;},pybind11::arg("binding"),pybind11::arg("origin")=pybind11::none(),pybind11::call_guard<Drained>())
     .def("storage_declaration",[](const TensorLayout &v,NSUInteger binding,const TensorLayout &source){
       return std::string([v.value declaration:binding fromStorage:source.value].UTF8String);}, pybind11::call_guard<Drained>())
     .def("storage_span",[](const TensorLayout &v){

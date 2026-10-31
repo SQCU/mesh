@@ -1527,12 +1527,15 @@ static id TensorSelectionIndex(NSInteger (^extent)(id),NSArray *shape,id express
     return result;
 }
 - (NSString *)declaration:(NSUInteger)binding {
+    return [self declaration:binding origin:_offset];
+}
+- (NSString *)declaration:(NSUInteger)binding origin:(NSInteger)origin {
     NSMutableString *result=[NSMutableString string];
     NSData *shape=TensorWords(_indexShape),*steps=TensorWords(_strides);
     NSMutableArray *coordinates=nil;
     if(_coordinates){coordinates=[NSMutableArray array];for(id value in _coordinates)[coordinates addObject:TensorExpressionSource(value,_count)];}
     [result appendString:MetalViewMappedIndexDeclaration(binding,shape.bytes,steps.bytes,_indexShape.count,(NSUInteger)_offset,_maps,
-        coordinates,coordinates?TensorVectorSpan(self):0)];
+        coordinates,coordinates?TensorVectorSpan(self):0,_offset-origin)];
     // APIs that require affine operands consume the strides of the placed
     // view, not strides captured before placement. These are shader constants.
     [result appendFormat:@"template<> constexpr bool mesh_affine<%lu>() { return %s; }\n",
@@ -1543,9 +1546,12 @@ static id TensorSelectionIndex(NSInteger (^extent)(id),NSArray *shape,id express
     return result;
 }
 - (NSArray<NSArray<NSNumber *> *> *)constants:(NSUInteger)binding {
+    return [self constants:binding origin:_offset];
+}
+- (NSArray<NSArray<NSNumber *> *> *)constants:(NSUInteger)binding origin:(NSInteger)origin {
     if(_maps.count||_coordinates)return nil; // The fixed-axis constant form cannot express composed coordinates.
     NSData *shape=TensorWords(_indexShape),*steps=TensorWords(_strides);
-    return MetalViewIndexConstants(binding,shape.bytes,steps.bytes,_indexShape.count,(NSUInteger)_offset);
+    return MetalViewIndexConstants(binding,shape.bytes,steps.bytes,_indexShape.count,(NSUInteger)_offset,_offset-origin);
 }
 - (NSString *)positionDeclaration:(NSUInteger)binding {
     isl_ctx *ctx=isl_ctx_alloc();isl_pw_aff *relation=MeshIndexFunction(ctx,self);

@@ -43,11 +43,12 @@ class Placements:
                 return alias(logical, physical, described)
         return None
 
-    def bind(self, described, placed):
-        if (tuple(described.shape) != tuple(placed.shape) or described.dtype != placed.dtype
+    def bind(self, described, placed, *, view=None):
+        view = descriptor(described) if view is None else view
+        if (tuple(view.shape) != tuple(placed.shape) or described.dtype != placed.dtype
                 or described.device.type != placed.device.type):
             raise ValueError('a destination must match its declared shape, dtype and device')
-        self.fixed.append((described, placed))
+        self.fixed.append((described, view, placed))
 
     def equate(self, left, right, left_view=None, right_view=None):
         """Two declared uses name the same values in the same logical order."""
@@ -57,8 +58,14 @@ class Placements:
             raise ValueError('shared page uses require the same ordered value type')
         self.equalities.append((left, right, left_view, right_view))
 
-    def declare(self, described, requirements, materializations=()):
-        """Unite logical storage families before physical pages are assigned."""
+    def declare(self, described, requirements, materializations=(), *, fields=(), uses=()):
+        """Unite logical storage families before physical pages are assigned.
+
+        ``fields`` supplies (root, byte view, scalar width). ``uses`` supplies
+        (root, byte view, scalar width, layout kind, typed target view,
+        byte capacity, alignment). These extend the same placement equations
+        to compact byte families without inventing whole-storage scalar views.
+        """
         from . import _stream
         roots, families = [], []
 
@@ -98,12 +105,14 @@ class Placements:
                     member['family'] = first
             first['members'].extend(second['members']);first['domain'] = domain
             families[:] = [family for family in families if family is not second]
-        for logical in (*materializations, *(logical for logical, _ in self.fixed)):
+        for logical in (*materializations, *(logical for logical, _, _ in self.fixed)):
             if isinstance(logical, torch.Tensor):
                 root(logical)
         for value, *_ in requirements:
             root(value)
-        self.declaration = (tuple(described), tuple(requirements), roots, families, use)
+        for value, *_ in (*fields, *uses):
+            root(value)
+        self.declaration = (tuple(described), tuple(requirements), roots, families, use, tuple(fields), tuple(uses))
 
     def materializes(self, value):
         """Whether this value belongs to a declared materialization family."""
@@ -117,26 +126,29 @@ class Placements:
         from .layout import allocate, solve_layout
         if described is not None:
             self.declare(described, requirements)
-        described, requirements, roots, families, use = self.declaration
+        described, requirements, roots, families, use, fields, uses = self.declaration
         self.bindings, self.owners = [], []
         for family in families:
             members, domain = family['members'], family['domain']
             related = lambda value: any(torch._C._is_alias_of(member['logical'], value) for member in members)
             values = [value for value in described if isinstance(value, torch.Tensor) and related(value)]
             values += [member['logical'] for member in members]
-            fixed = [(logical, placed) for logical, placed in self.fixed if related(logical)]
-            demands = [(value, view, kind, capacity, alignment) for value, view, kind, capacity, alignment in requirements if related(value)]
-            alignment = math.lcm(*(value.element_size() for value in values), *(entry[4] for entry in demands))
+            fixed = [(logical, view, placed) for logical, view, placed in self.fixed if related(logical)]
+            demands = [(use(value, view), value.element_size(), kind, view, capacity, alignment)
+                       for value, view, kind, capacity, alignment in requirements if related(value)]
+            demands.extend((use(value, view), width, kind, target, capacity, alignment)
+                           for value, view, width, kind, target, capacity, alignment in uses if related(value))
+            typed = [(use(value), value.element_size()) for value in values]
+            typed.extend((use(value, view), width) for value, view, width in fields if related(value))
+            alignment = math.lcm(*(width for _, width in typed), *(entry[5] for entry in demands))
             if not fixed:
-                mapping, extent = solve_layout(domain.count, [(use(value, view), value.element_size(), kind, view, capacity, aligned)
-                    for value, view, kind, capacity, aligned in demands],
-                    [(use(value), value.element_size()) for value in values])
+                mapping, extent = solve_layout(domain.count, demands, typed)
                 if mapping is None:
-                    mapping = _stream.TensorLayout((domain.count,), (1,))
+                    mapping, extent = solve_layout(domain.count, [], typed)
                 placed = allocate(mapping, torch.uint8, members[0]['logical'].device.type, extent=extent, alignment=alignment)
                 self.owners.append(placed.storage)
             else:
-                actuals = [TensorView.of(actual) for _, actual in fixed]
+                actuals = [TensorView.of(actual) for _, _, actual in fixed]
                 owners = [value.storage for value in actuals]
                 physical_pages, page = _stream.page_domain(owners)
                 alignment = math.lcm(alignment, page)
@@ -144,25 +156,29 @@ class Placements:
                 fixed_domain = _stream.TensorLayout(tuple(fixed_bytes.shape), (1,))
                 def assignments():
                     return _stream.TensorLayout.assign(domain.count,
-                        [use(logical) for logical, _ in fixed],
+                        [use(logical, view) for logical, view, _ in fixed],
                         [_stream.physical_layout(actual) for actual in actuals])
                 covered, physical, _ = assignments()
                 unique = physical.intersection(physical)
                 representatives = physical.rebase(unique, unique.rebase(physical, covered))
                 if not representatives.equivalent(covered):
+                    family_domain = domain
                     changed, mapping = _stream.TensorLayout.identify(domain.count, covered, representatives)
                     for member in members:
                         member['mapping'] = member['mapping'].rebase(domain, mapping)
                     domain = family['domain'] = changed
                     covered, physical, _ = assignments()
+                    typed = [(view.rebase(family_domain, mapping), width) for view, width in typed]
+                    demands = [(view.rebase(family_domain, mapping), width, kind, target, capacity, aligned)
+                               for view, width, kind, target, capacity, aligned in demands]
                 # Include complete caller pages as ordinary typed fields. The
                 # unknown bytes remain reserved; no new value can overwrite them.
                 joint, original, pages = _stream.TensorLayout.unite(domain, fixed_domain,
                     covered, physical.rebase(fixed_bytes, fixed_domain))
-                typed = [(use(value).rebase(domain, original), value.element_size()) for value in values]
+                typed = [(view.rebase(domain, original), width) for view, width in typed]
                 typed.append((pages, page))
-                demanded = [(use(value, view).rebase(domain, original), value.element_size(), kind, view, capacity, aligned)
-                    for value, view, kind, capacity, aligned in demands]
+                demanded = [(view.rebase(domain, original), width, kind, target, capacity, aligned)
+                            for view, width, kind, target, capacity, aligned in demands]
                 mapping, extent = solve_layout(joint.count, demanded, typed)
                 if mapping is None:
                     # An incompatible consumer gets the existing explicit AOT
@@ -185,3 +201,145 @@ class Placements:
             for member in members:
                 mapping = member['mapping'].rebase(domain, placed.layout)
                 self.bindings.append((member['logical'], TensorView(placed.storage, mapping)))
+
+
+def _selected_layout(record, algebra):
+    """Resolve one ordered typed use in its original storage coordinates."""
+    from .operand import relation_layout
+    binding = record['binding']
+    relation = record.get('relation')
+    if relation is None:
+        relation = algebra.selection_relation(record['selection']).then(binding['relation'])
+    return relation_layout(relation, record.get('shape', relation.shape),
+                           int(binding['storage_bytes']) // binding['dtype'].itemsize)
+
+
+def selected_view(storage, record, *, algebra, layout=None):
+    """Compose an explicit typed use with its assigned selected page bytes."""
+    binding = record['binding']
+    assigned = storage[binding['name']]
+    physical = TensorView.of(assigned['operand'])
+    layout = _selected_layout(record, algebra) if layout is None else layout
+    mapped = rebase_typed(layout, binding['dtype'].itemsize, assigned['source'],
+                          assigned['source_dtype'].itemsize, physical.layout)
+    return TensorView(physical.storage_as(binding['dtype']), mapped)
+
+
+def selected(projection, *, algebra, device, results=(), fixed=(), requirements=(), equalities=()):
+    """Place one projected numerical span through the ordinary family solver.
+
+    Canonical storage demands and returned ``source`` layouts are bytes.
+    Results and fixed operands carry ``binding`` plus an ordered ``selection``;
+    results additionally declare their ``shape``. A consumer use instead
+    supplies its exact scalar ``relation``, ``shape``, ``requirements``, access
+    role and stable ``key``. Fixed records supply an existing page ``operand``.
+    ``equalities`` pairs ordered typed uses that name the same values, including
+    local collective identity edges. No tensor payload is inspected here.
+
+    Returned storage feeds retained native IR directly. Per-use conversion
+    records stay attached to that consumer's read/write relation, rather than
+    introducing section-wide barriers. Unresolved access projection remains
+    the caller's unfulfilled declaration; this helper does not invent reads.
+    """
+    from torch._subclasses.fake_tensor import FakeTensorMode
+    from . import _stream
+    from .operand import layout_configuration, storage_requirement
+    from .layout import resolve, copies
+
+    results, fixed, requirements = tuple(results), tuple(fixed), tuple(requirements)
+    domains, widths = dict(projection['storage_bytes']), []
+
+    def retain(binding, layout, width, *, typed=True):
+        name = binding['name']
+        relation = algebra.layout(layout_configuration(layout))
+        positions = relation.image(relation.domain())
+        domains[name] = positions if name not in domains else domains[name].binary(positions, 'union')
+        if typed and layout.count:
+            widths.append((name, layout, width))
+
+    for record in projection['records']:
+        for part in (record, record.get('finish')):
+            if part is None:
+                continue
+            for side in ('reads', 'writes'):
+                for use in part[side].values():
+                    access = use['access']
+                    if use['positions'] is None:
+                        continue
+                    scalar = access['relation'].image(part['work'])
+                    layout = _stream.TensorLayout.runs(scalar.spans()).components(access['dtype'].itemsize)
+                    retain(access, layout, access['dtype'].itemsize)
+    requested = [(record, _selected_layout(record, algebra)) for record in results]
+    consumers = [(record, _selected_layout(record, algebra)) for record in requirements]
+    supplied = [(record, _selected_layout(record, algebra)) for record in fixed]
+    equivalent = [tuple((record, _selected_layout(record, algebra)) for record in pair) for pair in equalities]
+    for record, layout in (*requested, *consumers, *(item for pair in equivalent for item in pair)):
+        retain(record['binding'], layout.components(record['binding']['dtype'].itemsize), record['binding']['dtype'].itemsize)
+
+    original = {name: _stream.TensorLayout.runs(domain.spans()) for name, domain in domains.items()}
+    mode = FakeTensorMode()
+    with mode:
+        roots = {name: torch.empty((layout.count,), dtype=torch.uint8, device=device) for name, layout in original.items()}
+    compact = {name: descriptor(value) for name, value in roots.items()}
+    placements, fields, demands = Placements(), [], []
+
+    def use(name, layout):
+        return layout.rebase(original[name], compact[name])
+
+    for (left, a), (right, b) in equivalent:
+        first, second = left['binding'], right['binding']
+        placements.equate(roots[first['name']], roots[second['name']],
+            use(first['name'], a.components(first['dtype'].itemsize)),
+            use(second['name'], b.components(second['dtype'].itemsize)))
+    for name, layout, width in widths:
+        fields.append((roots[name], use(name, layout), width))
+    for record, layout in supplied:
+        binding, actual = record['binding'], TensorView.of(record['operand'])
+        name, width = binding['name'], binding['dtype'].itemsize
+        if actual.dtype != binding['dtype']:
+            raise ValueError('fixed pages must carry their declared scalar type')
+        if name not in domains:
+            continue
+        logical_bytes = layout.components(width).reshape((layout.count * width,))
+        relation = algebra.layout(layout_configuration(logical_bytes))
+        selected_bytes = relation.preimage(domains[name])
+        order = _stream.TensorLayout.runs(selected_bytes.spans())
+        if not order.count:
+            continue
+        ordinals = _stream.TensorLayout((logical_bytes.count,), (1,))
+        source = order.rebase(ordinals, logical_bytes)
+        target = order.rebase(ordinals, actual.layout.components(width).reshape((logical_bytes.count,)))
+        placements.bind(roots[name], TensorView(actual.storage_as(torch.uint8), target), view=use(name, source))
+    for record, layout in consumers:
+        binding, width = record['binding'], record['binding']['dtype'].itemsize
+        source = use(binding['name'], layout.components(width))
+        for requirement in record['requirements']:
+            kind, capacity, alignment = storage_requirement(requirement)
+            if kind == 'indexed':
+                if not capacity and alignment == 1:
+                    continue
+                # Indexed APIs constrain the argument origin/footprint, not
+                # the placement of every other scalar in this selected use.
+                count = int(bool(layout.count))
+                target = _stream.TensorLayout((count,), (1,))
+                positions = source.reshape((layout.count, width)).slice(0, 0, count, 1)
+                demands.append((roots[binding['name']], positions, width, 'contiguous', target, capacity, alignment))
+            else:
+                demands.append((roots[binding['name']], source, width, kind, layout, capacity, alignment))
+    placements.declare(tuple(roots.values()), (), tuple(roots.values()), fields=fields, uses=demands)
+    placements.solve()
+    storage = {name: dict(source=original[name], source_dtype=torch.uint8, operand=placements.get(root))
+               for name, root in roots.items()}
+
+    resolved, owners = {}, list(placements.owners)
+    for record, layout in consumers:
+        value = selected_view(storage, record, algebra=algebra, layout=layout)
+        writing = record['access'] == 'write'
+        operand, commands = resolve(value, record['requirements'], writing=writing)
+        before = () if writing else tuple(commands)
+        after = tuple(commands) if writing else tuple(copies(operand, value)) if record['access'] == 'readwrite' else ()
+        owners.append(operand.storage)
+        resolved[record['key']] = dict(record, operand=operand, before=before, after=after)
+    return dict(storage=storage, results=tuple(selected_view(storage, record, algebra=algebra, layout=layout)
+                                              for record, layout in requested),
+                pages=tuple(owners), uses=resolved)

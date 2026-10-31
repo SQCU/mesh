@@ -5,7 +5,7 @@ lower it to native arguments and accesses before a function runs. Layout
 metadata describes accesses; it never snapshots tensor contents. A tensor of
 page indices can be written and read by the compiled function like other data.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from . import _stream
 
@@ -14,6 +14,9 @@ from . import _stream
 class TensorView:
     storage: object
     layout: _stream.TensorLayout
+    # Preparation-only pointer origin in the final page buffer. None binds
+    # the ordinary layout origin. Access/dependency positions stay unchanged.
+    binding_origin: int | None = None
 
     @classmethod
     def of(cls, value):
@@ -68,14 +71,16 @@ class TensorView:
         """A scalar handle for the same allocation; no values are converted."""
         if dtype == self.dtype:
             return self.storage
-        width = self.storage.untyped_storage().nbytes() // self.element_size()
+        from math import lcm
+        unit = lcm(self.element_size(), dtype.itemsize)
+        width = self.storage.untyped_storage().nbytes() // unit * unit // self.element_size()
         return self.storage.as_strided((width,), (1,), 0).view(dtype)
 
     def typed(self, dtype):
         """Reinterpret equal-width scalars without changing their page selection."""
         if dtype.itemsize != self.element_size():
             raise ValueError('a scalar reinterpretation preserves its declared width')
-        return TensorView(self.storage_as(dtype), self.layout)
+        return replace(self, storage=self.storage_as(dtype))
 
     def tensor(self):
         """Bind an API which explicitly requires a strided tensor handle."""
@@ -94,19 +99,19 @@ class TensorView:
         return tuple(result)
 
     def slice(self, axis, first, count, step=1):
-        return TensorView(self.storage, self.layout.slice(axis, first, count, step))
+        return replace(self, layout=self.layout.slice(axis, first, count, step))
 
     def select(self, axis, indices):
-        return TensorView(self.storage, self.layout.select(axis, indices))
+        return replace(self, layout=self.layout.select(axis, indices))
 
     def gather(self, shape, indices):
-        return TensorView(self.storage, self.layout.gather(shape, indices))
+        return replace(self, layout=self.layout.gather(shape, indices))
 
     def permute(self, axes):
-        return TensorView(self.storage, self.layout.permute(axes))
+        return replace(self, layout=self.layout.permute(axes))
 
     def reshape(self, shape):
-        return TensorView(self.storage, self.layout.reshape(shape))
+        return replace(self, layout=self.layout.reshape(shape))
 
     def t(self):
         return self.permute((1, 0))
@@ -131,7 +136,8 @@ class TensorView:
                 not self.layout.affine, runs)
 
     def declaration(self, *requirements):
-        return dict(source=descriptor(self.storage).state, view=self.layout.state, requirements=requirements)
+        return dict(source=descriptor(self.storage).state, view=self.layout.state, requirements=requirements,
+                    binding_origin=self.binding_origin)
 
 
 def ordered_runs(segments):
@@ -159,7 +165,7 @@ def layout_configuration(layout):
 
 class _IndexTerms:
     """Emit the shared integer grammar through Torch's expression interpreter."""
-    _operators = dict(add='add', mul='mul', floordiv='div', mod='mod', python_mod='mod',
+    _operators = dict(add='add', floordiv='div', mod='mod', python_mod='mod',
                       minimum='min', maximum='max', eq='eq', le='le', lt='lt', ge='ge', gt='gt',
                       and_='and', or_='or', where='select')
 
@@ -180,6 +186,11 @@ class _IndexTerms:
         return ['add', *values] if len(values) > 1 else values[0] if values else 0
 
     @staticmethod
+    def mul(left, right):
+        # The shared layout grammar puts a constant scale after its index.
+        return ['mul', right, left] if isinstance(left, int) else ['mul', left, right]
+
+    @staticmethod
     def modular_indexing(value, divisor, modulus):
         return ['mod', ['div', value, divisor], modulus]
 
@@ -197,7 +208,7 @@ class _IndexTerms:
 
     @staticmethod
     def abs(value):
-        return ['max', value, ['mul', -1, value]]
+        return ['max', value, ['mul', value, -1]]
 
     @staticmethod
     def pow_by_natural(value, exponent):
@@ -228,6 +239,94 @@ def index_terms(expression, variables):
     return sympy_interp(_IndexTerms(), variables, expression)
 
 
+def index_expression(expression, index, operations):
+    """Interpret the shared index grammar in a caller's scalar compiler."""
+    from functools import reduce
+    if expression == 'i':
+        return index
+    if isinstance(expression, (int, bool)):
+        return expression
+    operation, *arguments = expression
+    values = [index_expression(value, index, operations) for value in arguments]
+    return operations[operation](*values) if operation == 'select' else reduce(operations[operation], values)
+
+
+def symbolic_index(expression, index):
+    """Use Torch's symbolic scalar operators for a compiled page-index term."""
+    from torch.utils._sympy.functions import Where
+    from torch.utils._sympy.reference import ReferenceAnalysis
+    operations = {name: getattr(ReferenceAnalysis, target) for name, target in {
+        'add': 'add', 'mul': 'mul', 'div': 'floordiv', 'mod': 'mod',
+        'eq': 'eq', 'le': 'le', 'lt': 'lt', 'ge': 'ge', 'gt': 'gt',
+        'and': 'and_', 'or': 'or_', 'min': 'minimum', 'max': 'maximum'}.items()}
+    return index_expression(expression, index, dict(operations, select=Where))
+
+
+def iteration_order(domain, shape):
+    """Compact selected work with the same ordered selection used by pages."""
+    import math
+    from mesh_relation import flat
+    shape = tuple(map(int, shape))
+    flatten = domain.algebra.map(shape, (math.prod(shape),), lambda source, target: [f'{target[0]} = {flat(shape, source)}'])
+    selected = flatten.image(domain)
+    selection = dict(shape=[math.prod(shape)], steps=[['select', 0, selected.spans()]])
+    order = domain.algebra.selection_relation(selection)
+    return order, domain.equal(flatten.domain())
+
+
+def scalar_expression(body, value, cache):
+    """Fold scalar index syntax with Torch's existing symbolic operators.
+
+    Payload reads and other unresolved scalar producers remain their original
+    body nodes. No value is loaded to decide a preparation-time relation.
+    """
+    import torch
+    import sympy
+    from torch._inductor.index_propagation import SymPyOps, TypedExpr
+    from torch.utils._sympy.reference import ReferenceAnalysis
+    from torch.utils import _pytree
+
+    if not isinstance(value, torch.fx.Node):
+        return value
+    if value in cache:
+        return cache[value]
+    result = None
+    if value.op == 'call_module' and value.target == 'get_index':
+        result = body.indexing_exprs[value.args[0]]
+    elif value.op == 'call_method':
+        unresolved = False
+        def argument(item):
+            nonlocal unresolved
+            result = scalar_expression(body, item, cache)
+            unresolved |= isinstance(item, torch.fx.Node) and result is None
+            return result
+        args, kwargs = _pytree.tree_map(argument, (value.args[1:], value.kwargs))
+        if not unresolved:
+            if hasattr(SymPyOps, value.target):
+                result = getattr(SymPyOps, value.target)(*args, **kwargs)
+                if result is NotImplemented:
+                    result = None
+            elif value.target in ('eq', 'ne', 'lt', 'le', 'gt', 'ge', 'and_', 'or_', 'not_',
+                                  'logical_and', 'logical_or', 'logical_not'):
+                operation = {'logical_and': 'and_', 'logical_or': 'or_', 'logical_not': 'not_'}.get(value.target, value.target)
+                result = TypedExpr(getattr(ReferenceAnalysis, operation)(*(sympy.sympify(item.expr) for item in args)), torch.bool)
+            if isinstance(result, TypedExpr) and not result.is_constant() and result.dtype != torch.bool:
+                # The symbolic handler describes integer arithmetic. Retain a
+                # typed scalar operation when overflow or rounding could alter
+                # that mathematical expression.
+                if result.dtype.is_floating_point or result.dtype.is_complex:
+                    result = None
+                else:
+                    from torch.utils._sympy.value_ranges import bound_sympy, ValueRanges
+                    bounds = bound_sympy(result.expr, {var: ValueRanges(0, size - 1)
+                        for var, size in {**body.var_ranges, **body.indirect_var_ranges}.items()})
+                    limits = torch.iinfo(result.dtype)
+                    if bounds.lower < limits.min or bounds.upper > limits.max:
+                        result = None
+    cache[value] = result
+    return result
+
+
 def index_relation(algebra, expression, variables, shape):
     """An IR address expression over its declared common iteration domain."""
     import math
@@ -239,10 +338,22 @@ def index_relation(algebra, expression, variables, shape):
                                maps={}, index_coordinates=[terms])).reshape(shape)
 
 
+def byte_relation(access):
+    """A typed access's scalar relation expressed in its named storage bytes."""
+    relation = access['relation']
+    if relation is None:
+        return None
+    width, extent = access['dtype'].itemsize, int(access['storage_bytes'])
+    components = relation.algebra.map(((extent + width - 1) // width,), (extent,),
+        lambda scalar, byte: [f'{width} * {scalar[0]} <= {byte[0]} < {width} * ({scalar[0]} + 1)'])
+    return relation.then(components)
+
+
 def bind(value, declaration):
     """Compose the declared use with the producer's assigned pages once."""
     placed = TensorView.of(value)
-    return TensorView(placed.storage, binding_layout(placed.layout, declaration))
+    return replace(placed, layout=binding_layout(placed.layout, declaration),
+                   binding_origin=declaration.get('binding_origin', placed.binding_origin))
 
 
 def binding_layout(layout, declaration):
@@ -253,17 +364,37 @@ def descriptor(value):
     return TensorView.of(value).layout
 
 
-def relation_view(value, relation, shape):
-    """Bind prepared logical indices to the same operand's assigned pages."""
+def relation_layout(relation, shape, extent):
+    """An exact logical-to-storage relation in its declared scalar units."""
     import json
-    value = TensorView.of(value)
     if not all(shape):
         from .layout import strides
-        return TensorView(value.storage, _stream.TensorLayout(tuple(shape), strides(shape)))
+        return _stream.TensorLayout(tuple(shape), strides(shape))
+    import math
+    flat = relation.reshape((math.prod(shape),))
+    return _stream.TensorLayout(tuple(shape), (1,), 0, {}, None,
+                                (extent,), json.dumps([flat.terms()]))
+
+
+def relation_view(value, relation, shape):
+    """Bind prepared logical indices to the same operand's assigned pages."""
+    value = TensorView.of(value)
     logical = _stream.TensorLayout((value.numel(),), (1,))
-    mapped = _stream.TensorLayout(tuple(shape), (1,), 0, {}, None,
-                                  (value.numel(),), json.dumps([relation.terms()]))
-    return TensorView(value.storage, mapped.rebase(logical, value.layout.reshape((value.numel(),))))
+    mapped = relation_layout(relation, shape, value.numel())
+    return replace(value, layout=mapped.rebase(logical, value.layout.reshape((value.numel(),))))
+
+
+def byte_operand(value):
+    """The same selected bytes, with the generated pointer bound at its root.
+
+    Keeping the base separate from indexed positions also permits one argument
+    to contain mixed scalar widths. Typed loads apply their width after this
+    byte relation; no scalar is rounded or expanded into a different value.
+    """
+    value = TensorView.of(value)
+    layout = value.layout if value.element_size() == 1 else value.layout.components(value.element_size())
+    import torch
+    return TensorView(value.storage_as(torch.uint8), layout, binding_origin=0)
 
 
 def rebase_typed(view, width, declared, source_width, placed):

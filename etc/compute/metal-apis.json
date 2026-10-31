@@ -11,6 +11,9 @@
     "INT64": "long",
     "UINT64": "ulong"
   },
+  "scalar_emitter": {
+    "arithmetic_types": ["BOOL", "INT8", "INT16", "INT32", "INT64", "UINT8", "UINT16", "UINT32", "UINT64", "FLOAT16", "BFLOAT16", "FLOAT32"]
+  },
   "reduction": {
     "input": "contiguous",
     "output": "contiguous"

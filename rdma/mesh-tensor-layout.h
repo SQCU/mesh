@@ -98,6 +98,9 @@ FOUNDATION_EXPORT NSInteger MetalTensorConstant(id expression, NSArray<NSNumber 
 // Address expressions and, for affine views, per-axis stride constants for
 // numerical APIs. Both describe the assigned operand, after page placement.
 - (NSString *)declaration:(NSUInteger)binding;
+// A separately declared pointer base, in this layout's scalar units. The
+// index expression retains every offset from that base to the selected pages.
+- (NSString *)declaration:(NSUInteger)binding origin:(NSInteger)origin;
 // Emit a declared index-valued relation as mesh_position<B>, with its logical
 // count and consecutive-run alignment. The relation stays compiler data;
 // arithmetic source is emitted without expanding a per-element index array.
@@ -105,6 +108,7 @@ FOUNDATION_EXPORT NSInteger MetalTensorConstant(id expression, NSArray<NSNumber 
 // The binding's layout as the constants form's function-constant values (metal-recording.h MetalViewIndexConstants), nil
 // where the view is mapped or does not fit it.
 - (NSArray<NSArray<NSNumber *> *> *)constants:(NSUInteger)binding;
+- (NSArray<NSArray<NSNumber *> *> *)constants:(NSUInteger)binding origin:(NSInteger)origin;
 // Lower the declared storage indices of a frontend IR to this page selection.
 // The source index is compiler structure, not a payload index tensor.
 - (NSString *)declaration:(NSUInteger)binding fromStorage:(MetalTensorLayout *)source;

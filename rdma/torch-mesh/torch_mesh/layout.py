@@ -4,6 +4,7 @@ This module runs only during preparation. A required materialization is an
 ordinary tiled data dependency, using preassigned region storage.
 """
 from functools import lru_cache
+from dataclasses import replace
 import math
 from pathlib import Path
 
@@ -25,18 +26,24 @@ def _layouts(bindings):
             for index, value in sorted(bindings.items())}
 
 
-def index_source(bindings, indices=None):
+def index_source(bindings, indices=None, origins=None):
     """Emit addresses from the same descriptors carried into command accesses."""
-    return (_stream.view_prelude() + ''.join(layout.declaration(index) for index, layout in _layouts(bindings).items())
+    return (_stream.view_prelude() + ''.join(layout.declaration(index, _binding_origin(bindings[index]) if origins is None else origins[index])
+                                           for index, layout in _layouts(bindings).items())
             + ''.join(_stream.index_values(int(index), values) for index, values in (indices or {}).items()))
 
 
-def index_constants(bindings):
+def _binding_origin(value):
+    origin = getattr(value, 'binding_origin', None)
+    return None if origin is None else origin // value.element_size()
+
+
+def index_constants(bindings, origins=None):
     """Every binding's layout as function constants (_stream TensorLayout.constants), as one tuple; None where one
     binding does not have the form (a mapped view), which then keeps the source form (index_source)."""
     constants = []
     for index, layout in _layouts(bindings).items():
-        own = layout.constants(index)
+        own = layout.constants(index, _binding_origin(bindings[index]) if origins is None else origins[index])
         if own is None:
             return None
         constants.extend(tuple(c) for c in own)
@@ -53,7 +60,7 @@ def _specialized(base, instance, name, constants):
     return _stream.pipeline_specialized(base, instance, name, [list(c) for c in constants])
 
 
-def pipeline(head, bindings, tail, name, indices=None, instance=''):
+def pipeline(head, bindings, tail, name, indices=None, instance='', origins=None):
     """Kernel `name` of `head`, the bindings' (TensorViews or TensorLayouts) index declarations, `tail` and the explicit
     instantiation `instance` (its line, '' for a kernel that is no template).
 
@@ -63,9 +70,9 @@ def pipeline(head, bindings, tail, name, indices=None, instance=''):
     a pipeline of them is read, then compile as one library (_stream batch_compile). Otherwise they are source text
     (index_source): mapped views' index tables, and mesh_stride's constant strides.
     """
-    constants = None if indices or 'mesh_stride<' in head + tail else index_constants(bindings)
+    constants = None if indices or 'mesh_stride<' in head + tail else index_constants(bindings, origins)
     if constants is None:
-        return _compiled(head + index_source(bindings, indices) + tail + instance, name)
+        return _compiled(head + index_source(bindings, indices, origins) + tail + instance, name)
     return _specialized(head + _stream.index_constant_prelude() + tail, instance, name, constants)
 
 
@@ -123,11 +130,13 @@ def place(graph, placements):
 
 
 @lru_cache(None)
-def _copy_pipeline(source, destination, width):
+def _copy_pipeline(source, destination, width, source_origin, destination_origin):
     kind = {1: 'uchar', 2: 'ushort', 4: 'uint', 8: 'ulong'}[width]
     prefix = (f'#define MESH_COPY_INPUT_TYPE {kind}\n#define MESH_COPY_OUTPUT_TYPE {kind}\n#define MESH_COPY_COUNT {source.count}ul\n'
               '#define MESH_COPY_SOURCE (mesh_index<0>(i))\n#define MESH_COPY_DESTINATION (mesh_index<1>(i))\n')
-    return pipeline('', {0: source, 1: destination}, prefix + Path(__file__).with_suffix('.metal').read_text(), 'mesh_layout_copy')
+    return pipeline('', {0: source, 1: destination}, prefix + Path(__file__).with_suffix('.metal').read_text(), 'mesh_layout_copy',
+                    origins={0: None if source_origin is None else source_origin // width,
+                             1: None if destination_origin is None else destination_origin // width})
 
 
 def copies(source, destination):
@@ -147,7 +156,8 @@ def copies(source, destination):
         left, right = source, destination
         for axis, (first, count) in enumerate(zip(origin, size)):
             left, right = left.slice(axis, first, count), right.slice(axis, first, count)
-        handle = _copy_pipeline(_stream.operand_layout(left).components(units), _stream.operand_layout(right).components(units), width)
+        handle = _copy_pipeline(_stream.operand_layout(left).components(units), _stream.operand_layout(right).components(units),
+                                width, left.binding_origin, right.binding_origin)
         threads = min(configuration['GATHER_THREADS'], _stream.pipeline_facts(handle)[0])
         count = left.numel() * units
         commands.append((handle, [left, right], {}, (-(-count // threads), 1, 1), (threads, 1, 1), False,
@@ -187,10 +197,11 @@ def resolve(value, declarations, *, writing=False, device=None):
     fits = ((base + at) % alignment == 0 and at + capacity <= available
             and first * value.element_size() + capacity <= storage.untyped_storage().nbytes())
     if descriptor(value) == layout and value.device.type == device and fits:
-        return TensorView(TensorView.of(value).storage, layout), []
+        return replace(TensorView.of(value), layout=layout), []
     allocation = layout.shift(-(layout.index(0) if layout.count else 0))
     extent = (allocation.index(0) * value.element_size() if allocation.count else 0) + capacity
     placed = allocate(allocation, value.dtype, device, extent=extent, alignment=alignment)
+    placed = replace(placed, binding_origin=TensorView.of(value).binding_origin)
     return placed, copies(placed, value) if writing else copies(value, placed)
 
 

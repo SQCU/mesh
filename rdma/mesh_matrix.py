@@ -124,3 +124,66 @@ def product(x, w, out, geometry, *, x1=None, bias=None, act=False, alpha=1, beta
                 'ready' if ready is not None else None)
     return dict(definitions=definitions, bindings=bindings, libraries=LIBRARIES, function='product',
                 grid=(-(-rows // row_tile), -(-columns // column_tile), batches), threads=(threads, 1, 1))
+
+
+def selected_products(domain, work, finish):
+    """Factor selected product work into ordinary mapped product declarations.
+
+    Equal output fibers share their selected reduction set. Each output is
+    written once, including outputs whose reduction set is empty. Role relations
+    stay in the named storage's declared scalar coordinates; page binding is a
+    later composition. No tensor values or per-element tables are constructed.
+    """
+    from mesh_relation import flat
+    algebra = work.algebra
+    original = tuple(domain['work'])
+    output_shape = original[:3]
+    finish_domain = domain['finish']
+
+    def selected(shape, axes):
+        local = tuple(sum(count * repeats for _, count, _, repeats in runs) for runs in axes)
+        order = algebra.selection_relation(dict(shape=list(shape),
+            steps=[['select', axis, runs] for axis, runs in enumerate(axes)]))
+        unflatten = algebra.map((prod(shape),), shape,
+            lambda i, o: [f'{i[0]} = {flat(shape, o)}'])
+        return local, order.reshape(local).then(unflatten)
+
+    covered = work.project(0, 3)
+    empty_outputs = finish.binary(covered, 'subtract')
+    fibers = [(part.project(0, 3), part.project(3)) for part in work.products((3,))]
+    if not empty_outputs.empty():
+        fibers.append((empty_outputs, algebra.set('{ [k] : false }', 1)))
+    plans = []
+    for outputs, inner in fibers:
+        phases = ((outputs.binary(finish, 'intersect'), True), (outputs.binary(finish, 'subtract'), False))
+        for rectangle, finished in ((rectangle, finished) for positions, finished in phases
+                                     for rectangle in positions.products()):
+            axes = rectangle.cartesian()
+            full_shape, to_work = selected(original, (*axes, inner.spans()))
+            final_shape, to_finish = selected(output_shape, axes)
+            batches, rows, columns, size = full_shape
+            operands = {}
+
+            def role(name, shape, positions, source, relation):
+                embed = algebra.map(shape, source.shape,
+                    lambda i, o: [f'{right} = {left}' for left, right in zip(positions(i), o, strict=True)])
+                access = relation['reads' if name != 'out' else 'writes'][name]
+                operands[name] = dict(access=access, shape=shape,
+                                      relation=embed.then(source).then(access['relation']))
+
+            for name in ('x', 'x1'):
+                if name not in domain['reads']:
+                    continue
+                valid = domain['reads'][name]['relation'].domain().project(3)
+                part = inner.binary(valid, 'intersect')
+                local, mapping = selected(original, (*axes, part.spans()))
+                role(name, (batches, rows, local[3]), lambda i: (i[0], i[1], '0', i[2]), mapping, domain)
+            role('w', (batches, size, columns), lambda i: (i[0], '0', i[2], i[1]), to_work, domain)
+            role('out', final_shape, lambda i: i, to_finish, finish_domain)
+            if finished and 'bias' in finish_domain['reads']:
+                role('bias', (rows, columns), lambda i: ('0', i[0], i[1]), to_finish, finish_domain)
+            parameters = dict(domain['parameters'])
+            if not finished:
+                parameters['act'] = False
+            plans.append(dict(operands=operands, parameters=parameters))
+    return tuple(plans)

@@ -11,21 +11,91 @@ from .operand import TensorView, ordered_runs
 from . import _stream
 
 
+def selection_exchanges(sources, destinations, *, algebra=None):
+    """Paired local page positions for explicitly declared owner selections."""
+    import json
+    from mesh_relation import Algebra
+    algebra = Algebra() if algebra is None else algebra
+    return tuple((source, destination, *(
+        _stream.TensorLayout(relation.shape, (1,), index_shape=(count,),
+                             index_coordinates=json.dumps([relation.terms()]))
+        for relation, count in ((read, source_count), (write, destination_count))))
+        for source, destination, read, write, source_count, destination_count in
+        algebra.exchanges(sources, destinations))
+
+
+def selected_calls(record, algebra):
+    """Project declared math onto exact contributor and recipient domains.
+
+    The common relation cover supplies cells with equal roles. Routing and
+    reduction ordering remain the existing collective compiler's work.
+    """
+    from .backend import ALLREDUCE, REDUCE, BROADCAST
+    source = record['call']
+    roles = [('read', rank, relation.domain().binary(record['work'], 'intersect'))
+             for rank, relation in record['read_relations'].items()]
+    roles.extend(('write', rank, domain) for rank, domain in record['requested'].items())
+    extent = _domains(source, 0, record['group'].size())[0]
+    for domain, members in algebra.cover([domain for _, _, domain in roles]):
+        contributors = tuple(roles[i][1] for i in members if roles[i][0] == 'read')
+        recipients = tuple(roles[i][1] for i in members if roles[i][0] == 'write')
+        if not recipients:
+            continue
+        order = algebra.selection_relation(dict(shape=[extent], steps=[['select', 0, domain.spans()]]))
+        identity = len(contributors) == 1
+        kind = BROADCAST if identity else REDUCE if len(recipients) == 1 else ALLREDUCE
+        root = contributors[0] if identity else recipients[0]
+        call = source._replace(kind=kind, count=order.shape[0], root=root, counts=None, matrix=None,
+                               contributors=contributors, recipients=recipients)
+        yield dict(call=call, reads={rank: order.then(record['read_relations'][rank]) for rank in contributors},
+                   writes={rank: order.then(record['write_relations'][rank]) for rank in recipients},
+                   identity=identity)
+
+
 def _domains(call, rank, size):
-    from .backend import REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL
+    from .backend import REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL, WRITE
     if call.kind == ALLTOALL:
         edges = list(accumulate([0, *call.matrix]))
         sends = [(edges[rank * size + q], edges[rank * size + q + 1]) for q in range(size)]
         receives = [(edges[q * size + rank], edges[q * size + rank + 1]) for q in range(size)]
-        return edges[-1], sends, receives
-    if call.kind in (ALLGATHER, REDUCE_SCATTER):
+        total = edges[-1]
+    elif call.kind in (ALLGATHER, REDUCE_SCATTER):
         edges = list(accumulate([0, *call.counts]))
         own, whole = [(edges[rank], edges[rank + 1])], [(0, edges[-1])]
-        return (edges[-1], own, whole) if call.kind == ALLGATHER else (edges[-1], whole, own)
-    whole = [(0, call.count)]
-    sends = whole if call.kind != BROADCAST or rank == call.root else []
-    receives = whole if call.kind != REDUCE or rank == call.root else []
-    return call.count, sends, receives
+        total, sends, receives = (edges[-1], own, whole) if call.kind == ALLGATHER else (edges[-1], whole, own)
+    else:
+        total, whole = call.count, [(0, call.count)]
+        sends = whole if call.kind not in (BROADCAST, WRITE) or rank == call.root else []
+        receives = whole if (call.kind != REDUCE or rank == call.root) and (call.kind != WRITE or rank == call.destination) else []
+    if call.contributors is not None and rank not in call.contributors:
+        sends = []
+    if call.recipients is not None and rank not in call.recipients:
+        receives = []
+    return total, sends, receives
+
+
+def domain_relations(call, rank, size, algebra):
+    """The same logical call positions used by projection and physical binding.
+
+    Relations map common call positions to this rank's compact scalar operands.
+    Counts and contributor roles are declarations; routing never enters them.
+    """
+    total, sends, receives = _domains(call, rank, size)
+    def relation(spans):
+        selection = dict(shape=[total], steps=[['select', 0, [(first, last - first, 0, 1) for first, last in spans]]])
+        return algebra.selection_relation(selection).inverse((total,))
+    return relation(sends), relation(receives)
+
+
+def complete_calls(calls, group):
+    """Resolve declared peer counts through the existing configuration exchange."""
+    from .backend import ALLTOALL
+    calls = list(calls)
+    missing = [i for i, call in enumerate(calls) if call.kind == ALLTOALL and call.matrix is None]
+    if missing:
+        for i, matrix in zip(missing, group.count_matrices([calls[i] for i in missing]), strict=True):
+            calls[i] = calls[i]._replace(matrix=matrix)
+    return calls
 
 
 def _binding(value, domain, unit, writing, layouts):
@@ -77,19 +147,12 @@ def lower(bindings, group):
     rank, size = group.rank(), group.size()
     # The graph supplies this rank's counts. The library completes an all-to-all's
     # matrix from every rank's, and pairs them, before physical routing is compiled.
-    missing = [i for i, (c, _, _) in enumerate(bindings) if c.kind == ALLTOALL and c.matrix is None]
-    if missing:
-        for i, matrix in zip(missing, group.count_matrices([bindings[i][0] for i in missing])):
-            call, source, destination = bindings[i]
-            bindings[i] = call._replace(matrix=matrix), source, destination
+    bindings = [(call, source, destination) for call, (_, source, destination) in zip(
+        complete_calls([call for call, _, _ in bindings], group), bindings, strict=True)]
     cuts, cursor, prepared, before, after = [0], 0, [], [], []
     layouts = api_layouts('reduction')
     for call, source, destination in bindings:
         total, sends, receives = _domains(call, rank, size)
-        if call.contributors is not None and rank not in call.contributors:
-            sends = []
-        if call.recipients is not None and rank not in call.recipients:
-            receives = []
         unit = math.prod(call.element_shape)
         if total % unit or any(count % unit for count in call.counts or ()):
             raise ValueError('collective counts must contain complete declared operator elements')
