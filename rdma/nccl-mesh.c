@@ -3,6 +3,7 @@
 #include "nccl.h"
 #include "mesh-call.h"
 #include "mesh-plan.h"
+#include "mesh-graph.h"
 #include "mesh.h"
 #include "mesh-span-plan.h"
 #include "mesh-landing.h"
@@ -2754,6 +2755,26 @@ static void weighed_free(struct mesh_paths *weighed, uint32_t pairs) {
   for (uint32_t p = 0; weighed && p < pairs; p++) free((void *)weighed[p].weight);
   free(weighed);
 }
+/* a write path's hops as mesh-graph.h mesh_graph_tree_path takes them: hop k's cable (`cable`, the path's), its far end
+   from `at`, and its share of the bandwidth of the cables joining its two ends */
+struct path_hops { const struct mesh_fabric *fabric; const uint32_t *cable; };
+static uint32_t path_hop_next(const void *context, uint32_t k, uint32_t at) {
+  const struct path_hops *h = context;
+  const struct mesh_cable *cable = h->fabric->cable + h->cable[k];
+  return cable->node[cable->node[0] == at];
+}
+static double path_hop_split(const void *context, uint32_t k, uint32_t at) {
+  const struct path_hops *h = context;
+  const struct mesh_cable *cable = h->fabric->cable + h->cable[k];
+  const uint32_t next = cable->node[cable->node[0] == at];
+  double joined = 0;
+  for (uint32_t e = 0; e < h->fabric->cables; e++) {
+    const struct mesh_cable *other = h->fabric->cable + e;
+    if ((other->node[0] == at && other->node[1] == next) || (other->node[1] == at && other->node[0] == next))
+      joined += other->bandwidth ? (double)other->bandwidth : 1;
+  }
+  return (cable->bandwidth ? (double)cable->bandwidth : 1) / joined;
+}
 static ncclResult_t writes_weigh(ncclComm_t comm, const struct mesh_demand *d, const unsigned char *weighs, uint32_t count,
                                  const struct flow *f, struct mesh_paths **out) {
   const uint32_t n = (uint32_t)comm->nranks;
@@ -2781,22 +2802,11 @@ static ncclResult_t writes_weigh(ncclComm_t comm, const struct mesh_demand *d, c
         if (f->demand[k] >= count || !weighs[f->demand[k]] || x->root != b || !x->leaves || !(x->leaves[a / 64] >> (a % 64) & 1)) continue;
         const uint32_t *up = f->parent + (size_t)k * n;
         for (uint32_t p = 0; p < paths->count; p++) {
-          double part = f->share[k] * (double)x->up;
-          uint32_t at = a;
-          for (uint32_t q = paths->first[p]; part > 0 && q < paths->first[p + 1]; q++) {
-            const struct mesh_cable *cable = fabric->cable + paths->cable[q];
-            const uint32_t next = cable->node[cable->node[0] == at];
-            if (up[at] != next) { part = 0; break; }
-            double joined = 0;
-            for (uint32_t e = 0; e < fabric->cables; e++) {
-              const struct mesh_cable *other = fabric->cable + e;
-              if ((other->node[0] == at && other->node[1] == next) || (other->node[1] == at && other->node[0] == next))
-                joined += other->bandwidth ? (double)other->bandwidth : 1;
-            }
-            part *= (cable->bandwidth ? (double)cable->bandwidth : 1) / joined;
-            at = next;
-          }
-          if (part > 0 && at == b) { flow[p] += part; sent = 1; }
+          const struct path_hops hops = {fabric, paths->cable + paths->first[p]};
+          uint32_t end = a;
+          const double part = f->share[k] * (double)x->up *
+            mesh_graph_tree_path(up, a, paths->first[p + 1] - paths->first[p], path_hop_next, path_hop_split, &hops, &end);
+          if (part > 0 && end == b) { flow[p] += part; sent = 1; }
         }
       }
       for (uint32_t p = 0; sent && p < paths->count; p++) if (flow[p] > most) most = flow[p];
