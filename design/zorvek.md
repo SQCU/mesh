@@ -110,3 +110,25 @@ what of the block takes its place. The order is forced: each later one guards a 
    the bridge runs compiled page lists per call (zinth hands it the call), its walk the executor of zirrup and
    zirrupel, which its entry word already is.
 7. The landing gate and the operand staging copies (zibbins): transport by view; a premultiplier folded into zelloth.
+
+## zinth: the bridge runs compiled lists (item 6), the design before the code
+
+Measured 2026-10-31 (test-ov3, not landed): with each issue on its own pages and its sums outside the pool, letting
+a declared repeat's presents skip their barrier gave no rate and deadlocked the chain service: a burst of small steps
+filled both ends' 4,096-entry rings with entries of different calls in orders neither end could drain (sent 5 of
+11,424 ready on one channel). The rings, not storage, are what make calls unable to overlap.
+
+- What the plan compiles. ncclMeshCommPlan lays every issue of one pass of its declared order (ncclMeshPlanRun),
+  each channel's counters from 0, so every entry's index, end and requirement base is relative to the pass, and
+  writes each stream's send and landing lists for the pass into region pages, with the pass's units on each list.
+- What mesh.h states. A holding names its compiled lists (region offset, entries) and, per pass, the units each list
+  adds; a requirement base is the relative one plus pass x those units. No ring, no `sends`/`lands` presented counts,
+  no `taken`.
+- What a call stores. One word per holding at the call's stream position, its start (after the barrier ordering it
+  after the caller's producers): own-page SENDs require it (zook), landings require it for their first write (a
+  later call's landing never meets pages a consumer in the stream before it still reads). Forwards keep `landed`, a
+  sum's SENDs zelloth's count.
+- What the bridge does. Walks each list in order as each entry's requirement allows (zirrup, zirrupel), posting as
+  deep as its queues take; the GPU does nothing for transport.
+- Deleted with it: present_group's per-call entries, metal_present and the present kernel, MESH_STREAM_ENTRIES and
+  the rings, walk_take's copy, the `taken` waits, commit_group's presented counts.
