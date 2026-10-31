@@ -1,6 +1,6 @@
 # Ownership integration tickets
 
-Recorded 2026-10-30 23:14 UTC; updated 2026-10-31 04:58 UTC. The initial source
+Recorded 2026-10-30 23:14 UTC; updated 2026-10-31 05:04 UTC. The initial source
 checkpoints were mesh `64477c9f` and metal-microbench `8a4454f2`; the status below
 describes the implementation accompanying this update and its open connections.
 This divides
@@ -57,7 +57,7 @@ distributed closure remains open at the connections below.
 | O2 | Supplied assignments retain local types, storage uses and exact independently scoped read prefixes | Joined distributed binding beyond the fake endpoint boundary |
 | O3 | Partial/complete values and cohort-typed byte expressions compose; providers receive exact read prefixes from each retained body | Joined distributed binding beyond the fake endpoint boundary |
 | O4 | Ordinary and owned Function plus public FX use one selected-section binder and exact byte equalities | Joined distributed binding beyond the fake endpoint boundary |
-| O5 | Importer consumes shared scalar and external command declarations, including selected and ragged outputs; UPDATE→GATHER remains fused | Encoded index folding and remaining packed-reader integration |
+| O5 | Shared commands retain nested bindings, repeated packed index selections and scalar conversion chains through native preparation | Encoded index constant folding still needs a shared preparation-time value definition |
 | O6 | Ordinary and selected emission require the same resolved storage, results, pages and consumer uses; alternate placement and binding reconstruction removed | Finish joined preparation evidence at the remaining frontend and transport handoffs |
 
 None of O1–O6 is closed by a helper alone. The later whole-function measurements
@@ -409,8 +409,8 @@ page bindings agree at numerical/collective boundaries.
 
 ## O5 — LiteRT access adapter
 
-**Resume here:** retain encoded index-value meaning and join remaining packed
-reader uses. `prepare_e2b.indexed_source` reaches retained access projection,
+**Resume here:** finish joined preparation with the retained encoded index-value
+meaning. `prepare_e2b.indexed_source` reaches retained access projection,
 selected placement and native stage emission through the actual save path.
 Distributed scalar selections consume shared live-read sections. Computed
 pointwise producers compose into those reads; UPDATE→GATHER emits one command
@@ -429,6 +429,16 @@ encoded integer **index values** during preparation is still open:
 `constant_integers` currently folds ordinary immutable scalar views. Until that
 shared reader connection exists, encoded indices retain their typed graph
 operands; their storage bytes are not interpreted as ordinary integer indices.
+
+Saved stage rebinding now follows explicit bindings inside encoded values,
+scale/zero operands and assembled pieces. Repeated selections retain their
+ordered occurrences. Scalar conversion chains retain each intermediate type;
+the shared native reader and placement consume that type rather than its
+underlying storage width. Numeric conversions are value expressions, not storage
+aliases. Actual importer export and native page/shader preparation preserve
+packed raw-code indices, scaled indices, FLOAT16 intermediates and ordinary
+INT32→FLOAT32→INT32 conversions. Empty selections emit no commands. The affected
+library builds; no numerical execution was performed.
 
 **Implement:** with immutable indexed-view preparation completed against the
 shared algebra, carry live index operands and their dependencies into existing
