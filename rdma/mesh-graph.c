@@ -535,3 +535,25 @@ int mesh_graph_classes(uint32_t vertices, const size_t *first, const uint32_t *h
   free(sorted); free(spans); free(reach); free(rows); free(at); free(heads); free(indegree);
   return result;
 }
+
+/* mesh-graph.h mesh_graph_depth */
+static uint32_t depth_head(const void *context, size_t k) { return ((const uint32_t *)context)[k]; }
+int mesh_graph_depth(uint32_t vertices, const size_t *first, const uint32_t *head, const unsigned char *marked, uint32_t *depth) {
+  size_t *out = calloc((size_t)vertices + 2, sizeof *out), *at = calloc((size_t)vertices + 1, sizeof *at);
+  uint32_t *heads = malloc((first[vertices] + 1) * sizeof *heads), *indegree = malloc(((size_t)vertices + 1) * sizeof *indegree);
+  uint32_t *ordinal = malloc(((size_t)vertices + 1) * sizeof *ordinal), *order = malloc(((size_t)vertices + 1) * sizeof *order);
+  int result = !out || !at || !heads || !indegree || !ordinal || !order ? ENOMEM : 0;
+  for (uint32_t v = 0; !result && v < vertices; v++) for (size_t k = first[v]; k < first[v + 1]; k++) out[head[k] + 1]++;
+  for (uint32_t v = 0; !result && v < vertices; v++) out[v + 1] += out[v];
+  for (uint32_t v = 0; !result && v < vertices; v++) for (size_t k = first[v]; k < first[v + 1]; k++) heads[out[head[k]] + at[head[k]]++] = v;
+  if (!result) result = mesh_graph_order(vertices, out, depth_head, heads, indegree, ordinal);
+  for (uint32_t v = 0; !result && v < vertices; v++) order[ordinal[v]] = v;
+  for (uint32_t p = 0; !result && p < vertices; p++) {
+    const uint32_t v = order[p];
+    depth[v] = 0;
+    for (size_t k = first[v]; k < first[v + 1]; k++)
+      if (marked[head[k]] && depth[head[k]] + 1 > depth[v]) depth[v] = depth[head[k]] + 1;
+  }
+  free(out); free(at); free(heads); free(indegree); free(ordinal); free(order);
+  return result;
+}

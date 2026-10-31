@@ -39,6 +39,10 @@ void mesh_graph_mark(const size_t *first, uint32_t (*head)(const void *context, 
    where a cycle leaves vertices unplaced (their ordinal UINT32_MAX). */
 int mesh_graph_order(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
                      const void *context, uint32_t *indegree, uint32_t *ordinal);
+/* Each marked vertex's depth over the edges into it (vertex v's row [first[v], first[v + 1]) of head[]: the vertices
+   whose work it follows): 0 where its row reaches no marked vertex, else one past the greatest depth among the marked
+   ones it reaches, taken over a topological order (mesh_graph_order).  0; EDEADLK where the rows hold a cycle; ENOMEM */
+int mesh_graph_depth(uint32_t vertices, const size_t *first, const uint32_t *head, const unsigned char *marked, uint32_t *depth);
 /* Chu-Liu/Edmonds: the minimum spanning arborescence of nodes [0, N) rooted at `root` in which each other node v
    takes one edge e with to[e] == v (its parent from[e]); chosen[v] that edge, the root's -1; 0, or -1 where a node has
    none.  Each node's lightest edge; a cycle among them contracted, the edges into it weighing their excess over the
