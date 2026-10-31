@@ -108,6 +108,11 @@ def bandwidth(config):
         prepared.append((binding, useful, calls, what, requested))
     observations = Observations()
     for index, (binding, useful, calls, what, requested) in enumerate(prepared):
+        # each case submitted once this rank's earlier ones have ended: its submission-to-completion time is then its
+        # own, where submitted behind every case still queued it included all of theirs (d4916d1e's "Cumulative",
+        # design/measurement-regressions-2026-10-30.md); a rank whose part of the case before ended early (a
+        # broadcast's root) still starts its next case early
+        observations.close()
         started = now()
         binding.enqueue()
         completion = binding.completion()
