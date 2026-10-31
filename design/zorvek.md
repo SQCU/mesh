@@ -132,3 +132,21 @@ relative + pass x units, was a ring over the program's order. Neither belongs he
   transport.
 - Deleted with it: present_group's per-call entries, metal_present and the present kernel, MESH_STREAM_ENTRIES and the
   rings, walk_take's copy, the `taken` waits, commit_group's presented counts.
+
+### zinth's interface (mesh.h), as the code will state it
+
+- `struct mesh_program`, a stream's compiled program in region pages, written once by the plan: `calls`, the declared
+  order's calls (the program's call sequence; sequencing alone, never a page decision); `order`, each call's
+  definition; for each definition its send and landing entries (`struct mesh_entry`) and each list's units; and for
+  each list the units of the calls before each call (so call n's absolute base is the order's earlier calls' units
+  plus its own relative one, n past the order taken whole times its units, as the program's call sequence repeats).
+- `struct mesh_entry` gains its requirement's kind: per unit (`word >= base + i + 1`: a forward's `landed`, a sum's
+  zelloth count) or whole (`word >= base`: the call's start for own pages and a landing's first write; an earlier
+  call's completion count where the compiler gave both calls the same pages). A whole requirement's base counts
+  calls (the start, a completion), a per-unit one units.
+- `struct mesh_stream` gains `program` (region offset, 0 none) and `started` (calls started, the holder's GPU store at
+  each call's stream position). A stream with a program is walked from it; one without, from its ring, as now, until
+  every user has moved (presents, fused crossings, WRITE plans, the quiet probe); then the rings, `sends`, `lands`,
+  `taken`, walk_take's copy and the presents go, and `program` is the only form.
+- The bridge finds unit q's entry by the program's prefix units (the call, then its entry), holds no copy of entries,
+  and posts each unit once its requirement holds.
