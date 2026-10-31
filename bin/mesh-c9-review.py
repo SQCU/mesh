@@ -43,7 +43,16 @@ def made(payload):
         str((response or {}).get(k) or '') for k in ('stdout', 'stderr')) if isinstance(response, dict) else ''
     shas = re.findall(r'^\[(?:detached HEAD|[^\]\s]+)(?: \(root-commit\))? ([0-9a-f]{7,40})\]', printed, re.M)
     cwd = payload.get('cwd') or os.getcwd()
-    dirs = [os.path.join(cwd, os.path.expanduser(d.strip('\'"'))) for d in re.findall(r'(?:\s-C|\bcd)\s+(\S+)', command)] + [cwd]
+    # the directories the command names (cd, git -C), with variables it assigns itself and the environment's expanded;
+    # where it names any, those alone: a quiet commit in a directory it named but this cannot resolve is left
+    # unreviewed rather than taken for whatever this hook's own directory last committed (another session's)
+    assigned = dict(re.findall(r'(?:^|[;&|\s])([A-Za-z_][A-Za-z0-9_]*)=([^\s;&|]+)', command))
+    def expanded(path):
+        path = re.sub(r'\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?', lambda m: assigned.get(m.group(1), os.environ.get(m.group(1), m.group(0))),
+                      path.strip('\'"'))
+        return os.path.join(cwd, os.path.expanduser(path))
+    named = re.findall(r'(?:\s-C|\bcd)\s+(\S+)', command)
+    dirs = [expanded(d) for d in named] if named else [cwd]
     dirs = [d for d in dict.fromkeys(dirs) if os.path.isdir(d)]
     found = []
     for sha in dict.fromkeys(shas):
