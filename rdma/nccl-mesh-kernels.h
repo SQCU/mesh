@@ -12,6 +12,8 @@
 
 #define STR(...) #__VA_ARGS__
 #define XSTR(...) STR(__VA_ARGS__)
+/* a combine's elements a thread of its block: four vec4, a worker's width apart (KINDS_OF's LANES) */
+#define MESH_COMBINE_LANES 16
 /* a kernel's arguments, one layout for the host (struct args) and the kernels (struct mesh_args): a wait's count at
    aux until scalar, a publication's count at aux stored scalar, each repeat j of a fused crossing's at scalar + j x
    stride (the packets a repeat adds to the count: nccl.h ncclMeshFused repeats).
@@ -162,13 +164,14 @@ static NSString *const KERNELS =
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); }\n"
   "#define LANDS(T, OP) volatile coherent(system) device T *x = (volatile coherent(system) device T *)(d + p.dst); volatile coherent(system) device const T *xs = (volatile coherent(system) device const T *)p.input; "
   "volatile coherent(system) device const T *y = (volatile coherent(system) device const T *)(s + p.src); "
-  "const ulong block = 4 * ulong(t), step = 4 * ulong(g); ulong seen = 0; uint looked = 0; "
-  "if ((p.dst | p.src | p.input) % (4 * sizeof(T)) == 0) for (ulong b = 4 * ulong(i - l); b < p.n; b += step) { "
-  "mesh_pages_await(p, a, vb, tg, l, p.scalar + ((p.phase + (min(b + block, p.n) - 1) * p.step) >> p.mask), seen, looked); const ulong k = b + 4 * l; "
+  "const ulong block = " XSTR(MESH_COMBINE_LANES) " * ulong(t), step = " XSTR(MESH_COMBINE_LANES) " * ulong(g); ulong seen = 0; uint looked = 0; "
+  "if ((p.dst | p.src | p.input) % (4 * sizeof(T)) == 0) for (ulong b = " XSTR(MESH_COMBINE_LANES) " * ulong(i - l); b < p.n; b += step) { "
+  "mesh_pages_await(p, a, vb, tg, l, p.scalar + ((p.phase + (min(b + block, p.n) - 1) * p.step) >> p.mask), seen, looked); "
+  "for (uint m = 0; m < " XSTR(MESH_COMBINE_LANES) " / 4; m++) { const ulong k = b + 4 * (ulong(l) + ulong(m) * ulong(t)); if (k >= p.n) break; "
   "if (k + 4 <= p.n) { const vec<T, 4> u = mesh_payload((volatile coherent(system) device const vec<T, 4> *)(xs + k)), w = mesh_payload((volatile coherent(system) device const vec<T, 4> *)(y + k)); "
   "vec<T, 4> r; for (int c = 0; c < 4; c++) r[c] = OP(u[c], w[c], p.op); *(volatile coherent(system) device vec<T, 4> *)(x + k) = r; } "
-  "else for (ulong e = k; e < p.n; e++) x[e] = OP(mesh_payload(xs + e), mesh_payload(y + e), p.op); } "
-  "else for (ulong b = 4 * ulong(i - l); b < p.n; b += step) { const ulong end = min(b + block, p.n); "
+  "else for (ulong e = k; e < p.n; e++) x[e] = OP(mesh_payload(xs + e), mesh_payload(y + e), p.op); } } "
+  "else for (ulong b = " XSTR(MESH_COMBINE_LANES) " * ulong(i - l); b < p.n; b += step) { const ulong end = min(b + block, p.n); "
   "mesh_pages_await(p, a, vb, tg, l, p.scalar + ((p.phase + (end - 1) * p.step) >> p.mask), seen, looked); "
   "for (ulong e = b + l; e < end; e += t) x[e] = OP(mesh_payload(xs + e), mesh_payload(y + e), p.op); }\n"
   "#define COMBINE(name, T, OP) HEAD(land_##name) { ENTER(i == 0) LANDS(T, OP) }\n"
@@ -229,20 +232,22 @@ static NSString *const KERNELS =
    library's lookup takes, once a process (nccl-mesh-metal.m kernels_of) and once an install (nccl-mesh-kernels.m)
    (newFunctionWithName, an interface the library does not implement: design/rubrics.md, Strings are messages) and whose body the switch calls; the word
    its step awaits (metal_tracks: WORD_D a spin's count, in its d; WORD_A a landing's pages, in its a; 0 none); and a
-   landing's elements a thread of its block (LANES: 4 a combine's, 1 a merge's rows; 0 a step that awaits no pages), so
+   landing's elements a thread of its block (LANES: MESH_COMBINE_LANES a combine's, four vec4 a thread spaced a worker's
+   width apart, so a claim's chunk is 16 KiB of f32 times 4: design/runtime-waits-2026-10-30.md; 1 a merge's rows; 0 a step
+   that awaits no pages), so
    a landing's chunk is one block and the scheduler reads the pages that block awaits (TRACKS track_want) */
 enum { WORD_D = 1, WORD_A };
 #define KINDS_OF(X) \
   X(copy_plain_4, 0, 0) X(copy_land_4, 0, 0) X(copy_plain_1, 0, 0) X(copy_land_1, 0, 0) \
-  X(land_i8, WORD_A, 4) X(premul_i8, 0, 0) X(truncdiv_i8, 0, 0) \
-  X(land_u8, WORD_A, 4) X(premul_u8, 0, 0) X(truncdiv_u8, 0, 0) \
-  X(land_i32, WORD_A, 4) X(premul_i32, 0, 0) X(truncdiv_i32, 0, 0) \
-  X(land_u32, WORD_A, 4) X(premul_u32, 0, 0) X(truncdiv_u32, 0, 0) \
-  X(land_i64, WORD_A, 4) X(premul_i64, 0, 0) X(truncdiv_i64, 0, 0) \
-  X(land_u64, WORD_A, 4) X(premul_u64, 0, 0) X(truncdiv_u64, 0, 0) \
-  X(land_f16, WORD_A, 4) X(premul_f16, 0, 0) X(land_f32, WORD_A, 4) X(premul_f32, 0, 0) \
-  X(land_bf16, WORD_A, 4) X(premul_bf16, 0, 0) X(land_e4m3, WORD_A, 4) X(premul_e4m3, 0, 0) \
-  X(land_e5m2, WORD_A, 4) X(premul_e5m2, 0, 0) \
+  X(land_i8, WORD_A, MESH_COMBINE_LANES) X(premul_i8, 0, 0) X(truncdiv_i8, 0, 0) \
+  X(land_u8, WORD_A, MESH_COMBINE_LANES) X(premul_u8, 0, 0) X(truncdiv_u8, 0, 0) \
+  X(land_i32, WORD_A, MESH_COMBINE_LANES) X(premul_i32, 0, 0) X(truncdiv_i32, 0, 0) \
+  X(land_u32, WORD_A, MESH_COMBINE_LANES) X(premul_u32, 0, 0) X(truncdiv_u32, 0, 0) \
+  X(land_i64, WORD_A, MESH_COMBINE_LANES) X(premul_i64, 0, 0) X(truncdiv_i64, 0, 0) \
+  X(land_u64, WORD_A, MESH_COMBINE_LANES) X(premul_u64, 0, 0) X(truncdiv_u64, 0, 0) \
+  X(land_f16, WORD_A, MESH_COMBINE_LANES) X(premul_f16, 0, 0) X(land_f32, WORD_A, MESH_COMBINE_LANES) X(premul_f32, 0, 0) \
+  X(land_bf16, WORD_A, MESH_COMBINE_LANES) X(premul_bf16, 0, 0) X(land_e4m3, WORD_A, MESH_COMBINE_LANES) X(premul_e4m3, 0, 0) \
+  X(land_e5m2, WORD_A, MESH_COMBINE_LANES) X(premul_e5m2, 0, 0) \
   X(publish, 0, 0) X(spin, WORD_D, 0) X(land_merge, WORD_A, 1) X(land_merge_from, WORD_A, 1) X(present, 0, 0)
 #define KIND_ENUM(name, word, lanes) KIND_##name,
 #define KIND_NAME(name, word, lanes) #name,

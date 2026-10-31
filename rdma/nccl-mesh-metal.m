@@ -349,7 +349,7 @@ struct metal_result metal_land(struct metal_program *program, int type, int op, 
     p.scalar = pages_to_word(pages_sub(w->target, packets)) + run.packet;
     p.phase = run.phase; p.step = run.step; p.mask = run.shift;
     recording_join(program, k > 0);
-    result = dispatch(program, kind, dst, w->data, w->words, w->violation, p, type == METAL_MERGE ? run.elements : (run.elements + 3) / 4, 0);
+    result = dispatch(program, kind, dst, w->data, w->words, w->violation, p, type == METAL_MERGE ? run.elements : (run.elements + LANES[kind] - 1) / LANES[kind], 0);
     if (result.status) break;
   }
   recording_join(program, 0);
