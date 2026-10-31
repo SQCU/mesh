@@ -288,31 +288,11 @@ are required; the recurrent gather's two-slot theorem cannot be assumed.
 
 ## Ahead of time
 
-`routing.Fabric` preserves the physical multigraph and enumerates simple physical
-paths. For a declared function's pairwise byte demands, `allocate` solves a
-multi-commodity linear program: each commodity's path flows sum to its bytes,
-and each directed physical cable's aggregate load is bounded by its capacity
-times a common duration. Zero is an exact allocation value; all paths remain
-coordinates of the empirical solver even when their initial allocation is zero.
-It uses [HiGHS through SciPy](https://docs.scipy.org/doc/scipy/reference/optimize.linprog-highs.html).
-The result is the fluid model's constrained optimum, not a claim that a real
-program with dependency release times attains that duration. Integer transport
-quanta, producer times, queues, and dispatch costs remain for measured feedback.
-
-On that optimum-duration face, a convex AOT solve minimizes
-`sum_e(load_e/capacity_e - T)^2`. This equalizes service completion times,
-including unequal cables. There is no intervening minimum-hop constraint:
-Mini traffic can traverse the spare Studio links without adding any traffic to
-the Mini cut. In the 4/1/2-cable triangle with equal all-pairs demands, the
-minimum-hop solution leaves Studio cables idle; equal-finish routing can fill
-all fourteen directions at the same fluid duration. The extra hops are reported
-as wire amplification, never extra useful bandwidth. General graphs and demands
-need not admit equal completion or full utilization on every edge.
-Before realization, each node-path's flow is averaged across its parallel
-physical paths in capacity proportion. This preserves its total flow and cannot
-increase the bundle's maximum service time. It also avoids an arbitrary solver
-nullspace assigning one producer to one cable and its relayed complement to
-another, despite those cables having the same release dependencies.
+`routing.Fabric` reads the communicator's physical multigraph and each pair's simple paths from the library
+(mesh-fabric.c enumerates them once, as the communicator starts; nccl.h ncclMeshCommWritePaths). The planner's one
+solver routes a declared function's traffic over them as each group compiles (nccl-mesh.c plan_calls, mesh-plan.h
+mesh_solve; design/collective-solver-2026-10-30.md names the exact packing it is to become). The Python linear program
+and equal-finish projection that allocated path flows here were deleted with the route install (b441f820).
 
 ## Numerical operands
 
