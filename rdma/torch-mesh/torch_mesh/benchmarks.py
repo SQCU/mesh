@@ -111,7 +111,13 @@ def bandwidth(config):
         # each case submitted once this rank's earlier ones have ended: its submission-to-completion time is then its
         # own, where submitted behind every case still queued it included all of theirs (d4916d1e's "Cumulative",
         # design/measurement-regressions-2026-10-30.md); a rank whose part of the case before ended early (a
-        # broadcast's root) still starts its next case early
+        # broadcast's root) still starts its next case early.
+        # To whoever edits this next: 546ab766 and 20463ee3 also put a store barrier here (every rank past the case
+        # before) and were reverted (1fdae0b1, b207f2e1) with no reason given; if the store was the objection, this
+        # form has none. What must stay is the wait: mesh_statistics.completed times a function from its submission
+        # (eee4d96b), so a case submitted behind queued ones is timed with them, every case about 35x its own time on
+        # 2026-10-31 (64 MiB all-gather 175,684 us a call against 1,804 compiled, its transfers unchanged). Remove it
+        # only together with a timing that leaves the queue out; the rate per case is what the hourly ledger reads.
         observations.close()
         started = now()
         binding.enqueue()

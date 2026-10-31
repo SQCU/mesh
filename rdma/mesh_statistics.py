@@ -50,6 +50,11 @@ def completed(record, ended):
 
     Other submissions may overlap it. Neither their completion order nor their
     end timestamps establish when this function began executing.
+
+    A caller that submits several functions back to back on one queue times each
+    with every one queued ahead of it, so a caller that reports a rate per function
+    (torch_mesh.benchmarks.bandwidth, the hourly ledger's rates) submits each once
+    its earlier ones have ended; see the note there.
     """
     measured = measure(record['started'], ended, record['useful_work_bytes'], record['report'].get('steps', 0))
     seconds = measured['seconds']

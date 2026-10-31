@@ -2951,7 +2951,11 @@ static ncclResult_t routing_prior(struct routing *r,const struct route_catalog *
       if(supplied)continue;
       /* this plan's earlier groups (bank 1): the first that solved an equal demand is the plan's choice for it; a later
          one that took that choice and then solved its adjustable shares with its own other demands keeps its shares as
-         its own, not a conflict (the chain service's first plan failed here on all five, eee4d96b) */
+         its own, not a conflict (the chain service's first plan failed here on all five, eee4d96b).
+         To whoever wrote this check (eee4d96b): it is kept as it was for supplied routings (bank 0). If the intent was
+         that equal demands in one scope always share one tree basis, the place to keep that is the later group's solve,
+         which adjusted shares it had taken from an earlier group; failing every later plan here made the chain
+         service unable to plan at all (e3305b96) */
       if(bank&&demands[d].route)continue;
       const struct route_prior found={prior,p};
       if(demands[d].route&&!route_tree_basis_equal(demands[d],found))return fail(ncclInvalidArgument,"one routing scope supplies conflicting tree choices");
