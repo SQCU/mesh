@@ -516,10 +516,10 @@ W(t) those requests already handed to the hardware reference, the plan's window 
 - The holder gives the stream by setting bit 63 of its owner word (`MESH_STREAM_GIVEN`), and the event loop does so for
   a holder gone (its exit, the event loop's EVFILT_PROC: the death is that event, not a poll). The progress thread ends the
   holding at once at the give, or at its client's retirement: nothing more of it is posted, and its entries taken and
-  not posted are dropped. Each unit is told before it is posted (its stable physical interval in its lane's
-  ring, then its lane's count, sequentially consistent) and posted only while its holding is still its holder's (its
-  owner word not given, its client's slot its own: mesh-link.c `unit_told`). A client that gives or retires and then
-  reads the lanes' units therefore sees every unit that will ever be posted for the holding. Nothing in the bridge
+  not posted are dropped. The progress thread reads the owner word each pass (stream_turn) and posts nothing of
+  a holding once it is given; no unit is told or pinned before it is posted (design/reclamation-2026-10-30.md: the
+  holding's end is its grace period, 2548cbce). A reclaimer acquires the owner word stream_free releases, and so
+  happens-after every read of the holding's tables and words. Nothing in the bridge
   closes a holding with its peer: no message, no totals, no clock.
 - On its next pass, that pass's completions taken, the progress thread reads the stream's two lanes. Where every SEND posted has
   completed and every receive posted has landed, the holding's words are made new and the owner word goes to 0: the
