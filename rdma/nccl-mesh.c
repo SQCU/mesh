@@ -4336,6 +4336,54 @@ static void landing_afters(const struct ncclComm *comm, struct issue *u) {
   }
 }
 
+/* design/zorvek.md zinth: a call's tables as the bridge reads them, one JSON line in MESH_PLAN_RECORD's directory a
+   process (none where it is unset): each channel's peer, cable, words (sent, landed, ready: region offsets) and the
+   call's bases; each entry of each list its units, word, base (the call's base added where `relative` names one) and
+   its `after` list's (word, base) pairs; for a whole program's wait-for graph across its ranks (rdma/plan_cycles.py),
+   read once at a call's present, never by the transport */
+static void plan_record(const struct ncclComm *comm, const struct issue *owner) {
+  static FILE *out;
+  static int opened;
+  if (!opened) {
+    opened = 1;
+    const char *dir = getenv("MESH_PLAN_RECORD");
+    char path[1024];
+    if (dir && snprintf(path, sizeof path, "%s/plan-%d-%d.jsonl", dir, comm->rank, (int)getpid()) < (int)sizeof path) out = fopen(path, "w");
+  }
+  if (!out) return;
+  const char *M = (const char *)comm->attach->context.M;
+  fprintf(out, "{\"rank\":%d,\"issue\":\"%p\",\"ch\":[", comm->rank, (const void *)owner);
+  int first = 1;
+  for (uint32_t h = 0; h < comm->count; h++) {
+    const struct channel *ch = comm->channels + h;
+    const struct mesh_zwoggle *t = owner->linking[h].tables;
+    if (!t) continue;
+    const struct mesh_zwoggle_entry *e = (const struct mesh_zwoggle_entry *)(t + 1);
+    fprintf(out, "%s{\"h\":%u,\"peer\":%u,\"cable\":%u,\"sent\":%llu,\"landed\":%llu,\"ready\":%llu,\"base\":[%llu,%llu],\"lists\":[",
+            first ? "" : ",", h, ch->node, ch->cable, (unsigned long long)((const char *)ch->view.sent - M),
+            (unsigned long long)((const char *)ch->view.landed - M), (unsigned long long)((const char *)ch->view.ready - M),
+            (unsigned long long)owner->bases[2 * h], (unsigned long long)owner->bases[2 * h + 1]);
+    first = 0;
+    for (int land = 0; land < 2; land++) {
+      fprintf(out, "%s[", land ? "," : "");
+      for (uint64_t k = 0; k < t->count[land]; k++) {
+        const struct mesh_zwoggle_entry *z = e + (land ? t->count[0] : 0) + k;
+        const uint64_t base = z->entry.base + (z->relative ? owner->bases[z->relative - 1] : 0);
+        fprintf(out, "%s[%llu,%llu,%llu,[", k ? "," : "", (unsigned long long)z->entry.units, (unsigned long long)z->entry.word,
+                (unsigned long long)base);
+        const uint64_t *list = z->after ? (const uint64_t *)(M + z->after) : NULL;
+        for (uint64_t r = 0; list && r < list[0]; r++)
+          fprintf(out, "%s[%llu,%llu]", r ? "," : "", (unsigned long long)list[1 + 2 * r], (unsigned long long)list[2 + 2 * r]);
+        fprintf(out, "]]");
+      }
+      fprintf(out, "]");
+    }
+    fprintf(out, "]}");
+  }
+  fprintf(out, "]}\n");
+  fflush(out);
+}
+
 static ncclResult_t present_group(struct metal_program *program, struct ncclComm *comm, struct issue *owner, struct schedule *plans,
                                   int direct) {
   struct mesh_ctx *context = &comm->attach->context;
@@ -4420,6 +4468,7 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
     if (direct) { const ncclResult_t published = present_publish(program, ch, p); if (published) return published; }
   }
   owner->laid = 1;
+  plan_record(comm, owner);
   return ncclSuccess;
 }
 
