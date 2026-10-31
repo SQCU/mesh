@@ -213,12 +213,16 @@ static void stream_turn(struct port *port,uint32_t t){
 /* Post exact compiled SEND spans whose producer prefix is available. Actual
    frame credits and the independent pin-slot ring bound outstanding work.
    Invalid tables fail the link; no fabricated page or filler is transmitted. */
+/* the units a pass posts on a stream's lanes, each way, before it reaps completions: the time `landed`, `sent` and the
+   frame credits wait to be told (design/runtime-waits-2026-10-30.md: posting a whole window first held them about 1 ms
+   at a call's start) */
+#define MESH_PASS_UNITS 64
 static void stream_send(struct port *port,uint32_t t,uint32_t served){
   struct link *l=&port->link;
   const uint32_t k=MESH_LANE_FIRST+2*t;
   if(l->hold[t]!=HOLD_SERVE || (served>>k&3)!=3)return;
   struct walk *w=l->sending+t;
-  for(;;){
+  for(uint32_t budget=2*MESH_PASS_UNITS;budget;budget--){
     const uint32_t j=MESH_STREAM_LANES>1 && lane_page(1,l->lane[k+1].sent)<lane_page(0,l->lane[k].sent),lane=k+j;
     struct lane_state *state=l->lane+lane;
     if(state->sent-state->done>=MESH_LANE_UNITS)break;
@@ -248,7 +252,7 @@ static void stream_post(struct port *port,uint32_t t,uint32_t served){
   const uint32_t k=MESH_LANE_FIRST+2*t;
   if(l->hold[t]!=HOLD_SERVE || (served>>k&3)!=3)return;
   struct walk *w=l->landing+t;
-  for(;;){
+  for(uint32_t budget=2*MESH_PASS_UNITS;budget;budget--){
     const uint32_t j=MESH_STREAM_LANES>1 && lane_page(1,l->lane[k+1].posted)<lane_page(0,l->lane[k].posted),lane=k+j;
     struct lane_state *state=l->lane+lane;
     if(state->posted-state->got>=MESH_LANE_UNITS)break;
@@ -299,15 +303,18 @@ static void link_failed(struct port *port,int64_t code){
    stored where its completions moved it (walk_count) */
 static void link_send(struct port *port,uint32_t served){
   struct link *l=&port->link;
-  struct ibv_wc done[16];
-  const int count=l->provider.poll(l->provider.sent,16,done);
-  if(count<0){link_failed(port,EIO);return;}
+  struct ibv_wc done[64];
   uint32_t completed=0;
-  for(int i=0;i<count;i++){
-    const uint32_t lane=link_lane(l,done[i].qp_num);
-    if(lane>=MESH_LINK_LANES || !(served>>lane&1))continue;
-    if(done[i].status){link_failed(port,(int64_t)done[i].status);return;}
-    gate_retire(l->gate+lane,done[i].wr_id);l->lane[lane].done++;completed|=UINT32_C(1)<<lane;
+  /* every completion waiting, not one poll's worth a pass */
+  for(int count=64;count==64;){
+    count=l->provider.poll(l->provider.sent,64,done);
+    if(count<0){link_failed(port,EIO);return;}
+    for(int i=0;i<count;i++){
+      const uint32_t lane=link_lane(l,done[i].qp_num);
+      if(lane>=MESH_LINK_LANES || !(served>>lane&1))continue;
+      if(done[i].status){link_failed(port,(int64_t)done[i].status);return;}
+      gate_retire(l->gate+lane,done[i].wr_id);l->lane[lane].done++;completed|=UINT32_C(1)<<lane;
+    }
   }
   if(!completed)return;
   for(uint32_t t=0;t<plan_streams(l->plan);t++){
@@ -337,19 +344,22 @@ static void link_landed_bytes(const struct port *port,uint64_t bytes){
    (the stamp of every row it covers) */
 static void link_receive(struct port *port,uint32_t served){
   struct link *l=&port->link;
-  struct ibv_wc done[16];
-  const int count=l->provider.poll(l->provider.completion,16,done);
-  if(count<0){link_failed(port,EIO);return;}
-  if(count)atomic_thread_fence(memory_order_acquire);
+  struct ibv_wc done[64];
   uint32_t landed=0;
   uint64_t bytes=0;
-  for(int i=0;i<count;i++){
-    const uint32_t lane=link_lane(l,done[i].qp_num);
-    if(lane>=MESH_LINK_LANES || !(served>>lane&1))continue;
-    uint64_t status_opcode;
-    memcpy(&status_opcode,&done[i].status,sizeof status_opcode);
-    if((uint32_t)status_opcode){link_failed(port,(uint32_t)status_opcode);return;}
-    if((status_opcode>>32)&IBV_WC_RECV){lane_landed(port,lane,done[i].wr_id);landed|=UINT32_C(1)<<lane;bytes+=done[i].byte_len;}
+  /* every landing waiting, not one poll's worth a pass */
+  for(int count=64;count==64;){
+    count=l->provider.poll(l->provider.completion,64,done);
+    if(count<0){link_failed(port,EIO);return;}
+    if(count)atomic_thread_fence(memory_order_acquire);
+    for(int i=0;i<count;i++){
+      const uint32_t lane=link_lane(l,done[i].qp_num);
+      if(lane>=MESH_LINK_LANES || !(served>>lane&1))continue;
+      uint64_t status_opcode;
+      memcpy(&status_opcode,&done[i].status,sizeof status_opcode);
+      if((uint32_t)status_opcode){link_failed(port,(uint32_t)status_opcode);return;}
+      if((status_opcode>>32)&IBV_WC_RECV){lane_landed(port,lane,done[i].wr_id);landed|=UINT32_C(1)<<lane;bytes+=done[i].byte_len;}
+    }
   }
   if(!(landed>>MESH_LANE_FIRST))return;
   for(uint32_t t=0;t<plan_streams(l->plan);t++){
@@ -378,7 +388,8 @@ static void port_pass(struct port *port,uint64_t *told){
   struct link *l=&port->link;
   const uint32_t served=atomic_load_explicit(&l->served,memory_order_acquire);
   for(uint32_t t=0;served>>MESH_LANE_FIRST && t<plan_streams(l->plan);t++){
-    stream_turn(port,t);stream_send(port,t,served);stream_post(port,t,served);
+    /* its receives first: a peer's SEND is held until its receive is posted (TN3205), so ours let its SENDs go */
+    stream_turn(port,t);stream_post(port,t,served);stream_send(port,t,served);
   }
   if(served){link_receive(port,served);link_send(port,served);}
   if(epoch!=*told){port_tell(&port->seen,epoch);*told=epoch;}
