@@ -24,6 +24,10 @@ uv=$(command -v uv || echo /usr/local/mesh/bin/uv)
 installed=$(make -s -C "$source/rdma" all install) || exit 1
 [ -x "$venv/bin/python" ] || "$uv" venv -q --python "$(cat "$source/.python-version")" "$venv" || exit 1
 "$uv" pip install -q --python "$venv/bin/python" -r "$source/rdma/requirements.txt" || exit 1
+dependency_root=$("$venv/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))') || exit 1
+if ! patch -R -s -f -C -F 0 -p1 -d "$dependency_root" < "$source/rdma/torch-2.14.patch" >/dev/null 2>&1; then
+  patch -f -F 0 -p1 -d "$dependency_root" < "$source/rdma/torch-2.14.patch" || exit 1
+fi
 configuration="$support/io.mesh.bridge/configuration.plist"; renew=
 "$venv/bin/python" "$source/rdma/bridge_configuration.py" "$document" "$configuration.new" || exit 1
 if cmp -s "$configuration.new" "$configuration"; then rm -f "$configuration.new"

@@ -1,0 +1,38 @@
+The pinned Torch source exposes reduction unrolling through its existing
+compiler choices interface. Logical preparation retains reduction axes until
+ownership has selected work; later source emission keeps the upstream policy.
+Apply at dependency installation, never during function preparation/execution.
+
+--- a/torch/_inductor/choices.py
++++ b/torch/_inductor/choices.py
+@@ -127,6 +127,10 @@
+     Subclasses used with inductor_choices_class must implement uuid() for
+     cache key computation.
+     """
++
++    def reduction_unroll_threshold(self) -> int:
++        """Let a compiler phase retain reduction axes before selecting work."""
++        return config.unroll_reductions_threshold
+ 
+     def get_config_heuristics(
+         self, device_type: str | None = "cuda"
+--- a/torch/_inductor/ir.py
++++ b/torch/_inductor/ir.py
+@@ -1900,7 +1900,7 @@
+ 
+         if (
+             isinstance(reduction_numel, Integer)
+-            and int(reduction_numel) < config.unroll_reductions_threshold
++            and int(reduction_numel) < V.choices.reduction_unroll_threshold()
+             and (sympy_product(ranges) != 1 or is_gpu(device.type))
+             and reduction_type != "dot"
+             and not strict_sum
+@@ -2513,7 +2513,7 @@
+ 
+         if (
+             isinstance(reduction_numel, Integer)
+-            and int(reduction_numel) < config.unroll_reductions_threshold
++            and int(reduction_numel) < V.choices.reduction_unroll_threshold()
+             and (sympy_product(ranges) != 1 or is_gpu(device.type))
+         ):
+             unrolled_fn = Reduction._unroll_reduction_fn(
