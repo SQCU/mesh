@@ -155,3 +155,29 @@ uint32_t mesh_graph_climb(const uint32_t *parent, uint32_t vertices, uint32_t ro
   }
   return UINT32_MAX;
 }
+
+/* mesh-graph.h: the climb's visits, a cycle's return, a level's height and a mark */
+static void climb_return(void *consumer, uint32_t at, uint32_t step) {
+  uint32_t *found = consumer;
+  if (step && at == found[0] && !found[1]) found[1] = step;
+}
+uint32_t mesh_graph_cycle_length(const uint32_t *parent, uint32_t vertices, uint32_t from) {
+  uint32_t found[2] = {from, 0};
+  mesh_graph_climb(parent, vertices, UINT32_MAX, from, climb_return, found);
+  return found[1];
+}
+static void climb_height(void *consumer, uint32_t at, uint32_t step) {
+  uint32_t *height = consumer;
+  if (step && height[at] < step) height[at] = step;
+}
+void mesh_graph_tree_levels(const uint32_t *parent, uint32_t vertices, uint32_t root, uint32_t *depth, uint32_t *height) {
+  for (uint32_t v = 0; v < vertices; v++) height[v] = 0;
+  for (uint32_t v = 0; v < vertices; v++) {
+    const uint32_t steps = mesh_graph_climb(parent, vertices, root, v, climb_height, height);
+    depth[v] = steps == UINT32_MAX ? vertices : steps;
+  }
+}
+static void climb_mark(void *consumer, uint32_t at, uint32_t step) { (void)step; ((unsigned char *)consumer)[at] = 1; }
+void mesh_graph_ancestors(const uint32_t *parent, uint32_t vertices, uint32_t root, uint32_t from, unsigned char *marked) {
+  mesh_graph_climb(parent, vertices, root, from, climb_mark, marked);
+}

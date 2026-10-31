@@ -52,4 +52,12 @@ int mesh_graph_arborescence(uint32_t N, uint32_t root, uint32_t E, const uint32_
    cycle), steps 0 to `vertices` visited.  `visit` NULL: none. */
 uint32_t mesh_graph_climb(const uint32_t *parent, uint32_t vertices, uint32_t root, uint32_t from,
                           void (*visit)(void *consumer, uint32_t at, uint32_t step), void *consumer);
+/* The length of the cycle a climb from `from` returns to `from` on (the first step past 0 it meets `from` again);
+   0 where it does not within `vertices` steps. */
+uint32_t mesh_graph_cycle_length(const uint32_t *parent, uint32_t vertices, uint32_t from);
+/* A tree's levels over its parent table: depth[v] the steps from v up to `root` (`vertices` where its climb meets no
+   end), height[v] the longest climb up to v from a vertex below it (0 for a leaf). */
+void mesh_graph_tree_levels(const uint32_t *parent, uint32_t vertices, uint32_t root, uint32_t *depth, uint32_t *height);
+/* `from` and every vertex its climb meets up to `root`, marked[v] = 1 (the rest of `marked` untouched). */
+void mesh_graph_ancestors(const uint32_t *parent, uint32_t vertices, uint32_t root, uint32_t from, unsigned char *marked);
 #endif
