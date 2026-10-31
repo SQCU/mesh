@@ -144,9 +144,13 @@ struct metal_zelloth_input { void *data; size_t data_offset; void *words; size_t
 /* a wait of a sum's before it folds: an earlier sum of the same array (`after`), its done word at its blocks, its
    result this sum's own operand */
 struct metal_zelloth_wait { const struct metal_zelloth_sum *after; };
-/* a sum: its result `out`, the rank's own operand `own`, its `inputs` landings, its `waits` */
+/* where a sum's own operand lies for one of its runs: the run's first element (an earlier sum's result in `out`, or
+   the caller's send view) */
+struct metal_zelloth_own { void *buffer; size_t offset; };
+/* a sum: its result `out`, the rank's own operand `own` (each run's own `owns[r]` where its runs' pages lie in more
+   than one place: NULL, all at `own`), its `inputs` landings, its `waits` */
 struct metal_zelloth_sum { void *out; size_t out_offset; void *own; size_t own_offset; uint32_t inputs; const struct metal_zelloth_input *in;
-                           uint32_t waits; const struct metal_zelloth_wait *wait; };
+                           uint32_t waits; const struct metal_zelloth_wait *wait; const struct metal_zelloth_own *owns; };
 /* every sum of a group of one `type` and `op` in one dispatch, one threadgroup a core for all of them, after a barrier
    (no present still spinning holds a core one of them needs) */
 struct metal_result metal_zelloth(struct metal_program *, int type, int op, size_t element_bytes, uint32_t sums,
