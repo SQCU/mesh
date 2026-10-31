@@ -39,7 +39,6 @@ enum { METAL_PLAIN, METAL_LAND };
 #else
 #define METAL_HANDLE(type) void *
 #endif
-struct recording;
 struct kernels;
 struct metal_program {
   METAL_HANDLE(id<MTL4ComputeCommandEncoder>) encoder;
@@ -48,12 +47,9 @@ struct metal_program {
   METAL_HANDLE(id<MTLBuffer>) violation;
   int added;
   uint32_t polls;
-  struct recording *recording;
   struct kernels *kernels;
   /* metal_order's state: a present being dispatched, and the presents dispatched so far */
   int presenting, presented;
-  /* its group's operands declared to the caller's schedule (metal_boundary): no barrier after its pool */
-  int declared;
 };
 #undef METAL_HANDLE
 /* A step's result and its message beside it (design/rubrics.md, Strings are messages): `status` 0, or an errno, and
@@ -158,10 +154,10 @@ struct metal_result metal_zelloth(struct metal_program *, int type, int op, size
 /* The same publication as part of a group's presenting (design/zorvek.md zook): after its presents' barrier and with
    none of its own, as a later present takes none */
 struct metal_result metal_publish_presented(struct metal_program *, const struct metal_release *);
-/* The next dispatch (or recorded tracks pool) reads/writes these prepared page
+/* The next dispatch reads/writes these prepared page
    ranges. Residency and diagnostic atomic words do not imply data ordering. */
 void metal_accesses(struct metal_program *, const ncclMeshAccess *, size_t n);
-/* a group's operands, read and written, declared once to its caller's schedule in place of a barrier after its pool */
+/* a group's operands, read and written, declared once to its caller's schedule in place of a barrier after its waits */
 void metal_boundary(struct metal_program *, const ncclMeshAccess *, size_t n);
 /* A communicator's gate word (at `word` in `words`) stored `value` after one system fence, as metal_publish stores: the
    number of the group whose landings it opens (nccl-mesh.c gate_of), a count of groups and no holding's. */
@@ -177,19 +173,8 @@ struct metal_result metal_spin(struct metal_program *, const struct metal_wait *
    stores, so a group's channels' landings are awaited at once (nccl-mesh.c zabbadoo's zelloq), the next dispatch's
    barrier, or its caller's schedule, ordering what follows after all of them */
 struct metal_result metal_spins(struct metal_program *, const struct metal_wait *, size_t n);
-/* Encode the numerical groups as their last required packet arrives. The
-   prepared span lengths lower to arithmetic readiness runs (mesh-landing.h),
-   including rows split across packets. `with` supplies the other operand,
-   whether it is the original input or the existing result. No packet list is
-   read by the kernel. `summed` (NULL none), at summed_offset, is the landing channel's count of units summed: each
-   prefix of the landing's chunks summed stores there the landed count its units reach (nccl-mesh-kernels.h
-   track_summed), so a SEND of the sum names it and goes unit by unit as the sum is made. */
 struct mesh_landing_run;
-struct metal_result metal_land(struct metal_program *, int type, int op, void *dst, size_t dst_offset,
-                               void *with, size_t with_offset,
-                               size_t element_bytes, mesh_pages packets, const struct mesh_landing_run *, size_t runs, const struct metal_wait *,
-                               void *summed, size_t summed_offset);
-/* the same two steps run by the caller's kernel (nccl.h ncclMeshFused): each one's record written to the function's immutable argument pages as a Metal 4 dispatch's would be, the
+/* a publication and a landing run by the caller's kernel (nccl.h ncclMeshFused): each one's record written to the function's immutable argument pages as a Metal 4 dispatch's would be, the
    buffers it names made resident, and its six bindings' addresses given in `bound` (0 d, 1 s, 2 the record, 3 a, 4 v,
    5 progress), nothing dispatched.  The publication: d its operand (at dst), a the
    holding's counts (mesh_step_release stores `ready`).  The landing: d and s its landing
@@ -198,35 +183,6 @@ struct metal_result metal_send_deferred(struct metal_program *, void *operand, s
 struct metal_result metal_land_deferred(struct metal_program *, void *landing, size_t offset, const struct metal_wait *, uint64_t bound[6]);
 /* metal_contents: a shared buffer's host address (NULL: none, a private buffer's) */
 void *metal_contents(void *buffer);
-/* Tracks (rdma/NCCL.md "Per-channel progress"): a completion's work on its channels, recorded and then run by one
-   pool of workers, each channel progressing on its own.
-   metal_record(program, track, cursor, position, need): the steps encoded after it (metal_copy .. metal_land) become
-   item `position` of cursor `cursor` (METAL_PUBLISH, its send entries, or METAL_CONSUME, its landing entries) of track
-   `track`, in place of their dispatches, until the next metal_record; track METAL_NONE ends the recording, and the
-   steps after it are dispatched as ever.  An item runs once every metal_depend of it holds (track `other` has consumed
-   `count`), and a consumption's once its track's publications have passed send entry `need` - 1 (0: none; a combine
-   into bytes a SEND of its channel reads, nccl-mesh.c schedule_laid, unordered with the NIC's read of it); each step's
-   chunks once the word it awaits has come (a spin's count; each landing chunk's own pages; the link's ~0 is a count
-   too); a consumption's end raises its track's count to `position` + 1.  A publication's `need` is 0: nothing credits
-   it.  Each cursor runs its items in order, and neither waits on the other but by `need`.  metal_tracks: the tracks
-   recorded since the last, `tracks` of them, track t's count from consumed[t], encoded as one dispatch of workers;
-   its result (struct metal_result).  The deferred steps (metal_send_deferred, metal_land_deferred) are never
-   recorded. */
-#define METAL_NONE UINT32_MAX
-enum { METAL_PUBLISH, METAL_CONSUME };
-struct metal_result metal_record(struct metal_program *, uint32_t track, int cursor, uint64_t position, uint64_t need);
-struct metal_result metal_depend(struct metal_program *, uint32_t other, uint64_t count);
-/* the item being recorded, a combine's consumption, follows track `other`'s consumption at `position` chunk by chunk:
-   its chunk c once that one has finished its first c + 1 (the two the same elements in the same runs), in place of a
-   count of that consumption whole (metal_depend) */
-struct metal_result metal_after(struct metal_program *, uint32_t other, uint64_t position);
-struct metal_result metal_tracks(struct metal_program *, uint32_t tracks, const uint64_t *consumed);
-/* a tracks pool's records as metal_tracks laid them (`records`, its workers' end words at `ended`, `workers` of them),
-   read on a failure alone: where some worker has not ended, each open cursor's track and kind, its task, that task's
-   chunks claimed and done, its item's position, need and dependencies (each count awaited and the count now) and its
-   step's kind and awaited count, into `out`; the characters written, 0 where every worker has ended, none has begun,
-   or the words are not that pool's */
-size_t metal_tracks_open(const void *records, const void *ended, uint32_t workers, char *out, size_t room);
 /* rdma/mesh.metal as this library was built with it, then the steps' Metal text: the argument record, a deferred step's
    bindings as one record (mesh_step_binding) and mesh_step_*; what a caller's kernel compiles after */
 const char *metal_prelude(void);

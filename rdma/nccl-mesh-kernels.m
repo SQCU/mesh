@@ -1,8 +1,8 @@
 /* libnccl-mesh's kernels at build time (nccl-mesh-kernels.h; the Makefile runs it, never a process the library serves):
-   `nccl-mesh-kernels TEXT` writes the kernels' Metal text to TEXT, rdma/mesh.metal's primitives then STEPS, KERNELS,
-   TRACKS and TRACK_KERNEL, the text the Makefile compiles to libnccl-mesh.metallib (its SHA-256, with the compile
-   line's, names the kernels' files);
-   `nccl-mesh-kernels METALLIB ARCHIVE` makes every kind's pipeline (NAME, the track kernel's among them) from METALLIB
+   `nccl-mesh-kernels TEXT` writes the kernels' Metal text to TEXT, rdma/mesh.metal's primitives then STEPS and
+   KERNELS, the text the Makefile compiles to libnccl-mesh.metallib (its SHA-256, with the compile line's, names the
+   kernels' files);
+   `nccl-mesh-kernels METALLIB ARCHIVE` makes every kind's pipeline (NAME) from METALLIB
    for this machine's GPU into one binary archive serialized at ARCHIVE (absent before), whose lookups nccl-mesh-metal.m
    kernels_of takes with MTLPipelineOptionFailOnBinaryArchiveMiss.  Each fails naming what failed, exit status 1. */
 #import <Metal/Metal.h>
@@ -18,7 +18,7 @@ static int failed(const char *what, NSError *error) {
 
 static int text(const char *path) {
   NSString *primitives = [[[NSString alloc] initWithBytes:mesh_metal length:mesh_metal_len encoding:NSUTF8StringEncoding] autorelease];
-  NSString *source = [@[@(MetalCompilationPrelude()), primitives, STEPS, KERNELS, TRACKS, TRACK_KERNEL] componentsJoinedByString:@""];
+  NSString *source = [@[@(MetalCompilationPrelude()), primitives, STEPS, KERNELS] componentsJoinedByString:@""];
   NSError *error = nil;
   return [source writeToFile:@(path) atomically:YES encoding:NSUTF8StringEncoding error:&error] ? 0 : failed(path, error);
 }
@@ -31,7 +31,7 @@ static int archive(const char *library_path, const char *archive_path) {
   id<MTLBinaryArchive> made = [[device newBinaryArchiveWithDescriptor:[[MTLBinaryArchiveDescriptor new] autorelease] error:&error] autorelease];
   if (!made) return failed("a binary archive", error);
   MTLComputePipelineDescriptor *described = [[MTLComputePipelineDescriptor new] autorelease];
-  for (uint32_t kind = 0; kind < PIPELINES; kind++) {
+  for (uint32_t kind = 0; kind < KINDS; kind++) {
     described.computeFunction = [[library newFunctionWithName:@(NAME[kind])] autorelease];
     error = nil;
     if (!described.computeFunction || ![made addComputePipelineFunctionsWithDescriptor:described error:&error]) return failed(NAME[kind], error);
