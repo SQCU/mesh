@@ -370,6 +370,29 @@ def access_domain(access, work):
                 positions=None if relation is None else relation.image(domain))
 
 
+def access_owner(access, owner):
+    """Compile complete typed-field ownership into the existing index grammar.
+
+    ``owner`` is the caller's declared byte selection. A scalar belongs to it
+    only when every byte of that scalar belongs to it. This prepares a predicate
+    on the original live index; it neither reads an index page nor assigns work.
+    """
+    import sympy
+    width, extent = access['dtype'].itemsize, int(access['storage_bytes'])
+    algebra, count = owner.algebra, extent // width
+    components = algebra.map((count,), (extent,),
+        lambda scalar, byte: [f'{width} * {scalar[0]} <= {byte[0]} < {width} * ({scalar[0]} + 1)'])
+    missing = components.image(components.domain()).binary(owner, 'subtract')
+    absent = components.preimage(missing)
+    present = components.domain().binary(absent, 'subtract')
+    covered = components.image(present)
+    if not covered.equal(owner.binary(components.image(components.domain()), 'intersect')):
+        raise ValueError('a scalar read port requires complete typed owner fields; partial bytes need a byte-typed read declaration')
+    yes = algebra.map((count,), (2,), lambda x, y: [f'{y[0]} = 1']).subtract_domain(absent)
+    no = algebra.map((count,), (2,), lambda x, y: [f'{y[0]} = 0']).subtract_domain(present)
+    return sympy.Eq(symbolic_index(yes.union(no).terms(), access['index']), 1)
+
+
 def bound_access(access, work, source, source_dtype, target):
     """Compose a declared byte reach with the argument's assigned byte layout.
 
@@ -470,15 +493,28 @@ def required_layout(view, declared):
 def signature(buffers, outputs, requirements):
     """One operand schema for GPU and host declarations; no payload is read."""
     import json
+    import torch
     views = {i: TensorView.of(value) for i, value in enumerate(buffers) if value is not None}
-    declarations = {i: view.declaration(*requirements[i]) for i, view in views.items()}
     results, slots = [], []
     for index in outputs:
         value = views[index].storage
-        found = next((j for j, held in enumerate(results) if held is value), None)
+        found = next((j for j, held in enumerate(results)
+                      if held.dtype == value.dtype and torch._C._is_alias_of(held, value)), None)
         if found is None:
+            # A result handle represents its storage root. Returning the first
+            # slice would discard the other slots' offsets when fake outputs
+            # recreate that handle during capture.
+            root = value
+            while root._base is not None:
+                root = root._base
+            if root.dtype == value.dtype and root.storage_offset() == 0:
+                value = root
+            else:
+                value = value.as_strided((value.untyped_storage().nbytes() // value.element_size(),), (1,), 0)
             results.append(value); slots.append([]); found = len(results) - 1
         slots[found].append(index)
+        views[index] = replace(views[index], storage=results[found])
+    declarations = {i: view.declaration(*requirements[i]) for i, view in views.items()}
     inputs = [i for i in views if i not in outputs]
     return dict(inputs=[views[i].storage for i in inputs], input_slots=inputs, output_slots=slots,
                 output_strides=[list(value.stride()) for value in results], shapes=[list(value.shape) for value in results],

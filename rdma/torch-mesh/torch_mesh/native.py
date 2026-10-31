@@ -118,11 +118,11 @@ def linears(xs, ws, biases, acts, x1s, *, outputs=None):
     return outputs
 
 
-def product(x, w, out, *, before=(), after=(), **parameters):
+def product(x, w, out, *, before=(), after=(), declaration=None, **parameters):
     roles = dict(x=x, w=w, out=out)
     roles.update((name, parameters.pop(name)) for name in ('x1', 'bias') if name in parameters)
     _records.get().append(dict(kind='product', operands=roles, parameters=parameters,
-                              before=tuple(before), after=tuple(after)))
+                              before=tuple(before), after=tuple(after), declaration=declaration))
 
 
 def mm(x, w, *, out):
@@ -204,6 +204,12 @@ class Program:
     def append(self, schedule):
         schedule.append(self.commands)
 
+    @classmethod
+    def prepare(cls, declaration):
+        recorded = tuple(command_records(declaration['commands'], with_reaches=True))
+        return cls(_stream.Commands([record for record, _ in recorded], [reach for _, reach in recorded]),
+                   declaration['output'], declaration['pages'])
+
 
 def body_accesses(body):
     """Read the scheduler's existing scalar graph, including guarded blocks.
@@ -248,6 +254,184 @@ def body_accesses(body):
 
     visit(body.root_block, ())
     return dict(body=body, reads=tuple(reads), writes=tuple(writes), index_producers=producers)
+
+
+def cut_body_read(body, access, output, incoming, ordinal, owner):
+    """Split one cached scalar load into a page producer and its continuation.
+
+    This copies compiler graphs, including their index-producer shims. It never
+    calls the source function or captures another scalar body. Implicit index
+    dependencies participate in graph liveness alongside ordinary FX edges.
+    """
+    import copy
+    from collections import Counter, defaultdict
+    from torch._inductor.loop_body import LoopBody, LoopBodyBlock, MemoryEntry, MemoryUsageType
+    from .operand import access_owner
+
+    def cloned():
+        result = copy.copy(body)
+        result.indexing_exprs = dict(body.indexing_exprs)
+        result.indexing_exprs_name = {expr: name for name, expr in result.indexing_exprs.items()}
+        result.memory_usage = defaultdict(list)
+        result.op_counts = Counter()
+        result.indexing = None
+        nodes = {}
+        def block(value):
+            made = LoopBodyBlock.__new__(LoopBodyBlock)
+            made.body, made.graph = result, torch.fx.Graph()
+            for node in value.graph.nodes:
+                nodes[node] = made.graph.node_copy(node, lambda value: nodes[value])
+                nodes[node].meta['mesh_source_node'] = node.meta.get('mesh_source_node', node)
+            return made
+        result.root_block = block(body.root_block)
+        result.subblocks = {name: block(value) for name, value in body.subblocks.items()}
+        result.submodules = {'get_index': result.get_index,
+            **{name: value.clone(result) for name, value in body.submodules.items() if name != 'get_index'}}
+        selected = next(value for old, value in nodes.items()
+                        if old is access['node'] or old.meta.get('mesh_source_node') is access['node'])
+        return result, selected
+
+    def index(result, graph, expression):
+        name = result.indexing_exprs_name.get(expression)
+        if name is None:
+            ordinal = len(result.indexing_exprs)
+            while (name := f'index{ordinal}') in result.indexing_exprs:
+                ordinal += 1
+            result.indexing_exprs[name] = expression
+            result.indexing_exprs_name[expression] = name
+        return graph.call_module('get_index', (name,))
+
+    def finish(result, *, writes=False):
+        # get_index names its indirect scalar producer through a symbolic
+        # variable, not an FX argument. Include those exact existing edges.
+        producers = body_accesses(result)['index_producers']
+        live, blocks = set(), set()
+        def keep(node):
+            if node in live:
+                return
+            live.add(node)
+            for value in node.all_input_nodes:
+                keep(value)
+            if node.op == 'call_module' and node.target == 'get_index':
+                for symbol in result.indexing_exprs[node.args[0]].free_symbols:
+                    if symbol in producers:
+                        keep(producers[symbol]['node'])
+            elif node.op == 'call_module' and node.target in result.subblocks:
+                keep_block(result.subblocks[node.target])
+        def keep_block(block):
+            if block in blocks:
+                return
+            blocks.add(block)
+            keep(next(node for node in block.graph.nodes if node.op == 'output'))
+            if writes:
+                for node in block.graph.nodes:
+                    if node.op == 'call_method' and node.target in ('store', 'store_reduction', 'partial_accumulate'):
+                        keep(node)
+        keep_block(result.root_block)
+        result.subblocks = {name: block for name, block in result.subblocks.items() if block in blocks}
+        for block in blocks:
+            for node in reversed(tuple(block.graph.nodes)):
+                if node not in live and node.op != 'placeholder':
+                    block.graph.erase_node(node)
+            block.graph.lint()
+        used_modules = {node.target for node in live if node.op == 'call_module'}
+        result.submodules = {name: value for name, value in result.submodules.items() if name in used_modules or name == 'get_index'}
+        expressions = {node.args[0] for node in live if node.op == 'call_module' and node.target == 'get_index'}
+        result.indexing_exprs = {name: expr for name, expr in result.indexing_exprs.items() if name in expressions}
+        result.indexing_exprs_name = {expr: name for name, expr in result.indexing_exprs.items()}
+        result.memory_usage, result.op_counts = defaultdict(list), Counter()
+        kinds = {'load': MemoryUsageType.LOAD, 'load_seed': MemoryUsageType.LOAD_SEED,
+                 'store': MemoryUsageType.STORE, 'store_reduction': MemoryUsageType.STORE_REDUCTION}
+        for node in live:
+            if node.op != 'call_method':
+                continue
+            result.op_counts[node.target] += 1
+            if node.target in kinds:
+                expression = node.args[2]
+                name = expression.args[0] if isinstance(expression, torch.fx.Node) else result.add_index_expr(expression, kinds[node.target])
+                mode = node.args[4] if node.target == 'store' and len(node.args) > 4 else None
+                result.memory_usage[kinds[node.target]].append(MemoryEntry(name, node.args[1], mode))
+            elif node.target in ('index_expr', 'value_expr', 'check_bounds'):
+                kind = MemoryUsageType.CHECK_BOUNDS if node.target == 'check_bounds' else MemoryUsageType.INDEX_EXPR
+                for value in node.all_input_nodes:
+                    if value.op == 'call_module' and value.target == 'get_index':
+                        result.memory_usage[kind].append(MemoryEntry(value.args[0], None, None))
+        result.has_partial_accumulate = bool(result.op_counts['partial_accumulate'])
+        return result
+
+    prefix, selected = cloned()
+    path = []
+    def find(block):
+        if any(node is selected for node in block.graph.nodes):
+            return True
+        for node in block.graph.nodes:
+            if node.op == 'call_module' and node.target in prefix.subblocks and find(prefix.subblocks[node.target]):
+                path.append((block, node))
+                return True
+        return False
+    if not find(prefix.root_block):
+        raise ValueError('the read does not belong to the retained scalar body')
+    graph = selected.graph
+    ops = next(node for node in graph.nodes if node.op == 'placeholder')
+    masked = LoopBodyBlock.__new__(LoopBodyBlock)
+    masked.body, masked.graph = prefix, torch.fx.Graph()
+    mask_ops = masked.graph.placeholder('ops')
+    loaded_index = masked.graph.call_module('get_index', (selected.args[2].args[0],))
+    loaded = masked.graph.call_method('load', (mask_ops, access['name'], loaded_index))
+    loaded.meta['mesh_read_bits'] = True
+    masked.graph.output(loaded)
+    name = prefix.add_submodule(None, 'masked_subblock')
+    prefix.subblocks[name] = masked
+    prefix.submodules[name] = prefix.bind_masked_shim(name)
+    with graph.inserting_before(selected):
+        declared_owner = access_owner(access, owner)
+        if declared_owner in (True, False):
+            predicate = graph.call_method('constant', (ops, bool(declared_owner), torch.bool))
+        else:
+            predicate = graph.call_method('index_expr', (ops, index(prefix, graph, declared_owner), torch.bool))
+        value = graph.call_module(name, (predicate, 0))
+    selected.replace_all_uses_with(value)
+    graph.erase_node(selected)
+    next(node for node in graph.nodes if node.op == 'output').args = (value,)
+    for block, node in path:
+        node.args = (node.args[0], 0)
+        next(item for item in block.graph.nodes if item.op == 'output').args = (node,)
+    graph = prefix.root_block.graph
+    returned = next(node for node in graph.nodes if node.op == 'output')
+    ops = next(node for node in graph.nodes if node.op == 'placeholder')
+    with graph.inserting_before(returned):
+        if declared_owner == False:
+            # An empty owner contributes literal zero bits and has no source
+            # or index read. Erase those dead scalar dependencies now, rather
+            # than requiring unused argument pages in the prepared command.
+            returned.args = (graph.call_method('constant', (ops, 0, access['dtype'])),)
+        stored = graph.call_method('store', (ops, output, index(prefix, graph, ordinal), returned.args[0], None))
+    returned.args = (stored,)
+    prefix.iter_vars = [*body.iter_vars, *body.reduce_vars]
+    prefix.reduce_vars = []
+    prefix.sizes = ([*body.sizes[0], *body.sizes[1]], [])
+
+    continuation, selected = cloned()
+    with selected.graph.inserting_before(selected):
+        replacement = index(continuation, selected.graph, ordinal)
+    selected.args = (selected.args[0], incoming, replacement)
+    prefix, continuation = finish(prefix), finish(continuation, writes=True)
+    value_body = copy.copy(prefix)
+    value_body.root_block = prefix.root_block.clone(value_body)
+    value_body.root_block.graph = torch.fx.Graph()
+    values = {}
+    for node in prefix.root_block.graph.nodes:
+        if node.op == 'call_method' and node.target == 'store':
+            values[node] = values[node.args[3]]
+        else:
+            values[node] = value_body.root_block.graph.node_copy(node, values.__getitem__)
+    value_body.subblocks = {name: block.clone(value_body) for name, block in prefix.subblocks.items()}
+    value_body.submodules = {'get_index': value_body.get_index,
+        **{name: shim.clone(value_body) for name, shim in prefix.submodules.items() if name != 'get_index'}}
+    value_body.memory_usage = defaultdict(list, {kind: entries for kind, entries in prefix.memory_usage.items()
+                                               if kind != MemoryUsageType.STORE})
+    prefix.value_body = value_body
+    return prefix, continuation
 
 
 def prepare_graph(module, metadata, *, materializations=()):
@@ -319,6 +503,13 @@ def prepare_graph(module, metadata, *, materializations=()):
 
         def load(self, name, index):
             with self.access(name):
+                if getattr(V.interpreter, 'current_node', None) is not None and V.interpreter.current_node.meta.get('mesh_read_bits'):
+                    # This declared value is transported, not evaluated in a
+                    # wider arithmetic type. In particular a half/bfloat load
+                    # must preserve NaN payloads through its fixed-width port.
+                    pointer = self.args.input(name)
+                    index = self.prepare_indexing(index)
+                    return self.cse.generate(self.loads, f'{pointer}[{self.index_to_str(index)}]', dtype=V.graph.get_dtype(name))
                 return super().load(name, index)
 
         def store(self, name, index, value, mode=None):
@@ -695,7 +886,239 @@ def prepare_graph(module, metadata, *, materializations=()):
                 raise NotImplementedError(f'FX numerical commands require a declared native backend for {device}')
             return MetalSource(self)
 
+    class NativeSection:
+        """A compiler operation slice of the same retained graph and scheduler."""
+        def __init__(self, graph, operations, inputs, outputs, nodes, algebra):
+            self.graph, self.operations = graph, tuple(operations)
+            self.inputs, self.outputs = dict(inputs), tuple(outputs)
+            self.nodes = {op.get_operation_name(): nodes[op.get_operation_name()] for op in operations}
+            self.algebra, self.declared_effects, self.selected_domains = algebra, None, None
+            self.scheduler_state = None
+            self.pending_declarations = ()
+            self.source_values = graph.source_values
+
+        @contextmanager
+        def active(self):
+            import copy
+            graph, scheduler = self.graph, self.graph.scheduler
+            names = ('operations', 'graph_inputs', 'graph_inputs_original', 'graph_input_names',
+                     'graph_outputs', 'example_inputs', 'wrapper_code', 'removed_operations',
+                     'removed_buffers', 'inplaced_to_remove', 'declared_effects', 'selected_domains',
+                     'pending_declarations')
+            absent = object()
+            saved = {name: getattr(graph, name, absent) for name in names}
+            scheduled = dict(scheduler.__dict__)
+            activated = False
+            with environment(), V.set_graph_handler(graph), V.set_extern_kernel_nodes([]), mode:
+                try:
+                    graph.operations = list(self.operations)
+                    graph.graph_inputs = {name: ir.TensorBox.create(value) for name, value in self.inputs.items()}
+                    graph.graph_inputs_original, graph.graph_input_names = dict(self.inputs), list(self.inputs)
+                    graph.graph_outputs, graph.example_inputs = list(self.outputs), None
+                    graph.wrapper_code = None
+                    for name in ('removed_operations', 'removed_buffers', 'inplaced_to_remove'):
+                        setattr(graph, name, type(saved[name])())
+                    graph.declared_effects = self.declared_effects
+                    graph.selected_domains = self.selected_domains
+                    graph.pending_declarations = self.pending_declarations
+                    graph.init_wrapper_code()
+                    if self.scheduler_state is None:
+                        scheduler.prepared_nodes = {name: (copy.copy(node), node.read_writes) for name, node in self.nodes.items()}
+                        scheduler._init(graph.operations)
+                    else:
+                        scheduler.__dict__.clear(); scheduler.__dict__.update(self.scheduler_state)
+                    activated = True
+                    yield graph
+                    self.nodes = {op.get_operation_name(): scheduler.name_to_node[op.get_operation_name()]
+                                  for op in self.operations}
+                finally:
+                    if activated:
+                        self.scheduler_state = dict(scheduler.__dict__)
+                        self.pending_declarations = graph.pending_declarations
+                    scheduler.__dict__.clear(); scheduler.__dict__.update(scheduled)
+                    for name, value in saved.items():
+                        if value is absent:
+                            graph.__dict__.pop(name, None)
+                        else:
+                            setattr(graph, name, value)
+
+        def effects(self, algebra=None):
+            if self.declared_effects is None:
+                with self.active() as graph:
+                    self.declared_effects = graph.effects(self.algebra if algebra is None else algebra)
+            return self.declared_effects
+
+        def value_binding(self, value, algebra):
+            return self.graph.value_binding(value, algebra)
+
+        def select_domains(self, records):
+            self.effects()
+            with self.active() as graph:
+                graph.select_domains(records)
+                self.selected_domains = tuple(records)
+            return self
+
+        def consumer_uses(self):
+            with self.active() as graph:
+                return graph.consumer_uses()
+
+        def emit(self, operands, **placement):
+            if placement.get('storage') is None:
+                raise ValueError('a numerical section requires its declared page storage operands')
+            with self.active() as graph:
+                # The ordinary binder consumes the same named storage records
+                # for original operands, carried values and received ports.
+                bound = [placement['storage'][name]['operand'] for name in self.inputs]
+                bound_storage.clear(); storage_layouts.clear()
+                views.clear(); product_arguments.clear(); external_outputs.clear(); command_accesses.clear()
+                return graph.emit(bound, **placement)
+
+        def bind(self, operands, **placement):
+            return Program.prepare(self.emit(operands, **placement))
+
     class NativeGraph(GraphLowering):
+        def cut_reads(self, requests):
+            """Expose ordered page-result cuts in this retained scalar graph.
+
+            Requests carry immutable work and byte-owner operands. The result
+            contains ordinary numerical sections over this graph and explicit
+            output/input ports between them. No possible table envelope becomes
+            a transfer request, and no collective is chosen by this compiler.
+            """
+            import copy
+            import sympy
+            from torch._inductor import dependencies
+            from torch._inductor.loop_body import LoopBody
+            from mesh_relation import flat
+            from .layout import strides
+            from .operand import iteration_order, symbolic_index, layout_configuration
+            requests = tuple(request for request in requests if not request['work'].empty())
+            if not requests:
+                return dict(sections=(self,), boundaries=())
+            algebra = requests[0]['work'].algebra
+            with environment(), V.set_graph_handler(self), V.set_extern_kernel_nodes([]), mode:
+                original_operations = tuple(self.operations)
+                original_inputs, original_outputs = dict(self.graph_inputs), tuple(self.graph_outputs)
+                nodes = {operation.get_operation_name(): copy.copy(self.scheduler.name_to_node[operation.get_operation_name()])
+                         for operation in original_operations}
+                order = {operation.get_operation_name(): index for index, operation in enumerate(original_operations)}
+                read_order = {operation.get_operation_name(): {id(access['node']): index
+                    for index, access in enumerate(body_accesses(nodes[operation.get_operation_name()]._body)['reads'])}
+                    for operation in original_operations if isinstance(nodes[operation.get_operation_name()], SchedulerNode)}
+                requests = sorted(enumerate(requests), key=lambda pair: (
+                    order[pair[1]['effect']['operation'].get_operation_name()],
+                    read_order[pair[1]['effect']['operation'].get_operation_name()][id(pair[1]['access']['node'])]))
+                stages, boundaries, cursor, pending = [], [], 0, []
+                fields, ports = torch.fx.Graph(), {}
+
+                def node_for(operation, body, template):
+                    made = copy.copy(template)
+                    made.__dict__.pop('page_pieces', None)
+                    made._init_from_node(operation)
+                    made._body, made._sizes = body, body.sizes
+                    device = operation.get_device_or_error()
+                    made.group = device, self.scheduler.get_backend(device).group_fn(made._sizes)
+                    made.read_writes = template.declared_read_writes
+                    made.refresh_dependencies(normalize=False, need_clear_tiling_cache=True)
+                    made.declared_read_writes = made.read_writes
+                    return made
+
+                def port(value):
+                    import json
+                    name = value.get_name()
+                    binding = self.value_binding(value, algebra)
+                    key = name, binding['dtype'], json.dumps(layout_configuration(binding['view']), sort_keys=True)
+                    if key in ports:
+                        return ports[key]
+                    field = fields.placeholder(name)
+                    field.meta['val'] = torch.empty_strided(tuple(value.get_size()), tuple(value.get_stride()),
+                                                           dtype=value.get_dtype(), device=value.get_device())
+                    ports[key] = dict(field=(field, ()), binding=binding, value=value)
+                    return ports[key]
+
+                for _, request in requests:
+                    operation, access, work = request['effect']['operation'], request['access'], request['work']
+                    at = order[operation.get_operation_name()]
+                    pending.extend(original_operations[cursor:at])
+                    cursor = at
+                    template = nodes[operation.get_operation_name()]
+                    body = template._body
+                    order_relation, _ = iteration_order(work, request['domain']['work'])
+                    count = order_relation.shape[0]
+                    flatten = algebra.map(request['domain']['work'], (math.prod(request['domain']['work']),),
+                        lambda x, y: [f'{y[0]} = {flat(request["domain"]["work"], x)}'])
+                    work_ordinals = order_relation.then(flatten.inverse((math.prod(request['domain']['work']),)))
+                    flat_index = sum(var * math.prod(request['domain']['work'][axis + 1:])
+                                     for axis, var in enumerate(request['domain']['variables']))
+                    ordinal = symbolic_index(order_relation.inverse((math.prod(request['domain']['work']),)).terms(), flat_index)
+                    device, dtype = operation.get_device_or_error(), access['dtype']
+                    layout = ir.FixedLayout(device, dtype, (sympy.Integer(count),), (sympy.Integer(1),))
+                    # The ordinary Pointwise owns the cached value body. Its
+                    # scalar callable is installed below from that same body;
+                    # the source function is not invoked during construction.
+                    produced = ir.ComputedBuffer(name=None, layout=layout, data=None)
+                    self.register_buffer(produced, set_name=True)
+                    # Different rank-local cuts retain distinct compiler
+                    # operations even though each activates the same source
+                    # graph's operation slice.
+                    produced.operation_name = self.qualify_name(f'op{len(self.name_to_op)}')
+                    self.name_to_op[produced.operation_name] = produced
+                    incoming = ir.InputBuffer(name=f'{produced.get_name()}_received', layout=layout)
+                    self.name_to_buffer[incoming.get_name()] = incoming
+                    prefix, continuation = cut_body_read(body, access, produced.get_name(), incoming.get_name(), ordinal, request['owner'])
+                    # A prefix has one output per *assigned* work point. Its
+                    # compact loop enumerates precisely that supplied set,
+                    # including disconnected selections and reduction terms.
+                    variables, ranges = dependencies.index_vars_no_squeeze((count,), (), prefix='c')
+                    logical = symbolic_index(order_relation.terms(), variables[0][0])
+                    coordinates = layout_configuration(_stream.TensorLayout(request['domain']['work'], strides(request['domain']['work'])))['index_coordinates']
+                    arguments = ([symbolic_index(term, logical) for term in coordinates], [])
+                    value_body = LoopBody(prefix.value_body, arguments, ranges, *variables, allow_same_symbol_in_index=True)
+                    prefix = LoopBody(prefix, arguments, ranges, *variables, allow_same_symbol_in_index=True)
+                    # The body is already cached at the scheduler's normal
+                    # compiler boundary. Keep that cache on the new ordinary IR
+                    # buffer so all subsequent compiler queries use it.
+                    setattr(produced, '__get_default_sizes_body_cache', (prefix.sizes, prefix, (prefix.iter_vars, prefix.reduce_vars)))
+                    produced.data = ir.Pointwise(device=device, dtype=dtype,
+                        inner_fn=lambda indices, body=value_body: body(indices), ranges=(count,))
+                    produced.origins = operation.get_origins()
+                    nodes[produced.get_operation_name()] = node_for(produced, prefix, template)
+                    nodes[operation.get_operation_name()] = node_for(operation, continuation, template)
+                    pending.append(produced)
+                    stages.append(tuple(pending)); pending = []
+                    output_port, input_port = port(produced), port(incoming)
+                    boundaries.append(dict(key=request['key'], access=access, work=work,
+                        output=output_port, input=input_port, ordinals=work_ordinals,
+                        before=len(stages) - 1, after=len(stages)))
+                stages.append((*pending, *original_operations[cursor:]))
+                self.operations = list(original_operations)
+                # Ordinary intermediate values crossing a section cut keep the
+                # same named storage; only the transferred read result has a
+                # distinct receiver port.
+                received = {item['input']['value'].get_name(): item['input']['value'] for item in boundaries}
+                buffers = {**original_inputs, **self.name_to_buffer, **received}
+                produced_at = {buffer.get_name(): at for at, stage in enumerate(stages)
+                               for operation in stage for buffer in operation.get_outputs()}
+                read_names = [{dep.name for operation in stage for dep in nodes[operation.get_operation_name()].read_writes.reads}
+                              for stage in stages]
+                final_names = {value.get_name() for value in original_outputs}
+                sections = []
+                for at, stage in enumerate(stages):
+                    own = {buffer.get_name() for operation in stage for buffer in operation.get_outputs()}
+                    required_inputs = read_names[at] | (final_names if at == len(stages) - 1 else set())
+                    inputs = {name: value if isinstance(value, ir.InputBuffer) else ir.InputBuffer(name=name, layout=value.get_layout())
+                              for name, value in buffers.items() if name in required_inputs - own}
+                    needed = set().union(*read_names[at + 1:], final_names)
+                    outputs = [buffers[name] for name in produced_at if produced_at[name] == at and name in needed]
+                    outputs.extend(item['output']['value'] for item in boundaries if item['before'] == at)
+                    if at == len(stages) - 1:
+                        outputs = list(original_outputs)
+                    section = NativeSection(self, stage, inputs, outputs, nodes, algebra)
+                    section.input_ports = {name: port(value) for name, value in inputs.items()}
+                    section.output_ports = tuple(port(value) for value in outputs)
+                    sections.append(section)
+                return dict(sections=tuple(sections), boundaries=tuple(boundaries))
+
         def run_node(self, node):
             result = super().run_node(node)
             if node.op == 'output' or 'val' not in node.meta:
@@ -958,7 +1381,9 @@ def prepare_graph(module, metadata, *, materializations=()):
                             continue
                         plans = []
                         for index, plan in enumerate(scheduled.selected_products):
-                            arguments = dict(plan['parameters'], before=[], after=[])
+                            arguments = dict(plan['parameters'], before=[], after=[],
+                                declaration=dict(operation=operation, index=index,
+                                                 operands=plan['operands'], parameters=plan['parameters']))
                             for role in ('out', *[name for name in plan['operands'] if name != 'out']):
                                 use = plan['operands'][role]
                                 from .operand import relation_layout
@@ -1031,10 +1456,7 @@ def prepare_graph(module, metadata, *, materializations=()):
                         storage=dict(storage_layouts))
 
         def bind(self, operands, **placement):
-            declared = self.emit(operands, **placement)
-            recorded = tuple(command_records(declared['commands'], with_reaches=True))
-            return Program(_stream.Commands([record for record, _ in recorded], [reach for _, reach in recorded]),
-                           declared['output'], declared['pages'])
+            return Program.prepare(self.emit(operands, **placement))
 
         def effects(self, algebra=None):
             """Logical operations with one shared iteration domain per body.

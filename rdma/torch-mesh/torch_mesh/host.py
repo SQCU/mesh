@@ -52,18 +52,27 @@ def bound(node):
     return getattr(getattr(node.target, '_schema', None), 'name', '') == 'torch_mesh::host_kernel'
 
 
-def equalities(node):
-    """Named result aliases become the shared typed placement equations."""
+def describe(node):
+    """Named source/result uses from the common captured operand schema."""
     from .operand import graph_bindings
     if not bound(node):
-        return
+        return None
     arguments, uses = graph_bindings(node)
     definition = json.loads(arguments['definition'])
-    sources = {name: i for i, name in enumerate(definition['inputs'])}
-    targets = {name: i for i, name in enumerate(definition['outputs'], len(sources))}
+    sources = {name: uses[i] for i, name in enumerate(definition['inputs'])}
+    targets = {name: uses[i] for i, name in enumerate(definition['outputs'], len(sources))}
+    return dict(definition=definition, inputs=sources, outputs=targets)
+
+
+def equalities(node):
+    """Named result aliases become the shared typed placement equations."""
+    declared = describe(node)
+    if declared is None:
+        return
+    definition, sources, targets = declared['definition'], declared['inputs'], declared['outputs']
     for name, source in definition.get('output_aliases', {}).items():
-        left, left_view, _ = uses[targets[name]]
-        right, right_view, _ = uses[sources[source] if source in sources else targets[source]]
+        left, left_view, _ = targets[name]
+        right, right_view, _ = sources[source] if source in sources else targets[source]
         yield left, left_view, right, right_view
 
 

@@ -32,16 +32,21 @@ deliberate replication; backward demand selects unassigned internal work and
 declares page deliveries. The binder preserves local identities as page
 equalities, actual input pages, ordered result uses and supplied destinations.
 Source/placement preparation has reached ordinary owned native shader binding.
-Complete partial-value transitions and local-view normalization remain open.
+Partial/complete transitions now splice their captured expressions and distinct
+value versions into those forward sections. Local index-value source scopes and
+multiple storage uses of one semantic field remain open.
 
 Native scalar emission now returns passive command declarations before pipeline
 realization. The native and LiteRT consumers retain the same typed byte
 selections, explicit slots, constants and binding origins. Full encoded values
 can decode into final pages; sub-scalar requests retain their exact byte
-interpretation. The portable stage consumer is prepared, but the automatic
-LiteRT importer connection and live-read split around collectives remain open.
-Per-command access export, selector/scan declarations and pool reduction ordering
-also remain. These are source, build and preparation observations, with no new
+interpretation. The LiteRT importer now consumes those stages and their exact
+per-command accesses. Selected native results feed the existing provider input
+pages, including explicit scalar-type conversions. Retained live-read sections
+now prepare through the same page and shader binder; their ownership/collective
+and importer connection remains open. Computed-source substitution through live reads, selector/scan
+declarations and pool reduction ordering remain open. These are source, build
+and preparation observations, with no new
 numerical or performance claim. Followups 2–6 are still outstanding.
 
 ## Window relations

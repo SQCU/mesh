@@ -1,6 +1,6 @@
 # Ownership integration tickets
 
-Recorded 2026-10-30 23:14 UTC; updated 2026-10-31 00:45 UTC. The initial source
+Recorded 2026-10-30 23:14 UTC; updated 2026-10-31 02:16 UTC. The initial source
 checkpoints were mesh `64477c9f` and metal-microbench `8a4454f2`; the status below
 describes the implementation accompanying this update and its open connections.
 This divides
@@ -53,11 +53,11 @@ distributed closure remains open at the connections below.
 
 | Ticket | State at this handoff | Next connection |
 |---|---|---|
-| O1 | Selected scalar/product work, passive command emission, exact byte origins and type eligibility prepared | Live-read splitting, selector/scan declarations, pool unrolling, per-command access export |
-| O2 | Current projection starts from output requests and walks sections backward | Compile supplied section assignments forward; join local views and typed transitions |
-| O3 | Shared state expressions and ragged per-rank transition captures prepared | Splice distinct value versions into ordered per-rank sections |
-| O4 | Ordinary owned `Function` consumes selected bindings; local collective identities share pages | Bind expanded transition sections and complete joined distributed preparation |
-| O5 | Portable native consumer, typed byte ports and direct final-page decoding prepared | Connect the importer entry point, live accesses and provider/codec ownership |
+| O1 | Selected work and typed live-read sections reach ordinary page/shader preparation | Connect live-read sections to ownership/importer; selector/scan declarations and pool unrolling |
+| O2 | Supplied assignments compile forward through typed placement transitions | Local-value source scopes and multiple storage uses of one field |
+| O3 | Partial/complete value versions splice into ordered sections; captured mask-state edges compose | Connect local index-value scopes and live reads |
+| O4 | Binder consumes expanded sections and shared port relations; collective identities and assembled views share pages | Joined distributed binding, multiple storage uses and ordinary/owned preparation unification |
+| O5 | Actual importer consumes shared native stages; selected results bind existing provider pages | Live-read cuts, computed-source substitution and encoded index folding |
 | O6 | Open | Join ordinary entry points, remove superseded paths, then build and inspect preparation |
 
 None of O1–O6 is closed by a helper alone. The later whole-function measurements
@@ -217,11 +217,10 @@ requires another source capture or full numerical lowering.
 
 ## O2 — Declared work and page deliveries
 
-**Resume here:** compile supplied section assignments in producer order. The
-current `project_expressions` API seeds output requests and propagates them
-backward. That is an implementation choice to replace, not a requirement of
-the emitter or page binder. Join declared local views and typed transitions
-through the same forward connection. Explicit work assignments retain the same
+**Resume here:** join declared local views and typed transitions through the
+forward assignment compiler. `compile_assignments` visits supplied sections in
+producer order; local demand projection derives their required reads without
+moving or enlarging their assigned work. Explicit work assignments retain the same
 meaning with and without a `DTensorSpec`; delivery choices remain separate
 operands.
 
@@ -317,10 +316,12 @@ page bindings agree at numerical/collective boundaries.
 
 ## O5 — LiteRT access adapter
 
-**Resume here:** connect `prepare_e2b.indexed_source` to selected ownership/access
-lowering and the existing native/provider stage emitter. Its source adapter is
-prepared but has no live importer-stage consumer yet. Resolve the common logical
-scalar-emission handoff with O1/O4 before changing individual operators.
+**Resume here:** connect the shared live-read sections to the existing importer
+consumer. `prepare_e2b.indexed_source` already reaches retained access projection,
+selected placement and native stage emission through the actual save path.
+Those results feed ordinary provider inputs with their declared scalar types.
+Computed producers still need substitution through live reads; a staged
+UPDATE→GATHER must not materialize the whole updated table merely to select rows.
 
 The adapter returns a source graph and explicit operands. Placeholder metadata
 `mesh_litert_operand`, source-node metadata `mesh_litert_origin`, and module

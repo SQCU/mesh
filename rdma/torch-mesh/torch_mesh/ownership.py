@@ -57,6 +57,140 @@ def _source_leaves(nodes):
             yield (node, tuple(path)), value
 
 
+def port_bindings(bindings, ports, algebra):
+    """Compose semantic value coordinates with a section's actual storage.
+
+    A port selection maps local expression ordinals to the declared value's
+    coordinates. It changes neither that value's identity nor the expression's
+    scalar type, storage extent or numerical meaning.
+    """
+    result = {}
+    for key, binding in bindings.items():
+        port = ports.get(key)
+        if port is None:
+            result[key] = binding
+            continue
+        order = algebra.selection_relation(port['selection'])
+        target = port['field']
+        value = pytree.key_get(target[0].meta['val'], target[1])
+        made = dict(binding, relation=order.inverse((value.numel(),)).then(binding['relation']))
+        if target not in result:
+            result[target] = made
+        else:
+            previous = result[target]
+            if all(previous[name] == made[name] for name in ('name', 'dtype', 'storage_bytes')):
+                result[target] = dict(previous, relation=previous['relation'].union(made['relation']))
+            else:
+                raise ValueError('distinct storage ports need distinct source fields and a declared page equality')
+    return result
+
+
+def port_requests(requested, ports, algebra, *, coordinate=None, incoming=False):
+    """Transport requested coordinates across declared source-expression ports."""
+    result = {}
+    if incoming:
+        for key, positions in requested.items():
+            port = ports.get(key)
+            if port is None:
+                _union(result, key, positions)
+            else:
+                selection = port.get('selections', {}).get(coordinate, port['selection'])
+                _union(result, port['field'], algebra.selection_relation(selection).image(positions))
+    else:
+        bound = set()
+        for key, port in ports.items():
+            if port['field'] not in requested:
+                continue
+            selection = port.get('selections', {}).get(coordinate, port['selection'])
+            result[key] = algebra.selection_relation(selection).preimage(requested[port['field']])
+            bound.add(port['field'])
+        for key, positions in requested.items():
+            if key not in bound:
+                result[key] = positions
+    return result
+
+
+def section_fields(section, side):
+    ports = section.get('ports', {})
+    return tuple(dict.fromkeys(ports.get(key, {}).get('field', key)
+                              for key, _ in _source_leaves(section[side])))
+
+
+def bind_ports(section, ports, algebra):
+    """Apply the same port relation to numerical and collective sections."""
+    made = dict(section, ports=ports)
+    if not section['boundaries']:
+        for side in ('input_bindings', 'output_bindings'):
+            made[side] = port_bindings(section[side], ports, algebra)
+    return made
+
+
+def source_uses(module, replacements, results):
+    """Give distinct typed source versions their own ordinary FX inputs.
+
+    Only source edges are copied. No numerical operation is evaluated or
+    captured again. The returned port map retains original result identities.
+    """
+    import operator
+    import torch
+    from torch.fx.node import map_arg
+    graph, bound, versions, ports = torch.fx.Graph(), {}, {}, {}
+    for node in module.graph.nodes:
+        if node.op == 'placeholder':
+            made = graph.placeholder(node.name)
+            made.meta = node.meta.copy()
+            bound[node] = made
+    for replacement in replacements.values():
+        for field in replacement.values():
+            if field not in versions:
+                node, path = field
+                made = graph.placeholder(f'value_{len(versions)}')
+                made.meta['val'] = pytree.key_get(node.meta['val'], path)
+                versions[field] = made
+                ports[made, ()] = dict(field=field, selection=dict(shape=list(made.meta['val'].shape), steps=[]))
+
+    def field(node, path):
+        value, declared = bound[node], node.meta['val']
+        for key in path:
+            if isinstance(key, pytree.GetAttrKey):
+                value = graph.call_function(getattr, (value, key.name))
+            else:
+                value = graph.call_function(operator.getitem, (value, key.idx if isinstance(key, pytree.SequenceKey) else key.key))
+            declared = key.get(declared)
+            value.meta['val'] = declared
+        return value
+
+    def arguments(node, side):
+        original = getattr(node, side)
+        def replace(path, value):
+            chosen = replacements.get((node, side, tuple(path)))
+            if chosen is None:
+                return bound[value] if isinstance(value, torch.fx.Node) else value
+            return pytree.tree_map_with_path(lambda field_path, described:
+                versions[chosen[tuple(field_path)]] if tuple(field_path) in chosen else field(value, field_path)
+                if isinstance(described, torch.Tensor) else described, value.meta['val'])
+        return pytree.tree_map_with_path(replace, original)
+
+    for node in module.graph.nodes:
+        if node.op == 'placeholder':
+            continue
+        if node.op == 'output':
+            graph.output(map_arg(node.args[0], bound.__getitem__))
+            continue
+        made = graph.create_node(node.op, node.target, arguments(node, 'args'), arguments(node, 'kwargs'), node.name)
+        made.meta = node.meta.copy()
+        bound[node] = made
+    for node, made in bound.items():
+        for key, value in _source_leaves((node,)):
+            if isinstance(value, torch.Tensor):
+                ports[made, key[1]] = dict(field=results.get(key, key), selection=dict(shape=list(value.shape), steps=[]))
+    from .compilation import _source_results
+    copied = torch.fx.GraphModule(module, graph)
+    copied.meta = dict(module.meta, mesh_source_results=_source_results(module, bound))
+    metadata = tuple(node.meta['val'] for node in graph.nodes if node.op == 'placeholder')
+    return dict(graph=copied, operands=metadata), ports, bound
+
+
 def prepare_expression(expression):
     """Retain one numerical IR per section of an already captured expression.
 
@@ -81,7 +215,7 @@ def prepare_expression(expression):
         while node in aliases:
             node = aliases[node]
         return node
-    algebra = Algebra()
+    algebra = expression.get('algebra') or Algebra()
     arguments = dict(zip((node for node in module.graph.nodes if node.op == 'placeholder'),
                          expression['operands'], strict=True))
     order = {node: index for index, node in enumerate(module.graph.nodes)}
@@ -117,6 +251,48 @@ def prepare_expression(expression):
                     configuration=configuration)
     expression['prepared'] = prepared
     return prepared
+
+
+def prepare_sources(sources, algebra):
+    """Join captured state edges, then retain each declaration's own sections."""
+    import torch
+    from .compilation import compose_sources
+    for index, source in enumerate(sources):
+        for node in source['expression']['graph'].graph.nodes:
+            if node.op not in ('placeholder', 'output'):
+                node.meta['mesh_placement_site'] = index
+    joined = compose_sources([source['expression'] for source in sources])
+    ports, cuts, results = {}, [], []
+    for source, mapping in zip(sources, joined['source_maps'], strict=True):
+        for (node, path), port in source['ports'].items():
+            ports[mapping[node], path] = port
+        original = source['expression']['graph']
+        last = next(node for node in reversed(list(original.graph.nodes)) if node.op not in ('placeholder', 'output'))
+        cuts.append((mapping[last], 'after'))
+        results.extend(node for node in pytree.tree_leaves(mapping[source['expression']['result']])
+                       if isinstance(node, torch.fx.Node))
+    joined.update(algebra=algebra, cuts=tuple(cuts), materializations=tuple(results))
+    prepared = prepare_expression(joined)
+    normalized = {}
+    for (node, path), port in ports.items():
+        while node in prepared['aliases']:
+            node = prepared['aliases'][node]
+        normalized[node, path] = port
+    spans = [[] for _ in sources]
+    for section in prepared['sections']:
+        sites = {node.meta['mesh_placement_site'] for node in section['graph'].graph.nodes
+                 if node.op not in ('placeholder', 'output') and 'mesh_placement_site' in node.meta}
+        if len(sites) != 1:
+            raise ValueError('placement source section lost its declared source-order boundary')
+        spans[sites.pop()].append(bind_ports(section, normalized, algebra))
+    result = []
+    for source, sections in zip(sources, spans, strict=True):
+        outputs = set(key for section in sections for key in section_fields(section, 'outputs'))
+        uses = set(key for others in spans if others is not sections for section in others
+                   for key in section_fields(section, 'inputs'))
+        result.append(dict(source, prepared=dict(prepared, sections=tuple(sections)),
+                           state_outputs=tuple(outputs.intersection(uses).difference((source['result'],)))))
+    return tuple(result)
 
 
 def _union(mapping, key, positions):
@@ -257,7 +433,7 @@ def project_numerical(span, demands, algebra, *, constraints=None, work=None):
                 records=tuple(records), live_reads=tuple(live_reads), live_inputs=live_inputs, pending=tuple(pending))
 
 
-def compile_assignments(prepared, assignments, outputs, *, delivery, boundary_projection, constraints=None):
+def compile_assignments(prepared, assignments, outputs, *, delivery, boundary_projection, constraints=None, transitions=()):
     """Compile supplied materialized-value assignments in producer order.
 
     A section's retained equations determine its input footprint. Delivering
@@ -279,8 +455,9 @@ def compile_assignments(prepared, assignments, outputs, *, delivery, boundary_pr
                for rank, values in outputs.items()}
     sections, pending = {rank: [] for rank in assignments}, {rank: [] for rank in assignments}
     inputs, deliveries = {rank: {} for rank in assignments}, []
-    external = {identity(key) for key, _ in _source_leaves(node for node in prepared['expression']['graph'].graph.nodes
-                                                        if node.op == 'placeholder')}
+    external = set(prepared.get('external_fields', ())) or {
+        identity(key) for key, _ in _source_leaves(node for node in prepared['expression']['graph'].graph.nodes
+                                                if node.op == 'placeholder')}
     produced = {rank: {key: positions for key, positions in values.items() if key in external}
                 for rank, values in assigned.items()}
 
@@ -299,8 +476,44 @@ def compile_assignments(prepared, assignments, outputs, *, delivery, boundary_pr
                 if source in external:
                     _union(inputs[rank], source, positions)
 
+    def append(section, records):
+        route(section, {rank: record['inputs'] for rank, record in records.items()})
+        for rank, record in records.items():
+            record['section'] = section
+            sections[rank].append(record)
+            pending[rank].extend(record['pending'])
+            for key, positions in record['outputs'].items():
+                produced[rank][identity(key)] = positions
+
+    def conversion(program, needs):
+        requested = {}
+        for rank in assignments:
+            requested[rank] = {}
+            for key, positions in needs.get(rank, {}).items():
+                value = pytree.key_get(key[0].meta['val'], key[1])
+                requested[rank][key] = dict(shape=list(value.shape), steps=[['reshape', [value.numel()]],
+                                                                          ['select', 0, positions.spans()]])
+        selected = project_expressions(program['prepared'], requested, boundary_projection=boundary_projection)
+        for index, span in enumerate(program['prepared']['sections']):
+            records = {rank: projection['sections'][index] for rank, projection in selected['projections'].items()}
+            for record in records.values():
+                for key in program['state_outputs']:
+                    binding = span.get('output_bindings', {}).get(key)
+                    if binding is None:
+                        continue
+                    positions = _empty(algebra, 1)
+                    for effect in record['records']:
+                        for domain in (effect, effect.get('finish')):
+                            if domain is not None:
+                                for written in domain['writes'].values():
+                                    if written['access']['name'] == binding['name'] and written['positions'] is not None:
+                                        positions = positions.binary(written['positions'], 'union')
+                    from .operand import byte_relation
+                    record['outputs'][key] = byte_relation(binding).preimage(positions)
+            append(span, records)
+
     for section in prepared['sections']:
-        fields = tuple(key for key, _ in _source_leaves(section['outputs']))
+        fields = section_fields(section, 'outputs')
         needs = {rank: {key: values[identity(key)] for key in fields if identity(key) in values}
                  for rank, values in assigned.items()}
         for rank in assignments:
@@ -310,6 +523,12 @@ def compile_assignments(prepared, assignments, outputs, *, delivery, boundary_pr
         records = (boundary_projection(section, needs, algebra) if section['boundaries'] else
                    {rank: project_numerical(section, values, algebra, constraints=constraints.get(rank))
                     for rank, values in needs.items()})
+        sources = section['graph'].meta.get('mesh_source_results', {})
+        for program in transitions:
+            transition = program['transition']
+            if program['before'] and transition['consumer'] in sources:
+                conversion(program, {rank: {program['result']: record['inputs'][program['result']]}
+                    if program['result'] in record['inputs'] else {} for rank, record in records.items()})
         from .operand import byte_relation
         for rank, record in records.items():
             for key, reads in record.get('live_inputs', {}).items():
@@ -320,13 +539,13 @@ def compile_assignments(prepared, assignments, outputs, *, delivery, boundary_pr
                     if not read['positions'].binary(available, 'subtract').empty():
                         pending[rank].append(dict(source=source, section=section, access=read,
                                                   requirement='selected_source_reads'))
-        route(section, {rank: record['inputs'] for rank, record in records.items()})
         for rank, record in records.items():
             record.update(section=section, outputs=needs[rank])
-            sections[rank].append(record)
-            pending[rank].extend(record['pending'])
-            for key, positions in needs[rank].items():
-                produced[rank][identity(key)] = positions
+        append(section, records)
+        for program in transitions:
+            if not program['before'] and program['transition']['consumer'] in sources:
+                conversion(program, {rank: {program['result']: assigned[rank][program['result']]}
+                    for rank in assignments})
     route(None, {rank: {key: relation.image(relation.domain()) for key, relation in values.items()}
                  for rank, values in ordered.items()})
     return dict(projections={rank: dict(prepared=prepared, outputs=ordered[rank], output_selections=dict(outputs[rank]),
@@ -378,7 +597,7 @@ def project_expressions(prepared, outputs, *, delivery=None, boundary_projection
             _union(initial[rank], identity(key), relation.image(relation.domain()))
     route(None, initial)
     for section in reversed(prepared['sections']):
-        needs = {rank: {key: values[key] for key, _ in _source_leaves(section['outputs']) if key in values}
+        needs = {rank: {key: values[key] for key in section_fields(section, 'outputs') if key in values}
                  for rank, values in requested.items()}
         if section['boundaries']:
             records = boundary_projection(section, needs, algebra)
@@ -392,10 +611,8 @@ def project_expressions(prepared, outputs, *, delivery=None, boundary_projection
             for key in needs[rank]:
                 requested[rank].pop(key)
         route(section, {rank: record['inputs'] for rank, record in records.items()})
-    inputs = tuple(_source_leaves(node for node in prepared['expression']['graph'].graph.nodes
-                                  if node.op == 'placeholder'))
     return dict(projections={rank: dict(prepared=prepared, outputs=ordered[rank],
-        output_selections=selections[rank], inputs={key: values[key] for key, _ in inputs if key in values},
+        output_selections=selections[rank], inputs=dict(values),
         sections=tuple(reversed(sections[rank])), pending=tuple(pending[rank]))
         for rank, values in requested.items()}, deliveries=tuple(deliveries))
 

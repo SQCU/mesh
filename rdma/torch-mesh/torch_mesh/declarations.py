@@ -591,7 +591,7 @@ def boundary_projection(section, outputs, algebra, *, ranks=None):
     meaning independently of the routing compiler's transport Call expansion.
     """
     from torch.utils import _pytree
-    from . import backend
+    from . import backend, host
     from .operand import TensorView, byte_relation, layout_configuration
     from .collective_views import _domains
 
@@ -658,6 +658,27 @@ def boundary_projection(section, outputs, algebra, *, ranks=None):
                     result_fields=tuple(bindings(result, output_fields))))
 
     for node in section['boundaries']:
+        declared = host.describe(node)
+        if declared is not None and declared['definition']['provider'] == 'pages':
+            from dataclasses import replace
+            for target, target_layout, source, source_layout in host.equalities(node):
+                target = replace(TensorView.of(target), layout=target_layout)
+                source = replace(TensorView.of(source), layout=source_layout)
+                needed = algebra.set('{ [i] : false }', 1)
+                result_fields = bindings(target, output_fields)
+                source_fields = bindings(source, input_fields)
+                for key, relation in result_fields:
+                    if key in outputs:
+                        selected = outputs[key] if relation is None else relation.preimage(outputs[key])
+                        needed = needed.binary(selected, 'union')
+                if needed.empty():
+                    continue
+                for key, relation in source_fields:
+                    join(inputs, key, needed if relation is None else relation.image(needed))
+                records.append(dict(boundary=source_nodes.get(node, node), preserved=True,
+                    source=source, result=target, positions=needed,
+                    source_fields=tuple(source_fields), result_fields=tuple(result_fields)))
+            continue
         declaration = _collective_declaration(node)
         if declaration is None or not declaration['mathematical']:
             peers = section.get('peer_outputs', {}).get(declaration['group_name'], {}) if declaration else {}
@@ -915,14 +936,14 @@ def _gathers(target, named, outputs, group):
 
 def _boundary_work(section, projection, algebra):
     """The same selected storage operands for declared collective work."""
-    from .ownership import _source_leaves
+    from .ownership import _source_leaves, port_bindings
     from .operand import TensorView, byte_relation, layout_configuration
     from .collective_views import selected_calls
 
     def binding(value):
         view = TensorView.of(value)
-        return dict(name=value.untyped_storage()._cdata, dtype=value.dtype,
-                    storage_bytes=value.untyped_storage().nbytes(),
+        return dict(name=view.storage.untyped_storage()._cdata, dtype=view.dtype,
+                    storage_bytes=view.storage.untyped_storage().nbytes(),
                     relation=algebra.layout(layout_configuration(view.layout)))
 
     inputs = {key: binding(value) for key, value in _source_leaves(section['inputs'])
@@ -942,13 +963,13 @@ def _boundary_work(section, projection, algebra):
         return dict(binding=described, relation=relation.then(described['relation']), shape=relation.shape)
 
     for record in projection.get('records', ()):
-        group, rank = record['group'], record['group'].rank()
         if record.get('preserved'):
-            if record['rank'] == rank:
+            if 'group' not in record or record['rank'] == record['group'].rank():
                 order = algebra.selection_relation(dict(shape=[record['result'].numel()],
                     steps=[['select', 0, record['positions'].spans()]]))
                 equalities.append((use(record['source'], order), use(record['result'], order)))
             continue
+        group, rank = record['group'], record['group'].rank()
         for selected in selected_calls(record, algebra):
             roles, accesses = {}, {'reads': {}, 'writes': {}}
             work = None
@@ -969,7 +990,9 @@ def _boundary_work(section, projection, algebra):
             if (selected['identity'] and selected['call'].contributors == selected['call'].recipients):
                 continue
             commands.append(dict(group=group, group_name=record['group_name'], call=selected['call'], **roles))
-    return dict(inputs=inputs, outputs=outputs, projection=dict(storage_bytes=domains, records=tuple(records)),
+    ports = section.get('ports', {})
+    return dict(inputs=port_bindings(inputs, ports, algebra), outputs=port_bindings(outputs, ports, algebra),
+                projection=dict(storage_bytes=domains, records=tuple(records)),
                 equalities=tuple(equalities), commands=tuple(commands))
 
 
@@ -1286,7 +1309,8 @@ class BoundGraph:
             return plan
 
         local = ownership['projections'][coordinate]
-        for section, projection in zip(prepared['sections'], local['sections'], strict=True):
+        for projection in local['sections']:
+            section = projection['section']
             if not section['boundaries']:
                 input_actuals = {binding['name']: available[original(key)]['operand']
                                 for key, binding in section['input_bindings'].items() if original(key) in available}
