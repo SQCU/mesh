@@ -141,8 +141,7 @@ static inline void mesh_pages_store(_Atomic uint64_t *word,struct mesh_pages p){
 #define MESH_PAGES_LOST ((struct mesh_pages){UINT64_MAX})
 /* Each posted unit retains its actual arena interval, independent of aliases
    or allocation-row boundaries. A stable sequence identifies its ring slot;
-   a reader racing reuse conservatively retains the allocation. All pin fields
-   precede posted and the final holding check (mesh-link.c unit_told). */
+   a reader racing reuse conservatively retains the allocation. */
 struct mesh_posts { _Alignas(MESH_RECORD_ALIGNMENT) _Atomic uint64_t posted[2]; _Atomic uint64_t done[2]; };
 _Static_assert(!(MESH_LANE_UNITS&(MESH_LANE_UNITS-1)),"a ring a power of two");
 static inline int mesh_span_overlaps(struct mesh_dma_span a,struct mesh_dma_span b){
@@ -162,7 +161,7 @@ static inline int mesh_span_overlaps(struct mesh_dma_span a,struct mesh_dma_span
    outstanding or the stream never live again in the pairing, so on a live stream both ends'
    counts are equal whenever no holder holds it.  No communicator reads them; a client reads every stream's, and their
    rows and child, as it returns a lease (mesh-dataflow.c mesh_lease_return, mesh_pinned: a row a unit outstanding
-   names stays held), and the bridge tells each unit before it posts it so that read sees it (mesh-link.c unit_told).
+   names stays held).
    A holding that ended with units
    outstanding leaves its owner word MESH_STREAM_GIVEN alone (naming no client, so none takes it) and the stream not
    live for the rest of its pairing.  The holder links its calls' tables (struct mesh_zwoggle, `zwoggle`), and the
@@ -255,24 +254,14 @@ static inline _Atomic uint64_t *mesh_plane(struct hdr *m,int plane){ return (_At
 /* design/transport.md */
 /* the arena occupancy bitmap is indexed by arena page and sized by arena pages: it is not a row plane */
 static inline _Atomic uint64_t *mesh_arena_bits(struct hdr *m){ return (_Atomic uint64_t*)((unsigned char*)m+m->arena_off); }
-/* Config-time validation; no rounding, copying, or interpretation of row IDs.
-   An entry's immutable table itself must reside in the region's arena. */
+/* A span's validity, checked once where the library makes the span (place_group), never again as it is posted
+   (design/fake-guards-2026-10-30.md: a check is merited at most once, where its fact is made); no rounding, copying,
+   or interpretation of row IDs */
 static inline int mesh_dma_span_valid(const struct hdr *m,struct mesh_dma_span span){
   const uint64_t arena=(uint64_t)mesh_arena_pages(m)*m->pgsz;
   if(!span.bytes || span.bytes>UINT32_MAX || span.offset<m->data_off)return 0;
   const uint64_t at=span.offset-m->data_off;
   return at<arena && span.bytes<=arena-at && span.bytes<=MESH_DMA_EXTENT-at%MESH_DMA_EXTENT;
-}
-static inline int mesh_entry_table_valid(const struct hdr *m,struct mesh_entry e){
-  return e.units && e.spans>=m->data_off && e.spans<=m->length && !(e.spans%_Alignof(struct mesh_dma_span)) &&
-    e.units<=(m->length-e.spans)/sizeof(struct mesh_dma_span) && e.base<UINT64_MAX-e.units &&
-    (!e.word || (!(e.word%_Alignof(_Atomic uint64_t)) && e.word<=m->length-sizeof(uint64_t)));
-}
-static inline int mesh_entry_valid(const struct hdr *m,struct mesh_entry e){
-  if(!mesh_entry_table_valid(m,e))return 0;
-  const struct mesh_dma_span *spans=(const struct mesh_dma_span *)((const char *)m+e.spans);
-  for(uint64_t i=0;i<e.units;i++)if(!mesh_dma_span_valid(m,spans[i]))return 0;
-  return 1;
 }
 static inline struct mesh_page_entry *mesh_page(struct hdr *m){ return (struct mesh_page_entry*)((unsigned char*)m+m->page_off); }
 /* Preparation resolves logical page bytes to registered backing. A consumer's
