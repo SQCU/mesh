@@ -1,0 +1,15 @@
+Traceable wrappers carry storage through their inner tensors. Fake conversion
+already applies storage memoization there; zero-storage resizing must do the
+same. Resizing the wrapper placeholder can call a real device storage API.
+
+--- a/torch/_subclasses/meta_utils.py
++++ b/torch/_subclasses/meta_utils.py
+@@ -2299,7 +2299,7 @@
+             # Need to reflect this in the generated FakeTensor.
+             from torch.fx.experimental.symbolic_shapes import guard_or_false
+ 
+-            if t.storage is not None and guard_or_false(t.storage.size == 0):
++            if not t.is_traceable_wrapper_subclass and t.storage is not None and guard_or_false(t.storage.size == 0):
+                 # pyrefly: ignore [unbound-name]
+                 r.untyped_storage().resize_(0)
+ 
