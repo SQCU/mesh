@@ -398,6 +398,33 @@ int mesh_graph_row(const uint32_t *first, const uint32_t *head, uint32_t v, int 
   return 0;
 }
 
+int64_t mesh_graph_forward(const uint32_t *first, const uint32_t *head, uint32_t v, int first_edge,
+                           int (*holds)(const void *consumer, uint32_t head), const void *consumer) {
+  if (first[v] == first[v + 1]) return -1;
+  const uint32_t r = head[first_edge ? first[v] : first[v + 1] - 1];
+  return !holds || holds(consumer, r) ? (int64_t)r : -1;
+}
+
+int mesh_graph_cut_at(uint64_t delta, uint64_t a, uint64_t b, uint64_t (*weight)(const void *context, int side, uint64_t k),
+                      const void *context, uint64_t *at) {
+  uint64_t k = 0, bytes = 0;
+  for (; bytes < delta && k < a; k++) bytes += weight(context, 0, k);
+  *at = k;
+  int same = bytes == delta && k + b <= a;
+  for (uint64_t u = 0; same && u < b; u++) same = weight(context, 1, u) == weight(context, 0, k + u);
+  return same;
+}
+
+uint64_t mesh_graph_cells(const uint64_t *length, size_t n, uint64_t cell, uint64_t *segment, uint64_t *place) {
+  uint64_t q = 0;
+  for (size_t i = 0; i < n; i++) {
+    const uint64_t cells = (length[i] + cell - 1) / cell;
+    for (uint64_t k = 0; segment && k < cells; k++) { segment[q + k] = i; place[q + k] = k; }
+    q += cells;
+  }
+  return q;
+}
+
 void mesh_graph_span_reach(const struct mesh_graph_span *a, size_t n, uint64_t *reach) {
   for (size_t i = 0; i < n; i++) reach[i] = i && reach[i - 1] > a[i].end ? reach[i - 1] : a[i].end;
 }

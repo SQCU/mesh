@@ -87,6 +87,21 @@ struct mesh_graph_chain { uint64_t node, item, before, left; };
    NULL: none).  *count (NULL: not wanted) the row's edges, and *last, where it has any, its last edge's head. */
 int mesh_graph_row(const uint32_t *first, const uint32_t *head, uint32_t v, int (*visit)(void *consumer, uint32_t head),
                    void *consumer, uint32_t *count, uint32_t *last);
+/* The edge v's work goes on along (a SEND, the receive whose bytes it forwards: nccl-mesh.c send_dependencies), in the
+   same rows: the head of v's row's first edge (`first_edge`) or its last, where `holds(consumer, head)` (NULL: any);
+   -1 where v's row is empty or that head does not hold it */
+int64_t mesh_graph_forward(const uint32_t *first, const uint32_t *head, uint32_t v, int first_edge,
+                           int (*holds)(const void *consumer, uint32_t head), const void *consumer);
+/* Two cuts of one byte range into units, `a` units and, from byte `delta` of it, `b` (a landing's and a SEND that
+   forwards part of it), unit k of cut `side` (0: a's) weight(context, side, k) bytes: *at the units of a wholly before
+   or across byte delta (a's units added while their bytes stay below delta); 1 where b's units are a's from there,
+   unit for unit (delta on a unit boundary of a, each of b's units the bytes of a's at its place), else 0 */
+int mesh_graph_cut_at(uint64_t delta, uint64_t a, uint64_t b, uint64_t (*weight)(const void *context, int side, uint64_t k),
+                      const void *context, uint64_t *at);
+/* A worklist's cells in their global order (design/zorvek.md zelloth: a group's sums' blocks): n segments of length[i]
+   units, each cut in order into cells of `cell` units (its last one short); cell q's segment at segment[q] and its
+   place in that segment, in cells, at place[q] (NULL, both: counted only).  The cells' count */
+uint64_t mesh_graph_cells(const uint64_t *length, size_t n, uint64_t cell, uint64_t *segment, uint64_t *place);
 int mesh_graph_chain(struct mesh_graph_chain *cursor, uint64_t q, uint64_t (*follow)(const void *context, uint64_t node),
                      uint64_t (*items)(const void *context, uint64_t node),
                      uint64_t (*weight)(const void *context, uint64_t node, uint64_t item), const void *context,

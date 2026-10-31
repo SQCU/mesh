@@ -177,11 +177,13 @@ static NSString *const KERNELS =
   "#define COMBINE(name, T, OP) HEAD(land_##name) { ENTER(i == 0) LANDS(T, OP) }\n"
   /* design/zorvek.md zelloth: a group's sums, each element written once, by one thread, from the rank's own element
      and every contribution's for it, once all of them have landed, in whatever order they landed. The table at
-     s + p.src (GPU addresses): [0] S sums, [1] a block's elements, [2] blocks of every sum; then S sums of 8 words
-     {K inputs, R runs, own, out, its done word (its blocks published), its first block, its blocks, the word offset
-     of its payload}; a payload: K inputs {landed data, landed word, summed word (0: none)}, then R runs {first,
-     elements, K x {scalar, phase, step, shift}}: element j of a run needs scalar + ((phase + j * step) >> shift) of its
-     input's word. One threadgroup a core for the whole group (all resident), each taking blocks in their global order:
+     s + p.src (GPU addresses): [0] S sums, [1] a block's elements, [2] blocks of every sum, [3] the word offset of
+     the blocks' cells; then S sums of 8 words {K inputs, R runs, own, out, its done word (its blocks published), its
+     first block, its blocks, the word offset of its payload}; a payload: K inputs {landed data, landed word, summed
+     word (0: none)}, then R runs {first, elements, K x {scalar, phase, step, shift}}: element j of a run needs
+     scalar + ((phase + j * step) >> shift) of its input's word; then each block's cell {its sum's word offset, its
+     run's, its place in that run in blocks}, in their global order (mesh-graph.h mesh_graph_cells, laid by
+     metal_zelloth). One threadgroup a core for the whole group (all resident), each taking blocks in their global order:
      thread 0 awaits a block's inputs, the threadgroup folds it, then, once every earlier block of its sum is published
      (its done word), stores each input's summed count past it (zuuz zimped, a SEND of the sum's readiness) and the
      done word.  FOLD writes element j: ZFOLD_OP an operator's, ZFOLD_MERGE a partials merge's row of p.op floats
@@ -193,17 +195,15 @@ static NSString *const KERNELS =
   "for (uint k = 1; k < K; k++) merge_row<true>(out + row, out + row, (volatile coherent(system) device const float *)in[3 * k] + row, p.op);\n"
   "#define ZELLOTH(name, T, OP) ZELLOTH_OF(name, T, OP, ZFOLD_OP)\n"
   "#define ZELLOTH_OF(name, T, OP, FOLD) HEAD(zelloth_##name) { ENTER(i == 0) "
-  "device const ulong *z = (device const ulong *)(s + p.src); const ulong S = z[0], block = z[1], blocks = z[2], G = ulong(g) / ulong(t); "
+  "device const ulong *z = (device const ulong *)(s + p.src); const ulong block = z[1], blocks = z[2], G = ulong(g) / ulong(t); "
   "for (ulong q = ulong(i - l) / ulong(t); q < blocks; q += G) { "
-  "device const ulong *sum = z + 3; for (ulong k = 0; k < S; k++) { sum = z + 3 + 8 * k; if (q < sum[5] + sum[6]) break; } "
-  "const uint K = uint(sum[0]), R = uint(sum[1]); "
+  "device const ulong *cell = z + z[3] + 3 * q, *sum = z + cell[0], *run = z + cell[1]; "
+  "const uint K = uint(sum[0]); "
   "volatile coherent(system) device const T *own = (volatile coherent(system) device const T *)sum[2]; "
   "volatile coherent(system) device T *out = (volatile coherent(system) device T *)sum[3]; "
   "volatile coherent(system) device ulong *done = (volatile coherent(system) device ulong *)sum[4]; "
-  "device const ulong *in = z + sum[7], *runs = in + 3 * ulong(K); const ulong local = q - sum[5]; "
-  "device const ulong *run = runs; ulong at = local; "
-  "for (uint r = 0; r < R; r++) { run = runs + ulong(r) * (2 + 4 * ulong(K)); const ulong nb = (run[1] + block - 1) / block; if (at < nb) break; at -= nb; } "
-  "const ulong first = run[0], b = at * block, end = min(b + block, run[1]); "
+  "device const ulong *in = z + sum[7]; const ulong local = q - sum[5]; "
+  "const ulong first = run[0], b = cell[2] * block, end = min(b + block, run[1]); "
   "if (l == 0) for (uint k = 0; k < K && !mesh_step_failed(p, vb); k++) { device const ulong *x = run + 2 + 4 * ulong(k); "
   "const ulong want = x[0] + ((x[1] + (end - 1) * x[2]) >> x[3]); "
   "mesh_step_check(p, mesh_step_wait(p, (device uchar *)in[3 * k + 1], want, vb), want, vb); } "

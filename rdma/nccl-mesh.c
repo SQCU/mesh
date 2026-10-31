@@ -3308,13 +3308,15 @@ static int meet(const struct mesh_step *x, const struct mesh_step *y) {
    whose piece holds its own (step k not reading the send buffer in place): a COPY into the same buffer, each unit as it
    lands, or, where `summed`, a combine there, each unit once summed (that receive's prepared progress word). The form
    63a3fe3d made and bd83c006 reverted for its count, a device atomic the bridge did not see; the count is stored
-   system-coherent (nccl-mesh-kernels.h TRACK_KERNEL) */
-static int32_t forwards(const struct steps *s, uint32_t k, int summed) {
-  if (s->prior_first[k] == s->prior_first[k + 1] || (s->read && named(s->read[k]))) return -1;
-  const uint32_t r = s->prior[s->prior_first[k + 1] - 1];
-  const struct mesh_step *a = s->steps + r, *b = s->steps + k;
-  return (a->op == MESH_STEP_COPY || (summed && a->op == MESH_STEP_REDUCE)) && a->first <= b->first &&
-         b->first + b->piece.elements <= a->first + a->piece.elements ? (int32_t)r : -1;
+   system-coherent (nccl-mesh-kernels.h TRACK_KERNEL).  The walk to that receive is the graph module's
+   (mesh-graph.h mesh_graph_forward: its row's last edge); whether it holds step k's piece is forwarded()'s */
+struct forwarding { const struct steps *s; uint32_t k; int summed; };
+static int forwarded(const void *consumer, uint32_t r) {
+  const struct forwarding *f = consumer;
+  const struct steps *s = f->s;
+  const struct mesh_step *a = s->steps + r, *b = s->steps + f->k;
+  return !(s->read && named(s->read[f->k])) && (a->op == MESH_STEP_COPY || (f->summed && a->op == MESH_STEP_REDUCE)) &&
+         a->first <= b->first && b->first + b->piece.elements <= a->first + a->piece.elements;
 }
 
 /* each channel's entries for the group, each list from its 0 (mesh_group_lay: schedule_laid lays them from the last
@@ -4070,6 +4072,9 @@ static void landing_needs(struct ncclComm *comm, struct schedule *plans) {
 /* each SEND's dependency, fixed while the issue is laid and placed (its steps' priors, its lists' positions, a write's
    occurrence's packet cuts): the landing it forwards, on channel `dep_h`, its entry's base `dep_rel` past that channel's
    landing count before the group, which present_group adds.  Found once here, not at each issue's presentation */
+static uint64_t unit_bytes(const void *context, int side, uint64_t k) {
+  return ((const struct message *const *)context)[side]->spans[k].bytes;
+}
 static void send_dependencies(struct ncclComm *comm, struct schedule *plans) {
   for (uint32_t h = 0; h < comm->count; h++)
     for (size_t k = 0; k < plans[h].ins; k++) {
@@ -4083,7 +4088,11 @@ static void send_dependencies(struct ncclComm *comm, struct schedule *plans) {
       /* a sum's landing counts its units summed (zelloth, or the tracks pool: consume; no fused crossing's, no WRITE
          plan's), a partials merge's as any other's */
       const int summed = !m->c->fused && !m->c->write_binding;
-      const int32_t dependency = m->c->target && comm->rank != m->c->root ? (int32_t)s->prior[s->prior_first[m->step]] : forwards(s, m->step, summed);
+      /* a WRITE relay's SEND goes on along its first receive; any other along the last before it, where that holds its
+         piece (forwarded) */
+      const int relay = m->c->target && comm->rank != m->c->root;
+      const struct forwarding f = {s, m->step, summed};
+      const int64_t dependency = mesh_graph_forward(s->prior_first, s->prior, m->step, relay, relay ? NULL : forwarded, &f);
       m->dep_h = UINT32_MAX; m->dep_summed = 0;
       if (dependency < 0) continue;
       /* The declaration owns the frame train. The fused output sink is still
@@ -4093,16 +4102,15 @@ static void send_dependencies(struct ncclComm *comm, struct schedule *plans) {
       const uint32_t incoming = s->channel[dependency];
       const struct schedule *received = plans + incoming;
       const struct message *from = received->in + s->entry[dependency] - (repeats - 1 - repeat) * (received->ins / repeats);
-      const uint64_t delta = m->offset - from->offset;
+      /* the landing's units before the SEND's first byte, and whether the SEND's units are the landing's from there
+         (mesh-graph.h mesh_graph_cut_at over their span tables: unit_bytes) */
+      const struct message *cuts[2] = {from, m};
       mesh_pages units = {0};
-      uint64_t bytes = 0;
-      for (; bytes < delta; units.n++) bytes += from->spans[units.n].bytes;
+      const int aligned = mesh_graph_cut_at(m->offset - from->offset, from->pages.n, m->pages.n, unit_bytes, cuts, &units.n);
       /* a sum goes on unit by unit as its landing's units are summed: only where each unit of the SEND is the landing's
          unit at the same place, else once its whole landing is summed (its publication) */
       const int sum = s->steps[dependency].op == MESH_STEP_REDUCE;
-      int same = !sum || (bytes == delta && units.n + m->pages.n <= from->pages.n);
-      for (uint64_t u = 0; sum && same && u < m->pages.n; u++) same = m->spans[u].bytes == from->spans[units.n + u].bytes;
-      if (!same) continue;
+      if (sum && !aligned) continue;
       m->dep_h = incoming; m->dep_summed = sum ? from->summed_word : 0;
       m->dep_rel = pages_add(pages_sub(from->laid, from->pages), units);
     }

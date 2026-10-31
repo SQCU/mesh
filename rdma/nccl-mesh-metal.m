@@ -8,6 +8,7 @@
 #include "metal-recording.h"
 #include "mesh-landing.h"
 #include "mesh-fabric.h"
+#include "mesh-graph.h"
 #include <dlfcn.h>
 #include <errno.h>
 #include <stdarg.h>
@@ -336,35 +337,46 @@ struct metal_result metal_zelloth(struct metal_program *program, int type, int o
                                                                                            : MESH_TRANSPORT_GROUP_THREADS;
   /* a block's elements: a combine's lanes a thread, a merge's one row a thread (LANES) */
   const uint64_t block = (type == METAL_MERGE ? 1 : MESH_COMBINE_LANES) * width;
-  size_t words = 3 + 8 * (size_t)S;
+  size_t words = 4 + 8 * (size_t)S, runs = 0;
   for (uint32_t s = 0; s < S; s++) {
     if (!sum[s].inputs || !sum[s].in[0].count) return metal_failed(EINVAL);
     words += 3 * (size_t)sum[s].inputs + sum[s].in[0].count * (2 + 4 * (size_t)sum[s].inputs);
+    runs += sum[s].in[0].count;
   }
+  /* the blocks' cells in their global order: every sum's runs in order, a segment each (mesh-graph.h
+     mesh_graph_cells), each cell naming its sum's and its run's words (`of`, a run's two) */
+  uint64_t *length = malloc((runs + 1) * sizeof *length), *of = malloc((2 * runs + 1) * sizeof *of);
+  if (!length || !of) { free(length); free(of); return metal_failed(ENOMEM); }
+  size_t n = 0;
+  for (uint32_t s = 0; s < S; s++)
+    for (size_t r = 0; r < sum[s].in[0].count; r++) length[n++] = sum[s].in[0].runs[r].elements;
+  const uint64_t blocks = mesh_graph_cells(length, runs, block, NULL, NULL);
+  uint64_t *segment = malloc((blocks + 1) * sizeof *segment), *place = malloc((blocks + 1) * sizeof *place);
   struct metal_bytes table;
-  if (metal_carve((words + S) * sizeof(uint64_t), &table)) return metal_failed(ENOMEM);
-  uint64_t *z = table.contents;
-  const uint64_t base = ((id<MTLBuffer>)table.buffer).gpuAddress + table.offset;
-  metal_resident(program, table.buffer);
-  uint64_t blocks = 0;
-  size_t off = 3 + 8 * (size_t)S;
-  for (uint32_t s = 0; s < S; s++) {
+  int status = !segment || !place || metal_carve((words + 3 * blocks + S) * sizeof(uint64_t), &table) ? ENOMEM : 0;
+  uint64_t *z = status ? NULL : table.contents;
+  const uint64_t base = status ? 0 : ((id<MTLBuffer>)table.buffer).gpuAddress + table.offset;
+  if (!status) metal_resident(program, table.buffer);
+  const size_t done = words + 3 * blocks;
+  uint64_t first = 0;
+  size_t off = 4 + 8 * (size_t)S, g = 0;
+  for (uint32_t s = 0; !status && s < S; s++) {
     const struct metal_zelloth_sum *x = sum + s;
     const uint32_t K = x->inputs;
     const size_t R = x->in[0].count;
     uint64_t mine = 0, elements = 0;
     for (size_t r = 0; r < R; r++) { mine += (x->in[0].runs[r].elements + block - 1) / block; elements = x->in[0].runs[r].first + x->in[0].runs[r].elements; }
-    uint64_t *h = z + 3 + 8 * (size_t)s;
-    z[words + s] = 0;
+    uint64_t *h = z + 4 + 8 * (size_t)s;
+    z[done + s] = 0;
     h[0] = K; h[1] = R; h[2] = ((id<MTLBuffer>)x->own).gpuAddress + x->own_offset; h[3] = ((id<MTLBuffer>)x->out).gpuAddress + x->out_offset;
-    h[4] = base + (words + s) * sizeof(uint64_t); h[5] = blocks; h[6] = mine; h[7] = off;
+    h[4] = base + (done + s) * sizeof(uint64_t); h[5] = first; h[6] = mine; h[7] = off;
     const ncclMeshAccess uses[] = {{{x->own, x->own_offset}, elements * element_bytes, ncclMeshAccessRead},
                                    {{x->out, x->out_offset}, elements * element_bytes, ncclMeshAccessWritten}};
     metal_accesses(program, uses, sizeof uses / sizeof *uses);
     uint64_t *in = z + off;
-    for (uint32_t i = 0; i < K; i++) {
+    for (uint32_t i = 0; !status && i < K; i++) {
       const struct metal_zelloth_input *y = x->in + i;
-      if (y->count != R) return metal_failed(EINVAL);
+      if (y->count != R) { status = EINVAL; break; }
       in[3 * i] = ((id<MTLBuffer>)y->data).gpuAddress + y->data_offset;
       in[3 * i + 1] = ((id<MTLBuffer>)y->words).gpuAddress + y->word;
       in[3 * i + 2] = y->summed ? ((id<MTLBuffer>)y->summed).gpuAddress + y->summed_offset : 0;
@@ -373,21 +385,32 @@ struct metal_result metal_zelloth(struct metal_program *program, int type, int o
         {{y->summed, y->summed_offset}, y->summed ? sizeof(uint64_t) : 0, ncclMeshAccessWritten}};
       metal_accesses(program, inputs, sizeof inputs / sizeof *inputs);
     }
-    for (size_t r = 0; r < R; r++) {
-      uint64_t *run = in + 3 * (size_t)K + r * (2 + 4 * (size_t)K);
+    for (size_t r = 0; !status && r < R; r++, g++) {
+      const size_t at = off + 3 * (size_t)K + r * (2 + 4 * (size_t)K);
+      uint64_t *run = z + at;
+      of[2 * g] = 4 + 8 * (size_t)s; of[2 * g + 1] = at;
       run[0] = x->in[0].runs[r].first; run[1] = x->in[0].runs[r].elements;
       for (uint32_t i = 0; i < K; i++) {
         const struct mesh_landing_run *y = x->in[i].runs + r;
-        if (y->first != run[0] || y->elements != run[1]) return metal_failed(EINVAL);
+        if (y->first != run[0] || y->elements != run[1]) { status = EINVAL; break; }
         uint64_t *w = run + 2 + 4 * (size_t)i;
         w[0] = pages_to_word(pages_sub(x->in[i].target, x->in[i].packets)) + y->packet; w[1] = y->phase; w[2] = y->step; w[3] = y->shift;
       }
     }
-    blocks += mine;
+    first += mine;
     off += 3 * (size_t)K + R * (2 + 4 * (size_t)K);
   }
-  z[0] = S; z[1] = block; z[2] = blocks;
-  metal_done((const _Atomic uint64_t *)(z + words), S, 1);
+  if (!status) {
+    mesh_graph_cells(length, runs, block, segment, place);
+    for (uint64_t q = 0; q < blocks; q++) {
+      uint64_t *cell = z + words + 3 * q;
+      cell[0] = of[2 * segment[q]]; cell[1] = of[2 * segment[q] + 1]; cell[2] = place[q];
+    }
+    z[0] = S; z[1] = block; z[2] = blocks; z[3] = words;
+    metal_done((const _Atomic uint64_t *)(z + done), S, 1);
+  }
+  free(length); free(of); free(segment); free(place);
+  if (status) return metal_failed(status);
   uint64_t bound[6];
   struct args p = {.src = table.offset, .op = (uint32_t)op, .polls = program->polls, .channel = channel, .at = at};
   const struct metal_result recorded = record4(program, (id<MTLBuffer>)sum[0].out, (id<MTLBuffer>)table.buffer, nil, program->violation, p, bound);
