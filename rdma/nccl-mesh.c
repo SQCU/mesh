@@ -3247,7 +3247,10 @@ struct message { struct call *c; uint32_t step, frame; uint64_t entry; mesh_page
                  /* a SEND's landing it forwards: its channel (UINT32_MAX none) and its base past that channel's landing
                     count before the group (send_dependencies) */
                  uint32_t dep_h; mesh_pages dep_rel; uint64_t dep_summed;
-                 uint64_t after; /* a landing's channels whose SENDs read the caller's pages it lands into (landing_readers) */ };
+                 uint64_t after; /* a landing's channels whose SENDs read the caller's pages it lands into (landing_readers) */
+                 /* a SEND that follows receives it does not forward: room for its requirement list in its issue's tables
+                    (place_group; NULL none), and whether the list states them (send_requirements) */
+                 uint64_t *requirement; int required; };
 /* a group's entries on one channel, each list in its order from its first (`first`: [0] the send list's, [1] the
    landing list's), its landing entries' gate (`word` a region offset, 0 none; `base` the value it reaches: a page
    count of the holding's `ready`, or the number of a group at the communicator's gate word: gate_of), and each list's
@@ -3521,6 +3524,10 @@ struct issue { struct schedule *plans; struct steps **steps; struct inflight *gr
                   landings land into */
                struct mesh_zwoggle_after *afters; uint64_t afters_at;
                struct reader { const struct compiled *x; uint64_t instance; size_t k; uint32_t q; } *readers; size_t readers_count;
+               /* every requirement its SENDs' lists state (send_requirements): where its base is, rewritten each call
+                  past the end of the receive it names (present_group) */
+               struct requirement { struct mesh_zwoggle_after *at; const struct message *landing; } *requirements;
+               size_t requirement_count;
                struct owned owned; /* the leases its entries read, held from its placement to the next or its end */ };
 /* All operation kinds share the declared binding instances and routing basis. */
 struct compiled { struct call *calls; size_t n; uint64_t repeat; struct schedule *plans; double seconds; uint32_t period;
@@ -4023,6 +4030,19 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u) {
     length += ((2 * (size_t)comm->count + 1) * sizeof *u->bases + align - 1) / align * align;
     if (pass) u->afters = (struct mesh_zwoggle_after *)((char *)u->tables + length);
     length += ((size_t)comm->count * sizeof *u->afters + align - 1) / align * align;
+    /* each SEND whose step follows receives (its prior row), not a WRITE's nor a fused crossing's: room for its
+       requirement list (mesh.h struct mesh_zwoggle_entry `after`: a count, then a struct mesh_zwoggle_after each) */
+    for (uint32_t h = 0; h < comm->count; h++)
+      for (size_t k = 0; k < plans[h].outs; k++) {
+        struct message *x = plans[h].out + k;
+        const struct steps *st = x->c->bound;
+        uint32_t priors = 0;
+        mesh_graph_row(st->prior_first, st->prior, x->step, NULL, NULL, &priors, NULL);
+        x->requirement = NULL; x->required = 0;
+        if (!priors || x->c->write_binding || x->c->fused) continue;
+        if (pass) x->requirement = (uint64_t *)((char *)u->tables + length);
+        length += ((1 + 2 * (size_t)priors) * sizeof(uint64_t) + align - 1) / align * align;
+      }
   }
   u->laid = 0;
   size_t linked = 0;
@@ -4116,6 +4136,58 @@ static void send_dependencies(struct ncclComm *comm, struct schedule *plans) {
     }
 }
 
+/* design/zorvek.md "The pool's last users": a SEND that follows receives it does not forward (send_dependencies: none
+   holds its piece, or a sum's units do not line up with it) waits for each one's whole consumption, which the pool
+   gave it (complete: metal_depend before its publication).  Here the bridge does (mesh.h struct mesh_zwoggle_entry
+   `after`): its list in the room place_group left, one requirement for each word those receives' consumptions count,
+   a COPY's its channel's `landed`, a combine's its summed word (landing_progress), each at the latest such receive's
+   end, rewritten each call (present_group); so it is published with its presents (present_publish) and its channel's
+   later SENDs no longer wait for it on the GPU.  A receive's word unknown (a combine without one), or past 64 words:
+   no list, the SEND the pool's as before */
+/* a SEND's receive j: its message in the issue's lists (the frame the SEND's), the word its consumption counts, and
+   its place on its channel (mesh-graph.h mesh_graph_frontier's key and rank) */
+struct requiring { const struct ncclComm *comm; const struct schedule *plans; const struct message *m; const char *M; };
+static const struct message *required_of(const struct requiring *a, uint32_t j) {
+  const struct steps *s = a->m->c->bound;
+  const uint32_t q = s->channel[j], repeats = a->m->c->frames;
+  return a->plans[q].in + s->entry[j] - (repeats - 1 - a->m->frame) * (a->plans[q].ins / repeats);
+}
+static uint64_t required_word(const void *consumer, uint32_t j) {
+  const struct requiring *a = consumer;
+  const struct steps *s = a->m->c->bound;
+  return s->steps[j].op == MESH_STEP_REDUCE ? required_of(a, j)->summed_word
+                                            : (uint64_t)((const char *)a->comm->channels[s->channel[j]].view.landed - a->M);
+}
+static uint64_t required_place(const void *consumer, uint32_t j) { return required_of(consumer, j)->listed; }
+static ncclResult_t send_requirements(struct ncclComm *comm, struct issue *u) {
+  const struct schedule *plans = u->plans;
+  const char *M = (const char *)comm->attach->context.M;
+  size_t room = 0;
+  u->requirement_count = 0;
+  for (uint32_t h = 0; h < comm->count; h++)
+    for (size_t k = 0; k < plans[h].outs; k++) {
+      struct message *m = plans[h].out + k;
+      m->required = 0;
+      if (!m->requirement || m->dep_h != UINT32_MAX) continue;
+      const struct steps *s = m->c->bound;
+      const struct requiring a = {comm, plans, m, M};
+      uint32_t kept[64];
+      uint64_t words[64];
+      const int64_t n = mesh_graph_frontier(s->prior_first, s->prior, m->step, required_word, required_place, &a, 64, kept, words);
+      if (n <= 0) continue;
+      struct mesh_zwoggle_after *list = (struct mesh_zwoggle_after *)(m->requirement + 1);
+      m->requirement[0] = (uint64_t)n;
+      for (int64_t r = 0; r < n; r++) {
+        list[r] = (struct mesh_zwoggle_after){words[r], 0};
+        if (grow(&u->requirements, &room, u->requirement_count, sizeof *u->requirements))
+          return fail(ncclSystemError, "out of memory");
+        u->requirements[u->requirement_count++] = (struct requirement){list + r, required_of(&a, kept[r])};
+      }
+      m->required = 1;
+    }
+  return ncclSuccess;
+}
+
 /* Bind only true overwrite hazards. Original-input bindings are disjoint from reduction results. A landing that writes
    bytes an earlier SEND of its call reads (a COPY landing in place, a combine into its buffer) takes the compiled proof
    that the SEND's bytes arrived first (mesh-routed.c: a causal witness of that arrival), else the call fails as a
@@ -4190,7 +4262,7 @@ static ncclResult_t present_publish(struct metal_program *program, struct channe
     const struct message *m = p->out + k;
     if (!needs_publication(m)) continue;
     const struct steps *st = m->c->bound;
-    if (m->dep_h == UINT32_MAX && st->prior_first[m->step] != st->prior_first[m->step + 1]) break;
+    if (m->dep_h == UINT32_MAX && !m->required && st->prior_first[m->step] != st->prior_first[m->step + 1]) break;
     last = m;
   }
   if (last) {
@@ -4311,6 +4383,9 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
   for (uint32_t h = 0; !owner->laid && h < comm->count; h++)
     owner->afters[h].word = (uint64_t)((char *)comm->channels[h].view.sent - (char *)context->M);
   landing_afters(comm, owner);
+  /* each SEND's requirements (send_requirements): the receive each names, past its end in this call */
+  for (size_t r = 0; r < owner->requirement_count; r++)
+    owner->requirements[r].at->base = pages_to_word(owner->requirements[r].landing->end);
   /* every entry's payload and descriptor tables are held by its owner since its preparation, a prepared WRITE (its
      plan) or its issue (owned_begin), each a registration scope open on its leases: a present only advances its
      channel's use, before anything is presented */
@@ -4362,7 +4437,7 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
         metal_resident(program, plan->source_ready.buffer);
       }
       if (relative) entry.base -= owner->bases[relative - 1];
-      records[k] = (struct mesh_zwoggle_entry){entry, relative, 0};
+      records[k] = (struct mesh_zwoggle_entry){entry, relative, m->required ? lease_offset(m->requirement) : 0};
     }
     /* a landing's gate (gate_of): the channel's `ready` past its own send units, or the communicator's gate past its
        gates; ungated, none */
@@ -4485,6 +4560,7 @@ static ncclResult_t issue_place(struct ncclComm *comm, struct issue *u) {
   ncclResult_t result = place_group(comm, u);
   if (!result) result = bind_retirements(comm, u->plans);
   if (!result) { landing_needs(comm, u->plans); send_dependencies(comm, u->plans); }
+  if (!result) result = send_requirements(comm, u);
   return result;
 }
 
@@ -4678,7 +4754,7 @@ static void issue_free(struct ncclComm *comm, struct issue *u) {
   if (u->tables) ncclMemFree(u->tables);
   if (u->progress) ncclMemFree(u->progress);
   if (u->zeeb) ncclMemFree(u->zeeb);
-  free(u->steps); free(u->calls); free(u->group); free(u->landings); free(u->sent); free(u->landed); free(u->linking); free(u->readers); free(u);
+  free(u->steps); free(u->calls); free(u->group); free(u->landings); free(u->sent); free(u->landed); free(u->linking); free(u->readers); free(u->requirements); free(u);
 }
 /* a group done with: what its calls own (the list is its issue's) */
 static void inflight_free(struct inflight *g) { parts_free(g->list, g->n); }

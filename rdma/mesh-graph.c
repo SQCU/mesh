@@ -405,6 +405,23 @@ int64_t mesh_graph_forward(const uint32_t *first, const uint32_t *head, uint32_t
   return !holds || holds(consumer, r) ? (int64_t)r : -1;
 }
 
+int64_t mesh_graph_frontier(const uint32_t *first, const uint32_t *head, uint32_t v,
+                            uint64_t (*key)(const void *consumer, uint32_t head),
+                            uint64_t (*rank)(const void *consumer, uint32_t head), const void *consumer, uint32_t most,
+                            uint32_t *kept, uint64_t *keys) {
+  uint32_t n = 0;
+  for (uint32_t k = first[v]; k < first[v + 1]; k++) {
+    const uint32_t r = head[k];
+    const uint64_t at = key(consumer, r);
+    if (!at) return -1;
+    uint32_t g = 0;
+    while (g < n && keys[g] != at) g++;
+    if (g == n) { if (n == most) return -1; keys[n] = at; kept[n++] = r; }
+    else if (rank(consumer, r) > rank(consumer, kept[g])) kept[g] = r;
+  }
+  return n;
+}
+
 int mesh_graph_cut_at(uint64_t delta, uint64_t a, uint64_t b, uint64_t (*weight)(const void *context, int side, uint64_t k),
                       const void *context, uint64_t *at) {
   uint64_t k = 0, bytes = 0;

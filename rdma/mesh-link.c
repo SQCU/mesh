@@ -118,13 +118,22 @@ static struct taken *walk_chain(struct walk *w,struct mesh_stream *x,int land,st
   const struct mesh_entry e=z.entry;
   const struct mesh_zwoggle *t=tables_at(w->chain.node);
   const uint64_t base=e.base+(z.relative?((const uint64_t *)((const char *)M+t->bases))[z.relative-1]:0);
+  /* mesh.h struct mesh_zwoggle_entry `after`: a landing's channels in its call's table, a SEND's own list (its count,
+     then its requirements), either read as the requirements a mask names */
+  uint64_t after=z.after;
+  const struct mesh_zwoggle_after *afters=NULL;
+  if(z.after && land)afters=(const struct mesh_zwoggle_after *)((const char *)M+t->after);
+  else if(z.after){
+    const uint64_t *list=(const uint64_t *)((const char *)M+z.after);
+    afters=(const struct mesh_zwoggle_after *)(list+1);after=list[0]>=64?~0ull:(1ull<<list[0])-1;
+  }
   w->current=(struct taken){(const struct mesh_dma_span *)((const char *)M+e.spans),{e.units},{base},{w->chain.before},
-                            e.word?stream_words(e.word):land?NULL:&x->ready,
-                            land?z.after:0,land && z.after?(const struct mesh_zwoggle_after *)((const char *)M+t->after):NULL};
+                            e.word?stream_words(e.word):land?NULL:&x->ready,after,afters};
   return &w->current;
 }
-/* whether a landing's `after` holds (mesh.h struct mesh_zwoggle_entry): on each channel it names, the last SEND an
-   earlier call laid of its pages completed, that channel's `sent` at its call's requirement there; reads alone */
+/* whether an entry's `after` holds (mesh.h struct mesh_zwoggle_entry): a landing's, on each channel it names, the last
+   SEND an earlier call laid of its pages completed, that channel's `sent` at its call's requirement there; a SEND's,
+   each receive it follows and does not forward consumed, its word at that receive's end; reads alone */
 static int after_holds(const struct taken *e){
   for(uint64_t a=e->after;a;a&=a-1){
     const struct mesh_zwoggle_after *r=e->afters+__builtin_ctzll(a);
@@ -228,6 +237,7 @@ static void stream_send(struct port *port,uint32_t t,uint32_t served){
     const struct mesh_units q=mesh_units_sub((struct mesh_units){lane_page(j,state->sent)},w->base);
     const struct taken *e=walk_chain(w,x,0,q);
     if(!e)break;
+    if(!after_holds(e))break;
     const struct mesh_units i=mesh_units_sub(q,e->unit);
     if(!mesh_units_lt(mesh_units_add(e->base,i),mesh_units_load(e->word)))break;
     const struct mesh_dma_span bytes=e->spans[i.n];

@@ -92,6 +92,14 @@ int mesh_graph_row(const uint32_t *first, const uint32_t *head, uint32_t v, int 
    -1 where v's row is empty or that head does not hold it */
 int64_t mesh_graph_forward(const uint32_t *first, const uint32_t *head, uint32_t v, int first_edge,
                            int (*holds)(const void *consumer, uint32_t head), const void *consumer);
+/* A vertex's row reduced to its frontier (a SEND's receives, one for each word their consumptions count: nccl-mesh.c
+   send_requirements): the heads of v's edges grouped by key(consumer, head), of each group the head of greatest
+   rank(consumer, head), at most `most` groups, their heads at kept[] and keys at keys[] in first-seen order.  The
+   groups' count; -1 where a key is 0 (none known) or the groups pass `most` */
+int64_t mesh_graph_frontier(const uint32_t *first, const uint32_t *head, uint32_t v,
+                            uint64_t (*key)(const void *consumer, uint32_t head),
+                            uint64_t (*rank)(const void *consumer, uint32_t head), const void *consumer, uint32_t most,
+                            uint32_t *kept, uint64_t *keys);
 /* Two cuts of one byte range into units, `a` units and, from byte `delta` of it, `b` (a landing's and a SEND that
    forwards part of it), unit k of cut `side` (0: a's) weight(context, side, k) bytes: *at the units of a wholly before
    or across byte delta (a's units added while their bytes stay below delta); 1 where b's units are a's from there,

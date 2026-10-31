@@ -110,7 +110,10 @@ _Static_assert(sizeof(struct mesh_entry)==MESH_SIZEOF_MESH_ENTRY,"mesh_entry ABI
    lands into, so that no unit of it is posted before the call's struct mesh_zwoggle_after for channel h holds
    (`after`: their region offset, channel h's at h): that channel's `sent` (`word`, a region offset) at `base`, the end
    there of the last SEND an earlier call has laid of those pages, so it has completed: a whole requirement, the
-   holder's for those pages alone (0: none; a SEND entry's is 0) */
+   holder's for those pages alone (0: none).  A SEND entry's `after` is the region offset of its own list (0: none):
+   a count n (at most 64), then n struct mesh_zwoggle_after, every one holding (its word at its base) before any unit
+   of the SEND is posted: the whole consumption of each receive its step follows and does not forward (a COPY's
+   channel's `landed`, a combine's summed word, at that receive's end), the holder rewriting each base at each call */
 struct mesh_zwoggle_after { uint64_t word, base; };
 struct mesh_zwoggle_entry { struct mesh_entry entry; uint64_t relative, after; };
 struct mesh_zwoggle { _Atomic uint64_t next; uint64_t entries[2], count[2], bases, after; };
