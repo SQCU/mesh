@@ -202,12 +202,19 @@ static struct metal_result record4(struct metal_program *program, id<MTLBuffer> 
   return METAL_DONE;
 }
 
+/* design/runtime-waits-2026-10-30.md: the barriers a group's dispatches take are fixed by their kinds where the group
+   is compiled, never found by comparing access ranges while encoding: one before the group's first present (its
+   receives let the NIC land into bytes earlier work used) and before every other direct dispatch (an operand copy, a
+   gate, a guard's spin, a fused landing, an epilogue: each orders after what came before it), none before a later
+   present (presents write disjoint lists and wait on their predecessors' words), and the pool's before and after it
+   (metal_tracks).  3f2a90b7's placement less its barrier at an empty begin. */
+static void metal_barrier(struct metal_program *program) {
+  [(id<MTL4ComputeCommandEncoder>)program->encoder barrierAfterEncoderStages:MTLStageDispatch|MTLStageBlit
+      beforeEncoderStages:MTLStageDispatch|MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+}
 static void metal_order(struct metal_program *program) {
-  NSData *accesses=program->accesses;
-  if(MetalEncoderOrder(program->encoder,accesses.bytes,accesses.length/sizeof(struct MetalReach)))
-    [program->encoder barrierAfterEncoderStages:MTLStageDispatch|MTLStageBlit beforeEncoderStages:MTLStageDispatch|MTLStageBlit
-        visibilityOptions:MTL4VisibilityOptionDevice];
-  [(NSMutableData *)program->accesses setLength:0];
+  if (program->presenting && program->presented++) return;
+  metal_barrier(program);
 }
 
 /* The same prepared range frontier orders direct dispatches and recorded work. */
@@ -291,20 +298,18 @@ static struct args release_args(const struct metal_release *r, size_t dst_offset
   return (struct args){.dst = dst_offset, .scalar = pages_to_word(r->value), .aux = r->word, .stride = (uint32_t)pages_to_word(r->stride)};
 }
 
-static void record_accesses(struct metal_program *, const struct MetalReach *, size_t);
+/* nccl-mesh-metal.h metal_boundary: the group's operands entered in the caller's schedule's frontier, the barrier that
+   ordering may call for the pool's own, which follows (metal_tracks) */
+void metal_boundary(struct metal_program *program,const ncclMeshAccess *uses,size_t n) {
+  struct MetalReach reach[n?n:1];
+  for(size_t k=0;k<n;k++)reach[k]=(struct MetalReach){(id)uses[k].storage.buffer,uses[k].storage.offset,uses[k].bytes,
+      (uses[k].access&ncclMeshAccessRead?MetalReachRead:0)|(uses[k].access&ncclMeshAccessWritten?MetalReachWritten:0),-1};
+  if(n)MetalEncoderOrder(program->encoder,reach,n);
+  program->declared=1;
+}
+/* a dispatch's buffers made resident; their ranges order nothing here (metal_order) */
 void metal_accesses(struct metal_program *program,const ncclMeshAccess *uses,size_t n) {
-  for(size_t k=0;k<n;k++) {
-    const ncclMeshAccess use=uses[k];if(!use.bytes)continue;
-    const struct MetalReach reach={(id)use.storage.buffer,use.storage.offset,use.bytes,
-        (use.access&ncclMeshAccessRead?MetalReachRead:0)|(use.access&ncclMeshAccessWritten?MetalReachWritten:0)|
-        (use.access&ncclMeshAccessObserve?MetalReachObserve:0),-1};
-    if(recording_on(program))record_accesses(program,&reach,1);
-    else {
-      if(!program->accesses)program->accesses=[NSMutableData new];
-      [(NSMutableData *)program->accesses appendBytes:&reach length:sizeof reach];
-      metal_resident(program,use.storage.buffer);
-    }
-  }
+  for(size_t k=0;k<n;k++)if(uses[k].bytes)metal_resident(program,uses[k].storage.buffer);
 }
 struct metal_result metal_publish(struct metal_program *program, const struct metal_release *r) {
   const ncclMeshAccess use={{r->words,r->word},sizeof(uint64_t),ncclMeshAccessWritten};metal_accesses(program,&use,1);
@@ -373,20 +378,13 @@ struct host_dep { uint64_t count; uint32_t other; };
 struct host_track { uint32_t *item[2]; size_t count[2], room[2]; };
 struct recording { struct host_op *op; size_t ops, op_room; struct host_item *item; size_t items, item_room; struct host_dep *dep; size_t deps, dep_room;
                    struct host_track *track; uint32_t tracks; uint32_t current; int on, join; NSMutableSet *named;
-                   void *summed; size_t summed_offset; NSMutableData *accesses; };
+                   void *summed; size_t summed_offset; };
 
 static int recording_on(const struct metal_program *program) { return program->recording && program->recording->on; }
 static void recording_join(struct metal_program *program, int join) { if (program->recording) program->recording->join = join; }
 /* the summed word the steps recorded next take (record_step), NULL none: a combine's landing's (metal_land) */
 static void recording_summed(struct metal_program *program, void *summed, size_t offset) {
   if (program->recording) { program->recording->summed = summed; program->recording->summed_offset = offset; }
-}
-
-static void record_accesses(struct metal_program *program,const struct MetalReach *uses,size_t n) {
-  struct recording *r=program->recording;
-  if(!r->accesses)r->accesses=[NSMutableData new];
-  [r->accesses appendBytes:uses length:n*sizeof *uses];
-  for(size_t k=0;k<n;k++)[r->named addObject:uses[k].buffer];
 }
 
 static void *more(void *items, size_t *room, size_t count, size_t size) {
@@ -402,7 +400,6 @@ static void recording_free(struct recording *r) {
   for (uint32_t t = 0; t < r->tracks; t++) { free(r->track[t].item[0]); free(r->track[t].item[1]); }
   free(r->track); free(r->op); free(r->item); free(r->dep);
   [r->named release];
-  [r->accesses release];
   free(r);
 }
 
@@ -618,10 +615,11 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
     id<MTL4ComputeCommandEncoder> encoder = program->encoder;
     [encoder setComputePipelineState:state];
     [encoder setArgumentTable:program->table];
-    if(!program->accesses)program->accesses=[NSMutableData new];
-    [(NSMutableData *)program->accesses appendData:r->accesses?:[NSData data]];
-    metal_order(program);
+    metal_barrier(program);
     [encoder dispatchThreadgroups:MTLSizeMake(workers, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+    /* after the pool: a barrier, unless its group declared its operands to the caller's schedule (metal_boundary) */
+    if (!program->declared) metal_barrier(program);
+    program->declared = 0;
   }
   recording_free(r);
   return METAL_DONE;
@@ -705,10 +703,19 @@ struct metal_result metal_present(struct metal_program *program,void *lists,size
       {{words,taken},sizeof(uint64_t),ncclMeshAccessRead|ncclMeshAccessObserve},
       {{words,presented},sizeof(uint64_t),ncclMeshAccessRead|ncclMeshAccessWritten}};
     metal_accesses(program,reaches,sizeof reaches/sizeof *reaches);
+    /* the lists and words the caller's schedule orders its crossings by (3f2a90b7's declaration) */
+    const struct MetalReach declared[]={
+      {(id)lists,list_offset+slot*sizeof(struct mesh_entry),head*sizeof(struct mesh_entry),MetalReachWritten,-1},
+      {(id)lists,list_offset,(count-head)*sizeof(struct mesh_entry),MetalReachWritten,-1},
+      {(id)words,taken,sizeof(uint64_t),MetalReachRead,-1},
+      {(id)words,presented,sizeof(uint64_t),MetalReachWritten,-1}};
+    MetalEncoderReaches(program->encoder,declared,sizeof declared/sizeof *declared);
   }
+  program->presenting = 1;
   const struct metal_result result = dispatch(program,KIND_present,lists,records,words,NULL,
     (struct args){.dst=list_offset,.src=record_offset,.n=count,.scalar=first,.aux=taken,
                   .at=presented,.count=MESH_STREAM_ENTRIES},count,1);
+  program->presenting = 0;
   return result;
 }
 
@@ -717,6 +724,5 @@ void metal_end(struct metal_program *program) {
   program->recording = NULL;
   if (program->added) [program->residency commit];
   [program->encoder release]; [program->table release]; [program->residency release]; [program->violation release];
-  [program->accesses release];
 }
 

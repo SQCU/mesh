@@ -4694,6 +4694,25 @@ static ncclResult_t operand_copies(struct metal_program *program, struct ncclCom
    into recvbuff as it completes; the program's end signals `finished` where the
    library made its encoder.  Its channels' counts, its slot and the buffers its deferred steps' bindings name are made
    resident through the stream's residency set, for its dispatches and the caller's kernels alike. */
+/* a call's operands as its caller's kernels read and write them, declared once at its group's pool (metal_boundary) so
+   the caller's schedule orders those kernels, in place of a barrier after the pool: its send operand read and its result
+   written, their whole extents (design/runtime-waits-2026-10-30.md).  None for a WRITE, whose views keep the barrier */
+static size_t call_boundary(const struct call *c, ncclMeshAccess *out) {
+  if (c->target) return 0;
+  const uint32_t me = (uint32_t)c->comm->rank, N = (uint32_t)c->comm->nranks;
+  const uint64_t own = c->segments ? c->segments[me] : c->count;
+  uint64_t send = 0, recv = 0;
+  if (counted(c)) {
+    for (uint32_t q = 0; c->matrix && q < N; q++) { send += c->matrix[(size_t)me * N + q]; recv += c->matrix[(size_t)q * N + me]; }
+  } else if (c->what == MESH_ALLGATHER) { send = own; recv = elements(c); }
+  else if (c->what == MESH_REDUCE_SCATTER) { send = elements(c); recv = own; }
+  else { send = call_contributes(c) ? elements(c) : 0; recv = call_receives(c) ? elements(c) : 0; }
+  size_t made = 0;
+  if (send && named(c->send_at)) out[made++] = (ncclMeshAccess){{c->send_at.buffer, c->send_at.offset}, send * SIZE[c->type], ncclMeshAccessRead};
+  if (recv && named(c->recv_at)) out[made++] = (ncclMeshAccess){{c->recv_at.buffer, c->recv_at.offset}, recv * SIZE[c->type], ncclMeshAccessWritten};
+  return made;
+}
+
 static ncclResult_t launch_metal(struct call *list, size_t n) {
   const ncclComm_t comm = list[0].comm;
   ncclResult_t result = ncclSuccess;
@@ -4804,6 +4823,12 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     if (g->fused) {
       fusing.out = fused; fusing.room[0] = fusing.out->publishes; fusing.room[1] = fusing.out->lands;
       fusing.published = fusing.landed = 0;
+    }
+    if (!result && !g->fused && !all_writes(list, n)) {
+      ncclMeshAccess bounds[2 * n + 1];
+      size_t k = 0;
+      for (size_t i = 0; i < n; i++) k += call_boundary(list + i, bounds + k);
+      metal_boundary(program, bounds, k);
     }
     if (!result) result = complete(program, g, &published);
     if (!result && g->fused && (fusing.published != publishes || fusing.landed != lands))

@@ -1,16 +1,7 @@
-# Transaction waits and repeated encoding work, 3f2a90b7 against main (2026-10-30)
-
-Phase correction from tracing the ordinary callers: `Function` realization and
-`MeshRankPrepare` call the encode path before `MetalScheduleEnqueue`. The host
-range/page walks below are therefore repeated encoding work during preparation,
-not work done by each prepared numerical invocation. GPU waits and fences remain
-execution work. Their costs must not be combined into one runtime attribution.
-The missing shared command-graph handoff is recorded in
-[Compiler followups](compiler-followups-2026-10-30.md#dependency-handoff-through-command-lowering).
+# Every wait, sync and guard a transaction pays at run time, 3f2a90b7 against main (2026-10-30)
 
 Found by reading the issue path, the kernels and the bridge at 3f2a90b7 and at main (b2fe8bf3), not by running and
-counting. Initial declaration and routing (`compile_group` and what it calls) are left out. Encoding is included
-below as host preparation work. A
+counting. Preparation (declaration, compile_group and what it calls) is left out: it does not run per issue. A
 transaction is one physical piece: a SEND entry, its posted receive, its page units (16 KiB, block 1, so 4,096 for 64
 MiB) and the combine or copy that consumes it.
 
@@ -28,7 +19,7 @@ size; an all-reduce adds its combines' chunks, about 3,300 a rank at 64 MiB (the
 
 ## What changed, and the 64 MiB rates
 
-The bridge and the kernels are the same in both revisions; c56f21a9 changed host encoding and the barriers it emits:
+The bridge and the kernels are the same in both revisions; c56f21a9 changed only what the host does per issue:
 
 - removed: the unconditional encoder barriers (begin, after the presents, after the pool, after each direct
   dispatch), and the per-forward `lease_offset(comm->sums)` under `attach_lock`;
@@ -41,18 +32,29 @@ The bridge and the kernels are the same in both revisions; c56f21a9 changed host
   `group_lock`, on every issue, of facts fixed when the declaration bound the pages. The root frontier's reads are
   erased only by writes, so it also grows with issues.
 
-Measured once each, slowest rank, 3f2a90b7 against main at 51a6ff10: at 64 MiB all-reduce 7,511 -> 9,390 us, all-gather
-5,630 -> 6,569, exchange 5,633 -> 4,696, reduce-scatter 7,508 -> 6,574. These earlier observations do not establish
-the page walk's contribution: their interval boundaries were not inspected in this source review. Changed GPU
-barriers and repeated host preparation are different costs. The proposed runtime attribution to the page walk is
-withdrawn pending evidence that the measured interval included it.
+Measured once each, slowest rank, on all five (us a call at 64 MiB):
+
+| | 3f2a90b7 | main (51a6ff10) | compiled barriers, a barrier after the pool | compiled barriers, the operands declared instead |
+|---|---|---|---|---|
+| all-gather | 5,630 | 6,569 | 5,631 | 6,570 |
+| exchange | 5,633 | 4,696 | 5,634 | 4,697 |
+| all-reduce | 7,511 | 9,390 | 9,385 | 9,393 |
+| reduce-scatter | 7,508 | 6,574 | 6,574 | 6,576 |
+
+The per-record page walk above is real work on every issue, but it is not what moved these rates: removing it (the two
+right columns) changes no rate. The barrier after the pool does: without it consecutive calls overlap, which the
+exchange gains by and the all-gather loses by. The all-reduce's 1.9 ms is neither; it came with c56f21a9's other changes
+(its transfer order for every group, the summed word a receive) and is read next.
 
 ## The fix, in order
 
-1. The physical ranges an issue declares are fixed at preparation: compute them there, once a prepared issue, and
-   pass them to the frontier with its records; MetalPageAccesses then makes no table and takes no lock at issue.
-2. Better, as design/collective-lowering-2026-10-30.md's form A says: the barriers of a prepared issue are fixed with
-   its dispatches; decide them at preparation, so encoding issues a barrier from a compiled bit and declares no ranges.
+1. Done: a group's barriers are fixed by its dispatches' kinds (nccl-mesh-metal.m metal_order: before its first present
+   and every other direct dispatch, before its pool), its accesses make buffers resident and order nothing, and in place
+   of a barrier after the pool it declares each call's operands once to its caller's schedule (metal_boundary: two
+   ranges a call). The frontier's per-entry records, their page walks and `attach_lock` at issue are gone.
+2. Next: those two ranges' physical pages are fixed at preparation; computing them there removes the last page walk.
+   Whether consecutive calls overlap is a choice the schedule can make per pair of groups (the exchange gains by it, the
+   all-gather loses), as design/collective-lowering-2026-10-30.md's form A says.
 3. Smaller items the readings found, each self-imposed: the bridge's per-unit release store of a private counter
    (mesh-link.c:240), its 4,096 request-depth test that cannot bind (L224, 254), the lane scan (L277) the wr_id already
    answers, one `post_send`/`post_recv` per unit where a chained work request would do, completions reaped once a pass

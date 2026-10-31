@@ -50,8 +50,10 @@ struct metal_program {
   uint32_t polls;
   struct recording *recording;
   struct kernels *kernels;
-  /* Exact pending dispatch accesses, consumed by the shared phase compiler. */
-  METAL_HANDLE(id) accesses;
+  /* metal_order's state: a present being dispatched, and the presents dispatched so far */
+  int presenting, presented;
+  /* its group's operands declared to the caller's schedule (metal_boundary): no barrier after its pool */
+  int declared;
 };
 #undef METAL_HANDLE
 /* A step's result and its message beside it (design/rubrics.md, Strings are messages): `status` 0, or an errno, and
@@ -139,6 +141,8 @@ struct metal_result metal_publish(struct metal_program *, const struct metal_rel
 /* The next dispatch (or recorded tracks pool) reads/writes these prepared page
    ranges. Residency and diagnostic atomic words do not imply data ordering. */
 void metal_accesses(struct metal_program *, const ncclMeshAccess *, size_t n);
+/* a group's operands, read and written, declared once to its caller's schedule in place of a barrier after its pool */
+void metal_boundary(struct metal_program *, const ncclMeshAccess *, size_t n);
 /* A communicator's gate word (at `word` in `words`) stored `value` after one system fence, as metal_publish stores: the
    number of the group whose landings it opens (nccl-mesh.c gate_of), a count of groups and no holding's. */
 struct metal_result metal_open_gate(struct metal_program *, void *words, size_t word, uint64_t value);
