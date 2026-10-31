@@ -1718,42 +1718,47 @@ static int child_main(int argc,char **argv){
    layout (`geometry`, mesh_layout of this configuration's region) are this bridge's: the same memory, its clients'
    slots, rows and leases standing and the GPU buffers over them valid, its pages registered again by the port children
    (the same pages: nothing is wired twice, nothing reloaded).  A region a live bridge serves is never read: a second
-   bridge of the node ends at its port's bind, before region_open.  A region of another layout, or one a stop released (layout version
-   0), is made expired (its layout version 0: no client's mesh_open takes it, and each client's next lease or
-   communicator returns the expiry, nccl-mesh.c attach_expired) and left named, and this bridge ends with EX_TEMPFAIL:
-   its heartbeat unlinks it once no process holds it and opens a bridge again, so no second region is ever made beside
-   a live client of the first (the 2026-10-20 watchdog panic, design/rubrics.md "Failure across interfaces"); a bridge
-   unlinks only a shared memory object that never became a region (no magic: a bridge ended while making it).  A region that cannot
-   be read is left as it is, and this bridge ends.  1 adopted, 0 made; *out its descriptor */
+   bridge of the node ends at its port's bind, before region_open.  The node has one region object, made once, when none
+   is named, at the configured size; every later layout is fitted to that object's size (mesh.h mesh_layout_within: the
+   arena what its metadata leaves) and takes its pages.  A region of another layout that is not yet expired is made
+   expired (its layout version 0: no client's mesh_open takes it, and each client's next lease or communicator returns
+   the expiry, nccl-mesh.c attach_expired), and this bridge ends with EX_TEMPFAIL: its heartbeat opens a bridge again once
+   none of the region's holders it can see lives.  An expired region (or an object that never became one) is made
+   again in place: its metadata zeroed and laid as this layout's, over the same pages.  So a restart never makes a
+   second region beside the first, whatever holds the first (a process in its exit, which no lookup by pid sees, keeps
+   the same pages wired, never others besides).  Only a release unlinks the object (mesh-heartbeat.c, SIGUSR1 or
+   SIGTERM).  A region that cannot be read is left as it is, and this bridge ends.  1
+   adopted, 0 made; *out its descriptor; *geometry fitted to the object's size */
 static int region_same(const struct hdr *a,const struct hdr *b){
   return a->pgsz==b->pgsz && a->block==b->block && a->rows==b->rows && a->streams==b->streams && a->clients==b->clients &&
          a->planes_off==b->planes_off && a->arena_off==b->arena_off && a->page_off==b->page_off && a->buffer_off==b->buffer_off &&
          a->bridge_off==b->bridge_off && a->stream_off==b->stream_off && a->client_off==b->client_off && a->data_off==b->data_off &&
          a->length==b->length;
 }
-static int region_open(const struct hdr *geometry,int *out){
+static int region_open(struct hdr *geometry,int *out){
   int fd=shm_open(MESH_NAME,O_RDWR,0);
   if(fd<0 && errno!=ENOENT){exit(1);}
+  struct stat shape={0};
+  if(fd>=0 && fstat(fd,&shape)){exit(1);}
+  if(fd>=0 && !shape.st_size){close(fd);fd=-1;shm_unlink(MESH_NAME);}
   if(fd>=0){
-    struct stat shape;
-    if(fstat(fd,&shape)){exit(1);}
     const size_t size=(size_t)shape.st_size;
-    struct hdr *old=size>=sizeof(struct hdr)?mmap(NULL,size,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0):NULL;
+    if(!mesh_layout_within(geometry,geometry->pgsz,geometry->block,size))die("the region object holds no layout");
+    struct hdr *old=mmap(NULL,size,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
     if(old==MAP_FAILED){exit(1);}
-    if(old && old->magic==MESH_MAGIC){
-      if(__atomic_load_n(&old->version,__ATOMIC_ACQUIRE)==MESH_LAYOUT && region_same(old,geometry)){M=old;*out=fd;return 1;}
-      __atomic_store_n(&old->version,0,__ATOMIC_SEQ_CST);
-      exit(EX_TEMPFAIL);
+    if(old->magic==MESH_MAGIC){
+      const uint32_t version=__atomic_load_n(&old->version,__ATOMIC_ACQUIRE);
+      if(version==MESH_LAYOUT && region_same(old,geometry)){M=old;*out=fd;return 1;}
+      if(version){__atomic_store_n(&old->version,0,__ATOMIC_SEQ_CST);exit(EX_TEMPFAIL);}
     }
-    if(old)munmap(old,size);
-    close(fd);
-    shm_unlink(MESH_NAME);
+    M=old;memset((void *)M,0,(size_t)geometry->data_off);
+  }else{
+    if((fd=shm_open(MESH_NAME,O_CREAT|O_EXCL|O_RDWR,MESH_MODE))<0)die("shm");
+    if(ftruncate(fd,(off_t)geometry->length))die("ftruncate");
+    fchmod(fd,MESH_MODE);
+    M=mmap(NULL,(size_t)geometry->length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
+    if(M==MAP_FAILED)die("mmap");
   }
-  if((fd=shm_open(MESH_NAME,O_CREAT|O_EXCL|O_RDWR,MESH_MODE))<0)die("shm");
-  if(ftruncate(fd,(off_t)geometry->length))die("ftruncate");
-  fchmod(fd,MESH_MODE);
-  M=mmap(NULL,(size_t)geometry->length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
-  if(M==MAP_FAILED)die("mmap");
   *M=*geometry;M->version=MESH_LAYOUT;
   for(uint32_t r=0;r<mesh_rows(M);r++)atomic_store_explicit(&mesh_page(M)[r].mapping,MESH_ABSENT,memory_order_relaxed);
   struct mesh_bridge_pages *own=mesh_bridge_pages(M);

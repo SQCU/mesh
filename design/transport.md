@@ -83,7 +83,8 @@ devices), and once the bridge has ended it makes the region *expire*, its layout
   it holds of it, or ends, and the library then unmaps it and closes its descriptor; a client with Metal buffers over
   it (its GPU work and residency set may hold those pages after they are released) ends; what a client still holds
   stays mapped and valid until it frees it or ends;
-- unlinked by the heartbeat once none of its holders lives, and its memory is then the system's. Its holders are
+- made again in place by the next bridge once none of its holders lives (its metadata laid as that bridge's layout over
+  the same object, mesh-link.c region_open), and unlinked only at a release, its memory then the system's. Its holders are
   recorded in the region, each by its pid and its process's start (so a pid the system gives again is no holder): the
   bridge (`bridge_pid` and `bridge_start`), each child a bridge spawned (the children register the region and hold it
   until their exit, which can outlast their bridge's), and each client slot's process (its owner's pid and `start`).
@@ -94,15 +95,16 @@ devices), and once the bridge has ended it makes the region *expire*, its layout
   Fields of the header, the slots and the bridge's area are only ever appended, so the heartbeat reads the holders of
   a region of any layout.
 
-A second region is never made beside a live holder of the first, because on the Mini (24 GB, a 17 GB region) GPU work on
-one region beside another's registration wired all its memory and its watchdog halted the node (2026-10-20): the
-heartbeat opens a bridge only once no expired region is named. A process that maps the region without a slot (a reader,
+A second region is never made beside the first: the node has one region object, made when none is named, and every later
+layout is fitted to that object (mesh.h mesh_layout_within) and takes its pages. Two regions wire past the node's memory
+and its watchdog halts it (metal-microbench docs/facts.md); a holder the heartbeat cannot see, a process in its exit,
+then keeps only the region's own pages wired. A process that maps the region without a slot (a reader,
 or a child forked by a client without exec) is not recorded; none registers it or makes it resident.
 
 **The heartbeat** (rdma/mesh-heartbeat, the job launchd keeps alive, `io.mesh.bridge`) supervises the bridge. It holds no
 device, region or socket of the mesh. It opens the bridge (a child in a process group of its own, so the bridge serves
 on if the heartbeat ends), closes it on the operator's signal and hears its end as a kernel event (EVFILT_PROC
-NOTE_EXIT), never inferred from a delay. It is the one process that unlinks an expired region. Its signals, sent with
+NOTE_EXIT), never inferred from a delay. It is the one process that unlinks a region, at a release alone. Its signals, sent with
 `launchctl kill SIG user/$(id -u)/io.mesh.bridge`:
 - SIGHUP opens the bridge, or restarts it: the bridge closes by SIGHUP (its region kept), the heartbeat runs its own
   image again (a deploy's new binaries both, bin/mesh-user.sh), and the bridge opens and adopts the region;
@@ -113,7 +115,8 @@ NOTE_EXIT), never inferred from a delay. It is the one process that unlinks an e
 
 A bridge that ends unasked opens again 60 s later, so the mesh is never restarted more than once a minute (rubrics 6: "do
 not stop meshes hundreds of times per second, minute, or hour"); nothing else is built for a crash (rubrics position
-5). A bridge that ended finding its region expired opens again once the heartbeat has unlinked that region. A job whose
+5). A bridge that ended finding its region of another layout opens again once none of that region's holders lives, and
+makes it again in place. A job whose
 definition predates the heartbeat runs the bridge directly until the job's next load (launchd keeps a loaded
 definition): its stops keep the region as ever, and it has no release.
 

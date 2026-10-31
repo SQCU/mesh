@@ -17,7 +17,8 @@ closes the bridge.
   freed at once, and the region's memory once none of its holders lives (each client's next lease or communicator returns the
   expiry; the heartbeat's log names the processes that still hold it);
 - `launchctl kill SIGHUP user/$(id -u)/io.mesh.bridge` opens it again (once a released region is unlinked), or
-  restarts it keeping the region (a changed region size replaces it, as a release does);
+  restarts it keeping the region's object (a new layout is laid over its pages; a changed region size takes effect only
+  after a release);
 - `launchctl kill SIGTERM user/$(id -u)/io.mesh.bridge` releases it and ends the heartbeat, which launchd then leaves
   stopped until `launchctl kickstart user/$(id -u)/io.mesh.bridge`.
 

@@ -1,10 +1,12 @@
 /* design/transport.md section 2, "The heartbeat": the node's bridge supervised by one small process, the job launchd
    keeps alive (bin/mesh-user.sh).  It holds no device, no region and no socket of the mesh: it opens the bridge (spawned
    in a process group of its own, so a heartbeat that ends leaves it serving), closes it when asked (a signal, its exit
-   then heard as a kernel event, never inferred from time passing), and is the one process that unlinks an expired
-   region, once none of the region's holders lives (the bridge, its children and its clients, each recorded in the region
-   by its pid and start: mesh_holds), before it opens a bridge again: a bridge is never opened while another is ending,
-   and no second region is ever made beside a live holder of the first (a process in its exit is none: mesh_started).
+   then heard as a kernel event, never inferred from time passing), and opens a bridge again over an expired region
+   once none of the region's holders lives (the bridge, its children and its clients, each recorded in the region by
+   its pid and start: mesh_holds): a bridge is never opened while another is ending.  It unlinks the region only at a
+   release (SIGUSR1, SIGTERM); a restart's bridge makes the expired region again in place (mesh-link.c region_open), so
+   no second region is ever made beside the first, whatever holds it: a process in its exit, which mesh_started does
+   not see, wires no pages but the region's own.
 
    Its operator's signals (`launchctl kill SIG user/$(id -u)/io.mesh.bridge`):
    - SIGHUP: open, or restart: the bridge closed by SIGHUP (its region kept for the next to adopt), this heartbeat's own
@@ -16,8 +18,8 @@
      launchd's KeepAlive {SuccessfulExit: false} does not restart).
    The bridge keeps its region at every stop of its own; a release is the heartbeat's: once the bridge it closed has
    ended, it expires the region (region_expire).  A bridge that ends unasked is opened again REOPEN_S later (a mesh is never restarted more than once a minute); one
-   that ended finding its region expired (EX_TEMPFAIL, mesh-link.c region_open) is opened again once the heartbeat has
-   unlinked that region. */
+   that ended finding its region expired (EX_TEMPFAIL, mesh-link.c region_open) is opened again once none of that
+   region's holders lives, and makes it again in place. */
 #include "mesh.h"
 #include "mesh-dataflow.h"
 #include "mesh-observe.h"
@@ -105,7 +107,8 @@ static void reopen_later(void){
   kevent64(events,&t,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
 }
 
-/* design/transport.md section 2: an expired region (magic, layout version 0) unlinked once none of its holders lives:
+/* design/transport.md section 2: an expired region (magic, layout version 0) waited for until none of its holders lives,
+   then, at a release alone (no bridge wanted), unlinked:
    its bridge (`bridge_pid`, `bridge_start`), each child its bridges recorded, and each client slot's process (its
    owner's pid, `start`), each identified by its pid and start (mesh_holds, so a reused pid is no holder).  Until then
    they are watched (their exits as events, the slots read every REPLACE_TICK_MS for a client that lets go and lives on)
@@ -134,7 +137,7 @@ static void replace_turn(void){
   munmap(m,size);
   if(!count){
     replacing=0;
-    if(shm_unlink(MESH_NAME) && errno!=ENOENT){
+    if(!wanted && shm_unlink(MESH_NAME) && errno!=ENOENT){
       if(!timer_open)reopen_later();
     }
     return;

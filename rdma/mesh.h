@@ -306,4 +306,17 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->data_off=at; at+=(uint64_t)arena*pgsz;
   h->length=at; return at;
 }
+/* the layout that fits a region object of `bytes` (its size, fixed when it was made): its arena the most pages its
+   metadata leaves, so a layout whose metadata grew or shrank takes the same object's pages (mesh-link.c region_open);
+   0 where none fits */
+static inline uint64_t mesh_layout_within(struct hdr *h,uint32_t pgsz,uint32_t block,uint64_t bytes){
+  /* blocks: lo the most known to fit, hi the most that might (a layout's length grows with its arena) */
+  uint64_t lo=0,hi=bytes/pgsz/block;
+  if(hi>UINT32_MAX/block)hi=UINT32_MAX/block;
+  while(lo<hi){
+    const uint64_t mid=lo+(hi-lo+1)/2;
+    if(mesh_layout(h,pgsz,block,(uint32_t)(mid*block))<=bytes)lo=mid;else hi=mid-1;
+  }
+  return lo && mesh_layout(h,pgsz,block,(uint32_t)(lo*block))<=bytes?h->length:0;
+}
 #endif
