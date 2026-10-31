@@ -3528,6 +3528,7 @@ struct issue { struct schedule *plans; struct steps **steps; struct inflight *gr
                   past the end of the receive it names (present_group) */
                struct requirement { struct mesh_zwoggle_after *at; const struct message *landing; } *requirements;
                size_t requirement_count;
+               struct zplan *zplan; /* its groups' sums as zabbadoo runs them (zabbadoo_plan) */
                struct owned owned; /* the leases its entries read, held from its placement to the next or its end */ };
 /* All operation kinds share the declared binding instances and routing basis. */
 struct compiled { struct call *calls; size_t n; uint64_t repeat; struct schedule *plans; double seconds; uint32_t period;
@@ -4556,11 +4557,13 @@ static ncclResult_t issue_layout(struct ncclComm *comm, struct compiled *x, stru
 }
 /* a crossing issue's entries' pages placed (place_group), their overwrites proved (bind_retirements), and its landings'
    and SENDs' dependencies found (landing_needs, send_dependencies) */
+static ncclResult_t zabbadoo_plan(struct ncclComm *comm, struct issue *u);
 static ncclResult_t issue_place(struct ncclComm *comm, struct issue *u) {
   ncclResult_t result = place_group(comm, u);
   if (!result) result = bind_retirements(comm, u->plans);
   if (!result) { landing_needs(comm, u->plans); send_dependencies(comm, u->plans); }
   if (!result) result = send_requirements(comm, u);
+  if (!result) result = zabbadoo_plan(comm, u);
   return result;
 }
 
@@ -4743,8 +4746,11 @@ static struct issue *issue_make(struct ncclComm *comm, const struct compiled *x,
   if (!made) { issue_free(comm, u); u = NULL; }
   return u;
 }
+struct zplan;
+static void zplan_free(struct zplan *z);
 static void issue_free(struct ncclComm *comm, struct issue *u) {
   if (!u) return;
+  zplan_free(u->zplan);
   schedules_free(comm, u->plans);
   for (size_t i = 0; u->steps && i < u->n; i++) steps_free(u->steps[i]);
   if (u->group) free(u->group->start);
@@ -5005,26 +5011,34 @@ static int zgroup_order(const void *left, const void *right) {
   if (a->call != b->call) return a->call < b->call ? -1 : 1;
   return (a->place > b->place) - (a->place < b->place);
 }
-static ncclResult_t zabbadoo(struct metal_program *program, struct ncclComm *comm, struct inflight *g, int *taken) {
-  *taken = 0;
-  if (g->fused) return ncclSuccess;
+/* zabbadoo's sums as the issue's lists lay them, found once where it is placed (issue_place), not at each call: their
+   groups, order and waits, and their inputs' tables but for each call's targets (`in`, zabbadoo); `pooled` where the
+   pool runs the issue's groups (a sum without landing runs or of a frame train, sums whose inputs' runs differ, two
+   calls' sums that overlap, a cycle, a sum over a COPY's landing) */
+struct zplan { int pooled; size_t count, made; struct zsum *sums; struct metal_zelloth_input *in;
+               struct metal_zelloth_sum *group; const struct call **of; struct metal_zelloth_wait *listed; };
+static void zplan_free(struct zplan *z) {
+  if (z) { free(z->sums); free(z->in); free(z->group); free(z->of); free(z->listed); free(z); }
+}
+static ncclResult_t zabbadoo_plan(struct ncclComm *comm, struct issue *u) {
+  zplan_free(u->zplan);
+  struct zplan *plan = u->zplan = calloc(1, sizeof *plan);
+  if (!plan) return fail(ncclSystemError, "out of memory");
+  plan->pooled = 1;
   size_t count = 0;
-  for (uint32_t h = 0; h < comm->count; h++) {
-    const struct channel *ch = comm->channels + h;
-    if (ch->published != g->end[h][0] || ch->consumed != g->start[h][1]) return ncclSuccess;
-    for (uint64_t at = g->start[h][1]; at < g->end[h][1]; at++) {
-      const struct message *m = in_at(g, h, at);
-      if (m->c->bound->steps[m->step].op == MESH_STEP_REDUCE) { if (!m->landing_count || g->repeats != 1) return ncclSuccess; count++; }
+  for (uint32_t h = 0; h < comm->count; h++)
+    for (size_t k = 0; k < u->plans[h].ins; k++) {
+      const struct message *m = u->plans[h].in + k;
+      if (m->c->bound->steps[m->step].op == MESH_STEP_REDUCE) { if (!m->landing_count || u->repeats != 1) return ncclSuccess; count++; }
     }
-  }
   struct zsum *sums = malloc((count + 1) * sizeof *sums);
   struct metal_zelloth_input *in = malloc((count + 1) * sizeof *in);
   if (!sums || !in) { free(sums); free(in); return fail(ncclSystemError, "out of memory"); }
   count = 0;
   for (uint32_t h = 0; h < comm->count; h++)
-    for (uint64_t at = g->start[h][1]; at < g->end[h][1]; at++) {
-      const struct message *m = in_at(g, h, at);
-      if (m->c->bound->steps[m->step].op == MESH_STEP_REDUCE) sums[count++] = (struct zsum){m, h, at};
+    for (size_t k = 0; k < u->plans[h].ins; k++) {
+      const struct message *m = u->plans[h].in + k;
+      if (m->c->bound->steps[m->step].op == MESH_STEP_REDUCE) sums[count++] = (struct zsum){m, h, k};
     }
   qsort(sums, count, sizeof *sums, zsum_order);
   /* every sum's inputs share one run structure, checked before anything is encoded */
@@ -5045,15 +5059,15 @@ static ncclResult_t zabbadoo(struct metal_program *program, struct ncclComm *com
      contributions (bandwidth's 16 MiB reduce-scatter max, 4.0 against 5.0: a01e4cd4).  Sums of two calls that overlap
      (no prior relates them), a cycle among the sums, or a sum over a COPY's landing: the pool's */
   struct zgroup *G = malloc((count + 1) * sizeof *G);
-  size_t *first_step = malloc((g->n + 1) * sizeof *first_step), steps = 0, groups = 0;
+  size_t *first_step = malloc((u->n + 1) * sizeof *first_step), steps = 0, groups = 0;
   if (!G || !first_step) { free(G); free(first_step); free(sums); free(in); return fail(ncclSystemError, "out of memory"); }
-  for (size_t i = 0; i < g->n; i++) { first_step[i] = steps; steps += g->list[i].bound ? g->list[i].bound->count : 0; }
+  for (size_t i = 0; i < u->n; i++) { first_step[i] = steps; steps += u->calls[i].bound ? u->calls[i].bound->count : 0; }
   int pooled = 0;
   for (size_t a = 0, b = 0; a < count && !pooled; a = b) {
     for (b = a + 1; b < count && zsum_same(sums + a, sums + b); b++) {}
     size_t i = 0;
-    while (i < g->n && g->list + i != sums[a].m->c) i++;
-    if (i == g->n) pooled = 1;
+    while (i < u->n && u->calls + i != sums[a].m->c) i++;
+    if (i == u->n) pooled = 1;
     else G[groups++] = (struct zgroup){a, b, (uint32_t)i, 0};
   }
   uint32_t *step_group = pooled ? NULL : malloc((steps + 1) * sizeof *step_group);
@@ -5163,13 +5177,25 @@ static ncclResult_t zabbadoo(struct metal_program *program, struct ncclComm *com
                                                (uint32_t)(used - from), used > from ? listed + from : NULL};
   }
   free(G); free(edges); free(laid); free(position);
+  *plan = (struct zplan){0, count, made, sums, in, group, of, listed};
+  return result;
+}
+/* design/zorvek.md zabbadoo: a group run from its issue's zplan (zabbadoo_plan), every SEND its presents published
+   and no landing of it consumed (`published`, `consumed`); each input's target this call's, then its sums */
+static ncclResult_t zabbadoo(struct metal_program *program, struct ncclComm *comm, struct inflight *g, struct issue *u, int *taken) {
+  *taken = 0;
+  struct zplan *z = u->zplan;
+  if (g->fused || !z || z->pooled) return ncclSuccess;
+  for (uint32_t h = 0; h < comm->count; h++)
+    if (comm->channels[h].published != g->end[h][0] || comm->channels[h].consumed != g->start[h][1]) return ncclSuccess;
+  for (size_t k = 0; k < z->count; k++) z->in[k].target = z->sums[k].m->end;
+  ncclResult_t result = ncclSuccess;
   /* one dispatch for each type and operator among the group's calls (a group of one call: one) */
-  for (size_t a = 0, b = 0; a < made && !result; a = b) {
-    for (b = a + 1; b < made && ktype(of[b]) == ktype(of[a]) && kop(of[b]) == kop(of[a]); b++) {}
-    result = gpu(metal_zelloth(program, ktype(of[a]), kop(of[a]), SIZE[of[a]->type] * unit_of(of[a]), (uint32_t)(b - a), group + a,
-                               sums[0].h, sums[0].at), "a group's sums (zelloth)");
+  for (size_t a = 0, b = 0; a < z->made && !result; a = b) {
+    for (b = a + 1; b < z->made && ktype(z->of[b]) == ktype(z->of[a]) && kop(z->of[b]) == kop(z->of[a]); b++) {}
+    result = gpu(metal_zelloth(program, ktype(z->of[a]), kop(z->of[a]), SIZE[z->of[a]->type] * unit_of(z->of[a]), (uint32_t)(b - a),
+                               z->group + a, z->sums[0].h, g->start[z->sums[0].h][1] + z->sums[0].at), "a group's sums (zelloth)");
   }
-  free(group); free(of); free(listed);
   /* zelloq: each channel's landings awaited once, past its last.  A WRITE declares no operands to its caller's
      schedule (call_boundary names none), where the pool's barrier after its waits stood: its landings, the bytes its
      caller's later work reads, declared written (metal_boundary), so that work orders after these waits where it
@@ -5190,7 +5216,6 @@ static ncclResult_t zabbadoo(struct metal_program *program, struct ncclComm *com
     if (!result) { ch->consumed = g->end[h][1]; if (ch->waited < g->end[h][1]) ch->waited = g->end[h][1]; }
   }
   if (!result && landings.n) metal_boundary(program, landings.ranges, landings.n);
-  free(sums); free(in);
   if (!result) *taken = 1;
   return result;
 }
@@ -5710,7 +5735,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     }
     /* design/zorvek.md zabbadoo: a group of copies and sums runs as its own dispatches, outside the pool */
     int zabbadood = 0;
-    if (!result && !g->fused) result = zabbadoo(program, comm, g, &zabbadood);
+    if (!result && !g->fused) result = zabbadoo(program, comm, g, u, &zabbadood);
     if (!result) result = complete(program, g, &published);
     if (!result && g->fused && (fusing.published != publishes || fusing.landed != lands))
       result = fail(ncclInvalidUsage, "a fused crossing whose program is not this rank's publications and landings of its whole operands");
