@@ -58,6 +58,54 @@ declarations and pool reduction ordering remain open. These are source, build
 and preparation observations, with no new numerical or performance claim.
 Followups 2–6 are still outstanding.
 
+## Dependency handoff through command lowering
+
+The October 30 source review found repeated dependency reconstruction across
+capture, work scheduling and encoding. In the ordinary prepared Python and
+LiteRT entry points, these calls precede `MetalScheduleEnqueue`; enqueue follows
+compiled wait/commit/signal records. The reconstruction is repeated preparation
+work, not a range solver called by every prepared numerical invocation.
+
+`MetalScheduleCrossWork` currently receives aggregate group accesses and an
+opaque crossing callback, then flushes the work. The callback enters
+`ncclMeshCommEncode`, constructs transport tasks and emits direct commands.
+The common scheduler therefore lacks those command records before encoding.
+`MetalEncoderOrder` reconstructs their hazards from ranges at that late stage.
+Caching its page walks alone would retain this missing compiler handoff.
+
+The common compiled record must carry the following facts through each lowering:
+
+| Fact established during preparation | Required consumer |
+|---|---|
+| Value identity, scalar type and ordered page selection | Numerical, provider and collective bindings |
+| Physical page aliases after final binding or relocation | One canonical access relation, shared by dependency lowering |
+| Paired transfer endpoints and relay producer edges | Routing cuts, wire order and publication operands, without re-pairing |
+| Reads, writes and overwrite dependencies across declared slots/invocations | Storage reuse and command order, without an issue-time reuse decision |
+| Transport and numerical dispatches, including their exact accesses | The existing common command graph before final encoding |
+| Provider resource capacities and actual host dependencies | Prepared resource assignments, event conditions and submission parts |
+| The final command order and dependency edges | Barrier bits, ICB segments and wait/signal records |
+
+`CommPlan` already prepares generation/slot variants and transfer geometry.
+Those variants must retain their task/command records instead of rebuilding
+call arrays, tracks, argument pages and reach lists in direct encoding.
+`MetalWork.dependencies` and the existing submission graph remain the common
+dependency representation. Capture census, replay barriers and final encoding
+must consume it instead of each recovering dependencies from ranges.
+
+The solve must include interleaved numerical/collective commands, actual slot
+wraps, host work and declared previous-function dependencies. A group's internal
+barrier bits alone do not cover those relationships. Relocating a template can
+change physical aliasing, so binding resolves that fact once for the new pages.
+Changing index contents remain ordinary data; their declared producer/consumer
+relation does not become a second scheduler.
+
+Execution observes the data conditions named by the compiled graph. It does not
+discover producers, choose storage, resolve capabilities or reconstruct range
+relationships. An absent dependency creates no barrier. The source changes to
+complete this handoff remain outstanding; the review does not establish a
+numerical performance result. See also
+[the collective lowering trace](collective-lowering-2026-10-30.md).
+
 ## Window relations
 
 `mesh_relation.Algebra.window` describes a window's source accesses. Both FX and
