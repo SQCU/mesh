@@ -246,3 +246,23 @@ channels' `published`, `consumed`, `waited`.
   sum's summed words are published as the prefix of its computed blocks grows (the threadgroup that extends the
   prefix publishes it), so no threadgroup waits on another's publication. With it a sum can also wait on a
   COPY's landing. Until then, a group whose sums overlap stays the pool's (a01e4cd4).
+
+### The pool and the mirror deleted (item 3's end)
+
+- cf32b3f1: zelloth's threadgroups claim whichever block is ready (mesh-graph.h MESH_GRAPH_METAL, the GPU
+  worklist), so a sum may wait on another without starving the sums laid after it. Overlapping sums are
+  ordered by their steps' priors.
+- 8cd0c480: sum steps fold together only at one depth (mesh_graph_depth), so a group's sums hold no cycle.
+  That was bandwidth's last group in the pool.
+- f82f0b15: zelloq's per-channel waits dispatch together (metal_spins).
+- a9bd4e7a, 53c1fe72: the tracks pool deleted, from nccl-mesh.c, then the Metal layer and the kernels. A
+  group zabbadoo cannot run fails when its plan is prepared. A fused crossing's records are fused_records.
+- Then the host's mirror: the channels' `published`, `consumed`, `waited`, the list of groups in flight,
+  retire and the tickets. Every group is published and awaited at its own call.
+- Still open: the chain service stands intermittently, on main since before these (3 of its last 5 runs).
+  At one stand m5ult2 had published nothing (`ready` 0 on every channel). m5ult3 waited on m5ult2's first
+  landing. m5ult2 reaches m5ult4 only through m5ult1, which had relayed it 8 units of m5ult4's input frames,
+  and those frames queue on m5ult4's channel behind its later input frames. Those wait for m5ult4's chain
+  kernel, which waits on m5ult1's state, which waits on m5ult2's. That is a cycle through the chain
+  program's input publication and the channel's host order, not through the library's waits. Its form is
+  the transport's: two independent calls sharing a cable must not queue in host order.
