@@ -54,8 +54,9 @@ pages, including explicit scalar-type conversions. Retained live-read sections
 now feed the importer's distributed scalar selections through the same page and
 shader binder. Forward ownership also composes the returned read values with
 the existing byte-collective expression. Inspection reaches selected collective
-calls and their input page binding; a fake process group cannot prepare the
-transport endpoint. This does not establish a complete distributed execution.
+calls and their input page binding. Source review follows those bindings through
+the canonical communicator plan and its prepared frame/slot variants. Actual
+communicator preparation and distributed execution remain for followup 6.
 Cached pointwise producers now
 compose into live reads before page placement; an imported UPDATE→GATHER emits
 one command without a full updated-table intermediate. Selected top-k/sort,
@@ -74,9 +75,57 @@ Neither consumer maps those accesses to source storage merely to invert them
 again. Each final binder realizes the declared layout requirements on its own
 pages. Ordinary and selected portable page/shader preparation reaches the
 existing native command compiler, including ragged butterfly inputs.
+Immutable encoded indices now use the emitted reader's scalar definitions at
+preparation. The importer shares initializer declarations and read projections
+with export and dependency extraction. Repeated, sparse and typed index views
+fold into page selections; changing indices remain ordinary graph operands.
 These are source, build and preparation observations, with no new numerical or
 performance claim.
 Followups 2–6 are still outstanding.
+
+## Whole-call feedback handoff
+
+`assignment.assign` already consumes complete-function observations and updates
+bounded work-share and compiler operands. The remaining connection is from
+those operands to the compiler's actual legal choices, then back from the
+executed choices to the next preparation. It does not require another executor.
+
+The source review found these specific breaks for followup 2:
+
+- `configuration.placement` starts with an empty observation list.
+  `configuration.record` supplies episode, proposal and executed operands, but
+  `mesh_statistics.completed` drops them from emitted results. No consumer feeds
+  those observations into the next placement here.
+- The native group solver produces demand/tree/share columns, then `plan_calls`
+  discards them. WRITE demands enter that solve but their transfers have already
+  been frozen over communicator paths; the group solution does not reach them.
+- Microbench `rates.step` still expects removed `flow:*` domains and
+  `assignment.routes`. The native compiler now owns routing. Its prepared
+  choices must be the feedback operands instead of reconstructed Python paths.
+- `placement.selected` carries legal layouts and conversion edges, but accepts
+  no empirical preference among those alternatives. The feasibility solve alone
+  does not provide that choice.
+
+Retain the native group's generated choices, their logical demand identities,
+topology, allocation grain and realized shares. The canonical communicator
+declaration must accept the next weights before WRITE bindings freeze their
+transfers. Numerical ownership and consumer-layout choices likewise enter as
+explicit preparation operands. Report the realized choices with the completed
+function's identity and paired latency/useful-throughput result. Observations
+must name compatible choice families, not merely vectors of the same length.
+
+Microbench already ingests complete rank reports and applies `rates.update` on
+the existing deferred work queue while subsequent calls proceed. Reuse that
+channel and its asynchronous preparation. Torch's local observation producer
+needs to preserve identity and join this ingestion; it must not perform a
+configuration gather from its observer. Late cohorts remain pending data, and
+the next preparation consumes whichever complete observations are available.
+
+The compiler already accepts declared call groups and invocation order. Legal
+changes to those competition windows must follow the retained dependencies;
+replay batching does not define them. Backend resource assignment remains
+followup 3, command dependency lowering followup 5, and live application
+measurements followup 6.
 
 ## Dependency handoff through command lowering
 
@@ -99,6 +148,11 @@ dependency graph: every direct kind other than a later present takes a barrier.
 Recorded numerical work still has separate dependency passes. Removing the
 range walk therefore does not complete this compiler handoff.
 
+The compiler owns these relationships from their first declaration to the final
+commands. Lowering an established relation into a different hardware form is
+necessary; dropping it and recovering it from addresses is not. The existing
+`MetalWork.dependencies` graph is the handoff, not another scheduling interface.
+
 The common compiled record must carry the following facts through each lowering:
 
 | Fact established during preparation | Required consumer |
@@ -117,6 +171,24 @@ call arrays, tracks, argument pages and reach lists in direct encoding.
 `MetalWork.dependencies` and the existing submission graph remain the common
 dependency representation. Capture census, replay barriers and final encoding
 must consume it instead of each recovering dependencies from ranges.
+
+In particular, `launch_metal` still walks `operand_copies` to count work and then
+again to emit it. `present_group` constructs descriptor records; `complete`
+rebuilds publication/consumption tracks; `metal_tracks` packs their task and
+dependency tables. Their structural inputs already exist in the compiled group
+and its prepared issue variants. Retain these descriptions there and expose
+their exact accesses before `MetalScheduleCrossWork` calls its encoder. The
+pool's internal task graph remains its existing graph; its dispatch and accesses
+join the common command graph.
+
+Resolve physical aliases once after final page binding, including invocation
+slots and wraps. Derive command predecessors and resource-capacity edges from
+those retained accesses. Capture levels, indirect-command barriers, host events
+and command-buffer cuts then consume the same edges. The separate ordering
+loops in `MetalScheduleFlush` and `MetalScheduleOrder` should use the shared
+graph machinery with their declared priorities. A per-group barrier table alone
+does not close this work, and replacing range checks with barriers by dispatch
+kind does not derive the required ordering.
 
 The solve must include interleaved numerical/collective commands, actual slot
 wraps, host work and declared previous-function dependencies. A group's internal

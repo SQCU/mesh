@@ -1,6 +1,6 @@
 # Ownership integration tickets
 
-Recorded 2026-10-30 23:14 UTC; updated 2026-10-31 05:04 UTC. The initial source
+Recorded 2026-10-30 23:14 UTC; updated 2026-10-31 05:26 UTC. The initial source
 checkpoints were mesh `64477c9f` and metal-microbench `8a4454f2`; the status below
 describes the implementation accompanying this update and its open connections.
 This divides
@@ -48,17 +48,18 @@ initializers and existing encoded-value reader.
 sections to selected pages. Both ordinary and owned functions enter `BoundGraph`
 and the existing recorder. Selected numerical bodies use `placement.selected`
 and the same native emitter; they do not re-enter source compilation. Actual
-owned local-shard preparation reaches shader construction. The complete
-distributed closure remains open at the connections below.
+owned local-shard preparation reaches shader construction. The WRITE handoff
+preserves those bindings through communicator preparation; live distributed
+execution remains part of followup 6.
 
 | Ticket | State at this handoff | Next connection |
 |---|---|---|
-| O1 | Selected row work includes ragged source multiplicities; pooled reductions keep their window axes; both consumers share command declarations | Joined ordinary frontend preparation; declared backend eligibility |
-| O2 | Supplied assignments retain local types, storage uses and exact independently scoped read prefixes | Joined distributed binding beyond the fake endpoint boundary |
-| O3 | Partial/complete values and cohort-typed byte expressions compose; providers receive exact read prefixes from each retained body | Joined distributed binding beyond the fake endpoint boundary |
-| O4 | Ordinary and owned Function plus public FX use one selected-section binder and exact byte equalities | Joined distributed binding beyond the fake endpoint boundary |
-| O5 | Shared commands retain nested bindings, repeated packed index selections and scalar conversion chains through native preparation | Encoded index constant folding still needs a shared preparation-time value definition |
-| O6 | Ordinary and selected emission require the same resolved storage, results, pages and consumer uses; alternate placement and binding reconstruction removed | Finish joined preparation evidence at the remaining frontend and transport handoffs |
+| O1 | Selected row work includes ragged source multiplicities; pooled reductions keep their window axes; both consumers share command declarations | Backend eligibility and assignment belong to followup 3 |
+| O2 | Supplied assignments retain local types, storage uses and exact independently scoped read prefixes through declared deliveries | Live distributed verification belongs to followup 6 |
+| O3 | Partial/complete values and cohort-typed byte expressions compose; providers receive exact read prefixes from each retained body | Live distributed verification belongs to followup 6 |
+| O4 | Ordinary and owned Function plus public FX use one selected-section binder and exact byte equalities through CommPlan | Live distributed verification belongs to followup 6 |
+| O5 | Immutable encoded indices consume shared scalar definitions and read relations; nested bindings, repeated selections and conversion chains reach native preparation | Live application verification belongs to followup 6 |
+| O6 | Ordinary and selected emission require the same resolved storage, results, pages and consumer uses; joined frontend and WRITE preparation retain them | Command dependency handoff belongs to followup 5; live verification to followup 6 |
 
 None of O1–O6 is closed by a helper alone. The later whole-function measurements
 remain part of followup 6.
@@ -409,8 +410,7 @@ page bindings agree at numerical/collective boundaries.
 
 ## O5 — LiteRT access adapter
 
-**Resume here:** finish joined preparation with the retained encoded index-value
-meaning. `prepare_e2b.indexed_source` reaches retained access projection,
+**Structural handoff complete:** `prepare_e2b.indexed_source` reaches retained access projection,
 selected placement and native stage emission through the actual save path.
 Distributed scalar selections consume shared live-read sections. Computed
 pointwise producers compose into those reads; UPDATE→GATHER emits one command
@@ -424,11 +424,14 @@ through shared preparation. The artifact consumer remains the existing native
 stage/Metal recorder or declared provider; source capture adds no PyTorch
 execution dependency to the imported program.
 
-Immutable encoded **data** views already retain their typed reader. Evaluating
-encoded integer **index values** during preparation is still open:
-`constant_integers` currently folds ordinary immutable scalar views. Until that
-shared reader connection exists, encoded indices retain their typed graph
-operands; their storage bytes are not interpreted as ordinary integer indices.
+Immutable encoded data and index views share the emitted scalar reader's code,
+scale, zero-point and conversion definitions. `initialized_operand` supplies the
+same stored leaves to export and preparation. `operand_read_projection` supplies
+the same support and parameter coordinates to dependency extraction and literal
+evaluation. `constant_integers` orders immutable bytes through those relations
+and calls `_stream.scalar_read`; it does not implement another scalar codec.
+Each nested conversion retains its scalar type and rounding boundary. Changing
+index operands retain their ordinary numerical readers and dependency edges.
 
 Saved stage rebinding now follows explicit bindings inside encoded values,
 scale/zero operands and assembled pieces. Repeated selections retain their
@@ -438,7 +441,11 @@ underlying storage width. Numeric conversions are value expressions, not storage
 aliases. Actual importer export and native page/shader preparation preserve
 packed raw-code indices, scaled indices, FLOAT16 intermediates and ordinary
 INT32→FLOAT32→INT32 conversions. Empty selections emit no commands. The affected
-library builds; no numerical execution was performed.
+library builds; no numerical execution was performed. Subsequent immutable-index
+preparation folded GATHER, GATHER_ND and STRIDED_SLICE inputs into page views with
+no numerical commands. Repeated and sparse selections, absent codes with nonzero
+zero points, FLOAT16/BFLOAT16 rounding, typed pieces, exact wide integers,
+symbolic initializer operands and empty selections reached this shared path.
 
 **Implement:** with immutable indexed-view preparation completed against the
 shared algebra, carry live index operands and their dependencies into existing
@@ -469,6 +476,16 @@ declarations remain source facts; they do not select a second physical layout.
 Public FX, products with empty dimensions, typed byte views, independently
 scoped read sections and portable product declarations reached page/shader
 preparation through this contract. No numerical invocation was made.
+
+The distributed source handoff is also explicit. `_bind_exchange` retains the
+selected view's order and scalar width. `ProcessGroupMesh.prepare_writes`
+supplies both its recorder operand and the canonical WRITE call. `plan` carries
+that geometry, byte count, origin and invocation slots into `ncclMeshCall`.
+`ncclMeshCommPlan` prepares endpoint bindings and every frame/slot before
+installation. `ViewWrites` retains actual tensor leases. The former fake
+process-group endpoint stopped inspection before this existing connection; it
+did not identify a missing compiler interface. Actual communicator preparation
+requires metadata exchanges and was not launched during this source review.
 
 **Implement:** connect the tickets through ordinary entry points and remove the
 replaced ownership reconstruction and duplicate preparation paths. Reconcile
@@ -501,20 +518,27 @@ existing collective API with declared calls and page operands. Shared header or
 layout changes require the same explicit handoff and normal committed-source
 installation as other changes.
 
-## Preparation evidence at this handoff
+## Preparation evidence
+
+The early observations below recorded boundaries before their later integration.
+O2/O3 now retain partial/complete transitions, independent read sections and
+cohort source types through the joined binder described above. O5 now includes
+immutable encoded-index folding. A fake endpoint was an inspection limit;
+source review follows the real WRITE preparation. These updates do not establish
+distributed numerical results.
 
 - O1 prepared unequal reduction fibers, small reductions whose axes survive
   ownership, segmented products, and empty selected fibers with their declared
   finish outputs. Selection changes the emitted work, not just the output view.
 - O2/O3 retained the global SUM and matrix graphs while selecting unequal K
   contributions. Matrix output followed by ReLU retained two sections with an
-  explicit unresolved partial-to-replicated transition before ReLU. That record
-  identifies unfinished integration, not a runnable substitute.
+  explicit partial-to-replicated transition before ReLU. The later integration
+  splices that transition's retained expression and distinct value versions.
 - O3's collective projection retained typed gather/scatter offsets, local
   identities, untouched output-view regions and the original AVG divisor. The
   source also represents indivisible reducer elements; this handoff does not
-  include preparation evidence for multi-scalar elements. Peer requests still
-  need O2's graph-wide connection.
+  include preparation evidence for multi-scalar elements. Peer requests now
+  retain O2's graph-wide source and type connection.
 - O4 prepared compact selected products through `select_domains`,
   `consumer_uses`, `placement.selected` and native `bind`. Byte aliases, mixed
   scalar widths, repeated/strided results, empty outputs and required per-use
@@ -527,8 +551,8 @@ installation as other changes.
   predicates, selected byte reductions and typed receiver. Requests narrow the
   collective's actual returned-value payload. Prefix and page-boundary binding
   reach transport preparation, where the inspection's fake process group has no
-  native endpoint. Rank-local access identity and unequal cohort source widths
-  remain explicit preparation gaps; they do not receive guessed metadata.
+  native endpoint. Subsequent preparation retained rank-local access identity
+  and unequal cohort source widths through independent source scopes.
 - O5 connects the actual importer to retained live-read sections and native
   access extraction. The ordinary stage/native pipeline prepared integer and
   floating-point selections with no incidental copies; the identity continuation

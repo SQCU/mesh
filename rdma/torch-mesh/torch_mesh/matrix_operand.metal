@@ -2,6 +2,25 @@
 // register fragment is a numerical operand, not another storage allocation.
 #ifndef MESH_MATRIX_OPERAND
 #define MESH_MATRIX_OPERAND
+
+// These scalar expressions also evaluate declared immutable initializers during
+// preparation. Their types and conversion boundaries are identical in both
+// compilations; only the surrounding address/command machinery is Metal-only.
+template <unsigned Bits, bool Signed = true>
+inline int mesh_matrix_code(unsigned raw) {
+    constexpr unsigned sign = Signed ? 1u << (Bits - 1) : 0u;
+    return int(raw ^ sign) - int(sign);
+}
+template <unsigned Bits, bool Signed = true>
+inline int mesh_matrix_bits(unsigned byte, unsigned position) {
+    return mesh_matrix_code<Bits,Signed>((byte >> position) & ((1u << Bits) - 1u));
+}
+template<typename Scalar, typename Code>
+inline Scalar mesh_matrix_scaled(Code code, float scale, long zero) {
+    return Scalar((float(code) - float(zero)) * scale);
+}
+
+#ifndef MESH_SCALAR_PREPARATION
 #include <metal_tensor>
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 using namespace metal;
@@ -44,21 +63,9 @@ struct mesh_matrix_read {
     }
 };
 
-// The scalar decode is shared by matrix readers and required layout conversions.
-template <uint Bits, bool Signed = true>
-inline int mesh_matrix_code(uint raw) {
-    constexpr uint sign = Signed ? 1u << (Bits - 1) : 0u;
-    return int(raw ^ sign) - int(sign);
-}
 template <uint Binding, uint Bits>
 inline int mesh_matrix_packed_read(device const uchar *values, ulong logical) {
-    const uint raw = (uint(values[mesh_index<Binding>(logical)]) >> uint(mesh_position<Binding>(logical)))
-                     & ((1u << Bits) - 1u);
-    return mesh_matrix_code<Bits>(raw);
-}
-template<typename Scalar, typename Code>
-inline Scalar mesh_matrix_scaled(Code code, float scale, long zero) {
-    return Scalar((float(code) - float(zero)) * scale);
+    return mesh_matrix_bits<Bits>(uint(values[mesh_index<Binding>(logical)]), uint(mesh_position<Binding>(logical)));
 }
 
 // Byte positions, bit lanes and quantization positions are independent compiled
@@ -118,4 +125,5 @@ inline auto mesh_matrix_operand(thread const Operation &operation, device const 
     return mesh_matrix_operand<Left,Binding,Affine,Rows,Columns,RowStride,ColumnStride,L,R>(
         operation,values,base,extent,origin,uint(extent.x));
 }
+#endif
 #endif

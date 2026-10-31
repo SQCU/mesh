@@ -1,7 +1,29 @@
 // The compiler supplies element type, count and both address expressions.
 // Every command covers a declared tile; the recorder sees its exact views.
+#ifndef MESH_SCALAR_PREPARATION
 #include <metal_stdlib>
 using namespace metal;
+#endif
+#ifndef MESH_LAYOUT_SCALAR
+#define MESH_LAYOUT_SCALAR
+template<typename Destination, typename Source>
+inline Destination mesh_layout_cast(Source value) {
+    return Destination(value);
+}
+template<typename Destination, typename Source>
+inline Destination mesh_layout_bitcast(Source value) {
+#ifdef MESH_SCALAR_PREPARATION
+    static_assert(sizeof(Destination) == sizeof(Source));
+    Destination result;
+    __builtin_memcpy(&result, &value, sizeof(result));
+    return result;
+#else
+    return as_type<Destination>(value);
+#endif
+}
+#endif
+
+#ifndef MESH_SCALAR_PREPARATION
 #if defined(MESH_COPY_INDEX_TYPE) && !defined(MESH_COPY_INDEX_VALUE)
 #define MESH_COPY_INDEX_VALUE indices[mesh_index<MESH_COPY_INDEX_BINDING>(i)]
 #endif
@@ -49,9 +71,9 @@ kernel void mesh_layout_copy(device const MESH_COPY_INPUT_TYPE *source [[buffer(
                 return mesh_matrix_scaled<MESH_COPY_OUTPUT_TYPE>(code,
                     scales[mesh_index<2>(i)], zeros[mesh_index<3>(i)]);
 #elif defined(MESH_COPY_BITCAST)
-                return as_type<MESH_COPY_OUTPUT_TYPE>(code);
+                return mesh_layout_bitcast<MESH_COPY_OUTPUT_TYPE>(code);
 #else
-                return MESH_COPY_OUTPUT_TYPE(code);
+                return mesh_layout_cast<MESH_COPY_OUTPUT_TYPE>(code);
 #endif
             }
         };
@@ -73,3 +95,4 @@ kernel void mesh_layout_copy(device const MESH_COPY_INPUT_TYPE *source [[buffer(
 #endif
     }
 }
+#endif

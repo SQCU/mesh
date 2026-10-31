@@ -32,6 +32,10 @@
 #include <array>
 #include <vector>
 #include <unistd.h>
+#define MESH_SCALAR_PREPARATION
+#include "matrix_operand.metal"
+#include "layout.metal"
+#undef MESH_SCALAR_PREPARATION
 #include "metal-recording.h"
 #include "nccl.h"
 #include "layout.h" /* MESH_PREPARATION_NS: the preparation deadline a kernel compile waits within */
@@ -39,6 +43,101 @@
 // allocator.mm: torch's MPS allocator made the region's, and its leases live now (address, bytes)
 void install_region_allocator();
 std::vector<std::pair<uint64_t, uint64_t>> region_allocations();
+
+// Typed immutable scalar evaluation during preparation. Address/support
+// relations are caller operands; all numerical conversions below come from
+// the same source compiled into the matrix reader and layout shader.
+template<typename T> struct ScalarTypeTag { using type=T; };
+template<typename Function>
+static std::string scalar_type(at::ScalarType type,const Function &function) {
+#define MESH_SCALAR_TYPE(Name,Type) case at::ScalarType::Name:return function(ScalarTypeTag<Type>{});
+  switch(type) {
+    MESH_SCALAR_TYPE(Bool,bool)
+    MESH_SCALAR_TYPE(Byte,uint8_t)
+    MESH_SCALAR_TYPE(Char,int8_t)
+    MESH_SCALAR_TYPE(Short,int16_t)
+    MESH_SCALAR_TYPE(UInt16,uint16_t)
+    MESH_SCALAR_TYPE(Int,int32_t)
+    MESH_SCALAR_TYPE(UInt32,uint32_t)
+    MESH_SCALAR_TYPE(Long,int64_t)
+    MESH_SCALAR_TYPE(UInt64,uint64_t)
+    MESH_SCALAR_TYPE(Half,c10::Half)
+    MESH_SCALAR_TYPE(BFloat16,c10::BFloat16)
+    MESH_SCALAR_TYPE(Float,float)
+    MESH_SCALAR_TYPE(Double,double)
+    MESH_SCALAR_TYPE(Float8_e4m3fn,c10::Float8_e4m3fn)
+    MESH_SCALAR_TYPE(Float8_e5m2,c10::Float8_e5m2)
+    default:TORCH_CHECK(false,"preparation scalar reader has no declared scalar type ",type);
+  }
+#undef MESH_SCALAR_TYPE
+}
+template<typename T> static T scalar_bytes(const std::string &bytes,size_t offset) {
+  T value;
+  __builtin_memcpy(&value,bytes.data()+offset,sizeof value);
+  return value;
+}
+template<bool Signed>
+static int scalar_packed(uint8_t byte,unsigned position,unsigned bits) {
+#define MESH_SCALAR_BITS(Bits) case Bits:return mesh_matrix_bits<Bits,Signed>(byte,position);
+  switch(bits) {
+    MESH_SCALAR_BITS(1) MESH_SCALAR_BITS(2) MESH_SCALAR_BITS(3) MESH_SCALAR_BITS(4)
+    MESH_SCALAR_BITS(5) MESH_SCALAR_BITS(6) MESH_SCALAR_BITS(7) MESH_SCALAR_BITS(8)
+    default:TORCH_CHECK(false,"packed preparation scalar width must be between 1 and 8 bits");
+  }
+#undef MESH_SCALAR_BITS
+}
+static pybind11::bytes scalar_read(const pybind11::bytes &source,at::ScalarType source_type,
+    at::ScalarType output_type,const std::vector<int64_t> &offsets,unsigned bits,bool signed_code,
+    const std::optional<pybind11::bytes> &scales,const std::optional<pybind11::bytes> &zeros,
+    int64_t absent,bool bitcast,const std::optional<std::vector<bool>> &present) {
+  const std::string bytes=source,scale_bytes=scales?std::string(*scales):std::string(),
+    zero_bytes=zeros?std::string(*zeros):std::string();
+  const size_t count=offsets.size(),width=c10::elementSize(source_type);
+  TORCH_CHECK(!bits || bits<=8,"packed preparation scalar width must be between 1 and 8 bits");
+  TORCH_CHECK(!present || present->size()==count,"support mask must match the declared output order");
+  TORCH_CHECK(count<=SIZE_MAX/sizeof(int64_t),"preparation scalar count exceeds address space");
+  TORCH_CHECK(!scales || scale_bytes.size()==count*sizeof(float),"scales must be output-ordered FLOAT32 bytes");
+  TORCH_CHECK(!zeros || zero_bytes.size()==count*sizeof(int64_t),"zeros must be output-ordered INT64 bytes");
+  TORCH_CHECK(!bitcast || (!bits&&!scales&&!zeros&&width==c10::elementSize(output_type)),
+    "bitcast requires ordinary equal-width scalar types without quantization");
+  for(size_t i=0;i<count;i++) {
+    TORCH_CHECK(offsets[i]>=0,"bit positions must be nonnegative; support is a separate operand");
+    if(present&&!(*present)[i])continue;
+    const uint64_t at=(uint64_t)offsets[i]/8,lane=(uint64_t)offsets[i]%8;
+    TORCH_CHECK(bits?lane+bits<=8:lane==0,"scalar field crosses its declared byte boundary");
+    const size_t bytes_needed=bits?1:width;
+    TORCH_CHECK(at<=bytes.size()&&bytes_needed<=bytes.size()-at,"scalar field exceeds supplied initializer bytes");
+  }
+  const std::string result=scalar_type(source_type,[&](auto input_tag) {
+    using Input=typename decltype(input_tag)::type;
+    return scalar_type(output_type,[&](auto output_tag) {
+      using Output=typename decltype(output_tag)::type;
+      TORCH_CHECK(count<=SIZE_MAX/sizeof(Output),"preparation scalar output exceeds address space");
+      std::string made(count*sizeof(Output),'\0');
+      for(size_t i=0;i<count;i++) {
+        const bool support=!present||(*present)[i];
+        const size_t at=(uint64_t)offsets[i]/8;
+        const float scale=scales?scalar_bytes<float>(scale_bytes,i*sizeof(float)):1.0f;
+        const int64_t zero=zeros?scalar_bytes<int64_t>(zero_bytes,i*sizeof(int64_t)):0;
+        Output value;
+        if(bits) {
+          const int code=support?(signed_code?scalar_packed<true>((uint8_t)bytes[at],offsets[i]%8,bits):
+                                               scalar_packed<false>((uint8_t)bytes[at],offsets[i]%8,bits)):
+                                  mesh_layout_cast<int>(absent);
+          value=scales||zeros?mesh_matrix_scaled<Output>(code,scale,zero):mesh_layout_cast<Output>(code);
+        } else {
+          const Input code=support?scalar_bytes<Input>(bytes,at):mesh_layout_cast<Input>(absent);
+          if(bitcast) {
+            if constexpr(sizeof(Input)==sizeof(Output))value=mesh_layout_bitcast<Output>(code);
+          } else value=scales||zeros?mesh_matrix_scaled<Output>(code,scale,zero):mesh_layout_cast<Output>(code);
+        }
+        __builtin_memcpy(made.data()+i*sizeof(Output),&value,sizeof value);
+      }
+      return made;
+    });
+  });
+  return pybind11::bytes(result);
+}
 
 // Framework stream dependencies and compatibility-call storage. The shared
 // native schedule owns prepared execution; this state names MPS data events.
@@ -1900,6 +1999,10 @@ struct Drained {
 };
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
+  module.def("scalar_read",&scalar_read,pybind11::arg("source"),pybind11::arg("source_type"),
+    pybind11::arg("output_type"),pybind11::arg("offsets"),pybind11::arg("bits")=0,
+    pybind11::arg("signed")=true,pybind11::arg("scales")=std::nullopt,pybind11::arg("zeros")=std::nullopt,
+    pybind11::arg("absent")=0,pybind11::arg("bitcast")=false,pybind11::arg("present")=std::nullopt);
   install_region_allocator();
   module.def("place_layout",[](NSUInteger count,const std::vector<TensorLayout> &uses,
       const std::vector<TensorLayout> &targets,const std::vector<std::vector<NSInteger>> &footprints,
