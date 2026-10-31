@@ -1,6 +1,6 @@
 # Ownership integration tickets
 
-Recorded 2026-10-30 23:14 UTC; updated 2026-10-31 04:03 UTC. The initial source
+Recorded 2026-10-30 23:14 UTC; updated 2026-10-31 04:44 UTC. The initial source
 checkpoints were mesh `64477c9f` and metal-microbench `8a4454f2`; the status below
 describes the implementation accompanying this update and its open connections.
 This divides
@@ -53,11 +53,11 @@ distributed closure remains open at the connections below.
 
 | Ticket | State at this handoff | Next connection |
 |---|---|---|
-| O1 | Selected selector/scan/sampling and ordinary butterfly work use existing kernels; max-pool keeps its window axes | Ragged butterfly source multiplicities; average/fractional-pool unroll overrides |
-| O2 | Supplied assignments retain local source-shape edges, typed cohorts and all storage uses | Original scalar operand-use identity across independently lowered rank bodies |
-| O3 | Partial/complete values and cohort-typed byte expressions compose; local shapes specialize from declared rank types | Complete independently scoped live-read handoff |
+| O1 | Selected row work includes ragged source multiplicities; pooled reductions keep their window axes; both consumers share command declarations | Joined ordinary frontend preparation; declared backend eligibility |
+| O2 | Supplied assignments retain local types, storage uses and exact independently scoped read prefixes | Joined distributed binding beyond the fake endpoint boundary |
+| O3 | Partial/complete values and cohort-typed byte expressions compose; providers receive exact read prefixes from each retained body | Joined distributed binding beyond the fake endpoint boundary |
 | O4 | Ordinary and owned Function plus public FX use one selected-section binder and exact byte equalities | Joined distributed binding beyond the fake endpoint boundary |
-| O5 | Importer consumes shared live-read sections; UPDATE→GATHER composes through its scalar producer | New passive external declarations; encoded index folding and remaining packed-reader integration |
+| O5 | Importer consumes shared scalar and external command declarations, including selected and ragged outputs; UPDATE→GATHER remains fused | Encoded index folding and remaining packed-reader integration |
 | O6 | Open | Join ordinary entry points, remove superseded paths, then build and inspect preparation |
 
 None of O1–O6 is closed by a helper alone. The later whole-function measurements
@@ -124,8 +124,11 @@ Owner records also retain local strides. Standard dense DTensor declarations
 use the framework's local-stride rule; an explicitly supplied stride takes
 precedence. A gapped peer layout needs that declaration. Lowering does not
 substitute a contiguous layout when it is absent.
-Empty peers retain their empty work. Capturing a wholly empty MPS DTensor still
-stops in the framework's metadata storage resize, before this source handoff.
+Empty peers retain their empty work. The pinned source extension keeps wrapper
+storage handling on the wrapper's inner tensors, matching its existing alias
+handling. A wholly empty MPS DTensor now reaches ordinary owned Function page
+preparation. Selected lowering retains the existing no-command scheduler record
+and its empty result storage; it does not invent an external numerical kernel.
 
 Shared source equations run before section splitting, so their page declarations
 enter the same boundary pass as explicit declarations. `prepared['fields']` and
@@ -175,6 +178,23 @@ The shared layout join now identifies equal positions in either input family,
 using the same equivalence closure as `TensorLayout.identify`. Repeated and
 zero-stride views keep their ordered shape while sharing their original bytes.
 Selected byte equalities do not round a request up to its surrounding scalar.
+
+Read-expression sharing uses the actual retained body and semantic input-port
+map. Distinct rank-local declarations keep distinct work coordinates. A provider
+compiles each required prefix from that retained body, with its index and mask
+pages delivered through the normal input mechanism. Only recipient ranks keep
+their assigned continuations. Providers do not need a new capture, guessed
+cross-body correspondence or another executor. Prepared ragged gather, reduction
+and dependent-read examples reach selected page and shader binding this way;
+complete transport binding remains beyond the fake process-group endpoint.
+
+External numerical commands retain named typed roles and API requirements
+before physical binding. The portable importer consumes that declaration; its
+final page binder realizes required conversions against its own pages. Native
+binding consumes the same declaration and keeps its own prepared conversion
+edges. Physical conversion commands from one binding are not portable source
+declarations. Workspace initial values and mutability are explicit operands,
+separate from immutable constants.
 
 Packing starts from its declared first component and zero cursor. The relation
 solver derives an inductive affine set from those seeds before closing the
@@ -242,18 +262,19 @@ respective owners. A ticket is not permission to collect every dirty file.
 **Resume here:** complete missing mathematical declarations for external commands
 and declared access domains for changing-index consumers. Pending records name
 those gaps. Preserve the selected scalar/product implementation already prepared.
-Ordinary reduction unrolling is deferred until ownership selection. The
-low-memory max-pool adapter now uses the existing window body under that same
-phase setting. Upstream average/fractional-pool overrides still need this
-reconciliation. Selected row and prefix relations serve top-k/sort, scans,
-sampling and ordinary butterfly factors through one external-plan binder;
+Reduction unrolling is deferred until ownership selection through the pinned
+source extension's compiler choice. Max, average and fractional pool use their
+original numerical bodies; the max-pool-specific bypass is removed. Fractional
+pool retains its declared float64 offset arithmetic and needs a compatible
+backend assignment. Selected row and prefix relations serve top-k/sort, scans,
+sampling and butterfly factors through one external-plan binder;
 their existing kernels consume selected output maps. Complete output coverage
 is a compiled constant. Sorted top-k retains only the prefix through the last
 requested rank; unsorted output keeps its declared selection semantics.
 Complete mapped scans reuse output pages for their partial sums when scalar
 widths agree. Omitted outputs retain the prefix workspace their inputs require.
-Ragged butterfly source sums need their ordered
-multiplicity declaration before they can use the same path.
+Ragged butterfly source sums retain ordered occurrence relations through the
+same path, including duplicate summands and empty segments.
 
 **Implement:** expose exact typed storage coordinates from the retained body and
 value bindings. Compose output demand with writes to select work, then compose

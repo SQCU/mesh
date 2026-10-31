@@ -9,7 +9,7 @@ kernel void scan_blocks(device const INPUT *source [[buffer(0)]], device OUTPUT 
     ACCUM total;
     const ACCUM prefix = mesh_prefix_sum<THREADS>(value, lid, sums, total);
     if constexpr (BLOCKS > 1) {
-        if (column < EXTENT) partial[mesh_index<2>(ulong(block.y) * EXTENT + column)] = prefix;
+        if (column < EXTENT) partial[mesh_index<3>(ulong(block.y) * EXTENT + column)] = prefix;
         if (lid == 0) totals[ulong(block.y) * BLOCKS + block.x] = total;
     } else if (column < EXTENT) {
         const ulong at = mesh_index<8>(ulong(block.y) * EXTENT + column);

@@ -38,8 +38,11 @@ each rank's operand types and global page relations, including ragged index/mask
 expressions. Explicit `to_local` shape queries now remain FX edges and consume
 each rank's declared local type. One semantic field retains all of its typed
 storage uses and their paired coordinates. Disjoint collective cohorts retain
-their own source types and declared group roles. Matching original scalar
-load-use identities across independently lowered rank bodies remains open.
+their own source types and declared group roles. Independently lowered rank
+bodies retain separate read expressions. Their providers compile the exact
+retained prefixes, with index/predicate pages as ordinary inputs; each rank
+keeps only its assigned continuation. Shared bodies still share selected work.
+There is no cross-body name, ordinal or shape-based identity reconstruction.
 
 Native scalar emission now returns passive command declarations before pipeline
 realization. The native and LiteRT consumers retain the same typed byte
@@ -57,10 +60,20 @@ Cached pointwise producers now
 compose into live reads before page placement; an imported UPDATE→GATHER emits
 one command without a full updated-table intermediate. Selected top-k/sort,
 scan, sampling and ordinary butterfly factors now use their existing kernels
-through one selected external-command binder. Max-pool retains its window axes
-until ownership selection. Average/fractional pooling still has upstream local
-unrolling overrides; ragged butterfly source multiplicities and portable
-importer consumption of the new external declarations also remain open.
+through one selected external-command binder. Ragged butterfly factors retain
+ordered source occurrences, including duplicates and empty segments. The pinned
+Torch source extension makes reduction unrolling a compiler phase choice;
+max/average/fractional pooling keep their window axes until ownership selection.
+This removes the max-pool-specific lowering override. Fractional pooling's
+float64 offset arithmetic remains an explicit backend eligibility requirement.
+Native and portable consumers now share the product, selector, scan, sampling
+and butterfly command declarations. These retain typed roles, workspace
+requirements and initial values, auxiliary index layouts, and the exact byte
+accesses within each argument. Scalar emission supplies the same access field.
+Neither consumer maps those accesses to source storage merely to invert them
+again. Each final binder realizes the declared layout requirements on its own
+pages. Ordinary and selected portable page/shader preparation reaches the
+existing native command compiler, including ragged butterfly inputs.
 These are source, build and preparation observations, with no new numerical or
 performance claim.
 Followups 2–6 are still outstanding.
@@ -115,6 +128,25 @@ relationships. An absent dependency creates no barrier. The source changes to
 complete this handoff remain outstanding; the review does not establish a
 numerical performance result. See also
 [the collective lowering trace](collective-lowering-2026-10-30.md).
+
+The handoff is larger than a barrier bit per collective issue. Source lowering
+retains value identities, types and work/access relations. Ownership selects
+work and deliveries. Placement resolves page aliases and required contiguous
+operands. Routing retains paired endpoints and relay edges. Dependency lowering
+joins numerical, transport and provider commands, including overwrites across
+prepared slots. Backend lowering turns those edges and declared resource limits
+into the exact command order, barrier scopes and publication conditions. Each
+stage consumes the previous stage's facts; it does not reconstruct them from
+names, byte overlaps or dispatch kinds.
+
+Today `MetalDataflow`, replay realization, `MetalWorkDependencies` and encoder
+ordering still analyze related accesses separately. The collective callback
+hides its dispatches until `MetalScheduleCrossWork` flushes and encodes it.
+Replacing the callback with concrete prepared command records is necessary
+before those analyses can share one graph. Merely caching one range walk or
+barriering every dispatch leaves that boundary incomplete. Changing index-page
+contents remain ordinary operands in this graph; they do not require a second
+execution interface.
 
 ## Window relations
 

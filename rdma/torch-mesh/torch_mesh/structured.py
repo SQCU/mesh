@@ -12,11 +12,14 @@ none of them decomposing E.  The same seed gives the same rotation, so a kernel 
   Rotation(n, seed); .rows(x) rotates each row of x [m, n] (x R^T); .columns(x) each column of x [n, k] (R x);
   .rows_inverse(y) undoes .rows (y R)"""
 from pathlib import Path
+import math
+import struct
 
 import torch
 
 from . import _stream
 from .compilation import operands
+from .command_declarations import Commands, dense, descriptions, configuration, bind
 
 SOURCE = Path(__file__).with_name('structured.metal').read_text()
 
@@ -115,89 +118,148 @@ def prepare(x, signs, width, *, out=None):
     return x, commands
 
 
-def stage_views(value, width, step):
+def _stage_layout(layout, width, step):
     """The coordinates changed by one factor, with its local axis last."""
-    from .operand import TensorView
-    value = TensorView.of(value)
-    rows, columns = value.shape
-    return value.reshape((rows, columns // (width * step), width, step)).permute((0, 1, 3, 2))
+    rows, columns = layout.shape
+    return layout.reshape((rows, columns // (width * step), width, step)).permute((0, 1, 3, 2))
+
+
+def factor_domain(algebra, source, signs, target, *, width, step, normalization, signed, sources, starts):
+    """One existing factor's typed reads, including ordered source occurrences."""
+    from .operand import layout_configuration
+    from .selection import row_domain
+    rows, columns = target['view'].shape
+    groups = rows * columns // width
+    def grouped(value):
+        value = dict(value)
+        value['view'] = _stage_layout(value['view'], width, step).reshape((groups, width))
+        return value
+    inputs = {} if starts else dict(x=grouped(source))
+    if signed:
+        repeated = _stream.TensorLayout((rows, columns), (0, 1))
+        repeated = repeated.rebase(_stream.TensorLayout((columns,), (1,)), signs['view'])
+        inputs['signs'] = grouped(dict(signs, view=repeated))
+    parameters = dict(width=width, normalization=normalization, signed=signed,
+                      sign_type={torch.int8: 'char', torch.float32: 'float'}[signs['dtype']])
+    domain = row_domain(algebra, inputs, dict(out=grouped(target)), width=width,
+                        adapter='fwht_stage', parameters=parameters)
+    if starts:
+        coordinates = [outer * width * step + lane * step + inner
+                       for outer in range(columns // (width * step)) for inner in range(step) for lane in range(width)]
+        present = [column for coordinate in coordinates for column in sources[starts[coordinate]:starts[coordinate + 1]]]
+        occurrence_coordinates = [ordinal for ordinal, coordinate in enumerate(coordinates)
+                                  for _ in range(starts[coordinate], starts[coordinate + 1])]
+        # The declaration already supplies these finite occurrence lists. Only
+        # rows repeat; their relation stays symbolic rather than expanding it.
+        occurrences = source['view'].select(1, present).reshape((rows * len(present),))
+        coordinate_view = _stream.TensorLayout((rows, columns), (columns, 1)).select(
+            1, occurrence_coordinates).reshape((rows * len(present),))
+        segments = algebra.layout(layout_configuration(coordinate_view)).then(algebra.map(
+            (rows * columns,), (groups, width), lambda i, o: [f'{i[0]} = {o[0]} * {width} + {o[1]}']))
+        logical = algebra.map(domain['work'], domain['work'], lambda i, o: [f'{o[0]} = {i[0]}']).then(
+            segments.inverse(domain['work']))
+        storage = algebra.layout(layout_configuration(occurrences))
+        access = dict(source, relation=logical.then(storage))
+        domain['reads']['x'] = access
+        domain['uses']['x'] = dict(access=access, logical=logical, storage=storage, shape=occurrences.shape,
+                                   side='read', segments=segments)
+    return domain
+
+
+def declaration(operands, parameters, configuration):
+    """The factor's unchanged shader and source-occurrence maps, before pages."""
+    commands = Commands(operands, **configuration)
+    width, normalization, signed = (parameters[key] for key in ('width', 'normalization', 'signed'))
+    source, target = commands.view('x'), commands.view('out')
+    signs = commands.view('signs') if signed else None
+    kinds = {torch.float32: 'float', torch.float16: 'half', torch.bfloat16: 'bfloat', torch.int8: 'char'}
+    input_type = kinds[source['dtype']]
+    sign_type = parameters.get('sign_type') or (kinds[signs['dtype']] if signed else 'float')
+    maps = parameters.get('write_maps')
+    if maps is not None:
+        groups = maps['out'].count // width
+        extents = (dense((groups * width + 1,)) if parameters.get('read_extents') is None else
+                   parameters['read_extents']['x'])
+        _piece(commands, source if source['layout'].count else None, target, signs, extents,
+               width=width, normalization=normalization, signed=signed, groups=groups, sign_groups=groups,
+               input_type=input_type, sign_type=sign_type, write_map=maps['out'],
+               write_complete=parameters['write_complete']['out'])
+    else:
+        step, starts, sources = parameters['step'], parameters['starts'], parameters['sources']
+        target = dict(target, layout=_stage_layout(target['layout'], width, step))
+        # Ragged reads get their coordinates from the output even when no
+        # source columns exist. Each piece declares only its own exact pages.
+        grouped = target if starts else dict(source, layout=_stage_layout(source['layout'], width, step))
+        if signed:
+            signs = dict(signs, layout=_stage_layout(signs['layout'].reshape((1, signs['layout'].count)), width, step))
+        for origin, size in _stream.view_tiles(grouped['layout'].shape, max(width, commands.geometry['FWHT_TILE_ELEMENTS'])):
+            def cut(view, broadcast=False):
+                if view is None:
+                    return None
+                layout = view['layout']
+                for axis, (first, count) in enumerate(zip(origin, size)):
+                    layout = layout.slice(axis, 0 if broadcast and axis == 0 else first,
+                                          1 if broadcast and axis == 0 else count, 1)
+                return dict(view, layout=layout)
+            reads, writes, selected_signs = cut(grouped), cut(target), cut(signs, True)
+            elements = math.prod(size[1:])
+            extents = dense((elements + 1,))
+            if starts:
+                coordinates = [(origin[1] + outer) * width * step + lane * step + origin[2] + inner
+                               for outer in range(size[1]) for inner in range(size[2]) for lane in range(width)]
+                present = [column for c in coordinates for column in sources[starts[c]:starts[c + 1]]]
+                first = [0]
+                for c in coordinates:
+                    first.append(first[-1] + starts[c + 1] - starts[c])
+                extents = extents.select(0, first)
+                reads = (dict(source, layout=source['layout'].slice(0, origin[0], size[0], 1).select(1, present))
+                         if present else None)
+            _piece(commands, reads, writes, selected_signs, extents, width=width, normalization=normalization,
+                   signed=signed, groups=math.prod(size) // width, sign_groups=math.prod(size[1:]) // width,
+                   input_type=input_type, sign_type=sign_type)
+    return commands.declaration()
+
+
+def _piece(commands, reads, writes, signs, extents, *, width, normalization, signed, groups, sign_groups,
+           input_type, sign_type, write_map=None, write_complete=True):
+    if not groups:
+        return
+    indices, definitions = {4: extents}, {}
+    if write_map is not None:
+        indices[8] = write_map
+        definitions = {'MESH_FWHT_RESULT(i)': 'mesh_index<8>(i)', 'MESH_FWHT_RESULTS': writes['layout'].count,
+                       'MESH_FWHT_SELECTED': int(not write_complete)}
+    instance = f'structured_butterfly<{width},{normalization},{str(signed).lower()},{input_type},{sign_type}>'
+    instantiated = f'\ntemplate [[host_name("butterfly")]] [[kernel]] decltype({instance}) {instance};'
+    commands.shader(SOURCE, 'butterfly', [reads, writes, signs if signed else None],
+        definitions=definitions, indices=indices, instance=instantiated, constants={3: struct.pack('I', sign_groups)},
+        grid=(groups, 1, 1), threadgroup=None, threadgroup_policy={'preferred': width // 2, 'minimum_simd': True},
+        limits={'threadgroup_memory_bytes': commands.capabilities['threadgroup_memory_bytes']},
+        access=((1 if reads is not None else 0) | (4 if signed else 0)) | (2 << commands.geometry['ACCESS_WRITE_SHIFT']))
 
 
 def prepare_stage(x, signs, width, step, normalization, signed, sources, starts, *, out=None):
     from .placement import output
-    from .operand import TensorView
-    import math
+    from .native import command_records
     y = output((x.shape[0], signs.shape[0]), torch.float32, x.device, out)
-    target = stage_views(y, width, step)
-    # Domain-addressed reads are bound per tile below. The target supplies
-    # their logical coordinates even when the source has no columns.
-    source = target if starts else stage_views(x, width, step)
-    sign = stage_views(TensorView.of(signs).reshape((1, signs.shape[0])), width, step)
-    kinds = {torch.float32: 'float', torch.float16: 'half', torch.bfloat16: 'bfloat', torch.int8: 'char'}
-    commands = []
-    # Each record names only its pages. Completion of one piece can release
-    # its consumer or a one-sided send without joining the rest of the row.
-    for origin, size in _stream.view_tiles(source.shape, max(width, operands()['FWHT_TILE_ELEMENTS'])):
-        def cut(view, broadcast=False):
-            for axis, (first, count) in enumerate(zip(origin, size)):
-                view = view.slice(axis, 0 if broadcast and axis == 0 else first, 1 if broadcast and axis == 0 else count)
-            return view
-        reads, writes, signs_view = cut(source), cut(target), cut(sign, True)
-        elements = math.prod(size[1:])
-        # binding 4: element e of a row reads its values [extents(e), extents(e + 1)); the identity reads one in place
-        extents = _stream.TensorLayout((elements + 1,), (1,))
-        if starts:
-            coordinates = [(origin[1] + outer) * width * step + lane * step + origin[2] + inner
-                           for outer in range(size[1]) for inner in range(size[2]) for lane in range(width)]
-            present = [column for c in coordinates for column in sources[starts[c]:starts[c + 1]]]
-            first = [0]
-            for c in coordinates:
-                first.append(first[-1] + starts[c + 1] - starts[c])
-            extents = extents.select(0, first)
-            # a piece whose elements have no sources reads nothing and depends on no input
-            reads = TensorView.of(x).slice(0, origin[0], size[0]).select(1, present) if present else None
-        groups = math.prod(size) // width
-        commands.append(_piece(reads, writes, signs_view, extents, width=width, normalization=normalization,
-                               signed=signed, groups=groups, sign_groups=math.prod(size[1:]) // width,
-                               input_type=kinds[x.dtype], sign_type=kinds[signs.dtype]))
-    return y, commands
+    values = dict(x=x, signs=signs, out=y)
+    prepared = declaration(descriptions(values),
+        dict(width=width, step=step, normalization=normalization, signed=signed, sources=sources, starts=starts),
+        configuration())
+    return y, list(command_records(bind(prepared, values)))
 
 
-def prepare_factor(x, *, signs=None, out, width, normalization, signed, sign_type, write_maps, write_complete):
-    """The existing butterfly body over selected, already grouped page operands."""
+def prepare_factor(x, *, signs=None, out, width, normalization, signed, sign_type, write_maps, write_complete,
+                   read_extents=None):
+    """The same factor recipe over selected, already grouped page operands."""
     from .operand import TensorView
-    kinds = {torch.float32: 'float', torch.float16: 'half', torch.bfloat16: 'bfloat'}
-    x, out = TensorView.of(x), TensorView.of(out)
-    groups = x.shape[0]
-    extents = _stream.TensorLayout((x.numel() + 1,), (1,))
-    record = _piece(x, out, signs, extents, width=width, normalization=normalization, signed=signed,
-                    groups=groups, sign_groups=groups, input_type=kinds[x.dtype], sign_type=sign_type,
-                    write_map=write_maps['out'], write_complete=write_complete['out'])
-    return out, [record] if groups else []
-
-
-def _piece(reads, writes, signs, extents, *, width, normalization, signed, groups, sign_groups,
-           input_type, sign_type, write_map=None, write_complete=True):
-    import struct
-    views = {1: writes, 4: extents, **({0: reads} if reads is not None else {}), **({2: signs} if signed else {})}
-    if write_map is not None:
-        views[8] = write_map
-    handle = _kernel(width, normalization, signed, input_type, sign_type, views,
-                     None if write_map is None else writes.numel(), write_complete)
-    maximum, lanes, _ = _stream.pipeline_facts(handle)
-    threads = min(maximum, max(lanes, width // 2))
-    return (handle, [reads, writes, signs if signed else None], {3: struct.pack('I', sign_groups)},
-            (groups, 1, 1), (threads, 1, 1), False,
-            ((1 if reads is not None else 0) | (4 if signed else 0)) | (2 << _stream.compilation['ACCESS_WRITE_SHIFT']))
-
-
-def _kernel(width, normalization, signed, input_type, sign_type, bindings, count=None, complete=True):
-    from .layout import pipeline
-    instance = f'structured_butterfly<{width},{normalization},{str(signed).lower()},{input_type},{sign_type}>'
-    declaration = f'\ntemplate [[host_name("butterfly")]] [[kernel]] decltype({instance}) {instance};'
-    head = '' if count is None else (f'#define MESH_FWHT_RESULT(i) mesh_index<8>(i)\n#define MESH_FWHT_RESULTS {count}\n'
-                                    f'#define MESH_FWHT_SELECTED {int(not complete)}\n')
-    return pipeline(head + _stream.metal_prelude(), bindings, SOURCE, 'butterfly', None, declaration)
+    from .native import command_records
+    out = TensorView.of(out)
+    values = dict(x=x, signs=signs, out=out)
+    prepared = declaration(descriptions(values),
+        dict(width=width, normalization=normalization, signed=signed, sign_type=sign_type,
+             write_maps=write_maps, write_complete=write_complete, read_extents=read_extents), configuration())
+    return out, list(command_records(bind(prepared, values)))
 
 
 def _factor(n, block_width):

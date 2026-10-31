@@ -420,7 +420,7 @@ def binding_layout(layout, declaration):
     return restore(declaration['view']).rebase(restore(declaration['source']), layout)
 
 def descriptor(value):
-    return TensorView.of(value).layout
+    return value if isinstance(value, _stream.TensorLayout) else TensorView.of(value).layout
 
 
 def relation_layout(relation, shape, extent):

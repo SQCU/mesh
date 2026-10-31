@@ -1,81 +1,77 @@
 """Prepare hierarchical tensor scans with the shared threadgroup prefix sum."""
-from functools import lru_cache
 import math
 from pathlib import Path
 
 import torch
-from . import _stream, empty
 from .operand import TensorView
-from .layout import index_source
+from .command_declarations import Commands, dense, rows, descriptions, configuration, bind
 
 
-@lru_cache(None)
-def pipelines(definitions, offsets, finishing):
-    directory = Path(__file__).parent
-    definitions = ''.join(f'#define {k} {v}\n' for k, v in definitions)
-    source = (directory / 'argmax.metal').read_text() + '\n' + (directory / 'scan.metal').read_text()
-    return tuple(_stream.pipeline(definitions + indices + source, name)
-                 for indices, name in ((offsets, 'scan_blocks'), (finishing, 'add_prefix')))
+_KINDS = {torch.bool: 'bool', torch.uint8: 'uchar', torch.int8: 'char', torch.int16: 'short',
+          torch.int32: 'int', torch.int64: 'long', torch.uint32: 'uint', torch.uint64: 'ulong',
+          torch.float16: 'half', torch.bfloat16: 'bfloat', torch.float32: 'float'}
+_SOURCE = Path(__file__).with_name('argmax.metal').read_text() + '\n' + Path(__file__).with_suffix('.metal').read_text()
 
 
-def cumsum(x, dim, *, dtype=None, out=None, write_maps=None, write_complete=None):
-    kinds = {torch.bool: 'bool', torch.uint8: 'uchar', torch.int8: 'char', torch.int16: 'short',
-             torch.int32: 'int', torch.int64: 'long', torch.uint32: 'uint', torch.uint64: 'ulong',
-             torch.float16: 'half', torch.bfloat16: 'bfloat', torch.float32: 'float'}
-    dtype = dtype or (x.dtype if x.is_floating_point() else torch.int64)
-    if x.dtype not in kinds or dtype not in kinds or dtype == torch.bool:
-        raise NotImplementedError('native cumsum requires a supported numeric output type')
-    from .placement import output as bind_output
-    output = TensorView.of(out) if write_maps is not None else bind_output(x.shape, dtype, x.device, out)
-    if not x.numel():
-        return output, []
-    source, target = TensorView.of(x), TensorView.of(output)
-    if not source.ndim:
-        source, target = source.reshape((1,)), target.reshape((1,))
-    dim %= source.ndim
-    rows = math.prod(source.shape[:dim] + source.shape[dim + 1:])
-    accumulator = torch.float32 if output.is_floating_point() else (torch.uint64 if output.element_size() > 4 else torch.uint32)
-    geometry = _stream.compilation
-    _, limit, memory = _stream.device_facts()
-    threads = min(limit, geometry['SCAN_THREADS'])
+def declaration(operands, parameters, configuration):
+    """The scan hierarchy, typed slots and selected writes before page binding."""
+    commands = Commands(operands, **configuration)
+    geometry, capabilities = commands.geometry, commands.capabilities
+    threads = min(capabilities['max_threads_per_threadgroup'], geometry['SCAN_THREADS'])
     threads -= threads % geometry['SIMD_WIDTH']
     if threads <= 0:
         raise ValueError('scan geometry requires at least one configured SIMD group')
-    extent = source.shape[dim]
-    blocks = -(-extent // threads)
-    totals = empty((rows, blocks), dtype=accumulator) if blocks > 1 else None
-    # Partial sums use their own layout when accumulation changes the width.
-    source = source.rows(dim)
-    target = target if write_maps is not None else target.rows(dim)
-    partial = target
-    if blocks > 1:
-        complete = write_maps is None or write_complete['out']
-        if complete and target.element_size() == accumulator.itemsize:
-            if write_maps is not None:
-                physical = write_maps['out'].rebase(_stream.TensorLayout((target.numel(),), (1,)),
-                                                  target.layout.reshape((target.numel(),)))
-                partial = TensorView(target.storage, physical.reshape(source.shape), target.binding_origin)
-            partial = partial.typed(accumulator)
-        else:
-            partial = empty(source.shape, dtype=accumulator)
-    definitions = dict(INPUT=kinds[source.dtype], OUTPUT=kinds[dtype], ACCUM=kinds[accumulator],
-                       EXTENT=extent, BLOCKS=blocks, THREADS=threads, OUTPUT_COUNT=target.numel(),
-                       OUTPUT_SELECTED=int(write_maps is not None and not write_complete['out']))
-
-    selected = write_maps['out'] if write_maps is not None else _stream.TensorLayout((rows * extent,), (1,))
-    offsets = index_source({0: source, 1: target, 2: partial, 8: selected})
-    finishing = index_source({0: target, 1: target, 2: partial, 8: selected})
-    handles = pipelines(tuple(definitions.items()), offsets, finishing)
-    for handle in handles:
-        maximum, _, fixed = _stream.pipeline_facts(handle)
-        if threads > maximum or fixed > memory:
-            raise ValueError('scan geometry exceeds the configured device/pipeline capability')
-    grid, group = (blocks, rows, 1), (threads, 1, 1)
+    limits = {'threadgroup_memory_bytes': capabilities['threadgroup_memory_bytes']}
     shift = geometry['ACCESS_WRITE_SHIFT']
-    records = [(handles[0], [source, target, totals, partial], {}, grid, group, False,
-                1 | ((12 if blocks > 1 else 2) << shift))]
-    if blocks > 1:
-        prefix, nested = cumsum(totals, 1, dtype=accumulator)
-        records.extend(nested)
-        records.append((handles[1], [target, prefix, partial], {}, grid, group, False, 6 | (1 << shift)))
-    return output, records
+
+    def scan(source, target, dim, maps=None, complete=None, prefix='scan'):
+        dtype = target['dtype']
+        if source['dtype'] not in _KINDS or dtype not in _KINDS or dtype == torch.bool:
+            raise NotImplementedError('native cumsum requires a supported numeric output type')
+        if not source['layout'].count:
+            return
+        if not source['layout'].shape:
+            source, target = (dict(value, layout=value['layout'].reshape((1,))) for value in (source, target))
+        source = rows(source, dim)
+        target = target if maps is not None else rows(target, dim)
+        count, extent = source['layout'].shape
+        accumulator = torch.float32 if dtype.is_floating_point else (torch.uint64 if dtype.itemsize > 4 else torch.uint32)
+        blocks = -(-extent // threads)
+        totals = commands.temporary(prefix + '/totals', (count, blocks), accumulator,
+                                    requirements=('contiguous',)) if blocks > 1 else None
+        partial = target
+        if blocks > 1:
+            if (maps is None or complete['out']) and dtype.itemsize == accumulator.itemsize:
+                mapping = target['layout'] if maps is None else maps['out'].rebase(
+                    dense((target['layout'].count,)), target['layout'].reshape((target['layout'].count,)))
+                partial = dict(target, layout=mapping.reshape(source['layout'].shape), dtype=accumulator)
+            else:
+                partial = commands.temporary(prefix + '/partial', source['layout'].shape, accumulator)
+        definitions = dict(INPUT=_KINDS[source['dtype']], OUTPUT=_KINDS[dtype], ACCUM=_KINDS[accumulator],
+                           EXTENT=extent, BLOCKS=blocks, THREADS=threads, OUTPUT_COUNT=target['layout'].count,
+                           OUTPUT_SELECTED=int(maps is not None and not complete['out']))
+        selected = maps['out'] if maps is not None else dense((count * extent,))
+        grid, group = (blocks, count, 1), (threads, 1, 1)
+        commands.shader(_SOURCE, 'scan_blocks', [source, target, totals, partial],
+            definitions=definitions, indices={8: selected}, grid=grid, threadgroup=group,
+            access=1 | ((12 if blocks > 1 else 2) << shift), limits=limits)
+        if blocks > 1:
+            result = commands.temporary(prefix + '/prefix', (count, blocks), accumulator,
+                                        requirements=('contiguous',))
+            scan(totals, result, 1, prefix=prefix + '/nested')
+            commands.shader(_SOURCE, 'add_prefix', [target, result, partial], definitions=definitions,
+                indices={8: selected}, grid=grid, threadgroup=group, access=6 | (1 << shift), limits=limits)
+
+    scan(commands.view('x'), commands.view('out'), parameters['dim'], parameters.get('write_maps'),
+         parameters.get('write_complete'))
+    return commands.declaration()
+
+
+def cumsum(x, dim, *, dtype=None, out=None, write_maps=None, write_complete=None):
+    from .placement import output as bind_output
+    from .native import command_records
+    dtype = dtype or (x.dtype if x.is_floating_point() else torch.int64)
+    output = TensorView.of(out) if write_maps is not None else bind_output(x.shape, dtype, x.device, out)
+    values = dict(x=x, out=output)
+    prepared = declaration(descriptions(values), dict(dim=dim, write_maps=write_maps, write_complete=write_complete), configuration())
+    return output, list(command_records(bind(prepared, values)))

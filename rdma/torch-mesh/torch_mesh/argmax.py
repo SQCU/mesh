@@ -27,14 +27,6 @@ from . import _stream
 from .streamed import instance
 
 SOURCE = Path(__file__).with_name('argmax.metal').read_text()
-THREADS = _stream.compilation['DRAW_THREADS']
-def _kernel(kernel, bindings, *arguments, definitions=None):
-    from .layout import pipeline
-    name, line = instance(kernel, THREADS, *arguments)
-    head = ''.join(f'#define {key} {value}\n' for key, value in (definitions or {}).items())
-    return pipeline(head, bindings, SOURCE + '\n', name, instance=line + '\n')
-
-
 def _rows(z, keys):
     z2 = z.to('mps', torch.float32).reshape(-1, z.shape[-1])
     return z2, torch.as_tensor(keys, dtype=torch.int32, device=z2.device).reshape(-1).expand(z2.shape[0])
@@ -79,47 +71,74 @@ def retain(z, seed, positions, head=_stream.compilation['KEPT_HEAD'], tail=_stre
     return ids.reshape(*z.shape[:-1], -1), kept.reshape(*z.shape[:-1], -1), log_z.reshape(z.shape[:-1])
 
 
-def prepare_draw(z, keys, cutoff, seed, first, *, out=None, write_maps=None, write_complete=None):
-    from . import empty
-    from .engines import host
+def declaration(kind, operands, parameters, configuration):
+    """Retain the existing sampling kernels as named preparation commands."""
     import struct
-    rows, width = z.shape
-    blocks = max(1, min(_stream.compilation['DRAW_MAX_BLOCKS'], width // _stream.compilation['DRAW_COLUMNS_PER_BLOCK']))
+    from .command_declarations import Commands
+    commands = Commands(operands, **configuration)
+    geometry = commands.geometry
+    rows, width = operands['z']['shape']
+    if not rows:
+        return commands.declaration()
+    maps, complete = parameters.get('write_maps'), parameters.get('write_complete')
+    definitions, indices = {}, {}
+    threads = geometry['DRAW_THREADS']
+    shift = geometry['ACCESS_WRITE_SHIFT']
+    if kind == 'draw':
+        blocks = max(1, min(geometry['DRAW_MAX_BLOCKS'], width // geometry['DRAW_COLUMNS_PER_BLOCK']))
+        parts = commands.temporary('draw/parts', (2 * rows * blocks,), torch.float32, requirements=('contiguous',))
+        arrivals = commands.temporary('draw/arrivals', (rows,), torch.int32, initializer=0, requirements=('contiguous',))
+        if maps is not None:
+            indices[8] = maps['ids']
+            definitions = {'MESH_DRAW_RESULT(i)': 'mesh_index<8>(i)',
+                           'MESH_DRAW_RESULTS': math.prod(operands['ids']['shape']),
+                           'MESH_DRAW_SELECTED': int(not complete['ids'])}
+        function, instantiated = instance('mesh_draw_rows', threads)
+        commands.shader(SOURCE + '\n', function,
+            [commands.view(role) for role in ('z', 'keys', 'cutoff', 'ids')] + [parts, arrivals],
+            constants={6: struct.pack('4I', width, parameters['seed'] & 0xffffffff,
+                                     parameters['first'] & 0xffffffff, blocks)},
+            definitions=definitions, indices=indices, instance=instantiated + '\n',
+            grid=(blocks, rows, 1), threadgroup=(threads, 1, 1), access=7 | (56 << shift))
+    else:
+        if maps is not None:
+            for slot, role in enumerate(('ids', 'kept', 'log_z'), 8):
+                indices[slot] = maps[role]
+                definitions[f'MESH_RETAIN_{role.upper()}(i)'] = f'mesh_index<{slot}>(i)'
+                definitions[f'MESH_RETAIN_{role.upper()}_COUNT'] = math.prod(operands[role]['shape'])
+                definitions[f'MESH_RETAIN_{role.upper()}_SELECTED'] = int(not complete[role])
+        function, instantiated = instance('mesh_retain_rows', threads, parameters['head'], parameters['tail'])
+        commands.shader(SOURCE + '\n', function, [commands.view(role) for role in ('z', 'keys', 'ids', 'kept', 'log_z')],
+            constants={5: struct.pack('2I', width, parameters['seed'] & 0xffffffff)},
+            definitions=definitions, indices=indices, instance=instantiated + '\n',
+            grid=(1, rows, 1), threadgroup=(threads, 1, 1), access=3 | (28 << shift))
+    return commands.declaration()
+
+
+def prepare_draw(z, keys, cutoff, seed, first, *, out=None, write_maps=None, write_complete=None):
     from .placement import output
     from .operand import TensorView
-    ids = TensorView.of(out) if write_maps is not None else output((rows,), torch.int64, z.device, out)
-    parts, arrivals = empty((2 * rows * blocks,)), empty((rows,), dtype=torch.int32)
-    host(arrivals).zero_()
-    bindings, definitions = {0: z, 1: keys, 2: cutoff, 3: ids}, {}
-    if write_maps is not None:
-        bindings[8] = write_maps['ids']
-        definitions = {'MESH_DRAW_RESULT(i)': 'mesh_index<8>(i)', 'MESH_DRAW_RESULTS': ids.numel(),
-                       'MESH_DRAW_SELECTED': int(not write_complete['ids'])}
-    record = (_kernel('mesh_draw_rows', bindings, definitions=definitions), [z, keys, cutoff, ids, parts, arrivals],
-              {6: struct.pack('4I', width, seed & 0xffffffff, first & 0xffffffff, blocks)}, (blocks, rows, 1), (THREADS, 1, 1), False,
-              7 | (56 << _stream.compilation['ACCESS_WRITE_SHIFT']))
-    return ids, [record] if rows else []
+    from .command_declarations import descriptions, configuration, bind
+    from .native import command_records
+    ids = TensorView.of(out) if write_maps is not None else output((z.shape[0],), torch.int64, z.device, out)
+    values = dict(z=z, keys=keys, cutoff=cutoff, ids=ids)
+    prepared = declaration('draw', descriptions(values),
+        dict(seed=seed, first=first, write_maps=write_maps, write_complete=write_complete), configuration())
+    return ids, list(command_records(bind(prepared, values)))
 
 
 def prepare_retain(z, keys, seed, head, tail, *, outputs=None, write_maps=None, write_complete=None):
-    from . import empty
-    import struct
-    rows, width = z.shape
     from .placement import output
     from .operand import TensorView
+    from .command_declarations import descriptions, configuration, bind
+    from .native import command_records
+    rows = z.shape[0]
     ids, kept, log_z = ([TensorView.of(value) for value in outputs] if write_maps is not None else
                        [output(shape, dtype, z.device, out) for shape, dtype, out in
                        zip(((rows, head + tail), (rows, head + tail), (rows,)),
                            (torch.int64, torch.float32, torch.float32),
                            outputs if outputs is not None else (None, None, None), strict=True)])
-    bindings, definitions = {0: z, 1: keys, 2: ids, 3: kept, 4: log_z}, {}
-    if write_maps is not None:
-        for slot, (role, target) in enumerate((('ids', ids), ('kept', kept), ('log_z', log_z)), 8):
-            bindings[slot] = write_maps[role]
-            definitions[f'MESH_RETAIN_{role.upper()}(i)'] = f'mesh_index<{slot}>(i)'
-            definitions[f'MESH_RETAIN_{role.upper()}_COUNT'] = target.numel()
-            definitions[f'MESH_RETAIN_{role.upper()}_SELECTED'] = int(not write_complete[role])
-    record = (_kernel('mesh_retain_rows', bindings, head, tail, definitions=definitions), [z, keys, ids, kept, log_z],
-              {5: struct.pack('2I', width, seed & 0xffffffff)}, (1, rows, 1), (THREADS, 1, 1), False,
-              3 | (28 << _stream.compilation['ACCESS_WRITE_SHIFT']))
-    return (ids, kept, log_z), [record] if rows else []
+    values = dict(z=z, keys=keys, ids=ids, kept=kept, log_z=log_z)
+    prepared = declaration('retain', descriptions(values),
+        dict(seed=seed, head=head, tail=tail, write_maps=write_maps, write_complete=write_complete), configuration())
+    return (ids, kept, log_z), list(command_records(bind(prepared, values)))

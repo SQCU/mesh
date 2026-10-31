@@ -1,5 +1,15 @@
 # Every wait, sync and guard a transaction pays at run time, 3f2a90b7 against main (2026-10-30)
 
+Phase correction from the ordinary prepared callers: the host range/frontier
+walk described below runs while the function is realized and encoded, before
+`MetalScheduleEnqueue`. Enqueue consumes compiled submission records. The GPU
+and bridge rows describe execution work; the host rows describe encoding work
+per declared issue. They must not be read as a claim that each invocation of a
+prepared function rebuilds its page dependencies. The historical measurements
+below do not establish a latency cost for that preparation work. The remaining
+compiler handoff is tracked in
+[Compiler followups](compiler-followups-2026-10-30.md#dependency-handoff-through-command-lowering).
+
 Found by reading the issue path, the kernels and the bridge at 3f2a90b7 and at main (b2fe8bf3), not by running and
 counting. Preparation (declaration, compile_group and what it calls) is left out: it does not run per issue. A
 transaction is one physical piece: a SEND entry, its posted receive, its page units (16 KiB, block 1, so 4,096 for 64

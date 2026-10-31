@@ -676,10 +676,49 @@ def assigned_read_sections(section, records, produced, algebra, *, delivery, tra
     returned values, ordered by the original work coordinates, are the payload
     of the ordinary placement expression supplied by the frontend adapter.
     """
+    groups = {}
+    for rank, record in records.items():
+        member = record['section']
+        groups.setdefault((member['retained'], id(member['input_bindings'])), {})[rank] = record
+    sections, boundaries, programs, order, pending = {rank: [] for rank in records}, {}, {}, [], []
+    changed = False
+    for declaration, recipients in groups.items():
+        split = _assigned_read_group(section, recipients, produced, algebra,
+                                     delivery=delivery, transition=transition, declaration=declaration)
+        if split is None:
+            tail = (declaration, None)
+            order.append(tail)
+            for rank, record in recipients.items():
+                sections[rank].append(dict(record, read_cut=tail))
+            continue
+        changed = True
+        pending.extend(split['pending'])
+        if split['pending']:
+            continue
+        for rank, spans in split['sections'].items():
+            sections[rank].extend(spans)
+        for rank, values in split['boundaries'].items():
+            boundaries.setdefault(rank, {}).update(values)
+        programs.update(split['programs'])
+        order.extend(split['order'])
+    if not changed:
+        return None
+    return dict(sections=sections, boundaries=boundaries, programs=programs,
+                order=tuple(order), pending=tuple(pending))
+
+
+def _assigned_read_group(section, records, produced, algebra, *, delivery, transition, declaration):
+    """One exact retained declaration, evaluated on its declared providers.
+
+    Independently captured local scopes do not assert equivalent scalar uses.
+    Each keeps its own coordinates and ports. Providers prepare only the read
+    prefixes; original assigned work remains on the declaration's recipients.
+    """
     import math
     import torch
     from mesh_relation import flat
     from .operand import byte_relation
+    retained = declaration[0]
     sites, pending = {}, []
     for rank, record in records.items():
         member = record['section']
@@ -692,21 +731,18 @@ def assigned_read_sections(section, records, produced, algebra, *, delivery, tra
                 for projected in record['records']:
                     for slot, value in projected['reads'].items():
                         if value['access'] is read['access']:
-                            key = (source, id(projected['domain']), slot)
+                            key = (declaration, source, id(projected['domain']), slot)
                             sites.setdefault(key, dict(source=source, effect=projected['effect'],
-                                domain=projected['domain'], access=read['access'], slot=slot,
-                                retained=member['retained']))
+                                domain=projected['domain'], access=read['access'], slot=slot))
     if not sites:
         return None
-    # A source use is the retained scalar node itself, not its generated name.
-    if any(member['section']['retained'] is not site['retained']
-           for member in records.values() for site in sites.values()):
-        return dict(pending=(dict(section=section, requirement='rank_source_access_identity'),))
-    requests = {rank: [] for rank in records}
+    requests = {rank: [] for rank in produced}
+    member = next(iter(records.values()))['section']
     fields = torch.fx.Graph()
     for key, site in sites.items():
         source = site['source']
-        needed, work = {}, {}
+        needed = {rank: _empty(algebra, 1) for rank in produced}
+        work = {rank: _empty(algebra, len(site['domain']['work'])) for rank in produced}
         for rank, record in records.items():
             matching = next(row for row in record['records'] if row['domain'] is site['domain'])
             work[rank] = matching['work']
@@ -725,7 +761,7 @@ def assigned_read_sections(section, records, produced, algebra, *, delivery, tra
         for rank, selected in owners.items():
             if not selected.binary(produced[rank].get(source, _empty(algebra, 1)), 'subtract').empty():
                 pending.append(dict(source=source, coordinate=rank, requirement='assigned_source_pages'))
-            peers = tuple(peer for peer in records if all(peer[axis] == rank[axis] for axis in fixed))
+            peers = tuple(peer for peer in produced if all(peer[axis] == rank[axis] for axis in fixed))
             if any(not selected.binary(owners[peer], 'intersect').empty() for peer in peers if peer < rank):
                 pending.append(dict(source=source, coordinate=rank, requirement='delivery_sources'))
             available = _empty(algebra, 1)
@@ -735,7 +771,7 @@ def assigned_read_sections(section, records, produced, algebra, *, delivery, tra
                 selected_work = selected_work.binary(work[peer], 'union')
             if not needed[rank].binary(available, 'subtract').empty():
                 pending.append(dict(source=source, coordinate=rank, requirement='live_read_owners'))
-            binding = binding_for_access(records[rank]['section']['input_bindings'], source, site['access'])
+            binding = binding_for_access(member['input_bindings'], source, site['access'])
             requests[rank].append(dict(site, key=key, work=selected_work,
                 owner=byte_relation(binding).image(selected)))
         value = pytree.key_get(source[0].meta['val'], source[1])
@@ -748,8 +784,7 @@ def assigned_read_sections(section, records, produced, algebra, *, delivery, tra
         return dict(pending=tuple(pending))
     split, boundaries = {}, {}
     for rank, requested in requests.items():
-        member = records[rank]['section']
-        cut = cut_sections(member, member['retained'].cut_reads(requested), algebra)
+        cut = cut_sections(member, retained.cut_reads(requested), algebra)
         ports = {}
         boundaries[rank] = {boundary['key']: boundary for boundary in cut['boundaries']}
         for boundary in cut['boundaries']:
@@ -765,29 +800,49 @@ def assigned_read_sections(section, records, produced, algebra, *, delivery, tra
     programs = []
     for key, site in sites.items():
         ports = {rank: dict(boundary=boundaries[rank].get(key), source=(site['fields'][0], ()),
-                           result=(site['fields'][1], ())) for rank in records}
+                           result=(site['fields'][1], ())) for rank in produced}
         program = transition(site, ports, algebra)
         pending.extend(program.get('pending', ()))
         programs.append(program)
     if pending:
         return dict(pending=tuple(pending))
-    projected = {rank: [] for rank in records}
+    projected = {rank: [] for rank in produced}
+    tail = (declaration, None)
     for rank, spans in split.items():
-        old = {id(row['effect']['operation']): row for row in records[rank]['records']}
+        original = records.get(rank)
+        old = {} if original is None else {id(row['effect']['operation']): row for row in original['records']}
+        prefixes = {}
+        for key, boundary in boundaries[rank].items():
+            shape = sites[key]['domain']['work']
+            flatten = algebra.map(shape, (math.prod(shape),), lambda x, y: [f'{y[0]} = {flat(shape, x)}'])
+            positions = flatten.image(boundary['work'])
+            prefixes[sites[key]['fields'][0], ()] = dict(shape=list(map(int, shape)),
+                steps=[['reshape', [int(math.prod(shape))]], ['select', 0, positions.spans()]])
+        prefix_work = project_expression(dict(algebra=algebra, aliases={}, sections=spans), prefixes)
         for at, span in enumerate(spans):
+            prefix = prefix_work['sections'][at]
+            if original is None and not any(not row['work'].empty() or
+                    row.get('finish') is not None and not row['finish']['work'].empty()
+                    for row in prefix['records']):
+                continue
+            required = {id(row['domain']): row for row in prefix['records']}
             assigned = {}
             for effect in span['effects']:
-                original = old.get(id(effect['operation']))
+                prior = old.get(id(effect['operation']))
                 for domain in effect['domains']:
-                    assigned[id(domain)] = (original['work'] if original is not None else
-                        algebra.map(domain['work'], (), lambda x, y: []).domain())
+                    selected = required[id(domain)]
+                    assigned[id(domain)] = selected['work'] if prior is None else selected['work'].binary(prior['work'], 'union')
                     if domain.get('finish') is not None:
-                        assigned[id(domain['finish'])] = (original['finish']['work'] if original is not None else
-                            algebra.map(domain['finish']['work'], (), lambda x, y: []).domain())
-            demanded = {key: value for key, value in records[rank]['outputs'].items() if key in span['output_bindings']}
+                        finish = selected['finish']['work']
+                        assigned[id(domain['finish'])] = finish if prior is None else finish.binary(prior['finish']['work'], 'union')
+            demanded = dict(prefix['outputs'])
+            if original is not None:
+                for key, value in original['outputs'].items():
+                    if key in span['output_bindings']:
+                        _union(demanded, key, value)
             record = project_numerical(span, demanded, algebra, work=assigned)
             record['read_cut'] = next((key for key, boundary in boundaries[rank].items()
-                                       if boundary['before'] == at), None)
+                                       if boundary['before'] == at), tail)
             # Publish the stores of that supplied work, including carried
             # intermediate values and the cut's ordinary contribution port.
             for field, binding in binding_uses(span['output_bindings']):
@@ -803,7 +858,7 @@ def assigned_read_sections(section, records, produced, algebra, *, delivery, tra
     ordered = sorted(sites, key=lambda key: next(values[key]['source_order']
                      for values in boundaries.values() if key in values))
     return dict(sections=projected, boundaries=boundaries, programs=dict(zip(sites, programs, strict=True)),
-                order=(*ordered, None), pending=())
+                order=(*ordered, tail), pending=())
 
 
 def compile_assignments(prepared, assignments, outputs, *, delivery, boundary_projection, constraints=None, transitions=(),
@@ -857,7 +912,7 @@ def compile_assignments(prepared, assignments, outputs, *, delivery, boundary_pr
             sections[rank].append(record)
             pending[rank].extend(record['pending'])
             for key, positions in record['outputs'].items():
-                produced[rank][identity(key)] = positions
+                _union(produced[rank], identity(key), positions)
 
     def conversion(program, needs):
         requested = {}

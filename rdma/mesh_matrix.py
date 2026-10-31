@@ -126,7 +126,7 @@ def product(x, w, out, geometry, *, x1=None, bias=None, act=False, alpha=1, beta
                 grid=(-(-rows // row_tile), -(-columns // column_tile), batches), threads=(threads, 1, 1))
 
 
-def selected_products(domain, work, finish):
+def selected_products(domain, work, finish, *, requirements):
     """Factor selected product work into ordinary mapped product declarations.
 
     Equal output fibers share their selected reduction set. Each output is
@@ -169,7 +169,9 @@ def selected_products(domain, work, finish):
                     lambda i, o: [f'{right} = {left}' for left, right in zip(positions(i), o, strict=True)])
                 access = relation['reads' if name != 'out' else 'writes'][name]
                 operands[name] = dict(access=access, shape=shape,
-                                      relation=embed.then(source).then(access['relation']))
+                                      relation=embed.then(source).then(access['relation']),
+                                      requirements=requirements[name],
+                                      access_mode='write' if name in relation['writes'] else 'read')
 
             for name in ('x', 'x1'):
                 if name not in domain['reads']:

@@ -65,6 +65,32 @@ def shader(source, name, access, names=(), types=(), accesses=()):
     return bind
 
 
+def command_declaration(declaration, configuration=None):
+    """Expand one numerical preparation declaration, preserving named roles."""
+    from . import command_declarations as commands
+    configuration = commands.configuration() if configuration is None else configuration
+    original = declaration.get('declaration')
+    operands = ({role: dict(shape=use['shape'], dtype=use['access']['dtype'],
+                           requirements=use.get('requirements', ()))
+                 for role, use in original['operands'].items()} if original is not None else
+                commands.descriptions(declaration['operands']))
+    kind, parameters = declaration['kind'], declaration['parameters']
+    if kind == 'product':
+        from .matrix import declaration as prepare
+    elif kind == 'topk':
+        from .selection import declaration as prepare
+    elif kind == 'cumsum':
+        from .scan import declaration as prepare
+    elif kind in ('draw', 'retain'):
+        from .argmax import declaration as prepare_sampling
+        return prepare_sampling(kind, operands, parameters, configuration)
+    elif kind == 'fwht_stage':
+        from .structured import declaration as prepare
+    else:
+        raise ValueError(f'{kind}: missing numerical command declaration')
+    return prepare(operands, parameters, configuration)
+
+
 def command_records(declarations, *, with_reaches=False):
     """Realize the shared preparation declarations into ordinary command records."""
     from . import layout
@@ -74,41 +100,36 @@ def command_records(declarations, *, with_reaches=False):
             continue
         if declaration['kind'] in ('product', 'topk', 'cumsum', 'draw', 'retain', 'fwht_stage'):
             yield from command_records(declaration['before'], with_reaches=with_reaches)
-            operands, parameters = declaration['operands'], declaration['parameters']
-            if declaration['kind'] == 'product':
-                from .matrix import product as prepare
-                commands = prepare(**operands, **parameters) if operands['out'].numel() else ()
-            elif declaration['kind'] == 'topk':
-                from .selection import topk as prepare
-                _, commands = prepare(operands['x'], outputs=(operands['values'], operands['indices']), **parameters)
-            elif declaration['kind'] == 'cumsum':
-                from .scan import cumsum as prepare
-                _, commands = prepare(operands['x'], out=operands['out'], **parameters)
-            elif declaration['kind'] == 'draw':
-                from .argmax import prepare_draw as prepare
-                _, commands = prepare(operands['z'], operands['keys'], operands['cutoff'], out=operands['ids'], **parameters)
-            elif declaration['kind'] == 'retain':
-                from .argmax import prepare_retain as prepare
-                _, commands = prepare(operands['z'], operands['keys'],
-                    outputs=tuple(operands[role] for role in ('ids', 'kept', 'log_z')), **parameters)
-            else:
-                from .structured import prepare_factor as prepare
-                _, commands = prepare(**operands, **parameters)
+            from .command_declarations import bind
+            commands = bind(command_declaration(declaration), declaration['operands'])
             yield from command_records(commands, with_reaches=with_reaches)
             yield from command_records(declaration['after'], with_reaches=with_reaches)
             continue
         operands = declaration['operands']
-        handle = layout.pipeline('', {i: value for i, value in enumerate(operands) if value is not None},
-                                 declaration['source'], declaration['function'])
+        views = {i: value for i, value in enumerate(operands) if value is not None}
+        origins = {i: None if value.binding_origin is None else value.binding_origin // value.element_size()
+                   for i, value in views.items()}
+        views.update(declaration.get('index_layouts', {}))
+        origins.update((i, 0) for i in declaration.get('index_layouts', {}))
+        handle = layout.pipeline(_stream.metal_prelude(), views,
+                                 declaration['source'], declaration['function'], origins=origins)
         grid, group = declaration['grid'], declaration['threadgroup']
-        if group is None:
-            remaining, _, _ = _stream.pipeline_facts(handle)
+        maximum, simd, memory = _stream.pipeline_facts(handle)
+        policy = declaration.get('threadgroup_policy')
+        if policy is not None:
+            preferred = max(simd if policy['minimum_simd'] else 1, policy['preferred'])
+            group = (min(maximum, preferred), 1, 1)
+        elif group is None:
+            remaining = maximum
             group = []
             for extent in grid:
-                part = min(remaining, extent)
+                part = min(remaining, max(1, extent))
                 group.append(part)
                 remaining //= part
             group = tuple(group)
+        limits = declaration.get('limits')
+        if math.prod(group) > maximum or (limits and memory > limits['threadgroup_memory_bytes']):
+            raise ValueError('declared command geometry exceeds the configured device/pipeline capability')
         record = (handle, operands, declaration['constants'], grid, group, declaration['thread_grid'], declaration['access'])
         yield (record, declaration['reaches']) if with_reaches else record
 
@@ -557,7 +578,7 @@ def prepare_graph(module, metadata, *, materializations=()):
     from torch._inductor.codegen.wrapper import PythonWrapperCodegen
     from torch._inductor.choices import InductorChoices
     from torch._inductor.graph import GraphLowering
-    from torch._inductor.scheduler import Scheduler, BaseSchedulerNode, SchedulerNode
+    from torch._inductor.scheduler import Scheduler, BaseSchedulerNode, SchedulerNode, NopKernelSchedulerNode
     from torch._inductor.virtualized import V
     from torch._inductor.debug import DebugContext
     from torch._inductor import ir
@@ -582,6 +603,10 @@ def prepare_graph(module, metadata, *, materializations=()):
             rows = max(1, numel_hint)
             groups = (reduction_groups + rows - 1) // rows
             return max(1, min(tiles, groups))
+
+    class LogicalChoices(NativeChoices):
+        def reduction_unroll_threshold(self):
+            return 0
 
     class PageKernel(MetalKernel):
         # These objects exist during source emission only. The numerical body
@@ -728,26 +753,9 @@ def prepare_graph(module, metadata, *, materializations=()):
                  for i, field in enumerate(operation.op_overload._schema.arguments)}
         outputs = tree_flatten(operation.codegen_outputs())[0]
         if adapter == 'fwht_stage':
-            if named['starts']:
-                return ()
-            from .selection import row_domain
-            source, signs, target = operand(named['x']), operand(named['signs']), operand(outputs[0])
-            rows, columns = source['view'].shape
-            width, step = named['width'], named['step']
-            def grouped(value):
-                value = dict(value)
-                value['view'] = value['view'].reshape((rows, columns // (width * step), width, step)).permute(
-                    (0, 1, 3, 2)).reshape((rows * columns // width, width))
-                return value
-            inputs = dict(x=grouped(source))
-            if named['signed']:
-                repeated = _stream.TensorLayout((rows, columns), (0, 1))
-                signs = dict(signs, view=repeated.rebase(_stream.TensorLayout((columns,), (1,)), signs['view']))
-                inputs['signs'] = grouped(signs)
-            parameters = dict(width=width, normalization=named['normalization'], signed=named['signed'],
-                              sign_type={torch.int8: 'char', torch.float32: 'float'}[signs['dtype']])
-            return (row_domain(algebra, inputs, dict(out=grouped(target)), width=width,
-                               adapter=adapter, parameters=parameters),)
+            from .structured import factor_domain
+            return (factor_domain(algebra, operand(named['x']), operand(named['signs']), operand(outputs[0]),
+                **{key: named[key] for key in ('width', 'step', 'normalization', 'signed', 'sources', 'starts')}),)
         if adapter in ('draw', 'retain'):
             from .selection import row_domain
             inputs = {role: operand(named[role]) for role in (('z', 'keys', 'cutoff') if adapter == 'draw' else ('z', 'keys'))}
@@ -1186,27 +1194,6 @@ def prepare_graph(module, metadata, *, materializations=()):
             return Program.prepare(self.emit(operands, **placement))
 
     class NativeGraph(GraphLowering):
-        def call_function(self, target, args, kwargs):
-            if target is torch.ops.prims._low_memory_max_pool_with_offsets.default:
-                from torch._inductor import lowering
-                # The upstream low-memory adapter locally enables reduction
-                # unrolling. Reuse its numerical body under the graph's
-                # logical-phase setting so ownership can still select the
-                # window axes before scalar emission optimizes them.
-                import inspect
-                fields = inspect.signature(lowering._low_memory_max_pool_with_offsets).bind(*args, **kwargs)
-                fields.apply_defaults()
-                values = fields.arguments
-                source = values.pop('x')
-                dimensions = len(values['kernel_size'])
-                kernel, stride, padding, dilation, _ = lowering.max_pool_checks(source,
-                    values['kernel_size'], values['stride'], values['padding'], values['dilation'],
-                    dimensions, assert_fallback=False)
-                result, offsets = lowering._max_pool_with_offsets(source, kernel, stride, padding, dilation,
-                    values['ceil_mode'], n_dim=dimensions)
-                return result, lowering.to_dtype(offsets, torch.int8)
-            return super().call_function(target, args, kwargs)
-
         def compose_reads(self):
             """Fold live reads of cached pointwise values into their consumers.
 
@@ -1497,10 +1484,14 @@ def prepare_graph(module, metadata, *, materializations=()):
             import copy
             from torch._inductor import dependencies
             from torch._inductor.loop_body import LoopBody
+            from .compilation import api_layouts
             from .layout import strides
             from .operand import iteration_order, layout_configuration, symbolic_index
 
             records = tuple(records)
+            layouts = api_layouts('matrix')
+            product_requirements = {name: (layouts[role],) for name, role in
+                dict(x='input', x1='input', w='weight', out='output', bias='bias').items()}
             selected = {}
             for record in records:
                 operation = record['effect']['operation']
@@ -1587,6 +1578,10 @@ def prepare_graph(module, metadata, *, materializations=()):
                         else:
                             node.page_pieces = tuple(pieces)
                         rw = dependencies.ReadWrites.merge_list([piece.read_writes for piece in pieces])
+                    elif isinstance(node, NopKernelSchedulerNode):
+                        # The retained IR declares no command. Its result
+                        # storage still passes through the ordinary binder.
+                        rw = node.declared_read_writes
                     else:
                         import mesh_matrix
                         domains = declarations[operation.get_operation_name()]['domains']
@@ -1599,7 +1594,7 @@ def prepare_graph(module, metadata, *, materializations=()):
                             node.selected_plans = tuple(plan for request in requests for plan in selected_rows(request))
                         elif domains:
                             node.selected_plans = tuple(dict(plan, adapter='product') for request in requests for plan in mesh_matrix.selected_products(
-                                request['domain'], request['work'], request['finish']['work']))
+                                request['domain'], request['work'], request['finish']['work'], requirements=product_requirements))
                         else:
                             undeclared.add(operation.get_operation_name())
                         rw = node.declared_read_writes
@@ -1616,19 +1611,14 @@ def prepare_graph(module, metadata, *, materializations=()):
 
         def consumer_uses(self):
             """Selected external API uses, before the common page-placement solve."""
-            from .compilation import api_layouts
-            layouts = api_layouts('matrix')
-            roles = dict(x='input', x1='input', w='weight', out='output', bias='bias')
             uses = []
             for operation in self.operations:
                 name = operation.get_operation_name()
                 scheduled = self.scheduler.name_to_node[name]
                 for index, plan in enumerate(getattr(scheduled, 'selected_plans', ())):
                     for role, use in plan['operands'].items():
-                        requirements = use['requirements'] if 'requirements' in use else (layouts[roles[role]],)
                         uses.append(dict(key=(name, index, role), binding=use['access'], relation=use['relation'],
-                                         shape=use['shape'], requirements=requirements,
-                                         access=use.get('access_mode', 'write' if role == 'out' else 'read')))
+                                         shape=use['shape'], requirements=use['requirements'], access=use['access_mode']))
             return tuple(uses)
 
         def page_aliases(self):
@@ -1646,7 +1636,8 @@ def prepare_graph(module, metadata, *, materializations=()):
                     write['node'].args[4] is not None):
                     continue
                 order, _ = iteration_order(work, domain['work'])
-                pair = tuple(dict(binding=access, relation=order.then(access['relation']), shape=order.shape)
+                pair = tuple(dict(binding=access, relation=order.then(
+                    access['relation'].reshape((math.prod(domain['work']),))), shape=order.shape)
                              for access in (read, write))
                 aliases.append(dict(operation=record['effect']['operation'], domain=domain, work=work, pair=pair))
             return tuple(aliases)
@@ -1728,7 +1719,7 @@ def prepare_graph(module, metadata, *, materializations=()):
                                 declaration=dict(operation=operation, index=index,
                                                  operands=plan['operands'], parameters=plan['parameters']))
                             roles = sorted(plan['operands'], key=lambda role: (
-                                plan['operands'][role].get('access_mode', 'write' if role == 'out' else 'read') != 'write',
+                                plan['operands'][role]['access_mode'] != 'write',
                                 not math.prod(plan['operands'][role]['shape'])))
                             for role in roles:
                                 use = plan['operands'][role]
@@ -1817,15 +1808,17 @@ def prepare_graph(module, metadata, *, materializations=()):
                          source_dtype=storage_layouts[name]['source_dtype'])
                     for slot, (name, dtype) in enumerate(zip(declaration['names'], declaration['types'], strict=True)))
                 from .operand import bound_access
-                reaches = []
+                from .command_declarations import dense, bind_accesses
+                accesses = []
                 for item in declaration['accesses']:
                     slot = item['slot']
-                    argument, operand = declaration['arguments'][slot], declaration['operands'][slot]
+                    argument = declaration['arguments'][slot]
+                    count = argument['source'].count * argument['source_dtype'].itemsize
                     selected = bound_access(item['access'], item['work'], argument['source'],
-                                            argument['source_dtype'], operand.layout)
-                    reaches.append((slot, 1 if item['side'] == 'reads' else 2,
-                                    TensorView(operand.storage, selected['layout'])))
-                declaration['reaches'] = tuple(reaches)
+                                            argument['source_dtype'], dense((count,)))
+                    accesses.append(dict(item, argument_layout=selected['layout']))
+                declaration['accesses'] = tuple(accesses)
+                declaration['reaches'] = bind_accesses(declaration)
             return dict(commands=tuple(records), output=output,
                         pages=tuple(placements.owners if assigned_owners is None else assigned_owners),
                         storage=dict(storage_layouts))
@@ -1901,10 +1894,12 @@ def prepare_graph(module, metadata, *, materializations=()):
         graph = NativeGraph(module, metadata, shape_env=mode.shape_env, is_inference=True)
         graph.source_values = {}
         with V.set_graph_handler(graph), V.set_extern_kernel_nodes([]), mode:
-            # Keep reduction fibers while ownership still selects work. This
-            # existing compiler setting applies only to logical construction;
-            # selected loops then reach the ordinary Metal/ISA optimizer.
-            with config.patch(unroll_reductions_threshold=0):
+            # Keep reduction axes until ownership selects work. The pinned
+            # source hook applies even when an operator has its own policy.
+            # Later preparation uses NativeChoices and the upstream policy.
+            if not hasattr(InductorChoices, 'reduction_unroll_threshold'):
+                raise RuntimeError('Torch compiler source extension is missing; install with bin/mesh-user.sh')
+            with V.set_choices_handler(LogicalChoices()):
                 graph.run(*metadata)
             graph.never_reuse_buffers.update(buffer.get_name() for _, _, buffer, _ in page_values)
             # This is the scheduler's normal body/layout preparation. Ownership
