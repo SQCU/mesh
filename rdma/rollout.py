@@ -12,20 +12,31 @@ from mesh_statistics import now, completed, emit
 PAUSE = 5e-3
 
 
+class _Observer(threading.Thread):
+    def run(self):
+        self.error = None
+        try:
+            super().run()
+        except BaseException as error:
+            self.error = error
+
+
 def start():
     """An observer: put (completion, record) pairs, in submission order, with record['started'] the clock (now) as the
     call was submitted; close it once the program's calls are submitted."""
     outgoing, stopping = queue.SimpleQueue(), threading.Event()
-    worker = threading.Thread(target=_observe, args=(outgoing, stopping), name='mesh-observations', daemon=True)
+    worker = _Observer(target=_observe, args=(outgoing, stopping), name='mesh-observations', daemon=True)
     worker.start()
     return outgoing, stopping, worker
 
 
 def close(observer):
-    """Every observation put before this emitted, then the observer ended."""
+    """Emit every queued observation, or raise the observer's original failure."""
     outgoing, stopping, worker = observer
     stopping.set()
     worker.join()
+    if worker.error is not None:
+        raise worker.error
 
 
 def _observe(outgoing, stopping):

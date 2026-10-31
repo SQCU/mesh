@@ -185,7 +185,10 @@ descriptor geometry establish this correction. Cluster execution has not yet
 verified recovery.
 
 The large-bandwidth failures have a separate first error still under review.
-In the saved c56f21a9 rank-3 log, a link is lost and paired again during the
-16 MiB all-reduce; the observer reports that failure before the later output
-comparisons. Those unchanged later outputs are consequences of an aborted run,
-not independent evidence of a defective kernel for each later shape.
+The saved c56f21a9 rank-0 log ends at a GPU wait deadline during the 16 MiB
+all-reduce. Other ranks then report a lost and re-paired link. Their observer
+threads raised that failure, but `close()` merely joined the threads, so callers
+continued into output comparisons. `close()` now re-raises the observer's
+original exception; polling and submission are unchanged. Those later unchanged
+outputs are consequences of an aborted run, not independent evidence of a
+defective kernel for each later shape. The initiating GPU wait remains unresolved.
