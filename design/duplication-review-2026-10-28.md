@@ -36,7 +36,7 @@ On 2026-10-29:
   (issue_same) touches no lease.
 - Critical 1 (alternating page sets for producers) is dropped, not deferred. The operator's direction ("why do you think
   you need anything besides pages"; refactoring consolidates and removes mechanisms) rules out a second slot or page
-  set. Reuse safety stays the retire ledger's and the landing gate's (transport.md section 14).
+  set. Reuse safety stays the retire ledger's and, since f4086e35, a landing's `after` (transport.md section 14).
 - The recorder's preparation cost, found by profiling cp's rank 0 five times, is fixed. Access spans are sorted
   (91c37d16), and the dependency frontier is bucketed by 1 MiB (a8856dd4). cp passes since (mb docs/facts.md).
 - Across 4, relay landings, is next. The plan:
@@ -54,7 +54,7 @@ On 2026-10-29:
       extent boundary, whose phase is 0 by construction.
     - Its period follows reuse. The frontends size relays by how soon a slot may be reused: mb's columns_prepare one
       per invocation, the fused ring two generations of repeats, the chain count x numel. The library's sizing must
-      follow the plan's own reuse rule (its landing gate and generations), not a fixed bytes x max(repeats, instances).
+      follow the plan's own reuse rule (its generations), not a fixed bytes x max(repeats, instances).
   - ncclMeshPageTableCreate(NULL, comm, ...) can name the library's relay: a table of no pages bound to comm, which
     write_prepare's existing table->comm already requires.
   - Landed, the off-path half (mesh a9248d17, mb 8ec8f40a):

@@ -149,7 +149,7 @@ struct entry { uint64_t below; struct mesh_program program; struct mesh_trees tr
 /* a channel (design/transport.md section 14): toward rank `peer` on node `node`, the holding of the stream toward that
    node its process holds (mesh-call.h mesh_stream_view: its two lists and its counts), and the Metal buffer over the
    page that holds the counts (`buffer`: `ready` and `landed` at those offsets in it; `ready_at` the region
-   offset of `ready`, a landing's gate).  Its entries, each list in its own order: `sends` and `lands` laid by the
+   offset of `ready`).  Its entries, each list in its own order: `sends` and `lands` laid by the
    groups scheduled, `out` and `in` their pages (the value each count reaches once they are whole).  The host's mirror
    of what the GPU had published and consumed (`published`, `consumed`, `waited`) is deleted with the tracks pool:
    every group is published and awaited at its own call (zabbadoo, fused_records) */
@@ -201,8 +201,6 @@ struct ncclComm {
   struct attach *attach;
   uint32_t held;
   struct channel *channels;
-  void *gate, *gate_word;
-  uint64_t gate_at, gates;
   _Atomic uint64_t *words;
   void *violation;
   uint64_t groups;
@@ -346,13 +344,10 @@ static void paths_free(struct mesh_paths *paths) {
   free((void *)paths->first); free((void *)paths->cable); free((void *)paths->weight);
   *paths = (struct mesh_paths){0};
 }
-/* comm's tables and its gate returned to the region (ncclMemFree), after its holdings are given back
-   (comm_leave: the bridge posts nothing more of a given holding, so only rows a unit already posted names stay held,
-   mesh-dataflow.c mesh_pinned) */
-static void comm_storage_free(struct ncclComm *comm) {
-  if (comm->gate_word) ncclMemFree(comm->gate_word);
-  comm->gate_word = comm->gate = NULL;
-}
+/* comm's tables returned to the region (ncclMemFree), after its holdings are given back (comm_leave: the bridge posts
+   nothing more of a given holding, so only rows a unit already posted names stay held, mesh-dataflow.c mesh_pinned).
+   The landing gate's word is deleted with the gate (design/zorvek.md "Instances") */
+static void comm_storage_free(struct ncclComm *comm) { (void)comm; }
 struct write_binding;
 static void comm_free(struct ncclComm *comm) {
   pthread_mutex_lock(&live_lock);
@@ -1367,9 +1362,6 @@ static int fabric_realize(struct ncclComm *comm) {
   if (ncclMemAlloc(&words, (size_t)getpagesize()) || lease_buffer(words, &comm->violation, &offset) || offset) status = ENOMEM;
   else { memset(words, 0, (size_t)getpagesize()); comm->words = words; }
   if (!status && !(comm->channels = calloc(comm->fabric.cables + 1, sizeof *comm->channels))) status = ENOMEM;
-  if (!status && comm->nranks > 1 && (ncclMemAlloc(&comm->gate_word, sizeof(uint64_t)) || lease_buffer(comm->gate_word, &comm->gate, &offset) || offset))
-    status = ENOMEM;
-  if (!status && comm->gate_word) comm->gate_at = lease_offset(comm->gate_word);
   for (uint32_t e = 0; !status && e < comm->fabric.cables; e++) {
     if (comm->endpoint[e] == UINT32_MAX) continue;
     const struct mesh_cable *c = comm->fabric.cable + e;
@@ -1935,8 +1927,8 @@ ncclResult_t ncclRedOpDestroy(ncclRedOp_t op, ncclComm_t comm) {
    destination spans (the destination itself for a COPY, the group's landing area for a combine).
    This end publishes its sends by raising its holding's `ready` past them, in
    order, and consumes its landings once `landed` covers them.  Nothing credits a publication: the hardware's credit
-   holds a SEND until its receive is posted (design/transport.md).  A Metal-path landing entry is gated on its
-   group's start in the stream (gate_of), so no receive lands in pages the stream's earlier work still reads.  A group
+   holds a SEND until its receive is posted (design/transport.md).  No landing entry is gated: the bridge reads none
+   before its group's link (zinth), stored after everything the stream's earlier work does with those pages.  A group
    presents its entries before it publishes any (schedule); a member that fails mid-group sends nothing more, and its
    holding's end with units outstanding takes its stream out of the pairing (design/transport.md section 14). ---------- */
 
@@ -3243,10 +3235,8 @@ struct message { struct call *c; uint32_t step, frame; uint64_t entry; mesh_page
                     (place_group; NULL none), and whether the list states them (send_requirements) */
                  uint64_t *requirement; int required; };
 /* a group's entries on one channel, each list in its order from its first (`first`: [0] the send list's, [1] the
-   landing list's), its landing entries' gate (`word` a region offset, 0 none; `base` the value it reaches: a page
-   count of the holding's `ready`, or the number of a group at the communicator's gate word: gate_of), and each list's
-   pages a repeat (`each`: issue_lay) */
-struct schedule { struct message *out, *in; size_t outs, ins; uint64_t first[2], word, base; mesh_pages each[2];
+   landing list's), and each list's pages a repeat (`each`: issue_lay) */
+struct schedule { struct message *out, *in; size_t outs, ins; uint64_t first[2]; mesh_pages each[2];
                   size_t *consume; /* consumer ordinal -> physical landing index */ };
 /* whether a SEND entry waits on its holding's `ready` (a publication): not a write's with producer words, which name
    their own word */
@@ -3332,7 +3322,7 @@ static ncclResult_t schedule_group(struct ncclComm *comm, struct call *list, siz
   for (uint32_t h = 0; h < comm->count && !result; h++) {
     const struct channel *ch = comm->channels + h;
     struct schedule *p = plans + h;
-    *p = (struct schedule){calloc(total, sizeof *p->out), calloc(total, sizeof *p->in), 0, 0, {0, 0}, 0, 0, {{0}, {0}}, NULL};
+    *p = (struct schedule){calloc(total, sizeof *p->out), calloc(total, sizeof *p->in), 0, 0, {0, 0}, {{0}, {0}}, NULL};
     if (!p->out || !p->in) { result = fail(ncclSystemError, "out of memory"); break; }
     for (int send = 1; send >= 0; send--) {
       uint32_t placed = 0;
@@ -3505,8 +3495,8 @@ struct issue { struct schedule *plans; struct steps **steps; struct inflight *gr
                   use (zinth; 0: never linked), which zumbled reads */
                struct linking { struct mesh_zwoggle *tables; uint64_t region; size_t offset; uint64_t left; } *linking;
                void *linkable;
-               /* the bases its calls state (mesh.h struct mesh_zwoggle `bases`, 2 count + 1 words: each channel's units
-                  before the call on its send and landing lists, then the communicator's gates before it), their region
+               /* the bases its calls state (mesh.h struct mesh_zwoggle `bases`, 2 count words: each channel's units
+                  before the call on its send and landing lists), their region
                   offset, and whether its entries are laid (present_group: at its first call, then only the bases) */
                uint64_t *bases, bases_at; int laid;
                /* its calls' requirements a landing's `after` names (mesh.h struct mesh_zwoggle_after, a channel each,
@@ -3687,7 +3677,7 @@ static void issue_lay(struct ncclComm *comm, const struct compiled *x, struct is
   for (uint32_t h = 0; h < comm->count; h++) {
     const struct schedule *p = x->plans + h;
     struct schedule *q = u->plans + h;
-    *q = (struct schedule){q->out, q->in, p->outs * repeats, p->ins * repeats, {0, 0}, 0, 0, {p->outs ? p->out[p->outs - 1].end : p->each[0],
+    *q = (struct schedule){q->out, q->in, p->outs * repeats, p->ins * repeats, {0, 0}, {p->outs ? p->out[p->outs - 1].end : p->each[0],
                            p->ins ? p->in[p->ins - 1].end : p->each[1]}, q->consume};
     for (size_t k = 0; k < q->outs; k++) q->out[k] = repeat_of(p->out, p->outs, k, stride, list, x->calls);
     for (size_t k = 0; k < q->ins; k++) q->in[k] = repeat_of(p->in, p->ins, k, stride, list, x->calls);
@@ -3998,7 +3988,7 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u) {
       length += (sizeof(struct mesh_zwoggle) + (plans[h].outs + plans[h].ins) * sizeof(struct mesh_zwoggle_entry) + align - 1) / align * align;
     }
     if (pass) u->bases = (uint64_t *)((char *)u->tables + length);
-    length += ((2 * (size_t)comm->count + 1) * sizeof *u->bases + align - 1) / align * align;
+    length += (2 * (size_t)comm->count * sizeof *u->bases + align - 1) / align * align;
     if (pass) u->afters = (struct mesh_zwoggle_after *)((char *)u->tables + length);
     length += ((size_t)comm->count * sizeof *u->afters + align - 1) / align * align;
     /* each SEND whose step follows receives (its prior row), not a WRITE's nor a fused crossing's: room for its
@@ -4175,28 +4165,6 @@ static ncclResult_t bind_retirements(struct ncclComm *comm, const struct schedul
   return ncclSuccess;
 }
 
-/* a Metal-path group's landing entries gated on its start in the stream (design/transport.md section 14: a landing
-   entry's word and base), so no receive lands in pages the stream's earlier work still reads or writes (the caller's
-   buffers; a slot an earlier group combines from): on each channel, the holding's `ready` past the first
-   page of the group's first send entry there where that entry's step waits on no receive (published at the group's
-   start, issue_group; one system fence before it), else the communicator's gate word at the group's value of it, which
-   the group's first dispatch stores (*gate) */
-static void gate_of(struct ncclComm *comm, struct schedule *plans, int *gate, uint32_t copies) {
-  for (uint32_t h = 0; h < comm->count; h++) {
-    struct schedule *p = plans + h;
-    if (!p->ins) continue;
-    /* Ungated receives declare their actual destination writes on presentation,
-       so the shared page frontier orders only earlier users of those bytes. */
-    if (!copies) { p->word = 0; p->base = 0; continue; }
-    const struct message *first = p->outs ? p->out : NULL;
-    if (first && first->c->bound->prior_first[first->step] == first->c->bound->prior_first[first->step + 1] && needs_publication(first)) {
-      p->word = comm->channels[h].ready_at;
-      p->base = pages_to_word(pages_add(pages_sub(first->end, first->pages), (mesh_pages){1}));
-      continue;
-    }
-    p->word = comm->gate_at; p->base = comm->gates + 1; *gate = 1;
-  }
-}
 
 /* each channel's entries laid as the group's tables on its stream (present_group: mesh.h struct mesh_zwoggle, the
    bridge's alone to read), linked once the program reaches the group (zinth), so the bridge takes a group whole and
@@ -4334,7 +4302,6 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
   for (uint32_t h = 0; h < comm->count; h++) {
     owner->bases[2 * h] = pages_to_word(comm->channels[h].out); owner->bases[2 * h + 1] = pages_to_word(comm->channels[h].in);
   }
-  owner->bases[2 * comm->count] = comm->gates;
   /* design/pages-and-functions.md Freeing 6-7: each channel's requirement a landing's `after` names (landing_readers),
      its `sent` word laid once, its value the call's (landing_afters) */
   for (uint32_t h = 0; !owner->laid && h < comm->count; h++)
@@ -4396,19 +4363,14 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
       if (relative) entry.base -= owner->bases[relative - 1];
       records[k] = (struct mesh_zwoggle_entry){entry, relative, m->required ? lease_offset(m->requirement) : 0};
     }
-    /* a landing's gate (gate_of): the channel's `ready` past its own send units, or the communicator's gate past its
-       gates; ungated, none */
-    const uint64_t landing = p->word == comm->channels[h].ready_at ? 1 + 2 * (uint64_t)h : p->word == comm->gate_at ? 1 + 2 * (uint64_t)comm->count : 0;
+    /* a landing entry waits on no word: the bridge reads none before the group's link (zinth) */
     for (size_t k = 0; !owner->laid && k < p->ins; k++)
-      records[p->outs + k] = (struct mesh_zwoggle_entry){{p->in[k].table, pages_to_word(p->in[k].pages), p->word,
-                                                          p->base - (landing ? owner->bases[landing - 1] : 0)}, p->word ? landing : 0,
-                                                         p->in[k].after};
-    if (!p->word)
-      for (size_t k = 0; k < p->ins; k++) {
-        const struct message *m = p->in + k;
-        const ncclMeshAccess use = {{m->data.buffer, m->data.offset}, m->bytes, ncclMeshAccessWritten};
-        metal_accesses(program, &use, 1);
-      }
+      records[p->outs + k] = (struct mesh_zwoggle_entry){{p->in[k].table, pages_to_word(p->in[k].pages), 0, 0}, 0, p->in[k].after};
+    for (size_t k = 0; k < p->ins; k++) {
+      const struct message *m = p->in + k;
+      const ncclMeshAccess use = {{m->data.buffer, m->data.offset}, m->bytes, ncclMeshAccessWritten};
+      metal_accesses(program, &use, 1);
+    }
     atomic_store_explicit(&tables->next, 0, memory_order_relaxed);
     tables->entries[0] = laid->region + sizeof *tables; tables->entries[1] = tables->entries[0] + p->outs * sizeof *records;
     tables->count[0] = p->outs; tables->count[1] = p->ins; tables->bases = owner->bases_at;
@@ -4445,20 +4407,16 @@ static void uses_add(struct metal_program *program,struct uses *batch,struct whe
 }
 
 /* the group's laid and placed entries (issue_bind) bound on each channel from its last scheduled entry and page
-   (schedule_laid), its landings gated (gate_of, *gate whether its first dispatch stores the communicator's gate) unless
-   its generations are immutable (a `fused` crossing's or an all-WRITE group's, `writes`, mesh 84056c43), presented
-   (present_group) and counted (commit_group); a failure
+   (schedule_laid), presented (present_group: its publications with its presents unless it is a `fused` crossing or
+   makes `copies`, launch_metal) and counted (commit_group); a failure
    before any entry is presented is the call's alone, one after it the communicator's (its lists stand mid-group) */
-static ncclResult_t schedule(struct metal_program *program, struct ncclComm *comm, struct issue *owner, struct schedule *plans, int *gate,
-                             int fused, int writes, uint32_t copies) {
+static ncclResult_t schedule(struct metal_program *program, struct ncclComm *comm, struct issue *owner, struct schedule *plans,
+                             int fused, uint32_t copies) {
   schedule_laid(comm, plans);
-  if (!fused && !writes) gate_of(comm, plans, gate, copies);
-  /* design/zorvek.md "The pool's last users": an all-WRITE group's publications, its SENDs that name no readiness word
-     of their own, made with its presents as a collective's (zook): immutable generations need no
-     landing gate, but its SENDs still wait for the stream's earlier work. A fused crossing's stay its records */
+  /* every group's publications, an all-WRITE group's among them, made with its presents (zook); a fused crossing's
+     stay its records */
   ncclResult_t result = present_group(program, comm, owner, plans, !fused && !copies);
   if (result) return result;
-  if (*gate) comm->gates++;
   commit_group(comm, plans);
   return ncclSuccess;
 }
@@ -4565,7 +4523,7 @@ static size_t own_segment(const struct call *c, size_t *sent, size_t *landed) {
 /* -- the Metal path ------------------------------------------------------------------------------------ */
 
 /* design/zorvek.md zinth: the group's tables (present_group) linked to its holding's streams at its place in the
-   program, after everything before it there (the caller's producers, the operand copies, the gate): one store a
+   program, after everything before it there (the caller's producers, the operand copies): one store a
    channel, at the word the last linked call left for it (metal_link), so the bridge walks the group once the stream
    reaches it; issue u's tables then in use until the walk of each list has left them, their place in the walk (the
    calls left by then) its use's (zumbled) and its leases' (owned_end: their walk's uses).  Under group_lock */
@@ -5237,10 +5195,10 @@ static void walk_failed(struct ncclComm *comm, ncclResult_t result) {
 }
 
 
-/* the operands a group makes in place, after its entries are presented and before its gate opens or anything is
+/* the operands a group makes in place, after its entries are presented and before anything is
    published: a premultiply, or a copy within the region, where a call reads no send buffer in place; a scratch's copy;
    an all-to-all's own segment.  Encoded into `program`, or, with none, only counted into *copies: a group that makes
-   none needs no gate on its landings (gate_of) */
+   some publishes once they are made (launch_metal) */
 #define COPIED(step, what) (program ? gpu(step, what) : ((*copies)++, ncclSuccess))
 static ncclResult_t operand_copies(struct metal_program *program, struct ncclComm *comm, struct call *list, size_t n, uint32_t *copies) {
   const size_t r = (size_t)comm->rank;
@@ -5290,9 +5248,9 @@ static ncclResult_t operand_copies(struct metal_program *program, struct ncclCom
    taking its calls: their buffers, results and storage its definition's issue's (issue_bind: a group of collectives'
    prepared, its storage its generation's slot), once that slot's last group has landed
    (guard); then the group scheduled and its entries presented (schedule: a piece off a page or
-   outside the region fails the call as a value, nothing presented), its operands made in place, its gate stored where
-   its landings wait on the communicator's (gate_of), in flight after the others, and completed with every group
-   before it (a fused one's steps the caller's kernels), its waits bounded by its calls' greatest polls; its results
+   outside the region fails the call as a value, nothing presented), its operands made in place, its tables linked
+   (zinth), its sums made and its landings awaited (zabbadoo; a fused one's steps the caller's kernels), its waits
+   bounded by its calls' greatest polls; its results
    into recvbuff as it completes; the program's end signals `finished` where the
    library made its encoder.  Its channels' counts, its slot and the buffers its deferred steps' bindings name are made
    resident through the stream's residency set, for its dispatches and the caller's kernels alike. */
@@ -5362,8 +5320,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     return fail(ncclSystemError, "%s", message);
   }
   for (uint32_t h = 0; remote && h < comm->count; h++) metal_resident(program, comm->channels[h].buffer);
-  if (remote && comm->gate) metal_resident(program, comm->gate);
-  int gate = 0, published = 0, scheduled = 0;
+  int published = 0, scheduled = 0;
   struct where area = {NULL, 0};
   /* design/zorvek.md zorvek: the group's issue, on pages no use the stream has not passed holds */
   if (!result) result = zorvek(comm, x, remote, &list, n, &plans, &u, &area);
@@ -5377,7 +5334,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     /* Indexed writes carry immutable source/landing generations. Their destinations need no local publication
        handshake, whether the GPU producer is fused or was encoded before this call (mesh 84056c43) */
     operand_copies(NULL, comm, list, n, &copies);
-    if (!(result = schedule(program, comm, u, plans, &gate, fused_kind != 0, all_writes(list, n), copies))) { g->plans = plans; plans = NULL; }
+    if (!(result = schedule(program, comm, u, plans, fused_kind != 0, copies))) { g->plans = plans; plans = NULL; }
     else g = NULL;
     if (!result) {
       for (uint32_t h = 0; h < comm->count; h++) { g->end[h][0] = comm->channels[h].sends; g->end[h][1] = comm->channels[h].lands; }
@@ -5390,15 +5347,6 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
      its presents could not (present_group `direct`) */
   for (uint32_t h = 0; !result && copies && g && !g->fused && h < comm->count; h++)
     result = present_publish(program, comm->channels + h, g->plans + h);
-  for (uint32_t h = 0; !result && gate && g && h < comm->count; h++) {
-    struct uses batch = {0};
-    for(size_t k=0;k<g->plans[h].ins;k++) {
-      const struct message *landing=g->plans[h].in+k;
-      uses_add(program,&batch,landing->data,landing->bytes,ncclMeshAccessWritten);
-    }
-    metal_accesses(program,batch.ranges,batch.n);
-  }
-  if (!result && gate) result = gpu(metal_open_gate(program, comm->gate, 0, comm->gates), "the group's gate");
   if (!result && g) result = gpu(zinth(program, comm, u), "the group's tables linked to its bridge");
   if (!result && g) {
     uint32_t lands = 0, publishes = 0;

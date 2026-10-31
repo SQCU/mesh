@@ -434,8 +434,8 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
 - The compiled plan gives both endpoints matching units. Each SGE names its exact byte interval with the proper
   1 GiB registration key; payload does not round to an allocation page or hardware credit frame. Parallel paths
   and relay buffers use the same descriptor. Storage ownership must hold for every physical reader.
-- A SEND unit k is available when its selected word (0 selects `ready`) reaches `base+k+1`. A receive's optional
-  word permits first write at `base`; fresh disjoint destinations need no reciprocal publication. A receive into pages
+- A SEND unit k is available when its selected word (0 selects `ready`) reaches `base+k+1`. A receive waits on no
+  word; fresh disjoint destinations need no reciprocal publication. A receive into pages
   some SEND of the program reads also waits, before its first write, for every SEND before its call on those SENDs'
   channels to complete (its `after`, mesh.h struct mesh_zwoggle_entry: each named channel's `sent` at the call's base
   there), so a page is written again only once its last outgoing DMA read ended (pages-and-functions.md, Freeing

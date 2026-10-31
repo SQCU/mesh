@@ -269,7 +269,6 @@ static void stream_post(struct port *port,uint32_t t,uint32_t served){
     const struct mesh_units q=mesh_units_sub((struct mesh_units){lane_page(j,state->posted)},w->base);
     const struct taken *e=walk_chain(w,x,1,q);
     if(!e)break;
-    if(e->word && mesh_units_lt(mesh_units_load(e->word),e->base))break;
     if(!after_holds(e))break;
     const struct mesh_dma_span bytes=e->spans[mesh_units_sub(q,e->unit).n];
     const struct frames each=frames_of(bytes.bytes);

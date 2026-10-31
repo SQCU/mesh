@@ -259,14 +259,10 @@ See [transport.md](../design/transport.md) for registration and credit units.
   by that block. A COPY lands in place, so its consumer needs readiness and no
   transport staging copy.
   - torch-mesh runs MPS region tensors here.
-  - **Gates and first-write ownership.** Ordinary NCCL calls with in-place aliases retain receive gates so an incoming
-    write cannot overwrite pages used by earlier stream work. Such an entry names the holding's `ready` past the
-    group's first independent publication, or the communicator's gate word stored by its first dispatch; the bridge
-    waits before posting that receive. Explicit immutable WRITE groups and physical fused crossings skip this gate:
-    their landing addresses and order are known ahead of time, and their disjoint fresh ranges can be preposted
-    independently of this node's outgoing producer. Reusing those pages requires a dependency proof before the next
-    first write, or fresh leases with deferred retirement. The old rule that a receiver's outgoing publication made
-    arbitrary receive-buffer reuse safe does not apply to this contract.
+  - **First writes.** No receive waits on a gate. The bridge reads none of a group's landing entries before the
+    group's link (design/zorvek.md zinth), which the stream stores after everything its earlier work does with
+    those pages. A page an earlier call's SEND still reads is written again only after that SEND completed: the
+    landing's `after`, the bridge's own `sent` prefixes (design/pages-and-functions.md, Freeing 6-7).
   - **Group end.** Publication is not send completion. There is no `sent` wait; the
     data program retains source and relay buffers through their final local DMA reads
     and establishes reuse through typed dependencies or asynchronous bridge-owned retirement. GPU readers must also
@@ -327,7 +323,8 @@ The crossing path's mechanisms, each judged by the contract of the program that 
 output_data/transport-buffers-20261021/LIBRARY.md ranks the changes of 2026-10-21):
 
 - **The bridge** (design/transport.md): its devices, queue pairs, lanes, the cut of entries into SENDs, the receives it
-  posts, the region's registration. It reads `ready` and each landing's gate word, and writes `sent` and `landed`.
+  posts, the region's registration. It reads `ready`, each SEND's word and each landing's `after`, and writes `sent`
+  and `landed`.
 - **The library**, by NCCL's contract: the caller touches no buffer of a collective in flight and issues the same
   collectives in the same order on every rank; the library delivers correct bytes. So the order of every read and
   write of a group is known from the programs every rank compiled, and the library encodes it in the stream's order.

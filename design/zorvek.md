@@ -110,6 +110,8 @@ what of the block takes its place. The order is forced: each later one guards a 
    bridge's walk_take copy): the bridge walks each call's laid tables, linked at the call's place (zinth, below), its
    walk the executor of zirrup and zirrupel, which its entry word already is.
 7. The landing gate and the operand staging copies (zibbins): transport by view; a premultiplier folded into zelloth.
+   The landing gate is deleted (design/zorvek.md "Instances"): the communicator's gate word, gate_of, a landing
+   entry's word, and the bridge's wait on it.
 
 ## zinth: a call's tables linked to the bridge (item 6)
 
@@ -137,7 +139,7 @@ What runs (mesh.h struct mesh_zwoggle, nccl-mesh.c present_group and zinth, mesh
   64 MiB rate within main's band (the A/A pair decides each outlier).
 
 - An issue's entries are laid at its first call, each base relative to one of the call's bases (mesh.h struct
-  mesh_zwoggle `bases`: each channel's units before the call on each list, the communicator's gates before it); a
+  mesh_zwoggle `bases`: each channel's units before the call on each list); a
   later call writes its bases and each table's `next` alone. A WRITE's source readiness word is its invocation's,
   which the issue's binding instance does not fix, so it alone is written each call.
 
@@ -168,8 +170,8 @@ in-place operand's SEND are the cases; the next call's landing there needs that 
   set until that channel's `sent` reaches it (mesh-link.c after_holds). MESH_LAYOUT 157.
 - The pages' local reads (zelloth, the caller's kernels) are before the call's link in stream order: the barrier before
   zinth's first store orders them, and item 5 keeps it.
-- The landing gate is already inert: its store is encoded before that barrier, so the bridge never reads a landing
-  entry before the gate holds. Deleting it (item 7 above) removes no order.
+- The landing gate was inert: its store was encoded before that barrier, so the bridge never read a landing entry
+  before the gate held. Deleting it (item 7 above) removed no order.
 - Measured first in a coarser form (test-after, not landed): every SEND before the call on each such channel, the
   issue's own included. It deadlocked the chain service on all five: m5ult4's and m5ult1's landing walks each held for
   SENDs the other's held receives kept from completing, SENDs past the real reader in the channel's order. The exact
