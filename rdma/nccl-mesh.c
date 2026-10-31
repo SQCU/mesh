@@ -5136,8 +5136,11 @@ static ncclResult_t operand_copies(struct metal_program *program, struct ncclCom
     if (counted(c)) {
       size_t sent, landed, part = own_segment(c, &sent, &landed);
       const struct where source=view_at(c,1,sent),destination=view_at(c,0,landed);
-      if (part && !same(source,destination))
-        result = COPIED(metal_copy(program,METAL_PLAIN,destination.buffer,destination.offset,source.buffer,source.offset,part), "an all-to-all's own segment");
+      /* the rank's own segment, read from the send buffer's and written to the result's: no SEND of the call reads it and
+         no landing writes it, so it is no operand the group's publications or landings wait for (not counted: the
+         group's SENDs go with its presents and its landings are ungated, gate_of) */
+      if (part && !same(source,destination) && program)
+        result = gpu(metal_copy(program,METAL_PLAIN,destination.buffer,destination.offset,source.buffer,source.offset,part), "an all-to-all's own segment");
       continue;
     }
     if (!call_contributes(c) || !bytes) continue;
