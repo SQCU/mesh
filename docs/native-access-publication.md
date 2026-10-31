@@ -196,10 +196,10 @@ ordinals; it does not invent measured tile times. Masked rows and GPU scheduling
 can finish in a different order. Time predictions are compilation operands, not
 runtime delays or permission to send unfinished data.
 
-`mesh_write_order` combines those records with the selected physical paths,
-link capacities and streamed parent dependencies. It chooses the earliest
-predicted available cable slot, then the producer ordinal. Source and recipient
-use the same global ordering.
+`mesh_graph_schedule` combines those records with the selected physical paths,
+link capacities and page-unit dependencies. Each time a cable frees, it carries
+the ready unit with the most cables below it, then the producer ordinal. Source
+and recipient use the same global ordering.
 Relay fragments retain their incoming-page dependencies. All WRITE groups now
 use that one schedule. The second `ordered_writes` copy, `write_plans` storage
 and fused/unfused schedule selection are removed.

@@ -134,10 +134,11 @@ the control comparison.
 
 The plan compiles all ranks' actual path fragments into a common dependency
 graph. `ncclMeshCommWriteRelease` supplies predicted producer release times.
-`mesh_write_order` tracks each directed cable's next free time, and each relay's
-first-page arrival and last-page dependency. It assigns the earliest-starting
-available fragment next, preserving parent-before-child order. Both endpoints
-use this common ordinal; queue order cannot introduce a dependency cycle.
+`mesh_graph_schedule` (mesh-graph.h) moves every fragment as its page units on
+its directed cable: each time a cable frees, of the units ready on it the one with
+the most cables below it goes, and a relay's unit waits only for the landing unit
+it forwards. Both endpoints use the resulting common ordinal (a topological
+order), so queue order cannot introduce a dependency cycle.
 An early relay can precede a Studio's local producer, while a relay whose input
 is queued upstream can follow an already-ready local transfer. Forwarding is
 streamed, not whole-fragment store-and-forward. This is an AOT list schedule,

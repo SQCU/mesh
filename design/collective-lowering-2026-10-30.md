@@ -21,7 +21,7 @@ then peers lose its link. Later output comparisons read unfinished results
    every SEND stayed whole).
 5. **Retirement proofs** (retirement_proofs, mesh-graph.h mesh_graph_mark): the dependency graph built from byte
    overlaps, its ancestors walked for each overwrite.
-6. **Order** (dependency_order, mesh_transfer_order, mesh-write-order.h mesh_write_order): per rank, the dependency
+6. **Order** (dependency_order, mesh_transfer_order, mesh-graph.h mesh_graph_schedule since 1fa47bfc, page units filled highest first; mesh_write_order before it): per rank, the dependency
    edges derived again from byte overlaps (O(n²) a row); endpoints paired again, by sorting on
    (group, source, destination, cable, round, type, width, elements); a list schedule over the cables' capacities
    gives each transfer its wire order (`round`) and its receive its consumption order.
