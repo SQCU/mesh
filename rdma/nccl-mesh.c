@@ -5198,7 +5198,7 @@ static ncclResult_t plan_direct(struct call *c, struct where own,int *result) {
   ncclResult_t related=binding_relations(c->comm,a,sent,b,made,before,&same,&overlap);
   if(related)return related;
   const int aliased=st->partial&&same;
-  if(!aliased&&overlap)return ncclSuccess;
+  if(!aliased&&overlap){if(getenv("MESH_COPIES_TRACE"))fprintf(stderr,"refused what %d: send and result overlap\n",(int)c->what);return ncclSuccess;}
   const uint32_t B = st->buffers;
   struct spans *w = kept(KEPT_SPANS, B * sizeof *w);
   for (uint32_t b = 0; w && b < B; b++) w[b].count = 0;
@@ -5210,6 +5210,10 @@ static ncclResult_t plan_direct(struct call *c, struct where own,int *result) {
     const struct where source=view_at(c,1,(size_t)(from-lo)*z);
     const struct where map={source.buffer,source.offset-(size_t)from*z};
     const int meet = spans_meet(w + step->buffer, from, to), inside = from >= lo && to <= hi;
+    if ((meet < 0 || (!meet && step->op != MESH_STEP_COPY && !inside)) && getenv("MESH_COPIES_TRACE"))
+      fprintf(stderr, "refused what %d: step %u of %u op %d buffer %u [%llu, %llu) meet %d inside %d lo %llu hi %llu\n", (int)c->what, k,
+              st->count, (int)step->op, step->buffer, (unsigned long long)from, (unsigned long long)to, meet, inside,
+              (unsigned long long)lo, (unsigned long long)hi);
     if (meet < 0 || (!meet && step->op != MESH_STEP_COPY && !inside)) direct = 0;
     else if (step->op == MESH_STEP_SEND) { if (!meet) st->read[k] = map; }
     else {
