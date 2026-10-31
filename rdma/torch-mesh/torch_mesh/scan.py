@@ -10,15 +10,15 @@ from .layout import index_source
 
 
 @lru_cache(None)
-def pipelines(definitions, offsets):
+def pipelines(definitions, offsets, finishing):
     directory = Path(__file__).parent
-    source = ''.join(f'#define {k} {v}\n' for k, v in definitions)
-    source += offsets + (directory / 'argmax.metal').read_text() + '\n'
-    source += (directory / 'scan.metal').read_text()
-    return tuple(_stream.pipeline(source, name) for name in ('scan_blocks', 'add_prefix'))
+    definitions = ''.join(f'#define {k} {v}\n' for k, v in definitions)
+    source = (directory / 'argmax.metal').read_text() + '\n' + (directory / 'scan.metal').read_text()
+    return tuple(_stream.pipeline(definitions + indices + source, name)
+                 for indices, name in ((offsets, 'scan_blocks'), (finishing, 'add_prefix')))
 
 
-def cumsum(x, dim, *, dtype=None, out=None):
+def cumsum(x, dim, *, dtype=None, out=None, write_maps=None, write_complete=None):
     kinds = {torch.bool: 'bool', torch.uint8: 'uchar', torch.int8: 'char', torch.int16: 'short',
              torch.int32: 'int', torch.int64: 'long', torch.uint32: 'uint', torch.uint64: 'ulong',
              torch.float16: 'half', torch.bfloat16: 'bfloat', torch.float32: 'float'}
@@ -26,7 +26,7 @@ def cumsum(x, dim, *, dtype=None, out=None):
     if x.dtype not in kinds or dtype not in kinds or dtype == torch.bool:
         raise NotImplementedError('native cumsum requires a supported numeric output type')
     from .placement import output as bind_output
-    output = bind_output(x.shape, dtype, x.device, out)
+    output = TensorView.of(out) if write_maps is not None else bind_output(x.shape, dtype, x.device, out)
     if not x.numel():
         return output, []
     source, target = TensorView.of(x), TensorView.of(output)
@@ -45,14 +45,27 @@ def cumsum(x, dim, *, dtype=None, out=None):
     blocks = -(-extent // threads)
     totals = empty((rows, blocks), dtype=accumulator) if blocks > 1 else None
     # Partial sums use their own layout when accumulation changes the width.
-    source, target = source.rows(dim), target.rows(dim)
-    partial = (target.typed(accumulator) if target.element_size() == accumulator.itemsize
-               else empty(source.shape, dtype=accumulator)) if blocks > 1 else target
+    source = source.rows(dim)
+    target = target if write_maps is not None else target.rows(dim)
+    partial = target
+    if blocks > 1:
+        complete = write_maps is None or write_complete['out']
+        if complete and target.element_size() == accumulator.itemsize:
+            if write_maps is not None:
+                physical = write_maps['out'].rebase(_stream.TensorLayout((target.numel(),), (1,)),
+                                                  target.layout.reshape((target.numel(),)))
+                partial = TensorView(target.storage, physical.reshape(source.shape), target.binding_origin)
+            partial = partial.typed(accumulator)
+        else:
+            partial = empty(source.shape, dtype=accumulator)
     definitions = dict(INPUT=kinds[source.dtype], OUTPUT=kinds[dtype], ACCUM=kinds[accumulator],
-                       EXTENT=extent, BLOCKS=blocks, THREADS=threads)
+                       EXTENT=extent, BLOCKS=blocks, THREADS=threads, OUTPUT_COUNT=target.numel(),
+                       OUTPUT_SELECTED=int(write_maps is not None and not write_complete['out']))
 
-    offsets = index_source({0: source, 1: target, 2: partial})
-    handles = pipelines(tuple(definitions.items()), offsets)
+    selected = write_maps['out'] if write_maps is not None else _stream.TensorLayout((rows * extent,), (1,))
+    offsets = index_source({0: source, 1: target, 2: partial, 8: selected})
+    finishing = index_source({0: target, 1: target, 2: partial, 8: selected})
+    handles = pipelines(tuple(definitions.items()), offsets, finishing)
     for handle in handles:
         maximum, _, fixed = _stream.pipeline_facts(handle)
         if threads > maximum or fixed > memory:

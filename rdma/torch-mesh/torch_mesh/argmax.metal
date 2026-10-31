@@ -260,6 +260,11 @@ __attribute__((always_inline)) static inline bool mesh_retain(thread float &m, t
 
 // argmax.py's draw: row group.y of z [rows, v] in blocks (group.x), each row's token first + c (words: v, seed, first,
 // blocks; parts: the blocks' records, values then keys).
+#ifndef MESH_DRAW_RESULT
+#define MESH_DRAW_RESULT(i) (i)
+#define MESH_DRAW_RESULTS (~0ul)
+#define MESH_DRAW_SELECTED false
+#endif
 template <uint T>
 kernel void mesh_draw_rows(device const float *z [[buffer(0)]], device const uint *keys [[buffer(1)]], device const float *cutoff [[buffer(2)]],
                            device long *ids [[buffer(3)]], coherent(device) device float *parts [[buffer(4)]],
@@ -276,10 +281,22 @@ kernel void mesh_draw_rows(device const float *z [[buffer(0)]], device const uin
                      [&](uint i) { return first + i; }, cutoff[mesh_index<2>(r)],
                      lo, hi, lid, tv, tk, parts, (coherent(device) device uint *)(parts + groups.y * blocks), &arrivals[r],
                      r * blocks + group.x, blocks))
-        ids[mesh_index<3>(r)] = long(first + c);
+        if (const ulong at = MESH_DRAW_RESULT(r); !MESH_DRAW_SELECTED || at < MESH_DRAW_RESULTS)
+            ids[mesh_index<3>(at)] = long(first + c);
 }
 
 // argmax.py's retain: row group.y of z [rows, v] in one threadgroup, its H + M entries and log Z (words: v, seed).
+#ifndef MESH_RETAIN_IDS
+#define MESH_RETAIN_IDS(i) (i)
+#define MESH_RETAIN_KEPT(i) (i)
+#define MESH_RETAIN_LOG_Z(i) ((i) / (H + M))
+#define MESH_RETAIN_IDS_COUNT (~0ul)
+#define MESH_RETAIN_KEPT_COUNT (~0ul)
+#define MESH_RETAIN_LOG_Z_COUNT (~0ul)
+#define MESH_RETAIN_IDS_SELECTED false
+#define MESH_RETAIN_KEPT_SELECTED false
+#define MESH_RETAIN_LOG_Z_SELECTED false
+#endif
 template <uint T, uint H, uint M>
 kernel void mesh_retain_rows(device const float *z [[buffer(0)]], device const uint *positions [[buffer(1)]], device long *ids [[buffer(2)]],
                              device float *kept [[buffer(3)]], device float *log_z [[buffer(4)]], constant uint *words [[buffer(5)]],
@@ -290,9 +307,12 @@ kernel void mesh_retain_rows(device const float *z [[buffer(0)]], device const u
     if (mesh_retain<T>(m, l, [&](uint c) { return z[mesh_index<0>(ulong(r) * v + c)]; }, words[1], positions[mesh_index<1>(r)],
                        [&](uint c) { return c; }, H, M, 0, v, lid,
                        w, [&](uint i, long token, float value) {
-                           ids[mesh_index<2>(ulong(r) * (H + M) + i)] = token;
-                           kept[mesh_index<3>(ulong(r) * (H + M) + i)] = value;
+                           const ulong at = ulong(r) * (H + M) + i;
+                           const ulong id = MESH_RETAIN_IDS(at), z = MESH_RETAIN_KEPT(at);
+                           if (!MESH_RETAIN_IDS_SELECTED || id < MESH_RETAIN_IDS_COUNT) ids[mesh_index<2>(id)] = token;
+                           if (!MESH_RETAIN_KEPT_SELECTED || z < MESH_RETAIN_KEPT_COUNT) kept[mesh_index<3>(z)] = value;
                        }))
-        log_z[mesh_index<4>(r)] = m + log(l);
+        if (const ulong at = MESH_RETAIN_LOG_Z(ulong(r) * (H + M)); !MESH_RETAIN_LOG_Z_SELECTED || at < MESH_RETAIN_LOG_Z_COUNT)
+            log_z[mesh_index<4>(at)] = m + log(l);
 }
 #endif

@@ -9,6 +9,10 @@
 enum MeshIndexClosureKind { MeshIndexSymmetricClosure, MeshIndexDirectedClosure };
 isl_map *MeshIndexClosure(isl_map *relation, NSUInteger count, enum MeshIndexClosureKind kind, isl_map *forbidden);
 #include <isl/set.h>
+// Exact states reachable from seeds under the same finite path bound. Derive
+// an inductive affine invariant before closing the relation; no seed or edge
+// is approximated. Consumes relation and seeds.
+isl_set *MeshIndexReachable(isl_map *relation, isl_set *seeds, NSUInteger count);
 
 // Preparation only. The relation type and its closed operations are isl's;
 // these functions translate the layout declarations and emitted index terms.

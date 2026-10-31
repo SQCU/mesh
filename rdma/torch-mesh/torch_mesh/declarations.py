@@ -18,11 +18,16 @@ class SourceCapture(TorchFunctionMode):
     This mode exists only while FX records source. Captured parameters and
     explicit arguments share the same identity table, including gradient leaves.
     The generated graph contains ordinary operators and lifted state values.
+    An ordinary DTensor used only through a closure's ``to_local`` must be
+    registered as a parameter: its raw local tensor alone has no global source
+    identity. RaggedTensor's source-capture hook supplies that identity directly.
     """
     def __init__(self, mode):
         super().__init__()
         self.mode, self.values, self.originals, self.local_sources = mode, {}, {}, {}
         self.source_nodes = {}
+        self.local_values = {}
+        self.local_shapes = None
         self.meshes = []
 
     def value(self, value):
@@ -33,6 +38,10 @@ class SourceCapture(TorchFunctionMode):
             return value
         if id(value) in self.values:
             return self.values[id(value)]
+        if id(value) in self.local_sources:
+            made = self.local(self.local_sources[id(value)])
+            self.values[id(value)] = made
+            return made
         if isinstance(value, FakeTensor):
             return value
         with disable_proxy_modes_tracing(), self.mode:
@@ -50,24 +59,57 @@ class SourceCapture(TorchFunctionMode):
     def local(self, value):
         """An explicit local view keeps its global source identity as metadata."""
         from .partition import _rank_selection, _value_ownership
-        from torch.fx.experimental.proxy_tensor import get_proxy_mode, get_proxy_slot
+        from torch.fx.experimental.proxy_tensor import get_proxy_mode, get_proxy_slot, disable_proxy_modes_tracing, track_tensor_tree
+        from torch.fx.experimental.symbolic_shapes import ShapeEnv, DimDynamic, StatelessSymbolicContext
+        from torch._dynamo.source import LocalSource
         made = self.value(value)
         proxy = get_proxy_mode()
-        source = get_proxy_slot(made, proxy.tracer).proxy.node
         original = self.originals.get(id(made), value)
+        if id(original) in self.local_values:
+            return self.local_values[id(original)]
+        if get_proxy_slot(made, proxy.tracer, None) is None:
+            made = torch.ops.aten.alias.default(made)
+        source = get_proxy_slot(made, proxy.tracer).proxy.node
+        self.source_nodes[id(original)] = source
         selection, _ = _rank_selection(original._spec, original.device_mesh.get_coordinate())
         for _, axis, runs in selection['steps']:
             first, count, _, _ = runs[0]
             made = made.narrow(axis, first, count)
         made = torch.ops.aten.alias.default(made)
         declaration, _ = _value_ownership(original, original.device_mesh)
-        get_proxy_slot(made, proxy.tracer).proxy.node.meta['mesh_local_source'] = dict(
+        coordinate = tuple(original.device_mesh.get_coordinate())
+        declaration = dict(declaration, owners=dict(declaration['owners']))
+        declaration['owners'][coordinate] = dict(declaration['owners'][coordinate],
+            stride=tuple(original._local_tensor.stride()))
+        slot = get_proxy_slot(made, proxy.tracer)
+        slot.proxy.node.meta['mesh_local_source'] = dict(
             declaration, mesh=original.device_mesh, selection=selection, source=(source, ()))
-        return made
+        # Upstream symbolic fake metadata preserves shape/stride queries as
+        # ordinary FX edges. Replaying those edges with each rank's declared
+        # local type preserves a reused shape expression without changing any
+        # equal-valued literal in the user's source.
+        if self.local_shapes is None:
+            self.local_shapes = ShapeEnv(specialize_zero_one=False)
+        shape, strides, _ = self.local_shapes.create_symbolic_sizes_strides_storage_offset(
+            original._local_tensor, LocalSource(slot.proxy.node.name),
+            symbolic_context=StatelessSymbolicContext(dynamic_sizes=[DimDynamic.DYNAMIC] * made.ndim))
+        with disable_proxy_modes_tracing(), self.mode, self.local_shapes.suppress_guards():
+            symbolic = torch.as_strided(made, shape, strides, made.storage_offset())
+        with self.local_shapes.suppress_guards():
+            track_tensor_tree(symbolic, slot.proxy, constant=None, tracer=proxy.tracer)
+        self.local_values[id(original)] = symbolic
+        return symbolic
 
     def __torch_function__(self, operation, types, args=(), kwargs=None):
         from torch.utils._pytree import tree_map
-        return operation(*tree_map(self.value, args), **tree_map(self.value, kwargs or {}))
+        args, kwargs = tree_map(self.value, (args, kwargs or {}))
+        if self.local_shapes is None:
+            return operation(*args, **kwargs)
+        # Only source operators are captured here. Their fake shape branches
+        # are evaluated again with the declared rank's type before lowering;
+        # they cannot specialize another rank's source shape to this hint.
+        with self.local_shapes.suppress_guards():
+            return operation(*args, **kwargs)
 
     def __enter__(self):
         from .partition import _SOURCE_CAPTURE
@@ -923,7 +965,7 @@ def sections(module, cuts, requested_outputs=()):
 
 def _boundary_work(section, projection, algebra):
     """The same selected storage operands for declared collective work."""
-    from .ownership import _source_leaves, port_bindings
+    from .ownership import _source_leaves, declared_binding, port_bindings
     from .operand import TensorView, byte_relation, layout_configuration
     from .collective_views import selected_calls
 
@@ -933,9 +975,9 @@ def _boundary_work(section, projection, algebra):
                     storage_bytes=view.storage.untyped_storage().nbytes(),
                     relation=algebra.layout(layout_configuration(view.layout)))
 
-    inputs = {key: binding(value) for key, value in _source_leaves(section['inputs'])
+    inputs = {key: (declared_binding(binding(value)),) for key, value in _source_leaves(section['inputs'])
               if isinstance(value, torch.Tensor)}
-    outputs = {key: binding(value) for key, value in _source_leaves(section['outputs'])
+    outputs = {key: (declared_binding(binding(value)),) for key, value in _source_leaves(section['outputs'])
                if isinstance(value, torch.Tensor)}
     domains, records, equalities, commands, requirements = {}, [], [], [], []
 
@@ -947,7 +989,9 @@ def _boundary_work(section, projection, algebra):
 
     def use(value, relation):
         described = binding(value)
-        return dict(binding=described, relation=relation.then(described['relation']), shape=relation.shape)
+        mapped = relation.then(described['relation'])
+        retain(dict(described, relation=mapped), mapped.domain())
+        return dict(binding=described, relation=mapped, shape=relation.shape)
 
     for record in projection.get('records', ()):
         if 'host' in record:
@@ -1061,9 +1105,9 @@ class BoundGraph:
         from torch.utils import _pytree as tree
         from torch.fx.node import map_arg
         from . import backend
-        from .ownership import _source_leaves, page_equalities
+        from .ownership import _source_leaves, binding_uses, declared_binding, page_equalities
         from .operand import TensorView, layout_configuration, relation_view
-        from .placement import selected, selected_view
+        from .placement import field_storage, selected, selected_view
         from .collective_views import selection_exchanges
         from .native import empty_strided
 
@@ -1113,21 +1157,27 @@ class BoundGraph:
 
         def bind_section(section, projection, input_bindings, output_bindings, *, equalities=(), requirements=()):
             source_section = None if section is None else section.get('source_section', section)
-            delivered = [record for record in ownership['deliveries'] if record['section'] is source_section]
+            delivered = [record for record in ownership['deliveries']
+                         if record['section'] is source_section and coordinate in record['participants']]
+            inputs, input_relations = field_storage(input_bindings, projection['storage_bytes'], algebra=algebra)
+            outputs, output_relations = field_storage(output_bindings, projection['storage_bytes'], algebra=algebra)
+            input_names = {binding['name'] for _, binding in binding_uses(input_bindings)}
             fixed, requirements = [], list(requirements)
             wanted = projection.get('outputs', {})
             requested = []
+            fixed_uses = []
             empty = algebra.set('{ [i] : false }', 1)
-            for key, binding in output_bindings.items():
+            for key, binding in outputs.items():
                 order = selection(key, wanted.get(key, empty))
                 requested.append(dict(binding=binding, selection=order,
                                       shape=algebra.selection_relation(order).shape))
+                uses = output_bindings[key]
                 key = original(key)
                 if key in final_targets:
                     requested_key, destination = final_targets[key][0]
                     owner = ownership['requests'][coordinate][requested_key]
                     held = available.get(key)
-                    relocatable = binding['name'] not in {value['name'] for value in input_bindings.values()}
+                    relocatable = all(value['name'] not in input_names for value in uses)
                     if held is not None:
                         from .placement import same_view
                         overlap = algebra.selection(held['selection']).binary(algebra.selection(owner['selection']), 'intersect')
@@ -1137,13 +1187,15 @@ class BoundGraph:
                             view(dict(selection=owner['selection'], operand=destination), common, shape))
                     if relocatable:
                         fixed.append(dict(binding=binding, selection=owner['selection'], operand=destination))
-            for key, binding in input_bindings.items():
+                        fixed_uses.extend(dict(binding=value) for value in uses)
+            for key, binding in inputs.items():
                 held = available.get(original(key))
                 if held is not None:
                     fixed.append(dict(binding=binding, **held))
+                    fixed_uses.extend(dict(binding=value) for value in input_bindings[key])
             for delivery in delivered:
                 key = delivery['source']
-                binding = input_bindings[key]
+                binding = inputs[key]
                 # Relay pages and numerical inputs share the same original
                 # value coordinates. Local edges therefore name the same pages.
                 selections = [delivery['sources'][coordinate], delivery['destinations'][coordinate]]
@@ -1160,14 +1212,15 @@ class BoundGraph:
             device = types[0].device.type
             plan = selected(projection, algebra=algebra, device=device, results=requested,
                             fixed=fixed, requirements=requirements,
-                            equalities=(*equalities, *page_equalities(section, fixed)))
+                            equalities=(*equalities, *input_relations, *output_relations,
+                                        *page_equalities(section, fixed_uses)))
             owners.extend(plan['pages'])
 
             def placed(binding, order):
                 return selected_view(plan['storage'], dict(binding=binding, selection=order), algebra=algebra)
 
             for delivery in delivered:
-                binding = input_bindings[delivery['source']]
+                binding = inputs[delivery['source']]
                 for step in delivery['steps']:
                     peers, group = step['peers'], step['group']
                     transfers = selection_exchanges([step['sources'][peer] for peer in peers],
@@ -1178,8 +1231,12 @@ class BoundGraph:
                     if command is not None:
                         self.steps.append(command)
                         self.groups.setdefault(group.group_name, []).append(calls)
-            for (key, binding), operand, request in zip(output_bindings.items(), plan['results'], requested, strict=True):
+            for (key, binding), operand, request in zip(outputs.items(), plan['results'], requested, strict=True):
                 available[original(key)] = dict(selection=request['selection'], operand=operand)
+            # Semantic fields have now become page views. The next lowerer
+            # consumes its own declared storage names, not the solve's roots.
+            for binding in (*inputs.values(), *outputs.values()):
+                plan['storage'].pop(binding['name'], None)
             return plan
 
         local = ownership['projections'][coordinate]
@@ -1188,7 +1245,7 @@ class BoundGraph:
             section = projection['section']
             if not section['boundaries']:
                 input_actuals = {binding['name']: available[original(key)]['operand']
-                                for key, binding in section['input_bindings'].items() if original(key) in available}
+                                for key, binding in binding_uses(section['input_bindings']) if original(key) in available}
                 plan = bind_section(section, projection, section['input_bindings'], section['output_bindings'])
                 actuals = [plan['storage'][name]['operand'] if name in plan['storage'] else
                            input_actuals.get(name, value)
@@ -1241,9 +1298,9 @@ class BoundGraph:
             for record in final:
                 key = record['source']
                 value = described(key)
-                bindings[key] = dict(name=value.untyped_storage()._cdata, dtype=value.dtype,
+                bindings[key] = (declared_binding(dict(name=value.untyped_storage()._cdata, dtype=value.dtype,
                     storage_bytes=value.untyped_storage().nbytes(),
-                    relation=algebra.layout(layout_configuration(TensorView.of(value).layout)))
+                    relation=algebra.layout(layout_configuration(TensorView.of(value).layout)))),)
                 needs[key] = algebra.selection(record['destinations'][coordinate])
             bind_section(None, dict(storage_bytes={}, records=(), outputs=needs), bindings, bindings)
 

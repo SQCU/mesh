@@ -35,9 +35,11 @@ Source/placement preparation has reached ordinary owned native shader binding.
 Partial/complete transitions now splice their captured expressions and distinct
 value versions into those forward sections. Registered local source scopes retain
 each rank's operand types and global page relations, including ragged index/mask
-expressions. Explicit `to_local` source-shape provenance, multiple storage uses
-of one semantic field, and independently typed rank/cohort source scopes remain
-open.
+expressions. Explicit `to_local` shape queries now remain FX edges and consume
+each rank's declared local type. One semantic field retains all of its typed
+storage uses and their paired coordinates. Disjoint collective cohorts retain
+their own source types and declared group roles. Matching original scalar
+load-use identities across independently lowered rank bodies remains open.
 
 Native scalar emission now returns passive command declarations before pipeline
 realization. The native and LiteRT consumers retain the same typed byte
@@ -53,9 +55,14 @@ calls and their input page binding; a fake process group cannot prepare the
 transport endpoint. This does not establish a complete distributed execution.
 Cached pointwise producers now
 compose into live reads before page placement; an imported UPDATE→GATHER emits
-one command without a full updated-table intermediate. Selector/scan
-declarations and pool reduction ordering remain open. These are source, build
-and preparation observations, with no new numerical or performance claim.
+one command without a full updated-table intermediate. Selected top-k/sort,
+scan, sampling and ordinary butterfly factors now use their existing kernels
+through one selected external-command binder. Max-pool retains its window axes
+until ownership selection. Average/fractional pooling still has upstream local
+unrolling overrides; ragged butterfly source multiplicities and portable
+importer consumption of the new external declarations also remain open.
+These are source, build and preparation observations, with no new numerical or
+performance claim.
 Followups 2–6 are still outstanding.
 
 ## Dependency handoff through command lowering
@@ -70,8 +77,11 @@ work, not a range solver called by every prepared numerical invocation.
 opaque crossing callback, then flushes the work. The callback enters
 `ncclMeshCommEncode`, constructs transport tasks and emits direct commands.
 The common scheduler therefore lacks those command records before encoding.
-`MetalEncoderOrder` reconstructs their hazards from ranges at that late stage.
-Caching its page walks alone would retain this missing compiler handoff.
+The later `b73d81bc` change removes the direct transport range walk and assigns
+barriers by dispatch kind. It still does not expose those commands to the common
+dependency graph: every direct kind other than a later present takes a barrier.
+Recorded numerical work still has separate dependency passes. Removing the
+range walk therefore does not complete this compiler handoff.
 
 The common compiled record must carry the following facts through each lowering:
 

@@ -303,30 +303,46 @@ isl_map *MeshIndexRelation(isl_ctx *ctx,MetalTensorLayout *layout) {
     return isl_map_from_pw_aff(MeshIndexFunction(ctx,layout));
 }
 
+// Number the equivalence classes of a finite ordinal domain. Representative
+// order is the original domain order; every equality participates before a
+// representative is selected, including many-to-one view relations.
+static isl_map *IndexQuotient(isl_ctx *ctx,NSUInteger count,isl_map *links,NSUInteger *size) {
+    isl_map *relation=NULL,*result=NULL;isl_set *representatives=NULL;
+    @try {
+        relation=isl_map_union(isl_set_identity(IndexDomain(ctx,0,count)),
+            isl_map_union(isl_map_copy(links),isl_map_reverse(links)));
+        relation=MeshIndexClosure(relation,count,MeshIndexSymmetricClosure,NULL);
+        relation=isl_map_lexmin(relation);representatives=isl_map_range(isl_map_copy(relation));
+        MetalTensorLayout *selected=MeshIndexSelection(representatives);*size=selected.count;
+        isl_map *numbered=isl_map_reverse(MeshIndexRelation(ctx,selected));
+        result=isl_map_apply_range(isl_map_copy(relation),numbered);
+    } @finally {isl_map_free(relation);isl_set_free(representatives);}
+    return result;
+}
+
 MetalTensorLayout *MeshIndexUnion(MetalTensorLayout *sourceRoot,MetalTensorLayout *targetRoot,
     MetalTensorLayout *source,MetalTensorLayout *target,MetalTensorLayout *member,BOOL sourceMember) {
     isl_ctx *ctx=isl_ctx_alloc();
-    isl_map *sourceInverse=NULL,*targetInverse=NULL,*targetMap=NULL,*relation=NULL;
-    isl_set *remaining=NULL;MetalTensorLayout *result=nil;
+    isl_map *sourceInverse=NULL,*targetInverse=NULL,*quotient=NULL,*relation=NULL;
+    MetalTensorLayout *result=nil;
     @try {
-        sourceInverse=isl_map_reverse(MeshIndexRelation(ctx,sourceRoot));
-        targetInverse=isl_map_reverse(MeshIndexRelation(ctx,targetRoot));
+        isl_map *sourceRelation=MeshIndexRelation(ctx,sourceRoot);
+        isl_map *shift=isl_map_from_pw_aff(MeshIndexExpression(ctx,@[@"add",@"i",@(sourceRoot.count)],0,targetRoot.count));
+        isl_map *targetRelation=isl_map_apply_range(isl_map_reverse(shift),MeshIndexRelation(ctx,targetRoot));
+        sourceInverse=isl_map_reverse(isl_map_copy(sourceRelation));
+        targetInverse=isl_map_reverse(isl_map_copy(targetRelation));
         isl_map *read=isl_map_apply_range(MeshIndexRelation(ctx,source),isl_map_copy(sourceInverse));
         isl_map *write=isl_map_apply_range(MeshIndexRelation(ctx,target),isl_map_copy(targetInverse));
-        targetMap=isl_map_apply_range(isl_map_reverse(write),read);
-        remaining=isl_set_subtract(IndexDomain(ctx,0,targetRoot.count),isl_map_domain(isl_map_copy(targetMap)));
-        MetalTensorLayout *extra=MeshIndexSelection(remaining);
-        const NSUInteger total=sourceRoot.count+extra.count;
+        isl_map *links=isl_map_apply_range(isl_map_reverse(read),write);
+        links=isl_map_union(links,isl_map_apply_range(sourceRelation,isl_map_copy(sourceInverse)));
+        links=isl_map_union(links,isl_map_apply_range(targetRelation,isl_map_copy(targetInverse)));
+        NSUInteger total=0;
+        quotient=IndexQuotient(ctx,sourceRoot.count+targetRoot.count,links,&total);
         if(!member)result=[MetalTensorLayout shape:@[@(total)] strides:@[@1] offset:0 maps:@{} indices:nil];
         else if(!member.count)result=[MetalTensorLayout shape:member.shape index:@0 parameters:@{}];
         else {
-            if(!sourceMember) {
-                isl_map *append=isl_map_from_pw_aff(MeshIndexExpression(ctx,@[@"add",@"i",@(sourceRoot.count)],0,extra.count));
-                append=isl_map_apply_range(isl_map_reverse(MeshIndexRelation(ctx,extra)),append);
-                targetMap=isl_map_coalesce(isl_map_union(targetMap,append));
-            }
             relation=isl_map_apply_range(MeshIndexRelation(ctx,member),isl_map_copy(sourceMember?sourceInverse:targetInverse));
-            if(!sourceMember)relation=isl_map_apply_range(relation,isl_map_copy(targetMap));
+            relation=isl_map_apply_range(relation,isl_map_copy(quotient));
             isl_pw_multi_aff *function=isl_pw_multi_aff_from_map(relation);relation=NULL;
             isl_pw_aff *index=isl_pw_multi_aff_get_pw_aff(function,0);isl_pw_multi_aff_free(function);
             result=[MetalTensorLayout shape:member.shape index:MeshIndexTerms(index) parameters:@{}];
@@ -334,8 +350,8 @@ MetalTensorLayout *MeshIndexUnion(MetalTensorLayout *sourceRoot,MetalTensorLayou
         if(isl_ctx_last_error(ctx)!=isl_error_none)
             [NSException raise:NSInvalidArgumentException format:@"view union: %s",isl_ctx_last_error_msg(ctx)];
     } @finally {
-        isl_map_free(sourceInverse);isl_map_free(targetInverse);isl_map_free(targetMap);isl_map_free(relation);
-        isl_set_free(remaining);isl_ctx_free(ctx);
+        isl_map_free(sourceInverse);isl_map_free(targetInverse);isl_map_free(quotient);isl_map_free(relation);
+        isl_ctx_free(ctx);
     }
     return result;
 }
@@ -402,24 +418,54 @@ isl_map *MeshIndexClosure(isl_map *relation,NSUInteger count,enum MeshIndexClosu
     }
     return relation;
 }
+isl_set *MeshIndexReachable(isl_map *relation,isl_set *seeds,NSUInteger count) {
+    isl_set *invariant=isl_set_from_basic_set(isl_set_affine_hull(isl_set_copy(seeds)));
+    isl_set *domain=NULL,*result=NULL;
+    // Hulls grow from the seeds by one-step images. Equality proves closure
+    // under the transition; every actually reachable state is then in this
+    // invariant, even when it expands to the full state space.
+    for(;;) {
+        isl_set *image=isl_set_apply(isl_set_copy(invariant),isl_map_copy(relation));
+        isl_set *next=isl_set_from_basic_set(isl_set_affine_hull(isl_set_union(isl_set_copy(invariant),image)));
+        isl_bool same=isl_set_is_equal(invariant,next);isl_set_free(invariant);invariant=next;
+        if(same==isl_bool_error)goto finished;
+        if(same==isl_bool_true)break;
+    }
+    relation=isl_map_intersect_domain(relation,isl_set_copy(invariant));
+    domain=isl_set_union(isl_set_copy(seeds),isl_map_range(isl_map_copy(relation)));
+    relation=MeshIndexNormalize(isl_map_intersect_domain(relation,isl_set_copy(domain)));
+    {
+        // Remove redundant case partitions only when their convex hull is
+        // exactly the same integer relation, including all divisibility.
+        isl_map *hull=isl_map_from_basic_map(isl_map_convex_hull(isl_map_copy(relation)));
+        isl_bool same=isl_map_is_equal(relation,hull);
+        if(same==isl_bool_true){isl_map_free(relation);relation=hull;}
+        else isl_map_free(hull);
+        if(same==isl_bool_error)goto finished;
+    }
+    // The seed states already supply paths of length zero. Adding identity
+    // edges for every intermediate cursor would restore discarded partitions.
+    relation=MeshIndexClosure(relation,count,MeshIndexDirectedClosure,NULL);
+    result=isl_set_coalesce(isl_set_detect_equalities(isl_set_compute_divs(isl_set_union(
+        isl_set_copy(seeds),isl_set_apply(isl_set_copy(seeds),isl_map_copy(relation))))));
+finished:
+    isl_set_free(invariant);isl_set_free(domain);isl_set_free(seeds);isl_map_free(relation);
+    return result;
+}
 NSArray<MetalTensorLayout *> *MetalTensorIdentify(NSUInteger count,MetalTensorLayout *source,MetalTensorLayout *target) {
     NSCParameterAssert([source.shape isEqual:target.shape]);
-    isl_ctx *ctx=isl_ctx_alloc();isl_map *relation=NULL;isl_set *representatives=NULL;NSArray *result=nil;
+    isl_ctx *ctx=isl_ctx_alloc();isl_map *relation=NULL;NSArray *result=nil;
     @try {
         MetalTensorLayout *domain=[MetalTensorLayout shape:@[@(count)] strides:@[@1] offset:0 maps:@{} indices:nil];
         isl_map *links=isl_map_apply_range(isl_map_reverse(MeshIndexRelation(ctx,source)),MeshIndexRelation(ctx,target));
-        relation=isl_map_union(MeshIndexRelation(ctx,domain),isl_map_union(isl_map_copy(links),isl_map_reverse(links)));
-        relation=MeshIndexClosure(relation,count,MeshIndexSymmetricClosure,NULL);
-        relation=isl_map_lexmin(relation);representatives=isl_map_range(isl_map_copy(relation));
-        MetalTensorLayout *selected=MeshIndexSelection(representatives);
-        MetalTensorLayout *compact=[MetalTensorLayout shape:selected.shape strides:@[@1] offset:0 maps:@{} indices:nil];
-        isl_map *numbered=isl_map_apply_range(isl_map_reverse(MeshIndexRelation(ctx,selected)),MeshIndexRelation(ctx,compact));
-        isl_pw_multi_aff *function=isl_pw_multi_aff_from_map(isl_map_apply_range(isl_map_copy(relation),numbered));
+        NSUInteger total=0;relation=IndexQuotient(ctx,count,links,&total);
+        MetalTensorLayout *compact=[MetalTensorLayout shape:@[@(total)] strides:@[@1] offset:0 maps:@{} indices:nil];
+        isl_pw_multi_aff *function=isl_pw_multi_aff_from_map(isl_map_copy(relation));
         isl_pw_aff *index=isl_pw_multi_aff_get_pw_aff(function,0);isl_pw_multi_aff_free(function);
         MetalTensorLayout *mapped=count?[MetalTensorLayout shape:domain.shape index:MeshIndexTerms(index) parameters:@{}]:domain;
         if(!count)isl_pw_aff_free(index);
         result=@[compact,mapped];
-    } @finally {isl_map_free(relation);isl_set_free(representatives);isl_ctx_free(ctx);}
+    } @finally {isl_map_free(relation);isl_ctx_free(ctx);}
     return result;
 }
 

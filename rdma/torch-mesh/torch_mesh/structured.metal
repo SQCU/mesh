@@ -8,6 +8,11 @@
 // ragged relation where a selected input feeds the transform; a row holds mesh_index<4>(signGroups * Width) values.
 #include <metal_stdlib>
 using namespace metal;
+#ifndef MESH_FWHT_RESULT
+#define MESH_FWHT_RESULT(i) (i)
+#define MESH_FWHT_RESULTS (~0ul)
+#define MESH_FWHT_SELECTED false
+#endif
 template <uint Width, ulong Normalize = 1, bool Signed = true, typename Input = float, typename Sign = float>
 kernel void structured_butterfly(device const Input *x [[buffer(0)]], device float *y [[buffer(1)]],
                                  device const Sign *sign [[buffer(2)]], constant uint &signGroups [[buffer(3)]],
@@ -33,6 +38,8 @@ kernel void structured_butterfly(device const Input *x [[buffer(0)]], device flo
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-    for (uint i = t; i < Width; i += threads)
-        y[mesh_index<1>(ulong(group) * Width + i)] = v[i] * rsqrt(float(Normalize));
+    for (uint i = t; i < Width; i += threads) {
+        const ulong at = MESH_FWHT_RESULT(ulong(group) * Width + i);
+        if (!MESH_FWHT_SELECTED || at < MESH_FWHT_RESULTS) y[mesh_index<1>(at)] = v[i] * rsqrt(float(Normalize));
+    }
 }

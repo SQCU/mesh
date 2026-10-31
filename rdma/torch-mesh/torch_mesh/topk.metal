@@ -37,8 +37,9 @@ kernel void select_top(device const INPUT *source [[buffer(0)]], device INPUT *v
         }
         for (uint i = lid; i < COUNT; i += THREADS) {
             const uint c = chosen[i];
-            values[mesh_index<1>(out + i)] = source[mesh_index<0>(base + c)];
-            indices[mesh_index<2>(ulong(row) * COUNT + i)] = long(c);
+            const ulong value = mesh_index<8>(out + i), index = mesh_index<9>(out + i);
+            if (!VALUE_SELECTED || value < VALUE_COUNT) values[mesh_index<1>(value)] = source[mesh_index<0>(base + c)];
+            if (!INDEX_SELECTED || index < INDEX_COUNT) indices[mesh_index<2>(index)] = long(c);
         }
     } else if constexpr (SORTED) {
         device uint *held = scratch + ulong(row) * PAD;
@@ -46,8 +47,9 @@ kernel void select_top(device const INPUT *source [[buffer(0)]], device INPUT *v
         mesh_top_ordered<THREADS>(key, 0, EXTENT, COUNT, lid, words, [&](uint i, uint c) { held[i] = c; });
     } else {
         mesh_top_ordered<THREADS>(key, 0, EXTENT, COUNT, lid, words, [&](uint i, uint c) {
-            values[mesh_index<1>(out + i)] = source[mesh_index<0>(base + c)];
-            indices[mesh_index<2>(ulong(row) * COUNT + i)] = long(c);
+            const ulong value = mesh_index<8>(out + i), index = mesh_index<9>(out + i);
+            if (!VALUE_SELECTED || value < VALUE_COUNT) values[mesh_index<1>(value)] = source[mesh_index<0>(base + c)];
+            if (!INDEX_SELECTED || index < INDEX_COUNT) indices[mesh_index<2>(index)] = long(c);
         });
     }
 }
@@ -66,7 +68,8 @@ kernel void write_top(device const INPUT *source [[buffer(0)]], device INPUT *va
     const ulong base = ulong(row) * EXTENT, out = ulong(row) * COUNT;
     for (uint i = lid; i < COUNT; i += THREADS) {
         const uint c = scratch[ulong(row) * PAD + i];
-        values[mesh_index<1>(out + i)] = source[mesh_index<0>(base + c)];
-        indices[mesh_index<2>(ulong(row) * COUNT + i)] = long(c);
+        const ulong value = mesh_index<8>(out + i), index = mesh_index<9>(out + i);
+        if (!VALUE_SELECTED || value < VALUE_COUNT) values[mesh_index<1>(value)] = source[mesh_index<0>(base + c)];
+        if (!INDEX_SELECTED || index < INDEX_COUNT) indices[mesh_index<2>(index)] = long(c);
     }
 }

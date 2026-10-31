@@ -227,6 +227,43 @@ def selected_view(storage, record, *, algebra, layout=None):
     return TensorView(physical.storage_as(binding['dtype']), mapped)
 
 
+def field_storage(bindings, domains, *, algebra):
+    """Relate each semantic value to all of its selected local storage uses.
+
+    The field is a virtual coordinate domain, not another physical buffer.
+    Existing placement equations give its uses the same pages. Only bytes
+    selected by the retained work enter those equations.
+    """
+    import math
+    from torch.utils import _pytree
+    from .operand import byte_relation
+    fields, equalities = {}, []
+    for field, uses in bindings.items():
+        value = _pytree.key_get(field[0].meta['val'], field[1])
+        relation = algebra.map((value.numel(),), (value.numel(),), lambda x, y: [f'{x[0]} = {y[0]}'])
+        canonical = fields[field] = dict(name=('field', field), dtype=value.dtype,
+            storage_bytes=value.numel() * value.element_size(), relation=relation)
+        width = value.element_size()
+
+        def bytes_(relation, extent):
+            count = math.prod(relation.shape) * width
+            scalars = algebra.map((count,), relation.shape, lambda x, y: [f'{y[0]} = floor({x[0]}/{width})'])
+            components = algebra.map((count,), (extent,), lambda x, y: [f'{x[0]} mod {width} = {y[0]} mod {width}'])
+            return scalars.then(byte_relation(dict(dtype=value.dtype, storage_bytes=extent, relation=relation))).intersect(components)
+
+        for binding in uses:
+            positions = domains.get(binding['name'])
+            if positions is None:
+                continue
+            for source, storage in binding['coordinates']:
+                left, right = bytes_(source, canonical['storage_bytes']), bytes_(storage, binding['storage_bytes'])
+                selected = right.preimage(positions)
+                order = algebra.selection_relation(dict(shape=list(right.shape), steps=[['select', 0, selected.spans()]]))
+                equalities.append((dict(binding=dict(canonical, dtype=torch.uint8), relation=order.then(left), shape=order.shape),
+                    dict(binding=dict(binding, dtype=torch.uint8), relation=order.then(right), shape=order.shape)))
+    return fields, tuple(equalities)
+
+
 def selected(projection, *, algebra, device, results=(), fixed=(), requirements=(), equalities=()):
     """Place one projected numerical span through the ordinary family solver.
 

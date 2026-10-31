@@ -951,12 +951,9 @@ MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *
         next=isl_map_lexmin(isl_map_intersect(next,isl_map_read_from_str(ctx,"{ [r] -> [s] : s > r }")));
         walk=isl_map_flat_range_product(isl_map_insert_dims(next,isl_dim_in,1,1),isl_map_from_pw_aff(end));
         states=isl_set_apply(isl_set_lexmin(isl_set_copy(rootIds)),isl_map_read_from_str(ctx,"{ [r] -> [r,0] }"));
-        // Every visited cursor is either the initial zero or a predecessor's
-        // end. Propagating that range removes unreachable alignment phases.
-        isl_set *domain=isl_set_union(isl_set_copy(states),isl_map_range(isl_map_copy(walk)));
-        walk=isl_map_coalesce(isl_map_intersect_domain(walk,isl_set_copy(domain)));
-        walk=MeshIndexClosure(isl_map_union(walk,isl_set_identity(domain)),count,MeshIndexDirectedClosure,NULL);
-        states=isl_set_apply(states,isl_map_copy(walk));
+        // Only states reachable from the declared first component and zero
+        // cursor participate in packing; unrelated cursor phases do not.
+        states=MeshIndexReachable(walk,states,count);walk=NULL;
         isl_map *bases=isl_map_project_out(isl_map_intersect_domain(isl_map_copy(base),isl_set_copy(states)),isl_dim_in,1,1);
         isl_map *which=isl_map_project_out(isl_map_copy(roots),isl_dim_out,1,1);
         isl_pw_aff *position=isl_map_dim_min(isl_map_apply_range(which,bases),0);

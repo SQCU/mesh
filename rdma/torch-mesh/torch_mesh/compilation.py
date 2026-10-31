@@ -319,7 +319,7 @@ def functionalize_source(module, inputs, decompositions):
     return lowered
 
 
-def normalize_source(module, decompositions):
+def normalize_source(module, decompositions, *, preserve=()):
     """Apply shared tensor equations to captured types before ownership.
 
     The framework's decomposition interpreter consumes only source metadata.
@@ -332,7 +332,9 @@ def normalize_source(module, decompositions):
     from torch._guards import detect_fake_mode
     from torch.fx.experimental.proxy_tensor import DecompositionInterpreter, get_proxy_slot, track_tensor_tree
     from torch.utils import _pytree as pytree
-    if not any(node.op == 'call_function' and node.target in decompositions for node in module.graph.nodes):
+    preserve = set(preserve)
+    if not any(node.op == 'call_function' and node.target in decompositions and node not in preserve
+               for node in module.graph.nodes):
         return module
     graph, results, operations = torch.fx.Graph(), {}, {}
 
@@ -347,10 +349,18 @@ def normalize_source(module, decompositions):
             self.source_node = node
             before = graph._root.prev
             with traceback.set_current_meta(node, 'mesh tensor equations'):
+                if node.op == 'output':
+                    graph.output(torch.fx.node.map_arg(node.args[0], results.__getitem__))
+                    return self.fetch_args_kwargs_from_env(node)[0][0]
+                if node in preserve:
+                    made = graph.node_copy(node, results.__getitem__)
+                    made.meta = node.meta.copy()
+                    value = node.meta['val']
+                    track_tensor_tree(value, torch.fx.Proxy(made, self.tracer), constant=None, tracer=self.tracer)
+                    results[node], operations[node] = made, (made,)
+                    return value
                 value = super().run_node(node)
                 origins, created = _source_origins(node, graph, before)
-                if node.op == 'output':
-                    return value
                 declared = node.meta.get('val', value)
 
                 def retain(path, item):
@@ -362,7 +372,8 @@ def normalize_source(module, decompositions):
                         # result. The ordinary alias is a page view, not a copy.
                         item = torch.ops.aten.alias.default(item)
                         made = get_proxy_slot(item, self.tracer).proxy.node
-                    _source_result(node, made, path, declared, pytree.key_get(declared, path), origins)
+                    metadata = item if node.meta.get('mesh_local_scope') else pytree.key_get(declared, path)
+                    _source_result(node, made, path, declared, metadata, origins)
                     return item
 
                 value = pytree.tree_map_with_path(retain, value)

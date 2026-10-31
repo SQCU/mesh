@@ -1285,10 +1285,13 @@ def _delivery_domains(section, source, requested, provided, mesh, algebra, *, ro
                 demands[rank] = demands[rank].binary(positions, 'union')
         relay_sources = {rank: selection(domain) for rank, domain in demands.items()}
         sources = {rank: selection(domain.binary(local[rank], 'union')) for rank, domain in demands.items()}
+    steps = (() if pending or all(algebra.selection(value).empty() for value in relay_destinations.values())
+             else exchange_steps(mesh, dimensions, relay_sources, relay_destinations))
+    domains = (sources, destinations, *(step[side] for step in steps for side in ('sources', 'destinations')))
+    participating = tuple(rank for rank in coordinates
+                          if any(not algebra.selection(domain[rank]).empty() for domain in domains))
     return dict(section=section, source=source, provided=provided, sources=sources,
-                destinations=destinations,
-                steps=() if pending or all(algebra.selection(value).empty() for value in relay_destinations.values())
-                else exchange_steps(mesh, dimensions, relay_sources, relay_destinations),
+                destinations=destinations, steps=steps, participants=participating,
                 pending=tuple(pending),
                 type=TensorMeta(described.shape, described.stride(), described.dtype))
 
@@ -1297,24 +1300,31 @@ def _project_owned_boundaries(section, needs, algebra, mesh):
     """Use declared group membership to transduce every peer's source demand."""
     from .declarations import boundary_groups, boundary_projection
     from .ownership import port_requests
-    ports = section.get('ports', {})
     original_needs = needs
-    if ports:
-        needs = {rank: port_requests(values, ports, algebra, coordinate=rank)
-                 for rank, values in needs.items()}
+    sections = {rank: section.get('rank_sections', {}).get(rank, section) for rank in needs}
+    needs = {rank: port_requests(values, sections[rank].get('ports', {}), algebra, coordinate=rank)
+             for rank, values in needs.items()}
     members = {int(mesh.mesh[rank]): rank for rank in _coordinates(mesh)}
-    groups = boundary_groups(section)
-    scopes = {name: {i: members[global_rank] for i, global_rank in enumerate(dist.get_process_group_ranks(group))}
-              for name, group in groups.items()}
-    peers = {name: {i: needs[rank] for i, rank in ranks.items()} for name, ranks in scopes.items()}
     records = {}
     for rank, requested in needs.items():
+        member = sections[rank]
+        ports = member.get('ports', {})
+        groups = boundary_groups(member)
+        scopes = {}
+        for name, group in groups.items():
+            axis = member.get('group_axes', {}).get(name)
+            scopes[name] = ({i: tuple(i if dim == axis else rank[dim] for dim in range(mesh.ndim))
+                             for i in range(mesh.size(axis))} if axis is not None else
+                            {i: members[global_rank] for i, global_rank in
+                             enumerate(dist.get_process_group_ranks(group))})
+        peers = {name: {i: needs[peer] for i, peer in ranks.items()} for name, ranks in scopes.items()}
         local = {name: i for name, ranks in scopes.items() for i, peer in ranks.items() if peer == rank}
-        nodes = tuple(node for node in section['boundaries']
-                      if not boundary_groups(dict(section, boundaries=(node,))) or
-                      any(name in local for name in boundary_groups(dict(section, boundaries=(node,)))))
-        scoped = dict(section, boundaries=nodes, peer_outputs=peers)
+        nodes = tuple(node for node in member['boundaries']
+                      if not boundary_groups(dict(member, boundaries=(node,))) or
+                      any(name in local for name in boundary_groups(dict(member, boundaries=(node,)))))
+        scoped = dict(member, boundaries=nodes, peer_outputs=peers)
         record = boundary_projection(scoped, requested, algebra, ranks=local)
+        record['section'] = member
         if ports:
             record['inputs'] = port_requests(record['inputs'], ports, algebra, coordinate=rank, incoming=True)
             record['outputs'] = original_needs[rank]
@@ -1399,9 +1409,10 @@ def declare_result(graph, value, ownership, *, mesh):
     owners = ownership['owners'] if 'owners' in ownership else ownership
     replicated = ownership.get('replicated_axes', ()) if 'owners' in ownership else ()
     spec = ownership.get('spec') if 'owners' in ownership else None
-    from .ownership import from_spec
+    from .ownership import from_spec, owner_layouts
     typed = from_spec(spec) if spec is not None else {}
-    declaration = dict(type=TensorMeta(described.shape, described.stride(), described.dtype), owners=owners,
+    typ = ownership.get('type', typed.get('type', TensorMeta(described.shape, described.stride(), described.dtype)))
+    declaration = dict(type=typ, owners=owner_layouts(typ, owners),
                        dimensions=ownership.get('dimensions', typed.get('dimensions',
                            tuple(i for i in range(mesh.ndim) if i not in replicated))),
                        reductions=ownership.get('reductions', typed.get('reductions', ())), mesh=mesh, spec=spec)
@@ -1465,7 +1476,10 @@ def _transition_sources(crossings, values, mesh):
             replacements.setdefault((transition['consumer'], transition['side'], transition['path']), {})[path] = output_key
         if source_key not in metadata:
             with described.fake_mode:
-                metadata[source_key] = torch.empty(before['owners'][coordinate]['shape'],
+                owner = before['owners'][coordinate]
+                if 'stride' not in owner:
+                    raise ValueError('placement source requires its declared per-rank stride for a gapped layout')
+                metadata[source_key] = torch.empty_strided(owner['shape'], owner['stride'],
                     dtype=described.dtype, device=described.device)
         value = metadata[source_key]
         cache = source.meta.setdefault('mesh_placement_sources', {})
@@ -1519,7 +1533,13 @@ def lower_owned_graph(graph, arguments, configuration):
                            consumer=None if route['consumer'] is None else declared_node(route['consumer'])))
     for name, declaration in configuration.get('values', {}).items():
         declare_result(graph, name, declaration, mesh=mesh)
-    graph = normalize_source(graph, partition_decompositions)
+    local_nodes = set()
+    for node in graph.graph.nodes:
+        if node.op != 'output' and ('mesh_local_source' in node.meta or
+                                   any(source in local_nodes for source in node.all_input_nodes)):
+            local_nodes.add(node)
+            node.meta['mesh_local_scope'] = True
+    graph = normalize_source(graph, partition_decompositions, preserve=local_nodes)
     for route in routes:
         node, path = route['source']
         mapped = graph.meta.get('mesh_source_results', {}).get(node, node)
@@ -1532,8 +1552,7 @@ def lower_owned_graph(graph, arguments, configuration):
     allocated = set(records)
     materialized = set(allocated)
     uses, crossings, cuts, scopes = {}, [], set(), {}
-    pending = [dict(source=node, declaration=node.meta['mesh_local_source'], requirement='local_source_scope')
-               for node in nodes if 'mesh_local_source' in node.meta]
+    pending = []
 
     def record_map(function, value):
         return pytree.tree_map(function, value, is_leaf=leaf)
@@ -1628,6 +1647,29 @@ def lower_owned_graph(graph, arguments, configuration):
     for node in nodes:
         node.meta['mesh_source_nodes'] = tuple(dict.fromkeys((node, *node.meta.get('mesh_source_nodes', ()))))
         if node.op in ('placeholder', 'get_attr', 'output'):
+            continue
+        if node.meta.get('mesh_local_scope'):
+            declaration = node.meta.get('mesh_local_source')
+            source = None
+            if declaration is not None:
+                original, path = declaration['source']
+                mapped = graph.meta.get('mesh_source_results', {}).get(original, original)
+                source = (mapped, path) if isinstance(mapped, torch.fx.Node) else (pytree.key_get(mapped, path), ())
+                records.setdefault(node, declaration)
+            output_owners = owners(node)
+            if output_owners:
+                # The value's public coordinates come from the explicit type;
+                # source_uses supplies each rank's local numerical type.
+                value = node.meta['val']
+                def global_value(path, item):
+                    owner = output_owners.get(tuple(path))
+                    if owner is None:
+                        return item
+                    with item.fake_mode:
+                        return torch.empty_strided(owner['type'].shape, owner['type'].stride,
+                            dtype=owner['type'].dtype, device=item.device, requires_grad=item.requires_grad)
+                node.meta['val'] = pytree.tree_map_with_path(global_value, value)
+            scopes[node] = dict(uses=(), outputs=output_owners, sharding=None, source=source)
             continue
         required = None
         assigned = records.get(node) if node in allocated else None
@@ -1769,31 +1811,46 @@ def lower_owned_graph(graph, arguments, configuration):
         dimensions = site['dimensions']
         partial = tuple(Partial('sum') if axis in dimensions else Replicate() for axis in range(mesh.ndim))
         complete = (Replicate(),) * mesh.ndim
-        local_shape = owners[tuple(mesh.get_coordinate())]['shape']
-        if any(owner['shape'] != local_shape for owner in owners.values()):
-            return dict(pending=(dict(source=site['source'], ports=ports, owners=owners,
-                dimensions=dimensions, requirement='collective_source_scope'),))
-        with described.fake_mode:
-            local = torch.empty(local_shape, dtype=described.dtype, device=described.device)
-        width = math.prod(local_shape) * described.dtype.itemsize
-        meta = TensorMeta(torch.Size((width,)), (1,), torch.uint8)
-        before, after = DTensorSpec(mesh, partial, tensor_meta=meta), DTensorSpec(mesh, complete, tensor_meta=meta)
-        def declaration(value):
-            bits = value.reshape(-1).view(torch.uint8)
-            received = _local_redistribute(bits, before, after)
-            return received.view(described.dtype).reshape(local_shape)
-        module, operands = source_expression(declaration, local)
-        argument = next(node for node in module.graph.nodes if node.op == 'placeholder')
-        output = next(node.args[0] for node in module.graph.nodes if node.op == 'output')
         selecting = {rank: owner['selection'] for rank, owner in owners.items()}
-        bindings = {(argument, ()): dict(field=source, selection=owners[tuple(mesh.get_coordinate())]['selection'],
-                                        selections=selecting),
-                    (output, ()): dict(field=result, selection=owners[tuple(mesh.get_coordinate())]['selection'],
-                                      selections=selecting)}
-        expression = dict(graph=module, operands=tuple(operands), algebra=algebra)
-        captured = prepare_expression(expression)
-        normalized = source_ports(captured, bindings)
-        captured = dict(captured, sections=tuple(bind_ports(span, normalized, algebra) for span in captured['sections']))
+        fixed = tuple(axis for axis in range(mesh.ndim) if axis not in dimensions)
+        cohorts = {}
+        for rank in owners:
+            cohorts.setdefault(tuple(rank[axis] for axis in fixed), []).append(rank)
+        variants = {}
+        group_axes = {mesh.get_group(axis).group_name: axis for axis in dimensions}
+        for cohort in cohorts.values():
+            coordinate = cohort[0]
+            local_shape = owners[coordinate]['shape']
+            if any(owners[rank]['shape'] != local_shape for rank in cohort):
+                raise ValueError('a selected-read cohort must share its declared union-work ordinals')
+            with described.fake_mode:
+                local = torch.empty(local_shape, dtype=described.dtype, device=described.device)
+            width = math.prod(local_shape) * described.dtype.itemsize
+            meta = TensorMeta(torch.Size((width,)), (1,), torch.uint8)
+            before, after = DTensorSpec(mesh, partial, tensor_meta=meta), DTensorSpec(mesh, complete, tensor_meta=meta)
+            def declaration(value):
+                bits = value.reshape(-1).view(torch.uint8)
+                received = _local_redistribute(bits, before, after)
+                return received.view(described.dtype).reshape(local_shape)
+            module, operands = source_expression(declaration, local)
+            argument = next(node for node in module.graph.nodes if node.op == 'placeholder')
+            output = next(node.args[0] for node in module.graph.nodes if node.op == 'output')
+            bindings = {(argument, ()): dict(field=source, selection=owners[coordinate]['selection'], selections=selecting),
+                        (output, ()): dict(field=result, selection=owners[coordinate]['selection'], selections=selecting)}
+            expression = dict(graph=module, operands=tuple(operands), algebra=algebra)
+            captured = prepare_expression(expression)
+            normalized = source_ports(captured, bindings)
+            captured = dict(captured, sections=tuple(dict(bind_ports(span, normalized, algebra), group_axes=group_axes)
+                                                     for span in captured['sections']))
+            variants.update((rank, captured) for rank in cohort)
+        captured = variants[tuple(mesh.get_coordinate())]
+        shared = []
+        for members in zip(*(value['sections'] for value in variants.values()), strict=True):
+            wrapper = dict(members[0])
+            wrapper['rank_sections'] = {rank: dict(member, source_section=wrapper)
+                for rank, member in zip(variants, members, strict=True)}
+            shared.append(wrapper)
+        captured = dict(captured, sections=tuple(shared))
         typ = TensorMeta(described.shape, described.stride(), described.dtype)
         # The typed prefix returns masked values. Its byte view, inside the
         # captured declaration, carries the SUM semantics; the float/int source

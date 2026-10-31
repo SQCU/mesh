@@ -127,7 +127,6 @@ def prepare_stage(x, signs, width, step, normalization, signed, sources, starts,
     from .placement import output
     from .operand import TensorView
     import math
-    import struct
     y = output((x.shape[0], signs.shape[0]), torch.float32, x.device, out)
     target = stage_views(y, width, step)
     # Domain-addressed reads are bound per tile below. The target supplies
@@ -157,23 +156,48 @@ def prepare_stage(x, signs, width, step, normalization, signed, sources, starts,
             extents = extents.select(0, first)
             # a piece whose elements have no sources reads nothing and depends on no input
             reads = TensorView.of(x).slice(0, origin[0], size[0]).select(1, present) if present else None
-        views = {1: writes, 4: extents, **({0: reads} if reads is not None else {}), **({2: signs_view} if signed else {})}
-        handle = _kernel(width, normalization, signed, kinds[x.dtype], kinds[signs.dtype], views)
-        maximum, lanes, _ = _stream.pipeline_facts(handle)
-        threads = min(maximum, max(lanes, width // 2))
         groups = math.prod(size) // width
-        commands.append((handle, [reads, writes, signs_view if signed else None],
-                         {3: struct.pack('I', math.prod(size[1:]) // width)},
-                         (groups, 1, 1), (threads, 1, 1), False,
-                         ((1 if reads is not None else 0) | (4 if signed else 0)) | (2 << _stream.compilation['ACCESS_WRITE_SHIFT'])))
+        commands.append(_piece(reads, writes, signs_view, extents, width=width, normalization=normalization,
+                               signed=signed, groups=groups, sign_groups=math.prod(size[1:]) // width,
+                               input_type=kinds[x.dtype], sign_type=kinds[signs.dtype]))
     return y, commands
 
 
-def _kernel(width, normalization, signed, input_type, sign_type, bindings):
+def prepare_factor(x, *, signs=None, out, width, normalization, signed, sign_type, write_maps, write_complete):
+    """The existing butterfly body over selected, already grouped page operands."""
+    from .operand import TensorView
+    kinds = {torch.float32: 'float', torch.float16: 'half', torch.bfloat16: 'bfloat'}
+    x, out = TensorView.of(x), TensorView.of(out)
+    groups = x.shape[0]
+    extents = _stream.TensorLayout((x.numel() + 1,), (1,))
+    record = _piece(x, out, signs, extents, width=width, normalization=normalization, signed=signed,
+                    groups=groups, sign_groups=groups, input_type=kinds[x.dtype], sign_type=sign_type,
+                    write_map=write_maps['out'], write_complete=write_complete['out'])
+    return out, [record] if groups else []
+
+
+def _piece(reads, writes, signs, extents, *, width, normalization, signed, groups, sign_groups,
+           input_type, sign_type, write_map=None, write_complete=True):
+    import struct
+    views = {1: writes, 4: extents, **({0: reads} if reads is not None else {}), **({2: signs} if signed else {})}
+    if write_map is not None:
+        views[8] = write_map
+    handle = _kernel(width, normalization, signed, input_type, sign_type, views,
+                     None if write_map is None else writes.numel(), write_complete)
+    maximum, lanes, _ = _stream.pipeline_facts(handle)
+    threads = min(maximum, max(lanes, width // 2))
+    return (handle, [reads, writes, signs if signed else None], {3: struct.pack('I', sign_groups)},
+            (groups, 1, 1), (threads, 1, 1), False,
+            ((1 if reads is not None else 0) | (4 if signed else 0)) | (2 << _stream.compilation['ACCESS_WRITE_SHIFT']))
+
+
+def _kernel(width, normalization, signed, input_type, sign_type, bindings, count=None, complete=True):
     from .layout import pipeline
     instance = f'structured_butterfly<{width},{normalization},{str(signed).lower()},{input_type},{sign_type}>'
     declaration = f'\ntemplate [[host_name("butterfly")]] [[kernel]] decltype({instance}) {instance};'
-    return pipeline(_stream.metal_prelude(), bindings, SOURCE, 'butterfly', None, declaration)
+    head = '' if count is None else (f'#define MESH_FWHT_RESULT(i) mesh_index<8>(i)\n#define MESH_FWHT_RESULTS {count}\n'
+                                    f'#define MESH_FWHT_SELECTED {int(not complete)}\n')
+    return pipeline(head + _stream.metal_prelude(), bindings, SOURCE, 'butterfly', None, declaration)
 
 
 def _factor(n, block_width):

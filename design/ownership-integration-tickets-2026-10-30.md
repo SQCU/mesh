@@ -1,6 +1,6 @@
 # Ownership integration tickets
 
-Recorded 2026-10-30 23:14 UTC; updated 2026-10-31 02:16 UTC. The initial source
+Recorded 2026-10-30 23:14 UTC; updated 2026-10-31 04:03 UTC. The initial source
 checkpoints were mesh `64477c9f` and metal-microbench `8a4454f2`; the status below
 describes the implementation accompanying this update and its open connections.
 This divides
@@ -53,11 +53,11 @@ distributed closure remains open at the connections below.
 
 | Ticket | State at this handoff | Next connection |
 |---|---|---|
-| O1 | Selected work and typed live-read sections reach ordinary page/shader preparation; cut coordinates survive loop optimization | Selector/scan declarations and pool unrolling |
-| O2 | Supplied assignments compile forward through typed transitions and returned live-read values | Explicit local-body shape provenance, multiple storage uses, and independently typed rank/cohort scopes |
-| O3 | Partial/complete value versions, captured mask state and byte-collective source expressions compose | Retain explicit to_local source-shape relations and varying cohort types |
-| O4 | Ordinary and owned Function plus the public FX compiler use one selected-section binder | Joined distributed binding and multiple storage uses |
-| O5 | Actual importer consumes shared live-read sections; UPDATE→GATHER composes through its cached scalar producer | Encoded index folding and remaining packed-reader integration |
+| O1 | Selected selector/scan/sampling and ordinary butterfly work use existing kernels; max-pool keeps its window axes | Ragged butterfly source multiplicities; average/fractional-pool unroll overrides |
+| O2 | Supplied assignments retain local source-shape edges, typed cohorts and all storage uses | Original scalar operand-use identity across independently lowered rank bodies |
+| O3 | Partial/complete values and cohort-typed byte expressions compose; local shapes specialize from declared rank types | Complete independently scoped live-read handoff |
+| O4 | Ordinary and owned Function plus public FX use one selected-section binder and exact byte equalities | Joined distributed binding beyond the fake endpoint boundary |
+| O5 | Importer consumes shared live-read sections; UPDATE→GATHER composes through its scalar producer | New passive external declarations; encoded index folding and remaining packed-reader integration |
 | O6 | Open | Join ordinary entry points, remove superseded paths, then build and inspect preparation |
 
 None of O1–O6 is closed by a helper alone. The later whole-function measurements
@@ -100,7 +100,32 @@ retain the declared global type and every rank's ordered selection. A delivery
 names its source field, provided owner, type, section, and destination selection
 on **every** rank, including explicit empty selections. A crossing separately
 names the required placement/value transition and its before-use or after-result
-site. A delivery alone does not perform a pending reduction.
+site. A delivery alone does not perform a pending reduction. Its `participants`
+include every rank with source, destination or intermediate relay pages. This
+keeps a cohort's internal fields in its declared scope while retaining ranks
+that only provide or relay values.
+
+Each numerical field maps to a tuple of typed storage uses, including a
+singleton. A use retains its storage name, scalar type, byte extent, access
+relation, and paired local-to-value/local-to-storage `coordinates`. Port
+composition carries those paired endpoints forward. It does not recover their
+pairing by inverting a possibly repeated selection. `field_storage` turns them
+into exact selected byte equalities for the existing page solve. Semantic field
+roots disappear before the native storage handoff; they allocate no second
+payload and add no execution object.
+
+Explicit local shape, stride and element-count queries remain ordinary FX
+edges. Source normalization preserves the declared local scope until each
+rank's type is supplied, then evaluates those same source operators. A literal
+that equals one rank's extent remains a literal. An ordinary DTensor captured
+only through a closure's `to_local` must be registered as a parameter so its
+global identity is available; there is no process-wide interception.
+Owner records also retain local strides. Standard dense DTensor declarations
+use the framework's local-stride rule; an explicitly supplied stride takes
+precedence. A gapped peer layout needs that declaration. Lowering does not
+substitute a contiguous layout when it is absent.
+Empty peers retain their empty work. Capturing a wholly empty MPS DTensor still
+stops in the framework's metadata storage resize, before this source handoff.
 
 Shared source equations run before section splitting, so their page declarations
 enter the same boundary pass as explicit declarations. `prepared['fields']` and
@@ -145,6 +170,18 @@ keep every supplied destination, even when the same value occurs more than once.
 when the result has no separate fixed backing. This is the same preparation
 helper in FX binding and the LiteRT importer. Equality of values at one operation
 does not by itself permit later writes to share storage.
+
+The shared layout join now identifies equal positions in either input family,
+using the same equivalence closure as `TensorLayout.identify`. Repeated and
+zero-stride views keep their ordered shape while sharing their original bytes.
+Selected byte equalities do not round a request up to its surrounding scalar.
+
+Packing starts from its declared first component and zero cursor. The relation
+solver derives an inductive affine set from those seeds before closing the
+recurrence. It replaces a partitioned relation with its convex hull only when
+ISL proves them equal. This removes unreachable cursor work and redundant
+partitions while retaining alignment and divisibility constraints; large
+symbolic declarations use the same solve.
 
 Host result aliases also enter this shared solve. Provider requirements can
 give an input a contiguous copy while a forwarded result keeps its original
@@ -205,8 +242,18 @@ respective owners. A ticket is not permission to collect every dirty file.
 **Resume here:** complete missing mathematical declarations for external commands
 and declared access domains for changing-index consumers. Pending records name
 those gaps. Preserve the selected scalar/product implementation already prepared.
-Ordinary reduction unrolling is deferred until ownership selection; pool-local
-unrolling overrides still need reconciliation with that pass order.
+Ordinary reduction unrolling is deferred until ownership selection. The
+low-memory max-pool adapter now uses the existing window body under that same
+phase setting. Upstream average/fractional-pool overrides still need this
+reconciliation. Selected row and prefix relations serve top-k/sort, scans,
+sampling and ordinary butterfly factors through one external-plan binder;
+their existing kernels consume selected output maps. Complete output coverage
+is a compiled constant. Sorted top-k retains only the prefix through the last
+requested rank; unsorted output keeps its declared selection semantics.
+Complete mapped scans reuse output pages for their partial sums when scalar
+widths agree. Omitted outputs retain the prefix workspace their inputs require.
+Ragged butterfly source sums need their ordered
+multiplicity declaration before they can use the same path.
 
 **Implement:** expose exact typed storage coordinates from the retained body and
 value bindings. Compose output demand with writes to select work, then compose

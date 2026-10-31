@@ -72,12 +72,29 @@ def command_records(declarations, *, with_reaches=False):
         if not isinstance(declaration, dict):
             yield (declaration, None) if with_reaches else declaration
             continue
-        if declaration['kind'] == 'product':
-            from .matrix import product as prepare
+        if declaration['kind'] in ('product', 'topk', 'cumsum', 'draw', 'retain', 'fwht_stage'):
             yield from command_records(declaration['before'], with_reaches=with_reaches)
-            if declaration['operands']['out'].numel():
-                yield from command_records(prepare(**declaration['operands'], **declaration['parameters']),
-                                           with_reaches=with_reaches)
+            operands, parameters = declaration['operands'], declaration['parameters']
+            if declaration['kind'] == 'product':
+                from .matrix import product as prepare
+                commands = prepare(**operands, **parameters) if operands['out'].numel() else ()
+            elif declaration['kind'] == 'topk':
+                from .selection import topk as prepare
+                _, commands = prepare(operands['x'], outputs=(operands['values'], operands['indices']), **parameters)
+            elif declaration['kind'] == 'cumsum':
+                from .scan import cumsum as prepare
+                _, commands = prepare(operands['x'], out=operands['out'], **parameters)
+            elif declaration['kind'] == 'draw':
+                from .argmax import prepare_draw as prepare
+                _, commands = prepare(operands['z'], operands['keys'], operands['cutoff'], out=operands['ids'], **parameters)
+            elif declaration['kind'] == 'retain':
+                from .argmax import prepare_retain as prepare
+                _, commands = prepare(operands['z'], operands['keys'],
+                    outputs=tuple(operands[role] for role in ('ids', 'kept', 'log_z')), **parameters)
+            else:
+                from .structured import prepare_factor as prepare
+                _, commands = prepare(**operands, **parameters)
+            yield from command_records(commands, with_reaches=with_reaches)
             yield from command_records(declaration['after'], with_reaches=with_reaches)
             continue
         operands = declaration['operands']
@@ -122,6 +139,12 @@ def product(x, w, out, *, before=(), after=(), declaration=None, **parameters):
     roles = dict(x=x, w=w, out=out)
     roles.update((name, parameters.pop(name)) for name in ('x1', 'bias') if name in parameters)
     _records.get().append(dict(kind='product', operands=roles, parameters=parameters,
+                              before=tuple(before), after=tuple(after), declaration=declaration))
+
+
+def external(adapter, operands, parameters, *, before=(), after=(), declaration=None):
+    """The selected operands of an existing numerical preparation declaration."""
+    _records.get().append(dict(kind=adapter, operands=operands, parameters=parameters,
                               before=tuple(before), after=tuple(after), declaration=declaration))
 
 
@@ -546,7 +569,7 @@ def prepare_graph(module, metadata, *, materializations=()):
 
     placements, bound_storage, views, storage_layouts = Placements(), {}, [], {}
     assigned_results, assigned_owners = None, None
-    product_arguments, external_outputs, command_accesses = [], [], []
+    external_arguments, external_outputs, command_accesses = [], [], []
     page_values = []
     configuration = compiler_operands()
     reduction_groups = hardware()['gpu']['cores'] * configuration['REDUCTION_GROUPS_PER_CORE']
@@ -698,12 +721,62 @@ def prepare_graph(module, metadata, *, materializations=()):
         if not isinstance(operation, ir.FallbackKernel):
             return ()
         adapter = _ALLOC_ADAPTERS.get(operation.get_kernel_name())
-        if adapter not in ('linear', 'linears', 'kernel'):
+        if adapter not in ('linear', 'linears', 'kernel', 'topk', 'sort', 'cumsum', 'draw', 'retain', 'fwht_stage'):
             return ()
         args, keywords = operation.unflatten_args(operation.inputs, operation.constant_args)
         named = {field.name: args[i] if i < len(args) else keywords.get(field.name, field.default_value)
                  for i, field in enumerate(operation.op_overload._schema.arguments)}
         outputs = tree_flatten(operation.codegen_outputs())[0]
+        if adapter == 'fwht_stage':
+            if named['starts']:
+                return ()
+            from .selection import row_domain
+            source, signs, target = operand(named['x']), operand(named['signs']), operand(outputs[0])
+            rows, columns = source['view'].shape
+            width, step = named['width'], named['step']
+            def grouped(value):
+                value = dict(value)
+                value['view'] = value['view'].reshape((rows, columns // (width * step), width, step)).permute(
+                    (0, 1, 3, 2)).reshape((rows * columns // width, width))
+                return value
+            inputs = dict(x=grouped(source))
+            if named['signed']:
+                repeated = _stream.TensorLayout((rows, columns), (0, 1))
+                signs = dict(signs, view=repeated.rebase(_stream.TensorLayout((columns,), (1,)), signs['view']))
+                inputs['signs'] = grouped(signs)
+            parameters = dict(width=width, normalization=named['normalization'], signed=named['signed'],
+                              sign_type={torch.int8: 'char', torch.float32: 'float'}[signs['dtype']])
+            return (row_domain(algebra, inputs, dict(out=grouped(target)), width=width,
+                               adapter=adapter, parameters=parameters),)
+        if adapter in ('draw', 'retain'):
+            from .selection import row_domain
+            inputs = {role: operand(named[role]) for role in (('z', 'keys', 'cutoff') if adapter == 'draw' else ('z', 'keys'))}
+            roles = ('ids',) if adapter == 'draw' else ('ids', 'kept', 'log_z')
+            parameters = {name: named[name] for name in (('seed', 'first') if adapter == 'draw' else ('seed', 'head', 'tail'))}
+            width = 1 if adapter == 'draw' else named['head'] + named['tail']
+            return (row_domain(algebra, inputs, dict(zip(roles, map(operand, outputs), strict=True)),
+                               width=width, adapter=adapter, parameters=parameters),)
+        if adapter in ('topk', 'sort', 'cumsum'):
+            from .selection import row_domain
+            source = operand(named['self'])
+            def rows(value):
+                value = dict(value)
+                shape = tuple(value['view'].shape) or (1,)
+                axis = named.get('dim', -1) % len(shape)
+                axes = (*[d for d in range(len(shape)) if d != axis], axis)
+                value['view'] = value['view'].reshape(shape).permute(axes).reshape(
+                    (math.prod(shape[d] for d in axes[:-1]), shape[axis]))
+                return value
+            source = rows(source)
+            targets = dict(zip(('out',) if adapter == 'cumsum' else ('values', 'indices'),
+                               (rows(operand(value)) for value in outputs), strict=True))
+            width = next(iter(targets.values()))['view'].shape[-1]
+            parameters = (dict(dim=1, dtype=targets['out']['dtype']) if adapter == 'cumsum' else
+                          dict(k=width, dim=1, largest=named.get('largest', named.get('descending', False)),
+                               sorted=named.get('sorted', True)))
+            return (row_domain(algebra, dict(x=source), targets, width=width,
+                               adapter='cumsum' if adapter == 'cumsum' else 'topk',
+                               parameters=parameters, prefix=adapter == 'cumsum'),)
         if adapter in ('linear', 'linears'):
             fields = ('x', 'w', 'bias', 'act', 'x1')
             arguments = ([named[field]] for field in fields) if adapter == 'linear' else (named[field] for field in fields)
@@ -848,12 +921,12 @@ def prepare_graph(module, metadata, *, materializations=()):
             return super().can_reuse(input_buffer, output_buffer)
 
         def selected_external(self, node):
-            selected = getattr(self, 'current_external_products', None)
+            selected = getattr(self, 'current_external_plans', None)
             if selected is None:
                 return False
             for plan in selected:
-                product_arguments.append(plan)
-                self.writeline(f'mesh_native.product(**mesh_products[{len(product_arguments) - 1}])')
+                external_arguments.append(plan)
+                self.writeline(f'mesh_native.external(**mesh_externals[{len(external_arguments) - 1}])')
             self.bound_external_results(node)
             return True
 
@@ -920,6 +993,8 @@ def prepare_graph(module, metadata, *, materializations=()):
             declarations = []
             from .layout import strides
             for name, slot in getattr(kernel, 'page_bindings', {}).items():
+                if name in kernel.removed_buffers:
+                    continue
                 buffer = V.graph.get_buffer(name)
                 binding = storage_layouts.get(name, dict(source=ir_layout(buffer.get_layout()),
                                                         source_dtype=buffer.get_dtype()))
@@ -962,7 +1037,7 @@ def prepare_graph(module, metadata, *, materializations=()):
                 V.graph.wrapper_code.bound_external_results(node.node)
                 self.free_buffers()
                 return
-            if not hasattr(node, 'page_products'):
+            if not hasattr(node, 'page_plans'):
                 return super().codegen_extern_call(node)
             # This is the ordinary external declaration's preparation boundary.
             # Its selected views are already bound, so no full-view references
@@ -972,11 +1047,11 @@ def prepare_graph(module, metadata, *, materializations=()):
                 node.decide_inplace_update()
                 node.mark_run()
             wrapper = V.graph.wrapper_code
-            wrapper.current_external_products = node.page_products
+            wrapper.current_external_plans = node.page_plans
             try:
                 wrapper.selected_external(node.node)
             finally:
-                wrapper.current_external_products = None
+                wrapper.current_external_plans = None
             self.free_buffers()
 
         def create_scheduler_node(self, node):
@@ -1104,13 +1179,34 @@ def prepare_graph(module, metadata, *, materializations=()):
                 # for original operands, carried values and received ports.
                 bound = [placement['storage'][name]['operand'] for name in self.graph_inputs]
                 bound_storage.clear(); storage_layouts.clear()
-                views.clear(); product_arguments.clear(); external_outputs.clear(); command_accesses.clear()
+                views.clear(); external_arguments.clear(); external_outputs.clear(); command_accesses.clear()
                 return graph.emit(bound, **placement)
 
         def bind(self, operands, **placement):
             return Program.prepare(self.emit(operands, **placement))
 
     class NativeGraph(GraphLowering):
+        def call_function(self, target, args, kwargs):
+            if target is torch.ops.prims._low_memory_max_pool_with_offsets.default:
+                from torch._inductor import lowering
+                # The upstream low-memory adapter locally enables reduction
+                # unrolling. Reuse its numerical body under the graph's
+                # logical-phase setting so ownership can still select the
+                # window axes before scalar emission optimizes them.
+                import inspect
+                fields = inspect.signature(lowering._low_memory_max_pool_with_offsets).bind(*args, **kwargs)
+                fields.apply_defaults()
+                values = fields.arguments
+                source = values.pop('x')
+                dimensions = len(values['kernel_size'])
+                kernel, stride, padding, dilation, _ = lowering.max_pool_checks(source,
+                    values['kernel_size'], values['stride'], values['padding'], values['dilation'],
+                    dimensions, assert_fallback=False)
+                result, offsets = lowering._max_pool_with_offsets(source, kernel, stride, padding, dilation,
+                    values['ceil_mode'], n_dim=dimensions)
+                return result, lowering.to_dtype(offsets, torch.int8)
+            return super().call_function(target, args, kwargs)
+
         def compose_reads(self):
             """Fold live reads of cached pointwise values into their consumers.
 
@@ -1498,8 +1594,11 @@ def prepare_graph(module, metadata, *, materializations=()):
                             pass
                         elif domains and all(domain.get('kind') == 'atomic' for domain in domains):
                             node.page_atomic = any(not request['work'].empty() for request in requests)
+                        elif domains and all(domain.get('kind') == 'rows' for domain in domains):
+                            from .selection import selected_rows
+                            node.selected_plans = tuple(plan for request in requests for plan in selected_rows(request))
                         elif domains:
-                            node.selected_products = tuple(plan for request in requests for plan in mesh_matrix.selected_products(
+                            node.selected_plans = tuple(dict(plan, adapter='product') for request in requests for plan in mesh_matrix.selected_products(
                                 request['domain'], request['work'], request['finish']['work']))
                         else:
                             undeclared.add(operation.get_operation_name())
@@ -1524,11 +1623,12 @@ def prepare_graph(module, metadata, *, materializations=()):
             for operation in self.operations:
                 name = operation.get_operation_name()
                 scheduled = self.scheduler.name_to_node[name]
-                for index, plan in enumerate(getattr(scheduled, 'selected_products', ())):
+                for index, plan in enumerate(getattr(scheduled, 'selected_plans', ())):
                     for role, use in plan['operands'].items():
+                        requirements = use['requirements'] if 'requirements' in use else (layouts[roles[role]],)
                         uses.append(dict(key=(name, index, role), binding=use['access'], relation=use['relation'],
-                                         shape=use['shape'], requirements=(layouts[roles[role]],),
-                                         access='write' if role == 'out' else 'read'))
+                                         shape=use['shape'], requirements=requirements,
+                                         access=use.get('access_mode', 'write' if role == 'out' else 'read')))
             return tuple(uses)
 
         def page_aliases(self):
@@ -1620,20 +1720,23 @@ def prepare_graph(module, metadata, *, materializations=()):
                             view.operand = destination
                     for operation in self.operations:
                         scheduled = self.scheduler.name_to_node[operation.get_operation_name()]
-                        if not hasattr(scheduled, 'selected_products'):
+                        if not hasattr(scheduled, 'selected_plans'):
                             continue
                         plans = []
-                        for index, plan in enumerate(scheduled.selected_products):
-                            arguments = dict(plan['parameters'], before=[], after=[],
+                        for index, plan in enumerate(scheduled.selected_plans):
+                            arguments = dict(adapter=plan['adapter'], operands={}, parameters=plan['parameters'], before=[], after=[],
                                 declaration=dict(operation=operation, index=index,
                                                  operands=plan['operands'], parameters=plan['parameters']))
-                            for role in ('out', *[name for name in plan['operands'] if name != 'out']):
+                            roles = sorted(plan['operands'], key=lambda role: (
+                                plan['operands'][role].get('access_mode', 'write' if role == 'out' else 'read') != 'write',
+                                not math.prod(plan['operands'][role]['shape'])))
+                            for role in roles:
                                 use = plan['operands'][role]
                                 from .operand import relation_layout
                                 access = use['access']
                                 assigned = None if uses is None else uses.get((operation.get_operation_name(), index, role))
                                 if assigned is not None:
-                                    arguments[role] = assigned['operand']
+                                    arguments['operands'][role] = assigned['operand']
                                     arguments['before'].extend(assigned['before'])
                                     arguments['after'].extend(assigned['after'])
                                     continue
@@ -1642,7 +1745,8 @@ def prepare_graph(module, metadata, *, materializations=()):
                                     # The API's unused slot names an empty view of
                                     # the already assigned result pages.
                                     logical = relation_layout(use['relation'], use['shape'], 0)
-                                    arguments[role] = TensorView(arguments['out'].storage_as(access['dtype']), logical)
+                                    reference = next(iter(arguments['operands'].values()), next(iter(storage_layouts.values()))['operand'])
+                                    arguments['operands'][role] = TensorView(reference.storage_as(access['dtype']), logical)
                                     continue
                                 binding = storage_layouts[access['name']]
                                 original, unit, physical = (binding[key] for key in ('source', 'source_dtype', 'operand'))
@@ -1650,9 +1754,9 @@ def prepare_graph(module, metadata, *, materializations=()):
                                     int(access['storage_bytes']) // access['dtype'].itemsize)
                                 mapped = rebase_typed(logical, access['dtype'].itemsize,
                                                       original, unit.itemsize, physical.layout)
-                                arguments[role] = TensorView(physical.storage_as(access['dtype']), mapped)
+                                arguments['operands'][role] = TensorView(physical.storage_as(access['dtype']), mapped)
                             plans.append(arguments)
-                        scheduled.page_products = tuple(plans)
+                        scheduled.page_plans = tuple(plans)
                 # Identity continuations disappear only after the supplied
                 # pages actually satisfy their declared selected equalities.
                 # The ordinary scheduler's removed-op mechanism also handles
@@ -1683,7 +1787,7 @@ def prepare_graph(module, metadata, *, materializations=()):
                 finally:
                     self.scheduler.removed_ops = removed
                 namespace = {'__name__': 'mesh_preparation', 'mesh_destinations': bound_storage, 'mesh_views': views,
-                             'mesh_results': assigned_results, 'mesh_products': product_arguments,
+                             'mesh_results': assigned_results, 'mesh_externals': external_arguments,
                              'mesh_external_outputs': external_outputs, 'mesh_accesses': command_accesses}
                 records = []
                 token = _records.set(records)
