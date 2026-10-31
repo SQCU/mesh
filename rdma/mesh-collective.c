@@ -1,5 +1,6 @@
 #include "mesh-call.h"
 #include "mesh-plan.h"
+#include "mesh-graph.h"
 #include <errno.h>
 #include <math.h>
 #include <stdlib.h>
@@ -116,6 +117,8 @@ int mesh_link_map_check(const struct mesh_link_map *map){
   return result;
 }
 
+/* link l's end `side` (mesh-graph.h's edge ends) */
+static uint32_t mesh_link_end(const void *context,uint32_t l,uint32_t side){ return ((const struct mesh_link_map *)context)->link[l][side]; }
 int mesh_link_map_joined(const struct mesh_link_map *map,uint32_t *apart){
   const int form=mesh_link_map_check(map);
   if(form)return form;
@@ -130,13 +133,11 @@ int mesh_link_map_joined(const struct mesh_link_map *map,uint32_t *apart){
     return 0;
   }
   if(map->kind!=MESH_LINKS_GRAPH)return 0;
-  /* breadth first from node 0 over the links either way */
-  uint32_t *order=malloc((size_t)n*sizeof *order),reached=1;
-  unsigned char *seen=calloc(n,1);
+  /* the nodes node 0 reaches over the links either way (mesh-graph.h) */
+  uint32_t *order=malloc((size_t)n*sizeof *order);
+  unsigned char *seen=malloc(n);
   if(!order || !seen){free(order);free(seen);return ENOMEM;}
-  order[0]=0;seen[0]=1;
-  for(uint32_t head=0;head<reached;head++)for(uint32_t l=0;l<map->links;l++)for(uint32_t e=0;e<2;e++)
-    if(map->link[l][e]==order[head] && !seen[map->link[l][1-e]]){seen[map->link[l][1-e]]=1;order[reached++]=map->link[l][1-e];}
+  mesh_graph_reach(n,map->links,mesh_link_end,map,0,order,seen);
   uint32_t first=0;
   while(first<n && seen[first])first++;
   free(order);free(seen);

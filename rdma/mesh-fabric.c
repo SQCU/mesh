@@ -1,4 +1,5 @@
 #include "mesh-plan.h"
+#include "mesh-graph.h"
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 #include <stdatomic.h>
@@ -253,6 +254,10 @@ static int mesh_write_routes_walk(const struct mesh_fabric *f, uint32_t source, 
    initialization cannot accidentally overwrite a solver's existing routes.
    There is no path-count/hop cap: only mesh_paths' uint32 representation and
    allocation limits bound enumeration. No partial table is ever published. */
+/* cable e's end `side` (mesh-graph.h's edge ends) */
+static uint32_t mesh_cable_end(const void *context, uint32_t e, uint32_t side) {
+  return ((const struct mesh_fabric *)context)->cable[e].node[side];
+}
 int mesh_write_routes_default(const struct mesh_fabric *f, struct mesh_paths **out) {
   if (!out || *out) return EINVAL;
   int error = mesh_fabric_check(f);
@@ -271,16 +276,8 @@ int mesh_write_routes_default(const struct mesh_fabric *f, struct mesh_paths **o
   };
   if (!walk.node || !walk.next || !walk.path || !walk.seen) { error = ENOMEM; goto done; }
   /* Reject disconnected fabrics before enumerating potentially large connected
-     components. This is connectivity validation, not a subset of allowed paths. */
-  uint32_t reached = 1;
-  walk.node[0] = 0; walk.seen[0] = 1;
-  for (uint32_t k = 0; k < reached; k++) for (uint32_t e = 0; e < f->cables; e++) {
-    const struct mesh_cable *c = f->cable + e;
-    if (c->node[0] != walk.node[k] && c->node[1] != walk.node[k]) continue;
-    const uint32_t other = c->node[c->node[0] == walk.node[k]];
-    if (!walk.seen[other]) { walk.seen[other] = 1; walk.node[reached++] = other; }
-  }
-  if (reached != n) { error = ENOLINK; goto done; }
+     components (mesh-graph.h). This is connectivity validation, not a subset of allowed paths. */
+  if (mesh_graph_reach(n, f->cables, mesh_cable_end, f, 0, walk.node, walk.seen) != n) { error = ENOLINK; goto done; }
   for (uint32_t source = 0; source < n; source++) for (uint32_t destination = 0; destination < n; destination++) {
     if (source == destination) continue;
     uint32_t paths, edges;

@@ -13,4 +13,9 @@ double mesh_graph_tree_path(const uint32_t *parent, uint32_t from, uint32_t hops
                             uint32_t (*step)(const void *context, uint32_t k, uint32_t at),
                             double (*split)(const void *context, uint32_t k, uint32_t at), const void *context,
                             uint32_t *end);
+/* The vertices `from` reaches over `edges` undirected edges, edge e joining `end(context, e, 0)` and
+   `end(context, e, 1)` (each below `vertices`), breadth first: their count; `order` (room for `vertices`) the vertices
+   in the order reached, `reached` (room for `vertices`) 1 for each and 0 for every other. */
+uint32_t mesh_graph_reach(uint32_t vertices, uint32_t edges, uint32_t (*end)(const void *context, uint32_t e, uint32_t side),
+                          const void *context, uint32_t from, uint32_t *order, unsigned char *reached);
 #endif
