@@ -163,9 +163,6 @@ struct channel {
   uint64_t ready_at, sends, lands, published, consumed, waited;
   mesh_pages out, in;
 };
-/* a generation of a group definition's storage (bind_slot), `held` by one or free; its last group in flight (`ticket`)
-   and each channel's landing ends once that group was presented, which its next user awaits (guard) */
-struct slot { void *address; size_t bytes; uint64_t ticket, *lands; mesh_pages *in; int held; };
 
 /* design/whole-function.md#interface */
 struct attach;
@@ -198,8 +195,6 @@ struct ncclComm {
   struct attach *attach;
   uint32_t held;
   struct channel *channels;
-  uint32_t slot_count;
-  struct slot *slots;
   void *gate, *gate_word;
   uint64_t gate_at, gates;
   _Atomic uint64_t *words;
@@ -347,14 +342,11 @@ static void paths_free(struct mesh_paths *paths) {
   free((void *)paths->first); free((void *)paths->cable); free((void *)paths->weight);
   *paths = (struct mesh_paths){0};
 }
-/* comm's tables, its slots and its gate returned to the region (ncclMemFree), after its holdings are given back
+/* comm's tables and its gate returned to the region (ncclMemFree), after its holdings are given back
    (comm_leave: the bridge posts nothing more of a given holding, so only rows a unit already posted names stay held,
    mesh-dataflow.c mesh_pinned) */
 static void comm_storage_free(struct ncclComm *comm) {
-  for (uint32_t k = 0; k < comm->slot_count; k++) { ncclMemFree(comm->slots[k].address); free(comm->slots[k].lands); free(comm->slots[k].in); }
   if (comm->gate_word) ncclMemFree(comm->gate_word);
-  free(comm->slots);
-  comm->slots = NULL; comm->slot_count = 0;
   comm->gate_word = comm->gate = NULL;
 }
 struct write_binding;
@@ -2496,7 +2488,7 @@ static ncclResult_t write_steps(struct call *c) {
   return ncclSuccess;
 }
 
-/* whether rank r's buffer b of call c is the communicator's (bind_slot): scratch, relay generations, and an operand
+/* whether rank r's buffer b of call c is the communicator's (an issue's own pages: zappo, design/zorvek.md): scratch, relay generations, and an operand
    that is no result in place (a reduce-scatter's, a rank's that receives nothing) */
 static int rank_member(const uint64_t *mask, uint32_t rank);
 static int generation_buffer(const struct call *c, uint32_t r, uint32_t b) {
@@ -3085,31 +3077,29 @@ static ncclResult_t compile_group(struct ncclComm *comm, struct call *list, size
 }
 
 /* Group definitions and a compact sequence of repeated blocks. Geometry is
-   compiled once per definition; invocation operands are bound separately.  A definition's invocations take turns
-   at GENERATIONS slots of storage (the plan's in-flight depth: bind_slot), `uses` of them bound so far */
-enum { GENERATIONS = 2 };
-/* Every group has prepared calls, schedules and descriptor bindings for each
-   generation and storage slot. Recording selects those tables; it does not
-   allocate or place WRITE operands. Definition disposal owns their lifetime. */
+   compiled once per definition; invocation operands are bound separately.  Each issue is laid over pages of its own
+   (design/zorvek.md zoblimp, zappo), and a laid issue is taken again only once the stream has passed its last use
+   (zumbled). Recording selects those tables; it does not allocate or place WRITE operands. Definition disposal owns
+   their lifetime. */
 struct inflight;
 struct issue { struct schedule *plans; struct steps **steps; struct inflight *group; struct call *calls; size_t n; uint32_t repeats;
-               /* in slot `slot` (its storage at `base`, its landing area at `area`), its span tables a lease (`tables`) */
-               uint32_t slot; struct where base, area; void *tables;
+               /* its own pages (zappo, design/zorvek.md: the definition's buffers the communicator holds and its combines'
+                  landing area, laid from `base`, the landing area at `area`), its span tables a lease (`tables`) */
+               struct where base, area; void *tables;
+               /* past its own pages its use count (zappoffs, at `counted`), the binding instance it was laid for, its
+                  uses, and its last use's units sent and landed on each channel (zappoff, zumbled) */
+               void *zeeb; const _Atomic uint64_t *zappoffs; struct where counted; uint64_t instance, used, *sent, *landed;
                struct mesh_landing_run *landings; void *progress;
                struct owned owned; /* the leases its entries read, held from its placement to the next or its end */ };
 /* All operation kinds use the same prepared generation/slot table. */
-struct compiled { struct call *calls; size_t n; uint64_t repeat; struct schedule *plans; double seconds; uint32_t slot[GENERATIONS], uses, period;
-                  struct issue **prepared; };
-/* a definition dropped: its slots back to the communicator's, for the next definition under the same guard, and its
-   issues freed */
+struct compiled { struct call *calls; size_t n; uint64_t repeat; struct schedule *plans; double seconds; uint32_t period;
+                  struct issue **laid; size_t laid_count, laid_room; };
+/* a definition dropped: its laid issues freed, their pages back to the region */
 static void calls_free(struct call *list, size_t n);
 static void issue_free(struct ncclComm *comm, struct issue *u);
 static void compiled_drop(struct ncclComm *comm, struct compiled *x) {
-  for (uint32_t g = 0; g < GENERATIONS; g++) {
-    if (x->slot[g] && comm->slots) comm->slots[x->slot[g] - 1].held = 0;
-  }
-  for (size_t j = 0; x->prepared && j < (size_t)GENERATIONS * x->period; j++) issue_free(comm, x->prepared[j]);
-  free(x->prepared);
+  for (size_t j = 0; j < x->laid_count; j++) issue_free(comm, x->laid[j]);
+  free(x->laid);
   calls_free(x->calls, x->n); schedules_free(comm, x->plans);
   *x = (struct compiled){0};
 }
@@ -3398,47 +3388,6 @@ void *metal_piece_hold(struct metal_bytes *made, size_t *bytes) {
 }
 void metal_piece_give(void *piece) { atomic_store_explicit(&((struct piece *)piece)->held, 0, memory_order_release); }
 
-/* a free slot of at least `bytes` (the least such), else a new one (ncclMemAlloc) of `bytes` rounded up to one of eight
-   sizes an octave (at most an eighth more: so a slot made for one definition fits others, and the slots made of each
-   size are never more than are held at once, whatever sizes the definitions name), held; its number + 1, 0 where the
-   region cannot meet it (the failure formatted).  A free slot too small is returned to the region (ncclMemFree), its
-   entry vacant for the next, once no GPU work of the library's can still reach it: its last group the host path's,
-   every landing awaited (`waited`); or its last group a Metal path's (`ticket`), whose stream has stored that ticket in
-   the slot's word of the communicator's failure words' page (word 8 + its index), as the stream does once it has run
-   past that group where its generation let the slot go (launch_metal); else at ncclCommDestroy.  Under group_lock */
-static uint32_t slot_take(struct ncclComm *comm, size_t bytes) {
-  size_t step = comm->page ? comm->page : 1;
-  if (bytes > SIZE_MAX / 4) { fail(ncclSystemError, "a slot of %zu bytes", bytes); return 0; }
-  bytes = bytes ? bytes : 1;
-  while (step <= (bytes - 1) / 8) step *= 2;
-  bytes = (bytes + step - 1) / step * step;
-  uint32_t best = 0, vacant = 0;
-  for (uint32_t k = 0; k < comm->slot_count; k++) {
-    struct slot *s = comm->slots + k;
-    const int released = s->ticket && 8 + k < (size_t)getpagesize() / 8 && atomic_load_explicit(comm->words + 8 + k, memory_order_acquire) == s->ticket;
-    int done = !s->held && (released || !s->ticket);
-    for (uint32_t h = 0; done && !released && h < comm->count; h++) done = comm->channels[h].waited >= s->lands[h];
-    if (!s->held && s->bytes >= bytes) { if (!best || s->bytes < comm->slots[best - 1].bytes) best = k + 1; }
-    else if (done) { ncclMemFree(s->address); s->address = NULL; s->bytes = 0; vacant = k + 1; }
-  }
-  if (!best && !vacant) {
-    struct slot *grown = realloc(comm->slots, (comm->slot_count + 1) * sizeof *grown);
-    struct slot made = {NULL, 0, 0, calloc(comm->count + 1, sizeof *made.lands), calloc(comm->count + 1, sizeof *made.in), 0};
-    if (grown) comm->slots = grown;
-    if (!grown || !made.lands || !made.in) { free(made.lands); free(made.in); fail(ncclSystemError, "out of memory"); return 0; }
-    comm->slots[comm->slot_count] = made;
-    vacant = ++comm->slot_count;
-  }
-  /* a slot that fits one registration extent lies within one, as every lease that does (mesh-dataflow.c
-     mesh_arena_alloc) */
-  if (!best) {
-    struct slot *s = comm->slots + vacant - 1;
-    if (ncclMemAlloc(&s->address, bytes)) { s->address = NULL; return 0; }
-    s->bytes = bytes; best = vacant;
-  }
-  comm->slots[best - 1].held = 1;
-  return best;
-}
 
 /* group x's storage for `list` (its calls: x's own at its declaration, an issued group's at its issue), a page each: its
    calls' buffers that are the communicator's (generation_buffer, read on x's own calls: an issued call keeps its roles
@@ -3460,19 +3409,21 @@ static size_t slot_laid(const struct ncclComm *comm, const struct compiled *x, c
       if (plans[h].in[k].c->bound->steps[plans[h].in[k].step].op == MESH_STEP_REDUCE) used += page_up(plans[h].in[k].bytes, comm->page);
   return used;
 }
-/* group x's storage (slot_laid) for generation k in x's slot k (*slot, its storage at *base, its lease's Metal buffer):
-   taken as x is prepared (definition_prepare) for each of GENERATIONS, and again where an issue needs more.  Under
-   group_lock */
-static ncclResult_t bind_slot(struct ncclComm *comm, struct compiled *x, uint32_t k, struct call *list, size_t n, const struct schedule *plans,
-                              struct where *base, struct where *area, uint32_t *slot) {
-  const size_t need = slot_laid(comm, x, list, n, plans, NULL, NULL);
-  uint32_t *held = x->slot + k;
-  if (*held && comm->slots[*held - 1].bytes < need) { comm->slots[*held - 1].held = 0; *held = 0; }
-  if (!*held && !(*held = slot_take(comm, need))) return fail(ncclSystemError, "a group's storage: %s", last.text);
-  void *address = comm->slots[(*slot = *held) - 1].address;
-  *base = (struct where){NULL, (size_t)address};
-  if (lease_buffer(address, &base->buffer, &base->offset)) return fail(ncclSystemError, "no Metal buffer over a lease of the communicator's");
-  slot_laid(comm, x, list, n, plans, base, area);
+/* design/zorvek.md zappo: issue u's own pages, the communicator's buffers of its calls and its combines' landing area
+   (slot_laid) and one word past them, its use count (zappoffs), a lease of the region (mem_alloc: one within a
+   registration extent, so its spans need no cut the declaration did not exchange), laid from u->base */
+static ncclResult_t zappo(struct ncclComm *comm, struct compiled *x, struct issue *u, struct call *list, size_t n,
+                          struct where *area) {
+  const size_t zirn = page_up(slot_laid(comm, x, list, n, u->plans, NULL, NULL), comm->page);
+  if (zirn > MESH_DMA_EXTENT - comm->page) return fail(ncclInvalidUsage, "a group's own pages past one registration extent (%zu bytes)", zirn);
+  ncclResult_t result = mem_alloc(&u->zeeb, zirn + sizeof(uint64_t), MESH_BACKING_LINEAR);
+  if (result) return fail(ncclSystemError, "a group's own pages: %s", last.text);
+  memset((char *)u->zeeb + zirn, 0, sizeof(uint64_t));
+  u->zappoffs = (const _Atomic uint64_t *)((char *)u->zeeb + zirn);
+  u->base = (struct where){NULL, (size_t)u->zeeb};
+  if (lease_buffer(u->zeeb, &u->base.buffer, &u->base.offset)) return fail(ncclSystemError, "no Metal buffer over a group's own pages");
+  u->counted = shifted(u->base, zirn);
+  slot_laid(comm, x, list, n, u->plans, &u->base, area);
   return ncclSuccess;
 }
 
@@ -3557,7 +3508,7 @@ static ncclResult_t landing_progress(const struct ncclComm *comm, struct issue *
 }
 
 /* where each entry's pages lie (struct message `data`): a SEND's in the buffer its step reads (the send buffer, where
-   it reads that in place), a COPY's in its step's buffer, a combine's in the group's landing area (`area`: bind_slot,
+   it reads that in place), a COPY's in its step's buffer, a combine's in the group's landing area (`area`: zappo,
    each entry from a page of it); each in a live lease, its common byte-packet span table in its issue's lease of them
    (`tables`, made for its binding; the one it replaces let go, kept by the bridge's reads of the entries presented
    from it: the uses owned_end hands it), the leases held by the issue from here to its next placement or its end
@@ -3880,12 +3831,6 @@ static ncclResult_t schedule(struct metal_program *program, struct ncclComm *com
   commit_group(comm, plans);
   return ncclSuccess;
 }
-/* a slot's last user: the group (`ticket`, 0 the host path's) and each channel's landing ends once it is presented */
-static void slot_used(struct ncclComm *comm, uint32_t slot, uint64_t ticket) {
-  struct slot *s = comm->slots + slot - 1;
-  s->ticket = ticket;
-  for (uint32_t h = 0; h < comm->count; h++) { s->lands[h] = comm->channels[h].lands; s->in[h] = comm->channels[h].in; }
-}
 
 
 
@@ -3899,7 +3844,7 @@ static struct where operand_at(const struct call *c, size_t at) {
 }
 /* where a call that is not a write or an all-to-all holds its result: recvbuff where it holds the whole operand or
    crosses nothing, a reduce-scatter's recvbuff as its own segment of the operand (partial_split), else the
-   communicator's (bind_slot) */
+   communicator's (zappo) */
 static struct where result_of(const struct call *c) {
   const struct steps *st = c->bound;
   size_t length;
@@ -3924,13 +3869,13 @@ static ncclResult_t bind_calls(struct call *list, size_t n) {
 }
 
 /* issue u laid for `list` (issue_lay, `repeats` times `stride` bytes apart, each call's steps that issue's copy made
-   again) and, where it crosses (`remote`), its storage bound in generation `generation`'s slot (bind_slot: *slot, its
-   landing area *area), its calls' buffers (bind_calls) and its entries' bytes (place_data) */
+   again) and, where it crosses (`remote`), its own pages (zappo: its landing area *area), its calls' buffers
+   (bind_calls) and its entries' bytes (place_data) */
 static ncclResult_t issue_layout(struct ncclComm *comm, struct compiled *x, struct issue *u, struct call *list,
-    size_t n, uint32_t generation, uint32_t repeats, size_t stride, int remote, struct where *area, uint32_t *slot) {
+    size_t n, uint32_t repeats, size_t stride, int remote, struct where *area) {
   for (size_t i = 0; i < n; i++) if (list[i].bound) steps_reset(list[i].bound, 0);
   issue_lay(comm, x, u, list, repeats, stride);
-  ncclResult_t result = remote ? bind_slot(comm, x, generation, list, n, u->plans, &u->base, area, slot) : ncclSuccess;
+  ncclResult_t result = remote ? zappo(comm, x, u, list, n, area) : ncclSuccess;
   if (!result) result=bind_calls(list,n);
   if (!result && remote) place_data(comm, u, *area);
   return result;
@@ -3944,22 +3889,6 @@ static ncclResult_t issue_place(struct ncclComm *comm, struct issue *u) {
   return result;
 }
 
-/* Select the declaration's prepared issue and attach its recording context. */
-static ncclResult_t issue_bind(struct call **calls, size_t n, struct compiled *x,
-                               struct schedule **plans, struct issue **issued, struct where *area, uint32_t *slot) {
-  const uint32_t k = x->uses++ % GENERATIONS;
-  struct issue *u = x->prepared[(size_t)k * x->period + (*calls)[0].invocation % x->period];
-  for (size_t i = 0; i < n; i++) {
-    struct call *c = u->calls + i;
-    const struct call *from = *calls + i;
-    c->stream = from->stream; c->encoder = from->encoder; c->table = from->table; c->residency = from->residency;
-    c->polls = from->polls; c->fused = from->fused; c->invocation = from->invocation;
-    memcpy(c->pre, from->pre, sizeof c->pre);
-    if ((c->bound = u->steps[i])) { atomic_fetch_add_explicit(&c->bound->references, 1, memory_order_relaxed); steps_reset(c->bound, 1); }
-  }
-  *calls = u->calls; *plans = u->plans; *issued = u; *area = u->area; *slot = u->slot;
-  return ncclSuccess;
-}
 
 /* an operator as the host runs it (premultiplier, combine, postoperation; the partials merge's row) */
 static ncclResult_t reduction(struct call *c) {
@@ -4022,6 +3951,60 @@ struct inflight {
 };
 
 static struct inflight *inflight, *inflight_last;
+static ncclResult_t zoblimp(struct ncclComm *comm, struct compiled *x, uint64_t instance, int remote, struct issue **made);
+/* design/zorvek.md zumbled: whether the stream has passed issue u's last use (zappoff): its use counted in its own
+   word, every unit it sent and landed on each channel past (a lost link's counts are ~0, past everything), and its
+   group no longer in flight on the host.  Reads alone; waits for nothing */
+static int zumbled(const struct ncclComm *comm, const struct issue *u) {
+  if (!u->used) return 1;
+  if (u->zappoffs && atomic_load_explicit(u->zappoffs, memory_order_acquire) < u->used) return 0;
+  for (uint32_t h = 0; h < comm->count; h++) {
+    const struct mesh_stream_view *w = &comm->channels[h].view;
+    if (u->sent[h] && (!w->sent || atomic_load_explicit(w->sent, memory_order_acquire) < u->sent[h])) return 0;
+    if (u->landed[h] && (!w->landed || atomic_load_explicit(w->landed, memory_order_acquire) < u->landed[h])) return 0;
+  }
+  for (const struct inflight *g = inflight; g; g = g->next_group) if (g == u->group) return 0;
+  return 1;
+}
+/* design/zorvek.md zorvek: the group's issue for this invocation, a laid one of its binding instance the stream has
+   passed (zumbled), else one laid now over pages of its own (zoblimp, issue_place), with the invocation's recording
+   context attached */
+static ncclResult_t zorvek(struct ncclComm *comm, struct compiled *x, int remote, struct call **calls, size_t n,
+                           struct schedule **plans, struct issue **issued, struct where *area) {
+  const uint64_t instance = (*calls)[0].invocation % x->period;
+  struct issue *u = NULL;
+  for (size_t k = 0; !u && k < x->laid_count; k++)
+    if (x->laid[k]->instance == instance && zumbled(comm, x->laid[k])) u = x->laid[k];
+  if (!u) {
+    ncclResult_t result = zoblimp(comm, x, instance, remote, &u);
+    if (!result && remote) result = issue_place(comm, u);
+    if (result) return result;
+  }
+  for (size_t i = 0; i < n; i++) {
+    struct call *c = u->calls + i;
+    const struct call *from = *calls + i;
+    c->stream = from->stream; c->encoder = from->encoder; c->table = from->table; c->residency = from->residency;
+    c->polls = from->polls; c->fused = from->fused; c->invocation = from->invocation;
+    memcpy(c->pre, from->pre, sizeof c->pre);
+    if ((c->bound = u->steps[i])) { atomic_fetch_add_explicit(&c->bound->references, 1, memory_order_relaxed); steps_reset(c->bound, 1); }
+  }
+  *calls = u->calls; *plans = u->plans; *issued = u; *area = u->area;
+  return ncclSuccess;
+}
+/* design/zorvek.md zappoff zumble zabbadoo: issue u's pages given back as the stream passes its work: its use counted
+   in its own word by a store encoded after everything of the group (metal_open_gate, ordered as every direct dispatch
+   is), and its last units sent and landed on each channel noted, read by zumbled */
+static ncclResult_t zappoff(struct metal_program *program, struct ncclComm *comm, struct issue *u) {
+  u->used++;
+  for (uint32_t h = 0; h < comm->count; h++) {
+    const struct schedule *p = u->plans + h;
+    u->sent[h] = p->outs ? pages_to_word(p->out[p->outs - 1].end) : 0;
+    u->landed[h] = p->ins ? pages_to_word(p->in[p->ins - 1].end) : 0;
+  }
+  if (!u->zappoffs) return ncclSuccess;
+  const struct metal_result made = metal_open_gate(program, u->counted.buffer, u->counted.offset, u->used);
+  return made.status ? fail(ncclSystemError, "a group's use counted on the GPU: %s", made.message) : ncclSuccess;
+}
 static uint64_t tickets;
 
 /* Issued calls borrow declaration operands and retain only their steps copy. */
@@ -4046,7 +4029,8 @@ static struct issue *issue_make(struct ncclComm *comm, const struct compiled *x,
   int made = u && (u->plans = calloc(comm->count + 1, sizeof *u->plans)) && (u->steps = calloc(x->n + 1, sizeof *u->steps)) &&
              (u->calls = calloc(x->n + 1, sizeof *u->calls)) &&
              (u->group = calloc(1, sizeof *u->group)) &&
-             (u->group->start = calloc(2 * (size_t)comm->count + 1, sizeof *u->group->start));
+             (u->group->start = calloc(2 * (size_t)comm->count + 1, sizeof *u->group->start)) &&
+             (u->sent = calloc((size_t)comm->count + 1, sizeof *u->sent)) && (u->landed = calloc((size_t)comm->count + 1, sizeof *u->landed));
   if (u) { u->n = x->n; u->repeats = repeats; }
   for (uint32_t h = 0; made && h < comm->count; h++) {
     const struct schedule *p = x->plans + h;
@@ -4068,7 +4052,8 @@ static void issue_free(struct ncclComm *comm, struct issue *u) {
   pthread_mutex_unlock(&attach_lock);
   if (u->tables) ncclMemFree(u->tables);
   if (u->progress) ncclMemFree(u->progress);
-  free(u->steps); free(u->calls); free(u->group); free(u->landings); free(u);
+  if (u->zeeb) ncclMemFree(u->zeeb);
+  free(u->steps); free(u->calls); free(u->group); free(u->landings); free(u->sent); free(u->landed); free(u);
 }
 /* a group done with: what its calls own (the list is its issue's) */
 static void inflight_free(struct inflight *g) { parts_free(g->list, g->n); }
@@ -4600,32 +4585,6 @@ static void walk_failed(struct ncclComm *comm, uint64_t ticket, ncclResult_t res
   fail(result, "%s", why);
 }
 
-/* The one place a reuse of storage is ordered: before a group writes a slot, the slot's last group's landings have
-   landed, so its SENDs from it were read (witnessed: mesh-routed.c) and its consumers ran earlier in the
-   stream; that group completed first where it is in flight, then `landed` awaited past the landings no work in the
-   stream awaited.  A fused crossing takes none: its source and landing generations are its own (mesh 84056c43,
-   whose cases passed), and its sources' reuse is the lease ledger's (mesh-lease-retire.h; design/pages-and-functions.md,
-   Freeing 6-7).  No `sent`.  Under group_lock */
-static ncclResult_t guard(struct metal_program *program, struct ncclComm *comm, uint32_t slot, int *published) {
-  const struct slot *s = comm->slots + slot - 1;
-  struct inflight *g = inflight;
-  while (g && g->ticket != s->ticket) g = g->next_group;
-  ncclResult_t result = g ? complete(program, g, published) : ncclSuccess;
-  if (g && !result) result = retire(program);
-  for (uint32_t h = 0; !result && h < comm->count; h++) {
-    struct channel *ch = comm->channels + h;
-    const uint64_t lands = s->lands[h];
-    if (ch->waited >= lands) continue;
-    presented_access(program,ch,1);
-    void *buffer=NULL;size_t offset=0;
-    result=ncclMeshMemBuffer(s->address,&buffer,&offset);if(result)break;
-    const ncclMeshAccess reuse={{buffer,offset},s->bytes,ncclMeshAccessRead};metal_accesses(program,&reuse,1);
-    const struct metal_wait wait = {ch->buffer, comm->violation, NULL, ch->landed, 0, s->in[h], lands - 1, h, {0},0};
-    result = gpu(metal_spin(program, &wait), "the last landings of a reused generation");
-    ch->waited = lands;
-  }
-  return result;
-}
 
 /* the operands a group makes in place, after its entries are presented and before its gate opens or anything is
    published: a premultiply, or a copy within the region, where a call reads no send buffer in place; a scratch's copy;
@@ -4752,18 +4711,9 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   if (remote && comm->gate) metal_resident(program, comm->gate);
   int gate = 0, published = 0, scheduled = 0;
   struct where area = {NULL, 0};
-  uint32_t slot = 0;
-  /* the last group of the generation this one binds, and once it is bound the last user of the slot it took where that
-     is another; a fused crossing none (guard) */
-  const uint32_t last = remote ? x->slot[x->uses % GENERATIONS] : 0;
-  if (remote && !fused && last) result = guard(program, comm, last, &published);
-  if (!result) result = issue_bind(&list, n, x, &plans, &u, &area, &slot);
-  if (!result && slot) metal_resident(program, u->base.buffer);
-  if (!result && remote && !fused && slot && slot != last) result = guard(program, comm, slot, &published);
-  /* the slot this generation let go, too small (bind_slot): its last group ran in the stream before this point (guard,
-     above), so the stream stores that group's ticket in the slot's word, and the slot is then returnable (slot_take) */
-  if (!result && remote && !fused && last && slot != last && comm->slots[last - 1].ticket && 8 + last <= (size_t)getpagesize() / 8)
-    result = gpu(metal_open_gate(program, comm->violation, (7 + (size_t)last) * 8, comm->slots[last - 1].ticket), "a slot let go");
+  /* design/zorvek.md zorvek: the group's issue, on pages no use the stream has not passed holds */
+  if (!result) result = zorvek(comm, x, remote, &list, n, &plans, &u, &area);
+  if (!result && u->zeeb) metal_resident(program, u->base.buffer);
   struct inflight *g = NULL, *before = NULL;
   uint64_t ticket = 0;
   if (!result && remote) {
@@ -4779,7 +4729,6 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     if (!result) {
       for (uint32_t h = 0; h < comm->count; h++) { g->end[h][0] = comm->channels[h].sends; g->end[h][1] = comm->channels[h].lands; }
       g->list = list; g->n = n; g->ticket = ticket = ++tickets;
-      slot_used(comm, slot, ticket);
       before = inflight_last;
       if (inflight_last) inflight_last->next_group = g; else inflight = g;
       inflight_last = g;
@@ -4827,6 +4776,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     metal_gate(program, violation);
     for (size_t i = 0; i < n && !result; i++) result = complement_copy(program, list + i);
     if (!result) result = retire(program);
+    if (!result && !g->fused) result = zappoff(program, comm, u);
   } else if (!result) result = epilogue(program, list, n);
   metal_end(program);
   if (result && scheduled) walk_failed(comm, ticket, result);
@@ -5166,12 +5116,12 @@ static void plan_free(struct ncclComm *comm, struct plan *plan) {
 }
 
 /* Every endpoint and relay contributes physical backing cuts in the declared
-   operand or transaction coordinates. Union every prepared issue's placement (each generation, each slot) before
+   operand or transaction coordinates. Union every laid issue's placement (each binding instance) before
    emitting either end's descriptors. These exchanges belong solely to declaration. */
 static ncclResult_t packets_prepare(struct ncclComm *comm, struct compiled *x) {
   ncclResult_t result = ncclSuccess;
-  for (size_t j = 0; !result && j < (size_t)GENERATIONS * x->period; j++) {
-    const struct issue *u = x->prepared[j];
+  for (size_t j = 0; !result && j < x->laid_count; j++) {
+    const struct issue *u = x->laid[j];
     for (uint32_t h = 0; !result && h < comm->count; h++) for (int send = 1; send >= 0; send--)
       for (size_t k = 0; !result && k < (send ? u->plans[h].outs : u->plans[h].ins); k++) {
         const struct message *m = (send ? u->plans[h].out : u->plans[h].in) + k;
@@ -5241,8 +5191,37 @@ static ncclResult_t packets_prepare(struct ncclComm *comm, struct compiled *x) {
   return result ? result : error ? fail(ncclSystemError, "preparing collective packets: %s", strerror(error)) : ncclSuccess;
 }
 
-/* Compile every generation, frame and binding slot before recording. WRITE and
-   collective calls share the same issue storage and packet preparation. */
+/* design/zorvek.md zoblimp: an issue of definition x for binding instance `instance`, laid over pages of its own: its
+   calls, their operands' views for that instance, its entries and its pages (issue_layout); kept among x's laid
+   issues, so x's drop frees it */
+static ncclResult_t zoblimp(struct ncclComm *comm, struct compiled *x, uint64_t instance, int remote, struct issue **made) {
+  const uint32_t frames = x->calls[0].frames;
+  struct issue *u = issue_make(comm, x, frames);
+  if (!u) return fail(ncclSystemError, "allocating a laid issue");
+  if (grow(&x->laid, &x->laid_room, x->laid_count, sizeof *x->laid)) { issue_free(comm, u); return fail(ncclSystemError, "out of memory"); }
+  x->laid[x->laid_count++] = u;
+  u->instance = instance;
+  memcpy(u->calls, x->calls, x->n * sizeof *u->calls);
+  ncclResult_t result = ncclSuccess;
+  for (size_t i = 0; i < x->n && !result; i++) {
+    struct call *c = u->calls + i;
+    c->bound = u->steps[i]; c->invocation = instance;
+    if (c->write_binding) {
+      c->send_at = c->write_binding->source; c->recv_at = c->write_binding->landing;
+    } else {
+      c->send_at = shifted(c->send_at, ncclMeshInvocationIndex(instance, c->bindings[0].invocation, c->bindings[0].instances) * c->bindings[0].stride);
+      c->recv_at = shifted(c->recv_at, ncclMeshInvocationIndex(instance, c->bindings[1].invocation, c->bindings[1].instances) * c->bindings[1].stride);
+    }
+    result = as_metal(&c->send_at);
+    if (!result) result = as_metal(&c->recv_at);
+  }
+  if (!result) result = issue_layout(comm, x, u, u->calls, x->n, frames, 0, remote, &u->area);
+  *made = u;
+  return result;
+}
+
+/* Lay one issue for each binding instance before recording (zoblimp), their packets cut together and exchanged once
+   (packets_prepare), then placed. WRITE and collective calls share the same issue storage and packet preparation. */
 static ncclResult_t prepared(struct ncclComm *comm, struct compiled *x, int remote) {
   uint64_t period = 1;
   const uint32_t frames = x->calls[0].frames;
@@ -5261,32 +5240,12 @@ static ncclResult_t prepared(struct ncclComm *comm, struct compiled *x, int remo
       period = period / d > invocations / a ? invocations : period / d * a;
     }
   }
-  if (period > UINT32_MAX / GENERATIONS) return fail(ncclInvalidArgument, "a declared group's issue table exceeds its index width");
-  const size_t issues = (size_t)GENERATIONS * period;
-  if (!(x->prepared = calloc(issues, sizeof *x->prepared))) return fail(ncclSystemError, "out of memory");
+  if (period > UINT32_MAX) return fail(ncclInvalidArgument, "a declared group's issue table exceeds its index width");
   x->period = (uint32_t)period;
   ncclResult_t result = ncclSuccess;
-  for (size_t j = 0; !result && j < issues; j++) {
-    struct issue *u = x->prepared[j] = issue_make(comm, x, frames);
-    if (!u) { result = fail(ncclSystemError, "allocating a prepared issue"); break; }
-    memcpy(u->calls, x->calls, x->n * sizeof *u->calls);
-    for (size_t i = 0; i < x->n && !result; i++) {
-      struct call *c = u->calls + i;
-      const uint64_t s = j % period;
-      c->bound = u->steps[i]; c->invocation = s;
-      if (c->write_binding) {
-        c->send_at = c->write_binding->source; c->recv_at = c->write_binding->landing;
-      } else {
-        c->send_at = shifted(c->send_at, ncclMeshInvocationIndex(s, c->bindings[0].invocation, c->bindings[0].instances) * c->bindings[0].stride);
-        c->recv_at = shifted(c->recv_at, ncclMeshInvocationIndex(s, c->bindings[1].invocation, c->bindings[1].instances) * c->bindings[1].stride);
-      }
-      result = as_metal(&c->send_at);
-      if (!result) result = as_metal(&c->recv_at);
-    }
-    if (!result) result = issue_layout(comm, x, u, u->calls, x->n, (uint32_t)(j / period), frames, 0, remote, &u->area, &u->slot);
-  }
+  for (uint64_t s = 0; !result && s < period; s++) { struct issue *u; result = zoblimp(comm, x, s, remote, &u); }
   if (!result && remote) result = packets_prepare(comm, x);
-  for (size_t j = 0; !result && remote && j < issues; j++) result = issue_place(comm, x->prepared[j]);
+  for (size_t j = 0; !result && remote && j < x->laid_count; j++) result = issue_place(comm, x->laid[j]);
   return result;
 }
 
@@ -5295,9 +5254,6 @@ static ncclResult_t definition_prepare(struct ncclComm *comm, struct compiled *x
   ncclResult_t result = compile_group(comm, x->calls, x->n, &x->plans, &x->seconds);
   int remote = 0;
   for (size_t i = 0; !result && i < x->n; i++) remote |= crosses(x->calls + i);
-  const size_t need = remote ? slot_laid(comm, x, x->calls, x->n, x->plans, NULL, NULL) : 0;
-  for (uint32_t k = 0; remote && !result && k < GENERATIONS; k++)
-    if (!(x->slot[k] = slot_take(comm, need))) result = fail(ncclSystemError, "a definition's storage: %s", last.text);
   return result ? result : prepared(comm, x, remote);
 }
 
