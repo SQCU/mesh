@@ -193,11 +193,8 @@ original exception; polling and submission are unchanged. Those later unchanged
 outputs are consequences of an aborted run, not independent evidence of a
 defective kernel for each later shape. The initiating GPU wait remains unresolved.
 
-The initiating error is located: with only a COPY's units owning SEND cuts, the 16 MiB all-reduce completes and every case checks right on all five, chain-service too (the builds below predate the frame correction above).
-In the saved c56f21a9 rank-3 log, a link is lost and paired again during the
-16 MiB all-reduce; the observer reports that failure before the later output
-comparisons. Those unchanged later outputs are consequences of an aborted run,
-not independent evidence of a defective kernel for each later shape.
+The initiating error is located: with only a COPY's units owning SEND cuts, the 16 MiB all-reduce completes and every case checks right on all five, chain-service too (the builds below predate the frame correction above). Main at 51a6ff10, with both, passes the
+same on all five.
 
 Localized within c56f21a9 by two builds of main with one part of its mesh_fabric_refine change undone (tags
 bisect-refine, bisect-owners, deleted after), each run on all five as above:
