@@ -3510,6 +3510,10 @@ struct issue { struct schedule *plans; struct steps **steps; struct inflight *gr
                   use (zinth; 0: never linked), which zumbled reads */
                struct linking { struct mesh_zwoggle *tables; uint64_t region; size_t offset; uint64_t left; } *linking;
                void *linkable;
+               /* the bases its calls state (mesh.h struct mesh_zwoggle `bases`, 2 count + 1 words: each channel's units
+                  before the call on its send and landing lists, then the communicator's gates before it), their region
+                  offset, and whether its entries are laid (present_group: at its first call, then only the bases) */
+               uint64_t *bases, bases_at; int laid;
                struct owned owned; /* the leases its entries read, held from its placement to the next or its end */ };
 /* All operation kinds share the declared binding instances and routing basis. */
 struct compiled { struct call *calls; size_t n; uint64_t repeat; struct schedule *plans; double seconds; uint32_t period;
@@ -3999,13 +4003,17 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u) {
           x->spans = made;
           x->table = lease_offset(made);
         }
-    /* design/zorvek.md zoblimp: each channel's tables for the bridge and their entries' room, after the span tables */
+    /* design/zorvek.md zoblimp: each channel's tables for the bridge and their entries' room, after the span tables,
+       then the bases its calls state */
     for (uint32_t h = 0; h < comm->count; h++) {
       if (!plans[h].outs && !plans[h].ins) continue;
       if (pass) u->linking[h].tables = (struct mesh_zwoggle *)((char *)u->tables + length);
-      length += (sizeof(struct mesh_zwoggle) + (plans[h].outs + plans[h].ins) * sizeof(struct mesh_entry) + align - 1) / align * align;
+      length += (sizeof(struct mesh_zwoggle) + (plans[h].outs + plans[h].ins) * sizeof(struct mesh_zwoggle_entry) + align - 1) / align * align;
     }
+    if (pass) u->bases = (uint64_t *)((char *)u->tables + length);
+    length += ((2 * (size_t)comm->count + 1) * sizeof *u->bases + align - 1) / align * align;
   }
+  u->laid = 0;
   size_t linked = 0;
   if (u->tables && lease_buffer(u->tables, &u->linkable, &linked)) return fail(ncclSystemError, "no Metal buffer over a group's span tables");
   for (uint32_t h = 0; h < comm->count; h++)
@@ -4013,6 +4021,7 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u) {
       u->linking[h].region = lease_offset(u->linking[h].tables);
       u->linking[h].offset = linked + (size_t)((char *)u->linking[h].tables - (char *)u->tables);
     }
+  u->bases_at = lease_offset(u->bases);
   for (uint32_t h = 0; h < comm->count; h++) schedule_units(plans + h, u->repeats);
   int error = landing_runs(comm, u);
   if (!error) {
@@ -4177,6 +4186,11 @@ static ncclResult_t present_publish(struct metal_program *program, struct channe
 static ncclResult_t present_group(struct metal_program *program, struct ncclComm *comm, struct issue *owner, struct schedule *plans,
                                   int direct) {
   struct mesh_ctx *context = &comm->attach->context;
+  /* the call's bases (struct issue `bases`): what its entries' bases are relative to */
+  for (uint32_t h = 0; h < comm->count; h++) {
+    owner->bases[2 * h] = pages_to_word(comm->channels[h].out); owner->bases[2 * h + 1] = pages_to_word(comm->channels[h].in);
+  }
+  owner->bases[2 * comm->count] = comm->gates;
   /* every entry's payload and descriptor tables are held by its owner since its preparation, a prepared WRITE (its
      plan) or its issue (owned_begin), each a registration scope open on its leases: a present only advances its
      channel's use, before anything is presented */
@@ -4198,11 +4212,20 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
        again once the walk of each list has left them (zumbled) */
     const struct linking *laid = owner->linking + h;
     struct mesh_zwoggle *tables = laid->tables;
-    struct mesh_entry *records = (struct mesh_entry *)(tables + 1);
-
-    for (size_t k = 0; k < p->outs; k++) {
+    struct mesh_zwoggle_entry *records = (struct mesh_zwoggle_entry *)(tables + 1);
+    /* a WRITE's source readiness word is its invocation's (not fixed by the issue's binding instance): written each
+       call; every other entry once, at the issue's first call, its base relative to that call's (`bases`) */
+    for (size_t k = 0; owner->laid && k < p->outs; k++) {
+      const struct message *m = p->out + k;
+      const struct write_binding *plan = m->c->write_binding;
+      if (m->dep_h != UINT32_MAX || !plan || !plan->ready_value) continue;
+      records[k].entry.word = plan->ready_offsets[m->c->invocation % plan->ready_layout.instances * plan->ready_tiles + write_tile(plan, m->offset)];
+      metal_resident(program, plan->source_ready.buffer);
+    }
+    for (size_t k = 0; !owner->laid && k < p->outs; k++) {
       const struct message *m = p->out + k;
       struct mesh_entry entry = {m->table, pages_to_word(m->pages), 0, pages_to_word(pages_sub(m->end, m->pages))};
+      uint64_t relative = 1 + 2 * (uint64_t)h;
       /* the landing it forwards (send_dependencies): that channel's landing count before the group, plus its base */
       if (m->dep_h != UINT32_MAX) {
         /* A combined source names its exact producer word; plain copies use
@@ -4210,16 +4233,23 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
         entry.word = m->dep_summed ? m->dep_summed
                                    : (uint64_t)((char *)comm->channels[m->dep_h].view.landed - (char *)context->M);
         entry.base = pages_to_word(pages_add(comm->channels[m->dep_h].in, m->dep_rel));
+        relative = 2 + 2 * (uint64_t)m->dep_h;
       } else if (m->c->write_binding && m->c->write_binding->ready_value) {
         const struct write_binding *plan = m->c->write_binding;
         entry.word = plan->ready_offsets[m->c->invocation % plan->ready_layout.instances * plan->ready_tiles + write_tile(plan, m->offset)];
         entry.base = plan->ready_value - m->pages.n;
+        relative = 0;
         metal_resident(program, plan->source_ready.buffer);
       }
-      records[k] = entry;
+      if (relative) entry.base -= owner->bases[relative - 1];
+      records[k] = (struct mesh_zwoggle_entry){entry, relative};
     }
-    for (size_t k = 0; k < p->ins; k++)
-      records[p->outs + k] = (struct mesh_entry){p->in[k].table, pages_to_word(p->in[k].pages), p->word, p->base};
+    /* a landing's gate (gate_of): the channel's `ready` past its own send units, or the communicator's gate past its
+       gates; ungated, none */
+    const uint64_t landing = p->word == comm->channels[h].ready_at ? 1 + 2 * (uint64_t)h : p->word == comm->gate_at ? 1 + 2 * (uint64_t)comm->count : 0;
+    for (size_t k = 0; !owner->laid && k < p->ins; k++)
+      records[p->outs + k] = (struct mesh_zwoggle_entry){{p->in[k].table, pages_to_word(p->in[k].pages), p->word,
+                                                          p->base - (landing ? owner->bases[landing - 1] : 0)}, p->word ? landing : 0};
     if (!p->word)
       for (size_t k = 0; k < p->ins; k++) {
         const struct message *m = p->in + k;
@@ -4227,11 +4257,12 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
         metal_accesses(program, &use, 1);
       }
     atomic_store_explicit(&tables->next, 0, memory_order_relaxed);
-    tables->entries[0] = laid->region + sizeof *tables; tables->entries[1] = tables->entries[0] + p->outs * sizeof(struct mesh_entry);
-    tables->count[0] = p->outs; tables->count[1] = p->ins;
+    tables->entries[0] = laid->region + sizeof *tables; tables->entries[1] = tables->entries[0] + p->outs * sizeof *records;
+    tables->count[0] = p->outs; tables->count[1] = p->ins; tables->bases = owner->bases_at;
     ch->tables = laid->region; ch->after = owner->linkable; ch->after_at = laid->offset + offsetof(struct mesh_zwoggle, next);
     if (direct) { const ncclResult_t published = present_publish(program, ch, p); if (published) return published; }
   }
+  owner->laid = 1;
   return ncclSuccess;
 }
 

@@ -136,11 +136,14 @@ What runs (mesh.h struct mesh_zwoggle, nccl-mesh.c present_group and zinth, mesh
 - Measured on all five, 2026-10-31: chain service exits 0, bandwidth 45 of 45 correct in each of two runs, every
   64 MiB rate within main's band (the A/A pair decides each outlier).
 
+- An issue's entries are laid at its first call, each base relative to one of the call's bases (mesh.h struct
+  mesh_zwoggle `bases`: each channel's units before the call on each list, the communicator's gates before it); a
+  later call writes its bases and each table's `next` alone. A WRITE's source readiness word is its invocation's,
+  which the issue's binding instance does not fix, so it alone is written each call.
+
 What remains of item 6, in order:
 
-1. Entries laid once per issue: each entry's base relative to its call's place on its list (a channel's units
-   before the call), so present_group writes nothing per call but `next`.
-2. The rings' last client, mesh-diagnostics.c's quiet probe (mesh_stream_present), moved to a linked table.
-3. Then deleted: MESH_STREAM_ENTRIES, the stream's `lists`, `sends` and `lands`, walk_take and struct taken's ring,
+1. The rings' last client, mesh-diagnostics.c's quiet probe (mesh_stream_present), moved to a linked table.
+2. Then deleted: MESH_STREAM_ENTRIES, the stream's `lists`, `sends` and `lands`, walk_take and struct taken's ring,
    mesh_stream_present, the `presented` words in the library's diagnostics and its group access declarations
    (ncclMeshGroupAccesses), and chain.py's input frames bounded by the rings (_stream.mm STREAM_ENTRIES).

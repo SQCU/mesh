@@ -124,23 +124,25 @@ static void walk_take(struct walk *w,struct mesh_stream *x,int land){
    longer read) */
 struct chained { const struct mesh_stream *x; int land; };
 static inline const struct mesh_zwoggle *tables_at(uint64_t node){ return (const struct mesh_zwoggle *)((const char *)M+node); }
-static inline const struct mesh_entry *entry_at(uint64_t node,int land,uint64_t item){
-  return (const struct mesh_entry *)((const char *)M+tables_at(node)->entries[land])+item;
+static inline const struct mesh_zwoggle_entry *entry_at(uint64_t node,int land,uint64_t item){
+  return (const struct mesh_zwoggle_entry *)((const char *)M+tables_at(node)->entries[land])+item;
 }
 static uint64_t chain_follow(const void *context,uint64_t node){
   const struct chained *c=context;
   return atomic_load_explicit(node?&tables_at(node)->next:&c->x->zwoggle,memory_order_acquire);
 }
 static uint64_t chain_items(const void *context,uint64_t node){ return tables_at(node)->count[((const struct chained *)context)->land]; }
-static uint64_t chain_weight(const void *context,uint64_t node,uint64_t item){ return entry_at(node,((const struct chained *)context)->land,item)->units; }
+static uint64_t chain_weight(const void *context,uint64_t node,uint64_t item){ return entry_at(node,((const struct chained *)context)->land,item)->entry.units; }
 static void chain_leave(void *consumer,uint64_t node,uint64_t left){ (void)node; atomic_store_explicit((_Atomic uint64_t *)consumer,left,memory_order_release); }
-/* the entry holding unit q of a holding that links its calls' tables, read where its call's tables hold it; NULL where
-   the call holding q is not yet linked */
+/* the entry holding unit q of a holding that links its calls' tables, read where its call's tables hold it, its base
+   the call's where it names one (mesh.h struct mesh_zwoggle); NULL where the call holding q is not yet linked */
 static struct taken *walk_chain(struct walk *w,struct mesh_stream *x,int land,struct mesh_units q){
   const struct chained c={x,land};
   if(!mesh_graph_chain(&w->chain,q.n,chain_follow,chain_items,chain_weight,&c,chain_leave,&x->taken[land]))return NULL;
-  const struct mesh_entry e=*entry_at(w->chain.node,land,w->chain.item);
-  w->current=(struct taken){(const struct mesh_dma_span *)((const char *)M+e.spans),{e.units},{e.base},{w->chain.before},
+  const struct mesh_zwoggle_entry z=*entry_at(w->chain.node,land,w->chain.item);
+  const struct mesh_entry e=z.entry;
+  const uint64_t base=e.base+(z.relative?((const uint64_t *)((const char *)M+tables_at(w->chain.node)->bases))[z.relative-1]:0);
+  w->current=(struct taken){(const struct mesh_dma_span *)((const char *)M+e.spans),{e.units},{base},{w->chain.before},
                             e.word?stream_words(e.word):land?NULL:&x->ready};
   return &w->current;
 }

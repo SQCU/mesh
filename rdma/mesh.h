@@ -95,15 +95,19 @@ _Static_assert(sizeof(struct mesh_entry)==MESH_SIZEOF_MESH_ENTRY,"mesh_entry ABI
    immutable span table and its backing allocations outlive every future unit
    and every posted DMA. `taken` does not release this table. */
 /* design/zorvek.md zinth: a call's laid tables (zwoggle) on one stream of its holding, in region memory the holder wrote
-   before the call: its send and landing entries (`entries`, region offsets of struct mesh_entry, `count` of each list),
-   and `next`, the region offset of the holding's next call's on the stream, 0 until that call stores it at its own
-   stream position (zinth: the call's one store for transport). The stream's `zwoggle` is its first call's. The bridge
-   walks the chain in order, keeps no copy of an entry, and counts in `taken` each list's calls it has left (their
-   tables no longer read: the holder takes their memory again past them). Links are stored in any order (a call's
-   command buffer may run before its predecessor's): the chain is the holding's call order however they land.
-   73b5df63's compiled program (a declared call order, per-call prefixes, relative bases) is deleted: a call's pages
-   are the allocator's (zappo), not a position in an order, so no order compiles them */
-struct mesh_zwoggle { _Atomic uint64_t next; uint64_t entries[2], count[2]; };
+   before the call: its send and landing entries (`entries`, region offsets of struct mesh_zwoggle_entry, `count` of
+   each list), the call's bases (`bases`, region offset of the uint64_t an entry's `relative` names), and `next`, the
+   region offset of the holding's next call's on the stream, 0 until that call stores it at its own stream position
+   (zinth: the call's one store for transport). The stream's `zwoggle` is its first call's. The bridge walks the chain
+   in order, keeps no copy of an entry, and counts in `taken` each list's calls it has left (their tables no longer
+   read: the holder takes their memory again past them). Links are stored in any order (a call's command buffer may run
+   before its predecessor's): the chain is the holding's call order however they land. An entry's requirement base is
+   its own `base` plus, where `relative` is not 0, the call's base relative - 1 (its place where the holder counts it:
+   a list's units before the call, the holder's gates before it), so a laid issue's entries are written once and each
+   of its calls writes its bases alone. 73b5df63's compiled program (a declared call order and each call's prefixes in
+   it) is deleted: a call's pages are the allocator's (zappo), not a position in an order, so no order compiles them */
+struct mesh_zwoggle_entry { struct mesh_entry entry; uint64_t relative; };
+struct mesh_zwoggle { _Atomic uint64_t next; uint64_t entries[2], count[2], bases; };
 struct mesh_units { uint64_t n; };
 static inline struct mesh_units mesh_units_add(struct mesh_units a,struct mesh_units b){ return (struct mesh_units){a.n+b.n}; }
 static inline struct mesh_units mesh_units_sub(struct mesh_units a,struct mesh_units b){ return (struct mesh_units){a.n-b.n}; }
