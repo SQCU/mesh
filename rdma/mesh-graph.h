@@ -18,4 +18,11 @@ double mesh_graph_tree_path(const uint32_t *parent, uint32_t from, uint32_t hops
    in the order reached, `reached` (room for `vertices`) 1 for each and 0 for every other. */
 uint32_t mesh_graph_reach(uint32_t vertices, uint32_t edges, uint32_t (*end)(const void *context, uint32_t e, uint32_t side),
                           const void *context, uint32_t from, uint32_t *order, unsigned char *reached);
+/* Every simple path from `source` to `destination` over the same edges, depth first in edge order and off the call
+   stack: `visit(consumer, path, length)` with each one's edges in order, a path ending where it first reaches
+   `destination`.  The first nonzero `visit` returns ends the walk and is returned; else 0, or ENOLINK where no path
+   joins them.  `work` holds 3 * vertices words, `seen` vertices bytes. */
+int mesh_graph_paths(uint32_t vertices, uint32_t edges, uint32_t (*end)(const void *context, uint32_t e, uint32_t side),
+                     const void *context, uint32_t source, uint32_t destination, uint32_t *work, unsigned char *seen,
+                     int (*visit)(void *consumer, const uint32_t *path, uint32_t length), void *consumer);
 #endif
