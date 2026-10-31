@@ -235,3 +235,14 @@ channels' `published`, `consumed`, `waited`.
   dependencies" unmet in the transport, not the pool. It is not item 3's.
 - fabric-dnn fails at 4f34df7d (before zinth), at 2b5a2fac and since: m5ult1's GPU wait ends with nothing it
   sends sent.
+- Found: zelloth's threadgroups take blocks in a fixed order (block q to threadgroup q mod G) and spin on each
+  one's inputs. A sum over an earlier sum's result, ordered by a wait on that sum's done word (each sum laid in a
+  topological order of its steps' priors), stood bandwidth on all five twice, identically (mini: a zelloth
+  input's word at 139008, 11080 calls linked; test-ov, test-ov2, 2026-10-31). The same stand came with or
+  without waits for COPY landings. A wait inside a fixed order holds the threadgroups that the sums laid after
+  it need, while some peer's input for the awaited sum is queued behind this rank's forward of those later sums.
+  The pool never stands this way because it claims whichever task is ready. The form zelloth lacks: each
+  threadgroup claims any block whose inputs and earlier sums hold (a scan, not a spin on one block), and each
+  sum's summed words are published as the prefix of its computed blocks grows (the threadgroup that extends the
+  prefix publishes it), so no threadgroup waits on another's publication. With it a sum can also wait on a
+  COPY's landing. Until then, a group whose sums overlap stays the pool's (a01e4cd4).
