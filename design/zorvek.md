@@ -86,7 +86,9 @@ orders (the in-order cursors' serialization of independent tasks).
 ## What remains to delete, in the order the code allows
 
 Done: zorbles, zandrels, zumquats, zethers and the let-go zibbin (f5276dbc: each issue on pages of its own, zappo,
-zappoff, zumbled, zorvek, zoblimp). Seven machines stand between the code and the block above; each is listed with
+zappoff, zumbled, zorvek, zoblimp). zelloth and zelloq for every group of copies and sums whose SENDs its presents
+publish (a77e5b74: zabbadoo, metal_zelloth, present_publish); the pool runs only what zabbadoo does not take (fused
+crossings, WRITEs, partials merges, a combine with a `need`, a SEND waiting on a consumption it cannot forward). Seven machines stand between the code and the block above; each is listed with
 what of the block takes its place. The order is forced: each later one guards a hazard only an earlier one makes.
 
 1. The pool's combines (zokkens, zumpets): tracks, in-order cursors, claims, the chunk protocol, `need`, priors,
@@ -108,3 +110,25 @@ what of the block takes its place. The order is forced: each later one guards a 
    the bridge runs compiled page lists per call (zinth hands it the call), its walk the executor of zirrup and
    zirrupel, which its entry word already is.
 7. The landing gate and the operand staging copies (zibbins): transport by view; a premultiplier folded into zelloth.
+
+## zinth: the bridge runs compiled lists (item 6), the design before the code
+
+Measured 2026-10-31 (test-ov3, not landed): letting a "declared repeat"'s presents skip their barrier gave no rate and
+deadlocked the chain service, a burst of small steps filling both ends' 4,096-entry rings with entries of different
+calls in orders neither end could drain. Retracted with it: the repeat index and the overlap flag were a positional
+rule standing in for a fact about pages, and an earlier draft of this section's "pass of the declared order", bases
+relative + pass x units, was a ring over the program's order. Neither belongs here.
+
+- Whether a call waits for another is a fact about their pages, known when the program is compiled: a call writes a
+  page another call reads or writes, or it does not. Nothing else orders two calls.
+- What the plan compiles: each definition's entries once (its pages, its spans, each requirement's word), in the
+  bridge's form, in region pages that mesh.h describes.
+- What a call stores: one word at its stream position, its start (after the barrier ordering it after the caller's
+  producers), naming the definition it runs. Own-page SENDs require it (zook); its landings require it for their
+  first write; a landing into a page an earlier call still reads requires that call's completion count, stated by the
+  compiler for that page alone.
+- What the bridge does: takes each started call's compiled entries, counts their requirement bases from the units it
+  has walked before them, and posts as each requirement allows (zirrup, zirrupel). The GPU does nothing for
+  transport.
+- Deleted with it: present_group's per-call entries, metal_present and the present kernel, MESH_STREAM_ENTRIES and the
+  rings, walk_take's copy, the `taken` waits, commit_group's presented counts.

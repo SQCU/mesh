@@ -17,12 +17,12 @@
 /* a typed kernel's kind by its operation and its ncclDataType_t (int8 uint8 int32 uint32 int64 uint64 float16 float32
    float64 bfloat16 e4m3 e5m2, then the partials merge's rows, METAL_MERGE), KINDS where none is compiled: float64's,
    truncdiv's but the integers', premul's of the merge */
-enum { OP_LAND, OP_PREMUL, OP_TRUNCDIV, OPS };
+enum { OP_LAND, OP_PREMUL, OP_TRUNCDIV, OP_ZELLOTH, OPS };
 #define INTEGERS(op) KIND_##op##_i8, KIND_##op##_u8, KIND_##op##_i32, KIND_##op##_u32, KIND_##op##_i64, KIND_##op##_u64
 #define FLOATS(op) KIND_##op##_f16, KIND_##op##_f32, KINDS, KIND_##op##_bf16, KIND_##op##_e4m3, KIND_##op##_e5m2
 static const uint8_t TYPED[OPS][METAL_MERGE + 1] = {
   {INTEGERS(land), FLOATS(land), KIND_land_merge}, {INTEGERS(premul), FLOATS(premul), KINDS},
-  {INTEGERS(truncdiv), KINDS, KINDS, KINDS, KINDS, KINDS, KINDS, KINDS}};
+  {INTEGERS(truncdiv), KINDS, KINDS, KINDS, KINDS, KINDS, KINDS, KINDS}, {INTEGERS(zelloth), FLOATS(zelloth), KINDS}};
 /* a copy's kind by its width (0 words of 4 bytes, 1 bytes) and its loads (METAL_PLAIN, METAL_LAND) */
 static const uint8_t COPY[2][METAL_LAND + 1] = {{KIND_copy_plain_4, KIND_copy_land_4}, {KIND_copy_plain_1, KIND_copy_land_1}};
 
@@ -314,6 +314,91 @@ void metal_accesses(struct metal_program *program,const ncclMeshAccess *uses,siz
 struct metal_result metal_publish(struct metal_program *program, const struct metal_release *r) {
   const ncclMeshAccess use={{r->words,r->word},sizeof(uint64_t),ncclMeshAccessWritten};metal_accesses(program,&use,1);
   return dispatch(program, KIND_publish, r->words, NULL, NULL, NULL, release_args(r, 0), 1, 1);
+}
+
+struct metal_result metal_publish_presented(struct metal_program *program, const struct metal_release *r) {
+  const ncclMeshAccess use={{r->words,r->word},sizeof(uint64_t),ncclMeshAccessWritten};metal_accesses(program,&use,1);
+  program->presenting = 1;
+  const struct metal_result result = dispatch(program, KIND_publish, r->words, NULL, NULL, NULL, release_args(r, 0), 1, 1);
+  program->presenting = 0;
+  return result;
+}
+
+struct metal_result metal_zelloth(struct metal_program *program, int type, int op, size_t element_bytes, uint32_t S,
+                                  const struct metal_zelloth_sum *sum, uint32_t channel, uint64_t at) {
+  const uint32_t kind = typed(OP_ZELLOTH, type);
+  if (kind >= KINDS || !S) return metal_failed(EINVAL);
+  const char *message = NULL;
+  struct kernels *k = program_kernels(program, &message);
+  if (!k) return (struct metal_result){EINVAL, message};
+  id<MTLComputePipelineState> state = k->pipelines[kind];
+  const uint64_t width = state.maxTotalThreadsPerThreadgroup < MESH_TRANSPORT_GROUP_THREADS ? state.maxTotalThreadsPerThreadgroup
+                                                                                           : MESH_TRANSPORT_GROUP_THREADS;
+  const uint64_t block = MESH_COMBINE_LANES * width;
+  size_t words = 3 + 8 * (size_t)S;
+  for (uint32_t s = 0; s < S; s++) {
+    if (!sum[s].inputs || !sum[s].in[0].count) return metal_failed(EINVAL);
+    words += 3 * (size_t)sum[s].inputs + sum[s].in[0].count * (2 + 4 * (size_t)sum[s].inputs);
+  }
+  struct metal_bytes table;
+  if (metal_carve((words + S) * sizeof(uint64_t), &table)) return metal_failed(ENOMEM);
+  uint64_t *z = table.contents;
+  const uint64_t base = ((id<MTLBuffer>)table.buffer).gpuAddress + table.offset;
+  metal_resident(program, table.buffer);
+  uint64_t blocks = 0;
+  size_t off = 3 + 8 * (size_t)S;
+  for (uint32_t s = 0; s < S; s++) {
+    const struct metal_zelloth_sum *x = sum + s;
+    const uint32_t K = x->inputs;
+    const size_t R = x->in[0].count;
+    uint64_t mine = 0, elements = 0;
+    for (size_t r = 0; r < R; r++) { mine += (x->in[0].runs[r].elements + block - 1) / block; elements = x->in[0].runs[r].first + x->in[0].runs[r].elements; }
+    uint64_t *h = z + 3 + 8 * (size_t)s;
+    z[words + s] = 0;
+    h[0] = K; h[1] = R; h[2] = ((id<MTLBuffer>)x->own).gpuAddress + x->own_offset; h[3] = ((id<MTLBuffer>)x->out).gpuAddress + x->out_offset;
+    h[4] = base + (words + s) * sizeof(uint64_t); h[5] = blocks; h[6] = mine; h[7] = off;
+    const ncclMeshAccess uses[] = {{{x->own, x->own_offset}, elements * element_bytes, ncclMeshAccessRead},
+                                   {{x->out, x->out_offset}, elements * element_bytes, ncclMeshAccessWritten}};
+    metal_accesses(program, uses, sizeof uses / sizeof *uses);
+    uint64_t *in = z + off;
+    for (uint32_t i = 0; i < K; i++) {
+      const struct metal_zelloth_input *y = x->in + i;
+      if (y->count != R) return metal_failed(EINVAL);
+      in[3 * i] = ((id<MTLBuffer>)y->data).gpuAddress + y->data_offset;
+      in[3 * i + 1] = ((id<MTLBuffer>)y->words).gpuAddress + y->word;
+      in[3 * i + 2] = y->summed ? ((id<MTLBuffer>)y->summed).gpuAddress + y->summed_offset : 0;
+      const ncclMeshAccess inputs[] = {{{y->data, y->data_offset}, elements * element_bytes, ncclMeshAccessRead},
+        {{y->words, y->word}, sizeof(uint64_t), ncclMeshAccessRead | ncclMeshAccessObserve},
+        {{y->summed, y->summed_offset}, y->summed ? sizeof(uint64_t) : 0, ncclMeshAccessWritten}};
+      metal_accesses(program, inputs, sizeof inputs / sizeof *inputs);
+    }
+    for (size_t r = 0; r < R; r++) {
+      uint64_t *run = in + 3 * (size_t)K + r * (2 + 4 * (size_t)K);
+      run[0] = x->in[0].runs[r].first; run[1] = x->in[0].runs[r].elements;
+      for (uint32_t i = 0; i < K; i++) {
+        const struct mesh_landing_run *y = x->in[i].runs + r;
+        if (y->first != run[0] || y->elements != run[1]) return metal_failed(EINVAL);
+        uint64_t *w = run + 2 + 4 * (size_t)i;
+        w[0] = pages_to_word(pages_sub(x->in[i].target, x->in[i].packets)) + y->packet; w[1] = y->phase; w[2] = y->step; w[3] = y->shift;
+      }
+    }
+    blocks += mine;
+    off += 3 * (size_t)K + R * (2 + 4 * (size_t)K);
+  }
+  z[0] = S; z[1] = block; z[2] = blocks;
+  metal_done((const _Atomic uint64_t *)(z + words), S, 1);
+  uint64_t bound[6];
+  struct args p = {.src = table.offset, .op = (uint32_t)op, .polls = program->polls, .channel = channel, .at = at};
+  const struct metal_result recorded = record4(program, (id<MTLBuffer>)sum[0].out, (id<MTLBuffer>)table.buffer, nil, program->violation, p, bound);
+  if (recorded.status) return recorded;
+  metal_order(program);
+  for (NSUInteger a = 0; a < 6; a++) [program->table setAddress:bound[a] atIndex:a];
+  id<MTL4ComputeCommandEncoder> encoder = program->encoder;
+  [encoder setComputePipelineState:state];
+  [encoder setArgumentTable:program->table];
+  const uint64_t groups = blocks < k->cores ? blocks : k->cores;
+  [encoder dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+  return METAL_DONE;
 }
 
 struct metal_result metal_open_gate(struct metal_program *program, void *words, size_t word, uint64_t value) {
