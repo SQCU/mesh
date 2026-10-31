@@ -80,11 +80,14 @@ Followups 2–6 are still outstanding.
 
 ## Dependency handoff through command lowering
 
-The October 30 source review found repeated dependency reconstruction across
-capture, work scheduling and encoding. In the ordinary prepared Python and
-LiteRT entry points, these calls precede `MetalScheduleEnqueue`; enqueue follows
-compiled wait/commit/signal records. The reconstruction is repeated preparation
-work, not a range solver called by every prepared numerical invocation.
+The source review found repeated dependency reconstruction in `MetalDataflow`,
+replay realization, `MetalWorkDependencies` and encoder ordering. In the ordinary
+prepared Python and LiteRT entry points, these calls precede
+`MetalScheduleEnqueue`; enqueue follows compiled wait/commit/signal records.
+The reconstruction is repeated preparation work, not a range solver called by
+every prepared numerical invocation. `MetalViewPrior` and `MetalViewDefine`
+also repeat physical-page canonicalization through `MetalPageAccesses` instead
+of retaining its result with the bound command.
 
 `MetalScheduleCrossWork` currently receives aggregate group accesses and an
 opaque crossing callback, then flushes the work. The callback enters
@@ -128,25 +131,6 @@ relationships. An absent dependency creates no barrier. The source changes to
 complete this handoff remain outstanding; the review does not establish a
 numerical performance result. See also
 [the collective lowering trace](collective-lowering-2026-10-30.md).
-
-The handoff is larger than a barrier bit per collective issue. Source lowering
-retains value identities, types and work/access relations. Ownership selects
-work and deliveries. Placement resolves page aliases and required contiguous
-operands. Routing retains paired endpoints and relay edges. Dependency lowering
-joins numerical, transport and provider commands, including overwrites across
-prepared slots. Backend lowering turns those edges and declared resource limits
-into the exact command order, barrier scopes and publication conditions. Each
-stage consumes the previous stage's facts; it does not reconstruct them from
-names, byte overlaps or dispatch kinds.
-
-Today `MetalDataflow`, replay realization, `MetalWorkDependencies` and encoder
-ordering still analyze related accesses separately. The collective callback
-hides its dispatches until `MetalScheduleCrossWork` flushes and encodes it.
-Replacing the callback with concrete prepared command records is necessary
-before those analyses can share one graph. Merely caching one range walk or
-barriering every dispatch leaves that boundary incomplete. Changing index-page
-contents remain ordinary operands in this graph; they do not require a second
-execution interface.
 
 ## Window relations
 

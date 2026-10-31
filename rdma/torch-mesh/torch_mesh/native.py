@@ -589,9 +589,9 @@ def prepare_graph(module, metadata, *, materializations=()):
     from mesh_compute import hardware
 
     placements, bound_storage, views, storage_layouts = Placements(), {}, [], {}
-    assigned_results, assigned_owners = None, None
+    assigned_results = ()
     external_arguments, external_outputs, command_accesses = [], [], []
-    page_values = []
+    materialized_buffers = set()
     configuration = compiler_operands()
     reduction_groups = hardware()['gpu']['cores'] * configuration['REDUCTION_GROUPS_PER_CORE']
 
@@ -626,8 +626,8 @@ def prepare_graph(module, metadata, *, materializations=()):
         def index_to_str(self, index):
             expression = super().index_to_str(index)
             name = getattr(self, 'page_access', None)
-            if name is not None and assigned_owners is not None and name not in storage_layouts:
-                raise ValueError(f'owned numerical access {name} has no assigned page operand')
+            if name is not None and name not in storage_layouts:
+                raise ValueError(f'numerical access {name} has no assigned page operand')
             if name is not None:
                 bindings = self.__dict__.setdefault('page_bindings', {})
                 slot = bindings.setdefault(name, len(bindings))
@@ -665,21 +665,17 @@ def prepare_graph(module, metadata, *, materializations=()):
 
     class PageView(ir.ReinterpretView):
         def codegen_reference(self, writer=None):
-            if hasattr(self, 'selected_binding'):
-                original, unit, physical = (self.selected_binding[key] for key in ('source', 'source_dtype', 'operand'))
-                mapped = rebase_typed(ir_layout(self.layout), self.layout.dtype.itemsize,
-                                      original, unit.itemsize, physical.layout)
-                operand = TensorView(physical.storage_as(self.layout.dtype), mapped)
-            else:
-                operand = self.operand
+            binding = storage_layouts[self.data.get_name()]
+            original, unit, physical = (binding[key] for key in ('source', 'source_dtype', 'operand'))
+            mapped = rebase_typed(ir_layout(self.layout), self.layout.dtype.itemsize,
+                                  original, unit.itemsize, physical.layout)
+            operand = TensorView(physical.storage_as(self.layout.dtype), mapped)
             index = len(views)
             views.append(operand)
             return f'mesh_views[{index}]'
 
-    def page_view(storage, layout, operand):
-        result = PageView(data=storage, layout=layout)
-        result.operand = operand
-        return ir.TensorBox(result)
+    def page_view(storage, layout):
+        return ir.TensorBox(PageView(data=storage, layout=layout))
 
     def ir_layout(layout):
         return _stream.TensorLayout(tuple(map(int, layout.size)), tuple(map(int, layout.stride)), int(layout.offset))
@@ -889,9 +885,7 @@ def prepare_graph(module, metadata, *, materializations=()):
 
     class Preparation(PythonWrapperCodegen):
         def get_output_refs(self):
-            if assigned_results is not None:
-                return [f'mesh_results[{i}]' for i in range(len(assigned_results))]
-            return super().get_output_refs()
+            return [f'mesh_results[{i}]' for i in range(len(assigned_results))]
 
         def codegen_reinterpret_view(self, data, size, stride, offset, writeline, dtype=None):
             if data.get_name() not in storage_layouts:
@@ -908,17 +902,7 @@ def prepare_graph(module, metadata, *, materializations=()):
         def make_allocation(self, name, device, dtype, shape, stride, allocation_shape=None, is_pinned=False):
             if name in bound_storage:
                 return f'{name} = mesh_destinations[{name!r}]'
-            if assigned_owners is not None:
-                raise ValueError(f'owned numerical storage {name} has no assigned page operand')
-            if is_pinned:
-                raise NotImplementedError('native graph storage uses the bridge region, not a separate pinned allocator')
-            allocation_shape = shape if allocation_shape is None else allocation_shape
-            sizes = self.codegen_python_shape_tuple(allocation_shape)
-            strides = self.codegen_python_shape_tuple(stride)
-            made = f'{name} = mesh_native.empty_strided({sizes}, {strides}, {dtype}, {str(device)!r})'
-            if tuple(shape) != tuple(allocation_shape):
-                made += f'.as_strided({self.codegen_python_shape_tuple(shape)}, {strides})'
-            return made
+            raise ValueError(f'numerical storage {name} has no assigned page operand')
 
         def can_reuse(self, input_buffer, output_buffer=None):
             # Logical landing declarations constrain reuse before pages exist.
@@ -1003,9 +987,7 @@ def prepare_graph(module, metadata, *, materializations=()):
             for name, slot in getattr(kernel, 'page_bindings', {}).items():
                 if name in kernel.removed_buffers:
                     continue
-                buffer = V.graph.get_buffer(name)
-                binding = storage_layouts.get(name, dict(source=ir_layout(buffer.get_layout()),
-                                                        source_dtype=buffer.get_dtype()))
+                binding = storage_layouts[name]
                 original, unit = binding['source'], binding['source_dtype']
                 byte_source = original.components(unit.itemsize)
                 local = _stream.TensorLayout(tuple(original.shape), strides(original.shape)).components(unit.itemsize)
@@ -1179,16 +1161,12 @@ def prepare_graph(module, metadata, *, materializations=()):
             with self.active() as graph:
                 return graph.page_aliases()
 
-        def emit(self, operands, **placement):
-            if placement.get('storage') is None:
-                raise ValueError('a numerical section requires its declared page storage operands')
+        def emit(self, operands, *, storage, results, pages, uses):
             with self.active() as graph:
                 # The ordinary binder consumes the same named storage records
                 # for original operands, carried values and received ports.
-                bound = [placement['storage'][name]['operand'] for name in self.graph_inputs]
-                bound_storage.clear(); storage_layouts.clear()
-                views.clear(); external_arguments.clear(); external_outputs.clear(); command_accesses.clear()
-                return graph.emit(bound, **placement)
+                bound = [storage[name]['operand'] for name in self.graph_inputs]
+                return graph.emit(bound, storage=storage, results=results, pages=pages, uses=uses)
 
         def bind(self, operands, **placement):
             return Program.prepare(self.emit(operands, **placement))
@@ -1437,8 +1415,8 @@ def prepare_graph(module, metadata, *, materializations=()):
                 if isinstance(value, ir.BaseView) and not isinstance(value, ir.ReinterpretView):
                     value = ir.ExternKernel.convert_to_reinterpret_view(value)
                 storage, layout = ir.as_storage_and_layout(value)
-                view = page_view(storage, layout, None)
-                page_values.append((view.data, logical, storage.data, layout))
+                view = page_view(storage, layout)
+                materialized_buffers.add(storage.get_name())
                 leaves[i] = view
             result = tree_unflatten(leaves, spec)
             self.source_values[node] = result
@@ -1642,17 +1620,17 @@ def prepare_graph(module, metadata, *, materializations=()):
                 aliases.append(dict(operation=record['effect']['operation'], domain=domain, work=work, pair=pair))
             return tuple(aliases)
 
-        def emit(self, operands, *, destinations=None, storage=None, results=None, pages=(), uses=None):
+        def emit(self, operands, *, storage, results, pages, uses):
             """Bind already selected scalar domains to their assigned pages.
 
             ``storage`` maps each retained IR storage name to ``source`` (its
             selected original scalar positions), ``source_dtype`` (their explicit
             scalar unit), and ``operand`` (the assigned compact page view in
             that same unit and order). ``results`` retains requested
-            output order and repetitions. Placement owns allocation; this mode
+            output order and repetitions. Placement owns allocation; emission
             only composes those relations into the existing emitted bindings.
             """
-            nonlocal assigned_results, assigned_owners
+            nonlocal assigned_results
             missing = [declaration for declaration in self.consumer_constraints() if declaration['missing_types']]
             if missing:
                 names = ', '.join(f"{declaration['operation'].get_operation_name()} ({', '.join(map(str, declaration['missing_types']))})"
@@ -1661,54 +1639,18 @@ def prepare_graph(module, metadata, *, materializations=()):
             if getattr(self, 'pending_declarations', ()):
                 names = ', '.join(operation.get_operation_name() for operation in self.pending_declarations)
                 raise ValueError(f'selected numerical work is missing external access declarations: {names}')
+            bound_storage.clear(); storage_layouts.clear()
+            views.clear(); external_arguments.clear(); external_outputs.clear(); command_accesses.clear()
             with environment(), V.set_graph_handler(self), V.set_extern_kernel_nodes([]), mode:
                 with unset_fake_temporarily():
-                    if storage is not None:
-                        if results is None:
-                            raise ValueError('selected page binding requires explicit ordered result operands')
-                        assigned_results, assigned_owners = tuple(results), tuple(pages)
-                        for name, binding in storage.items():
-                            physical = TensorView.of(binding['operand'])
-                            storage_layouts[name] = dict(source=binding['source'], source_dtype=binding['source_dtype'], operand=physical)
-                            if not isinstance(self.get_buffer(name), ir.InputBuffer):
-                                bound_storage[name] = physical
-                        actuals = [storage_layouts[name]['operand'] if name in storage_layouts else actual
-                                   for (name, value), actual in zip(self.graph_inputs.items(), operands, strict=True)]
-                        for view, _, buffer, _ in page_values:
-                            if buffer.get_name() in storage_layouts:
-                                view.selected_binding = storage_layouts[buffer.get_name()]
-                    else:
-                        for node, actual in zip(placeholders, operands, strict=True):
-                            if isinstance(node.meta.get('val'), torch.Tensor):
-                                placements.bind(node.meta['val'], actual)
-                        if destinations is not None:
-                            output_nodes = next(n.args[0] for n in module.graph.nodes if n.op == 'output')
-                            described_outputs = tree_flatten(map_arg(output_nodes, lambda n: n.meta['val']))[0]
-                            for described, destination in zip(described_outputs, destinations, strict=True):
-                                if destination is not None:
-                                    placements.bind(described, destination)
-                        placements.solve()
-                        input_storage = {node.name: placements.get(node.meta['val']) if isinstance(node.meta.get('val'), torch.Tensor) else actual
-                                         for node, actual in zip(placeholders, operands, strict=True)}
-                        actuals = [input_storage[node.name] for node in placeholders]
-                        for view, logical, buffer, layout in page_values:
-                            destination = placements.get(logical)
-                            name = buffer.get_name()
-                            if isinstance(buffer, ir.InputBuffer):
-                                from .placement import alias
-                                original = next(n.meta['val'] for n in placeholders if n.name == name)
-                                actual = alias(original, input_storage[name], logical)
-                                if not same_view(actual, destination):
-                                    raise ValueError('a supplied graph input cannot be relocated by producer placement')
-                                storage_layouts[name] = dict(source=ir_layout(buffer.get_layout()), source_dtype=buffer.get_dtype(),
-                                                             operand=TensorView.of(input_storage[name]))
-                            elif name not in bound_storage:
-                                base = buffer.get_layout()
-                                source_layout, base_layout = ir_layout(layout), ir_layout(base)
-                                mapped = rebase_typed(base_layout, base.dtype.itemsize, source_layout, layout.dtype.itemsize, destination.layout)
-                                bound_storage[name] = TensorView(destination.storage_as(base.dtype), mapped)
-                                storage_layouts[name] = dict(source=base_layout, source_dtype=base.dtype, operand=bound_storage[name])
-                            view.operand = destination
+                    assigned_results = tuple(results)
+                    for name, binding in storage.items():
+                        physical = TensorView.of(binding['operand'])
+                        storage_layouts[name] = dict(source=binding['source'], source_dtype=binding['source_dtype'], operand=physical)
+                        if not isinstance(self.get_buffer(name), ir.InputBuffer):
+                            bound_storage[name] = physical
+                    actuals = [storage_layouts[name]['operand'] if name in storage_layouts else actual
+                               for (name, value), actual in zip(self.graph_inputs.items(), operands, strict=True)]
                     for operation in self.operations:
                         scheduled = self.scheduler.name_to_node[operation.get_operation_name()]
                         if not hasattr(scheduled, 'selected_plans'):
@@ -1718,34 +1660,11 @@ def prepare_graph(module, metadata, *, materializations=()):
                             arguments = dict(adapter=plan['adapter'], operands={}, parameters=plan['parameters'], before=[], after=[],
                                 declaration=dict(operation=operation, index=index,
                                                  operands=plan['operands'], parameters=plan['parameters']))
-                            roles = sorted(plan['operands'], key=lambda role: (
-                                plan['operands'][role]['access_mode'] != 'write',
-                                not math.prod(plan['operands'][role]['shape'])))
-                            for role in roles:
-                                use = plan['operands'][role]
-                                from .operand import relation_layout
-                                access = use['access']
-                                assigned = None if uses is None else uses.get((operation.get_operation_name(), index, role))
-                                if assigned is not None:
-                                    arguments['operands'][role] = assigned['operand']
-                                    arguments['before'].extend(assigned['before'])
-                                    arguments['after'].extend(assigned['after'])
-                                    continue
-                                if not math.prod(use['shape']) and access['name'] not in storage_layouts:
-                                    # An empty declared read has no storage demand.
-                                    # The API's unused slot names an empty view of
-                                    # the already assigned result pages.
-                                    logical = relation_layout(use['relation'], use['shape'], 0)
-                                    reference = next(iter(arguments['operands'].values()), next(iter(storage_layouts.values()))['operand'])
-                                    arguments['operands'][role] = TensorView(reference.storage_as(access['dtype']), logical)
-                                    continue
-                                binding = storage_layouts[access['name']]
-                                original, unit, physical = (binding[key] for key in ('source', 'source_dtype', 'operand'))
-                                logical = relation_layout(use['relation'], use['shape'],
-                                    int(access['storage_bytes']) // access['dtype'].itemsize)
-                                mapped = rebase_typed(logical, access['dtype'].itemsize,
-                                                      original, unit.itemsize, physical.layout)
-                                arguments['operands'][role] = TensorView(physical.storage_as(access['dtype']), mapped)
+                            for role in plan['operands']:
+                                assigned = uses[operation.get_operation_name(), index, role]
+                                arguments['operands'][role] = assigned['operand']
+                                arguments['before'].extend(assigned['before'])
+                                arguments['after'].extend(assigned['after'])
                             plans.append(arguments)
                         scheduled.page_plans = tuple(plans)
                 # Identity continuations disappear only after the supplied
@@ -1791,11 +1710,6 @@ def prepare_graph(module, metadata, *, materializations=()):
             for declaration in records:
                 if not isinstance(declaration, dict) or declaration['kind'] != 'shader':
                     continue
-                for slot, name in enumerate(declaration['names']):
-                    if name not in storage_layouts:
-                        buffer = self.get_buffer(name)
-                        storage_layouts[name] = dict(source=ir_layout(buffer.get_layout()).components(buffer.get_dtype().itemsize),
-                                                    source_dtype=torch.uint8, operand=declaration['operands'][slot])
                 # Shader slots retain their source identity and coordinate
                 # units. A portable caller composes this declared relation
                 # with its own pages; it never identifies an input by address.
@@ -1820,7 +1734,7 @@ def prepare_graph(module, metadata, *, materializations=()):
                 declaration['accesses'] = tuple(accesses)
                 declaration['reaches'] = bind_accesses(declaration)
             return dict(commands=tuple(records), output=output,
-                        pages=tuple(placements.owners if assigned_owners is None else assigned_owners),
+                        pages=tuple(pages),
                         storage=dict(storage_layouts))
 
         def bind(self, operands, **placement):
@@ -1901,7 +1815,7 @@ def prepare_graph(module, metadata, *, materializations=()):
                 raise RuntimeError('Torch compiler source extension is missing; install with bin/mesh-user.sh')
             with V.set_choices_handler(LogicalChoices()):
                 graph.run(*metadata)
-            graph.never_reuse_buffers.update(buffer.get_name() for _, _, buffer, _ in page_values)
+            graph.never_reuse_buffers.update(materialized_buffers)
             # This is the scheduler's normal body/layout preparation. Ownership
             # and placement inspect these same cached bodies; codegen retains
             # this wrapper and scheduler after physical page bindings arrive.

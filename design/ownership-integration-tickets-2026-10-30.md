@@ -1,6 +1,6 @@
 # Ownership integration tickets
 
-Recorded 2026-10-30 23:14 UTC; updated 2026-10-31 04:44 UTC. The initial source
+Recorded 2026-10-30 23:14 UTC; updated 2026-10-31 04:58 UTC. The initial source
 checkpoints were mesh `64477c9f` and metal-microbench `8a4454f2`; the status below
 describes the implementation accompanying this update and its open connections.
 This divides
@@ -58,7 +58,7 @@ distributed closure remains open at the connections below.
 | O3 | Partial/complete values and cohort-typed byte expressions compose; providers receive exact read prefixes from each retained body | Joined distributed binding beyond the fake endpoint boundary |
 | O4 | Ordinary and owned Function plus public FX use one selected-section binder and exact byte equalities | Joined distributed binding beyond the fake endpoint boundary |
 | O5 | Importer consumes shared scalar and external command declarations, including selected and ragged outputs; UPDATE→GATHER remains fused | Encoded index folding and remaining packed-reader integration |
-| O6 | Open | Join ordinary entry points, remove superseded paths, then build and inspect preparation |
+| O6 | Ordinary and selected emission require the same resolved storage, results, pages and consumer uses; alternate placement and binding reconstruction removed | Finish joined preparation evidence at the remaining frontend and transport handoffs |
 
 None of O1–O6 is closed by a helper alone. The later whole-function measurements
 remain part of followup 6.
@@ -450,6 +450,15 @@ use the shared reader; their raw storage is never silently treated as a scalar.
 **Resume here:** after the producer/consumer handoffs are joined, inspect the
 ordinary entry points against the finish line above. O6 closes the shared path;
 it does not add another wrapper that hides an incomplete O1–O5 connection.
+
+Native emission now requires the complete output of `placement.selected`:
+`storage`, `results`, `pages` and `uses`. It no longer has a whole-graph placement
+solve, an allocation alternative, or per-role binding reconstruction. Empty
+consumer roles retain their explicit prepared uses. Source materialization
+declarations remain source facts; they do not select a second physical layout.
+Public FX, products with empty dimensions, typed byte views, independently
+scoped read sections and portable product declarations reached page/shader
+preparation through this contract. No numerical invocation was made.
 
 **Implement:** connect the tickets through ordinary entry points and remove the
 replaced ownership reconstruction and duplicate preparation paths. Reconcile
