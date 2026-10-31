@@ -158,10 +158,16 @@ struct channel {
   uint32_t node, stream, cable;
   const uint64_t *wire;
   struct mesh_stream_view view;
-  void *buffer, *lists;
+  void *buffer;
   size_t ready, landed;
   uint64_t ready_at, sends, lands, published, consumed, waited;
   mesh_pages out, in;
+  /* design/zorvek.md zinth: the word the holding's next call's tables are linked at (the stream's `zwoggle`, then the
+     last linked call's `next`), the calls linked, and the group's tables awaiting their link (`tables`, region offset; 0
+     none) with the word that will be their `next` (present_group, zinth): each word a Metal buffer and its offset */
+  void *link, *after;
+  size_t link_at, after_at;
+  uint64_t linked, tables;
 };
 
 /* design/whole-function.md#interface */
@@ -356,7 +362,7 @@ static void comm_free(struct ncclComm *comm) {
   pthread_mutex_unlock(&live_lock);
   bootstrap_close(comm);
   routes_free(comm, 1);
-  for (uint32_t h = 0; h < comm->count; h++) { metal_release(comm->channels[h].buffer); metal_release(comm->channels[h].lists); }
+  for (uint32_t h = 0; h < comm->count; h++) metal_release(comm->channels[h].buffer);
   ncclMemFree((void *)comm->words);
   plan_free(comm, comm->plan);
   comm_leave(comm);
@@ -1376,7 +1382,10 @@ static int fabric_realize(struct ncclComm *comm) {
     struct channel *ch = comm->channels + comm->count++;
     *ch = (struct channel){.peer = (int)peer, .node = comm->members[peer], .stream = h->stream,
       .cable = e, .wire = &h->wire, .view = h->view};
-    if (!(status = channel_buffer(ch, m))) atomic_store(&comm->attach->wrapped, 1);
+    if (!(status = channel_buffer(ch, m))) {
+      atomic_store(&comm->attach->wrapped, 1);
+      ch->link = ch->buffer; ch->link_at = ch->ready + (size_t)((char *)ch->view.zwoggle - (char *)ch->view.ready);
+    }
   }
   /* live once its channels are made, the watch reading them (watch_turn) */
   if (!status) {
@@ -1617,7 +1626,8 @@ static int lease_read_sample(void *context, uint32_t stream, struct mesh_lease_r
     if (!mesh_stream_held(&a->context, stream, h->wire)) return ENOLINK;
     *sample = (struct mesh_lease_retire_sample){.wire = h->wire, .holding = h->generation,
       .sent = atomic_load_explicit(h->view.sent, memory_order_acquire),
-      .landed = atomic_load_explicit(h->view.landed, memory_order_acquire)};
+      .landed = atomic_load_explicit(h->view.landed, memory_order_acquire),
+      .left = {atomic_load_explicit(h->view.taken[0], memory_order_acquire), atomic_load_explicit(h->view.taken[1], memory_order_acquire)}};
     return mesh_stream_held(&a->context, stream, h->wire) ? 0 : ENOLINK;
   }
   return ENOENT;
@@ -1804,15 +1814,18 @@ static int owned_add(struct owned *o, const void *address, unsigned kind) {
   o->leases[o->count++] = (struct owned_lease){address, (unsigned char)kind};
   return 0;
 }
-/* `o`'s uses, a channel's direction each, at the holdings `comm` has now.  0, ENOMEM.  Under attach_lock */
+/* `o`'s uses at the holdings `comm` has now: each channel's two directions (2h + d: units sent or landed), then its two
+   walks' (2 count + 2h + d: the calls each walk has left, design/zorvek.md zinth: the issue's linked tables, read
+   until the walk leaves them, so a table lease alone takes them: owned_end).  0, ENOMEM.  Under attach_lock */
 static int owned_uses(struct ncclComm *comm, struct owned *o) {
-  if (!(o->uses = calloc(2 * (size_t)comm->count, sizeof *o->uses))) return ENOMEM;
+  if (!(o->uses = calloc(4 * (size_t)comm->count, sizeof *o->uses))) return ENOMEM;
   o->channels = comm->count;
   for (uint32_t h = 0; h < comm->count; h++) {
     const struct channel *ch = comm->channels + h;
     const struct hold *hold = comm->attach->holds + comm->endpoint[ch->cable];
-    for (unsigned d = 0; d < 2; d++)
-      o->uses[2 * h + d] = (struct mesh_lease_retire_dep){.stream = ch->stream, .wire = hold->wire, .holding = hold->generation, .direction = d};
+    for (unsigned d = 0; d < 4; d++)
+      o->uses[(d / 2) * 2 * comm->count + 2 * h + d % 2] =
+        (struct mesh_lease_retire_dep){.stream = ch->stream, .wire = hold->wire, .holding = hold->generation, .direction = d};
   }
   return 0;
 }
@@ -1839,9 +1852,10 @@ static void owned_end(struct owned *o, int marks) {
   for (size_t i = 0; o->uses && i < o->count; i++) {
     struct lease *l = lease_at(o->leases[i].address, NULL);
     int error = l ? 0 : EINVAL;
-    for (uint32_t k = 0; !error && marks && k < 2 * o->channels; k++) {
+    for (uint32_t k = 0; !error && marks && k < 4 * o->channels; k++) {
       const struct mesh_lease_retire_dep *d = o->uses + k;
       if ((o->leases[i].kind & OWNED_SENDS) && d->direction != MESH_LEASE_SEND) continue;
+      if (d->direction >= MESH_LEASE_LEFT_SEND && !(o->leases[i].kind & OWNED_TABLE)) continue;
       error = mesh_lease_retire_mark_use(&l->reads, d->stream, d->wire, d->holding, d->end, d->direction, o->leases[i].kind & OWNED_TABLE);
     }
     if (!error) mesh_lease_retire_end(&l->reads);
@@ -3490,6 +3504,12 @@ struct issue { struct schedule *plans; struct steps **steps; struct inflight *gr
                   uses, and its last use's units sent and landed on each channel (zappoff, zumbled) */
                void *zeeb; const _Atomic uint64_t *zappoffs; struct where counted; uint64_t instance, used, *sent, *landed;
                struct mesh_landing_run *landings; void *progress;
+               /* design/zorvek.md zinth: on each channel its tables for the bridge (mesh.h struct mesh_zwoggle, its
+                  entries after them) in its span tables' lease (`tables`, over Metal buffer `linkable`): their
+                  region offset, their offset in that buffer, and the walk's calls left once it has left their last
+                  use (zinth; 0: never linked), which zumbled reads */
+               struct linking { struct mesh_zwoggle *tables; uint64_t region; size_t offset; uint64_t left; } *linking;
+               void *linkable;
                struct owned owned; /* the leases its entries read, held from its placement to the next or its end */ };
 /* All operation kinds share the declared binding instances and routing basis. */
 struct compiled { struct call *calls; size_t n; uint64_t repeat; struct schedule *plans; double seconds; uint32_t period;
@@ -3979,7 +3999,20 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u) {
           x->spans = made;
           x->table = lease_offset(made);
         }
+    /* design/zorvek.md zoblimp: each channel's tables for the bridge and their entries' room, after the span tables */
+    for (uint32_t h = 0; h < comm->count; h++) {
+      if (!plans[h].outs && !plans[h].ins) continue;
+      if (pass) u->linking[h].tables = (struct mesh_zwoggle *)((char *)u->tables + length);
+      length += (sizeof(struct mesh_zwoggle) + (plans[h].outs + plans[h].ins) * sizeof(struct mesh_entry) + align - 1) / align * align;
+    }
   }
+  size_t linked = 0;
+  if (u->tables && lease_buffer(u->tables, &u->linkable, &linked)) return fail(ncclSystemError, "no Metal buffer over a group's span tables");
+  for (uint32_t h = 0; h < comm->count; h++)
+    if (u->linking[h].tables) {
+      u->linking[h].region = lease_offset(u->linking[h].tables);
+      u->linking[h].offset = linked + (size_t)((char *)u->linking[h].tables - (char *)u->tables);
+    }
   for (uint32_t h = 0; h < comm->count; h++) schedule_units(plans + h, u->repeats);
   int error = landing_runs(comm, u);
   if (!error) {
@@ -4109,12 +4142,13 @@ static void gate_of(struct ncclComm *comm, struct schedule *plans, int *gate, ui
   }
 }
 
-/* each channel's entries presented by the program (metal_present: the GPU's present, its send list's and then its
-   landing list's once the bridge has room for all of them, each list's entries presented and not taken fewer than
-   MESH_STREAM_ENTRIES with them), so a group is presented whole or not at all; a send entry's bytes ready once `ready`
-   passes them (word 0), a landing entry gated as gate_of says.  0; ncclSystemError where a list's entries are more than
-   the bridge ever takes (nothing presented, the call's failure alone); a refused presentation fails comm (its lists
-   stand mid-group).  Under group_lock */
+/* each channel's entries laid as the group's tables on its stream (present_group: mesh.h struct mesh_zwoggle, the
+   bridge's alone to read), linked once the program reaches the group (zinth), so the bridge takes a group whole and
+   has no ring to fill: a send entry's bytes ready once `ready` passes them (word 0), a landing entry gated as gate_of
+   says.  The GPU present that copied each group's entries into the stream's 4,096-entry rings, and waited for their
+   room and its predecessor's count, is deleted (design/zorvek.md zarpers): two calls' presents filling both ends'
+   rings deadlocked the chain service (test-ov3, 2026-10-31).  0; ncclSystemError where the region cannot hold the
+   tables.  Under group_lock */
 /* design/zorvek.md zook: each channel's leading publications that wait for nothing, the rank's own pages and every SEND
    that forwards a landing (the bridge waits on that landing's own word), published once with the channel's presents
    (`direct`: no operand copy made after them, no fused crossing), so no SEND of the rank's own pages waits for a
@@ -4143,15 +4177,6 @@ static ncclResult_t present_publish(struct metal_program *program, struct channe
 static ncclResult_t present_group(struct metal_program *program, struct ncclComm *comm, struct issue *owner, struct schedule *plans,
                                   int direct) {
   struct mesh_ctx *context = &comm->attach->context;
-  for (uint32_t h = 0; h < comm->count; h++)
-    for (int list = 0; list < 2; list++) {
-      const struct channel *ch = comm->channels + h;
-      const uint64_t need = list ? plans[h].ins : plans[h].outs;
-      if (need > MESH_STREAM_ENTRIES)
-        return fail(ncclSystemError, "communicator %s: the group lays %llu entries on its %s list toward node %u, and its bridge takes at most %u "
-                    "not yet done (mesh.h MESH_STREAM_ENTRIES); none was presented", comm->name, (unsigned long long)need, list ? "landing" : "send",
-                    ch->node, MESH_STREAM_ENTRIES);
-    }
   /* every entry's payload and descriptor tables are held by its owner since its preparation, a prepared WRITE (its
      plan) or its issue (owned_begin), each a registration scope open on its leases: a present only advances its
      channel's use, before anything is presented */
@@ -4167,12 +4192,13 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
   for (uint32_t h = 0; h < comm->count; h++) {
     struct channel *ch = comm->channels + h;
     const struct schedule *p = plans + h;
-    int status = 0;
     if (!p->outs && !p->ins) continue;
-    struct metal_bytes compiled = {0};
-    if (metal_carve((p->outs + p->ins) * sizeof(struct mesh_entry), &compiled))
-      return fail(ncclSystemError, "communicator %s: the region cannot hold a group's entries for its present", comm->name);
-    struct mesh_entry *records = compiled.contents;
+    /* design/zorvek.md zinth: the group's tables on this channel's stream (mesh.h struct mesh_zwoggle) and its
+       entries after them, laid in its issue's span tables (place_group), read by the bridge alone; the issue is taken
+       again once the walk of each list has left them (zumbled) */
+    const struct linking *laid = owner->linking + h;
+    struct mesh_zwoggle *tables = laid->tables;
+    struct mesh_entry *records = (struct mesh_entry *)(tables + 1);
 
     for (size_t k = 0; k < p->outs; k++) {
       const struct message *m = p->out + k;
@@ -4194,28 +4220,16 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
     }
     for (size_t k = 0; k < p->ins; k++)
       records[p->outs + k] = (struct mesh_entry){p->in[k].table, pages_to_word(p->in[k].pages), p->word, p->base};
-    if (!ch->lists) ch->lists = metal_wrap(ch->view.list[0], 2 * MESH_STREAM_ENTRIES * sizeof(struct mesh_entry));
-    if (!ch->lists) return fail(ncclSystemError, "binding bridge descriptor lists");
-    metal_resident(program, ch->lists); metal_resident(program, compiled.buffer);
-    /* the records done with once the GPU has presented them all: the landing list's count past the group's */
-    metal_done(ch->view.presented[p->ins ? 1 : 0], 1, p->first[p->ins ? 1 : 0] + (p->ins ? p->ins : p->outs));
-    for (int list = 0; list < 2 && !status; list++) {
-      const size_t count = list ? p->ins : p->outs;
-      if(list&&!p->word)for(size_t k=0;k<count;k++) {
-        const struct message *m=p->in+k;
-        const ncclMeshAccess use={{m->data.buffer,m->data.offset},m->bytes,ncclMeshAccessWritten};
-        metal_accesses(program,&use,1);
+    if (!p->word)
+      for (size_t k = 0; k < p->ins; k++) {
+        const struct message *m = p->in + k;
+        const ncclMeshAccess use = {{m->data.buffer, m->data.offset}, m->bytes, ncclMeshAccessWritten};
+        metal_accesses(program, &use, 1);
       }
-      const struct where taken = channel_word(ch, (const void *)ch->view.taken[list]);
-      const struct where presented = channel_word(ch, (const void *)ch->view.presented[list]);
-      struct metal_result placed = metal_present(program, ch->lists, list * MESH_STREAM_ENTRIES * sizeof(struct mesh_entry),
-        compiled.buffer, compiled.offset + (list ? p->outs * sizeof(struct mesh_entry) : 0), count, p->first[list], ch->buffer,
-        taken.offset, presented.offset);
-      status = placed.status;
-    }
-    if (status)
-      return comm_fail(comm, status == ENOLINK || status == EPERM ? ncclRemoteError : ncclSystemError, "communicator %s: an entry toward node %u "
-                       "presented to its bridge: %s", comm->name, ch->node, strerror(status));
+    atomic_store_explicit(&tables->next, 0, memory_order_relaxed);
+    tables->entries[0] = laid->region + sizeof *tables; tables->entries[1] = tables->entries[0] + p->outs * sizeof(struct mesh_entry);
+    tables->count[0] = p->outs; tables->count[1] = p->ins;
+    ch->tables = laid->region; ch->after = owner->linkable; ch->after_at = laid->offset + offsetof(struct mesh_zwoggle, next);
     if (direct) { const ncclResult_t published = present_publish(program, ch, p); if (published) return published; }
   }
   return ncclSuccess;
@@ -4358,6 +4372,25 @@ static size_t own_segment(const struct call *c, size_t *sent, size_t *landed) {
 
 /* -- the Metal path ------------------------------------------------------------------------------------ */
 
+/* design/zorvek.md zinth: the group's tables (present_group) linked to its holding's streams at its place in the
+   program, after everything before it there (the caller's producers, the operand copies, the gate): one store a
+   channel, at the word the last linked call left for it (metal_link), so the bridge walks the group once the stream
+   reaches it; issue u's tables then in use until the walk of each list has left them, their place in the walk (the
+   calls left by then) its use's (zumbled) and its leases' (owned_end: their walk's uses).  Under group_lock */
+static struct metal_result zinth(struct metal_program *program, struct ncclComm *comm, struct issue *u) {
+  struct metal_link links[comm->count ? comm->count : 1];
+  size_t n = 0;
+  for (uint32_t h = 0; h < comm->count; h++) {
+    struct channel *ch = comm->channels + h;
+    if (!ch->tables) continue;
+    links[n++] = (struct metal_link){ch->link, ch->link_at, ch->tables};
+    ch->link = ch->after; ch->link_at = ch->after_at; ch->tables = 0;
+    u->linking[h].left = ++ch->linked;
+    for (unsigned d = 0; u->owned.uses && d < 2; d++) u->owned.uses[2 * comm->count + 2 * h + d].end = ch->linked;
+  }
+  return metal_link(program, links, n);
+}
+
 /* a step's result (nccl-mesh-metal.h struct metal_result): its errno a failure, named by `what` and the step's own message */
 static ncclResult_t gpu(struct metal_result step, const char *what) {
   return step.status ? fail(ncclSystemError, "%s on the GPU: %s", what, step.message) : ncclSuccess;
@@ -4384,6 +4417,11 @@ static ncclResult_t zoblimp(struct ncclComm *comm, struct compiled *x, uint64_t 
    word, every unit it sent and landed on each channel past (a lost link's counts are ~0, past everything), and its
    group no longer in flight on the host.  Reads alone; waits for nothing */
 static int zumbled(const struct ncclComm *comm, const struct issue *u) {
+  /* design/zorvek.md zinth: its tables for the bridge left by the walk of both of each channel's lists (`taken` past
+     their last use), whatever else the issue awaits: a fused crossing's counts no use */
+  for (uint32_t h = 0; h < comm->count; h++)
+    for (int list = 0; u->linking[h].left && list < 2; list++)
+      if (atomic_load_explicit(comm->channels[h].view.taken[list], memory_order_acquire) < u->linking[h].left) return 0;
   if (!u->used) return 1;
   if (u->zappoffs && atomic_load_explicit(u->zappoffs, memory_order_acquire) < u->used) return 0;
   for (uint32_t h = 0; h < comm->count; h++) {
@@ -4458,7 +4496,8 @@ static struct issue *issue_make(struct ncclComm *comm, const struct compiled *x,
              (u->calls = calloc(x->n + 1, sizeof *u->calls)) &&
              (u->group = calloc(1, sizeof *u->group)) &&
              (u->group->start = calloc(2 * (size_t)comm->count + 1, sizeof *u->group->start)) &&
-             (u->sent = calloc((size_t)comm->count + 1, sizeof *u->sent)) && (u->landed = calloc((size_t)comm->count + 1, sizeof *u->landed));
+             (u->sent = calloc((size_t)comm->count + 1, sizeof *u->sent)) && (u->landed = calloc((size_t)comm->count + 1, sizeof *u->landed)) &&
+             (u->linking = calloc((size_t)comm->count + 1, sizeof *u->linking));
   if (u) { u->n = x->n; u->repeats = repeats; }
   for (uint32_t h = 0; made && h < comm->count; h++) {
     const struct schedule *p = x->plans + h;
@@ -4481,7 +4520,7 @@ static void issue_free(struct ncclComm *comm, struct issue *u) {
   if (u->tables) ncclMemFree(u->tables);
   if (u->progress) ncclMemFree(u->progress);
   if (u->zeeb) ncclMemFree(u->zeeb);
-  free(u->steps); free(u->calls); free(u->group); free(u->landings); free(u->sent); free(u->landed); free(u);
+  free(u->steps); free(u->calls); free(u->group); free(u->landings); free(u->sent); free(u->landed); free(u->linking); free(u);
 }
 /* a group done with: what its calls own (the list is its issue's) */
 static void inflight_free(struct inflight *g) { parts_free(g->list, g->n); }
@@ -5281,6 +5320,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     metal_accesses(program,batch.ranges,batch.n);
   }
   if (!result && gate) result = gpu(metal_open_gate(program, comm->gate, 0, comm->gates), "the group's gate");
+  if (!result && g) result = gpu(zinth(program, comm, u), "the group's tables linked to its bridge");
   if (!result && g) {
     uint32_t lands = 0, publishes = 0;
     for (uint32_t h = 0; h < comm->count; h++) {

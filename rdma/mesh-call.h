@@ -38,7 +38,7 @@ int mesh_stream_held(struct mesh_ctx *,uint32_t stream,uint64_t wire);
    EINVAL, EPERM where the client does not hold it, or ENOLINK */
 struct mesh_stream_view {
   struct mesh_entry *list[2];
-  _Atomic uint64_t *presented[2],*taken[2],*ready,*sent,*landed;
+  _Atomic uint64_t *presented[2],*taken[2],*ready,*sent,*landed,*zwoggle;
 };
 int mesh_stream_view(struct mesh_ctx *,uint32_t stream,struct mesh_stream_view *);
 /* design/transport.md section 14: `entry` presented on held stream `stream`'s send list (`land` 0) or landing list

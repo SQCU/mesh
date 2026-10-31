@@ -7,6 +7,7 @@
 #include "mesh-verbs.h"
 #include "mesh-call.h"
 #include "mesh-observe.h"
+#include "mesh-graph.h"
 #include <dispatch/dispatch.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <sys/event.h>
@@ -120,8 +121,13 @@ static inline uint64_t lanes_through(const uint64_t *u){
 }
 /* A taken-entry ring; units/base/count refer to transport units. `base` is
    the pairing-wide prefix before this holding. Tables stay immutable through
-   final unit completion; taking an entry releases only its list slot. */
-struct walk { struct taken *ring; uint64_t taken,done,at; struct mesh_units units,base,count; };
+   final unit completion; taking an entry releases only its list slot.
+   design/zorvek.md zinth: a holding that links its calls' tables (mesh.h struct mesh_zwoggle) is walked from them
+   instead (`chained`): `chain` its place in them (mesh-graph.h mesh_graph_chain: a node a call's tables, an item an
+   entry of its list, its positions the holding's units, the nodes left the list's calls left), `current` the entry
+   holding the unit last asked for, read from the call's tables (mesh-link.c walk_chain) */
+struct walk { struct taken *ring; uint64_t taken,done,at; struct mesh_units units,base,count;
+              int chained; struct mesh_graph_chain chain; struct taken current; };
 /* design/transport.md section 14: a holding's state on its stream at its port's progress thread: none (`HOLD_NONE`);
    served (`HOLD_SERVE`); ended (its owner word given, or its client retired), until the next pass has taken its lanes'
    completions (`HOLD_END`); ended with units outstanding on the stream's lanes, the stream not live and nothing served

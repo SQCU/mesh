@@ -97,6 +97,10 @@ static void link_failed(struct port *,int64_t);
    as its ring has room: each copied once and typed (struct taken),
    its first unit over the holding counted, and the list's `taken` stored past them */
 static void walk_take(struct walk *w,struct mesh_stream *x,int land){
+  /* design/zorvek.md zinth: a holding that links its calls' tables (its `zwoggle` stored before any entry presented) is
+     walked from them (walk_chain), its rings never read */
+  if(w->chained)return;
+  if(!w->taken && atomic_load_explicit(&x->zwoggle,memory_order_acquire)){w->chained=1;return;}
   const uint64_t n=atomic_load_explicit(land?&x->lands:&x->sends,memory_order_acquire);
   const struct mesh_entry *list=(const struct mesh_entry *)((char *)M+x->lists)+(uint64_t)land*MESH_STREAM_ENTRIES;
   uint64_t t=w->taken;
@@ -114,9 +118,36 @@ static void walk_take(struct walk *w,struct mesh_stream *x,int land){
   if(t!=w->taken){w->taken=t;atomic_store_explicit(&x->taken[land],t,memory_order_release);}
 
 }
+/* design/zorvek.md zinth: mesh-graph.h mesh_graph_chain's operands over a holding's linked call tables (mesh.h struct
+   mesh_zwoggle): node 0 the stream's `zwoggle` word, a node a call's tables (their region offset) and its link their
+   `next`, an item an entry of the list's, weighed in units, a call left told in the list's `taken` (its tables no
+   longer read) */
+struct chained { const struct mesh_stream *x; int land; };
+static inline const struct mesh_zwoggle *tables_at(uint64_t node){ return (const struct mesh_zwoggle *)((const char *)M+node); }
+static inline const struct mesh_entry *entry_at(uint64_t node,int land,uint64_t item){
+  return (const struct mesh_entry *)((const char *)M+tables_at(node)->entries[land])+item;
+}
+static uint64_t chain_follow(const void *context,uint64_t node){
+  const struct chained *c=context;
+  return atomic_load_explicit(node?&tables_at(node)->next:&c->x->zwoggle,memory_order_acquire);
+}
+static uint64_t chain_items(const void *context,uint64_t node){ return tables_at(node)->count[((const struct chained *)context)->land]; }
+static uint64_t chain_weight(const void *context,uint64_t node,uint64_t item){ return entry_at(node,((const struct chained *)context)->land,item)->units; }
+static void chain_leave(void *consumer,uint64_t node,uint64_t left){ (void)node; atomic_store_explicit((_Atomic uint64_t *)consumer,left,memory_order_release); }
+/* the entry holding unit q of a holding that links its calls' tables, read where its call's tables hold it; NULL where
+   the call holding q is not yet linked */
+static struct taken *walk_chain(struct walk *w,struct mesh_stream *x,int land,struct mesh_units q){
+  const struct chained c={x,land};
+  if(!mesh_graph_chain(&w->chain,q.n,chain_follow,chain_items,chain_weight,&c,chain_leave,&x->taken[land]))return NULL;
+  const struct mesh_entry e=*entry_at(w->chain.node,land,w->chain.item);
+  w->current=(struct taken){(const struct mesh_dma_span *)((const char *)M+e.spans),{e.units},{e.base},{w->chain.before},
+                            e.word?stream_words(e.word):land?NULL:&x->ready};
+  return &w->current;
+}
 /* the walk's entry holding unit q of the holding, from the walk's place, which it moves past every entry done and
    every entry whose units are all before q; NULL where no entry taken holds it */
-static struct taken *walk_unit(struct walk *w,struct mesh_units q){
+static struct taken *walk_unit(struct walk *w,struct mesh_stream *x,int land,struct mesh_units q){
+  if(w->chained)return walk_chain(w,x,land,q);
   if(w->at<w->done)w->at=w->done;
   for(;w->at<w->taken;w->at++){
     struct taken *t=w->ring+w->at%MESH_STREAM_ENTRIES;
@@ -141,7 +172,7 @@ static void walk_count(struct walk *w,struct mesh_units through,_Atomic uint64_t
    where nothing of the holding is outstanding; MESH_STREAM_GIVEN alone, naming no client, so none takes it, where
    units are (stream_end) */
 static void stream_free(struct mesh_stream *x,uint64_t owner){
-  _Atomic uint64_t *words[]={&x->sends,&x->lands,&x->taken[0],&x->taken[1],&x->ready,&x->sent,&x->landed};
+  _Atomic uint64_t *words[]={&x->sends,&x->lands,&x->taken[0],&x->taken[1],&x->ready,&x->sent,&x->landed,&x->zwoggle};
   for(size_t i=0;i<sizeof words/sizeof *words;i++)atomic_store_explicit(words[i],0,memory_order_relaxed);
   atomic_store_explicit(&x->owner,owner,memory_order_release);
 }
@@ -221,13 +252,14 @@ static void stream_send(struct port *port,uint32_t t,uint32_t served){
   struct link *l=&port->link;
   const uint32_t k=MESH_LANE_FIRST+2*t;
   if(l->hold[t]!=HOLD_SERVE || (served>>k&3)!=3)return;
+  struct mesh_stream *x=stream_of(port,t);
   struct walk *w=l->sending+t;
   for(uint32_t budget=2*MESH_PASS_UNITS;budget;budget--){
     const uint32_t j=MESH_STREAM_LANES>1 && lane_page(1,l->lane[k+1].sent)<lane_page(0,l->lane[k].sent),lane=k+j;
     struct lane_state *state=l->lane+lane;
     if(state->sent-state->done>=MESH_LANE_UNITS)break;
     const struct mesh_units q=mesh_units_sub((struct mesh_units){lane_page(j,state->sent)},w->base);
-    const struct taken *e=walk_unit(w,q);
+    const struct taken *e=walk_unit(w,x,0,q);
     if(!e)break;
     const struct mesh_units i=mesh_units_sub(q,e->unit);
     if(!mesh_units_lt(mesh_units_add(e->base,i),mesh_units_load(e->word)))break;
@@ -251,13 +283,14 @@ static void stream_post(struct port *port,uint32_t t,uint32_t served){
   struct link *l=&port->link;
   const uint32_t k=MESH_LANE_FIRST+2*t;
   if(l->hold[t]!=HOLD_SERVE || (served>>k&3)!=3)return;
+  struct mesh_stream *x=stream_of(port,t);
   struct walk *w=l->landing+t;
   for(uint32_t budget=2*MESH_PASS_UNITS;budget;budget--){
     const uint32_t j=MESH_STREAM_LANES>1 && lane_page(1,l->lane[k+1].posted)<lane_page(0,l->lane[k].posted),lane=k+j;
     struct lane_state *state=l->lane+lane;
     if(state->posted-state->got>=MESH_LANE_UNITS)break;
     const struct mesh_units q=mesh_units_sub((struct mesh_units){lane_page(j,state->posted)},w->base);
-    const struct taken *e=walk_unit(w,q);
+    const struct taken *e=walk_unit(w,x,1,q);
     if(!e)break;
     if(e->word && mesh_units_lt(mesh_units_load(e->word),e->base))break;
     const struct mesh_dma_span bytes=e->spans[mesh_units_sub(q,e->unit).n];
@@ -646,7 +679,7 @@ static void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
   for(uint32_t s=0;s<plan_streams(l->plan);s++){
     struct mesh_stream *x=stream_of(port,s);
     atomic_store_explicit(&x->owner,0,memory_order_release);
-    _Atomic uint64_t *words[]={&x->sends,&x->lands,&x->ready,&x->sent,&x->landed,&x->taken[0],&x->taken[1],
+    _Atomic uint64_t *words[]={&x->sends,&x->lands,&x->ready,&x->sent,&x->landed,&x->taken[0],&x->taken[1],&x->zwoggle,
                                &x->posts[0].posted[0],&x->posts[0].posted[1],&x->posts[0].done[0],&x->posts[0].done[1],
                                &x->posts[1].posted[0],&x->posts[1].posted[1],&x->posts[1].done[0],&x->posts[1].done[1]};
     for(size_t i=0;i<sizeof words/sizeof *words;i++)atomic_store_explicit(words[i],0,memory_order_relaxed);

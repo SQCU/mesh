@@ -406,6 +406,15 @@ struct metal_result metal_open_gate(struct metal_program *program, void *words, 
   return dispatch(program, KIND_publish, words, NULL, NULL, NULL, (struct args){.scalar = value, .aux = word}, 1, 1);
 }
 
+/* nccl-mesh-metal.h metal_link: presenting, so metal_order bars the first store alone */
+struct metal_result metal_link(struct metal_program *program, const struct metal_link *links, size_t n) {
+  struct metal_result made = METAL_DONE;
+  program->presenting = 1; program->presented = 0;
+  for (size_t k = 0; k < n && !made.status; k++) made = metal_open_gate(program, links[k].words, links[k].word, links[k].value);
+  program->presenting = 0;
+  return made;
+}
+
 struct metal_result metal_spin(struct metal_program *program, const struct metal_wait *w) {
   const ncclMeshAccess uses[]={{{w->words,w->word},sizeof(uint64_t),ncclMeshAccessRead|ncclMeshAccessObserve},
     {{w->data,w->data_offset},w->bytes,ncclMeshAccessWritten}};
@@ -771,37 +780,6 @@ const char *metal_prelude(void) {
     text = [[NSString alloc] initWithFormat:@"%@\n%@", words, STEPS];
   });
   return text.UTF8String;
-}
-
-struct metal_result metal_present(struct metal_program *program,void *lists,size_t list_offset,
-    void *records,size_t record_offset,size_t count,uint64_t first,void *words,size_t taken,size_t presented) {
-  if(count) {
-    // The bridge consumes this list in order. The kernel stores the group's end only once the list's count has
-    // reached its first entry (its predecessor's end), so a later group's count never passes an earlier group's
-    // unwritten entries, in whatever command buffer each runs; here the count is read as well as written.
-    const size_t slot=first%MESH_STREAM_ENTRIES;
-    const size_t head=count<MESH_STREAM_ENTRIES-slot?count:MESH_STREAM_ENTRIES-slot;
-    const ncclMeshAccess reaches[]={
-      {{lists,list_offset+slot*sizeof(struct mesh_entry)},head*sizeof(struct mesh_entry),ncclMeshAccessWritten},
-      {{lists,list_offset},(count-head)*sizeof(struct mesh_entry),ncclMeshAccessWritten},
-      {{records,record_offset},count*sizeof(struct mesh_entry),ncclMeshAccessRead},
-      {{words,taken},sizeof(uint64_t),ncclMeshAccessRead|ncclMeshAccessObserve},
-      {{words,presented},sizeof(uint64_t),ncclMeshAccessRead|ncclMeshAccessWritten}};
-    metal_accesses(program,reaches,sizeof reaches/sizeof *reaches);
-    /* the lists and words the caller's schedule orders its crossings by (3f2a90b7's declaration) */
-    const struct MetalReach declared[]={
-      {(id)lists,list_offset+slot*sizeof(struct mesh_entry),head*sizeof(struct mesh_entry),MetalReachWritten,-1},
-      {(id)lists,list_offset,(count-head)*sizeof(struct mesh_entry),MetalReachWritten,-1},
-      {(id)words,taken,sizeof(uint64_t),MetalReachRead,-1},
-      {(id)words,presented,sizeof(uint64_t),MetalReachWritten,-1}};
-    MetalEncoderReaches(program->encoder,declared,sizeof declared/sizeof *declared);
-  }
-  program->presenting = 1;
-  const struct metal_result result = dispatch(program,KIND_present,lists,records,words,NULL,
-    (struct args){.dst=list_offset,.src=record_offset,.n=count,.scalar=first,.aux=taken,
-                  .at=presented,.count=MESH_STREAM_ENTRIES},count,1);
-  program->presenting = 0;
-  return result;
 }
 
 void metal_end(struct metal_program *program) {

@@ -162,6 +162,11 @@ void metal_boundary(struct metal_program *, const ncclMeshAccess *, size_t n);
 /* A communicator's gate word (at `word` in `words`) stored `value` after one system fence, as metal_publish stores: the
    number of the group whose landings it opens (nccl-mesh.c gate_of), a count of groups and no holding's. */
 struct metal_result metal_open_gate(struct metal_program *, void *words, size_t word, uint64_t value);
+/* design/zorvek.md zinth: a group's tables linked to its holding's streams, `n` stores (each `value` at `word` in
+   `words`, as metal_open_gate stores), one barrier before the first (they follow everything before them) and none
+   between them (each its own word) */
+struct metal_link { void *words; size_t word; uint64_t value; };
+struct metal_result metal_link(struct metal_program *, const struct metal_link *, size_t n);
 /* the wait alone (a COPY's landing in place), one threadgroup */
 struct metal_result metal_spin(struct metal_program *, const struct metal_wait *);
 /* Encode the numerical groups as their last required packet arrives. The
@@ -217,11 +222,6 @@ size_t metal_tracks_open(const void *records, const void *ended, uint32_t worker
 /* rdma/mesh.metal as this library was built with it, then the steps' Metal text: the argument record, a deferred step's
    bindings as one record (mesh_step_binding) and mesh_step_*; what a caller's kernel compiles after */
 const char *metal_prelude(void);
-/* Publish a compiled descriptor list. Its only dependency is reuse of slots
-   already read by the local bridge; no peer acknowledgement is introduced. */
-struct metal_result metal_present(struct metal_program *, void *lists, size_t list_offset,
-    void *records, size_t record_offset, size_t count, uint64_t first,
-    void *words, size_t taken, size_t presented);
 /* Release preparation state and commit residency additions. Submission remains
    owned by the enclosing recorded function. */
 void metal_end(struct metal_program *);

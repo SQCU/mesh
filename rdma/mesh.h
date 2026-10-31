@@ -93,24 +93,17 @@ _Static_assert(sizeof(struct mesh_entry)==MESH_SIZEOF_MESH_ENTRY,"mesh_entry ABI
 /* A SEND's unit i is available at word >= base+i+1 (word 0: stream ready).
    A receive's optional word permits its first write at word >= base. The
    immutable span table and its backing allocations outlive every future unit
-   and every posted DMA. `taken` does not release this table.
-   design/zorvek.md zinth: an entry of a compiled program whose word carries MESH_ENTRY_WHOLE
-   requires word >= base of every unit (a call's start, an earlier call's completion count); without it unit i requires
-   word >= base+i+1 (a forward's `landed`, a sum's zelloth count). The bit lies above every region offset. (struct
-   mesh_zwoggle below) */
-#define MESH_ENTRY_WHOLE (UINT64_C(1) << 63)
-/* design/zorvek.md zinth, zwoggle (the laid tables): a stream's compiled program, in region pages its holder wrote once at its plan; the bridge
-   walks it and keeps no copy of its entries. `calls` the program's call sequence (the plan's declared order; it
-   repeats as the program does, and sequences calls alone: no page is reused by it), `order` each call's definition
-   (calls uint32_t), `definitions` of them at `defs`, `prefix` each list's units of the calls before each call (calls + 1
-   uint64_t a list, the last one call sequence's), `first` the holding's call (its `started` count) at which this
-   program's call 0 begins, `next` the program after it (region offset, 0 none) from its own `first` on. Every offset
-   is the region's. An entry's base is relative to its `relative` count at its call's start: 0 none, 1 the holding's
-   calls before it, 2 + 2s + l the units of stream s's list l (0 send, 1 landing) before it */
-struct mesh_zwoggle_entry { struct mesh_entry entry; uint64_t relative; };
-struct mesh_zwoggle_definition { uint64_t entries[2], count[2], units[2]; };
-struct mesh_zwoggle { uint64_t first; uint32_t calls, definitions; uint64_t order, defs, prefix[2], next; };
-enum { MESH_RELATIVE_NONE, MESH_RELATIVE_CALLS, MESH_RELATIVE_UNITS };
+   and every posted DMA. `taken` does not release this table. */
+/* design/zorvek.md zinth: a call's laid tables (zwoggle) on one stream of its holding, in region memory the holder wrote
+   before the call: its send and landing entries (`entries`, region offsets of struct mesh_entry, `count` of each list),
+   and `next`, the region offset of the holding's next call's on the stream, 0 until that call stores it at its own
+   stream position (zinth: the call's one store for transport). The stream's `zwoggle` is its first call's. The bridge
+   walks the chain in order, keeps no copy of an entry, and counts in `taken` each list's calls it has left (their
+   tables no longer read: the holder takes their memory again past them). Links are stored in any order (a call's
+   command buffer may run before its predecessor's): the chain is the holding's call order however they land.
+   73b5df63's compiled program (a declared call order, per-call prefixes, relative bases) is deleted: a call's pages
+   are the allocator's (zappo), not a position in an order, so no order compiles them */
+struct mesh_zwoggle { _Atomic uint64_t next; uint64_t entries[2], count[2]; };
 struct mesh_units { uint64_t n; };
 static inline struct mesh_units mesh_units_add(struct mesh_units a,struct mesh_units b){ return (struct mesh_units){a.n+b.n}; }
 static inline struct mesh_units mesh_units_sub(struct mesh_units a,struct mesh_units b){ return (struct mesh_units){a.n-b.n}; }
@@ -159,7 +152,7 @@ static inline int mesh_span_overlaps(struct mesh_dma_span a,struct mesh_dma_span
    names stays held), and the bridge tells each unit before it posts it so that read sees it (mesh-link.c unit_told).
    A holding that ended with units
    outstanding leaves its owner word MESH_STREAM_GIVEN alone (naming no client, so none takes it) and the stream not
-   live for the rest of its pairing.  The holder presents its
+   live for the rest of its pairing.  The holder links its calls' tables (struct mesh_zwoggle, `zwoggle`), or presents its
    entries in order: entry e of a list in slot e mod MESH_STREAM_ENTRIES of `lists` (region offsets: the send list,
    then the landing list), then `sends` or `lands` (entries presented) past it, a slot reusable once `taken` (the
    bridge's, per list) is past it.  Three unit counts over the holding, each in its list's order and all of it before:
@@ -180,10 +173,9 @@ struct mesh_stream {
   _Atomic uint64_t unfinished;
   uint64_t unfinished_room[3];
   _Alignas(MESH_RECORD_ALIGNMENT) _Atomic uint64_t ready;
-  /* design/zorvek.md zinth, the holder's, beside `ready` in its line (no offset or size moves): its calls started (one
-     store at each call's stream position) and its compiled program (struct mesh_zwoggle, region offset; 0: none, the
-     stream walked from its rings) */
-  _Atomic uint64_t started;
+  /* design/zorvek.md zinth, the holder's, beside `ready` in its line (no offset or size moves): its first call's tables
+     (struct mesh_zwoggle, region offset), stored at that call's stream position; 0 while a holding presents on the
+     rings instead (a client that has not moved: mesh-call.c mesh_stream_present) */
   _Atomic uint64_t zwoggle;
   _Alignas(MESH_RECORD_ALIGNMENT) _Atomic uint64_t sent;
   _Atomic uint64_t landed,taken[2];

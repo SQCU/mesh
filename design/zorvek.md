@@ -107,46 +107,40 @@ what of the block takes its place. The order is forced: each later one guards a 
 5. The encoder barriers between groups and the metal_boundary frontier (zilbos): with no transport on the GPU and no
    page shared between calls, a call's functions order after what they read in stream order alone (zumble).
 6. The GPU presents and the descriptor rings (zarpers: MESH_STREAM_ENTRIES, `taken`, the bridge's walk_take copy):
-   the bridge runs compiled page lists per call (zinth hands it the call), its walk the executor of zirrup and
-   zirrupel, which its entry word already is.
+   the bridge walks each call's laid tables, linked at the call's place (zinth, below: the presents are deleted, the
+   rings are left to their last client), its walk the executor of zirrup and zirrupel, which its entry word already is.
 7. The landing gate and the operand staging copies (zibbins): transport by view; a premultiplier folded into zelloth.
 
-## zinth: the bridge runs compiled lists (item 6), the design before the code
+## zinth: a call's tables linked to the bridge (item 6)
 
 Measured 2026-10-31 (test-ov3, not landed): letting a "declared repeat"'s presents skip their barrier gave no rate and
 deadlocked the chain service, a burst of small steps filling both ends' 4,096-entry rings with entries of different
 calls in orders neither end could drain. Retracted with it: the repeat index and the overlap flag were a positional
-rule standing in for a fact about pages, and an earlier draft of this section's "pass of the declared order", bases
-relative + pass x units, was a ring over the program's order. Neither belongs here.
+rule standing in for a fact about pages, and so was the first form of this section's interface (73b5df63: a stream's
+compiled program, a declared call order with per-call unit prefixes and bases relative to the call's place in it). A
+call's pages are the allocator's (zappo), not a position in an order, so no order compiles them.
 
-- Whether a call waits for another is a fact about their pages, known when the program is compiled: a call writes a
-  page another call reads or writes, or it does not. Nothing else orders two calls.
-- What the plan compiles: each definition's entries once (its pages, its spans, each requirement's word), in the
-  bridge's form, in region pages that mesh.h describes.
-- What a call stores: one word at its stream position, its start (after the barrier ordering it after the caller's
-  producers), naming the definition it runs. Own-page SENDs require it (zook); its landings require it for their
-  first write; a landing into a page an earlier call still reads requires that call's completion count, stated by the
-  compiler for that page alone.
-- What the bridge does: takes each started call's compiled entries, counts their requirement bases from the units it
-  has walked before them, and posts as each requirement allows (zirrup, zirrupel). The GPU does nothing for
-  transport.
-- Deleted with it: present_group's per-call entries, metal_present and the present kernel, MESH_STREAM_ENTRIES and the
-  rings, walk_take's copy, the `taken` waits, commit_group's presented counts.
+What runs (mesh.h struct mesh_zwoggle, nccl-mesh.c present_group and zinth, mesh-link.c walk_chain):
 
-### zinth's interface (mesh.h), as the code will state it
+- zoblimp lays, in the issue's span-table lease (linear backing: the bridge reads it as one region interval), one
+  table a channel: the call's send and landing entries and a `next` word.
+- zinth is one store a channel at the call's place in the program, after the operand copies and the gate: the
+  table's region offset into the word the holding's last call left for it (the stream's `zwoggle`, then that call's
+  `next`). Links are stored in whatever order command buffers run; the chain is the holding's call order regardless.
+  Nothing waits for ring room or for a predecessor's count; the GPU present kernel and metal_present are deleted.
+- The bridge walks the chain (mesh-graph.h mesh_graph_chain, its operands the stream's tables), keeps no copy of an
+  entry, and counts in each list's `taken` the calls it has left. A table is read until its walk leaves it, which
+  happens only once the next call is linked, so its lifetime is that count, never a unit's completion (a list may
+  carry no unit after it). An issue is taken again once both walks of each channel have left its tables (zumbled),
+  and its table lease is returned only then (mesh-lease-retire.h MESH_LEASE_LEFT_SEND, MESH_LEASE_LEFT_LAND).
+- Measured on all five, 2026-10-31: chain service exits 0, bandwidth 45 of 45 correct in each of two runs, every
+  64 MiB rate within main's band (the A/A pair decides each outlier).
 
-- `struct mesh_program`, a stream's compiled program in region pages, written once by the plan: `calls`, the declared
-  order's calls (the program's call sequence; sequencing alone, never a page decision); `order`, each call's
-  definition; for each definition its send and landing entries (`struct mesh_entry`) and each list's units; and for
-  each list the units of the calls before each call (so call n's absolute base is the order's earlier calls' units
-  plus its own relative one, n past the order taken whole times its units, as the program's call sequence repeats).
-- `struct mesh_entry` gains its requirement's kind: per unit (`word >= base + i + 1`: a forward's `landed`, a sum's
-  zelloth count) or whole (`word >= base`: the call's start for own pages and a landing's first write; an earlier
-  call's completion count where the compiler gave both calls the same pages). A whole requirement's base counts
-  calls (the start, a completion), a per-unit one units.
-- `struct mesh_stream` gains `program` (region offset, 0 none) and `started` (calls started, the holder's GPU store at
-  each call's stream position). A stream with a program is walked from it; one without, from its ring, as now, until
-  every user has moved (presents, fused crossings, WRITE plans, the quiet probe); then the rings, `sends`, `lands`,
-  `taken`, walk_take's copy and the presents go, and `program` is the only form.
-- The bridge finds unit q's entry by the program's prefix units (the call, then its entry), holds no copy of entries,
-  and posts each unit once its requirement holds.
+What remains of item 6, in order:
+
+1. Entries laid once per issue: each entry's base relative to its call's place on its list (a channel's units
+   before the call), so present_group writes nothing per call but `next`.
+2. The rings' last client, mesh-diagnostics.c's quiet probe (mesh_stream_present), moved to a linked table.
+3. Then deleted: MESH_STREAM_ENTRIES, the stream's `lists`, `sends` and `lands`, walk_take and struct taken's ring,
+   mesh_stream_present, the `presented` words in the library's diagnostics and its group access declarations
+   (ncclMeshGroupAccesses), and chain.py's input frames bounded by the rings (_stream.mm STREAM_ENTRIES).

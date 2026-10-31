@@ -367,3 +367,21 @@ done:
   free(last); free(arc_first); free(free_at); free(ready); free(queued); free(known); free(place);
   return status;
 }
+
+/* mesh-graph.h mesh_graph_chain */
+int mesh_graph_chain(struct mesh_graph_chain *cursor, uint64_t q, uint64_t (*follow)(const void *context, uint64_t node),
+                     uint64_t (*items)(const void *context, uint64_t node),
+                     uint64_t (*weight)(const void *context, uint64_t node, uint64_t item), const void *context,
+                     void (*leave)(void *consumer, uint64_t node, uint64_t left), void *consumer) {
+  for (;;) {
+    for (const uint64_t n = cursor->node ? items(context, cursor->node) : 0; cursor->item < n; cursor->item++) {
+      const uint64_t w = weight(context, cursor->node, cursor->item);
+      if (q - cursor->before < w) return 1;
+      cursor->before += w;
+    }
+    const uint64_t next = follow(context, cursor->node);
+    if (!next) return 0;
+    if (cursor->node && leave) leave(consumer, cursor->node, ++cursor->left);
+    cursor->node = next; cursor->item = 0;
+  }
+}

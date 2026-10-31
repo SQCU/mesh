@@ -28,8 +28,11 @@ struct mesh_lease_retire {
   size_t count, room;
   uint64_t registering;
 };
-enum { MESH_LEASE_SEND = 0, MESH_LEASE_LAND = 1 };
-struct mesh_lease_retire_sample { uint64_t wire, holding, sent, landed; };
+/* MESH_LEASE_LEFT_SEND and MESH_LEASE_LEFT_LAND: design/zorvek.md zinth, a call's linked tables (mesh.h struct
+   mesh_zwoggle), metadata the bridge's walk of that list reads until it leaves them, which its `taken` counts (`left`:
+   the calls left), not any unit's completion (a list may carry no unit after them) */
+enum { MESH_LEASE_SEND = 0, MESH_LEASE_LAND = 1, MESH_LEASE_LEFT_SEND = 2, MESH_LEASE_LEFT_LAND = 3 };
+struct mesh_lease_retire_sample { uint64_t wire, holding, sent, landed, left[2]; };
 /* Return zero only when sample describes this stream's currently held words. */
 typedef int (*mesh_lease_retire_query)(void *, uint32_t, struct mesh_lease_retire_sample *);
 /* Zero proves no future access from this holding; payload DMA may be handed
@@ -53,7 +56,7 @@ static inline int mesh_lease_retire_end(struct mesh_lease_retire *r) {
 static inline int mesh_lease_retire_mark_use(struct mesh_lease_retire *r, uint32_t stream,
                                             uint64_t wire, uint64_t holding, uint64_t end,
                                             unsigned direction, unsigned metadata) {
-  if (!wire || !holding || end == UINT64_MAX || direction > MESH_LEASE_LAND || metadata > 1) return EINVAL;
+  if (!wire || !holding || end == UINT64_MAX || direction > MESH_LEASE_LEFT_LAND || metadata > 1) return EINVAL;
   if (!end) return 0;
   for (size_t i = 0; i < r->count; i++) {
     struct mesh_lease_retire_dep *d = r->deps + i;
@@ -91,7 +94,8 @@ static inline int mesh_lease_retire_ready(struct mesh_lease_retire *r,
     if (d->done) continue;
     struct mesh_lease_retire_sample sample;
     if (d->invalid || !query || query(context, d->stream, &sample)) { ready = 0; continue; }
-    const uint64_t completed = d->direction == MESH_LEASE_LAND ? sample.landed : sample.sent;
+    const uint64_t completed = d->direction >= MESH_LEASE_LEFT_SEND ? sample.left[d->direction - MESH_LEASE_LEFT_SEND]
+                              : d->direction == MESH_LEASE_LAND ? sample.landed : sample.sent;
     if (sample.wire != d->wire || sample.holding != d->holding || completed == UINT64_MAX) {
       d->invalid = 1; ready = 0; continue;
     }

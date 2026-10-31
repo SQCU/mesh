@@ -74,4 +74,16 @@ struct mesh_graph_follow { uint32_t before, after, offset; enum mesh_graph_wait 
 struct mesh_graph_move { uint32_t arc, units; uint64_t production; double unit_seconds, last_seconds, release; };
 int mesh_graph_schedule(const struct mesh_graph_move *move, uint32_t moves, uint32_t arcs,
                         const struct mesh_graph_follow *follow, size_t follows, uint32_t *order, double *finish);
+/* A walk along a chain whose links are stored as it grows (a node's successor `follow(context, node)`, 0 until stored;
+   node 0 the chain's head) to the item holding position q, each node's `items(context, node)` items in order and item
+   i `weight(context, node, i)` positions long: the walk's place (`cursor`: its node, its item there, `before` the
+   positions of the items passed, `left` the nodes left) moves past every item whose positions all lie before q and
+   into each node linked after its own, `leave(consumer, node, left)` told each node it leaves (NULL: none).  1 where
+   it reaches q's item (cursor->item of cursor->node, its first position cursor->before), 0 where the chain ends
+   before it.  A place only moves forward: q at or past the last q asked. */
+struct mesh_graph_chain { uint64_t node, item, before, left; };
+int mesh_graph_chain(struct mesh_graph_chain *cursor, uint64_t q, uint64_t (*follow)(const void *context, uint64_t node),
+                     uint64_t (*items)(const void *context, uint64_t node),
+                     uint64_t (*weight)(const void *context, uint64_t node, uint64_t item), const void *context,
+                     void (*leave)(void *consumer, uint64_t node, uint64_t left), void *consumer);
 #endif

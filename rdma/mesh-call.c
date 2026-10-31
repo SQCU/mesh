@@ -89,7 +89,7 @@ int mesh_stream_view(struct mesh_ctx *context,uint32_t stream,struct mesh_stream
   char *m=(char *)context->M;
   struct mesh_entry *lists=(struct mesh_entry *)(m+x->lists);
   *view=(struct mesh_stream_view){.list={lists,lists+MESH_STREAM_ENTRIES},.presented={&x->sends,&x->lands},.taken={&x->taken[0],&x->taken[1]},
-    .ready=&x->ready,.sent=&x->sent,.landed=&x->landed};
+    .ready=&x->ready,.sent=&x->sent,.landed=&x->landed,.zwoggle=&x->zwoggle};
   return 0;
 }
 int mesh_stream_present(struct mesh_ctx *context,uint32_t stream,int land,struct mesh_entry entry){
