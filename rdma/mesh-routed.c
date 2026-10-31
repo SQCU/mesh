@@ -350,7 +350,7 @@ static int order_edge(struct mesh_graph_follow **edges,size_t *used,size_t *room
    units ready on it, highest first, so a relay offsets its pages by its hops and takes no cable's time from it. */
 int mesh_transfer_order(const struct mesh_fabric *fabric,uint32_t groups,const uint32_t *first,
                         const struct mesh_transfer *transfer,const struct mesh_transfer_production *production,
-                        uint64_t page,uint32_t *publish,uint32_t *consume){
+                        uint64_t page,uint32_t *publish,uint32_t *consume,double *finish){
   if(mesh_fabric_check(fabric)||!first||!page||first[0])return EINVAL;
   const size_t rows=(size_t)groups*fabric->nodes;
   for(size_t row=0;row<rows;row++)if(first[row]>first[row+1])return EINVAL;
@@ -417,7 +417,7 @@ int mesh_transfer_order(const struct mesh_fabric *fabric,uint32_t groups,const u
       status=order_edge(&edges,&used,&room,sent[k].entry,received[k].entry,0,MESH_GRAPH_STREAMED);
     }
   }
-  if(!status)status=mesh_graph_schedule(moves,count,arcs,edges,used,order,NULL);
+  if(!status)status=mesh_graph_schedule(moves,count,arcs,edges,used,order,finish);
   if(!status)for(uint32_t k=0;k<sends;k++){
     const uint32_t send=sent[k].entry,receive=received[k].entry;
     publish[send]=publish[receive]=order[send];
@@ -435,7 +435,7 @@ static int dependency_order(const struct mesh_fabric *fabric,struct routed_piece
   if(!status){
     for(size_t k=0;k<count;k++){first[pieces[k].rank+1]++;transfers[k]=pieces[k].transfer;}
     for(uint32_t rank=0;rank<fabric->nodes;rank++)first[rank+1]+=first[rank];
-    status=mesh_transfer_order(fabric,1,first,transfers,NULL,page,publication,consumption);
+    status=mesh_transfer_order(fabric,1,first,transfers,NULL,page,publication,consumption,NULL);
     if(!status)for(size_t k=0;k<count;k++){
       pieces[k].transfer.step.round=publication[k];pieces[k].consume=consumption[k];
     }

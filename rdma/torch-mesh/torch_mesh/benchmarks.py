@@ -115,7 +115,8 @@ def bandwidth(config):
             'workload': {'collective': what, 'bytes': requested, 'calls': calls}, 'implementation': 'loaded-program',
             'started': started, 'rank': rank, 'size': size, 'useful_work_bytes': useful * calls,
             'report': {'what': what, 'requested_bytes': requested, 'calls': calls,
-                       'useful_output_bytes_per_call_rank': useful}})
+                       'useful_output_bytes_per_call_rank': useful,
+                       'compiled_microseconds_per_call': group._plan.seconds[index] * 1e6}})
     observations.close()
     checked(rank, outputs)
     dist.destroy_process_group()

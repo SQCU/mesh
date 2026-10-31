@@ -202,11 +202,13 @@ int mesh_fabric_refine(const struct mesh_transfer *,uint32_t count,uint64_t page
    declared local dependency order. Production operands are per transfer (its
    producer's order and release); NULL means every source ready at zero. page is
    the unit the schedule moves (mesh-graph.h mesh_graph_schedule). publish/consume
-   return paired wire and receive/combine event orders. */
+   return paired wire and receive/combine event orders; *finish (NULL: not wanted)
+   the schedule's last unit's end, in seconds from its start: every page moved as
+   soon as it is ready, at its cables' rates, nothing else waited for. */
 struct mesh_transfer_production { uint64_t order; double seconds; };
 int mesh_transfer_order(const struct mesh_fabric *,uint32_t groups,const uint32_t *first,
                         const struct mesh_transfer *,const struct mesh_transfer_production *,uint64_t page,
-                        uint32_t *publish,uint32_t *consume);
+                        uint32_t *publish,uint32_t *consume,double *finish);
 /* struct mesh_paths (mesh-fabric.h): allocation uses uint128_t products and integer remainders. */
 int mesh_paths_check(const struct mesh_fabric *,uint32_t source,uint32_t destination,const struct mesh_paths *);
 /* tile is the publication width in elements (0: one publication). Route the

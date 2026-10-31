@@ -2997,7 +2997,8 @@ static int all_writes(const struct call *list, size_t n) {
   return n != 0;
 }
 
-static ncclResult_t order_transfers(const struct ncclComm *comm,const struct call *list,size_t calls,struct schedule *plans) {
+static ncclResult_t order_transfers(const struct ncclComm *comm,const struct call *list,size_t calls,struct schedule *plans,
+                                    double *seconds) {
   const uint32_t nodes=(uint32_t)comm->nranks;
   if(calls>UINT32_MAX||calls>(SIZE_MAX-1)/nodes)return fail(ncclInvalidUsage,"transfer group extent");
   const size_t rows=calls*nodes;
@@ -3044,7 +3045,7 @@ static ncclResult_t order_transfers(const struct ncclComm *comm,const struct cal
     }
   }
   const int status=mesh_transfer_order(&comm->fabric,(uint32_t)calls,first,transfers,production,comm->page,
-                                      publication,consumption);
+                                      publication,consumption,seconds);
   if(status){result=fail(ncclInternalError,"transfer schedule: %s",strerror(status));goto done;}
   for(size_t i=0;i<calls;i++)if(list[i].bound) {
     struct steps *s=list[i].bound;
@@ -3072,12 +3073,12 @@ done:
 }
 
 /* a group's calls compiled: each crossing call's steps (plan_calls) and the group's entries on each channel, each list
-   from its 0 (schedule_group); *plans NULL where it failed */
-static ncclResult_t compile_group(struct ncclComm *comm, struct call *list, size_t n, struct schedule **plans) {
+   from its 0 (schedule_group), *seconds its schedule's finish (mesh_transfer_order); *plans NULL where it failed */
+static ncclResult_t compile_group(struct ncclComm *comm, struct call *list, size_t n, struct schedule **plans, double *seconds) {
   ncclResult_t result = plan_calls(comm, list, n);
   if (!result && !(*plans = calloc(comm->count + 1, sizeof **plans))) result = fail(ncclSystemError, "out of memory");
   if (!result) result = schedule_group(comm, list, n, *plans);
-  if (!result) result = order_transfers(comm, list, n, *plans);
+  if (!result) result = order_transfers(comm, list, n, *plans, seconds);
   for (uint32_t h = 0; h < comm->count && !result; h++) result = schedule_consumption(*plans + h, 1);
   if (result) { schedules_free(comm, *plans); *plans = NULL; }
   return result;
@@ -3097,7 +3098,7 @@ struct issue { struct schedule *plans; struct steps **steps; struct inflight *gr
                struct mesh_landing_run *landings; void *progress;
                struct owned owned; /* the leases its entries read, held from its placement to the next or its end */ };
 /* All operation kinds use the same prepared generation/slot table. */
-struct compiled { struct call *calls; size_t n; uint64_t repeat; struct schedule *plans; uint32_t slot[GENERATIONS], uses, period;
+struct compiled { struct call *calls; size_t n; uint64_t repeat; struct schedule *plans; double seconds; uint32_t slot[GENERATIONS], uses, period;
                   struct issue **prepared; };
 /* a definition dropped: its slots back to the communicator's, for the next definition under the same guard, and its
    issues freed */
@@ -3117,6 +3118,7 @@ struct plan {
   struct compiled *group;
   ncclMeshPlanRun *order;
   uint64_t *ends, (*entries)[2];
+  double *seconds; /* each declared group's compiled finish (view.seconds) */
   const uint64_t **matrices; /* each declared call's count matrix, its call's own (view.matrices) */
   size_t runs;
   /* the declaration it was made from, flat (plan_declaration), and its bindings' places in it */
@@ -5155,7 +5157,7 @@ static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call
 /* a plan's own: its groups' calls and entries, their storage back to the communicator's (compiled_drop) */
 static void plan_free(struct ncclComm *comm, struct plan *plan) {
   for (uint32_t g = 0; plan && plan->group && g < plan->view.groups; g++) compiled_drop(comm, plan->group + g);
-  if (plan) { free(plan->group); free(plan->order); free(plan->ends); free(plan->entries); free(plan->matrices); free(plan->declaration); free(plan->places); }
+  if (plan) { free(plan->group); free(plan->order); free(plan->ends); free(plan->entries); free(plan->seconds); free(plan->matrices); free(plan->declaration); free(plan->places); }
   free(plan);
 }
 
@@ -5286,7 +5288,7 @@ static ncclResult_t prepared(struct ncclComm *comm, struct compiled *x, int remo
 
 /* Compile and bind every issue before command recording. */
 static ncclResult_t definition_prepare(struct ncclComm *comm, struct compiled *x) {
-  ncclResult_t result = compile_group(comm, x->calls, x->n, &x->plans);
+  ncclResult_t result = compile_group(comm, x->calls, x->n, &x->plans, &x->seconds);
   int remote = 0;
   for (size_t i = 0; !result && i < x->n; i++) remote |= crosses(x->calls + i);
   const size_t need = remote ? slot_laid(comm, x, x->calls, x->n, x->plans, NULL, NULL) : 0;
@@ -5410,6 +5412,7 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
   for (int i = 0; i < count; i++) groups += !i || calls[i].group != calls[i - 1].group;
   struct plan *made = groups ? calloc(1, sizeof *made) : NULL;
   ncclResult_t result = !groups || (made && (made->group = calloc(groups, sizeof *made->group)) && (made->entries = calloc(groups, sizeof *made->entries))
+                                    && (made->seconds = calloc(groups, sizeof *made->seconds))
                                     && (made->matrices = calloc((size_t)count, sizeof *made->matrices)))
                         ? ncclSuccess : fail(ncclSystemError, "out of memory");
   if (made) made->view.groups = groups;
@@ -5454,13 +5457,14 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
   for (uint32_t g = 0; g < groups && !result; g++) {
     struct compiled *x = made->group + g;
     result = definition_prepare(comm, x);
+    if (!result) made->seconds[g] = x->seconds;
     for (uint32_t h = 0; h < comm->count && !result; h++) { made->entries[g][0] += x->plans[h].outs; made->entries[g][1] += x->plans[h].ins; }
   }
   if (!result && made) result = plan_declaration(comm, calls, count, order, runs, made);
   if (!result) {
     struct plan *was = comm->plan;
     if (made) { made->view.first = comm->groups + 1; made->view.entries = (const uint64_t (*)[2])made->entries;
-                made->view.matrices = made->matrices; }
+                made->view.seconds = made->seconds; made->view.matrices = made->matrices; }
     comm->plan = made;
     made = was;
     if (plan) *plan = comm->plan ? &comm->plan->view : NULL;

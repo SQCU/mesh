@@ -1165,6 +1165,8 @@ typedef struct {
    (`issues`, the sum of each block's count times repeat), the number of the communicator's group the order starts at (`first`: its groups
    numbered from 1 in issue order, the first after the call), and of declared group g this rank's entries on its send
    lists and on its landing lists (entries[g][0] and [1]: a fused crossing's publications and landings, ncclMeshFused);
+   and of declared group g its compiled finish (seconds[g]: from its first unit to its schedule's last unit's end, every
+   page moved as soon as it is ready at its cables' rates and nothing else waited for, mesh-graph.h mesh_graph_schedule),
    and of declared call k (ncclMeshCommPlan's calls[k]) its complete source-major count matrix, nranks x nranks
    (matrices[k]): an AlltoAllV's as its declaration gave it or as the plan exchanged its ranks' counts, NULL for any
    other call. */
@@ -1172,6 +1174,7 @@ typedef struct {
   uint32_t groups;
   uint64_t issues, first;
   const uint64_t (*entries)[2];
+  const double* seconds;
   const uint64_t* const* matrices;
 } ncclMeshPlan;
 /* A compact sequence of contiguous declared groups, repeated as a block.
