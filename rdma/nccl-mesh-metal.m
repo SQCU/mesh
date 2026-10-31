@@ -475,7 +475,7 @@ struct metal_result metal_depend(struct metal_program *program, uint32_t other, 
    track_item, track_op, track_dep), then the state its workers share: each track's consumption count, each cursor's
    task, each task's chunks claimed and finished, the count of tasks finished, each worker's end, and each chunk's mark
    (finished) and each task's prefix of marked chunks, which a combine's landing counts its summed units by: its op's
-   `summed` word, the channel's, where a SEND names it to send each unit of the sum on as it is made (nccl-mesh.c
+   `summed` word, the receive's, where a SEND names it to send each unit of the sum on as it is made (nccl-mesh.c
    forwards) */
 struct track_head { uint64_t cursors_off, tasks_off, items_off, ops_off, deps_off, count_off, state_off, claim_off, done_off, progress_off,
                     ended_off, marks_off, prefix_off; uint32_t cursors, polls; };

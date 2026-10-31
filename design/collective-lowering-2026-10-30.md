@@ -50,14 +50,24 @@ frontier's aliasing in 9 (keys are allocation bases and pages). Found by two bui
 owners every case passes. Which later stage loses a combine-owned piece's data (8's summed forwarding is the first to
 read) is the open question, and is itself an instance of the pattern above.
 
-A further concrete mismatch is the progress operand for combining relays.
+A further concrete mismatch was the progress operand for combining relays.
 Consumption may differ from wire order, but the channel's shared summed word
-still claims a completed physical prefix. A later receive can publish past an
-unfinished earlier receive, which can then store a smaller prefix. Each produced
-receive needs its own prepared progress operand. The existing kernel already
-accepts that operand; no serial consumption restriction is required. The saved
-run lacks its prepared plan, so this defect is not yet established as that run's
-first cause.
+claimed a completed physical prefix. A later receive could publish past an
+unfinished earlier receive, which could then store a smaller prefix. Each
+produced receive now has its own prepared progress word. Its relays name that
+word; the existing kernel consumes it. The words are allocated and initialized
+during placement, held with the issue's descriptor pages, and retain increasing
+packet values across uses. Execution adds no allocation, reset, or serialization.
+Actual-source preparation confirmed distinct producer words and exact relay
+dependencies across reordered frames; the library builds. The saved failed run
+lacks its prepared plan, so this defect is not established as that run's first
+cause, and no numerical run of this change has been made. REDUCE-owned cut
+refinement remains unfinished; COPY-only refinement is not the intended final
+capability.
+
+Preparation also reports missing page bindings as an error. Returning success
+without preparing the group served the removed eager path; all calls now supply
+their bindings through the same declaration.
 
 ## Three forms
 

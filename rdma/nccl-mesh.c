@@ -204,10 +204,6 @@ struct ncclComm {
   uint64_t gate_at, gates;
   _Atomic uint64_t *words;
   void *violation;
-  /* each channel's count of units summed (a page of the region, a word a channel): a combine's landing on channel h
-     stores at word h the landed count its summed units reach, and a SEND of that sum names it (forwards) */
-  _Atomic uint64_t *sums;
-  void *sums_buffer;
   uint64_t groups;
   struct ncclComm *next_live;
   struct plan *plan;
@@ -370,7 +366,6 @@ static void comm_free(struct ncclComm *comm) {
   routes_free(comm, 1);
   for (uint32_t h = 0; h < comm->count; h++) { metal_release(comm->channels[h].buffer); metal_release(comm->channels[h].lists); }
   ncclMemFree((void *)comm->words);
-  ncclMemFree((void *)comm->sums);
   plan_free(comm, comm->plan);
   comm_leave(comm);
   free(comm->channels); free(comm->endpoint); free((void *)comm->fabric.cable);
@@ -1378,11 +1373,6 @@ static int fabric_realize(struct ncclComm *comm) {
   if (ncclMemAlloc(&words, (size_t)getpagesize()) || lease_buffer(words, &comm->violation, &offset) || offset) status = ENOMEM;
   else { memset(words, 0, (size_t)getpagesize()); comm->words = words; }
   if (!status && !(comm->channels = calloc(comm->fabric.cables + 1, sizeof *comm->channels))) status = ENOMEM;
-  void *sums = NULL;
-  if (!status && ((comm->fabric.cables + 1) * sizeof(uint64_t) > (size_t)getpagesize() || ncclMemAlloc(&sums, (size_t)getpagesize()) ||
-                  lease_buffer(sums, &comm->sums_buffer, &offset) || offset)) status = ENOMEM;
-  comm->sums = sums;
-  if (!status) memset(sums, 0, (size_t)getpagesize());
   if (!status && comm->nranks > 1 && (ncclMemAlloc(&comm->gate_word, sizeof(uint64_t)) || lease_buffer(comm->gate_word, &comm->gate, &offset) || offset))
     status = ENOMEM;
   if (!status && comm->gate_word) comm->gate_at = lease_offset(comm->gate_word);
@@ -2863,11 +2853,13 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
 struct message { struct call *c; uint32_t step, frame; uint64_t entry; mesh_pages pages, end; uint64_t need; size_t offset, bytes;
                  struct where data; struct mesh_dma_span *spans; uint64_t table; double priority;
                  const struct mesh_landing_run *landings; size_t landing_count;
+                 /* This receive's prepared chunk-progress word, storing its physical/global packet prefix. */
+                 struct where summed; uint64_t summed_word;
                  uint64_t listed; mesh_pages laid; /* its entry and end in its issue's own lists (issue_lay), schedule_laid's base */
                  uint64_t needs; /* a landing's need past its channel's first send entry, 0 none (landing_needs) */
                  /* a SEND's landing it forwards: its channel (UINT32_MAX none) and its base past that channel's landing
                     count before the group (send_dependencies) */
-                 uint32_t dep_h; mesh_pages dep_rel; int dep_summed; };
+                 uint32_t dep_h; mesh_pages dep_rel; uint64_t dep_summed; };
 /* a group's entries on one channel, each list in its order from its first (`first`: [0] the send list's, [1] the
    landing list's), its landing entries' gate (`word` a region offset, 0 none; `base` the value it reaches: a page
    count of the holding's `ready`, or the number of a group at the communicator's gate word: gate_of), and each list's
@@ -2926,7 +2918,7 @@ static int meet(const struct mesh_step *x, const struct mesh_step *y) {
 /* the receive whose bytes SEND step k sends on as they are made (design/data-model.md section 9: a relay is the identity
    at a rank, or the sum where it adds partials as they pass), or -1: the last receive before it that meets its piece,
    whose piece holds its own (step k not reading the send buffer in place): a COPY into the same buffer, each unit as it
-   lands, or, where `summed`, a combine there, each unit once summed (its channel's word of comm->sums).  The form
+   lands, or, where `summed`, a combine there, each unit once summed (that receive's prepared progress word). The form
    63a3fe3d made and bd83c006 reverted for its count, a device atomic the bridge did not see; the count is stored
    system-coherent (nccl-mesh-kernels.h TRACK_KERNEL) */
 static int32_t forwards(const struct steps *s, uint32_t k, int summed) {
@@ -3119,7 +3111,7 @@ struct inflight;
 struct issue { struct schedule *plans; struct steps **steps; struct inflight *group; struct call *calls; size_t n; uint32_t repeats;
                /* in slot `slot` (its storage at `base`, its landing area at `area`), its span tables a lease (`tables`) */
                uint32_t slot; struct where base, area; void *tables;
-               struct mesh_landing_run *landings;
+               struct mesh_landing_run *landings; void *progress;
                struct owned owned; /* the leases its entries read, held from its placement to the next or its end */ };
 /* All operation kinds use the same prepared generation/slot table. */
 struct compiled { struct call *calls; size_t n; uint64_t repeat; struct schedule *plans; uint32_t slot[GENERATIONS], uses, period;
@@ -3547,6 +3539,38 @@ static int landing_runs(const struct ncclComm *comm, struct issue *u) {
   return 0;
 }
 
+/* Consumer order can differ from physical landing order. Each combine therefore
+   publishes its own prefix; another receive can neither satisfy nor lower it.
+   Later uses of this prepared issue retain increasing global packet values. */
+static ncclResult_t landing_progress(const struct ncclComm *comm, struct issue *u) {
+  size_t count = 0;
+  for (uint32_t h = 0; h < comm->count; h++) for (size_t k = 0; k < u->plans[h].ins; k++) {
+    struct message *m = u->plans[h].in + k;
+    m->summed = (struct where){0}; m->summed_word = 0;
+    if (m->c->bound->steps[m->step].op == MESH_STEP_REDUCE && !m->c->fused &&
+        !m->c->write_binding && ktype(m->c) != METAL_MERGE) count++;
+  }
+  if (u->progress) ncclMemFree(u->progress);
+  u->progress = NULL;
+  if (!count) return ncclSuccess;
+  if (count > SIZE_MAX / sizeof(uint64_t)) return fail(ncclSystemError, "a group's progress words exceed its byte domain");
+  const size_t bytes = count * sizeof(uint64_t);
+  ncclResult_t result = mem_alloc(&u->progress, bytes, MESH_BACKING_LINEAR);
+  if (result) return result;
+  memset(u->progress, 0, bytes);
+  struct where base = {0};
+  if (lease_buffer(u->progress, &base.buffer, &base.offset)) return fail(ncclSystemError, "binding a group's progress words");
+  size_t at = 0;
+  for (uint32_t h = 0; h < comm->count; h++) for (size_t k = 0; k < u->plans[h].ins; k++) {
+    struct message *m = u->plans[h].in + k;
+    if (m->c->bound->steps[m->step].op != MESH_STEP_REDUCE || m->c->fused ||
+        m->c->write_binding || ktype(m->c) == METAL_MERGE) continue;
+    m->summed = shifted(base, at * sizeof(uint64_t));
+    m->summed_word = lease_offset((uint64_t *)u->progress + at++);
+  }
+  return ncclSuccess;
+}
+
 /* where each entry's pages lie (struct message `data`): a SEND's in the buffer its step reads (the send buffer, where
    it reads that in place), a COPY's in its step's buffer, a combine's in the group's landing area (`area`: bind_slot,
    each entry from a page of it); each in a live lease, its common byte-packet span table in its issue's lease of them
@@ -3621,7 +3645,12 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u) {
   }
   for (uint32_t h = 0; h < comm->count; h++) schedule_units(plans + h, u->repeats);
   int error = landing_runs(comm, u);
+  if (!error) {
+    ncclResult_t result = landing_progress(comm, u);
+    if (result) return result;
+  }
   if (!error && u->tables) error = owned_add(&u->owned, u->tables, OWNED_TABLE);
+  if (!error && u->progress) error = owned_add(&u->owned, u->progress, OWNED_TABLE | OWNED_SENDS);
   pthread_mutex_lock(&attach_lock);
   if (!error) error = owned_uses(comm, &u->owned);
   if (!error) error = owned_begin(&u->owned, 0);
@@ -3685,7 +3714,7 @@ static void send_dependencies(struct ncclComm *comm, struct schedule *plans) {
       int same = !sum || (bytes == delta && units.n + m->pages.n <= from->pages.n);
       for (uint64_t u = 0; sum && same && u < m->pages.n; u++) same = m->spans[u].bytes == from->spans[units.n + u].bytes;
       if (!same) continue;
-      m->dep_h = incoming; m->dep_summed = sum;
+      m->dep_h = incoming; m->dep_summed = sum ? from->summed_word : 0;
       m->dep_rel = pages_add(pages_sub(from->laid, from->pages), units);
     }
 }
@@ -3787,8 +3816,9 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
       struct mesh_entry entry = {m->table, pages_to_word(m->pages), 0, pages_to_word(pages_sub(m->end, m->pages))};
       /* the landing it forwards (send_dependencies): that channel's landing count before the group, plus its base */
       if (m->dep_h != UINT32_MAX) {
-        /* a channel's landed count, in its stream's record; or its word of comm->sums, a lease, at its region offset */
-        entry.word = m->dep_summed ? lease_offset(comm->sums) + m->dep_h * sizeof(uint64_t)
+        /* A combined source names its exact producer word; plain copies use
+           the channel's monotone physical landing prefix. */
+        entry.word = m->dep_summed ? m->dep_summed
                                    : (uint64_t)((char *)comm->channels[m->dep_h].view.landed - (char *)context->M);
         entry.base = pages_to_word(pages_add(comm->channels[m->dep_h].in, m->dep_rel));
       } else if (m->c->write_binding && m->c->write_binding->ready_value) {
@@ -4052,6 +4082,7 @@ static void issue_free(struct ncclComm *comm, struct issue *u) {
   owned_end(&u->owned, 1);
   pthread_mutex_unlock(&attach_lock);
   if (u->tables) ncclMemFree(u->tables);
+  if (u->progress) ncclMemFree(u->progress);
   free(u->steps); free(u->calls); free(u->group); free(u->landings); free(u);
 }
 /* a group done with: what its calls own (the list is its issue's) */
@@ -4207,10 +4238,9 @@ static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm
   if (!result && step->op == MESH_STEP_REDUCE) {
     const struct where to = shifted(st->buffer[step->buffer], m->offset);
     const struct where with = st->fresh && st->fresh[m->step] ? shifted(st->read[m->step], m->offset) : to;
-    const int summed = base != METAL_NONE && !g->fused && !m->c->write_binding && ktype(m->c) != METAL_MERGE;
     result = gpu(metal_land(program, ktype(m->c), kop(m->c), to.buffer, to.offset, with.buffer, with.offset,
       SIZE[m->c->type] * unit_of(m->c), m->pages, m->landings, m->landing_count, &wait,
-      summed ? comm->sums_buffer : NULL, summed ? h * sizeof(uint64_t) : 0), "a landing");
+      m->summed.buffer, m->summed.offset), "a landing");
   } else if (!result && g->fused && (at - g->start[h][1]) * g->repeats < g->end[h][1] - g->start[h][1]) {
     if (fusing.landed >= fusing.room[1])
       return fail(ncclInvalidUsage, "a fused crossing's landings past the %u its ncclMeshFused has room for (ncclMeshPlan's entries)", fusing.room[1]);
@@ -5206,7 +5236,7 @@ static ncclResult_t prepared(struct ncclComm *comm, struct compiled *x, int remo
   const uint64_t invocations = x->repeat / frames;
   for (size_t i = 0; i < x->n; i++) {
     const struct call *c = x->calls + i;
-    if (!c->declared_bindings) return ncclSuccess;
+    if (!c->declared_bindings) return fail(ncclInvalidArgument, "each declared call requires its page bindings before preparation");
     if (c->frames != frames || !!c->fused != !!x->calls[0].fused)
       return fail(ncclInvalidArgument, "a group's calls share one frame count and publication record sink");
     for (int b = 0; b < (c->write_binding ? 1 : 2); b++) {
