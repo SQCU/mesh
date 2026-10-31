@@ -2085,7 +2085,9 @@ int MetalScheduleEnd(const struct MetalSchedule *s,double *ended,NSError **error
 int MetalScheduleStatus(const struct MetalSchedule *s,NSError **error) {
     *error=nil;
     const struct MetalSchedule *root=s->root;
-    int result=1;
+    // A part publishes its status before its arrival. Completion polling must
+    // observe the final arrival too, so reading the reported end cannot wait.
+    int result=atomic_load_explicit(&root->arrived,memory_order_acquire)?1:0;
     for(;s;s=s->next){int state=atomic_load_explicit(&s->status,memory_order_acquire);if(state<0){*error=s->error;return -1;}if(!state)result=0;}
     for(MetalWork *host in root->hosts) {
         int state=atomic_load_explicit(&host->status,memory_order_acquire);
