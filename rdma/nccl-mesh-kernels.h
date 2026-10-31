@@ -163,7 +163,7 @@ static NSString *const KERNELS =
      of that sum the block waits for (metal_zelloth: its blocks starting at or before this block's last element),
      as the pool's combine followed an earlier one chunk by chunk (zelloth_needs); a payload: K inputs {landed data,
      landed word, summed
-     word (0: none)}, then R runs {first, elements, K x {scalar, phase, step, shift}}: element j of a run needs
+     word (0: none)}, then R runs {first, elements, K x {scalar, phase, step, shift}, own}: element j of a run needs
      scalar + ((phase + j * step) >> shift) of its input's word; then each block's cell {its sum's word offset, its
      run's, its place in that run in blocks}, in their global order (mesh-graph.h mesh_graph_cells, laid by
      metal_zelloth); then each sum's done word, the threadgroups' `ended`, the first sum with open blocks `low`, each
@@ -225,7 +225,7 @@ static NSString *const KERNELS =
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); "
   "device const ulong *cell = z + z[3] + 3 * q, *sum = z + cell[0], *run = z + cell[1], *in = z + sum[7]; "
   "const uint K = uint(sum[0]); "
-  "volatile coherent(system) device const T *own = (volatile coherent(system) device const T *)sum[2]; "
+  "volatile coherent(system) device const T *own = (volatile coherent(system) device const T *)run[2 + 4 * ulong(K)]; "
   "volatile coherent(system) device T *out = (volatile coherent(system) device T *)sum[3]; "
   "const ulong first = run[0], b = cell[2] * block, end = min(b + block, run[1]); "
   "for (ulong e = b + l; e < end; e += t) { const ulong j = first + e; FOLD(T, OP) } "

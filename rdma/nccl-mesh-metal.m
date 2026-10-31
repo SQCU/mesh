@@ -334,7 +334,7 @@ struct metal_result metal_zelloth(struct metal_program *program, int type, int o
     if (!sum[s].inputs || !sum[s].in[0].count) return metal_failed(EINVAL);
     uint64_t mine = 0;
     for (size_t r = 0; r < sum[s].in[0].count; r++) mine += (sum[s].in[0].runs[r].elements + block - 1) / block;
-    words += 3 * (size_t)sum[s].inputs + sum[s].in[0].count * (2 + 4 * (size_t)sum[s].inputs) +
+    words += 3 * (size_t)sum[s].inputs + sum[s].in[0].count * (3 + 4 * (size_t)sum[s].inputs) +
              (sum[s].waits ? 1 + (2 + mine) * (size_t)sum[s].waits : 0);
     runs += sum[s].in[0].count;
   }
@@ -368,9 +368,13 @@ struct metal_result metal_zelloth(struct metal_program *program, int type, int o
     z[done + s] = 0;
     h[0] = K; h[1] = R; h[2] = ((id<MTLBuffer>)x->own).gpuAddress + x->own_offset; h[3] = ((id<MTLBuffer>)x->out).gpuAddress + x->out_offset;
     h[4] = base + (done + s) * sizeof(uint64_t); h[5] = first; h[6] = mine; h[7] = off;
-    const ncclMeshAccess uses[] = {{{x->own, x->own_offset}, elements * element_bytes, ncclMeshAccessRead},
+    const ncclMeshAccess uses[] = {{{x->own, x->own_offset}, x->owns ? 0 : elements * element_bytes, ncclMeshAccessRead},
                                    {{x->out, x->out_offset}, elements * element_bytes, ncclMeshAccessWritten}};
     metal_accesses(program, uses, sizeof uses / sizeof *uses);
+    for (size_t r = 0; x->owns && r < R; r++) {
+      const ncclMeshAccess read = {{x->owns[r].buffer, x->owns[r].offset}, x->in[0].runs[r].elements * element_bytes, ncclMeshAccessRead};
+      metal_accesses(program, &read, 1);
+    }
     uint64_t *in = z + off;
     for (uint32_t i = 0; !status && i < K; i++) {
       const struct metal_zelloth_input *y = x->in + i;
@@ -384,10 +388,12 @@ struct metal_result metal_zelloth(struct metal_program *program, int type, int o
       metal_accesses(program, inputs, sizeof inputs / sizeof *inputs);
     }
     for (size_t r = 0; !status && r < R; r++, g++) {
-      const size_t at = off + 3 * (size_t)K + r * (2 + 4 * (size_t)K);
+      const size_t at = off + 3 * (size_t)K + r * (3 + 4 * (size_t)K);
       uint64_t *run = z + at;
       of[2 * g] = 4 + 9 * (size_t)s; of[2 * g + 1] = at;
       run[0] = x->in[0].runs[r].first; run[1] = x->in[0].runs[r].elements;
+      /* its own operand's base, element j of the sum at base + j (the sum's own, or where this run's pages lie) */
+      run[2 + 4 * (size_t)K] = x->owns ? ((id<MTLBuffer>)x->owns[r].buffer).gpuAddress + x->owns[r].offset - run[0] * element_bytes : h[2];
       for (uint32_t i = 0; i < K; i++) {
         const struct mesh_landing_run *y = x->in[i].runs + r;
         if (y->first != run[0] || y->elements != run[1]) { status = EINVAL; break; }
@@ -396,7 +402,7 @@ struct metal_result metal_zelloth(struct metal_program *program, int type, int o
       }
     }
     first += mine;
-    off += 3 * (size_t)K + R * (2 + 4 * (size_t)K);
+    off += 3 * (size_t)K + R * (3 + 4 * (size_t)K);
     /* its waits (nccl-mesh-metal.h struct metal_zelloth_wait): each an earlier sum of the same buffer, its done word
        and, for each of this sum's blocks, the count of that sum's blocks starting at or before its last element
        (mesh-graph.h mesh_graph_through), as the pool's combine followed an earlier one chunk by chunk; that sum's

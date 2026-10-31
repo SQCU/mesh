@@ -4852,9 +4852,63 @@ static int zgroup_order(const void *left, const void *right) {
    landing runs or in a frame train, sums whose inputs' runs differ, two calls' sums that overlap, a sum over a COPY's
    landing, or no order among them: the plan fails as a value (the tracks pool that ran them is deleted) */
 struct zplan { size_t count, made; struct zsum *sums; struct metal_zelloth_input *in;
-               struct metal_zelloth_sum *group; const struct call **of; struct metal_zelloth_wait *listed; };
+               struct metal_zelloth_sum *group; const struct call **of; struct metal_zelloth_wait *listed;
+               void **held; size_t helds; /* the runs and owns of sums whose own pages lie in two places (zsum_owns) */ };
 static void zplan_free(struct zplan *z) {
-  if (z) { free(z->sums); free(z->in); free(z->group); free(z->of); free(z->listed); free(z); }
+  if (!z) return;
+  for (size_t k = 0; k < z->helds; k++) free(z->held[k]);
+  free(z->held); free(z->sums); free(z->in); free(z->group); free(z->of); free(z->listed); free(z);
+}
+/* a sum fresh in part (plan_direct `fresh` 2): its runs split at the bounds of what earlier steps of its call wrote
+   in its buffer, so each run's own pages lie in one place, `to` (its result, those steps' writes) where they wrote,
+   the send view `read` where they did not; each input's runs split alike (element j of a run's second part needs the
+   first's j + d: its phase + d x step), the arrays the plan's (`held`) */
+static ncclResult_t zsum_owns(struct zplan *plan, const struct steps *st, const struct message *m, struct where to, struct where read,
+                              struct metal_zelloth_input *in, uint32_t K, const struct metal_zelloth_own **owns) {
+  const struct mesh_step *s = st->steps + m->step;
+  const uint64_t n = s->piece.elements, z = s->piece.element_bytes;
+  uint64_t *cut = malloc((2 * (size_t)m->step + 2) * sizeof *cut), (*written)[2] = malloc(((size_t)m->step + 1) * sizeof *written);
+  size_t cuts = 0, spans = 0;
+  if (!cut || !written) { free(cut); free(written); return fail(ncclSystemError, "out of memory"); }
+  for (uint32_t j = 0; j < m->step; j++) {
+    const struct mesh_step *a = st->steps + j;
+    if (a->op == MESH_STEP_SEND || a->buffer != s->buffer) continue;
+    const uint64_t lo = a->first > s->first ? a->first - s->first : 0;
+    const uint64_t hi = a->first + a->piece.elements < s->first + n ? a->first + a->piece.elements - s->first : n;
+    if (a->first >= s->first + n || a->first + a->piece.elements <= s->first || lo >= hi) continue;
+    written[spans][0] = lo; written[spans++][1] = hi; cut[cuts++] = lo; cut[cuts++] = hi;
+  }
+  size_t room = plan->helds, runs = 0;
+  struct mesh_landing_run *made = NULL;
+  struct metal_zelloth_own *own = NULL;
+  ncclResult_t result = ncclSuccess;
+  for (uint32_t i = 0; !result && i < K; i++) {
+    const struct mesh_landing_run *r = in[i].runs;
+    size_t count = 0;
+    made = malloc((in[i].count + cuts + 1) * sizeof *made);
+    if (!i) own = malloc((in[i].count + cuts + 1) * sizeof *own);
+    if (!made || (!i && !own) || grow(&plan->held, &room, plan->helds + 1, sizeof *plan->held)) { result = fail(ncclSystemError, "out of memory"); break; }
+    plan->held[plan->helds++] = made;
+    if (!i) plan->held[plan->helds++] = own;
+    for (size_t k = 0; k < in[i].count; k++)
+      for (uint64_t p = r[k].first, end = r[k].first + r[k].elements; p < end;) {
+        uint64_t q = end;
+        for (size_t c = 0; c < cuts; c++) if (cut[c] > p && cut[c] < q) q = cut[c];
+        made[count] = r[k]; made[count].first = p; made[count].elements = q - p; made[count].phase = r[k].phase + (p - r[k].first) * r[k].step;
+        if (!i) {
+          int covered = 0;
+          for (size_t w = 0; w < spans && !covered; w++) covered = p >= written[w][0] && p < written[w][1];
+          own[count] = covered ? (struct metal_zelloth_own){to.buffer, to.offset + (size_t)(p * z)}
+                               : (struct metal_zelloth_own){read.buffer, read.offset + (size_t)(p * z)};
+        }
+        count++; p = q;
+      }
+    if (i && count != runs) { result = fail(ncclInvalidUsage, "a sum's inputs land in runs that differ"); break; }
+    runs = count; in[i].runs = made; in[i].count = count;
+  }
+  free(cut); free(written);
+  *owns = result ? NULL : own;
+  return result;
 }
 static ncclResult_t zabbadoo_plan(struct ncclComm *comm, struct issue *u) {
   zplan_free(u->zplan);
@@ -4968,27 +5022,32 @@ static ncclResult_t zabbadoo_plan(struct ncclComm *comm, struct issue *u) {
     const struct steps *st = m->c->bound;
     const struct mesh_step *step = st->steps + m->step;
     const struct where to = shifted(st->buffer[step->buffer], m->offset);
+    /* its own operand: the send view where its steps are fresh, its result where earlier steps wrote it, both where
+       they wrote it in part (zsum_owns: each run its own place) */
     struct where own = to;
-    for (size_t e = a; e < b; e++) {
-      const struct message *x = sums[e].m;
-      if (st->fresh && st->fresh[x->step]) { own = shifted(st->read[x->step], x->offset); break; }
-    }
+    const struct message *fresh = NULL;
+    for (size_t e = a; e < b && !fresh; e++) if (st->fresh && st->fresh[sums[e].m->step]) fresh = sums[e].m;
+    if (fresh && st->fresh[fresh->step] == 1) own = shifted(st->read[fresh->step], fresh->offset);
     for (size_t e = a; e < b; e++) {
       const struct message *x = sums[e].m;
       const struct channel *ch = comm->channels + sums[e].h;
       in[e] = (struct metal_zelloth_input){x->data.buffer, x->data.offset, ch->buffer, ch->landed, x->summed.buffer, x->summed.offset,
                                            x->end, x->pages, x->landings, x->landing_count};
     }
+    const struct metal_zelloth_own *owns = NULL;
+    if (fresh && st->fresh[fresh->step] == 2)
+      result = zsum_owns(plan, st, fresh, to, shifted(st->read[fresh->step], fresh->offset), in + a, (uint32_t)(b - a), &owns);
+    if (result) break;
     const size_t from = used;
     for (size_t d = in_first[k]; d < in_first[k + 1]; d++) listed[used++] = (struct metal_zelloth_wait){group + position[in_from[d]]};
     of[made] = m->c;
     group[made++] = (struct metal_zelloth_sum){to.buffer, to.offset, own.buffer, own.offset, (uint32_t)(b - a), in + a,
-                                               (uint32_t)(used - from), used > from ? listed + from : NULL};
+                                               (uint32_t)(used - from), used > from ? listed + from : NULL, owns};
   }
   free(first_step); free(firsts); free(priors); free(marked); free(rows); free(heads); free(depth); free(class_of); free(part);
   free(place); free(in_first); free(in_from); free(G); free(span); free(laid); free(position);
   if (result) { free(sums); free(in); free(group); free(of); free(listed); return result; }
-  *plan = (struct zplan){count, made, sums, in, group, of, listed};
+  *plan = (struct zplan){count, made, sums, in, group, of, listed, plan->held, plan->helds};
   return ncclSuccess;
 }
 
@@ -5210,10 +5269,12 @@ static ncclResult_t plan_direct(struct call *c, struct where own,int *result) {
     const struct where source=view_at(c,1,(size_t)(from-lo)*z);
     const struct where map={source.buffer,source.offset-(size_t)from*z};
     const int meet = spans_meet(w + step->buffer, from, to), inside = from >= lo && to <= hi;
-    if (meet < 0 || (!meet && step->op != MESH_STEP_COPY && !inside)) direct = 0;
+    /* a combine over a range earlier steps wrote in part is fresh in part (`fresh` 2): its own operand read where they
+       did not write from the send view, where they did from its result (zabbadoo_plan's runs, each its own place) */
+    if ((meet < 0 && step->op != MESH_STEP_REDUCE) || (!meet && step->op != MESH_STEP_COPY && !inside)) direct = 0;
     else if (step->op == MESH_STEP_SEND) { if (!meet) st->read[k] = map; }
     else {
-      if (step->op == MESH_STEP_REDUCE && !meet) { st->fresh[k] = 1; st->read[k] = map; }
+      if (step->op == MESH_STEP_REDUCE && meet <= 0) { st->fresh[k] = meet ? 2 : 1; st->read[k] = map; }
       if (spans_add(w + step->buffer, from, to)) direct = 0;
     }
   }
