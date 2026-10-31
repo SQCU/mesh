@@ -175,13 +175,48 @@ static NSString *const KERNELS =
   "mesh_pages_await(p, a, vb, tg, l, p.scalar + ((p.phase + (end - 1) * p.step) >> p.mask), seen, looked); "
   "for (ulong e = b + l; e < end; e += t) x[e] = OP(mesh_payload(xs + e), mesh_payload(y + e), p.op); }\n"
   "#define COMBINE(name, T, OP) HEAD(land_##name) { ENTER(i == 0) LANDS(T, OP) }\n"
-  "#define INTEGER(name, T, SIGNED) COMBINE(name, T, op_int<T>) "
+  /* design/zorvek.md zelloth: a group's sums, each element written once, by one thread, from the rank's own element
+     and every contribution's for it, once all of them have landed, in whatever order they landed. The table at
+     s + p.src (GPU addresses): [0] S sums, [1] a block's elements, [2] blocks of every sum; then S sums of 8 words
+     {K inputs, R runs, own, out, its done word (its blocks published), its first block, its blocks, the word offset
+     of its payload}; a payload: K inputs {landed data, landed word, summed word (0: none)}, then R runs {first,
+     elements, K x {scalar, phase, step, shift}}: element j of a run needs scalar + ((phase + j * step) >> shift) of its
+     input's word. One threadgroup a core for the whole group (all resident), each taking blocks in their global order:
+     thread 0 awaits a block's inputs, the threadgroup folds it, then, once every earlier block of its sum is published
+     (its done word), stores each input's summed count past it (zuuz zimped, a SEND of the sum's readiness) and the
+     done word */
+  "#define ZELLOTH(name, T, OP) HEAD(zelloth_##name) { ENTER(i == 0) "
+  "device const ulong *z = (device const ulong *)(s + p.src); const ulong S = z[0], block = z[1], blocks = z[2], G = ulong(g) / ulong(t); "
+  "for (ulong q = ulong(i - l) / ulong(t); q < blocks; q += G) { "
+  "device const ulong *sum = z + 3; for (ulong k = 0; k < S; k++) { sum = z + 3 + 8 * k; if (q < sum[5] + sum[6]) break; } "
+  "const uint K = uint(sum[0]), R = uint(sum[1]); "
+  "volatile coherent(system) device const T *own = (volatile coherent(system) device const T *)sum[2]; "
+  "volatile coherent(system) device T *out = (volatile coherent(system) device T *)sum[3]; "
+  "volatile coherent(system) device ulong *done = (volatile coherent(system) device ulong *)sum[4]; "
+  "device const ulong *in = z + sum[7], *runs = in + 3 * ulong(K); const ulong local = q - sum[5]; "
+  "device const ulong *run = runs; ulong at = local; "
+  "for (uint r = 0; r < R; r++) { run = runs + ulong(r) * (2 + 4 * ulong(K)); const ulong nb = (run[1] + block - 1) / block; if (at < nb) break; at -= nb; } "
+  "const ulong first = run[0], b = at * block, end = min(b + block, run[1]); "
+  "if (l == 0) for (uint k = 0; k < K && !mesh_step_failed(p, vb); k++) { device const ulong *x = run + 2 + 4 * ulong(k); "
+  "const ulong want = x[0] + ((x[1] + (end - 1) * x[2]) >> x[3]); "
+  "mesh_step_check(p, mesh_step_wait(p, (device uchar *)in[3 * k + 1], want, vb), want, vb); } "
+  "threadgroup_barrier(mem_flags::mem_threadgroup); "
+  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); "
+  "for (ulong e = b + l; e < end; e += t) { const ulong j = first + e; T v = mesh_payload(own + j); "
+  "for (uint k = 0; k < K; k++) v = OP(v, mesh_payload((volatile coherent(system) device const T *)in[3 * k] + j), p.op); out[j] = v; } "
+  "threadgroup_barrier(mem_flags::mem_device); "
+  "if (l == 0) { mesh_step_check(p, mesh_step_wait(p, (device uchar *)done, local, vb), local, vb); "
+  "for (uint k = 0; k < K; k++) if (in[3 * k + 2]) { device const ulong *x = run + 2 + 4 * ulong(k); "
+  "mesh_publish((volatile coherent(system) device ulong *)in[3 * k + 2], x[0] + ((x[1] + (end - 1) * x[2]) >> x[3])); } "
+  "mesh_publish(done, local + 1); } "
+  "threadgroup_barrier(mem_flags::mem_threadgroup); } }\n"
+  "#define INTEGER(name, T, SIGNED) COMBINE(name, T, op_int<T>) ZELLOTH(name, T, op_int<T>) "
   "HEAD(premul_##name) { ENTER(i == 0) volatile coherent(system) device T *x = (volatile coherent(system) device T *)(d + p.dst); device const T *y = (device const T *)(s + p.src); ulong c = ulong(T(p.scalar)); LOOP x[k] = T(ulong(y[k]) * c); } "
   "HEAD(truncdiv_##name) { ENTER(i == 0) volatile coherent(system) device T *x = (volatile coherent(system) device T *)(d + p.dst); volatile coherent(system) device const T *y = (volatile coherent(system) device const T *)(s + p.src); LOOP { T v = mesh_payload(y + k); bool negative = SIGNED && v < T(0); "
   "ulong m = negative ? 0UL - ulong(v) : ulong(v), q = m / p.scalar; x[k] = negative ? T(0UL - q) : T(q); } }\n"
-  "#define FLOATING(name, T) COMBINE(name, T, op_float<T>) "
+  "#define FLOATING(name, T) COMBINE(name, T, op_float<T>) ZELLOTH(name, T, op_float<T>) "
   "HEAD(premul_##name) { ENTER(i == 0) volatile coherent(system) device T *x = (volatile coherent(system) device T *)(d + p.dst); device const T *y = (device const T *)(s + p.src); float c = as_type<float>(uint(p.scalar)); LOOP x[k] = T(float(y[k]) * c); }\n"
-  "#define FLOAT8(name, E5) COMBINE(name, uchar, op_f8<E5>) "
+  "#define FLOAT8(name, E5) COMBINE(name, uchar, op_f8<E5>) ZELLOTH(name, uchar, op_f8<E5>) "
   "HEAD(premul_##name) { ENTER(i == 0) volatile coherent(system) device uchar *x = (volatile coherent(system) device uchar *)(d + p.dst); device const uchar *y = (device const uchar *)(s + p.src); float c = as_type<float>(uint(p.scalar)); LOOP x[k] = f8_from(f8_to(y[k], E5) * c, E5); }\n"
   "INTEGER(i8, char, true)\n"
   "INTEGER(u8, uchar, false)\n"
@@ -248,7 +283,9 @@ enum { WORD_D = 1, WORD_A };
   X(land_f16, WORD_A, MESH_COMBINE_LANES) X(premul_f16, 0, 0) X(land_f32, WORD_A, MESH_COMBINE_LANES) X(premul_f32, 0, 0) \
   X(land_bf16, WORD_A, MESH_COMBINE_LANES) X(premul_bf16, 0, 0) X(land_e4m3, WORD_A, MESH_COMBINE_LANES) X(premul_e4m3, 0, 0) \
   X(land_e5m2, WORD_A, MESH_COMBINE_LANES) X(premul_e5m2, 0, 0) \
-  X(publish, 0, 0) X(spin, WORD_D, 0) X(land_merge, WORD_A, 1) X(land_merge_from, WORD_A, 1) X(present, 0, 0)
+  X(publish, 0, 0) X(spin, WORD_D, 0) X(land_merge, WORD_A, 1) X(land_merge_from, WORD_A, 1) X(present, 0, 0) \
+  X(zelloth_i8, 0, 0) X(zelloth_u8, 0, 0) X(zelloth_i32, 0, 0) X(zelloth_u32, 0, 0) X(zelloth_i64, 0, 0) X(zelloth_u64, 0, 0) \
+  X(zelloth_f16, 0, 0) X(zelloth_f32, 0, 0) X(zelloth_bf16, 0, 0) X(zelloth_e4m3, 0, 0) X(zelloth_e5m2, 0, 0)
 #define KIND_ENUM(name, word, lanes) KIND_##name,
 #define KIND_NAME(name, word, lanes) #name,
 #define KIND_WORD(name, word, lanes) word,

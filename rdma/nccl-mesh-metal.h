@@ -138,6 +138,22 @@ struct metal_wait { void *words, *violation, *data; size_t word, data_offset; me
    later repeat of a fused crossing's `stride` pages past it */
 struct metal_release { void *words; size_t word; mesh_pages value, stride; };
 struct metal_result metal_publish(struct metal_program *, const struct metal_release *);
+/* design/zorvek.md zelloth: the sum `out` of `type` and reduction `op` (as metal_land's), each element once, by one
+   writer, from `own` and every input's landed element for it, once all have landed, whatever their order; each input
+   one landing (its landed data, its channel's `landed` word, its target and packets as a metal_wait's, its landing runs,
+   every input's runs over the same elements) and the summed word its forwards name (none: summed NULL), stored past
+   each block in order */
+struct metal_zelloth_input { void *data; size_t data_offset; void *words; size_t word; void *summed; size_t summed_offset;
+                             mesh_pages target, packets; const struct mesh_landing_run *runs; size_t count; };
+/* a sum: its result `out`, the rank's own operand `own`, its `inputs` landings */
+struct metal_zelloth_sum { void *out; size_t out_offset; void *own; size_t own_offset; uint32_t inputs; const struct metal_zelloth_input *in; };
+/* every sum of a group of one `type` and `op` in one dispatch, one threadgroup a core for all of them, after a barrier
+   (no present still spinning holds a core one of them needs) */
+struct metal_result metal_zelloth(struct metal_program *, int type, int op, size_t element_bytes, uint32_t sums,
+                                  const struct metal_zelloth_sum *sum, uint32_t channel, uint64_t at);
+/* The same publication as part of a group's presenting (design/zorvek.md zook): after its presents' barrier and with
+   none of its own, as a later present takes none */
+struct metal_result metal_publish_presented(struct metal_program *, const struct metal_release *);
 /* The next dispatch (or recorded tracks pool) reads/writes these prepared page
    ranges. Residency and diagnostic atomic words do not imply data ordering. */
 void metal_accesses(struct metal_program *, const ncclMeshAccess *, size_t n);

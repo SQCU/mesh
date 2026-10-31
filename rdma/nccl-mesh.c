@@ -4115,7 +4115,33 @@ static void gate_of(struct ncclComm *comm, struct schedule *plans, int *gate, ui
    passes them (word 0), a landing entry gated as gate_of says.  0; ncclSystemError where a list's entries are more than
    the bridge ever takes (nothing presented, the call's failure alone); a refused presentation fails comm (its lists
    stand mid-group).  Under group_lock */
-static ncclResult_t present_group(struct metal_program *program, struct ncclComm *comm, struct issue *owner, struct schedule *plans) {
+/* design/zorvek.md zook: each channel's leading publications that wait for nothing, the rank's own pages and every SEND
+   that forwards a landing (the bridge waits on that landing's own word), published once with the channel's presents
+   (`direct`: no operand copy made after them, no fused crossing), so no SEND of the rank's own pages waits for a
+   GPU task; the pool records only the publications that wait for a consumption. `ready` only rises: these are the
+   channel's first publications of the group, and the pool's come after them */
+static ncclResult_t present_publish(struct metal_program *program, struct channel *ch, const struct schedule *p) {
+  if (!p->outs || ch->published != p->first[0]) return ncclSuccess;
+  const struct message *last = NULL;
+  size_t k = 0;
+  for (; k < p->outs; k++) {
+    const struct message *m = p->out + k;
+    if (!needs_publication(m)) continue;
+    const struct steps *st = m->c->bound;
+    if (m->dep_h == UINT32_MAX && st->prior_first[m->step] != st->prior_first[m->step + 1]) break;
+    last = m;
+  }
+  if (last) {
+    const struct metal_release release = {ch->buffer, ch->ready, last->end, p->each[0]};
+    const struct metal_result made = metal_publish_presented(program, &release);
+    if (made.status) return fail(ncclSystemError, "a group's publication with its presents on the GPU: %s", made.message);
+  }
+  ch->published = p->first[0] + k;
+  return ncclSuccess;
+}
+
+static ncclResult_t present_group(struct metal_program *program, struct ncclComm *comm, struct issue *owner, struct schedule *plans,
+                                  int direct) {
   struct mesh_ctx *context = &comm->attach->context;
   for (uint32_t h = 0; h < comm->count; h++)
     for (int list = 0; list < 2; list++) {
@@ -4190,6 +4216,7 @@ static ncclResult_t present_group(struct metal_program *program, struct ncclComm
     if (status)
       return comm_fail(comm, status == ENOLINK || status == EPERM ? ncclRemoteError : ncclSystemError, "communicator %s: an entry toward node %u "
                        "presented to its bridge: %s", comm->name, ch->node, strerror(status));
+    if (direct) { const ncclResult_t published = present_publish(program, ch, p); if (published) return published; }
   }
   return ncclSuccess;
 }
@@ -4226,7 +4253,7 @@ static ncclResult_t schedule(struct metal_program *program, struct ncclComm *com
                              int immutable, uint32_t copies) {
   schedule_laid(comm, plans);
   if (!immutable) gate_of(comm, plans, gate, copies);
-  ncclResult_t result = present_group(program, comm, owner, plans);
+  ncclResult_t result = present_group(program, comm, owner, plans, !immutable && !copies);
   if (result) return result;
   if (*gate) comm->gates++;
   commit_group(comm, plans);
@@ -4664,6 +4691,111 @@ static int tile_landing_order(const void *left,const void *right) {
   if(a->record!=b->record)return (uintptr_t)a->record<(uintptr_t)b->record?-1:1;
   return a->entry>b->entry?-1:a->entry<b->entry;
 }
+/* design/zorvek.md zabbadoo, for a group whose every landing is a copy or a sum and whose every SEND its presents
+   published (present_publish: `published` at the group's end on every channel), with no combine into bytes a SEND
+   of its call reads (a landing's `need`), not fused and no WRITE: each sum's landings (a call's combines into one
+   buffer range, the same runs each) one zelloth, one writer an element from the rank's own element and every
+   contribution's once all have landed, whatever their order, its summed count stored past each block; then each
+   channel's landings awaited once (zelloq: a copy's landing is the copy); nothing of the group in the tracks pool.
+   *taken 0, nothing encoded, where a group's sums do not each share one run structure (the pool runs it as before) */
+struct zsum { const struct message *m; uint32_t h; uint64_t at; };
+static int zsum_order(const void *left, const void *right) {
+  const struct zsum *a = left, *b = right;
+  const struct mesh_step *x = a->m->c->bound->steps + a->m->step, *y = b->m->c->bound->steps + b->m->step;
+  if (a->m->c != b->m->c) return (uintptr_t)a->m->c < (uintptr_t)b->m->c ? -1 : 1;
+  const uint64_t u[] = {x->buffer, x->first, x->piece.elements}, v[] = {y->buffer, y->first, y->piece.elements};
+  for (int k = 0; k < 3; k++) if (u[k] != v[k]) return u[k] < v[k] ? -1 : 1;
+  return (a->h > b->h) - (a->h < b->h);
+}
+static int zsum_same(const struct zsum *a, const struct zsum *b) {
+  const struct mesh_step *x = a->m->c->bound->steps + a->m->step, *y = b->m->c->bound->steps + b->m->step;
+  return a->m->c == b->m->c && x->buffer == y->buffer && x->first == y->first && x->piece.elements == y->piece.elements;
+}
+static ncclResult_t zabbadoo(struct metal_program *program, struct ncclComm *comm, struct inflight *g, int *taken) {
+  *taken = 0;
+  if (g->fused || g->repeats != 1) return ncclSuccess;
+  for (size_t i = 0; i < g->n; i++) if (g->list[i].write_binding || ktype(g->list + i) == METAL_MERGE) return ncclSuccess;
+  size_t count = 0;
+  for (uint32_t h = 0; h < comm->count; h++) {
+    const struct channel *ch = comm->channels + h;
+    if (ch->published != g->end[h][0] || ch->consumed != g->start[h][1]) return ncclSuccess;
+    for (uint64_t at = g->start[h][1]; at < g->end[h][1]; at++) {
+      const struct message *m = in_at(g, h, at);
+      if (m->c->bound->steps[m->step].op == MESH_STEP_REDUCE) { if (m->need || !m->landing_count) return ncclSuccess; count++; }
+    }
+  }
+  struct zsum *sums = malloc((count + 1) * sizeof *sums);
+  struct metal_zelloth_input *in = malloc((count + 1) * sizeof *in);
+  if (!sums || !in) { free(sums); free(in); return fail(ncclSystemError, "out of memory"); }
+  count = 0;
+  for (uint32_t h = 0; h < comm->count; h++)
+    for (uint64_t at = g->start[h][1]; at < g->end[h][1]; at++) {
+      const struct message *m = in_at(g, h, at);
+      if (m->c->bound->steps[m->step].op == MESH_STEP_REDUCE) sums[count++] = (struct zsum){m, h, at};
+    }
+  qsort(sums, count, sizeof *sums, zsum_order);
+  /* every sum's inputs share one run structure, checked before anything is encoded */
+  for (size_t a = 0, b = 0; a < count; a = b) {
+    for (b = a + 1; b < count && zsum_same(sums + a, sums + b); b++) {
+      const struct message *x = sums[a].m, *y = sums[b].m;
+      int same = x->landing_count == y->landing_count;
+      for (size_t r = 0; same && r < x->landing_count; r++)
+        same = x->landings[r].first == y->landings[r].first && x->landings[r].elements == y->landings[r].elements;
+      if (!same) { free(sums); free(in); return ncclSuccess; }
+    }
+  }
+  /* the sums, one dispatch for each type and operator the group's calls name (one, a group of one call) */
+  struct metal_zelloth_sum *group = malloc((count + 1) * sizeof *group);
+  const struct call **of = malloc((count + 1) * sizeof *of);
+  if (!group || !of) { free(group); free(of); free(sums); free(in); return fail(ncclSystemError, "out of memory"); }
+  ncclResult_t result = ncclSuccess;
+  size_t made = 0;
+  for (size_t a = 0, b = 0; a < count; a = b) {
+    for (b = a + 1; b < count && zsum_same(sums + a, sums + b); b++) {}
+    const struct message *m = sums[a].m;
+    const struct steps *st = m->c->bound;
+    const struct mesh_step *step = st->steps + m->step;
+    const struct where to = shifted(st->buffer[step->buffer], m->offset);
+    struct where own = to;
+    for (size_t k = a; k < b; k++) {
+      const struct message *x = sums[k].m;
+      if (st->fresh && st->fresh[x->step]) { own = shifted(st->read[x->step], x->offset); break; }
+    }
+    for (size_t k = a; k < b; k++) {
+      const struct message *x = sums[k].m;
+      const struct channel *ch = comm->channels + sums[k].h;
+      in[k] = (struct metal_zelloth_input){x->data.buffer, x->data.offset, ch->buffer, ch->landed, x->summed.buffer, x->summed.offset,
+                                           x->end, x->pages, x->landings, x->landing_count};
+    }
+    of[made] = m->c;
+    group[made++] = (struct metal_zelloth_sum){to.buffer, to.offset, own.buffer, own.offset, (uint32_t)(b - a), in + a};
+  }
+  /* one dispatch for each type and operator among the group's calls (a group of one call: one) */
+  for (size_t a = 0, b = 0; a < made && !result; a = b) {
+    for (b = a + 1; b < made && ktype(of[b]) == ktype(of[a]) && kop(of[b]) == kop(of[a]); b++) {}
+    result = gpu(metal_zelloth(program, ktype(of[a]), kop(of[a]), SIZE[of[a]->type] * unit_of(of[a]), (uint32_t)(b - a), group + a,
+                               sums[0].h, sums[0].at), "a group's sums (zelloth)");
+  }
+  free(group); free(of);
+  /* zelloq: each channel's landings awaited once, past its last */
+  for (uint32_t h = 0; h < comm->count && !result; h++) {
+    if (g->end[h][1] == g->start[h][1]) continue;
+    struct channel *ch = comm->channels + h;
+    mesh_pages last = {0};
+    uint64_t lat = g->start[h][1];
+    for (uint64_t at = g->start[h][1]; at < g->end[h][1]; at++) {
+      const struct message *x = in_at(g, h, at);
+      if (pages_to_word(x->end) > pages_to_word(last)) { last = x->end; lat = at; }
+    }
+    const struct metal_wait wait = {ch->buffer, comm->violation, NULL, ch->landed, 0, last, lat, h, g->plans[h].each[1], 0};
+    result = gpu(metal_spin(program, &wait), "a group's landings (zelloq)");
+    if (!result) { ch->consumed = g->end[h][1]; if (ch->waited < g->end[h][1]) ch->waited = g->end[h][1]; }
+  }
+  free(sums); free(in);
+  if (!result) *taken = 1;
+  return result;
+}
+
 static ncclResult_t complete(struct metal_program *program, struct inflight *through, int *published) {
   if (through->fused) {
     /* A group of immutable one-way writes. Relay entries already name their
@@ -5169,6 +5301,9 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       for (size_t i = 0; i < n; i++) k += call_boundary(list + i, bounds + k);
       metal_boundary(program, bounds, k);
     }
+    /* design/zorvek.md zabbadoo: a group of copies and sums runs as its own dispatches, outside the pool */
+    int zabbadood = 0;
+    if (!result && !g->fused) result = zabbadoo(program, comm, g, &zabbadood);
     if (!result) result = complete(program, g, &published);
     if (!result && g->fused && (fusing.published != publishes || fusing.landed != lands))
       result = fail(ncclInvalidUsage, "a fused crossing whose program is not this rank's publications and landings of its whole operands");
