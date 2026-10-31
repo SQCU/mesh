@@ -1,7 +1,8 @@
 # Collective lowering, logical steps to wire entries: the path as it is, and three forms that derive it once (2026-10-30)
 
-Written while tracing c56f21a9's regression: every collective at 16 and 64 MiB lands nothing on ranks 1-4, while
-rank 0 and every size up to 4 MiB are right (design/measurement-regressions-2026-10-30.md). The path below is read at
+Written while tracing c56f21a9's regression: rank 0 reaches a GPU wait deadline during the 16 MiB all-reduce,
+then peers lose its link. Later output comparisons read unfinished results
+([failure record](measurement-regressions-2026-10-30.md)). The path below is read at
 0cd7af62. Each stage is named with what it takes, what it makes and what it re-derives.
 
 ## The path as it is
@@ -49,6 +50,15 @@ fallback with every receive now a cut owner, 8's silent drop where 4's new cuts 
 and the presentation and gating changes (present_group, gate_of: "ungated receives declare their actual destination
 writes on presentation").
 
+A further concrete mismatch is the progress operand for combining relays.
+Consumption may differ from wire order, but the channel's shared summed word
+still claims a completed physical prefix. A later receive can publish past an
+unfinished earlier receive, which can then store a smaller prefix. Each produced
+receive needs its own prepared progress operand. The existing kernel already
+accepts that operand; no serial consumption restriction is required. The saved
+run lacks its prepared plan, so this defect is not yet established as that run's
+first cause.
+
 ## Three forms
 
 **A. One graph, made where the facts are made.** Stage 2 emits each hop as a pair record, never as two pieces to be
@@ -57,8 +67,9 @@ produces what its SEND forwards; a combine consumes a local publication). Cuttin
 an edge's interval at a page-cut set and its incident edges with it; pairs stay pairs by construction. Stages 5-9 read
 the graph's edges: priors, forwarding (a forward is an edge, its unit offset stored on it), retirement and barriers
 (each dispatch carries the indices of the dispatches it follows, decided here). Compile time: one O(E log E) build
-instead of five overlap scans, three of them O(n²). Run time: encoding issues a barrier from a precomputed bit, with
-no ranges, dictionaries or Objective-C objects per dispatch.
+instead of five overlap scans, three of them O(n²). Recording can then issue a
+barrier from a precomputed bit, with no repeated range lookup per dispatch.
+In the current prepared caller, recording itself precedes data-function execution.
 
 **B. Page units as the representation.** Lower every step to the transport's real grain, page units: each unit one
 producer event and its consumers, as compressed rows. Cuts disappear (every unit boundary is a cut), and so does the
