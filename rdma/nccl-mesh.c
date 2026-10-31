@@ -5207,7 +5207,12 @@ static ncclResult_t zabbadoo(struct metal_program *program, struct ncclComm *com
      caller's later work reads, declared written (metal_boundary), so that work orders after these waits where it
      meets them */
   struct uses landings = {.flush = metal_boundary};
-  for (uint32_t h = 0; h < comm->count && !result; h++) {
+  /* the channels' waits at once (metal_spins): each reads only its channel's `landed`, so none is barred from another
+     or from zelloth; the dispatch after the group, or its caller's schedule, orders what follows after them all.  Each
+     barred from the one before had a launch and a barrier between them, up to a channel's count at every call */
+  struct metal_wait waits[comm->count + 1];
+  size_t waiting = 0;
+  for (uint32_t h = 0; h < comm->count; h++) {
     if (g->end[h][1] == g->start[h][1]) continue;
     struct channel *ch = comm->channels + h;
     mesh_pages last = {0};
@@ -5217,9 +5222,13 @@ static ncclResult_t zabbadoo(struct metal_program *program, struct ncclComm *com
       if (pages_to_word(x->end) > pages_to_word(last)) { last = x->end; lat = at; }
       if (x->c->target) uses_add(program, &landings, x->data, x->bytes, ncclMeshAccessWritten);
     }
-    const struct metal_wait wait = {ch->buffer, comm->violation, NULL, ch->landed, 0, last, lat, h, g->plans[h].each[1], 0};
-    result = gpu(metal_spin(program, &wait), "a group's landings (zelloq)");
-    if (!result) { ch->consumed = g->end[h][1]; if (ch->waited < g->end[h][1]) ch->waited = g->end[h][1]; }
+    waits[waiting++] = (struct metal_wait){ch->buffer, comm->violation, NULL, ch->landed, 0, last, lat, h, g->plans[h].each[1], 0};
+  }
+  if (!result) result = gpu(metal_spins(program, waits, waiting), "a group's landings (zelloq)");
+  for (uint32_t h = 0; !result && h < comm->count; h++) {
+    struct channel *ch = comm->channels + h;
+    if (g->end[h][1] == g->start[h][1]) continue;
+    ch->consumed = g->end[h][1]; if (ch->waited < g->end[h][1]) ch->waited = g->end[h][1];
   }
   if (!result && landings.n) metal_boundary(program, landings.ranges, landings.n);
   if (!result) *taken = 1;

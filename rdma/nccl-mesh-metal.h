@@ -173,6 +173,10 @@ struct metal_link { void *words; size_t word; uint64_t value; };
 struct metal_result metal_link(struct metal_program *, const struct metal_link *, size_t n);
 /* the wait alone (a COPY's landing in place), one threadgroup */
 struct metal_result metal_spin(struct metal_program *, const struct metal_wait *);
+/* n such waits, none barred from another or from the dispatches before them: each reads only a count the bridge
+   stores, so a group's channels' landings are awaited at once (nccl-mesh.c zabbadoo's zelloq), the next dispatch's
+   barrier, or its caller's schedule, ordering what follows after all of them */
+struct metal_result metal_spins(struct metal_program *, const struct metal_wait *, size_t n);
 /* Encode the numerical groups as their last required packet arrives. The
    prepared span lengths lower to arithmetic readiness runs (mesh-landing.h),
    including rows split across packets. `with` supplies the other operand,

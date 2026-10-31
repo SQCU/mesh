@@ -476,6 +476,15 @@ struct metal_result metal_spin(struct metal_program *program, const struct metal
   metal_accesses(program,uses,sizeof uses/sizeof *uses);
   return dispatch(program, KIND_spin, w->words, w->words, NULL, w->violation, wait_args(w, 0, 1, 0), 1, 1);
 }
+/* nccl-mesh-metal.h metal_spins: presenting with one already presented, so metal_order bars none of them */
+struct metal_result metal_spins(struct metal_program *program, const struct metal_wait *w, size_t n) {
+  const int presenting = program->presenting, presented = program->presented;
+  program->presenting = 1; program->presented = 1;
+  struct metal_result made = METAL_DONE;
+  for (size_t k = 0; k < n && !made.status; k++) made = metal_spin(program, w + k);
+  program->presenting = presenting; program->presented = presented;
+  return made;
+}
 
 struct metal_result metal_land(struct metal_program *program, int type, int op, void *dst, size_t dst_offset,
                                void *with, size_t with_offset,
