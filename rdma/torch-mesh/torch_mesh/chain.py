@@ -118,11 +118,10 @@ def operands(a, b, inputs, outputs, group, batch, resident_tiles, input_frames, 
     X, Y = empty(R, K, dtype=torch.half), empty(R, S, dtype=torch.half)
     arrivals = empty(1, dtype=torch.int32).zero_()
     counts = []
-    # a window's frames: two windows' entries fit each cable's list at once, since the next is issued before the
-    # current one's consumers (_stream.mm compile_chain); a frame's entries on its busiest cable are the solver's own
-    # (_stream.write_entries: libnccl-mesh's ncclMeshCommWriteEntries, over the compile its WRITE steps take)
-    per_frame = _stream.write_entries(group.group_name, 0, list(range(1, group.size())), rows * width, inputs.element_size())
-    input_frames = max(1, min(input_frames, _stream.STREAM_ENTRIES // 2 // max(1, per_frame)))
+    # A window's frames are the solver's alone. Its bound by the bridge's rings (two windows' entries within each
+    # cable's 4,096-entry list, from _stream.write_entries) went with the rings: the bridge walks each call's laid tables,
+    # of any length (design/zorvek.md zinth).
+    input_frames = max(1, input_frames)
     counts = Counter()
     first = 0
     while first < steps:

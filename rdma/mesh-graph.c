@@ -385,3 +385,15 @@ int mesh_graph_chain(struct mesh_graph_chain *cursor, uint64_t q, uint64_t (*fol
     cursor->node = next; cursor->item = 0;
   }
 }
+
+/* mesh-graph.h mesh_graph_row */
+int mesh_graph_row(const uint32_t *first, const uint32_t *head, uint32_t v, int (*visit)(void *consumer, uint32_t head),
+                   void *consumer, uint32_t *count, uint32_t *last) {
+  if (count) *count = first[v + 1] - first[v];
+  if (last && first[v + 1] > first[v]) *last = head[first[v + 1] - 1];
+  for (uint32_t k = first[v]; visit && k < first[v + 1]; k++) {
+    const int stop = visit(consumer, head[k]);
+    if (stop) return stop;
+  }
+  return 0;
+}

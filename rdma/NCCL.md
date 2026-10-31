@@ -582,8 +582,8 @@ required endpoint is a configuration error.
 Every wait of a group has a deadline, `MESH_PLATFORM_NS` from the wait's start, past which the program ends, the wait
 and its deadline named on stderr: no retry and no recovery (design/eager-execution.md, assumption A4; the operator, 2026-10-23:
 "no wait may ever run longer than a deadline operand presented at the time the wait was constructed; the presumed
-default is 5 seconds"). A group whose entries do not find room in its bridge's
-lists (`MESH_STREAM_ENTRIES` presented and not taken) waits for the bridge's `taken` to advance; a host-path group
+default is 5 seconds"). A group's entries wait for no room: its tables are linked to the bridge whole
+(design/zorvek.md zinth), and the bridge's rings and their `taken` waits are deleted; a host-path group
 waits for its own communicator's GPU work until its command buffer completes, an error status (which the platform's
 watchdog gives a command buffer that overruns) failing the group, and one not yet committed failing it at once
 (`ncclInvalidUsage`). Each wait reads the revoke and its holding between

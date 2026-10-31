@@ -86,23 +86,8 @@ int mesh_stream_view(struct mesh_ctx *context,uint32_t stream,struct mesh_stream
   struct mesh_stream *x=view?stream_owned(context,stream,&error):NULL;
   if(!view)return EINVAL;
   if(!x)return error;
-  char *m=(char *)context->M;
-  struct mesh_entry *lists=(struct mesh_entry *)(m+x->lists);
-  *view=(struct mesh_stream_view){.list={lists,lists+MESH_STREAM_ENTRIES},.presented={&x->sends,&x->lands},.taken={&x->taken[0],&x->taken[1]},
-    .ready=&x->ready,.sent=&x->sent,.landed=&x->landed,.zwoggle=&x->zwoggle};
-  return 0;
-}
-int mesh_stream_present(struct mesh_ctx *context,uint32_t stream,int land,struct mesh_entry entry){
-  int error;
-  struct mesh_stream *x=stream_owned(context,stream,&error);
-  if(!x)return error;
-  const struct hdr *m=context->M;
-  if(land<0 || land>1 || !mesh_entry_valid(m,entry))return EINVAL;
-  _Atomic uint64_t *presented=land?&x->lands:&x->sends;
-  const uint64_t e=atomic_load_explicit(presented,memory_order_relaxed);
-  if(e-atomic_load_explicit(&x->taken[land],memory_order_acquire)>=MESH_STREAM_ENTRIES)return EAGAIN;
-  ((struct mesh_entry *)((char *)m+x->lists))[(uint64_t)land*MESH_STREAM_ENTRIES+e%MESH_STREAM_ENTRIES]=entry;
-  atomic_store_explicit(presented,e+1,memory_order_release);
+  *view=(struct mesh_stream_view){.taken={&x->taken[0],&x->taken[1]},.ready=&x->ready,.sent=&x->sent,.landed=&x->landed,
+    .zwoggle=&x->zwoggle};
   return 0;
 }
 

@@ -106,9 +106,9 @@ what of the block takes its place. The order is forced: each later one guards a 
    zumbled.
 5. The encoder barriers between groups and the metal_boundary frontier (zilbos): with no transport on the GPU and no
    page shared between calls, a call's functions order after what they read in stream order alone (zumble).
-6. The GPU presents and the descriptor rings (zarpers: MESH_STREAM_ENTRIES, `taken`, the bridge's walk_take copy):
-   the bridge walks each call's laid tables, linked at the call's place (zinth, below: the presents are deleted, the
-   rings are left to their last client), its walk the executor of zirrup and zirrupel, which its entry word already is.
+6. Done: the GPU presents and the descriptor rings (zarpers: MESH_STREAM_ENTRIES, `taken` as ring room, the
+   bridge's walk_take copy): the bridge walks each call's laid tables, linked at the call's place (zinth, below), its
+   walk the executor of zirrup and zirrupel, which its entry word already is.
 7. The landing gate and the operand staging copies (zibbins): transport by view; a premultiplier folded into zelloth.
 
 ## zinth: a call's tables linked to the bridge (item 6)
@@ -141,9 +141,11 @@ What runs (mesh.h struct mesh_zwoggle, nccl-mesh.c present_group and zinth, mesh
   later call writes its bases and each table's `next` alone. A WRITE's source readiness word is its invocation's,
   which the issue's binding instance does not fix, so it alone is written each call.
 
-What remains of item 6, in order:
-
-1. The rings' last client, mesh-diagnostics.c's quiet probe (mesh_stream_present), moved to a linked table.
-2. Then deleted: MESH_STREAM_ENTRIES, the stream's `lists`, `sends` and `lands`, walk_take and struct taken's ring,
-   mesh_stream_present, the `presented` words in the library's diagnostics and its group access declarations
-   (ncclMeshGroupAccesses), and chain.py's input frames bounded by the rings (_stream.mm STREAM_ENTRIES).
+- The rings are deleted (MESH_LAYOUT 156): MESH_STREAM_ENTRIES, the stream's `lists`, `sends` and `lands`, the
+  bridge's list pages, walk_take and its ring of copied entries, mesh_stream_present. The quiet probe links one
+  call's tables like any holder (mesh-diagnostics.c lay). A group still declares one word a list to its caller's
+  schedule, the chain's head (`zwoggle`) in place of `presented`, so its crossing stays after the channel's earlier
+  groups (their `ready` publications keep their order). chain.py's input frames are no longer bounded by the rings.
+  Measured on all five: chain service exits 0, bandwidth 45 of 45 in each of three runs, every rate within main's
+  band measured the same hour (two runs' scattered outliers, 2-3x on one case each, moved between cases and did not
+  repeat).

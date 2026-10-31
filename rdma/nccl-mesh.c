@@ -268,10 +268,9 @@ static uint64_t bound_reached(const struct ncclComm *comm, char *wait, size_t ro
     const struct mesh_stream_view *w = &comm->channels[h].view;
     const uint64_t landed = atomic_load_explicit(w->landed, memory_order_acquire), sent = atomic_load_explicit(w->sent, memory_order_acquire),
                    ready = atomic_load_explicit(w->ready, memory_order_acquire);
-    snprintf(counts, sizeof counts, "; on that channel landed %llu, this rank's sends ready %llu and sent %llu, its lists presented %llu/%llu "
-             "and taken %llu/%llu (send/landing)", (unsigned long long)landed, (unsigned long long)ready, (unsigned long long)sent,
-             (unsigned long long)atomic_load_explicit(w->presented[0], memory_order_acquire),
-             (unsigned long long)atomic_load_explicit(w->presented[1], memory_order_acquire),
+    snprintf(counts, sizeof counts, "; on that channel landed %llu, this rank's sends ready %llu and sent %llu, its calls linked %llu "
+             "and left %llu/%llu (send/landing)", (unsigned long long)landed, (unsigned long long)ready, (unsigned long long)sent,
+             (unsigned long long)comm->channels[h].linked,
              (unsigned long long)atomic_load_explicit(w->taken[0], memory_order_acquire),
              (unsigned long long)atomic_load_explicit(w->taken[1], memory_order_acquire));
   }
@@ -1981,10 +1980,8 @@ static void channel_counts(const struct ncclComm *comm, char *out, size_t room, 
                      comm->channels[h].node, (unsigned long long)atomic_load_explicit(w->landed, memory_order_acquire),
                      (unsigned long long)atomic_load_explicit(w->ready, memory_order_acquire),
                      (unsigned long long)atomic_load_explicit(w->sent, memory_order_acquire));
-    if (n >= 0 && lists && w->presented[0] && w->taken[0] && (size_t)n < room - used)
-      n += snprintf(out + used + n, room - used - n, ", presented %llu/%llu, taken %llu/%llu",
-                    (unsigned long long)atomic_load_explicit(w->presented[0], memory_order_acquire),
-                    (unsigned long long)atomic_load_explicit(w->presented[1], memory_order_acquire),
+    if (n >= 0 && lists && w->taken[0] && (size_t)n < room - used)
+      n += snprintf(out + used + n, room - used - n, ", calls linked %llu, left %llu/%llu", (unsigned long long)comm->channels[h].linked,
                     (unsigned long long)atomic_load_explicit(w->taken[0], memory_order_acquire),
                     (unsigned long long)atomic_load_explicit(w->taken[1], memory_order_acquire));
     if (n < 0) break;
@@ -3611,10 +3608,14 @@ ncclResult_t ncclMeshGroupAccesses(const ncclMeshGroup *group, ncclMeshAccess *a
     size_t at = 0;
     for (uint32_t h = 0; h < comm->count; h++)for (unsigned list = 0; list < 2; list++)if (active[h] & (1u << list)) {
       const struct channel *ch = comm->channels + h;
+      /* design/zorvek.md zinth: the list's walk's calls left, read, and the chain every group of the channel extends,
+         written (its head word, the stream's `zwoggle`), in place of the deleted rings' `presented` counts: a group's
+         crossing stays after the channel's earlier groups in its caller's schedule, so their `ready` publications
+         keep their order (metal-recording.m MetalScheduleCrossWork) */
       const struct where taken = channel_word(ch, (const void *)ch->view.taken[list]);
-      const struct where presented = channel_word(ch, (const void *)ch->view.presented[list]);
+      const struct where chain = channel_word(ch, (const void *)ch->view.zwoggle);
       accesses[at++] = (ncclMeshAccess){{taken.buffer, taken.offset}, sizeof(uint64_t), ncclMeshAccessRead|ncclMeshAccessObserve};
-      accesses[at++] = (ncclMeshAccess){{presented.buffer, presented.offset}, sizeof(uint64_t), ncclMeshAccessWritten};
+      accesses[at++] = (ncclMeshAccess){{chain.buffer, chain.offset}, sizeof(uint64_t), ncclMeshAccessWritten};
     }
   }
   *count = needed;
@@ -4616,12 +4617,6 @@ static const struct message *channel_publication(struct inflight *g, uint32_t h,
    one release storing the holding's `ready` past the last (one system fence, nccl-mesh-kernels.h mesh_step_release),
    or, the fused crossing's, its record for its caller's kernel (metal_send_deferred), whose last threadgroup to write
    its operand stores it, its first repeat's alone (a later repeat's is the record's at its own j) */
-static void presented_access(struct metal_program *program,const struct channel *channel,unsigned list) {
-  const struct where word=channel_word(channel,(const void *)channel->view.presented[list]);
-  const ncclMeshAccess use={{word.buffer,word.offset},sizeof(uint64_t),ncclMeshAccessRead|ncclMeshAccessObserve};
-  metal_accesses(program,&use,1);
-}
-
 static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm, uint32_t h, uint64_t upto, int *published) {
   struct channel *ch = comm->channels + h;
   struct inflight *g = inflight_at(comm, h, 0, upto - 1);
@@ -4637,7 +4632,6 @@ static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm
                  "a fused publication's record");
     fusing.published += !result;
   } else if (!g->fused) {
-    presented_access(program,ch,0);
     struct uses batch = {0};
     struct inflight *x = NULL;
     for(uint64_t at=ch->published;at<upto;at++) {
@@ -4658,6 +4652,13 @@ static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm
    wait alone (it landed in place), the fused crossing's landing recorded for its caller's kernel
    (metal_land_deferred: its first repeat's alone, as publish); a receive depends on every earlier overlapping receive
    (metal_depend), while disjoint ranges on separate cables can proceed independently */
+/* consume's visit of a receive's earlier overlapping receives (mesh-graph.h mesh_graph_row over its steps' `prior`
+   rows): each one's whole consumption awaited (metal_depend) */
+struct depending { struct metal_program *program; const struct steps *st; uint32_t base; };
+static int depend_on(void *consumer, uint32_t j) {
+  const struct depending *d = consumer;
+  return (int)gpu(metal_depend(d->program, d->base + d->st->channel[j], d->st->consumption[j] + 1), "a receive's dependency");
+}
 static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm, uint32_t h, uint32_t base, struct inflight *held) {
   struct channel *ch = comm->channels + h;
   const uint64_t at = ch->consumed;
@@ -4669,7 +4670,6 @@ static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm
   const struct mesh_step *step = st->steps + m->step;
   ncclResult_t result = ncclSuccess;
   if(!g->fused) {
-    presented_access(program,ch,1);
     const uint64_t gate=g->plans[h].word;
     if(gate) {
       const struct where word=gate==ch->ready_at?(struct where){ch->buffer,ch->ready}:(struct where){comm->gate,0};
@@ -4683,9 +4683,9 @@ static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm
      combine block by block as they land, child after child, rather than one child's whole landing after another's
      (d3869552 made every receive wait for each earlier overlapping receive's whole consumption) */
   int32_t after = -1;
-  if (base != METAL_NONE && step->op == MESH_STEP_REDUCE && !g->fused && !m->c->write_binding && ktype(m->c) != METAL_MERGE &&
-      st->prior_first[m->step] < st->prior_first[m->step + 1]) {
-    const uint32_t j = st->prior[st->prior_first[m->step + 1] - 1];
+  uint32_t priors = 0, j = 0;
+  mesh_graph_row(st->prior_first, st->prior, m->step, NULL, NULL, &priors, &j);
+  if (base != METAL_NONE && step->op == MESH_STEP_REDUCE && !g->fused && !m->c->write_binding && ktype(m->c) != METAL_MERGE && priors) {
     const struct mesh_step *a = st->steps + j;
     const uint32_t q = st->channel[j];
     const struct message *earlier = a->op == MESH_STEP_REDUCE && a->buffer == step->buffer && a->first == step->first &&
@@ -4696,10 +4696,9 @@ static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm
       same = earlier->landings[r].first == m->landings[r].first && earlier->landings[r].elements == m->landings[r].elements;
     if (same) after = (int32_t)j;
   }
-  for (uint32_t at = st->prior_first[m->step]; !result && base != METAL_NONE && after < 0 && at < st->prior_first[m->step + 1]; at++) {
-    const uint32_t j = st->prior[at];
-    result = gpu(metal_depend(program, base + st->channel[j], st->consumption[j] + 1), "a receive's dependency");
-  }
+  struct depending depending = {program, st, base};
+  if (!result && base != METAL_NONE && after < 0)
+    result = (ncclResult_t)mesh_graph_row(st->prior_first, st->prior, m->step, depend_on, &depending, NULL, NULL);
   if (!result && after >= 0)
     result = gpu(metal_after(program, base + st->channel[after], st->consumption[after]), "a combine's chunks after an earlier combine's");
   const struct metal_wait wait = {ch->buffer, comm->violation, m->data.buffer, ch->landed, m->data.offset, m->end, at, h, g->plans[h].each[1],m->bytes};

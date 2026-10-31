@@ -82,6 +82,11 @@ int mesh_graph_schedule(const struct mesh_graph_move *move, uint32_t moves, uint
    it reaches q's item (cursor->item of cursor->node, its first position cursor->before), 0 where the chain ends
    before it.  A place only moves forward: q at or past the last q asked. */
 struct mesh_graph_chain { uint64_t node, item, before, left; };
+/* Vertex v's edges in compressed rows of 32-bit words (v's edges [first[v], first[v + 1]), edge k reaching head[k]),
+   in row order: `visit(consumer, head[k])` for each until one returns nonzero, which is returned; else 0 (`visit`
+   NULL: none).  *count (NULL: not wanted) the row's edges, and *last, where it has any, its last edge's head. */
+int mesh_graph_row(const uint32_t *first, const uint32_t *head, uint32_t v, int (*visit)(void *consumer, uint32_t head),
+                   void *consumer, uint32_t *count, uint32_t *last);
 int mesh_graph_chain(struct mesh_graph_chain *cursor, uint64_t q, uint64_t (*follow)(const void *context, uint64_t node),
                      uint64_t (*items)(const void *context, uint64_t node),
                      uint64_t (*weight)(const void *context, uint64_t node, uint64_t item), const void *context,

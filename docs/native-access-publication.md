@@ -164,8 +164,8 @@ Dependency words, landing records, and actual DMA descriptors still scale with
 the independently live tiles and payload bindings. Those are data relationships,
 not duplicate routing problems. Numerical submission remains `MetalScheduleEnqueue`;
 there is no new tile loop, route lookup, allocation, or host wait in that submission.
-Item 5's ordering change follows below. The shared stream still limits a group to its
-configured `MESH_STREAM_ENTRIES`; plan compaction does not remove that physical-list limit.
+Item 5's ordering change follows below. A group's entries have no physical-list limit: the
+stream's 4,096-entry rings are deleted, and the bridge walks each call's laid tables (design/zorvek.md zinth).
 Compact affine/page lowering is recorded under item 8 below.
 
 The shared libraries, CFFI module, Torch extension and macOS 26 Swift/native/LiteRT

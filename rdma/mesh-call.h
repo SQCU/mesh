@@ -33,16 +33,11 @@ void mesh_stream_give(struct mesh_ctx *,uint32_t stream);
    `wire`: live, its owner word this client's, its identity the one taken.  A pairing lost and made again opens every
    stream of the link new (no owner): a holding of the lost pairing reads 0 here, and its holder starts no group on it */
 int mesh_stream_held(struct mesh_ctx *,uint32_t stream,uint64_t wire);
-/* design/transport.md section 14: a held stream's words as its holder uses them (mesh.h struct mesh_stream): its two
-   lists (0 the send list, 1 the landing list) and their counts presented and taken, and its three contiguous unit counts; 0,
-   EINVAL, EPERM where the client does not hold it, or ENOLINK */
+/* design/transport.md section 14: a held stream's words as its holder uses them (mesh.h struct mesh_stream): the calls
+   each list's walk has left (0 the send list, 1 the landing list), its three contiguous unit counts and its first
+   call's tables' word (design/zorvek.md zinth); 0, EINVAL, EPERM where the client does not hold it, or ENOLINK */
 struct mesh_stream_view {
-  struct mesh_entry *list[2];
-  _Atomic uint64_t *presented[2],*taken[2],*ready,*sent,*landed,*zwoggle;
+  _Atomic uint64_t *taken[2],*ready,*sent,*landed,*zwoggle;
 };
 int mesh_stream_view(struct mesh_ctx *,uint32_t stream,struct mesh_stream_view *);
-/* design/transport.md section 14: `entry` presented on held stream `stream`'s send list (`land` 0) or landing list
-   (`land` 1): its slot written, then the list's count one past it (a release store); 0, EINVAL for an invalid immutable span table, byte extent or publication word, EAGAIN where the list's slot is not yet taken
-   (MESH_STREAM_ENTRIES presented and not taken: present it again), EPERM, or ENOLINK */
-int mesh_stream_present(struct mesh_ctx *,uint32_t stream,int land,struct mesh_entry entry);
 #endif

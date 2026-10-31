@@ -1214,20 +1214,6 @@ static int physical_channels(ncclComm_t comm) {
   return channels;
 }
 
-// The most entries one repeat of a group of WRITEs, `root` to each of `destinations` with `count` elements of
-// `element_bytes`, lays on any directed cable (libnccl-mesh's ncclMeshCommWriteEntries, over the compile its WRITE steps
-// take). A group of R repeats lays R times this on that list, and a list holds MESH_STREAM_ENTRIES (write_window).
-static int64_t write_entries(const std::string &group, int64_t root, const std::vector<int64_t> &destinations,
-                             int64_t count, int64_t element_bytes) {
-  const int64_t handle = communicator_of(c10::IValue(group));
-  TORCH_CHECK(handle, "torch_mesh.write_entries: ", group, " is no live mesh group of this process");
-  const std::vector<int> to(destinations.begin(), destinations.end());
-  uint64_t most = 0;
-  checked(ncclMeshCommWriteEntries(communicator(handle), (int)root, to.data(), (int)to.size(), (size_t)count, (size_t)element_bytes,
-                                   &most));
-  return (int64_t)most;
-}
-
 using ViewBinding = std::tuple<at::Tensor, int64_t, std::vector<int64_t>, std::vector<int64_t>, int64_t, bool, std::vector<int64_t>, int, int>;
 struct WriteOperand {
   ViewBinding view;
@@ -2345,8 +2331,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     TORCH_CHECK(handle, "torch_mesh.channels: ", group, " is no live mesh group of this process");
     return physical_channels(communicator(handle));
   }, pybind11::call_guard<Drained>());
-  module.def("write_entries", &write_entries, pybind11::call_guard<Drained>());
-  module.attr("STREAM_ENTRIES") = (int64_t)MESH_STREAM_ENTRIES;
   pybind11::class_<WriteOperands,std::shared_ptr<WriteOperands>>(module,"WriteOperands")
     .def("declarations",&WriteOperands::declarations);
   module.def("write_operands",&fused_write_operands,pybind11::call_guard<Drained>());

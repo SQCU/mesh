@@ -81,8 +81,8 @@
    records on its communicator's channels: one holding per cable, each transfer one entry of its send
    list or landing list of immutable exact byte spans. Each direction has one
    matching DMA-unit sequence at both ends, in compiled dependency order,
-   presented to the bridge as the group is issued (mesh-call.h
-   mesh_stream_present).  A member that fails, is revoked or ends mid-group sends nothing more: its peers' host-path
+   its tables linked to the bridge at the group's place in its program (mesh.h struct mesh_zwoggle,
+   design/zorvek.md zinth).  A member that fails, is revoked or ends mid-group sends nothing more: its peers' host-path
    waits end at a revoke, the link's loss or their deadlines, and their GPU waits at their bounds (a deadline past
    which the program ends: design/eager-execution.md, assumption A4), and its holding's end with units outstanding takes its stream out of its link's pairing
    (design/transport.md section 14).  A publication

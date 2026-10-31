@@ -24,21 +24,27 @@ static int wait_for(const struct mesh_stream_view *v,uint64_t value,uint64_t thr
 
 /* No timed request reads or changes a descriptor. One immutable source is read
    repeatedly; every preposted landing has separate backing, so even two hardware
-   lanes can never overwrite the same destination. Tables are local metadata. */
-static int present(struct mesh_ctx *c,uint32_t stream,uint32_t rounds,
-                   struct mesh_section data,struct mesh_section table){
-  struct mesh_dma_span *spans=mesh_section_address(c,table,0);
+   lanes can never overwrite the same destination. Tables are local metadata.
+   design/zorvek.md zinth: the probe is one call, its tables (mesh.h struct mesh_zwoggle: its SEND entry and its landing
+   entry, then their spans) linked as the holding's first, the stream's `zwoggle`; its SENDs go as `ready` allows */
+static void lay(struct mesh_ctx *c,const struct mesh_stream_view *v,uint32_t rounds,
+                struct mesh_section data,struct mesh_section table){
+  struct mesh_zwoggle *tables=mesh_section_address(c,table,0);
+  struct mesh_zwoggle_entry *entries=(struct mesh_zwoggle_entry *)(tables+1);
+  struct mesh_dma_span *spans=(struct mesh_dma_span *)(entries+2);
   const uint64_t source=mesh_page_offset(c->M,data.first,0);
   for(uint32_t k=0;k<rounds;k++){
     spans[k]=(struct mesh_dma_span){.offset=source,.bytes=data.bytes};
     spans[rounds+k]=(struct mesh_dma_span){
       .offset=mesh_page_offset(c->M,data.first+(k+1)*data.stride,0),.bytes=data.bytes};
   }
-  const uint64_t metadata=mesh_page_offset(c->M,table.first,0);
-  int error=mesh_stream_present(c,stream,1,(struct mesh_entry){
-    .spans=metadata+rounds*sizeof *spans,.units=rounds,.word=0,.base=0});
-  return error?error:mesh_stream_present(c,stream,0,(struct mesh_entry){
-    .spans=metadata,.units=rounds,.word=0,.base=0});
+  const uint64_t metadata=mesh_page_offset(c->M,table.first,0),first=metadata+(uint64_t)((char *)spans-(char *)tables);
+  entries[0]=(struct mesh_zwoggle_entry){.entry={.spans=first,.units=rounds},.relative=0};
+  entries[1]=(struct mesh_zwoggle_entry){.entry={.spans=first+rounds*sizeof *spans,.units=rounds},.relative=0};
+  atomic_store_explicit(&tables->next,0,memory_order_relaxed);
+  tables->entries[0]=metadata+sizeof *tables;tables->entries[1]=tables->entries[0]+sizeof *entries;
+  tables->count[0]=tables->count[1]=1;tables->bases=0;
+  atomic_store_explicit(v->zwoggle,metadata,memory_order_release);
 }
 
 static void release_probe(struct mesh_ctx *c,uint32_t stream,int completed,
@@ -49,9 +55,12 @@ static void release_probe(struct mesh_ctx *c,uint32_t stream,int completed,
        On error retain tables until the old client's owner has disappeared.
        A different owner implies that the bridge ended this holding first.
        These observations are local teardown, never remote receipt messages. */
+    /* design/zorvek.md zinth: the bridge's walk reads the probe's tables until the holding ends, whatever completed,
+       so they are kept until then on every path (the ring's entries were copies the bridge held) */
+    (void)completed;
     const struct mesh_deadline deadline=mesh_deadline("quiet: the bridge's end of the probe's holding (release_probe)",0);
-    if(!completed)while((atomic_load_explicit(&mesh_stream_at(c->M,stream)->owner,memory_order_acquire)&
-                       ~MESH_STREAM_GIVEN)==c->client){mesh_deadline_left(&deadline);usleep(1000);}
+    while((atomic_load_explicit(&mesh_stream_at(c->M,stream)->owner,memory_order_acquire)&
+          ~MESH_STREAM_GIVEN)==c->client){mesh_deadline_left(&deadline);usleep(1000);}
   }
   if(table.count)mesh_lease_return(c,table.first);
   for(uint32_t k=0;k<data.count;k++)mesh_lease_return(c,data.first+k*data.stride);
@@ -81,23 +90,22 @@ int mesh_diagnostic_quiet(int argc,char **argv){
   struct mesh_section data={0},table={0};
   uint32_t stream=MESH_ABSENT;
   struct mesh_stream_view v;
-  if(role<0 || role>1 || !rounds || !ngaps || rounds>=MESH_STREAM_ENTRIES ||
+  if(role<0 || role>1 || !rounds || !ngaps ||
      mesh_section_create(&c,page,rounds+1,MESH_BACKING_PAGES,&data) ||
-     mesh_section_create(&c,2*rounds*sizeof(struct mesh_dma_span),1,MESH_BACKING_LINEAR,&table) ||
+     mesh_section_create(&c,sizeof(struct mesh_zwoggle)+2*sizeof(struct mesh_zwoggle_entry)+2*rounds*sizeof(struct mesh_dma_span),1,
+                         MESH_BACKING_LINEAR,&table) ||
      mesh_stream_take(&c,wire,&stream) || mesh_stream_view(&c,stream,&v)){
-    fprintf(stderr,"quiet: no lease, no stream %llu, or rounds past %u\n",(unsigned long long)wire,MESH_STREAM_ENTRIES);
+    fprintf(stderr,"quiet: no lease or no stream %llu\n",(unsigned long long)wire);
     release_probe(&c,stream,0,data,table);
     return 3;
   }
   memset(mesh_section_address(&c,data,0),0x5a,page);
-  if(present(&c,stream,rounds,data,table)){
-    fprintf(stderr,"quiet: an entry refused\n");release_probe(&c,stream,0,data,table);return 4;
-  }
-  uint64_t *done=calloc(rounds,sizeof *done),*trip=calloc(rounds,sizeof *trip);
+  uint64_t *done=calloc(rounds,sizeof *done),*trip=calloc(rounds,sizeof *trip),*a=calloc(rounds,sizeof *a),*b=calloc(rounds,sizeof *b);
   uint32_t *gap=calloc(rounds,sizeof *gap);
-  if(!done || !trip || !gap){
-    free(done);free(trip);free(gap);release_probe(&c,stream,0,data,table);return 3;
+  if(!done || !trip || !gap || !a || !b){
+    free(done);free(trip);free(gap);free(a);free(b);release_probe(&c,stream,0,data,table);return 3;
   }
+  lay(&c,&v,rounds,data,table);
   /* a SEND's time: its unit's `sent` seen while the next landing is awaited (the responder's, at its next round, so its
      last round's is not read), or that landing's time where `sent` had not moved by then */
   int failed=0;
@@ -119,10 +127,9 @@ int mesh_diagnostic_quiet(int argc,char **argv){
   }
   if(failed){
     fprintf(stderr,"quiet: the link was lost\n");
-    free(done);free(trip);free(gap);release_probe(&c,stream,0,data,table);return 5;
+    free(done);free(trip);free(gap);free(a);free(b);release_probe(&c,stream,0,data,table);return 5;
   }
   for(uint32_t g=0;g<ngaps;g++){
-    uint64_t a[MESH_STREAM_ENTRIES],b[MESH_STREAM_ENTRIES];
     size_t n=0;
     for(uint32_t k=8;k+(uint32_t)role<rounds;k++)if(gap[k]==g){a[n]=done[k];b[n++]=trip[k];}
     printf("{\"scope\": \"physical_link_quiet_probe\", \"wire\": \"%016llx\", \"payload_bytes\": %llu, \"role\": %d, \"node\": %u, \"quiet_microseconds\": %llu, \"trips\": %zu, \"send_p10\": %.2f, \"send_median\": %.2f, \"send_p90\": %.2f",
@@ -131,7 +138,7 @@ int mesh_diagnostic_quiet(int argc,char **argv){
     printf("}\n");
     if(role)break;
   }
-  free(done);free(trip);free(gap);release_probe(&c,stream,1,data,table);
+  free(done);free(trip);free(gap);free(a);free(b);release_probe(&c,stream,1,data,table);
   return 0;
 }
 

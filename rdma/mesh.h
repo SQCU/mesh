@@ -38,7 +38,6 @@
 #define MESH_STREAM_GIVEN (UINT64_C(1)<<MESH_OWNER_FLAG_BIT)
 _Static_assert(MESH_OWNER_GENERATION_SHIFT+MESH_OWNER_GENERATION_BITS<=MESH_OWNER_FLAG_BIT,"an owner word");
 _Static_assert(MESH_CLIENTS == (1u << MESH_OWNER_CLIENT_BITS), "client capacity and owner-word layout agree");
-_Static_assert(!(MESH_STREAM_ENTRIES&(MESH_STREAM_ENTRIES-1)),"a ring a power of two");
 /* design/transport.md: the pause between a port's hellos and between the bridge's liveness turns */
 /* design/transport.md, the operator's deadline (2026-10-18): no DMA or network send/receive channel of the
    mesh is used longer than this without something happening on it or its scope concluding */
@@ -156,10 +155,8 @@ static inline int mesh_span_overlaps(struct mesh_dma_span a,struct mesh_dma_span
    names stays held), and the bridge tells each unit before it posts it so that read sees it (mesh-link.c unit_told).
    A holding that ended with units
    outstanding leaves its owner word MESH_STREAM_GIVEN alone (naming no client, so none takes it) and the stream not
-   live for the rest of its pairing.  The holder links its calls' tables (struct mesh_zwoggle, `zwoggle`), or presents its
-   entries in order: entry e of a list in slot e mod MESH_STREAM_ENTRIES of `lists` (region offsets: the send list,
-   then the landing list), then `sends` or `lands` (entries presented) past it, a slot reusable once `taken` (the
-   bridge's, per list) is past it.  Three unit counts over the holding, each in its list's order and all of it before:
+   live for the rest of its pairing.  The holder links its calls' tables (struct mesh_zwoggle, `zwoggle`), and the
+   bridge counts in `taken` the calls each list's walk has left.  Three unit counts over the holding, each in its list's order and all of it before:
    `ready`, the holder's, of the send list produced; `sent`, the bridge's, of the send list whose SENDs have completed;
    `landed`, the bridge's, of the landing list landed; `sent` and `landed` ~0 once the link is lost.  Its `wire` is
    one cable's stream's identity, made from its first lane's two queue pair numbers and the two ends' GIDs (mesh-link.c
@@ -167,19 +164,16 @@ static inline int mesh_span_overlaps(struct mesh_dma_span a,struct mesh_dma_span
 struct mesh_stream {
   _Alignas(MESH_RECORD_ALIGNMENT) _Atomic uint32_t peer;
   _Atomic uint32_t live;
-  uint64_t lists,rows;
   _Atomic uint64_t bandwidth,wire;
   _Alignas(MESH_RECORD_ALIGNMENT) _Atomic uint64_t owner;
-  _Atomic uint64_t sends,lands;
   /* design/reclamation-2026-10-30.md: the owner word of the holding that ended with units outstanding (0 none), with
      each lane's posted and done counts in `posts` from then (stream_end); a reclaim of that client's pages waits for
      those units or the port child's reaping (`child` 0), mesh-dataflow.c mesh_holding_retained */
   _Atomic uint64_t unfinished;
   uint64_t unfinished_room[3];
   _Alignas(MESH_RECORD_ALIGNMENT) _Atomic uint64_t ready;
-  /* design/zorvek.md zinth, the holder's, beside `ready` in its line (no offset or size moves): its first call's tables
-     (struct mesh_zwoggle, region offset), stored at that call's stream position; 0 while a holding presents on the
-     rings instead (a client that has not moved: mesh-call.c mesh_stream_present) */
+  /* design/zorvek.md zinth, the holder's, beside `ready` in its line: its first call's tables (struct mesh_zwoggle,
+     region offset), stored at that call's stream position */
   _Atomic uint64_t zwoggle;
   _Alignas(MESH_RECORD_ALIGNMENT) _Atomic uint64_t sent;
   _Atomic uint64_t landed,taken[2];

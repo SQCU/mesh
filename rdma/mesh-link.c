@@ -93,31 +93,6 @@ static inline struct ibv_sge dma_span(const struct port *port,struct mesh_dma_sp
     .lkey=port->device.extent_mrs[at/MESH_EXTENT]->lkey};
 }
 static void link_failed(struct port *,int64_t);
-/* design/transport.md section 14: the entries a holder has presented on one of its lists taken into the walk, as far
-   as its ring has room: each copied once and typed (struct taken),
-   its first unit over the holding counted, and the list's `taken` stored past them */
-static void walk_take(struct walk *w,struct mesh_stream *x,int land){
-  /* design/zorvek.md zinth: a holding that links its calls' tables (its `zwoggle` stored before any entry presented) is
-     walked from them (walk_chain), its rings never read */
-  if(w->chained)return;
-  if(!w->taken && atomic_load_explicit(&x->zwoggle,memory_order_acquire)){w->chained=1;return;}
-  const uint64_t n=atomic_load_explicit(land?&x->lands:&x->sends,memory_order_acquire);
-  const struct mesh_entry *list=(const struct mesh_entry *)((char *)M+x->lists)+(uint64_t)land*MESH_STREAM_ENTRIES;
-  uint64_t t=w->taken;
-  for(;t<n && t-w->done<MESH_STREAM_ENTRIES;t++){
-    struct taken *k=w->ring+t%MESH_STREAM_ENTRIES;
-    const struct mesh_entry e=list[t%MESH_STREAM_ENTRIES];
-    /* the library's compiled entry, its table, units and word checked where it compiled them (nccl-mesh.c
-       place_group, present_group): taken as it is (design/fake-guards-2026-10-30.md) */
-    const _Atomic uint64_t *word=e.word?stream_words(e.word):land?NULL:&x->ready;
-    k->spans=(const struct mesh_dma_span *)((const char *)M+e.spans);
-    k->units=(struct mesh_units){e.units};k->base=(struct mesh_units){e.base};
-    k->word=word;k->unit=w->units;
-    w->units=mesh_units_add(w->units,k->units);
-  }
-  if(t!=w->taken){w->taken=t;atomic_store_explicit(&x->taken[land],t,memory_order_release);}
-
-}
 /* design/zorvek.md zinth: mesh-graph.h mesh_graph_chain's operands over a holding's linked call tables (mesh.h struct
    mesh_zwoggle): node 0 the stream's `zwoggle` word, a node a call's tables (their region offset) and its link their
    `next`, an item an entry of the list's, weighed in units, a call left told in the list's `taken` (its tables no
@@ -146,27 +121,10 @@ static struct taken *walk_chain(struct walk *w,struct mesh_stream *x,int land,st
                             e.word?stream_words(e.word):land?NULL:&x->ready};
   return &w->current;
 }
-/* the walk's entry holding unit q of the holding, from the walk's place, which it moves past every entry done and
-   every entry whose units are all before q; NULL where no entry taken holds it */
-static struct taken *walk_unit(struct walk *w,struct mesh_stream *x,int land,struct mesh_units q){
-  if(w->chained)return walk_chain(w,x,land,q);
-  if(w->at<w->done)w->at=w->done;
-  for(;w->at<w->taken;w->at++){
-    struct taken *t=w->ring+w->at%MESH_STREAM_ENTRIES;
-    if(mesh_units_lt(q,mesh_units_add(t->unit,t->units)))return t;
-  }
-  return NULL;
-}
-/* design/transport.md section 14: a walk's entries whose units have all completed passed (`through`: the stream's
-   units completed in order, SENDs or landings, lanes_through), and its count (`sent` or `landed`, in units of the
-   holding) stored where it moved */
+/* design/transport.md section 14: a walk's count (`sent` or `landed`, in units of the holding) stored where its
+   stream's units completed in order moved (`through`: SENDs or landings, lanes_through) */
 static void walk_count(struct walk *w,struct mesh_units through,_Atomic uint64_t *count){
   through=mesh_units_sub(through,w->base);
-  while(w->done<w->taken){
-    const struct taken *e=w->ring+w->done%MESH_STREAM_ENTRIES;
-    if(mesh_units_lt(through,mesh_units_add(e->unit,e->units)))break;
-    w->done++;
-  }
   if(through.n!=w->count.n){w->count=through;mesh_units_store(count,through);}
 }
 /* design/transport.md section 14: a holding's words made new (its lists' counts, `ready`, `sent`, `landed`), then its
@@ -174,7 +132,7 @@ static void walk_count(struct walk *w,struct mesh_units through,_Atomic uint64_t
    where nothing of the holding is outstanding; MESH_STREAM_GIVEN alone, naming no client, so none takes it, where
    units are (stream_end) */
 static void stream_free(struct mesh_stream *x,uint64_t owner){
-  _Atomic uint64_t *words[]={&x->sends,&x->lands,&x->taken[0],&x->taken[1],&x->ready,&x->sent,&x->landed,&x->zwoggle};
+  _Atomic uint64_t *words[]={&x->taken[0],&x->taken[1],&x->ready,&x->sent,&x->landed,&x->zwoggle};
   for(size_t i=0;i<sizeof words/sizeof *words;i++)atomic_store_explicit(words[i],0,memory_order_relaxed);
   atomic_store_explicit(&x->owner,owner,memory_order_release);
 }
@@ -234,14 +192,10 @@ static void stream_turn(struct port *port,uint32_t t){
     if(!owner)return;
     if(owner&MESH_STREAM_GIVEN){stream_free(x,0);return;}
     l->held[t]=owner;l->hold[t]=HOLD_SERVE;
-    l->sending[t]=(struct walk){.ring=l->sending[t].ring,.base={s[0].sent+s[1].sent}};
-    l->landing[t]=(struct walk){.ring=l->landing[t].ring,.base={s[0].posted+s[1].posted}};
+    l->sending[t]=(struct walk){.base={s[0].sent+s[1].sent}};
+    l->landing[t]=(struct walk){.base={s[0].posted+s[1].posted}};
   }
-  if(owner==l->held[t] && owned(owner)){
-    walk_take(l->sending+t,x,0);
-    walk_take(l->landing+t,x,1);
-  }
-  else l->hold[t]=HOLD_END;
+  if(owner!=l->held[t] || !owned(owner))l->hold[t]=HOLD_END;
 }
 /* Post exact compiled SEND spans whose producer prefix is available. Actual
    frame credits and the independent pin-slot ring bound outstanding work.
@@ -261,7 +215,7 @@ static void stream_send(struct port *port,uint32_t t,uint32_t served){
     struct lane_state *state=l->lane+lane;
     if(state->sent-state->done>=MESH_LANE_UNITS)break;
     const struct mesh_units q=mesh_units_sub((struct mesh_units){lane_page(j,state->sent)},w->base);
-    const struct taken *e=walk_unit(w,x,0,q);
+    const struct taken *e=walk_chain(w,x,0,q);
     if(!e)break;
     const struct mesh_units i=mesh_units_sub(q,e->unit);
     if(!mesh_units_lt(mesh_units_add(e->base,i),mesh_units_load(e->word)))break;
@@ -292,7 +246,7 @@ static void stream_post(struct port *port,uint32_t t,uint32_t served){
     struct lane_state *state=l->lane+lane;
     if(state->posted-state->got>=MESH_LANE_UNITS)break;
     const struct mesh_units q=mesh_units_sub((struct mesh_units){lane_page(j,state->posted)},w->base);
-    const struct taken *e=walk_unit(w,x,1,q);
+    const struct taken *e=walk_chain(w,x,1,q);
     if(!e)break;
     if(e->word && mesh_units_lt(mesh_units_load(e->word),e->base))break;
     const struct mesh_dma_span bytes=e->spans[mesh_units_sub(q,e->unit).n];
@@ -681,12 +635,12 @@ static void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
   for(uint32_t s=0;s<plan_streams(l->plan);s++){
     struct mesh_stream *x=stream_of(port,s);
     atomic_store_explicit(&x->owner,0,memory_order_release);
-    _Atomic uint64_t *words[]={&x->sends,&x->lands,&x->ready,&x->sent,&x->landed,&x->taken[0],&x->taken[1],&x->zwoggle,
+    _Atomic uint64_t *words[]={&x->ready,&x->sent,&x->landed,&x->taken[0],&x->taken[1],&x->zwoggle,
                                &x->posts[0].posted[0],&x->posts[0].posted[1],&x->posts[0].done[0],&x->posts[0].done[1],
                                &x->posts[1].posted[0],&x->posts[1].posted[1],&x->posts[1].done[0],&x->posts[1].done[1]};
     for(size_t i=0;i<sizeof words/sizeof *words;i++)atomic_store_explicit(words[i],0,memory_order_relaxed);
     l->held[s]=0;l->hold[s]=HOLD_NONE;
-    l->sending[s]=(struct walk){.ring=l->sending[s].ring};l->landing[s]=(struct walk){.ring=l->landing[s].ring};
+    l->sending[s]=(struct walk){0};l->landing[s]=(struct walk){0};
     atomic_store_explicit(&x->unfinished,0,memory_order_relaxed); /* the predecessor exited before this new pairing */
     x->child_start=mesh_started(getpid());
     atomic_store_explicit(&x->child,(uint32_t)getpid(),memory_order_release);
@@ -741,49 +695,11 @@ static void lane_reset(struct port *port,uint32_t k){
   l->lane[k]=(struct lane_state){.frame_capacity=room.n};
   atomic_thread_fence(memory_order_release);
 }
-/* design/transport.md section 14: the arena pages of a port's streams' lists: each stream's two lists of
-   MESH_STREAM_ENTRIES entries, rounded to allocation pages (page_round); no interval ring (design/reclamation-2026-10-30.md) */
-static uint64_t page_round(uint64_t bytes){ return (bytes+page_bytes()-1)/page_bytes()*page_bytes(); }
-static uint32_t lists_pages(void){
-  const uint64_t each=page_round(2*(uint64_t)MESH_STREAM_ENTRIES*sizeof(struct mesh_entry));
-  return (uint32_t)(MESH_LINK_STREAMS*each/M->pgsz);
-}
-/* design/transport.md section 14: the port's streams' lists and rings, leased from the arena by the parent as the
-   port first pairs (recorded in the region, so a bridge adopting the region takes the same pages: section 2) and held
-   for the region's life, every child and bridge of the port's, told in the region (mesh.h struct mesh_stream `lists`,
-   `rows`).  0, or ENOMEM where the region holds no room for them */
-static int stream_lists(struct port *port){
-  struct link *l=&port->link;
-  struct mesh_bridge_pages *own=mesh_bridge_pages(M);
-  const uint32_t pages=lists_pages();
-  if(own->lists[port->index]==MESH_ABSENT)own->lists[port->index]=mesh_arena_alloc(&bridge,pages,M->block);
-  const uint32_t page=own->lists[port->index];
-  if(page==MESH_ABSENT)return ENOMEM;
-  held_pages+=pages;record_changed();
-  uint64_t at=M->data_off+(uint64_t)page*M->pgsz;
-  for(uint32_t s=0;s<MESH_LINK_STREAMS;s++){
-    struct mesh_stream *x=stream_of(port,s);
-    x->lists=at;at+=page_round(2*(uint64_t)MESH_STREAM_ENTRIES*sizeof(struct mesh_entry));
-    x->rows=0;
-  }
-  l->lists=page;
-  return 0;
-}
-/* design/transport.md section 14, "A process a port": the child's walks of each stream's two lists, made at its first
-   connect; 0, or ENOMEM */
-static int lanes_room(struct port *port){
-  struct link *l=&port->link;
-  for(uint32_t s=0;s<MESH_LINK_STREAMS;s++){
-    if(!l->sending[s].ring && !(l->sending[s].ring=calloc(MESH_STREAM_ENTRIES,sizeof(struct taken))))return ENOMEM;
-    if(!l->landing[s].ring && !(l->landing[s].ring=calloc(MESH_STREAM_ENTRIES,sizeof(struct taken))))return ENOMEM;
-  }
-  return 0;
-}
 /* design/transport.md section 14: the streams of a port (`port` NULL: of every port) live no more, and their `sent`
    and `landed` ~0, as its link is lost or the bridge stops: a client waiting on one reads the loss */
 void streams_cancel(const struct port *port){
   for(uint32_t p=0;p<port_count;p++){
-    if((port && ports+p!=port) || ports[p].link.lists==MESH_ABSENT)continue;
+    if(port && ports+p!=port)continue;
     for(uint32_t s=0;s<MESH_LINK_STREAMS;s++){
       struct mesh_stream *x=stream_of(ports+p,s);
       atomic_store_explicit(&x->live,0,memory_order_release);
@@ -838,8 +754,7 @@ static void link_turn(struct port *port){
   if(l->job || held)return;
   if(l->state==LINK_DOWN){
     if((l->page==MESH_ABSENT && ((l->page=mesh_bridge_pages(M)->link[port->index]=mesh_arena_alloc(&bridge,l->pages,M->block))==MESH_ABSENT ||
-                                 !(held_pages+=l->pages))) ||
-       (l->lists==MESH_ABSENT && stream_lists(port))){
+                                 !(held_pages+=l->pages)))){
       port_lost(port,ENOMEM);
       return;
     }
@@ -1152,7 +1067,6 @@ static void ports_found(void){
     /* design/transport.md: the link's block, the pages leased for the port's index */
     port->link.pages=link_pages();
     port->link.page=link_page[port_count];
-    port->link.lists=MESH_ABSENT;
     port->link.provider.device=&port->device;
     snprintf(port->device.name,sizeof port->device.name,"%s",devices[i]);snprintf(port->name,sizeof port->name,"%s",devices[i]+5);
     /* the interface as the kernel's events name it, its name read once here into typed values (addresses_heard) */
@@ -1682,7 +1596,6 @@ static void child_command(struct port *port,const struct child_message *heard){
   if(!refused && job==LINK_JOB_CONNECT){
     memcpy(l->peer,heard->peer,sizeof l->peer);port->heard.lid=heard->lid;memcpy(port->heard.gid,heard->gid,16);
     port->peer=heard->node;child_bandwidth=heard->bandwidth;
-    refused=lanes_room(port);
   }
   if(refused){
     child_tell((struct child_message){.kind=job==LINK_JOB_MAKE?CHILD_MADE:CHILD_CONNECTED,.pairing=heard->pairing,.result=refused});
@@ -1757,7 +1670,7 @@ static int child_main(int argc,char **argv){
   close(fd);
   struct port *port=ports;
   *port=(struct port){.index=(uint32_t)index,.control=-1,.child_fd=-1,.work=dispatch_queue_create("mesh.port",DISPATCH_QUEUE_SERIAL)};
-  port->link.provider.device=&port->device;port->link.page=port->link.lists=MESH_ABSENT;
+  port->link.provider.device=&port->device;port->link.page=MESH_ABSENT;
   snprintf(port->device.name,sizeof port->device.name,"%s",argv[3]);snprintf(port->name,sizeof port->name,"%s",argv[3]+5);
   ones=(uint32_t)strtoul(argv[5],NULL,10);
   __atomic_store_n(&port_count,1,__ATOMIC_SEQ_CST);
@@ -1824,7 +1737,7 @@ static int region_open(const struct hdr *geometry,int *out){
   *M=*geometry;M->version=MESH_LAYOUT;
   for(uint32_t r=0;r<mesh_rows(M);r++)atomic_store_explicit(&mesh_page(M)[r].mapping,MESH_ABSENT,memory_order_relaxed);
   struct mesh_bridge_pages *own=mesh_bridge_pages(M);
-  for(uint32_t p=0;p<MESH_PORTS;p++)own->link[p]=own->lists[p]=MESH_ABSENT;
+  for(uint32_t p=0;p<MESH_PORTS;p++)own->link[p]=MESH_ABSENT;
   own->ones=own->map=MESH_ABSENT;own->map_pages=0;
   *out=fd;
   return 0;

@@ -107,8 +107,8 @@ static inline void gate_retire(struct send_gate *gate,uint64_t id){ gate->retire
    outstanding requests independently to MESH_LANE_UNITS. Receive WR IDs carry
    the cumulative frame prefix retired by each completion. */
 struct lane_state { uint64_t sent,done,posted,got,frames_posted,frames_retired,frame_capacity; };
-/* A taken entry keeps its immutable resolved span table. `unit` is its first
-   unit over this holding; every dependency/completion prefix counts units. */
+/* An entry as the walk reads it from its call's tables: its immutable resolved span table, `unit` its first unit over
+   this holding; every dependency/completion prefix counts units. */
 struct taken { const struct mesh_dma_span *spans; struct mesh_units units,base,unit; const _Atomic uint64_t *word; };
 /* Unit p goes on lane p mod MESH_STREAM_LANES as unit p/lanes there.
    Only the contiguous completed prefix across both lanes becomes available. */
@@ -119,15 +119,13 @@ static inline uint64_t lanes_through(const uint64_t *u){
   for(uint32_t j=1;j<MESH_STREAM_LANES;j++)g=MIN(g,lane_page(j,u[j]));
   return g;
 }
-/* A taken-entry ring; units/base/count refer to transport units. `base` is
-   the pairing-wide prefix before this holding. Tables stay immutable through
-   final unit completion; taking an entry releases only its list slot.
-   design/zorvek.md zinth: a holding that links its calls' tables (mesh.h struct mesh_zwoggle) is walked from them
-   instead (`chained`): `chain` its place in them (mesh-graph.h mesh_graph_chain: a node a call's tables, an item an
-   entry of its list, its positions the holding's units, the nodes left the list's calls left), `current` the entry
-   holding the unit last asked for, read from the call's tables (mesh-link.c walk_chain) */
-struct walk { struct taken *ring; uint64_t taken,done,at; struct mesh_units units,base,count;
-              int chained; struct mesh_graph_chain chain; struct taken current; };
+/* A list's walk over its holding's linked call tables (design/zorvek.md zinth, mesh.h struct mesh_zwoggle): `base` the
+   pairing-wide prefix before this holding, `count` the units completed told, `chain` its place in the tables
+   (mesh-graph.h mesh_graph_chain: a node a call's tables, an item an entry of its list, its positions the holding's
+   units, the nodes left the list's calls left), `current` the entry holding the unit last asked for, read from the
+   call's tables (mesh-link.c walk_chain). The bridge's 4,096-entry rings of entries copied from the holder's
+   presented lists are deleted: every holder links its tables */
+struct walk { struct mesh_units base,count; struct mesh_graph_chain chain; struct taken current; };
 /* design/transport.md section 14: a holding's state on its stream at its port's progress thread: none (`HOLD_NONE`);
    served (`HOLD_SERVE`); ended (its owner word given, or its client retired), until the next pass has taken its lanes'
    completions (`HOLD_END`); ended with units outstanding on the stream's lanes, the stream not live and nothing served
@@ -167,8 +165,7 @@ static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_L
    parent hears the peer's HELLO and told the child with the make; its lanes left out have no queue pair and their
    `qpn` UINT32_MAX, no queue pair's number).  Each
    lane's SEND gate (`gate`: the frames posted and retired; its capacity, set as the lane connects), each data lane's
-   progress (`lane`, struct lane_state), the arena page of the streams' lists and rings of rows (`lists`, leased as
-   the port first pairs, MESH_ABSENT none: mesh.h struct mesh_stream).  Each stream's holding at the progress thread: the
+   progress (`lane`, struct lane_state).  Each stream's holding at the progress thread: the
    owner it serves (`held`), its state (`hold`) and its send and landing walks (`sending`, `landing`) */
 enum { LINK_DOWN, LINK_MADE, LINK_CONNECTING, LINK_UP };
 enum { LINK_JOB_MAKE=1, LINK_JOB_CONNECT };
@@ -177,7 +174,7 @@ struct link {
   int state,job,result,heard,lanes;
   _Atomic int done,lost;
   _Atomic uint32_t served,broken,pairing;
-  uint32_t plan,peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],page,pages,lists,job_pairing,psn;
+  uint32_t plan,peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],page,pages,job_pairing,psn;
   struct frames share;
   struct send_gate gate[MESH_LINK_LANES];
   struct lane_state lane[MESH_LINK_LANES];
