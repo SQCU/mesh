@@ -46,4 +46,10 @@ int mesh_graph_order(uint32_t vertices, const size_t *first, uint32_t (*head)(co
    edge into the same node). */
 int mesh_graph_arborescence(uint32_t N, uint32_t root, uint32_t E, const uint32_t *from, const uint32_t *to,
                             const double *weight, int32_t *chosen);
+/* The walk up a parent table from `from` (parent[v]: v's next vertex up): `visit(consumer, at, step)` for each vertex
+   it meets, `from` at step 0, until one that is `root` (UINT32_MAX: none), its own parent or names none
+   (parent[at] >= vertices), visited last.  The steps to that vertex; UINT32_MAX where `vertices` steps meet none (a
+   cycle), steps 0 to `vertices` visited.  `visit` NULL: none. */
+uint32_t mesh_graph_climb(const uint32_t *parent, uint32_t vertices, uint32_t root, uint32_t from,
+                          void (*visit)(void *consumer, uint32_t at, uint32_t step), void *consumer);
 #endif

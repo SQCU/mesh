@@ -80,9 +80,10 @@ uint32_t mesh_route_path(const struct mesh_link_map *map,uint32_t a,uint32_t b,u
   return count;
 }
 
+/* the first step past 0 a climb from node 0 meets node 0 again (mesh_graph_climb's visit) */
+static void mesh_ring_return(void *consumer,uint32_t at,uint32_t step){ uint32_t *back=consumer; if(step && !at && !*back)*back=step; }
 int mesh_link_map_check(const struct mesh_link_map *map){
   const uint32_t n=map->nodes,N=mesh_all(map);
-  uint32_t at,steps;
   if(map->kind>MESH_LINKS_GRAPH || !n || (map->links && !map->link) || (map->relays && (!map->next || map->kind!=MESH_LINKS_GRAPH)))
     return EINVAL;
   for(uint32_t l=0;l<map->links;l++)if(map->link[l][0]>=N || map->link[l][1]>=N || map->link[l][0]==map->link[l][1])return EINVAL;
@@ -102,16 +103,14 @@ int mesh_link_map_check(const struct mesh_link_map *map){
     if(up[map->link[l][1]]<n)result=EINVAL;
     else up[map->link[l][1]]=map->link[l][0];
   }
+  /* a ring's links one cycle up from node 0 through every node (its first return n steps on); a tree's every
+     chain ending at a root (mesh-graph.h) */
   if(!result && map->kind==MESH_LINKS_RING){
-    at=0;steps=0;
-    do{at=up[at];steps++;}while(at<n && at && steps<n);
-    result=at==0 && steps==n?0:EINVAL;
+    uint32_t back=0;
+    result=mesh_graph_climb(up,n,UINT32_MAX,0,mesh_ring_return,&back)==UINT32_MAX && back==n?0:EINVAL;
   }else if(!result){
     if(map->links!=n-1)result=EINVAL;
-    for(uint32_t v=0;v<n && !result;v++){
-      for(at=v,steps=0;up[at]<n && steps<n;steps++)at=up[at];
-      if(up[at]<n)result=EINVAL;
-    }
+    for(uint32_t v=0;v<n && !result;v++)if(mesh_graph_climb(up,n,UINT32_MAX,v,NULL,NULL)==UINT32_MAX)result=EINVAL;
   }
   free(up);
   return result;
@@ -348,20 +347,18 @@ static uint32_t mesh_trees_heaviest(const struct mesh_trees *trees,uint32_t r){
 /* A tree's shape: each node's height (its longest path up from a leaf below it), depth, whether its subtree holds a
    contributor (`live`) and whether a child's does (`inner`) */
 struct mesh_shape { uint32_t height,depth; int live,inner; };
+/* a climb's visits (mesh_graph_climb): the height `step` gives the node it meets, and the node live */
+static void mesh_shape_height(void *consumer,uint32_t at,uint32_t step){ struct mesh_shape *s=consumer; if(step && s[at].height<step)s[at].height=step; }
+static void mesh_shape_live(void *consumer,uint32_t at,uint32_t step){ (void)step; ((struct mesh_shape *)consumer)[at].live=1; }
 static void mesh_tree_shape(const struct mesh_trees *trees,uint32_t t,const uint64_t *contributors,struct mesh_shape *shape){
   const uint32_t n=trees->nodes,r=trees->root[t],*parent=trees->parent+(size_t)t*n;
   for(uint32_t v=0;v<n;v++)shape[v]=(struct mesh_shape){0,0,0,0};
+  /* each node's climb to the root (mesh-graph.h): its depth, the height it gives each node above it */
   for(uint32_t v=0;v<n;v++){
-    uint32_t at=v,k=0;
-    for(;at!=r && k<n;k++){
-      const uint32_t up=parent[at];
-      if(shape[up].height<k+1)shape[up].height=k+1;
-      at=up;
-    }
-    shape[v].depth=k;
+    const uint32_t k=mesh_graph_climb(parent,n,r,v,mesh_shape_height,shape);
+    shape[v].depth=k==UINT32_MAX?n:k;
   }
-  for(uint32_t v=0;v<n;v++)
-    if(mesh_member(contributors,v))for(uint32_t at=v,k=0;k<=n;at=parent[at],k++){shape[at].live=1;if(at==r)break;}
+  for(uint32_t v=0;v<n;v++)if(mesh_member(contributors,v))mesh_graph_climb(parent,n,r,v,mesh_shape_live,shape);
   for(uint32_t v=0;v<n;v++)if(v!=r && shape[v].live)shape[parent[v]].inner=1;
 }
 

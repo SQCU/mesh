@@ -143,3 +143,15 @@ done:
   free(best);free(id);free(seen);free(nfrom);free(nto);free(origin);free(nweight);free(nchosen);free(cyclic);
   return status;
 }
+
+/* mesh-graph.h */
+uint32_t mesh_graph_climb(const uint32_t *parent, uint32_t vertices, uint32_t root, uint32_t from,
+                          void (*visit)(void *consumer, uint32_t at, uint32_t step), void *consumer) {
+  uint32_t at = from;
+  for (uint32_t step = 0; step <= vertices; step++) {
+    if (visit) visit(consumer, at, step);
+    if (at == root || parent[at] >= vertices || parent[at] == at) return step;
+    at = parent[at];
+  }
+  return UINT32_MAX;
+}
