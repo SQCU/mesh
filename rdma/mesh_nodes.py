@@ -8,9 +8,11 @@ import functools
 import getpass
 import io
 import json
+import re
 import math
 import os
 import shlex
+import socket
 import subprocess
 import sys
 import threading
@@ -391,6 +393,80 @@ def bridge_began():
     return time.mktime(time.strptime(started, '%a %b %d %H:%M:%S %Y')) if started else None
 
 
+RESET_REPORTS = Path('/Library/Logs/DiagnosticReports')
+BRIDGE_LOG = HOME / 'Library/Logs/io.mesh.bridge.log'
+LIFECYCLE = ('signal', 'stopping', 'exited', 'asked to end', 'ended', 'lost', 'holding ended', 'not sent', 'region',
+             'not reapable', 'reaped', 'opened', 'started')
+
+
+def _report_time(name):
+    """A DiagnosticReports file's local time from its name (…-YYYY-MM-DD-HHMMSS…), unix seconds"""
+    stamp = re.search(r'\d{4}-\d{2}-\d{2}-\d{6}', name)
+    return time.mktime(time.strptime(stamp.group(0), '%Y-%m-%d-%H%M%S')) if stamp else 0
+
+
+def _panic(path):
+    """A panic report's first line of its panic string, its wired and free pages and its mesh processes' states"""
+    text = path.read_text(errors='replace')
+    body = text.split('\n', 1)[1] if '\n' in text else ''
+    try:
+        report = json.loads(body)
+    except ValueError:
+        return {'panic': body[:200]}
+    found = {}
+
+    def walk(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k in ('panicString', 'memoryPages', 'processByPid') and k not in found:
+                    found[k] = v
+                walk(v)
+    walk(report)
+    pages = found.get('memoryPages') or {}
+    mesh = sorted(f"{p.get('procname')} {pid} " + '|'.join(sorted({','.join(t.get('state', [])) for t in p.get('threadById', {}).values()}))
+                  for pid, p in (found.get('processByPid') or {}).items() if str(p.get('procname', '')).startswith('mesh'))
+    return {'panic': str(found.get('panicString', '')).split('\n')[0][:200], 'wired': pages.get('wired'),
+            'free': pages.get('free'), 'mesh': mesh}
+
+
+def node_resets(since, name=''):
+    """This node's resets since `since` (YYYY-MM-DD), one JSON line each: its time, its boot faults or panic, and the
+    bridge log's lifecycle lines in the 300 s before it (the log's times are UTC)"""
+    start = time.mktime(time.strptime(since, '%Y-%m-%d'))
+    reports = sorted((p for p in RESET_REPORTS.glob('*') if p.name.startswith(('ResetCounter-', 'panic-full-'))),
+                     key=lambda p: _report_time(p.name))
+    log = BRIDGE_LOG.read_text(errors='replace').splitlines() if BRIDGE_LOG.exists() else []
+    for path in reports:
+        at = _report_time(path.name)
+        if at < start:
+            continue
+        row = {'node': name or socket.gethostname(), 'at': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(at)), 'report': path.name}
+        if path.name.startswith('ResetCounter-'):
+            faults = [line for line in path.read_text(errors='replace').splitlines() if line.startswith('Boot faults')]
+            row['faults'] = faults[0].split(':', 1)[1].strip() if faults else ''
+        else:
+            row.update(_panic(path))
+        first = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(at - 300))
+        last = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(at))
+        row['before'] = [line[:200] for line in log if first <= line[:19] <= last and any(k in line for k in LIFECYCLE)][-40:]
+        print(json.dumps(row))
+    return 0
+
+
+def resets(since):
+    """Every configured member's resets since `since`, from its management path (this module run there by its source,
+    so a node's checkout is no operand)"""
+    cluster = load()
+    source = f'__file__ = {str(Path(__file__)).replace(str(HOME), "~")!r}\n' + Path(__file__).read_text()
+    nodes = [Node(cluster, number, member.management) for number, member in cluster.members.items()
+             if 'workstation' not in member.roles]
+    def one(n):
+        return n.run(f"{cluster.python} - node resets {shlex.quote(since)} {shlex.quote(n.name)}", input=source.encode(), timeout=60)
+    for n, result in zip(nodes, parallel([lambda n=n: one(n) for n in nodes])):
+        print(result[1].rstrip() if isinstance(result, tuple) else f'{n.name}: {result}')
+    return 0
+
+
 def show():
     nodes = discover(load())[0] or []
     on = {n.number for n in up(nodes)}
@@ -403,7 +479,7 @@ def main(argv=None):
     remote = bool(argv and argv[0] == 'node')
     if remote:
         argv.pop(0)
-    commands = {'prepare': node_prepare} if remote else {'discover': show}
+    commands = {'prepare': node_prepare, 'resets': node_resets} if remote else {'discover': show, 'resets': resets}
     return commands[argv[0]](*argv[1:])
 
 

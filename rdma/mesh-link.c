@@ -1337,41 +1337,26 @@ static void child_send(struct port *port,struct child_message said){
   if(port->child_fd>=0)message_send(port->child_fd,&said);
 }
 static void child_reaped(struct port *port);
-/* a process, not this bridge nor one of its children, that is a child of the port's device of any version (its argv
-   `--child VERSION DEVICE ...`, the three words every version keeps): a child of a launch whose parent ended unbidden, which holds the device's queue
-   pairs until its exit (child_leave, at most 2 MESH_PLATFORM_NS); its pid, or 0.  A device's queue pairs are one
-   child's at a time: a link takes as many as its device holds for it, up to MESH_LINK_LANES (ten of a macOS 26
-   device's ten, design/HETEROGENEOUS-LINKS.md) */
+/* a child of the port's device that is not one of this bridge's: one of an earlier launch, alive or in its exit (the
+   region's holder table, mesh_holds: a process in its exit holds its device's queue pairs until the kernel has released
+   them, which no scan of the processes' arguments sees), its entry naming this device or any (`unit` 0); its pid, or 0.
+   A device's queue pairs are one child's at a time: a link takes as many as its device holds for it, up to
+   MESH_LINK_LANES (ten of a macOS 26 device's ten, design/HETEROGENEOUS-LINKS.md) */
 static pid_t child_elsewhere(const struct port *port){
-  static pid_t pids[MESH_PROCESS_SNAPSHOT_ENTRIES];
-  static char *arguments;
-  static size_t room;
-  int most=0,argmax[2]={CTL_KERN,KERN_ARGMAX};
-  size_t length=sizeof most;
-  if(!arguments && (sysctl(argmax,2,&most,&length,NULL,0) || most<=0 || !(arguments=malloc(room=(size_t)most))))return 0;
-  const int count=proc_listallpids(pids,(int)sizeof pids);
-  for(int i=0;i<count && i<(int)(sizeof pids/sizeof *pids);i++){
-    const pid_t pid=pids[i];
-    int own=pid==getpid();
+  const struct mesh_holder *holders=mesh_bridge_pages(M)->child;
+  for(uint32_t entry=0;entry<2*MESH_PORTS;entry++){
+    const pid_t pid=(pid_t)holders[entry].pid;
+    int own=!pid;
     for(uint32_t p=0;p<port_count;p++)own|=pid==ports[p].child;
-    if(own)continue;
-    int mib[3]={CTL_KERN,KERN_PROCARGS2,pid},argc=0;
-    size_t size=room;
-    if(sysctl(mib,3,arguments,&size,NULL,0) || size<sizeof argc)continue;
-    memcpy(&argc,arguments,sizeof argc);
-    const char *at=arguments+sizeof argc,*end=arguments+size,*argv[4]={0};
-    at+=strnlen(at,(size_t)(end-at));
-    while(at<end && !*at)at++;
-    for(int a=0;a<argc && a<4 && at<end;a++){argv[a]=at;at+=strnlen(at,(size_t)(end-at))+1;}
-    if(argc>=4 && argv[1] && argv[3] && !strcmp(argv[1],"--child") && !strcmp(argv[3],port->device.name))return pid;
+    if(!own && (!holders[entry].unit || holders[entry].unit==port->unit+1) && mesh_holds(pid,holders[entry].start))return pid;
   }
   return 0;
 }
 /* the port's child spawned (its socket's messages and its exit watched, tagged by the port); 0, or the error, the
-   port's next spawn held MESH_PAUSE_NS.  A child of its device from an earlier launch (child_elsewhere) holds the spawn
-   until its exit, which the event loop hears (EVFILT_PROC, tagged by the port: `elsewhere` cleared) and spawns at once;
-   the processes are read again only then, not at every turn while it lives.  One whose exit cannot be watched is read
-   again at the next turn (at once where it has already gone or is in its exit, which the scan does not see) */
+   port's next spawn held MESH_PAUSE_NS.  A child of its device from an earlier launch (child_elsewhere) holds this
+   port's spawn alone, the other ports spawning, until its exit, which the event loop hears (EVFILT_PROC, tagged by the
+   port: `elsewhere` cleared) and spawns at once; one already in its exit takes no such filter (ESRCH), and is read
+   again MESH_PAUSE_NS on, never at every turn */
 static int child_spawn(struct port *port){
   int pair[2],on=1;
   if(port->elsewhere)return EBUSY;
@@ -1379,7 +1364,7 @@ static int child_spawn(struct port *port){
   if(elsewhere){
     struct kevent64_s watch;
     EV_SET64(&watch,(uint64_t)elsewhere,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,TAG_CHILD|port->index,0,0);
-    if(kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)){if(errno==ESRCH)wake();return EBUSY;}
+    if(kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)){port->hold_to=now+MESH_PAUSE_NS;return EBUSY;}
     port->elsewhere=elsewhere;
     return EBUSY;
   }
@@ -1420,7 +1405,7 @@ static int child_spawn(struct port *port){
     return error;
   }
   port->child=pid;port->child_fd=pair[0];port->child_held=0;port->ending=0;
-  holders[entry]=(struct mesh_holder){(uint32_t)pid,0,mesh_started(pid)};
+  holders[entry]=(struct mesh_holder){(uint32_t)pid,port->unit+1,mesh_started(pid)};
   port->holder=entry;
   struct kevent64_s watch;
   EV_SET64(&watch,(uint64_t)pair[0],EVFILT_READ,EV_ADD,0,0,TAG_CHILD|port->index,0,0);
@@ -1586,12 +1571,45 @@ static int child_halted;
 static unsigned char child_in[sizeof(struct child_message)];
 static uint32_t child_got;
 static void child_tell(struct child_message said){ message_send(3,&said); }
+/* design/transport.md section 14, "A process a port": the queue pairs a child leaves holding work released as the
+   literature releases one (rdmamojo "Flushing Work Requests"; Linux ib_drain_qp before ib_destroy_qp; the operator's
+   permission of 2026-10-22, "you can do this and nothing else with error states"): each lane with a SEND not completed
+   or a receive not landed moved to the error state, so the device completes each (IBV_WC_WR_FLUSH_ERR), and those
+   completions taken, at most until `until`; the kernel destroys the rest at the exit.  An exit with work posted can
+   wait in the kernel's release with no deadline (IOThunderboltPath::deactivateSynchronous, metal-microbench
+   docs/facts.md), holding its device and its pages; on this provider the flush took 0.41 and 0.46 s for 687 requests.
+   Under the port's guard (child_leave): no progress thread posts or polls meanwhile */
+static void lanes_flush(struct port *port,uint64_t until){
+  struct link *l=&port->link;
+  uint64_t left=0;
+  uint32_t moved=0;
+  for(uint32_t k=0;k<MESH_LINK_LANES;k++){
+    const struct lane_state *s=l->lane+k;
+    struct ibv_qp_attr error={.qp_state=IBV_QPS_ERR};
+    if((s->sent!=s->done || s->posted!=s->got) && l->plan>>k&1 && !ibv_modify_qp(l->provider.queues[k].pair,&error,IBV_QP_STATE)){
+      moved|=UINT32_C(1)<<k;left+=s->sent-s->done+s->posted-s->got;
+    }
+  }
+  const uint64_t held=left;
+  struct ibv_wc done[16];
+  for(int n=0,c=0;left && n>=0 && clock_ns()<until;c^=1){
+    n=l->provider.poll(c?l->provider.sent:l->provider.completion,16,done);
+    for(int i=0;i<n;i++)if(left && moved>>link_lane(l,done[i].qp_num)&1)left--;
+  }
+  if(held)mesh_say("bridge","link %u (%s): its child leaves with %llu work requests outstanding on lanes %#x: moved to the "
+                   "error state, %llu flushed",port->index,port->name,(unsigned long long)held,moved,(unsigned long long)(held-left));
+}
+/* the child's end, asked (its parent's word, or a signal that ends a process: SIGTERM, SIGINT, SIGHUP) or not (its
+   parent's loss): its progress threads held at the port's guard (none where a job of the port's is out), its lanes
+   served no more, its own windows waited out (B9, B9b: no release inside a termination), what its lanes hold flushed
+   (lanes_flush), and its exit, within (asked 1, else 2) MESH_PLATFORM_NS and the flush's MESH_PLATFORM_NS */
 static __attribute__((noreturn)) void child_leave(struct port *port,int asked){
+  const uint64_t start=clock_ns(),bound=start+(asked?1:2)*MESH_PLATFORM_NS;
+  const int held=port->link.job?0:guard_raise(port);
   atomic_fetch_add(&port->link.pairing,1);
   atomic_store(&port->link.served,0);
   atomic_store_explicit(&port->closing,1,memory_order_release);
   guard_wake(port);
-  const uint64_t start=clock_ns(),bound=start+(asked?1:2)*MESH_PLATFORM_NS;
   for(;;){
     const uint64_t at=clock_ns(),windows=MAX(atomic_load(&exit_at),atomic_load(&port->quiet_at));
     const uint64_t until=MIN(bound,MAX(asked?start:start+MESH_PLATFORM_NS,windows));
@@ -1599,6 +1617,7 @@ static __attribute__((noreturn)) void child_leave(struct port *port,int asked){
     struct timespec rest={(time_t)((until-at)/1000000000u),(long)((until-at)%1000000000u)};
     nanosleep(&rest,NULL);
   }
+  if(held>0)lanes_flush(port,clock_ns()+MESH_PLATFORM_NS);
   exit(0);
 }
 static void child_command(struct port *port,const struct child_message *heard){
@@ -1700,6 +1719,14 @@ static int child_main(int argc,char **argv){
   if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("child events");
   EV_SET64(&event,3,EVFILT_READ,EV_ADD,0,0,UINT64_MAX,0,0);
   if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("child events");
+  /* a signal that ends a process ends the child as its parent's word does (child_leave: its lanes flushed first), within
+     its bound; SIGKILL ends it at once */
+  static const int ending[]={SIGTERM,SIGINT,SIGHUP};
+  for(size_t i=0;i<sizeof ending/sizeof *ending;i++){
+    EV_SET64(&event,(uint64_t)ending[i],EVFILT_SIGNAL,EV_ADD,0,0,UINT64_MAX,0,0);
+    if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("child events");
+    signal(ending[i],SIG_IGN);
+  }
   terminations_watch(0);
   for(;;){
     now=clock_ns();
@@ -1709,7 +1736,10 @@ static int child_main(int argc,char **argv){
     struct timespec tick={(time_t)(MESH_PAUSE_NS/1000000000u),(long)(MESH_PAUSE_NS%1000000000u)};
     const int count=kevent64(events,NULL,0,ready,4,0,&tick);
     now=clock_ns();
-    for(int i=0;i<count;i++)if(ready[i].filter==EVFILT_READ && ready[i].ident==3)child_read(port);
+    for(int i=0;i<count;i++){
+      if(ready[i].filter==EVFILT_SIGNAL)child_leave(port,1);
+      if(ready[i].filter==EVFILT_READ && ready[i].ident==3)child_read(port);
+    }
   }
 }
 
@@ -1725,8 +1755,8 @@ static int child_main(int argc,char **argv){
    the expiry, nccl-mesh.c attach_expired), and this bridge ends with EX_TEMPFAIL: its heartbeat opens a bridge again once
    none of the region's holders it can see lives.  An expired region (or an object that never became one) is made
    again in place: its metadata zeroed and laid as this layout's, over the same pages.  So a restart never makes a
-   second region beside the first, whatever holds the first (a process in its exit, which no lookup by pid sees, keeps
-   the same pages wired, never others besides).  Only a release unlinks the object (mesh-heartbeat.c, SIGUSR1 or
+   second region beside the first, whatever holds the first (a process in its exit keeps the same pages wired, never
+   others besides).  Only a release unlinks the object (mesh-heartbeat.c, SIGUSR1 or
    SIGTERM).  A region that cannot be read is left as it is, and this bridge ends.  1
    adopted, 0 made; *out its descriptor; *geometry fitted to the object's size */
 static int region_same(const struct hdr *a,const struct hdr *b){
@@ -1734,6 +1764,38 @@ static int region_same(const struct hdr *a,const struct hdr *b){
          a->planes_off==b->planes_off && a->arena_off==b->arena_off && a->page_off==b->page_off && a->buffer_off==b->buffer_off &&
          a->bridge_off==b->bridge_off && a->stream_off==b->stream_off && a->client_off==b->client_off && a->data_off==b->data_off &&
          a->length==b->length;
+}
+static struct mesh_holder region_children[2*MESH_PORTS];
+/* whether process `pid` of start `start` still runs: its exit not begun (argument 0 of PROC_PIDTBSDINFO reads no process
+   in its exit, mesh-dataflow.h mesh_started) */
+static int region_running(pid_t pid,uint64_t start){
+  struct proc_bsdinfo info;
+  return pid && proc_pidinfo(pid,PROC_PIDTBSDINFO,0,&info,(int)sizeof info)==(int)sizeof info &&
+         (!start || (uint64_t)info.pbi_start_tvsec*UINT64_C(1000000)+info.pbi_start_tvusec==start);
+}
+/* an earlier launch's children (region_children) that still run, before a layout is laid over their region: each
+   told to end as a signal ends a process (SIGTERM: it closes, its lanes flushed, child_leave) and awaited its bounds
+   (2 MESH_PLATFORM_NS and MESH_PAUSE_NS), then ended (SIGKILL: a process it is pending for runs none of its own code
+   again, even one in a kernel call now), so none writes its words into the new layout; one in its exit runs nothing of
+   its own, and its device is the next child's to wait for (child_elsewhere).  A bridge that ended as asked ended after
+   its children; these are a bridge's that did not */
+static void region_orphans_end(void){
+  uint32_t running=0;
+  for(uint32_t e=0;e<2*MESH_PORTS;e++)
+    if(region_running((pid_t)region_children[e].pid,region_children[e].start)){running++;kill((pid_t)region_children[e].pid,SIGTERM);}
+  if(running)mesh_say("bridge","%u children of an earlier launch still run: told to end (SIGTERM) before a layout is laid over "
+                      "their region",running);
+  for(const uint64_t asked=clock_ns()+2*MESH_PLATFORM_NS+MESH_PAUSE_NS;running;poll(NULL,0,100)){
+    running=0;
+    for(uint32_t e=0;e<2*MESH_PORTS;e++)running+=region_running((pid_t)region_children[e].pid,region_children[e].start);
+    if(running && clock_ns()>=asked){
+      for(uint32_t e=0;e<2*MESH_PORTS;e++)
+        if(region_running((pid_t)region_children[e].pid,region_children[e].start))kill((pid_t)region_children[e].pid,SIGKILL);
+      mesh_say("bridge","%u children of an earlier launch ran on %.0f s after SIGTERM: ended (SIGKILL)",running,
+               (double)(2*MESH_PLATFORM_NS+MESH_PAUSE_NS)/1e9);
+      break;
+    }
+  }
 }
 static int region_open(struct hdr *geometry,int *out){
   int fd=shm_open(MESH_NAME,O_RDWR,0);
@@ -1751,6 +1813,10 @@ static int region_open(struct hdr *geometry,int *out){
       if(version==MESH_LAYOUT && region_same(old,geometry)){M=old;*out=fd;return 1;}
       if(version){__atomic_store_n(&old->version,0,__ATOMIC_SEQ_CST);exit(EX_TEMPFAIL);}
     }
+    /* the children an earlier launch recorded kept across the new layout, those that still hold (child_elsewhere) */
+    if(old->magic==MESH_MAGIC && old->bridge_off+MESH_BRIDGE_BYTES<=size)
+      memcpy(region_children,mesh_bridge_pages(old)->child,sizeof region_children);
+    region_orphans_end();
     M=old;memset((void *)M,0,(size_t)geometry->data_off);
   }else{
     if((fd=shm_open(MESH_NAME,O_CREAT|O_EXCL|O_RDWR,MESH_MODE))<0)die("shm");
@@ -1764,6 +1830,8 @@ static int region_open(struct hdr *geometry,int *out){
   struct mesh_bridge_pages *own=mesh_bridge_pages(M);
   for(uint32_t p=0;p<MESH_PORTS;p++)own->link[p]=MESH_ABSENT;
   own->ones=own->map=MESH_ABSENT;own->map_pages=0;
+  for(uint32_t e=0;e<2*MESH_PORTS;e++)
+    if(region_children[e].pid && mesh_holds((pid_t)region_children[e].pid,region_children[e].start))own->child[e]=region_children[e];
   *out=fd;
   return 0;
 }
@@ -2012,24 +2080,44 @@ int main(int argc,char **argv){
     struct pollfd heard={.fd=network,.events=POLLIN};
     if(poll(&heard,1,(int)((latest-now+999999)/1000000))>0){now=clock_ns();network_heard(1);}
   }
-  /* design/transport.md section 14, "A process a port": each child asked to end, and its exit awaited, at most
-     MESH_PLATFORM_NS (its own windows its own: child_leave), so no child of this launch holds its device's queue pairs
-     as the next launch's children make theirs: each exit heard on a queue of the children's exits alone (EVFILT_PROC),
-     where a poll every 50 ms took each up to 50 ms late (a queue not made waits out the bound) */
+  /* design/transport.md section 14, "A process a port": this bridge ends after its children, never before.  Each is
+     asked to end (CHILD_END: it closes, its lanes flushed, child_leave) and awaited for as long as its own bounds can
+     take (its windows' MESH_PLATFORM_NS and its flush's), reaped as it ends (waitpid: its exit whole, the kernel's
+     release of its device's objects and its pages done); one not reaped by then is ended (SIGKILL) and awaited
+     MESH_PLATFORM_NS more.  One the kernel holds in its exit past that stays named in the region's holder table (struct
+     mesh_holder: its pid, device and start), so no later launch's child opens its device while it lives
+     (child_elsewhere), and it is named here.  Each exit heard on a queue of the children's exits alone (EVFILT_PROC) */
   for(uint32_t p=0;p<port_count;p++)child_send(ports+p,(struct child_message){.kind=CHILD_END});
   const int exits=kqueue();
   for(uint32_t p=0;exits>=0 && p<port_count;p++)if(ports[p].child){
     struct kevent64_s watch;EV_SET64(&watch,(uint64_t)ports[p].child,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,p,0,0);
     kevent64(exits,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
   }
-  for(const uint64_t until=clock_ns()+MESH_PLATFORM_NS;;){
+  const uint64_t asked=clock_ns()+2*MESH_PLATFORM_NS+MESH_PAUSE_NS,killed=asked+MESH_PLATFORM_NS;
+  for(int kill_sent=0;;){
     uint32_t left=0;
     for(uint32_t p=0;p<port_count;p++)if(ports[p].child){
       if(!waitpid(ports[p].child,NULL,WNOHANG))left++;
       else ports[p].child=0;
     }
     const uint64_t at=clock_ns();
-    if(!left || at>=until)break;
+    if(!left)break;
+    if(at>=asked && !kill_sent){
+      kill_sent=1;
+      for(uint32_t p=0;p<port_count;p++)if(ports[p].child){
+        mesh_say("bridge","link %u (%s): child %d has not ended %.0f s after it was asked: ended (SIGKILL)",ports[p].index,
+                 ports[p].name,(int)ports[p].child,(double)(2*MESH_PLATFORM_NS+MESH_PAUSE_NS)/1e9);
+        kill(ports[p].child,SIGKILL);
+      }
+    }
+    if(at>=killed){
+      for(uint32_t p=0;p<port_count;p++)if(ports[p].child)
+        mesh_say("bridge","link %u (%s): child %d not reaped %.0f s after its SIGKILL: its exit waits in the kernel, named "
+                 "in the region's holders, so no later child opens its device while it lives",ports[p].index,ports[p].name,
+                 (int)ports[p].child,(double)MESH_PLATFORM_NS/1e9);
+      break;
+    }
+    const uint64_t until=kill_sent?killed:asked;
     struct kevent64_s ended;
     struct timespec rest={(time_t)((until-at)/1000000000u),(long)((until-at)%1000000000u)};
     if(exits<0 || (kevent64(exits,NULL,0,&ended,1,0,&rest)<0 && errno!=EINTR))poll(NULL,0,(int)((until-at+999999)/1000000));

@@ -5,8 +5,8 @@
    once none of the region's holders lives (the bridge, its children and its clients, each recorded in the region by
    its pid and start: mesh_holds): a bridge is never opened while another is ending.  It unlinks the region only at a
    release (SIGUSR1, SIGTERM); a restart's bridge makes the expired region again in place (mesh-link.c region_open), so
-   no second region is ever made beside the first, whatever holds it: a process in its exit, which mesh_started does
-   not see, wires no pages but the region's own.
+   no second region is ever made beside the first, whatever holds it: a process in its exit (which mesh_started reads
+   as a holder until its exit is whole) wires no pages but the region's own.
 
    Its operator's signals (`launchctl kill SIG user/$(id -u)/io.mesh.bridge`):
    - SIGHUP: open, or restart: the bridge closed by SIGHUP (its region kept for the next to adopt), this heartbeat's own
@@ -109,8 +109,11 @@ static void reopen_later(void){
 
 /* design/transport.md section 2: an expired region (magic, layout version 0) waited for until none of its holders lives,
    then, at a release alone (no bridge wanted), unlinked:
-   its bridge (`bridge_pid`, `bridge_start`), each child its bridges recorded, and each client slot's process (its
-   owner's pid, `start`), each identified by its pid and start (mesh_holds, so a reused pid is no holder).  Until then
+   its bridge (`bridge_pid`, `bridge_start`), each child its bridges recorded (at a release alone: a restart's bridge
+   lays the region again over the same pages, and its spawn of each port's child waits for that device's last child, so
+   one the kernel holds in its exit keeps its port alone, never the node: mesh-link.c child_elsewhere), and each client
+   slot's process (its owner's pid, `start`), each identified by its pid and start (mesh_holds, a process in its exit
+   included, so a reused pid is no holder).  Until then
    they are watched (their exits as events, the slots read every REPLACE_TICK_MS for a client that lets go and lives on)
    and named as they change.  A region that is live, or none, ends the replacement */
 static void replace_turn(void){
@@ -127,7 +130,7 @@ static void replace_turn(void){
   uint64_t start;
   const pid_t serving=bridge_of(m,size,&start);
   if(serving)holders[count++]=serving;
-  for(uint32_t a=0;a<2*MESH_PORTS;a++)
+  for(uint32_t a=0;!wanted && a<2*MESH_PORTS;a++)
     if(own->child[a].pid && mesh_holds((pid_t)own->child[a].pid,own->child[a].start))holders[count++]=(pid_t)own->child[a].pid;
   for(uint32_t c=0;c<m->clients && c<MESH_CLIENTS && m->client_off+(uint64_t)(c+1)*sizeof(struct mesh_client)<=size;c++){
     const struct mesh_client *slot=(const struct mesh_client *)((const char *)m+m->client_off)+c;
@@ -358,7 +361,7 @@ int main(int argc,char **argv){
         if(!ending){
           ending=1;
           struct kevent64_s t;
-          EV_SET64(&t,TIMER_END,EVFILT_TIMER,EV_ADD|EV_ONESHOT,0,(int64_t)(3*MESH_PLATFORM_NS/1000000),0,0,0);
+          EV_SET64(&t,TIMER_END,EVFILT_TIMER,EV_ADD|EV_ONESHOT,0,(int64_t)(5*MESH_PLATFORM_NS/1000000),0,0,0);
           kevent64(events,&t,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
         }
       }
@@ -366,7 +369,7 @@ int main(int argc,char **argv){
       else if(e->filter==EVFILT_TIMER && e->ident==TIMER_REAP)bridge_ended();
       else if(e->filter==EVFILT_TIMER && e->ident==TIMER_END){
         mesh_say("heartbeat","bridge %d has not ended %.0f s after it was asked: the heartbeat ends without it",(int)bridge,
-                 (double)(3*MESH_PLATFORM_NS)/1e9);
+                 (double)(5*MESH_PLATFORM_NS)/1e9);
         region_expire();
         return 0;
       }

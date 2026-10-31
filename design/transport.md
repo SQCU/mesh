@@ -88,8 +88,12 @@ devices), and once the bridge has ended it makes the region *expire*, its layout
   recorded in the region, each by its pid and its process's start (so a pid the system gives again is no holder): the
   bridge (`bridge_pid` and `bridge_start`), each child a bridge spawned (the children register the region and hold it
   until their exit, which can outlast their bridge's), and each client slot's process (its owner's pid and `start`).
-  A process in its exit is none of them: XNU takes it from every lookup by pid as the exit begins, before the kernel
-  releases its device objects (metal-microbench docs/facts.md). On 10-23 the heartbeat so made a region beside port
+  A process in its exit is one of them until its exit is whole: XNU takes it from every lookup by pid as the exit
+  begins, before the kernel releases its device objects, so the holder probe reads it as a zombie is
+  (proc_pidinfo's argument 1) and it is gone at SZOMB (metal-microbench docs/facts.md; mesh-dataflow.h mesh_started).
+  At a restart the heartbeat waits for the bridge and the clients, not the children: the next bridge lays the region
+  over the same pages, and spawns each port's child only once that device's last child is gone, so a child the kernel
+  holds in its exit keeps its port alone. On 10-23 the heartbeat so made a region beside port
   children of the reverted line that never left that release (metal-microbench
   output_data/review-20261023/LIBRARY-STATES.md, section 2).
   Fields of the header, the slots and the bridge's area are only ever appended, so the heartbeat reads the holders of
@@ -97,8 +101,8 @@ devices), and once the bridge has ended it makes the region *expire*, its layout
 
 A second region is never made beside the first: the node has one region object, made when none is named, and every later
 layout is fitted to that object (mesh.h mesh_layout_within) and takes its pages. Two regions wire past the node's memory
-and its watchdog halts it (metal-microbench docs/facts.md); a holder the heartbeat cannot see, a process in its exit,
-then keeps only the region's own pages wired. A process that maps the region without a slot (a reader,
+and its watchdog halts it (metal-microbench docs/facts.md); a holder still in its exit then keeps only the region's own
+pages wired. A process that maps the region without a slot (a reader,
 or a child forked by a client without exec) is not recorded; none registers it or makes it resident.
 
 **The heartbeat** (rdma/mesh-heartbeat, the job launchd keeps alive, `io.mesh.bridge`) supervises the bridge. It holds no
@@ -592,10 +596,14 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   a child ended: the spawn backoff of 1f9be1d5 and 128d0e84 (the k-th unbidden end within 60 s of a spawn holding the
   next 60·2^(k−2) s) is deleted (4dc9e98a; the operator, 2026-10-23 01:03Z: "this is not a real feature. delete it and
   anything like it"). A child whose parent is gone halts its
-  lanes and exits MESH_PLATFORM_NS later, its own windows held; a port's child is spawned only while no other child of
-  its device lives (one of the launch before, whose parent ended unbidden; one in its exit is not seen), so a device's
-  queue pairs are one child's at a time and no make meets the device's ceiling. At the bridge's stop every child is halted before the
-  farewell, asked to end after the exit's hold, and awaited up to MESH_PLATFORM_NS. A message to a child, or a child's
+  lanes and exits MESH_PLATFORM_NS later, its own windows held; a child's end (asked, its parent's loss, or SIGTERM,
+  SIGINT or SIGHUP) flushes the lanes that hold work (moved to the error state, their completions taken, at most
+  MESH_PLATFORM_NS) before its exit, so the kernel's release finds nothing posted; a port's child is spawned only
+  while no other child of its device lives (the region's holder table, each entry its pid, device and start, a child in
+  its exit included), so a device's queue pairs are one child's at a time and no make meets the device's ceiling. At
+  the bridge's stop every child is halted before the farewell, asked to end after the exit's hold, awaited for as long
+  as its own bounds (2 MESH_PLATFORM_NS and MESH_PAUSE_NS), then ended (SIGKILL) and awaited MESH_PLATFORM_NS more: the
+  bridge ends after its children, one the kernel still holds named in the holder table. A message to a child, or a child's
   to its parent, goes whole within MESH_PLATFORM_NS of its send, and a peer that takes none by then ends the sending
   process at once, the wait named (the operator, 2026-10-23, of the blocking send: "forbidden. no wait may ever run
   longer than a deadline operand presented at the time the wait was constructed; the presumed default is 5 seconds").
