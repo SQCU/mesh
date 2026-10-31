@@ -5257,7 +5257,7 @@ static ncclResult_t plan_direct(struct call *c, struct where own,int *result) {
   ncclResult_t related=binding_relations(c->comm,a,sent,b,made,before,&same,&overlap);
   if(related)return related;
   const int aliased=st->partial&&same;
-  if(!aliased&&overlap)return ncclSuccess;
+  if(!aliased&&overlap){if(getenv("MESH_COPIES_TRACE"))fprintf(stderr,"refused what %d: overlap\n",(int)c->what);return ncclSuccess;}
   const uint32_t B = st->buffers;
   struct spans *w = kept(KEPT_SPANS, B * sizeof *w);
   for (uint32_t b = 0; w && b < B; b++) w[b].count = 0;
@@ -5271,6 +5271,8 @@ static ncclResult_t plan_direct(struct call *c, struct where own,int *result) {
     const int meet = spans_meet(w + step->buffer, from, to), inside = from >= lo && to <= hi;
     /* a combine over a range earlier steps wrote in part is fresh in part (`fresh` 2): its own operand read where they
        did not write from the send view, where they did from its result (zabbadoo_plan's runs, each its own place) */
+    if (((meet < 0 && step->op != MESH_STEP_REDUCE) || (!meet && step->op != MESH_STEP_COPY && !inside)) && getenv("MESH_COPIES_TRACE"))
+      fprintf(stderr, "refused what %d: op %d buffer %u meet %d inside %d\n", (int)c->what, (int)step->op, step->buffer, meet, inside);
     if ((meet < 0 && step->op != MESH_STEP_REDUCE) || (!meet && step->op != MESH_STEP_COPY && !inside)) direct = 0;
     else if (step->op == MESH_STEP_SEND) { if (!meet) st->read[k] = map; }
     else {
@@ -5486,6 +5488,8 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     /* Indexed writes carry immutable source/landing generations. Their destinations need no local publication
        handshake, whether the GPU producer is fused or was encoded before this call (mesh 84056c43) */
     operand_copies(NULL, comm, list, n, &copies);
+    if (getenv("MESH_COPIES_TRACE") && copies)
+      fprintf(stderr, "copies %u: what %d count %zu direct %d\n", copies, (int)list[0].what, list[0].count, list[0].direct);
     if (!(result = schedule(program, comm, u, plans, fused_kind != 0, copies))) { g->plans = plans; plans = NULL; }
     else g = NULL;
     if (!result) {
