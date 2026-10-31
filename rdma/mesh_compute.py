@@ -9,6 +9,74 @@ import re
 
 
 @cache
+def implementations():
+    """Declared compiler capabilities; loading this catalog is preparation."""
+    path = Path(__file__).resolve().parents[1] / 'etc/compute/implementations.json'
+    return json.loads(path.read_text())
+
+
+def eligibility(required, implementation):
+    """Compare explicit semantic sets, retaining the reasons with the candidate.
+
+    Frontends supply requirements from their existing typed declarations.
+    Implementations state admitted values and required properties in the same
+    vocabulary. Layout relations remain operands of the shared placement solve;
+    they are not approximated by another eligibility predicate here.
+    """
+    missing = []
+    for field, admitted in implementation['accepts'].items():
+        values = [value for value in required[field] if value not in admitted]
+        if values:
+            missing.append(dict(field=field, relation='accepts', values=values))
+    for field, necessary in implementation['requires'].items():
+        values = [value for value in necessary if value not in required[field]]
+        if values:
+            missing.append(dict(field=field, relation='requires', values=values))
+    return dict(implementation=implementation, required=required, missing=missing)
+
+
+def select_implementation(required, catalog, selected=None):
+    """Resolve a declared choice, or the sole legal implementation.
+
+    Several legal implementations require an assignment operand. Neither the
+    catalog's ordering nor a source tensor's device chooses between them.
+    """
+    declarations = [eligibility(required, candidate) for candidate in catalog]
+    choices = [item for item in declarations if not item['missing'] and
+               (selected is None or item['implementation']['id'] == selected)]
+    if len(choices) != 1:
+        raise ValueError(f'work requires one legal implementation assignment; selected={selected}, declarations={declarations}')
+    return choices[0]['implementation']
+
+
+def work_domain(required, candidates, capacities, *, units, grain, identity):
+    """One ordinary assignment domain over the declared legal implementations.
+
+    Work rates are supplied or measured. Hardware core counts are not rates.
+    A candidate's inability to implement these requirements is a zero upper
+    bound in this solve, not a runtime substitution or an error in another
+    candidate's otherwise legal program.
+    """
+    import math
+    from assignment import project
+    if len(candidates) != len(capacities) or not candidates:
+        raise ValueError('work assignment needs a rate for each declared implementation')
+    if any(not math.isfinite(rate) or rate < 0 for rate in capacities):
+        raise ValueError('implementation work rates must be finite and nonnegative')
+    declarations = [eligibility(required, candidate) for candidate in candidates]
+    rates = [rate if not declaration['missing'] else 0.0
+             for rate, declaration in zip(capacities, declarations, strict=True)]
+    total = sum(rates)
+    if not math.isfinite(total) or total <= 0:
+        raise ValueError(f'no declared implementation has a positive work rate for {required}: {declarations}')
+    high = [units if rate else 0 for rate in rates]
+    parts = project([units * (rate / total) for rate in rates], units, grain, [0] * len(rates), high)
+    return dict(parts=parts, grain=grain, low=[0] * len(rates), high=high,
+                units=units, capacity=rates, implementations=declarations,
+                identity=dict(work=identity, implementations=[candidate['id'] for candidate in candidates]))
+
+
+@cache
 def compilation():
     """The native build manifest, for offline graph importers without Metal."""
     path = Path(__file__).resolve().parents[1] / 'etc/compute/metal.def'

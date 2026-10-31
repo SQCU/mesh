@@ -8,7 +8,6 @@ loads a model, or joins a future while it runs.
 """
 import ctypes
 import hashlib
-import math
 import json
 import os
 import shutil
@@ -94,7 +93,7 @@ def _coreml():
             lib.mesh_coreml_contract.argtypes = [ctypes.c_long]
             lib.mesh_coreml_compile.restype = ctypes.c_int
             lib.mesh_coreml_compile.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
-            lib.mesh_cpu_program_create.argtypes = [ctypes.POINTER(CpuCommand), ctypes.c_size_t]
+            lib.mesh_cpu_program_create.argtypes = [ctypes.POINTER(CpuCommand), ctypes.c_size_t, ctypes.c_char_p]
             lib.mesh_cpu_program_create.restype = ctypes.c_void_p
             lib.mesh_cpu_program_prepare.argtypes = [ctypes.c_void_p] * 4
             lib.mesh_cpu_program_prepare.restype = ctypes.c_char_p
@@ -127,34 +126,40 @@ def ffn(x, gate, up, down, out=None):
 
 
 class Engine:
-    """One engine of the node.  `limits`: dtypes (the operand dtypes it takes), constants (its weights must be
-    constants).  `occupies`: the physical units it runs on (the configuration's `occupies` option, '+'-separated, in
-    place of the engine's own).  It lowers each operation kind by its prepare_<kind> (its resident shard of units
-    [start, end)) and run_<kind> (its share into `out`)."""
-    name, limits = None, {'dtypes': (torch.float16, torch.bfloat16, torch.float32), 'constants': False}
-    host_side, occupies = True, frozenset()
+    """An implementation operand lowered through the shared function compiler."""
+    name, profile = None, None
+    host_side = True
 
     def __init__(self, **options):
+        from mesh_compute import implementations
         self.options = options
-        if 'occupies' in options:
-            self.occupies = frozenset(u for u in str(options['occupies']).split('+') if u)
+        self.implementation = options['implementation'] if 'implementation' in options else implementations()[self.profile]
+
+    def required(self, op, dtype):
+        return dict(interfaces=[op.kind], input_types=[str(dtype).removeprefix('torch.')], arithmetic_types=[],
+                    constants=['weights'] if op.constant else [])
+
+    def eligible(self, op, dtype):
+        from mesh_compute import eligibility
+        return eligibility(self.required(op, dtype), self.implementation)
+
+    def scalar_type(self, role, dtype):
+        name = self.implementation[role + '_type']
+        return dtype if name == 'source' else getattr(torch, name)
 
     @classmethod
     def missing(cls):
         """Why the node lacks this engine, or None."""
         return None
 
-    def takes(self, op, dtype):
-        return hasattr(self, 'prepare_' + op.kind) and dtype in self.limits['dtypes']
-
     def input_dtype(self, dtype):
-        return dtype
+        return self.scalar_type('input', dtype)
 
     def out_dtype(self, dtype):
-        return dtype
+        return self.scalar_type('output', dtype)
 
-    def sum_dtype(self):
-        return torch.float32
+    def sum_dtype(self, dtype):
+        return self.scalar_type('sum', dtype)
 
     def prepare(self, op, start, end):
         return getattr(self, 'prepare_' + op.kind)(op, start, end)
@@ -165,7 +170,7 @@ class Engine:
 
 class Mps(Engine):
     """GPU products declared to the whole-function compiler."""
-    name, host_side, occupies = 'mps', False, frozenset({'gpu'})
+    name, host_side, profile = 'mps', False, 'metal_engine'
 
     @classmethod
     def missing(cls):
@@ -187,23 +192,17 @@ class Mps(Engine):
 class Cpu(Engine):
     """The CPU's matrix units through prepared Accelerate commands: the input read in place as fp32 (the
     GPU's prologue converts it), the fp32 shard resident in host memory, the output written in place in fp32."""
-    name, occupies = 'cpu', frozenset({'cpu'})
-
-    def input_dtype(self, dtype):
-        return torch.float32
-
-    def out_dtype(self, dtype):
-        return torch.float32
+    name, profile = 'cpu', 'accelerate_engine'
 
     def prepare_linear(self, op, start, end):
         from . import empty
         weight = op.weight[start:end].detach()
-        return empty(weight.shape, dtype=torch.float32, device='cpu').copy_(weight)
+        return empty(weight.shape, dtype=self.input_dtype(weight.dtype), device='cpu').copy_(weight)
 
     def prepare_ffn(self, op, start, end):
         from . import empty
         def cpu(t):
-            return empty(t.shape, dtype=torch.float32, device='cpu').copy_(t.detach())
+            return empty(t.shape, dtype=self.input_dtype(t.dtype), device='cpu').copy_(t.detach())
         return cpu(op.gate[start:end]), cpu(op.up[start:end]), cpu(op.down[:, start:end])
 
     def declaration(self, op, shard, rows):
@@ -211,40 +210,54 @@ class Cpu(Engine):
         layouts = api_layouts('cpu_matrix')
         weights = (shard,) if op.kind == 'linear' else shard
         weights = {f'weight{i}': w for i, w in enumerate(weights)}
-        return dict(definition=dict(provider='cpu', operation=op.kind, weights=list(weights)), weights=weights,
-                    input_layouts=dict(input=layouts['input'], **{name: layouts['weight'] for name in weights}),
-                    output_layouts={'output': layouts['output']}, binding_layout='indexed',
-                    input_dtype=torch.float32, output_dtype=torch.float32)
+        input_layouts = dict(input=layouts['input'], **{name: layouts['weight'] for name in weights})
+        output_layouts = {'output': layouts['output']}
+        input_dtype, output_dtype = self.input_dtype(weights['weight0'].dtype), self.out_dtype(weights['weight0'].dtype)
+        operands = dict(input=dict(shape=[rows, weights['weight0'].shape[1]], dtype=str(input_dtype).removeprefix('torch.'),
+                                   requirements=[input_layouts['input']], role=True),
+                        output=dict(shape=[rows, weights['weight0'].shape[0] if op.kind == 'linear' else weights['weight2'].shape[0]],
+                                    dtype=str(output_dtype).removeprefix('torch.'), requirements=[output_layouts['output']], role=True))
+        operands.update({name: dict(shape=list(value.shape), dtype=str(value.dtype).removeprefix('torch.'),
+                                   requirements=[input_layouts[name]], role=True) for name, value in weights.items()})
+        recipe = cpu_recipe(op.kind, operands, weights=list(weights), implementation=self.implementation)
+        return dict(definition=dict(provider='cpu', operation=op.kind, weights=list(weights),
+                                    implementation=self.implementation, recipe=recipe), weights=weights,
+                    input_layouts=input_layouts, output_layouts=output_layouts, binding_layout='indexed',
+                    input_dtype=input_dtype, output_dtype=output_dtype)
 
-    def bind(self, op, shard, x, out, *, input_layouts, output_layouts, binding_layout):
-        weights = (shard,) if op.kind == 'linear' else shard
-        inputs = dict(input=x, **{f'weight{i}': w for i, w in enumerate(weights)})
-        source, target, before, after = _host_bindings(inputs, {'output': out},
-            input_layouts, output_layouts, binding_layout)
-        x, out = source['input'], target['output']
-        weights = tuple(source[f'weight{i}'] for i in range(len(weights)))
+    def bind(self, definition, source, target):
+        source, target, before, after = _host_bindings(source, target,
+            definition['input_layouts'], definition['output_layouts'], definition['binding_layout'])
         native = _coreml()
         if native is None:
             raise RuntimeError('CPU commands require the native engine library')
+        from . import layout, _stream
+        from .operand import TensorView, requirements
+        recipe = definition['recipe']
+        values = {name: TensorView.of(value) for name, value in {**source, **target}.items()}
+        for name, binding in recipe['bindings'].items():
+            if binding['role']:
+                continue
+            dense = _stream.TensorLayout(binding['shape'], layout.strides(binding['shape']))
+            selected = requirements(dense, binding['requirements'])
+            values[name] = layout.allocate(selected, getattr(torch, binding['dtype']), 'cpu')
         records = []
-        def product(x, w, y):
-            records.append((_CPU_PRODUCT, CpuCommand(None,
-                            x.shape[0], w.shape[0], x.shape[1], x.stride(0), w.stride(0), y.stride(0),
-                            x.stride(1), w.stride(1), y.stride(1),
-                            _host_address(x), _host_address(w), _host_address(y), None)))
-        if op.kind == 'linear':
-            product(x, weights[0], out)
-            outputs = (out,)
-        else:
-            gate, up, down = weights
-            from . import empty
-            g, u, scratch = (empty(x.shape[0], gate.shape[0], dtype=torch.float32, device='cpu') for _ in range(3))
-            product(x, gate, g)
-            product(x, up, u)
-            records.append((_CPU_GELU, CpuCommand(None, g.shape[0], g.shape[1], 0, 0, 0, 0, 0, 0, 0,
-                                                  g.data_ptr(), u.data_ptr(), g.data_ptr(), scratch.data_ptr())))
-            product(g, down, out)
-            outputs = (out, g, u, scratch)
+        for command in recipe['commands']:
+            operands = {role: values[name] for role, name in command['operands'].items()}
+            x, w, y = (operands[role] for role in ('input', 'weight', 'output'))
+            if command['kind'] == 'product':
+                records.append((_CPU_PRODUCT, CpuCommand(None,
+                    x.shape[0], w.shape[0], x.shape[1], x.stride(0), w.stride(0), y.stride(0),
+                    x.stride(1), w.stride(1), y.stride(1), _host_address(x), _host_address(w), _host_address(y), None)))
+            elif command['kind'] == 'gelu':
+                records.append((_CPU_GELU, CpuCommand(None, x.shape[0], x.shape[1], 0, 0, 0, 0, 0, 0, 0,
+                    _host_address(x), _host_address(w), _host_address(y), _host_address(operands['scratch']))))
+            else:
+                raise ValueError(f"unknown declared CPU command {command['kind']}")
+        reads = dict.fromkeys(name for command in recipe['commands'] for name in command['reads']
+                              if recipe['bindings'][name]['role'])
+        writes = dict.fromkeys(name for command in recipe['commands'] for name in command['writes'])
+        outputs = tuple(values[name] for name in writes)
         pages = None
         def workspace(size):
             nonlocal pages
@@ -253,10 +266,41 @@ class Cpu(Engine):
             # one workspace that covers all their declared requirements.
             pages = empty(size, dtype=torch.uint8, device='cpu')
             return _host_address(pages)
-        binding, address = _cpu_program(native, records, workspace)
+        binding, address = _cpu_program(native, records, workspace, self.implementation)
         if pages is not None:
             outputs += (pages,)
-        return CpuProgram(native, binding, _cpu_declaration(records, address), tuple(source.values()), outputs, before, after)
+        return CpuProgram(native, binding, _cpu_declaration(records, address, self.implementation), tuple(values[name] for name in reads), outputs, before, after)
+
+
+def cpu_recipe(operation, operands, *, weights, implementation):
+    """The existing CPU numerical program, declared before any pages are bound."""
+    bindings = {name: dict(value) for name, value in operands.items()}
+    commands = []
+
+    def product(x, w, y):
+        commands.append(dict(kind='product', operands=dict(input=x, weight=w, output=y),
+                             reads=[x, w], writes=[y]))
+
+    if operation == 'linear':
+        product('input', weights[0], 'output')
+    elif operation == 'ffn':
+        shape = [bindings['input']['shape'][0], bindings[weights[0]]['shape'][0]]
+        for name in ('gate', 'up', 'scratch'):
+            bindings[name] = dict(shape=shape, dtype=implementation['output_type'],
+                                  requirements=['contiguous'], role=False)
+        product('input', weights[0], 'gate')
+        product('input', weights[1], 'up')
+        commands.append(dict(kind='gelu', operands=dict(input='gate', weight='up', output='gate', scratch='scratch'),
+                             reads=['gate', 'up'], writes=['gate', 'scratch']))
+        product('gate', weights[2], 'output')
+    else:
+        raise ValueError(f'no declared CPU numerical program for {operation}')
+    # MeshCpuCommand uses float pointers, sgemm/BNNS Float32 and vvtanhf.
+    # This is the declared numerical ABI, independent of physical page layout.
+    invalid = {name: binding['dtype'] for name, binding in bindings.items() if binding['dtype'] != 'float32'}
+    if invalid:
+        raise ValueError(f'MeshCpuCommand requires float32 named operands: {invalid}')
+    return dict(bindings=bindings, commands=commands)
 
 
 class CpuCommand(ctypes.Structure):
@@ -274,7 +318,7 @@ def _native_entry(prepare, binding, retain, release):
 _CPU_PRODUCT, _CPU_GELU = 0, 1
 
 
-def _cpu_program(native, records, workspace):
+def _cpu_program(native, records, workspace, implementation):
     """The native program of CPU commands `records` ((kind, CpuCommand as declared, before binding), in order): each
     product bound to its bulk contraction, the activation to mesh_cpu_gelu, and the products that need one given
     `workspace(bytes)`'s address, which covers the largest requirement. Returns the program and that address (0: none)."""
@@ -296,23 +340,26 @@ def _cpu_program(native, records, workspace):
     for k, _ in needs:
         native.mesh_cpu_product_workspace(ctypes.byref(commands[k]), address)
     bound = (CpuCommand * len(commands))(*commands)
-    binding = native.mesh_cpu_program_create(bound, len(bound))
+    binding = native.mesh_cpu_program_create(bound, len(bound), json.dumps(implementation['resources'], separators=(',', ':')).encode())
     if not binding:
         for command in bound:
             native.mesh_cpu_command_release(ctypes.byref(command))
-        raise MemoryError('preparing CPU commands')
+        raise RuntimeError(native.mesh_coreml_error().decode())
     return binding, address
 
 
 _CPU_FIELDS = ('input', 'weight', 'output', 'scratch')
 
 
-def _cpu_declaration(records, workspace):
+def _cpu_declaration(records, workspace, implementation):
     """design/replay-templates-2026-10-29.md: CPU commands as a host declaration ('cpu', bytes, places): their count and
-    workspace address, then each command's kind and its CpuCommand before binding; each address a place."""
+    workspace address, then each command's kind and its CpuCommand before binding; each address a place.
+    The trailing implementation operand preserves the compiler contract through template restoration."""
     step = 8 + ctypes.sizeof(CpuCommand)
     data = struct.pack('<QQ', len(records), workspace) + b''.join(struct.pack('<Q', kind) + bytes(command) for kind, command in records)
     places = [(8, 0)] + [(16 + k * step + 8 + getattr(CpuCommand, name).offset, 0) for k in range(len(records)) for name in _CPU_FIELDS]
+    metadata = json.dumps(implementation, separators=(',', ':')).encode()
+    data += struct.pack('<Q', len(metadata)) + metadata
     return 'cpu', data, places
 
 
@@ -325,13 +372,19 @@ def rebuild(kind, data):
     if kind == 'cpu':
         count, workspace = struct.unpack_from('<QQ', data)
         step = 8 + ctypes.sizeof(CpuCommand)
+        length, = struct.unpack_from('<Q', data, 16 + count * step)
+        implementation = json.loads(data[24 + count * step:24 + count * step + length])
+        if implementation['compiler'] != 'accelerate':
+            raise ValueError('CPU replay requires its declared Accelerate implementation')
         records = [(struct.unpack_from('<Q', data, 16 + k * step)[0], CpuCommand.from_buffer_copy(data, 16 + k * step + 8))
                    for k in range(count)]
-        binding, _ = _cpu_program(native, records, lambda size: workspace)
+        binding, _ = _cpu_program(native, records, lambda size: workspace, implementation)
         return _native_entry(native.mesh_cpu_program_prepare, binding, native.mesh_cpu_program_retain, native.mesh_cpu_program_release)
     if kind == 'coreml':
         length, = struct.unpack_from('<Q', data)
         header = json.loads(data[8:8 + length])
+        if header['implementation']['compiler'] != 'coreml':
+            raise ValueError('model replay requires its declared provider implementation')
         addresses = struct.unpack_from(f'<{len(header["inputs"]) + len(header["outputs"])}Q', data, _coreml_addresses(length))
         handle = _load_coreml(native, header['compiled'], header['configuration'])
         try:
@@ -379,12 +432,12 @@ class Ane(Engine):
     Compilation and model loading happen during preparation. Direct ANE requests
     bind guaranteed caller-owned input and output pages.
     """
-    name, limits, occupies = 'ane', {'dtypes': (torch.float16, torch.bfloat16, torch.float32), 'constants': True}, frozenset({'ane'})
+    name, profile = 'ane', 'ane_engine'
 
     def __init__(self, **options):
         super().__init__(**options)
         self.tile, self.block = int(options['tile']), int(options['block'])
-        self.model = options['model']
+        self.model = dict(options['model'], implementation=self.implementation)
 
     def input_dtype(self, dtype):
         return getattr(torch, self.model['input']['dtype'])
@@ -392,7 +445,7 @@ class Ane(Engine):
     def out_dtype(self, dtype):
         return getattr(torch, self.model['output']['dtype'])
 
-    def sum_dtype(self):
+    def sum_dtype(self, dtype):
         return getattr(torch, self.model['sum_dtype'])
 
     @classmethod
@@ -415,7 +468,8 @@ class Ane(Engine):
         contract = model_pages(placement['contract'])
         source, target = self.model['input'], self.model['output']
         columns = shard.arrays[0].shape[0] if shard.kind == 'linear' else shard.arrays[2].shape[0]
-        return dict(definition=dict(provider='coreml', compiled=str(compiled), configuration=self.model, contract=contract), weights={},
+        return dict(definition=dict(provider='coreml', compiled=str(compiled), configuration=self.model, contract=contract,
+                                    implementation=provider_implementation(self.implementation, contract, placement)), weights={},
                     input_layouts=model_requirements(contract['inputs'], {source['name']: (rows, shard.arrays[0].shape[1])}),
                     output_layouts=model_requirements(contract['outputs'], {target['name']: (rows, columns)}),
                     binding_layout=self.model['binding_layout'],
@@ -433,6 +487,15 @@ class ModelView(ctypes.Structure):
 
 
 _MODEL_TYPES = (torch.float16, torch.float32, torch.int32, torch.float64, torch.int8)
+
+
+def provider_implementation(implementation, contract, placement=None):
+    """Retain the compiled provider facts on the selected capability operand."""
+    provider = dict(contract=contract)
+    if placement is not None:
+        provider['placement'] = placement
+    return dict(implementation, output_storage=contract.get('output_storage', implementation['output_storage']),
+                provider=provider)
 
 
 def model_pages(contract):
@@ -481,11 +544,12 @@ def _coreml_addresses(length):
 
 class Prediction:
     """One direct ANE invocation's pages, bound before the numerical function."""
-    def __init__(self, native, model, source, target, *, compiled, configuration, contract):
+    def __init__(self, native, model, source, target, *, compiled, configuration, contract, implementation):
         from . import _stream
         from .operand import TensorView
         self.native = native
         self.placement = json.loads(native.mesh_coreml_placement(model))
+        self.implementation = provider_implementation(implementation, contract, self.placement)
         input_layouts = model_requirements(contract['inputs'], {name: value.shape for name, value in source.items()})
         output_layouts = model_requirements(contract['outputs'], {name: value.shape for name, value in target.items()})
         source, target, before, after = _host_bindings(source, target, input_layouts, output_layouts, configuration['binding_layout'])
@@ -510,7 +574,7 @@ class Prediction:
         if not self.binding:
             raise RuntimeError(native.mesh_coreml_error().decode())
         # The compiled model, all load constraints and its views survive replay preparation.
-        header = json.dumps({'compiled': str(compiled), 'configuration': configuration, 'inputs': [v for v, _ in given],
+        header = json.dumps({'compiled': str(compiled), 'configuration': configuration, 'implementation': self.implementation, 'inputs': [v for v, _ in given],
                              'outputs': [v for v, _ in made]}).encode()
         at = _coreml_addresses(len(header))
         addresses = [a for _, a in given + made]
@@ -546,7 +610,7 @@ def coreml_contract(compiled, configuration):
         native.mesh_coreml_release(handle)
 
 
-def coreml_graph(compiled, inputs, outputs, *, configuration, contract):
+def coreml_graph(compiled, inputs, outputs, *, configuration, contract, implementation):
     """Bind a compiled graph with guaranteed caller-owned output pages.
 
     ``configuration`` supplies backend, compute units, function and devices.
@@ -558,12 +622,13 @@ def coreml_graph(compiled, inputs, outputs, *, configuration, contract):
     which the caller has already consumed when assigning producer storage.
     """
     model_pages(contract)
+    configuration = dict(configuration, implementation=implementation)
     native = _coreml()
     if native is None:
         raise RuntimeError('Core ML graph requires the native shared-memory binding')
     handle = _load_coreml(native, compiled, configuration)
     try:
-        return Prediction(native, handle, inputs, outputs, compiled=compiled, configuration=configuration, contract=contract)
+        return Prediction(native, handle, inputs, outputs, compiled=compiled, configuration=configuration, contract=contract, implementation=implementation)
     finally:
         native.mesh_coreml_release(handle)
 
@@ -669,6 +734,7 @@ def export_coreml_graph(program, *, directory, configuration):
     types, including aliases which require no provider output or host task.
     ``weights`` supplies returned captures through the existing weight operands.
     """
+    implementation = configuration['implementation']
     import copy
     import coremltools as ct
     from coremltools.converters.mil.frontend.torch.utils import TORCH_DTYPE_TO_MIL_DTYPE
@@ -712,7 +778,8 @@ def export_coreml_graph(program, *, directory, configuration):
     input_layouts.update(model_requirements(contract['inputs'], {name: inputs[name].shape for name in contract['inputs']}))
     output_layouts.update(model_requirements(contract['outputs'], {name: outputs[name].shape for name in contract['outputs']}))
     return dict(definition=dict(provider='coreml', compiled=None if compiled is None else str(compiled), configuration=provider,
-                               contract=contract, output_aliases=aliases, state_pairs=configuration['state_pairs']),
+                               contract=contract, implementation=provider_implementation(implementation, contract),
+                               output_aliases=aliases, state_pairs=configuration['state_pairs']),
                 input_layouts=input_layouts, output_layouts=output_layouts, binding_layout=configuration['binding_layout'],
                 input_meta=inputs, output_meta=outputs, weights=weights)
 
@@ -836,6 +903,7 @@ class Engines:
         self.engines = [ENGINES[n](**options.get(n, {})) for n in names]
         self.operations, self.decisions = [], {}
         self.parameters = options.get('compilation', {})
+        self.source_scope = options.get('source_scope')
 
 
 class Operation:
@@ -849,7 +917,7 @@ class Operation:
 
     def __init__(self, units, width, engines, name, grain, constant):
         self.units, self.width, self.engines, self.grain, self.constant = units, width, engines, grain, constant
-        self.name = name or f'{self.kind}{id(self):x}'
+        self.name = name
         if engines is not None:
             engines.operations.append(self)
 
@@ -860,24 +928,21 @@ class Operation:
         observations refine them through the same assignment solver as routes.
         A zero explicitly excludes an engine from this declaration.
         """
+        from mesh_compute import work_domain
+        if self.name is None or self.engines.source_scope is None:
+            raise ValueError('engine work requires a declared operation name and source_scope')
         key = f'{self.name}@{rows}'
-        total = sum(capacities)
-        if (len(capacities) != len(self.engines.engines) or not all(math.isfinite(c) and c >= 0 for c in capacities)
-                or not math.isfinite(total) or total <= 0):
-            raise ValueError(f'{key}: supply a nonnegative work rate per engine, with a positive total')
-        able = [c > 0 for c in capacities]
-        for engine, active in zip(self.engines.engines, able):
-            if active and (not engine.takes(self, dtype) or (engine.limits['constants'] and not self.constant)):
-                raise ValueError(f'{key}: configured engine {engine.name} cannot take this operation at {dtype}')
-        from assignment import project
-        parts = project([self.units * (c / total) for c in capacities], self.units, self.grain,
-                        [0] * len(able), [self.units if a else 0 for a in able])
-        self.engines.decisions[key] = {'parts': parts, 'grain': self.grain, 'low': [0] * len(able),
-                                      'high': [self.units if a else 0 for a in able], 'units': self.units,
-                                      'capacity': list(capacities)}
+        required = dict(interfaces=[self.kind], input_types=[str(dtype).removeprefix('torch.')], arithmetic_types=[],
+                        constants=['weights'] if self.constant else [])
+        self.engines.decisions[key] = work_domain(required,
+            [engine.implementation for engine in self.engines.engines], capacities,
+            units=self.units, grain=self.grain,
+            identity=dict(scope=self.engines.source_scope, operation=self.name, interface=self.kind))
         return key
 
     def prepare(self, x, *, parts, output=None):
+        if self.name is None or self.engines.source_scope is None:
+            raise ValueError('engine preparation requires a declared operation name and source_scope')
         return Prepared(self, x, parts, output)
 
     def finish(self, y, first=0):
@@ -898,16 +963,22 @@ class Prepared:
         output_device = self.output.device
         configuration = {k: p['value'] for k, p in op.engines.parameters.items()}
         shares, start = [], 0
-        sum_types = [engine.sum_dtype() for engine, count in zip(op.engines.engines, parts) if count]
+        sum_types = [engine.sum_dtype(dtype) for engine, count in zip(op.engines.engines, parts) if count]
         from functools import reduce
         accumulator = reduce(torch.promote_types, sum_types, dtype)
         for engine, count in zip(op.engines.engines, parts):
             end = start + count
             if count:
-                if not engine.takes(op, dtype) or (engine.limits['constants'] and not op.constant):
-                    raise ValueError(f'{engine.name} cannot execute the declared operation')
+                candidate = engine.eligible(op, dtype)
+                if candidate['missing']:
+                    raise ValueError(f'{engine.name} cannot execute the declared operation: {candidate}')
                 shard = engine.prepare(op, start, end)
                 declaration = engine.declaration(op, shard, rows) if engine.host_side else None
+                if declaration is not None:
+                    candidate = dict(candidate, implementation=declaration['definition']['implementation'])
+                decision = op.engines.decisions.get(f'{op.name}@{rows}')
+                if decision is not None:
+                    decision['implementations'][op.engines.engines.index(engine)] = candidate
                 shares.append((engine, shard, start, end, declaration))
             start = end
 
@@ -941,7 +1012,8 @@ class Prepared:
         from .operand import TensorView
         destinations = ([TensorView.of(self.output).slice(1, first, end - first) for _, _, first, end, _ in shares]
                         if op.combine == 'concat' else [self.output])
-        self.function = Function(function, x, configuration=configuration)
+        self.function = Function(function, x, configuration=configuration,
+                                 source_scope=dict(scope=op.engines.source_scope, operation=op.name))
         self.function.declare(None, destinations=destinations)
 
     def append(self, schedule):
@@ -981,8 +1053,7 @@ class FFN(Operation):
 def placement(engines, observations, *, step, family):
     # design/whole-function.md#numerical-operands
     from assignment import assign, domains
-    decisions = {k: {field: d[field] for field in ('parts', 'grain', 'low', 'high', 'capacity')}
-                 for k, d in engines.decisions.items()}
+    decisions = engines.decisions
     assigned = assign(domains(decisions, {}, engines.parameters), observations, step=step, family=family)
     for key, parts in assigned['parts'].items():
         if key in engines.decisions:

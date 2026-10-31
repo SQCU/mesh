@@ -570,6 +570,7 @@ def prepare_graph(module, metadata, *, materializations=()):
     Declare those boundaries here; ``bind`` later chooses their actual pages
     and emits commands from this same graph.
     """
+    import copy
     from torch._guards import detect_fake_mode
     from torch._subclasses.fake_tensor import unset_fake_temporarily
     from torch._inductor import config
@@ -585,6 +586,7 @@ def prepare_graph(module, metadata, *, materializations=()):
     from torch.utils._pytree import tree_flatten, tree_unflatten
     from torch.fx.node import map_arg
     from .placement import Placements, same_view
+    from .compilation import implementations
     from contextlib import contextmanager
     from mesh_compute import hardware
 
@@ -593,25 +595,31 @@ def prepare_graph(module, metadata, *, materializations=()):
     external_arguments, external_outputs, command_accesses = [], [], []
     materialized_buffers = set()
     configuration = compiler_operands()
-    reduction_groups = hardware()['gpu']['cores'] * configuration['REDUCTION_GROUPS_PER_CORE']
+    implementation_catalog = copy.deepcopy(implementations())
 
     class NativeChoices(InductorChoices):
         def reduction_split_factor(self, device, reduction_numel_hint, numel_hint, inner_reduction):
             # Split the numerical IR, not execution. Both stages are ordinary
             # page producers; the recorder retains their data dependencies.
+            reduction_groups = hardware()['gpu']['cores'] * configuration['REDUCTION_GROUPS_PER_CORE']
             tiles = (reduction_numel_hint + configuration['REDUCTION_TILE_ELEMENTS'] - 1) // configuration['REDUCTION_TILE_ELEMENTS']
             rows = max(1, numel_hint)
             groups = (reduction_groups + rows - 1) // rows
             return max(1, min(tiles, groups))
 
     class LogicalChoices(NativeChoices):
+        def reduction_split_factor(self, device, reduction_numel_hint, numel_hint, inner_reduction):
+            # Assignment consumes the original reduction fiber. Backend work
+            # splitting belongs to preparation of the selected implementation.
+            return 1
+
         def reduction_unroll_threshold(self):
             return 0
 
     class PageKernel(MetalKernel):
         # These objects exist during source emission only. The numerical body
         # receives page bindings and the resulting ordinary address expression.
-        max_threadgroup_size = min(configuration['ROW_THREADS'], _stream.device_facts()[1])
+        max_threadgroup_size = configuration['ROW_THREADS']
         simd_group_size = configuration['SIMD_WIDTH']
 
         @contextmanager
@@ -687,9 +695,8 @@ def prepare_graph(module, metadata, *, materializations=()):
             return None
         storage, layout = ir.as_storage_and_layout(value, freeze=False)
         name = storage.get_name()
-        if V.graph.scheduler is not None:
-            name = V.graph.scheduler.mutation_real_name.get(name, name)
-            storage = V.graph.get_buffer(name)
+        name = V.graph.storage_aliases.get(name, name)
+        storage = V.graph.get_buffer(name)
         return dict(name=name, dtype=layout.dtype, storage_dtype=storage.get_dtype(),
                     storage_bytes=storage.get_layout().storage_size() * storage.get_dtype().itemsize,
                     view=ir_layout(layout))
@@ -843,7 +850,7 @@ def prepare_graph(module, metadata, *, materializations=()):
                                     if conditions and condition.free_symbols <= known else None)
                 if relation is not None and predicate_domain is not None:
                     relation = relation.subtract_domain(relation.domain().binary(predicate_domain, 'subtract'))
-                name = V.graph.scheduler.mutation_real_name.get(item['name'], item['name'])
+                name = V.graph.storage_aliases.get(item['name'], item['name'])
                 dtype = V.graph.get_dtype(item['name'])
                 storage = V.graph.get_buffer(name)
                 # A changing address has ordinary scalar producers. Retain
@@ -1028,6 +1035,23 @@ def prepare_graph(module, metadata, *, materializations=()):
             wrapper.header.writeline(f'{name} = mesh_native.shader({source_text!r}, "generated_kernel", {access}, {tuple(arguments)!r}, {types!r}, mesh_accesses[{index}])')
             return name
 
+    scalar_compilers = {'metal_scalar': (MetalSource, 'mps')}
+
+    class DeclaredSchedulerNode(SchedulerNode):
+        """Start backend scheduling from the retained, assigned scalar body."""
+        def __init__(self, scheduler, operation, declaration):
+            self.declaration = declaration
+            super().__init__(scheduler, operation)
+
+        def _compute_attrs(self, *args, **kwargs):
+            declaration = self.__dict__.pop('declaration', None)
+            if declaration is None:
+                return super()._compute_attrs(*args, **kwargs)
+            self._body, self._sizes = declaration._body, declaration._sizes
+            device = self.node.get_device_or_error()
+            self.group = device, self.scheduler.get_backend(device).group_fn(self._sizes)
+            self.set_read_writes(declaration.read_writes)
+
     class NativeScheduler(Scheduler):
         def codegen_extern_call(self, node):
             if getattr(node, 'page_atomic', None) is False:
@@ -1055,7 +1079,9 @@ def prepare_graph(module, metadata, *, materializations=()):
         def create_scheduler_node(self, node):
             prepared = getattr(self, 'prepared_nodes', None)
             if prepared is None:
-                result = super().create_scheduler_node(node)
+                declaration = V.graph.declaration_nodes[node.get_operation_name()]
+                result = (DeclaredSchedulerNode(self, node, declaration) if declaration._body is not None
+                          else super().create_scheduler_node(node))
                 result.declared_read_writes = result.read_writes
                 return result
             result, dependencies = prepared[node.get_operation_name()]
@@ -1078,39 +1104,35 @@ def prepare_graph(module, metadata, *, materializations=()):
                         piece.merge_loops()
 
         def create_backend(self, device):
-            if device.type != 'mps':
-                raise NotImplementedError(f'FX numerical commands require a declared native backend for {device}')
+            # The selected compiler owns code generation. A source tensor's
+            # storage device is not a numerical implementation assignment.
+            if V.graph.selected_implementations:
+                compiler = V.graph.selected_implementations[0]['implementation']['compiler']
+                return scalar_compilers[compiler][0](self)
+            # Externals already name their current native numerical recipe.
             return MetalSource(self)
 
     class NativeSection:
-        """A compiler operation slice of the same retained graph and scheduler."""
+        """A compiler operation slice with the same retained declaration bodies."""
         def __init__(self, graph, operations, inputs, outputs, nodes, algebra):
             self.graph, self.operations = graph, tuple(operations)
             self.graph_inputs_original, self.outputs = dict(inputs), tuple(outputs)
             self.graph_inputs = {name: ir.TensorBox.create(value) for name, value in inputs.items()}
             self.nodes = {op.get_operation_name(): nodes[op.get_operation_name()] for op in operations}
-            # Assignment coordinates belong to these retained declaration
-            # bodies. Scheduler loop merging may optimize its own nodes before
-            # selection; it must not change the caller's work coordinate space.
-            self.declaration_bodies = {name: node._body for name, node in self.nodes.items()
-                                       if isinstance(node, SchedulerNode)}
             self.algebra, self.declared_effects, self.selected_domains = algebra, None, None
-            self.scheduler_state = None
+            self.scheduler = None
             self.pending_declarations = ()
             self.source_values = graph.source_values
 
         @contextmanager
         def active(self):
-            import copy
-            graph, scheduler = self.graph, self.graph.scheduler
+            graph = self.graph
             names = ('operations', 'graph_inputs', 'graph_inputs_original', 'graph_input_names',
                      'graph_outputs', 'example_inputs', 'wrapper_code', 'removed_operations',
                      'removed_buffers', 'inplaced_to_remove', 'declared_effects', 'selected_domains',
-                     'pending_declarations')
+                     'pending_declarations', 'declaration_nodes', 'scheduler', 'selected_implementations', 'reduction_uses')
             absent = object()
             saved = {name: getattr(graph, name, absent) for name in names}
-            scheduled = dict(scheduler.__dict__)
-            activated = False
             with environment(), V.set_graph_handler(graph), V.set_extern_kernel_nodes([]), mode:
                 try:
                     graph.operations = list(self.operations)
@@ -1123,21 +1145,15 @@ def prepare_graph(module, metadata, *, materializations=()):
                     graph.declared_effects = self.declared_effects
                     graph.selected_domains = self.selected_domains
                     graph.pending_declarations = self.pending_declarations
-                    graph.init_wrapper_code()
-                    if self.scheduler_state is None:
-                        scheduler.prepared_nodes = {name: (copy.copy(node), node.read_writes) for name, node in self.nodes.items()}
-                        scheduler._init(graph.operations)
-                    else:
-                        scheduler.__dict__.clear(); scheduler.__dict__.update(self.scheduler_state)
-                    activated = True
+                    graph.declaration_nodes, graph.scheduler = self.nodes, self.scheduler
+                    graph.selected_implementations = getattr(self, 'selected_implementations', None)
+                    graph.reduction_uses = getattr(self, 'reduction_uses', ())
                     yield graph
-                    self.nodes = {op.get_operation_name(): scheduler.name_to_node[op.get_operation_name()]
-                                  for op in self.operations}
                 finally:
-                    if activated:
-                        self.scheduler_state = dict(scheduler.__dict__)
-                        self.pending_declarations = graph.pending_declarations
-                    scheduler.__dict__.clear(); scheduler.__dict__.update(scheduled)
+                    self.scheduler = graph.scheduler
+                    self.selected_implementations = graph.selected_implementations
+                    self.reduction_uses = graph.reduction_uses
+                    self.pending_declarations = graph.pending_declarations
                     for name, value in saved.items():
                         if value is absent:
                             graph.__dict__.pop(name, None)
@@ -1147,8 +1163,7 @@ def prepare_graph(module, metadata, *, materializations=()):
         def effects(self, algebra=None):
             if self.declared_effects is None:
                 with self.active() as graph:
-                    self.declared_effects = graph.effects(self.algebra if algebra is None else algebra,
-                                                         bodies=self.declaration_bodies)
+                    self.declared_effects = graph.effects(self.algebra if algebra is None else algebra)
             return self.declared_effects
 
         def value_binding(self, value, algebra):
@@ -1180,6 +1195,35 @@ def prepare_graph(module, metadata, *, materializations=()):
             return Program.prepare(self.emit(operands, **placement))
 
     class NativeGraph(GraphLowering):
+        def declaration(self, operation, body=None):
+            """Keep original scalar coordinates without choosing a backend."""
+            from types import SimpleNamespace
+            from torch._inductor import dependencies
+            if body is None and isinstance(operation, ir.ComputedBuffer) and not operation.is_no_op():
+                sizes, original, variables = operation.get_default_sizes_body()
+                body, _ = clone_body(original)
+                # The default cache retains literal-zero argument positions
+                # for singleton tensor axes. Its returned variable/range
+                # lists are the corresponding independent work coordinates.
+                body.sizes = tuple(map(tuple, sizes))
+                body.iter_vars, body.reduce_vars = variables
+                body = finish_body(body, writes=True)
+            sizes = None if body is None else body.sizes
+            reads_writes = (operation.get_read_writes() if body is None else
+                           dependencies.extract_read_writes(body, *sizes, normalize=False))
+            return SimpleNamespace(node=operation, _body=body, _sizes=sizes, read_writes=reads_writes)
+
+        def retain_declarations(self):
+            self.declaration_nodes = {operation.get_operation_name(): self.declaration(operation)
+                                      for operation in self.operations}
+            # These are the IR's declared storage aliases. The selected
+            # scheduler still constructs versioned ordering dependencies.
+            self.storage_aliases = {}
+            for operation in self.operations:
+                for output in operation.get_outputs():
+                    for source in output.get_mutation_names():
+                        self.storage_aliases[output.get_name()] = self.storage_aliases.get(source, source)
+
         def compose_reads(self):
             """Fold live reads of cached pointwise values into their consumers.
 
@@ -1188,19 +1232,17 @@ def prepare_graph(module, metadata, *, materializations=()):
             use their exact write inverse; no intermediate table is allocated
             solely because an index into that value changes at execution.
             """
-            import copy
             from mesh_relation import Algebra, flat
             from .layout import strides
             from .operand import access_domain, byte_relation, layout_configuration, symbolic_index
             algebra = Algebra()
-            nodes = {op.get_operation_name(): self.scheduler.name_to_node[op.get_operation_name()]
-                     for op in self.operations}
+            nodes = self.declaration_nodes
             producers = {value.get_name(): op for op in self.operations for value in op.get_outputs()}
             protected = self.never_reuse_buffers | {value.get_name() for value in self.graph_outputs}
             substituted = set()
             for operation in self.operations:
                 node = nodes[operation.get_operation_name()]
-                if not isinstance(node, SchedulerNode):
+                if node._body is None:
                     continue
                 while True:
                     domain, = computed_domains(operation, node._body, algebra)
@@ -1212,7 +1254,7 @@ def prepare_graph(module, metadata, *, materializations=()):
                             not isinstance(producer, ir.ComputedBuffer) or not isinstance(producer.data, ir.Pointwise)):
                             continue
                         source = nodes[producer.get_operation_name()]
-                        if not isinstance(source, SchedulerNode) or source._body.reduce_vars:
+                        if source._body is None or source._body.reduce_vars:
                             continue
                         source_domain, = computed_domains(producer, source._body, algebra)
                         if len(source_domain['writes']) != 1:
@@ -1234,11 +1276,9 @@ def prepare_graph(module, metadata, *, materializations=()):
                             lambda x, y: [f'{y[0]} = {flat(shape, x)}'])
                         ordinal = symbolic_index(inverse.then(flatten).terms(), access['index'])
                         coordinates = layout_configuration(_stream.TensorLayout(shape, strides(shape)))['index_coordinates']
-                        node._body = compose_body_read(node._body, access, source._body,
+                        body = compose_body_read(node._body, access, source._body,
                             [symbolic_index(term, ordinal) for term in coordinates], access['dtype'])
-                        node.read_writes = node.declared_read_writes
-                        node.refresh_dependencies(normalize=False, need_clear_tiling_cache=True)
-                        node.declared_read_writes = node.read_writes
+                        node = nodes[operation.get_operation_name()] = self.declaration(operation, body)
                         operation.origins = operation.get_origins() | producer.get_origins()
                         substituted.add(producer.get_operation_name())
                         changed = True
@@ -1256,9 +1296,7 @@ def prepare_graph(module, metadata, *, materializations=()):
                 if not any(value.get_name() in live for value in operation.get_outputs()):
                     retained.remove(operation)
             self.operations = retained
-            self.scheduler.prepared_nodes = {op.get_operation_name(): (copy.copy(nodes[op.get_operation_name()]),
-                nodes[op.get_operation_name()].read_writes) for op in retained}
-            self.scheduler._init(retained)
+            self.declaration_nodes = {op.get_operation_name(): nodes[op.get_operation_name()] for op in retained}
             return self
 
         def cut_reads(self, requests):
@@ -1283,29 +1321,17 @@ def prepare_graph(module, metadata, *, materializations=()):
             with environment(), V.set_graph_handler(self), V.set_extern_kernel_nodes([]), mode:
                 original_operations = tuple(self.operations)
                 original_inputs, original_outputs = dict(self.graph_inputs), tuple(self.graph_outputs)
-                nodes = {operation.get_operation_name(): copy.copy(self.scheduler.name_to_node[operation.get_operation_name()])
+                nodes = {operation.get_operation_name(): copy.copy(self.declaration_nodes[operation.get_operation_name()])
                          for operation in original_operations}
                 order = {operation.get_operation_name(): index for index, operation in enumerate(original_operations)}
                 read_order = {operation.get_operation_name(): {id(access['node']): index
                     for index, access in enumerate(body_accesses(nodes[operation.get_operation_name()]._body)['reads'])}
-                    for operation in original_operations if isinstance(nodes[operation.get_operation_name()], SchedulerNode)}
+                    for operation in original_operations if nodes[operation.get_operation_name()]._body is not None}
                 requests = sorted(enumerate(requests), key=lambda pair: (
                     order[pair[1]['effect']['operation'].get_operation_name()],
                     read_order[pair[1]['effect']['operation'].get_operation_name()][id(pair[1]['access']['node'])]))
                 stages, boundaries, cursor, pending = [], [], 0, []
                 fields, ports = torch.fx.Graph(), {}
-
-                def node_for(operation, body, template):
-                    made = copy.copy(template)
-                    made.__dict__.pop('page_pieces', None)
-                    made._init_from_node(operation)
-                    made._body, made._sizes = body, body.sizes
-                    device = operation.get_device_or_error()
-                    made.group = device, self.scheduler.get_backend(device).group_fn(made._sizes)
-                    made.read_writes = template.declared_read_writes
-                    made.refresh_dependencies(normalize=False, need_clear_tiling_cache=True)
-                    made.declared_read_writes = made.read_writes
-                    return made
 
                 def port(value):
                     import json
@@ -1366,8 +1392,8 @@ def prepare_graph(module, metadata, *, materializations=()):
                     produced.data = ir.Pointwise(device=device, dtype=dtype,
                         inner_fn=lambda indices, body=value_body: body(indices), ranges=(count,))
                     produced.origins = operation.get_origins()
-                    nodes[produced.get_operation_name()] = node_for(produced, prefix, template)
-                    nodes[operation.get_operation_name()] = node_for(operation, continuation, template)
+                    nodes[produced.get_operation_name()] = self.declaration(produced, prefix)
+                    nodes[operation.get_operation_name()] = self.declaration(operation, continuation)
                     pending.append(produced)
                     stages.append(tuple(pending)); pending = []
                     output_port, input_port = port(produced), port(incoming)
@@ -1442,16 +1468,14 @@ def prepare_graph(module, metadata, *, materializations=()):
                 return dict(binding, value=value, relation=algebra.layout(layout_configuration(binding['view'])))
 
         def loop_body(self, operation, bodies=None):
-            """The scheduler's current cached body, without retracing or freezing."""
+            """Original declared work coordinates, independent of scheduling."""
             if bodies is not None:
                 return bodies.get(operation.get_operation_name())
-            scheduled = self.scheduler.name_to_node[operation.get_operation_name()]
-            return scheduled._body if isinstance(scheduled, SchedulerNode) else None
+            return self.declaration_nodes[operation.get_operation_name()]._body
 
         def consumer_constraints(self, bodies=None):
             """Typed backend eligibility, separate from storage interpretation."""
-            from .compilation import api_layouts
-            allowed = tuple(getattr(torch, name.lower()) for name in api_layouts('scalar_emitter')['arithmetic_types'])
+            from mesh_compute import eligibility
             declarations = []
             for operation in self.operations:
                 body = self.loop_body(operation, bodies)
@@ -1464,10 +1488,118 @@ def prepare_graph(module, metadata, *, materializations=()):
                 accesses = body_accesses(body)
                 for access in (*accesses['reads'], *accesses['writes']):
                     required.add(self.get_dtype(access['name']))
-                declarations.append(dict(consumer='scalar_emitter', operation=operation,
-                    required_types=tuple(sorted(required, key=str)), arithmetic_types=allowed,
-                    missing_types=tuple(sorted(required.difference(allowed), key=str))))
+                requirement = dict(interfaces=['scalar'], input_types=[],
+                    arithmetic_types=sorted(str(dtype).removeprefix('torch.') for dtype in required), constants=[])
+                declarations.append(dict(operation=operation, required=requirement,
+                    candidates=tuple(eligibility(requirement, candidate)
+                                     for candidate in implementation_catalog.values())))
             return tuple(declarations)
+
+        def select_implementations(self, records=None):
+            """Resolve explicit choices against the retained typed requirements."""
+            from mesh_compute import select_implementation
+            choices = []
+            for declaration in self.consumer_constraints():
+                operation = declaration['operation']
+                requests = ((None,) if records is None else tuple(record for record in records
+                    if record['effect']['operation'] is operation and
+                    (not record['work'].empty() or record['finish'] is not None and not record['finish']['work'].empty())))
+                for record in requests:
+                    implementation = select_implementation(declaration['required'], implementation_catalog.values(),
+                        None if record is None else record.get('implementation'))
+                    if implementation['compiler'] not in scalar_compilers:
+                        raise NotImplementedError(f"retained scalar emission has no compiler for {implementation['compiler']}")
+                    choices.append(dict(operation=operation, domain=None if record is None else record['domain'],
+                        work=None if record is None else record['work'],
+                        required=declaration['required'], implementation=implementation))
+            self.selected_implementations = tuple(choices)
+
+        def split_reduction(self, node):
+            """Apply the selected compiler's existing split to a cached body."""
+            import copy
+            import sympy
+            from torch._inductor.utils import reduction_num_outputs
+            from mesh_relation import Algebra
+            from .operand import layout_configuration
+            operation, body = node.node, node._body
+            if not body.reduce_vars or not isinstance(operation.data, ir.Reduction):
+                return (), node
+            value, _ = clone_body(body)
+            reduction = next(item for item in value.root_block.graph.nodes
+                             if item.op == 'call_method' and item.target == 'reduction')
+            payload = reduction.args[4]
+            next(item for item in value.root_block.graph.nodes if item.op == 'output').args = (payload,)
+            value = finish_body(value)
+            def inner(indices, reductions):
+                return value(indices, reductions, allow_same_symbol_in_index=True)
+            data = operation.data
+            ranges, reduction_ranges = map(list, body.sizes)
+            hint, split = ir.Reduction.num_splits(data.device, data.dtype, data.src_dtype, inner,
+                ranges, reduction_ranges, data.reduction_type, sympy.prod(reduction_ranges))
+            if split <= 1:
+                return (), node
+            # GraphLowering assigns operation names from its registration
+            # sequence. A selected section is only a slice of that sequence;
+            # retain the full existing declarations while adding stages.
+            operations = self.operations
+            self.operations = list(self.name_to_op.values())
+            start = len(self.operations)
+            try:
+                if isinstance(data, ir.WelfordReduction):
+                    values = payload if isinstance(payload, (tuple, list)) else (payload,)
+                    loaders = tuple((lambda i, r, at=at: inner(i, r)[at]) for at in range(len(values))) if isinstance(payload, (tuple, list)) else (inner,)
+                    made = type(data).create_multilayer(data.device, data.dtype, loaders, ranges,
+                        reduction_ranges, data.reduction_type, split, hint)[data.output_index]
+                elif isinstance(data, ir.MultiOutputReduction):
+                    made = type(data).create_multilayer(data.device, data.dtype, data.src_dtype, inner,
+                        ranges, reduction_ranges, reduction_num_outputs(data.reduction_type), split, hint)[data.output_index]
+                else:
+                    made = type(data).create_multilayer(data.device, data.dtype, data.src_dtype, inner,
+                        ranges, reduction_ranges, data.reduction_type, split, hint)
+                while isinstance(made, (ir.TensorBox, ir.StorageBox)):
+                    made = made.data
+                for stage in self.operations[start:]:
+                    stage.decide_layout()
+                final = copy.copy(operation)
+                final.data = made.data if isinstance(made, ir.ComputedBuffer) else made
+                # The backend's final fiber keeps the original selected store
+                # relation rather than publishing a dense result temporary.
+                layout = ir.FixedLayout(data.device, data.dtype, ranges, ir.FlexibleLayout.contiguous_strides(ranges))
+                described = ir.ComputedBuffer(name=operation.get_name(), layout=layout, data=final.data)
+                _, final_body, _ = described.get_default_sizes_body()
+                final_body, _ = clone_body(final_body)
+                original_write, = body_accesses(body)['writes']
+                substitutions = dict(zip(body.iter_vars, final_body.iter_vars, strict=True))
+                target = original_write['index'].xreplace(substitutions)
+                write, = body_accesses(final_body)['writes']
+                with write['node'].graph.inserting_before(write['node']):
+                    index = body_index(final_body, write['node'].graph, target)
+                write['node'].args = (write['node'].args[0], original_write['name'], index, *write['node'].args[3:])
+                final_body = finish_body(final_body, writes=True)
+                # Other ordinary IR queries (free symbols and dependencies)
+                # use the same retained store, including singleton axes and
+                # compact selections whose shape differs from the storage.
+                final.get_store_function = lambda: lambda *indices: final_body(*indices, allow_same_symbol_in_index=True)
+                setattr(final, '__get_default_sizes_body_cache',
+                    (final_body.sizes, final_body, (final_body.iter_vars, final_body.reduce_vars)))
+                stages = tuple(stage for stage in self.operations[start:] if stage is not made)
+            finally:
+                self.operations = operations
+            physical = []
+            algebra = Algebra()
+            for stage in stages:
+                stage.origins = operation.get_origins()
+                declaration = self.declaration(stage)
+                prepared = DeclaredSchedulerNode(self.scheduler, stage, declaration)
+                prepared.declared_read_writes = declaration.read_writes
+                physical.append(prepared)
+                binding = self.value_binding(stage, algebra)
+                relation = algebra.layout(layout_configuration(binding['view']))
+                self.reduction_uses.append(dict(key=('reduction', stage.get_operation_name()),
+                    binding=binding, relation=relation, shape=relation.shape, requirements=(), access='readwrite'))
+            final_node = DeclaredSchedulerNode(self.scheduler, final, self.declaration(final, final_body))
+            final_node.declared_read_writes = final_node.read_writes
+            return tuple(physical), final_node
 
         def select_domains(self, records):
             """Apply owner-selected work to this IR's existing scalar bodies."""
@@ -1508,9 +1640,12 @@ def prepare_graph(module, metadata, *, materializations=()):
                 return LoopBody(body, arguments, ranges, *variables, allow_same_symbol_in_index=True)
 
             with environment(), V.set_graph_handler(self), V.set_extern_kernel_nodes([]), mode:
-                prepared, undeclared = {}, set()
+                self.select_implementations(records)
+                self._update_scheduler()
+                prepared, undeclared, backend_operations = {}, set(), []
+                self.reduction_uses = []
                 declarations = {effect['operation'].get_operation_name(): effect for effect in self.declared_effects}
-                for operation in self.operations:
+                for operation in tuple(self.operations):
                     node = self.scheduler.name_to_node[operation.get_operation_name()]
                     requests = selected.get(operation.get_operation_name(), ())
                     if isinstance(node, SchedulerNode):
@@ -1525,6 +1660,10 @@ def prepare_graph(module, metadata, *, materializations=()):
                             piece.mutation_renames = {}
                             piece.read_writes = node.declared_read_writes
                             piece.refresh_dependencies(normalize=False, need_clear_tiling_cache=True)
+                            stages, piece = self.split_reduction(piece)
+                            for stage in stages:
+                                prepared[stage.get_name()] = stage, stage.read_writes
+                                backend_operations.append(stage.node)
                             pieces.append(piece)
                         for request in requests:
                             body = request['domain']['body']
@@ -1563,7 +1702,7 @@ def prepare_graph(module, metadata, *, materializations=()):
                                                 selected_finish = selected if selected_finish is None else selected_finish.binary(selected, 'union')
                                     append(finish_body, selected_finish)
                         if len(pieces) == 1:
-                            node._body, node._sizes, node.group = pieces[0]._body, pieces[0]._sizes, pieces[0].group
+                            node = pieces[0]
                             node.__dict__.pop('page_pieces', None)
                         else:
                             node.page_pieces = tuple(pieces)
@@ -1589,19 +1728,22 @@ def prepare_graph(module, metadata, *, materializations=()):
                             undeclared.add(operation.get_operation_name())
                         rw = node.declared_read_writes
                     prepared[operation.get_operation_name()] = node, rw
+                    backend_operations.append(node.node)
                 self.selected_domains = records
                 # Reuse the scheduler and its normal dependency/fusion passes.
                 # create_scheduler_node retains these bodies and operation
                 # objects; no GraphLowering or scalar capture runs again.
                 self.scheduler.prepared_nodes = prepared
-                self.scheduler._init(self.operations)
+                self.scheduler._init(backend_operations)
                 self.pending_declarations = tuple(node.node for group in self.scheduler.nodes for node in group.get_nodes()
                                                   if node.get_name() in undeclared)
             return self
 
         def consumer_uses(self):
             """Selected external API uses, before the common page-placement solve."""
-            uses = []
+            live = {output.get_name() for group in self.scheduler.nodes for node in group.get_nodes()
+                    for output in node.get_outputs()}
+            uses = [use for use in getattr(self, 'reduction_uses', ()) if use['binding']['name'] in live]
             for operation in self.operations:
                 name = operation.get_operation_name()
                 scheduled = self.scheduler.name_to_node[name]
@@ -1643,17 +1785,13 @@ def prepare_graph(module, metadata, *, materializations=()):
             only composes those relations into the existing emitted bindings.
             """
             nonlocal assigned_results
-            missing = [declaration for declaration in self.consumer_constraints() if declaration['missing_types']]
-            if missing:
-                names = ', '.join(f"{declaration['operation'].get_operation_name()} ({', '.join(map(str, declaration['missing_types']))})"
-                                  for declaration in missing)
-                raise ValueError(f'scalar_emitter has no type-compatible backend assignment: {names}')
             if getattr(self, 'pending_declarations', ()):
                 names = ', '.join(operation.get_operation_name() for operation in self.pending_declarations)
                 raise ValueError(f'selected numerical work is missing external access declarations: {names}')
             bound_storage.clear(); storage_layouts.clear()
             views.clear(); external_arguments.clear(); external_outputs.clear(); command_accesses.clear()
             with environment(), V.set_graph_handler(self), V.set_extern_kernel_nodes([]), mode:
+                self._update_scheduler()
                 with unset_fake_temporarily():
                     assigned_results = tuple(results)
                     for name, binding in storage.items():
@@ -1756,7 +1894,8 @@ def prepare_graph(module, metadata, *, materializations=()):
             """Logical operations with one shared iteration domain per body.
 
             Domains retain the cached body's symbols, guards and scalar nodes.
-            Scheduler dependencies retain their existing scheduling role.
+            IR dependencies retain their declared role; the selected scheduler
+            later adds its versioned ordering dependencies.
             Aggregate StarDeps are not scalar address relations.
             Declared external domains compose their logical uses with the same
             selected storage views; each access carries its scalar type.
@@ -1780,7 +1919,7 @@ def prepare_graph(module, metadata, *, materializations=()):
                 for operation in self.operations:
                     data = operation.data if isinstance(operation, ir.ComputedBuffer) else None
                     body = self.loop_body(operation, bodies)
-                    dependencies = self.scheduler.name_to_node[operation.get_operation_name()].read_writes
+                    dependencies = self.declaration_nodes[operation.get_operation_name()].read_writes
                     records.append(dict(operation=operation, body=body, scheduling_dependencies=dependencies,
                         scheduling_reads=tuple((dep, value_type(dep.name)) for dep in dependencies.reads),
                         scheduling_writes=tuple((dep, value_type(dep.name)) for dep in dependencies.writes),
@@ -1795,13 +1934,18 @@ def prepare_graph(module, metadata, *, materializations=()):
         def init_wrapper_code(self, *args, **kwargs):
             if self.wrapper_code is not None:
                 return
-            self.device_type = 'mps'
-            self.device_ops = get_device_op_overrides('mps')
+            self.device_type = (scalar_compilers[self.selected_implementations[0]['implementation']['compiler']][1]
+                                if self.selected_implementations else 'mps')
+            self.device_ops = get_device_op_overrides(self.device_type)
             self.wrapper_code = Preparation()
             self.wrapper_code.header.writeline('from torch_mesh import native as mesh_native')
 
         def _update_scheduler(self):
+            if getattr(self, 'selected_implementations', None) is None:
+                self.select_implementations()
+            self.init_wrapper_code()
             if self.scheduler is None:
+                PageKernel.max_threadgroup_size = min(configuration['ROW_THREADS'], _stream.device_facts()[1])
                 self.scheduler = NativeScheduler(self.operations)
 
     mode = detect_fake_mode((metadata, [node.meta.get('val') for node in module.graph.nodes]))
@@ -1819,6 +1963,7 @@ def prepare_graph(module, metadata, *, materializations=()):
     with environment():
         graph = NativeGraph(module, metadata, shape_env=mode.shape_env, is_inference=True)
         graph.source_values = {}
+        graph.storage_aliases = {}
         with V.set_graph_handler(graph), V.set_extern_kernel_nodes([]), mode:
             # Keep reduction axes until ownership selects work. The pinned
             # source hook applies even when an operator has its own policy.
@@ -1828,10 +1973,6 @@ def prepare_graph(module, metadata, *, materializations=()):
             with V.set_choices_handler(LogicalChoices()):
                 graph.run(*metadata)
             graph.never_reuse_buffers.update(materialized_buffers)
-            # This is the scheduler's normal body/layout preparation. Ownership
-            # and placement inspect these same cached bodies; codegen retains
-            # this wrapper and scheduler after physical page bindings arrive.
-            graph.init_wrapper_code()
-            graph._update_scheduler()
+            graph.retain_declarations()
             graph.compose_reads()
     return graph

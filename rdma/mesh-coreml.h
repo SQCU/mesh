@@ -22,8 +22,10 @@ enum MeshModelUnits { MeshModelCPUAndANE, MeshModelAll, MeshModelCPU, MeshModelC
 extern "C" {
 #endif
 
-/* Configuration JSON selects the backend, function, units, devices and explicit
-   state input/output pairs. Core ML units set device eligibility; its plan
+/* Configuration JSON selects the backend, function, units, devices, explicit
+   state input/output pairs and implementation.resources. Resource rows name a
+   JSON identity and positive integer capacity; prepared models retain them.
+   Core ML units set device eligibility; its plan
    reports preferred placement. The direct ANE backend requires its own declared
    capabilities and symbols, and returns the compiled operand contract. */
 long mesh_coreml_load(const char *compiled, const char *configuration);
@@ -72,7 +74,10 @@ int64_t mesh_cpu_product_bind(MeshCpuCommand *command);
 void mesh_cpu_product_workspace(MeshCpuCommand *command, void *workspace);
 void mesh_cpu_command_release(MeshCpuCommand *command);
 void mesh_cpu_gelu(const MeshCpuCommand *command);
-void *mesh_cpu_program_create(const MeshCpuCommand *commands, size_t count);
+/* resources_json is the implementation's declared resource array, including
+   an explicit [] when none are required. Each row names a JSON identity and a
+   positive integer capacity. Identity lifetime is held by prepared programs. */
+void *mesh_cpu_program_create(const MeshCpuCommand *commands, size_t count, const char *resources_json);
 const char *mesh_cpu_program_prepare(void *program, MeshHostCompletion, void *context, MeshHostTask *);
 void mesh_cpu_program_retain(void *program);
 void mesh_cpu_program_release(void *program);

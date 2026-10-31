@@ -880,7 +880,6 @@ static void MetalCaptureAddresses(MetalCapture *capture,id<MTLDevice> device,NSU
 static void MetalReplayBuild(MetalCapture *capture,id<MTLDevice> device,NSUInteger repetitions,enum MetalForm form,
     struct MetalReplay *result) {
     result->count = (uint32_t)(capture->dispatches.length / sizeof(struct MetalRecordedDispatch));
-    if (!result->count) [NSException raise:NSInvalidArgumentException format:@"No compute commands recorded"];
     MetalCaptureAddresses(capture,device,repetitions);
     [capture->owners unionSet:capture->resources];
     result->buffers = (uint16_t)capture->buffers; result->memory = (uint16_t)capture->memory;
@@ -905,7 +904,9 @@ static void MetalReplayBuild(MetalCapture *capture,id<MTLDevice> device,NSUInteg
     [residency release];
     if (!result->residency) [NSException raise:NSMallocException format:@"%@", error];
     for (id allocation in capture->owners) [result->residency addAllocation:allocation];
-    if (form != MetalFormIndirect) { [result->residency commit]; [result->residency requestResidency]; return; }
+    if (form != MetalFormIndirect || !result->count || !repetitions) {
+        [result->residency commit]; [result->residency requestResidency]; return;
+    }
     MTLIndirectCommandBufferDescriptor *descriptor = [MTLIndirectCommandBufferDescriptor new];
     descriptor.commandTypes = MTLIndirectCommandTypeConcurrentDispatch | MTLIndirectCommandTypeConcurrentDispatchThreads;
     descriptor.inheritBuffers = NO; descriptor.inheritPipelineState = NO;
@@ -1177,15 +1178,21 @@ struct MetalReplay *MetalReplayDescribed(id<MTLDevice> device,const struct Metal
             MetalCaptureOperands(capture,operands,operandCount);
             for(size_t h=0;h<hostCount;h++) {
                 const struct MetalHostDescription *host=hosts+h;
-                if(!host->operation||!host->count)[NSException raise:NSInvalidArgumentException format:@"host operation needs declared data views"];
-                for(size_t k=0;k<host->count;k++)if(host->reaches[k].buffer)[capture->owners addObject:host->reaches[k].buffer];
-                [capture->hosts addObject:@{@"at":@(host->at),@"accesses":[NSData dataWithBytes:host->reaches length:host->count*sizeof *host->reaches],
-                    @"operation":[[host->operation copy] autorelease]}];
+                if(!host->instances||!host->bindings)[NSException raise:NSInvalidArgumentException format:@"host operation needs prepared invocation bindings"];
+                NSMutableArray *bindings=[NSMutableArray arrayWithCapacity:host->instances];
+                for(size_t j=0;j<host->instances;j++) {
+                    const struct MetalHostBinding *binding=host->bindings+j;
+                    if(!binding->operation||!binding->count)[NSException raise:NSInvalidArgumentException format:@"host operation needs declared data views"];
+                    for(size_t k=0;k<binding->count;k++)if(binding->reaches[k].buffer)[capture->owners addObject:binding->reaches[k].buffer];
+                    [bindings addObject:@{@"accesses":[NSData dataWithBytes:binding->reaches length:binding->count*sizeof *binding->reaches],
+                        @"operation":[[binding->operation copy] autorelease]}];
+                }
+                [capture->hosts addObject:@{@"at":@(host->at),@"bindings":bindings,@"invocation":@(host->invocation)}];
             }
             replay=MetalReplayMade(capture,device,invocations,form);
             const struct MetalRecordedDispatch *recorded=capture->dispatches.bytes;
             const NSUInteger n=replay->count;
-            NSUInteger levels=1;
+            NSUInteger levels=n?1:0;
             for(NSUInteger i=1;i<n;i++)levels+=recorded[i].barrier;
             printf("prepared program commands %lu levels %lu form %s\n",(unsigned long)n,(unsigned long)levels,(const char *[]){"icb","encoded"}[form]);
             NSMutableDictionary *allocations=[NSMutableDictionary dictionary];
@@ -1933,7 +1940,9 @@ NSError *MetalScheduleAppend(struct MetalSchedule *root,struct MetalReplay *repl
             MetalScheduleRange(root,replay,t,from,at);
             while(h<hosts.count&&[hosts[h][@"at"] unsignedIntegerValue]==at) {
                 NSDictionary *host=hosts[h++];
-                MetalScheduleHostWork(root,host[@"accesses"],host[@"operation"]);
+                NSArray *bindings=host[@"bindings"];
+                NSDictionary *binding=bindings[ncclMeshInvocationIndex(t,[host[@"invocation"] longLongValue],bindings.count)];
+                MetalScheduleHostWork(root,binding[@"accesses"],binding[@"operation"]);
             }
             while(k<marks.count&&marks[k].unsignedIntegerValue==at) {
                 const NSUInteger mark=k++;

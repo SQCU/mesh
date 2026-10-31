@@ -1,0 +1,56 @@
+{
+  "metal_scalar": {
+    "id": "metal_scalar",
+    "compiler": "metal_scalar",
+    "accepts": {
+      "interfaces": ["scalar"],
+      "arithmetic_types": ["bool", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float16", "bfloat16", "float32"]
+    },
+    "requires": {},
+    "devices": ["gpu"],
+    "resources": [],
+    "output_storage": "caller-pages"
+  },
+  "metal_engine": {
+    "id": "metal_engine",
+    "compiler": "native",
+    "accepts": {
+      "interfaces": ["linear", "ffn"],
+      "input_types": ["float16", "bfloat16", "float32"]
+    },
+    "requires": {},
+    "devices": ["gpu"],
+    "resources": [],
+    "output_storage": "caller-pages",
+    "input_type": "source",
+    "output_type": "source",
+    "sum_type": "float32"
+  },
+  "accelerate_engine": {
+    "id": "accelerate_engine",
+    "compiler": "accelerate",
+    "accepts": {
+      "interfaces": ["linear", "ffn"],
+      "input_types": ["float16", "bfloat16", "float32"]
+    },
+    "requires": {},
+    "devices": ["cpu"],
+    "resources": [],
+    "output_storage": "caller-pages",
+    "input_type": "float32",
+    "output_type": "float32",
+    "sum_type": "float32"
+  },
+  "ane_engine": {
+    "id": "ane_engine",
+    "compiler": "coreml",
+    "accepts": {
+      "interfaces": ["linear", "ffn"],
+      "input_types": ["float16", "bfloat16", "float32"]
+    },
+    "requires": {"constants": ["weights"]},
+    "devices": ["ane"],
+    "resources": [],
+    "output_storage": "caller-pages"
+  }
+}

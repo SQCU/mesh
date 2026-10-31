@@ -23,6 +23,8 @@ def declare(inputs, outputs, definition, *, input_layouts, output_layouts, bindi
     from .operand import signature
     if inputs.keys() != input_layouts.keys() or outputs.keys() != output_layouts.keys():
         raise ValueError('each host graph operand requires a declared layout')
+    if definition['provider'] != 'pages' and 'implementation' not in definition:
+        raise ValueError('numerical host declarations require an implementation operand')
     names = [*inputs, *outputs]
     layouts = [input_layouts[name] for name in inputs] + [output_layouts[name] for name in outputs]
     requirements = {i: (layout, binding_layout) for i, layout in enumerate(layouts)}
@@ -87,15 +89,10 @@ def prepare_views(definition, source, target):
     original pages; those two API uses need not have the same physical view.
     """
     from .engines import Cpu, coreml_graph
-    from types import SimpleNamespace
     if definition['provider'] == 'pages':
         return None
     if definition['provider'] == 'cpu':
-        weights = tuple(source[name] for name in definition['weights'])
-        shard = weights[0] if definition['operation'] == 'linear' else weights
-        return Cpu().bind(SimpleNamespace(kind=definition['operation']), shard, source['input'], target['output'],
-                          input_layouts=definition['input_layouts'], output_layouts=definition['output_layouts'],
-                          binding_layout=definition['binding_layout'])
+        return Cpu(implementation=definition['implementation']).bind(definition, source, target)
     if definition['provider'] == 'coreml':
         contract = definition['contract']
         if not contract['outputs']:
@@ -103,5 +100,5 @@ def prepare_views(definition, source, target):
         source = {name: source[name] for name in contract['inputs']}
         target = {name: target[name] for name in contract['outputs']}
         return coreml_graph(definition['compiled'], source, target, configuration=definition['configuration'],
-                            contract=contract)
+                            contract=contract, implementation=definition['implementation'])
     raise ValueError(f"unknown declared host provider {definition['provider']}")

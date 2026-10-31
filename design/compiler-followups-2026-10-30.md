@@ -152,6 +152,57 @@ Backend assignment remains followup 3, partial-result fusion followup 4, and the
 command dependency work below followup 5. No numerical or cluster run is part
 of this structural pass.
 
+## Backend assignment handoff, October 31
+
+`mesh_compute` supplies the common implementation catalog and eligibility
+relation. A source declaration supplies its interface, input and arithmetic
+types, and constant operands. An implementation supplies admitted values,
+required properties, output-storage guarantees and resource operands. Layout
+requirements still enter the existing placement relation; a second predicate
+does not approximate them. Work rates remain supplied or measured values,
+separate from hardware core counts. Illegal candidates have no assigned work.
+Several legal scalar implementations require an assignment operand; catalog
+order and the source tensor's device do not select one.
+
+Engine declarations use this same relation for their CPU, GPU and ANE shares.
+The previous class-local dtype/constant limits and unused occupancy claims are
+removed. The whole-call assignment retains source identity and candidate
+records. Bound host definitions retain the selected implementation and compiled
+provider contract through binding and restoration. CPU products and the existing
+FFN adapter now supply one passive named command recipe, used by both Python
+binding and the imported-program binder.
+
+Canonical scalar work is retained before a backend scheduler chooses loop order
+or reduction splits. Selected Metal preparation applies the existing reduction
+split to that retained work and presents intermediate storage to the ordinary
+page placement solve. It does not replace a large reduction with an unsplit
+kernel merely to obtain a backend-neutral declaration.
+
+An imported host stage carries the ordinary host definition and ordered typed
+ports. Provider layout, capacity and alignment enter placement before binding;
+the stage then records the existing native task. Host replay bindings have the
+same finite invocation relation as numerical bindings. Preparation selects the
+bound task and exact accesses for each invocation; enqueue does no selection.
+A program with only host work has no GPU command or indirect buffer.
+
+Explicit resource identities and capacities enter the existing host dependency
+solve. CPU programs and provider models retain these records through preparation
+and replay. The last prepared holder releases the identity. Submission does not
+look up resource names, allocate requests or decide how much work may run.
+
+This establishes the declaration and binding handoffs, not arbitrary backend
+coverage. The generic scalar compiler still needs its CPU emitter and mixed
+implementation partitioning. External numerical recipes still need their
+implementation candidates. Generic Core ML export can supply a compiled
+provider declaration; assigning arbitrary source sections to it must use its
+actual compiled contract. The current model-specific share adapters do not
+establish that broader assignment. Replay-template serialization of recorded
+host stages remains part of the common declaration work in followup 5.
+
+Source and preparation inspection cover eligibility, retained work coordinates,
+typed CPU recipes and host invocation bindings. These are structural results;
+whole-function execution and performance remain followup 6.
+
 ## Dependency handoff through command lowering
 
 The source review found repeated dependency reconstruction in `MetalDataflow`,
@@ -167,11 +218,13 @@ of retaining its result with the bound command.
 opaque crossing callback, then flushes the work. The callback enters
 `ncclMeshCommEncode`, constructs transport tasks and emits direct commands.
 The common scheduler therefore lacks those command records before encoding.
-The later `b73d81bc` change removes the direct transport range walk and assigns
-barriers by dispatch kind. It still does not expose those commands to the common
-dependency graph: every direct kind other than a later present takes a barrier.
-Recorded numerical work still has separate dependency passes. Removing the
-range walk therefore does not complete this compiler handoff.
+The later `b73d81bc` change removes the per-dispatch transport range walk and
+assigns barriers by dispatch kind. `metal_boundary` still calls
+`MetalEncoderOrder` for aggregate collective operands, and recorded numerical
+work still has separate dependency passes. Individual transport commands remain
+hidden from the common dependency graph: every direct kind other than a later
+present takes a barrier. Replacing the per-dispatch range walk therefore does
+not complete this compiler handoff.
 
 The compiler owns these relationships from their first declaration to the final
 commands. Lowering an established relation into a different hardware form is
@@ -185,6 +238,14 @@ the whole function's graph. Producer writes, reads, overwrites and resource
 capacities establish those predecessors. Dispatch kinds and group boundaries do
 not establish them. The final encoder lowers the chosen edges to the backend's
 barriers and events; it does not decide the edges again.
+
+Preparation must establish these facts in order: selected work and routes;
+their actual numerical, copy and transport commands; bound pages and aliases;
+data, overwrite and resource edges; then command order and backend barriers.
+Each lowering retains the facts its predecessor supplied. A backend can split
+one command into several commands, but must return their accesses and internal
+edges before the common dependency solve. Neither an opaque encoding callback
+nor a command's kind supplies that missing relation.
 
 The common compiled record must carry the following facts through each lowering:
 
@@ -238,6 +299,12 @@ barrier bits alone do not cover those relationships. Relocating a template can
 change physical aliasing, so binding resolves that fact once for the new pages.
 Changing index contents remain ordinary data; their declared producer/consumer
 relation does not become a second scheduler.
+
+A required layout conversion has the same obligation. Placement supplies its
+source pages, destination pages and producer/consumer edges before commands are
+ordered. A contiguous provider operand does not authorize an operation-time
+copy or a whole-input join. Required memory visibility remains an output of the
+dependency solve; removing an unrelated barrier does not remove a data edge.
 
 Execution observes the data conditions named by the compiled graph. It does not
 discover producers, choose storage, resolve capabilities or reconstruct range
@@ -433,13 +500,13 @@ compiler, without expanding positions. The shared `binding_layout` supplies the
 same view composition to source dependencies and physical binding. Other opaque
 external commands still need their mathematical access declarations.
 
-The existing native scheduler and wrapper now prepare once before page placement
-and survive through code generation. Access records retain the scheduler's
-actual scalar-body nodes, enclosing masks, and changing-index producers. Source
-FX values retain their original IR objects and views. Scheduling dependencies
-keep their scheduling role; they are not substituted for mathematical accesses.
-The shared index-term adapter uses the framework's expression interpreter and
-the existing relation compiler.
+The original scalar bodies retain their coordinates, enclosing masks and
+changing-index producers before backend assignment. Source FX values retain
+their original IR objects and views. The selected implementation then prepares
+its scheduler and wrapper before page placement and keeps them through code
+generation. Scheduling dependencies keep their scheduling role; they are not
+substituted for mathematical accesses. The shared index-term adapter uses the
+framework's expression interpreter and the existing relation compiler.
 
 Ownership still needs to consume these common IR records throughout source
 lowering. These are data-kind changes: D1 and D4 rank shared operator declarations

@@ -324,9 +324,12 @@ def prepare_expression(expression):
     section's source inputs/results keep their tensor-field identities while
     the common numerical compiler performs its ordinary source rewrites.
     """
-    from .compilation import operands as compiler_operands, normalize_source
+    from .compilation import operands as compiler_operands, implementations, normalize_source
     configuration = dict(compiler_operands())
-    if 'prepared' in expression and expression['prepared']['configuration'] == configuration:
+    import copy
+    available = copy.deepcopy(implementations())
+    if ('prepared' in expression and expression['prepared']['configuration'] == configuration
+            and expression['prepared']['implementations'] == available):
         return expression['prepared']
     import torch
     from torch.fx.node import map_arg
@@ -400,7 +403,7 @@ def prepare_expression(expression):
     normalized = dict(expression, graph=module)
     normalized.pop('prepared', None)
     prepared = dict(expression=normalized, algebra=algebra, aliases=aliases, fields=fields, sections=tuple(spans),
-                    configuration=configuration)
+                    configuration=configuration, implementations=available)
     expression['prepared'] = prepared
     return prepared
 
@@ -478,7 +481,7 @@ def page_equalities(section, fixed=()):
         return ()
     retained = section['retained']
     aliases = retained.page_aliases()
-    mutations = retained.scheduler_state['mutation_real_name']
+    mutations = retained.scheduler.mutation_real_name
     fixed_names = {mutations.get(record['binding']['name'], record['binding']['name']) for record in fixed}
     result = []
     for alias in aliases:

@@ -209,12 +209,20 @@ struct MetalReplay *MetalReplayCommands(id<MTLDevice>, const struct MetalCommand
 // These are prepared native operations, not callbacks into a frontend. CPU-only
 // views use a nil buffer and their address as offset; Metal views use buffer-relative
 // offsets. The bound operation retains any CPU storage it uses. The replay holds Metal
-// buffers. Host views/operations stay bound to these operands across replay slots.
-struct MetalHostDescription {
-    NSUInteger at;
+// buffers. Every binding is prepared over its exact page operands. Preparation
+// selects (t + invocation) modulo instances, just as for numerical operands;
+// an operation over fixed pages has one binding. No binding selection occurs
+// when the completed schedule is enqueued.
+struct MetalHostBinding {
     const struct MetalReach *reaches;
     size_t count;
     __unsafe_unretained MetalHostOperation operation;
+};
+struct MetalHostDescription {
+    NSUInteger at;
+    const struct MetalHostBinding *bindings;
+    size_t instances;
+    NSInteger invocation;
 };
 // docs/kernels.md Any program: a program's `count` commands as one invocation, each named operand bound by its slots,
 // and its host operations in command order, prepared as `invocations` of them in `form` (the indirect form's command

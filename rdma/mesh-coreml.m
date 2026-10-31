@@ -21,8 +21,77 @@ static NSMutableArray *models_;
 static NSMutableDictionary *loaded_;
 static NSMutableArray *placements_, *placement_text_;
 static NSMutableArray *contracts_, *contract_text_;
-static NSMutableArray *references_, *keys_;
+static NSMutableArray *references_, *keys_, *model_resources_;
 static _Thread_local char error_[2048];
+
+/* Explicit resource names are preparation operands. Live prepared programs
+   share one identity; the final holder removes it from this registry. */
+@interface MeshDeclaredResource : NSObject
+@property NSData *key;
+@property size_t capacity, holders;
+@end
+@implementation MeshDeclaredResource
+@end
+static NSMutableDictionary<NSData *, MeshDeclaredResource *> *host_resources_;
+@interface MeshResourceBinding : NSObject { @public MeshHostResource *entries; size_t count; }
+@property NSArray<MeshDeclaredResource *> *owners;
+@end
+@implementation MeshResourceBinding
+- (void)dealloc {
+  @synchronized([MeshResourceBinding class]) {
+    for(MeshDeclaredResource *resource in _owners)
+      if(!--resource.holders)[host_resources_ removeObjectForKey:resource.key];
+  }
+  free(entries);
+}
+@end
+
+static MeshResourceBinding *host_resources(id declaration) {
+  if(![declaration isKindOfClass:NSArray.class]) {
+    snprintf(error_,sizeof error_,"implementation resources must be an explicit array");return nil;
+  }
+  NSMutableDictionary<NSData *, NSNumber *> *capacities=[NSMutableDictionary dictionary];
+  NSMutableArray<NSData *> *keys=[NSMutableArray array];
+  for(id row in declaration) {
+    if(![row isKindOfClass:NSDictionary.class]||!row[@"identity"]||![row[@"capacity"] isKindOfClass:NSNumber.class]) {
+      snprintf(error_,sizeof error_,"host resource needs an explicit JSON identity and positive integer capacity");return nil;
+    }
+    NSNumber *capacity=row[@"capacity"];
+    if(CFGetTypeID((__bridge CFTypeRef)capacity)==CFBooleanGetTypeID()||
+       [capacity compare:@0]!=NSOrderedDescending||[capacity compare:@(SIZE_MAX)]==NSOrderedDescending||
+       [capacity compare:@(capacity.unsignedLongLongValue)]!=NSOrderedSame) {
+      snprintf(error_,sizeof error_,"host resource capacity must be a positive integer");return nil;
+    }
+    NSData *key=[NSJSONSerialization dataWithJSONObject:row[@"identity"]
+      options:NSJSONWritingSortedKeys|NSJSONWritingFragmentsAllowed|NSJSONWritingWithoutEscapingSlashes error:nil];
+    if(!key){snprintf(error_,sizeof error_,"host resource identity must be JSON");return nil;}
+    if(capacities[key]&&![capacities[key] isEqual:capacity]) {
+      snprintf(error_,sizeof error_,"one host resource has conflicting declared capacities");return nil;
+    }
+    if(!capacities[key])[keys addObject:key];capacities[key]=capacity;
+  }
+  MeshResourceBinding *binding=[MeshResourceBinding new];
+  binding->entries=calloc(MAX(keys.count,(NSUInteger)1),sizeof *binding->entries);
+  if(!binding->entries){snprintf(error_,sizeof error_,"allocating declared host resources");return nil;}
+  @synchronized([MeshResourceBinding class]) {
+    if(!host_resources_)host_resources_=[NSMutableDictionary dictionary];
+    for(NSData *key in keys)if(host_resources_[key]&&host_resources_[key].capacity!=capacities[key].unsignedLongLongValue) {
+      snprintf(error_,sizeof error_,"live declarations give one host resource conflicting capacities");return nil;
+    }
+    NSMutableArray *owners=[NSMutableArray array];
+    for(NSData *key in keys) {
+      MeshDeclaredResource *resource=host_resources_[key];
+      if(!resource) {
+        resource=[MeshDeclaredResource new];resource.key=key;resource.capacity=capacities[key].unsignedLongLongValue;
+        host_resources_[key]=resource;
+      }
+      resource.holders++;[owners addObject:resource];
+      binding->entries[binding->count++]=(MeshHostResource){(__bridge const void *)resource,resource.capacity};
+    }
+    binding.owners=owners;
+  }
+  return binding;
+}
 
 /* Prepared CPU numerical commands, on the same shared views as graph shares.
    Weights and scratch are bound by the compiler; execution allocates nothing. */
@@ -102,14 +171,19 @@ void mesh_cpu_gelu(const MeshCpuCommand *c) {
 typedef struct {
   _Atomic unsigned references;
   size_t count;
+  void *resources; /* retained MeshResourceBinding */
   MeshCpuCommand commands[];
 } MeshCpuProgram;
 
 /* Preparation transfers command-owned workspace into this native lifetime.
    The schedule retains it independently of the frontend that constructed it. */
-void *mesh_cpu_program_create(const MeshCpuCommand *commands, size_t count) {
+void *mesh_cpu_program_create(const MeshCpuCommand *commands, size_t count, const char *resources_json) {
+  id declared=resources_json?[NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:resources_json length:strlen(resources_json)] options:0 error:nil]:nil;
+  MeshResourceBinding *resources=host_resources(declared);if(!resources)return NULL;
+  if(count>(SIZE_MAX-sizeof(MeshCpuProgram))/sizeof *commands){snprintf(error_,sizeof error_,"CPU command extent overflows");return NULL;}
   MeshCpuProgram *p=malloc(sizeof *p+count*sizeof *commands);
-  if(!p)return NULL;
+  if(!p){snprintf(error_,sizeof error_,"allocating CPU program");return NULL;}
+  p->resources=(__bridge_retained void *)resources;
   atomic_init(&p->references,1);p->count=count;
   memcpy(p->commands,commands,count*sizeof *commands);
   return p;
@@ -121,7 +195,7 @@ void mesh_cpu_program_release(void *program) {
   MeshCpuProgram *p=program;
   if(atomic_fetch_sub_explicit(&p->references,1,memory_order_acq_rel)!=1)return;
   for(size_t j=0;j<p->count;j++)mesh_cpu_command_release(p->commands+j);
-  free(p);
+  CFRelease(p->resources);free(p);
 }
 typedef struct { MeshCpuProgram *program; MeshHostCompletion complete; void *context; } MeshCpuTask;
 static void cpu_submit(void *bound) {
@@ -136,7 +210,8 @@ const char *mesh_cpu_program_prepare(void *program,MeshHostCompletion complete,v
   MeshCpuTask *task=malloc(sizeof *task);
   if(!task)return "preparing CPU completion operand";
   mesh_cpu_program_retain(program);*task=(MeshCpuTask){program,complete,context};
-  *result=(MeshHostTask){task,cpu_submit,cpu_release,NULL,0};return NULL;
+  MeshResourceBinding *resources=(__bridge MeshResourceBinding *)task->program->resources;
+  *result=(MeshHostTask){task,cpu_submit,cpu_release,resources->entries,resources->count};return NULL;
 }
 
 const char *mesh_coreml_error(void) { return error_; }
@@ -210,6 +285,8 @@ typedef BOOL (*MeshANEEvaluate)(id,SEL,id,id,id,unsigned,NSError **);
 @interface MeshANEModel : NSObject
 @property id model, client, requestResource;
 @property NSDictionary *options, *contract, *capabilities;
+@property MeshResourceBinding *declaredResources;
+@property NSData *resources;
 @property unsigned qos;
 @property size_t capacity;
 @property BOOL loaded, cacheMapping;
@@ -284,7 +361,7 @@ static NSDictionary *ane_features(NSArray *live,NSArray *symbols,NSIndexSet *use
   }
   return result;
 }
-static MeshANEModel *ane_model(NSURL *compiled,NSDictionary *given) {
+static MeshANEModel *ane_model(NSURL *compiled,NSDictionary *given,MeshResourceBinding *declaredResources) {
   NSDictionary *declared=given[@"ane"],*capabilities=declared[@"capabilities"];
   if(![declared[@"model_key"] isKindOfClass:NSString.class]||![declared[@"model_type"] isKindOfClass:NSString.class]||
      ![declared[@"qos"] isKindOfClass:NSNumber.class]||![declared[@"cache_mapping"] isKindOfClass:NSNumber.class]||![declared[@"options"] isKindOfClass:NSDictionary.class]||
@@ -327,6 +404,11 @@ static MeshANEModel *ane_model(NSURL *compiled,NSDictionary *given) {
   const signed char capacity=((signed char(*)(id,SEL))objc_msgSend)(model,@selector(queueDepth));
   if(!prepared.requestResource||capacity<=0){snprintf(error_,sizeof error_,"compiled ANE model has no request resource/capacity");return nil;}
   prepared.capacity=(size_t)capacity;
+  prepared.declaredResources=declaredResources;
+  NSMutableData *resources=[NSMutableData dataWithBytes:prepared.declaredResources->entries
+      length:prepared.declaredResources->count*sizeof(MeshHostResource)];
+  const MeshHostResource request={(__bridge const void *)prepared.requestResource,prepared.capacity};
+  [resources appendBytes:&request length:sizeof request];prepared.resources=resources;
   NSDictionary *attributes=((id(*)(id,SEL))objc_msgSend)(model,@selector(modelAttributes));
   id descriptionKey=ane_symbol(@"kANEFModelDescriptionKey"),procedureKey=ane_symbol(@"kANEFModelProcedureNameToIDMapKey");
   if(!descriptionKey||!procedureKey)return nil;
@@ -336,7 +418,8 @@ static MeshANEModel *ane_model(NSURL *compiled,NSDictionary *given) {
   for(NSDictionary *candidate in attributes[@"NetworkStatusList"])if([candidate[@"Name"] isEqual:given[@"function"]]){network=candidate;break;}
   if(!network){snprintf(error_,sizeof error_,"compiled ANE has no storage schema for function %s",[given[@"function"] UTF8String]);return nil;}
   if([network[@"LiveStateList"] count]){snprintf(error_,sizeof error_,"ANE state must be functionalized into declared input/output pages before compilation");return nil;}
-  NSMutableDictionary *contract=[@{@"backend":@"ane",@"output_storage":@"caller-pages",@"function":given[@"function"],@"procedure":procedure,@"request_capacity":@(prepared.capacity)} mutableCopy];
+  NSMutableDictionary *contract=[@{@"backend":@"ane",@"output_storage":@"caller-pages",@"function":given[@"function"],@"procedure":procedure,@"request_capacity":@(prepared.capacity),
+    @"resources":given[@"implementation"][@"resources"]} mutableCopy];
   NSArray *sides=@[@[@"inputs",@"LiveInputList",@"kANEFModelInputSymbolsArrayKey",@"kANEFModelInput16KAlignmentArrayKey",@"inputSymbolIndicesForProcedureIndex:"],
                    @[@"outputs",@"LiveOutputList",@"kANEFModelOutputSymbolsArrayKey",@"kANEFModelOutput16KAlignmentArrayKey",@"outputSymbolIndicesForProcedureIndex:"]];
   for(NSArray *side in sides) {
@@ -379,12 +462,13 @@ long mesh_coreml_load(const char *package,const char *configuration_json) {
    if((unsigned)units>=sizeof choices/sizeof *choices){snprintf(error_,sizeof error_,"invalid compute units");return -1;}
    @synchronized([MLModel class]) {
     if(!models_){models_=[NSMutableArray new];loaded_=[NSMutableDictionary new];placements_=[NSMutableArray new];placement_text_=[NSMutableArray new];
-      contracts_=[NSMutableArray new];contract_text_=[NSMutableArray new];references_=[NSMutableArray new];keys_=[NSMutableArray new];}
+      contracts_=[NSMutableArray new];contract_text_=[NSMutableArray new];references_=[NSMutableArray new];keys_=[NSMutableArray new];model_resources_=[NSMutableArray new];}
     NSArray *key=@[@(package),given];NSNumber *held=loaded_[key];
     if(held){long h=held.longValue;references_[h]=@([references_[h] unsignedLongValue]+1);return h;}
+    MeshResourceBinding *resources=host_resources(given[@"implementation"][@"resources"]);if(!resources)return -1;
     NSError *error=nil;NSURL *compiled=[NSURL fileURLWithPath:@(package)];id model;NSDictionary *placement,*contract;
     if([backend isEqual:@"ane"]) {
-      MeshANEModel *prepared=ane_model(compiled,given);if(!prepared)return -1;model=prepared;contract=prepared.contract;
+      MeshANEModel *prepared=ane_model(compiled,given,resources);if(!prepared)return -1;model=prepared;contract=prepared.contract;
       placement=@{@"backend":@"ane",@"allowed_devices":@[@"ane"],@"preferred":@{},@"supported":@{},@"unresolved":@{},@"operations":@[]};
     } else {
       for(id device in devices)if(![@[@"cpu",@"gpu",@"ane"] containsObject:device]) {
@@ -405,14 +489,15 @@ long mesh_coreml_load(const char *package,const char *configuration_json) {
         snprintf(error_,sizeof error_,"functional state %s requires declared input/output feature names",name.UTF8String);return -1;
       }
     }
-    NSMutableDictionary *stateful=[contract mutableCopy];stateful[@"state_pairs"]=given[@"state_pairs"];contract=stateful;
+    NSMutableDictionary *stateful=[contract mutableCopy];stateful[@"state_pairs"]=given[@"state_pairs"];
+    stateful[@"resources"]=given[@"implementation"][@"resources"];contract=stateful;
     if([model isKindOfClass:MeshANEModel.class])[(MeshANEModel *)model setContract:contract];
     NSString *text=[[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:placement options:NSJSONWritingSortedKeys error:nil] encoding:NSUTF8StringEncoding];
     NSString *schema=[[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:contract options:NSJSONWritingSortedKeys error:nil] encoding:NSUTF8StringEncoding];
     NSUInteger handle=[models_ indexOfObject:NSNull.null];
     if(handle==NSNotFound){handle=models_.count;[models_ addObject:model];[placements_ addObject:placement];[placement_text_ addObject:text];
-      [contracts_ addObject:contract];[contract_text_ addObject:schema];[references_ addObject:@1];[keys_ addObject:key];}
-    else{models_[handle]=model;placements_[handle]=placement;placement_text_[handle]=text;contracts_[handle]=contract;contract_text_[handle]=schema;references_[handle]=@1;keys_[handle]=key;}
+      [contracts_ addObject:contract];[contract_text_ addObject:schema];[references_ addObject:@1];[keys_ addObject:key];[model_resources_ addObject:resources];}
+    else{models_[handle]=model;placements_[handle]=placement;placement_text_[handle]=text;contracts_[handle]=contract;contract_text_[handle]=schema;references_[handle]=@1;keys_[handle]=key;model_resources_[handle]=resources;}
     loaded_[key]=@(handle);return (long)handle;
    }
   } @catch(NSException *failure){snprintf(error_,sizeof error_,"model preparation: %s",failure.reason.UTF8String);return -1;} }
@@ -421,7 +506,7 @@ long mesh_coreml_load(const char *package,const char *configuration_json) {
 void mesh_coreml_release(long handle) {
   @synchronized([MLModel class]) {
     NSUInteger left=[references_[handle] unsignedLongValue]-1;references_[handle]=@(left);
-    if(!left){[loaded_ removeObjectForKey:keys_[handle]];models_[handle]=[NSNull null];placements_[handle]=[NSNull null];placement_text_[handle]=[NSNull null];contracts_[handle]=[NSNull null];contract_text_[handle]=[NSNull null];keys_[handle]=[NSNull null];}
+    if(!left){[loaded_ removeObjectForKey:keys_[handle]];models_[handle]=[NSNull null];placements_[handle]=[NSNull null];placement_text_[handle]=[NSNull null];contracts_[handle]=[NSNull null];contract_text_[handle]=[NSNull null];keys_[handle]=[NSNull null];model_resources_[handle]=[NSNull null];}
   }
 }
 
@@ -447,7 +532,6 @@ static void model_task_release(void *context) { CFRelease(context); }
   unsigned qos;
   MeshHostCompletion complete;
   void *context;
-  MeshHostResource resource;
 }
 @property MeshANEInvocation *source;
 @property BOOL mapped;
@@ -469,7 +553,6 @@ static const char *ane_prepare(id object,MeshHostCompletion complete,void *conte
   Class requestClass=NSClassFromString(@"_ANERequest");
   MeshANETask *task=[MeshANETask new];task.source=source;task->complete=complete;task->context=context;
   task->client=model.client;task->model=model.model;task->options=model.options;task->evaluate=model.evaluate;task->qos=model.qos;
-  task->resource=(MeshHostResource){(__bridge const void *)model.requestResource,model.capacity};
   task->request=((id(*)(id,SEL,id,id,id,id,id))objc_msgSend)(requestClass,@selector(requestWithInputs:inputIndices:outputs:outputIndices:procedureIndex:),
     source.inputs,source.inputIndices,source.outputs,source.outputIndices,model.contract[@"procedure"]);
   if(!task->request)return "direct ANE request construction failed";
@@ -480,7 +563,7 @@ static const char *ane_prepare(id object,MeshHostCompletion complete,void *conte
   ((void(*)(id,SEL,id))objc_msgSend)(task->request,@selector(setCompletionHandler:),completed);
   NSError *error=nil;task.mapped=model.map(model.client,@selector(mapIOSurfacesWithModel:request:cacheInference:error:),model.model,task->request,model.cacheMapping,&error);
   if(!task.mapped){snprintf(error_,sizeof error_,"direct ANE page mapping: %s",error.localizedDescription.UTF8String);return error_;}
-  *result=(MeshHostTask){(__bridge_retained void *)task,ane_submit,model_task_release,&task->resource,1};return NULL;
+  *result=(MeshHostTask){(__bridge_retained void *)task,ane_submit,model_task_release,model.resources.bytes,model.resources.length/sizeof(MeshHostResource)};return NULL;
 }
 static void *ane_bind(long handle,MeshANEModel *model,const MeshModelView *inputs,size_t ni,const MeshModelView *outputs,size_t no) {
   Class surfaceClass=NSClassFromString(@"_ANEIOSurfaceObject"),requestClass=NSClassFromString(@"_ANERequest");

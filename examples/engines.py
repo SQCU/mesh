@@ -19,6 +19,7 @@ env = lambda key, default: int(os.environ.get(key, default))
 rows, k, n, steps, every, layers = env('ROWS', 1024), env('K', 3840), env('N', 3456), env('STEPS', 40), env('EVERY', 1), env('LAYERS', 4)
 names, kind = os.environ.get('ENGINES', 'mps,cpu,ane'), os.environ.get('OP', 'ffn')
 rates = json.loads(os.environ['ENGINE_CAPACITIES'])
+source_scope = json.loads(os.environ['SOURCE_SCOPE'])
 capacities = [rates[name] for name in names.split(',')]
 codes, first = os.environ.get('CODES'), env('FIRST', 0)
 if codes:
@@ -31,24 +32,22 @@ if codes:
 torch.manual_seed(0)
 x = torch.randn(rows, k).half().to('mps') / 4
 coreml = json.loads(Path(os.environ.get('COREML_CONFIGURATION', Path(__file__).resolve().parents[1] / 'etc/compute/coreml.json')).read_text())
-pool = engines.Engines(names.split(','), compilation=parameters(),
+pool = engines.Engines(names.split(','), compilation=parameters(), source_scope=source_scope,
                        ane={**coreml, 'tile': env('ANE_TILE', 128), 'block': env('ANE_BLOCK', 4096)})
 projections, shared = [], []
 for layer in range(layers):
     projections.append((torch.randn(k, k) / k ** 0.5).half().to('mps'))
     if kind == 'linear':
         w = (torch.randn(k, k) / k ** 0.5).half().to('mps')
-        shared.append(engines.Linear(w, engines=pool, name=kind, grain=128))
+        shared.append(engines.Linear(w, engines=pool, name=f'{kind}/{layer}', grain=128))
     else:
         if codes:
             gate, up, down = coded[layer]
         else:
             gate, up = ((torch.randn(n, k) / k ** 0.5).half().to('mps') for _ in range(2))
             down = (torch.randn(k, n) / n ** 0.5).half().to('mps')
-        shared.append(engines.FFN(gate, up, down, engines=pool, name=kind, grain=128))
-key = shared[0].declare(rows, x.dtype, capacities=capacities)
-for operation in shared[1:]:
-    operation.declare(rows, x.dtype, capacities=capacities)
+        shared.append(engines.FFN(gate, up, down, engines=pool, name=f'{kind}/{layer}', grain=128))
+keys = [operation.declare(rows, x.dtype, capacities=capacities) for operation in shared]
 observations = Observations()
 from torch_mesh.declarations import Function, execution_sequence
 history = []
@@ -60,11 +59,12 @@ for proposal, start in enumerate(range(0, steps, every)):
     history = window(history + observations.poll())
     assigned = engines.placement(pool, history, step=proposal, family=family)
     spans, source = [], x
-    for projection, operation in zip(projections, shared):
+    for layer, (projection, operation, key) in enumerate(zip(projections, shared, keys, strict=True)):
         normalized = torch.empty_like(x)
         def project(source=source, projection=projection, normalized=normalized):
             return normalized.copy_(torch.nn.functional.rms_norm(torch.nn.functional.linear(source, projection), (k,), eps=1e-6))
-        project = Function(project, configuration=assigned['operands'])
+        project = Function(project, configuration=assigned['operands'],
+                           source_scope=dict(scope=source_scope, operation=['projection', layer]))
         project.declare(None)
         work = operation.prepare(normalized, parts=assigned['parts'][key])
         spans.extend((project, work))
