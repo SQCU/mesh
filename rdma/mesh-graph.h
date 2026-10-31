@@ -39,4 +39,11 @@ void mesh_graph_mark(const size_t *first, uint32_t (*head)(const void *context, 
    where a cycle leaves vertices unplaced (their ordinal UINT32_MAX). */
 int mesh_graph_order(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
                      const void *context, uint32_t *indegree, uint32_t *ordinal);
+/* Chu-Liu/Edmonds: the minimum spanning arborescence of nodes [0, N) rooted at `root` in which each other node v
+   takes one edge e with to[e] == v (its parent from[e]); chosen[v] that edge, the root's -1; 0, or -1 where a node has
+   none.  Each node's lightest edge; a cycle among them contracted, the edges into it weighing their excess over the
+   edge they would replace, the contracted graph's arborescence expanded (the edge into a cycle replaces the cycle's
+   edge into the same node). */
+int mesh_graph_arborescence(uint32_t N, uint32_t root, uint32_t E, const uint32_t *from, const uint32_t *to,
+                            const double *weight, int32_t *chosen);
 #endif

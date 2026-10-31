@@ -1,5 +1,6 @@
 #include "mesh-graph.h"
 #include <errno.h>
+#include <stdlib.h>
 
 /* mesh-graph.h */
 double mesh_graph_tree_path(const uint32_t *parent, uint32_t from, uint32_t hops,
@@ -95,4 +96,50 @@ int mesh_graph_order(uint32_t vertices, const size_t *first, uint32_t (*head)(co
     for (size_t k = first[next]; k < first[next + 1]; k++) indegree[head(context, k)]--;
   }
   return 0;
+}
+
+/* mesh-graph.h */
+int mesh_graph_arborescence(uint32_t N,uint32_t root,uint32_t E,const uint32_t *from,const uint32_t *to,const double *weight,int32_t *chosen){
+  int32_t *best=malloc(N*sizeof *best),*id=malloc(N*sizeof *id),*seen=malloc(N*sizeof *seen);
+  uint32_t *nfrom=malloc((E+1)*sizeof *nfrom),*nto=malloc((E+1)*sizeof *nto),*origin=malloc((E+1)*sizeof *origin);
+  double *nweight=malloc((E+1)*sizeof *nweight);
+  int32_t *nchosen=malloc(N*sizeof *nchosen);
+  unsigned char *cyclic=calloc(N,1);
+  int status=-1;
+  if(!best || !id || !seen || !nfrom || !nto || !origin || !nweight || !nchosen || !cyclic)goto done;
+  for(uint32_t v=0;v<N;v++){best[v]=-1;id[v]=-1;seen[v]=-1;}
+  for(uint32_t e=0;e<E;e++)
+    if(from[e]!=to[e] && to[e]!=root && (best[to[e]]<0 || weight[e]<weight[best[to[e]]]))best[to[e]]=(int32_t)e;
+  for(uint32_t v=0;v<N;v++)if(v!=root && best[v]<0)goto done;
+  uint32_t components=0;
+  for(uint32_t v=0;v<N;v++){
+    uint32_t at=v;
+    while(at!=root && seen[at]<0 && id[at]<0){seen[at]=(int32_t)v;at=from[best[at]];}
+    if(at!=root && id[at]<0 && seen[at]==(int32_t)v){
+      uint32_t x=at;
+      do{id[x]=(int32_t)components;x=from[best[x]];}while(x!=at);
+      cyclic[components++]=1;
+    }
+  }
+  if(!components){
+    for(uint32_t v=0;v<N;v++)chosen[v]=v==root?-1:best[v];
+    status=0;goto done;
+  }
+  for(uint32_t v=0;v<N;v++)if(id[v]<0)id[v]=(int32_t)components++;
+  uint32_t m=0;
+  for(uint32_t e=0;e<E;e++){
+    const uint32_t u=(uint32_t)id[from[e]],w=(uint32_t)id[to[e]];
+    if(u==w)continue;
+    nfrom[m]=u;nto[m]=w;origin[m]=e;
+    nweight[m]=cyclic[w]?weight[e]-weight[best[to[e]]]:weight[e];
+    m++;
+  }
+  if(mesh_graph_arborescence(components,(uint32_t)id[root],m,nfrom,nto,nweight,nchosen))goto done;
+  for(uint32_t v=0;v<N;v++)chosen[v]=v==root?-1:best[v];
+  for(uint32_t x=0;x<components;x++)
+    if(x!=(uint32_t)id[root]){const uint32_t e=origin[nchosen[x]];chosen[to[e]]=(int32_t)e;}
+  status=0;
+done:
+  free(best);free(id);free(seen);free(nfrom);free(nto);free(origin);free(nweight);free(nchosen);free(cyclic);
+  return status;
 }
