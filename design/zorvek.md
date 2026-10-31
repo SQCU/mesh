@@ -86,7 +86,9 @@ orders (the in-order cursors' serialization of independent tasks).
 ## What remains to delete, in the order the code allows
 
 Done: zorbles, zandrels, zumquats, zethers and the let-go zibbin (f5276dbc: each issue on pages of its own, zappo,
-zappoff, zumbled, zorvek, zoblimp). Seven machines stand between the code and the block above; each is listed with
+zappoff, zumbled, zorvek, zoblimp). zelloth and zelloq for every group of copies and sums whose SENDs its presents
+publish (a77e5b74: zabbadoo, metal_zelloth, present_publish); the pool runs only what zabbadoo does not take (fused
+crossings, WRITEs, partials merges, a combine with a `need`, a SEND waiting on a consumption it cannot forward). Seven machines stand between the code and the block above; each is listed with
 what of the block takes its place. The order is forced: each later one guards a hazard only an earlier one makes.
 
 1. The pool's combines (zokkens, zumpets): tracks, in-order cursors, claims, the chunk protocol, `need`, priors,
