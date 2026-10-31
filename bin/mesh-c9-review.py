@@ -35,6 +35,9 @@ def made(payload):
     """(repository, sha) of each commit the Bash call made: the `[branch sha]` lines it printed, else (a quiet commit)
     its repository's HEAD where that was committed in the last few minutes"""
     command = (payload.get('tool_input') or {}).get('command') or ''
+    # git's commit subcommand, any options before it (the `if` filter lets through commands it cannot parse)
+    if not re.search(r'\bgit(?:\s+-[Cc]\s+\S+|\s+--?[\w-]+(?:=\S+)?)*\s+commit\b', command):
+        return []
     response = payload.get('tool_response')
     printed = response if isinstance(response, str) else '\n'.join(
         str((response or {}).get(k) or '') for k in ('stdout', 'stderr')) if isinstance(response, dict) else ''
