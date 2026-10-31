@@ -21,9 +21,12 @@ python3 "$source/rdma/mesh_source.py" verify "$source" || exit 1
 venv=$HOME/.venv-mesh-uv
 support="$HOME/Library/Application Support"; state=$HOME/.cache/mesh
 uv=$(command -v uv || echo /usr/local/mesh/bin/uv)
-installed=$(make -s -C "$source/rdma" all install) || exit 1
 [ -x "$venv/bin/python" ] || "$uv" venv -q --python "$(cat "$source/.python-version")" "$venv" || exit 1
 "$uv" pip install -q --python "$venv/bin/python" -r "$source/rdma/requirements.txt" || exit 1
+# The build after the venv, its tools on PATH: 9b54a49b's .build/libsleef.a (rdma/cpu.mk) runs cmake, which no node
+# has but the venv's (requirements.txt, the PyPI wheel); built before it, every node's prepare failed (2026-10-31,
+# "make: cmake: No such file or directory").  The images still install before the bridge's configuration is written.
+installed=$(PATH="$venv/bin:$PATH" make -s -C "$source/rdma" all install) || exit 1
 dependency_root=$("$venv/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))') || exit 1
 for dependency_patch in "$source/rdma/torch-2.14.patch" "$source/rdma/torch-wrapper-storage.patch" "$source/rdma/torch-cpu-build.patch"; do
   if ! patch -R -s -f -C -F 0 -p1 -d "$dependency_root" < "$dependency_patch" >/dev/null 2>&1; then
