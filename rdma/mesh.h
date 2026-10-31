@@ -93,7 +93,24 @@ _Static_assert(sizeof(struct mesh_entry)==MESH_SIZEOF_MESH_ENTRY,"mesh_entry ABI
 /* A SEND's unit i is available at word >= base+i+1 (word 0: stream ready).
    A receive's optional word permits its first write at word >= base. The
    immutable span table and its backing allocations outlive every future unit
-   and every posted DMA. `taken` does not release this table. */
+   and every posted DMA. `taken` does not release this table.
+   design/zorvek.md zinth: an entry of a compiled program whose word carries MESH_ENTRY_WHOLE
+   requires word >= base of every unit (a call's start, an earlier call's completion count); without it unit i requires
+   word >= base+i+1 (a forward's `landed`, a sum's zelloth count). The bit lies above every region offset. (struct
+   mesh_zwoggle below) */
+#define MESH_ENTRY_WHOLE (UINT64_C(1) << 63)
+/* design/zorvek.md zinth, zwoggle (the laid tables): a stream's compiled program, in region pages its holder wrote once at its plan; the bridge
+   walks it and keeps no copy of its entries. `calls` the program's call sequence (the plan's declared order; it
+   repeats as the program does, and sequences calls alone: no page is reused by it), `order` each call's definition
+   (calls uint32_t), `definitions` of them at `defs`, `prefix` each list's units of the calls before each call (calls + 1
+   uint64_t a list, the last one call sequence's), `first` the holding's call (its `started` count) at which this
+   program's call 0 begins, `next` the program after it (region offset, 0 none) from its own `first` on. Every offset
+   is the region's. An entry's base is relative to its `relative` count at its call's start: 0 none, 1 the holding's
+   calls before it, 2 + 2s + l the units of stream s's list l (0 send, 1 landing) before it */
+struct mesh_zwoggle_entry { struct mesh_entry entry; uint64_t relative; };
+struct mesh_zwoggle_definition { uint64_t entries[2], count[2], units[2]; };
+struct mesh_zwoggle { uint64_t first; uint32_t calls, definitions; uint64_t order, defs, prefix[2], next; };
+enum { MESH_RELATIVE_NONE, MESH_RELATIVE_CALLS, MESH_RELATIVE_UNITS };
 struct mesh_units { uint64_t n; };
 static inline struct mesh_units mesh_units_add(struct mesh_units a,struct mesh_units b){ return (struct mesh_units){a.n+b.n}; }
 static inline struct mesh_units mesh_units_sub(struct mesh_units a,struct mesh_units b){ return (struct mesh_units){a.n-b.n}; }
@@ -163,6 +180,11 @@ struct mesh_stream {
   _Atomic uint64_t unfinished;
   uint64_t unfinished_room[3];
   _Alignas(MESH_RECORD_ALIGNMENT) _Atomic uint64_t ready;
+  /* design/zorvek.md zinth, the holder's, beside `ready` in its line (no offset or size moves): its calls started (one
+     store at each call's stream position) and its compiled program (struct mesh_zwoggle, region offset; 0: none, the
+     stream walked from its rings) */
+  _Atomic uint64_t started;
+  _Atomic uint64_t zwoggle;
   _Alignas(MESH_RECORD_ALIGNMENT) _Atomic uint64_t sent;
   _Atomic uint64_t landed,taken[2];
   _Atomic uint32_t child;
