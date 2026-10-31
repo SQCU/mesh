@@ -1,6 +1,6 @@
 # Ownership integration tickets
 
-Recorded 2026-10-30 23:14 UTC; updated 2026-10-31 00:29 UTC. The initial source
+Recorded 2026-10-30 23:14 UTC; updated 2026-10-31 00:45 UTC. The initial source
 checkpoints were mesh `64477c9f` and metal-microbench `8a4454f2`; the status below
 describes the implementation accompanying this update and its open connections.
 This divides
@@ -13,12 +13,16 @@ replacement for the [data model](data-model.md).
 Frontend declarations and the placement solver supply the work assignment.
 Lowering can compile that assignment forward, including deliberately replicated
 work. The assignment's access relations give its input pages and output pages.
-The same retained graph emits the assigned numerical work into those pages.
+The compiler visits the assigned sections in producer order. For each section,
+it derives the required input pages, binds the declared deliveries, and emits
+the retained numerical work into the assigned output pages.
 
 Demand propagation can trim internal work that has no use. It must preserve
 explicit work assignments. A copy-source selection chooses which existing value
 to deliver; it does not decide where that value is computed. Narrowing numerical
 work changes the emitted work and storage, not just a view of a whole result.
+Local read/write analysis within a section can walk its equations backward.
+That does not require a backward ownership pass across the whole program.
 
 Source types, source identity, masks, reduction semantics, changing index values,
 and consumer layout constraints cross each step explicitly. The compiler solves
@@ -50,7 +54,7 @@ distributed closure remains open at the connections below.
 | Ticket | State at this handoff | Next connection |
 |---|---|---|
 | O1 | Selected scalar/product work, passive command emission, exact byte origins and type eligibility prepared | Live-read splitting, selector/scan declarations, pool unrolling, per-command access export |
-| O2 | One demand pass preserves assigned work and emits explicit deliveries | Local-view normalization and the remaining typed transition connections |
+| O2 | Current projection starts from output requests and walks sections backward | Compile supplied section assignments forward; join local views and typed transitions |
 | O3 | Shared state expressions and ragged per-rank transition captures prepared | Splice distinct value versions into ordered per-rank sections |
 | O4 | Ordinary owned `Function` consumes selected bindings; local collective identities share pages | Bind expanded transition sections and complete joined distributed preparation |
 | O5 | Portable native consumer, typed byte ports and direct final-page decoding prepared | Connect the importer entry point, live accesses and provider/codec ownership |
@@ -159,7 +163,7 @@ generated inventory, linter or execution-time bookkeeping is needed.
 | Ticket | Handoff contact | Files principally edited | Depends on |
 |---|---|---|---|
 | O1 — Retained access and selected numerical work | `ane_constraints` | `torch_mesh/native.py`, `torch_mesh/operand.py`, shared index emission in `algebra.py`, `rdma/mesh_matrix.py` | Existing retained-IR checkpoint |
-| O2 — Whole-graph owner propagation | `sparse_reshape` | `torch_mesh/partition.py`, ownership records in `ownership.py` | O1 records; O3 expression handoff |
+| O2 — Declared work and page deliveries | `sparse_reshape` | `torch_mesh/partition.py`, ownership records in `ownership.py` | O1 records; O3 expression handoff |
 | O3 — Source and partial-expression sections | `sparse_reshape` | `torch_mesh/ownership.py`, `torch_mesh/compilation.py` | O1 projection; existing `declarations.sections` |
 | O4 — Bind the retained graph once | Root integrator; `output_domains` for selected placement | `torch_mesh/declarations.py`, `torch_mesh/__init__.py`; `torch_mesh/placement.py` | O1–O3 |
 | O5 — LiteRT access adapter | `output_domains` | microbench `tools/prepare_e2b.py` | Shared relation/access contract; O1 coordination |
@@ -211,18 +215,26 @@ the IR, scheduler and cached scalar graphs. Index substitution may create ordina
 `LoopBody` wrappers; empty finishes derive their declared identity body. Neither
 requires another source capture or full numerical lowering.
 
-## O2 — Whole-graph owner propagation
+## O2 — Declared work and page deliveries
 
-**Resume here:** normalize declared local-view scopes and join typed transition
-sections to the existing all-rank demand pass. Explicit work assignments retain
-the same meaning with and without a `DTensorSpec`; delivery choices remain
-separate operands.
+**Resume here:** compile supplied section assignments in producer order. The
+current `project_expressions` API seeds output requests and propagates them
+backward. That is an implementation choice to replace, not a requirement of
+the emitter or page binder. Join declared local views and typed transitions
+through the same forward connection. Explicit work assignments retain the same
+meaning with and without a `DTensorSpec`; delivery choices remain separate
+operands.
 
-**Implement:** use source value/result identities to carry explicit owners and
-schema-derived ownership through the retained graph. Propagate requests backward
-through read/write relations. Factories, returned inputs, local views, correlated
-cuts and compound outputs use the same mechanism. An operation without tensor
-inputs still has its declared result domain.
+**Implement:** retain each supplied work domain and its source value/result
+identity. Use the section's retained read/write relations to derive its input
+footprint. Bind those inputs to produced pages through the supplied delivery
+relations, then emit the section. A consumer's input request must not silently
+enlarge or move its producer's assigned work. Deliberate replicated work remains
+valid. Factories, returned inputs, local views, correlated cuts and compound
+outputs use the same mechanism. An operation without tensor inputs still has
+its declared result domain. Internal operations within a fused section obtain
+their work from that section's equations; callers need not assign each internal
+instruction.
 
 The worktree removes `_owned_pointwise`, `_owned_convolution`, the local FX
 retrace and obsolete `algebra.owned_product`. Complete their shared caller using
@@ -252,11 +264,16 @@ split at its declared collective or provider boundaries, and retain original
 input, state and result edges. Reuse `declarations.sections` and the common
 normalization of functional collective result edges.
 
-Carry demand backward across those sections using O1. A reduction request
+Use O1 to derive each assigned section's required inputs. A reduction request
 includes its declared reduction fiber. An average preserves the original axis
 divisor. A masked partial preserves the mask and captured state. Postprocessing
 keeps its declared shape and order. Noncommuting reductions follow source edges;
 routing/planner order does not define their mathematical order.
+
+Each rank can have different numerical sections around a shared collective.
+Keep their source order and use the existing collective declarations to connect
+their pages. This does not require aligning numerical section counts or adding
+a scheduler to join the ranks' source graphs.
 
 **Handoff:** O2 consumes the expression and its input requests. O4 binds the
 already-prepared numerical sections and selected collective boundaries. Do not
