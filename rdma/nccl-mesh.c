@@ -4390,8 +4390,9 @@ static void commit_group(struct ncclComm *comm, const struct schedule *plans) {
   }
 }
 
-/* Exact compiled payload spans, coalescing adjacent uses of the same mode. */
-struct uses { ncclMeshAccess ranges[64]; size_t n; };
+/* Exact compiled payload spans, coalescing adjacent uses of the same mode, each full batch given to `flush`
+   (metal_accesses where NULL; metal_boundary, a group's operands to its caller's schedule); the last the caller's */
+struct uses { ncclMeshAccess ranges[64]; size_t n; void (*flush)(struct metal_program *, const ncclMeshAccess *, size_t); };
 static void uses_add(struct metal_program *program,struct uses *batch,struct where where,size_t bytes,uint32_t access) {
   if(!bytes)return;
   if(batch->n) {
@@ -4400,20 +4401,23 @@ static void uses_add(struct metal_program *program,struct uses *batch,struct whe
       last->bytes+=bytes;return;
     }
   }
-  if(batch->n==sizeof batch->ranges/sizeof *batch->ranges){metal_accesses(program,batch->ranges,batch->n);batch->n=0;}
+  if(batch->n==sizeof batch->ranges/sizeof *batch->ranges){(batch->flush?batch->flush:metal_accesses)(program,batch->ranges,batch->n);batch->n=0;}
   batch->ranges[batch->n++]=(ncclMeshAccess){{where.buffer,where.offset},bytes,access};
 }
 
 /* the group's laid and placed entries (issue_bind) bound on each channel from its last scheduled entry and page
    (schedule_laid), its landings gated (gate_of, *gate whether its first dispatch stores the communicator's gate) unless
-   its generations are immutable (a fused crossing's or an all-WRITE group's, mesh 84056c43), presented (present_group)
-   and counted (commit_group); a failure
+   its generations are immutable (a `fused` crossing's or an all-WRITE group's, `writes`, mesh 84056c43), presented
+   (present_group) and counted (commit_group); a failure
    before any entry is presented is the call's alone, one after it the communicator's (its lists stand mid-group) */
 static ncclResult_t schedule(struct metal_program *program, struct ncclComm *comm, struct issue *owner, struct schedule *plans, int *gate,
-                             int immutable, uint32_t copies) {
+                             int fused, int writes, uint32_t copies) {
   schedule_laid(comm, plans);
-  if (!immutable) gate_of(comm, plans, gate, copies);
-  ncclResult_t result = present_group(program, comm, owner, plans, !immutable && !copies);
+  if (!fused && !writes) gate_of(comm, plans, gate, copies);
+  /* design/zorvek.md "The pool's last users": an all-WRITE group's publications, its SENDs that name no readiness word
+     of their own, made with its presents as a collective's (zook), not by the pool: immutable generations need no
+     landing gate, but its SENDs still wait for the stream's earlier work. A fused crossing's stay its records */
+  ncclResult_t result = present_group(program, comm, owner, plans, !fused && !copies);
   if (result) return result;
   if (*gate) comm->gates++;
   commit_group(comm, plans);
@@ -4877,10 +4881,13 @@ static int tile_landing_order(const void *left,const void *right) {
 }
 /* design/zorvek.md zabbadoo, for a group whose every landing is a copy or a sum and whose every SEND its presents
    published (present_publish: `published` at the group's end on every channel), with no combine into bytes a SEND
-   of its call reads (a landing's `need`), not fused and no WRITE: each sum's landings (a call's combines into one
-   buffer range, the same runs each) one zelloth, one writer an element from the rank's own element and every
+   of its call reads (a landing's `need`), not fused and no partials merge: each sum's landings (a call's combines
+   into one buffer range, the same runs each) one zelloth, one writer an element from the rank's own element and every
    contribution's once all have landed, whatever their order, its summed count stored past each block; then each
    channel's landings awaited once (zelloq: a copy's landing is the copy); nothing of the group in the tracks pool.
+   A WRITE's landings are copies (its landing records are a fused crossing's alone: complete), a frame train's
+   (`repeats` past 1) every frame's entries, so zelloq past the last awaits them all; a sum is keyed on its step, not
+   its frame, so a frame train with a sum stays the pool's.
    *taken 0, nothing encoded, where a group's sums do not each share one run structure (the pool runs it as before) */
 struct zsum { const struct message *m; uint32_t h; uint64_t at; };
 static int zsum_order(const void *left, const void *right) {
@@ -4897,15 +4904,15 @@ static int zsum_same(const struct zsum *a, const struct zsum *b) {
 }
 static ncclResult_t zabbadoo(struct metal_program *program, struct ncclComm *comm, struct inflight *g, int *taken) {
   *taken = 0;
-  if (g->fused || g->repeats != 1) return ncclSuccess;
-  for (size_t i = 0; i < g->n; i++) if (g->list[i].write_binding || ktype(g->list + i) == METAL_MERGE) return ncclSuccess;
+  if (g->fused) return ncclSuccess;
+  for (size_t i = 0; i < g->n; i++) if (ktype(g->list + i) == METAL_MERGE) return ncclSuccess;
   size_t count = 0;
   for (uint32_t h = 0; h < comm->count; h++) {
     const struct channel *ch = comm->channels + h;
     if (ch->published != g->end[h][0] || ch->consumed != g->start[h][1]) return ncclSuccess;
     for (uint64_t at = g->start[h][1]; at < g->end[h][1]; at++) {
       const struct message *m = in_at(g, h, at);
-      if (m->c->bound->steps[m->step].op == MESH_STEP_REDUCE) { if (m->need || !m->landing_count) return ncclSuccess; count++; }
+      if (m->c->bound->steps[m->step].op == MESH_STEP_REDUCE) { if (m->need || !m->landing_count || g->repeats != 1) return ncclSuccess; count++; }
     }
   }
   struct zsum *sums = malloc((count + 1) * sizeof *sums);
@@ -4961,7 +4968,11 @@ static ncclResult_t zabbadoo(struct metal_program *program, struct ncclComm *com
                                sums[0].h, sums[0].at), "a group's sums (zelloth)");
   }
   free(group); free(of);
-  /* zelloq: each channel's landings awaited once, past its last */
+  /* zelloq: each channel's landings awaited once, past its last.  A WRITE declares no operands to its caller's
+     schedule (call_boundary names none), where the pool's barrier after its waits stood: its landings, the bytes its
+     caller's later work reads, declared written (metal_boundary), so that work orders after these waits where it
+     meets them */
+  struct uses landings = {.flush = metal_boundary};
   for (uint32_t h = 0; h < comm->count && !result; h++) {
     if (g->end[h][1] == g->start[h][1]) continue;
     struct channel *ch = comm->channels + h;
@@ -4970,11 +4981,13 @@ static ncclResult_t zabbadoo(struct metal_program *program, struct ncclComm *com
     for (uint64_t at = g->start[h][1]; at < g->end[h][1]; at++) {
       const struct message *x = in_at(g, h, at);
       if (pages_to_word(x->end) > pages_to_word(last)) { last = x->end; lat = at; }
+      if (x->c->target) uses_add(program, &landings, x->data, x->bytes, ncclMeshAccessWritten);
     }
     const struct metal_wait wait = {ch->buffer, comm->violation, NULL, ch->landed, 0, last, lat, h, g->plans[h].each[1], 0};
     result = gpu(metal_spin(program, &wait), "a group's landings (zelloq)");
     if (!result) { ch->consumed = g->end[h][1]; if (ch->waited < g->end[h][1]) ch->waited = g->end[h][1]; }
   }
+  if (!result && landings.n) metal_boundary(program, landings.ranges, landings.n);
   free(sums); free(in);
   if (!result) *taken = 1;
   return result;
@@ -5444,7 +5457,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
        handshake, whether the GPU producer is fused or was encoded before this call (mesh 84056c43) */
     uint32_t copies = 0;
     operand_copies(NULL, comm, list, n, &copies);
-    if (!(result = schedule(program, comm, u, plans, &gate, fused_kind != 0 || all_writes(list, n), copies))) { g->plans = plans; plans = NULL; }
+    if (!(result = schedule(program, comm, u, plans, &gate, fused_kind != 0, all_writes(list, n), copies))) { g->plans = plans; plans = NULL; }
     else g = NULL;
     if (!result) {
       for (uint32_t h = 0; h < comm->count; h++) { g->end[h][0] = comm->channels[h].sends; g->end[h][1] = comm->channels[h].lands; }
