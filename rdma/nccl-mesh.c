@@ -2949,6 +2949,10 @@ static ncclResult_t routing_prior(struct routing *r,const struct route_catalog *
     for(uint32_t d=0;d<r->view.demands;d++)for(uint32_t p=0;p<prior->demands;p++)if(route_demand_equal(&r->view,d,prior,p)) {
       int supplied=0;for(uint32_t old=0;bank&&old<catalog->count[0];old++)supplied|=demands[d].route==catalog->at[0]+old;
       if(supplied)continue;
+      /* this plan's earlier groups (bank 1): the first that solved an equal demand is the plan's choice for it; a later
+         one that took that choice and then solved its adjustable shares with its own other demands keeps its shares as
+         its own, not a conflict (the chain service's first plan failed here on all five, eee4d96b) */
+      if(bank&&demands[d].route)continue;
       const struct route_prior found={prior,p};
       if(demands[d].route&&!route_tree_basis_equal(demands[d],found))return fail(ncclInvalidArgument,"one routing scope supplies conflicting tree choices");
       demands[d]=found;
@@ -2956,6 +2960,7 @@ static ncclResult_t routing_prior(struct routing *r,const struct route_catalog *
     for(uint32_t s=0;s<r->view.scopes;s++)for(uint32_t p=0;p<prior->scopes;p++)if(route_scope_equal(r->view.scope[s],prior->scope[p])) {
       int supplied=0;for(uint32_t old=0;bank&&old<catalog->count[0];old++)supplied|=paths[s].route==catalog->at[0]+old;
       if(supplied)continue;
+      if(bank&&paths[s].route)continue;
       const struct route_prior found={prior,p};
       if(paths[s].route&&!route_path_basis_equal(paths[s],found))return fail(ncclInvalidArgument,"one routing scope supplies conflicting physical choices");
       paths[s]=found;

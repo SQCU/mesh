@@ -82,3 +82,29 @@ generations (GENERATIONS, x->uses % GENERATIONS, the per-generation prepared-iss
 SENDs. zarpers: the bridge's descriptor rings (MESH_STREAM_ENTRIES, taken, walk_take's copy). zilbos: the encoder
 barriers between groups. zokkens: the combine chains (metal_after, combine-after-combine priors). zumpets: imposed
 orders (the in-order cursors' serialization of independent tasks).
+
+## What remains to delete, in the order the code allows
+
+Done: zorbles, zandrels, zumquats, zethers and the let-go zibbin (f5276dbc: each issue on pages of its own, zappo,
+zappoff, zumbled, zorvek, zoblimp). Seven machines stand between the code and the block above; each is listed with
+what of the block takes its place. The order is forced: each later one guards a hazard only an earlier one makes.
+
+1. The pool's combines (zokkens, zumpets): tracks, in-order cursors, claims, the chunk protocol, `need`, priors,
+   `metal_after` chains, and the accumulator made in place ("send op piece", later combines into the same bytes).
+   In its place zelloth: for each page of a sum, one writer computes it once from the rank's own page and every
+   contribution page for it, as soon as all of them have landed, in whatever order they landed; no atomics, since
+   each page has one writer. Its count of pages done is the readiness word of a SEND of the sum (zirrupel's) and its
+   completion. The sum's pages are the call's output or pages of its own (zennets), never bytes a SEND of the same
+   call reads. zelloq needs no kernel: a copy's landing is the copy; the call's completion waits on `landed`.
+2. The witness and retirement proofs (zolvies' remnant: mesh-routed.c retirement_proofs, byte_witness, witnessed;
+   nccl-mesh.c bind_retirements, retired_first): they prove in-place overwrites safe; after 1 there are none.
+3. The publication tasks and the pool's `ready` cursor: zook. The rank's own pages are ready when the group is
+   encoded (one store with the presents); a sum's pages by zelloth's count.
+4. The host's mirror of GPU progress (struct inflight, complete, retire, published/consumed): the bridge's counts and
+   zumbled.
+5. The encoder barriers between groups and the metal_boundary frontier (zilbos): with no transport on the GPU and no
+   page shared between calls, a call's functions order after what they read in stream order alone (zumble).
+6. The GPU presents and the descriptor rings (zarpers: MESH_STREAM_ENTRIES, `taken`, the bridge's walk_take copy):
+   the bridge runs compiled page lists per call (zinth hands it the call), its walk the executor of zirrup and
+   zirrupel, which its entry word already is.
+7. The landing gate and the operand staging copies (zibbins): transport by view; a premultiplier folded into zelloth.
