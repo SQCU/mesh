@@ -1963,9 +1963,12 @@ static void MetalScheduleArrived(struct MetalSchedule *root) {
 }
 
 // a GPU host time (mach_absolute_time's seconds, MTL4CommitFeedback) in the statistics clock, CLOCK_MONOTONIC
-// (mesh-statistics.c), which also counts the time the machine slept
+// (mesh-statistics.c), which also counts the time the machine slept: the two clocks' difference signed, since on a
+// machine that never slept it is about 0 and the second reading may be the later one (2ff98b3b's unsigned difference
+// wrapped to 2^64 ns there)
 static double MetalMonotonic(CFTimeInterval host) {
-    return host+(double)(clock_gettime_nsec_np(CLOCK_MONOTONIC)-clock_gettime_nsec_np(CLOCK_UPTIME_RAW))*1e-9;
+    const uint64_t uptime=clock_gettime_nsec_np(CLOCK_UPTIME_RAW),monotonic=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    return host+(double)(int64_t)(monotonic-uptime)*1e-9;
 }
 static void MetalScheduleCompleted(struct MetalSchedule *s,NSError *error,double ended) {
     s->error=[error retain];
