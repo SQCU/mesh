@@ -630,217 +630,25 @@ def _configuration_exchange(group, outgoing, incoming, dtype, matrix=None):
         yield
 
 
-_MIGRATION_SOURCE = r"""
-template <uint CHANNELS>
-struct migration_words {
-    ulong source, destination, row, rows, source_stride, destination_stride, frame;
-    uint j, unused;
-    mesh_step_binding land[CHANNELS], publish[CHANNELS];
-};
-template <uint BYTES> using migration_bits = metal::conditional_t<BYTES == 16, uint4,
-    metal::conditional_t<BYTES == 8, uint2, metal::conditional_t<BYTES == 4, uint,
-    metal::conditional_t<BYTES == 2, ushort, uchar>>>>;
-
-template <uint CHANNELS>
-inline void migration_observe(constant migration_words<CHANNELS>& w, uint tid) {
-    if (tid == 0)
-        for (uint q = 0; q < CHANNELS; q++) if (w.land[q].p) {
-            mesh_step_enter(*w.land[q].p, w.land[q].v, w.land[q].progress, true);
-            mesh_step_counts(*w.land[q].p, w.land[q].a, w.land[q].v, w.j);
-        }
-    threadgroup_barrier(mem_flags::mem_device);
-    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
-}
-template <uint CHANNELS, uint THREADS>
-[[max_total_threads_per_threadgroup(THREADS)]]
-kernel void migration_ready(constant migration_words<CHANNELS>& w [[buffer(15)]],
-                            uint tid [[thread_index_in_threadgroup]]) { migration_observe(w, tid); }
-
-template <uint CHANNELS, uint THREADS>
-[[max_total_threads_per_threadgroup(THREADS)]]
-kernel void migration_publish_existing(constant migration_words<CHANNELS>& w [[buffer(15)]],
-                                       uint tid [[thread_index_in_threadgroup]]) {
-    for (uint q = 0; q < CHANNELS; q++) if (w.publish[q].p) {
-        mesh_step_enter(*w.publish[q].p, w.publish[q].v, w.publish[q].progress, tid == 0);
-        mesh_step_release(*w.publish[q].p, w.publish[q].a, tid);
-    }
-}
-
-template <uint BYTES, uint CHANNELS, ulong ROW, uint THREADS>
-[[max_total_threads_per_threadgroup(THREADS)]]
-kernel void migration_local(device const migration_bits<BYTES>* original [[buffer(0)]],
-                            device migration_bits<BYTES>* destination [[buffer(1)]],
-                            constant migration_words<CHANNELS>& w [[buffer(15)]],
-                            uint tid [[thread_index_in_threadgroup]], uint g [[threadgroup_position_in_grid]],
-                            uint groups [[threadgroups_per_grid]]) {
-    for (ulong i = ulong(g) * THREADS + tid; i < w.rows * ROW; i += ulong(groups) * THREADS)
-        destination[w.destination + (i / ROW) * w.destination_stride + i % ROW] =
-            original[w.source + (i / ROW) * w.source_stride + i % ROW];
-}
-
-template <uint AXES> struct migration_view_words {
-    ulong count, shape[AXES], source_stride[AXES], destination_stride[AXES];
-};
-template <uint AXES, uint UNITS, uint BYTES, uint THREADS>
-[[max_total_threads_per_threadgroup(THREADS)]]
-kernel void migration_local_views(device const migration_bits<BYTES>* source [[buffer(0)]],
-                                  device migration_bits<BYTES>* destination [[buffer(1)]],
-                                  constant migration_view_words<AXES>& w [[buffer(15)]],
-                                  uint tid [[thread_index_in_threadgroup]], uint g [[threadgroup_position_in_grid]],
-                                  uint groups [[threadgroups_per_grid]]) {
-    for (ulong k = ulong(g) * THREADS + tid; k < w.count; k += ulong(groups) * THREADS) {
-        ulong element = k / UNITS, a = k % UNITS, b = k % UNITS;
-        for (uint axis = AXES; axis-- > 0;) {
-            const ulong index = element % w.shape[axis];
-            a += index * w.source_stride[axis] * UNITS;
-            b += index * w.destination_stride[axis] * UNITS;
-            element /= w.shape[axis];
-        }
-        destination[b] = source[a];
-    }
-}
-"""
-
-
-def _migration_kernel(kernel, *arguments):
-    from . import _stream, fused
-    from .argmax import SOURCE
-    from .streamed import instance
-    name, line = instance(kernel, *arguments, _GATHER_THREADS)
-    if name not in _GATHER_KERNELS:
-        _GATHER_KERNELS[name] = _stream.pipeline(fused.steps() + SOURCE + '\n' + _MIGRATION_SOURCE + '\n' + line, name)
-    return _GATHER_KERNELS[name]
-
-
-def _migration_words(run, frame_bytes, vector, j=0):
-    values = (run.source_offset // vector, run.destination_offset // vector, run.row_bytes // vector,
-              run.rows, run.source_stride // vector, run.destination_stride // vector, frame_bytes // vector)
-    return [word for value in values for word in (value & 0xFFFFFFFF, value >> 32)] + [j, 0]
-
-
-def _follow_bytes(placement, local, logical_shape, logical_stride, key, rank, group, publish_boundary):
-    """AOT affine byte writes from original rows into final destination rows.
-
-    Each RowWrite is one compiled logical message, independently of row count.
-    The native plan gathers registration phases and local pitches once, fixes
-    equal exact-byte units along every selected path, and owns its immutable
-    span tables. No payload is packed, padded, or unpacked. Relays have distinct
-    compact leases; their receives directly supply their outgoing DMA reads.
-    """
-    from migration import compile_rows
-    from . import address, fused
-
-    if (not _region_backed(local, group) or
-            tuple(logical_stride) != tuple(torch.empty(tuple(logical_shape), device='meta').stride())):
-        return None
-    dim, size = placement.dim % local.ndim, local.element_size()
-    shape = list(local.shape)
-    shape[dim] = logical_shape[dim]
-    program = compile_rows(shape, dim, _OPERANDS[placement.key].capacity, _OPERANDS[key].capacity, size)
-    if not local.is_contiguous():
-        return None
-    if tuple(local.shape) != program.source_shapes[rank] or (local.numel() and not address(local)):
-        raise ValueError('mesh: byte migration requires the declared regional source shape')
-    original = local.view(-1)
-    incoming = [run for run in program.runs if run.destination == rank]
-    extent = math.prod(program.destination_shapes[rank])
-    alias = (len(incoming) == 1 and incoming[0].source == rank and incoming[0].destination_offset == 0 and
-             incoming[0].bytes == extent * size and
-             (incoming[0].rows == 1 or incoming[0].source_stride == incoming[0].row_bytes))
-    result = (original.narrow(0, incoming[0].source_offset // size, extent).view(program.destination_shapes[rank])
-              if alias else _empty(program.destination_shapes[rank], local, group))
-    channels = _stream.channels(group.group_name)
-    jobs = []
-    # Allocate leases and compile kernels before any plan can present receives.
-    for run in program.runs:
-        if run.source == run.destination:
-            if run.source != rank or alias:
-                continue
-            vector = math.gcd(16, run.source_offset, run.destination_offset, run.row_bytes,
-                              run.source_stride, run.destination_stride, address(local), address(result))
-            words = _migration_words(run, run.bytes, vector)
-            groups = max(1, -(-(run.bytes // vector) // (_GATHER_THREADS * 8)))
-            jobs.append((run, _migration_kernel('migration_local', vector, channels, run.row_bytes // vector),
-                         words, groups, None, 0))
-            continue
-        # the run as an element view of the rank's own tensor (its rows of `run.row_bytes`, `stride` apart), its layout
-        # the library's to lower (design/pointer-lowering-2026-10-28.md); a relay's rows its own lease, packed
-        if any(n % size for n in (run.source_offset, run.destination_offset, run.row_bytes, run.source_stride, run.destination_stride)):
-            raise ValueError('mesh: a migration run is whole elements')
-        rows, width = run.rows, run.row_bytes // size
-        if rank == run.source:
-            view = original.as_strided((rows, width), (run.source_stride // size, 1), original.storage_offset() + run.source_offset // size)
-            kernel = _migration_kernel('migration_publish_existing', channels)
-        elif rank == run.destination:
-            flat = result.view(-1)
-            view = flat.as_strided((rows, width), (run.destination_stride // size, 1), flat.storage_offset() + run.destination_offset // size)
-            kernel = _migration_kernel('migration_ready', channels)
-        else:   # a relay: its shape and type alone, the library's lease where a route crosses this rank (nccl.h ncclMeshWriteLayoutPrepare)
-            view, kernel = torch.empty((rows, width), dtype=local.dtype, device='meta'), None
-        jobs.append((run, kernel, _migration_words(run, run.row_bytes, 1), 1, view, 0))
-    # each crossing run's fused WRITE its own group, declared for this configuration transition as its crossings are
-    # recorded (a group no declaration covers ends the program: nccl.h ncclMeshCommPlan)
-    from .backend import Call, WRITE
-    writes = [[Call(WRITE, run.rows * run.row_bytes, torch.uint8, root=run.source, destination=run.destination, fused=True)]
-              for run, *_ in jobs if run.source != run.destination]
-    with group.configuration(writes) if writes else contextlib.nullcontext():
-        schedule = _stream.Schedule()
-        consumers = []
-        for run, kernel, words, groups, view, _ in jobs:
-            if run.source == run.destination:
-                schedule.compute(kernel, [local, result], fused._encode_words(words, channels, None, None),
-                                 15, groups, 1, _GATHER_THREADS, 1 | (2 << _stream.compilation['ACCESS_WRITE_SHIFT']))
-                continue
-            crossing = fused.write_rows(schedule, view, [None if view.is_meta else view], [(run.source, run.destination)], group)
-            if rank == run.source:
-                schedule.compute(kernel, [], fused._encode_words(words, channels, None, crossing),
-                                 15, 1, 1, _GATHER_THREADS, 0)
-            elif rank == run.destination:
-                consumers.append((kernel, words, crossing))
-        for kernel, words, crossing in consumers:
-            schedule.compute(kernel, [], fused._encode_words(words, channels, crossing, None),
-                             15, 1, 1, _GATHER_THREADS, 0)
-        schedule.finish()
-        schedule.enqueue()
-    return result
-
-
-def _copy_view(source, destination):
-    """Necessary local relocation, one indexed bit-preserving data kernel."""
-    if not source.numel():
-        return
-    if source.device.type != 'mps':
-        destination.copy_(source)
-        return
-    from . import _stream
-    width = math.gcd(source.element_size(), 4)
-    units = source.element_size() // width
-    values = [source.numel() * units, *source.shape, *source.stride(), *destination.stride()]
-    words = [word for value in values for word in (value & 0xFFFFFFFF, value >> 32)]
-    kernel = _migration_kernel('migration_local_views', source.ndim, units, width)
-    groups = max(1, -(-(source.numel() * units) // (_GATHER_THREADS * 8)))
-    _stream.encode(kernel, [source, destination], words, 15, groups, 1, _GATHER_THREADS)
-
-
 def _scatter_spans(tensor, dim, sizes, rank, source, group):
     """Initial input-domain import, then the same exact native span WRITE plan."""
     if not hasattr(group, 'prepare_writes'):
         return None
     from . import _stream
-    from .backend import Call, WRITE
+    imports = []
     dim %= tensor.ndim
     offsets = list(itertools.accumulate(sizes, initial=0))
     original = tensor
     if rank == source and not _in_region(tensor):
         # Native DMA addresses currently belong to the registered region. This
         # is one input-domain import, independent of destination count/layout.
-        original = _empty(tensor.shape, tensor, group)
-        _copy_view(tensor, original)
+        imported, imports = _stream.import_attributes([tensor])
+        original = imported[0]
     shape = list(tensor.shape)
     shape[dim] = sizes[rank]
     result = (original.narrow(dim, offsets[rank], sizes[rank]) if rank == source
               else _empty(shape, tensor, group))
-    deliveries, calls = [], []
+    deliveries = []
     row = _row(tensor, dim)
     for destination, count in enumerate(sizes):
         if destination == source or not count * row:
@@ -849,22 +657,24 @@ def _scatter_spans(tensor, dim, sizes, rank, source, group):
         view = (original.narrow(dim, offsets[destination], count) if rank == source
                 else result if rank == destination else torch.empty((count * row,), dtype=tensor.dtype, device='meta'))
         deliveries.append((view, source, destination))
-        calls.append(Call(WRITE, count * row * tensor.element_size(), torch.uint8, root=source, destination=destination))
-    if deliveries:
-        prepared = group.prepare_writes(deliveries)
-        if tensor.device.type == 'mps':
-            _stream.publish_boundary()
-        with group.configuration([calls]):
-            prepared.realize()
-            prepared.enqueue()
+    prepared, calls = group.prepare_writes(deliveries) if deliveries else (None, [])
+    with group.configuration([calls]) if calls else contextlib.nullcontext():
+        schedule = _stream.Schedule()
+        for source_bytes, destination_bytes in imports:
+            schedule.copy(source_bytes, destination_bytes)
+        if prepared is not None:
+            prepared.append(schedule)
+        schedule.finish()
+        schedule.enqueue()
     return result
 
 
-def _follow_spans(placement, local, logical_shape, key, rank, group, publish_boundary):
+def _follow_spans(placement, local, logical_shape, key, rank, group):
     """Arbitrary regional strides use exact AOT span WRITE bindings."""
     if not hasattr(group, 'prepare_writes'):
         return None
-    from .backend import Call, WRITE
+    from .layout import copies
+    commands = []
     dim = placement.dim % local.ndim
     old, new = _OPERANDS[placement.key], _OPERANDS[key]
     before_sizes, before = _blocks(old, logical_shape[dim])
@@ -873,8 +683,11 @@ def _follow_spans(placement, local, logical_shape, key, rank, group, publish_bou
         raise ValueError('strided migration source does not match its attached partition')
     shape = list(local.shape)
     shape[dim] = after_sizes[rank]
-    result = _empty(shape, local, group)
-    deliveries, calls = [], []
+    start = after[rank] - before[rank]
+    result = (local.narrow(dim, start, after_sizes[rank])
+              if 0 <= start and start + after_sizes[rank] <= before_sizes[rank]
+              else _empty(shape, local, group))
+    deliveries = []
     row = math.prod(local.shape[:dim] + local.shape[dim + 1:])
     for source in range(len(before)):
         for destination in range(len(after)):
@@ -885,8 +698,8 @@ def _follow_spans(placement, local, logical_shape, key, rank, group, publish_bou
             count = last - first
             if source == destination:
                 if source == rank:
-                    _copy_view(local.narrow(dim, first - before[source], count),
-                               result.narrow(dim, first - after[destination], count))
+                    commands.extend(copies(local.narrow(dim, first - before[source], count),
+                                           result.narrow(dim, first - after[destination], count)))
                 continue
             if rank == source:
                 view = local.narrow(dim, first - before[source], count)
@@ -895,65 +708,36 @@ def _follow_spans(placement, local, logical_shape, key, rank, group, publish_bou
             else:   # a relay is its shape and type alone: the library leases it where a route crosses this rank
                 view = torch.empty((row * count,), dtype=local.dtype, device='meta')
             deliveries.append((view, source, destination))
-            calls.append(Call(WRITE, row * count * local.element_size(), torch.uint8, root=source, destination=destination))
-    if deliveries:
-        prepared = group.prepare_writes(deliveries)
-        if local.device.type == 'mps':
-            publish_boundary()
-        # Repartition is a configuration transition, its WRITE group declared for it as _scatter_spans' is (a group no
-        # declaration covers ends the program: nccl.h ncclMeshCommPlan). Ordinary native stream completion orders next
-        # consumers; no application receipt is emitted.
-        with group.configuration([calls]):
-            prepared.realize()
-            prepared.enqueue()
+    prepared, calls = group.prepare_writes(deliveries) if deliveries else (None, [])
+    with group.configuration([calls]) if calls else contextlib.nullcontext():
+        schedule = _stream.Schedule()
+        schedule.append(_stream.Commands(commands))
+        if prepared is not None:
+            prepared.append(schedule)
+        schedule.finish()
+        schedule.enqueue()
     return result
 
 
 @torch.no_grad()
 def follow(*tensors):
-    """DTensors `tensors` (of one mesh), each split along each partitioned mesh dimension by the operand attached there
-    now (after the Balancer moved it), as a list. Contiguous region layouts use compact affine exact-byte writes:
-    original source rows to final destination rows, with distinct compact relay leases. A RowWrite remains one
-    logical message regardless of its row count. Configuration-time metadata fixes common packet cuts at row and
-    registration boundaries; execution performs no metadata exchange, payload packing, padding, or unpacking.
-    An unchanged contiguous local interval is aliased; other retained local ranges are copied directly once.
+    """Realize changed shard assignments through typed final page views.
 
-    Other mesh layouts bind original strided source views and final destination views through exact indexed WRITE
-    plans. Their span descriptors are agreed once at configuration, without materializing payloads. Local retained
-    values use one indexed bit-preserving relocation kernel; every relay has its own compact lease.
-
-    Other distributed backends use one declared MPI_Alltoallv per tensor of the rows that
-    change rank alone, each piece an exact compact segment of a staging lease, sent once and copied once into its
-    place in the tensor's new block, a region tensor contiguous in the tensor's own layout; the rows that stay are
-    copied into their place there, crossing nothing. Each tensor has fresh transfer leases. Dropping their Python
-    references returns them through native deferred retirement: their local GPU users and every DMA reader must
-    finish before the region can allocate the bytes again. No receipt all-gather or other application acknowledgment
-    is emitted, and no unrelated incoming transfer is used as evidence of consumption. The rows that stay pass
-    through the staging too, so no copy has both sides strided (torch's MPS copy makes such a copy through a temporary
-    of its size, from 10 MiB a 1 GiB heap).  Each is returned at its logical shape and that shape's contiguous strides
-    (a moved block's leading extents of one may carry any stride, which from_local's inference would refuse).
-
-    This other-backend compatibility path still materializes whole-operand staging.
-    The exact-byte path writes only the declared final intervals, preserving neighboring live bytes."""
+    Mesh deliveries become bound communicator Calls; local relocations use the
+    shared layout-copy commands in the same prepared schedule. Original input
+    imports are exact byte copies in that schedule. Other distributed backends
+    retain their existing staging adapter until their function compiler is
+    connected to the same page declarations.
+    """
     from . import _stream
     mesh, held = tensors[0].device_mesh, [[list(t.placements), t.to_local(), t.shape, t.stride()] for t in tensors]
     for i in range(mesh.ndim):
         key = _NAMED.get((mesh, mesh.mesh_dim_names[i])) if mesh.mesh_dim_names else None
         moving = [h for h in held if isinstance(h[0][i], RaggedShard) and key not in (None, h[0][i].key)]
         rank, group = mesh.get_coordinate()[i], mesh.get_group(i)
-        published = False
-
-        def publish_boundary():
-            nonlocal published
-            if not published:
-                _stream.publish_boundary()
-                published = True
-
         for h in moving:
             p, d = h[0][i], h[0][i].dim % h[1].ndim
-            direct = _follow_bytes(p, h[1], h[2], h[3], key, rank, group, publish_boundary)
-            if direct is None:
-                direct = _follow_spans(p, h[1], h[2], key, rank, group, publish_boundary)
+            direct = _follow_spans(p, h[1], h[2], key, rank, group)
             if direct is not None:
                 h[0][i], h[1] = RaggedShard(p.dim, key), direct
                 continue
@@ -1634,7 +1418,7 @@ def lower_owned_graph(graph, arguments, configuration):
     numerical relations select work and pages for every declared rank.
     """
     import operator
-    from .ownership import from_spec, propagate, prepare_expression, project_expressions, contribution_domains
+    from .ownership import from_spec, propagate, prepare_expression, compile_assignments, contribution_domains
     from .compilation import normalize_source
     from .algebra import partition_decompositions
     mesh = configuration['mesh']
@@ -1848,7 +1632,8 @@ def lower_owned_graph(graph, arguments, configuration):
         limits, unresolved = contribution_domains(prepared, values, rank, uses=uses)
         constraints[rank] = limits
         pending.extend(dict(item, coordinate=rank) for item in unresolved)
-    selected = project_expressions(prepared,
+    selected = compile_assignments(prepared,
+        {rank: {key: owner['owners'][rank]['selection'] for key, owner in values.items()} for rank in requests},
         {rank: {key: owner['selection'] for key, owner in requested.items()} for rank, requested in requests.items()},
         constraints=constraints,
         delivery=delivery,

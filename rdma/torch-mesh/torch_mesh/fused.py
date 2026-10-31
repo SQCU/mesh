@@ -42,43 +42,24 @@ def _words(addresses):
     return [w for a in addresses for w in (a & 0xFFFFFFFF, a >> 32)]
 
 
-def writes(schedule, send, landings, pairs, group, polls=0, *, repeats=1, stride=0, ready=None, ready_value=0, tile_bytes=0):
-    """Immutable routed writes, one landing lease per (source, destination).
+def declare(send, landings, pairs, group, polls=0, *, repeats=1, stride=0, ready=None, ready_value=0, tile_bytes=0):
+    """Local typed views and producer records for the common communicator plan."""
+    declaration = _stream.write_operands(send, list(landings), list(pairs), group.handle,
+        int(polls), int(repeats), int(stride), ready, int(ready_value), int(tile_bytes))
+    return declaration, calls(declaration.declarations())
 
-    The producer releases every returned publication after making its operand.
-    The consumer awaits every returned landing before reading its destinations.
-    Bindings follow physical channels, not peers. Source and relay leases remain
-    unchanged through the whole function's downstream uses. Previous users of
-    the disjoint landing leases must finish before encoding this call; receives
-    are posted immediately, without waiting for the local producer.
 
-    ``repeats`` preposts a train of equal compiled frames once. Tensor arguments
-    name the first frame inside backing storage covering all frames; ``stride``
-    is their local byte displacement. Kernels release/await frame ``j``
-    using the binding's repeat index. Publication must advance in frame order;
-    it never certifies an unfinished earlier frame. A zero stride requires a
-    separate lifetime proof before overwriting any prior frame's live bytes.
+def calls(declarations):
+    import torch
+    from .backend import Call, WRITE
+    return [Call(WRITE, dtype=torch.uint8, **record) for record in declarations]
 
-    ``ready`` and ``ready_value`` bind an independent producer word instead of
-    the channel prefix. The producer calls mesh_source_release after this
-    tile's stores. Distinct tiles own distinct words; no completion ordering
-    between them is assumed. Relay readiness still follows incoming pages.
-    With ``tile_bytes``, one WRITE family covers the operand. ``ready`` has one
-    word per tile; ``land`` contains tile-major physical-channel bindings,
-    padded with null records. Contributions to the same tile share each
-    channel's last required prefix.
-    """
-    publish, land = schedule.writes(send, list(landings), list(pairs), group.handle,
-                                    int(polls), int(repeats), int(stride), ready, int(ready_value), int(tile_bytes))
+
+def writes(schedule, declaration):
+    """Encode the next declared group and expose its compiled publication records."""
+    publish, land = schedule.writes(declaration)
     return Crossing(tuple(map(tuple, publish)), tuple(map(tuple, land)))
 
-
-
-def write_rows(schedule, send, landings, pairs, group):
-    """One exact WRITE of a view (rows of it at a rank-local pitch, whatever its layout): the library lowers each rank's
-    own view's layout, so only its bytes cross links, with no packing; publication and landing use repeat index zero."""
-    publish, land = schedule.writes(send, list(landings), list(pairs), group.handle, 0, 1, 0, None, 0, 0)
-    return Crossing(tuple(map(tuple, publish)), tuple(map(tuple, land)))
 
 def _encode_words(constants, channels, land, publish):
     words = list(constants) + [0] * (len(constants) % 2)

@@ -108,7 +108,7 @@ static NSString *const STEPS =
   "static inline void mesh_source_release(device ulong *words, uint slot, ulong value, uint i) { "
   "threadgroup_barrier(mem_flags::mem_device); "
   "if (i == 0) mesh_publish((volatile coherent(system) device ulong *)(words + slot), value); }\n"
-  /* one tile's landing record as ncclMeshWriteLandings lays it (nccl.h: { uint64_t count; ncclMeshBinding
+  /* one tile's landing record as the communicator declaration lays it (nccl.h: { uint64_t count; ncclMeshBinding
      bindings[capacity]; }), at the address the caller's own ncclMeshTileLayout gives that tile: the record's one
      statement is nccl.h's, so this reads no stride or header of its own */
   "static inline void mesh_landing_counts(device const ulong *record) { "

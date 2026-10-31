@@ -9,6 +9,11 @@ The claims marked verified were checked against the source a second time.
 A clone scan of rdma/nccl-mesh.c (identifiers and numbers normalized, four-statement windows) finds 99 repeated code
 lines in 5,516. The file is not copy-pasted: what it holds twice are whole alternative forms of one job.
 
+The retained-WRITE conclusions below are superseded by the October 30
+canonical declaration correction in [desk-cluster-readiness-2026-10-30.md](desk-cluster-readiness-2026-10-30.md).
+Both WRITE preparers and the separate plan lifecycle are removed. Sharing a
+builder did not justify retaining a second input contract.
+
 ## Delete now: no caller
 
 | What | Lines | Evidence |
@@ -163,14 +168,11 @@ immediately." Form C is resolved, and with it the recorder's capture:
   return. In that span a group either completes (`complete`, `retire`) or is lost with its communicator
   (`walk_failed` → `inflight_lose`), and every drop of a definition takes the same lock. `held`, `dropped`,
   `issue_let`, `issue_drop` and the inflight record's issue are gone (-25 net; nccl-mesh.c is 6,393 lines).
-- Declared groups of WRITEs stay laid at their issue, for the plans the issue names. That issue happens at record
-  time: every one is a `ncclMeshWriteExecute` inside a `MetalScheduleCross` block, in torch_mesh's
-  `prepare_fused_writes`, its `views` and `writes` template crossings, and `ViewWrites::encode`, and in mb's
-  crossing. So laying there adds no work to an execution. Preparing these groups at declaration would need the
-  declaration to name each plan, and a template blocks that: it replays the communicator's declaration (its `plan`
-  call) before the crossing whose plans `declared_plans` makes again. A declaration that named the plans would
-  have to carry and remake them itself, which gives each plan a second owner beside its crossing. That is a new
-  mechanism, and it would buy the deletion of one branch of `issue_bind`.
+- The prior argument for keeping WRITE placement at recording time was wrong.
+  It treated the separate plan lifecycle and template restoration order as
+  requirements. The common declaration now owns the page operands and layouts;
+  its serializer restores them before recording. WRITE groups use the same
+  prepared slots as other operations. No standalone WRITE plan is needed.
 
 ## Order
 
@@ -178,9 +180,8 @@ immediately." Form C is resolved, and with it the recorder's capture:
 2. The frontends' one lowering (D6-D11), the largest duplicate, beneath both Metal frontends.
 3. B, B' and C together: mesh_mpi onto a library-owned Metal 4 queue, then the host path, the issue-then-complete
    path and the classic program form go; MPS remains an ordering point between queues.
-4. A and G: prepared generations for every slot instance and WRITE, then issue-time re-binding goes. Done for
-   collectives and a WRITE plan's own definitions, and G deleted (above); declared groups of WRITEs stay laid at
-   their record-time issue, for the reason above.
+4. A and G: prepare every slot instance and WRITE through the canonical declaration;
+   remove issue-time placement and standalone WRITE lifecycles.
 5. E's one-track form into tracks; F's and I's single builders.
 
 Steps 1-5 remove roughly 2,500 to 3,000 lines across the two repositories: about 1,025 without callers (most of it python/mesh, deleted 2026-10-30), 710 of the

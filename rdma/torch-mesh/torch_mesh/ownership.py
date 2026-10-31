@@ -179,7 +179,7 @@ def contribution_domains(prepared, values, coordinate, *, uses=None):
     return limits, tuple(pending)
 
 
-def project_numerical(span, demands, algebra, *, constraints=None):
+def project_numerical(span, demands, algebra, *, constraints=None, work=None):
     """Write preimages and read images over the same retained numerical body.
 
     Demands name original tensor fields in logical scalar positions. Aliases
@@ -187,34 +187,37 @@ def project_numerical(span, demands, algebra, *, constraints=None):
     relations remain actual source expressions; no full-storage dependency is
     substituted for them. A selected reduction finish survives an empty fiber.
     """
-    from .operand import byte_relation
+    from .operand import access_domain, byte_relation
     constraints = {} if constraints is None else constraints
-    needed, pending, records = {}, [], []
+    assigned = work
+    needed, exact, pending, records, live_reads = {}, {}, [], [], []
     for key, binding in span['output_bindings'].items():
         if key in demands:
-            _union(needed, binding['name'], byte_relation(binding).image(demands[key]))
+            positions = byte_relation(binding).image(demands[key])
+            _union(needed, binding['name'], positions)
+            _union(exact, binding['name'], positions)
 
     def selected(domain):
-        work = _empty(algebra, len(domain['work']))
+        work = _empty(algebra, len(domain['work'])) if assigned is None else assigned[id(domain)]
         unresolved = []
-        for slot, access in domain['writes'].items():
-            requested = needed.get(access['name'])
-            if requested is None or requested.empty():
-                continue
-            relation = byte_relation(access)
-            if relation is None or access.get('unresolved_predicates'):
-                unresolved.append(dict(slot=slot, access=access, requested=requested))
-            else:
-                work = work.binary(relation.preimage(requested), 'union')
-        if id(domain) in constraints:
+        if assigned is None:
+            for slot, access in domain['writes'].items():
+                requested = needed.get(access['name'])
+                if requested is None or requested.empty():
+                    continue
+                relation = byte_relation(access)
+                if relation is None or access.get('unresolved_predicates'):
+                    unresolved.append(dict(slot=slot, access=access, requested=requested))
+                else:
+                    work = work.binary(relation.preimage(requested), 'union')
+        if assigned is None and id(domain) in constraints:
             work = work.binary(constraints[id(domain)], 'intersect')
         reads, writes = {}, {}
         for side, result in (('reads', reads), ('writes', writes)):
             for slot, access in domain[side].items():
-                relation = byte_relation(access)
-                positions = (relation.image(work) if relation is not None
-                             and not access.get('unresolved_predicates') else None)
-                result[slot] = dict(access=access, relation=relation, positions=positions)
+                projected = access_domain(access, work)
+                positions = projected['positions']
+                result[slot] = projected
                 if side == 'writes':
                     result[slot]['requested'] = needed.get(access['name'], _empty(algebra, 1))
                 if side == 'reads' and not work.empty():
@@ -222,6 +225,11 @@ def project_numerical(span, demands, algebra, *, constraints=None):
                         pending.append(dict(domain=domain, access=access, work=work))
                     else:
                         _union(needed, access['name'], positions)
+                        space = access.get('index_space')
+                        if access.get('unresolved_predicates') or space is not None and space['values']:
+                            live_reads.append(projected)
+                        else:
+                            _union(exact, access['name'], positions)
         pending.extend(dict(domain=domain, **record) for record in unresolved)
         return dict(work=work, reads=reads, writes=writes, unresolved=tuple(unresolved))
 
@@ -240,10 +248,90 @@ def project_numerical(span, demands, algebra, *, constraints=None):
             projected.append(dict(effect=effect, domain=domain, **main, finish=finish))
         records.extend(projected)
     records.reverse()
-    inputs = {key: byte_relation(binding).preimage(needed[binding['name']])
-              for key, binding in span['input_bindings'].items() if binding['name'] in needed}
+    inputs = {key: byte_relation(binding).preimage(exact[binding['name']])
+              for key, binding in span['input_bindings'].items() if binding['name'] in exact}
+    live_inputs = {key: tuple(record for record in live_reads if record['access']['name'] == binding['name'])
+                   for key, binding in span['input_bindings'].items()}
+    live_inputs = {key: records for key, records in live_inputs.items() if records}
     return dict(section=span, outputs=dict(demands), inputs=inputs, storage_bytes=needed,
-                records=tuple(records), pending=tuple(pending))
+                records=tuple(records), live_reads=tuple(live_reads), live_inputs=live_inputs, pending=tuple(pending))
+
+
+def compile_assignments(prepared, assignments, outputs, *, delivery, boundary_projection, constraints=None):
+    """Compile supplied materialized-value assignments in producer order.
+
+    A section's retained equations determine its input footprint. Delivering
+    those inputs does not enlarge or relocate any producer's assigned work.
+    Repeated result uses retain their ordered selections independently of work.
+    """
+    algebra, aliases = prepared['algebra'], prepared['aliases']
+    constraints = {} if constraints is None else constraints
+    def identity(key):
+        node, path = key if isinstance(key, tuple) else (key, ())
+        while node in aliases:
+            node = aliases[node]
+        return node, path
+    assigned = {rank: {} for rank in assignments}
+    for rank, values in assignments.items():
+        for key, selection in values.items():
+            _union(assigned[rank], identity(key), algebra.selection(selection))
+    ordered = {rank: {key: algebra.selection_relation(value) for key, value in values.items()}
+               for rank, values in outputs.items()}
+    sections, pending = {rank: [] for rank in assignments}, {rank: [] for rank in assignments}
+    inputs, deliveries = {rank: {} for rank in assignments}, []
+    external = {identity(key) for key, _ in _source_leaves(node for node in prepared['expression']['graph'].graph.nodes
+                                                        if node.op == 'placeholder')}
+    produced = {rank: {key: positions for key, positions in values.items() if key in external}
+                for rank, values in assigned.items()}
+
+    def route(section, incoming):
+        for key in dict.fromkeys(key for values in incoming.values() for key in values):
+            source = identity(key)
+            needs = {rank: values[key] for rank, values in incoming.items() if key in values}
+            record = delivery(section, source, needs, algebra)
+            deliveries.append(record)
+            for rank, selection in record['sources'].items():
+                positions = algebra.selection(selection)
+                missing = positions.binary(produced[rank].get(source, _empty(algebra, 1)), 'subtract')
+                if not missing.empty():
+                    pending[rank].append(dict(source=source, section=section, positions=missing,
+                                              requirement='assigned_source_pages'))
+                if source in external:
+                    _union(inputs[rank], source, positions)
+
+    for section in prepared['sections']:
+        fields = tuple(key for key, _ in _source_leaves(section['outputs']))
+        needs = {rank: {key: values[identity(key)] for key in fields if identity(key) in values}
+                 for rank, values in assigned.items()}
+        for rank in assignments:
+            for key in fields:
+                if identity(key) not in assigned[rank]:
+                    pending[rank].append(dict(source=key, section=section, requirement='section_assignment'))
+        records = (boundary_projection(section, needs, algebra) if section['boundaries'] else
+                   {rank: project_numerical(section, values, algebra, constraints=constraints.get(rank))
+                    for rank, values in needs.items()})
+        from .operand import byte_relation
+        for rank, record in records.items():
+            for key, reads in record.get('live_inputs', {}).items():
+                source = identity(key)
+                binding = section['input_bindings'][key]
+                available = byte_relation(binding).image(produced[rank].get(source, _empty(algebra, 1)))
+                for read in reads:
+                    if not read['positions'].binary(available, 'subtract').empty():
+                        pending[rank].append(dict(source=source, section=section, access=read,
+                                                  requirement='selected_source_reads'))
+        route(section, {rank: record['inputs'] for rank, record in records.items()})
+        for rank, record in records.items():
+            record.update(section=section, outputs=needs[rank])
+            sections[rank].append(record)
+            pending[rank].extend(record['pending'])
+            for key, positions in needs[rank].items():
+                produced[rank][identity(key)] = positions
+    route(None, {rank: {key: relation.image(relation.domain()) for key, relation in values.items()}
+                 for rank, values in ordered.items()})
+    return dict(projections={rank: dict(prepared=prepared, outputs=ordered[rank], output_selections=dict(outputs[rank]),
+        inputs=inputs[rank], sections=tuple(sections[rank]), pending=tuple(pending[rank])) for rank in assignments},
+        deliveries=tuple(deliveries))
 
 
 def project_expressions(prepared, outputs, *, delivery=None, boundary_projection=None, constraints=None):

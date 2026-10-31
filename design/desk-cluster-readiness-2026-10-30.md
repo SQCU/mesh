@@ -1,167 +1,113 @@
 # Desk-cluster deployment review
 
-Recorded 2026-10-31 00:51 UTC (October 30 on the desk). Reviewed mesh
-`8b5c7371` and metal-microbench `55c1fad1`, plus the current uncommitted
-access-export edits in `native.py`, `operand.py`, and `_stream.mm`.
-Those edits are incomplete and are not deployment evidence. This review reads
-source and history; it starts no cluster job or numerical execution.
+Reviewed October 30, 2026. The initial review used mesh `8b5c7371` and
+metal-microbench `55c1fad1`. The source corrections below are part of the same
+integration pass. They are not measurements or evidence of installed peers.
 
-**The ordinary distributed compiler is not ready for the requested deployment.**
-The target is several Studios running whole models with sharded sparse table
-reads and fine-grained sharded feed-forward work. The missing connection is
-between capabilities already present in the library. A separate executor or a
-special implementation for a model name would not close it.
+The target is several Studios running whole models with sharded table reads
+and fine-grained sharded numerical work. The remaining task is to connect the
+ordinary compiler components. A second executor for a model name does not
+close that task.
 
-## What the two WRITE interfaces actually do
+## Correction: one declaration owns WRITE operands
 
-`ncclMeshWritePagesPrepare` was introduced in `ac1ea093` on October 26.
-`ncclMeshWriteLayoutPrepare` followed in `bf4f1454` on October 28. Both reach
-the same `write_prepare` and return the same plan, executed by
-`ncclMeshWriteExecute`. They are two public preparation contracts, not two
-independent transport engines. See `rdma/nccl-mesh.c:6289`, `:6309`, `:6449`,
-`:6498`, and `:6607`.
+A declaration is compiler input: an operation, its page operands, layouts and
+production relations. `ncclMeshCall` holds that input; `ncclMeshCommPlan` compiles
+it. Neither is a reason to give WRITE a separate lifecycle.
 
-The later interface accepts a tensor layout over page storage. Its lowering
-supports strided/mapped views, framed publications, local binding periods,
-sub-byte encoded storage and library-owned relays. Both variants also persist
-through `write_declared.kind` and separate template restoration branches.
-Current tensor frontends call the layout variant: `_stream.mm:1371`, `:1958`,
-`mesh_mpi.py:273`, and microbench `mesh_rank.m:940`.
+The initial review compared `ncclMeshWritePagesPrepare` with
+`ncclMeshWriteLayoutPrepare` and proposed retaining the former. That identified
+the wrong boundary. Both belonged to the competing WRITE-plan lifecycle.
+The required interface is `ncclMeshCommPlan` for every operation.
 
-The consolidation target is one public page-and-mask WRITE contract, with tensor
-layout conversion performed by the shared compiler before that boundary.
-Remove the second preparation contract and the duplicate declaration/restore
-branches after moving its callers and representational features into that
-lowering. Do not lose framing, local periods, relay placement or compact indexed
-views by reverting callers to an older, narrower binding. No second execution
-mechanism is needed.
+The history is:
 
-One historical duplication is already removed: `f48ded9b` made declared groups
-and standalone WRITE plans use the same `definition_prepare`. The current
-code must not be reported as still having two independent definition builders.
-The larger collective compiler also calls the same physical
-`mesh_write_compile`; its remaining divergence is scheduling, below.
+- `4bb01da0` (October 24) introduced a separate WRITE plan and execute call.
+- `ac1ea093` (October 26) added the page-mask preparer.
+- `fb024020` (October 28) added actual bindings to `ncclMeshCall`, but explicitly
+  skipped WRITE. Its branch excluded counted transfers too; `6393626e` removed
+  that exclusion while leaving WRITE excluded.
+- `bf4f1454` (October 28) added the layout preparer over the separate plan.
+- `f48ded9b` shared a definition-building helper between the two lifecycles.
+  Sharing that helper did not remove their competing contracts.
 
-## Current blockers and removal targets
+Thus the separate lifecycle predates the binding exclusion. The later binding
+work preserved the duplication instead of completing the common interface.
 
-### Changing indices do not yet cross the ordinary distributed pipeline
+The correction removes both preparers, `ncclMeshWriteExecute`, the public plan
+handle, its readiness/landing setters, its standalone definitions, reference
+lifecycle and serializer. `ncclMeshCall` now contains source/result page slots,
+local layout geometry, frames, packet bounds, source-ready words and landing
+records. The sole declaration serializer carries those same fields.
 
-`ownership.project_numerical` still marks live index/predicate accesses pending
-(`ownership.py:204–225`). `BoundGraph._bind_owned` then stops preparation
-(`declarations.py:1168`). Native IR retains the index producer; the new
-`operand.access_domain` exposes its possible byte reads, but that helper is not
-yet connected to the owned graph and the required selected-value crossing.
+`ncclMeshCommEncode` records the next declared group. It accepts a communicator
+and recording context, not buffers or a per-WRITE handle. Every group's slots
+are prepared before recording. WRITE groups no longer rebuild placement at the
+call site; mixed WRITE/collective groups use the same prepared issue path.
+The Python, fused chain/DNN and native rank callers supply their bindings before
+`CommPlan` and use that common recording entry.
 
-There is already an owner-local `index_select` expression that preserves value
-bits, including masks and collective reduction (`partition.py:2068–2117`).
-It is selected through actual DTensor dispatch, which the new global source
-capture does not invoke. Its expression must join the retained compiler path.
-Local-view scopes and typed Partial/complete transitions likewise remain
-pending (`partition.py:1665`, `:1749`, `:1803`).
+## Shared scheduling and dependencies
 
-Compile supplied work assignments forward. Use local access analysis to derive
-input pages and retain the actual index-producing edges. A possible read domain
-is not a request to transfer every possibly selected table value. The execution
-must move the selected values through the same fixed-width page operations,
-with changing index contents as ordinary data.
+WRITE and general collective groups now use the same capacity/dependency
+ordering engine. The routed compiler's separate ready-event loop is removed.
+The engine represents publication, streamed consumption, completion and
+multi-parent combination. Relay refinement accepts combined producers as well
+as copies.
 
-### Encoded collective calls still have blanket barriers
+Transport dispatches use the recorder's existing access frontier. Blanket
+barriers at group entry, dispatch, pool and presentation are removed. A
+monotone progress observation depends on its preceding publication; it does
+not stop a later publication from advancing the counter. Ordinary payload
+read/write dependencies remain.
 
-`metal_begin` emits a dispatch-to-dispatch barrier for every collective group
-(`nccl-mesh-metal.m:233`). `dispatch4` adds another after every dispatch outside
-the presentation phase (`:297`). These commands are encoded during preparation
-but run on every replay. Source-level preparation does not make their runtime
-cost disappear.
+Native emitted commands export separate read and write selections. The Python
+binder and LiteRT importer carry them to the same recorder. An argument's
+residency no longer substitutes for its actual access range.
 
-`ncclMeshGroupAccesses` also describes shared channel `taken`/`presented` words
-as accesses (`nccl-mesh.c:3222–3248`). `MetalScheduleCrossWork` adds them to
-the same dependency analysis as payload pages (`metal-recording.m:1470`).
-Repeated crossings can therefore acquire order through shared descriptor-list
-state even when their payload ranges do not overlap.
+## Removed blocking alternatives
 
-Replace blanket ordering with the compiled page, channel and publication
-relations. Preserve actual producer/consumer dependencies and hardware credit
-limits. The current list protocol depends on its ordering; simply deleting its
-edges without replacing that dependency representation is not the refactor.
+`_stream.encode` and its private submit-and-wait path are removed. Migration
+copies use the ordinary layout-copy compiler in the same schedule as their
+transfers. Imported source state becomes an explicit initializer recorded once
+before a function's first invocation; original attributes are not mutated into
+not-yet-filled pages.
 
-### Exact access records are still lost at consumer boundaries
+The transport's private host submission/commit/wait path and unused GPU polling
+calibration are removed. The common recorder owns submissions. No null-stream
+adapter is silently upgraded into a second executor.
 
-The native emitter's new per-command read/write relations have not yet reached
-all consumers. The `_stream.Commands` constructor edit is not yet connected to
-`native.bind` or rebuilt. LiteRT's `native_shader` takes only the argument access
-bitmask (`tools/prepare_e2b.py:4244`); its dispatch recorder declares the whole
-argument layout (`litert_program.m:2657`). Disjoint sparse uses of a shared
-binding can thus look dependent.
+The old `mesh_mpi` imperative methods and the Xonotic NumPy/Torch world callers
+still need whole-function integration. Their numerical code consumes results
+between immediate calls. Replacing one world wrapper with another does not
+make that code a prepared function. They are not a supported blocking fallback.
+Their standalone WRITE helpers are removed.
 
-Carry separate read and write selections through the existing command record
-and recorder. Binding a buffer does not mean every command accesses all of it.
-The actual LiteRT indexed-source importer connection is also unfinished.
+## Remaining deployment work
 
-### Collectives and WRITE-only groups get different scheduling quality
+The source has physical multipath writes, relay placement, retained numerical
+bodies, page aliases, selection kernels, sparse products and recorded execution.
+The ordinary distributed pipeline still needs these connections:
 
-Only all-WRITE groups receive `order_writes` and its capacity-aware ordering
-(`nccl-mesh.c:3118`). General collective dependencies use a lowest-numbered-ready
-event order (`mesh-routed.c:384–394`), preserving incidental transaction order
-where another ready transfer could use a cable sooner.
+- Changing index/predicate accesses must join the selected-value crossing and
+  continuation of the retained numerical body. A possible read domain must not
+  become a transfer of every possibly selected value.
+- Local scope and Partial/complete transitions must consume the supplied work
+  assignments through the common forward compiler.
+- Indexed update/gather composition must eliminate unnecessary full intermediate
+  materialization through shared fusion.
+- Landing metadata reused across several recorded tiled invocations still needs
+  immutable occurrence-specific records. Current DNN declarations use a distinct
+  record table per group and chain's repeated groups are untiled; they do not
+  establish the general repeated tiled case.
+- The imperative Xonotic solver callers must declare their numerical work and
+  crossings together.
+- Ordinary model demos must consume explicit capacities and the same completed
+  compiler interfaces. The existing fixed-capacity MoE demo is not deployment
+  evidence for arbitrary changing sparse work.
 
-`mesh_fabric_refine` recognizes COPY producers but not REDUCE producers
-(`mesh-fabric.c:73`). Combined relay output can therefore retain a larger
-publication boundary even though the runtime supports per-unit sum forwarding.
-The current `mesh_solve` still uses shortest-path trees for all-leaf demands
-(`mesh-collective.c:858–877`); the prior review's tree-packing fix is not landed.
-These are remaining causes of link underuse, not evidence that extra links or
-relays are intrinsically counterproductive.
-
-### Synchronous alternative entry points remain
-
-The main `Executions.run` only enqueues the prepared schedule
-(`_stream.mm:1940`), as does `MeshRankRun`. `Drained` is an autorelease pool
-(`_stream.mm:2060`), not a stream drain.
-
-The separate `_stream.encode` helper instead creates a schedule and semaphore,
-marks every operand read/write, submits and CPU-waits (`:907–925`). Its current
-callers are input-import/repartition copies and an explicit layout probe, not
-the main Function replay. `schedule_after_inputs` also commits prior PyTorch
-work and installs a broad entry event during preparation (`:410–417`).
-
-The host `mesh_mpi.WritePlan.Execute` uses a null stream (`mesh_mpi.py:129`),
-which reaches `host_finish` and waits for GPU completion (`nccl-mesh.c:4942`).
-These alternatives need migration to the shared prepared-function interface;
-they must not become hidden execution paths for model operations.
-
-Separately, microbench `Rank.take` serializes whole server requests until the
-previous request and its output handling finish (`rank.swift:379`, `:451`).
-That is service admission, not a dependency between tensor pages. Removing it
-requires giving independent requests their declared state and output operands,
-including replacing process-wide output redirection.
-
-### The current MoE demo does not establish the target workload
-
-`examples/ep.py` fixes expert count, top-k, token count and bucket capacity
-(`:19–20`). It masks overflowing assignments and writes them to a replacement
-slot (`:43–45`), then transfers and computes the bucket slots (`:46–52`). It
-also uses the still-unconnected local scopes (`:36–37`). This is not evidence
-of arbitrary, fine-grained selected work across the cluster.
-
-The radix selector and static sparse-product schedule already exist. Static
-sparse layouts explicitly remain fixed during execution; that does not
-establish changing sparse table lookups or changing work selection. The demo
-must consume the same completed shared compiler interfaces with explicit
-configuration, without a separate expert executor or an overflow workaround.
-
-## What is already established, and what establishes readiness
-
-The source has a shared physical WRITE compiler, multiple physical cable paths,
-relay placement, retained numerical bodies, page aliases, native selection
-kernels, static sparse products and an asynchronous recorded execution entry.
-Recent work removed the older classic executor, duplicate definition builders,
-several bridge per-unit checks, and barriers between individual presentations.
-Those fixes do not close the remaining paths above.
-
-Readiness requires an ordinary configured whole model to compose changing
-indices, sharded table reads, selected feed-forward work and reductions through
-one compiler and recorder, with no unresolved transitions or substitute
-executors. Emitted dependencies must follow actual pages and resources.
-After that structural connection, use ordinary demos/hourlies to record complete
-function latency and useful throughput together. This review supplies no new
-performance estimate and makes no claim about installed peer builds.
+Readiness means an ordinary whole model composes changing indices, sharded
+reads, selected work and reductions through this compiler and recorder. After
+those structural connections, ordinary demos/hourlies record whole-function
+latency and useful throughput together. This review makes no new performance
+claim.

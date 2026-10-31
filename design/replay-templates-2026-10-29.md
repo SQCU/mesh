@@ -222,7 +222,7 @@ interface.
 | R2 | The template directory: plist, libraries, per-architecture pipeline archive (landed) | `MetalTemplateWrite`, `MetalTemplateRead` |
 | R3 | Instantiation of GPU-only functions: data, compute, append (landed) | `MetalScheduleInstantiate`; torch_mesh `Schedule.save`, `Schedule.load` |
 | R4 | Host operations declared: (kind, bytes, places); the engine rebuilds them (landed: CPU programs, Core ML predictions) | `MetalDeclaration`, `MetalScheduleHost`; engines `rebuild` |
-| R5 | Crossings declared, communicators a place; the communicator's plan and each WRITE plan captured where they are made and made again at instantiation (landed) | `MetalScheduleCross`; `ncclMeshCommPlanDeclaration`/`Declared`, `ncclMeshWritePlanDeclaration`/`Declared` |
+| R5 | Crossings refer to the complete communicator plan; typed views and progress bindings are serialized once. Instantiation restores that plan, and each crossing records its next declared group. | `MetalScheduleCross`; `ncclMeshCommPlanDeclaration`/`Declared`; `ncclMeshCommEncode` |
 | R6 | Another architecture: per-architecture archives kept on first load; compile facts and pipeline thread limits checked as values (landed) | `MetalTemplateArchive`; `MetalScheduleInstantiate` |
 | R7 | Bound operands are views, their byte offset the parameter (landed). Shape parameters need symbolic sizes from lowering | `MetalScheduleTemplate`/`Instantiate` offsets |
 

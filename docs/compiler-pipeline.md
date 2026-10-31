@@ -386,20 +386,20 @@ uses the same parameter operands. The solver does not run during numerical work.
 The supplied parameter domain determines which choices it can change; a tile or
 layout absent from that domain is not magically searched.
 
-## Page-mask communication boundary
+## Declared page communication boundary
 
-`ncclMeshPageTableCreate` resolves local allocated storage before execution.
-`ncclMeshWritePagesPrepare` consumes ordered `(page, first, count)` masks. Each mask
-stays in one local page; each peer uses its own table and page size. Their logical
-byte totals agree. No remote pointer or cross-page extent appears in this public
-declaration. The NumPy frontend's `Pages` makes a table for its layout writes; it has no page-mask call.
+`ncclMeshCommPlan` is the common preparation boundary for every collective,
+including `ncclMeshCallWrite`. Each call carries local `bindings` (buffer slots),
+optional pure `views` geometry, frames and declared producer/landing operands.
+The shared compiler resolves those operands to page tables, exact masks and
+physical spans. Page masks are compiler data, not a second public WRITE API.
 
-The raw `ncclMeshWritePrepare`, `ncclMeshWriteRowsPrepare` and
-`ncclMeshWriteSpansPrepare` public interfaces are removed. Local tensor adapters
-are compiler-only functions in `mesh-write-compiler.h`; Python, native and Torch
-call that common lowering. NumPy's public arbitrary-span method is removed.
-Compiled plans retain their existing route, relay and tile-readiness machinery.
-Page validation and mask lowering add no numerical-loop lookup or check.
+`ncclMeshCommEncode` encodes the next declared group into the existing recorder.
+There is no separate WRITE handle, execute call, destruction path or serializer.
+Templates serialize the complete communicator declaration once through
+`ncclMeshCommPlanDeclaration`/`Declared`; crossings retain only their position
+and publication-mode metadata. Routes, relays and tile readiness remain in that
+same compiled function. Numerical execution performs no layout reconstruction.
 
 Matching hand-tuned performance requires retaining both the numerical algorithms and their schedules.
 Operator coverage alone does not establish this. Performance evidence is the canonical committed-main

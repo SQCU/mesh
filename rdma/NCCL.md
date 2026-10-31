@@ -616,12 +616,12 @@ that leaves its links working (a link lost elsewhere, a node that joins) reaches
 and `ncclCommGrow`, an init at the id comm's root broadcasts on comm, holding streams of its own as every init does. `ncclCommRevoke` is NCCL's, from any thread and under the communicator's own lock
 alone: its operations in flight are revoked and its resources kept (its streams stay held, and its bridge sends what
 its groups published and nothing else); an init
-still running (a non-blocking one's) ends as a value, its host-path groups return at their next look, its GPU waits
+still running (a non-blocking one's) ends as a value, and its GPU waits
 end at their landings or their bounds, or once another wait on the communicator's failure words has failed (no kernel
 stops at the revoke; a wait that reaches its bound after it names it as its cause), and every later group on it is refused (`ncclInvalidUsage`, "revoked") until `ncclCommDestroy` gives its
-streams back; `ncclCommFinalize` after it returns `ncclSuccess`, and its `revokeFlags` is not read. `ncclCommDestroy` awaits the command buffer of the last GPU program the library committed for the communicator until its
-status is Completed or Error (the platform's watchdog ends one that overruns), within its deadline,
-`MESH_PLATFORM_NS`, past which the program ends, the groups' lock released meanwhile; one not committed is not awaited; work encoded in a caller's encoder (torch-mesh's) is the caller's to finish first, as NCCL's
+streams back; `ncclCommFinalize` after it returns `ncclSuccess`, and its `revokeFlags` is not read. The caller must complete its recorded function before calling `ncclCommDestroy`, which returns its streams.
+The library has no private queue or submission to wait for; work encoded in the caller's recorder is the caller's
+to finish first, as NCCL's
 contract has it: a kernel of it still queued when its streams are given back would write a stream the next holder
 may take. Likewise a lease a group of a revoked or failed communicator named is the caller's to keep until
 `ncclCommDestroy`: the communicator still holds its streams, its bridge may still post receives into that lease for
@@ -641,59 +641,25 @@ communicator a stream (a holding's lists and counts are its holder's alone), of 
 
 ## NumPy
 
-`rdma/mesh_mpi.py` spells the host path as mpi4py spells a communicator's buffer methods, so an mpi4py program ports
-by its import:
+`rdma/mesh_mpi.py` retains legacy NumPy caller source and page-allocation helpers.
+Its imperative buffer methods are not a supported execution path: the library
+no longer creates or waits on a private host-path submission. The removed
+standalone WRITE preparation/execution wrappers are not available.
 
-```python
-from mesh_mpi import Comm, SUM, MAX     # sys.path: ~/mesh/rdma
-comm = Comm()                           # RANK of WORLD_SIZE, NCCL's bootstrap at MASTER_ADDR:MASTER_PORT
-comm.Allreduce(local, total, op=SUM)    # Allgather, Bcast, Reduce, Reduce_scatter_block, Alltoall
-best = comm.allreduce(x.max(), op=MAX)  # Barrier; IN_PLACE as a send buffer
-comm.Allgatherv(part, [whole, counts])  # a count a rank: ncclMeshAllGatherV
-comm.Reduce_scatter(full, mine, counts) # ncclMeshReduceScatterV
-```
+`Comm.Plan(calls)` and `PlanDemands()` describe the complete communicator
+function and query its compiled payload demands. A usable NumPy frontend must
+also lower its numerical producers and consumers into the existing prepared
+function. The current `xonotic/planner/plan.py` and
+`xonotic/solver/worker.py:MPIWorld` still interleave imperative NumPy work with
+collective results; their complete numerical capture remains unconnected.
+Replacing them with imperative `TorchWorld` calls would not close that gap.
 
-Subcommunicators are `Split(color, key)` and a Cartesian grid: `grid = comm.Create_cart([2, 2])`, `grid.Sub([False,
-True])` its row, `grid.Shift(0, 1)` the neighbours, as mpi4py spells them.
-
-`comm.Plan(calls)` declares the complete function through the shared controller's
-native `ncclMeshCall` descriptors; `comm.PlanDemands()` returns the physical
-fabric and compiler-reported directed payload demands. These methods add no
-NumPy planner or traffic estimate. Declare the entire function, including
-repeats, before constructing its joint compute/routing controller.
-
-Current NumPy callers include `xonotic/planner/plan.py` and
-`xonotic/solver/worker.py:MPIWorld`. The former declares the complete planner
-tick; the latter supplies broadcast, all-reduce and ragged gather adapters.
-
-Exact one-way bindings use the same native WRITE API as other front ends:
-`comm.Write_prepare(sendbuf, landingbuf, source, destination)` for contiguous
-arrays, `comm.Write_rows_prepare(..., row_bytes=257, rows=5003)` for affine
-rows, `comm.Write_spans_prepare(..., spans=[(offset, bytes), ...])` for an
-explicit ordered view, or `comm.Write_view_prepare(...)` for ndarray shape and
-byte strides. All ranks prepare the same sequence; the source supplies its original
-send view and other ranks supply destination/relay landing storage. Unused
-arguments may be `None`. Used arrays come from `mesh_mpi.empty` or its views.
-Row widths/counts agree, while local pitches may differ. Indexed lists may
-differ in count, order and physical offsets, with equal logical byte totals.
-Negative strides and repeated source intervals are valid; overlapping landing
-intervals fail configuration. All intervals belong to one lease; multiple
-leases use ordered shared WRITE declarations. Preparation copies metadata,
-validates lease bounds and jointly cuts view/registration boundaries. It
-performs no tensor packing.
-
-The returned `WritePlan` retains those array owners. `plan.Execute()` executes
-its fixed native bindings; `plan.Free()` destroys them. Repeated invocations
-must respect the compiled source-read and destination-consumer lifetimes:
-returning from a source-only invocation does not prove a remote consumer has
-finished, or permit mutation before every scheduled DMA read retires. A `with` block
-also frees the plan. The indexed wrappers use the shared `mesh.view_layout` (mesh-write-compiler.h `mesh_view_layout`)
-metadata mapper and the native span preparation; see the
-[client coverage manifest](../design/collective-client-coverage.md#numpy-fixed-bindings-and-indexed-views).
-
-Directed exchange declares independent WRITEs for the two directions, retaining
-all physical ranks for relaying. The NumPy interface has no separate Send,
-Recv or Sendrecv protocol.
+All compiled frontends declare `ncclMeshCallWrite` through `ncclMeshCommPlan`.
+`bindings` supplies local page-backed buffer slots; optional `views` supplies
+pure typed geometry. Frames, source-ready words and landing records are
+explicit Call operands. The compiler owns relay storage and physical cuts.
+`ncclMeshCommEncode` records the next declared group into the caller's recorder;
+it takes no independent WRITE plan or replacement buffer bindings.
 
 ## Not implemented
 

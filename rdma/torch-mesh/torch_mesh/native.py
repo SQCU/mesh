@@ -38,11 +38,15 @@ def empty_strided(shape, stride, dtype, device):
 
 
 @lru_cache(None)
-def shader(source, name, access, names=(), types=()):
-    """Retain the emitted command declaration before final pipeline binding."""
+def shader_source(source):
     from pathlib import Path
     from torch.utils._cpp_embed_headers import _embed_headers
-    source = _embed_headers(source.splitlines(keepends=True), [Path(torch.__file__).parent / 'include'], set())
+    return _embed_headers(source.splitlines(keepends=True), [Path(torch.__file__).parent / 'include'], set())
+
+
+def shader(source, name, access, names=(), types=(), accesses=()):
+    """Retain the emitted command declaration before final pipeline binding."""
+    source = shader_source(source)
 
     def bind(*arguments, threads, group_size=None):
         from .operand import byte_operand
@@ -52,27 +56,29 @@ def shader(source, name, access, names=(), types=()):
             if not isinstance(value, (torch.Tensor, TensorView)):
                 constants[index] = struct.pack('q', int(value))
         _records.get().append(dict(kind='shader', source=source, function=name, access=access,
+            accesses=accesses,
             operands=tensors, names=tuple(names), types=tuple(types), index_dtype=torch.uint8, constants=constants,
             binding_origins=tuple(None if value is None else value.binding_origin for value in tensors),
-            grid=tuple(threads) + (1,) * (3 - len(threads)),
-            threadgroup=None if group_size is None else tuple(group_size) + (1,) * (3 - len(group_size)),
+            grid=tuple(map(int, threads)) + (1,) * (3 - len(threads)),
+            threadgroup=None if group_size is None else tuple(map(int, group_size)) + (1,) * (3 - len(group_size)),
             thread_grid=True))
     return bind
 
 
-def command_records(declarations):
+def command_records(declarations, *, with_reaches=False):
     """Realize the shared preparation declarations into ordinary command records."""
     from . import layout
     for declaration in declarations:
         if not isinstance(declaration, dict):
-            yield declaration
+            yield (declaration, None) if with_reaches else declaration
             continue
         if declaration['kind'] == 'product':
             from .matrix import product as prepare
-            yield from command_records(declaration['before'])
+            yield from command_records(declaration['before'], with_reaches=with_reaches)
             if declaration['operands']['out'].numel():
-                yield from prepare(**declaration['operands'], **declaration['parameters'])
-            yield from command_records(declaration['after'])
+                yield from command_records(prepare(**declaration['operands'], **declaration['parameters']),
+                                           with_reaches=with_reaches)
+            yield from command_records(declaration['after'], with_reaches=with_reaches)
             continue
         operands = declaration['operands']
         handle = layout.pipeline('', {i: value for i, value in enumerate(operands) if value is not None},
@@ -86,7 +92,8 @@ def command_records(declarations):
                 group.append(part)
                 remaining //= part
             group = tuple(group)
-        yield (handle, operands, declaration['constants'], grid, group, declaration['thread_grid'], declaration['access'])
+        record = (handle, operands, declaration['constants'], grid, group, declaration['thread_grid'], declaration['access'])
+        yield (record, declaration['reaches']) if with_reaches else record
 
 
 def linear(x, w, bias=None, act=0, x1=None, *, out=None):
@@ -270,7 +277,7 @@ def prepare_graph(module, metadata, *, materializations=()):
 
     placements, bound_storage, views, storage_layouts = Placements(), {}, [], {}
     assigned_results, assigned_owners = None, None
-    product_arguments, external_outputs = [], []
+    product_arguments, external_outputs, command_accesses = [], [], []
     page_values = []
     configuration = compiler_operands()
     reduction_groups = hardware()['gpu']['cores'] * configuration['REDUCTION_GROUPS_PER_CORE']
@@ -617,15 +624,26 @@ def prepare_graph(module, metadata, *, materializations=()):
                 declarations.append(text + f'inline long mesh_storage_{slot}(long i) '
                     f'{{ return mesh_index<{arguments.index(name)}>(mesh_logical_storage_{slot}(i * {width}l)) / {width}l; }}\n')
             source_text = ''.join(declarations) + source_text
-            if source_text in wrapper.src_to_kernel:
-                return wrapper.src_to_kernel[source_text]
             if 'error' in kernel.headers:
                 raise NotImplementedError('runtime index assertions must be resolved in the declared graph')
             access = (1 << (len(outputs) + len(inputs))) - 1 | ((1 << len(outputs)) - 1) << _stream.compilation['ACCESS_WRITE_SHIFT']
             name = f'mesh_kernel_{wrapper.next_kernel_suffix()}'
-            wrapper.src_to_kernel[source_text] = name
             types = tuple(V.graph.get_dtype(argument) for argument in arguments)
-            wrapper.header.writeline(f'{name} = mesh_native.shader({source_text!r}, "generated_kernel", {access}, {tuple(arguments)!r}, {types!r})')
+            from mesh_relation import Algebra
+            algebra, accesses = Algebra(), []
+            for node in node_schedule:
+                if not isinstance(node, SchedulerNode):
+                    continue
+                for domain in computed_domains(node.node, node._body, algebra):
+                    work = algebra.map(domain['work'], (), lambda source, target: []).domain()
+                    for side in ('reads', 'writes'):
+                        for item in domain[side].values():
+                            if item['name'] in arguments:
+                                accesses.append(dict(side=side, slot=arguments.index(item['name']), access=item, work=work,
+                                                     origins=tuple(node.node.get_origins())))
+            index = len(command_accesses)
+            command_accesses.append(tuple(accesses))
+            wrapper.header.writeline(f'{name} = mesh_native.shader({source_text!r}, "generated_kernel", {access}, {tuple(arguments)!r}, {types!r}, mesh_accesses[{index}])')
             return name
 
     class NativeScheduler(Scheduler):
@@ -970,7 +988,7 @@ def prepare_graph(module, metadata, *, materializations=()):
                 source, _ = self.codegen()
                 namespace = {'__name__': 'mesh_preparation', 'mesh_destinations': bound_storage, 'mesh_views': views,
                              'mesh_results': assigned_results, 'mesh_products': product_arguments,
-                             'mesh_external_outputs': external_outputs}
+                             'mesh_external_outputs': external_outputs, 'mesh_accesses': command_accesses}
                 records = []
                 token = _records.set(records)
                 try:
@@ -998,13 +1016,24 @@ def prepare_graph(module, metadata, *, materializations=()):
                          source=storage_layouts[name]['source'],
                          source_dtype=storage_layouts[name]['source_dtype'])
                     for slot, (name, dtype) in enumerate(zip(declaration['names'], declaration['types'], strict=True)))
+                from .operand import bound_access
+                reaches = []
+                for item in declaration['accesses']:
+                    slot = item['slot']
+                    argument, operand = declaration['arguments'][slot], declaration['operands'][slot]
+                    selected = bound_access(item['access'], item['work'], argument['source'],
+                                            argument['source_dtype'], operand.layout)
+                    reaches.append((slot, 1 if item['side'] == 'reads' else 2,
+                                    TensorView(operand.storage, selected['layout'])))
+                declaration['reaches'] = tuple(reaches)
             return dict(commands=tuple(records), output=output,
                         pages=tuple(placements.owners if assigned_owners is None else assigned_owners),
                         storage=dict(storage_layouts))
 
         def bind(self, operands, **placement):
             declared = self.emit(operands, **placement)
-            return Program(_stream.Commands(list(command_records(declared['commands']))),
+            recorded = tuple(command_records(declared['commands'], with_reaches=True))
+            return Program(_stream.Commands([record for record, _ in recorded], [reach for _, reach in recorded]),
                            declared['output'], declared['pages'])
 
         def effects(self, algebra=None):

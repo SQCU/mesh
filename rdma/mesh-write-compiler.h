@@ -1,18 +1,17 @@
-/* The view-layout arithmetic every WRITE binding is lowered with, during preparation only. Program-facing operands
-   are nccl.h's: a page table and its masks (ncclMeshWritePagesPrepare), or a view's abstract layout over a page
-   table (ncclMeshLayout, ncclMeshWriteLayoutPrepare); no address is an operand. Peers may use different row or
+/* The view-layout arithmetic every declared WRITE binding is lowered with, during preparation only.
+   Program-facing operands are ncclMeshCall's page bindings and ncclMeshLayout geometry.
+   Peers may use different row or
    span forms of the same logical bytes (design/pointer-lowering-2026-10-28.md). */
 #ifndef MESH_WRITE_COMPILER_H
 #define MESH_WRITE_COMPILER_H
 #include "nccl.h"
 typedef struct ncclMeshSpan { uint64_t offset, bytes; } ncclMeshSpan;
-/* A binding's local layout as the common WRITE compiler takes it, in bytes (ncclMeshWriteLayoutPrepare fills it from
-   ncclMeshLayout's elements; ncclMeshWritePagesPrepare from its pages). */
-struct mesh_write_layout { size_t tile_bytes, instances, instance_stride, invocations; };
+/* Local byte layout, including the declared slot relation and finite invocation domain. */
+struct mesh_write_layout { size_t tile_bytes, instances, instance_stride, invocations; int64_t invocation; };
 #ifdef __cplusplus
 extern "C" {
 #endif
-/* A strided view's bytes in logical (C) element order, the transfer order every WRITE binds (nccl.h ncclMeshWriteLayoutPrepare):
+/* A strided view's bytes in logical (C) element order, the transfer order every declared WRITE binds:
    an affine view's rows (rows[0] bytes each, rows[1] of them, rows[2] apart, ascending) and no
    span; else spans ({offset, bytes}, adjacent ones merged, a broadcast view's repeated bytes repeated) relative to its
    lowest addressed byte, *shift bytes from its first element, up to `room` of them written.  Strides are bytes;

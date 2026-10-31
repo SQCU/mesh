@@ -1,4 +1,5 @@
 #include "mesh-plan.h"
+#include "mesh-write-order.h"
 #include <errno.h>
 #include <limits.h>
 #include <stdlib.h>
@@ -70,9 +71,6 @@ static int refine_pieces(struct routed_piece **storage,size_t *length,uint64_t p
       if(!input){status=ENOMEM;break;}
       for(uint32_t k=0;k<n;k++)input[k]=pieces[first+k].transfer;
       const int room=mesh_fabric_refine(input,n,page,NULL,0);
-      /* Non-page-aligned dependencies retain their existing whole-piece proof.
-         This pass only refines representable streaming boundaries. */
-      if(room==-EINVAL){free(input);first=last;continue;}
       struct mesh_transfer *output=room<0?NULL:malloc(((size_t)room+1)*sizeof *output);
       if(room<0 || !output){free(input);status=room<0?-room:ENOMEM;break;}
       if(mesh_fabric_refine(input,n,page,output,(uint32_t)room)!=room)status=EPROTO;
@@ -329,72 +327,120 @@ static int retirement_proofs(struct routed_piece *pieces,size_t count,uint64_t p
    not complete its remote arrival or retire its source. Physical wire lists
    follow publication order. Each local consumer follows consumption order,
    which may differ for independently staged arrivals on one physical cable. */
-static int dependency_order(struct routed_piece *pieces,size_t count){
-  if(count>UINT32_MAX)return EOVERFLOW;
-  const uint32_t events=(uint32_t)count;
-  struct routed_edge *edges=NULL;
+struct transfer_endpoint {
+  uint32_t group,source,destination,cable,round,type,width,entry;
+  uint64_t elements;
+};
+static int endpoint_order(const void *left,const void *right){
+  const struct transfer_endpoint *a=left,*b=right;
+  const uint32_t x[]={a->group,a->source,a->destination,a->cable,a->round,a->type,a->width};
+  const uint32_t y[]={b->group,b->source,b->destination,b->cable,b->round,b->type,b->width};
+  for(unsigned i=0;i<sizeof x/sizeof *x;i++)if(x[i]!=y[i])return x[i]<y[i]?-1:1;
+  if(a->elements!=b->elements)return a->elements<b->elements?-1:1;
+  return (a->entry>b->entry)-(a->entry<b->entry);
+}
+static int order_edge(struct mesh_write_dependency **edges,size_t *used,size_t *room,
+                       uint32_t before,uint32_t after,enum mesh_write_dependency_kind kind){
+  if(*used==*room){
+    const size_t next=*room?2**room:1;
+    if(next<*room||next>SIZE_MAX/sizeof **edges)return EOVERFLOW;
+    struct mesh_write_dependency *made=realloc(*edges,next*sizeof *made);
+    if(!made)return ENOMEM;
+    *edges=made;*room=next;
+  }
+  (*edges)[(*used)++]=(struct mesh_write_dependency){before,after,kind};
+  return 0;
+}
+
+int mesh_transfer_order(const struct mesh_fabric *fabric,uint32_t groups,const uint32_t *first,
+                        const struct mesh_transfer *transfer,const struct mesh_transfer_production *production,
+                        uint64_t page,uint32_t *publish,uint32_t *consume){
+  if(mesh_fabric_check(fabric)||!first||!page||first[0])return EINVAL;
+  const size_t rows=(size_t)groups*fabric->nodes;
+  for(size_t row=0;row<rows;row++)if(first[row]>first[row+1])return EINVAL;
+  const uint32_t count=first[rows],arcs=2*fabric->cables;
+  if(fabric->cables>UINT32_MAX/2)return EOVERFLOW;
+  if(count&&(!transfer||!publish||!consume))return EINVAL;
+  struct mesh_write_task *tasks=calloc((size_t)count+1,sizeof *tasks);
+  struct transfer_endpoint *sent=malloc(((size_t)count+1)*sizeof *sent),
+                           *received=malloc(((size_t)count+1)*sizeof *received);
+  double *capacity=malloc(((size_t)arcs+1)*sizeof *capacity);
+  struct mesh_write_dependency *edges=NULL;
   size_t used=0,room=0;
-  int status=0;
-  for(size_t begin=0,k=0;k<count && !status;k++){
-    if(k && pieces[k].rank!=pieces[k-1].rank)begin=k;
-    const struct mesh_step *s=&pieces[k].transfer.step;
-    /* A physical arrival follows its source publication. The bridge may
-       satisfy this edge page by page; no remote software ACK is involved. */
-    for(size_t j=begin;j<=k;j++){
-      const struct mesh_step *prior=&pieces[j].transfer.step;
-      uint32_t before,after;
-      if(j==k){
-        if(s->op==MESH_STEP_SEND)continue;
-        before=2*s->round;after=before+1;
-      }else{
-        if(prior->buffer!=s->buffer || prior->first>=s->first+s->piece.elements ||
-           s->first>=prior->first+prior->piece.elements)continue;
+  uint32_t sends=0,receives=0;
+  int status=tasks&&sent&&received&&capacity?0:ENOMEM;
+  for(uint32_t cable=0;!status&&cable<fabric->cables;cable++)
+    capacity[2*cable]=capacity[2*cable+1]=fabric->cable[cable].bandwidth/8.0;
+  for(size_t row=0;!status&&row<rows;row++){
+    const uint32_t rank=(uint32_t)(row%fabric->nodes),group=(uint32_t)(row/fabric->nodes);
+    for(uint32_t k=first[row];!status&&k<first[row+1];k++){
+      const struct mesh_transfer *t=transfer+k;
+      const struct mesh_step *s=&t->step;
+      if(t->cable>=fabric->cables||s->op>MESH_STEP_COPY||!s->piece.element_bytes||
+         s->peer>=fabric->nodes||s->peer==rank||s->first>UINT64_MAX-s->piece.elements||
+         s->first+s->piece.elements>UINT64_MAX/s->piece.element_bytes){status=EINVAL;break;}
+      const struct mesh_cable *cable=fabric->cable+t->cable;
+      if(!((cable->node[0]==rank&&cable->node[1]==s->peer)||
+           (cable->node[1]==rank&&cable->node[0]==s->peer))){status=EINVAL;break;}
+      const int sending=s->op==MESH_STEP_SEND;
+      struct transfer_endpoint endpoint={group,sending?rank:s->peer,sending?s->peer:rank,
+        t->cable,s->round,s->piece.type,s->piece.element_bytes,k,s->piece.elements};
+      if(sending)sent[sends++]=endpoint;else received[receives++]=endpoint;
+      const double bytes=(double)mesh_step_bytes(s);
+      tasks[k]=(struct mesh_write_task){.arc=sending&&bytes?2*t->cable+(rank==cable->node[1]):UINT32_MAX,
+        .bytes=bytes,.first_bytes=production&&production[k].first_bytes?production[k].first_bytes:fmin(bytes,(double)page),
+        .production=production?production[k].order:0,.release=production?production[k].seconds:0};
+      for(uint32_t j=first[row];!status&&j<k;j++){
+        const struct mesh_step *prior=&transfer[j].step;
+        if(prior->buffer!=s->buffer||!prior->piece.elements||!s->piece.elements)continue;
+        const uint64_t a=prior->first*prior->piece.element_bytes,b=s->first*s->piece.element_bytes,
+                       an=mesh_step_bytes(prior),bn=mesh_step_bytes(s);
+        if(a>=b+bn||b>=a+an)continue;
         if(prior->op==MESH_STEP_SEND){
-          /* The existing in-place combine guard requires publication, not
-             transfer completion. Keep the two directions of an exchange
-             executable instead of contracting them into a false cycle. */
-          if(s->op!=MESH_STEP_REDUCE)continue;
-          before=2*prior->round;after=2*s->round+1;
+          /* A combine consumes the old local value after its publication,
+             without making an exchange wait for both opposite full arrivals. */
+          if(s->op==MESH_STEP_REDUCE)status=order_edge(&edges,&used,&room,j,k,MESH_WRITE_PUBLISHED);
         }else{
-          before=2*prior->round+1;after=2*s->round+(s->op!=MESH_STEP_SEND);
+          const int streaming=a<=b&&b+bn<=a+an&&(b-a)%page==0;
+          status=order_edge(&edges,&used,&room,j,k,streaming?MESH_WRITE_STREAMED:MESH_WRITE_COMPLETE);
         }
       }
-      if(before==after){status=EPROTO;break;}
-      if(used==room){
-        const size_t next=room?room*2:64;
-        if(next<room || next>SIZE_MAX/sizeof *edges){status=EOVERFLOW;break;}
-        struct routed_edge *grown=realloc(edges,next*sizeof *edges);
-        if(!grown){status=ENOMEM;break;}
-        edges=grown;room=next;
-      }
-      edges[used++]=(struct routed_edge){before,after};
     }
   }
-  uint32_t *indegree=calloc((size_t)events+1,sizeof *indegree);
-  uint32_t *order=malloc(((size_t)events+1)*sizeof *order);
-  size_t *first=calloc((size_t)events+1,sizeof *first);
-  if(!indegree || !order || !first)status=ENOMEM;
+  if(!status&&sends!=receives)status=EPROTO;
   if(!status){
-    if(used)qsort(edges,used,sizeof *edges,edge_order);
-    size_t unique=0;
-    for(size_t k=0;k<used;k++)if(!k || edge_order(edges+k,edges+k-1))edges[unique++]=edges[k];
-    used=unique;
-    for(size_t k=0;k<used;k++){first[edges[k].before+1]++;indegree[edges[k].after]++;}
-    for(uint32_t k=0;k<events;k++){first[k+1]+=first[k];order[k]=UINT32_MAX;}
-    for(uint32_t ordinal=0;ordinal<events;ordinal++){
-      uint32_t next=0;
-      while(next<events && (indegree[next] || order[next]!=UINT32_MAX))next++;
-      if(next==events){status=EDEADLK;break;}
-      order[next]=ordinal;
-      for(size_t k=first[next];k<first[next+1];k++)indegree[edges[k].after]--;
-    }
-    if(!status)for(size_t k=0;k<count;k++){
-      const uint32_t transaction=pieces[k].transfer.step.round;
-      pieces[k].transfer.step.round=order[2*transaction];
-      pieces[k].consume=order[2*transaction+1];
+    qsort(sent,sends,sizeof *sent,endpoint_order);qsort(received,receives,sizeof *received,endpoint_order);
+    for(uint32_t k=0;k<sends&&!status;k++){
+      struct transfer_endpoint a=sent[k],b=received[k];
+      a.entry=b.entry=0;
+      if(endpoint_order(&a,&b)){status=EPROTO;break;}
+      status=order_edge(&edges,&used,&room,sent[k].entry,received[k].entry,MESH_WRITE_STREAMED);
     }
   }
-  free(edges);free(indegree);free(order);free(first);return status;
+  if(!status)status=mesh_write_order(tasks,count,edges,used,capacity,arcs);
+  if(!status)for(uint32_t k=0;k<sends;k++){
+    const uint32_t send=sent[k].entry,receive=received[k].entry;
+    publish[send]=publish[receive]=tasks[send].order;
+    consume[send]=consume[receive]=tasks[receive].order;
+  }
+  free(tasks);free(sent);free(received);free(capacity);free(edges);return status;
+}
+
+static int dependency_order(const struct mesh_fabric *fabric,struct routed_piece *pieces,size_t count,uint64_t page){
+  if(count>UINT32_MAX)return EOVERFLOW;
+  uint32_t *first=calloc((size_t)fabric->nodes+1,sizeof *first),
+           *publication=malloc((count+1)*sizeof *publication),*consumption=malloc((count+1)*sizeof *consumption);
+  struct mesh_transfer *transfers=malloc((count+1)*sizeof *transfers);
+  int status=first&&publication&&consumption&&transfers?0:ENOMEM;
+  if(!status){
+    for(size_t k=0;k<count;k++){first[pieces[k].rank+1]++;transfers[k]=pieces[k].transfer;}
+    for(uint32_t rank=0;rank<fabric->nodes;rank++)first[rank+1]+=first[rank];
+    status=mesh_transfer_order(fabric,1,first,transfers,NULL,page,publication,consumption);
+    if(!status)for(size_t k=0;k<count;k++){
+      pieces[k].transfer.step.round=publication[k];pieces[k].consume=consumption[k];
+    }
+  }
+  free(first);free(publication);free(consumption);free(transfers);return status;
 }
 
 void mesh_routed_free(struct mesh_routed_program *p){
@@ -508,7 +554,7 @@ int mesh_routed_compile(const struct mesh_fabric *f,const struct mesh_paths *pat
     for(uint32_t r=0;r<N;r++)made.rank[r].count=0;
     for(size_t k=0;k<count;k++)made.rank[pieces[k].rank].count++;
     status=retirement_proofs(pieces,count,page);
-    if(!status)status=dependency_order(pieces,count);
+    if(!status)status=dependency_order(f,pieces,count,page);
   }
   if(!status){
     size_t at=0;

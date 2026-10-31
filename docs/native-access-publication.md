@@ -322,6 +322,12 @@ view metadata gap recorded in item 6 remains a provider requirement; this change
 
 ## Compact page-bound views — 2026-10-27
 
+This dated implementation record predates the 2026-10-30 interface consolidation.
+The current preparation boundary is `ncclMeshCommPlan` with Call buffer slots,
+pure typed views and progress operands; `ncclMeshCommEncode` records its next
+group. Both standalone WRITE preparers and their execution/serialization
+lifecycle have been removed. The older API names below describe that revision.
+
 Structural item 8 removes the row → span → page-mask → span round trip. `mesh_compile_rows` now keeps
 row width, row count and local pitch as scalar operands. Typed repeated WRITEs no longer allocate a page-mask
 array only to discard it. `mesh_compile_spans` retains the caller's declared selections without splitting each

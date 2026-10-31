@@ -178,22 +178,32 @@ static inline uint64_t mesh_segment_first(const uint64_t *segment,uint32_t q){ u
 /* design/whole-function.md#fabric */
 struct mesh_transfer { struct mesh_step step; uint32_t cable,padding; };
 int mesh_fabric_check(const struct mesh_fabric *);
-/* Refine physical SENDs where their latest preceding receive changes: a COPY's
-   interval is an identity source; REDUCE or no receive is not. Only receives in
+/* Refine physical SENDs where their latest preceding receive changes. COPY
+   and REDUCE both produce page units consumed by subsequent sends. Only receives in
    the same buffer with the same element size participate. Adjacent pieces with
-   the same latest COPY are kept whole, including where older writes overlap.
+   the same latest receive are kept whole, including where older writes overlap.
    Non-SEND transfers are unchanged; each SEND's pieces retain its order, cable,
    round, peer, type and exact coverage. Every inserted boundary is a multiple
    of page bytes from that SEND's start, so its wire page sequence is unchanged
    and its peer may retain the unsplit receive. Entry-indexed diagnostics must
    match page ranges rather than require one local entry per remote entry.
-   Returns the required count (out NULL: count only), or -errno: EINVAL for a
-   needed non-page cut or COPY-relative start, invalid operands/page, or aliased input/output; ENOSPC
+   An indivisible non-page dependency keeps its SEND whole; other SENDs still
+   refine. Returns the required count (out NULL: count only), or -errno: EINVAL for
+   invalid operands/page or aliased input/output; ENOSPC
    for insufficient room; EOVERFLOW for unrepresentable extents/count. out must
    be separate storage; a negative return leaves no usable output. No state,
    receive gate, payload copy or synchronization is introduced. */
 int mesh_fabric_refine(const struct mesh_transfer *,uint32_t count,uint64_t page,
                        struct mesh_transfer *out,uint32_t room);
+/* One preparation scheduler for physical WRITE and collective fragments.
+   first has groups*nodes+1 offsets into transfer, grouped by call then rank in
+   declared local dependency order. Production/first-packet operands are per
+   transfer; NULL production means source-ready at zero with the supplied page
+   quantum. publish/consume return paired wire and receive/combine event orders. */
+struct mesh_transfer_production { uint64_t order; double seconds,first_bytes; };
+int mesh_transfer_order(const struct mesh_fabric *,uint32_t groups,const uint32_t *first,
+                        const struct mesh_transfer *,const struct mesh_transfer_production *,uint64_t page,
+                        uint32_t *publish,uint32_t *consume);
 /* struct mesh_paths (mesh-fabric.h): allocation uses uint128_t products and integer remainders. */
 int mesh_paths_check(const struct mesh_fabric *,uint32_t source,uint32_t destination,const struct mesh_paths *);
 /* tile is the publication width in elements (0: one publication). Route the

@@ -37,7 +37,10 @@ static inline NSUInteger MetalInvocationOffset(NSUInteger offset, NSUInteger str
 // tools/mesh/schedule.py: whether MetalReplayDescribed lists its commands
 void MetalRecordingList(int on);
 // docs/kernels.md Any program
-enum { MetalReachRead = 1, MetalReachWritten = 2, MetalReachBinding = 4, MetalReachResident = 8, MetalReachAddress = 16 };
+// Observe qualifies only monotone progress reads. It retains the producer edge
+// without an anti-dependency on later publications of the same progress word.
+enum { MetalReachRead = 1, MetalReachWritten = 2, MetalReachBinding = 4, MetalReachResident = 8, MetalReachAddress = 16,
+    MetalReachObserve = 32 };
 // Binding reaches name their actual argument index. Several disjoint ranges
 // can describe one view; all follow that argument's prepared invocation slot.
 // Address reaches use binding = the command address-record ordinal.
@@ -130,6 +133,9 @@ NSData *MetalTensorSpanReaches(id<MTLBuffer> buffer, NSUInteger base, NSData *sp
 // queue. Prepare and enqueue its functions in the same order. Disjoint ranges
 // add no dependency. Transport uses this declaration for its shared counters.
 void MetalEncoderReaches(id<MTL4ComputeCommandEncoder>, const struct MetalReach *, size_t count);
+// One dispatch's accesses enter the same prepared phase frontier as replayed
+// commands. The result requests a barrier only for a real prior hazard.
+BOOL MetalEncoderOrder(id<MTL4ComputeCommandEncoder>, const struct MetalReach *, size_t count);
 // docs/kernels.md#collectives
 typedef int (^MetalCrossing)(id<MTL4ComputeCommandEncoder> encoder, id<MTL4ArgumentTable> table, id<MTLResidencySet> residency,
     NSUInteger invocation, NSUInteger mark);

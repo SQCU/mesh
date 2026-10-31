@@ -546,7 +546,7 @@ static NSUInteger MetalAllocationBase(id<MTLBuffer> buffer) {
     return [buffer respondsToSelector:@selector(heap)]&&[buffer heap]?buffer.heapOffset:0;
 }
 
-typedef void (^MetalAccess)(id<MTLBuffer> buffer, NSUInteger offset, NSUInteger bytes, BOOL load, BOOL store);
+typedef void (^MetalAccess)(id<MTLBuffer> buffer, NSUInteger offset, NSUInteger bytes, uint32_t access);
 // docs/kernels.md Any program: a command's accesses, each a buffer's bytes [offset, offset + bytes) read or written:
 // Each binding has an explicit extent or a union of binding reaches. Slot strides
 // relocate those views; neither slot strides nor allocation sizes are accesses.
@@ -556,7 +556,7 @@ static void MetalAccesses(const struct MetalRecordedDispatch *command, const str
         const BOOL load=(command->access>>j)&1,store=(command->access>>(MESH_ACCESS_WRITE_SHIFT+j))&1;
         if(!buffer||(!load&&!store)||((command->extents>>j)&1))continue;
         const NSUInteger offset=MetalInvocationOffset(command->offsets[j],command->strides[j],command->instances[j],invocation,command->invocations[j]);
-        if(command->lengths[j])each(buffer,offset,command->lengths[j],load,store);
+        if(command->lengths[j])each(buffer,offset,command->lengths[j],(load?MetalReachRead:0)|(store?MetalReachWritten:0));
     }
     for(uint32_t k=0;k<command->reaches;k++) {
         const struct MetalReach *reach=reaches+command->reach+k;
@@ -567,7 +567,7 @@ static void MetalAccesses(const struct MetalRecordedDispatch *command, const str
             offset=MetalInvocationOffset(offset,address->stride,address->instances,invocation,address->value.invocation);
         } else if(reach->access&MetalReachBinding)
             offset=MetalInvocationOffset(offset,command->strides[reach->binding],command->instances[reach->binding],invocation,command->invocations[reach->binding]);
-        each(reach->buffer,offset,reach->length,(reach->access&MetalReachRead)!=0,(reach->access&MetalReachWritten)!=0);
+        each(reach->buffer,offset,reach->length,reach->access);
     }
 }
 
@@ -670,7 +670,7 @@ static void MetalViewDefine(NSMutableDictionary *read,NSMutableDictionary *writt
     });
     MetalViewAccesses(views,^(id key,NSUInteger lo,NSUInteger hi,uint32_t access){
         if(access&MetalReachWritten)MetalSpanAdd(written,key,lo,hi,node);
-        else if(access&MetalReachRead)MetalSpanAdd(read,key,lo,hi,node);
+        else if((access&MetalReachRead)&&!(access&MetalReachObserve))MetalSpanAdd(read,key,lo,hi,node);
     });
 }
 
@@ -686,8 +686,8 @@ NSArray<NSIndexSet *> *MetalViewDependencies(NSArray<NSData *> *accesses) {
 
 static NSData *MetalCommandReaches(const struct MetalRecordedDispatch *command,const struct MetalReach *reaches,NSUInteger invocation) {
     NSMutableData *views=[NSMutableData data];
-    MetalAccesses(command,reaches,invocation,^(id<MTLBuffer> buffer,NSUInteger offset,NSUInteger bytes,BOOL load,BOOL store){
-        const struct MetalReach view={buffer,offset,bytes,(load?MetalReachRead:0)|(store?MetalReachWritten:0),-1};
+    MetalAccesses(command,reaches,invocation,^(id<MTLBuffer> buffer,NSUInteger offset,NSUInteger bytes,uint32_t access){
+        const struct MetalReach view={buffer,offset,bytes,access&~(MetalReachBinding|MetalReachAddress),-1};
         [views appendBytes:&view length:sizeof view];
     });
     return views;
@@ -762,27 +762,37 @@ void MetalEncoderReaches(id<MTL4ComputeCommandEncoder> encoder,const struct Meta
     declare([NSData dataWithBytes:reaches length:count*sizeof *reaches]);
     for(size_t i=0;i<count;i++) {
         const struct MetalReach r=reaches[i];if(!r.length)continue;
-        if(r.access&MetalReachRead)MetalRangeAdd(current->read,r.buffer,r.offset,r.offset+r.length);
+        if((r.access&MetalReachRead)&&!(r.access&MetalReachObserve))MetalRangeAdd(current->read,r.buffer,r.offset,r.offset+r.length);
         if(r.access&MetalReachWritten)MetalRangeAdd(current->written,r.buffer,r.offset,r.offset+r.length);
     }
 }
 
-static void MetalEncoderAccesses(id<MTL4ComputeCommandEncoder> encoder,const struct MetalRecordedDispatch *command,
+BOOL MetalEncoderOrder(id<MTL4ComputeCommandEncoder> encoder,const struct MetalReach *reaches,size_t count) {
+    MetalEncoderReaches(encoder,reaches,count);
+    NSArray *scope=objc_getAssociatedObject(encoder,&encoderAccessKey);
+    BOOL (^order)(NSData *)=scope[2];
+    return order([NSData dataWithBytes:reaches length:count*sizeof *reaches]);
+}
+
+static BOOL MetalEncoderAccesses(id<MTL4ComputeCommandEncoder> encoder,const struct MetalRecordedDispatch *command,
     const struct MetalReach *reaches,NSUInteger invocation) {
     NSData *views=MetalCommandReaches(command,reaches,invocation);
-    MetalEncoderReaches(encoder,views.bytes,views.length/sizeof(struct MetalReach));
+    return MetalEncoderOrder(encoder,views.bytes,views.length/sizeof(struct MetalReach));
 }
 
 // Lower the same relation to a serial sequence of GPU phases. An emitted
 // barrier already covers all earlier phases, so their frontier can be dropped.
-static BOOL MetalOrder(NSMutableDictionary *read,NSMutableDictionary *written,NSUInteger *phase,
-    const struct MetalRecordedDispatch *command,const struct MetalReach *reaches,NSUInteger invocation) {
-    NSData *views=MetalCommandReaches(command,reaches,invocation);
+static BOOL MetalOrderViews(NSMutableDictionary *read,NSMutableDictionary *written,NSUInteger *phase,NSData *views) {
     NSIndexSet *prior=MetalViewPrior(read,written,views);
     const NSUInteger level=prior.count?MAX(*phase,prior.lastIndex+1):*phase;
     BOOL barrier=level!=*phase;
     if(barrier){[read removeAllObjects];[written removeAllObjects];}
     MetalViewDefine(read,written,views,level);*phase=level;return barrier;
+}
+
+static BOOL MetalOrder(NSMutableDictionary *read,NSMutableDictionary *written,NSUInteger *phase,
+    const struct MetalRecordedDispatch *command,const struct MetalReach *reaches,NSUInteger invocation) {
+    return MetalOrderViews(read,written,phase,MetalCommandReaches(command,reaches,invocation));
 }
 
 static void MetalDataflow(MetalCapture *capture) {
@@ -953,7 +963,8 @@ static NSString *MetalCommandLine(const struct MetalRecordedDispatch *command,co
     __block NSUInteger read=0,written=0;
     for(NSUInteger j=0;j<MESH_MEMORY_BINDINGS;j++)memory+=command->memory[j];
     NSMutableString *names=[NSMutableString string],*bindings=[NSMutableString string];
-    MetalAccesses(command,reaches,0,^(id<MTLBuffer> buffer,NSUInteger offset,NSUInteger bytes,BOOL load,BOOL store) {
+    MetalAccesses(command,reaches,0,^(id<MTLBuffer> buffer,NSUInteger offset,NSUInteger bytes,uint32_t access) {
+        const BOOL load=(access&MetalReachRead)!=0,store=(access&MetalReachWritten)!=0;
         if(load)read+=bytes;
         if(store)written+=bytes;
         if(buffer.label.length)[names appendFormat:@" %@:%s%s",buffer.label,load?"r":"-",store?"w":"-"];
@@ -1350,7 +1361,8 @@ struct MetalSchedule *MetalScheduleCreateOn(id<MTL4CommandQueue> queue, enum Met
         MetalViewDefine(s->externalRead,s->externalWritten,MetalQueueViews(previous),0);
         MetalQueueAccess *current=[MetalQueueAccess new];
         void (^declare)(NSData *)=^(NSData *views){MetalScheduleAccesses(s,views);};
-        objc_setAssociatedObject(s->encoder,&encoderAccessKey,@[current,[[declare copy] autorelease]],OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        BOOL (^order)(NSData *)=^(NSData *views){return MetalOrderViews(s->read,s->written,&s->phase,views);};
+        objc_setAssociatedObject(s->encoder,&encoderAccessKey,@[current,[[declare copy] autorelease],[[order copy] autorelease]],OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         [current release];
     }
     if(!s->queue||!s->command||!s->residency||!s->allocator||!s->table||!s->encoder) {
@@ -1432,9 +1444,8 @@ static void MetalScheduleComputeNow(struct MetalSchedule *s,id<MTLComputePipelin
         [s->owners addObject:b.buffer];
         [s->residency addAllocation:b.buffer];
     }
-    BOOL barrier=MetalOrder(s->read,s->written,&s->phase,&command,NULL,0);
-    MetalEncoderAccesses(s->encoder,&command,NULL,0);
-    if(barrier)[s->encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+    BOOL barrier=MetalEncoderAccesses(s->encoder,&command,NULL,0);
+    if(barrier)[s->encoder barrierAfterEncoderStages:MTLStageDispatch|MTLStageBlit beforeEncoderStages:MTLStageDispatch|MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
     MetalReplayDispatch4(s->encoder,s->table,&view,&command,0);
 }
 
@@ -1476,7 +1487,7 @@ static int MetalScheduleCrossWork(struct MetalSchedule *root,NSData *accesses,co
     const ncclMeshAccess *source=records.bytes;
     for(size_t k=0;k<count;k++) {
         const uint32_t access=(source[k].access&ncclMeshAccessRead?MetalReachRead:0)|
-            (source[k].access&ncclMeshAccessWritten?MetalReachWritten:0);
+            (source[k].access&ncclMeshAccessWritten?MetalReachWritten:0)|(source[k].access&ncclMeshAccessObserve?MetalReachObserve:0);
         const struct MetalReach view={(id)source[k].storage.buffer,source[k].storage.offset,source[k].bytes,access,-1};
         [declared appendBytes:&view length:sizeof view];
     }
@@ -1487,7 +1498,6 @@ static int MetalScheduleCrossWork(struct MetalSchedule *root,NSData *accesses,co
         s->commands++;
         MetalEncoderReaches(s->encoder,accesses.bytes,accesses.length/sizeof(struct MetalReach));
         error=cross(s->encoder,s->table,s->residency,0,0);
-        [s->read removeAllObjects];[s->written removeAllObjects];
     },nil);
     // Realization produces publication operands used by subsequent compilation.
     // The persistent frontier keeps those calls' data edges across this flush.
@@ -1545,16 +1555,15 @@ static void MetalScheduleRangeNow(struct MetalSchedule *root,struct MetalReplay 
     NSUInteger pending=t*n+from;
     for(NSUInteger c=pending;c<t*n+to;c++) @autoreleasepool {
         const struct MetalRecordedDispatch *source=records+c%n;
-        MetalEncoderAccesses(encoder,source,reaches,t);
-        BOOL barrier=MetalOrder(s->read,s->written,&s->phase,source,reaches,t);
+        BOOL barrier=MetalEncoderAccesses(encoder,source,reaches,t);
         if(made==MetalFormEncoded) {
-            if(barrier)[encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+            if(barrier)[encoder barrierAfterEncoderStages:MTLStageDispatch|MTLStageBlit beforeEncoderStages:MTLStageDispatch|MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
             MetalReplayDispatch4(encoder,s->table,replay,source,t);
         } else if(barrier&&(!barriers[c]||c==pending)) {
             MetalReplaySegments(replay,NSMakeRange(pending,c-pending),^(id<MTLIndirectCommandBuffer> segment,NSRange local){
                 [encoder executeCommandsInBuffer:segment withRange:local];
             });
-            [encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+            [encoder barrierAfterEncoderStages:MTLStageDispatch|MTLStageBlit beforeEncoderStages:MTLStageDispatch|MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
             pending=c;
         }
     }
@@ -1583,14 +1592,10 @@ static void MetalScheduleCopyNow(struct MetalSchedule *root,id<MTLBuffer> source
     [s->residency addAllocation:source];[s->residency addAllocation:destination];
     id<MTL4ComputeCommandEncoder> encoder=s->encoder;
     const struct MetalReach views[]={{source,from,bytes,MetalReachRead,-1},{destination,to,bytes,MetalReachWritten,-1}};
-    MetalEncoderReaches(encoder,views,sizeof views/sizeof *views);
-    // ordered after and before every other command, as a crossing is: its reaches are bytes no recorded access names
-    [encoder barrierAfterEncoderStages:MTLStageDispatch|MTLStageBlit beforeEncoderStages:MTLStageDispatch|MTLStageBlit
-        visibilityOptions:MTL4VisibilityOptionDevice];
+    if(MetalEncoderOrder(encoder,views,sizeof views/sizeof *views))
+        [encoder barrierAfterEncoderStages:MTLStageDispatch|MTLStageBlit beforeEncoderStages:MTLStageDispatch|MTLStageBlit
+            visibilityOptions:MTL4VisibilityOptionDevice];
     [encoder copyFromBuffer:source sourceOffset:from toBuffer:destination destinationOffset:to size:bytes];
-    [encoder barrierAfterEncoderStages:MTLStageDispatch|MTLStageBlit beforeEncoderStages:MTLStageDispatch|MTLStageBlit
-        visibilityOptions:MTL4VisibilityOptionDevice];
-    [s->read removeAllObjects];[s->written removeAllObjects];
 }
 
 // metal-recording.h MetalScheduleCopy

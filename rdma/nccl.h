@@ -279,7 +279,7 @@ struct mesh_trees;
 #include "metal-capabilities.h"
 #include "mesh-fabric.h"
 #define NCCL_MESH_POLLS MESH_POLL_LIMIT
-/* The stream: NULL (the host path) or an ncclMeshStream (the Metal path, above). */
+/* Recording context: an ncclMeshStream supplied by the common function recorder. */
 typedef void *cudaStream_t;
 typedef struct { void *buffer; size_t offset; } ncclMeshBuffer;
 /* Fused publication and landing bindings, in physical channel order. Each
@@ -309,8 +309,7 @@ typedef struct {
   void *residencySet;
   uint32_t polls;
   ncclMeshFused *fused;
-  /* the group's invocation: each declared binding's slot (invocation + displacement) % instances (ncclMeshBufferSlots); a WRITE's is
-     its execution's (ncclMeshWriteExecute) */
+  /* Each declared binding uses (invocation + displacement) % instances. */
   size_t invocation;
 } ncclMeshStream;
 /* ncclCollConfig_t.launchCompletionEvent: not used; must be NULL. */
@@ -1026,7 +1025,6 @@ ncclResult_t ncclMeshCommRealized(ncclComm_t comm);
    their selected bytes form the same logical message in list order.
    Allocation stays alive through execution. Table metadata may be destroyed
    once the WRITE has been prepared; its immutable descriptors own the binding. */
-typedef struct ncclMeshWritePlan *ncclMeshWritePlan_t;
 typedef struct ncclMeshPageTable *ncclMeshPageTable_t;
 typedef struct { uint64_t page, first, count; } ncclMeshPageMask;
 ncclResult_t ncclMeshPageTableCreate(const void* local, ncclComm_t comm, int metal, ncclMeshPageTable_t* out);
@@ -1052,84 +1050,32 @@ ncclResult_t ncclMeshPageTableBacking(ncclMeshPageTable_t table, ncclMeshPageBac
 /* Local base of the prepared page view; creates no backend resource. */
 ncclResult_t ncclMeshPageTableAddress(ncclMeshPageTable_t table, const void** address);
 ncclResult_t ncclMeshPageTableDestroy(ncclMeshPageTable_t table);
-/* Preparation-only accesses of the next compiled group(s). A standalone WRITE
-   supplies its already prepared plan; otherwise the communicator's declared
-   order selects each definition. Querying consumes no issue or channel prefix.
+/* Preparation-only accesses of the next compiled group(s). The communicator's
+   declared order selects each definition. Querying consumes no issue or channel prefix.
    groups counts actual group calls; a fused group's repetitions are one call.
    Only active channel/list directions appear. Their progress words order the
    same physical descriptor lists whose exact spans are bound when encoded. */
 typedef struct ncclMeshGroup {
   ncclComm_t comm;
-  ncclMeshWritePlan_t write;
   size_t invocation;
   uint64_t groups;
 } ncclMeshGroup;
-enum { ncclMeshAccessRead = 1, ncclMeshAccessWritten = 2 };
+/* Observe qualifies a monotone progress read: it requires the preceding
+   publication, but does not prevent a later publication from advancing it. */
+enum { ncclMeshAccessRead = 1, ncclMeshAccessWritten = 2, ncclMeshAccessObserve = 4 };
 typedef struct { ncclMeshBuffer storage; size_t bytes; uint32_t access; } ncclMeshAccess;
 /* With accesses NULL return required count; otherwise *count is capacity. */
 ncclResult_t ncclMeshGroupAccesses(const ncclMeshGroup* group, ncclMeshAccess* accesses, size_t* count);
-/* A repeated local binding. Instance selection happens while compiling commands;
-   execution reads the resulting page lists. Each rank supplies its own period
-   and page stride in its local table. tile_bytes is common logical publication geometry, 0 for a
-   single publication. invocations is the common function extent; each local
-   binding period can differ. A relay can retain a distinct slot per invocation. */
-typedef struct { size_t tile_bytes, instances, instance_pages, invocations; } ncclMeshWriteLayout;
-/* Affine metadata table: tile t, invocation i names
+/* Affine progress table. Tile t of invocation i names
    (i % instances)*instance_stride + (t/columns)*row_stride + (t%columns)*tile_stride.
-   All strides are bytes. These indices are resolved during preparation. */
+   All strides are bytes; preparation resolves these indices. */
 typedef struct { size_t columns, tile_stride, row_stride, instances, instance_stride; } ncclMeshTileLayout;
-ncclResult_t ncclMeshWritePagesPrepare(ncclMeshPageTable_t table, const ncclMeshPageMask* masks, size_t count,
-    int source, int destination, size_t max_packet, ncclMeshWriteLayout layout, ncclMeshWritePlan_t* out);
-/* A view of a page table's storage, in elements: each `element_bits` bits (sub-byte ones too: the innermost axis then
-   packs whole bytes), `rank` axes of `shape` elements `strides` elements apart, its first element `offset` elements past
-   the table's first byte; or, where `runs` (not NULL), a mapped view's `nruns` runs in logical order, each its first
-   element's offset past the table's first byte and its element count (runs[2k], runs[2k + 1]).  `frames` (0 or 1: one)
-   equal frames of a contiguous view, `frame_stride` elements apart, are one train compiled once, each frame its own
-   publication (a ring of slots, a chain's steps); each rank's stride its own.  `instances` (0 or 1: one) slots of the
-   view, `instance_stride` elements apart, are its binding's period: invocation i reads or lands in slot i % instances
-   (each rank's period and stride its own; the WRITE's ncclMeshWriteLayout then names only what every rank shares, its
-   tile bytes and invocations).  Abstract layout, never an
-   address: preparation lowers it to the table's pages, affine rows where it is affine, else its spans in logical order
-   (mesh-write-compiler.h mesh_view_layout). */
-typedef struct { ncclMeshPageTable_t storage; uint32_t element_bits, rank; const uint64_t* shape; const int64_t* strides;
-                 uint64_t offset; const uint64_t* runs; size_t nruns; uint32_t frames; int64_t frame_stride;
-                 uint64_t instances; int64_t instance_stride; } ncclMeshLayout;
-/* The WRITE whose local view is `local`: the source's values on `source`, the landing on `destination`, a relay's on any
-   other rank; every rank's view holds the same logical bytes, in its own layout.  On a rank that ends neither side,
-   `local` over an empty table (ncclMeshPageTableCreate(NULL, comm, metal, &table)) is the library's relay: where an
-   installed path of nonzero weight crosses this rank (any, where none is installed), a lease of the region the plan
-   holds, its layout's logical bytes a slot for each of its frames and instances (its shape or runs, element bits, frames
-   and instances read; its strides and offset not); elsewhere no pages.  The plan returns the lease as it is destroyed
-   and its last execution ends. */
-ncclResult_t ncclMeshWriteLayoutPrepare(const ncclMeshLayout* local, int source, int destination, size_t max_packet,
-    ncclMeshWriteLayout layout, ncclMeshWritePlan_t* out);
-/* Bind source words once (ncclMeshBuffer on Metal, region address on host).
-   Only the source supplies the words and their local layout. All ranks supply
-   the same value. value covers one logical tile (the entire write when
-   tile_bytes is 0). Each tile/occurrence has its own word or nonoverlapping value
-   interval. Initial words are below value - largest_tile_bytes + 1 (using
-   the whole byte count for an untiled write); no reset may race an earlier reader.
-   A relay still reads its incoming landed word. */
-ncclResult_t ncclMeshWriteSourceReady(ncclMeshWritePlan_t plan, const void* words, uint64_t value, ncclMeshTileLayout layout);
-/* Destination records are { uint64_t count; ncclMeshBinding bindings[capacity]; }
-   in the supplied affine table. Compilation fills each tile's last incoming
-   prefix per physical channel, without a whole-write completion command.
-   Plans in one group may share records for tiles consumed together; compilation
-   then takes the last incoming prefix across those contributors on each cable. */
-ncclResult_t ncclMeshWriteLandings(ncclMeshWritePlan_t plan, void* records, uint32_t capacity, ncclMeshTileLayout layout);
-/* Execution binds what preparation made: a WRITE alone in its group (not on a fused stream), where the communicator has
-   no declaration (ncclMeshCommPlan), the definition its plan compiled as it was prepared (an untiled plan's), its issues
-   laid and placed once a generation; otherwise, and for WRITEs grouped together, its group's declared definition. */
-ncclResult_t ncclMeshWriteExecute(ncclMeshWritePlan_t plan, size_t invocation, cudaStream_t stream);
-ncclResult_t ncclMeshWritePlanDestroy(ncclMeshWritePlan_t plan);
-/* design/replay-templates-2026-10-29.md: the calls `plan` was made by (its page table's storage, its prepare, and the
-   readiness and landings set on it since), flat: `length` bytes, and the `count` places in them that name memory or the
-   communicator, each its offset and its kind (0 a host address, 1 an ncclMeshBuffer, 2 a communicator). With bytes,
-   places and kinds NULL, only their sizes (0: none); else each holds at least as many. */
-ncclResult_t ncclMeshWritePlanDeclaration(ncclMeshWritePlan_t plan, void* bytes, size_t* length, size_t* places,
-    uint32_t* kinds, size_t* count);
-/* The WRITE plan such bytes declare, made on every rank as its prepare is (its landing records its own). */
-ncclResult_t ncclMeshWritePlanDeclared(const void* bytes, size_t length, ncclMeshWritePlan_t* out);
+/* Local geometry over a call's page binding. Elements have element_bits bits.
+   shape and strides describe an affine view. runs, when present, instead names
+   pairs of element offsets and counts in logical order. offset and frame_stride
+   use elements. This declaration contains no storage or separate lifetime. */
+typedef struct { uint32_t element_bits, rank; const uint64_t* shape; const int64_t* strides;
+                 uint64_t offset; const uint64_t* runs; size_t nruns; int64_t frame_stride; } ncclMeshLayout;
 /* A call a program declares ahead (ncclMeshCommPlan): `what` (ncclMeshCallAllReduce, ncclMeshCallBroadcast,
    ncclMeshCallReduce, ncclMeshCallReduceScatter, ncclMeshCallAllGather, ncclMeshCallAlltoAllV or ncclMeshCallWrite:
    the first five the planner's mesh-plan.h MESH_*), its `peer` (a
@@ -1139,7 +1085,8 @@ ncclResult_t ncclMeshWritePlanDeclared(const void* bytes, size_t length, ncclMes
    `count` of it is the WRITE's bytes, all a WRITE moves: its values' type is its producer's and consumer's), `op` (a
    reduction's), and `group`: consecutive calls of one number are one group (ncclGroupStart to ncclGroupEnd; a call
    outside one its own group). ncclMeshPlanRun supplies their invocation order. `fused` (not 0): the call is
-   issued on a fused stream (ncclMeshStream fused). It uses the same physical striping and routed-write
+   recorded with a fused record sink (ncclMeshStream fused). All calls in a
+   group share that sink and frame count. It uses the same physical striping and routed-write
    representation as other calls; fusion changes publication/consumption encoding, not available cables. */
 enum { ncclMeshCallAllReduce = 0, ncclMeshCallBroadcast = 1, ncclMeshCallReduce = 2, ncclMeshCallReduceScatter = 3,
        ncclMeshCallAllGather = 4, ncclMeshCallAlltoAllV = 18, ncclMeshCallWrite = 19 };
@@ -1166,9 +1113,10 @@ static inline size_t ncclMeshInvocationIndex(uint64_t invocation, int64_t displa
   return (size_t)index;
 }
 /* A prepared operand's page-backed local view and its storage slots. Zero
-   stride names one view. Nonzero stride requires the declared slot count;
-   invocation i (its stream's: ncclMeshStream invocation; 0 on the host path) binds
-   buffer.offset + ((i + invocation) mod instances) * stride bytes. The signed
+   stride names one view. instances=0 uses the finite invocation domain; a
+   positive instances count declares cyclic storage. An
+   invocation i (ncclMeshStream invocation) binds the indexed slot * stride
+   bytes past buffer.offset; linear slots use i + invocation directly. The signed
    displacement is independent of buffer.offset. A group is laid and placed for
    every slot as it is declared, and its issue names none. */
 typedef struct { ncclMeshBuffer buffer; size_t stride, instances; int64_t invocation; } ncclMeshBufferSlots;
@@ -1198,6 +1146,20 @@ typedef struct {
      Preparation joins endpoint and relay backing cuts in common byte domains,
      across all declared slots, without splitting numerical rows. */
   const ncclMeshBufferSlots* bindings;
+  /* Source and result geometry, in bindings order. NULL means contiguous.
+     frames (0 or 1: one) repeats the same logical transfer; each view supplies
+     its frame stride. max_packet is the declared physical packet bound. */
+  const ncclMeshLayout* views;
+  uint32_t frames;
+  size_t max_packet;
+  /* Source publication words and destination landing records are page operands
+     of this declaration. Relays consume their incoming publication prefixes.
+     Landing records hold {count, bindings[land_capacity]}; preparation fills
+     each tile's incoming prefixes across all contributing physical cables. */
+  ncclMeshBuffer source_ready, landings;
+  uint64_t ready_value;
+  ncclMeshTileLayout ready_layout, land_layout;
+  uint32_t land_capacity;
 } ncclMeshCall;
 /* A communicator's plan (ncclMeshCommPlan): its `groups` declared groups, the groups one pass of its order issues
    (`issues`, the sum of each block's count times repeat), the number of the communicator's group the order starts at (`first`: its groups
@@ -1221,6 +1183,9 @@ typedef struct { uint32_t first, count; uint64_t repeat; } ncclMeshPlanRun;
    count=0 and runs=0 drop the declaration. Every rank supplies the same order. */
 ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall* calls, int count,
     const ncclMeshPlanRun* order, size_t runs, const ncclMeshPlan** plan);
+/* Record the next declared group into the supplied prepared stream. All page
+   bindings and geometry come from CommPlan; this call supplies no operands. */
+ncclResult_t ncclMeshCommEncode(ncclComm_t comm, cudaStream_t stream);
 /* design/replay-templates-2026-10-29.md: the declaration comm's plan was made from, flat: `length` bytes, and the
    `count` offsets in them of each binding's ncclMeshBuffer. With bytes and places NULL, only their sizes (0: no plan);
    else each holds at least as many. */

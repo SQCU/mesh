@@ -8,8 +8,7 @@ from pathlib import Path
 
 import torch
 
-from . import _stream, argmax, empty, fused, partition
-from .backend import Call, WRITE
+from . import _stream, argmax, empty, fused
 from .streamed import instance
 
 
@@ -124,27 +123,23 @@ def operands(a, b, inputs, outputs, group, batch, resident_tiles, input_frames, 
     # (_stream.write_entries: libnccl-mesh's ncclMeshCommWriteEntries, over the compile its WRITE steps take)
     per_frame = _stream.write_entries(group.group_name, 0, list(range(1, group.size())), rows * width, inputs.element_size())
     input_frames = max(1, min(input_frames, _stream.STREAM_ENTRIES // 2 // max(1, per_frame)))
-    input_calls = [Call(WRITE, rows * width, inputs.dtype, root=0, destination=rank, fused=True)
-                   for rank in range(1, group.size())]
-    calls = [(input_calls, min(input_frames, steps))]
+    counts = Counter()
     first = 0
     while first < steps:
         count = min(batch, steps - first, input_frames - first % input_frames)
-        if first % input_frames == 0 and first + input_frames < steps:
-            calls.append((input_calls, min(input_frames, steps - first - input_frames)))
-        calls.append((partition.summed(X, group), count))
-        counts.append(count)
+        counts[count] += 1
         first += count
-    return calls, (_stream.chain_slot(), kernel, ready, products, linear, [At, Bt, inputs, outputs, X, Y, X, arrivals],
-                   [1, 0, *words, 0, width, rows, 0, 0], workers, threads, group.group_name,
-                   group.size(), batch, input_frames, Counter(counts))
+    for repeats, batches in counts.items():
+        _stream.fused_prepare(X, None, 0, [X.shape[0]] * group.size(), group.group_name, True, repeats, batches)
+    index = _stream.chain_slot()
+    _stream.prepare_chain(index, kernel, ready, products, linear, [At, Bt, inputs, outputs, X, Y, X, arrivals],
+        [1, 0, *words, 0, width, rows, 0, 0], workers, threads, group.group_name, group.size(), batch, input_frames)
+    from .fused import calls as bound_calls
+    return [(bound_calls(records), records[0]['frames']) for records in _stream.chain_declarations(index) if records], (index,)
 
 
 def prepare(operands):
-    """Bind the current physical routes to already allocated numerical pages."""
-    index, kernel, ready, products, linear, buffers, words, workers, threads, group, ranks, batch, input_frames, counts = operands
-    x = buffers[4]
-    for repeats, batches in counts.items():
-        _stream.fused_prepare(x, None, 0, [x.shape[0]] * ranks, group, True, repeats, batches)
-    _stream.prepare_chain(index, kernel, ready, products, linear, buffers, words, workers, threads, group, ranks, batch, input_frames)
+    """Record the already declared invocation sequence through the common plan."""
+    index, = operands
+    _stream.chain_record(index)
     return index

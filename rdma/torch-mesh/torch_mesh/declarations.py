@@ -276,7 +276,7 @@ def _bind_exchange(source, destination, plan, group):
         else:
             value = torch.empty(read.count, dtype=source.dtype, device='meta')
         deliveries.append((value, a, b))
-    return group.prepare_writes(deliveries) if deliveries else None
+    return group.prepare_writes(deliveries) if deliveries else (None, [])
 
 
 def effects(nodes):
@@ -769,16 +769,24 @@ def trace(function, *arguments, parameters=()):
 
 class Execution:
     """Configuration which appends every numerical span and crossing to one native function."""
-    def __init__(self, steps, output=None, pages=()):
+    def __init__(self, steps, output=None, pages=(), initializations=()):
         from . import _stream
         self.steps, self.output, self.pages = tuple(steps), output, tuple(pages)
+        self.initializations = tuple(initializations)
+        self._initialized = False
         self.executions = _stream.Executions(output)
         self.forward = self.executions.run
         self.completion = self.executions.completion
 
     def append(self, schedule):
+        # This is declaration-time state: only the first prepared invocation
+        # contains imports. Runtime submits the already recorded schedules.
+        if not self._initialized:
+            for source, destination in self.initializations:
+                schedule.copy(source, destination)
         for step in self.steps:
             step.append(schedule)
+        self._initialized = True
 
     def realize(self, repetitions=1):
         from . import _stream
@@ -789,8 +797,8 @@ class Execution:
             self.executions.add(schedule)
 
 
-def execution_sequence(steps, output=None, pages=()):
-    return Execution(steps, output, pages)
+def execution_sequence(steps, output=None, pages=(), initializations=()):
+    return Execution(steps, output, pages, initializations)
 
 
 _BOUND = {'all_to_all_single', 'merge_partials', 'reduce_scatterv', 'allgatherv', 'allgatherv_out', 'select_exchange', 'select_reduce',
@@ -977,6 +985,7 @@ class BoundGraph:
             self.prepared = ownership['prepared']
             self.groups, self.steps = {}, []
             self._bind_owned(ownership, destinations)
+            self.execution.initializations = tuple(graph.meta.get('mesh_initializations', ()))
             return
         from .compilation import lift_attributes
         if prepared is None:
@@ -1101,12 +1110,12 @@ class BoundGraph:
                 native = dist.distributed_c10d._resolve_process_group(metadata['group_name'])
                 declarations = lower(module)
                 if target is torch.ops.torch_mesh.select_exchange.default:
-                    prepared = _bind_exchange(named['x'], tree_flatten(targets)[0][0],
+                    prepared, calls = _bind_exchange(named['x'], tree_flatten(targets)[0][0],
                                               _exchange_plan(crossing, metadata), native)
                     if prepared is not None:
                         self.steps.append(prepared)
-                    for name, calls in declarations.items():
-                        self.groups.setdefault(name, []).extend(calls)
+                    if calls:
+                        self.groups.setdefault(metadata['group_name'], []).append(calls)
                     values.update(zip(exported, targets))
                     continue
                 if target is torch.ops.torch_mesh.select_reduce.default:
@@ -1120,11 +1129,11 @@ class BoundGraph:
                     continue
                 gathers = _gathers(target, named, targets, native)
                 if gathers is not None:
-                    prepared = backend.bind_gather_views(gathers, native)
+                    prepared, calls = backend.bind_gather_views(gathers, native)
                     if prepared is not None:
                         self.steps.append(prepared)
-                    for name, calls in declarations.items():
-                        self.groups.setdefault(name, []).extend(calls)
+                    if calls:
+                        self.groups.setdefault(metadata['group_name'], []).append(calls)
                     values.update(zip(exported, targets))
                     continue
                 if target is torch.ops.torch_mesh.reduce_scatterv.default:
@@ -1150,7 +1159,8 @@ class BoundGraph:
             values.update(zip(exported, targets))
         output = next(node for node in graph.graph.nodes if node.op == 'output')
         self.output = map_arg(output.args[0], values.__getitem__)
-        self.execution = execution_sequence(self.steps, self.output, placements.owners)
+        self.execution = execution_sequence(self.steps, self.output, placements.owners,
+                                           graph.meta.get('mesh_initializations', ()))
 
     def _bind_owned(self, ownership, destinations):
         """Bind explicit work and delivery assignments to the existing recorder."""
@@ -1267,11 +1277,9 @@ class BoundGraph:
                                                     [step['destinations'][peer] for peer in peers], algebra=algebra)
                     source = placed(binding, step['sources'][coordinate])
                     destination = placed(binding, step['destinations'][coordinate])
-                    command = _bind_exchange(source, destination, transfers, group)
+                    command, calls = _bind_exchange(source, destination, transfers, group)
                     if command is not None:
                         self.steps.append(command)
-                        calls = [backend.Call(backend.WRITE, read.count, source.dtype, root=a, destination=b, fused=True)
-                                 for a, b, read, write in transfers if a != b]
                         self.groups.setdefault(group.group_name, []).append(calls)
             for (key, binding), operand, request in zip(output_bindings.items(), plan['results'], requested, strict=True):
                 available[original(key)] = dict(selection=request['selection'], operand=operand)

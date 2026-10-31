@@ -94,15 +94,14 @@ the actual cluster. Extra transfer accounting is not required to report that pai
 splits a typed operand among them. It emits one matching send and copy per path
 hop, with no reduction or payload transformation at a
 relay. Every rank declares `ncclMeshCallWrite` with the same source, destination,
-and element count; each supplies a registered landing buffer of that extent.
-Only the source reads its source buffer and only the destination's complete
-landing buffer is an output. Other ranks' buffers are relay storage.
+and element count. Source and destination supply their local buffer slots and optional typed views.
+Only the source reads its source values and only the destination writes its output.
+The communicator compiler allocates relay storage for the selected routes.
 
 `ncclMeshCommWriteRoutes` installs paths in the communicator's configuration.
-`ncclMeshWritePrepare`, `ncclMeshWriteRowsPrepare` and `ncclMeshWriteSpansPrepare` bind exact source/landing
-extents and jointly compile registration/packet cuts before execution;
-`ncclMeshWriteExecute` reuses that plan. The interface that combined preparation
-and execution has been removed. A relay's send reads its receive's registered
+`ncclMeshCommPlan` binds exact source/landing views and jointly compiles registration/packet cuts
+with the complete function. Frames and producer progress are explicit Call fields.
+`ncclMeshCommEncode` records its next group; no separate WRITE plan or execution interface exists. A relay's send reads its receive's registered
 interval directly and uses the incoming stream's landed prefix as its supplied
 word. It can forward a completed span without a host round trip or whole-operand
 join. Path weights describe total flow; realization conserves bytes without a

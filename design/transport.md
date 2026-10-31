@@ -154,10 +154,10 @@ queue-pair numbers, packet sequence numbers and GIDs the hardware assigns at eac
 endpoint exchange): HELLO and LINK on the control socket, once a pairing. RECORD carries each node's links and memory
 (the map), which is data, not a dialogue.
 
-Before execution, both ends have equal payload lengths and unit order. `ncclMeshWritePagesPrepare` and the
-[tensor adapters](../rdma/mesh-write-compiler.h) resolve local page selections and exchange shape metadata
-through the existing bootstrap while realizing the plan. `ncclMeshWriteExecute` exchanges neither that metadata
-nor acknowledgments. Affine rows stay in a fixed-size report. Peers may use different row pitches, row shapes or
+Before execution, both ends have equal payload lengths and unit order. `ncclMeshCommPlan` consumes
+Call bindings and typed views through the [shared tensor lowerer](../rdma/mesh-write-compiler.h), resolving local
+page selections and exchanging shape metadata through the existing bootstrap. `ncclMeshCommEncode` records the
+next declared group; numerical execution exchanges neither that metadata nor acknowledgments. Affine rows stay in a fixed-size report. Peers may use different row pitches, row shapes or
 indexed selections for the same message. The [common cut builder](../rdma/nccl-mesh.c) includes actual layout
 discontinuities, each binding occurrence's registration boundaries, publication tiles and the packet limit.
 Typed repeats retain the [modular repeat compiler](../rdma/mesh-span-plan.h). Only final DMA descriptors are

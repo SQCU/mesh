@@ -61,6 +61,8 @@ int mesh_fabric_refine(const struct mesh_transfer *in,uint32_t count,uint64_t pa
     qsort(cuts,n,sizeof *cuts,mesh_cut_order);
     const uint64_t quantum=mesh_page_quantum(page,s->piece.element_bytes);
     uint64_t first=s->first;
+    const uint64_t begin=written;
+    int whole=0;
     int64_t owner=-2;
     for(size_t i=0;i+1<n;i++){
       if(cuts[i]==cuts[i+1])continue;
@@ -70,12 +72,12 @@ int mesh_fabric_refine(const struct mesh_transfer *in,uint32_t count,uint64_t pa
         if(prior->op==MESH_STEP_SEND || prior->buffer!=s->buffer ||
            prior->piece.element_bytes!=s->piece.element_bytes || prior->first>cuts[i] ||
            prior->first+prior->piece.elements<=cuts[i])continue;
-        if(prior->op==MESH_STEP_COPY)next=j;
+        next=j;
         break;
       }
-      if(next>=0 && next!=owner && (cuts[i]-in[next].step.first)%quantum){error=-EINVAL;break;}
+      if(next>=0 && next!=owner && (cuts[i]-in[next].step.first)%quantum){whole=1;break;}
       if(owner!=-2 && next!=owner){
-        if((cuts[i]-s->first)%quantum){error=-EINVAL;break;}
+        if((cuts[i]-s->first)%quantum){whole=1;break;}
         if(out && written<room){
           out[written]=in[k];out[written].step.first=first;
           out[written].step.piece.elements=cuts[i]-first;
@@ -84,6 +86,9 @@ int mesh_fabric_refine(const struct mesh_transfer *in,uint32_t count,uint64_t pa
       }
       owner=next;
     }
+    /* The packet operand determines representable streaming cuts. An indivisible
+       dependency keeps this SEND whole, without suppressing other SEND cuts. */
+    if(whole){written=begin;first=s->first;}
     if(!error){
       if(out && written<room){
         out[written]=in[k];out[written].step.first=first;

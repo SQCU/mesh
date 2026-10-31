@@ -139,98 +139,20 @@ uint64_t metal_signaled(void *event) { return ((id<MTLSharedEvent>)event).signal
 int metal_wait(void *event, uint64_t value, uint64_t ns) { return [(id<MTLSharedEvent>)event waitUntilSignaledValue:value timeoutMS:ns / 1000000]; }
 void metal_release(void *object) { [(id)object release]; }
 void *metal_retain(void *object) { return [(id)object retain]; }
-/* nccl-mesh-metal.h metal_queue, metal_submission_make: the library's own Metal 4 work */
-struct metal_submission {
-  id<MTL4CommandQueue> queue;
-  id<MTL4CommandAllocator> allocator;
-  id<MTL4CommandBuffer> buffer;
-  id<MTL4ComputeCommandEncoder> encoder;
-  id<MTL4ArgumentTable> table;
-  id<MTLResidencySet> residency;
-  _Atomic uint32_t references;
-  _Atomic int ended;
-  int committed;
-  double seconds;
-};
-void *metal_queue(void) { return [(id<MTLDevice>)metal_device() newMTL4CommandQueue]; }
-struct metal_submission *metal_submission_retain(struct metal_submission *s) {
-  if (s) atomic_fetch_add_explicit(&s->references, 1, memory_order_relaxed);
-  return s;
-}
-void metal_submission_release(struct metal_submission *s) {
-  if (!s || atomic_fetch_sub_explicit(&s->references, 1, memory_order_acq_rel) != 1) return;
-  if (!s->committed && s->encoder) { [s->encoder endEncoding]; [s->buffer endCommandBuffer]; }
-  [s->encoder release]; [s->table release]; [s->residency release]; [s->buffer release]; [s->allocator release]; [s->queue release];
-  free(s);
-}
-int metal_submission_ended(const struct metal_submission *s) {
-  return atomic_load_explicit(&((struct metal_submission *)s)->ended, memory_order_acquire);
-}
-struct metal_submission *metal_submission_make(void *queue, void **encoder, void **table, void **residency, const char **message) {
-  @autoreleasepool {
-    id<MTLDevice> device = (id<MTLDevice>)metal_device();
-    struct metal_submission *s = calloc(1, sizeof *s);
-    if (!s) { *message = "out of memory"; return NULL; }
-    atomic_init(&s->references, 1);
-    s->queue = [(id<MTL4CommandQueue>)queue retain];
-    s->allocator = [device newCommandAllocator];
-    s->buffer = [device newCommandBuffer];
-    MTL4ArgumentTableDescriptor *bindings = [[MTL4ArgumentTableDescriptor new] autorelease];
-    bindings.maxBufferBindCount = 6;   /* d, s, the record, a, v, progress: the kernels' six (record4) */
-    NSError *error = nil;
-    s->table = [device newArgumentTableWithDescriptor:bindings error:&error];
-    if (s->table) s->residency = [device newResidencySetWithDescriptor:[[MTLResidencySetDescriptor new] autorelease] error:&error];
-    if (s->queue && s->allocator && s->buffer && s->residency) {
-      [s->buffer beginCommandBufferWithAllocator:s->allocator];
-      s->encoder = [[s->buffer computeCommandEncoder] retain];
-    }
-    if (!s->encoder) {
-      *message = say("the library's Metal 4 submission (its queue, allocator, command buffer, argument table, residency set and encoder): %s",
-                     error ? error.localizedDescription.UTF8String : "one was not made");
-      metal_submission_release(s);
-      return NULL;
-    }
-    *encoder = s->encoder; *table = s->table; *residency = s->residency;
-    return s;
-  }
-}
-/* the submission committed on its queue, `event` (nil: none) signalled to `value` after it, its end and GPU seconds
-   taken from its commit feedback */
-static void submission_commit(struct metal_submission *s, id<MTLEvent> event, uint64_t value) {
-  @autoreleasepool {
-    [s->encoder endEncoding];
-    [s->buffer useResidencySet:s->residency];
-    [s->buffer endCommandBuffer];
-    s->committed = 1;
-    MTL4CommitOptions *options = [[MTL4CommitOptions new] autorelease];
-    metal_submission_retain(s);
-    [options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
-      s->seconds = feedback.GPUEndTime - feedback.GPUStartTime;
-      atomic_store_explicit(&s->ended, feedback.error ? -1 : 1, memory_order_release);
-      metal_submission_release(s);
-    }];
-    const id<MTL4CommandBuffer> buffers[1] = {s->buffer};
-    [s->queue commit:buffers count:1 options:options];
-    if (event) [s->queue signalEvent:event value:value];
-  }
-}
-
 /* a stream's polls as a program's bound: 0, or more than NCCL_MESH_POLLS, is NCCL_MESH_POLLS
    (design/transport.md) */
 static uint32_t bound_of(uint32_t polls) { return polls && polls < NCCL_MESH_POLLS ? polls : NCCL_MESH_POLLS; }
 
 struct metal_program *metal_begin(struct metal_program *program, void *encoder, void *table, void *residency, void *violation, uint32_t polls,
-                                  struct metal_submission *own, const char **message) {
+                                  const char **message) {
   if (!kernels_of(((id<MTLResidencySet>)residency).device, message)) return NULL;
   *program = (struct metal_program){0};
-  program->own = own;
   program->encoder = [(id<MTL4ComputeCommandEncoder>)encoder retain];
   program->table = [(id<MTL4ArgumentTable>)table retain];
   program->residency = [(id<MTLResidencySet>)residency retain];
   program->violation = [(id<MTLBuffer>)violation retain];
   program->polls = bound_of(polls);
   metal_resident(program, violation);
-  [program->encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
   return program;
 }
 
@@ -280,13 +202,21 @@ static struct metal_result record4(struct metal_program *program, id<MTLBuffer> 
   return METAL_DONE;
 }
 
-/* the Metal 4 form's dispatch: its record (record4), every buffer bound by address through the caller's table, then a
-   barrier before the next */
+static void metal_order(struct metal_program *program) {
+  NSData *accesses=program->accesses;
+  if(MetalEncoderOrder(program->encoder,accesses.bytes,accesses.length/sizeof(struct MetalReach)))
+    [program->encoder barrierAfterEncoderStages:MTLStageDispatch|MTLStageBlit beforeEncoderStages:MTLStageDispatch|MTLStageBlit
+        visibilityOptions:MTL4VisibilityOptionDevice];
+  [(NSMutableData *)program->accesses setLength:0];
+}
+
+/* The same prepared range frontier orders direct dispatches and recorded work. */
 static struct metal_result dispatch4(struct metal_program *program, id<MTLComputePipelineState> state, id<MTLBuffer> d, id<MTLBuffer> s,
                                      id<MTLBuffer> a, id<MTLBuffer> words, struct args p, uint64_t units, int group) {
   uint64_t bound[6];
   const struct metal_result recorded = record4(program, d, s, a, words, p, bound);
   if (recorded.status) return recorded;
+  metal_order(program);
   for (NSUInteger k = 0; k < 6; k++) [program->table setAddress:bound[k] atIndex:k];
   id<MTL4ComputeCommandEncoder> encoder = program->encoder;
   [encoder setComputePipelineState:state];
@@ -294,8 +224,6 @@ static struct metal_result dispatch4(struct metal_program *program, id<MTLComput
   const NSUInteger most = group ? MESH_TRANSPORT_GROUP_THREADS : MESH_TRANSPORT_ELEMENT_THREADS, width = state.maxTotalThreadsPerThreadgroup < most ? state.maxTotalThreadsPerThreadgroup : most;
   if (group) [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
   else [encoder dispatchThreads:MTLSizeMake(units < MESH_TRANSPORT_GRID_THREADS ? (NSUInteger)units : MESH_TRANSPORT_GRID_THREADS, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
-  if (!program->presenting)
-    [encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
   return METAL_DONE;
 }
 
@@ -325,6 +253,8 @@ static struct metal_result dispatch(struct metal_program *program, uint32_t kind
 struct metal_result metal_copy(struct metal_program *program, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t bytes) {
   const int words = !((dst_offset | src_offset | bytes) & 3);
   if (mode < METAL_PLAIN || mode > METAL_LAND) return metal_failed(EINVAL);
+  const ncclMeshAccess uses[]={{{src,src_offset},bytes,ncclMeshAccessRead},{{dst,dst_offset},bytes,ncclMeshAccessWritten}};
+  metal_accesses(program,uses,sizeof uses/sizeof *uses);
   return dispatch(program, COPY[!words][mode], dst, src, NULL, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = words ? bytes / 4 : bytes},
                   words ? bytes / 4 : bytes, 0);
 }
@@ -333,13 +263,17 @@ struct metal_result metal_copy(struct metal_program *program, int mode, void *ds
 static uint32_t typed(int op, int type) { return (unsigned)type <= METAL_MERGE ? TYPED[op][type] : KINDS; }
 
 struct metal_result metal_premultiply(struct metal_program *program, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n,
-                                      uint64_t scalar) {
+                                      size_t element_bytes, uint64_t scalar) {
+  const ncclMeshAccess uses[]={{{src,src_offset},n*element_bytes,ncclMeshAccessRead},{{dst,dst_offset},n*element_bytes,ncclMeshAccessWritten}};
+  metal_accesses(program,uses,sizeof uses/sizeof *uses);
   return dispatch(program, typed(OP_PREMUL, type), dst, src, NULL, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .scalar = scalar},
                   n, 0);
 }
 
 struct metal_result metal_truncdiv(struct metal_program *program, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n,
-                                   uint64_t divisor) {
+                                   size_t element_bytes, uint64_t divisor) {
+  const ncclMeshAccess uses[]={{{src,src_offset},n*element_bytes,ncclMeshAccessRead},{{dst,dst_offset},n*element_bytes,ncclMeshAccessWritten}};
+  metal_accesses(program,uses,sizeof uses/sizeof *uses);
   return dispatch(program, typed(OP_TRUNCDIV, type), dst, src, NULL, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .scalar = divisor},
                   n, 0);
 }
@@ -357,60 +291,35 @@ static struct args release_args(const struct metal_release *r, size_t dst_offset
   return (struct args){.dst = dst_offset, .scalar = pages_to_word(r->value), .aux = r->word, .stride = (uint32_t)pages_to_word(r->stride)};
 }
 
-static void record_uses(struct metal_program *, void *const *, size_t);
-void metal_uses(struct metal_program *program, void *const *buffers, size_t n) {
-  if (recording_on(program)) { record_uses(program, buffers, n); return; }
-  for (size_t k = 0; k < n; k++) metal_resident(program, buffers[k]);
+static void record_accesses(struct metal_program *, const struct MetalReach *, size_t);
+void metal_accesses(struct metal_program *program,const ncclMeshAccess *uses,size_t n) {
+  for(size_t k=0;k<n;k++) {
+    const ncclMeshAccess use=uses[k];if(!use.bytes)continue;
+    const struct MetalReach reach={(id)use.storage.buffer,use.storage.offset,use.bytes,
+        (use.access&ncclMeshAccessRead?MetalReachRead:0)|(use.access&ncclMeshAccessWritten?MetalReachWritten:0)|
+        (use.access&ncclMeshAccessObserve?MetalReachObserve:0),-1};
+    if(recording_on(program))record_accesses(program,&reach,1);
+    else {
+      if(!program->accesses)program->accesses=[NSMutableData new];
+      [(NSMutableData *)program->accesses appendBytes:&reach length:sizeof reach];
+      metal_resident(program,use.storage.buffer);
+    }
+  }
 }
-
 struct metal_result metal_publish(struct metal_program *program, const struct metal_release *r) {
+  const ncclMeshAccess use={{r->words,r->word},sizeof(uint64_t),ncclMeshAccessWritten};metal_accesses(program,&use,1);
   return dispatch(program, KIND_publish, r->words, NULL, NULL, NULL, release_args(r, 0), 1, 1);
 }
 
 struct metal_result metal_open_gate(struct metal_program *program, void *words, size_t word, uint64_t value) {
+  const ncclMeshAccess use={{words,word},sizeof(uint64_t),ncclMeshAccessWritten};metal_accesses(program,&use,1);
   return dispatch(program, KIND_publish, words, NULL, NULL, NULL, (struct args){.scalar = value, .aux = word}, 1, 1);
 }
 
-/* design/transport.md section 5: the seconds one GPU wait's load takes on `device`, read once in the process: the spin
-   kernel's bounded wait on a count that never reaches its target, 2^16 loads, timed by its command buffer, the second of
-   two (the GPU's clock risen), each on fresh failure words; 0 where it could not be read */
-double metal_poll_seconds(void *device) {
-  static double period;
-  static dispatch_once_t once;
-  dispatch_once(&once, ^{ @autoreleasepool {
-    const char *message = NULL;
-    struct kernels *k = kernels_of((id<MTLDevice>)device, &message);
-    id<MTL4CommandQueue> queue = k ? [(id<MTLDevice>)device newMTL4CommandQueue] : nil;
-    /* the counts at 0, the failure words at 64, the argument record at 128, the progress word at 256 */
-    id<MTLBuffer> words = [(id<MTLDevice>)device newBufferWithLength:384 options:MTLResourceStorageModeShared];
-    const struct args p = {.scalar = 1, .polls = 1u << 16};
-    _Static_assert(sizeof p <= 128, "the argument record fits between the failure words and the progress word");
-    for (int pass = 0; queue && words && pass < 2; pass++) {
-      memset(words.contents, 0, 384);
-      memcpy((char *)words.contents + 128, &p, sizeof p);
-      void *encoder = NULL, *table = NULL, *residency = NULL;
-      struct metal_submission *made = metal_submission_make(queue, &encoder, &table, &residency, &message);
-      if (!made) break;
-      [(id<MTLResidencySet>)residency addAllocation:words];
-      [(id<MTLResidencySet>)residency commit];
-      const uint64_t at = words.gpuAddress, bound[6] = {at, at, at + 128, at, at + 64, at + 256};
-      for (NSUInteger i = 0; i < 6; i++) [(id<MTL4ArgumentTable>)table setAddress:bound[i] atIndex:i];
-      [(id<MTL4ComputeCommandEncoder>)encoder setComputePipelineState:k->pipelines[KIND_spin]];
-      [(id<MTL4ComputeCommandEncoder>)encoder setArgumentTable:(id<MTL4ArgumentTable>)table];
-      [(id<MTL4ComputeCommandEncoder>)encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
-      submission_commit(made, nil, 0);
-      const uint64_t until = mesh_clock_ns() + MESH_PLATFORM_NS;
-      while (!metal_submission_ended(made) && mesh_clock_ns() < until) usleep(100);
-      period = metal_submission_ended(made) == 1 ? made->seconds / p.polls : 0;
-      metal_submission_release(made);
-    }
-    [queue release]; [words release];
-  }});
-  return period;
-}
-
 struct metal_result metal_spin(struct metal_program *program, const struct metal_wait *w) {
-  metal_uses(program, &w->data, w->data != NULL);
+  const ncclMeshAccess uses[]={{{w->words,w->word},sizeof(uint64_t),ncclMeshAccessRead|ncclMeshAccessObserve},
+    {{w->data,w->data_offset},w->bytes,ncclMeshAccessWritten}};
+  metal_accesses(program,uses,sizeof uses/sizeof *uses);
   return dispatch(program, KIND_spin, w->words, w->words, NULL, w->violation, wait_args(w, 0, 1, 0), 1, 1);
 }
 
@@ -418,12 +327,17 @@ struct metal_result metal_land(struct metal_program *program, int type, int op, 
                                void *with, size_t with_offset,
                                size_t element_bytes, mesh_pages packets, const struct mesh_landing_run *runs, size_t count, const struct metal_wait *w,
                                void *summed, size_t summed_offset) {
-  if (count) metal_uses(program, &with, 1);
   recording_summed(program, summed, summed_offset);
   const uint32_t kind = type == METAL_MERGE && (with != dst || with_offset != dst_offset) ? KIND_land_merge_from : typed(OP_LAND, type);
   struct metal_result result = METAL_DONE;
   for (size_t k = 0; k < count; k++) {
     const struct mesh_landing_run run = runs[k];
+    const size_t first=run.first*element_bytes,bytes=run.elements*element_bytes;
+    const ncclMeshAccess uses[]={{{with,with_offset+first},bytes,ncclMeshAccessRead},
+      {{w->data,w->data_offset+first},bytes,ncclMeshAccessRead},{{dst,dst_offset+first},bytes,ncclMeshAccessWritten},
+      {{w->words,w->word},sizeof(uint64_t),ncclMeshAccessRead|ncclMeshAccessObserve},
+      {{summed,summed_offset},summed?sizeof(uint64_t):0,ncclMeshAccessWritten}};
+    metal_accesses(program,uses,sizeof uses/sizeof *uses);
     struct args p = wait_args(w, dst_offset + run.first * element_bytes, run.elements, op);
     p.src += run.first * element_bytes;
     p.input = ((id<MTLBuffer>)with).gpuAddress + with_offset + run.first * element_bytes;
@@ -459,7 +373,7 @@ struct host_dep { uint64_t count; uint32_t other; };
 struct host_track { uint32_t *item[2]; size_t count[2], room[2]; };
 struct recording { struct host_op *op; size_t ops, op_room; struct host_item *item; size_t items, item_room; struct host_dep *dep; size_t deps, dep_room;
                    struct host_track *track; uint32_t tracks; uint32_t current; int on, join; NSMutableSet *named;
-                   void *summed; size_t summed_offset; };
+                   void *summed; size_t summed_offset; NSMutableData *accesses; };
 
 static int recording_on(const struct metal_program *program) { return program->recording && program->recording->on; }
 static void recording_join(struct metal_program *program, int join) { if (program->recording) program->recording->join = join; }
@@ -468,8 +382,11 @@ static void recording_summed(struct metal_program *program, void *summed, size_t
   if (program->recording) { program->recording->summed = summed; program->recording->summed_offset = offset; }
 }
 
-static void record_uses(struct metal_program *program, void *const *buffers, size_t n) {
-  for (size_t k = 0; k < n; k++) if (buffers[k]) [program->recording->named addObject:(id)buffers[k]];
+static void record_accesses(struct metal_program *program,const struct MetalReach *uses,size_t n) {
+  struct recording *r=program->recording;
+  if(!r->accesses)r->accesses=[NSMutableData new];
+  [r->accesses appendBytes:uses length:n*sizeof *uses];
+  for(size_t k=0;k<n;k++)[r->named addObject:uses[k].buffer];
 }
 
 static void *more(void *items, size_t *room, size_t count, size_t size) {
@@ -485,6 +402,7 @@ static void recording_free(struct recording *r) {
   for (uint32_t t = 0; t < r->tracks; t++) { free(r->track[t].item[0]); free(r->track[t].item[1]); }
   free(r->track); free(r->op); free(r->item); free(r->dep);
   [r->named release];
+  [r->accesses release];
   free(r);
 }
 
@@ -700,8 +618,10 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
     id<MTL4ComputeCommandEncoder> encoder = program->encoder;
     [encoder setComputePipelineState:state];
     [encoder setArgumentTable:program->table];
+    if(!program->accesses)program->accesses=[NSMutableData new];
+    [(NSMutableData *)program->accesses appendData:r->accesses?:[NSData data]];
+    metal_order(program);
     [encoder dispatchThreadgroups:MTLSizeMake(workers, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
-    [encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
   }
   recording_free(r);
   return METAL_DONE;
@@ -770,12 +690,6 @@ const char *metal_prelude(void) {
   return text.UTF8String;
 }
 
-void metal_presented(struct metal_program *program) {
-  if (program->encoder)
-    [(id<MTL4ComputeCommandEncoder>)program->encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch
-                                                            visibilityOptions:MTL4VisibilityOptionDevice];
-}
-
 struct metal_result metal_present(struct metal_program *program,void *lists,size_t list_offset,
     void *records,size_t record_offset,size_t count,uint64_t first,void *words,size_t taken,size_t presented) {
   if(count) {
@@ -784,26 +698,25 @@ struct metal_result metal_present(struct metal_program *program,void *lists,size
     // unwritten entries, in whatever command buffer each runs; here the count is read as well as written.
     const size_t slot=first%MESH_STREAM_ENTRIES;
     const size_t head=count<MESH_STREAM_ENTRIES-slot?count:MESH_STREAM_ENTRIES-slot;
-    const struct MetalReach reaches[]={
-      {(id)lists,list_offset+slot*sizeof(struct mesh_entry),head*sizeof(struct mesh_entry),MetalReachWritten,-1},
-      {(id)lists,list_offset,(count-head)*sizeof(struct mesh_entry),MetalReachWritten,-1},
-      {(id)words,taken,sizeof(uint64_t),MetalReachRead,-1},
-      {(id)words,presented,sizeof(uint64_t),MetalReachWritten,-1}};
-    MetalEncoderReaches(program->encoder,reaches,sizeof reaches/sizeof *reaches);
+    const ncclMeshAccess reaches[]={
+      {{lists,list_offset+slot*sizeof(struct mesh_entry)},head*sizeof(struct mesh_entry),ncclMeshAccessWritten},
+      {{lists,list_offset},(count-head)*sizeof(struct mesh_entry),ncclMeshAccessWritten},
+      {{records,record_offset},count*sizeof(struct mesh_entry),ncclMeshAccessRead},
+      {{words,taken},sizeof(uint64_t),ncclMeshAccessRead|ncclMeshAccessObserve},
+      {{words,presented},sizeof(uint64_t),ncclMeshAccessRead|ncclMeshAccessWritten}};
+    metal_accesses(program,reaches,sizeof reaches/sizeof *reaches);
   }
-  program->presenting = 1;
   const struct metal_result result = dispatch(program,KIND_present,lists,records,words,NULL,
     (struct args){.dst=list_offset,.src=record_offset,.n=count,.scalar=first,.aux=taken,
                   .at=presented,.count=MESH_STREAM_ENTRIES},count,1);
-  program->presenting = 0;
   return result;
 }
 
-void metal_end(struct metal_program *program, void *event, uint64_t value) {
+void metal_end(struct metal_program *program) {
   recording_free(program->recording);
   program->recording = NULL;
   if (program->added) [program->residency commit];
-  if (program->own && event) submission_commit(program->own, (id<MTLEvent>)event, value);
   [program->encoder release]; [program->table release]; [program->residency release]; [program->violation release];
+  [program->accesses release];
 }
 

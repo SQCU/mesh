@@ -101,7 +101,7 @@ kernel void fold(device const float *own [[buffer(0)]], {inputs}device float *ou
         if not hasattr(self, 'fold'):
             self.fold = _stream.pipeline(self.source, 'fold')
         schedule = _stream.Schedule()
-        for first, rows in self.tiles:
+        for tile_index, (first, rows) in enumerate(self.tiles):
             x = self.input.narrow(0, first, rows)
             result = self.x.narrow(0, first, rows)
             hidden = self.hidden.narrow(0, first, rows)
@@ -109,15 +109,10 @@ kernel void fold(device const float *own [[buffer(0)]], {inputs}device float *ou
                 partial = self.partial[layer].narrow(0, first, rows)
                 landings = [t.narrow(0, first, rows) for t in self.landing[layer]]
                 tiles = row_tiles(rows)
-                ready = torch_mesh.empty(len(tiles), dtype=torch.int64) if self.pairs else None
-                arrivals = torch_mesh.empty(len(tiles), dtype=torch.int32) if self.pairs else None
-                if ready is not None:
-                    host(ready).zero_(); host(arrivals).zero_()
+                ready, arrivals, declaration = self.declarations[tile_index][layer]
                 words = [partial.numel(), H, tiles[0][1], 0]
-                if self.pairs:
-                    tile_bytes = tiles[0][1] * H * partial.element_size()
-                    crossing = fused.writes(schedule, partial, landings, self.pairs, self.group,
-                        ready=ready, ready_value=tile_bytes, tile_bytes=tile_bytes)
+                if declaration is not None:
+                    crossing = fused.writes(schedule, declaration)
                     words += [w for binding in crossing.land for w in fused._words(binding)]
                 schedule.append(_stream.Commands([
                     *product(x, a, hidden, act=True),
@@ -132,8 +127,24 @@ kernel void fold(device const float *own [[buffer(0)]], {inputs}device float *ou
         self.prepared(schedule)
 
     def declare(self):
-        from .backend import Call, WRITE
-        return [([Call(WRITE, rows * self.args.width, torch.float32, root=a, destination=b, fused=True,
-                       tile_bytes=row_tiles(rows)[0][1] * self.args.width * torch.float32.itemsize,
-                       production=[{'seconds': 0, 'order': tile} for tile in range(len(row_tiles(rows)))])
-                  for a, b in self.pairs], 1) for _, rows in self.tiles for _ in range(self.args.layers)]
+        """Bind producer words and local pages before the communicator plan is compiled."""
+        calls, self.declarations = [], []
+        for first, rows in self.tiles:
+            declared = []
+            tiles = row_tiles(rows)
+            for layer in range(self.args.layers):
+                ready = torch_mesh.empty(len(tiles), dtype=torch.int64) if self.pairs else None
+                arrivals = torch_mesh.empty(len(tiles), dtype=torch.int32) if self.pairs else None
+                declaration = None
+                if ready is not None:
+                    host(ready).zero_(); host(arrivals).zero_()
+                    partial = self.partial[layer].narrow(0, first, rows)
+                    landings = [value.narrow(0, first, rows) for value in self.landing[layer]]
+                    tile_bytes = tiles[0][1] * self.args.width * partial.element_size()
+                    declaration, bound = fused.declare(partial, landings, self.pairs, self.group,
+                        ready=ready, ready_value=tile_bytes, tile_bytes=tile_bytes)
+                    production = [{'seconds': 0, 'order': tile} for tile in range(len(tiles))]
+                    calls.append([call._replace(production=production) for call in bound])
+                declared.append((ready, arrivals, declaration))
+            self.declarations.append(declared)
+        return calls

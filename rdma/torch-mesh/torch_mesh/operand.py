@@ -349,6 +349,42 @@ def byte_relation(access):
     return relation.then(components)
 
 
+def access_domain(access, work):
+    """Project an assigned work operand onto its declared possible byte reaches.
+
+    Index values remain ordinary scalar producers. Their declared value axes
+    extend the work domain; no payload is inspected and no work is assigned.
+    Original predicates remain attached to the access and execute in its body.
+    Unknown predicates cannot remove a possible reach during preparation.
+    """
+    space = access.get('index_space')
+    relation = access['relation'] if space is None else space['relation']
+    domain = work
+    if space is not None and len(space['shape']) != space['work_dimensions']:
+        count = space['work_dimensions']
+        projection = work.algebra.map(space['shape'], space['shape'][:count],
+            lambda source, target: [f'{y} = {x}' for x, y in zip(source[:count], target, strict=True)])
+        domain = projection.preimage(work)
+    relation = None if relation is None else byte_relation(dict(access, relation=relation))
+    return dict(access=access, relation=relation, domain=domain,
+                positions=None if relation is None else relation.image(domain))
+
+
+def bound_access(access, work, source, source_dtype, target):
+    """Compose a declared byte reach with the argument's assigned byte layout.
+
+    ``source`` retains original storage coordinates in ``source_dtype`` units;
+    ``target`` supplies bytes in that same ordered domain. This is a dependency
+    footprint, not a request to deliver every possibly addressed value.
+    """
+    projected = access_domain(access, work)
+    if projected['positions'] is None:
+        raise ValueError(f"access {access['name']} still requires its scalar index declaration")
+    selected = _stream.TensorLayout.runs(projected['positions'].spans())
+    original = source.components(source_dtype.itemsize).reshape((source.count * source_dtype.itemsize,))
+    return dict(projected, layout=selected.rebase(original, target.reshape((target.count,))))
+
+
 def bind(value, declaration):
     """Compose the declared use with the producer's assigned pages once."""
     placed = TensorView.of(value)

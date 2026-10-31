@@ -300,18 +300,15 @@ extents, 4 KiB hardware credit frames, and actual SGE payload lengths are distin
 Short or unaligned spans transfer only their declared bytes. Exact intervals
 leave adjacent destination values untouched, without padded transport copies.
 
-[`ncclMeshWritePrepare`, `ncclMeshWriteRowsPrepare` and `ncclMeshWriteSpansPrepare`](../rdma/nccl.h) bind
-placements and common packet cuts at configuration time. The rows form maps
-logical byte k to `(k / row_bytes) * local_pitch + k % row_bytes`; all rows use
-one span table, with no per-row host execution call or entry. Registration cuts
-use the actual phase of each row. The indexed form concatenates each local
-span list in logical order; endpoints may have different counts, gaps, and
-physical ordering. Source intervals can repeat, while overlapping landing
-intervals fail configuration. The common cuts preserve every local boundary
-and actual registration phase. No numerical buffer is packed.
-`ncclMeshWriteExecute` reuses the binding with no new placement exchange or
-receipt. Indexed preparation has local sanitizer and protected-memory tests;
-it has not yet been included in the live cluster evidence below.
+The current API places exact source and destination geometry on
+`ncclMeshCallWrite` in `ncclMeshCommPlan`. Local buffer slots, pure typed views,
+frames and progress operands are declared together. Rows and indexed selections
+use the same cut compiler; no numerical buffer is packed merely to describe a
+view. `ncclMeshCommEncode` records the next declared group without a separate
+WRITE handle or placement exchange.
+
+The measurements below describe the earlier byte-extent revision, before this
+public API consolidation; they do not validate the new declaration interface.
 
 This source revision is wire 135/layout 154. Its existing contiguous/affine
 [live validation](transport.md#exact-byte-validation-on-2026-10-24)

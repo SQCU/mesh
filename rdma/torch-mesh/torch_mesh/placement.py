@@ -266,8 +266,11 @@ def selected(projection, *, algebra, device, results=(), fixed=(), requirements=
                     access = use['access']
                     if use['positions'] is None:
                         continue
-                    scalar = access['relation'].image(part['work'])
-                    layout = _stream.TensorLayout.runs(scalar.spans()).components(access['dtype'].itemsize)
+                    # The projection already applied the assigned work and
+                    # any declared live index-value axes. Its byte positions
+                    # retain complete typed fields without inventing a static
+                    # work-only relation for a changing index operand.
+                    layout = _stream.TensorLayout.runs(use['positions'].spans())
                     retain(access, layout, access['dtype'].itemsize)
     requested = [(record, _selected_layout(record, algebra)) for record in results]
     consumers = [(record, _selected_layout(record, algebra)) for record in requirements]

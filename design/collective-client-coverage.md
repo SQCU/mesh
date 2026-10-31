@@ -24,10 +24,10 @@ does not gain that capability by changing an import alone.
 | Client / implementation | Executed boundary | Allocation and layout | Coverage / remaining work |
 | --- | --- | --- | --- |
 | `rdma/mesh.py`: `LinkMap`, `routes(lmap)`, `route(lmap,a,b)`, `members(whole,among)`, `current()`, `lease(nbytes)` | CFFI map/route discovery and `ncclMemAlloc`; this file does not execute collectives | Lease returned as a Python buffer; views retain its owner | `route` is one node path, not a physical multi-path placement description. Callers must not use it to exclude otherwise reachable relays. |
-| `rdma/mesh_mpi.py`: `Comm.Allreduce`, `Reduce`, `Bcast`, `Allgather[v]`, `Reduce_scatter[_block]`, `Alltoall`, `Gather`, `Scatter`; `Write_prepare`, `Write_rows_prepare`, `Write_spans_prepare`, `Write_view_prepare` | Collectives call their matching NCCL/V signatures; exact WRITE bindings call native `WritePrepare` / `WriteRowsPrepare` / `WriteSpansPrepare` / `WriteExecute`; host pointer and NULL stream. There are no Send/Recv/Sendrecv methods. | `empty` uses `mesh.lease`; native dtype or exact `itemsize` bytes. Ragged count vectors retain zero shares. WRITE plans retain original arrays and accept exact contiguous, affine and arbitrary indexed views, including negative strides. Legacy `to_region` currently copies noncontiguous gather input and passes contiguous host arrays through without proving registration. | Adapter tests cover pointers/counts/operation plus prepared binding identity/ownership. The shared indexed WRITE interface is implemented; ordinary collective layout/registration limitations and legacy gather packing remain open gaps. `Barrier` is an explicit user-requested scalar all-reduce, not a storage receipt. |
+| `rdma/mesh_mpi.py`: legacy buffer methods; `Comm.Plan`, `PlanDemands` | Only declaration/query helpers connect to the compiled plan. No supported NULL-stream synchronous executor; standalone WRITE wrappers are removed. | `empty` retains bridge pages. Imperative NumPy numerical callers still require whole-function capture. | `xonotic/planner/plan.py` and `solver/worker.py:MPIWorld` remain unmigrated; changing imports or substituting imperative TorchWorld does not close the gap. |
 | `python/mesh/collective.py`, `_native.py`, `__init__.py`: Program block DSL (deleted 2026-10-30: a wrapper over torch_mesh with no caller) | Movement tasks prepare ordered shared exact WRITEs on one full physical communicator. Typed reductions use native all-reduce or owner-rooted reduce over the AOT union of contiguous reference intervals. `Program.copy` uses the same prepared WRITE representation. | Contributor and recipient masks describe logical subsets; every physical rank executes crossing tasks. Views/buffers are bound once at realization. Movement binds original indexed source/final views and distinct relay leases; disconnected backings use ordered WRITEs. PARTIALS keeps complete contiguous float32 records, permits gaps between records, and rejects strided record fields. Constant initialization precedes recurrent execution. | Eleven Program tests pass after the indexed movement migration. The source removes `_bound`/`_load`/`_store` packing. The shared Torch indexed binding passes a three-rank live test; a complete live Program execution is separate validation. |
 | `rdma/torch-mesh/torch_mesh/backend.py`, `_stream.mm`, `fused.py`, `partition.py` | NCCL compatibility calls and prepared exact contiguous/row/indexed WRITEs all bind the common physical fragments; complete declarations carry masks and counted-exchange matrices | Bridge leases and exact row/span descriptors; partition migration keeps DMA reads and destination consumers distinct | Backend plan metadata, generic plans/values and whole-function feedback have focused tests. The shared `SpanWrites` binding passes a three-rank live test with different endpoint strides and preserved neighboring bytes. Fused bindings preserve every active physical channel. ProcessGroup Send/Recv overrides and their native dispatch cases are removed. |
-| `microbench:mesh_rank.m`: `MeshRankFlows`, `MeshRankGroup`, `MeshRankCrossing`, `MeshRankCross` → `issue` | Gather → `ncclMeshAllGatherV`; broadcast → `ncclBroadcast`; sum/max → `ncclAllReduce`; reduce → `ncclReduce` | `MeshRankAllocate` uses `ncclMemAlloc`; operand storage is allocation-rounded. Host bindings use MTLBuffer contents plus exact byte offset. Recorded Metal bindings preserve the `ncclMeshBuffer` wrapper and offset. Gather counts are explicit bytes or pieces × elements × element width. | One full-fabric communicator admits relay-only ranks. Recorded complete-graph preparation carries contributor/recipient masks and reports actual installed `mesh_routing` metadata. Four production-body adapter tests and the optimized rank compile/link pass. Live execution of a complete model through this caller remains separate validation. |
+| `microbench:mesh_rank.m`: `MeshRankPlan`, `MeshRankPrepare` | Every scalar collective and row WRITE is a bound `ncclMeshCall` in `CommPlan`; preparation records through `CommEncode`. | Buffer slots retain invocation phases; typed row geometry and producer/landing operands are declared before planning. | Strict source/build validation covers this consolidation; no numerical or cluster execution of the changed interface is claimed. |
 | `microbench:decode_crossings.swift`: `CrossingPoint.cross`, `StepCrossings.init` | `MeshRankGroup`, `MeshRankCrossing`, `MeshRankCross` | Existing Metal buffers wrapped with byte offsets | Shares `mesh_rank.m` transport; no separate Swift routing implementation. Configuration membership remains material. |
 | `microbench:litert_program.m`: `crossing_read`, `cross`, `LiteRtProgramRun` | Typed `MeshRankCrossing` and `MeshRankCross` from LiteRT/WebGPU work | `MeshRankOperand` / `MeshRankAllocate`; shared-memory Metal buffers | Shares the same crossing executor. Imported model kernels and engine waits are data-processing concerns, not a replacement communicator. |
 | `microbench:metal_native.m`, `metal_recording.m`, `metal_runtime.swift`, `engine_recording.swift` | Metal encoding/recording; crossings flow through the typed rank interface; shared `ncclMeshMetalPrelude` | Recorded resources retain bindings; engine output is an operand of later crossings | No private cable routing found. Dataflow/recorded buffer lifetime and local engine synchronization require separate scrutiny from native source-DMA retirement. |
@@ -177,41 +177,15 @@ not retained as an alternate API surface.
 
 ## NumPy fixed bindings and indexed views
 
-`Comm.Write_prepare(sendbuf, landingbuf, source, destination, max_packet=0)`
-binds exact contiguous bytes. `Comm.Write_rows_prepare(..., row_bytes=...,
-rows=..., max_packet=0)` binds a positive affine row map. Row width/count agree
-across ranks; pitches are inferred and validated from local shape/stride
-metadata. Source supplies its original send view, other ranks supply final or
-relay landing storage; unused arguments can be `None`. Native preparation
-validates the actual bridge lease, span bounds and registration cuts.
-`WritePlan.Execute()` reuses that handle; `Free()` retires it and releases its
-Python owners. Communicator `Free()` destroys retained plans first. Existing
-NumPy collective methods still use the common native collective lowering.
-`Comm.Plan(calls)` and `Comm.PlanDemands()` delegate declaration and exact demand
-query to the shared `controller` module without inventing per-operation traffic
-or installing a separate optimization policy.
+The standalone NumPy WRITE preparers and `WritePlan` lifecycle are removed.
+All compiled clients use `ncclMeshCallWrite` within `ncclMeshCommPlan`, carrying
+local `bindings`, pure typed `views`, frames and source/landing progress records.
+The shared lowerer preserves affine, reversed and indexed source selections;
+physical page and registration cuts remain preparation work.
 
-`Comm.Write_spans_prepare(sendbuf, landingbuf, spans, source, destination)`
-binds an ordered list of `(offset, bytes)` intervals relative to the used
-array's first element. `Comm.Write_view_prepare(...)` derives that list from
-shape, byte strides and element width through shared `mesh.view_layout` (mesh-write-compiler.h `mesh_view_layout`),
-including reversed axes and broadcast source views. The original array owner
-is retained; no values are read at preparation. Native
-`ncclMeshWriteSpansPrepare` accepts different local lists with the same total
-logical bytes, copies their metadata, and jointly cuts every view boundary,
-packet limit and actual registration crossing. Repeated source ranges are
-valid; overlapping landing ranges are a configuration error. All intervals
-belong to one lease. Distinct lease bases use ordered shared WRITE declarations,
-not a packed intermediate. The existing compact affine row form remains
-available without expanding a configuration into per-row execution calls.
-
-The remaining ordinary-collective constraint is explicit: logical-only
-`CommPlan` does not yet exchange actual buffer bindings and therefore cannot
-jointly packetize arbitrary unaligned bindings across 1 GiB registrations.
-The provider permits one SGE per DMA unit, not a scatter/gather SGE list.
-The shared prepared WRITE view stage supplies those cuts, but exposing it does
-not by itself migrate every ordinary collective binding. Legacy NumPy
-`Allgatherv` still calls `to_region` for noncontiguous input; that private
-packing is not claimed to have been removed by adding the view API. Typed
-reduction element identity and output placement must survive each caller's
-migration to the shared binding contract.
+`Comm.Plan` and `PlanDemands` expose declaration/query metadata, but the legacy
+imperative buffer methods are not a supported synchronous fallback. The
+Xonotic NumPy callers still need their numerical producer/consumer graph lowered
+into the same prepared function. Current Torch and native clients record
+`ncclMeshCommEncode`; their templates retain only the complete communicator
+plan serializer, with no per-WRITE plan reconstruction.

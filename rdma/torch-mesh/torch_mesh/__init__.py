@@ -29,10 +29,13 @@ def _autoload():
 
 def compiler(gm, example_inputs, *, configuration=None, destinations=None):
     from .compilation import bind
+    from .declarations import execution_sequence
     from .native import compile_graph
     with bind(configuration):
         lowered, metadata, operands = prepare_source(gm, example_inputs)
-        return compile_graph(lowered, metadata, operands, destinations=destinations)
+        program = compile_graph(lowered, metadata, operands, destinations=destinations)
+        return execution_sequence((program,), program.output, program.pages,
+                                  lowered.meta.get('mesh_initializations', ()))
 
 
 def prepare_source(gm, example_inputs):

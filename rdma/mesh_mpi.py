@@ -1,36 +1,15 @@
-"""NumPy arrays on libnccl-mesh, spelled as mpi4py spells a communicator's buffer methods, so an mpi4py program ports
-by its import (rdma/NCCL.md "NumPy"):
+"""Legacy NumPy frontend source awaiting whole-function declaration lowering.
 
-    from mesh_mpi import Comm, SUM, MAX
-    comm = Comm()
-    comm.Allreduce(local, total, op=SUM)
-
-Comm() is the world: this process is rank RANK of WORLD_SIZE (the variables torchrun and the launchers set), its
-communicator made by NCCL's bootstrap at NCCL_COMM_ID, else MASTER_ADDR:MASTER_PORT (ncclCommInitRank: the map is the
-links among the ranks' nodes their bridges hold paired), its collectives the library's compiled defaults.  Every call is libnccl-mesh's host path: contiguous arrays at host pointers, a NULL stream, the call
-complete when it returns.  Methods: Get_rank, Get_size, Allreduce, Reduce, Bcast, Allgather, Allgatherv,
-Reduce_scatter_block, Reduce_scatter, Alltoall, Gather, Scatter, Barrier, allreduce (a Python number), Free;
-IN_PLACE as a send buffer, None for a buffer a rank does not use
-(Gather's off the root, Scatter's send off it); an array of a dtype the library has no type of moves as its bytes, and
-a reduction takes the library's types alone.  Allgatherv and Reduce_scatter take a count a rank, as mpi4py spells
-them (a receive buffer [array, counts], recvcounts): one program over the segments (ncclMeshAllGatherV,
-ncclMeshReduceScatterV), every rank passing the same counts; Allgather and Reduce_scatter_block are the same calls with
-equal counts (the library takes equal segments as its equal program).  COMM_WORLD is Comm(), made at first use.  Subcommunicators: Split(color, key) (ncclCommSplit; UNDEFINED
-for none), Shrink(exclude) (ncclCommShrink), Grow(size) and Comm.joining (ncclCommGrow), Revoke() (ncclCommRevoke), and
-a Cartesian process grid, Create_cart(dims) with Get_coords, Get_cart_rank, Shift and Sub(remain_dims),
-each sub-grid a Split of it (a 2-D mesh's rows and columns), whose members the cables need not join.  Not here:
-nonblocking calls, Alltoallv, Gatherv and Scatterv, object (pickled) collectives, or paired Send/Recv.
-Directed transfers use the prepared WRITE interface below, with every physical rank admitted for forwarding.
-The host path works on any node whose bridge runs (a communicator, a lone rank's too, is a client of its node's bridge: rdma/NCCL.md "Communicators"); it is not the measured path (GPU tensors take the Metal
-path through torch-mesh).  Memory: empty(shape, dtype) is an array in this node's bridge's region (ncclMemAlloc, the
-role mpi4py's MPI.Alloc_mem plays), the memory a program hands the collectives (rdma/NCCL.md "Memory"); the module's
-own temporaries are such arrays. Write_prepare, Write_rows_prepare, Write_spans_prepare and Write_view_prepare expose
-the same native AOT exact-byte WRITE bindings as other front ends; their WritePlan.Execute reuses the fixed bindings
-without exchanging layout metadata. Explicit spans and metadata-derived ndarray views preserve arbitrary byte
-strides and original array owners without packing values. This adds no alternative collective planner."""
+Comm.Plan and the page allocation helpers describe existing native operands.
+The imperative buffer methods below are retained for the Xonotic planner and
+MPIWorld source migration; the compiled library no longer provides a blocking
+host execution path for them. Migrating those callers requires capturing their
+numerical producers and consumers into the ordinary prepared function, not
+replacing this adapter with another synchronous or per-call async executor.
+Directed writes have only the complete communicator Call declaration.
+"""
 import math
 import os
-import weakref
 
 import numpy as np
 
@@ -107,49 +86,6 @@ class PageTable:
     def __del__(self):
         if getattr(self, 'handle', ffi.NULL) != ffi.NULL:
             lib.ncclMeshPageTableDestroy(self.handle)
-
-
-class WritePlan:
-    """Fixed native WRITE bindings; preparation exchanges layout metadata once.
-
-    Execute is the synchronous host execution of that native plan. Original
-    arrays and their owners remain retained until Free. Source mutation requires
-    every scheduled DMA read to retire; a source-only Execute return alone does
-    not prove it. Destination reuse additionally requires its own consumers to
-    finish. Bindings and shape remain fixed. Every
-    participating rank prepares and executes the same write sequence, including
-    relay ranks with landing storage. This class contains no collective planner.
-    """
-    def __init__(self, comm, handle, arrays):
-        self.comm, self.handle, self.arrays = comm, handle, arrays
-        if not hasattr(comm, '_writes'):
-            comm._writes = weakref.WeakSet()
-        comm._writes.add(self)
-
-    def Execute(self, invocation=0):
-        if self.handle == ffi.NULL:
-            raise ValueError('WRITE plan is already freed')
-        check(lib.ncclMeshWriteExecute(self.handle, invocation, ffi.NULL))
-
-    __call__ = Execute
-
-    def Free(self):
-        if self.handle != ffi.NULL:
-            check(lib.ncclMeshWritePlanDestroy(self.handle))
-            self.handle, self.arrays = ffi.NULL, ()
-            self.comm._writes.discard(self)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        self.Free()
-
-    def __del__(self):
-        try:
-            self.Free()
-        except Exception:
-            pass
 
 
 class Comm:
@@ -244,54 +180,6 @@ class Comm:
         check(lib.ncclMeshPageTableCreate(at(array), self.comm, 0, made))
         return PageTable(self, made[0], array)
 
-    def _layout(self, own):
-        """`own`'s view of its lease as abstract layout (nccl.h ncclMeshLayout): its storage's page table, its shape and
-        strides in elements, its first element's offset in elements, its element bits.  numpy names no storage offset,
-        so this is where an array's position is read: its distance from the array over its whole lease (empty)."""
-        if not isinstance(own, np.ndarray) or own.dtype.hasobject:
-            raise ValueError('a WRITE binding is a numpy array without Python objects')
-        root = own
-        while isinstance(root.base, np.ndarray):
-            root = root.base
-        size = own.dtype.itemsize
-        offset = own.__array_interface__['data'][0] - root.__array_interface__['data'][0]
-        if offset % size or any(stride % size for stride in own.strides):
-            raise ValueError("a WRITE binding's offset and strides are whole elements")
-        table = self.Pages(root)
-        shape, strides = ffi.new('uint64_t[]', list(own.shape) or [0]), ffi.new('int64_t[]', [x // size for x in own.strides] or [0])
-        return (table, shape, strides), ffi.new('ncclMeshLayout *', {'storage': table.handle, 'element_bits': 8 * size,
-                                                                    'rank': own.ndim, 'shape': shape, 'strides': strides,
-                                                                    'offset': offset // size})
-
-    def Write_view_prepare(self, sendbuf, landingbuf, source, destination, *, max_packet=0):
-        """Bind an ndarray view in logical row-major element order: the source's values on `source`, the landing on
-        `destination`, a relay's on any other rank (unused buffers may be None).  Its layout over its lease's pages
-        is lowered natively (nccl.h ncclMeshWriteLayoutPrepare): transposes, gaps, reversed strides and broadcast
-        source views, with no copy; every rank's view holds the same logical bytes, in its own layout."""
-        kept, layout = self._layout(sendbuf if self.rank == source else landingbuf)
-        made = ffi.new('ncclMeshWritePlan_t *')
-        check(lib.ncclMeshWriteLayoutPrepare(layout, source, destination, max_packet,
-                                             {'instances': 1, 'instance_pages': 0, 'invocations': 1}, made))
-        return WritePlan(self, made[0], (sendbuf if self.rank == source else landingbuf,))
-
-    def Write_prepare(self, sendbuf, landingbuf, source, destination, *, max_packet=0):
-        """One contiguous WRITE: Write_view_prepare of a C-contiguous array."""
-        if not (sendbuf if self.rank == source else landingbuf).flags.c_contiguous:
-            raise ValueError('Write_prepare binds a C-contiguous array; Write_view_prepare binds any view')
-        return self.Write_view_prepare(sendbuf, landingbuf, source, destination, max_packet=max_packet)
-
-    def Write_rows_prepare(self, sendbuf, landingbuf, source, destination, *, row_bytes, rows, max_packet=0):
-        """The WRITE of a view that is exactly `rows` rows of `row_bytes` (local pitches may differ by rank): its rows
-        checked, then Write_view_prepare, whose layout lowering finds the same rows."""
-        own = sendbuf if self.rank == source else landingbuf
-        row_bytes, rows = int(row_bytes), int(rows)
-        if row_bytes <= 0 or rows <= 0 or row_bytes * rows != own.nbytes or row_bytes % own.itemsize:
-            raise ValueError('row_bytes * rows must cover exactly the array, in whole dtype elements')
-        width, count, pitch = mesh.view_layout(own.shape, own.strides, own.itemsize)[1]
-        if not (count and pitch == width) and (width, count) != (row_bytes, rows):
-            raise ValueError('the requested rows are not the affine intervals of this view')
-        return self.Write_view_prepare(sendbuf, landingbuf, source, destination, max_packet=max_packet)
-
     def Allreduce(self, sendbuf, recvbuf, op=SUM):
         send = recvbuf if sendbuf is IN_PLACE else sendbuf
         check(lib.ncclAllReduce(at(send), at(recvbuf), recvbuf.size, TYPES[recvbuf.dtype], op, self.comm, ffi.NULL))
@@ -365,8 +253,6 @@ class Comm:
         return box[0].item()
 
     def Free(self):
-        for plan in tuple(getattr(self, '_writes', ())):
-            plan.Free()
         check(lib.ncclCommDestroy(self.comm))
 
 

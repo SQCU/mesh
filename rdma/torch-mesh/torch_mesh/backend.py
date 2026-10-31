@@ -44,8 +44,8 @@ WRITE = 8
 # element_shape declares one indivisible numerical element in those scalar units.
 # bindings, where given, are the (send, receive) tensors the call is issued with (nccl.h ncclMeshCall bindings).
 # design/eager-execution.md#what-follows
-Call = collections.namedtuple('Call', 'kind count dtype root op counts destination fused contributors matrix recipients tile_bytes production element_shape bindings',
-                              defaults=(0, ReduceOp.SUM, None, 0, False, None, None, None, 0, None, (), None))
+Call = collections.namedtuple('Call', 'kind count dtype root op counts destination fused contributors matrix recipients tile_bytes production element_shape bindings views frames max_packet source_ready landings ready_value ready_layout land_layout land_capacity',
+                              defaults=(0, ReduceOp.SUM, None, 0, False, None, None, None, 0, None, (), None, None, 1, 0, None, None, 0, None, None, 0))
 WHAT = {ALLREDUCE: LIB.MESH_ALLREDUCE, REDUCE: LIB.MESH_REDUCE, BROADCAST: LIB.MESH_BROADCAST, ALLGATHER: LIB.MESH_ALLGATHER,
         REDUCE_SCATTER: LIB.MESH_REDUCE_SCATTER, ALLTOALL: LIB.ncclMeshCallAlltoAllV, WRITE: LIB.ncclMeshCallWrite}
 TYPES = {torch.int8: LIB.ncclInt8, torch.uint8: LIB.ncclUint8, torch.bool: LIB.ncclUint8, torch.int32: LIB.ncclInt32,
@@ -233,11 +233,38 @@ class ProcessGroupMesh(dist.ProcessGroup):
             if c.production is not None and production_seconds is not None:
                 check(LIB.ncclMeshProductionTimes(production, len(c.production),
                       production_seconds[c.root] / producer_groups[c.root]))
-            # design/eager-execution.md#what-follows
-            kept.append(ffi.new('ncclMeshBufferSlots[2]', [{'buffer': _binding(t), 'instances': 1} for t in c.bindings]) if c.bindings is not None else ffi.NULL)
+            local = list(c.bindings) if c.bindings is not None else [None, None]
+            geometries = []
+            if c.views is not None:
+                for side, view in enumerate(c.views):
+                    if view is None:
+                        geometries.append({})
+                        continue
+                    storage, bits, shape, strides, offset, mapped, runs, *frame = view
+                    if storage.is_meta:
+                        geometries.append({})
+                        continue
+                    local[side] = {'tensor': storage, **(local[side] if isinstance(local[side], dict) else {})}
+                    arrays = [ffi.new('uint64_t[]', shape or [0]), ffi.NULL if mapped else ffi.new('int64_t[]', strides or [0]),
+                              ffi.new('uint64_t[]', runs or [0])]
+                    kept.extend(arrays)
+                    geometries.append(dict(element_bits=bits, rank=len(shape), shape=arrays[0], strides=arrays[1],
+                        offset=offset, runs=arrays[2] if mapped else ffi.NULL, nruns=len(runs) // 2,
+                        frame_stride=frame[0] if frame else 0))
+            bindings = []
+            for value in local:
+                record = value if isinstance(value, dict) else {'tensor': value}
+                bindings.append({'buffer': _binding(record.get('tensor')), 'instances': record.get('instances', 1),
+                                 'stride': record.get('stride', 0), 'invocation': record.get('invocation', 0)})
+            slots = ffi.new('ncclMeshBufferSlots[2]', bindings) if c.bindings is not None or c.views is not None else ffi.NULL
+            views = ffi.new('ncclMeshLayout[2]', geometries) if c.views is not None else ffi.NULL
+            kept.extend((slots, views))
             made.append({'what': WHAT[c.kind], 'peer': c.root, 'count': c.count * per, 'type': nccl, 'op': code,
                          'group': g, 'destination': c.destination, 'fused': int(c.fused), 'tile_bytes': c.tile_bytes,
-                         'production': production, 'bindings': kept[-1],
+                         'production': production, 'bindings': slots, 'views': views, 'frames': c.frames,
+                         'max_packet': c.max_packet, 'source_ready': _binding(c.source_ready),
+                         'landings': _binding(c.landings), 'ready_value': c.ready_value,
+                         'ready_layout': c.ready_layout or {}, 'land_layout': c.land_layout or {}, 'land_capacity': c.land_capacity,
                          'counts': counts, 'matrix': matrix, 'contributors': masks[0], 'recipients': masks[1]})
         view = ffi.new('ncclMeshPlan **')
         check(LIB.ncclMeshCommPlan(self.comm, ffi.new('ncclMeshCall[]', made or 1), len(made),
@@ -282,24 +309,18 @@ class ProcessGroupMesh(dist.ProcessGroup):
         return {(a, b): int(values[a * n + b]) for a in range(n) for b in range(n)
                 if a != b and values[a * n + b]}
 
-    def reset_fused_configuration(self):
-        """Retire cached physical WRITE generations before route re-realization."""
-        _stream.fused_reconfigure(self.handle)
-
-
     def prepare_writes(self, deliveries):
-        """Bind exact logical tensor views once to the common physical WRITE plan.
-
-        Each delivery is ``(local_view, source, destination)``. On the source it
-        names original values, on the destination final output bytes, and on any
-        other rank a meta tensor of its shape and type, the library's relay
-        (nccl.h ncclMeshWriteLayoutPrepare). Local strides and span counts may
-        differ; native preparation agrees their common logical byte units.
-        """
+        """Bind local source/result geometry into ordinary communicator Calls."""
         from .operand import TensorView
-        bindings = [(*TensorView.of(view).write_layout(), int(source), int(destination))
-                    for view, source, destination in deliveries]
-        return _stream.ViewWrites(bindings, self.handle)
+        bindings, calls = [], []
+        for value, source, destination in deliveries:
+            view = TensorView.of(value)
+            geometry = view.write_layout()
+            bindings.append((*geometry, int(source), int(destination)))
+            sides = tuple(geometry if self.rank() == rank else None for rank in (source, destination))
+            calls.append(Call(WRITE, view.numel() * view.element_size(), torch.uint8,
+                              root=source, destination=destination, views=sides))
+        return _stream.ViewWrites(bindings, self.handle), calls
 
     def exchange_configuration(self, value):
         """Every rank's `value` (JSON), in rank order, before the function runs: the communicator's configuration
@@ -384,7 +405,7 @@ def bind_gather_views(gathers, group):
                 view = (source if group.rank() == a else segment if group.rank() == b else
                         torch.empty(segment.numel() * segment.element_size(), dtype=torch.uint8, device='meta'))
                 deliveries.append((view, a, b))
-    return group.prepare_writes(deliveries) if deliveries else None
+    return group.prepare_writes(deliveries) if deliveries else (None, [])
 
 
 def bind_scatter_views(source, output, dim, sizes, reduction, group):

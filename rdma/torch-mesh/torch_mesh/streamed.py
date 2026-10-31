@@ -135,7 +135,7 @@ def _pipeline(name, line=''):
 
 def _dims(tiles=0, outputs=0, rows=0, per=0, stride=0, shares=0, split=0, finish=0, count=0, columns=0, inputs=0,
           cap=0.0, eps=0.0, flags=0, layer=0, pitch=0):
-    """streamed_dims, field for field: its words as the constant block _stream.encode binds at buffer 15."""
+    """streamed_dims, field for field: its words as the prepared command constant block at buffer 15."""
     floats = [struct.unpack('<i', struct.pack('<f', v))[0] for v in (cap, eps)]
     return [tiles, outputs, rows, per, stride, shares, split, finish, count, columns, inputs, *floats, flags, layer, pitch]
 
@@ -528,28 +528,6 @@ def coop_slots():
     if _EVIDENCE is None or type(_EVIDENCE.get('coop')) is not int:
         raise RuntimeError(f'{_EVIDENCE_PATH}: missing cooperative tensor layout (coop); realize the backend capabilities before compilation')
     return _EVIDENCE['coop']
-
-
-def read_cooperative_layout():
-    """The node's cooperative-tensor slots as streamed_coop's COOP (docs/kernels.md#fragment-tiles), or None where
-    matmul2d<M, 32, 32>'s right-input map is not the canonical lanes' up to bit permutations (M 8 and 16 read)."""
-    if 'coop' in _PIPELINES:
-        return _PIPELINES['coop']
-    from . import _stream
-    found = None
-    for m in POLICY['cooperative_rows']:
-        out = torch.zeros(32 * 130, dtype=torch.int32, device='mps')
-        xs = torch.zeros(32 * 32, dtype=torch.float16, device='mps')
-        _stream.encode(_pipeline(f'streamed_coopmap_{m}'), [None, out, None, None, xs] + [None] * 10, _dims(), 15, 1, 1, 32)
-        slots = coop_of(out.cpu().view(32, 130).tolist())
-        if slots is None or (found is not None and slots != found):
-            found = None
-            break
-        found = slots
-    if found is None:
-        raise RuntimeError('the measured cooperative tensor layout is not represented by this backend; supply its layout before compilation')
-    _PIPELINES['coop'] = found
-    return found
 
 
 def coop_of(maps):
@@ -1551,7 +1529,7 @@ def _fit(args):
               'count': len(obs), 'loss': loss, 'median_log_error': errors[len(errors) // 2],
               'held_out': {'median_log_error': held[len(held) // 2], 'median_regret': regrets[len(regrets) // 2],
                            'worst_regret': regrets[-1]}, 'coefficients': fit.coefficients(), 'factors': fit.factors,
-              'attention': attention_fit(attention), 'coop': read_cooperative_layout(),
+              'attention': attention_fit(attention), 'coop': coop_slots(),
               'readings': [{'slice': list(k), 'instance': list(c), 'us': us} for k, read in sorted(readings(obs).items()) for c, us in sorted(read.items())],
               'attention_readings': [dict(zip(ATTENTION_READ, k), us=us) for k, us in sorted(attention_readings(attention).items())],
               'fused': kept.get('fused', {}), 'forms_at_bar': kept.get('forms_at_bar', {})}
