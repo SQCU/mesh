@@ -2547,16 +2547,16 @@ static int generation_buffer(const struct call *c, uint32_t r, uint32_t b) {
 }
 
 /* Every rank derives the complete transaction graph before selecting its own physical steps, with the fragment
-   allocator explicit WRITEs use (mesh_write_compile), over one of the communicator's two route tables:
-   - `tree` (a tree collective's program: each transaction a tree edge, which a cable joins): the composed table, so
-     an edge keeps to its cables unless a route was installed for its pair;
-   - else (an all-to-all's transactions, between any pair, like a WRITE's): the installed paths, relays included,
-     which the solver weighs (ncclMeshCommWriteRoutes). */
+   allocator explicit WRITEs use (mesh_write_compile), over `paths`:
+   - a tree collective's program (each transaction a tree edge, which a cable joins): the composed table, so an edge
+     keeps to its cables unless a route was installed for its pair;
+   - an all-to-all's transactions, between any pair: its group's paths as the group's solution weighs them
+     (plan_calls, writes_weigh), relays included. */
 static ncclResult_t bind_routed_steps(struct call *c, const uint32_t *first, const struct mesh_step *logical,
-                                       const uint32_t *initialized, int tree) {
+                                       const uint32_t *initialized, const struct mesh_paths *paths) {
   struct ncclComm *comm = c->comm;
   struct mesh_routed_program physical = {0};
-  const int status = mesh_routed_compile(&comm->fabric, tree ? comm->composed : comm->writes,
+  const int status = mesh_routed_compile(&comm->fabric, paths,
                                            first, logical, initialized, comm->page, counted(c) ? MESH_PACKET_TRANSACTIONS : MESH_PACKET_OPERAND, &physical);
   ncclResult_t result = status ? fail(ncclInvalidUsage, "physical collective lowering for %s: %s", comm->name, strerror(status)) : ncclSuccess;
   if (!result) {
@@ -2598,12 +2598,12 @@ static ncclResult_t routed_steps(struct call *c, const struct mesh_program *prog
     initialized[r] = 1 + program->scratch;
     first[r + 1] = first[r] + mesh_program_steps_cut(program, r, operand, cut, c->comm->page, logical + first[r]);
   }
-  if (!result) result = bind_routed_steps(c, first, logical, initialized, 1);
+  if (!result) result = bind_routed_steps(c, first, logical, initialized, c->comm->composed);
   free(first); free(initialized); free(logical);
   return result;
 }
 
-static ncclResult_t counted_steps(struct call *c) {
+static ncclResult_t counted_steps(struct call *c, const struct mesh_paths *paths) {
   if (!c->matrix) return fail(ncclInvalidUsage, "prepare the complete AlltoAllV count graph with ncclMeshCommPlan before execution");
   const uint32_t N = (uint32_t)c->comm->nranks;
   uint32_t *first = calloc((size_t)N + 1, sizeof *first), *initialized = malloc(N * sizeof *initialized);
@@ -2616,7 +2616,7 @@ static ncclResult_t counted_steps(struct call *c) {
     first[r + 1] = first[r] + mesh_counted_steps(N, r, segments, (struct mesh_operand){(uint32_t)c->type + 1, (uint32_t)SIZE[c->type], 0},
                                                 logical + first[r]);
   }
-  if (!result) result = bind_routed_steps(c, first, logical, initialized, 0);
+  if (!result) result = bind_routed_steps(c, first, logical, initialized, paths);
   free(first); free(initialized); free(segments); free(logical);
   return result;
 }
@@ -2670,8 +2670,10 @@ static ncclResult_t partial_split(struct call *c) {
    mesh_solve, b7311501's, which 3f72cbde's reset of main to an older tree removed and a tree packer and every-path
    weights of 1 then stood in for): each call's traffic its demands (demands_of), the group's demands solved together
    in finite time, and every crossing compiled from the solution, a collective along its own demands' trees and shares
-   (solved_steps), an all-to-all's and a WRITE's pairs over the write paths weighed by the flow the solution sends along
-   each (writes_weigh). A configuration's forms and a caller's programs or paths are its own (comm_routes). */
+   (solved_steps), an all-to-all's pairs over the write paths weighed by the flow the solution sends along each, in the
+   group's own paths table (writes_weigh). A WRITE keeps the paths its fragments were compiled over as its plan was
+   prepared, until a declared WRITE carries its memory and is compiled once, here. A configuration's forms and a
+   caller's programs or paths are its own (comm_routes). */
 #define MESH_SOLVE_EPS 0.1
 struct flow { uint32_t count, *demand, *parent; double *share; };
 static void flow_free(struct flow *f) { free(f->demand); free(f->parent); free(f->share); *f = (struct flow){0, NULL, NULL, NULL}; }
@@ -2741,23 +2743,42 @@ static ncclResult_t solved_steps(struct call *c, const struct mesh_demand *d, co
   return result;
 }
 
-/* each pair the group's WRITEs and all-to-alls send between (demands [0, count) of them), its write paths weighed by
-   the flow the solution sends along each: a solved tree's route from the pair's source up to its destination, its share
-   times its demand's bytes, split over each hop's parallel cables by their bandwidths; a pair a configuration routed
-   keeps its routes (ncclMeshCommWriteRoutes) */
-static ncclResult_t writes_weigh(ncclComm_t comm, const struct mesh_demand *d, uint32_t count, const struct flow *f) {
+/* the group's own paths table (*out, the caller's to free with weighed_free): each pair's write paths as the
+   communicator's (comm->writes, which nothing here writes), weighed where the group's all-to-alls send between it
+   (`weighs` of its demands) by the flow the solution sends along each: a solved tree's route from the pair's source up
+   to its destination, its share times its demand's bytes, split over each hop's parallel cables by their bandwidths; a
+   pair a configuration routed keeps its routes (ncclMeshCommWriteRoutes).  The solution is this compile's operand
+   alone: a later compile weighs its own, and a WRITE plan's fragments, compiled as the plan was prepared over the
+   communicator's paths, stay those its group lays */
+static void weighed_free(struct mesh_paths *weighed, uint32_t pairs) {
+  for (uint32_t p = 0; weighed && p < pairs; p++) free((void *)weighed[p].weight);
+  free(weighed);
+}
+static ncclResult_t writes_weigh(ncclComm_t comm, const struct mesh_demand *d, const unsigned char *weighs, uint32_t count,
+                                 const struct flow *f, struct mesh_paths **out) {
   const uint32_t n = (uint32_t)comm->nranks;
   const struct mesh_fabric *fabric = &comm->fabric;
+  struct mesh_paths *weighed = comm->writes ? calloc((size_t)n * n, sizeof *weighed) : NULL;
+  *out = NULL;
+  if (!comm->writes) return ncclSuccess;
+  if (!weighed) return fail(ncclSystemError, "out of memory");
+  for (uint32_t p = 0; p < n * n; p++) {
+    const struct mesh_paths *own = comm->writes + p;
+    uint64_t *weight = malloc(((size_t)own->count + 1) * sizeof *weight);
+    if (!weight) { weighed_free(weighed, n * n); return fail(ncclSystemError, "out of memory"); }
+    if (own->count) memcpy(weight, own->weight, own->count * sizeof *weight);
+    weighed[p] = (struct mesh_paths){own->count, own->first, own->cable, weight};
+  }
   for (uint32_t a = 0; a < n; a++)
     for (uint32_t b = 0; b < n; b++) {
-      if (a == b || !comm->writes || (comm->write_overrides && comm->write_overrides[(size_t)a * n + b])) continue;
-      struct mesh_paths *paths = comm->writes + (size_t)a * n + b;
+      if (a == b || (comm->write_overrides && comm->write_overrides[(size_t)a * n + b])) continue;
+      struct mesh_paths *paths = weighed + (size_t)a * n + b;
       double *flow = calloc((size_t)paths->count + 1, sizeof *flow), most = 0;
-      if (!flow) return fail(ncclSystemError, "out of memory");
+      if (!flow) { weighed_free(weighed, n * n); return fail(ncclSystemError, "out of memory"); }
       int sent = 0;
       for (uint32_t k = 0; k < f->count; k++) {
         const struct mesh_demand *x = d + f->demand[k];
-        if (f->demand[k] >= count || x->root != b || !x->leaves || !(x->leaves[a / 64] >> (a % 64) & 1)) continue;
+        if (f->demand[k] >= count || !weighs[f->demand[k]] || x->root != b || !x->leaves || !(x->leaves[a / 64] >> (a % 64) & 1)) continue;
         const uint32_t *up = f->parent + (size_t)k * n;
         for (uint32_t p = 0; p < paths->count; p++) {
           double part = f->share[k] * (double)x->up;
@@ -2782,11 +2803,12 @@ static ncclResult_t writes_weigh(ncclComm_t comm, const struct mesh_demand *d, u
       for (uint32_t p = 0; sent && p < paths->count; p++) ((uint64_t *)paths->weight)[p] = (uint64_t)(flow[p] / most * 1099511627776.0);
       free(flow);
     }
+  *out = weighed;
   return ncclSuccess;
 }
 
-/* every call that crosses a link planned, its group's traffic routed at once (above): a WRITE's and an all-to-all's
-   steps over the weighed write paths (write_steps, counted_steps), a collective along a configured form or the caller's
+/* every call that crosses a link planned, its group's traffic routed at once (above): a WRITE's steps over its pair's
+   paths (write_steps), an all-to-all's over the group's weighed table (counted_steps), a collective along a configured form or the caller's
    programs where one fits it (comm_compile, program_of), else along its solved trees (solved_steps); its steps cut on
    the communicator's page (mesh-plan.h mesh_program_steps_cut), a reduce-scatter's and an all-gather's segments NCCL's,
    its operand's element a merge's row where it merges */
@@ -2798,19 +2820,22 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
   uint32_t *lo = calloc(n + 1, sizeof *lo), *hi = calloc(n + 1, sizeof *hi);
   struct mesh_demand *d = calloc((size_t)room + 1, sizeof *d);
   uint64_t *leaves = calloc((size_t)room * words + 1, sizeof *leaves);
+  unsigned char *weighs = calloc((size_t)room + 1, 1);
+  struct mesh_paths *weighed = NULL;
   struct flow f = {0, NULL, NULL, NULL};
-  ncclResult_t result = lo && hi && d && leaves ? ncclSuccess : fail(ncclSystemError, "out of memory");
+  ncclResult_t result = lo && hi && d && leaves && weighs ? ncclSuccess : fail(ncclSystemError, "out of memory");
   for (size_t i = 0; !result && i < n; i++) {
     lo[i] = hi[i] = demands;
     if (crosses(list + i)) hi[i] = demands += demands_of(comm, list + i, d + demands, leaves + (size_t)demands * words);
+    for (uint32_t k = lo[i]; counted(list + i) && k < hi[i]; k++) weighs[k] = 1;
   }
   if (!result) result = flow_solve(comm, d, demands, &f);
-  if (!result) result = writes_weigh(comm, d, demands, &f);
+  if (!result) result = writes_weigh(comm, d, weighs, demands, &f, &weighed);
   for (size_t i = 0; !result && i < n; i++) {
     struct call *c = list + i;
     if (!crosses(c)) continue;
     if (c->target) { result = write_steps(c); continue; }
-    if (counted(c)) { result = counted_steps(c); continue; }
+    if (counted(c)) { result = counted_steps(c, weighed); continue; }
     result = comm_compile(comm);
     if (result) break;
     const struct entry *entry = program_of(comm, c->what, c->root, elements(c) * SIZE[c->type]);
@@ -2823,7 +2848,7 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
                    : solved_steps(c, d, &f, lo[i], hi[i], operand, segmented ? cut : NULL);
     if (!result && c->what == MESH_REDUCE_SCATTER) result = partial_split(c);
   }
-  flow_free(&f); free(lo); free(hi); free(d); free(leaves);
+  flow_free(&f); free(lo); free(hi); free(d); free(leaves); free(weighs); weighed_free(weighed, N * N);
   return result;
 }
 
