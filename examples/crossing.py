@@ -6,8 +6,7 @@ import torch.distributed as dist
 import torch.distributed._functional_collectives as collective
 import torch_mesh
 from torch_mesh.declarations import Function
-from mesh_statistics import now
-import rollout
+from mesh_statistics import now, Observations
 
 
 HIDDEN = int(os.environ.get('HIDDEN', '1536'))
@@ -35,16 +34,16 @@ def main():
     function = Function(chain, x, y, weight)
     group.plan(function.declare(group))
     function.prepare()
-    observer = rollout.start()
-    group._observers = [observer]
     started = now()
     function.run()
     completion = function.completion()
-    observer[0].put((completion, {'episode': '0', 'parts': {}, 'proposal': 0, 'graphs': {},
+    observations = Observations()
+    observations.put(completion, {'episode': '0', 'parts': {}, 'proposal': 0, 'graphs': {},
         'workload': {'hidden': HIDDEN, 'crossings': CROSSINGS, 'steps': STEPS, 'overlap': OVERLAP},
         'implementation': 'loaded-program', 'started': started, 'rank': rank, 'size': size,
         'useful_work_bytes': STEPS * CROSSINGS * HIDDEN * x.element_size(),
-        'report': {'program': 'crossing', 'steps': STEPS, 'calls': STEPS * CROSSINGS, 'overlap': OVERLAP}}))
+        'report': {'program': 'crossing', 'steps': STEPS, 'calls': STEPS * CROSSINGS, 'overlap': OVERLAP}})
+    observations.close()
     dist.destroy_process_group()
 
 

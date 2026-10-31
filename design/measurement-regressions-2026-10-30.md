@@ -51,12 +51,15 @@ measurement.
 
 ## The observer
 
-`rdma/rollout.py` is now a local observer. It stamps each completion as soon as it is seen (a 50 µs pause between
-looks), and times it from its start or from the completion queued ahead of it, whichever is later. One queue runs one
-call at a time, so a call submitted behind another starts when that one ends. The time spent behind earlier calls is
-reported as `queued_seconds`. Each rank emits its own rows. There is no store, no peer and no aggregation; the hourly
-already keeps every rank's rows. Callers: torch_mesh's bandwidth benchmark and configuration, and examples/crossing.py,
-engines.py and memory-read.py.
+There is no observer thread. `rdma/rollout.py` stamped each completion when a polling thread noticed it, and 78895bdb
+set that poll to 5 ms, so every interval was a whole number of polls (about 7.5 ms with the sleep's overrun): at 64 MiB
+and 8 calls, every reported time sat on a 939 us grid. It is deleted. Each completion now carries its own end, the GPU's
+end of its last part as Metal 4 reports it (`MTL4CommitFeedback` `GPUEndTime`, kept by the schedule, converted to the
+statistics clock), read once the schedule's last part arrives (`MetalScheduleEnd`, woken by that arrival, never
+polled). `mesh_statistics.Observations` emits each record in submission order: from its submission or the end of the
+completion ahead of it, whichever is later, to its own end; the time behind earlier calls is `queued_seconds`. `put`
+emits those already ended without waiting, `close` the rest. Callers: torch_mesh's bandwidth benchmark and
+configuration (closed by the group's shutdown), and examples/crossing.py, engines.py and memory-read.py.
 
 ## Still owed
 

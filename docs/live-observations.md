@@ -10,8 +10,8 @@ The hourly (`rdma/mesh_hourly.py`, every node's `io.mesh.hourly` job) runs each 
 node, `/usr/local/mesh/log/user/io.mesh.hourly.log` (newsyslog rotates it past 4 MB, two kept): a line naming the
 program and the nodes before each run, the program's records and diagnostics, and a line with its exit status after.
 
-A program keeps its own observations, which its placement reads before it runs and its close appends after
-(`rdma/rollout.py`: a path as named, or a bare name's `~/.cache/mesh/observations/<name>.jsonl`). Live connectivity
+A program emits its own records, each call timed to its GPU end (`rdma/mesh_statistics.py` `Observations`); no
+placement reads them back before a run (placement is an operand). Live connectivity
 and the bandwidth landed through each port are `mesh-top`'s, which starts its own telemetry sampler for as long as it
 runs.
 

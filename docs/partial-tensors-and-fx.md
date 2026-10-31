@@ -127,9 +127,10 @@ values. Reversed and broadcast dimensions retain their mappings. Affine geometry
 dimensions, with no span.
 
 `MeshWork.wait`, `isCompleted` and `getFuture` concern host encoding completion in this adapter. They are not
-a passive GPU completion clock. `_stream.completion()` and `_stream.completed(token)` expose ordinary command
-completion state to the asynchronous observer. The canonical measurement path uses that observation, not a
-new numerical executor or a timing drain.
+a passive GPU completion clock. `_stream.completion()` gives a call's completion; `_stream.completion_ended(token)`
+says whether it has ended without waiting, and `_stream.completion_end(token)` waits for its last part and returns the
+GPU's own end of it (`MTL4CommitFeedback` `GPUEndTime`). The measurement path (`mesh_statistics.Observations`) times
+each call to that end, not to when anything looked.
 
 ## Ragged tensors and parallel operations
 

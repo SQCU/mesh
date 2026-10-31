@@ -2,6 +2,8 @@
 #include "nccl.h"
 #import <objc/runtime.h>
 #include <stdatomic.h>
+#include <time.h>
+#include <os/os_sync_wait_on_address.h>
 #include <limits.h>
 
 BOOL MetalViewLayoutMatches(const NSUInteger *shape,const NSInteger *strides,const NSInteger *required,size_t rank) {
@@ -1230,6 +1232,7 @@ static NSError *MetalReplayFailure(NSInteger code, NSString *reason) {
     _Atomic unsigned remaining;
     _Atomic int status;
     NSError *error;
+    double ended;
 }
 @end
 @implementation MetalWork
@@ -1271,6 +1274,10 @@ struct MetalSchedule {
     BOOL externalVisible;
     NSUInteger commands, ordinal;
     _Atomic int status;
+    // the part's end, in the statistics clock (MetalScheduleEnd), stored before its status
+    double ended;
+    // the root's: 1 once every part and host task has ended (MetalScheduleArrived), woken for MetalScheduleEnd
+    _Atomic uint32_t arrived;
     _Atomic unsigned references;
     _Atomic unsigned pending;
     NSError *error;
@@ -1675,6 +1682,7 @@ static void MetalHostFinished(void *context,const char *failure) {
     MetalWork *task=context;
     NSError *error=failure?MetalReplayFailure(EIO,@(failure)):nil;
     task->error=[error retain];
+    task->ended=(double)clock_gettime_nsec_np(CLOCK_MONOTONIC)*1e-9;
     atomic_store_explicit(&task->status,error?-1:1,memory_order_release);
     task->event.signaledValue=1;
     MetalScheduleArrived(task->root);
@@ -1947,13 +1955,21 @@ static void MetalScheduleArrived(struct MetalSchedule *root) {
     if(atomic_fetch_sub_explicit(&root->pending,1,memory_order_acq_rel)==1) {
         NSError *failure=nil;
         MetalScheduleStatus(root,&failure);
+        atomic_store_explicit(&root->arrived,1,memory_order_release);
+        os_sync_wake_by_address_all(&root->arrived,sizeof root->arrived,OS_SYNC_WAKE_BY_ADDRESS_NONE);
         if(root->completed)root->completed(failure);
         MetalScheduleFree(root);
     }
 }
 
-static void MetalScheduleCompleted(struct MetalSchedule *s,NSError *error) {
+// a GPU host time (mach_absolute_time's seconds, MTL4CommitFeedback) in the statistics clock, CLOCK_MONOTONIC
+// (mesh-statistics.c), which also counts the time the machine slept
+static double MetalMonotonic(CFTimeInterval host) {
+    return host+(double)(clock_gettime_nsec_np(CLOCK_MONOTONIC)-clock_gettime_nsec_np(CLOCK_UPTIME_RAW))*1e-9;
+}
+static void MetalScheduleCompleted(struct MetalSchedule *s,NSError *error,double ended) {
     s->error=[error retain];
+    s->ended=ended;
     atomic_store_explicit(&s->status,error?-1:1,memory_order_release);
     MetalScheduleArrived(s->root);
     MetalScheduleFree(s);
@@ -1979,7 +1995,7 @@ static void MetalScheduleFinishPart(struct MetalSchedule *s) {
     [s->command endCommandBuffer];
     s->options=[MTL4CommitOptions new];
     [s->options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback){
-        MetalScheduleCompleted(s,feedback.error);
+        MetalScheduleCompleted(s,feedback.error,MetalMonotonic(feedback.GPUEndTime));
     }];
 }
 
@@ -2044,6 +2060,23 @@ int MetalScheduleFinish(struct MetalSchedule *root,void (^completed)(NSError *))
         if(error)return error;
     }
     return 0;
+}
+
+int MetalScheduleEnd(const struct MetalSchedule *s,double *ended,NSError **error) {
+    struct MetalSchedule *root=s->root;
+    *error=nil;
+    while(!atomic_load_explicit(&root->arrived,memory_order_acquire)) {
+        // woken by the last arrival; each second without it, its communicators' errors read (a lost link's GPU waits
+        // end at their own bounds, and with them the parts)
+        os_sync_wait_on_address_with_timeout(&root->arrived,0,sizeof root->arrived,OS_SYNC_WAIT_ON_ADDRESS_NONE,
+                                             OS_CLOCK_MACH_ABSOLUTE_TIME,1000000000ull);
+        if(MetalScheduleStatus(s,error)<0)return -1;
+    }
+    double latest=0;
+    for(const struct MetalSchedule *part=s;part;part=part->next)if(part->ended>latest)latest=part->ended;
+    for(MetalWork *host in root->hosts)if(host->ended>latest)latest=host->ended;
+    *ended=latest;
+    return MetalScheduleStatus(s,error);
 }
 
 int MetalScheduleStatus(const struct MetalSchedule *s,NSError **error) {

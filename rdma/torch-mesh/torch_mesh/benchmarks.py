@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import sys
 
-from mesh_statistics import now
+from mesh_statistics import now, Observations
 
 
 def exchange_counts(rank, size, count):
@@ -88,7 +88,6 @@ def bandwidth(config):
     # design/whole-function.md#observations
     import torch
     import torch.distributed as dist
-    import rollout
     from .backend import prepare_fragments
     dist.init_process_group(backend='mesh', device_id=torch.device('mps', 0))
     rank, size = dist.get_rank(), dist.get_world_size()
@@ -107,18 +106,17 @@ def bandwidth(config):
     for binding, useful, _, calls, what, requested in cases:
         binding.realize(calls)
         prepared.append((binding, useful, calls, what, requested))
-    observer = rollout.start()
-    group._observers = [observer]
+    observations = Observations()
     for index, (binding, useful, calls, what, requested) in enumerate(prepared):
         started = now()
         binding.enqueue()
         completion = binding.completion()
-        observer[0].put((completion, {'episode': str(index), 'parts': {}, 'graphs': {}, 'proposal': 0,
+        observations.put(completion, {'episode': str(index), 'parts': {}, 'graphs': {}, 'proposal': 0,
             'workload': {'collective': what, 'bytes': requested, 'calls': calls}, 'implementation': 'loaded-program',
             'started': started, 'rank': rank, 'size': size, 'useful_work_bytes': useful * calls,
             'report': {'what': what, 'requested_bytes': requested, 'calls': calls,
-                       'useful_output_bytes_per_call_rank': useful}}))
-    rollout.close(observer)
+                       'useful_output_bytes_per_call_rank': useful}})
+    observations.close()
     checked(rank, outputs)
     dist.destroy_process_group()
 

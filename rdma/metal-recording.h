@@ -252,8 +252,12 @@ NSError *MetalScheduleAppend(struct MetalSchedule *, struct MetalReplay *, NSRan
 // Returns the collective preparation error, or zero. Enqueue does no exchange.
 int MetalScheduleFinish(struct MetalSchedule *, void (^completed)(NSError *error));
 void MetalScheduleEnqueue(struct MetalSchedule *);
-// Ordinary completion observation: 0 pending, 1 complete, -1 failed.
+// 0 pending, 1 complete, -1 failed.
 int MetalScheduleStatus(const struct MetalSchedule *, NSError **error);
+// An enqueued schedule's end, once every part and host task has ended (woken by the last, never polled): *ended the
+// latest GPU end of its parts (MTL4CommitFeedback GPUEndTime) and of its host tasks, in the statistics clock
+// (mesh-statistics.c mesh_statistics_now), 0 where no part ran on either; 1 complete, -1 failed (*error).
+int MetalScheduleEnd(const struct MetalSchedule *, double *ended, NSError **error);
 void MetalScheduleFree(struct MetalSchedule *);
 // A replay MetalReplayCommands or MetalReplayDescribed returned, destroyed and freed.
 void MetalReplayFree(struct MetalReplay *);

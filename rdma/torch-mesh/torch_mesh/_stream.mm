@@ -1842,18 +1842,47 @@ struct ViewWrites {
 
 };
 
-static bool completed(pybind11::object observation) {
+// a completion's end, once it has ended (MetalScheduleEnd: woken by its last part, its time the GPU's own), the latest
+// of a tuple's, in mesh_statistics.now's clock
+static void completion_schedules(pybind11::handle observation, std::vector<Schedule> &into) {
   if(pybind11::isinstance<pybind11::tuple>(observation)) {
-    bool done=true;
-    for(auto item:observation.cast<pybind11::tuple>())done=completed(pybind11::reinterpret_borrow<pybind11::object>(item))&&done;
-    return done;
+    for(auto item:observation.cast<pybind11::tuple>())completion_schedules(item,into);
+    return;
   }
-  // a prepared function's completion (schedule_completion), the one observation there is
-  auto token=observation.cast<pybind11::capsule>();
-  TORCH_CHECK(!strcmp(token.name(),"mesh.prepared-function"),"torch_mesh.completed: ",token.name()," is no prepared function's completion");
-  NSError *error=nil;
-  int status=MetalScheduleStatus(static_cast<Schedule *>(token.get_pointer())->get(),&error);
-  TORCH_CHECK(status>=0,"the prepared function failed: ",error.localizedDescription.UTF8String);return status==1;
+  auto token=pybind11::reinterpret_borrow<pybind11::capsule>(observation);
+  TORCH_CHECK(!strcmp(token.name(),"mesh.prepared-function"),"torch_mesh.completion_end: ",token.name()," is no prepared function's completion");
+  into.push_back(*static_cast<Schedule *>(token.get_pointer()));
+}
+// whether a completion has ended, without waiting (its failure raised)
+static bool completion_ended(pybind11::object observation) {
+  std::vector<Schedule> schedules;
+  completion_schedules(observation,schedules);
+  bool ended=true;
+  for(const Schedule &schedule:schedules) {
+    NSError *error=nil;
+    const int status=MetalScheduleStatus(schedule.get(),&error);
+    TORCH_CHECK(status>=0,"the prepared function failed: ",error.localizedDescription.UTF8String);
+    ended=ended&&status==1;
+  }
+  return ended;
+}
+static double completion_end(pybind11::object observation) {
+  std::vector<Schedule> schedules;
+  completion_schedules(observation,schedules);
+  double latest=0;
+  for(const Schedule &schedule:schedules) {
+    double ended=0;
+    NSError *error=nil;
+    int status;
+    {
+      pybind11::gil_scoped_release unlocked;
+      status=MetalScheduleEnd(schedule.get(),&ended,&error);
+    }
+    TORCH_CHECK(status>0,"the prepared function failed: ",error.localizedDescription.UTF8String);
+    TORCH_CHECK(ended>0,"torch_mesh.completion_end: a completion none of whose parts ran on the GPU or the host");
+    latest=std::max(latest,ended);
+  }
+  return latest;
 }
 
 // The module: prepared functions, their collectives (Collectives, ViewWrites) and fused crossings; no collective is
@@ -1901,7 +1930,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
       return std::array<uint64_t,3>{(uint64_t)(uintptr_t)pages.buffer.contents,pages.buffer.length,pages.origin};
     } @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
   }, pybind11::call_guard<Drained>());
-  module.def("completed", &completed, pybind11::call_guard<Drained>());
+  module.def("completion_ended", &completion_ended, pybind11::call_guard<Drained>());
+  module.def("completion_end", &completion_end, pybind11::call_guard<Drained>());
   module.def("pipeline", &pipeline, pybind11::call_guard<Drained>());
   module.def("pipeline_specialized", &pipeline_specialized, pybind11::call_guard<Drained>());
   module.def("index_constant_prelude", [](){return std::string(MetalViewIndexConstantPrelude().UTF8String);}, pybind11::call_guard<Drained>());

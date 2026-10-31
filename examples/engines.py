@@ -11,8 +11,7 @@ from pathlib import Path
 import torch
 from torch_mesh import engines
 from torch_mesh.compilation import parameters
-import rollout
-from mesh_statistics import now
+from mesh_statistics import now, Observations
 
 env = lambda key, default: int(os.environ.get(key, default))
 rows, k, n, steps, every, layers = env('ROWS', 1024), env('K', 3840), env('N', 3456), env('STEPS', 40), env('EVERY', 1), env('LAYERS', 4)
@@ -48,7 +47,7 @@ for layer in range(layers):
 key = shared[0].declare(rows, x.dtype, capacities=capacities)
 for operation in shared[1:]:
     operation.declare(rows, x.dtype, capacities=capacities)
-observer = rollout.start()
+observations = Observations()
 from torch_mesh.declarations import Function, execution_sequence
 # placed once, on this pool as it is: no observation of an earlier chunk or run is an input
 assigned = engines.placement(pool, [], step=0)
@@ -69,9 +68,9 @@ for start in range(0, steps, every):
     began = now()
     program.forward()
     completion = program.completion()
-    observer[0].put((completion, {'episode': str(start), 'parts': assigned['parts'], 'proposal': assigned['proposal'], 'graphs': {},
+    observations.put(completion, {'episode': str(start), 'parts': assigned['parts'], 'proposal': assigned['proposal'], 'graphs': {},
         'workload': {'layers': layers, 'kind': kind, 'rows': rows, 'k': k, 'n': n},
         'implementation': 'loaded-program', 'started': began, 'rank': 0, 'size': 1,
         'useful_work_bytes': rows * k * calls * 2,
-        'report': {'program': 'engines', 'steps': calls, 'rows': rows, 'parts': assigned['parts']}}))
-rollout.close(observer)
+        'report': {'program': 'engines', 'steps': calls, 'rows': rows, 'parts': assigned['parts']}})
+observations.close()

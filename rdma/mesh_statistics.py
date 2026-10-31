@@ -46,7 +46,7 @@ def completed(record, seconds):
     result = {**record['report'], 'rank': record['rank'], 'size': record['size'],
               'seconds': measured['seconds'], 'useful_output_bytes': record['useful_work_bytes'],
               'useful_gigabytes_per_second': measured['useful_gigabytes_per_second'],
-              'timing_method': 'continuous submission; each completion stamped as seen, timed from its start or the completion before it'}
+              'timing_method': 'continuous submission; each completion timed to its GPU end (MTL4CommitFeedback), from its submission or the completion before it'}
     if 'steps' in result:
         result.update(step_microseconds=seconds / result['steps'] * 1e6,
                       calls_per_second=measured['units_per_second'])
@@ -90,3 +90,31 @@ def aggregate(ranks):
                                   aggregate_rows_per_second=measure(0, seconds, 0, values[0]['rows'] * values[0]['steps'])['units_per_second'])
     return result
 
+
+
+class Observations:
+    """A program's completions in submission order, each emitted once it has ended: its interval from its submission
+    (record['started'], now's clock) or the end of the completion before it, whichever is later (one queue runs one
+    call at a time), to its own end as the GPU reported it (torch_mesh._stream.completion_end, MTL4CommitFeedback
+    GPUEndTime), the wait behind earlier ones its report's queued_seconds. No time is the time of a look: put emits
+    those already ended without waiting, close the rest, waiting for each to end."""
+
+    def __init__(self):
+        self.submitted, self.ended = [], 0.0
+
+    def put(self, completion, record):
+        self.submitted.append((completion, record))
+        self._emit(False)
+
+    def close(self):
+        self._emit(True)
+
+    def _emit(self, waiting):
+        from torch_mesh import _stream
+        while self.submitted and (waiting or _stream.completion_ended(self.submitted[0][0])):
+            completion, record = self.submitted.pop(0)
+            end = _stream.completion_end(completion)
+            began = max(record['started'], self.ended)
+            self.ended = end
+            record['report'] = {**record['report'], 'queued_seconds': began - record['started']}
+            emit([completed(record, end - began)])

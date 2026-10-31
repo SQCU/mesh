@@ -4,10 +4,9 @@ import time
 from pathlib import Path
 
 import assignment
-import rollout
 import routing
 from mesh_source import revision
-from mesh_statistics import emit
+from mesh_statistics import emit, Observations
 from . import partition
 from .streamed import node
 
@@ -70,8 +69,8 @@ def bind(configuration, groups, prepare):
     prepare()
     emit({'phase': 'prepared', 'unix': time.time()})
     c.update(decisions=decisions, graphs={name: graph}, assignment={**c['assignment'], 'parts': operands})
-    c['observer'] = rollout.start()
-    group._observers = getattr(group, '_observers', []) + [c['observer']]
+    c['observations'] = Observations()
+    group.observations.append(c['observations'])
 
 
 def record(configuration, completion, started, useful_work_bytes, report):
@@ -82,5 +81,5 @@ def record(configuration, completion, started, useful_work_bytes, report):
            'workload': c['workload'], 'implementation': c['implementation'],
            'proposal': c['assignment']['proposal'], 'importance': 1.0,
            'rank': c['rank'], 'size': c['size'], 'report': report, 'started': started, 'useful_work_bytes': useful_work_bytes}
-    c['observer'][0].put((completion, row))
+    c['observations'].put(completion, row)
     return row

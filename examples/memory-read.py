@@ -2,8 +2,7 @@
 import argparse
 import torch
 from torch_mesh import _stream, streamed
-from mesh_statistics import now
-import rollout
+from mesh_statistics import now, Observations
 
 
 def main():
@@ -15,15 +14,15 @@ def main():
     data = torch.full((count * 8,), 0x5a5a, dtype=torch.int16, device='mps')
     output = torch.zeros(1024, dtype=torch.int32, device='mps')
     function = streamed.prepare_read(data, output, count, config.rounds)
-    observer = rollout.start()
     completion = function.completion()
     started = now()
     function.enqueue()
-    observer[0].put((completion, {'episode': '0', 'parts': {}, 'proposal': 0, 'graphs': {},
+    observations = Observations()
+    observations.put(completion, {'episode': '0', 'parts': {}, 'proposal': 0, 'graphs': {},
         'workload': {'mib': config.mib, 'rounds': config.rounds}, 'implementation': 'loaded-program',
         'started': started, 'rank': 0, 'size': 1, 'useful_work_bytes': count * 16 * config.rounds,
-        'report': {'program': 'memory-read', 'kind': 'bandwidth', 'node': list(streamed.node()), 'steps': config.rounds}}))
-    rollout.close(observer)
+        'report': {'program': 'memory-read', 'kind': 'bandwidth', 'node': list(streamed.node()), 'steps': config.rounds}})
+    observations.close()
 
 
 if __name__ == '__main__':

@@ -101,6 +101,8 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     def _held(self, rank, size, comm):
         self._rank, self._size, self._operators = rank, size, {}
+        # the completions submitted under this group (mesh_statistics.Observations), emitted by its shutdown at the latest
+        self.observations = []
         self._declaration = ([], [])
         self.comm = comm
         self.handle = int(ffi.cast('uintptr_t', self.comm))
@@ -159,10 +161,10 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     def shutdown(self):
         """torch's end of this group (destroy_process_group): the fused crossings' forms on its communicator released,
-        their leases back to the region once the stream has passed them (_stream.mm fused_release)."""
-        for observer in getattr(self, '_observers', ()):
-            from rollout import close
-            close(observer)
+        their leases back to the region once the stream has passed them (_stream.mm fused_release), its completions'
+        observations emitted first."""
+        for observations in self.observations:
+            observations.close()
         _stream.fused_release(self.handle)
         super().shutdown()
 
