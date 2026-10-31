@@ -481,3 +481,57 @@ void mesh_graph_meets(const struct mesh_graph_span *a, const uint64_t *reach, si
   while (low < high) { const size_t mid = low + (high - low) / 2; if (a[mid].begin < b.end) low = mid + 1; else high = mid; }
   for (size_t i = low; i-- > 0 && reach[i] > b.begin;) if (a[i].end > b.begin) meet(consumer, i);
 }
+
+/* mesh-graph.h mesh_graph_classes */
+struct classes_span { struct mesh_graph_span span; uint32_t k; };
+static int classes_span_order(const void *left, const void *right) {
+  const struct classes_span *a = left, *b = right;
+  return (a->span.begin > b->span.begin) - (a->span.begin < b->span.begin);
+}
+struct classes_meet { const struct classes_span *spans; const uint32_t *part; uint32_t at; int crossed; };
+static void classes_met(void *consumer, size_t i) {
+  struct classes_meet *m = consumer;
+  if (m->part[m->spans[i].k] != m->part[m->at]) m->crossed = 1;
+}
+static uint32_t classes_head(const void *context, size_t k) { return ((const uint32_t *)context)[k]; }
+int mesh_graph_classes(uint32_t vertices, const size_t *first, const uint32_t *head, const uint32_t *class_of,
+                       uint32_t classes, const struct mesh_graph_span *span, const uint32_t *part, uint32_t *place,
+                       uint32_t **from, uint32_t **to, size_t *edges) {
+  size_t n = 0;
+  for (uint32_t v = 0; v < vertices; v++)
+    if (class_of[v] != UINT32_MAX)
+      for (size_t k = first[v]; k < first[v + 1]; k++) n += class_of[head[k]] != UINT32_MAX && class_of[head[k]] != class_of[v];
+  *from = malloc((n + 1) * sizeof **from); *to = malloc((n + 1) * sizeof **to); *edges = 0;
+  struct classes_span *sorted = malloc(((size_t)classes + 1) * sizeof *sorted);
+  struct mesh_graph_span *spans = malloc(((size_t)classes + 1) * sizeof *spans);
+  uint64_t *reach = malloc(((size_t)classes + 1) * sizeof *reach);
+  size_t *rows = calloc((size_t)classes + 2, sizeof *rows), *at = calloc((size_t)classes + 1, sizeof *at);
+  uint32_t *heads = malloc((n + 1) * sizeof *heads), *indegree = malloc(((size_t)classes + 1) * sizeof *indegree);
+  int result = !*from || !*to || !sorted || !spans || !reach || !rows || !at || !heads || !indegree ? ENOMEM : 0;
+  for (uint32_t v = 0; !result && v < vertices; v++)
+    if (class_of[v] != UINT32_MAX)
+      for (size_t k = first[v]; k < first[v + 1]; k++) {
+        const uint32_t a = class_of[head[k]];
+        if (a != UINT32_MAX && a != class_of[v]) { (*from)[*edges] = a; (*to)[(*edges)++] = class_of[v]; }
+      }
+  if (!result) {
+    for (uint32_t k = 0; k < classes; k++) sorted[k] = (struct classes_span){span[k], k};
+    qsort(sorted, classes, sizeof *sorted, classes_span_order);
+    for (uint32_t k = 0; k < classes; k++) spans[k] = sorted[k].span;
+    mesh_graph_span_reach(spans, classes, reach);
+    struct classes_meet meet = {sorted, part, 0, 0};
+    for (uint32_t k = 0; !meet.crossed && k < classes; k++) {
+      meet.at = sorted[k].k;
+      mesh_graph_meets(spans, reach, classes, spans[k], classes_met, &meet);
+    }
+    if (meet.crossed) result = 1;
+  }
+  if (!result) {
+    for (size_t k = 0; k < *edges; k++) rows[(*from)[k] + 1]++;
+    for (uint32_t k = 0; k < classes; k++) rows[k + 1] += rows[k];
+    for (size_t k = 0; k < *edges; k++) heads[rows[(*from)[k]] + at[(*from)[k]]++] = (*to)[k];
+    if (mesh_graph_order(classes, rows, classes_head, heads, indegree, place)) result = 1;
+  }
+  free(sorted); free(spans); free(reach); free(rows); free(at); free(heads); free(indegree);
+  return result;
+}

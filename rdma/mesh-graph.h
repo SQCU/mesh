@@ -180,4 +180,13 @@ struct mesh_graph_span { uint64_t begin, end; };
 void mesh_graph_span_reach(const struct mesh_graph_span *a, size_t n, uint64_t *reach);
 void mesh_graph_meets(const struct mesh_graph_span *a, const uint64_t *reach, size_t n, struct mesh_graph_span b,
                       void (*meet)(void *consumer, size_t i), void *consumer);
+/* Classes of vertices ordered by the edges between them (a group's sums, each a class of its steps: nccl-mesh.c
+   zabbadoo_plan): vertex v's row [first[v], first[v + 1]) of head[], class_of[v] its class (UINT32_MAX: none); an edge
+   from class a to class b != a wherever a vertex of b's row reaches one of a, kept in *from and *to (*edges of them,
+   malloc'd: the caller frees them).  span[k] class k's range and part[k] its partition: two classes of different
+   partitions whose spans meet, which no edge orders, are refused.  place[k] k's place in a topological order of the
+   edges (mesh_graph_order).  0; 1 where spans of two partitions meet or the edges hold a cycle; ENOMEM */
+int mesh_graph_classes(uint32_t vertices, const size_t *first, const uint32_t *head, const uint32_t *class_of,
+                       uint32_t classes, const struct mesh_graph_span *span, const uint32_t *part, uint32_t *place,
+                       uint32_t **from, uint32_t **to, size_t *edges);
 #endif
