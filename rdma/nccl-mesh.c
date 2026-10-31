@@ -4904,6 +4904,10 @@ static int zsum_order(const void *left, const void *right) {
   for (int k = 0; k < 3; k++) if (u[k] != v[k]) return u[k] < v[k] ? -1 : 1;
   return (a->h > b->h) - (a->h < b->h);
 }
+static int span_order(const void *left, const void *right) {
+  const struct mesh_graph_span *a = left, *b = right;
+  return (a->begin > b->begin) - (a->begin < b->begin);
+}
 static int zsum_same(const struct zsum *a, const struct zsum *b) {
   const struct mesh_step *x = a->m->c->bound->steps + a->m->step, *y = b->m->c->bound->steps + b->m->step;
   return a->m->c == b->m->c && x->buffer == y->buffer && x->first == y->first && x->piece.elements == y->piece.elements;
@@ -4940,6 +4944,24 @@ static ncclResult_t zabbadoo(struct metal_program *program, struct ncclComm *com
       if (!same) { free(sums); free(in); return ncclSuccess; }
     }
   }
+  /* the sums' result ranges pairwise disjoint (mesh-graph.h mesh_graph_disjoint, over their addresses): two steps that
+     combine into overlapping ranges not one sum (a later receive's combine over an earlier one's result: consume's
+     metal_depend, in the pool) would each fold the rank's own operand, so one loses the other's contributions
+     (bandwidth's 16 MiB reduce-scatter max, 4.0 against 5.0, once a group making its operands in place reached here:
+     test-cp, 2026-10-31); such a group stays the pool's */
+  struct mesh_graph_span *spans = malloc((count + 1) * sizeof *spans);
+  if (!spans) { free(sums); free(in); return fail(ncclSystemError, "out of memory"); }
+  size_t ranges = 0;
+  for (size_t a = 0, b = 0; a < count; a = b) {
+    for (b = a + 1; b < count && zsum_same(sums + a, sums + b); b++) {}
+    const struct message *m = sums[a].m;
+    const uintptr_t at = (uintptr_t)address_of(shifted(m->c->bound->buffer[m->c->bound->steps[m->step].buffer], m->offset));
+    spans[ranges++] = (struct mesh_graph_span){at, at + m->bytes};
+  }
+  qsort(spans, ranges, sizeof *spans, span_order);
+  const int disjoint = mesh_graph_disjoint(spans, ranges);
+  free(spans);
+  if (!disjoint) { free(sums); free(in); return ncclSuccess; }
   /* the sums, one dispatch for each type and operator the group's calls name (one, a group of one call) */
   struct metal_zelloth_sum *group = malloc((count + 1) * sizeof *group);
   const struct call **of = malloc((count + 1) * sizeof *of);

@@ -425,6 +425,15 @@ uint64_t mesh_graph_cells(const uint64_t *length, size_t n, uint64_t cell, uint6
   return q;
 }
 
+int mesh_graph_disjoint(const struct mesh_graph_span *a, size_t n) {
+  uint64_t reach = 0;
+  for (size_t i = 0; i < n; i++) {
+    if (i && a[i].begin < reach) return 0;
+    if (a[i].end > reach) reach = a[i].end;
+  }
+  return 1;
+}
+
 void mesh_graph_span_reach(const struct mesh_graph_span *a, size_t n, uint64_t *reach) {
   for (size_t i = 0; i < n; i++) reach[i] = i && reach[i - 1] > a[i].end ? reach[i - 1] : a[i].end;
 }

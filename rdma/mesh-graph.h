@@ -112,6 +112,8 @@ int mesh_graph_chain(struct mesh_graph_chain *cursor, uint64_t q, uint64_t (*fol
    spans scanned back past b's begin, those it meets where a's spans are disjoint) */
 struct mesh_graph_span { uint64_t begin, end; };
 void mesh_graph_span_reach(const struct mesh_graph_span *a, size_t n, uint64_t *reach);
+/* whether n spans sorted on begin are pairwise disjoint: each begins at or past the end of every one before it */
+int mesh_graph_disjoint(const struct mesh_graph_span *a, size_t n);
 void mesh_graph_meets(const struct mesh_graph_span *a, const uint64_t *reach, size_t n, struct mesh_graph_span b,
                       void (*meet)(void *consumer, size_t i), void *consumer);
 #endif
