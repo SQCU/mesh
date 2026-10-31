@@ -1,5 +1,6 @@
 #include "mesh-graph.h"
 #include <errno.h>
+#include <math.h>
 #include <stdlib.h>
 
 /* mesh-graph.h */
@@ -180,4 +181,189 @@ void mesh_graph_tree_levels(const uint32_t *parent, uint32_t vertices, uint32_t 
 static void climb_mark(void *consumer, uint32_t at, uint32_t step) { (void)step; ((unsigned char *)consumer)[at] = 1; }
 void mesh_graph_ancestors(const uint32_t *parent, uint32_t vertices, uint32_t root, uint32_t from, unsigned char *marked) {
   mesh_graph_climb(parent, vertices, root, from, climb_mark, marked);
+}
+
+/* mesh-graph.h: the schedule's moves, their follows each way (CSR), and every unit's time (an arc unit's end, an
+   event's moment; NAN until known) */
+struct schedule {
+  const struct mesh_graph_move *move; const struct mesh_graph_follow *follow;
+  size_t *base, *in_first, *out_first; uint32_t *in, *out, *next, *height, *depth;
+  double *at, *began, *done;
+};
+static uint32_t schedule_after(const void *context, size_t k) {
+  const struct schedule *s = context;
+  return s->follow[s->out[k]].after;
+}
+/* move k's next unit's ready time, where every unit it waits for has its time */
+static int schedule_ready(const struct schedule *s, uint32_t k, double *ready) {
+  double t = s->move[k].release;
+  for (size_t i = s->in_first[k]; i < s->in_first[k + 1]; i++) {
+    const struct mesh_graph_follow *f = s->follow + s->in[i];
+    const double x = f->wait == MESH_GRAPH_STREAMED ? s->at[s->base[f->before] + f->offset + s->next[k]]
+                   : f->wait == MESH_GRAPH_COMPLETE ? s->done[f->before] : s->began[f->before];
+    if (isnan(x)) return 0;
+    if (x > t) t = x;
+  }
+  *ready = t;
+  return 1;
+}
+/* the events on `stack` given every unit time they can have, and the events below each that moved queued in turn */
+static void schedule_events(struct schedule *s, uint32_t arcs, uint32_t *stack, size_t pending, unsigned char *queued) {
+  while (pending) {
+    const uint32_t c = stack[--pending];
+    const struct mesh_graph_move *m = s->move + c;
+    int moved = 0;
+    double ready;
+    queued[c] = 0;
+    while (s->next[c] < m->units && schedule_ready(s, c, &ready)) {
+      if (!s->next[c]) s->began[c] = ready;
+      s->at[s->base[c] + s->next[c]++] = ready;
+      moved = 1;
+    }
+    if (!moved) continue;
+    if (s->next[c] == m->units) s->done[c] = s->at[s->base[c] + m->units - 1];
+    for (size_t i = s->out_first[c]; i < s->out_first[c + 1]; i++) {
+      const uint32_t child = s->follow[s->out[i]].after;
+      if (s->move[child].arc == arcs && !queued[child] && s->next[child] < s->move[child].units) {
+        queued[child] = 1;
+        stack[pending++] = child;
+      }
+    }
+  }
+}
+/* the arc's move to carry next: the higher, then the one carried last, then the lower production, then the lower */
+static int schedule_better(const struct schedule *s, uint32_t k, uint32_t than, uint32_t last) {
+  if (s->height[k] != s->height[than]) return s->height[k] > s->height[than];
+  if ((k == last) != (than == last)) return k == last;
+  if (s->move[k].production != s->move[than].production) return s->move[k].production < s->move[than].production;
+  return k < than;
+}
+struct schedule_place { double at; uint32_t depth, k; };
+static int schedule_place_order(const void *left, const void *right) {
+  const struct schedule_place *a = left, *b = right;
+  if (a->at != b->at) return a->at < b->at ? -1 : 1;
+  if (a->depth != b->depth) return a->depth < b->depth ? -1 : 1;
+  return (a->k > b->k) - (a->k < b->k);
+}
+/* mesh-graph.h */
+int mesh_graph_schedule(const struct mesh_graph_move *move, uint32_t moves, uint32_t arcs,
+                        const struct mesh_graph_follow *follow, size_t follows, uint32_t *order, double *finish) {
+  if ((moves && (!move || !order)) || (follows && !follow)) return EINVAL;
+  size_t units = 0, carried = 0;
+  for (uint32_t k = 0; k < moves; k++) {
+    const struct mesh_graph_move *m = move + k;
+    if (m->arc > arcs || !m->units || !isfinite(m->release) || m->release < 0) return EINVAL;
+    if (m->arc < arcs && (!(m->unit_seconds > 0) || !isfinite(m->unit_seconds) || !(m->last_seconds > 0) ||
+                          !isfinite(m->last_seconds))) return EINVAL;
+    units += m->units;
+    if (m->arc < arcs) carried += m->units;
+  }
+  for (size_t e = 0; e < follows; e++) {
+    const struct mesh_graph_follow *f = follow + e;
+    if (f->before >= moves || f->after >= moves || f->before == f->after || f->wait > MESH_GRAPH_COMPLETE ||
+        (f->wait == MESH_GRAPH_STREAMED && (uint64_t)f->offset + move[f->after].units > move[f->before].units))
+      return EINVAL;
+  }
+  struct schedule s = {.move = move, .follow = follow,
+    .base = malloc(((size_t)moves + 1) * sizeof *s.base), .in_first = calloc((size_t)moves + 2, sizeof *s.in_first),
+    .out_first = calloc((size_t)moves + 2, sizeof *s.out_first), .in = malloc((follows + 1) * sizeof *s.in),
+    .out = malloc((follows + 1) * sizeof *s.out), .next = calloc((size_t)moves + 1, sizeof *s.next),
+    .height = calloc((size_t)moves + 1, sizeof *s.height), .depth = calloc((size_t)moves + 1, sizeof *s.depth),
+    .at = malloc((units + 1) * sizeof *s.at), .began = malloc(((size_t)moves + 1) * sizeof *s.began),
+    .done = malloc(((size_t)moves + 1) * sizeof *s.done)};
+  uint32_t *indegree = malloc(((size_t)moves + 1) * sizeof *indegree), *ordinal = malloc(((size_t)moves + 1) * sizeof *ordinal),
+           *placed = malloc(((size_t)moves + 1) * sizeof *placed), *stack = malloc(((size_t)moves + 1) * sizeof *stack),
+           *on = malloc(((size_t)moves + 1) * sizeof *on), *carrying = calloc((size_t)arcs + 1, sizeof *carrying),
+           *last = malloc(((size_t)arcs + 1) * sizeof *last);
+  size_t *arc_first = calloc((size_t)arcs + 2, sizeof *arc_first);
+  double *free_at = calloc((size_t)arcs + 1, sizeof *free_at), *ready = malloc(((size_t)moves + 1) * sizeof *ready);
+  unsigned char *queued = calloc((size_t)moves + 1, 1), *known = calloc((size_t)moves + 1, 1);
+  struct schedule_place *place = malloc(((size_t)moves + 1) * sizeof *place);
+  int status = 0;
+  if (!s.base || !s.in_first || !s.out_first || !s.in || !s.out || !s.next || !s.height || !s.depth || !s.at || !s.began ||
+      !s.done || !indegree || !ordinal || !placed || !stack || !on || !carrying || !last || !arc_first || !free_at ||
+      !ready || !queued || !known || !place) { status = ENOMEM; goto done; }
+  for (uint32_t k = 0; k < moves; k++) s.base[k] = k ? s.base[k - 1] + move[k - 1].units : 0;
+  for (size_t e = 0; e < follows; e++) { s.in_first[follow[e].after + 2]++; s.out_first[follow[e].before + 2]++; }
+  for (uint32_t k = 0; k < moves; k++) { s.in_first[k + 2] += s.in_first[k + 1]; s.out_first[k + 2] += s.out_first[k + 1]; }
+  for (size_t e = 0; e < follows; e++) {
+    s.in[s.in_first[follow[e].after + 1]++] = (uint32_t)e;
+    s.out[s.out_first[follow[e].before + 1]++] = (uint32_t)e;
+  }
+  if ((status = mesh_graph_order(moves, s.out_first, schedule_after, &s, indegree, ordinal))) goto done;
+  for (uint32_t k = 0; k < moves; k++) placed[ordinal[k]] = k;
+  for (uint32_t p = moves; p-- > 0;) {
+    const uint32_t k = placed[p];
+    uint32_t below = 0;
+    for (size_t i = s.out_first[k]; i < s.out_first[k + 1]; i++)
+      if (s.height[follow[s.out[i]].after] > below) below = s.height[follow[s.out[i]].after];
+    s.height[k] = below + (move[k].arc < arcs);
+  }
+  for (uint32_t p = 0; p < moves; p++) {
+    const uint32_t k = placed[p];
+    for (size_t i = s.out_first[k]; i < s.out_first[k + 1]; i++) {
+      const uint32_t child = follow[s.out[i]].after;
+      if (s.depth[child] < s.depth[k] + 1) s.depth[child] = s.depth[k] + 1;
+    }
+  }
+  for (size_t u = 0; u < units; u++) s.at[u] = NAN;
+  for (uint32_t k = 0; k < moves; k++) { s.began[k] = s.done[k] = NAN; arc_first[move[k].arc + 1]++; }
+  for (uint32_t a = 0; a < arcs; a++) { arc_first[a + 1] += arc_first[a]; last[a] = UINT32_MAX; }
+  for (uint32_t k = 0; k < moves; k++) if (move[k].arc < arcs) on[arc_first[move[k].arc] + carrying[move[k].arc]++] = k;
+  size_t pending = 0;
+  for (uint32_t p = 0; p < moves; p++) if (move[placed[p]].arc == arcs) { queued[placed[p]] = 1; stack[pending++] = placed[p]; }
+  schedule_events(&s, arcs, stack, pending, queued);
+  for (; carried; carried--) {
+    double best = INFINITY;
+    uint32_t pick = UINT32_MAX, arc = arcs;
+    for (uint32_t a = 0; a < arcs; a++) {
+      double earliest = INFINITY;
+      for (uint32_t j = 0; j < carrying[a]; j++) {
+        const uint32_t k = on[arc_first[a] + j];
+        known[k] = (unsigned char)schedule_ready(&s, k, ready + k);
+        if (known[k] && ready[k] < earliest) earliest = ready[k];
+      }
+      if (!isfinite(earliest)) continue;
+      const double t = free_at[a] > earliest ? free_at[a] : earliest;
+      if (t >= best) continue;
+      uint32_t chosen = UINT32_MAX;
+      for (uint32_t j = 0; j < carrying[a]; j++) {
+        const uint32_t k = on[arc_first[a] + j];
+        if (known[k] && ready[k] <= t && (chosen == UINT32_MAX || schedule_better(&s, k, chosen, last[a]))) chosen = k;
+      }
+      best = t; pick = chosen; arc = a;
+    }
+    if (pick == UINT32_MAX) { status = EDEADLK; goto done; }
+    const struct mesh_graph_move *m = move + pick;
+    const uint32_t u = s.next[pick];
+    const double end = best + (u + 1 == m->units ? m->last_seconds : m->unit_seconds);
+    if (!u) s.began[pick] = best;
+    s.at[s.base[pick] + u] = end;
+    free_at[arc] = end; last[arc] = pick;
+    if (++s.next[pick] == m->units) {
+      s.done[pick] = end;
+      for (uint32_t j = 0; j < carrying[arc]; j++)
+        if (on[arc_first[arc] + j] == pick) { on[arc_first[arc] + j] = on[arc_first[arc] + --carrying[arc]]; break; }
+    }
+    pending = 0;
+    for (size_t i = s.out_first[pick]; i < s.out_first[pick + 1]; i++) {
+      const uint32_t child = follow[s.out[i]].after;
+      if (move[child].arc == arcs && !queued[child] && s.next[child] < move[child].units) { queued[child] = 1; stack[pending++] = child; }
+    }
+    schedule_events(&s, arcs, stack, pending, queued);
+  }
+  double latest = 0;
+  for (uint32_t k = 0; k < moves; k++) {
+    if (s.next[k] != move[k].units) { status = EDEADLK; goto done; }
+    if (s.done[k] > latest) latest = s.done[k];
+    place[k] = (struct schedule_place){s.began[k], s.depth[k], k};
+  }
+  qsort(place, moves, sizeof *place, schedule_place_order);
+  for (uint32_t p = 0; p < moves; p++) order[place[p].k] = p;
+  if (finish) *finish = latest;
+done:
+  free(s.base); free(s.in_first); free(s.out_first); free(s.in); free(s.out); free(s.next); free(s.height); free(s.depth);
+  free(s.at); free(s.began); free(s.done); free(indegree); free(ordinal); free(placed); free(stack); free(on); free(carrying);
+  free(last); free(arc_first); free(free_at); free(ready); free(queued); free(known); free(place);
+  return status;
 }

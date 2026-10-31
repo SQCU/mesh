@@ -2257,22 +2257,6 @@ struct call {
 
 static ncclResult_t write_binding_prepare(struct call *c, const ncclMeshCall *d, uint64_t invocations);
 
-/* The common scheduler consumes a first-publication size. WRITE declarations
-   already have exact physical cuts; other calls have their declared transport
-   quantum until their backing is bound. */
-static double call_first_unit(const struct call *c, const struct mesh_transfer *transfer) {
-  const struct mesh_step *step = &transfer->step;
-  const uint64_t bytes = mesh_step_bytes(step);
-  uint64_t first = c->comm->page;
-  if (c->write_binding) {
-    const uint64_t offset = step->first * step->piece.element_bytes;
-    const struct mesh_span_plan *packets = write_packets(c->write_binding, c->invocation);
-    const size_t cut = span_after(packets, offset);
-    first = cut < packets->count ? packets->cuts[cut] - offset : bytes;
-  }
-  return first < bytes ? first : bytes;
-}
-
 static _Thread_local int depth;
 static _Thread_local struct call *calls;
 static _Thread_local size_t call_count, call_capacity;
@@ -3056,8 +3040,7 @@ static ncclResult_t order_transfers(const struct ncclComm *comm,const struct cal
       const struct mesh_step *s=&transfers[k].step;
       const size_t tile=c->tile_bytes?s->first*s->piece.element_bytes/c->tile_bytes:0;
       const ncclMeshProduction declared=s->op==MESH_STEP_SEND&&c->production?c->production[tile]:(ncclMeshProduction){0};
-      production[k]=(struct mesh_transfer_production){declared.order,declared.seconds,
-        call_first_unit(c,transfers+k)};
+      production[k]=(struct mesh_transfer_production){declared.order,declared.seconds};
     }
   }
   const int status=mesh_transfer_order(&comm->fabric,(uint32_t)calls,first,transfers,production,comm->page,

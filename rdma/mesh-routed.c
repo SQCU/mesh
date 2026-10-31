@@ -1,5 +1,4 @@
 #include "mesh-plan.h"
-#include "mesh-write-order.h"
 #include "mesh-graph.h"
 #include <errno.h>
 #include <limits.h>
@@ -332,19 +331,23 @@ static int endpoint_order(const void *left,const void *right){
   if(a->elements!=b->elements)return a->elements<b->elements?-1:1;
   return (a->entry>b->entry)-(a->entry<b->entry);
 }
-static int order_edge(struct mesh_write_dependency **edges,size_t *used,size_t *room,
-                       uint32_t before,uint32_t after,enum mesh_write_dependency_kind kind){
+static int order_edge(struct mesh_graph_follow **edges,size_t *used,size_t *room,
+                      uint32_t before,uint32_t after,uint32_t offset,enum mesh_graph_wait wait){
   if(*used==*room){
     const size_t next=*room?2**room:1;
     if(next<*room||next>SIZE_MAX/sizeof **edges)return EOVERFLOW;
-    struct mesh_write_dependency *made=realloc(*edges,next*sizeof *made);
+    struct mesh_graph_follow *made=realloc(*edges,next*sizeof *made);
     if(!made)return ENOMEM;
     *edges=made;*room=next;
   }
-  (*edges)[(*used)++]=(struct mesh_write_dependency){before,after,kind};
+  (*edges)[(*used)++]=(struct mesh_graph_follow){before,after,offset,wait};
   return 0;
 }
 
+/* Each transfer a move of page units on its directed cable (a receive or combine an event on none), each follow a
+   unit's real wait: a pair's receive unit on its SEND unit, a forward's or a combine's unit on the landing unit it
+   reads, a combine on the publication of the bytes it overwrites. mesh_graph_schedule fills every cable from the
+   units ready on it, highest first, so a relay offsets its pages by its hops and takes no cable's time from it. */
 int mesh_transfer_order(const struct mesh_fabric *fabric,uint32_t groups,const uint32_t *first,
                         const struct mesh_transfer *transfer,const struct mesh_transfer_production *production,
                         uint64_t page,uint32_t *publish,uint32_t *consume){
@@ -354,14 +357,15 @@ int mesh_transfer_order(const struct mesh_fabric *fabric,uint32_t groups,const u
   const uint32_t count=first[rows],arcs=2*fabric->cables;
   if(fabric->cables>UINT32_MAX/2)return EOVERFLOW;
   if(count&&(!transfer||!publish||!consume))return EINVAL;
-  struct mesh_write_task *tasks=calloc((size_t)count+1,sizeof *tasks);
+  struct mesh_graph_move *moves=calloc((size_t)count+1,sizeof *moves);
   struct transfer_endpoint *sent=malloc(((size_t)count+1)*sizeof *sent),
                            *received=malloc(((size_t)count+1)*sizeof *received);
   double *capacity=malloc(((size_t)arcs+1)*sizeof *capacity);
-  struct mesh_write_dependency *edges=NULL;
+  uint32_t *order=malloc(((size_t)count+1)*sizeof *order);
+  struct mesh_graph_follow *edges=NULL;
   size_t used=0,room=0;
   uint32_t sends=0,receives=0;
-  int status=tasks&&sent&&received&&capacity?0:ENOMEM;
+  int status=moves&&sent&&received&&capacity&&order?0:ENOMEM;
   for(uint32_t cable=0;!status&&cable<fabric->cables;cable++)
     capacity[2*cable]=capacity[2*cable+1]=fabric->cable[cable].bandwidth/8.0;
   for(size_t row=0;!status&&row<rows;row++){
@@ -379,10 +383,13 @@ int mesh_transfer_order(const struct mesh_fabric *fabric,uint32_t groups,const u
       struct transfer_endpoint endpoint={group,sending?rank:s->peer,sending?s->peer:rank,
         t->cable,s->round,s->piece.type,s->piece.element_bytes,k,s->piece.elements};
       if(sending)sent[sends++]=endpoint;else received[receives++]=endpoint;
-      const double bytes=(double)mesh_step_bytes(s);
-      tasks[k]=(struct mesh_write_task){.arc=sending&&bytes?2*t->cable+(rank==cable->node[1]):UINT32_MAX,
-        .bytes=bytes,.first_bytes=production&&production[k].first_bytes?production[k].first_bytes:fmin(bytes,(double)page),
-        .production=production?production[k].order:0,.release=production?production[k].seconds:0};
+      const uint64_t bytes=mesh_step_bytes(s),units=bytes?(bytes+page-1)/page:1;
+      if(units>UINT32_MAX){status=EOVERFLOW;break;}
+      const uint32_t arc=sending&&bytes?2*t->cable+(rank==cable->node[1]):arcs;
+      moves[k]=(struct mesh_graph_move){.arc=arc,.units=(uint32_t)units,
+        .production=production?production[k].order:0,.release=production?production[k].seconds:0,
+        .unit_seconds=arc<arcs?(double)page/capacity[arc]:0,
+        .last_seconds=arc<arcs?(double)(bytes-(units-1)*page)/capacity[arc]:0};
       for(uint32_t j=first[row];!status&&j<k;j++){
         const struct mesh_step *prior=&transfer[j].step;
         if(prior->buffer!=s->buffer||!prior->piece.elements||!s->piece.elements)continue;
@@ -392,11 +399,11 @@ int mesh_transfer_order(const struct mesh_fabric *fabric,uint32_t groups,const u
         if(prior->op==MESH_STEP_SEND){
           /* A combine consumes the old local value after its publication,
              without making an exchange wait for both opposite full arrivals. */
-          if(s->op==MESH_STEP_REDUCE)status=order_edge(&edges,&used,&room,j,k,MESH_WRITE_PUBLISHED);
-        }else{
-          const int streaming=a<=b&&b+bn<=a+an&&(b-a)%page==0;
-          status=order_edge(&edges,&used,&room,j,k,streaming?MESH_WRITE_STREAMED:MESH_WRITE_COMPLETE);
-        }
+          if(s->op==MESH_STEP_REDUCE)status=order_edge(&edges,&used,&room,j,k,0,MESH_GRAPH_STARTED);
+        }else if(a<=b&&b+bn<=a+an&&(b-a)%page==0){
+          if((b-a)/page>UINT32_MAX){status=EOVERFLOW;break;}
+          status=order_edge(&edges,&used,&room,j,k,(uint32_t)((b-a)/page),MESH_GRAPH_STREAMED);
+        }else status=order_edge(&edges,&used,&room,j,k,0,MESH_GRAPH_COMPLETE);
       }
     }
   }
@@ -407,16 +414,16 @@ int mesh_transfer_order(const struct mesh_fabric *fabric,uint32_t groups,const u
       struct transfer_endpoint a=sent[k],b=received[k];
       a.entry=b.entry=0;
       if(endpoint_order(&a,&b)){status=EPROTO;break;}
-      status=order_edge(&edges,&used,&room,sent[k].entry,received[k].entry,MESH_WRITE_STREAMED);
+      status=order_edge(&edges,&used,&room,sent[k].entry,received[k].entry,0,MESH_GRAPH_STREAMED);
     }
   }
-  if(!status)status=mesh_write_order(tasks,count,edges,used,capacity,arcs);
+  if(!status)status=mesh_graph_schedule(moves,count,arcs,edges,used,order,NULL);
   if(!status)for(uint32_t k=0;k<sends;k++){
     const uint32_t send=sent[k].entry,receive=received[k].entry;
-    publish[send]=publish[receive]=tasks[send].order;
-    consume[send]=consume[receive]=tasks[receive].order;
+    publish[send]=publish[receive]=order[send];
+    consume[send]=consume[receive]=order[receive];
   }
-  free(tasks);free(sent);free(received);free(capacity);free(edges);return status;
+  free(moves);free(sent);free(received);free(capacity);free(order);free(edges);return status;
 }
 
 static int dependency_order(const struct mesh_fabric *fabric,struct routed_piece *pieces,size_t count,uint64_t page){

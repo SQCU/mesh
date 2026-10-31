@@ -60,4 +60,18 @@ uint32_t mesh_graph_cycle_length(const uint32_t *parent, uint32_t vertices, uint
 void mesh_graph_tree_levels(const uint32_t *parent, uint32_t vertices, uint32_t root, uint32_t *depth, uint32_t *height);
 /* `from` and every vertex its climb meets up to `root`, marked[v] = 1 (the rest of `marked` untouched). */
 void mesh_graph_ancestors(const uint32_t *parent, uint32_t vertices, uint32_t root, uint32_t from, unsigned char *marked);
+/* A page schedule: file transfers scheduled as an edge colouring with precedence (Coffman, Garey, Johnson and
+   LaPaugh 1985), by highest-level-first list scheduling.  Move k is units[k] units on arc[k], each unit_seconds long
+   and its last last_seconds, or, arc[k] == arcs, an event that takes no arc and no time; none of its units is ready
+   before release.  Follow e: move after's unit u waits for move before's unit offset + u (MESH_GRAPH_STREAMED), its
+   last unit (MESH_GRAPH_COMPLETE) or its first unit's start (MESH_GRAPH_STARTED); nothing else waits.  An arc carries
+   one unit at a time and a move's units go in order; each time an arc frees, of the units ready on it the one whose
+   move has the most arcs below it goes (ties: the move the arc carried last, then the lower `production`, then the
+   lower k), else the first to be ready.  order[k]: k's place by its first unit's time, ties by depth then k (a
+   topological order).  *finish (NULL: not wanted): the last unit's end.  0, EINVAL, ENOMEM, or EDEADLK (a cycle). */
+enum mesh_graph_wait { MESH_GRAPH_STARTED, MESH_GRAPH_STREAMED, MESH_GRAPH_COMPLETE };
+struct mesh_graph_follow { uint32_t before, after, offset; enum mesh_graph_wait wait; };
+struct mesh_graph_move { uint32_t arc, units; uint64_t production; double unit_seconds, last_seconds, release; };
+int mesh_graph_schedule(const struct mesh_graph_move *move, uint32_t moves, uint32_t arcs,
+                        const struct mesh_graph_follow *follow, size_t follows, uint32_t *order, double *finish);
 #endif
