@@ -208,3 +208,30 @@ form each takes in the block above:
 
 Then the pool and the mirror go: metal_tracks and its kernels, complete, retire, consume, publish, inflight and the
 channels' `published`, `consumed`, `waited`.
+
+### Moved, and found, from 2ac8f638
+
+- A WRITE that is not a fused crossing: it publishes with its presents and zabbadoo takes it, frame trains
+  included (2ac8f638). Its landings are declared to the caller's schedule (metal_boundary), where the pool's
+  barrier used to stand.
+- A partials merge: zelloth's fold is a kernel parameter, merge_row the merge's. Its forwards wait on summed
+  words (84ac0814).
+- A combine with a `need`: zabbadoo takes it (cb70ddb1). zabbadoo publishes every SEND with the presents, so the
+  need is met before zelloth runs; the SEND's read finishing is the witness proofs' until item 4.
+- Found, not in the inventory: a group that makes its operands in place (operand_copies: a premultiply, a copy
+  within the region, a scratch's copy) never publishes with its presents (`direct` 0), so it always ran in the
+  pool. Its form is a publication once the copies are made (launch_metal). Moving it exposed a second gap.
+- Found: two steps of one call can combine into overlapping ranges that are not one sum, a later receive's
+  combine over an earlier one's result. The pool orders the two (consume's metal_depend). zelloth does not: both
+  sums fold the rank's own operand, so one loses the other's contributions. Bandwidth's 16 MiB reduce-scatter
+  max came out 4.0 against 5.0 on rank 1 once groups that make copies reached zabbadoo. A group whose sums'
+  result ranges are not disjoint stays the pool's (mesh_graph_disjoint). Its form: the later sum's own operand is
+  the earlier sum's result, its blocks after that sum's done words, an explicit edge between the two sums.
+- Found: the chain service stands, on main too, when the placement puts m5ult4-m5ult1 on one of its two
+  cables (routing:["tp",0] wire 1555147594227890318 for node [0, 2]; the other wire passes). Each node's GPU
+  then waits for a landing the other's SEND would make, and that SEND queues behind an earlier one on the same
+  channel that is not ready yet. A channel's walk takes its calls in host order, so two independent calls
+  sharing a cable are serialized. That is the requirement "every link at full bandwidth but for actual
+  dependencies" unmet in the transport, not the pool. It is not item 3's.
+- fabric-dnn fails at 4f34df7d (before zinth), at 2b5a2fac and since: m5ult1's GPU wait ends with nothing it
+  sends sent.

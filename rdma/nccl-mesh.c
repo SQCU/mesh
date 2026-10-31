@@ -4178,8 +4178,9 @@ static void gate_of(struct ncclComm *comm, struct schedule *plans, int *gate, ui
    tables.  Under group_lock */
 /* design/zorvek.md zook: each channel's leading publications that wait for nothing, the rank's own pages and every SEND
    that forwards a landing (the bridge waits on that landing's own word), published once with the channel's presents
-   (`direct`: no operand copy made after them, no fused crossing), so no SEND of the rank's own pages waits for a
-   GPU task; the pool records only the publications that wait for a consumption. `ready` only rises: these are the
+   (`direct`: no operand copy made after them, no fused crossing), or once its operand copies are made
+   (launch_metal), so no SEND of the rank's own pages waits for a GPU task but those copies; the pool records only
+   the publications that wait for a consumption. `ready` only rises: these are the
    channel's first publications of the group, and the pool's come after them */
 static ncclResult_t present_publish(struct metal_program *program, struct channel *ch, const struct schedule *p) {
   if (!p->outs || ch->published != p->first[0]) return ncclSuccess;
@@ -5476,13 +5477,13 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   if (!result && u->zeeb) metal_resident(program, u->base.buffer);
   struct inflight *g = NULL, *before = NULL;
   uint64_t ticket = 0;
+  uint32_t copies = 0;
   if (!result && remote) {
     uint64_t (*const start)[2] = u->group->start;
     *(g = u->group) = (struct inflight){.comm = comm, .start = start, .end = start + comm->count, .repeats = repeats, .fused = fused_kind};
     for (uint32_t h = 0; h < comm->count; h++) { g->start[h][0] = comm->channels[h].sends; g->start[h][1] = comm->channels[h].lands; }
     /* Indexed writes carry immutable source/landing generations. Their destinations need no local publication
        handshake, whether the GPU producer is fused or was encoded before this call (mesh 84056c43) */
-    uint32_t copies = 0;
     operand_copies(NULL, comm, list, n, &copies);
     if (!(result = schedule(program, comm, u, plans, &gate, fused_kind != 0, all_writes(list, n), copies))) { g->plans = plans; plans = NULL; }
     else g = NULL;
@@ -5496,6 +5497,10 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     }
   }
   if (!result) result = operand_copies(program, comm, list, n, NULL);
+  /* design/zorvek.md zook: a group that makes operands in place publishes its leading SENDs once they are made, as
+     its presents could not (present_group `direct`), and not in the tracks pool */
+  for (uint32_t h = 0; !result && copies && g && !g->fused && h < comm->count; h++)
+    result = present_publish(program, comm->channels + h, g->plans + h);
   for (uint32_t h = 0; !result && gate && g && h < comm->count; h++) {
     struct uses batch = {0};
     for(size_t k=0;k<g->plans[h].ins;k++) {
