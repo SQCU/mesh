@@ -113,22 +113,22 @@ what of the block takes its place. The order is forced: each later one guards a 
 
 ## zinth: the bridge runs compiled lists (item 6), the design before the code
 
-Measured 2026-10-31 (test-ov3, not landed): with each issue on its own pages and its sums outside the pool, letting
-a declared repeat's presents skip their barrier gave no rate and deadlocked the chain service: a burst of small steps
-filled both ends' 4,096-entry rings with entries of different calls in orders neither end could drain (sent 5 of
-11,424 ready on one channel). The rings, not storage, are what make calls unable to overlap.
+Measured 2026-10-31 (test-ov3, not landed): letting a "declared repeat"'s presents skip their barrier gave no rate and
+deadlocked the chain service, a burst of small steps filling both ends' 4,096-entry rings with entries of different
+calls in orders neither end could drain. Retracted with it: the repeat index and the overlap flag were a positional
+rule standing in for a fact about pages, and an earlier draft of this section's "pass of the declared order", bases
+relative + pass x units, was a ring over the program's order. Neither belongs here.
 
-- What the plan compiles. ncclMeshCommPlan lays every issue of one pass of its declared order (ncclMeshPlanRun),
-  each channel's counters from 0, so every entry's index, end and requirement base is relative to the pass, and
-  writes each stream's send and landing lists for the pass into region pages, with the pass's units on each list.
-- What mesh.h states. A holding names its compiled lists (region offset, entries) and, per pass, the units each list
-  adds; a requirement base is the relative one plus pass x those units. No ring, no `sends`/`lands` presented counts,
-  no `taken`.
-- What a call stores. One word per holding at the call's stream position, its start (after the barrier ordering it
-  after the caller's producers): own-page SENDs require it (zook), landings require it for their first write (a
-  later call's landing never meets pages a consumer in the stream before it still reads). Forwards keep `landed`, a
-  sum's SENDs zelloth's count.
-- What the bridge does. Walks each list in order as each entry's requirement allows (zirrup, zirrupel), posting as
-  deep as its queues take; the GPU does nothing for transport.
-- Deleted with it: present_group's per-call entries, metal_present and the present kernel, MESH_STREAM_ENTRIES and
-  the rings, walk_take's copy, the `taken` waits, commit_group's presented counts.
+- Whether a call waits for another is a fact about their pages, known when the program is compiled: a call writes a
+  page another call reads or writes, or it does not. Nothing else orders two calls.
+- What the plan compiles: each definition's entries once (its pages, its spans, each requirement's word), in the
+  bridge's form, in region pages that mesh.h describes.
+- What a call stores: one word at its stream position, its start (after the barrier ordering it after the caller's
+  producers), naming the definition it runs. Own-page SENDs require it (zook); its landings require it for their
+  first write; a landing into a page an earlier call still reads requires that call's completion count, stated by the
+  compiler for that page alone.
+- What the bridge does: takes each started call's compiled entries, counts their requirement bases from the units it
+  has walked before them, and posts as each requirement allows (zirrup, zirrupel). The GPU does nothing for
+  transport.
+- Deleted with it: present_group's per-call entries, metal_present and the present kernel, MESH_STREAM_ENTRIES and the
+  rings, walk_take's copy, the `taken` waits, commit_group's presented counts.
