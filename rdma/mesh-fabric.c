@@ -73,7 +73,8 @@ int mesh_fabric_refine(const struct mesh_transfer *in,uint32_t count,uint64_t pa
         if(prior->op==MESH_STEP_SEND || prior->buffer!=s->buffer ||
            prior->piece.element_bytes!=s->piece.element_bytes || prior->first>cuts[i] ||
            prior->first+prior->piece.elements<=cuts[i])continue;
-        next=j;
+        /* a COPY's units own cuts; a combine's do not (mesh-plan.h) */
+        if(prior->op==MESH_STEP_COPY)next=j;
         break;
       }
       if(next>=0 && next!=owner && (cuts[i]-in[next].step.first)%quantum){whole=1;break;}

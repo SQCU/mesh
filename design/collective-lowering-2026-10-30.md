@@ -45,10 +45,10 @@ Eliminated by reading: the pairing in 6 (3's pair number is in its key, so it is
 order it replaced (the same edges: a pair's publish before its consume, a receive's consume before a later SEND's
 publish, a SEND's publish before a combine over its bytes; only the topological order chosen differs); data placement
 (place_data's displacement is the old one for collectives); issue laying (a collective's `frames` is 1); the
-frontier's aliasing in 9 (keys are allocation bases and pages). Remaining in c56f21a9's range: 4's per-SEND whole
-fallback with every receive now a cut owner, 8's silent drop where 4's new cuts do not line up with a combine's units,
-and the presentation and gating changes (present_group, gate_of: "ungated receives declare their actual destination
-writes on presentation").
+frontier's aliasing in 9 (keys are allocation bases and pages). Found by two builds of main with one part undone
+(design/measurement-regressions-2026-10-30.md): 4's cut owners. c56f21a9 made a REDUCE's units own cuts; with COPY-only
+owners every case passes. Which later stage loses a combine-owned piece's data (8's summed forwarding is the first to
+read) is the open question, and is itself an instance of the pattern above.
 
 A further concrete mismatch is the progress operand for combining relays.
 Consumption may differ from wire order, but the channel's shared summed word

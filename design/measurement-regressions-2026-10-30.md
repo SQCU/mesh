@@ -192,3 +192,19 @@ continued into output comparisons. `close()` now re-raises the observer's
 original exception; polling and submission are unchanged. Those later unchanged
 outputs are consequences of an aborted run, not independent evidence of a
 defective kernel for each later shape. The initiating GPU wait remains unresolved.
+
+The initiating error is located: with only a COPY's units owning SEND cuts, the 16 MiB all-reduce completes and every case checks right on all five, chain-service too (the builds below predate the frame correction above). Main at 51a6ff10, with both, passes the
+same on all five.
+
+Localized within c56f21a9 by two builds of main with one part of its mesh_fabric_refine change undone (tags
+bisect-refine, bisect-owners, deleted after), each run on all five as above:
+
+| Build | chain-service | bandwidth check |
+|---|---|---|
+| refinement as before c56f21a9 (COPY-only cut owners, an unrepresentable cut the rank's whole refinement refused) | 5 × exit 0 | 45 checked, none wrong |
+| COPY-only cut owners, c56f21a9's fallback kept (an unrepresentable cut keeps that SEND whole) | 5 × exit 0 | 45 checked, none wrong |
+
+The cause is c56f21a9 making every receive, REDUCE included, a cut owner (`next=j`). The fix restores COPY-only
+owners and keeps the per-SEND fallback (mesh-plan.h mesh_fabric_refine says why). How a combine-owned cut loses its
+data is not yet shown from source; the summed forwarding of a SEND split at a combine's boundary (send_dependencies,
+the channel's count of units summed) is where to read next, before any combine is made a cut owner again.

@@ -178,8 +178,10 @@ static inline uint64_t mesh_segment_first(const uint64_t *segment,uint32_t q){ u
 /* design/whole-function.md#fabric */
 struct mesh_transfer { struct mesh_step step; uint32_t cable,padding; };
 int mesh_fabric_check(const struct mesh_fabric *);
-/* Refine physical SENDs where their latest preceding receive changes. COPY
-   and REDUCE both produce page units consumed by subsequent sends. Only receives in
+/* Refine physical SENDs where their latest preceding COPY changes: a COPY's page units are what a later SEND
+   forwards as they land. A REDUCE's are not cut owners: c56f21a9 made them owners, and every collective at 16 and
+   64 MiB then landed nothing on ranks 1-4 and chain-service ended in SIGBUS, with COPY-only owners it passes
+   (design/measurement-regressions-2026-10-30.md). Only receives in
    the same buffer with the same element size participate. Adjacent pieces with
    the same latest receive are kept whole, including where older writes overlap.
    Non-SEND transfers are unchanged; each SEND's pieces retain its order, cable,
