@@ -3,6 +3,7 @@
    no cable, collective or tensor.  Python's are rdma/mesh_graph.py's. */
 #ifndef MESH_GRAPH_H
 #define MESH_GRAPH_H
+#include <stddef.h>
 #include <stdint.h>
 
 /* A path's share of a tree's flow: the path from `from` of `hops` hops, hop k leading from `at` to
@@ -25,4 +26,17 @@ uint32_t mesh_graph_reach(uint32_t vertices, uint32_t edges, uint32_t (*end)(con
 int mesh_graph_paths(uint32_t vertices, uint32_t edges, uint32_t (*end)(const void *context, uint32_t e, uint32_t side),
                      const void *context, uint32_t source, uint32_t destination, uint32_t *work, unsigned char *seen,
                      int (*visit)(void *consumer, const uint32_t *path, uint32_t length), void *consumer);
+
+/* Directed edges in compressed rows: vertex v's leave as edges [first[v], first[v + 1]), edge k entering
+   `head(context, k)`. */
+/* Every vertex reachable over such edges from the `pending` vertices on `stack` (room for each vertex once more),
+   marked `seen[v] = stamp` as an edge reaches it (the seeds only where one does): a stamp a query, so `seen` needs no
+   clearing between queries. */
+void mesh_graph_mark(const size_t *first, uint32_t (*head)(const void *context, size_t k), const void *context,
+                     uint32_t *seen, uint32_t stamp, uint32_t *stack, size_t pending);
+/* A topological order of such edges' `vertices` vertices: ordinal[v] v's place, each place taken by the
+   lowest-numbered vertex whose every edge in leaves a placed one.  `indegree` holds `vertices` words.  0, or EDEADLK
+   where a cycle leaves vertices unplaced (their ordinal UINT32_MAX). */
+int mesh_graph_order(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                     const void *context, uint32_t *indegree, uint32_t *ordinal);
 #endif

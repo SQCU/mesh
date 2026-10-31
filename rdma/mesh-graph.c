@@ -69,3 +69,30 @@ int mesh_graph_paths(uint32_t vertices, uint32_t edges, uint32_t (*end)(const vo
   }
   return any ? 0 : ENOLINK;
 }
+
+/* mesh-graph.h */
+void mesh_graph_mark(const size_t *first, uint32_t (*head)(const void *context, size_t k), const void *context,
+                     uint32_t *seen, uint32_t stamp, uint32_t *stack, size_t pending) {
+  while (pending) {
+    const uint32_t at = stack[--pending];
+    for (size_t k = first[at]; k < first[at + 1]; k++) {
+      const uint32_t next = head(context, k);
+      if (seen[next] != stamp) { seen[next] = stamp; stack[pending++] = next; }
+    }
+  }
+}
+
+/* mesh-graph.h */
+int mesh_graph_order(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                     const void *context, uint32_t *indegree, uint32_t *ordinal) {
+  for (uint32_t v = 0; v < vertices; v++) { indegree[v] = 0; ordinal[v] = UINT32_MAX; }
+  for (size_t k = 0; k < first[vertices]; k++) indegree[head(context, k)]++;
+  for (uint32_t place = 0; place < vertices; place++) {
+    uint32_t next = 0;
+    while (next < vertices && (indegree[next] || ordinal[next] != UINT32_MAX)) next++;
+    if (next == vertices) return EDEADLK;
+    ordinal[next] = place;
+    for (size_t k = first[next]; k < first[next + 1]; k++) indegree[head(context, k)]--;
+  }
+  return 0;
+}

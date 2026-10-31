@@ -1,4 +1,5 @@
 #include "mesh-plan.h"
+#include "mesh-graph.h"
 #include <errno.h>
 #include <limits.h>
 #include <stdlib.h>
@@ -235,16 +236,8 @@ static int byte_retired(const struct routed_piece *pieces,const size_t *send,con
   if(frontier==end)*proven=1;
   free(states);free(covered);return status;
 }
-/* every strict causal ancestor of the events on `stack` stamped */
-static void ancestors(const size_t *first,const struct routed_edge *edges,uint32_t *seen,uint32_t *stack,size_t pending,uint32_t stamp){
-  while(pending){
-    const uint32_t at=stack[--pending];
-    for(size_t e=first[at];e<first[at+1];e++){
-      const uint32_t prior=edges[e].after;
-      if(seen[prior]!=stamp){seen[prior]=stamp;stack[pending++]=prior;}
-    }
-  }
-}
+/* edge k's event entered (mesh-graph.h's edge heads, over the edges' compressed rows) */
+static uint32_t routed_after(const void *context,size_t k){ return ((const struct routed_edge *)context)[k].after; }
 static int retirement_proofs(struct routed_piece *pieces,size_t count,uint64_t page){
   if(count/2>UINT32_MAX/3)return EOVERFLOW;
   const uint32_t events=(uint32_t)(count/2)*3;
@@ -294,7 +287,7 @@ static int retirement_proofs(struct routed_piece *pieces,size_t count,uint64_t p
       if(s->op==MESH_STEP_SEND)continue; /* a COPY landing in place, or a combine into its buffer */
       const uint32_t stamp=(uint32_t)k+1,root=3*s->round;
       stack[0]=root;seen[root]=stamp;
-      ancestors(first,edges,seen,stack,1,stamp);
+      mesh_graph_mark(first,routed_after,edges,seen,stamp,stack,1);
       for(size_t j=begin;j<k;j++){
         const struct mesh_step *a=&pieces[j].transfer.step;
         if(a->op!=MESH_STEP_SEND || !pieces_meet(a,s))continue;
@@ -317,7 +310,7 @@ static int retirement_proofs(struct routed_piece *pieces,size_t count,uint64_t p
         const uint32_t root=3*pieces[k].transfer.step.round;
         if(pieces[k].transfer.step.op!=MESH_STEP_SEND && seen[root]!=stamp){seen[root]=stamp;stack[pending++]=root;}
       }
-      ancestors(first,edges,seen,stack,pending,stamp);
+      mesh_graph_mark(first,routed_after,edges,seen,stamp,stack,pending);
       for(size_t k=begin;k<end;k++)
         pieces[k].witnessed=pieces[k].transfer.step.op==MESH_STEP_SEND && seen[3*pieces[k].transfer.step.round+1]==stamp;
     }
@@ -379,15 +372,10 @@ static int dependency_order(struct routed_piece *pieces,size_t count){
     size_t unique=0;
     for(size_t k=0;k<used;k++)if(!k || edge_order(edges+k,edges+k-1))edges[unique++]=edges[k];
     used=unique;
-    for(size_t k=0;k<used;k++){first[edges[k].before+1]++;indegree[edges[k].after]++;}
-    for(uint32_t k=0;k<events;k++){first[k+1]+=first[k];order[k]=UINT32_MAX;}
-    for(uint32_t ordinal=0;ordinal<events;ordinal++){
-      uint32_t next=0;
-      while(next<events && (indegree[next] || order[next]!=UINT32_MAX))next++;
-      if(next==events){status=EDEADLK;break;}
-      order[next]=ordinal;
-      for(size_t k=first[next];k<first[next+1];k++)indegree[edges[k].after]--;
-    }
+    for(size_t k=0;k<used;k++)first[edges[k].before+1]++;
+    for(uint32_t k=0;k<events;k++)first[k+1]+=first[k];
+    /* the events' order (mesh-graph.h): each next place the lowest-numbered event whose priors are placed */
+    status=mesh_graph_order(events,first,routed_after,edges,indegree,order);
     if(!status)for(size_t k=0;k<count;k++){
       const uint32_t transaction=pieces[k].transfer.step.round;
       pieces[k].transfer.step.round=order[2*transaction];
