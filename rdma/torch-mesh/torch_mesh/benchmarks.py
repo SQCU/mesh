@@ -107,7 +107,15 @@ def bandwidth(config):
         binding.realize(calls)
         prepared.append((binding, useful, calls, what, requested))
     observations = Observations()
+    store = dist.distributed_c10d._get_default_store()
     for index, (binding, useful, calls, what, requested) in enumerate(prepared):
+        # each case submitted once every rank has ended the one before (its completion, then a store barrier outside
+        # the interval): a rank whose part of a case ends early, a broadcast's root, whose GPU part ends once it has
+        # published while its pages are still on the wire, would otherwise time its next case from that early end and
+        # carry the case before it (the 64 MiB all-gather read 4.9 ms a call on rank 0, 2.06 on the Mini)
+        observations.close()
+        store.set(f'mesh/bandwidth/{index}/{rank}', '1')
+        store.wait([f'mesh/bandwidth/{index}/{r}' for r in range(size)])
         started = now()
         binding.enqueue()
         completion = binding.completion()
