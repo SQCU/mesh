@@ -4365,7 +4365,11 @@ static ncclResult_t complete(struct metal_program *program, struct inflight *thr
         if (!needs_publication(m)) { ch->published++; continue; }
         result = gpu(metal_record(program, track, METAL_PUBLISH, at, 0), "a publication's record");
         const struct steps *prior = m->c->bound;
-        for (uint32_t d = prior->prior_first[m->step]; !result && d < prior->prior_first[m->step + 1]; d++) {
+        /* a SEND that forwards a landing goes unit by unit on that landing's own word (send_dependencies: `landed`, or a
+           combine's summed word), which the bridge reads for it: its publication waits for nothing, so the publications
+           after it on this cursor, the rank's own pages among them, do not wait for the whole consumption of the landing
+           it forwards (a relay's arrival time lent to every later SEND of the channel) */
+        for (uint32_t d = prior->prior_first[m->step]; !result && m->dep_h == UINT32_MAX && d < prior->prior_first[m->step + 1]; d++) {
           const uint32_t j = prior->prior[d];
           result = gpu(metal_depend(program, base[k] + prior->channel[j], prior->consumption[j] + 1), "a SEND's dependency");
         }
