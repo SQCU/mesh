@@ -12,6 +12,8 @@ import json
 import sys
 from pathlib import Path
 
+import mesh_graph
+
 LOST = 2**64 - 1
 
 
@@ -141,10 +143,19 @@ def main(directory):
                             waits.append(('ready', (r, q, 1, frontier(r, q, 1)), f'{k} {now} < {e["base"]}'))
                     elif c['now']['ready'] <= max(c['now']['sent'], e['start']):
                         waits.append(('published', None, f'ready {c["now"]["ready"]} <= {e["start"]}'))
-                p, h2 = paired(r, h)
-                if not waits and p is not None and h2 is not None:
-                    waits.append(('credit' if not land else 'data', (p, h2, 1 - land, frontier(p, h2, 1 - land)), ''))
                 edges[v] = (e, waits)
+    # where its own conditions hold: a landing (posted) waits on the SEND that fills it; a SEND (posted) only on its
+    # landing's posting, so only where that landing's own conditions do not hold (the hardware's credit)
+    for v, (e, waits) in list(edges.items()):
+        r, h, land, i = v
+        p, h2 = paired(r, h)
+        if waits or p is None or h2 is None:
+            continue
+        to = (p, h2, 1 - land, frontier(p, h2, 1 - land))
+        if land:
+            waits.append(('data', to, ''))
+        elif to in edges and edges[to][1]:
+            waits.append(('credit', to, 'its landing not posted'))
     names = {r: d['name'] for r, d in ranks.items()}
 
     def label(v):
@@ -161,19 +172,7 @@ def main(directory):
             print(f'    waits ({kind} {why}) on {label(to) if isinstance(to, tuple) else to}')
     # cycles over the frontier
     graph = {v: [to for _, to, _ in waits if isinstance(to, tuple) and to in edges] for v, (_, waits) in edges.items()}
-    seen, stack, cycles = set(), [], []
-
-    def visit(v, path):
-        if v in path:
-            cycles.append(path[path.index(v):])
-            return
-        if v in seen:
-            return
-        seen.add(v)
-        for w in graph.get(v, []):
-            visit(w, path + [v])
-    for v in graph:
-        visit(v, [])
+    cycles = mesh_graph.cycles(graph)
     for cycle in cycles:
         print('CYCLE:')
         for v in cycle:

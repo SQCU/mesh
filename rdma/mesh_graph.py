@@ -226,3 +226,23 @@ def partition(reads, writes, roots, cuts=(), effects=(), constants=(), external=
     spans = [[i for i in span if i not in external] for span in _needed(reads, writes, roots, cuts, effects, accesses)]
     return [(span, inputs, outputs) for span, (inputs, outputs) in
             zip(spans, _frontiers(reads, writes, spans, roots, constants, accesses))]
+
+
+def cycles(graph):
+    """Every cycle a depth-first walk of ``graph`` ({vertex: [successor, ...]}) closes, each the vertices on the walk
+    from the one it returns to, in order (one a back edge; a vertex walked from once)."""
+    seen, found = set(), []
+
+    def visit(v, path):
+        if v in path:
+            found.append(path[path.index(v):])
+            return
+        if v in seen:
+            return
+        seen.add(v)
+        for w in graph.get(v, ()):
+            visit(w, path + [v])
+    for v in graph:
+        visit(v, [])
+    return found
+
