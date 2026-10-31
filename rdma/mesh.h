@@ -105,18 +105,16 @@ _Static_assert(sizeof(struct mesh_entry)==MESH_SIZEOF_MESH_ENTRY,"mesh_entry ABI
    a list's units before the call), so a laid issue's entries are written once and each
    of its calls writes its bases alone. 73b5df63's compiled program (a declared call order and each call's prefixes in
    it) is deleted: a call's pages are the allocator's (zappo), not a position in an order, so no order compiles them.
-   A landing entry's `after` (design/pages-and-functions.md Freeing 6-7, a page written again only once its last
-   outgoing DMA read ended): bit h set where a SEND the holder's program lays on its channel h reads bytes the entry
-   lands into, so that no unit of it is posted before the call's struct mesh_zwoggle_after for channel h holds
-   (`after`: their region offset, channel h's at h): that channel's `sent` (`word`, a region offset) at `base`, the end
-   there of the last SEND an earlier call has laid of those pages, so it has completed: a whole requirement, the
-   holder's for those pages alone (0: none).  A SEND entry's `after` is the region offset of its own list (0: none):
-   a count n (at most 64), then n struct mesh_zwoggle_after, every one holding (its word at its base) before any unit
-   of the SEND is posted: the whole consumption of each receive its step follows and does not forward (a COPY's
-   channel's `landed`, a combine's summed word, at that receive's end), the holder rewriting each base at each call */
+   An entry's `after` is the region offset of its own list (0: none): a count n (at most 64), then n struct
+   mesh_zwoggle_after, every one holding (its word at its base) before any unit of the entry is posted, the holder
+   rewriting each base at each call.  A SEND's: the whole consumption of each receive its step follows and does not
+   forward (a COPY's channel's `landed`, a combine's summed word, at that receive's end).  A landing's
+   (design/pages-and-functions.md Freeing 6-7, a page written again only once its last outgoing DMA read ended): on
+   each channel a SEND reads bytes it writes, that channel's `sent` at the end of the last such SEND, an earlier step's
+   of its call or an earlier call's of another issue over the caller's pages, so that SEND has completed */
 struct mesh_zwoggle_after { uint64_t word, base; };
 struct mesh_zwoggle_entry { struct mesh_entry entry; uint64_t relative, after; };
-struct mesh_zwoggle { _Atomic uint64_t next; uint64_t entries[2], count[2], bases, after; };
+struct mesh_zwoggle { _Atomic uint64_t next; uint64_t entries[2], count[2], bases; };
 struct mesh_units { uint64_t n; };
 static inline struct mesh_units mesh_units_add(struct mesh_units a,struct mesh_units b){ return (struct mesh_units){a.n+b.n}; }
 static inline struct mesh_units mesh_units_sub(struct mesh_units a,struct mesh_units b){ return (struct mesh_units){a.n-b.n}; }

@@ -19,7 +19,8 @@ then peers lose its link. Later output comparisons read unfinished results
    again by an O(n²) scan of byte overlaps, a quantum check per cut, both endpoints split by pair number, repeated
    until relays stop changing. An unrepresentable cut keeps its SEND whole (since c56f21a9; before it, the rank's
    every SEND stayed whole).
-5. **Retirement proofs** (retirement_proofs, mesh-graph.h mesh_graph_mark): the dependency graph built from byte
+5. **Retirement proofs** (deleted, design/zorvek.md item 2: a landing waits in the bridge on the SEND it overwrites;
+   retirement_proofs, mesh-graph.h mesh_graph_mark): the dependency graph built from byte
    overlaps, its ancestors walked for each overwrite.
 6. **Order** (dependency_order, mesh_transfer_order, mesh-graph.h mesh_graph_schedule since 1fa47bfc, page units filled highest first; mesh_write_order before it): per rank, the dependency
    edges derived again from byte overlaps (O(n²) a row); endpoints paired again, by sorting on

@@ -80,15 +80,11 @@ waiting for CPU/GPU completion. The following work stays on the same serial queu
 it sends no receipt and adds no reciprocal receive gate.
 
 Fresh disjoint WRITE and fused landing ranges can be preposted independently of the receiver's outgoing producer.
-Ordinary NCCL calls with in-place aliases retain their existing receive gates; those gates are not part of the
-immutable WRITE contract. A reused range needs proof that every previous reader precedes its next first write:
+No receive waits on a gate. A reused range's landing, a fused crossing's included, is posted once the SEND that last
+read it completed (the bridge's `sent`, the landing's `after`: design/pages-and-functions.md, Freeing 6-7); no
+proof from returning data dependencies stands in for that (lifetimes.prove_recurrent_gather, deleted):
 
-- Positive-contribution recurrent all-gathers use `lifetimes.prove_recurrent_gather`: each rank consumes the previous
-  pieces before its next publication. The returning natural data dependencies prove two-slot reuse. This proof is
-  specific to that recurrence, including relays; it does not certify unrelated feed-forward or asymmetric sends.
-- A zero-count participant has no corresponding returning publication. Native realization therefore gives that
-  shape fresh generations and retires old leases asynchronously instead of applying the positive-count proof.
-- Other source/relay leases remain immutable through their final DMA reads. Region retirement combines completion
+- Source/relay leases remain immutable through their final DMA reads. Region retirement combines completion
   of local GPU users with `ncclMeshMemReusable`, which includes registered reads not yet posted by the bridge.
   Dropping a Python tensor or completing its producer alone does not release its bytes for reuse. Destination
   readers have their own lifetime dependencies. No receipt all-gather or remote ACK establishes these lifetimes.

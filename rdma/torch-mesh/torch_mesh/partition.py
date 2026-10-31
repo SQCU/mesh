@@ -314,22 +314,6 @@ def _linear_kernel(*arguments):
     return _GATHER_KERNELS[name]
 
 
-def _gather_paths(fabric):
-    """Node paths for the realized physical fabric, retaining parallel fragments."""
-    routes = {}
-    for pair, paths in fabric.paths.items():
-        routes[pair] = []
-        for path in paths:
-            nodes = [pair[0]]
-            for cable in path:
-                a, b = fabric.cables[cable]['nodes']
-                if nodes[-1] not in (a, b):
-                    raise ValueError('gather lifetime path is disconnected from its physical cable')
-                nodes.append(b if nodes[-1] == a else a)
-            routes[pair].append(tuple(nodes))
-    return routes
-
-
 def _fused_form(x, w, dim, sizes, group_name, adds, channels):
     """A fused crossing's form for torch_mesh::fused_step, made during preparation (_stream.mm fused_maker): the
     communicator and the waits' bound; this rank and the ranks; the publication's kernel (partial_publish, or
@@ -338,7 +322,6 @@ def _fused_form(x, w, dim, sizes, group_name, adds, channels):
     and the output's shape; the publication's arrival count; the separate landing-prefix
     observer and physical channel extent."""
     from . import _stream
-    from lifetimes import prove_recurrent_gather
     if not adds:
         raise ValueError('gathers use prepared final views, not fused reduction storage')
     group = dist.distributed_c10d._resolve_process_group(group_name)
@@ -349,11 +332,6 @@ def _fused_form(x, w, dim, sizes, group_name, adds, channels):
     row, half = math.prod(operand[:dim] + operand[dim + 1:]), x.element_size() // copy_bytes
     counts = [s * row for s in sizes]
     starts = list(itertools.accumulate(counts, initial=0))
-    # Positive contributions provide the returning dependency that proves the
-    # two-slot recurrence. Empty participants have no such publication; native
-    # realization must retain fresh generations for those shapes instead.
-    if all(counts):
-        prove_recurrent_gather(n, _gather_paths(group.fabric))
     words = ([math.prod(operand) * half, math.prod(operand[:dim]), math.prod(operand[dim + 1:]) * half, rank, 0] + list(sizes) +
              starts[:-1])
     shape = operand

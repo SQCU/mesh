@@ -246,8 +246,8 @@ for those limits and the compilation-only validation.
 
 - **Remove:** `spare_take` and `spare_where` as runtime scratch suppliers, and numerical execution's dependence
   on `ncclMeshMemReusable`/lease-retirement queries to choose storage.
-- **Use:** preallocated page slots, [lifetimes.py](../rdma/lifetimes.py)'s static dependency relations,
-  `mesh_routed_program` retirement relations and native invocation-slot bindings.
+- **Use:** preallocated page slots and native invocation-slot bindings (lifetimes.py and the routed program's
+  retirement relations since deleted: a landing waits on its source's `sent` in the bridge, design/zorvek.md item 2).
 - **Integration still required:** compile causal reuse into the page plan. Keep the bridge's hardware queue
   credit accounting and actual data publication relations. Those are distinct from a numerical allocator
   searching for a reusable buffer. `LifetimePlan.tracker` is not the desired replacement: it is another
@@ -375,7 +375,6 @@ The [graph history](aot-graphs-and-pytorch.md) explains the connections and prio
 | [mesh.metal](../rdma/mesh.metal), [nccl-mesh-kernels.h](../rdma/nccl-mesh-kernels.h), `ncclMeshFused` | Coherent payload access, fused publication and consumption | Useful shared primitives. Current polling granularity and timeout/guard paths are not evidence of minimum overhead. |
 | [nccl-mesh-metal.h](../rdma/nccl-mesh-metal.h), `metal_program`, `metal_wait`, `metal_release` | Bind collective numerical operations into Metal encoders | Shared backend machinery, with current allocation and coarse dependency gaps. Callers should supply the compiled relation, not an independent wait policy. |
 | [routing.py](../rdma/routing.py), `Fabric`; [assignment.py](../rdma/assignment.py); [allocate.py](../rdma/allocate.py) | All-simple-path capacity model, shares, finite-difference feedback and projections | Configuration-side operands fit the model. Active measured hop mean/spread integration was not found; `completion_model` had no external caller in the searched scope. |
-| [lifetimes.py](../rdma/lifetimes.py), `Event`, `Read`, `Transfer`, `LifetimePlan` | Compile causal page-reuse relations | Preserve static analysis; remove runtime storage choice under R10. |
 | [python/mesh](../python/mesh/__init__.py), `Partial`, `Tensor`, `Ref`, `BlockSpec`, `Program` | Partial sums, slices and recorded tile calls | Strong existing declaration vocabulary; its former runtime scheduler is replaced by compiled spans and native bindings (R03). |
 | [collective.py](../python/mesh/collective.py) | Gather, scatter, reduce, partials and prepared strided moves | Preserve semantic operations and common transport. Whole-fill synchronization is explicit, not a default. |
 | [partition.py](../rdma/torch-mesh/torch_mesh/partition.py), `RaggedShard`; [declarations.py](../rdma/torch-mesh/torch_mesh/declarations.py) | Ragged DTensor integration; fake tracing; full forward/backward declarations; indexed crossings | Valuable PyTorch frontend work. It does not yet make all eager callers or all backend launches AOT (R09); indexed crossing lookup is now mandatory (R16). |

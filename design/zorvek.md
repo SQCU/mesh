@@ -98,8 +98,17 @@ what of the block takes its place. The order is forced: each later one guards a 
    each page has one writer. Its count of pages done is the readiness word of a SEND of the sum (zirrupel's) and its
    completion. The sum's pages are the call's output or pages of its own (zennets), never bytes a SEND of the same
    call reads. zelloq needs no kernel: a copy's landing is the copy; the call's completion waits on `landed`.
-2. The witness and retirement proofs (zolvies' remnant: mesh-routed.c retirement_proofs, byte_witness, witnessed;
-   nccl-mesh.c bind_retirements, retired_first): they prove in-place overwrites safe; after 1 there are none.
+2. Done: the witness and retirement proofs (zolvies' remnant: mesh-routed.c retirement_proofs, byte_witness,
+   witnessed; nccl-mesh.c bind_retirements, retired_first). "After 1 there are none" was wrong: an in-place
+   all-reduce's gather lands its results into the bytes its reduce-scatter's SENDs read, and only those COPY
+   landings in bandwidth.py leaned on a proof (none of its combines did). The proofs re-derived, from the program's
+   causal arrivals, a fact the transport states: a SEND's completion, its channel's `sent`. In their place each
+   landing's own list (mesh.h struct mesh_zwoggle_entry `after`, one form with a SEND's, nccl-mesh.c landing_lists):
+   on each channel a SEND reads bytes it writes, that channel's `sent` at the last such SEND's end, its own call's or
+   another issue's, which the bridge reads before it posts the landing. The compiler orders the SEND that fills the
+   landing after that SEND completes (mesh-routed.c mesh_transfer_order), so an exchange in place (each side's
+   landing on its own SEND, a cycle through the hardware's credit) is refused there as a value, as the missing proof
+   refused it.
 3. The publication tasks and the pool's `ready` cursor: zook. The rank's own pages are ready when the group is
    encoded (one store with the presents); a sum's pages by zelloth's count.
 4. The host's mirror of GPU progress (struct inflight, complete, retire, published/consumed): the bridge's counts and
@@ -204,9 +213,8 @@ form each takes in the block above:
   word (`landed` or its summed word, every unit at the landing's end), which mesh_entry's per-unit form cannot state:
   an entry kind.
 - A combine with a `need` (a sum into bytes an earlier SEND of its call on that channel reads: landing_needs): the
-  pool runs it after that SEND's publication, the witness proofs (item 4) standing for the SEND's completion. Its
-  form: the sum on pages of its own (zennets), never bytes a SEND of the same call reads, which is the compiler's
-  placement of the sum (mesh-collective.c mesh_compile_sets' scratch), not a wait.
+  pool runs it after that SEND's publication, the SEND's completion the landing's own requirement on that channel's
+  `sent` since item 2 (landing_lists): the bridge posts none of its contributions' units before it.
 
 Then the pool and the mirror go: metal_tracks and its kernels, complete, retire, consume, publish, inflight and the
 channels' `published`, `consumed`, `waited`.
@@ -219,7 +227,8 @@ channels' `published`, `consumed`, `waited`.
 - A partials merge: zelloth's fold is a kernel parameter, merge_row the merge's. Its forwards wait on summed
   words (84ac0814).
 - A combine with a `need`: zabbadoo takes it (cb70ddb1). zabbadoo publishes every SEND with the presents, so the
-  need is met before zelloth runs; the SEND's read finishing is the witness proofs' until item 4.
+  need is met before zelloth runs; the SEND's read finishing is its landing's requirement in the bridge
+  (landing_lists, item 2).
 - Found, not in the inventory: a group that makes its operands in place (operand_copies: a premultiply, a copy
   within the region, a scratch's copy) never publishes with its presents (`direct` 0), so it always ran in the
   pool. Its form is a publication once the copies are made (launch_metal). Moving it exposed a second gap.

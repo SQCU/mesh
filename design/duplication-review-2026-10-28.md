@@ -201,6 +201,10 @@ direct `mesh_stream_present` calls behind a host wait for room.
 
 ### 3. `need` re-searched every issue; it is the same walk as `bind_retirements`
 
+Moot: `need` and `bind_retirements` are both deleted. One walk (nccl-mesh.c landing_lists, mesh-graph.h
+mesh_graph_meets) finds each landing's last earlier SEND of its call over the bytes it writes, and the bridge waits
+on that SEND's completion (design/zorvek.md item 2).
+
 **Instances**
 - `schedule_laid` 2907–2916. It runs on every issue. For each REDUCE landing it scans every SEND on the same channel
   for an earlier step of the same call that meets it, and takes `need = max(o->entry + 1)`. That is O(ins × outs) per

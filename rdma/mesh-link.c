@@ -118,12 +118,11 @@ static struct taken *walk_chain(struct walk *w,struct mesh_stream *x,int land,st
   const struct mesh_entry e=z.entry;
   const struct mesh_zwoggle *t=tables_at(w->chain.node);
   const uint64_t base=e.base+(z.relative?((const uint64_t *)((const char *)M+t->bases))[z.relative-1]:0);
-  /* mesh.h struct mesh_zwoggle_entry `after`: a landing's channels in its call's table, a SEND's own list (its count,
-     then its requirements), either read as the requirements a mask names */
-  uint64_t after=z.after;
+  /* mesh.h struct mesh_zwoggle_entry `after`: the entry's own list (its count, then its requirements), a SEND's and a
+     landing's alike */
+  uint64_t after=0;
   const struct mesh_zwoggle_after *afters=NULL;
-  if(z.after && land)afters=(const struct mesh_zwoggle_after *)((const char *)M+t->after);
-  else if(z.after){
+  if(z.after){
     const uint64_t *list=(const uint64_t *)((const char *)M+z.after);
     afters=(const struct mesh_zwoggle_after *)(list+1);after=list[0]>=64?~0ull:(1ull<<list[0])-1;
   }
@@ -132,8 +131,8 @@ static struct taken *walk_chain(struct walk *w,struct mesh_stream *x,int land,st
   return &w->current;
 }
 /* whether an entry's `after` holds (mesh.h struct mesh_zwoggle_entry): a landing's, on each channel it names, the last
-   SEND an earlier call laid of its pages completed, that channel's `sent` at its call's requirement there; a SEND's,
-   each receive it follows and does not forward consumed, its word at that receive's end; reads alone */
+   SEND that reads bytes it writes completed (that channel's `sent` at that SEND's end); a SEND's, each receive it
+   follows and does not forward consumed, its word at that receive's end; reads alone */
 static int after_holds(const struct taken *e){
   for(uint64_t a=e->after;a;a&=a-1){
     const struct mesh_zwoggle_after *r=e->afters+__builtin_ctzll(a);

@@ -224,10 +224,11 @@
    done, and a group completes without waiting for that. Published source bytes are immutable until every registered
    physical DMA reader has finished, including readers on parallel cables, relay paths and not-yet-posted entries.
    Mutating them earlier is invalid. The compiled page assignment includes local GPU reads,
-   incoming writes and destination consumers before it assigns an overwrite. A natural landing
-   is an alternative witness only if its actual causal ancestry proves every relevant reader finished; merely being
-   later or coming from each peer is insufficient. Logical free defers physical reuse under these source obligations
-   without adding a receipt, acknowledgment or data-program wait.
+   incoming writes and destination consumers before it assigns an overwrite. A landing into bytes a SEND reads (an
+   in-place collective's later step, a later call over the same pages) is posted by the bridge only once that SEND
+   completed, its channel's `sent` at its end (mesh.h struct mesh_zwoggle_entry `after`), a wait the compiler states
+   and orders (an exchange in place, each side's landing on its own SEND, is refused as a value). Logical free defers
+   physical reuse under these source obligations without adding a receipt, acknowledgment or data-program wait.
    ncclCommRegister refuses a buffer outside the region.  Design: design/transport.md.
 
    Failures are ncclResult_t values, ncclGetLastError naming what was lost; nothing resumes a failed group, and a
@@ -1276,15 +1277,12 @@ ncclResult_t ncclMeshCommPlanRouteUnits(ncclComm_t comm, uint64_t* units, size_t
    observing availability is not a separate network message.
 
    Receives have AOT addresses and orders. Fresh disjoint landing ranges can be
-   preposted immediately, independent of this node's outgoing publication. Reuse
-   needs a proof before the next first write. The recurrent all-gather proof in
-   design/whole-function.md permits two source/landing slots when every rank's
-   next publication follows consumption of all previous pieces. It does not
-   apply to arbitrary asymmetric sends or independent feed-forward calls. Their
-   immutable source leases survive until their final local DMA reads end, with
-   asynchronous bridge-owned retirement; destination consumers have separate
-   lifetimes. No receive gate, per-tensor receipt all-gather or remote ACK is a
-   substitute for those proofs.
+   preposted immediately, independent of this node's outgoing publication. A
+   reused range's landing is posted once the SEND that last read it completed
+   (the bridge's `sent`, the landing's `after`). Immutable source leases survive
+   until their final local DMA reads end, with asynchronous bridge-owned
+   retirement; destination consumers have separate lifetimes. No receive gate,
+   per-tensor receipt all-gather or remote ACK is added.
 
    Fused kernels are ordered by the caller's serial compute stream. An encoding
    group publishes binding records, not the source values themselves. Repeated
