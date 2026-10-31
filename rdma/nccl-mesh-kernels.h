@@ -184,8 +184,15 @@ static NSString *const KERNELS =
      input's word. One threadgroup a core for the whole group (all resident), each taking blocks in their global order:
      thread 0 awaits a block's inputs, the threadgroup folds it, then, once every earlier block of its sum is published
      (its done word), stores each input's summed count past it (zuuz zimped, a SEND of the sum's readiness) and the
-     done word */
-  "#define ZELLOTH(name, T, OP) HEAD(zelloth_##name) { ENTER(i == 0) "
+     done word.  FOLD writes element j: ZFOLD_OP an operator's, ZFOLD_MERGE a partials merge's row of p.op floats
+     (merge_row, after its definition below), the own row merged with each input's in turn, any order a valid one */
+  "#define ZFOLD_OP(T, OP) T v = mesh_payload(own + j); "
+  "for (uint k = 0; k < K; k++) v = OP(v, mesh_payload((volatile coherent(system) device const T *)in[3 * k] + j), p.op); out[j] = v;\n"
+  "#define ZFOLD_MERGE(T, OP) const ulong row = j * ulong(p.op); "
+  "merge_row<false>(out + row, own + row, (volatile coherent(system) device const float *)in[0] + row, p.op); "
+  "for (uint k = 1; k < K; k++) merge_row<true>(out + row, out + row, (volatile coherent(system) device const float *)in[3 * k] + row, p.op);\n"
+  "#define ZELLOTH(name, T, OP) ZELLOTH_OF(name, T, OP, ZFOLD_OP)\n"
+  "#define ZELLOTH_OF(name, T, OP, FOLD) HEAD(zelloth_##name) { ENTER(i == 0) "
   "device const ulong *z = (device const ulong *)(s + p.src); const ulong S = z[0], block = z[1], blocks = z[2], G = ulong(g) / ulong(t); "
   "for (ulong q = ulong(i - l) / ulong(t); q < blocks; q += G) { "
   "device const ulong *sum = z + 3; for (ulong k = 0; k < S; k++) { sum = z + 3 + 8 * k; if (q < sum[5] + sum[6]) break; } "
@@ -202,8 +209,7 @@ static NSString *const KERNELS =
   "mesh_step_check(p, mesh_step_wait(p, (device uchar *)in[3 * k + 1], want, vb), want, vb); } "
   "threadgroup_barrier(mem_flags::mem_threadgroup); "
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); "
-  "for (ulong e = b + l; e < end; e += t) { const ulong j = first + e; T v = mesh_payload(own + j); "
-  "for (uint k = 0; k < K; k++) v = OP(v, mesh_payload((volatile coherent(system) device const T *)in[3 * k] + j), p.op); out[j] = v; } "
+  "for (ulong e = b + l; e < end; e += t) { const ulong j = first + e; FOLD(T, OP) } "
   "threadgroup_barrier(mem_flags::mem_device); "
   "if (l == 0) { mesh_step_check(p, mesh_step_wait(p, (device uchar *)done, local, vb), local, vb); "
   "for (uint k = 0; k < K; k++) if (in[3 * k + 2]) { device const ulong *x = run + 2 + 4 * ulong(k); "
@@ -246,7 +252,8 @@ static NSString *const KERNELS =
   "const ulong r = b + l; const uint u = p.op; /* the merge's row floats (ARGS op) */ "
   "if (r < end) merge_row<Same>(x + r * u, xs + r * u, y + r * u, u); } }\n"
   "HEAD(land_merge) { land_merge_body<true>(d, s, p, a, vb, progress, i, g, l, t, tg); }\n"
-  "HEAD(land_merge_from) { land_merge_body<false>(d, s, p, a, vb, progress, i, g, l, t, tg); }\n";
+  "HEAD(land_merge_from) { land_merge_body<false>(d, s, p, a, vb, progress, i, g, l, t, tg); }\n"
+  "ZELLOTH_OF(merge, float, 0, ZFOLD_MERGE)\n";
 
 /* every kernel a track may record, by its kind: one list, the one numbering of the host's steps (struct host_op kind,
    a device's pipelines' index: nccl-mesh-metal.m kernels_of) and of the track kernel's switch (TRACKS' enum and TRACK_KERNEL's cases, made
@@ -272,7 +279,8 @@ enum { WORD_D = 1, WORD_A };
   X(land_e5m2, WORD_A, MESH_COMBINE_LANES) X(premul_e5m2, 0, 0) \
   X(publish, 0, 0) X(spin, WORD_D, 0) X(land_merge, WORD_A, 1) X(land_merge_from, WORD_A, 1) \
   X(zelloth_i8, 0, 0) X(zelloth_u8, 0, 0) X(zelloth_i32, 0, 0) X(zelloth_u32, 0, 0) X(zelloth_i64, 0, 0) X(zelloth_u64, 0, 0) \
-  X(zelloth_f16, 0, 0) X(zelloth_f32, 0, 0) X(zelloth_bf16, 0, 0) X(zelloth_e4m3, 0, 0) X(zelloth_e5m2, 0, 0)
+  X(zelloth_f16, 0, 0) X(zelloth_f32, 0, 0) X(zelloth_bf16, 0, 0) X(zelloth_e4m3, 0, 0) X(zelloth_e5m2, 0, 0) \
+  X(zelloth_merge, 0, 0)
 #define KIND_ENUM(name, word, lanes) KIND_##name,
 #define KIND_NAME(name, word, lanes) #name,
 #define KIND_WORD(name, word, lanes) word,

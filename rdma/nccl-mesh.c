@@ -3917,8 +3917,7 @@ static ncclResult_t landing_progress(const struct ncclComm *comm, struct issue *
   for (uint32_t h = 0; h < comm->count; h++) for (size_t k = 0; k < u->plans[h].ins; k++) {
     struct message *m = u->plans[h].in + k;
     m->summed = (struct where){0}; m->summed_word = 0;
-    if (m->c->bound->steps[m->step].op == MESH_STEP_REDUCE && !m->c->fused &&
-        !m->c->write_binding && ktype(m->c) != METAL_MERGE) count++;
+    if (m->c->bound->steps[m->step].op == MESH_STEP_REDUCE && !m->c->fused && !m->c->write_binding) count++;
   }
   if (u->progress) ncclMemFree(u->progress);
   u->progress = NULL;
@@ -3933,8 +3932,7 @@ static ncclResult_t landing_progress(const struct ncclComm *comm, struct issue *
   size_t at = 0;
   for (uint32_t h = 0; h < comm->count; h++) for (size_t k = 0; k < u->plans[h].ins; k++) {
     struct message *m = u->plans[h].in + k;
-    if (m->c->bound->steps[m->step].op != MESH_STEP_REDUCE || m->c->fused ||
-        m->c->write_binding || ktype(m->c) == METAL_MERGE) continue;
+    if (m->c->bound->steps[m->step].op != MESH_STEP_REDUCE || m->c->fused || m->c->write_binding) continue;
     m->summed = shifted(base, at * sizeof(uint64_t));
     m->summed_word = lease_offset((uint64_t *)u->progress + at++);
   }
@@ -4082,9 +4080,9 @@ static void send_dependencies(struct ncclComm *comm, struct schedule *plans) {
     for (size_t k = 0; k < plans[h].outs; k++) {
       struct message *m = plans[h].out + k;
       const struct steps *s = m->c->bound;
-      /* a sum's landing counts its units summed where a track's worker pool runs it (consume: no fused crossing's, no
-         WRITE plan's, no partials merge's) */
-      const int summed = !m->c->fused && !m->c->write_binding && ktype(m->c) != METAL_MERGE;
+      /* a sum's landing counts its units summed (zelloth, or the tracks pool: consume; no fused crossing's, no WRITE
+         plan's), a partials merge's as any other's */
+      const int summed = !m->c->fused && !m->c->write_binding;
       const int32_t dependency = m->c->target && comm->rank != m->c->root ? (int32_t)s->prior[s->prior_first[m->step]] : forwards(s, m->step, summed);
       m->dep_h = UINT32_MAX; m->dep_summed = 0;
       if (dependency < 0) continue;
@@ -4881,9 +4879,10 @@ static int tile_landing_order(const void *left,const void *right) {
 }
 /* design/zorvek.md zabbadoo, for a group whose every landing is a copy or a sum and whose every SEND its presents
    published (present_publish: `published` at the group's end on every channel), with no combine into bytes a SEND
-   of its call reads (a landing's `need`), not fused and no partials merge: each sum's landings (a call's combines
-   into one buffer range, the same runs each) one zelloth, one writer an element from the rank's own element and every
-   contribution's once all have landed, whatever their order, its summed count stored past each block; then each
+   of its call reads (a landing's `need`), not fused: each sum's landings (a call's combines into one buffer range,
+   the same runs each; a partials merge's rows as a sum's elements, merge_row its fold) one zelloth, one writer an
+   element from the rank's own element and every contribution's once all have landed, whatever their order, its
+   summed count stored past each block; then each
    channel's landings awaited once (zelloq: a copy's landing is the copy); nothing of the group in the tracks pool.
    A WRITE's landings are copies (its landing records are a fused crossing's alone: complete), a frame train's
    (`repeats` past 1) every frame's entries, so zelloq past the last awaits them all; a sum is keyed on its step, not
@@ -4905,7 +4904,6 @@ static int zsum_same(const struct zsum *a, const struct zsum *b) {
 static ncclResult_t zabbadoo(struct metal_program *program, struct ncclComm *comm, struct inflight *g, int *taken) {
   *taken = 0;
   if (g->fused) return ncclSuccess;
-  for (size_t i = 0; i < g->n; i++) if (ktype(g->list + i) == METAL_MERGE) return ncclSuccess;
   size_t count = 0;
   for (uint32_t h = 0; h < comm->count; h++) {
     const struct channel *ch = comm->channels + h;

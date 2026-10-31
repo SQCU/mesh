@@ -22,7 +22,7 @@ enum { OP_LAND, OP_PREMUL, OP_TRUNCDIV, OP_ZELLOTH, OPS };
 #define FLOATS(op) KIND_##op##_f16, KIND_##op##_f32, KINDS, KIND_##op##_bf16, KIND_##op##_e4m3, KIND_##op##_e5m2
 static const uint8_t TYPED[OPS][METAL_MERGE + 1] = {
   {INTEGERS(land), FLOATS(land), KIND_land_merge}, {INTEGERS(premul), FLOATS(premul), KINDS},
-  {INTEGERS(truncdiv), KINDS, KINDS, KINDS, KINDS, KINDS, KINDS, KINDS}, {INTEGERS(zelloth), FLOATS(zelloth), KINDS}};
+  {INTEGERS(truncdiv), KINDS, KINDS, KINDS, KINDS, KINDS, KINDS, KINDS}, {INTEGERS(zelloth), FLOATS(zelloth), KIND_zelloth_merge}};
 /* a copy's kind by its width (0 words of 4 bytes, 1 bytes) and its loads (METAL_PLAIN, METAL_LAND) */
 static const uint8_t COPY[2][METAL_LAND + 1] = {{KIND_copy_plain_4, KIND_copy_land_4}, {KIND_copy_plain_1, KIND_copy_land_1}};
 
@@ -334,7 +334,8 @@ struct metal_result metal_zelloth(struct metal_program *program, int type, int o
   id<MTLComputePipelineState> state = k->pipelines[kind];
   const uint64_t width = state.maxTotalThreadsPerThreadgroup < MESH_TRANSPORT_GROUP_THREADS ? state.maxTotalThreadsPerThreadgroup
                                                                                            : MESH_TRANSPORT_GROUP_THREADS;
-  const uint64_t block = MESH_COMBINE_LANES * width;
+  /* a block's elements: a combine's lanes a thread, a merge's one row a thread (LANES) */
+  const uint64_t block = (type == METAL_MERGE ? 1 : MESH_COMBINE_LANES) * width;
   size_t words = 3 + 8 * (size_t)S;
   for (uint32_t s = 0; s < S; s++) {
     if (!sum[s].inputs || !sum[s].in[0].count) return metal_failed(EINVAL);
