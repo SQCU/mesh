@@ -279,7 +279,16 @@ channels' `published`, `consumed`, `waited`.
   group zabbadoo cannot run fails when its plan is prepared. A fused crossing's records are fused_records.
 - Then the host's mirror: the channels' `published`, `consumed`, `waited`, the list of groups in flight,
   retire and the tickets. Every group is published and awaited at its own call.
-- Still open: the chain service stands intermittently, on main since before these (3 of its last 5 runs).
+- Root-caused (2026-10-31), and not a deadlock: the chain service's ranks started their prepared programs up to
+  10.7 s apart, past the 5 s a GPU wait is bounded, so the first to start ended its waits (assumption A4) and the
+  loss ended the rest. Each rank left preparation together (bind's exchange), then wrote its configuration's
+  observation declaration, a 4.4 MB JSON line, to stdout before the program started (mesh_statistics.py
+  Observations): 6.4 s on m5ult2, 3.3 s on m5ult3, each pipe its own. Written at the first report instead, the five
+  started within 0.1 s, and 8 of 8 runs passed. rdma/plan_cycles.py over the bridge's own tables (nccl-mesh.c
+  plan_record, MESH_PLAN_RECORD) and mesh-stat streams found no landing or SEND held by a requirement at the stand:
+  the cable-order cycle below was not its cause. Preparation still takes 2.2 s a rank (the chain's recording, 2.0 s,
+  about 160 us a command; a deep copy of the plan's graphs, 0.9 s), which no service step should.
+- Superseded by the entry above: the chain service stands intermittently, on main since before these (3 of its last 5 runs).
   At one stand m5ult2 had published nothing (`ready` 0 on every channel). m5ult3 waited on m5ult2's first
   landing. m5ult2 reaches m5ult4 only through m5ult1, which had relayed it 8 units of m5ult4's input frames,
   and those frames queue on m5ult4's channel behind its later input frames. Those wait for m5ult4's chain
