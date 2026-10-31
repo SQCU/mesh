@@ -5,6 +5,8 @@ rdma/mesh-flow
 rdma/mesh-heartbeat
 rdma/mesh-stat
 rdma/*.dylib
+# 9b54a49b's installed image (rdma/Makefile OTHERS); unignored, it left every node's checkout unclean, so the next prepare refused
+rdma/libsleef.a
 rdma/*.metallib
 rdma/*.binarchive
 rdma/Mesh.swiftmodule
