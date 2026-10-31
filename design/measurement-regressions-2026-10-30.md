@@ -151,3 +151,24 @@ SEND published once its whole landing is summed and every call completed in its 
     channel's count of units summed, stored system-coherent, named by the SEND as a relay names `landed`.
   - **The bubble.** Every call is its own schedule behind a queue barrier (20afa368, 8fa0b005), and its present and
     gate run only after the previous call's pool has ended: about 1 ms a call with no cable carrying anything.
+
+## c56f21a9: every collective at 16 and 64 MiB lands nothing, chain-service ends in SIGBUS (bisected 2026-10-30)
+
+On all five members, examples/bandwidth.py (metal-microbench tools/mesh/hourly/bandwidth.json) and
+examples/chain-service.py (chain.json), each commit prepared on every node:
+
+| Commit | chain-service | bandwidth check |
+|---|---|---|
+| 3f2a90b7 (last pass) | 5 × exit 0 | 45 checked, none wrong, every rank |
+| c56f21a9 "Bind WRITE operands through the canonical communicator declaration" (first fail) | 4 × exit 138 (SIGBUS after placement, as the WRITE bindings prepare), 1 × exit 1 (its peers gone: "preparing exact-byte write bindings: Connection reset by peer") | all-reduce, broadcast, all-gather, reduce-scatter and the exchange wrong at 16 MiB and 64 MiB on ranks 1-4; every size to 4 MiB right |
+| d217b906, 18709d4d, f21a4d24, 7e7f8726 (c56f21a9 merged) | the same | the same |
+
+What the wrong values say: a broadcast's recipient holds its own input (rank r reads r + 1 where 1 is sent), an
+all-gather's and a reduce-scatter's outputs keep their initial -1, an all-reduce is partly reduced: at those sizes the
+receives are never copied out. c56f21a9's issue pipeline is the range: every issue laid with its call's `frames` as its
+repeats at stride 0 (prepared, issue_layout), the binding period capped at the group's invocations, and a group's
+residency and hazards declared as exact byte ranges ordered by the shared page frontier (uses_add, metal_accesses)
+instead of whole buffers.
+
+7e7f8726's message names 18709d4d's climb stop as the cause; the bisect above refutes that (d217b906 fails without it).
+7e7f8726 stays: it restores mesh_tree_shape's walk for a node its own parent, as it was before 18709d4d.
