@@ -4886,8 +4886,7 @@ static int tile_landing_order(const void *left,const void *right) {
   return a->entry>b->entry?-1:a->entry<b->entry;
 }
 /* design/zorvek.md zabbadoo, for a group whose every landing is a copy or a sum and whose every SEND its presents
-   published (present_publish: `published` at the group's end on every channel), with no combine into bytes a SEND
-   of its call reads (a landing's `need`), not fused: each sum's landings (a call's combines into one buffer range,
+   published (present_publish: `published` at the group's end on every channel), not fused: each sum's landings (a call's combines into one buffer range,
    the same runs each; a partials merge's rows as a sum's elements, merge_row its fold) one zelloth, one writer an
    element from the rank's own element and every contribution's once all have landed, whatever their order, its
    summed count stored past each block; then each
@@ -4918,7 +4917,7 @@ static ncclResult_t zabbadoo(struct metal_program *program, struct ncclComm *com
     if (ch->published != g->end[h][0] || ch->consumed != g->start[h][1]) return ncclSuccess;
     for (uint64_t at = g->start[h][1]; at < g->end[h][1]; at++) {
       const struct message *m = in_at(g, h, at);
-      if (m->c->bound->steps[m->step].op == MESH_STEP_REDUCE) { if (m->need || !m->landing_count || g->repeats != 1) return ncclSuccess; count++; }
+      if (m->c->bound->steps[m->step].op == MESH_STEP_REDUCE) { if (!m->landing_count || g->repeats != 1) return ncclSuccess; count++; }
     }
   }
   struct zsum *sums = malloc((count + 1) * sizeof *sums);
