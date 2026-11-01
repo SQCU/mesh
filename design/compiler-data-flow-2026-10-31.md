@@ -127,6 +127,13 @@ argument records and hardware requests from the finished declarations. The
 common recorder lowers the complete dependency graph to backend commands.
 Its resource constraints come from the selected capability operands.
 
+The recorder assigns encoder scopes and fence lifetimes from that graph before
+encoding commands. Compatible steps keep one encoder. Stage barriers and
+cross-scope checkpoints preserve the solved edges; a command group does not
+itself require a new encoder or fence. See
+[encoder lifetimes](encoder-lifetimes-2026-11-01.md) for the backend scope rules
+and the remaining queue-event limitation.
+
 CPU numerical bodies are shared headers. ANE submit and completion entries use
 one shared source recipe. The effect pass specializes these sources before
 binding. Host access records retain the same observation and atomic modes as

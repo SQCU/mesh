@@ -145,10 +145,8 @@ uint64_t metal_signaled(void *event) { return ((id<MTLSharedEvent>)event).signal
 int metal_wait(void *event, uint64_t value, uint64_t ns) { return [(id<MTLSharedEvent>)event waitUntilSignaledValue:value timeoutMS:ns / 1000000]; }
 void metal_release(void *object) { [(id)object release]; }
 void *metal_retain(void *object) { return [(id)object retain]; }
-/* a stream's polls as a program's bound: 0, or more than NCCL_MESH_POLLS, is NCCL_MESH_POLLS
-   (design/transport.md) */
-static uint32_t bound_of(uint32_t polls) { return polls && polls < NCCL_MESH_POLLS ? polls : NCCL_MESH_POLLS; }
-
+/* The occurrence already owns its effective observation budget. Binding does
+   not reinterpret configuration or start any observation. */
 struct metal_program *metal_begin(struct metal_program *program, void *encoder, void *table, void *residency, void *violation, uint32_t polls,
                                   const char **message) {
   if (!kernels_of(((id<MTLResidencySet>)residency).device, message)) return NULL;
@@ -157,7 +155,7 @@ struct metal_program *metal_begin(struct metal_program *program, void *encoder, 
   program->table = [(id<MTL4ArgumentTable>)table retain];
   program->residency = [(id<MTLResidencySet>)residency retain];
   program->violation = [(id<MTLBuffer>)violation retain];
-  program->polls = bound_of(polls);
+  program->polls = polls;
   program->accesses = [NSMutableData new];
   metal_resident(program, violation);
   return program;

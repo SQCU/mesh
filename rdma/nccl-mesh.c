@@ -210,8 +210,9 @@ void mesh_library_expired(const char *wait, uint64_t ns) {
   library_stop();
   mesh_expired(wait, ns);
 }
-/* a call no declaration covers: a warning on stderr, and the program ends, its GPU work stopped first as at an expiry
-   (design/eager-execution.md#what-follows) */
+/* An unusable declaration or an exhausted execution observation: report the
+   actual cause and stop GPU work before ending the program. A poll budget is
+   not a measured wall-clock duration. */
 __attribute__((noreturn)) static void library_end(const char *why) {
   library_stop();
   char text[MESH_DIAGNOSTIC_BYTES];
@@ -226,10 +227,10 @@ static uint64_t deadline_left(const struct mesh_deadline *d) {
   return d->at - now;
 }
 static void channel_counts(const struct ncclComm *comm, char *out, size_t room, int lists);
-/* the GPU wait whose bound a communicator's failure words record (METAL_BOUND, nccl-mesh-kernels.h mesh_step_check),
-   named into `wait`; its deadline, 0 where they record none.  Every channel's counts, its lists' too, a line of their
-   own on stderr: which ring of which channel stood still, past the one the wait was on */
-static uint64_t bound_reached(const struct ncclComm *comm, char *wait, size_t room) {
+/* Report an exhausted execution-local poll budget. No preparation or elapsed
+   timestamp exists in these records. Every channel's counts accompany the
+   exact entry and load budget that failed. */
+static int bound_reached(const struct ncclComm *comm, char *wait, size_t room) {
   const _Atomic uint64_t *v = comm->words;
   const uint64_t at = v ? atomic_load_explicit(v + 2, memory_order_acquire) : 0;
   if (!at || atomic_load_explicit(v, memory_order_relaxed) != METAL_BOUND) return 0;
@@ -248,15 +249,15 @@ static uint64_t bound_reached(const struct ncclComm *comm, char *wait, size_t ro
              (unsigned long long)atomic_load_explicit(w->taken[0], memory_order_acquire),
              (unsigned long long)atomic_load_explicit(w->taken[1], memory_order_acquire));
   }
-  snprintf(wait, room, "libnccl-mesh: communicator %s's GPU wait for entry %llu on the channel to node %u, through %llu polls (its stream's "
-           "bound, ncclMeshStream polls: the wait's deadline, fixed when it was made), its awaited count last read %llu%s",
-           comm->name, (unsigned long long)(at - 1), h < comm->count ? comm->channels[h].node : UINT32_MAX, (unsigned long long)polls,
-           (unsigned long long)read, counts);
+  snprintf(wait, room, "communicator %s exhausted %llu execution-time observations for entry %llu on the channel to node %u; "
+           "its awaited count last read %llu%s",
+           comm->name, (unsigned long long)polls, (unsigned long long)(at - 1),
+           h < comm->count ? comm->channels[h].node : UINT32_MAX, (unsigned long long)read, counts);
   char every[2048], line[2304];
   channel_counts(comm, every, sizeof every, 1);
   const int n = every[0] ? snprintf(line, sizeof line, "libnccl-mesh: communicator %s as its GPU wait ended%s\n", comm->name, every) : 0;
   if (n > 0) (void)!write(2, line, (size_t)n < sizeof line ? (size_t)n : sizeof line - 1);
-  return MESH_PLATFORM_NS;
+  return 1;
 }
 static void program_free(struct mesh_program *program) {
   free((void *)program->segment); free((void *)program->log_weight); free((void *)program->first); free((void *)program->move);
@@ -749,27 +750,22 @@ static void comm_lost(struct ncclComm *comm, uint32_t h) {
   atomic_store_explicit(comm->words + 3, h, memory_order_relaxed);
   atomic_store_explicit(comm->words + 2, UINT64_MAX, memory_order_release);
 }
-/* design/transport.md section 5: every MESH_PLATFORM_NS / 20, each communicator's streams read: one no longer its own
-   (a peer gone ends its holding: mesh_stream_held) is recorded as a loss (comm_lost), ending its GPU waits at once as a
-   value; a bound a GPU wait records (bound_reached) ends the program at once, named.  No wait is extended: each GPU
-   wait's bound and each host wait's deadline is fixed when it is made (design/eager-execution.md assumption A4).
-   Then the library's own GPU programs: a communicator's last program committed and not ended, seen so at every look
-   since `finished` last moved for twice MESH_PLATFORM_NS, the program ended there, the wait named; a look that finds none
-   committed and not ended starts the count again, so time with no program does not count; group_lock only where free
-   (a holder's own waits are bounded) */
+/* Observe link loss and reported poll exhaustion. GPU/CPU load budgets begin
+   inside their executing observations. This watcher neither starts nor renews
+   those budgets, and preparation time is not an elapsed observation. */
 static void watch_turn(void *unused) {
   (void)unused;
   char wait[MESH_DIAGNOSTIC_BYTES];
-  uint64_t idle = 0;
+  int exhausted = 0;
   pthread_mutex_lock(&live_lock);
-  for (struct ncclComm *c = live; c && !idle; c = c->next_live) {
+  for (struct ncclComm *c = live; c && !exhausted; c = c->next_live) {
     int held = !__atomic_load_n(&c->revoked, __ATOMIC_ACQUIRE);
     for (uint32_t h = 0; held && h < c->count; h++)
       if (!(held = mesh_stream_held(&c->attach->context, c->channels[h].stream, *c->channels[h].wire))) comm_lost(c, h);
-    idle = bound_reached(c, wait, sizeof wait);
+    exhausted = bound_reached(c, wait, sizeof wait);
   }
   pthread_mutex_unlock(&live_lock);
-  if (idle) mesh_library_expired(wait, idle);
+  if (exhausted) library_end(wait);
 }
 static void watch_start(void *unused) {
   (void)unused;
@@ -1984,8 +1980,7 @@ static ncclResult_t comm_failure(struct ncclComm *comm) {
       return comm_fail(comm, ncclRemoteError, "the link to node %u was lost (its holding's counts ~0) at entry %llu", node,
                        (unsigned long long)(at - 1));
     char wait[MESH_DIAGNOSTIC_BYTES];
-    const uint64_t bound = bound_reached(comm, wait, sizeof wait);
-    if (bound) mesh_library_expired(wait, bound);
+    if (bound_reached(comm, wait, sizeof wait)) library_end(wait);
     return comm_fail(comm, ncclRemoteError, "entry %llu on the channel to node %u was not done within %llu polls of a GPU wait (its "
                      "stream's bound, ncclMeshStream polls): its bytes had not landed, the peer's work there beginning that "
                      "much later, or its link was lost", (unsigned long long)(at - 1), node,
@@ -5550,9 +5545,13 @@ static ncclResult_t operand_copies(struct metal_program *program, struct ncclCom
 static ncclResult_t lower_group(struct call *list,size_t n,struct issue **made) {
   const ncclComm_t comm=list[0].comm;
   ncclResult_t result=ncclSuccess;int remote=0;
-  uint32_t polls=list[0].polls;
+  /* Resolve the configured budget before either typed page effects or builtin
+     command records consume it. Zero is a preparation default, not a runtime
+     instruction to read once and accept an unfinished value. */
+  uint32_t polls=0;
   for(size_t i=0;i<n&&!result;i++) {
-    polls=!polls||!list[i].polls?0:polls>list[i].polls?polls:list[i].polls;
+    const uint32_t bound=list[i].polls&&list[i].polls<NCCL_MESH_POLLS?list[i].polls:NCCL_MESH_POLLS;
+    if(bound>polls)polls=bound;
     if(reducing(list[i].what))result=reduction(list+i);
     remote|=crosses(list+i);
   }

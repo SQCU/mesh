@@ -12,7 +12,9 @@ static inline void mesh_publish(volatile uint64_t *word,uint64_t value) {
 
 /* Native code consumes the same count pages and diagnostic fields as mesh.metal.
    All pointers and thresholds are prepared operands. These functions observe
-   actual remote production; they never choose tasks or reconstruct a schedule. */
+   actual remote production; they never choose tasks or reconstruct a schedule.
+   Preparation supplies a positive effective load budget. Its local counter
+   begins here, when the numerical leaf first observes the needed page. */
 static inline void mesh_step_observe(volatile uint64_t *word,uint64_t target,void *violation,
                                     uint32_t polls,uint32_t channel,uint64_t entry) {
     uint64_t *v=(uint64_t *)violation;

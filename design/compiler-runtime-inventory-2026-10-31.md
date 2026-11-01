@@ -4,6 +4,12 @@ Recorded 2026-10-31, 13:21 PDT. Source review only; no numerical execution or pe
 
 The initial checkout was mesh `f82f0b15`. During review, concurrent changes reached `99b05c3c`; the collective findings below were rechecked against that revision. The other repo is metal-microbench `c6f87fc2`. Source references describe these revisions, not an unspecified future main.
 
+Later integration notes: [compiler data flow](compiler-data-flow-2026-10-31.md)
+records the corrected lowering order. [Encoder lifetimes, November 1](encoder-lifetimes-2026-11-01.md)
+records the removal of per-group encoder/fence creation and distinguishes the
+remaining queue-event scope from the solved GPU stage scopes. The original
+inventory below remains a record of its named revisions.
+
 The compiled numerical path is connected, but the complete dependency-lowering requirement is not met. A prepared function does not rerun its Python lowering on each invocation. Its emitted program still contains broad encoder barriers, whole-group landing joins, runtime readiness searches, and host submission gates. Moving the construction of these instructions to preparation does not remove their execution cost.
 
 ## 1. The pool was an incomplete replacement, not a formal requirement

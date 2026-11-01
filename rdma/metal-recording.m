@@ -1259,7 +1259,9 @@ static NSError *MetalReplayFailure(NSInteger code, NSString *reason) {
     id<MTLFence> fence;
     uint64_t eventValue;
     MTLStages stages;
-    BOOL prepared, external, declaredInput, hostConsumer, exported;
+    MTLStages barrierAfter, barrierBefore;
+    NSUInteger scope;
+    BOOL prepared, external, declaredInput, hostConsumer, exported, hostProducer, needsFence;
     NSUInteger declaredCommand;
     _Atomic unsigned remaining;
     _Atomic int status;
@@ -1299,11 +1301,13 @@ struct MetalSchedule {
     MetalCapture *declarations;
     NSMutableData *waits;
     NSMutableData *results;
+    NSMutableDictionary *fenceStages;
     double resultObserved;
     NSMutableDictionary *frontierRead, *frontierWritten, *frontierAtomic, *hostResources;
     MetalQueueAccess *queueAccesses;
     NSMutableArray *parts;
     NSUInteger commands, ordinal;
+    NSUInteger encoderScope, scopeCount;
     _Atomic int status;
     // the part's end, in the statistics clock (MetalScheduleEnd), stored before its status
     double ended;
@@ -1319,6 +1323,8 @@ struct MetalSchedule {
     id<MTLBuffer> data;
     NSUInteger used;
 };
+
+#include "metal-scope-plan.inc"
 
 MTLCompileOptions *MetalDeviceCompilerOptions(id<MTLDevice> device) {
     MTLCompileOptions *options=[MTLCompileOptions new];
@@ -1452,7 +1458,7 @@ static MetalWork *MetalScheduleWork(struct MetalSchedule *root,NSData *accesses,
     void (^encode)(struct MetalSchedule *),MetalHostOperation operation) {
     MetalWork *work=[MetalWork new];work->accesses=[accesses copy];work->encode=[encode copy];work->operation=[operation copy];
     work->readVersions=[root->readVersions copy];
-    work->root=root;
+    work->root=root;work->hostProducer=operation!=nil;
     work->stages=MTLStageDispatch;work->eventValue=1;
     work->dependencies=[NSMutableIndexSet new];work->successors=[NSMutableIndexSet new];
     work->hostDependencies=[NSMutableIndexSet new];work->gpuDependencies=[NSMutableIndexSet new];
@@ -1479,7 +1485,7 @@ void MetalScheduleReadVersions(struct MetalSchedule *root,const struct MetalReac
 void MetalScheduleInput(struct MetalSchedule *root,const struct MetalReach *views,size_t count,id<MTLEvent> event,uint64_t value) {
     if(!event)[NSException raise:NSInvalidArgumentException format:@"page producer requires its completion event"];
     MetalWork *work=MetalScheduleWork(root,[NSData dataWithBytes:views length:count*sizeof *views],nil,nil);
-    work->external=YES;work->declaredInput=YES;work->event=[(id)event retain];work->eventValue=value;
+    work->external=YES;work->declaredInput=YES;work->hostProducer=YES;work->event=[(id)event retain];work->eventValue=value;
 }
 
 void MetalEncoderCompute(id<MTL4ComputeCommandEncoder> encoder,const struct MetalCommandDescription *command) {
@@ -1728,7 +1734,7 @@ static void MetalScheduleExpandHost(struct MetalSchedule *root,MetalWork *work,N
     }
 }
 
-static BOOL MetalWorkHost(MetalWork *work) { return work->operation!=nil||(work->external&&!work->fence); }
+static BOOL MetalWorkHost(MetalWork *work) { return work->hostProducer; }
 
 static NSUInteger MetalWorkDependencies(struct MetalSchedule *root,NSArray *work) {
     const NSUInteger first=root->history.count;
@@ -1923,26 +1929,35 @@ static void MetalScheduleEndEncoder(struct MetalSchedule *s) {
     if(!s->encoder)return;
     objc_setAssociatedObject(s->encoder,&encoderScheduleKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [s->encoder endEncoding];[s->encoder release];s->encoder=nil;
+    s->encoderScope=0;[s->fenceStages removeAllObjects];
 }
 
-// A fence covers just its producer's encoder. Independent commands have their
-// own scopes in the same command buffer, so no stage-prefix barrier orders them.
+// Scope membership and barriers are already solved. An encoder lives for its
+// entire compatible scope; only a genuine scope cut ends it.
 static void MetalScheduleBeginCommand(struct MetalSchedule *s,MetalWork *work) {
-    MetalScheduleEndEncoder(s);
-    s->encoder=[[s->command computeCommandEncoder] retain];
-    if(!s->encoder)[NSException raise:NSMallocException format:@"preparing command encoder"];
-    objc_setAssociatedObject(s->encoder,&encoderScheduleKey,[NSValue valueWithPointer:s],OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if(s->encoderScope&&s->encoderScope!=work->scope)MetalScheduleEndEncoder(s);
+    if(!s->encoder) {
+        s->encoder=[[s->command computeCommandEncoder] retain];
+        if(!s->encoder)[NSException raise:NSMallocException format:@"preparing command encoder"];
+        objc_setAssociatedObject(s->encoder,&encoderScheduleKey,[NSValue valueWithPointer:s],OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    s->encoderScope=work->scope;
+    if(work->barrierBefore)[s->encoder barrierAfterEncoderStages:work->barrierAfter
+        beforeEncoderStages:work->barrierBefore visibilityOptions:MTL4VisibilityOptionDevice|MTL4VisibilityOptionResourceAlias];
     [work->gpuDependencies enumerateIndexesUsingBlock:^(NSUInteger p,BOOL *stop){
         (void)stop;MetalWork *producer=s->root->history[p];
-        [s->encoder waitForFence:producer->fence beforeEncoderStages:work->stages];
+        if(!producer->external&&producer->scope==work->scope)return;
+        if(!s->fenceStages)s->fenceStages=[NSMutableDictionary new];
+        NSValue *key=[NSValue valueWithPointer:producer->fence];
+        const MTLStages prior=[s->fenceStages[key] unsignedLongLongValue],needed=work->stages&~prior;
+        if(needed)[s->encoder waitForFence:producer->fence beforeEncoderStages:needed];
+        s->fenceStages[key]=@(prior|needed);
     }];
-    work->fence=[s->device newFence];
-    if(!work->fence)[NSException raise:NSMallocException format:@"preparing command dependency fence"];
 }
 
-// Storage adjacency in an ICB is not an execution dependency. Each command
-// consumes the same compiled edges, whether its dispatch is direct or indirect.
-static void MetalScheduleEmit(struct MetalSchedule *root,NSArray *batch) {
+// Equal incoming/outgoing relations form a cohort. Storage adjacency alone
+// never makes commands share a dependency or a publication.
+static NSArray *MetalScheduleCohorts(NSArray *batch) {
     NSMutableArray *groups=[NSMutableArray array];NSMutableDictionary *equivalent=[NSMutableDictionary dictionary];
     for(MetalWork *work in batch) {
         if(work->external)continue;
@@ -1954,15 +1969,21 @@ static void MetalScheduleEmit(struct MetalSchedule *root,NSArray *batch) {
         if(!group){group=[NSMutableArray array];[groups addObject:group];if(key)equivalent[key]=group;}
         [group addObject:work];
     }
-    for(NSArray *group in groups) {
+    return groups;
+}
+
+static void MetalScheduleEmit(struct MetalSchedule *root,NSArray *sequence) {
+    for(id entry in sequence) {
+        if([entry isKindOfClass:[MetalWork class]]) {
+            MetalWork *work=entry;
+            if(!work->external)MetalScheduleBindHost(root,work,root->history);
+            continue;
+        }
+        NSArray *group=entry;
         MetalWork *work=group[0];
         struct MetalSchedule *part=MetalSchedulePart(root,work,work->gpuDependencies);
-        // Shared events are queue publications. Isolate a GPU value consumed
-        // by a host task so its publication never includes unrelated commands.
-        if(work->hostConsumer&&part->commands) {
-            MetalScheduleFinishPart(part);
-            part=MetalSchedulePart(root,work,work->gpuDependencies);
-        }
+        // A host publication ends this part after its producer. A separate
+        // part before that producer would not narrow a queue event's prefix.
         MetalScheduleBeginCommand(part,work);
         for(MetalWork *member in group) {
             if(member->end) {
@@ -1970,10 +1991,14 @@ static void MetalScheduleEmit(struct MetalSchedule *root,NSArray *batch) {
                 MetalScheduleRangeNow(root,&replay,member->invocation,member->first,member->end);
             } else member->encode(root);
             member->part=part;[member->encode release];member->encode=nil;
-            if(member!=work)member->fence=[work->fence retain];
         }
-        [part->encoder updateFence:work->fence afterEncoderStages:work->stages];
-        MetalScheduleEndEncoder(part);
+        BOOL exported=NO;for(MetalWork *member in group)exported|=member->needsFence;
+        if(exported) {
+            work->fence=[part->device newFence];
+            if(!work->fence)[NSException raise:NSMallocException format:@"preparing exported dependency fence"];
+            for(MetalWork *member in group)if(member!=work)member->fence=[work->fence retain];
+            [part->encoder updateFence:work->fence afterEncoderStages:work->stages];
+        }
         if(work->hostConsumer)MetalSchedulePublication(part);
     }
 }
@@ -2018,32 +2043,36 @@ static void MetalScheduleFlush(struct MetalSchedule *root) { @autoreleasepool {
         left[i]=[((MetalWork *)nodes[i])->dependencies countOfIndexesInRange:NSMakeRange(first,nodes.count)];
         if(!left[i])[ready addIndex:i];
     }
-    NSMutableArray *batch=[NSMutableArray array];
+    NSMutableArray *batch=[NSMutableArray array],*sequence=[NSMutableArray array];
+    __block NSIndexSet *selectedHosts=MetalScheduleTail(root)->hostDependencies;
     while(ready.count) {
         __block NSUInteger selected=NSNotFound;
         [ready enumerateIndexesUsingBlock:^(NSUInteger i,BOOL *stop){
             MetalWork *work=nodes[i];
             if(work->operation){selected=i;*stop=YES;return;}
-            if([MetalScheduleTail(root)->hostDependencies containsIndexes:work->hostDependencies]&&selected==NSNotFound)selected=i;
+            if([selectedHosts containsIndexes:work->hostDependencies]&&selected==NSNotFound)selected=i;
         }];
         if(selected==NSNotFound)selected=ready.firstIndex;
         [ready removeIndex:selected];MetalWork *work=nodes[selected];
         if(work->external) {
             // An external producer is a typed input, not executable work.
+            [sequence addObjectsFromArray:MetalScheduleCohorts(batch)];[batch removeAllObjects];
+            [sequence addObject:work];
         } else if(work->operation) {
-            MetalScheduleEmit(root,batch);[batch removeAllObjects];
-            MetalScheduleBindHost(root,work,root->history);
+            [sequence addObjectsFromArray:MetalScheduleCohorts(batch)];[batch removeAllObjects];
+            [sequence addObject:work];
         } else {
-            // Emit preceding work first so each named GPU predecessor already
-            // has its command part when the next batch chooses its wait scope.
             if(batch.count&&!MetalScheduleSameInputs(batch.lastObject,work)) {
-                MetalScheduleEmit(root,batch);[batch removeAllObjects];
+                [sequence addObjectsFromArray:MetalScheduleCohorts(batch)];[batch removeAllObjects];
             }
             [batch addObject:work];
+            selectedHosts=work->hostDependencies;
         }
         [work->successors enumerateIndexesUsingBlock:^(NSUInteger i,BOOL *stop){(void)stop;if(!--left[i])[ready addIndex:i];}];
     }
-    MetalScheduleEmit(root,batch);
+    [sequence addObjectsFromArray:MetalScheduleCohorts(batch)];
+    MetalScheduleScopes(root,sequence,first);
+    MetalScheduleEmit(root,sequence);
 }
 }
 
@@ -2183,7 +2212,7 @@ static void MetalSchedulePublishFrontier(struct MetalSchedule *root) {
     NSMutableArray *producers=[NSMutableArray arrayWithCapacity:live.count];
     [live enumerateIndexesUsingBlock:^(NSUInteger p,BOOL *stop){
         (void)stop;MetalWork *source=root->history[p],*producer=[MetalWork new];
-        producer->external=YES;producer->ordinal=producers.count;
+        producer->external=YES;producer->ordinal=producers.count;producer->hostProducer=source->hostProducer;
         producer->eventValue=source->eventValue;producer->fence=[source->fence retain];
         producer->event=[(source->event?:MetalSchedulePublication(source->part)) retain];
         producer->hostDependencies=[NSMutableIndexSet new];producer->gpuDependencies=[NSMutableIndexSet new];
@@ -2337,7 +2366,7 @@ void MetalScheduleFree(struct MetalSchedule *s) {
     [s->history release];[s->readVersions release];[s->frontierRead release];[s->frontierWritten release];[s->frontierAtomic release];[s->hostResources release];
     [s->queueAccesses release];[s->parts release];
     [s->completed release];[s->completionError release];[s->error release];[s->device release];[s->communicators release];
-    [s->results release];free(s);
+    [s->fenceStages release];[s->results release];free(s);
 }
 
 void MetalReplayFree(struct MetalReplay *replay) {

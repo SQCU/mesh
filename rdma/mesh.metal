@@ -23,6 +23,8 @@
 // a dispatch's failure claim (nccl-mesh-kernels.h mesh_step_claim), so that once one wait of a dispatch has failed, every
 // other wait of it ends within 2^10 loads instead of at its own bound (the Mini's watchdog reset, 2026-10-21: a dispatch's
 // whole spin is what must stay bounded, and a wide dispatch runs its threadgroups' waits in waves).
+// Preparation fixes only the load budget. This local counter starts at the
+// first executed observation; no wall-clock timestamp ages while compiling.
 template <typename W>
 __attribute__((always_inline)) static inline W mesh_wait_bounded(volatile coherent(system) device const W *word, ulong target, uint polls,
                                                                   device metal::atomic_uint *stop) {

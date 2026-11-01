@@ -126,13 +126,16 @@
    lost; every wait is bounded: the stream's `polls` is the most loads of a count a wait makes,
    the caller's bound for the group's crossings, which it derives from its plan (the lag it expects at them, over the
    period of one load on the node's GPU: rdma/NCCL.md "Bounded waits"); 0, or more than NCCL_MESH_POLLS, is
-   NCCL_MESH_POLLS (design/transport.md); the waits a group encodes take its calls' greatest.  A wait that reaches its
+   NCCL_MESH_POLLS, resolved once during declaration lowering. A group's budget
+   uses its calls' greatest effective limit. Its counter starts at the
+   first executed observation, not when the program is prepared. A wait that reaches its
    bound or reads a lost link records its
    cause, entry and channel in its communicator's failure words, on which no kernel halts (every later dispatch runs as
    encoded, a later wait on those words ending at once, one under way within 2^10 loads: nccl-mesh-kernels.h
    mesh_step_failed), read by the host after its command buffer (ncclCommGetAsyncError, or the communicator's next
-   group): the bound is the wait's deadline, and a wait past it ends the program there (design/data-model.md section
-   6); a lost link, or a bound reached after a revoke, fails the group as a value.
+   group): exhausting the load budget ends the program. Its report names the
+   load count, not an inferred wall-clock duration. A lost link, or a bound
+   reached after a revoke, fails the group as a value.
    The stream is Metal 4's alone: commandEncoder an id<MTL4ComputeCommandEncoder>, argumentTable an
    id<MTL4ArgumentTable> and residencySet an id<MTLResidencySet>, all three required.  The group is encoded as compute
    dispatches between the encoder's commands before and after it, bound through the caller's argument table (at least 6
@@ -276,7 +279,8 @@ struct mesh_trees;
    above it: MESH_PLATFORM_NS over the slowest load period read on a node's GPU (the M4 Pro's 1.1 us while its clock
    rises, rdma/NCCL.md "Bounded waits"); each wait's own, and once one wait has recorded a failure every other wait on
    the same failure words ends at once or within 2^10 loads (nccl-mesh-kernels.h mesh_step_failed), so waits that never
-   land hold the GPU about one bound in all */
+   land hold the GPU about one bound in all. This is a load-count budget, not a
+   stored absolute timestamp; actual elapsed time depends on the device. */
 #include "metal-capabilities.h"
 #include "mesh-fabric.h"
 #define NCCL_MESH_POLLS MESH_POLL_LIMIT
