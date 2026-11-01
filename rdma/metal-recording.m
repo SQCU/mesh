@@ -948,8 +948,13 @@ static void MetalReplayBuild(MetalCapture *capture,id<MTLDevice> device,NSUInteg
         [command setComputePipelineState:source->pipeline];
         // ../dox/mesh/design/prepared-machine.md#M13: the one modulus.  Invocation t binds slot
         // (t % instances), and instances == repetitions is a bare t.
+        // Every buffer the command names is bound, accessed or not: a binding is the command's, its access bits only the
+        // dependency frontier's. Binding the accessed ones alone left a transport kernel's buffers unbound, its arguments
+        // the one binding with an access (nccl-mesh-metal.m record4), so a replayed publish stored through whatever
+        // address its table held and no rank's SEND became ready (the chain on main, 2026-11-01; bandwidth/overhead
+        // session). What must stay: the binding loop reads the buffer, not the access.
         for (NSUInteger j = 0; j < capture->buffers; ++j)
-            if (((source->access | (source->access >> MESH_ACCESS_WRITE_SHIFT)) >> j) & 1) {
+            if (source->buffers[j]) {
                 [command setKernelBuffer:source->buffers[j]
                     offset:MetalInvocationOffset(source->offsets[j],source->strides[j],source->instances[j],t,source->invocations[j]) atIndex:j];
             }
@@ -1006,7 +1011,8 @@ static void MetalReplaySegments(struct MetalReplay *replay, NSRange range, void 
 static void MetalReplayDispatch4(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
     struct MetalReplay *replay,const struct MetalRecordedDispatch *source,NSUInteger t) {
     [encoder setArgumentTable:table];[encoder setComputePipelineState:source->pipeline];
-    for(NSUInteger j=0;j<replay->buffers;j++)if(((source->access|(source->access>> MESH_ACCESS_WRITE_SHIFT))>>j)&1) {
+    // every buffer the command names bound, as in the indirect form above (its note)
+    for(NSUInteger j=0;j<replay->buffers;j++)if(source->buffers[j]) {
         [table setAddress:source->buffers[j].gpuAddress+MetalInvocationOffset(source->offsets[j],source->strides[j],source->instances[j],t,source->invocations[j]) atIndex:j];
     }
     for(NSUInteger j=0;j<replay->memory;j++)if(source->memory[j])[encoder setThreadgroupMemoryLength:source->memory[j] atIndex:j];
