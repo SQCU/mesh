@@ -36,8 +36,8 @@ anywhere in a service is three to six orders of magnitude off what these machine
    for the whole call: one step's range part written staged the whole operand. *Partly done, ec69f367* (a combine over
    a part-written range now stays direct). *Recommended:* the same for a SEND over such a range: its entry's spans are
    already a list (struct mesh_entry `spans`), so each span can name the buffer its bytes lie in; nothing forces one
-   source per step. The in-place all-reduce and broadcast are still refused for their overlap and copy nothing, but
-   lose the direct publication: their overlap is exact aliasing, a relation binding_relations already computes.
+   source per step. The in-place all-reduce and broadcast were refused for their overlap (the reduce-scatter's offset applied to
+   every collective). *Done, the commit after ec69f367:* each collective compared at its own in-place offset.
 3. **`spans_meet`, a range as {-1, 0, 1}**, and **`read`/`fresh`, one map per step**. A part-written range can only
    say "refuse". *Recommended:* carry the written set's intersection (a few intervals; at most a step's count) to
    the steps that need it, as zsum_owns now does for sums.
