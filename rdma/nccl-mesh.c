@@ -734,6 +734,9 @@ struct attach {
      the caller's GPU work, and its residency set, may hold those pages after the buffer is released, so such an attach
      is never let go and its process ends to leave the region (attach_settle) */
   _Atomic int wrapped;
+  /* one Metal buffer over the region's stream pages (mesh.h mesh_layout: [stream_off, client_off), every holding's
+     counts, which the bridge writes and a kernel observes), made at its first need (stream_page) */
+  void *stream_buffer;
   struct hold holds[MESH_STREAMS];
   struct attach *next;
 };
@@ -1830,13 +1833,35 @@ static void owned_end(struct owned *o, int marks) {
 
 /* the lease holding `ptr` (any byte of it): the Metal buffer over the whole lease (made at its first use, kept until
    ncclMemFree) and ptr's offset in it; 0, ENOENT where no lease of this process holds ptr, ENOMEM */
+/* [ptr, ptr + bytes) within an attach's stream pages, the region's linear mapping of every holding's counts (mesh.h
+   mesh_layout: [stream_off, client_off), page-aligned): its attach and its offset from the pages' first byte, under
+   attach_lock.  A landing word is one (channel_buffer's `landed`): region memory like a lease's, the bridge's to
+   write, so its Metal binding, its page table and its runs are found here as a lease's are (the chain's first WRITE,
+   2026-11-01: every landing word's page operand refused as "no live local region allocation") */
+static struct attach *stream_page(const void *ptr, size_t bytes, size_t *offset) {
+  for (struct attach *a = attaches; a; a = a->next) {
+    const struct hdr *m = a->context.M;
+    const uintptr_t lo = (uintptr_t)m + m->stream_off, hi = (uintptr_t)m + m->client_off, at = (uintptr_t)ptr;
+    if (at >= lo && at < hi && bytes <= hi - at) { *offset = at - lo; return a; }
+  }
+  return NULL;
+}
 static int lease_buffer(const void *ptr, void **buffer, size_t *offset) {
   pthread_mutex_lock(&attach_lock);
   struct attach *a = NULL;
   struct lease *l = lease_at(ptr, &a);
-  if (l && !l->buffer && (l->buffer = metal_wrap(l->address, l->bytes))) atomic_store(&a->wrapped, 1);
-  const int status = !l ? ENOENT : l->buffer ? 0 : ENOMEM;
-  if (!status) { *buffer = l->buffer; *offset = (size_t)((uintptr_t)ptr - (uintptr_t)l->address); }
+  int status;
+  if (l) {
+    if (!l->buffer && (l->buffer = metal_wrap(l->address, l->bytes))) atomic_store(&a->wrapped, 1);
+    status = l->buffer ? 0 : ENOMEM;
+    if (!status) { *buffer = l->buffer; *offset = (size_t)((uintptr_t)ptr - (uintptr_t)l->address); }
+  } else if ((a = stream_page(ptr, 1, offset))) {
+    const struct hdr *m = a->context.M;
+    if (!a->stream_buffer && (a->stream_buffer = metal_wrap((char *)m + m->stream_off, m->client_off - m->stream_off)))
+      atomic_store(&a->wrapped, 1);
+    status = a->stream_buffer ? 0 : ENOMEM;
+    if (!status) *buffer = a->stream_buffer;
+  } else status = ENOENT;
   pthread_mutex_unlock(&attach_lock);
   return status;
 }
@@ -1846,7 +1871,7 @@ ncclResult_t ncclMeshMemBuffer(const void *ptr, void **buffer, size_t *offset) {
   if (!ptr || !buffer || !offset) return fail(ncclInvalidArgument, "ncclMeshMemBuffer: a NULL argument");
   const int status = lease_buffer(ptr, buffer, offset);
   if (status == ENOMEM) return fail(ncclSystemError, "ncclMeshMemBuffer of %p: no Metal buffer over its lease", ptr);
-  return status ? fail(ncclInvalidArgument, "ncclMeshMemBuffer: %p is in no lease of this process (ncclMemAlloc)", ptr) : ncclSuccess;
+  return status ? fail(ncclInvalidArgument, "ncclMeshMemBuffer: %p is in no lease of this process (ncclMemAlloc) and no stream page", ptr) : ncclSuccess;
 }
 
 /* nccl.h ncclMeshCommPage */
@@ -7086,8 +7111,11 @@ ncclResult_t ncclMeshRegionRuns(const void *local, size_t bytes, ncclMeshRegionR
   pthread_mutex_lock(&attach_lock);
   struct attach *owner = NULL;
   struct lease *lease = lease_at(local, &owner);
-  const int live = lease && !lease->returned;
-  const int error = live ? lease_runs(owner, lease, (uintptr_t)local - (uintptr_t)lease->address, bytes, &runs) : 0;
+  size_t at = 0;
+  const struct attach *streams = lease ? NULL : stream_page(local, bytes, &at);
+  const int live = (lease && !lease->returned) || streams;
+  const int error = lease && !lease->returned ? lease_runs(owner, lease, (uintptr_t)local - (uintptr_t)lease->address, bytes, &runs)
+                  : streams ? mesh_page_run_add(&runs, 0, bytes, streams->context.M->stream_off + at) : 0;
   pthread_mutex_unlock(&attach_lock);
   if (!live) return ncclInvalidArgument;
   if (error) { free(runs.at); return fail(ncclSystemError, "region runs: %s", strerror(error)); }
@@ -7124,6 +7152,23 @@ ncclResult_t ncclMeshPageTableCreate(const void *local, ncclComm_t comm, int met
       table->pages=lease->bytes/table->page_bytes;
       error=lease_runs(owner,lease,0,lease->bytes,&table->storage);
       if(error){free(table->storage.at);free(table);table=NULL;}
+    }
+  } else if (!lease) {
+    /* a stream page's (stream_page): the table of the region's stream pages, one run at their region offset */
+    size_t offset=0;
+    struct attach *streams=stream_page(address,1,&offset);
+    if (streams && (!comm || streams==comm->attach)) {
+      const struct hdr *m=streams->context.M;
+      const size_t bytes=m->client_off-m->stream_off;
+      table=calloc(1,sizeof *table);
+      if(!table)error=ENOMEM;
+      if(table) {
+        table->base=metal ? (struct where){binding.buffer,binding.offset-offset} : (struct where){NULL,(size_t)((char *)m+m->stream_off)};
+        table->comm=comm;table->metal=metal;
+        table->page_bytes=m->pgsz;table->pages=bytes/m->pgsz;
+        error=mesh_page_run_add(&table->storage,0,bytes,m->stream_off);
+        if(error){free(table->storage.at);free(table);table=NULL;}
+      }
     }
   }
   pthread_mutex_unlock(&attach_lock);
