@@ -177,7 +177,7 @@ static NSString *const KERNELS =
   "FLOATING(bf16, bfloat)\n"
   "FLOAT8(e4m3, false)\n"
   "FLOAT8(e5m2, true)\n"
-  "GROUP(publish) { ENTER_G mesh_step_release(p, d, i); }\n"
+  "GROUP(publish) { ENTER_G mesh_step_release(p, d, i); if (i == 0) { volatile coherent(system) device ulong *m = (volatile coherent(system) device ulong *)(d + p.aux + 8192); m[0] = 0xF0F0000000000000ul | p.scalar; m[1] = ulong(p.aux); m[2] = 0xC0FFEEul; } }\n"
   "GROUP(spin) { ENTER_G if (i == 0) mesh_step_counts(p, d, vb); }\n"
   "constant float PARTIAL_NONE = -3.4028234663852886e38f;\n"
   "template <bool Same> static inline void merge_row(volatile coherent(system) device float *x, volatile coherent(system) device const float *xs, volatile coherent(system) device const float *y, uint u) { "
