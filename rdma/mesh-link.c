@@ -1633,7 +1633,12 @@ static __attribute__((noreturn)) void child_leave(struct port *port,int asked){
     nanosleep(&rest,NULL);
   }
   if(held>0)lanes_flush(port,clock_ns()+MESH_PLATFORM_NS);
-  exit(0);
+  /* its registrations of the region released before its exit, then the exit itself: the kernel's own release of
+     them at an exit took 11.4-13 s with nothing posted, ibv_dereg_mr of the same 82 extents 1.0-1.3 s and the exit
+     after 0.85 s (m5ult1, 2026-11-01).  No queue pair is moved or destroyed here (rubrics M3): those the exit releases */
+  for(uint32_t e=0;port->device.extent_mrs && e<port->device.extents;e++)
+    if(port->device.extent_mrs[e]){ibv_dereg_mr(port->device.extent_mrs[e]);port->device.extent_mrs[e]=NULL;}
+  _exit(0);
 }
 static void child_command(struct port *port,const struct child_message *heard){
   struct link *l=&port->link;
