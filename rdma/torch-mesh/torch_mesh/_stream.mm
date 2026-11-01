@@ -1791,6 +1791,15 @@ struct Drained {
 };
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
+  // An Objective-C exception from any binding reaches Python as a ValueError naming its reason. Without it, pybind
+  // reports a binding with no @catch of its own as "Caught an unknown exception!" (the chain's first distribute on
+  // main, 2026-11-01, TensorLayout select_runs), its cause gone. A C++ exception leaves this translator for pybind's own.
+  pybind11::register_exception_translator([](std::exception_ptr raised) {
+    @try { if (raised) std::rethrow_exception(raised); }
+    @catch (NSException *error) {
+      PyErr_SetString(PyExc_ValueError, [NSString stringWithFormat:@"%@: %@", error.name, error.reason].UTF8String);
+    }
+  });
   module.def("scalar_read",&scalar_read,pybind11::arg("source"),pybind11::arg("source_type"),
     pybind11::arg("output_type"),pybind11::arg("offsets"),pybind11::arg("bits")=0,
     pybind11::arg("signed")=true,pybind11::arg("scales")=std::nullopt,pybind11::arg("zeros")=std::nullopt,
