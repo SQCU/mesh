@@ -2341,6 +2341,14 @@ void MetalScheduleEnqueue(struct MetalSchedule *s) {
         struct MetalSchedule *next=s->submit;
         atomic_fetch_add_explicit(&s->references,1,memory_order_relaxed);
         const struct MetalScheduleWait *waits=s->waits.bytes;
+        if(getenv("MESH_SCHEDULE_TRACE")) {
+            fprintf(stderr,"schedule %.3f part %lu: %lu commands, %lu waits:",clock_gettime_nsec_np(CLOCK_REALTIME)/1e9,(unsigned long)s->ordinal,(unsigned long)s->commands,
+                    (unsigned long)(s->waits.length/sizeof *waits));
+            for(NSUInteger i=0;i<s->waits.length/sizeof *waits;i++)
+                fprintf(stderr," [%p needs %llu, at %llu]",(void *)waits[i].event,(unsigned long long)waits[i].value,
+                        [(id)waits[i].event respondsToSelector:@selector(signaledValue)]?(unsigned long long)((id<MTLSharedEvent>)waits[i].event).signaledValue:~0ull);
+            fprintf(stderr,"\n");
+        }
         for(NSUInteger i=0;i<s->waits.length/sizeof *waits;i++)[s->queue waitForEvent:waits[i].event value:waits[i].value];
         [s->queue commit:&s->command count:1 options:s->options];
         if(s->event)[s->queue signalEvent:s->event value:1];

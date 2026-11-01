@@ -112,7 +112,9 @@ def bind(configuration, groups, prepare):
     operands = {**c['assignment']['operands'], 'layout_preferences': assignment.layout_operands(parts, layouts)}
     c.update(decisions=decisions, graphs={name: graph}, layouts=layouts,
              assignment={**c['assignment'], 'parts': parts, 'domains': assignment.choice_domains(decisions), 'operands': operands})
-    c['prepared'] = copy.deepcopy({'parts': parts, 'operands': operands, 'graphs': c['graphs'], 'layouts': layouts})
+    # Built here, every value of it, and nothing writes into it after: shared, not copied (two deep copies of the plan's
+    # graphs took 0.9 s of every rank's preparation, 2026-10-31).
+    c['prepared'] = {'parts': parts, 'operands': operands, 'graphs': c['graphs'], 'layouts': layouts}
     c['observations'] = Observations(declaration={
         'configuration': c['key'], 'proposal': c['assignment']['proposal'],
         'parts': c['assignment']['parts'], 'domains': c['assignment']['domains'], 'operands': c['assignment']['operands'],
