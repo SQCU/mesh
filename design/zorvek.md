@@ -158,8 +158,9 @@ Measured 2026-10-31 (test-ov3, not landed): letting a "declared repeat"'s presen
 deadlocked the chain service, a burst of small steps filling both ends' 4,096-entry rings with entries of different
 calls in orders neither end could drain. Retracted with it: the repeat index and the overlap flag were a positional
 rule standing in for a fact about pages, and so was the first form of this section's interface (73b5df63: a stream's
-compiled program, a declared call order with per-call unit prefixes and bases relative to the call's place in it). A
-call's pages are the allocator's (zappo), not a position in an order, so no order compiles them.
+compiled program, a declared call order with per-call unit prefixes and bases relative to the call's place in it).
+The current compiler instead assigns each occurrence's pages before solving its dependencies. Page identity and
+channel positions are both known during preparation.
 
 What runs (mesh.h struct mesh_zwoggle, nccl-mesh.c present_group and zinth, mesh-link.c walk_chain):
 
@@ -172,15 +173,17 @@ What runs (mesh.h struct mesh_zwoggle, nccl-mesh.c present_group and zinth, mesh
 - The bridge walks the chain (mesh-graph.h mesh_graph_chain, its operands the stream's tables), keeps no copy of an
   entry, and counts in each list's `taken` the calls it has left. A table is read until its walk leaves it, which
   happens only once the next call is linked, so its lifetime is that count, never a unit's completion (a list may
-  carry no unit after it). An issue is taken again once both walks of each channel have left its tables (zumbled),
-  and its table lease is returned only then (mesh-lease-retire.h MESH_LEASE_LEFT_SEND, MESH_LEASE_LEFT_LAND).
+  carry no unit after it). Each prepared occurrence owns its tables through execution. Lease retirement also
+  retains descriptor reads (mesh-lease-retire.h MESH_LEASE_LEFT_SEND, MESH_LEASE_LEFT_LAND).
 - Measured on all five, 2026-10-31: chain service exits 0, bandwidth 45 of 45 correct in each of two runs, every
   64 MiB rate within main's band (the A/A pair decides each outlier).
 
-- An issue's entries are laid at its first call, each base relative to one of the call's bases (mesh.h struct
-  mesh_zwoggle `bases`: each channel's units before the call on each list); a
-  later call writes its bases and each table's `next` alone. A WRITE's source readiness word is its invocation's,
-  which the issue's binding instance does not fix, so it alone is written each call.
+- Preparation writes each occurrence's entries once, including its absolute readiness bases, WRITE source words,
+  and exact prerequisite lists. Layout 161 removes the per-call base table and each entry's `relative` field.
+  `22eb8cf5` introduced those fields to reuse entries across calls. `zorvek` now assigns each compiled occurrence
+  its own issue, so there is no later call which needs to rewrite them. The bridge consumes `entry.base` directly,
+  as before `22eb8cf5`; the newer counted prerequisite lists remain. The remaining linked descriptor walk is a
+  separate unfinished compiler-to-bridge connection. No performance result is claimed for this source change.
 
 - The rings are deleted (MESH_LAYOUT 156): MESH_STREAM_ENTRIES, the stream's `lists`, `sends` and `lands`, the
   bridge's list pages, walk_take and its ring of copied entries, mesh_stream_present. The quiet probe links one

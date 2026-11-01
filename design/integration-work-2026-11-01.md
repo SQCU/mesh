@@ -84,6 +84,13 @@ an encoder; a command group no longer creates its own encoder and fence by
 default. Queue-wide host event ordering and bridge descriptor traversal remain
 separate unfinished work under item 2.
 
+The bridge now consumes absolute readiness bases prepared for each occurrence.
+The relative-base lookup and the old repeated-call table rewrite are removed;
+shared-region layout 161 records that ABI change. Linked descriptor traversal
+and the actual page prerequisites still remain. This is not completion of
+item 2. The bridge, collective library and CoreML library build with this
+change; there is no new numerical or performance result.
+
 The next source pass has replaced the Python-only effect solver with a binding
 to `metal-page-effects.h`. The common library, CoreML library, CFFI binding and
 PyTorch extension build with that connection. This is source/build evidence;

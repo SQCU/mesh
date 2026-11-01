@@ -93,21 +93,17 @@ _Static_assert(sizeof(struct mesh_entry)==MESH_SIZEOF_MESH_ENTRY,"mesh_entry ABI
    A receive's word and base are 0: it waits on nothing but its `after`. The
    immutable span table and its backing allocations outlive every future unit
    and every posted DMA. `taken` does not release this table. */
-/* design/zorvek.md zinth: a call's laid tables (zwoggle) on one stream of its holding, in region memory the holder wrote
-   before the call: its send and landing entries (`entries`, region offsets of struct mesh_zwoggle_entry, `count` of
-   each list), the call's bases (`bases`, region offset of the uint64_t an entry's `relative` names), and `next`, the
-   region offset of the holding's next call's on the stream, 0 until that call stores it at its own stream position
-   (zinth: the call's one store for transport). The stream's `zwoggle` is its first call's. The bridge walks the chain
-   in order, keeps no copy of an entry, and counts in `taken` each list's calls it has left (their tables no longer
-   read: the holder takes their memory again past them). Links are stored in any order (a call's command buffer may run
-   before its predecessor's): the chain is the holding's call order however they land. An entry's requirement base is
-   its own `base` plus, where `relative` is not 0, the call's base relative - 1 (its place where the holder counts it:
-   a list's units before the call), so a laid issue's entries are written once and each
-   of its calls writes its bases alone. 73b5df63's compiled program (a declared call order and each call's prefixes in
-   it) is deleted: a call's pages are the allocator's (zappo), not a position in an order, so no order compiles them.
+/* A prepared occurrence's tables on one stream: SEND and landing entries
+   (`entries`, region offsets; `count` of each list), and `next`, the region
+   offset of the next occurrence's tables. Preparation writes every entry's
+   absolute readiness base once. Execution only publishes the prepared link;
+   the bridge reads the base directly, with no per-call base table.
+   The stream's `zwoggle` is its first occurrence's tables. The bridge walks
+   this chain in order and counts in `taken` the lists it has left. Links may
+   be published in any order; their prepared predecessors fix the chain order.
    An entry's `after` is the region offset of its own list (0: none): a count n, then n struct
    mesh_zwoggle_after, every one holding (its word at its base) before any unit of the entry is posted, the holder
-   rewriting each base at each call.  A SEND's: the whole consumption of each receive its step follows and does not
+   fixing each base during preparation. A SEND's: the whole consumption of each receive its step follows and does not
    forward (a COPY's channel's `landed`, a combine's summed word, at that receive's end).  A landing's
    (design/pages-and-functions.md Freeing 6-7, a page written again only once its last outgoing DMA read ended): on
    each channel a SEND reads bytes it writes, that channel's `sent` at the end of the last such SEND, an earlier step's
@@ -115,8 +111,8 @@ _Static_assert(sizeof(struct mesh_entry)==MESH_SIZEOF_MESH_ENTRY,"mesh_entry ABI
    Preparation resolves the complete relation. There is no channel-mask decoding or fixed prerequisite count in
    execution; SEND and landing lists have the same counted representation. */
 struct mesh_zwoggle_after { uint64_t word, base; };
-struct mesh_zwoggle_entry { struct mesh_entry entry; uint64_t relative, after; };
-struct mesh_zwoggle { _Atomic uint64_t next; uint64_t entries[2], count[2], bases; };
+struct mesh_zwoggle_entry { struct mesh_entry entry; uint64_t after; };
+struct mesh_zwoggle { _Atomic uint64_t next; uint64_t entries[2], count[2]; };
 struct mesh_units { uint64_t n; };
 static inline struct mesh_units mesh_units_add(struct mesh_units a,struct mesh_units b){ return (struct mesh_units){a.n+b.n}; }
 static inline struct mesh_units mesh_units_sub(struct mesh_units a,struct mesh_units b){ return (struct mesh_units){a.n-b.n}; }

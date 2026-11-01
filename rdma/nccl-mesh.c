@@ -3707,10 +3707,7 @@ struct issue { struct schedule *plans; struct steps **steps; struct inflight *gr
                struct linking { struct mesh_zwoggle *tables; uint64_t region; size_t offset; uint64_t left;
                                 struct where predecessor; } *linking;
                void *linkable;
-               /* the bases its calls state (mesh.h struct mesh_zwoggle `bases`, 2 count words: each channel's units
-                  before the call on its send and landing lists), their region
-                  offset, and whether its entries are laid (present_group: at its first call, then only the bases) */
-               uint64_t *bases, bases_at; int laid;
+               int scheduled; /* preparation has fixed this occurrence's channel positions */
                /* each channel's requirement this call for its landings over caller's pages other issues' SENDs read
                   (landing_afters), and what each is found from (landing_readers): an issue's definition and binding
                   instance whose SEND `k` on channel `q` is the last of those reading caller's pages its landings land
@@ -3718,7 +3715,7 @@ struct issue { struct schedule *plans; struct steps **steps; struct inflight *gr
                uint64_t *afters;
                struct reader { const struct compiled *x; uint64_t instance; size_t k; uint32_t q; } *readers; size_t readers_count;
                /* every requirement its entries' lists state (send_requirements, landing_lists): where its base is,
-                  rewritten each call (present_group), past the end of the entry `end` names (a SEND's receive, a
+                  fixed during preparation (present_group), past the end of the entry `end` names (a SEND's receive, a
                   landing's own call's SEND), else channel q's of `afters` */
                struct requirement { struct mesh_zwoggle_after *at; const struct message *end; uint32_t q; } *requirements;
                size_t requirement_count;
@@ -4127,15 +4124,12 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u) {
           x->spans = made;
           x->table = lease_offset(made);
         }
-    /* design/zorvek.md zoblimp: each channel's tables for the bridge and their entries' room, after the span tables,
-       then the bases its calls state */
+    /* Each channel's immutable occurrence tables and entries follow its spans. */
     for (uint32_t h = 0; h < comm->count; h++) {
       if (!plans[h].outs && !plans[h].ins) continue;
       if (pass) u->linking[h].tables = (struct mesh_zwoggle *)((char *)u->tables + length);
       length += (sizeof(struct mesh_zwoggle) + (plans[h].outs + plans[h].ins) * sizeof(struct mesh_zwoggle_entry) + align - 1) / align * align;
     }
-    if (pass) u->bases = (uint64_t *)((char *)u->tables + length);
-    length += (2 * (size_t)comm->count * sizeof *u->bases + align - 1) / align * align;
     /* One counted prerequisite list for each prepared SEND or landing. */
     for (uint32_t h = 0; h < comm->count; h++) for (int send = 1; send >= 0; send--)
       for (size_t k = 0; k < (send ? plans[h].outs : plans[h].ins); k++) {
@@ -4150,7 +4144,6 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u) {
       }
 
   }
-  u->laid = 0;
   size_t linked = 0;
   if (u->tables && lease_buffer(u->tables, &u->linkable, &linked)) return fail(ncclSystemError, "no Metal buffer over a group's span tables");
   for (uint32_t h = 0; h < comm->count; h++)
@@ -4158,7 +4151,6 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u) {
       u->linking[h].region = lease_offset(u->linking[h].tables);
       u->linking[h].offset = linked + (size_t)((char *)u->linking[h].tables - (char *)u->tables);
     }
-  u->bases_at = lease_offset(u->bases);
   for (uint32_t h = 0; h < comm->count; h++) schedule_units(plans + h, u->repeats);
   int error = landing_runs(comm, u);
   if (!error) {
@@ -4449,7 +4441,7 @@ static void landing_afters(const struct ncclComm *comm, struct issue *u) {
     const struct reader *a = u->readers + r;
     for (size_t j = 0; j < a->x->laid_count; j++) {
       const struct issue *v = a->x->laid[j];
-      if (v == u || !v->laid || v->instance != a->instance) continue;
+      if (v == u || !v->scheduled || v->instance != a->instance) continue;
       const uint64_t end = pages_to_word(v->plans[a->q].out[a->k].end);
       if (end > u->afters[a->q]) u->afters[a->q] = end;
     }
@@ -4458,7 +4450,7 @@ static void landing_afters(const struct ncclComm *comm, struct issue *u) {
 
 /* design/zorvek.md zinth: a call's tables as the bridge reads them, one JSON line in MESH_PLAN_RECORD's directory a
    process (none where it is unset): each channel's peer, cable, words (sent, landed, ready: region offsets) and the
-   call's bases; each entry of each list its units, word, base (the call's base added where `relative` names one) and
+   call's channel positions; each entry of each list its units, word, absolute readiness base and
    its `after` list's (word, base) pairs; for a whole program's wait-for graph across its ranks (rdma/plan_cycles.py),
    read once at a call's present, never by the transport */
 static void plan_record(const struct ncclComm *comm, const struct issue *owner) {
@@ -4482,15 +4474,14 @@ static void plan_record(const struct ncclComm *comm, const struct issue *owner) 
     fprintf(out, "%s{\"h\":%u,\"peer\":%u,\"cable\":%u,\"sent\":%llu,\"landed\":%llu,\"ready\":%llu,\"base\":[%llu,%llu],\"lists\":[",
             first ? "" : ",", h, ch->node, ch->cable, (unsigned long long)((const char *)ch->view.sent - M),
             (unsigned long long)((const char *)ch->view.landed - M), (unsigned long long)((const char *)ch->view.ready - M),
-            (unsigned long long)owner->bases[2 * h], (unsigned long long)owner->bases[2 * h + 1]);
+            (unsigned long long)pages_to_word(ch->out), (unsigned long long)pages_to_word(ch->in));
     first = 0;
     for (int land = 0; land < 2; land++) {
       fprintf(out, "%s[", land ? "," : "");
       for (uint64_t k = 0; k < t->count[land]; k++) {
         const struct mesh_zwoggle_entry *z = e + (land ? t->count[0] : 0) + k;
-        const uint64_t base = z->entry.base + (z->relative ? owner->bases[z->relative - 1] : 0);
         fprintf(out, "%s[%llu,%llu,%llu,[", k ? "," : "", (unsigned long long)z->entry.units, (unsigned long long)z->entry.word,
-                (unsigned long long)base);
+                (unsigned long long)z->entry.base);
         const uint64_t *list = z->after ? (const uint64_t *)(M + z->after) : NULL;
         for (uint64_t r = 0; list && r < list[0]; r++)
           fprintf(out, "%s[%llu,%llu]", r ? "," : "", (unsigned long long)list[1 + 2 * r], (unsigned long long)list[2 + 2 * r]);
@@ -4506,10 +4497,6 @@ static void plan_record(const struct ncclComm *comm, const struct issue *owner) 
 
 static ncclResult_t present_group(struct ncclComm *comm, struct issue *owner, struct schedule *plans) {
   struct mesh_ctx *context = &comm->attach->context;
-  /* the call's bases (struct issue `bases`): what its entries' bases are relative to */
-  for (uint32_t h = 0; h < comm->count; h++) {
-    owner->bases[2 * h] = pages_to_word(comm->channels[h].out); owner->bases[2 * h + 1] = pages_to_word(comm->channels[h].in);
-  }
   /* each entry's requirements (send_requirements, landing_lists): past the end in this call of the entry each names,
      else the call's over the caller's pages on its channel (landing_afters) */
   landing_afters(comm, owner);
@@ -4540,18 +4527,10 @@ static ncclResult_t present_group(struct ncclComm *comm, struct issue *owner, st
     struct linking *laid = owner->linking + h;
     struct mesh_zwoggle *tables = laid->tables;
     struct mesh_zwoggle_entry *records = (struct mesh_zwoggle_entry *)(tables + 1);
-    /* a WRITE's source readiness word is its invocation's (not fixed by the issue's binding instance): written each
-       call; every other entry once, at the issue's first call, its base relative to that call's (`bases`) */
-    for (size_t k = 0; owner->laid && k < p->outs; k++) {
-      const struct message *m = p->out + k;
-      const struct write_binding *plan = m->c->write_binding;
-      if (m->dep_h != UINT32_MAX || !plan || m->c->input_pages || !plan->ready_value) continue;
-      records[k].entry.word = plan->ready_offsets[m->c->invocation % plan->ready_layout.instances * plan->ready_tiles + message_tile(m)];
-    }
-    for (size_t k = 0; !owner->laid && k < p->outs; k++) {
+    /* Each occurrence is scheduled once; readiness words and bases are final. */
+    for (size_t k = 0; k < p->outs; k++) {
       const struct message *m = p->out + k;
       struct mesh_entry entry = {m->table, pages_to_word(m->pages), p->ready_word, pages_to_word(pages_sub(m->laid, m->pages))};
-      uint64_t relative = 0;
       /* the landing it forwards (send_dependencies): that channel's landing count before the group, plus its base */
       if (m->dep_h != UINT32_MAX) {
         /* A combined source names its exact producer word; plain copies use
@@ -4559,36 +4538,33 @@ static ncclResult_t present_group(struct ncclComm *comm, struct issue *owner, st
         entry.word = m->dep_summed ? m->dep_summed
                                    : (uint64_t)((char *)comm->channels[m->dep_h].view.landed - (char *)context->M);
         entry.base = pages_to_word(pages_add(comm->channels[m->dep_h].in, m->dep_rel));
-        relative = 2 + 2 * (uint64_t)m->dep_h;
       } else if (m->c->write_binding && m->c->input_pages) {
         const struct where ready=copied_word(m->c,m->frame,message_tile(m));
-        entry.word=lease_offset(address_of(ready));entry.base=1-m->pages.n;relative=0;
+        entry.word=lease_offset(address_of(ready));entry.base=1-m->pages.n;
       } else if(named(m->copied)) {
-        entry.word=lease_offset(address_of(m->copied));entry.base=1-m->pages.n;relative=0;
+        entry.word=lease_offset(address_of(m->copied));entry.base=1-m->pages.n;
       } else if (m->c->write_binding && m->c->write_binding->ready_value) {
         const struct write_binding *plan = m->c->write_binding;
         entry.word = plan->ready_offsets[m->c->invocation % plan->ready_layout.instances * plan->ready_tiles + message_tile(m)];
         entry.base = plan->ready_value - m->pages.n;
-        relative = 0;
-        }
-      if (relative) entry.base -= owner->bases[relative - 1];
-      records[k] = (struct mesh_zwoggle_entry){entry, relative, m->required ? lease_offset(m->requirement) : 0};
+      }
+      records[k] = (struct mesh_zwoggle_entry){entry, m->required ? lease_offset(m->requirement) : 0};
     }
     /* Landings have only their actual overwrite prerequisite lists. */
-    for (size_t k = 0; !owner->laid && k < p->ins; k++) {
+    for (size_t k = 0; k < p->ins; k++) {
       const struct message *m=p->in+k;
-      records[p->outs+k]=(struct mesh_zwoggle_entry){{m->table,pages_to_word(m->pages),0,0},0,
+      records[p->outs+k]=(struct mesh_zwoggle_entry){{m->table,pages_to_word(m->pages),0,0},
         m->required?lease_offset(m->requirement):0};
     }
     atomic_store_explicit(&tables->next, 0, memory_order_relaxed);
     tables->entries[0] = laid->region + sizeof *tables; tables->entries[1] = tables->entries[0] + p->outs * sizeof *records;
-    tables->count[0] = p->outs; tables->count[1] = p->ins; tables->bases = owner->bases_at;
+    tables->count[0] = p->outs; tables->count[1] = p->ins;
     laid->predecessor=(struct where){ch->link,ch->link_at};
     ch->link=owner->linkable;ch->link_at=laid->offset+offsetof(struct mesh_zwoggle,next);
     laid->left=++ch->linked;
     for(unsigned d=0;owner->owned.uses&&d<2;d++)owner->owned.uses[2*comm->count+2*h+d].end=ch->linked;
   }
-  owner->laid = 1;
+  owner->scheduled = 1;
   plan_record(comm, owner);
   return ncclSuccess;
 }
@@ -5051,7 +5027,7 @@ static void arithmetic_targets(struct issue *u) {
     if(!r->x)last=u->plans[r->q].out+r->k;
     else for(size_t j=0;j<r->x->laid_count;j++) {
       const struct issue *v=r->x->laid[j];
-      if(v==u||!v->laid||v->instance!=r->instance)continue;
+      if(v==u||!v->scheduled||v->instance!=r->instance)continue;
       const struct message *candidate=v->plans[r->q].out+r->k;
       if(!last||candidate->end.n>last->end.n)last=candidate;
     }

@@ -103,6 +103,12 @@ that same occurrence by index. It does not select a new issue or reconstruct
 its dependencies from backend addresses. Several occurrences may be lowered
 before any is recorded; each retains its own counter and link snapshots.
 
+Every DMA entry stores its absolute readiness base. Preparation resolves the
+channel position into that field once. The bridge does not look up a second
+per-call base table or add its contents during posting. Layout 161 removes
+that obsolete shared-region representation. The wire payload format stays the
+same; the local bridge and its clients must use the same region layout.
+
 The source prefixes emitted by this lowering belong to an occurrence and a
 physical lane. Each new occurrence has fresh region words, including repeated
 uses of a declaration

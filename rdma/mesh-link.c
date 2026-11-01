@@ -117,8 +117,8 @@ static void chain_leave(void *consumer,uint64_t node,uint64_t left){
     if(progress->walk->chain[lane].left<through)through=progress->walk->chain[lane].left;
   atomic_store_explicit(progress->word,through,memory_order_release);
 }
-/* the entry holding unit q of a holding that links its calls' tables, read where its call's tables hold it, its base
-   the call's where it names one (mesh.h struct mesh_zwoggle); NULL where the call holding q is not yet linked */
+/* The entry holding unit q, including its absolute readiness base, is already
+   prepared. NULL where the occurrence holding q is not yet linked. */
 static struct taken *walk_chain(struct walk *w,struct mesh_stream *x,int land,uint32_t lane,struct mesh_units q){
   const struct chained c={x,land};
   struct mesh_graph_chain *cursor=w->chain+lane;
@@ -126,13 +126,11 @@ static struct taken *walk_chain(struct walk *w,struct mesh_stream *x,int land,ui
   if(!mesh_graph_chain(cursor,q.n,chain_follow,chain_items,chain_weight,&c,chain_leave,&progress))return NULL;
   const struct mesh_zwoggle_entry z=*entry_at(cursor->node,land,cursor->item);
   const struct mesh_entry e=z.entry;
-  const struct mesh_zwoggle *t=tables_at(cursor->node);
-  const uint64_t base=e.base+(z.relative?((const uint64_t *)((const char *)M+t->bases))[z.relative-1]:0);
   /* Every SEND and landing names its own counted prerequisite list. */
   const uint64_t *list = z.after ? (const uint64_t *)((const char *)M + z.after) : NULL;
   const uint64_t count = list ? list[0] : 0;
   const struct mesh_zwoggle_after *afters = list ? (const struct mesh_zwoggle_after *)(list + 1) : NULL;
-  w->current=(struct taken){(const struct mesh_dma_span *)((const char *)M+e.spans),{e.units},{base},{cursor->before},
+  w->current=(struct taken){(const struct mesh_dma_span *)((const char *)M+e.spans),{e.units},{e.base},{cursor->before},
                             e.word?stream_words(e.word):land?NULL:&x->ready,count,afters};
   return &w->current;
 }
