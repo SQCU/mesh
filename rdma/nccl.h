@@ -1029,6 +1029,12 @@ ncclResult_t ncclMeshCommRealized(ncclComm_t comm);
 typedef struct ncclMeshPageTable *ncclMeshPageTable_t;
 typedef struct { uint64_t page, first, count; } ncclMeshPageMask;
 ncclResult_t ncclMeshPageTableCreate(const void* local, ncclComm_t comm, int metal, ncclMeshPageTable_t* out);
+/* the region bytes [local, local + bytes) of a live local lease lie in: each physically contiguous run, {its first
+   byte's region offset, its bytes}, in order, into `runs` (capacity *count in, the runs out: those past the capacity
+   not written); those of the range alone, never the lease's whole table.  ncclInvalidArgument where `local` lies in
+   no live lease (ordinary storage) */
+typedef struct { uint64_t offset, bytes; } ncclMeshRegionRun;
+ncclResult_t ncclMeshRegionRuns(const void* local, size_t bytes, ncclMeshRegionRun* runs, size_t* count);
 ncclResult_t ncclMeshPageTableShape(ncclMeshPageTable_t table, size_t* pages, size_t* page_bytes);
 /* Local compute preparation may pass a NULL communicator to Create. Binding
    returns the backend view over those same bridge pages, never new storage.

@@ -6872,6 +6872,22 @@ static ncclResult_t write_prepare(ncclMeshPageTable_t table, struct write_page_i
   *out = plan;
   return ncclSuccess;
 }
+ncclResult_t ncclMeshRegionRuns(const void *local, size_t bytes, ncclMeshRegionRun *out, size_t *count) {
+  if (!local || !count || (*count && !out)) return fail(ncclInvalidArgument, "region runs need local storage and a result");
+  struct mesh_page_runs runs = {0};
+  pthread_mutex_lock(&attach_lock);
+  struct attach *owner = NULL;
+  struct lease *lease = lease_at(local, &owner);
+  const int live = lease && !lease->returned;
+  const int error = live ? lease_runs(owner, lease, (uintptr_t)local - (uintptr_t)lease->address, bytes, &runs) : 0;
+  pthread_mutex_unlock(&attach_lock);
+  if (!live) return ncclInvalidArgument;
+  if (error) { free(runs.at); return fail(ncclSystemError, "region runs: %s", strerror(error)); }
+  for (size_t k = 0; k < runs.count && k < *count; k++) out[k] = (ncclMeshRegionRun){runs.at[k].offset, runs.at[k].end - runs.at[k].first};
+  *count = runs.count;
+  free(runs.at);
+  return ncclSuccess;
+}
 ncclResult_t ncclMeshPageTableCreate(const void *local, ncclComm_t comm, int metal, ncclMeshPageTable_t *out) {
   if (!out || *out || (metal != 0 && metal != 1) || (!local && !comm))
     return fail(ncclInvalidArgument, "page table needs local storage (or, empty, a communicator) and an empty result");

@@ -576,28 +576,22 @@ static void MetalAccesses(const struct MetalRecordedDispatch *command, const str
 // Every bridge lease and composed view names pages in the process's one region.
 // The virtual address is a binding; physical page identity orders its users.
 static char MetalRegionPageIdentity;
+/* each physical run of a region access, by its region offset: the range's runs alone (ncclMeshRegionRuns), where a
+   page table of the whole lease and a scan of all its runs, for every binding of every dispatch, took 2.0 s of the
+   chain's 12,337-command recording (2026-11-01, sampled: lease_runs 80% of the recording thread) */
 static BOOL MetalPageAccesses(NSUInteger address,NSUInteger length,uint32_t access,
     void (^each)(id,NSUInteger,NSUInteger,uint32_t)) {
-    ncclMeshPageTable_t table=NULL;
-    ncclResult_t status=ncclMeshPageTableCreate((const void *)address,NULL,0,&table);
+    ncclMeshRegionRun local[16],*runs=local;size_t count=16;
+    ncclResult_t status=ncclMeshRegionRuns((const void *)address,length,runs,&count);
     if(status==ncclInvalidArgument)return NO; // Ordinary nonbridge storage.
-    if(status)[NSException raise:NSMallocException format:@"dependency page table: %s",ncclGetLastError(NULL)];
-    size_t pages=0,pageBytes=0,count=0;const void *base=NULL;
-    status=ncclMeshPageTableShape(table,&pages,&pageBytes);
-    if(!status)status=ncclMeshPageTableAddress(table,&base);
-    if(!status)status=ncclMeshPageTableBacking(table,NULL,&count);
-    NSMutableData *storage=status?nil:[NSMutableData dataWithLength:count*sizeof(ncclMeshPageBacking)];
-    if(!status)status=ncclMeshPageTableBacking(table,storage.mutableBytes,&count);
-    ncclMeshPageTableDestroy(table);
-    if(status)[NSException raise:NSMallocException format:@"dependency page backing: %s",ncclGetLastError(NULL)];
-    const NSUInteger first=address-(NSUInteger)base,last=first+length;
-    const ncclMeshPageBacking *runs=storage.bytes;
-    NSValue *key=[NSValue valueWithPointer:&MetalRegionPageIdentity];
-    for(size_t r=0;r<count;r++) {
-        const NSUInteger begin=runs[r].first*pageBytes,end=(runs[r].first+runs[r].count)*pageBytes;
-        const NSUInteger lo=MAX(first,begin),hi=MIN(last,end);
-        if(lo<hi){const NSUInteger physical=runs[r].page*pageBytes+lo-begin;each(key,physical,physical+hi-lo,access);}
+    NSMutableData *more=nil;
+    if(!status&&count>16) {
+        more=[NSMutableData dataWithLength:count*sizeof *runs];runs=more.mutableBytes;
+        status=ncclMeshRegionRuns((const void *)address,length,runs,&count);
     }
+    if(status)[NSException raise:NSMallocException format:@"dependency page runs: %s",ncclGetLastError(NULL)];
+    NSValue *key=[NSValue valueWithPointer:&MetalRegionPageIdentity];
+    for(size_t r=0;r<count;r++)each(key,(NSUInteger)runs[r].offset,(NSUInteger)(runs[r].offset+runs[r].bytes),access);
     return YES;
 }
 
@@ -2124,6 +2118,8 @@ void MetalScheduleEnqueue(struct MetalSchedule *s) {
         struct MetalSchedule *next=s->submit;
         atomic_fetch_add_explicit(&s->references,1,memory_order_relaxed);
         const struct MetalScheduleWait *waits=s->waits.bytes;
+        if(getenv("MESH_SCHEDULE_TRACE"))fprintf(stderr,"schedule %.3f part %lu: %lu commands\n",clock_gettime_nsec_np(CLOCK_REALTIME)/1e9,
+                                                (unsigned long)s->ordinal,(unsigned long)s->commands);
         for(NSUInteger i=0;i<s->waits.length/sizeof *waits;i++)[s->queue waitForEvent:waits[i].event value:waits[i].value];
         [s->queue commit:&s->command count:1 options:s->options];
         if(s->event)[s->queue signalEvent:s->event value:1];

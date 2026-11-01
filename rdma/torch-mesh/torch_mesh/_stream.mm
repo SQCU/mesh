@@ -164,6 +164,8 @@ struct MeshStream {
   void signalled(bool wait) {
     const uint64_t value = ++committed;
     id<MTLSharedEvent> event = progress;
+    if (getenv("MESH_SCHEDULE_TRACE")) fprintf(stderr, "torch %.3f progress %p: committed %llu, at %llu\n", clock_gettime_nsec_np(CLOCK_REALTIME) / 1e9,
+                                               (void *)event, (unsigned long long)value, (unsigned long long)event.signaledValue);
     std::mutex *order = &rising;
     std::shared_ptr<at::mps::MPSEvent> ended = at::mps::getMPSEventPool()->acquireEvent(false, mps);
     ended->record(false);
