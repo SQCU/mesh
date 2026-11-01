@@ -85,10 +85,11 @@ Each with its cost now, what replaces it, and why we can.
    - *Replace with:* the declaration named by its configuration key, as completion lines already are; its body written
      once where the configuration is.
 4. **A deploy with nothing to build.**
-   - *Now:* 3.5-5.8 s a node (mesh_nodes node prepare: mesh-user.sh 0.4-4.9 s, mesh_c_build.py 0.7-0.9 s, setup.py
-     0.5-0.8 s; 10-31 and 11-01).
-   - *Replace with:* one make, whose targets include _mesh_c and the torch extension with their real dependencies, and the
-     launchd definitions as files make installs only when they change.
+   - *Now:* about 1.7 s a node where nothing changed (mesh_nodes node prepare: mesh-user.sh 0.4 s, mesh_c_build.py
+     0.7-0.9 s, setup.py 0.5-0.8 s, both run every time), 3.5-5.8 s where the libraries rebuilt (10-31 and 11-01).
+   - *Done for the modules (the commit adding `make modules`):* _mesh_c and the torch extension are make targets with
+     their real inputs; an up-to-date one is an mtime read. *Remaining:* mesh-user.sh's 0.4 s (uv's requirements check,
+     three patch dry runs over torch, the launchd definitions rewritten and compared each time) as make targets too.
    - *Why:* a no-op make over a few dozen targets reads their mtimes, milliseconds.
 5. **A bridge restart.**
    - *Now:* after bc17811b, a 5 s quiet window (B9), about 2 s of the kernel releasing the children's registrations,
@@ -107,10 +108,11 @@ Each with its cost now, what replaces it, and why we can.
    - *Replace with:* nothing but the programs once items 1-5 hold: the preparation is a no-op make, nothing restarts, so
      nothing pairs, and each program loads its artifacts.
 7. **A host wait with no end.**
-   - *Now:* MetalScheduleEnd waits on its completion word with no bound. On 10-31 four ranks waited 42 minutes for a
+   - *Was:* MetalScheduleEnd waited on its completion word with no bound. On 10-31 four ranks waited 42 minutes for a
      peer whose kernel had failed to build, while every GPU wait is bounded at about 1.1 s (NCCL_MESH_POLLS).
-   - *Replace with:* the failure word every bounded GPU wait stores (mesh_step_claim) ends the host's wait too: the
-     schedule's end is its parts' completion or its first failure, whichever comes first.
+   - *On main since 8632a4ad:* completion is observed, never awaited (MetalScheduleStatus, mesh_statistics'
+     `_emit`), and a teardown's waits (ncclCommDestroy) run under mesh_deadline, MESH_PLATFORM_NS, after which the
+     program ends naming the wait. Resolved; kept here as the bound every later host wait meets.
 8. **Compile steps as the library's own programs.**
    - Any preparation step over tuples that takes longer than a few register and shared-memory round trips is a SIMD or
      SIMT program: the frontier sweep (item 1), the zelloth run tables (ec69f367), the plan's step lists. The library
@@ -123,6 +125,6 @@ Each with its cost now, what replaces it, and why we can.
 
 ## Order
 
-Items 7 and 2 first: each ends a failure that costs minutes, not seconds. Then 1 and 4, both contained in one file each.
+Item 2 first: it ends a failure that costs seconds to minutes a start. Then 1 and 4, both contained in one file each.
 Then 5, which is the bridge's lifecycle and is written in the bridge by hand (no subagent), one port at a time, with
 the B9 hold kept wherever a link is lost. Item 6 follows from the others; 3 and 8 alongside.

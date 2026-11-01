@@ -11,8 +11,8 @@ NumPy may view their shared input and output pages. Uneven nodes and links: [des
 
 The node's user keeps the library in the user's mesh checkout (`~/mesh`): `bin/mesh-user.sh` builds the bridge and the
 libraries there, keeps the user's torch environment's base requirements (`~/.venv-mesh-uv`; a checkout's Python bindings,
-`_mesh_c` and torch-mesh, are built in place by `rdma/mesh_c_build.py` and torch-mesh's `setup.py build_ext --inplace`
-and loaded by path, as the hourly's `node prepare` does), and runs the bridge as the user's launchd agent (`io.mesh.bridge`, design/transport.md) with
+`_mesh_c` and torch-mesh, are built in place by `make -C rdma modules` (`rdma/mesh_c_build.py` and torch-mesh's
+`setup.py build_ext --inplace`, each only where its inputs changed) and loaded by path, as `node prepare` does), and runs the bridge as the user's launchd agent (`io.mesh.bridge`, design/transport.md) with
 the node's bridge configuration, its one operand (`bin/mesh-user.sh CONFIGURATION`, etc/bridge/README.md; there is no
 default); no part of it needs root. A program links or imports the checkout's library:
 

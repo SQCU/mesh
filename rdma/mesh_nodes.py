@@ -306,7 +306,7 @@ def node_prepare():
     """Build the node's one checkout, ~/mesh (the bridge's and the ranks', moved to this commit before this runs),
     as nothing but make's and ninja's staleness decide: bin/mesh-user.sh's `make all install` (in parallel), the one
     build of the libraries and the bridge, which restarts the bridge (SIGHUP, its region kept) only where its images
-    changed; then _mesh_c and torch_mesh's extension in place."""
+    changed; then `make modules`, _mesh_c and torch_mesh's extension, each built only where its inputs changed."""
     jobs = {**os.environ, 'MESH_RDMA': str(ROOT / 'rdma'), 'MAKEFLAGS': f'-j{os.cpu_count() or 1}'}
     installed, seconds = None, {}
     # the bridge's restart is asked within the first step (bin/mesh-user.sh's SIGHUP), so a bridge started at or
@@ -320,12 +320,10 @@ def node_prepare():
     if recorded.parent.parts[-2:] != ('etc', 'bridge') or not document.is_file():
         document = recorded
     for where, *argv in (('.', ROOT / 'bin/mesh-user.sh', document, ROOT),
-                         ('rdma', sys.executable, 'mesh_c_build.py'),
-                         ('rdma/torch-mesh', sys.executable, 'setup.py', '-q', 'build_ext', '--inplace',
-                          '--build-temp', '../.build/torch-mesh')):
+                         ('rdma', 'make', '-s', f'PYTHON={sys.executable}', 'modules')):
         began = time.time()
         done = run(*argv, cwd=ROOT / where, env=jobs)
-        seconds[os.path.basename(str(argv[1] if argv[0] == sys.executable else argv[0]))] = round(time.time() - began, 2)
+        seconds[os.path.basename(str(argv[0])) if argv[0] != 'make' else 'modules'] = round(time.time() - began, 2)
         if done.returncode:
             raise RuntimeError(f'{where}: {" ".join(map(str, argv[:3]))} failed: {(done.stderr or done.stdout)[-600:]}')
         installed = installed or done
