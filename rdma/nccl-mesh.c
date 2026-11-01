@@ -4315,6 +4315,8 @@ static ncclResult_t present_publish(struct metal_program *program, struct channe
   size_t k = 0;
   for (; k < p->outs; k++) {
     const struct message *m = p->out + k;
+    if(getenv("MESH_PUBLISH_TRACE"))fprintf(stderr,"publish-trace message %zu: needs %d fused %d dep_h %u source_input %d required %d\n",
+        k,needs_publication(m),m->c->fused!=NULL,m->dep_h,m->source_input,m->required);
     if (!needs_publication(m)) continue;
     if(m->c->fused&&m->dep_h==UINT32_MAX&&!m->source_input)break;
     const struct steps *st = m->c->bound;
@@ -5676,6 +5678,8 @@ static ncclResult_t record_group(struct issue *u,const ncclMeshStream *on) {
   }
   if(u->zeeb)metal_resident(program,u->base.buffer);
   ncclResult_t result=ncclSuccess;int published=0;
+  if(getenv("MESH_PUBLISH_TRACE"))fprintf(stderr,"publish-trace encode rank %d: remote %d copies %u fused %d inputs_bound %d\n",
+      comm->rank,u->remote,(unsigned)u->copies,g->fused,u->inputs_bound);
   for(uint32_t h=0;!result&&u->remote&&(!u->copies||g->fused)&&(!g->fused||u->inputs_bound)&&h<comm->count;h++)
     result=present_publish(program,comm->channels+h,g->plans+h);
   if(!result)result=operand_copies(program,comm,list,n,u->plans,NULL);
@@ -5879,6 +5883,7 @@ ncclResult_t ncclMeshCommSourceInputs(ncclComm_t comm,uint64_t occurrence,
     pthread_mutex_unlock(&attach_lock);
     if(error)result=fail(ncclSystemError,"holding source dependency pages: %s",strerror(error));
   }
+  if(getenv("MESH_PUBLISH_TRACE"))fprintf(stderr,"publish-trace source inputs rank %d: %zu inputs, result %d\n",comm->rank,count,(int)result);
   if(!result)u->inputs_bound=1;
   pthread_mutex_unlock(&group_lock);return result;
 }
