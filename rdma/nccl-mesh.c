@@ -5253,11 +5253,12 @@ static ncclResult_t plan_direct(struct call *c, struct where own,int *result) {
   if (!b) return 0;
   /* a reduce-scatter's result is its own segment alone, which in place (NCCL's) is its own contribution's range */
   if (st->partial) { b += before; made = length * z; }
+  /* in place: a reduce-scatter's result its own segment of the operand, at `before`; any other call's result the
+     operand's own bytes, at 0 (an all-reduce's, a broadcast root's), read where they lie */
   int same=0,overlap=0;
-  ncclResult_t related=binding_relations(c->comm,a,sent,b,made,before,&same,&overlap);
+  ncclResult_t related=binding_relations(c->comm,a,sent,b,made,st->partial?before:0,&same,&overlap);
   if(related)return related;
-  const int aliased=st->partial&&same;
-  if(!aliased&&overlap)return ncclSuccess;
+  if(!same&&overlap)return ncclSuccess;
   const uint32_t B = st->buffers;
   struct spans *w = kept(KEPT_SPANS, B * sizeof *w);
   for (uint32_t b = 0; w && b < B; b++) w[b].count = 0;
@@ -5309,6 +5310,7 @@ static ncclResult_t complement_copy(struct metal_program *program, const struct 
   for (uint32_t k = 0; k < c->complements && !result; k++) {
     const uint64_t *x = c->complement + 3 * k;
     const struct where source=view_at(c,1,x[1]);
+    if (source.buffer == c->sum.buffer && source.offset == x[0]) continue; /* in place: those bytes are the result's */
     result = gpu(metal_copy(program, METAL_PLAIN, c->sum.buffer, x[0], source.buffer, source.offset, x[2]), "the operand's own ranges");
   }
   return result;
