@@ -737,6 +737,14 @@ struct attach {
   /* one Metal buffer over the region's stream pages (mesh.h mesh_layout: [stream_off, client_off), every holding's
      counts, which the bridge writes and a kernel observes), made at its first need (stream_page) */
   void *stream_buffer;
+  /* the composed leases (owners_count: views over other leases' pages, each mapped where mmap put it, so no row of the
+     client view finds one) by address, sorted, for lease_at's binary search: rebuilt at a lookup once one was added,
+     given back or moved (`composed_stale`), its room grown where one is composed (ncclMeshPageTableCompose).  A scan of
+     every lease for every byte no row finds took half of bandwidth.py's preparation on main, over 30 s with no call
+     made (2026-11-01, sampled: lease_at's loop inlined at ncclMeshRegionRuns+260, a lease's 0x78 bytes a step) */
+  struct composed_at { uintptr_t lo, hi; size_t lease; } *composed;
+  size_t composed_count, composed_room, composed_total;
+  int composed_stale;
   struct hold holds[MESH_STREAMS];
   struct attach *next;
 };
@@ -800,7 +808,7 @@ static void attach_settle(void) {
   struct attach *a = attaches;
   if (!a || a->count || a->comms || atomic_load(&a->wrapped) || !attach_expired(a)) return;
   mesh_detach(&a->context);
-  free(a->leases); free(a->lease_of);
+  free(a->leases); free(a->lease_of); free(a->composed);
   free(a);
   attaches = NULL;
 }
@@ -1664,6 +1672,8 @@ static int lease_give(struct attach *a, size_t i) {
   mesh_lease_retire_destroy(&l->reads);
   lease_mark(a, i, 0);
   a->returned--;
+  if (l->owners_count) a->composed_total--;
+  a->composed_stale = 1;
   *l = a->leases[--a->count];
   if (i < a->count) lease_mark(a, i, (uint32_t)i + 1);
   return 1;
@@ -1736,6 +1746,19 @@ ncclResult_t ncclMemFree(void *ptr) {
 }
 
 /* the lease holding ptr and its attach (*held, where held is not NULL), under attach_lock (NULL: none) */
+static int composed_order(const void *x, const void *y) {
+  const uintptr_t a = ((const struct composed_at *)x)->lo, b = ((const struct composed_at *)y)->lo;
+  return a < b ? -1 : a > b;
+}
+/* the attach's composed leases sorted by address (their room is composed_total's, grown where one is composed) */
+static void composed_index(struct attach *a) {
+  a->composed_count = 0;
+  for (size_t i = 0; i < a->count; i++) if (a->leases[i].owners_count)
+    a->composed[a->composed_count++] = (struct composed_at){(uintptr_t)a->leases[i].address,
+                                                            (uintptr_t)a->leases[i].address + a->leases[i].bytes, i};
+  qsort(a->composed, a->composed_count, sizeof *a->composed, composed_order);
+  a->composed_stale = 0;
+}
 static struct lease *lease_at(const void *ptr, struct attach **held) {
   for (struct attach *a = attaches; a; a = a->next) {
     const uint32_t row = a->lease_of ? view_row(a, ptr) : UINT32_MAX, k = row == UINT32_MAX ? 0 : a->lease_of[row];
@@ -1743,12 +1766,13 @@ static struct lease *lease_at(const void *ptr, struct attach **held) {
       if (held) *held = a;
       return a->leases + k - 1;
     }
-    for(size_t i=0;i<a->count;i++) {
-      struct lease *l=a->leases+i;
-      if(l->owners_count&&(uintptr_t)ptr>=(uintptr_t)l->address&&(uintptr_t)ptr-(uintptr_t)l->address<l->bytes) {
-        if(held)*held=a;
-        return l;
-      }
+    if (a->composed_stale) composed_index(a);
+    const uintptr_t at = (uintptr_t)ptr;
+    size_t lo = 0, hi = a->composed_count;
+    while (lo < hi) { const size_t mid = lo + (hi - lo) / 2; if (a->composed[mid].hi <= at) lo = mid + 1; else hi = mid; }
+    if (lo < a->composed_count && a->composed[lo].lo <= at) {
+      if (held) *held = a;
+      return a->leases + a->composed[lo].lease;
     }
   }
   return NULL;
@@ -7273,7 +7297,8 @@ ncclResult_t ncclMeshPageTableCompose(const ncclMeshPageSelection *selections,si
   }
   if(!error) {
     table=calloc(1,sizeof *table);
-    if(!table||grow(&attachment->leases,&attachment->room,attachment->count,sizeof *attachment->leases))error=ENOMEM;
+    if(!table||grow(&attachment->leases,&attachment->room,attachment->count,sizeof *attachment->leases)||
+       grow((void **)&attachment->composed,&attachment->composed_room,attachment->composed_total,sizeof *attachment->composed))error=ENOMEM;
   }
   if(!error) {
     for(size_t k=0;!error&&k<physical.count;k++) {
@@ -7285,6 +7310,7 @@ ncclResult_t ncclMeshPageTableCompose(const ncclMeshPageSelection *selections,si
     for(size_t k=0;k<owner_count;k++)lease_at(owners[k],NULL)->pins++;
     attachment->leases[attachment->count++]=(struct lease){.address=view,.bytes=bytes,
       .owners=owners,.owners_count=owner_count,.backing=physical};
+    attachment->composed_total++;attachment->composed_stale=1;
     table->base=(struct where){NULL,(size_t)view};table->page_bytes=page;table->pages=bytes/page;table->owned=view;table->comm=comm;
   }
   pthread_mutex_unlock(&attach_lock);
