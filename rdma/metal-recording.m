@@ -1516,7 +1516,13 @@ static int MetalScheduleCrossWork(struct MetalSchedule *root,NSData *accesses,co
     // The callback realizes immutable bindings and declares each inner command.
     // It runs now, before dependency compilation, and cannot hide a collective
     // behind an opaque runtime operation or force a partial compiler flush.
-    struct MetalSchedule *s=MetalScheduleTail(root);
+    // Its commands are the part's (bandwidth/overhead session, 2026-11-01): the callback encodes them into this part's
+    // encoder directly, so the part counts them, as every other encode here does (MetalScheduleWritable, commands++).
+    // Uncounted, a part holding only a crossing ended its buffer uncommitted and read as complete (MetalScheduleFinishPart):
+    // a scatter's publication, encoded for the right words and values, never ran, and no rank sent (the chain on main,
+    // all five, docs/facts.md 2026-11-01). What must stay: a crossing's part counts as holding work.
+    struct MetalSchedule *s=MetalScheduleWritable(root);
+    s->commands++;
     return cross(s->encoder,s->table,s->residency,0,0);
 }
 
