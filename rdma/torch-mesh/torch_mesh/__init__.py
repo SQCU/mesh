@@ -170,6 +170,11 @@ def prepare_source(gm, example_inputs):
               for node, value in zip((n for n in lifted.graph.nodes if n.op == 'placeholder'), operands, strict=True)]
     with mode:
         lowered = functionalize_source(lifted, inputs, select_decomp_table() | decompositions)
+    # The section's interface is its operands' leaves, as returned below and as native lowering runs it: an operand
+    # can be a list (a host declaration's results, whose getitem lies in this section), and make_fx then gives the
+    # trace a pytree codegen whose output unflattening fails in GraphLowering.run (lstm-service's [x, h] product after
+    # its concatenation's host declaration, 2026-11-01). The placeholders and the output are already flat.
+    lowered.graph._codegen = torch.fx.graph.CodeGen()
     output = next(node for node in lowered.graph.nodes if node.op == 'output')
     if not isinstance(output.args[0], (tuple, list)):
         output.args = ((output.args[0],),)
