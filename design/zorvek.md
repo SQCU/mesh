@@ -98,8 +98,17 @@ what of the block takes its place. The order is forced: each later one guards a 
    each page has one writer. Its count of pages done is the readiness word of a SEND of the sum (zirrupel's) and its
    completion. The sum's pages are the call's output or pages of its own (zennets), never bytes a SEND of the same
    call reads. zelloq needs no kernel: a copy's landing is the copy; the call's completion waits on `landed`.
-2. The witness and retirement proofs (zolvies' remnant: mesh-routed.c retirement_proofs, byte_witness, witnessed;
-   nccl-mesh.c bind_retirements, retired_first): they prove in-place overwrites safe; after 1 there are none.
+2. Done: the witness and retirement proofs (zolvies' remnant: mesh-routed.c retirement_proofs, byte_witness,
+   witnessed; nccl-mesh.c bind_retirements, retired_first). "After 1 there are none" was wrong: an in-place
+   all-reduce's gather lands its results into the bytes its reduce-scatter's SENDs read, and only those COPY
+   landings in bandwidth.py leaned on a proof (none of its combines did). The proofs re-derived, from the program's
+   causal arrivals, a fact the transport states: a SEND's completion, its channel's `sent`. In their place each
+   landing's own list (mesh.h struct mesh_zwoggle_entry `after`, one form with a SEND's, nccl-mesh.c landing_lists):
+   on each channel a SEND reads bytes it writes, that channel's `sent` at the last such SEND's end, its own call's or
+   another issue's, which the bridge reads before it posts the landing. The compiler orders the SEND that fills the
+   landing after that SEND completes (mesh-routed.c mesh_transfer_order), so an exchange in place (each side's
+   landing on its own SEND, a cycle through the hardware's credit) is refused there as a value, as the missing proof
+   refused it.
 3. The publication tasks and the pool's `ready` cursor: zook. The rank's own pages are ready when the group is
    encoded (one store with the presents); a sum's pages by zelloth's count.
 4. The host's mirror of GPU progress (struct inflight, complete, retire, published/consumed): the bridge's counts and
@@ -110,6 +119,19 @@ what of the block takes its place. The order is forced: each later one guards a 
    bridge's walk_take copy): the bridge walks each call's laid tables, linked at the call's place (zinth, below), its
    walk the executor of zirrup and zirrupel, which its entry word already is.
 7. The landing gate and the operand staging copies (zibbins): transport by view; a premultiplier folded into zelloth.
+   The copies bandwidth.py makes, counted on all five (MESH_COPIES_TRACE, 2026-10-31): only the out-of-place
+   reduce-scatter's, 5 a call (its whole operand into its operand area, segment by segment, before it publishes).
+   plan_direct refuses it at a REDUCE step over a range an earlier one partly wrote (m5ult2: [104857, 209714) at
+   1 MiB, spans_meet -1), the pool's rule: the first combine wrote send op piece and the later ones accumulated, so a
+   range part written could not say where its own operand was. zelloth reads a sum's own page from the send view
+   where its steps are fresh (zabbadoo_plan `own`), else from the sum's target, which the copy fills. The partial
+   overlaps are relay cuts: one contribution cut, another whole, over one segment. Its form: every REDUCE piece of a
+   rank's buffer cut at the others' bounds (mesh-routed.c refine_pieces, as relays' cuts already are), so each sum
+   is one range (zsum_same), each step wholly fresh or wholly written, and the call direct, its copy gone. The
+   in-place all-reduce and broadcast make no copy (their operand is their result); plan_direct refuses them for the
+   overlap all the same.
+   The landing gate is deleted (design/zorvek.md "Instances"): the communicator's gate word, gate_of, a landing
+   entry's word, and the bridge's wait on it.
 
 ## zinth: a call's tables linked to the bridge (item 6)
 
@@ -137,7 +159,7 @@ What runs (mesh.h struct mesh_zwoggle, nccl-mesh.c present_group and zinth, mesh
   64 MiB rate within main's band (the A/A pair decides each outlier).
 
 - An issue's entries are laid at its first call, each base relative to one of the call's bases (mesh.h struct
-  mesh_zwoggle `bases`: each channel's units before the call on each list, the communicator's gates before it); a
+  mesh_zwoggle `bases`: each channel's units before the call on each list); a
   later call writes its bases and each table's `next` alone. A WRITE's source readiness word is its invocation's,
   which the issue's binding instance does not fix, so it alone is written each call.
 
@@ -168,8 +190,8 @@ in-place operand's SEND are the cases; the next call's landing there needs that 
   set until that channel's `sent` reaches it (mesh-link.c after_holds). MESH_LAYOUT 157.
 - The pages' local reads (zelloth, the caller's kernels) are before the call's link in stream order: the barrier before
   zinth's first store orders them, and item 5 keeps it.
-- The landing gate is already inert: its store is encoded before that barrier, so the bridge never reads a landing
-  entry before the gate holds. Deleting it (item 7 above) removes no order.
+- The landing gate was inert: its store was encoded before that barrier, so the bridge never read a landing entry
+  before the gate held. Deleting it (item 7 above) removed no order.
 - Measured first in a coarser form (test-after, not landed): every SEND before the call on each such channel, the
   issue's own included. It deadlocked the chain service on all five: m5ult4's and m5ult1's landing walks each held for
   SENDs the other's held receives kept from completing, SENDs past the real reader in the channel's order. The exact
@@ -202,9 +224,8 @@ form each takes in the block above:
   word (`landed` or its summed word, every unit at the landing's end), which mesh_entry's per-unit form cannot state:
   an entry kind.
 - A combine with a `need` (a sum into bytes an earlier SEND of its call on that channel reads: landing_needs): the
-  pool runs it after that SEND's publication, the witness proofs (item 4) standing for the SEND's completion. Its
-  form: the sum on pages of its own (zennets), never bytes a SEND of the same call reads, which is the compiler's
-  placement of the sum (mesh-collective.c mesh_compile_sets' scratch), not a wait.
+  pool runs it after that SEND's publication, the SEND's completion the landing's own requirement on that channel's
+  `sent` since item 2 (landing_lists): the bridge posts none of its contributions' units before it.
 
 Then the pool and the mirror go: metal_tracks and its kernels, complete, retire, consume, publish, inflight and the
 channels' `published`, `consumed`, `waited`.
@@ -217,7 +238,8 @@ channels' `published`, `consumed`, `waited`.
 - A partials merge: zelloth's fold is a kernel parameter, merge_row the merge's. Its forwards wait on summed
   words (84ac0814).
 - A combine with a `need`: zabbadoo takes it (cb70ddb1). zabbadoo publishes every SEND with the presents, so the
-  need is met before zelloth runs; the SEND's read finishing is the witness proofs' until item 4.
+  need is met before zelloth runs; the SEND's read finishing is its landing's requirement in the bridge
+  (landing_lists, item 2).
 - Found, not in the inventory: a group that makes its operands in place (operand_copies: a premultiply, a copy
   within the region, a scratch's copy) never publishes with its presents (`direct` 0), so it always ran in the
   pool. Its form is a publication once the copies are made (launch_metal). Moving it exposed a second gap.
@@ -233,10 +255,15 @@ channels' `published`, `consumed`, `waited`.
   channel that is not ready yet. The cable abstraction in that sentence is the code's, not the model's: a
   channel is one cable (struct channel `cable`, `wire`), routing binds each piece to one wire, and the walk
   takes each wire's entries in host call order. In the model there are only edges, a node pair with all its
-  cables and relay paths, and nothing is ordered but by a page. The one real constraint is a lane's: the
-  transport is two-sided (TN3205, design/deliverables.md I1), so on a queue pair the k-th SEND lands in the
-  k-th posted receive, an order both ends compute. The defect is that this order comes from host call
-  order instead of the dependencies. It is not item 3's.
+  cables and relay paths, and nothing is ordered but by a page. The links' own abstraction, the queue pair
+  (TN3205: UC, SEND into the oldest posted RECV), is the bridge's alone: every queue pair, request and
+  completion queue, and "in what order a link's queue pairs carry which call's positions" (design/
+  transport.md section 2). Complete mediation keeps it out of every program's reach, because its state
+  machines check preconditions by faulting and its finite shared lanes deadlock when parties order their parts
+  on their own (Coffman's hold-and-wait). The defect: the collective names a cable (a stream per wire, routes
+  as cable lists, a transfer's cable index), so the order the program compiles becomes the order of that
+  cable's queue pairs. Program-dependent code thereby orders queue pairs, and the stand is the non-termination
+  section 2 predicts. It is not item 3's.
 - fabric-dnn fails at 4f34df7d (before zinth), at 2b5a2fac and since: m5ult1's GPU wait ends with nothing it
   sends sent.
 - Found: zelloth's threadgroups take blocks in a fixed order (block q to threadgroup q mod G) and spin on each
@@ -263,14 +290,24 @@ channels' `published`, `consumed`, `waited`.
   group zabbadoo cannot run fails when its plan is prepared. A fused crossing's records are fused_records.
 - Then the host's mirror: the channels' `published`, `consumed`, `waited`, the list of groups in flight,
   retire and the tickets. Every group is published and awaited at its own call.
-- Still open: the chain service stands intermittently, on main since before these (3 of its last 5 runs).
+- Root-caused (2026-10-31), and not a deadlock: the chain service's ranks started their prepared programs up to
+  10.7 s apart, past the 5 s a GPU wait is bounded, so the first to start ended its waits (assumption A4) and the
+  loss ended the rest. Each rank left preparation together (bind's exchange), then wrote its configuration's
+  observation declaration, a 4.4 MB JSON line, to stdout before the program started (mesh_statistics.py
+  Observations): 6.4 s on m5ult2, 3.3 s on m5ult3, each pipe its own. Written at the first report instead, the five
+  started within 0.1 s, and 8 of 8 runs passed. rdma/plan_cycles.py over the bridge's own tables (nccl-mesh.c
+  plan_record, MESH_PLAN_RECORD) and mesh-stat streams found no landing or SEND held by a requirement at the stand:
+  the cable-order cycle below was not its cause. Preparation still takes 2.2 s a rank (the chain's recording, 2.0 s,
+  about 160 us a command; a deep copy of the plan's graphs, 0.9 s), which no service step should.
+- Superseded by the entry above: the chain service stands intermittently, on main since before these (3 of its last 5 runs).
   At one stand m5ult2 had published nothing (`ready` 0 on every channel). m5ult3 waited on m5ult2's first
   landing. m5ult2 reaches m5ult4 only through m5ult1, which had relayed it 8 units of m5ult4's input frames,
   and those frames queue on m5ult4's channel behind its later input frames. Those wait for m5ult4's chain
   kernel, which waits on m5ult1's state, which waits on m5ult2's. That is a cycle through the chain
   program's input publication and a lane order taken from host call order, not through the library's
-  waits. Its form: the compiler orders each lane's units by a topological order of the actual page
-  dependencies, the cross-rank ones included (the chain's input publication order is declared in its
-  production records). Units are spread over the whole edge's capacity, every cable between the two nodes
-  and every relay path, so no unit waits behind one that depends on it. Host call order and cables are no
-  inputs.
+  waits. Its form is not a compiler that orders lanes, which leaks the queue pair to program-dependent code
+  again. The collective names a node and positions in its rows; its dependencies reach the transport only
+  as its readiness words. Links, cables, queue pairs and lanes, and the order in which a link's queue pairs
+  carry positions, are the bridge's alone, chosen by a rule independent of data and program, so no program
+  can make the transport stand (transport.md section 2's table: "a port and a lane pair ≺ a node"; "the
+  bridge stripes a node's stream over the link's lane pairs").

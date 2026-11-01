@@ -123,8 +123,8 @@ Generic gather and sum declare one page-padded ALLGATHER. A single `gather_ready
 prefixes before a parallel consumer; a one-threadgroup consumer inlines that observation. The LSTM example uses
 `torch_mesh::allgatherv_out` to write its persistent hidden-state destination directly, eliminating the additional
 result-to-state copy. Generic gather still uses its common segment layout; not every remaining layout copy has been
-removed. Positive-contribution recurrent gathers have a typed two-slot reuse proof; zero-share cases use fresh
-generations and deferred retirement. See [DESIGN-fused-stream.md](DESIGN-fused-stream.md) for the current API,
+removed. Preparation binds source and result generations and their actual page dependencies.
+See [DESIGN-fused-stream.md](DESIGN-fused-stream.md) for the current API,
 ownership requirements, and dated two-/three-rank validation.
 
 ### Partials merge
@@ -132,14 +132,20 @@ ownership requirements, and dated two-/three-rank validation.
 Attention whose keys are split among members (split-KV, Flash-Decoding) leaves each member a partial: each query row's
 logsumexp and its attention over the member's keys. `torch_mesh.merge_partials(out, lse, group, root=-1)` merges them
 by the rows' logsumexp into the attention over every member's keys (and its logsumexp), on every member or at `root`:
-the operator `torch_mesh::merge_partials`, an all-reduce or reduce by libnccl-mesh's partials operator
-(`ncclMeshRedOpCreatePartials`, [NCCL.md](../NCCL.md)) over float32 rows of `[m, l, O]` (`backend.partial` and
+the operator `torch_mesh::merge_partials`, an all-reduce or reduce compiled from the supplied
+`reduction.partials` function over float32 rows of `[m, l, O]` (`backend.partial` and
 `backend.attention` make and read them). The backend's `merge_partials(out, partials, rows=None, root=-1)` also takes
 `rows`, each rank's rows of the operand: a reduce-scatter by the operator (`ncclMeshReduceScatterV`), each rank's rows
 merged at it. Like every other call it is one group of the one path, so it coalesces. `partition`'s ring attention is
 its caller: every rank's query block gathered, each block's attention over the rank's own keys written as its owner's
 rows (a half of a block that sees none of the rank's keys left at none), and one reduce-scatter, so each owner holds its
 rows' attention. Its reproduction target is `cp.py`'s (Uneven nodes, below).
+
+Other reductions use the same `Reduction(combine, identity, dtype=...,
+element_shape=...)` source interface. Preparation fuses the supplied numerical
+function with the collective's page reads and publications. See
+[Supplied reduction functions](../../design/function-reductions-2026-10-31.md)
+and [the example](../../examples/function_reduction.py).
 
 ### Prepare and call a whole function
 

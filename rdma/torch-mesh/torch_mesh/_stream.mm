@@ -1661,6 +1661,7 @@ struct ScheduleBinding {
   ScheduleBinding():schedule(prepared_schedule()){}
   explicit ScheduleBinding(MetalSchedule *prepared):schedule(prepared,[](MetalSchedule *){}){}
   std::vector<at::Tensor> operands;
+  std::vector<pybind11::object> compilerOperands;
   void inputs(const std::vector<pybind11::object> &values) {
     for(const auto &value:values)operands.push_back(TensorOperand(value).storage);
     schedule_inputs(schedule.get(),values);
@@ -1939,7 +1940,12 @@ static pybind11::list load(const std::string &directory,const std::vector<at::Te
   if((error=MetalTemplateArchive(read,@(directory.c_str()))))
     TORCH_WARN("template ",directory,": this architecture's pipelines were not kept: ",error.localizedDescription.UTF8String);
   pybind11::list functions;
-  for(auto &function:made){function->operands=bound;functions.append(pybind11::cast(std::move(function)));}
+  for(auto &function:made){
+    function->operands=bound;
+    for(const auto &communicator:reductions)for(const auto &binding:communicator)
+      function->compilerOperands.push_back(binding.second);
+    functions.append(pybind11::cast(std::move(function)));
+  }
   return functions;
 }
 

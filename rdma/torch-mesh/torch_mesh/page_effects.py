@@ -23,6 +23,11 @@ def _groups(command):
     from .compilation import operands
     grid = tuple(command['grid'])
     group = command['threadgroup']
+    policy = command.get('threadgroup_policy')
+    if policy is not None:
+        preferred = max(operands()['SIMD_WIDTH'] if policy['minimum_simd'] else 1, policy['preferred'])
+        command['threadgroup'] = group = (min(_stream.device_facts()[1], preferred), 1, 1)
+        command.pop('threadgroup_policy')
     if group is None:
         left = min(_stream.device_facts()[1], operands()['ROW_THREADS'])
         group = []
@@ -146,6 +151,46 @@ def _append(command, value, mode):
     return slot, f'(mesh_effect_{slot} + mesh_index<{slot}>(0))'
 
 
+def _metadata_pages(command, first, text):
+    """Bind flat effect arrays at constant offsets in one composed page operand.
+
+    Fields retain their within-page order; their backing pages may be scattered.
+    Distinct fields may repeat a physical page in this virtual page selection.
+    """
+    views = command['operands'][first:]
+    owners = [view.storage for view in views]
+    _, page_bytes = _stream.page_domain(owners)
+    pages, fields, offsets, cursor = [], {}, {}, 0
+    for slot, value in enumerate(views, first):
+        physical = _stream.physical_layout(value)
+        if physical in fields:
+            offsets[slot] = fields[physical]
+            continue
+        spans = physical.ordered_spans()
+        offsets[slot] = fields[physical] = cursor * page_bytes + spans[0][0] % page_bytes
+        previous = None
+        for begin, count in spans:
+            start, end = begin // page_bytes, (begin + count + page_bytes - 1) // page_bytes
+            if previous == start:
+                start += 1
+            if end > start:
+                pages.append((start, end - start));cursor += end - start
+            previous = end - 1
+    order = _stream.TensorLayout.runs(pages)
+    storage = _stream.page_storage(owners, order, page_bytes)
+    view = TensorView(storage, _stream.TensorLayout((storage.numel(),), (1,)), 0)
+    for slot, offset in offsets.items():
+        text = text.replace(f'(mesh_effect_{slot} + mesh_index<{slot}>(0))',
+                            f'(mesh_effect_{first} + {offset}ul)')
+    command['operands'] = [*command['operands'][:first], view]
+    command['types'] = (*command['types'][:first], torch.uint8)
+    command['binding_origins'] = (*command['binding_origins'][:first], 0)
+    command['reaches'] = tuple((first, mode,
+        TensorView(storage, _stream.TensorLayout((operand.numel(),), (1,), offsets[slot]), 0))
+        if slot >= first else (slot, mode, operand) for slot, mode, operand in command['reaches'])
+    return text
+
+
 def _inject_cpu(command, thresholds, contributions, effects, expected, arrivals):
     """Put a cut's page effects in its existing compiled native task body."""
     observations = [index for index, threshold in enumerate(thresholds[0]) if threshold]
@@ -260,11 +305,23 @@ def _inject(command, thresholds, contributions, effects, expected, arrivals):
         after.append('mesh_effect_prefix mesh_publish_prefix = {' + ','.join(values) + '};')
         count = len(effects['rows'])
         after.append(f'mesh_graph_settle(mesh_settled, 0, {count}u, mesh_settled + {count}, mesh_publish_prefix);\n}}')
+    combined = _metadata_pages(command, initial, '\n'.join(helpers) + '\n@@BEFORE@@\n' + '\n'.join(before) +
+                               '\n@@AFTER@@\n' + '\n'.join(after))
+    helpers, combined = combined.split('\n@@BEFORE@@\n')
+    before, after = combined.split('\n@@AFTER@@\n')
+    command['source'] = shader_source(command, initial, helpers, before, after)
+
+
+def shader_source(command, initial, helpers, before, after):
+    """Compose effects into retained source; page binding is a separate operand."""
     source = command['source']
-    added = ''.join(f', device uchar *mesh_effect_{slot} [[buffer({slot})]]'
-                    for slot in range(initial, len(command['operands'])))
-    added += ', uint mesh_lane [[thread_index_in_threadgroup]], uint3 mesh_group [[threadgroup_position_in_grid]]'
-    matches = tuple(re.finditer(r'kernel\s+void\s+' + re.escape(command['function']) + r'\s*\(', source))
+    definition = command['function']
+    instance = re.search(r'host_name\("' + re.escape(definition) + r'"\).*?decltype\((\w+)\s*<', source)
+    if instance is not None:
+        definition = instance.group(1)
+    matches = tuple(re.finditer(r'kernel\s+void\s+' + re.escape(definition) + r'\s*\(', source))
+    if not matches:
+        raise ValueError('the declared shader entry must retain its source definition for page-effect composition')
     for match in reversed(matches):
         start, cursor, depth = match.end(), match.end(), 1
         while depth:
@@ -277,17 +334,32 @@ def _inject(command, thresholds, contributions, effects, expected, arrivals):
             depth += (source[closing] == '{') - (source[closing] == '}')
             closing += 1
         parameters = source[start:end].rstrip()
+        added = f', device uchar *mesh_effect_{initial} [[buffer({initial})]]'
+        aliases = []
+        for attribute, target in (('thread_index_in_threadgroup', 'mesh_lane'), ('threadgroup_position_in_grid', 'mesh_group')):
+            declared = re.search(r'\b(uint[123]?)\s+(\w+)\s*\[\[' + attribute + r'\]\]', parameters)
+            if declared is None:
+                added += f', {"uint" if target == "mesh_lane" else "uint3"} {target} [[{attribute}]]'
+            elif declared.group(2) != target:
+                kind, name = declared.groups()
+                expression = name if target == 'mesh_lane' or kind == 'uint3' else f'uint3({name}, 0)' if kind == 'uint2' else f'uint3({name}, 0, 0)'
+                aliases.append(f'const auto {target} = {expression};')
         if command.get('names'):
             pieces = parameters.split(',')
-            for slot in command.get('observed_slots', ()):
+            for slot in command.get('observed_slots', set()) | command.get('published_slots', set()):
                 pieces[slot] = re.sub(r'\bconstant\s+', 'volatile coherent(system) device const ', pieces[slot])
                 if 'coherent(system)' not in pieces[slot]:
                     pieces[slot] = re.sub(r'\bdevice\s+', 'volatile coherent(system) device ', pieces[slot])
             parameters = ','.join(pieces)
-        source = (source[:start] + parameters + added + source[end:opening + 1] +
-                  '\n'.join(before) + source[opening + 1:closing - 1] + '\n'.join(after) + source[closing - 1:])
+        elif 'MESH_MATRIX_' not in source:
+            for slot in command.get('observed_slots', set()) | command.get('published_slots', set()):
+                parameters = re.sub(r'\b(device|constant)\s+([^,]*?\[\[buffer\(' + str(slot) + r'\)\]\])',
+                    lambda match: 'volatile coherent(system) device ' + ('const ' if match.group(1) == 'constant' else '') + match.group(2), parameters)
+        source = (source[:match.start()] + '#pragma METAL internals : enable\n' + source[match.start():start] +
+                  parameters + added + source[end:opening + 1] + ''.join(aliases) + before +
+                  source[opening + 1:closing - 1] + after + source[closing - 1:])
     observed = sum(1 << slot for slot in command.get('observed_slots', ()))
-    command['source'] = f'#define MESH_OBSERVED_BINDINGS {observed}ul\n' + ''.join(helpers) + source
+    return f'#define MESH_OBSERVED_BINDINGS {observed}ul\n' + helpers + source
 
 
 def lower(programs, effects):
@@ -310,7 +382,10 @@ def lower(programs, effects):
             thresholds=[[0] * len(effects['observations']) for _ in range(count)],
             contributions=[set() for _ in range(count)]))
     for observation_index, observation in enumerate(effects['observations']):
-        source = TensorView.of(effects['sources'][observation['source']])
+        destination = observation['source'] == len(effects['sources'])
+        source = TensorView.of(effects['destination'] if destination else
+                               effects['sources'][observation['source']])
+        side = 'writes' if destination else 'reads'
         for cut_index, row in enumerate(effects['rows']):
             selected = TensorView(source.storage, source.layout.reshape((source.numel(),)).select_runs(
                 0, [(row[0] * effects['unit'], row[1] * effects['unit'])]))
@@ -320,7 +395,7 @@ def lower(programs, effects):
                 for access in program['accesses']:
                     if access['root'] != root:
                         continue
-                    if access['side'] == 'reads':
+                    if access['side'] == side:
                         spans = access['relation'].preimage(remaining).spans()
                         if spans:
                             program['command'].setdefault('observed_slots', set()).add(access['slot'])
@@ -341,7 +416,10 @@ def lower(programs, effects):
         for program in reversed(projected):
             writes = [item for item in program['accesses'] if item['root'] == root and item['side'] == 'writes']
             for access in writes:
-                for first, width in access['relation'].preimage(remaining).spans():
+                spans = access['relation'].preimage(remaining).spans()
+                if spans:
+                    program['command'].setdefault('published_slots', set()).add(access['slot'])
+                for first, width in spans:
                     for group in range(first, first + width):
                         program['contributions'][group].add(cut_index)
             for access in writes:

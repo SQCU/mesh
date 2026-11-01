@@ -126,8 +126,8 @@ landing leases must have finished **before the group is encoded**: reception is
 posted immediately, without waiting for that node's own producer. Source and
 relay leases remain immutable through downstream uses. Overlapping landing
 ranges, or landing ranges overlapping local sources, fail during realization.
-The DNN uses distinct leases per layer. Reuse requires the compiled source-read
-and destination-consumer retirement proofs below, not a peer rendezvous.
+The DNN uses distinct leases per layer. Reuse waits on the source's DMA-read
+completion and its destination consumers (below), not a peer rendezvous.
 Its producer publishes from its last threadgroup; its consumer reads the
 received values directly. The ordinary write interface remains available for
 the control comparison.
@@ -175,65 +175,14 @@ into the published lease using the existing Metal tensor-operation pattern.
 
 ### Typed one-sided lifetimes
 
-`rdma/lifetimes.py` is an executable compiler for ownership proofs. Its inputs
-are invocation-specific page-range `Lease`s; local `Event`s for first write,
-publication, final read and landing; physical `Transfer`s; and declared local
-`Read`s. Every physical fragment and relay use must appear, including planned
-reads not posted yet. A transfer adds only the real publish → first destination
-write → landing relation. Local edges are existing arithmetic dependencies.
-There is no arbitrary cross-node edge that could smuggle in a missing receipt.
-
-For a lease `p`, let `uses(p)` contain each final arithmetic read and each
-outgoing DMA read. A transfer's final DMA read is proved either by its local
-bridge-owned final source completion or by the destination landing; neither
-requires destination arithmetic to finish. For every use `u`, reuse needs a
-known event `e` with `u ≺ e`. A naturally returning result can supply `e` when
-the actual remote data graph contains that dependency. An unrelated landing,
-an ordinally later collective, or local function completion cannot supply it.
-Remote consumers of the independent destination pages have their own uses.
-
-Monotone prefixes imply all earlier contiguous prefixes on the same physical
-channel, direction and connection generation. Every outgoing fragment is an
-AND obligation, even when several go to one peer. Alternative witnesses of
-one final DMA read are OR proofs. `plan.rules(node, bridge=True)` exposes
-bridge-owned source completion to the allocator; the default rules exclude it
-from data-program observation. `plan.tracker(...).observe(existing_event)`
-updates only affected ownership obligations and returns newly retired leases.
-It sends no message and inserts no wait, copy, read of private driver state,
-or data-program branch. An unproved lifetime remains retained.
-
-The source completion must cover the entire presented range, not only the
-first posted requests. Presentation ownership must therefore survive until
-every scheduled use has been posted and every actual DMA read has ended.
-The final destination consumer's lifetime is not shortened by that event.
-Runtime adapters supply actual events; this pure compiler does not observe
-hardware or grant permission to fabricate completion.
-
-Static allocation first-fits compatible page intervals only when every old
-use already precedes the new **first write**. Publication comes after stores,
-so publication-after-read alone cannot justify in-place reuse. Missing
-first-write evidence gets separate storage. The allocator introduces no
-dependency to obtain a smaller allocation and claims no minimum-memory proof.
-Splitting a lease into page/range leases permits retirement at that granularity.
-
-`prove_recurrent_gather(participants, paths)` checks the following two-slot
-proof once at realization, retaining parallel physical fragments and relays:
-
-- Each rank's `publish(i+1)` follows its `consume(i)`.
-- Each `consume(i)` follows final landing of all ranks' required pieces at i.
-- Local `consume(i+1)` therefore proves that every peer consumed its previous
-  value i, so the local source slot i can be first-written for i+2.
-- Remote `publish(i+2)` follows that peer's `consume(i+1)`, which follows our
-  `publish(i+1)`, which follows our `consume(i)`. Thus the next write into our
-  destination slot i cannot begin until its old consumer ended. Forwarding
-  preserves the same causal chain; relay page reuse is checked as well.
-
-No destination gate or receipt message is needed for this proven recurrence.
-One-slot reuse fails the proof. Independent feed-forward publications and
-asymmetric repartitioning also fail that recurrence; their source releases
-must use actual DMA-read retirement or another natural proof. The tests cover
-these counterexamples, multiple physical fragments, independent channel
-generations, returning data, local readers, and remote sinks with no return.
+A page's reuse waits on its last outgoing DMA read's completion, the bridge's own
+`sent` prefix: a landing into bytes a SEND reads is posted only once that SEND
+completed (mesh.h struct mesh_zwoggle_entry `after`, design/pages-and-functions.md
+Freeing 6-7). `rdma/lifetimes.py` and `prove_recurrent_gather`, which proved
+reuse instead from a returning data dependency (a peer's later publication as a
+witness of the read), are deleted with the C library's witness proofs
+(design/zorvek.md item 2): both re-derived from the program what the transport
+reports.
 
 `mesh-lease-retire.h` supplies native source ownership bookkeeping. It records
 the maximum final **DMA-unit** prefix for each physical stream/holding before

@@ -660,6 +660,7 @@ def prepare_graph(module, metadata, *, materializations=()):
     assigned_results = ()
     external_arguments, external_outputs, command_accesses = [], [], []
     materialized_buffers = set()
+    binding_reserve = 0
     configuration = compiler_operands()
     implementation_catalog = copy.deepcopy(implementations())
     implementation_choices = copy.deepcopy(implementation_assignment())
@@ -1454,6 +1455,9 @@ def prepare_graph(module, metadata, *, materializations=()):
             with self.active() as graph:
                 return graph.consumer_constraints()
 
+        def reserve_bindings(self, count):
+            self.graph.reserve_bindings(count)
+
         def page_projection(self, projection):
             with self.active() as graph:
                 return graph.page_projection(projection)
@@ -1473,6 +1477,10 @@ def prepare_graph(module, metadata, *, materializations=()):
             return Program.prepare(self.emit(operands, **placement))
 
     class NativeGraph(GraphLowering):
+        def reserve_bindings(self, count):
+            nonlocal binding_reserve
+            binding_reserve = count
+
         def declaration(self, operation, body=None):
             """Keep original scalar coordinates without choosing a backend."""
             from types import SimpleNamespace
@@ -2341,7 +2349,7 @@ def prepare_graph(module, metadata, *, materializations=()):
     @contextmanager
     def environment():
         with config.patch(size_asserts=False, alignment_asserts=False, scalar_asserts=False, split_reductions=True,
-                          max_fusion_unique_io_buffers=configuration['BUFFER_BINDINGS'], max_autotune=False,
+                          max_fusion_unique_io_buffers=configuration['BUFFER_BINDINGS'] - binding_reserve, max_autotune=False,
                           max_autotune_gemm=False, distributed_max_autotune_gemm=False,
                           benchmark_fusion=False, benchmark_combo_kernel=False, assert_indirect_indexing=False), \
                 V.set_fake_mode(mode), V.set_choices_handler(NativeChoices()), DebugContext():

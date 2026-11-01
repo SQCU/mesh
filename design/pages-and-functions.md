@@ -104,14 +104,15 @@ carries no numerical value and does not say that outstanding work completed.
 ### Freeing
 
 6. A page is reusable after its final local arithmetic read and final outgoing
-   DMA read. The compiler records those distinct uses. A naturally returning
-   downstream result may prove the remote read ended, but only if the actual
-   dependency graph carries that result back to the owner. The bridge's
-   existing final DMA-read completion can independently release a source;
-   this is local ownership bookkeeping, not a remote-consumption ACK. The
-   destination's consumers have their own lifetime. No receipt message is
-   introduced. If the owner has neither proof, it retains the page. Release
-   does not zero the page: each next producer must define the values it exposes.
+   DMA read. The compiler records those distinct uses. The bridge's final
+   DMA-read completion (`sent`) releases a source: a landing into it is posted
+   only once its channel's `sent` passes that SEND's end (mesh.h struct
+   mesh_zwoggle_entry `after`), local ownership bookkeeping, not a
+   remote-consumption ACK. No proof that a downstream arrival implies the read
+   ended stands in for it (the witness proofs, deleted: they re-derived the
+   transport's completion from the program). The destination's consumers have
+   their own lifetime. No receipt message is introduced. Release does not zero
+   the page: each next producer must define the values it exposes.
 7. A page is written again only after release. Two NFEs can be in flight
    because rows for NFE k+1 point at other pages until the rows for NFE k are
    released. Reuse must be ordered before the next **first write**, not merely
@@ -181,13 +182,10 @@ input is some function's output rows, on this Mini or on an adjacent Mini.
 
 ### Freeing
 
-7. Apply the same local-read and outgoing-DMA-read ownership proof as above.
-   A dependent's stamp is sufficient only where it already arrives by a
-   natural data dependency and proves **every** relevant use. Feed-forward
-   topology alone does not guarantee a return path. In a one-way migration
-   from rank 1 to rank 2, an unrelated later landing on rank 1 proves nothing
-   about rank 2; the source bridge can still retire rank 1's source after its
-   own DMA reads end, without learning when rank 2 finishes arithmetic.
+7. Apply the same local-read and outgoing-DMA-read ownership as above: the
+   source bridge retires rank 1's source after its own DMA reads end, without
+   learning when rank 2 finishes arithmetic, and a later landing into it waits
+   for that completion in the bridge.
 8. A page is written again only after release. Two NFEs can be in flight
    because the rows for NFE k+1 point at other pages until the rows for NFE k
    are released.
@@ -272,25 +270,15 @@ asynchronous metadata, not through numerical values or a status gate inside
 the callgraph. The same dependency rules apply whether it has one neighbour
 or many; latency and utilization must be measured for the actual graph.
 
-## Executable ownership proof
+## Ownership by completion
 
-`rdma/lifetimes.py` compiles `Event`, `Lease`, `Read` and `Transfer` declarations.
-Each read is an obligation. Existing natural events and monotone prefixes
-provide proofs; all physical outgoing fragments must be covered. It emits
-incremental retirement rules and page aliases justified by existing
-happens-before edges, without inserting waits, messages or copies. The
-allocator/bridge can observe a typed `source_done`; data functions cannot use
-it as an execution prerequisite. A partial SEND completion must not cover
-unposted source pages: presentation retention lasts until **all** compiled
-reads of that source range have been scheduled and completed.
-
-`prove_recurrent_gather` proves two-slot source, landing and relay reuse only
-for a recurrence where every rank consumes all source pieces before its next
-publication. For independent feed-forward writes or asymmetric migration,
-there is no such theorem. Unknown first-write order gets separate storage;
-unknown retirement evidence retains storage. See
-[whole-function.md](whole-function.md#typed-one-sided-lifetimes) and
-`rdma/tests/test_lifetimes.py` for the proof and counterexamples.
+A source range is reusable once its last outgoing DMA read completed, the
+bridge's `sent` prefix past that SEND's end: the landing that writes it again
+lists that requirement (mesh.h struct mesh_zwoggle_entry `after`) and the
+bridge posts none of it before. A partial SEND completion does not cover
+unposted source pages. `rdma/lifetimes.py`, an executable proof of reuse from
+natural events (`prove_recurrent_gather` for a two-slot recurrence among them),
+is deleted with the C library's witness proofs (design/zorvek.md item 2).
 
 The byte-extent revision resolves a logical page or affine row into exact byte
 intervals. A local 16-byte `mesh_dma_span {offset, bytes}` names one payload;

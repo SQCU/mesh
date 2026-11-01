@@ -1,5 +1,6 @@
 #ifndef MESH_PLAN_H
 #define MESH_PLAN_H
+#include <stddef.h>
 #include <stdint.h>
 #include "../etc/bridge/layout.h"
 #include "mesh-fabric.h"
@@ -198,8 +199,14 @@ int mesh_fabric_refine(const struct mesh_transfer *,uint32_t count,uint64_t page
    the schedule's last unit's end, in seconds from its start: every page moved as
    soon as it is ready, at its cables' rates, nothing else waited for. */
 struct mesh_transfer_production { uint64_t order; double seconds; };
+/* Actual placed-page overwrite relation. A COPY writes its landing; a REDUCE
+   writes its numerical result after receiving into separate pages. `preserve`
+   permits preparation to separate the original source generation if retaining
+   its alias would close a cycle. separate[k] reports that allocation decision. */
+struct mesh_transfer_alias { uint32_t read,write,preserve; };
 int mesh_transfer_order(const struct mesh_fabric *,uint32_t groups,const uint32_t *first,
-                        const struct mesh_transfer *,const struct mesh_transfer_production *,uint64_t page,
+                        const struct mesh_transfer *,const struct mesh_transfer_production *,
+                        const struct mesh_transfer_alias *,size_t aliases,unsigned char *separate,uint64_t page,
                         uint32_t *publish,uint32_t *consume,double *finish);
 /* struct mesh_paths (mesh-fabric.h): allocation uses uint128_t products and integer remainders. */
 int mesh_paths_check(const struct mesh_fabric *,uint32_t source,uint32_t destination,const struct mesh_paths *);
@@ -244,9 +251,7 @@ struct mesh_routed_rank {
   uint32_t count,buffers,initialized,padding;
   struct mesh_transfer *transfer;
   uint32_t *consume; /* per-step AOT consumption event order, distinct from wire order */
-  uint32_t *retired_first,*retired; /* prior local SENDs whose source read precedes this receive (a COPY's arrival, a combine's) */
   uint64_t *extent;
-  unsigned char *witnessed; /* a SEND whose arrival precedes a later landing at its rank */
   struct mesh_packet_view *views;
 };
 struct mesh_routed_program {

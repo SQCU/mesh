@@ -83,26 +83,32 @@ devices), and once the bridge has ended it makes the region *expire*, its layout
   it holds of it, or ends, and the library then unmaps it and closes its descriptor; a client with Metal buffers over
   it (its GPU work and residency set may hold those pages after they are released) ends; what a client still holds
   stays mapped and valid until it frees it or ends;
-- unlinked by the heartbeat once none of its holders lives, and its memory is then the system's. Its holders are
+- made again in place by the next bridge once none of its holders lives (its metadata laid as that bridge's layout over
+  the same object, mesh-link.c region_open), and unlinked only at a release, its memory then the system's. Its holders are
   recorded in the region, each by its pid and its process's start (so a pid the system gives again is no holder): the
   bridge (`bridge_pid` and `bridge_start`), each child a bridge spawned (the children register the region and hold it
   until their exit, which can outlast their bridge's), and each client slot's process (its owner's pid and `start`).
-  A process in its exit is none of them: XNU takes it from every lookup by pid as the exit begins, before the kernel
-  releases its device objects (metal-microbench docs/facts.md). On 10-23 the heartbeat so made a region beside port
+  A process in its exit is one of them until its exit is whole: XNU takes it from every lookup by pid as the exit
+  begins, before the kernel releases its device objects, so the holder probe reads it as a zombie is
+  (proc_pidinfo's argument 1) and it is gone at SZOMB (metal-microbench docs/facts.md; mesh-dataflow.h mesh_started).
+  At a restart the heartbeat waits for the bridge and the clients, not the children: the next bridge lays the region
+  over the same pages, and spawns each port's child only once that device's last child is gone, so a child the kernel
+  holds in its exit keeps its port alone. On 10-23 the heartbeat so made a region beside port
   children of the reverted line that never left that release (metal-microbench
   output_data/review-20261023/LIBRARY-STATES.md, section 2).
   Fields of the header, the slots and the bridge's area are only ever appended, so the heartbeat reads the holders of
   a region of any layout.
 
-A second region is never made beside a live holder of the first, because on the Mini (24 GB, a 17 GB region) GPU work on
-one region beside another's registration wired all its memory and its watchdog halted the node (2026-10-20): the
-heartbeat opens a bridge only once no expired region is named. A process that maps the region without a slot (a reader,
+A second region is never made beside the first: the node has one region object, made when none is named, and every later
+layout is fitted to that object (mesh.h mesh_layout_within) and takes its pages. Two regions wire past the node's memory
+and its watchdog halts it (metal-microbench docs/facts.md); a holder still in its exit then keeps only the region's own
+pages wired. A process that maps the region without a slot (a reader,
 or a child forked by a client without exec) is not recorded; none registers it or makes it resident.
 
 **The heartbeat** (rdma/mesh-heartbeat, the job launchd keeps alive, `io.mesh.bridge`) supervises the bridge. It holds no
 device, region or socket of the mesh. It opens the bridge (a child in a process group of its own, so the bridge serves
 on if the heartbeat ends), closes it on the operator's signal and hears its end as a kernel event (EVFILT_PROC
-NOTE_EXIT), never inferred from a delay. It is the one process that unlinks an expired region. Its signals, sent with
+NOTE_EXIT), never inferred from a delay. It is the one process that unlinks a region, at a release alone. Its signals, sent with
 `launchctl kill SIG user/$(id -u)/io.mesh.bridge`:
 - SIGHUP opens the bridge, or restarts it: the bridge closes by SIGHUP (its region kept), the heartbeat runs its own
   image again (a deploy's new binaries both, bin/mesh-user.sh), and the bridge opens and adopts the region;
@@ -113,7 +119,8 @@ NOTE_EXIT), never inferred from a delay. It is the one process that unlinks an e
 
 A bridge that ends unasked opens again 60 s later, so the mesh is never restarted more than once a minute (rubrics 6: "do
 not stop meshes hundreds of times per second, minute, or hour"); nothing else is built for a crash (rubrics position
-5). A bridge that ended finding its region expired opens again once the heartbeat has unlinked that region. A job whose
+5). A bridge that ended finding its region of another layout opens again once none of that region's holders lives, and
+makes it again in place. A job whose
 definition predates the heartbeat runs the bridge directly until the job's next load (launchd keeps a loaded
 definition): its stops keep the region as ever, and it has no release.
 
@@ -434,8 +441,8 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
 - The compiled plan gives both endpoints matching units. Each SGE names its exact byte interval with the proper
   1 GiB registration key; payload does not round to an allocation page or hardware credit frame. Parallel paths
   and relay buffers use the same descriptor. Storage ownership must hold for every physical reader.
-- A SEND unit k is available when its selected word (0 selects `ready`) reaches `base+k+1`. A receive's optional
-  word permits first write at `base`; fresh disjoint destinations need no reciprocal publication. A receive into pages
+- A SEND unit k is available when its selected word (0 selects `ready`) reaches `base+k+1`. A receive waits on no
+  word; fresh disjoint destinations need no reciprocal publication. A receive into pages
   some SEND of the program reads also waits, before its first write, for every SEND before its call on those SENDs'
   channels to complete (its `after`, mesh.h struct mesh_zwoggle_entry: each named channel's `sent` at the call's base
   there), so a page is written again only once its last outgoing DMA read ended (pages-and-functions.md, Freeing
@@ -516,10 +523,10 @@ W(t) those requests already handed to the hardware reference, the plan's window 
 - The holder gives the stream by setting bit 63 of its owner word (`MESH_STREAM_GIVEN`), and the event loop does so for
   a holder gone (its exit, the event loop's EVFILT_PROC: the death is that event, not a poll). The progress thread ends the
   holding at once at the give, or at its client's retirement: nothing more of it is posted, and its entries taken and
-  not posted are dropped. Each unit is told before it is posted (its stable physical interval in its lane's
-  ring, then its lane's count, sequentially consistent) and posted only while its holding is still its holder's (its
-  owner word not given, its client's slot its own: mesh-link.c `unit_told`). A client that gives or retires and then
-  reads the lanes' units therefore sees every unit that will ever be posted for the holding. Nothing in the bridge
+  not posted are dropped. The progress thread reads the owner word each pass (stream_turn) and posts nothing of
+  a holding once it is given; no unit is told or pinned before it is posted (design/reclamation-2026-10-30.md: the
+  holding's end is its grace period, 2548cbce). A reclaimer acquires the owner word stream_free releases, and so
+  happens-after every read of the holding's tables and words. Nothing in the bridge
   closes a holding with its peer: no message, no totals, no clock.
 - On its next pass, that pass's completions taken, the progress thread reads the stream's two lanes. Where every SEND posted has
   completed and every receive posted has landed, the holding's words are made new and the owner word goes to 0: the
@@ -589,10 +596,14 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   a child ended: the spawn backoff of 1f9be1d5 and 128d0e84 (the k-th unbidden end within 60 s of a spawn holding the
   next 60·2^(k−2) s) is deleted (4dc9e98a; the operator, 2026-10-23 01:03Z: "this is not a real feature. delete it and
   anything like it"). A child whose parent is gone halts its
-  lanes and exits MESH_PLATFORM_NS later, its own windows held; a port's child is spawned only while no other child of
-  its device lives (one of the launch before, whose parent ended unbidden; one in its exit is not seen), so a device's
-  queue pairs are one child's at a time and no make meets the device's ceiling. At the bridge's stop every child is halted before the
-  farewell, asked to end after the exit's hold, and awaited up to MESH_PLATFORM_NS. A message to a child, or a child's
+  lanes and exits MESH_PLATFORM_NS later, its own windows held; a child's end (asked, its parent's loss, or SIGTERM,
+  SIGINT or SIGHUP) flushes the lanes that hold work (moved to the error state, their completions taken, at most
+  MESH_PLATFORM_NS) before its exit, so the kernel's release finds nothing posted; a port's child is spawned only
+  while no other child of its device lives (the region's holder table, each entry its pid, device and start, a child in
+  its exit included), so a device's queue pairs are one child's at a time and no make meets the device's ceiling. At
+  the bridge's stop every child is halted before the farewell, asked to end after the exit's hold, awaited for as long
+  as its own bounds (2 MESH_PLATFORM_NS and MESH_PAUSE_NS), then ended (SIGKILL) and awaited MESH_PLATFORM_NS more: the
+  bridge ends after its children, one the kernel still holds named in the holder table. A message to a child, or a child's
   to its parent, goes whole within MESH_PLATFORM_NS of its send, and a peer that takes none by then ends the sending
   process at once, the wait named (the operator, 2026-10-23, of the blocking send: "forbidden. no wait may ever run
   longer than a deadline operand presented at the time the wait was constructed; the presumed default is 5 seconds").

@@ -81,6 +81,9 @@ class Reduction:
         return result
 
     def operator(self, group):
+        return self.binding(group).operator
+
+    def binding(self, group):
         """Register only a preparation callback, retained by the communicator."""
         from . import _stream
         from .backend import TYPES
@@ -88,7 +91,7 @@ class Reduction:
         if key not in group._operators:
             group._operators[key] = _stream.Reduction(self.lower, self.dtype, self.element_shape, self.flags,
                                                       TYPES[self.dtype], group.handle)
-        return group._operators[key].operator
+        return group._operators[key]
 
     def lower(self, sources, destination, schedule, effects):
         """Bind one resolved collective cell into the existing recorder."""

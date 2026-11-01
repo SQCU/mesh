@@ -84,6 +84,33 @@ def declaration(kind, operands, parameters, configuration):
     definitions, indices = {}, {}
     threads = geometry['DRAW_THREADS']
     shift = geometry['ACCESS_WRITE_SHIFT']
+    from mesh_relation import Algebra
+    from .operand import layout_configuration
+    algebra = Algebra()
+    def dispatch(blocks, bindings, modes):
+        accesses = []
+        for slot, (view, mode) in enumerate(zip(bindings, modes, strict=True)):
+            role = view['name']
+            columns = math.prod(view['layout'].shape) // rows
+            def equations(g, i):
+                selected_row = f'floor({g[0]}/{blocks})'
+                result = [f'{selected_row} * {columns} <= {i[0]} < ({selected_row} + 1) * {columns}']
+                if role == 'z':
+                    span = -(-width // blocks)
+                    result.append(f'({g[0]} mod {blocks}) * {span} <= {i[0]} mod {width} < (({g[0]} mod {blocks}) + 1) * {span}')
+                return result
+            relation = algebra.map((rows * blocks,), (rows * columns,), equations)
+            if role == 'draw/parts':
+                relation = algebra.map((rows * blocks,), (2 * rows * blocks,),
+                    lambda g, i: [f'({i[0]} = {g[0]} or {i[0]} = {rows * blocks} + {g[0]})'])
+            if maps is not None and role in maps:
+                columns = parameters['head'] + parameters['tail'] if kind != 'draw' else 1
+                relation = algebra.map((rows * blocks,), (rows * columns,),
+                    lambda g, i: [f'floor({g[0]}/{blocks}) * {columns} <= {i[0]} < (floor({g[0]}/{blocks}) + 1) * {columns}'])
+                relation = relation.then(algebra.layout(layout_configuration(maps[role])))
+            accesses.extend(dict(side=side, slot=slot, group_relation=relation)
+                            for side, flag in (('reads', 1), ('writes', 2)) if mode & flag)
+        return tuple(accesses)
     if kind == 'draw':
         blocks = max(1, min(geometry['DRAW_MAX_BLOCKS'], width // geometry['DRAW_COLUMNS_PER_BLOCK']))
         parts = commands.temporary('draw/parts', (2 * rows * blocks,), torch.float32, requirements=('contiguous',))
@@ -94,12 +121,13 @@ def declaration(kind, operands, parameters, configuration):
                            'MESH_DRAW_RESULTS': math.prod(operands['ids']['shape']),
                            'MESH_DRAW_SELECTED': int(not complete['ids'])}
         function, instantiated = instance('mesh_draw_rows', threads)
-        commands.shader(SOURCE + '\n', function,
-            [commands.view(role) for role in ('z', 'keys', 'cutoff', 'ids')] + [parts, arrivals],
+        bindings = [commands.view(role) for role in ('z', 'keys', 'cutoff', 'ids')] + [parts, arrivals]
+        commands.shader(SOURCE + '\n', function, bindings,
             constants={6: struct.pack('4I', width, parameters['seed'] & 0xffffffff,
                                      parameters['first'] & 0xffffffff, blocks)},
             definitions=definitions, indices=indices, instance=instantiated + '\n',
-            grid=(blocks, rows, 1), threadgroup=(threads, 1, 1), access=7 | (56 << shift))
+            grid=(blocks, rows, 1), threadgroup=(threads, 1, 1), access=7 | (56 << shift),
+            dispatch=dispatch(blocks, bindings, [1, 1, 1, 2, 2, 2]))
     else:
         if maps is not None:
             for slot, role in enumerate(('ids', 'kept', 'log_z'), 8):
@@ -108,10 +136,12 @@ def declaration(kind, operands, parameters, configuration):
                 definitions[f'MESH_RETAIN_{role.upper()}_COUNT'] = math.prod(operands[role]['shape'])
                 definitions[f'MESH_RETAIN_{role.upper()}_SELECTED'] = int(not complete[role])
         function, instantiated = instance('mesh_retain_rows', threads, parameters['head'], parameters['tail'])
-        commands.shader(SOURCE + '\n', function, [commands.view(role) for role in ('z', 'keys', 'ids', 'kept', 'log_z')],
+        bindings = [commands.view(role) for role in ('z', 'keys', 'ids', 'kept', 'log_z')]
+        commands.shader(SOURCE + '\n', function, bindings,
             constants={5: struct.pack('2I', width, parameters['seed'] & 0xffffffff)},
             definitions=definitions, indices=indices, instance=instantiated + '\n',
-            grid=(1, rows, 1), threadgroup=(threads, 1, 1), access=3 | (28 << shift))
+            grid=(1, rows, 1), threadgroup=(threads, 1, 1), access=3 | (28 << shift),
+            dispatch=dispatch(1, bindings, [1, 1, 2, 2, 2]))
     return commands.declaration()
 
 

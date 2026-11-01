@@ -11,8 +11,6 @@ struct routed_piece {
   struct mesh_transfer transfer;
   uint32_t rank,local,transaction,round,hop,consume;
   uint64_t offset;
-  uint32_t *retired,retires;
-  unsigned char witnessed;
   struct mesh_packet_view view;
 };
 
@@ -48,7 +46,7 @@ static int number_pieces(struct routed_piece *pieces,size_t count){
   return 0;
 }
 
-/* Restore streaming refinement before proving lifetimes. Split both endpoint
+/* Restore streaming refinement before ordering. Split both endpoint
    views together, so each publication/arrival event still names one exact byte
    interval. Repeat until upstream cuts have propagated through all relays.
    Each change adds an existing value boundary, hence the finite page graph
@@ -125,203 +123,6 @@ static int refine_pieces(struct routed_piece **storage,size_t *length,uint64_t p
   return status;
 }
 
-struct routed_edge { uint32_t before,after; };
-static int edge_order(const void *a,const void *b){
-  const struct routed_edge *x=a,*y=b;
-  if(x->before!=y->before)return x->before<y->before?-1:1;
-  return (x->after>y->after)-(x->after<y->after);
-}
-
-/* A COPY can overwrite an old SEND generation when its arrival is a causal
-   witness that the NIC has already read that generation. Keep first-publication,
-   full-arrival and local-consumption events separate: forwarding can start before
-   a whole COPY is consumed. Only strict data edges, never optional publication
-   guards, establish this lifetime certificate. */
-static int proof_edge(struct routed_edge **edges,size_t *used,size_t *room,uint32_t before,uint32_t after){
-  if(*used==*room){
-    const size_t next=*room?*room*2:64;
-    if(next<*room || next>SIZE_MAX/sizeof **edges)return EOVERFLOW;
-    struct routed_edge *grown=realloc(*edges,next*sizeof **edges);
-    if(!grown)return ENOMEM;
-    *edges=grown;*room=next;
-  }
-  /* Reverse edges: queries walk from an incoming first publication to its
-     strict causal ancestors, looking for a prior outgoing full arrival. */
-  (*edges)[(*used)++]=(struct routed_edge){after,before};
-  return 0;
-}
-
-struct byte_witness {
-  uint32_t transaction,event,point;
-  uint64_t first,last;
-};
-static int byte_witness_add(struct byte_witness **states,size_t *count,size_t *room,struct byte_witness next){
-  for(size_t k=0;k<*count;k++){
-    const struct byte_witness *s=*states+k;
-    if(s->transaction==next.transaction && s->event==next.event && s->point==next.point &&
-       s->first==next.first && s->last==next.last)return 0;
-  }
-  if(*count==*room){
-    const size_t n=*room?2**room:32;
-    if(n<*room || n>SIZE_MAX/sizeof **states)return EOVERFLOW;
-    struct byte_witness *more=realloc(*states,n*sizeof **states);
-    if(!more)return ENOMEM;
-    *states=more;*room=n;
-  }
-  (*states)[(*count)++]=next;return 0;
-}
-static int pieces_meet(const struct mesh_step *a,const struct mesh_step *b){
-  return a->buffer==b->buffer && a->first<b->first+b->piece.elements && b->first<a->first+a->piece.elements;
-}
-
-/* Whole-entry arrival is stronger than a streaming overwrite needs. For each
-   byte x in the overwritten intersection, walk the strict ancestry of that
-   incoming byte's publication. Point states preserve x's affine byte offset
-   through identity relays. A consumed predecessor instead establishes a whole
-   interval before every x. Only arrival of the old outgoing byte is a witness;
-   publication alone never retires a source. This is a compiler proof, not an
-   extra execution dependency or a wait for an entire forwarding entry. */
-static int byte_retired(const struct routed_piece *pieces,const size_t *send,const size_t *land,
-                        size_t incoming,size_t outgoing,uint64_t page,int *proven){
-  const struct mesh_step *copy=&pieces[incoming].transfer.step,*old=&pieces[outgoing].transfer.step;
-  const uint64_t cfirst=copy->first*copy->piece.element_bytes,ofirst=old->first*old->piece.element_bytes;
-  const uint64_t clast=cfirst+copy->piece.elements*copy->piece.element_bytes;
-  const uint64_t olast=ofirst+old->piece.elements*old->piece.element_bytes;
-  const uint64_t begin=cfirst>ofirst?cfirst:ofirst,end=clast<olast?clast:olast;
-  struct byte_witness *states=NULL,*covered=NULL;size_t count=0,room=0,covers=0,cover_room=0;
-  *proven=0;
-  int status=byte_witness_add(&states,&count,&room,(struct byte_witness){copy->round,0,1,begin-cfirst,end-cfirst});
-  for(size_t at=0;at<count && !status && !*proven;at++){
-    const struct byte_witness state=states[at];
-    const size_t k=state.event==0?send[state.transaction]:land[state.transaction];
-    const struct mesh_step *s=&pieces[k].transfer.step;
-    if(state.event==1){
-      if(state.transaction==old->round){
-        if(state.point){
-          /* The same byte, not merely another byte in the same transaction. */
-          if(state.first==begin-ofirst)*proven=1;
-        }else{
-          const uint64_t lo=ofirst+state.first>begin?ofirst+state.first:begin;
-          const uint64_t hi=ofirst+state.last<end?ofirst+state.last:end;
-          if(lo<hi)status=byte_witness_add(&covered,&covers,&cover_room,(struct byte_witness){0,0,0,lo,hi});
-        }
-      }
-      if(!status)status=byte_witness_add(&states,&count,&room,(struct byte_witness){state.transaction,0,state.point,state.first,state.last});
-      continue;
-    }
-    size_t start=k;while(start && pieces[start-1].rank==pieces[k].rank)start--;
-    size_t latest=k;
-    for(size_t j=start;j<k;j++)if(pieces[j].transfer.step.op!=MESH_STEP_SEND && pieces_meet(&pieces[j].transfer.step,s))latest=j;
-    const struct mesh_step *a=&pieces[latest].transfer.step;
-    const int forwarding=state.event==0 && latest<k && a->op==MESH_STEP_COPY &&
-      a->piece.element_bytes==s->piece.element_bytes && a->first<=s->first &&
-      s->first+s->piece.elements<=a->first+a->piece.elements &&
-      (s->first-a->first)*s->piece.element_bytes%page==0;
-    if(forwarding){
-      const uint64_t shift=(s->first-a->first)*s->piece.element_bytes;
-      status=byte_witness_add(&states,&count,&room,(struct byte_witness){a->round,1,state.point,shift+state.first,shift+state.last});
-    }else{
-      if(state.event==2)status=byte_witness_add(&states,&count,&room,
-        (struct byte_witness){state.transaction,1,0,0,s->piece.elements*s->piece.element_bytes});
-      for(size_t j=start;j<k && !status;j++){
-        a=&pieces[j].transfer.step;
-        if(a->op!=MESH_STEP_SEND && pieces_meet(a,s))status=byte_witness_add(&states,&count,&room,
-          (struct byte_witness){a->round,2,0,0,a->piece.elements*a->piece.element_bytes});
-      }
-    }
-  }
-  /* Different complete predecessor slices may jointly certify the overlap. */
-  uint64_t frontier=begin;
-  for(size_t pass=0;pass<covers && frontier<end;pass++){
-    const uint64_t prior=frontier;
-    for(size_t k=0;k<covers;k++)if(covered[k].first<=frontier && covered[k].last>frontier)frontier=covered[k].last;
-    if(frontier==prior)break;
-  }
-  if(frontier==end)*proven=1;
-  free(states);free(covered);return status;
-}
-/* edge k's event entered (mesh-graph.h's edge heads, over the edges' compressed rows) */
-static uint32_t routed_after(const void *context,size_t k){ return ((const struct routed_edge *)context)[k].after; }
-static int retirement_proofs(struct routed_piece *pieces,size_t count,uint64_t page){
-  if(count/2>UINT32_MAX/3)return EOVERFLOW;
-  const uint32_t events=(uint32_t)(count/2)*3;
-  struct routed_edge *edges=NULL;size_t used=0,room=0;
-  int status=0;
-  for(size_t begin=0,k=0;k<count && !status;k++){
-    if(k && pieces[k].rank!=pieces[k-1].rank)begin=k;
-    const struct mesh_step *s=&pieces[k].transfer.step;
-    const uint32_t event=3*s->round;
-    if(s->op!=MESH_STEP_SEND){
-      if((status=proof_edge(&edges,&used,&room,event,event+1)) ||
-         (status=proof_edge(&edges,&used,&room,event+1,event+2)))break;
-    }
-    size_t latest=k;
-    for(size_t j=begin;j<k;j++){
-      const struct mesh_step *a=&pieces[j].transfer.step;
-      if(a->op!=MESH_STEP_SEND && a->buffer==s->buffer &&
-         a->first<s->first+s->piece.elements && s->first<a->first+a->piece.elements)latest=j;
-    }
-    const struct mesh_step *a=&pieces[latest].transfer.step;
-    const int forwarding=s->op==MESH_STEP_SEND && latest<k && a->op==MESH_STEP_COPY &&
-      a->first<=s->first && s->first+s->piece.elements<=a->first+a->piece.elements &&
-      (s->first-a->first)*s->piece.element_bytes%page==0;
-    if(forwarding){
-      status=proof_edge(&edges,&used,&room,3*a->round,event);
-      if(!status && a->first==s->first && a->piece.elements==s->piece.elements)
-        status=proof_edge(&edges,&used,&room,3*a->round+1,event+1);
-    }else for(size_t j=begin;j<k && !status;j++){
-      a=&pieces[j].transfer.step;
-      if(a->op==MESH_STEP_SEND || a->buffer!=s->buffer ||
-         a->first>=s->first+s->piece.elements || s->first>=a->first+a->piece.elements)continue;
-      status=proof_edge(&edges,&used,&room,3*a->round+2,event+(s->op!=MESH_STEP_SEND?2:0));
-    }
-  }
-  size_t *first=calloc((size_t)events+1,sizeof *first);
-  uint32_t *seen=calloc((size_t)events+1,sizeof *seen),*stack=malloc(((size_t)events+1)*sizeof *stack);
-  size_t *send=malloc((count/2+1)*sizeof *send),*land=malloc((count/2+1)*sizeof *land);
-  if(!first || !seen || !stack || !send || !land)status=ENOMEM;
-  if(!status){
-    for(size_t k=0;k<count;k++)(pieces[k].transfer.step.op==MESH_STEP_SEND?send:land)[pieces[k].transfer.step.round]=k;
-    if(used)qsort(edges,used,sizeof *edges,edge_order);
-    for(size_t k=0;k<used;k++)first[edges[k].before+1]++;
-    for(uint32_t k=0;k<events;k++)first[k+1]+=first[k];
-    for(size_t begin=0,k=0;k<count && !status;k++){
-      if(k && pieces[k].rank!=pieces[k-1].rank)begin=k;
-      const struct mesh_step *s=&pieces[k].transfer.step;
-      if(s->op==MESH_STEP_SEND)continue; /* a COPY landing in place, or a combine into its buffer */
-      const uint32_t stamp=(uint32_t)k+1,root=3*s->round;
-      stack[0]=root;seen[root]=stamp;
-      mesh_graph_mark(first,routed_after,edges,seen,stamp,stack,1);
-      for(size_t j=begin;j<k;j++){
-        const struct mesh_step *a=&pieces[j].transfer.step;
-        if(a->op!=MESH_STEP_SEND || !pieces_meet(a,s))continue;
-        int proven=seen[3*a->round+1]==stamp;
-        if(!proven)status=byte_retired(pieces,send,land,k,j,page,&proven);
-        if(status)break;
-        if(!proven)continue;
-        uint32_t *more=realloc(pieces[k].retired,((size_t)pieces[k].retires+1)*sizeof *more);
-        if(!more){status=ENOMEM;break;}
-        pieces[k].retired=more;more[pieces[k].retires++]=(uint32_t)(j-begin);
-      }
-    }
-    /* A SEND is witnessed where its arrival is a strict causal ancestor of a
-       later landing at its own rank: that landing proves the peer read it. */
-    for(size_t begin=0,end=0;!status && begin<count;begin=end){
-      while(end<count && pieces[end].rank==pieces[begin].rank)end++;
-      const uint32_t stamp=(uint32_t)(count+1+begin);
-      size_t pending=0;
-      for(size_t k=begin;k<end;k++){
-        const uint32_t root=3*pieces[k].transfer.step.round;
-        if(pieces[k].transfer.step.op!=MESH_STEP_SEND && seen[root]!=stamp){seen[root]=stamp;stack[pending++]=root;}
-      }
-      mesh_graph_mark(first,routed_after,edges,seen,stamp,stack,pending);
-      for(size_t k=begin;k<end;k++)
-        pieces[k].witnessed=pieces[k].transfer.step.op==MESH_STEP_SEND && seen[3*pieces[k].transfer.step.round+1]==stamp;
-    }
-  }
-  free(edges);free(first);free(seen);free(stack);free(send);free(land);return status;
-}
-
 /* Publications and consumptions are distinct events: publishing a SEND does
    not complete its remote arrival or retire its source. Physical wire lists
    follow publication order. Each local consumer follows consumption order,
@@ -351,28 +152,54 @@ static int order_edge(struct mesh_graph_follow **edges,size_t *used,size_t *room
   return 0;
 }
 
-/* Each transfer a move of page units on its directed cable (a receive or combine an event on none), each follow a
-   unit's real wait: a pair's receive unit on its SEND unit, a forward's or a combine's unit on the landing unit it
-   reads, a combine on the publication of the bytes it overwrites. mesh_graph_schedule fills every cable from the
-   units ready on it, highest first, so a relay offsets its pages by its hops and takes no cable's time from it. */
+static uint32_t order_head(const void *context,size_t k) {
+  return ((const uint32_t *)context)[k];
+}
+/* Adding before -> after closes a cycle precisely when after already reaches
+   before. Use the common graph traversal over preparation's retained edges. */
+static int order_closes(uint32_t count,const struct mesh_graph_follow *edges,size_t used,
+                        uint32_t before,uint32_t after,int *closes) {
+  size_t *first=calloc((size_t)count+1,sizeof *first),*cursor=malloc(((size_t)count+1)*sizeof *cursor);
+  uint32_t *head=malloc((used+1)*sizeof *head),*seen=calloc((size_t)count+1,sizeof *seen),
+           *stack=malloc(((size_t)count+1)*sizeof *stack);
+  int status=first&&cursor&&head&&seen&&stack?0:ENOMEM;
+  if(!status) {
+    for(size_t k=0;k<used;k++)first[edges[k].before+1]++;
+    for(uint32_t k=0;k<count;k++)first[k+1]+=first[k];
+    memcpy(cursor,first,((size_t)count+1)*sizeof *cursor);
+    for(size_t k=0;k<used;k++)head[cursor[edges[k].before]++]=edges[k].after;
+    stack[0]=after;seen[after]=1;
+    mesh_graph_mark(first,order_head,head,seen,1,stack,1);
+    *closes=seen[before]!=0;
+  }
+  free(first);free(cursor);free(head);free(seen);free(stack);return status;
+}
+
+/* Wire order consumes value dependencies and actual placed-page aliases.
+   Logical buffer names alone never imply a source/result physical alias.
+   A COPY overwrite precedes its filling SEND; a REDUCE overwrite constrains
+   only its arithmetic consumption, since incoming values use distinct pages. */
 int mesh_transfer_order(const struct mesh_fabric *fabric,uint32_t groups,const uint32_t *first,
                         const struct mesh_transfer *transfer,const struct mesh_transfer_production *production,
-                        uint64_t page,uint32_t *publish,uint32_t *consume,double *finish){
+                        const struct mesh_transfer_alias *alias,size_t aliases,unsigned char *separate,uint64_t page,uint32_t *publish,uint32_t *consume,double *finish){
   if(mesh_fabric_check(fabric)||!first||!page||first[0])return EINVAL;
   const size_t rows=(size_t)groups*fabric->nodes;
   for(size_t row=0;row<rows;row++)if(first[row]>first[row+1])return EINVAL;
   const uint32_t count=first[rows],arcs=2*fabric->cables;
   if(fabric->cables>UINT32_MAX/2)return EOVERFLOW;
   if(count&&(!transfer||!publish||!consume))return EINVAL;
+  if(aliases&&(!alias||!separate))return EINVAL;
+  if(separate)memset(separate,0,aliases);
   struct mesh_graph_move *moves=calloc((size_t)count+1,sizeof *moves);
   struct transfer_endpoint *sent=malloc(((size_t)count+1)*sizeof *sent),
                            *received=malloc(((size_t)count+1)*sizeof *received);
   double *capacity=malloc(((size_t)arcs+1)*sizeof *capacity);
   uint32_t *order=malloc(((size_t)count+1)*sizeof *order);
+  uint32_t *filled=malloc(((size_t)count+1)*sizeof *filled);
   struct mesh_graph_follow *edges=NULL;
   size_t used=0,room=0;
   uint32_t sends=0,receives=0;
-  int status=moves&&sent&&received&&capacity&&order?0:ENOMEM;
+  int status=moves&&sent&&received&&capacity&&order&&filled?0:ENOMEM;
   for(uint32_t cable=0;!status&&cable<fabric->cables;cable++)
     capacity[2*cable]=capacity[2*cable+1]=fabric->cable[cable].bandwidth/8.0;
   for(size_t row=0;!status&&row<rows;row++){
@@ -403,11 +230,8 @@ int mesh_transfer_order(const struct mesh_fabric *fabric,uint32_t groups,const u
         const uint64_t a=prior->first*prior->piece.element_bytes,b=s->first*s->piece.element_bytes,
                        an=mesh_step_bytes(prior),bn=mesh_step_bytes(s);
         if(a>=b+bn||b>=a+an)continue;
-        if(prior->op==MESH_STEP_SEND){
-          /* A combine consumes the old local value after its publication,
-             without making an exchange wait for both opposite full arrivals. */
-          if(s->op==MESH_STEP_REDUCE)status=order_edge(&edges,&used,&room,j,k,0,MESH_GRAPH_STARTED);
-        }else if(a<=b&&b+bn<=a+an&&(b-a)%page==0){
+        if(prior->op==MESH_STEP_SEND)continue;
+        if(a<=b&&b+bn<=a+an&&(b-a)%page==0){
           if((b-a)/page>UINT32_MAX){status=EOVERFLOW;break;}
           status=order_edge(&edges,&used,&room,j,k,(uint32_t)((b-a)/page),MESH_GRAPH_STREAMED);
         }else status=order_edge(&edges,&used,&room,j,k,0,MESH_GRAPH_COMPLETE);
@@ -422,6 +246,20 @@ int mesh_transfer_order(const struct mesh_fabric *fabric,uint32_t groups,const u
       a.entry=b.entry=0;
       if(endpoint_order(&a,&b)){status=EPROTO;break;}
       status=order_edge(&edges,&used,&room,sent[k].entry,received[k].entry,0,MESH_GRAPH_STREAMED);
+      filled[received[k].entry]=sent[k].entry;
+    }
+    /* Required versions first; then choose original-source generations only
+       for actual aliases whose reuse would introduce a directed cycle. */
+    for(unsigned pass=0;pass<2&&!status;pass++)for(size_t e=0;e<aliases&&!status;e++) {
+      const struct mesh_transfer_alias a=alias[e];
+      if(!!a.preserve!=pass)continue;
+      if(a.read>=count||a.write>=count||transfer[a.read].step.op!=MESH_STEP_SEND||
+         transfer[a.write].step.op==MESH_STEP_SEND){status=EINVAL;break;}
+      const uint32_t after=transfer[a.write].step.op==MESH_STEP_COPY?filled[a.write]:a.write;
+      int closes=0;
+      if(a.preserve)status=order_closes(count,edges,used,a.read,after,&closes);
+      if(!status&&closes)separate[e]=1;
+      else if(!status)status=order_edge(&edges,&used,&room,a.read,after,0,MESH_GRAPH_COMPLETE);
     }
   }
   if(!status)status=mesh_graph_schedule(moves,count,arcs,edges,used,order,finish);
@@ -430,7 +268,7 @@ int mesh_transfer_order(const struct mesh_fabric *fabric,uint32_t groups,const u
     publish[send]=publish[receive]=order[send];
     consume[send]=consume[receive]=order[receive];
   }
-  free(moves);free(sent);free(received);free(capacity);free(order);free(edges);return status;
+  free(moves);free(sent);free(received);free(capacity);free(order);free(edges);free(filled);return status;
 }
 
 static int dependency_order(const struct mesh_fabric *fabric,struct routed_piece *pieces,size_t count,uint64_t page){
@@ -442,7 +280,7 @@ static int dependency_order(const struct mesh_fabric *fabric,struct routed_piece
   if(!status){
     for(size_t k=0;k<count;k++){first[pieces[k].rank+1]++;transfers[k]=pieces[k].transfer;}
     for(uint32_t rank=0;rank<fabric->nodes;rank++)first[rank+1]+=first[rank];
-    status=mesh_transfer_order(fabric,1,first,transfers,NULL,page,publication,consumption,NULL);
+    status=mesh_transfer_order(fabric,1,first,transfers,NULL,NULL,0,NULL,page,publication,consumption,NULL);
     if(!status)for(size_t k=0;k<count;k++){
       pieces[k].transfer.step.round=publication[k];pieces[k].consume=consumption[k];
     }
@@ -454,7 +292,6 @@ void mesh_routed_free(struct mesh_routed_program *p){
   if(!p)return;
   for(uint32_t r=0;p->rank && r<p->nodes;r++){
     free(p->rank[r].transfer);free(p->rank[r].consume);free(p->rank[r].extent);
-    free(p->rank[r].retired_first);free(p->rank[r].retired);free(p->rank[r].witnessed);
     free(p->rank[r].views);
   }
   free(p->rank);free(p->demand);free(p->route_units);*p=(struct mesh_routed_program){0};
@@ -544,7 +381,7 @@ int mesh_routed_compile(const struct mesh_fabric *f,const struct mesh_paths *pat
         if(r==source){t.step.buffer=send->buffer;t.step.first+=send->first;local=k-first[r];}
         else if(r==destination){t.step.op=land->op;t.step.buffer=land->buffer;t.step.first+=land->first;local=receive-first[r];}
         else t.step.buffer=relay[r];
-        pieces[count++]=(struct routed_piece){t,r,local,transaction,send->round,hop,0,offset,NULL,0,0,
+        pieces[count++]=(struct routed_piece){t,r,local,transaction,send->round,hop,0,offset,
           {(offset+(coordinates==MESH_PACKET_OPERAND?send->first:0))*send->piece.element_bytes,
            coordinates==MESH_PACKET_OPERAND?0:transaction,0}};
         made.rank[r].count++;
@@ -560,8 +397,7 @@ int mesh_routed_compile(const struct mesh_fabric *f,const struct mesh_paths *pat
   if(!status){
     for(uint32_t r=0;r<N;r++)made.rank[r].count=0;
     for(size_t k=0;k<count;k++)made.rank[pieces[k].rank].count++;
-    status=retirement_proofs(pieces,count,page);
-    if(!status)status=dependency_order(f,pieces,count,page);
+    status=dependency_order(f,pieces,count,page);
   }
   if(!status){
     size_t at=0;
@@ -569,25 +405,13 @@ int mesh_routed_compile(const struct mesh_fabric *f,const struct mesh_paths *pat
       struct mesh_routed_rank *rank=made.rank+r;
       rank->transfer=calloc((size_t)rank->count+1,sizeof *rank->transfer);
       rank->consume=calloc((size_t)rank->count+1,sizeof *rank->consume);
-      rank->retired_first=calloc((size_t)rank->count+1,sizeof *rank->retired_first);
-      rank->witnessed=calloc((size_t)rank->count+1,1);
       rank->views=calloc((size_t)rank->count+1,sizeof *rank->views);
-      size_t total=0;for(uint32_t k=0;k<rank->count;k++)total+=pieces[at+k].retires;
-      if(total>UINT32_MAX){status=EOVERFLOW;break;}
-      rank->retired=malloc((total+1)*sizeof *rank->retired);
-      if(!rank->transfer || !rank->consume || !rank->retired_first || !rank->retired || !rank->witnessed || !rank->views){status=ENOMEM;break;}
-      uint32_t retired=0;
+      if(!rank->transfer || !rank->consume || !rank->views){status=ENOMEM;break;}
       for(uint32_t k=0;k<rank->count;k++,at++){
-        rank->transfer[k]=pieces[at].transfer;rank->consume[k]=pieces[at].consume;rank->witnessed[k]=pieces[at].witnessed;
-        rank->views[k]=pieces[at].view;
-        rank->retired_first[k]=retired;
-        if(pieces[at].retires)memcpy(rank->retired+retired,pieces[at].retired,pieces[at].retires*sizeof *rank->retired);
-        retired+=pieces[at].retires;
+        rank->transfer[k]=pieces[at].transfer;rank->consume[k]=pieces[at].consume;rank->views[k]=pieces[at].view;
       }
-      rank->retired_first[rank->count]=retired;
     }
   }
-  for(size_t k=0;k<count;k++)free(pieces[k].retired);
   free(pieces);free(matched);free(relay);
   made.domains=coordinates==MESH_PACKET_OPERAND?!!transaction:transaction;
   if(status)mesh_routed_free(&made);else *out=made;

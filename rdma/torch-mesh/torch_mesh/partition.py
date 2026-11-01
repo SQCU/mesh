@@ -214,22 +214,6 @@ def _linear_kernel(*arguments):
     return _GATHER_KERNELS[name]
 
 
-def _gather_paths(fabric):
-    """Node paths for the realized physical fabric, retaining parallel fragments."""
-    routes = {}
-    for pair, paths in fabric.paths.items():
-        routes[pair] = []
-        for path in paths:
-            nodes = [pair[0]]
-            for cable in path:
-                a, b = fabric.cables[cable]['nodes']
-                if nodes[-1] not in (a, b):
-                    raise ValueError('gather lifetime path is disconnected from its physical cable')
-                nodes.append(b if nodes[-1] == a else a)
-            routes[pair].append(tuple(nodes))
-    return routes
-
-
 def _fused_form(x, dim, sizes, group_name, channels):
     """A chain crossing's prepared physical declarations: the communicator;
     this rank and its peers; the partial publication's kernel and grid; the reduction's (sum_land, and
@@ -237,7 +221,6 @@ def _fused_form(x, dim, sizes, group_name, channels):
     and the output's shape; the publication's arrival count; the separate landing-prefix
     observer and physical channel extent."""
     from . import _stream
-    from lifetimes import prove_recurrent_gather
     group = dist.distributed_c10d._resolve_process_group(group_name)
     n, rank = len(sizes), group.rank()
     operand = tuple(x.shape)
@@ -246,11 +229,6 @@ def _fused_form(x, dim, sizes, group_name, channels):
     row, half = math.prod(operand[:dim] + operand[dim + 1:]), x.element_size() // copy_bytes
     counts = [s * row for s in sizes]
     starts = list(itertools.accumulate(counts, initial=0))
-    # Positive contributions provide the returning dependency that proves the
-    # two-slot recurrence. Empty participants have no such publication; native
-    # realization must retain fresh generations for those shapes instead.
-    if all(counts):
-        prove_recurrent_gather(n, _gather_paths(group.fabric))
     words = ([math.prod(operand) * half, math.prod(operand[:dim]), math.prod(operand[dim + 1:]) * half, rank, 0] + list(sizes) +
              starts[:-1])
     shape = operand

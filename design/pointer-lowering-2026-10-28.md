@@ -176,7 +176,7 @@ Needs storage identity and element offset. The lease is known at allocation.
 15. nccl-mesh.c `in_region` 2105-2109
 16. nccl-mesh.c `operands_check` 2124-2140
 17. nccl-mesh.c `place_group` 3112-3121
-18. nccl-mesh.c `bind_retirements` 3164-3185: overlap test on addresses
+18. nccl-mesh.c `bind_retirements` 3164-3185: overlap test on addresses (deleted; landing_lists' meets)
 19. nccl-mesh.c `present_group` 3253-3258
 20. nccl-mesh.c `present_group` 3293-3296: ready word address
 21. nccl-mesh.c `declared` 4891-4900: binding address → phase

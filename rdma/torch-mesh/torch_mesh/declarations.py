@@ -1163,6 +1163,8 @@ def _local_assignment(prepared, arguments, page_effects=None):
                 values[key] = dict(owners={None: owner})
                 requests[key] = owner
     for section in prepared['sections']:
+        if not section['boundaries']:
+            section['retained'].reserve_bindings(1 if page_effects is not None and page_effects['rows'] else 0)
         outputs = {key: algebra.selection(requests[key]['selection'])
                    for key, value in _source_leaves(section['outputs']) if isinstance(value, torch.Tensor)}
         if section['boundaries']:

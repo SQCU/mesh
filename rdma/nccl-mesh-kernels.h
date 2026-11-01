@@ -108,9 +108,16 @@ static NSString *const KERNELS =
   "#define HEAD(name) static void body_##name(PARAMS); kernel void name(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant mesh_args &p [[buffer(2)]], device uchar *a [[buffer(3)]], device uchar *vb [[buffer(4)]], device ulong *progress [[buffer(5)]], uint i [[thread_position_in_grid]], uint g [[threads_per_grid]], uint l [[thread_position_in_threadgroup]], uint t [[threads_per_threadgroup]]) { threadgroup ulong tg[4]; body_##name(d, s, p, a, vb, progress, i, g, l, t, tg); } static void body_##name(PARAMS)\n"
   "#define GROUP(name) static void body_##name(PARAMS); kernel void name(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant mesh_args &p [[buffer(2)]], device uchar *a [[buffer(3)]], device uchar *vb [[buffer(4)]], device ulong *progress [[buffer(5)]], uint i [[thread_position_in_threadgroup]], uint g [[threads_per_threadgroup]]) { threadgroup ulong tg[4]; body_##name(d, s, p, a, vb, progress, i, g, i, g, tg); } static void body_##name(PARAMS)\n"
   "#define LOOP for (ulong k = i; k < p.n; k += g)\n"
+  "template<typename W,bool Land,bool Observe> static void copy_body(PARAMS) { ENTER(i == 0) "
+  "if constexpr(Observe) { if(l == 0) mesh_step_observe(a + p.aux,p.scalar,vb,p.polls,p.channel,p.at); "
+  "threadgroup_barrier(mem_flags::mem_device); atomic_thread_fence(mem_flags::mem_device,memory_order_seq_cst,static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); } "
+  "volatile coherent(system) device W *x=(volatile coherent(system) device W *)(d+p.dst); "
+  "LOOP { if constexpr(Land) x[k]=mesh_step_read<W>(s+p.src,k); else x[k]=((device const W *)(s+p.src))[k]; } }\n"
   "#define COPY(Z, W) "
-  "HEAD(copy_plain_##Z) { ENTER(i == 0) volatile coherent(system) device W *x = (volatile coherent(system) device W *)(d + p.dst); device const W *y = (device const W *)(s + p.src); LOOP x[k] = y[k]; } "
-  "HEAD(copy_land_##Z) { ENTER(i == 0) volatile coherent(system) device W *x = (volatile coherent(system) device W *)(d + p.dst); volatile coherent(system) device const W *y = (volatile coherent(system) device const W *)(s + p.src); LOOP x[k] = mesh_payload(y + k); }\n"
+  "HEAD(copy_plain_##Z) { copy_body<W,false,false>(d,s,p,a,vb,progress,i,g,l,t,tg); } "
+  "HEAD(copy_land_##Z) { copy_body<W,true,false>(d,s,p,a,vb,progress,i,g,l,t,tg); } "
+  "HEAD(copy_ready_plain_##Z) { copy_body<W,false,true>(d,s,p,a,vb,progress,i,g,l,t,tg); } "
+  "HEAD(copy_ready_land_##Z) { copy_body<W,true,true>(d,s,p,a,vb,progress,i,g,l,t,tg); }\n"
   "COPY(4, uint)\n"
   "COPY(1, uchar)\n"
   "template <typename T> T op_int(T a, T b, uint op) { return op == 0 ? T(ulong(a) + ulong(b)) : op == 1 ? T(ulong(a) * ulong(b)) : (op == 2 ? b > a : b < a) ? b : a; }\n"
@@ -126,14 +133,17 @@ static NSString *const KERNELS =
   "for (uint k = 1; k < K; k++) merge_row<true>(out + row, out + row, (volatile coherent(system) device const float *)in[3 * k] + row, p.op);\n"
   "#define ZELLOTH(name, T, OP) ZELLOTH_OF(name##_sum, T, OP, ZFOLD_OP, 0) ZELLOTH_OF(name##_prod, T, OP, ZFOLD_OP, 1) ZELLOTH_OF(name##_max, T, OP, ZFOLD_OP, 2) ZELLOTH_OF(name##_min, T, OP, ZFOLD_OP, 3)\n"
   "struct zelloth_publish { device const ulong *z; uint K; "
-  "void at(uint p) { device const ulong *cell = z + z[4] + (2 + K) * ulong(p - 1); "
+  "void at(uint p) { device const ulong *cell = z + z[4] + (2 + K + z[7]) * ulong(p - 1); "
   "for (uint k = 0; k < K; k++) if (z[10 + 3 * k]) "
   "mesh_publish((volatile coherent(system) device ulong *)z[10 + 3 * k], cell[2 + k]); } };\n"
   "#define ZELLOTH_OF(name, T, OP, FOLD, C) HEAD(zelloth_##name) { ENTER(i == 0) "
-  "device const ulong *z = (device const ulong *)(s + p.src); const uint K = uint(z[0]), q = i / t; "
-  "device const ulong *cell = z + z[4] + ulong(2 + K) * q, *in = z + 8; "
-  "if (l == 0) for (uint k = 0; k < K; k++) "
+  "device const ulong *z = (device const ulong *)(s + p.src); const uint K = uint(z[0]), W = uint(z[7]), q = i / t; "
+  "device const ulong *cell = z + z[4] + ulong(2 + K + W) * q, *in = z + 8; "
+  "if (l == 0) { for (uint k = 0; k < K; k++) "
   "mesh_step_check(p, mesh_step_wait(p, (device uchar *)in[3 * k + 1], cell[2 + k], vb), cell[2 + k], vb); "
+  "for (uint k = 0; k < W; k++) if (cell[2 + K + k]) "
+  "mesh_step_check(p.polls, uint(in[3 * (K + k) + 1]), in[3 * (K + k) + 2], "
+  "mesh_step_wait(p, (device uchar *)in[3 * (K + k)], cell[2 + K + k], vb), cell[2 + K + k], vb); } "
   "threadgroup_barrier(mem_flags::mem_device); "
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); "
   "volatile coherent(system) device const T *own = (volatile coherent(system) device const T *)z[2]; "
@@ -183,6 +193,7 @@ static NSString *const KERNELS =
 #define REDUCTION_KINDS(X, T) X(zelloth_##T##_sum) X(zelloth_##T##_prod) X(zelloth_##T##_max) X(zelloth_##T##_min)
 #define KINDS_OF(X) \
   X(copy_plain_4) X(copy_land_4) X(copy_plain_1) X(copy_land_1) \
+  X(copy_ready_plain_4) X(copy_ready_land_4) X(copy_ready_plain_1) X(copy_ready_land_1) \
   X(premul_i8) X(truncdiv_i8) X(premul_u8) X(truncdiv_u8) X(premul_i32) X(truncdiv_i32) X(premul_u32) X(truncdiv_u32) \
   X(premul_i64) X(truncdiv_i64) X(premul_u64) X(truncdiv_u64) \
   X(premul_f16) X(premul_f32) X(premul_bf16) X(premul_e4m3) X(premul_e5m2) \

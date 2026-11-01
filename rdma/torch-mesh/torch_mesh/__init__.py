@@ -11,10 +11,10 @@ writes where it lies.  Every MPS tensor is one: torch's MPS allocator is the reg
 _stream loads).  records() is the region tensors' leases live now and address(t) where a tensor's bytes lie in the
 region (0: outside it); check_memory() warns where this process's MPS tensors outside it come to 1 GiB or more.
 
-merge_partials() is the softmax over a split as the library's collective (the torch operator torch_mesh::merge_partials:
-an all-reduce or reduce by libnccl-mesh's partials operator, ncclMeshRedOpCreatePartials): each member's attention over
-its own keys merged by the rows' logsumexp into the attention over all of them; partition's ring attention merges by it
-(a reduce-scatter by the operator).
+merge_partials() declares a softmax-summary reduction through reduction.partials,
+an ordinary supplied Reduction function. Each member's attention over its own
+keys is merged by the rows' logsumexp into the attention over all of them.
+Partition's ring attention uses the same function for reduce-scatter.
 
 plan() declares a program's collectives on a group once, in their order (libnccl-mesh's ncclMeshCommPlan), each
 compiled then, so none is planned where it is issued.
@@ -239,8 +239,8 @@ def plan(group, calls, *, production_seconds=None, routing=None):
 
 def merge_partials(out, lse, group=None, root=-1):
     """Every member's attention over its own keys merged into the attention over all of them (split-KV attention's
-    merge: libnccl-mesh's partials operator, ncclMeshRedOpCreatePartials, through the torch operator
-    torch_mesh::merge_partials): `out` (rows x dim, any leading shape) and `lse` (each row's logsumexp, -inf where it saw
+    merge, compiled from reduction.partials through torch_mesh::merge_partials):
+    `out` (rows x dim, any leading shape) and `lse` (each row's logsumexp, -inf where it saw
     no key), the same rows on every member.  Returns (the attention in out's dtype, each row's logsumexp), on every member
     (`root` -1) or at `root`."""
     import torch

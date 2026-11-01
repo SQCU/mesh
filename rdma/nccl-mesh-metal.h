@@ -109,7 +109,12 @@ void metal_resident(struct metal_program *, void *buffer);
    encoded next, in which every dispatch naming none of its own records a failed wait (nccl-mesh.c complete,
    issue_group, retire), so one communicator's failure is recorded as its own and no other's. */
 void metal_gate(struct metal_program *, void *violation);
-struct metal_result metal_copy(struct metal_program *, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t bytes);
+struct metal_wait;
+/* Preparation supplies the original value's page relation. Its observation,
+   when needed, is compiled into the copy body rather than another task. */
+struct metal_copy_relation { const struct metal_wait *ready; uint32_t source_access; };
+struct metal_result metal_copy(struct metal_program *, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset,
+                              size_t bytes, const struct metal_copy_relation *);
 /* `type` METAL_MERGE: the partials merge (nccl.h ncclMeshRedOpCreatePartials) of rows of `op` float32 [m, l, O], a row
    with l > 0 rescaled to the greater m and summed, one with none counting for none (two such the row [the least float,
    0, 0]); else `type` an ncclDataType_t and op as nccl-mesh.c combine_into (0 sum, 1 product, 2 max, 3 min) */
@@ -140,14 +145,17 @@ struct metal_zelloth_input { void *data; size_t data_offset; void *words; size_t
                              mesh_pages target, packets; const struct mesh_landing_run *runs; size_t count; };
 /* Each sum's exact accesses enter the common command graph. */
 struct metal_zelloth_sum { void *out; size_t out_offset; void *own; size_t own_offset;
-  uint32_t inputs; const struct metal_zelloth_input *in; uint32_t own_access; };
+  uint32_t inputs; const struct metal_zelloth_input *in; uint32_t own_access;
+  /* Exact output ranges which overwrite an outstanding SEND source. These
+     observations constrain arithmetic stores, never the scratch DMA landing. */
+  size_t waits; const struct metal_wait *wait; };
 /* Emit each resolved value version as a command with its exact page accesses.
    The grid assigns one common landing cell to each threadgroup. */
 struct metal_result metal_zelloth(struct metal_program *, int type, int op, size_t element_bytes, uint32_t sums,
                                   const struct metal_zelloth_sum *sum, uint32_t channel, uint64_t at);
 /* A user combine is compiled onto the same resolved landing cells. */
 struct metal_result metal_reduce_function(struct metal_program *,const ncclMeshReductionFunction *,
-  ncclDataType_t,uint32_t unit,const struct metal_zelloth_sum *,uint32_t channel,uint64_t entry);
+  ncclDataType_t,uint32_t unit,size_t element_bytes,const struct metal_zelloth_sum *,uint32_t channel,uint64_t entry);
 /* The next dispatch reads/writes these prepared page
    ranges. Residency and diagnostic atomic words do not imply data ordering. */
 void metal_accesses(struct metal_program *, const ncclMeshAccess *, size_t n);

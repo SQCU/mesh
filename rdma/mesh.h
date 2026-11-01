@@ -90,7 +90,7 @@ struct mesh_entry { uint64_t spans,units,word,base; };
 _Static_assert(sizeof(struct mesh_dma_span)==MESH_SIZEOF_MESH_DMA_SPAN,"mesh_dma_span ABI");
 _Static_assert(sizeof(struct mesh_entry)==MESH_SIZEOF_MESH_ENTRY,"mesh_entry ABI");
 /* A SEND's unit i is available at word >= base+i+1 (word 0: stream ready).
-   A receive's optional word permits its first write at word >= base. The
+   A receive's word and base are 0: it waits on nothing but its `after`. The
    immutable span table and its backing allocations outlive every future unit
    and every posted DMA. `taken` does not release this table. */
 /* design/zorvek.md zinth: a call's laid tables (zwoggle) on one stream of its holding, in region memory the holder wrote
@@ -102,13 +102,18 @@ _Static_assert(sizeof(struct mesh_entry)==MESH_SIZEOF_MESH_ENTRY,"mesh_entry ABI
    read: the holder takes their memory again past them). Links are stored in any order (a call's command buffer may run
    before its predecessor's): the chain is the holding's call order however they land. An entry's requirement base is
    its own `base` plus, where `relative` is not 0, the call's base relative - 1 (its place where the holder counts it:
-   a list's units before the call, the holder's gates before it), so a laid issue's entries are written once and each
+   a list's units before the call), so a laid issue's entries are written once and each
    of its calls writes its bases alone. 73b5df63's compiled program (a declared call order and each call's prefixes in
    it) is deleted: a call's pages are the allocator's (zappo), not a position in an order, so no order compiles them.
-   Every entry's `after` names the same list: a count followed by that many
-   mesh_zwoggle_after records, or zero for no prerequisites. Preparation resolves
-   the complete relation; the bridge only reads each required publication value.
-   There is no channel-mask decoding or fixed dependency count in execution. */
+   An entry's `after` is the region offset of its own list (0: none): a count n, then n struct
+   mesh_zwoggle_after, every one holding (its word at its base) before any unit of the entry is posted, the holder
+   rewriting each base at each call.  A SEND's: the whole consumption of each receive its step follows and does not
+   forward (a COPY's channel's `landed`, a combine's summed word, at that receive's end).  A landing's
+   (design/pages-and-functions.md Freeing 6-7, a page written again only once its last outgoing DMA read ended): on
+   each channel a SEND reads bytes it writes, that channel's `sent` at the end of the last such SEND, an earlier step's
+   of its call or an earlier call's of another issue over the caller's pages, so that SEND has completed.
+   Preparation resolves the complete relation. There is no channel-mask decoding or fixed prerequisite count in
+   execution; SEND and landing lists have the same counted representation. */
 struct mesh_zwoggle_after { uint64_t word, base; };
 struct mesh_zwoggle_entry { struct mesh_entry entry; uint64_t relative, after; };
 struct mesh_zwoggle { _Atomic uint64_t next; uint64_t entries[2], count[2], bases; };
@@ -136,8 +141,7 @@ static inline void mesh_pages_store(_Atomic uint64_t *word,struct mesh_pages p){
 #define MESH_PAGES_LOST ((struct mesh_pages){UINT64_MAX})
 /* Each posted unit retains its actual arena interval, independent of aliases
    or allocation-row boundaries. A stable sequence identifies its ring slot;
-   a reader racing reuse conservatively retains the allocation. All pin fields
-   precede posted and the final holding check (mesh-link.c unit_told). */
+   a reader racing reuse conservatively retains the allocation. */
 struct mesh_posts { _Alignas(MESH_RECORD_ALIGNMENT) _Atomic uint64_t posted[2]; _Atomic uint64_t done[2]; };
 _Static_assert(!(MESH_LANE_UNITS&(MESH_LANE_UNITS-1)),"a ring a power of two");
 static inline int mesh_span_overlaps(struct mesh_dma_span a,struct mesh_dma_span b){
@@ -157,7 +161,7 @@ static inline int mesh_span_overlaps(struct mesh_dma_span a,struct mesh_dma_span
    outstanding or the stream never live again in the pairing, so on a live stream both ends'
    counts are equal whenever no holder holds it.  No communicator reads them; a client reads every stream's, and their
    rows and child, as it returns a lease (mesh-dataflow.c mesh_lease_return, mesh_pinned: a row a unit outstanding
-   names stays held), and the bridge tells each unit before it posts it so that read sees it (mesh-link.c unit_told).
+   names stays held).
    A holding that ended with units
    outstanding leaves its owner word MESH_STREAM_GIVEN alone (naming no client, so none takes it) and the stream not
    live for the rest of its pairing.  The holder links its calls' tables (struct mesh_zwoggle, `zwoggle`), and the
@@ -250,24 +254,14 @@ static inline _Atomic uint64_t *mesh_plane(struct hdr *m,int plane){ return (_At
 /* design/transport.md */
 /* the arena occupancy bitmap is indexed by arena page and sized by arena pages: it is not a row plane */
 static inline _Atomic uint64_t *mesh_arena_bits(struct hdr *m){ return (_Atomic uint64_t*)((unsigned char*)m+m->arena_off); }
-/* Config-time validation; no rounding, copying, or interpretation of row IDs.
-   An entry's immutable table itself must reside in the region's arena. */
+/* A span's validity, checked once where the library makes the span (place_group), never again as it is posted
+   (design/fake-guards-2026-10-30.md: a check is merited at most once, where its fact is made); no rounding, copying,
+   or interpretation of row IDs */
 static inline int mesh_dma_span_valid(const struct hdr *m,struct mesh_dma_span span){
   const uint64_t arena=(uint64_t)mesh_arena_pages(m)*m->pgsz;
   if(!span.bytes || span.bytes>UINT32_MAX || span.offset<m->data_off)return 0;
   const uint64_t at=span.offset-m->data_off;
   return at<arena && span.bytes<=arena-at && span.bytes<=MESH_DMA_EXTENT-at%MESH_DMA_EXTENT;
-}
-static inline int mesh_entry_table_valid(const struct hdr *m,struct mesh_entry e){
-  return e.units && e.spans>=m->data_off && e.spans<=m->length && !(e.spans%_Alignof(struct mesh_dma_span)) &&
-    e.units<=(m->length-e.spans)/sizeof(struct mesh_dma_span) && e.base<UINT64_MAX-e.units &&
-    (!e.word || (!(e.word%_Alignof(_Atomic uint64_t)) && e.word<=m->length-sizeof(uint64_t)));
-}
-static inline int mesh_entry_valid(const struct hdr *m,struct mesh_entry e){
-  if(!mesh_entry_table_valid(m,e))return 0;
-  const struct mesh_dma_span *spans=(const struct mesh_dma_span *)((const char *)m+e.spans);
-  for(uint64_t i=0;i<e.units;i++)if(!mesh_dma_span_valid(m,spans[i]))return 0;
-  return 1;
 }
 static inline struct mesh_page_entry *mesh_page(struct hdr *m){ return (struct mesh_page_entry*)((unsigned char*)m+m->page_off); }
 /* Preparation resolves logical page bytes to registered backing. A consumer's
@@ -313,5 +307,18 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->data_off=at; at+=(uint64_t)arena*pgsz;
   h->length=at; return at;
+}
+/* the layout that fits a region object of `bytes` (its size, fixed when it was made): its arena the most pages its
+   metadata leaves, so a layout whose metadata grew or shrank takes the same object's pages (mesh-link.c region_open);
+   0 where none fits */
+static inline uint64_t mesh_layout_within(struct hdr *h,uint32_t pgsz,uint32_t block,uint64_t bytes){
+  /* blocks: lo the most known to fit, hi the most that might (a layout's length grows with its arena) */
+  uint64_t lo=0,hi=bytes/pgsz/block;
+  if(hi>UINT32_MAX/block)hi=UINT32_MAX/block;
+  while(lo<hi){
+    const uint64_t mid=lo+(hi-lo+1)/2;
+    if(mesh_layout(h,pgsz,block,(uint32_t)(mid*block))<=bytes)lo=mid;else hi=mid-1;
+  }
+  return lo && mesh_layout(h,pgsz,block,(uint32_t)(lo*block))<=bytes?h->length:0;
 }
 #endif

@@ -231,11 +231,32 @@ def _piece(commands, reads, writes, signs, extents, *, width, normalization, sig
                        'MESH_FWHT_SELECTED': int(not write_complete)}
     instance = f'structured_butterfly<{width},{normalization},{str(signed).lower()},{input_type},{sign_type}>'
     instantiated = f'\ntemplate [[host_name("butterfly")]] [[kernel]] decltype({instance}) {instance};'
+    from mesh_relation import Algebra
+    from .operand import layout_configuration
+    algebra = Algebra()
+    output = algebra.map((groups,), (groups * width,),
+        lambda g, i: [f'{g[0]} * {width} <= {i[0]} < ({g[0]} + 1) * {width}'])
+    if write_map is not None:
+        output = output.then(algebra.layout(layout_configuration(write_map)))
+    dispatch = [dict(side='writes', slot=1, group_relation=output)]
+    if reads is not None:
+        boundaries = [extents.index(index * width) for index in range(sign_groups + 1)]
+        def sources(g, i):
+            return ['(' + ' or '.join(f'({g[0]} mod {sign_groups} = {index} and '
+                f'floor({g[0]}/{sign_groups}) * {boundaries[-1]} + {first} <= {i[0]} < '
+                f'floor({g[0]}/{sign_groups}) * {boundaries[-1]} + {last})'
+                for index, (first, last) in enumerate(zip(boundaries, boundaries[1:]))) + ')']
+        dispatch.append(dict(side='reads', slot=0,
+            group_relation=algebra.map((groups,), (reads['layout'].count,), sources)))
+    if signed:
+        dispatch.append(dict(side='reads', slot=2, group_relation=algebra.map((groups,), (sign_groups * width,),
+            lambda g, i: [f'({g[0]} mod {sign_groups}) * {width} <= {i[0]} < (({g[0]} mod {sign_groups}) + 1) * {width}'])))
     commands.shader(SOURCE, 'butterfly', [reads, writes, signs if signed else None],
         definitions=definitions, indices=indices, instance=instantiated, constants={3: struct.pack('I', sign_groups)},
         grid=(groups, 1, 1), threadgroup=None, threadgroup_policy={'preferred': width // 2, 'minimum_simd': True},
         limits={'threadgroup_memory_bytes': commands.capabilities['threadgroup_memory_bytes']},
-        access=((1 if reads is not None else 0) | (4 if signed else 0)) | (2 << commands.geometry['ACCESS_WRITE_SHIFT']))
+        access=((1 if reads is not None else 0) | (4 if signed else 0)) | (2 << commands.geometry['ACCESS_WRITE_SHIFT']),
+        dispatch=tuple(dispatch))
 
 
 def prepare_stage(x, signs, width, step, normalization, signed, sources, starts, *, out=None):

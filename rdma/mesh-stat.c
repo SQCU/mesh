@@ -92,6 +92,44 @@ static int landed_watch(uint64_t period_us,double seconds){
   munmap(m,size);
   return 0;
 }
+/* mesh-stat streams <period_us> <seconds>: every held stream's words, a line each time any of them moves, looked at every
+   period_us for `seconds` from a mapping of the region to read: {"ns": the clock, "streams": [[stream, peer node, owner,
+   ready, sent, landed, calls left of the send list, of the landing list], ...]}, so a stall's last line is the stall.
+   It reads the region alone */
+static int streams_watch(uint64_t period_us,double seconds){
+  size_t size=0;
+  struct hdr *m=region_read(&size);
+  if(!m || m->magic!=MESH_MAGIC || m->version!=MESH_LAYOUT){printf("{\"up\":false,\"errno\":%d}\n",m?EINVAL:errno);return 1;}
+  static uint64_t seen[MESH_STREAMS][6];
+  const uint64_t end=clock_gettime_nsec_np(CLOCK_MONOTONIC)+(uint64_t)(seconds*1e9);
+  const struct timespec pause={(time_t)(period_us/1000000),(long)(period_us%1000000*1000)};
+  while(clock_gettime_nsec_np(CLOCK_MONOTONIC)<end){
+    int moved=0;
+    uint64_t now[MESH_STREAMS][6];
+    for(uint32_t t=0;t<MESH_STREAMS;t++){
+      const struct mesh_stream *x=mesh_stream_at(m,t);
+      const uint64_t words[6]={atomic_load(&x->owner),atomic_load(&x->ready),atomic_load(&x->sent),atomic_load(&x->landed),
+                               atomic_load(&x->taken[0]),atomic_load(&x->taken[1])};
+      for(int w=0;w<6;w++){now[t][w]=words[w];moved|=words[w]!=seen[t][w];seen[t][w]=words[w];}
+    }
+    if(moved){
+      printf("{\"ns\":%llu,\"streams\":[",(unsigned long long)clock_gettime_nsec_np(CLOCK_REALTIME));
+      int first=1;
+      for(uint32_t t=0;t<MESH_STREAMS;t++)if(now[t][0]){
+        const struct mesh_stream *x=mesh_stream_at(m,t);
+        printf("%s[%u,%u,%llu,%llu,%llu,%llu,%llu,%llu]",first?"":",",t,atomic_load(&x->peer),(unsigned long long)now[t][0],
+               (unsigned long long)now[t][1],(unsigned long long)now[t][2],(unsigned long long)now[t][3],
+               (unsigned long long)now[t][4],(unsigned long long)now[t][5]);
+        first=0;
+      }
+      printf("]}\n");
+      fflush(stdout);
+    }
+    nanosleep(&pause,NULL);
+  }
+  munmap(m,size);
+  return 0;
+}
 /* design/transport.md: the node's bridge as it publishes itself, one JSON line: whether it answers
    (`up`, else the errno), its node, its ports by index (ports_read: each port's peer node, phase, bandwidth and bytes landed with the bridge's clock of them) and the
    mesh's map (mesh_map over every node its records hold: each node's bridge number, and each link by the two nodes'
@@ -100,6 +138,7 @@ static int landed_watch(uint64_t period_us,double seconds){
    available memory (mesh_nodes_health, design/transport.md) */
 int main(int argc,char **argv){
   if(argc==4 && !strcmp(argv[1],"landed"))return landed_watch(strtoull(argv[2],NULL,10),strtod(argv[3],NULL));
+  if(argc==4 && !strcmp(argv[1],"streams"))return streams_watch(strtoull(argv[2],NULL,10),strtod(argv[3],NULL));
   struct port_view port[MESH_PORTS];
   uint32_t node=0,layout=0,*nodes=NULL,(*link)[2]=NULL,room=64,links=64;
   uint64_t *bandwidth=NULL;
