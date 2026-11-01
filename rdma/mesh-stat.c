@@ -130,6 +130,25 @@ static int streams_watch(uint64_t period_us,double seconds){
   munmap(m,size);
   return 0;
 }
+/* mesh-stat words <offset>...: the 8-byte words at those region offsets (a plan record's `word`s: nccl-mesh.c
+   plan_record, rdma/plan_cycles.py), one line {"ns": the clock, "words": [[offset, value], ...]}, read from a
+   mapping of the region alone: a stalled program's producer words as they stand */
+static int words_read(int count,char **offsets){
+  size_t size=0;
+  struct hdr *m=region_read(&size);
+  if(!m || m->magic!=MESH_MAGIC || m->version!=MESH_LAYOUT){printf("{\"up\":false,\"errno\":%d}\n",m?EINVAL:errno);return 1;}
+  printf("{\"ns\":%llu,\"words\":[",(unsigned long long)clock_gettime_nsec_np(CLOCK_REALTIME));
+  for(int i=0;i<count;i++){
+    const uint64_t at=strtoull(offsets[i],NULL,10);
+    const int inside=at%sizeof(uint64_t)==0 && at+sizeof(uint64_t)<=size;
+    printf("%s[%llu,",i?",":"",(unsigned long long)at);
+    if(inside)printf("%llu]",(unsigned long long)atomic_load((_Atomic uint64_t *)((char *)m+at)));
+    else printf("null]");
+  }
+  printf("]}\n");
+  munmap(m,size);
+  return 0;
+}
 /* design/transport.md: the node's bridge as it publishes itself, one JSON line: whether it answers
    (`up`, else the errno), its node, its ports by index (ports_read: each port's peer node, phase, bandwidth and bytes landed with the bridge's clock of them) and the
    mesh's map (mesh_map over every node its records hold: each node's bridge number, and each link by the two nodes'
@@ -139,6 +158,7 @@ static int streams_watch(uint64_t period_us,double seconds){
 int main(int argc,char **argv){
   if(argc==4 && !strcmp(argv[1],"landed"))return landed_watch(strtoull(argv[2],NULL,10),strtod(argv[3],NULL));
   if(argc==4 && !strcmp(argv[1],"streams"))return streams_watch(strtoull(argv[2],NULL,10),strtod(argv[3],NULL));
+  if(argc>=3 && !strcmp(argv[1],"words"))return words_read(argc-2,argv+2);
   struct port_view port[MESH_PORTS];
   uint32_t node=0,layout=0,*nodes=NULL,(*link)[2]=NULL,room=64,links=64;
   uint64_t *bandwidth=NULL;
