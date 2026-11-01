@@ -125,6 +125,15 @@ their old registries and publication protocols are removed. They are not
 complete consumers of `CommSources`/`CommSpecialize`; the new contract has no
 compatibility execution substitute for them.
 
+Their replacements are being connected to grouped frame declarations. The
+source and transfer records retain explicit frame identity and logical order.
+Recording must preserve that order too: appending all native preservation
+copies at an occurrence's entry can put a later frame's read before its writer.
+Repeated frames may use the same physical pages, so a generic next-writer flag
+cannot identify the right generation. Interleave the retained native leaves
+with the declared numerical leaves before recorder dependency construction.
+This is unfinished; deleting the old fused-record sink alone does not close it.
+
 Swift's enclosing preparation now gathers native and frontend declarations,
 solves them together, then binds commands. Its recipes and the LiteRT provider
 export still need complete group-to-page relations, including host and ANE
@@ -132,6 +141,14 @@ contracts. Whole-buffer access lists repeated for every group do not supply
 that relation. LiteRT's scalar serializer was dropping dispatch metadata; it
 is being connected to the shared logical access stage. That stage preserves
 source coordinates before target launch geometry or physical pages are bound.
+
+The GPU provider also retains source, but its existing selector/codegen drops
+the access equations and final-write coverage. The final pipeline and tensor
+shapes cannot supply those facts. The provider integration must retain the
+actual indexed Read/Write sites and their coverage through code generation,
+then pass those ordinary source cells to the common solve. Repeated or masked
+writes need their declared contribution relation; a possible-address union is
+not that relation. This missing producer remains item 6 work.
 
 The retained relations now share the Function's explicit compilation context.
 Command construction, native source queries and the shared solve consume it.
